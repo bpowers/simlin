@@ -954,3 +954,127 @@ describe('DirectBackend wasm engine: end-to-end name resolution for arrayed vars
     dispose();
   });
 });
+
+// A conveyor belt whose `<len>` evaluates to 0. `init_belts` (the belt pass's
+// run_initials hook) rejects a transit time that is not positive and finite, so the
+// blob raises `ConveyorTransitNotPositive` on the first run_to. The model COMPILES
+// to wasm -- `beginning` is the default inflow placement, the only one the belt pass
+// lowers -- so this reaches the runtime error channel rather than the compile-time
+// `WasmGenError::Unsupported` path exercised above.
+const WASM_ZERO_TRANSIT_CONVEYOR_XMILE = `<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+    <header>
+        <vendor>Test</vendor>
+        <product>Simlin</product>
+        <options><uses_conveyor/></options>
+    </header>
+    <sim_specs method="Euler" time_units="Months">
+        <start>0</start>
+        <stop>2</stop>
+        <dt>0.25</dt>
+    </sim_specs>
+    <model>
+        <variables>
+            <stock name="belt">
+                <eqn>0</eqn>
+                <inflow>arriving</inflow>
+                <outflow>departing</outflow>
+                <conveyor><len>0</len></conveyor>
+            </stock>
+            <flow name="arriving"><eqn>10</eqn></flow>
+            <flow name="departing"><eqn>0</eqn></flow>
+        </variables>
+    </model>
+</xmile>`;
+
+// The engine `ErrorCode::ConveyorTransitNotPositive` discriminant. The blob's
+// `get_error()` reports the raw discriminant, and no TypeScript surface names it:
+// `simlin_error_get_code` speaks the narrower FFI `SimlinErrorCode`, which collapses
+// every conveyor code to `Generic`. Recompute with
+// `ErrorCode::ConveyorTransitNotPositive as i32` if `common.rs`'s enum is reordered
+// -- this test failing on the number is the intended signal, not a flake.
+const CONVEYOR_TRANSIT_NOT_POSITIVE = 58;
+
+describe('DirectBackend wasm engine: the blob runtime error channel', () => {
+  let backend: DirectBackend;
+
+  beforeAll(async () => {
+    backend = new DirectBackend();
+    backend.reset();
+    backend.configureWasm({ source: loadWasmBuffer() });
+    await backend.init();
+  });
+
+  afterAll(() => {
+    backend.reset();
+  });
+
+  function openConveyor(): {
+    modelHandle: ModelHandle;
+    dispose: () => void;
+  } {
+    const projectHandle = backend.projectOpenXmile(new TextEncoder().encode(WASM_ZERO_TRANSIT_CONVEYOR_XMILE));
+    const modelHandle = backend.projectGetModel(projectHandle, null);
+    return {
+      modelHandle,
+      dispose: () => {
+        backend.modelDispose(modelHandle);
+        backend.projectDispose(projectHandle);
+      },
+    };
+  }
+
+  // Guards the precondition: the raise must come from the RUNTIME channel, not from
+  // a compile-time reject. If a future change made a zero-transit belt unlowerable,
+  // simNew would throw and the throw below would no longer prove anything.
+  it('the zero-transit belt compiles to a wasm blob', () => {
+    const { modelHandle, dispose } = openConveyor();
+    const sim = backend.simNew(modelHandle, false, 'wasm');
+    expect(sim).toBeGreaterThan(0);
+    backend.simDispose(sim);
+    dispose();
+  });
+
+  it('simRunToEnd throws the decoded ConveyorTransitNotPositive rather than truncating', () => {
+    const { modelHandle, dispose } = openConveyor();
+    const sim = backend.simNew(modelHandle, false, 'wasm');
+
+    // A wasm export cannot return a Result: the blob abandons the failing step and
+    // returns normally. Without throwIfWasmRuntimeError's poll this call succeeds
+    // and hands back a silently truncated series -- the whole point of the guard.
+    expect(() => backend.simRunToEnd(sim)).toThrow(
+      new RegExp(`simulation error ${CONVEYOR_TRANSIT_NOT_POSITIVE} raised by the wasm engine \\(conveyor plan 0\\)`),
+    );
+
+    backend.simDispose(sim);
+    dispose();
+  });
+
+  it('repeated runs never silently succeed, and reset does not mask the error', () => {
+    const { modelHandle, dispose } = openConveyor();
+    const sim = backend.simNew(modelHandle, false, 'wasm');
+
+    // Note this does NOT distinguish sticky-until-reset from re-raise-on-rerun:
+    // this model raises unconditionally in init, so both implementations throw
+    // on every call. True stickiness (run_to is a no-op while the channel is
+    // set) is pinned Rust-side in wasmgen/errors_tests.rs; what this pins is
+    // that the TS surface can never observe a silent success.
+    expect(() => backend.simRunToEnd(sim)).toThrow(/simulation error/);
+    expect(() => backend.simRunToEnd(sim)).toThrow(/simulation error/);
+    // reset clears the channel; the belt still has a zero transit, so the next run
+    // re-raises rather than silently succeeding.
+    backend.simReset(sim);
+    expect(() => backend.simRunToEnd(sim)).toThrow(/simulation error/);
+
+    backend.simDispose(sim);
+    dispose();
+  });
+
+  it('the VM raises on the same model, so this is a real error and not a wasm artifact', () => {
+    const { modelHandle, dispose } = openConveyor();
+    const sim = backend.simNew(modelHandle, false, 'vm');
+    expect(() => backend.simRunToEnd(sim)).toThrow(/transit time must be positive and finite/);
+    backend.simDispose(sim);
+    dispose();
+  });
+});

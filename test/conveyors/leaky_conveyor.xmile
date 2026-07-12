@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header>
+    <name>leaky conveyor</name>
+    <vendor>test</vendor>
+    <product version="1.0">test</product>
+    <options>
+      <uses_conveyor leak="true"/>
+    </options>
+  </header>
+  <sim_specs method="Euler" time_units="Months">
+    <start>0</start>
+    <stop>6</stop>
+    <dt>0.5</dt>
+  </sim_specs>
+  <model>
+    <variables>
+      <!-- Transit 2 at dt 0.5 => 4 slats. Two leak flows with DIFFERENT path
+           zones, so the per-slat leak schedule (design doc 5.3) is exercised
+           rather than a single whole-belt fraction: `seepage` drains every slat,
+           `spillage` only the second half of the belt (measured from the entry).
+           Each leak drains into its own sink so the run reports every leaked
+           volume as an integrable series -- conservation
+           (belt + drained + seeped + spilled == integral of arriving) is then
+           visible in the checked columns, not just in a VM-vs-wasm diff. -->
+      <stock name="belt">
+        <eqn>0</eqn>
+        <inflow>arriving</inflow>
+        <outflow>departing</outflow>
+        <outflow>seepage</outflow>
+        <outflow>spillage</outflow>
+        <conveyor>
+          <len>2</len>
+        </conveyor>
+      </stock>
+      <!-- Ramped, so no two slats ride the belt with the same volume and the
+           belt never settles into a steady state that would hide a zone error. -->
+      <flow name="arriving">
+        <eqn>100 + 10 * TIME</eqn>
+      </flow>
+      <flow name="departing">
+      </flow>
+      <flow name="seepage" leak_start="0" leak_end="1">
+        <eqn>0.05</eqn>
+        <leak/>
+      </flow>
+      <flow name="spillage" leak_start="0.5" leak_end="1">
+        <eqn>0.1</eqn>
+        <leak/>
+      </flow>
+      <stock name="drained">
+        <eqn>0</eqn>
+        <inflow>departing</inflow>
+      </stock>
+      <stock name="seeped">
+        <eqn>0</eqn>
+        <inflow>seepage</inflow>
+      </stock>
+      <stock name="spilled">
+        <eqn>0</eqn>
+        <inflow>spillage</inflow>
+      </stock>
+    </variables>
+  </model>
+</xmile>

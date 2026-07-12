@@ -445,10 +445,11 @@ pub enum ErrorCode {
     /// (docs/design/conveyors.md §4.3 "Visibility to other equations").
     ConveyorDrivenFlowRead,
     /// A conveyor stock reached the ordinary compile path without being expanded
-    /// by the special-stock build path (`queue_compile::build_vm`). Conveyor
-    /// simulation is only wired through that entry point; any other path would
-    /// integrate the belt as a plain stock and silently mis-simulate, so it is
-    /// rejected (docs/design/conveyors.md §9.3).
+    /// by the special-stock build path. An INTERNAL invariant guard, not a
+    /// backend or model limitation: every backend (the bytecode VM and wasmgen
+    /// alike) routes a conveyor model through `queue_compile::compile_sim`, which
+    /// expands it. Any other path would integrate the belt as a plain stock and
+    /// silently mis-simulate, so it is rejected (docs/design/conveyors.md §9.3).
     ConveyorNotExpanded,
     /// A conveyor inflow requests an `isee:spreadflow` placement whose runtime
     /// wiring is not yet available (`dist` needs the distribution graphical
@@ -461,21 +462,24 @@ pub enum ErrorCode {
     /// cannot be resolved. An internal-consistency guard on the arrayed-conveyor
     /// expansion (docs/design/conveyors.md §10).
     ConveyorArrayedDimensionUnresolved,
-    /// An equation uses a conveyor stock as a **container** -- indexing into its
-    /// belt (`conv[j]`) or reducing over its slat contents
-    /// (`SUM`/`MIN`/`MAX`/`MEAN`/`STDDEV`/`SIZE` of a conveyor). XMILE §3.7.1
-    /// makes conveyors containers, but the belt lives in the VM's conveyor side
-    /// table with a runtime-dynamic length, not in the fixed-dimension data
-    /// buffer the bytecode VM reads, so container access is not yet supported.
-    /// Rejected loudly rather than silently mis-resolving (`SIZE` -> 1,
-    /// `MEAN` -> the belt total) or erroring opaquely
+    /// An equation uses a conveyor stock as a **container** in a form that cannot
+    /// be lowered. The supported forms -- `SUM`/`MIN`/`MAX`/`MEAN`/`STDDEV`/`SIZE`
+    /// over a single belt, and `conv[j]` for a compile-time-constant slat index --
+    /// are rewritten to synthesized hidden stocks the passes publish at step
+    /// start, on both backends. What stays rejected is a reducer over an
+    /// EXPRESSION involving the belt, a dynamic slat index, a range/wildcard over
+    /// slats, and a bare arrayed-conveyor reducer other than `SUM`: the belt lives
+    /// in a side table with a runtime-dynamic length, not in the fixed-dimension
+    /// data buffer. Rejected loudly rather than silently mis-resolving (`SIZE` ->
+    /// 1, `MEAN` -> the belt total) or erroring opaquely
     /// (docs/design/conveyors.md §10).
     ConveyorContainerAccessUnsupported,
     /// A queue stock reached the ordinary compile path without being expanded by
-    /// the queue build path (`queue_compile::build_vm`). Queue simulation is only
-    /// wired through that entry point; any other path would integrate the FIFO as
-    /// a plain stock and silently mis-simulate, so it is rejected (mirrors
-    /// [`ConveyorNotExpanded`], docs/design/queues.md §10.3).
+    /// the special-stock build path. An INTERNAL invariant guard on every backend,
+    /// which all route a queue model through `queue_compile::compile_sim`; any
+    /// other path would integrate the FIFO as a plain stock and silently
+    /// mis-simulate, so it is rejected (mirrors [`ConveyorNotExpanded`],
+    /// docs/design/queues.md §10.3).
     QueueNotExpanded,
     /// A queue is present under RK2/RK4 integration. The per-DT admit-then-serve
     /// batch model is defined per-DT and has no meaning under Runge-Kutta
@@ -511,14 +515,14 @@ pub enum ErrorCode {
     /// main model, so a conveyor anywhere else can never be expanded and would
     /// otherwise trip the internal [`ConveyorNotExpanded`] guard with an
     /// engine-internal message. Support for conveyors inside sub-models is a
-    /// deferred build-sequence step (docs/design/conveyors.md §9.3 "Conveyors
-    /// inside submodules ... are later build-sequence steps"), so this is a
-    /// user-facing feature limitation, rejected up front with the offending
-    /// stock's name and model rather than the internal invariant error.
+    /// deferred feature, not an engine bug, so it is rejected up front with the
+    /// offending stock's name and model rather than the internal invariant error.
+    /// The spec does not yet state the limitation anywhere; GH #940 tracks writing
+    /// it down, and GH #941 is the real-world fixture it blocks.
     ConveyorInSubmodelUnsupported,
     /// A queue stock is defined in a model that is NOT the main model. Queue
     /// simulation is currently supported only in the main model (mirrors
-    /// [`ConveyorInSubmodelUnsupported`], docs/design/queues.md §10.3).
+    /// [`ConveyorInSubmodelUnsupported`]; undocumented in the spec, GH #940).
     QueueInSubmodelUnsupported,
     /// A queue outflow OTHER THAN the primary (first, highest-priority) feeds a
     /// conveyor -- an `<overflow/>` sibling or a second ordinary outflow whose

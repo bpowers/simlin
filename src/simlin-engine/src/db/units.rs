@@ -498,6 +498,9 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
 /// "unknown units are skipped" rule elsewhere in unit checking. Likewise a
 /// parameter whose expression reads a variable with unknown units is skipped
 /// (a `DoesNotExist` verdict), never reported as a mismatch.
+// The salsa keys, the two model stages, and the four project-wide contexts are all
+// already resolved by the single caller (`check_model_units`); re-deriving any of
+// them here would re-run a salsa query per conveyor stock.
 #[allow(clippy::too_many_arguments)]
 fn check_conveyor_param_units(
     db: &dyn Db,
@@ -767,7 +770,6 @@ mod tests {
 
     /// Build a conveyor stock: an ordinary `datamodel::Stock` carrying a
     /// `<conveyor>` block on its `Compat`.
-    #[allow(clippy::too_many_arguments)]
     fn conveyor_stock(
         ident: &str,
         init: &str,

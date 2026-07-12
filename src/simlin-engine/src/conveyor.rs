@@ -750,6 +750,10 @@ impl ConveyorState {
             // fresh allocation per slat made the allocation count scale with
             // the belt length every step (GH #879).
             let mut sheds = vec![0.0; n];
+            // `i` is a belt POSITION, not merely a slat index: it is passed to
+            // `self.in_zone(i, ..)` and indexes the parallel `slat_vols[k][i]`
+            // column. Iterating `self.slats` would also hold a borrow across the
+            // `&self` call.
             #[allow(clippy::needless_range_loop)]
             for i in 0..l {
                 let c0 = self.slats[i].content;
@@ -835,8 +839,10 @@ impl ConveyorState {
             }
             // Undo the continuous removal for this flow, both from content and
             // from the per-slat breakdown (the whole-unit removals below become
-            // the authoritative per-slat detail for this flow). `i` indexes both
-            // `self.slats` and the per-slat column `slat_vols[k][i]`.
+            // the authoritative per-slat detail for this flow). `i` indexes three
+            // parallel structures -- `self.slats`, the flattened `shed_by[i * n + k]`,
+            // and the per-slat column `slat_vols[k][i]` -- so no single iterator
+            // yields it.
             #[allow(clippy::needless_range_loop)]
             for i in 0..l {
                 self.slats[i].content += shed_by[i * n + k];
@@ -847,6 +853,8 @@ impl ConveyorState {
             self.leak_carry[k] -= whole;
             // Remove `whole` units, exit-most in-zone slat first, clamped to
             // each slat's content. Undelivered units return to the carry.
+            // `i` is a belt POSITION passed to `self.in_zone(i, ..)`, and the loop
+            // mutates `self.slats[i]` across that `&self` call.
             let mut remaining = whole;
             #[allow(clippy::needless_range_loop)]
             for i in 0..l {

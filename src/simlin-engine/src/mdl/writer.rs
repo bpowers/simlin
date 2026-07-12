@@ -2310,6 +2310,8 @@ fn resolve_arrayed_entries(
 /// Emit one MDL entry per arrayed element. A per-variable ACTIVE INITIAL wrap
 /// (`compat.active_initial`) is applied to every element equation (#857), the
 /// same way the Scalar / Apply-to-All paths wrap it.
+// An emit helper: every parameter is a local of the one `write_variable` arm that
+// calls it, threaded straight through to the per-element entry it writes.
 #[allow(clippy::too_many_arguments)]
 fn write_arrayed_element_entries(
     buf: &mut String,

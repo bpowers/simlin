@@ -1256,12 +1256,22 @@ fn apply_couplings(
 
 /// A coupled queue serve wired to one conveyor (derived from the plans by
 /// [`CouplingTable::build`]).
+///
+/// Public because the wasm backend (`wasmgen::module`) unrolls the same interleaved
+/// order [`run_coupled_passes`] walks, and must read the very table the VM reads:
+/// deriving a second one there is how the two backends' admission priorities would
+/// drift apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct CoupledServe {
-    queue: usize,
-    shared_flow_off: usize,
-    one_at_a_time: bool,
-    batch_integrity: bool,
+pub struct CoupledServe {
+    /// Index into the queue plan set.
+    pub queue: usize,
+    /// The slab slot that is BOTH the queue's driven primary outflow rate and the
+    /// conveyor's admitted inflow rate.
+    pub shared_flow_off: usize,
+    /// `isee:one_at_a_time` on the belt: serve only the front batch.
+    pub one_at_a_time: bool,
+    /// `isee:batch_integrity` on the belt: never split a batch.
+    pub batch_integrity: bool,
 }
 
 /// The queue-conveyor coupling table [`run_coupled_passes`] reads each step:
@@ -1349,6 +1359,24 @@ impl CouplingTable {
             queue_is_coupled,
             any,
         }
+    }
+
+    /// Is any queue coupled to any conveyor? False selects [`run_coupled_passes`]'
+    /// fast path, and the wasm backend's independent belt-then-queue emission.
+    pub fn any(&self) -> bool {
+        self.any
+    }
+
+    /// The queues coupled to conveyor `i`, in that belt's `<inflow>` declaration
+    /// order -- the admission priority. Empty for an uncoupled belt.
+    pub fn serves_for_conveyor(&self, i: usize) -> &[CoupledServe] {
+        &self.coupling_for_conveyor[i]
+    }
+
+    /// Is queue `qi` served by the interleaved pass? If so the uncoupled
+    /// admit-then-serve must SKIP it -- serving it twice would double-admit.
+    pub fn queue_is_coupled(&self, qi: usize) -> bool {
+        self.queue_is_coupled[qi]
     }
 }
 

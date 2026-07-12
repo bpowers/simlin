@@ -993,7 +993,9 @@ fn leak_into_arrested_conveyor_is_skipped_no_stock_belt_divergence() {
     }
     // During arrest the leak into `down` is skipped entirely (rate 0), so `up`
     // does not shed it (the material stays on up's belt to advance normally).
-    // `i` is the semantic step index (arrest window t in [5, 8) == steps 20..32).
+    // `i` is the semantic step index (arrest window t in [5, 8) == steps 20..32),
+    // used to recover `t` and to name the step in the failure message; the range is
+    // an absolute window into the series, not a walk of the whole slice.
     #[allow(clippy::needless_range_loop)]
     for i in 20..32 {
         assert!(
@@ -1098,7 +1100,8 @@ fn leak_to_cloud_keeps_flowing_while_another_conveyor_is_arrested() {
     vm.run_to_end().expect("run");
     let up_leak = vm.get_series(&Ident::new("up_leak")).expect("up_leak");
     // `other` is arrested for steps 20..32; `up_leak` goes to a cloud, so it
-    // keeps flowing throughout. `i` is the semantic step index.
+    // keeps flowing throughout. `i` is the semantic step index, named in the failure
+    // message; the range is an absolute window into the series, not a walk of it.
     #[allow(clippy::needless_range_loop)]
     for i in 20..32 {
         assert!(

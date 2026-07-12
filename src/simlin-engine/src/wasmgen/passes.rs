@@ -17,10 +17,15 @@
 //! reproduces the QUEUE half of that machinery inside the emitted wasm blob, so
 //! a queue model simulates with no host imports and no VM fallback. The CONVEYOR
 //! half lives in the sibling [`super::belt`], which reuses this module's bump
-//! allocator ([`emit_alloc`], [`G_HEAP`]) and its slab-addressing fragments;
-//! [`reject_coupled_outflows`] is the guard that keeps a queue-conveyor coupling
-//! -- served by the VM's *interleaved* pass, not by either module's independent
-//! one -- from silently mis-simulating.
+//! allocator ([`emit_alloc`], [`G_HEAP`]) and its slab-addressing fragments.
+//!
+//! When a queue's primary outflow feeds a discrete conveyor the two halves must
+//! INTERLEAVE (`queues.md` §9): the VM's `run_coupled_passes` runs every belt's
+//! phase A, then each belt's coupled queue serves, then that belt's phase B.
+//! `module::Passes::emit_step_body` unrolls that same order, calling
+//! [`QueuePass::emit_coupled_serve`] between the belt emitters. It reads the VM's
+//! own [`CouplingTable`](crate::queue_compile::CouplingTable) rather than deriving
+//! a second one, so the admission priorities cannot drift apart.
 //!
 //! ## What is specialized, and what is not
 //!
@@ -83,9 +88,8 @@
 use wasm_encoder::{BlockType, Function, Instruction as Ins, ValType};
 
 use crate::conveyor_compile::ContainerKind;
-use crate::queue_compile::{QueueOutflowKind, QueuePlan};
+use crate::queue_compile::{CoupledServe, QueueOutflowKind, QueuePlan};
 
-use super::WasmGenError;
 use super::lower::{HelperFn, f64_const, i32_memarg, memarg};
 
 /// Index of the bump-pointer global. It follows the nine globals `module.rs`
@@ -155,6 +159,15 @@ pub(super) struct QueueHelperFns {
     /// `q_take_from_front(d: i32, requested: f64) -> f64` --
     /// `QueueState::take_from_front` (`queue.rs:130`).
     take_from_front: u32,
+    /// `q_front(d: i32) -> f64` -- `batches.front().copied().unwrap_or(0.0)`. Only
+    /// a §11 coupled serve reads the front without removing it, so this is emitted
+    /// only for a coupled model.
+    front: Option<u32>,
+    /// `q_take_batches(d: i32, budget: f64) -> f64` -- the `(one_at_a_time = false,
+    /// batch_integrity = true)` arm of `QueueState::take_for_conveyor`, the only one
+    /// of the four that needs a loop of its own. Emitted only when some coupled
+    /// primary carries that pair.
+    take_batches: Option<u32>,
     /// `q_clone_ring(d: i32)` -- repoint the descriptor at a verbatim copy of
     /// its ring, so the mid-run preview pass can run on a throwaway side table.
     clone_ring: u32,
@@ -201,29 +214,34 @@ pub(super) struct QueuePass<'a> {
     dt: f64,
 }
 
-/// Reject a queue plan whose primary outflow feeds a discrete conveyor
-/// (`QueueOutflowKind::Coupled`, `queues.md` §9).
+/// The 0-based ring index a 1-based `queue[k]` container access reads, or `None` when
+/// `k` can never name a batch of any ring -- which is a compile-time constant NaN, not
+/// a runtime test.
 ///
-/// Unreachable today -- `compile_datamodel_to_artifact` rejects any model with a
-/// conveyor marker, and a coupling requires a conveyor -- but a coupled outflow
-/// is served by the interleaved `run_coupled_passes`, NOT by the uncoupled
-/// admit-then-serve this module emits, so silently emitting the uncoupled form
-/// would double-admit and mis-account. Loud, not silent, until the conveyor
-/// phases land.
-pub(super) fn reject_coupled_outflows(plans: &[QueuePlan]) -> Result<(), WasmGenError> {
-    let coupled = plans
+/// Two ways to be nameless. `k == 0` is out of range by definition (the index is
+/// 1-based). And a `k` whose 0-based form exceeds `i32::MAX` cannot address a batch
+/// either: a ring's `len` is an i32, so `k - 1 > i32::MAX >= len` always. Narrowing
+/// such a `k` with `as i32` instead would WRAP -- `queue[4294967297]` would read the
+/// FRONT batch -- which is exactly the wrong answer where
+/// `container_value_from_slice`'s `vec.get(k - 1)` returns `None`, hence NaN.
+fn batch_index(k: usize) -> Option<i32> {
+    i32::try_from(k.checked_sub(1)?).ok()
+}
+
+/// The `(one_at_a_time, batch_integrity)` pairs some coupled primary outflow in
+/// `plans` uses. Drives which `take_for_conveyor` helper bodies get emitted.
+fn coupled_batch_rules(plans: &[QueuePlan]) -> impl Iterator<Item = (bool, bool)> + '_ {
+    plans
         .iter()
         .flat_map(|p| p.outflows.iter())
-        .any(|o| matches!(o.kind, QueueOutflowKind::Coupled { .. }));
-    if coupled {
-        return Err(WasmGenError::Unsupported(
-            "wasmgen: a queue coupled to a discrete conveyor is not yet supported by the \
-             wasm backend; the bytecode VM is the only backend that simulates the \
-             interleaved queue-conveyor pass today"
-                .to_string(),
-        ));
-    }
-    Ok(())
+        .filter_map(|o| match o.kind {
+            QueueOutflowKind::Coupled {
+                one_at_a_time,
+                batch_integrity,
+                ..
+            } => Some((one_at_a_time, batch_integrity)),
+            _ => None,
+        })
 }
 
 impl<'a> QueuePass<'a> {
@@ -284,6 +302,24 @@ impl<'a> QueuePass<'a> {
         );
         let clone_ring = push(vec![ValType::I32], vec![], emit_clone_ring(alloc));
 
+        // The §11 coupling helpers, emitted only for a coupled model. `q_front`
+        // serves both `conveyor_desire(one_at_a_time = true)` and the two
+        // `one_at_a_time` arms of `take_for_conveyor`; `q_take_batches` is the one
+        // arm that needs its own loop.
+        let front = coupled_batch_rules(plans)
+            .next()
+            .is_some()
+            .then(|| push(vec![ValType::I32], vec![ValType::F64], emit_front()));
+        let take_batches = coupled_batch_rules(plans)
+            .any(|rules| rules == (false, true))
+            .then(|| {
+                push(
+                    vec![ValType::I32, ValType::F64],
+                    vec![ValType::F64],
+                    emit_take_batches(),
+                )
+            });
+
         // The reducers are emitted only for the container kinds this model uses,
         // so a container-free queue model carries none of them.
         let uses = |want: fn(&ContainerKind) -> bool| {
@@ -300,15 +336,16 @@ impl<'a> QueuePass<'a> {
             .then(|| push(vec![ValType::I32], vec![ValType::F64], emit_min_max(false)));
         let stddev = uses(|k| matches!(k, ContainerKind::Stddev))
             .then(|| push(vec![ValType::I32], vec![ValType::F64], emit_stddev(total)));
-        // `Slat(0)` is a constant NaN at the call site (a 1-based index of 0 can
-        // never name a batch), so it needs no helper.
-        let batch = uses(|k| matches!(k, ContainerKind::Slat(j) if *j >= 1)).then(|| {
-            push(
-                vec![ValType::I32, ValType::I32],
-                vec![ValType::F64],
-                emit_batch(),
-            )
-        });
+        // A `queue[k]` whose `k` names no batch of any ring is a constant NaN at the
+        // call site ([`batch_index`]), so it needs no helper -- the gate must agree.
+        let batch = uses(|k| matches!(k, ContainerKind::Slat(j) if batch_index(*j).is_some()))
+            .then(|| {
+                push(
+                    vec![ValType::I32, ValType::I32],
+                    vec![ValType::F64],
+                    emit_batch(),
+                )
+            });
 
         QueuePass {
             plans,
@@ -319,6 +356,8 @@ impl<'a> QueuePass<'a> {
                 total,
                 serve_unconstrained,
                 take_from_front,
+                front,
+                take_batches,
                 clone_ring,
                 mean,
                 min,
@@ -408,16 +447,18 @@ impl<'a> QueuePass<'a> {
     fn emit_container_value(&self, f: &mut Function, i: usize, kind: &ContainerKind) {
         let d = self.desc_addr(i);
         match kind {
-            // A 1-based batch index of 0 can never name a batch: constant NaN,
-            // with no helper call and no runtime test.
-            ContainerKind::Slat(0) => {
-                f.instruction(&f64_const(f64::NAN));
-            }
-            ContainerKind::Slat(j) => {
-                f.instruction(&Ins::I32Const(d));
-                f.instruction(&Ins::I32Const((*j - 1) as i32));
-                f.instruction(&Ins::Call(self.fns.batch.expect("batch helper emitted")));
-            }
+            ContainerKind::Slat(j) => match batch_index(*j) {
+                // An index that can never name a batch: constant NaN, with no helper
+                // call and no runtime test. See [`batch_index`].
+                None => {
+                    f.instruction(&f64_const(f64::NAN));
+                }
+                Some(idx) => {
+                    f.instruction(&Ins::I32Const(d));
+                    f.instruction(&Ins::I32Const(idx));
+                    f.instruction(&Ins::Call(self.fns.batch.expect("batch helper emitted")));
+                }
+            },
             ContainerKind::Size => {
                 f.instruction(&Ins::I32Const(d));
                 f.instruction(&Ins::I32Load(i32_memarg(D_LEN)));
@@ -448,42 +489,31 @@ impl<'a> QueuePass<'a> {
 
     // ── the pass proper (between Flows and Stocks) ──────────────────────────
 
-    /// The queue pass (`queue_compile::run_queue_pass`, `queue_compile.rs:754`),
-    /// unrolled over the plan set: admit `Σ max(inflow, 0) · dt`, then serve the
-    /// outflows in `<outflow>` declaration = priority order.
+    /// The UNCOUPLED queue pass (`queue_compile::run_queue_pass`), unrolled over the
+    /// plan set: admit `Σ max(inflow, 0) · dt`, then serve the outflows in
+    /// `<outflow>` declaration = priority order.
     ///
-    /// Every queue here is UNCOUPLED ([`reject_coupled_outflows`] guarantees it),
-    /// so the primary outflow is unconstrained and drains the whole FIFO
-    /// (`queues.md` §4.3). The `redirectable` budget an `<overflow/>` sibling may
-    /// claim is therefore 0 -- the primary was never blocked (§4.5). The budget
-    /// is still tracked in a live local rather than constant-folded away, because
-    /// the coupled primary of a later phase seeds it with `desire − taken` and
-    /// the secondary loop is otherwise identical.
-    pub(super) fn emit_step_pass(&self, f: &mut Function, locals: QueuePassLocals) {
+    /// `is_coupled(i)` names the queues the caller already served through the
+    /// interleaved conveyor pass ([`Self::emit_coupled_serve`]); they are SKIPPED
+    /// here, exactly as `run_coupled_passes`' uncoupled tail skips them. Serving one
+    /// twice would admit its inflow twice.
+    ///
+    /// An uncoupled primary outflow is unconstrained and drains the whole FIFO
+    /// (`queues.md` §4.3), so the `redirectable` budget an `<overflow/>` sibling may
+    /// claim is 0 -- the primary was never blocked (§4.5). It is still tracked in a
+    /// live local rather than constant-folded away, because the coupled primary seeds
+    /// it with `desire − taken` and the secondary loop is otherwise identical.
+    pub(super) fn emit_step_pass(
+        &self,
+        f: &mut Function,
+        locals: QueuePassLocals,
+        is_coupled: impl Fn(usize) -> bool,
+    ) {
         for (i, plan) in self.plans.iter().enumerate() {
-            let d = self.desc_addr(i);
-
-            // admit_inflows (`queue_compile.rs:703`): clamp each inflow slot IN
-            // PLACE before summing, so the ordinary Stocks phase integrates the
-            // same volume the FIFO admitted (the §4.1 conservation identity).
-            f.instruction(&f64_const(0.0));
-            f.instruction(&Ins::LocalSet(locals.rate));
-            for &off in &plan.inflow_offs {
-                emit_load_curr(f, off);
-                emit_clamp_nonneg(f, locals.tmp);
-                f.instruction(&Ins::LocalSet(locals.tmp));
-                f.instruction(&Ins::I32Const(0));
-                f.instruction(&Ins::LocalGet(locals.tmp));
-                f.instruction(&Ins::F64Store(memarg(slot_addr(off))));
-                f.instruction(&Ins::LocalGet(locals.rate));
-                f.instruction(&Ins::LocalGet(locals.tmp));
-                f.instruction(&Ins::F64Add);
-                f.instruction(&Ins::LocalSet(locals.rate));
+            if is_coupled(i) {
+                continue;
             }
-            f.instruction(&Ins::I32Const(d));
-            f.instruction(&Ins::LocalGet(locals.rate));
-            f.instruction(&f64_const(self.dt));
-            f.instruction(&Ins::Call(self.fns.admit));
+            self.emit_admit_inflows(f, i, locals);
 
             // A queue with no outflow only accumulates (`serve_uncoupled_queue`
             // returns after the admit), so the whole serve is skipped.
@@ -494,44 +524,224 @@ impl<'a> QueuePass<'a> {
             // The primary of an uncoupled queue empties the FIFO; its driven rate
             // is `removed / dt`.
             f.instruction(&Ins::I32Const(0));
-            f.instruction(&Ins::I32Const(d));
+            f.instruction(&Ins::I32Const(self.desc_addr(i)));
             f.instruction(&Ins::Call(self.fns.serve_unconstrained));
             f.instruction(&f64_const(self.dt));
             f.instruction(&Ins::F64Div);
             f.instruction(&Ins::F64Store(memarg(slot_addr(primary.flow_off))));
 
-            // serve_secondary_outflows (`queue_compile.rs:649`). `redirectable`
-            // starts at 0 for an uncoupled primary.
             f.instruction(&f64_const(0.0));
             f.instruction(&Ins::LocalSet(locals.redirectable));
-            for outflow in plan.outflows.iter().skip(1) {
-                if outflow.overflow {
-                    // Overflow: claim only the still-redirectable blocked volume,
-                    // splitting freely (§4.5, never batch-integrity-bound).
-                    f.instruction(&Ins::I32Const(d));
-                    f.instruction(&Ins::LocalGet(locals.redirectable));
-                    f.instruction(&Ins::Call(self.fns.take_from_front));
-                    f.instruction(&Ins::LocalSet(locals.tmp));
-                    f.instruction(&Ins::LocalGet(locals.redirectable));
-                    f.instruction(&Ins::LocalGet(locals.tmp));
-                    f.instruction(&Ins::F64Sub);
-                    f.instruction(&Ins::LocalSet(locals.redirectable));
-                    f.instruction(&Ins::I32Const(0));
-                    f.instruction(&Ins::LocalGet(locals.tmp));
-                } else {
-                    // An ordinary competing outflow drains the whole remaining
-                    // front (§5.4), leaving nothing to redirect.
-                    f.instruction(&f64_const(0.0));
-                    f.instruction(&Ins::LocalSet(locals.redirectable));
-                    f.instruction(&Ins::I32Const(0));
-                    f.instruction(&Ins::I32Const(d));
-                    f.instruction(&Ins::Call(self.fns.serve_unconstrained));
-                }
-                f.instruction(&f64_const(self.dt));
-                f.instruction(&Ins::F64Div);
-                f.instruction(&Ins::F64Store(memarg(slot_addr(outflow.flow_off))));
+            self.emit_secondary_outflows(f, i, locals);
+        }
+    }
+
+    /// `queue_compile::admit_inflows`: clamp each inflow slot IN PLACE before summing,
+    /// so the ordinary Stocks phase integrates the same volume the FIFO admitted (the
+    /// §4.1 conservation identity), then `admit(Σ, dt)`.
+    ///
+    /// Shared by the uncoupled pass and the coupled serve, for the same reason the VM
+    /// has one `admit_inflows`: a write-back that drifted between them would leave the
+    /// flat stock and `Σ batches` disagreeing on one path only.
+    pub(super) fn emit_admit_inflows(&self, f: &mut Function, i: usize, locals: QueuePassLocals) {
+        f.instruction(&f64_const(0.0));
+        f.instruction(&Ins::LocalSet(locals.rate));
+        for &off in &self.plans[i].inflow_offs {
+            emit_load_curr(f, off);
+            emit_clamp_nonneg(f, locals.tmp);
+            f.instruction(&Ins::LocalSet(locals.tmp));
+            f.instruction(&Ins::I32Const(0));
+            f.instruction(&Ins::LocalGet(locals.tmp));
+            f.instruction(&Ins::F64Store(memarg(slot_addr(off))));
+            f.instruction(&Ins::LocalGet(locals.rate));
+            f.instruction(&Ins::LocalGet(locals.tmp));
+            f.instruction(&Ins::F64Add);
+            f.instruction(&Ins::LocalSet(locals.rate));
+        }
+        f.instruction(&Ins::I32Const(self.desc_addr(i)));
+        f.instruction(&Ins::LocalGet(locals.rate));
+        f.instruction(&f64_const(self.dt));
+        f.instruction(&Ins::Call(self.fns.admit));
+    }
+
+    /// `queue_compile::serve_secondary_outflows` for queue `i`, over the post-primary
+    /// front. The caller must have left the redirectable budget in `locals.redirectable`
+    /// (0 for an uncoupled primary; `max(0, desire − taken)` for a coupled one).
+    ///
+    /// A `Coupled` secondary is skipped rather than drained: only a PRIMARY couples
+    /// (`detect_coupling_specs` rejects a coupled secondary outright), so this mirrors
+    /// the VM's defense-in-depth `continue` rather than a reachable case.
+    fn emit_secondary_outflows(&self, f: &mut Function, i: usize, locals: QueuePassLocals) {
+        let d = self.desc_addr(i);
+        for outflow in self.plans[i].outflows.iter().skip(1) {
+            if matches!(outflow.kind, QueueOutflowKind::Coupled { .. }) {
+                continue;
+            }
+            if outflow.overflow {
+                // Overflow: claim only the still-redirectable blocked volume,
+                // splitting freely (§4.5, never batch-integrity-bound).
+                f.instruction(&Ins::I32Const(d));
+                f.instruction(&Ins::LocalGet(locals.redirectable));
+                f.instruction(&Ins::Call(self.fns.take_from_front));
+                f.instruction(&Ins::LocalSet(locals.tmp));
+                f.instruction(&Ins::LocalGet(locals.redirectable));
+                f.instruction(&Ins::LocalGet(locals.tmp));
+                f.instruction(&Ins::F64Sub);
+                f.instruction(&Ins::LocalSet(locals.redirectable));
+                f.instruction(&Ins::I32Const(0));
+                f.instruction(&Ins::LocalGet(locals.tmp));
+            } else {
+                // An ordinary competing outflow drains the whole remaining
+                // front (§5.4), leaving nothing to redirect.
+                f.instruction(&f64_const(0.0));
+                f.instruction(&Ins::LocalSet(locals.redirectable));
+                f.instruction(&Ins::I32Const(0));
+                f.instruction(&Ins::I32Const(d));
+                f.instruction(&Ins::Call(self.fns.serve_unconstrained));
+            }
+            f.instruction(&f64_const(self.dt));
+            f.instruction(&Ins::F64Div);
+            f.instruction(&Ins::F64Store(memarg(slot_addr(outflow.flow_off))));
+        }
+    }
+
+    // ── the queue half of conveyor coupling (queues.md §9) ──────────────────
+
+    /// Steps 2-5 of one coupled serve (`run_coupled_passes`' loop body): admit the
+    /// queue's inflow, measure the batch-policy `desire`, take at most `req` under the
+    /// batch rules, publish the shared rate, and serve the secondaries against
+    /// `max(0, desire − taken)`.
+    ///
+    /// The caller (`module::Passes::emit_step_body`) owns steps 1 and 4-6 -- the belt's
+    /// `req`, its `consume_inflow_budget(taken)`, `prior += taken`, and its phase B --
+    /// because they are conveyor-side. `taken` is left in `belt_taken` for it. The
+    /// ORDER between `consume_inflow_budget` and this emitter's shared-rate store is
+    /// unobservable (different state), but the order between the `desire` read and the
+    /// `take` is not: `desire` must be measured on the pre-take front.
+    ///
+    /// `req` arrives in `belt_req`; it is the belt's budget, so the `req <= 0` early
+    /// return of `take_for_conveyor` also covers the arrested belt (whose budget is 0).
+    pub(super) fn emit_coupled_serve(
+        &self,
+        f: &mut Function,
+        cs: &CoupledServe,
+        locals: QueuePassLocals,
+        belt_req: u32,
+        belt_desire: u32,
+        belt_taken: u32,
+    ) {
+        let i = cs.queue;
+        let d = self.desc_addr(i);
+        self.emit_admit_inflows(f, i, locals);
+
+        // desire = conveyor_desire(one_at_a_time), measured BEFORE the take mutates
+        // the front (§4.5).
+        if cs.one_at_a_time {
+            f.instruction(&Ins::I32Const(d));
+            f.instruction(&Ins::Call(self.fns.front.expect("q_front emitted")));
+        } else {
+            f.instruction(&Ins::I32Const(d));
+            f.instruction(&Ins::Call(self.fns.total));
+        }
+        f.instruction(&Ins::LocalSet(belt_desire));
+
+        self.emit_take_for_conveyor(f, cs, locals, belt_req, belt_taken);
+
+        // The shared slot is BOTH the queue's driven outflow rate and the conveyor's
+        // admitted inflow rate: the Stocks phase integrates `-taken` on the queue
+        // stock and `+taken` on the belt stock from this one number.
+        f.instruction(&Ins::I32Const(0));
+        f.instruction(&Ins::LocalGet(belt_taken));
+        f.instruction(&f64_const(self.dt));
+        f.instruction(&Ins::F64Div);
+        f.instruction(&Ins::F64Store(memarg(slot_addr(cs.shared_flow_off))));
+
+        // redirectable = (desire - taken).max(0.0) -- Rust's `max`, so a NaN degrades
+        // to "nothing to redirect" (`emit_clamp_nonneg`, never `f64.max`).
+        f.instruction(&Ins::LocalGet(belt_desire));
+        f.instruction(&Ins::LocalGet(belt_taken));
+        f.instruction(&Ins::F64Sub);
+        emit_clamp_nonneg(f, locals.tmp);
+        f.instruction(&Ins::LocalSet(locals.redirectable));
+        self.emit_secondary_outflows(f, i, locals);
+    }
+
+    /// `QueueState::take_for_conveyor(req, one_at_a_time, batch_integrity)`, leaving
+    /// the taken volume in `belt_taken`.
+    ///
+    /// The two flags are compile-time constants of the coupling, so all four arms are
+    /// SPECIALIZED here rather than branched on at runtime. Three of them reduce to a
+    /// `q_take_from_front` call; only `(false, true)` -- pop whole batches while they
+    /// fit -- needs its own loop, and only that one gets a helper.
+    ///
+    /// The `req <= 0.0` early return is emitted first, and is what makes the empty-queue
+    /// cases agree with the VM's `let Some(front) = ... else { return 0.0 }` guards:
+    /// with `req > 0`, an empty queue's `front` of 0 turns `(true, false)` into
+    /// `take_from_front(0)` and `(true, true)` into `0 <= req` then `take_from_front(0)`,
+    /// both of which remove nothing and return 0.
+    fn emit_take_for_conveyor(
+        &self,
+        f: &mut Function,
+        cs: &CoupledServe,
+        locals: QueuePassLocals,
+        belt_req: u32,
+        belt_taken: u32,
+    ) {
+        let d = self.desc_addr(cs.queue);
+        f.instruction(&f64_const(0.0));
+        f.instruction(&Ins::LocalSet(belt_taken));
+
+        // `req.max(0.0)` then `if req <= 0.0 { return 0.0 }` is exactly `req > 0.0`
+        // (false for NaN, for -0.0, and for every negative).
+        f.instruction(&Ins::LocalGet(belt_req));
+        f.instruction(&f64_const(0.0));
+        f.instruction(&Ins::F64Gt);
+        f.instruction(&Ins::If(BlockType::Empty));
+        match (cs.one_at_a_time, cs.batch_integrity) {
+            (true, false) => {
+                // Split the single front batch down to `req` when it is larger.
+                // `f64.min` is sound: `front >= 0` (the no-empty-batch invariant, or
+                // the 0 of an empty queue) and `req > 0`, so neither is NaN.
+                f.instruction(&Ins::I32Const(d));
+                f.instruction(&Ins::I32Const(d));
+                f.instruction(&Ins::Call(self.fns.front.expect("q_front emitted")));
+                f.instruction(&Ins::LocalGet(belt_req));
+                f.instruction(&Ins::F64Min);
+                f.instruction(&Ins::Call(self.fns.take_from_front));
+                f.instruction(&Ins::LocalSet(belt_taken));
+            }
+            (true, true) => {
+                // The single front batch, whole, only if it fully fits.
+                f.instruction(&Ins::I32Const(d));
+                f.instruction(&Ins::Call(self.fns.front.expect("q_front emitted")));
+                f.instruction(&Ins::LocalSet(locals.tmp));
+                f.instruction(&Ins::LocalGet(locals.tmp));
+                f.instruction(&Ins::LocalGet(belt_req));
+                f.instruction(&Ins::F64Le);
+                f.instruction(&Ins::If(BlockType::Empty));
+                f.instruction(&Ins::I32Const(d));
+                f.instruction(&Ins::LocalGet(locals.tmp));
+                f.instruction(&Ins::Call(self.fns.take_from_front));
+                f.instruction(&Ins::LocalSet(belt_taken));
+                f.instruction(&Ins::End);
+            }
+            (false, false) => {
+                // Whole front batches that fit, splitting the boundary batch.
+                f.instruction(&Ins::I32Const(d));
+                f.instruction(&Ins::LocalGet(belt_req));
+                f.instruction(&Ins::Call(self.fns.take_from_front));
+                f.instruction(&Ins::LocalSet(belt_taken));
+            }
+            (false, true) => {
+                f.instruction(&Ins::I32Const(d));
+                f.instruction(&Ins::LocalGet(belt_req));
+                f.instruction(&Ins::Call(
+                    self.fns.take_batches.expect("q_take_batches emitted"),
+                ));
+                f.instruction(&Ins::LocalSet(belt_taken));
             }
         }
+        f.instruction(&Ins::End);
     }
 
     // ── the mid-run preview (run_to's resting re-eval) ──────────────────────
@@ -1083,6 +1293,117 @@ fn emit_take_from_front() -> Function {
     f.instruction(&Ins::End); // block
 
     f.instruction(&Ins::LocalGet(TF_REMOVED));
+    f.instruction(&Ins::End);
+    f
+}
+
+/// `q_front(d) -> f64`: `batches.front().copied().unwrap_or(0.0)`.
+///
+/// The `unwrap_or(0.0)` is not a papering-over: `take_for_conveyor`'s two
+/// `one_at_a_time` arms return 0 on an empty queue, and so does every use of a
+/// 0-valued front once the `req > 0` guard has run (see
+/// [`QueuePass::emit_take_for_conveyor`]). `conveyor_desire` spells the same
+/// `unwrap_or(0.0)` explicitly.
+fn emit_front() -> Function {
+    let mut f = Function::new([]);
+    f.instruction(&Ins::LocalGet(0));
+    f.instruction(&Ins::I32Load(i32_memarg(D_LEN)));
+    f.instruction(&Ins::I32Eqz);
+    f.instruction(&Ins::If(BlockType::Result(ValType::F64)));
+    f.instruction(&f64_const(0.0));
+    f.instruction(&Ins::Else);
+    f.instruction(&Ins::LocalGet(0));
+    f.instruction(&Ins::I32Load(i32_memarg(D_BASE)));
+    f.instruction(&Ins::LocalGet(0));
+    f.instruction(&Ins::I32Load(i32_memarg(D_HEAD)));
+    f.instruction(&Ins::I32Const(SLOT_BYTES));
+    f.instruction(&Ins::I32Mul);
+    f.instruction(&Ins::I32Add);
+    f.instruction(&Ins::F64Load(memarg(0)));
+    f.instruction(&Ins::End);
+    f.instruction(&Ins::End);
+    f
+}
+
+// `q_take_batches(d: i32, budget: f64) -> f64`
+const TB_D: u32 = 0;
+const TB_BUDGET: u32 = 1;
+const TB_REMOVED: u32 = 2;
+const TB_FRONT: u32 = 3;
+
+/// `q_take_batches(d, budget) -> removed`: the `(one_at_a_time = false,
+/// batch_integrity = true)` arm of `QueueState::take_for_conveyor` -- pop whole front
+/// batches while they fit, stopping at the first that would not. NEVER splits, so it
+/// cannot reuse `q_take_from_front`, whose boundary case does.
+///
+/// The loop guard is `front <= budget`, which is FALSE for a NaN `budget` and so
+/// stops immediately -- Rust's `if front <= budget` does the same. `budget` is
+/// strictly positive on entry (the caller's `req > 0` guard) but may reach exactly 0
+/// after a batch of exactly `budget` pops; the next iteration then pops only a
+/// zero-volume batch, which the no-empty-batch invariant forbids, so it stops.
+fn emit_take_batches() -> Function {
+    let mut f = Function::new([(2, ValType::F64)]);
+
+    f.instruction(&f64_const(0.0));
+    f.instruction(&Ins::LocalSet(TB_REMOVED));
+
+    f.instruction(&Ins::Block(BlockType::Empty));
+    f.instruction(&Ins::Loop(BlockType::Empty));
+
+    // while let Some(&front) = batches.front()
+    f.instruction(&Ins::LocalGet(TB_D));
+    f.instruction(&Ins::I32Load(i32_memarg(D_LEN)));
+    f.instruction(&Ins::I32Eqz);
+    f.instruction(&Ins::BrIf(1));
+
+    f.instruction(&Ins::LocalGet(TB_D));
+    f.instruction(&Ins::I32Load(i32_memarg(D_BASE)));
+    f.instruction(&Ins::LocalGet(TB_D));
+    f.instruction(&Ins::I32Load(i32_memarg(D_HEAD)));
+    f.instruction(&Ins::I32Const(SLOT_BYTES));
+    f.instruction(&Ins::I32Mul);
+    f.instruction(&Ins::I32Add);
+    f.instruction(&Ins::F64Load(memarg(0)));
+    f.instruction(&Ins::LocalSet(TB_FRONT));
+
+    // if !(front <= budget) { break }
+    f.instruction(&Ins::LocalGet(TB_FRONT));
+    f.instruction(&Ins::LocalGet(TB_BUDGET));
+    f.instruction(&Ins::F64Le);
+    f.instruction(&Ins::I32Eqz);
+    f.instruction(&Ins::BrIf(1));
+
+    // pop_front: head = (head + 1) % cap; len -= 1
+    f.instruction(&Ins::LocalGet(TB_D));
+    f.instruction(&Ins::LocalGet(TB_D));
+    f.instruction(&Ins::I32Load(i32_memarg(D_HEAD)));
+    f.instruction(&Ins::I32Const(1));
+    f.instruction(&Ins::I32Add);
+    f.instruction(&Ins::LocalGet(TB_D));
+    f.instruction(&Ins::I32Load(i32_memarg(D_CAP)));
+    f.instruction(&Ins::I32RemU);
+    f.instruction(&Ins::I32Store(i32_memarg(D_HEAD)));
+    f.instruction(&Ins::LocalGet(TB_D));
+    f.instruction(&Ins::LocalGet(TB_D));
+    f.instruction(&Ins::I32Load(i32_memarg(D_LEN)));
+    f.instruction(&Ins::I32Const(1));
+    f.instruction(&Ins::I32Sub);
+    f.instruction(&Ins::I32Store(i32_memarg(D_LEN)));
+
+    f.instruction(&Ins::LocalGet(TB_REMOVED));
+    f.instruction(&Ins::LocalGet(TB_FRONT));
+    f.instruction(&Ins::F64Add);
+    f.instruction(&Ins::LocalSet(TB_REMOVED));
+    f.instruction(&Ins::LocalGet(TB_BUDGET));
+    f.instruction(&Ins::LocalGet(TB_FRONT));
+    f.instruction(&Ins::F64Sub);
+    f.instruction(&Ins::LocalSet(TB_BUDGET));
+
+    f.instruction(&Ins::Br(0));
+    f.instruction(&Ins::End); // loop
+    f.instruction(&Ins::End); // block
+
+    f.instruction(&Ins::LocalGet(TB_REMOVED));
     f.instruction(&Ins::End);
     f
 }

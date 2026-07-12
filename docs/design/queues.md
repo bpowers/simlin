@@ -25,14 +25,17 @@ canonically, a queue feeding a `discrete` conveyor whose capacity or inflow
 limit throttles admission. XMILE 1.0 marks queues OPTIONAL (§3.7.3, "Optional
 Queue Conformance").
 
-### Current behavior (verified against HEAD, 2026-07-07)
+### The behavior this spec replaced (verified against HEAD, 2026-07-07)
 
-`<queue/>` is not represented: the XMILE reader does not recognize the stock
-option, so a queue stock imports as a plain INTEG stock and the `<overflow/>`
-flow property and `<uses_queue>` header are dropped. Import-then-export
-**corrupts** a Stella queue model exactly as it did conveyors before their
-support landed. A conveyor with a queue directly upstream cannot be expressed at
-all, so conveyors.md §11 (the coupling) is unreachable.
+Before any of the below was implemented, `<queue/>` was not represented: the XMILE
+reader did not recognize the stock option, so a queue stock imported as a plain
+INTEG stock and the `<overflow/>` flow property and `<uses_queue>` header were
+dropped. Import-then-export **corrupted** a Stella queue model exactly as it did
+conveyors before their support landed. A conveyor with a queue directly upstream
+could not be expressed at all, so conveyors.md §11 (the coupling) was unreachable.
+
+All of that is now implemented on both backends, and
+`test/conveyors/queue_coupled_conveyor.xmile` is the coupling's corpus fixture.
 
 ## 2. Concepts and vocabulary
 
@@ -365,11 +368,21 @@ Stocks. The `QueueNotExpanded` guard still fires for any path that reaches
 `compile_project_incremental` with a live `<queue/>` marker, so a future caller
 that bypasses the dispatch cannot silently mis-simulate.
 
-Conveyors are still `Unsupported` from the wasm backend (loud, no silent VM
-fallback; conveyors.md §9.5), and a conveyor-bearing model is rejected up front
-before the dispatch. Conveyor-to-queue coupling therefore does not arise on the
-wasm path yet; a `QueueOutflowKind::Coupled` outflow is rejected explicitly
-rather than mis-lowered.
+Conveyor-to-queue coupling (§9) IS lowered. `module::Passes::emit_step_body`
+branches on the VM's own `CouplingTable` -- read, not re-derived, so the two
+backends' admission priorities cannot drift -- and unrolls the interleaved order
+`run_coupled_passes` walks: every belt's phase A, then for each belt its coupled
+queues' serves in the belt's `<inflow>` declaration order, then that belt's phase
+B, then the uncoupled queues. `QueuePass::emit_step_pass` takes an `is_coupled`
+predicate so a coupled queue is served exactly once. All four
+`(one_at_a_time, batch_integrity)` batch rules are compile-time constants of the
+coupling and are specialized at the call site; only "whole batches, never split"
+needs a loop of its own.
+
+A coupled model reaches the coupled emission through the PUBLIC wasm entries, like
+any other conveyor model (GH #924; conveyors.md §9.5). `test/conveyors/queue_coupled_conveyor.xmile`
+is the end-to-end corpus fixture: both backends must agree on the queue, the belt,
+the coupled serve, and the `<overflow/>` that claims the refused volume.
 
 ### 10.5 LTM
 

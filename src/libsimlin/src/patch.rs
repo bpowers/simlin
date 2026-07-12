@@ -328,12 +328,14 @@ impl ErrorDetailBuilder {
     }
 
     /// Build an `ErrorDetailData` from a `FormattedError`, carrying the
-    /// diagnostic's real severity. The `vm_error`/compile-failure path uses
-    /// the `Error`-defaulting `from_formatted` wrapper below.
-    fn from_formatted_with_severity(
-        error: errors::FormattedError,
-        severity: crate::SimlinErrorSeverity,
-    ) -> ErrorDetailData {
+    /// diagnostic's real severity.
+    ///
+    /// The severity rides on the `FormattedError` itself (GH #919), so it can
+    /// neither be forgotten here nor drift from the wording of `message`. A
+    /// `format_simulation_error` detail (a compile/VM-validation failure, with
+    /// no `Diagnostic` behind it) is `Error` by construction.
+    fn from_formatted(error: errors::FormattedError) -> ErrorDetailData {
+        let severity = crate::SimlinErrorSeverity::from(error.severity);
         let kind = match error.kind {
             errors::FormattedErrorKind::Project => SimlinErrorKind::Project,
             errors::FormattedErrorKind::Model => SimlinErrorKind::Model,
@@ -365,13 +367,6 @@ impl ErrorDetailBuilder {
             .offsets(error.start_offset, error.end_offset)
             .build()
     }
-
-    /// Build an `ErrorDetailData` with `Error` severity (the default for
-    /// compile/VM-validation failures and any caller that does not carry a
-    /// diagnostic severity).
-    fn from_formatted(error: errors::FormattedError) -> ErrorDetailData {
-        Self::from_formatted_with_severity(error, crate::SimlinErrorSeverity::Error)
-    }
 }
 
 // ── error collection ───────────────────────────────────────────────────
@@ -395,10 +390,9 @@ pub(crate) fn gather_error_details_with_db(
     let mut all_errors: Vec<ErrorDetailData> = diags
         .iter()
         .map(|d| {
-            ErrorDetailBuilder::from_formatted_with_severity(
-                errors::format_diagnostic_with_datamodel(d, datamodel),
-                crate::SimlinErrorSeverity::from(d.severity),
-            )
+            ErrorDetailBuilder::from_formatted(errors::format_diagnostic_with_datamodel(
+                d, datamodel,
+            ))
         })
         .collect();
 

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header>
+    <name>conveyor containers</name>
+    <vendor>test</vendor>
+    <product version="1.0">test</product>
+    <options>
+      <uses_conveyor/>
+    </options>
+  </header>
+  <sim_specs method="Euler" time_units="Months">
+    <start>0</start>
+    <stop>6</stop>
+    <dt>0.5</dt>
+  </sim_specs>
+  <model>
+    <variables>
+      <!-- Transit 2 at dt 0.5 => 4 slats, seeded at the steady-state fill (40
+           units, 10 per slat) and then driven by a ramping inflow so no two slats
+           carry the same volume: every container reduction below (design doc 10)
+           has a distinct value, and a reducer that silently folded the wrong slat
+           range would not coincide with the right answer. `INIT(total)` pins the
+           reconciliation rule -- a container aux is a hidden no-flow stock, so its
+           initial value must be the start-of-run belt total (40), not the
+           placeholder 0, which is why the belt must not start empty here.
+
+           The `belt[1]`/`belt[2]` slat accesses below simulate correctly on both
+           backends but still draw a spurious Error diagnostic: GH #948. -->
+      <stock name="belt">
+        <eqn>40</eqn>
+        <inflow>arriving</inflow>
+        <outflow>departing</outflow>
+        <conveyor>
+          <len>2</len>
+        </conveyor>
+      </stock>
+      <flow name="arriving">
+        <eqn>10 + 3 * TIME</eqn>
+      </flow>
+      <flow name="departing">
+      </flow>
+      <stock name="drained">
+        <eqn>0</eqn>
+        <inflow>departing</inflow>
+      </stock>
+      <aux name="total">
+        <eqn>SUM(belt)</eqn>
+      </aux>
+      <aux name="average">
+        <eqn>MEAN(belt)</eqn>
+      </aux>
+      <aux name="lightest">
+        <eqn>MIN(belt)</eqn>
+      </aux>
+      <aux name="heaviest">
+        <eqn>MAX(belt)</eqn>
+      </aux>
+      <aux name="spread">
+        <eqn>STDDEV(belt)</eqn>
+      </aux>
+      <aux name="slat_count">
+        <eqn>SIZE(belt)</eqn>
+      </aux>
+      <aux name="exit_slat">
+        <eqn>belt[1]</eqn>
+      </aux>
+      <aux name="second_slat">
+        <eqn>belt[2]</eqn>
+      </aux>
+      <aux name="initial_total">
+        <eqn>INIT(total)</eqn>
+      </aux>
+    </variables>
+  </model>
+</xmile>

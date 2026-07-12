@@ -293,14 +293,24 @@ fn test_error_kind_unit_consistency_error() {
             details.starts_with("computed units"),
             "details should be the bare reason: {details}"
         );
+        // Match the summary line on the severity-independent "in model" phrase:
+        // a unit consistency mismatch is Warning-severity, so pinning the word
+        // "error" here would pass vacuously (GH #919).
         assert!(
-            !details.contains('~') && !details.contains("units error in model"),
+            !details.contains('~') && !details.contains("in model"),
             "details must not carry snippet/summary formatting: {details}"
         );
         let message = CStr::from_ptr(consistency.message).to_str().unwrap();
         assert!(
             message.contains('~'),
             "message keeps the terminal-formatted snippet: {message}"
+        );
+        // The consistency mismatch does not block simulation, so its message
+        // must not claim to be an error.
+        assert_eq!(consistency.severity, SimlinErrorSeverity::Warning);
+        assert!(
+            message.contains("units warning in model") && !message.contains("units error in model"),
+            "a Warning-severity unit mismatch renders as a warning: {message}"
         );
 
         simlin_error_free(all_errors);
@@ -569,8 +579,8 @@ fn test_get_errors_conveyor_model_has_no_not_expanded() {
 
 /// A two-model XMILE whose main model instantiates `sub` as a module and whose
 /// `sub` model holds a `<conveyor>` stock. Conveyor/queue support is main-model
-/// only for now (docs/design/conveyors.md §9.3), so this must be rejected with a
-/// clear, user-facing limitation naming the stock and its model -- NOT the
+/// only for now (an undocumented limitation, GH #940), so this must be rejected
+/// with a clear, user-facing limitation naming the stock and its model -- NOT the
 /// engine-internal "reached the ordinary compile path un-expanded" guard text.
 const CONVEYOR_IN_SUBMODEL_XMILE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">

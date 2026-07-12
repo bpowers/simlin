@@ -623,8 +623,9 @@ describe('convertErrorDetails', () => {
         startOffset: 0,
         endOffset: 6,
         // The message is terminal-formatted (snippet + squiggles + summary)
-        // and must NOT leak into the UnitError the UI renders.
-        message: "    2*aux1\n    ~~~~~~\nunits error in model 'main' variable 'inflow': unit_mismatch",
+        // and must NOT leak into the UnitError the UI renders. A consistency
+        // mismatch is Warning severity, so the engine words it as a warning.
+        message: "    2*aux1\n    ~~~~~~\nunits warning in model 'main' variable 'inflow': unit_mismatch",
         details: "computed units 'blerz' don't match specified units",
       } as unknown as ErrorDetail,
     ];
@@ -736,7 +737,8 @@ describe('ProjectController error cache + navigation', () => {
         variableName: null,
         kind: SimlinErrorKind.Model,
         code: 33,
-        message: "error in model 'main': unit_mismatch -- unit checking failed; inconsistent constraints:\n    1 == x",
+        message:
+          "warning in model 'main': unit_mismatch -- unit checking failed; inconsistent constraints:\n    1 == x",
         details: "the units of 'a' and 'b' are inconsistent with each other",
       } as unknown as ErrorDetail,
       {

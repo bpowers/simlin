@@ -44,7 +44,7 @@
 //! index from another; [`decode_error_word`] is the canonical unpacker and
 //! [`emit_get_error`] the canonical packer, so the two cannot drift.
 //!
-//! ## The unwind contract (what GH #922 must honor)
+//! ## The unwind contract (what the belt pass honors, GH #922)
 //!
 //! See [`ErrorScope`]. In short: a driver wraps an error-capable pass body in a
 //! `block`, the pass raises with [`ErrorScope::raise`] (which sets the two
@@ -403,11 +403,17 @@ pub fn reconstruct_error(
 
 // ── test-only fault injection ────────────────────────────────────────────────
 //
-// The conveyor belt pass (GH #922) does not exist yet, so no production model
-// can raise. To prove the mechanism -- the unwind, the driver guards, the
-// no-row-saved semantics, the preview's swallow-and-restore -- the tests splice
-// a synthetic one-instruction "pass" into the SAME hook points the belt pass will
-// occupy.
+// Production models DO raise on this channel: [`super::belt`]'s init pass raises
+// `ConveyorTransitNotPositive`/`ConveyorTransitTooLong` on a belt whose `<len>`
+// is non-positive/non-finite or over the §4.1 slat bound, and its phase-A latch
+// raises `ConveyorTransitTooLong` when a live `<len>` crosses that bound mid-run.
+// Both need a conveyor plan, though, so the MECHANISM -- the unwind, the driver
+// guards, the no-row-saved semantics, the preview's swallow-and-restore -- would
+// otherwise be observable only through the belt pass, on belt models. To exercise
+// it independently of that pass (and on ordinary and queue-only models, whose
+// blobs are the ones that must elide the guards entirely), the tests splice a
+// synthetic one-instruction "pass" into the SAME hook points the belt pass
+// occupies.
 //
 // Outside a test build [`FaultInjection`] is an UNINHABITED enum. That keeps
 // `module.rs` free of `#[cfg(test)]`: it stores an ordinary

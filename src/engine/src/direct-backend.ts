@@ -595,9 +595,10 @@ export class DirectBackend implements EngineBackend {
    * it again on the next `run_to` rather than accumulating rows over a half-built
    * side table.
    *
-   * Nothing in the corpus can raise today -- the only raising pass is the conveyor
-   * belt pass, and a conveyor model is still rejected at wasm compile time (GH
-   * #922/#924) -- so this is always a no-op and a tripwire for when it is not.
+   * The only raising pass is the conveyor belt pass (`ConveyorTransitNotPositive`,
+   * `ConveyorTransitTooLong`), and since GH #924 a conveyor model reaches the wasm
+   * backend through the public compile entry -- so this is live, not a tripwire. A
+   * queue-only or ordinary model still cannot raise: its blob elides the guards.
    */
   private throwIfWasmRuntimeError(exports: WasmBlobExports): void {
     const err = decodeWasmError(exports.get_error());

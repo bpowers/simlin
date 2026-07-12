@@ -323,59 +323,47 @@ fn compile_simulation_gf_lookup_modes_match_vm() {
     }
 }
 
-/// GH #884: a CONVEYOR model is rejected UP FRONT by the wasm datamodel entry
-/// points with a typed `WasmGenError::Unsupported` whose message honestly
-/// states the wasm-backend limitation -- not the engine-internal
-/// `ConveyorNotExpanded` guard text, which directs the reader at the VM-only
-/// special-stock build path (a path that produces no wasm blob). The
-/// LTM-enabled compile takes the same early exit. The companion `build_vm`
-/// oracle proves the same fixture simulates fine on the bytecode VM, so the
-/// limitation is wasm-backend-specific, not a structural model error.
+/// GH #924, the inverse of the GH #884 reject this test used to pin: a CONVEYOR
+/// model lowers through the PUBLIC wasm datamodel entry points, with no up-front
+/// marker scan and no silent VM fallback. Both LTM flag settings take the same
+/// special-stock dispatch (which compiles an always-`ltm_enabled == false`
+/// expanded project -- the documented conveyors.md §9 degradation), so an
+/// `ltm_enabled` compile must succeed rather than trip a reject.
 ///
-/// The QUEUE half of GH #884 has landed: a queue model now lowers, and its
-/// parity with the VM is pinned in `wasmgen::passes`'s tests. Only the belt
-/// pass is left.
+/// The `build_vm` companion is kept as the oracle-of-record: both backends build
+/// the same fixture, which is the whole point of removing the gate. Slab-level
+/// parity for this and every other belt feature lives in `wasmgen::belt`'s tests,
+/// and the end-to-end corpus gate in `tests/integration/simulate.rs`.
 #[test]
-fn conveyor_models_rejected_up_front() {
+fn conveyor_models_lower_through_the_datamodel_entry_point() {
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
     let datamodel =
         open_xmile(&mut BufReader::new(xml.as_bytes())).expect("parse conveyor fixture");
     let main = datamodel.models[0].name.clone();
 
     for ltm_enabled in [false, true] {
-        match compile_datamodel_to_artifact(&datamodel, &main, ltm_enabled, false) {
-            Ok(_) => {
-                panic!("a conveyor model must not lower to wasm (ltm_enabled={ltm_enabled})")
-            }
-            Err(WasmGenError::Unsupported(msg)) => {
-                assert!(
-                    msg.contains("not yet supported by the wasm backend"),
-                    "the error must state the wasm-backend limitation, got: {msg}"
-                );
-                assert!(
-                    msg.contains("conveyor"),
-                    "the error must name the conveyor construct, got: {msg}"
-                );
-                assert!(
-                    !msg.contains("build_vm") && !msg.contains("build_sim"),
-                    "the wasm-path error must not direct the caller at a \
-                     VM-only build entry point, got: {msg}"
-                );
-            }
-        }
+        let artifact = compile_datamodel_to_artifact(&datamodel, &main, ltm_enabled, false)
+            .unwrap_or_else(|e| {
+                panic!("a conveyor model must lower (ltm_enabled={ltm_enabled}): {e:?}")
+            });
+        validate(&artifact.wasm).expect("the conveyor blob must validate under the interpreter");
+        assert!(
+            artifact
+                .layout
+                .var_offsets
+                .iter()
+                .any(|(n, _)| n == "students"),
+            "the conveyor stock must be in the layout"
+        );
     }
 
-    // VM oracle: the same fixture simulates through the special-stock
-    // build path, proving the wasm reject is a backend gap, not a
-    // broken model (mirrors `unsupported_ltm_model_returns_wasmgen_error`).
     let mut vm = crate::queue_compile::build_vm(&datamodel, &main).expect("VM must build");
     vm.run_to_end().expect("VM must run the conveyor fixture");
 }
 
-/// The queue fixture the sibling reject test used to carry now LOWERS. Kept here
-/// (rather than only in `wasmgen::passes`'s tests) so the two entry points'
-/// contract stays visible side by side: conveyor rejects, queue lowers, and both
-/// simulate on the VM.
+/// The queue sibling of [`conveyor_models_lower_through_the_datamodel_entry_point`].
+/// Kept here (rather than only in `wasmgen::passes`'s tests) so the two special-stock
+/// kinds' entry-point contract stays visible side by side.
 #[test]
 fn queue_models_lower_through_the_datamodel_entry_point() {
     let xml = include_str!("../../../../test/queues/queue_drain.xmile");

@@ -1727,6 +1727,9 @@ impl Vm {
     /// A CompiledInitial's `offsets` are exactly the slots it writes, so a
     /// container stock -- which writes only its own slot(s) -- is the one whose
     /// offsets are wholly contained in the container-slot set.
+    // Mirrors `eval_initials`' parameter list (the borrow split between `curr` and
+    // `next` is what keeps it a free function rather than a `&mut self` method) plus
+    // the one skip set; bundling them would obscure that correspondence.
     #[allow(clippy::too_many_arguments)]
     fn eval_initials_skipping(
         sliced_sim: &CompiledSlicedSimulation,

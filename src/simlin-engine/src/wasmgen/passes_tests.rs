@@ -13,11 +13,9 @@
 //! `queue_compile::compile_sim` dispatch), runs the blob under the DLR-FT
 //! interpreter, and diffs the two slabs variable-by-variable.
 
-use super::*;
-
 use crate::common::{Canonical, Ident};
-use crate::queue_compile::{QueueOutflowPlan, build_vm};
-use crate::wasmgen::{WasmArtifact, WasmGenError, compile_datamodel_to_artifact};
+use crate::queue_compile::build_vm;
+use crate::wasmgen::{WasmArtifact, compile_datamodel_to_artifact};
 use checked::{Store, Stored};
 use std::io::BufReader;
 use wasm::addrs::ModuleAddr;
@@ -448,6 +446,39 @@ fn queue_container_access_matches_vm() {
     );
 }
 
+/// A `queue[k]` whose 0-based index does not fit in an `i32` names no batch of any ring
+/// (a ring's `len` is an i32), so it is NaN like any other out-of-range index. The
+/// emitter must not narrow it with `as i32`: `2^32 + 1` would WRAP to 0 and silently
+/// return the FRONT batch.
+#[test]
+fn a_batch_index_beyond_i32_is_nan() {
+    let project = parse(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>q</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler"><start>0</start><stop>2</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>9</eqn><inflow>arrivals</inflow><queue/></stock>
+    <flow name="arrivals"><eqn>0</eqn><non_negative/></flow>
+    <aux name="front"><eqn>waiting[1]</eqn></aux>
+    <aux name="wrapped"><eqn>waiting[4294967297]</eqn></aux>
+  </variables></model>
+</xmile>"#,
+    );
+    let artifact = artifact_for(&project);
+    assert_slab_matches_vm(&project, &artifact);
+
+    // `(4294967297 - 1) as i32 == 0`, so a wrapping narrowing would report the front
+    // batch's 9.0 here rather than NaN.
+    let slab = run_artifact(&artifact);
+    assert_eq!(wasm_series(&artifact, &slab, "front")[0], 9.0);
+    let wrapped = wasm_series(&artifact, &slab, "wrapped");
+    assert!(
+        wrapped.iter().all(|v| v.is_nan()),
+        "an index past i32::MAX must be NaN, got {wrapped:?}"
+    );
+}
+
 /// `INIT(<container access>)` must read the START-OF-RUN batch total, not the
 /// container stock's frozen `0` placeholder. This is the wasm twin of
 /// `queue_compile`'s `queue_container_init_reads_start_of_run_not_placeholder`,
@@ -734,7 +765,13 @@ fn set_value_rejects_pass_written_slots() {
     let artifact = artifact_for(&project);
 
     let leaving = layout_offset(&artifact, "leaving");
-    let backlog = layout_offset(&artifact, "backlog");
+    // `leaving` is the load-bearing case: a driven outflow's placeholder `0` equation
+    // compiles to a flows-phase `AssignConstCurr`, so it LOOKS overridable and only the
+    // `pass_written_offsets` retraction rejects it. The container stock below is a
+    // no-flow stock -- never classified overridable in the first place (see
+    // `ConveyorPlan::pass_written_offsets`' rustdoc) -- so it pins the BEHAVIOR contract
+    // ("a container slot is not settable"), not the retraction.
+    let container = layout_offset(&artifact, "$queue$sum$waiting");
     let rate = layout_offset(&artifact, "rate");
 
     with_instance(&artifact, |store, inst| {
@@ -756,7 +793,7 @@ fn set_value_rejects_pass_written_slots() {
         );
         // The hidden container stock's slot: rejected.
         assert_eq!(
-            try_set(store, backlog, 1.0),
+            try_set(store, container, 1.0),
             1,
             "a container slot is not overridable"
         );
@@ -772,7 +809,7 @@ fn set_value_rejects_pass_written_slots() {
     // an override the blob accepts and the VM rejects (or vice versa) is the bug.
     let mut vm = build_vm(&project, &main).expect("vm");
     assert!(vm.set_value_by_offset(leaving, 1.0).is_err());
-    assert!(vm.set_value_by_offset(backlog, 1.0).is_err());
+    assert!(vm.set_value_by_offset(container, 1.0).is_err());
     assert!(vm.set_value_by_offset(rate, 3.0).is_ok());
 }
 
@@ -833,80 +870,11 @@ fn set_value_override_on_a_queue_inflow_matches_vm() {
     assert!((served.last().unwrap() - 12.0).abs() < EPS);
 }
 
-// ── what still rejects ───────────────────────────────────────────────────────
+// ── the shared dispatch ──────────────────────────────────────────────────────
 
-/// A CONVEYOR model is still rejected up front (GH #884, phases 2-4). The message
-/// must state the wasm-backend limitation, never the engine-internal
-/// `ConveyorNotExpanded` guard text (which points at a VM-only build entry point
-/// that produces no blob).
-#[test]
-fn conveyor_models_still_rejected_up_front() {
-    let project = parse(include_str!(
-        "../../../../test/conveyors/minimal_conveyor.xmile"
-    ));
-    let main = project.models[0].name.clone();
-    for ltm_enabled in [false, true] {
-        match compile_datamodel_to_artifact(&project, &main, ltm_enabled, false) {
-            Ok(_) => panic!("a conveyor model must not lower to wasm (ltm={ltm_enabled})"),
-            Err(WasmGenError::Unsupported(msg)) => {
-                assert!(
-                    msg.contains("not yet supported by the wasm backend")
-                        && msg.contains("conveyor"),
-                    "the error must state the wasm-backend conveyor limitation, got: {msg}"
-                );
-                assert!(
-                    !msg.contains("build_vm") && !msg.contains("build_sim"),
-                    "must not direct the caller at a VM-only build entry point: {msg}"
-                );
-            }
-        }
-    }
-}
-
-/// A queue whose primary outflow feeds a discrete conveyor is served by the
-/// INTERLEAVED `run_coupled_passes`, not the uncoupled admit-then-serve this
-/// module emits. Emitting the uncoupled form would double-admit and mis-account,
-/// so the guard is loud. (Unreachable through `compile_datamodel_to_artifact`
-/// today -- a coupling needs a conveyor, and conveyor models reject above -- which
-/// is exactly why it is pinned directly here.)
-#[test]
-fn coupled_queue_outflow_is_rejected() {
-    use crate::queue_compile::{QueueOutflowKind, QueuePlan};
-
-    let coupled = QueuePlan {
-        stock_off: 4,
-        inflow_offs: vec![5],
-        outflows: vec![QueueOutflowPlan {
-            flow_off: 6,
-            kind: QueueOutflowKind::Coupled {
-                conveyor: 0,
-                one_at_a_time: true,
-                batch_integrity: false,
-            },
-            overflow: false,
-        }],
-        containers: Vec::new(),
-    };
-    let err = reject_coupled_outflows(std::slice::from_ref(&coupled))
-        .expect_err("a coupled queue outflow must be rejected");
-    let WasmGenError::Unsupported(msg) = err;
-    assert!(
-        msg.contains("coupled") && msg.contains("conveyor"),
-        "the error must name the coupling, got: {msg}"
-    );
-
-    // The uncoupled twin of the same plan is accepted, so the guard keys on the
-    // outflow KIND rather than rejecting every plan.
-    let uncoupled = QueuePlan {
-        outflows: vec![QueueOutflowPlan {
-            flow_off: 6,
-            kind: QueueOutflowKind::Unconstrained,
-            overflow: false,
-        }],
-        ..coupled
-    };
-    assert!(reject_coupled_outflows(std::slice::from_ref(&uncoupled)).is_ok());
-}
+// The conveyor half of this entry point's contract (GH #884 / #924: a belt model
+// lowers, with no up-front reject) is pinned by `wasmgen::module`'s
+// `conveyor_models_lower_through_the_datamodel_entry_point`, beside its queue twin.
 
 /// An ordinary (queue-free) model still lowers through the same entry point and
 /// carries no pass machinery -- the routing change is transparent to it.

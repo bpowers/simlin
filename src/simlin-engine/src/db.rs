@@ -1222,11 +1222,11 @@ pub fn compile_project_incremental(
     //   * NON-MAIN model (a module-referenced sub-model, or a model defined but
     //     never instantiated): conveyor/queue support is deliberately main-model
     //     only for now -- the expansion pass never touches a sub-model, so the
-    //     marker legitimately survives (docs/design/conveyors.md §9.3 "Conveyors
-    //     inside submodules ... are later build-sequence steps"). This is a
-    //     user-facing feature limitation, NOT an engine bug, so reject it with
-    //     the clear `ConveyorInSubmodelUnsupported`/`QueueInSubmodelUnsupported`
-    //     diagnostic naming the stock and its model.
+    //     marker legitimately survives. This is a user-facing feature limitation,
+    //     NOT an engine bug, so reject it with the clear
+    //     `ConveyorInSubmodelUnsupported`/`QueueInSubmodelUnsupported` diagnostic
+    //     naming the stock and its model. Neither spec writes the limitation down
+    //     yet; GH #940 tracks doing so.
     //
     // The scan covers every synced model of the passed `project`, which on the
     // special path is the db's EXPANDED `SourceProject` (the main model's markers
@@ -1258,10 +1258,10 @@ pub fn compile_project_incremental(
                     return crate::sim_err!(
                         ConveyorNotExpanded,
                         format!(
-                            "conveyor stock '{}' reached the ordinary compile path un-expanded; \
-                             conveyor simulation is only supported by the bytecode VM, which \
-                             routes through the special-stock build path (queue_compile::build_sim) \
-                             -- the wasm backend does not lower conveyors",
+                            "internal error: conveyor stock '{}' reached the ordinary compile \
+                             path un-expanded; every backend routes a conveyor model through \
+                             the special-stock dispatch (queue_compile::compile_sim), so this \
+                             is an engine bug, not a model or backend limitation",
                             source_var.ident(db)
                         )
                     );
@@ -1271,8 +1271,7 @@ pub fn compile_project_incremental(
                     format!(
                         "conveyor stock '{}' is defined in model '{}', but conveyors are \
                          currently supported only in the main model, not in a sub-model or \
-                         module; move the conveyor into the main model to simulate it \
-                         (docs/design/conveyors.md §9.3)",
+                         module; move the conveyor into the main model to simulate it",
                         source_var.ident(db),
                         source_model.name(db)
                     )
@@ -1283,10 +1282,10 @@ pub fn compile_project_incremental(
                     return crate::sim_err!(
                         QueueNotExpanded,
                         format!(
-                            "queue stock '{}' reached the ordinary compile path un-expanded; \
-                             queue simulation is only supported by the bytecode VM, which \
-                             routes through the special-stock build path (queue_compile::build_sim) \
-                             -- the wasm backend does not lower queues",
+                            "internal error: queue stock '{}' reached the ordinary compile path \
+                             un-expanded; every backend routes a queue model through the \
+                             special-stock dispatch (queue_compile::compile_sim), so this is an \
+                             engine bug, not a model or backend limitation",
                             source_var.ident(db)
                         )
                     );
@@ -1296,8 +1295,7 @@ pub fn compile_project_incremental(
                     format!(
                         "queue stock '{}' is defined in model '{}', but queues are currently \
                          supported only in the main model, not in a sub-model or module; move \
-                         the queue into the main model to simulate it \
-                         (docs/design/queues.md §10.3)",
+                         the queue into the main model to simulate it",
                         source_var.ident(db),
                         source_model.name(db)
                     )

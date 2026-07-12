@@ -25,7 +25,6 @@ struct StepOut {
     cleared: Vec<f64>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn step_single(
     conv: &mut ConveyorState,
     eq_rates: &[f64],

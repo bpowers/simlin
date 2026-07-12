@@ -319,7 +319,8 @@ pub fn vm_results_for_special(
 /// production datamodel entry point [`compile_datamodel_to_artifact`], which
 /// performs the SAME `queue_compile::compile_sim` dispatch, so the blob simulates
 /// the identical expanded project the VM does. `Err` carries the `Unsupported`
-/// message (a conveyor model today); the caller decides whether that is a skip.
+/// message; the caller decides whether that is a skip (`simulate_special_path`
+/// treats it as a hard failure -- see its rustdoc).
 ///
 /// Imperative Shell: drives the salsa compile pipeline and the wasm interpreter,
 /// delegating the reshape to the pure [`wasm_results_from_slab`].
@@ -565,15 +566,16 @@ pub fn ensure_wasm_matches(
 /// [`run_wasm_results_segmented`], so checking here covers all of them: a raised
 /// error can never masquerade as a short-but-valid results slab.
 ///
-/// Nothing in the corpus can raise today (the queue pass has no per-step runtime
-/// error, and a conveyor model is still rejected at compile time), so this is a
-/// tripwire for the belt pass. It deliberately does NOT rebuild the VM's message:
-/// that needs the model's `ConveyorPlan` list, which neither `run_wasm_results`
-/// caller has to hand, and inventing a plan-threading path for a case no fixture
-/// reaches would be speculative. `simlin_engine::wasmgen::reconstruct_error` is the
-/// reconstruction (unit-tested against the VM's exact text in
-/// `wasmgen/errors_tests.rs`); GH #924, which first routes a conveyor fixture
-/// through the special-stock harness, is where it gets wired in.
+/// The conveyor fixtures CAN raise in principle (the belt pass is the only pass with
+/// per-step runtime errors: `ConveyorTransitTooLong`, plus `ConveyorTransitNotPositive`
+/// from `init_belts`), but none of them does -- every corpus belt has a positive,
+/// in-bound transit. So this stays a tripwire rather than an expectation. It
+/// deliberately does NOT rebuild the VM's message: that needs the model's
+/// `ConveyorPlan` list, which neither `run_wasm_results` caller has to hand, and the
+/// panic below names the raw code and belt index, which is enough to identify a
+/// fixture that started raising. `simlin_engine::wasmgen::reconstruct_error` is the
+/// reconstruction, unit-tested against the VM's exact text in
+/// `wasmgen/errors_tests.rs`.
 fn assert_no_runtime_error(store: &mut Store<()>, inst: checked::Stored<ModuleAddr>) {
     let f = store
         .instance_export(inst, "get_error")

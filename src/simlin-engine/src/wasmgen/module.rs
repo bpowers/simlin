@@ -36,11 +36,12 @@
 //! holds the full, correct state for the timestep it represents.
 //!
 //! Current scope: the full scalar + array opcode set, Euler/RK2/RK4 integration,
-//! nested modules (incl. SMOOTH/DELAY stdlib expansions), and QUEUE models (whose
-//! per-step FIFO side-table pass is lowered by [`super::passes`]). A genuine
+//! nested modules (incl. SMOOTH/DELAY stdlib expansions), QUEUE models (whose
+//! per-step FIFO side-table pass is lowered by [`super::passes`]), and CONVEYOR
+//! models (whose per-step belt pass is lowered by [`super::belt`]). A genuine
 //! runtime view range (`ViewRangeDynamic`), array unrolling past the per-function
-//! budget, or a CONVEYOR model (the belt pass is still VM-only, GH #884) returns
-//! `WasmGenError::Unsupported`.
+//! budget, or a conveyor construct [`super::belt::reject_unsupported`] refuses
+//! returns `WasmGenError::Unsupported`.
 
 use wasm_encoder::Instruction as I;
 use wasm_encoder::{
@@ -53,7 +54,7 @@ use std::collections::HashMap;
 
 use crate::bytecode::{ByteCode, CompiledModule, Opcode};
 use crate::conveyor_compile::ConveyorPlan;
-use crate::queue_compile::QueuePlan;
+use crate::queue_compile::{CouplingTable, QueuePlan};
 use crate::results::{Method, Specs};
 use crate::vm::{CompiledSimulation, ModuleKey, StepPart};
 
@@ -121,10 +122,10 @@ const L_DST: u32 = 2;
 // the bump heap (`emit_run_to`'s locals list), which is what keeps a pass-free
 // blob byte-identical.
 //
-// The queue's three and the belt's eight are declared TOGETHER whenever either
-// pass is present, so both index blocks are fixed regardless of which passes a
-// model carries. A queue-only blob therefore declares eight locals it never reads
-// -- two bytes of encoding and no runtime cost -- in exchange for the two emitters
+// The queue's three and the belt's sixteen f64s (plus one i64) are declared TOGETHER
+// whenever either pass is present, so both index blocks are fixed regardless of which
+// passes a model carries. A queue-only blob therefore declares locals it never reads
+// -- a few bytes of encoding and no runtime cost -- in exchange for the two emitters
 // never needing to know about each other's presence.
 const L_PASS_HEAP_SAVE: u32 = 5; // i32: `G_HEAP` across the mid-run preview
 const L_PASS_RATE: u32 = 6; // f64: Σ max(inflow, 0)
@@ -138,6 +139,19 @@ const L_BELT_REM_CAP: u32 = 13;
 const L_BELT_REM_LIMIT: u32 = 14;
 const L_BELT_ACC: u32 = 15;
 const L_BELT_TMP: u32 = 16;
+const L_BELT_CAP_ROOM: u32 = 17;
+const L_BELT_BUDGET: u32 = 18;
+const L_BELT_UNITS: u32 = 19;
+const L_BELT_TMP2: u32 = 20;
+const L_BELT_PRIOR: u32 = 21;
+const L_BELT_REQ: u32 = 22;
+const L_BELT_DESIRE: u32 = 23;
+const L_BELT_TAKEN: u32 = 24;
+/// The single i64 local, declared after the f64 run (the locals declaration is a list
+/// of `(count, type)` runs, so the type change costs one more run, not a reshuffle).
+const L_BELT_UNIT: u32 = 25;
+/// f64 locals `L_BELT_TRANSIT..=L_BELT_TAKEN`, in one run.
+const N_BELT_F64_LOCALS: u32 = L_BELT_TAKEN - L_PASS_RATE + 1;
 
 /// The queue pass's f64 scratch locals inside `run_to`.
 const PASS_LOCALS: QueuePassLocals = QueuePassLocals {
@@ -146,7 +160,7 @@ const PASS_LOCALS: QueuePassLocals = QueuePassLocals {
     tmp: L_PASS_TMP,
 };
 
-/// The belt pass's f64 scratch locals inside `run_to`.
+/// The belt pass's scratch locals inside `run_to`.
 const BELT_LOCALS: ConveyorPassLocals = ConveyorPassLocals {
     transit: L_BELT_TRANSIT,
     n_slats: L_BELT_N_SLATS,
@@ -156,6 +170,15 @@ const BELT_LOCALS: ConveyorPassLocals = ConveyorPassLocals {
     rem_limit: L_BELT_REM_LIMIT,
     acc: L_BELT_ACC,
     tmp: L_BELT_TMP,
+    cap_room: L_BELT_CAP_ROOM,
+    budget: L_BELT_BUDGET,
+    units: L_BELT_UNITS,
+    tmp2: L_BELT_TMP2,
+    prior: L_BELT_PRIOR,
+    req: L_BELT_REQ,
+    desire: L_BELT_DESIRE,
+    taken: L_BELT_TAKEN,
+    unit: L_BELT_UNIT,
 };
 
 /// `run_initials`' two f64 locals, which the belt init hook uses as its `transit`
@@ -172,13 +195,17 @@ const RI_BELT_N_SLATS: u32 = 1;
 /// (`simlin_model_compile_to_wasm`): it works from a datamodel alone, with no
 /// `Vm`/`SimlinSim`, returning both the blob and the name->offset layout. An
 /// incremental-compile failure or an unsupported construct surfaces as
-/// [`WasmGenError`] (the FFI maps it to a `SimlinError`, never a panic). A
-/// CONVEYOR model is still rejected up front as `Unsupported` (GH #884): the belt
-/// pass exists only in the bytecode VM, and there is no silent VM fallback here.
-/// A QUEUE model routes through the shared special-stock dispatch
+/// [`WasmGenError`] (the FFI maps it to a `SimlinError`, never a panic).
+///
+/// A CONVEYOR or QUEUE model routes through the shared special-stock dispatch
 /// ([`crate::queue_compile::compile_sim`]) -- the same one the VM takes -- so the
-/// expanded project and the resolved [`QueuePlan`]s are byte-identical to the
-/// VM's, and [`super::passes`] lowers the FIFO pass into the blob.
+/// expanded project and the resolved [`ConveyorPlan`]/[`QueuePlan`]s are
+/// byte-identical to the VM's, and [`super::belt`]/[`super::passes`] lower the
+/// belt and FIFO passes into the blob. There is no up-front special-stock reject
+/// and no silent VM fallback: a construct the belt pass cannot lower correctly
+/// (an inflow carrying a non-default `isee:spreadflow` -- `even`/`dest`/`dist`/
+/// `source`, GH #946) is refused loudly by [`super::belt::reject_unsupported`],
+/// deeper in the same call.
 ///
 /// When `ltm_enabled` is true, the synthesized `$⁚ltm⁚*` link/loop score
 /// variables are included in the emitted layout and blob. `ltm_discovery_mode`
@@ -187,46 +214,6 @@ const RI_BELT_N_SLATS: u32 = 1;
 /// branch: that path compiles a separate, always-`ltm_enabled == false`
 /// `SourceProject` (a documented degradation, `queues.md` §10).
 pub fn compile_datamodel_to_artifact(
-    datamodel: &crate::datamodel::Project,
-    model_name: &str,
-    ltm_enabled: bool,
-    ltm_discovery_mode: bool,
-) -> Result<WasmArtifact, WasmGenError> {
-    // GH #884: the conveyor half of the side-table machinery (`init_belts` /
-    // `run_phase_a` / `conveyor_phase_b_one` and the belt state they advance) is
-    // not lowered yet, so detect the conveyor marker up front -- the same cheap
-    // predicate `queue_compile::compile_sim` dispatches on -- and reject with an
-    // honest wasm-caller-facing message. Without this, the model would fall
-    // through to the dispatch and emit a blob whose belts never advance.
-    if crate::conveyor_compile::project_has_conveyor(datamodel, model_name) {
-        return Err(WasmGenError::Unsupported(
-            "wasmgen: conveyor models are not yet supported by the wasm backend; \
-             the bytecode VM is the only backend that simulates conveyors today"
-                .to_string(),
-        ));
-    }
-    compile_datamodel_dispatch(datamodel, model_name, ltm_enabled, ltm_discovery_mode)
-}
-
-/// [`compile_datamodel_to_artifact`] WITHOUT the up-front conveyor reject.
-///
-/// GH #922 step 1 lowers the core belt pass but keeps the public entry point
-/// closed: the remaining conveyor features ([`belt::reject_unsupported`]) and the
-/// corpus-wide parity gate land in GH #923/#924. This is the seam those steps
-/// widen -- and the seam `belt_tests.rs` compiles conveyor models through today,
-/// so the lowering is exercised against the VM before the public surface changes.
-#[cfg(test)]
-pub(super) fn compile_datamodel_including_conveyors(
-    datamodel: &crate::datamodel::Project,
-    model_name: &str,
-) -> Result<WasmArtifact, WasmGenError> {
-    compile_datamodel_dispatch(datamodel, model_name, false, false)
-}
-
-/// The shared body of [`compile_datamodel_to_artifact`]: sync, apply the LTM flags,
-/// run the unified special-stock dispatch, and lower the resulting
-/// `CompiledSimulation` together with whatever plans it produced.
-fn compile_datamodel_dispatch(
     datamodel: &crate::datamodel::Project,
     model_name: &str,
     ltm_enabled: bool,
@@ -553,17 +540,18 @@ struct PerInstance<'a> {
 ///
 /// This is the ORDINARY-model entry point: it asserts (in debug) that `sim` has
 /// not had its overridable-constant set retracted, i.e. that it did not come from
-/// the special conveyor/queue build path. A queue model must use
+/// the special conveyor/queue build path. A conveyor or queue model must use
 /// [`compile_simulation_with_plans`], which carries the plans the pass needs.
 pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, WasmGenError> {
     compile_simulation_with_plans(sim, &[], &[])
 }
 
 /// [`compile_simulation`] with a synthetic error-raising pass spliced into the
-/// same two hook points the conveyor belt pass will occupy (`run_initials`'s
+/// same two hook points the conveyor belt pass occupies (`run_initials`'s
 /// side-table init, and the between-Flows-and-Stocks step). Test-only: it is how
 /// the runtime error channel's unwind, driver guards, and preview swallow are
-/// exercised before GH #922 lands a production pass that can raise.
+/// exercised independently of that pass -- including on the ordinary and
+/// queue-only models whose blobs must elide the guards entirely.
 #[cfg(test)]
 pub(super) fn compile_simulation_with_fault(
     sim: &CompiledSimulation,
@@ -579,10 +567,8 @@ pub(super) fn compile_simulation_with_fault(
 ///
 /// Both plan sets empty == the ordinary path, byte-identical to before this
 /// existed: no bump-pointer global, no side-table helpers, no pass hooks. A
-/// conveyor feature outside the lowered core, and a queue coupled to a conveyor,
-/// are rejected loudly ([`belt::reject_unsupported`] /
-/// [`passes::reject_coupled_outflows`]) rather than emitted as the simpler thing
-/// they are not.
+/// conveyor feature outside the lowered core is rejected loudly
+/// ([`belt::reject_unsupported`]) rather than emitted as the simpler thing it is not.
 pub fn compile_simulation_with_plans(
     sim: &CompiledSimulation,
     conveyor_plans: &[ConveyorPlan],
@@ -634,7 +620,6 @@ fn compile_with_passes(
     fault: Option<errors::FaultInjection>,
 ) -> Result<WasmArtifact, WasmGenError> {
     belt::reject_unsupported(conveyor_plans)?;
-    passes::reject_coupled_outflows(queue_plans)?;
     // Decides three things, all no-ops for a model whose passes are total: the
     // driver guards (`errors::emit_return_if_error`), the `curr` save area the
     // mid-run preview restores from, and the error clear in `reset`. Known before
@@ -837,13 +822,18 @@ fn compile_with_passes(
         .checked_add(n_slots)
         .ok_or_else(too_large)?;
 
-    // The belt pass's four fixed-size regions: one 48-byte descriptor per belt, a
+    // The belt pass's six fixed-size regions: one 48-byte descriptor per belt, a
     // same-shaped save area for the mid-run preview, a cleared-volume scratch wide
     // enough for the busiest belt's equation-driven inflow list (only one belt's
-    // phase B is live at a time), and the concatenated §7.2 init-list tables (seeded
-    // by an active data segment). All 8-byte-aligned so the ring addresses they
-    // carry stay naturally aligned for `f64` access; a belt-free model reserves
-    // nothing but the alignment.
+    // phase B is live at a time), the concatenated §7.2 init-list tables (seeded by
+    // an active data segment), the nine parallel per-leak-flow arrays (§5's leak
+    // volumes, integer carry + its preview save, and the zone scratch), and the
+    // discrete belt's clock + quantization carries (§6.3/§6.4) with their own preview
+    // save. A belt-free model reserves nothing but the alignment, a leak-free one
+    // reserves no leak arrays, and a continuous-only one no quantization carries.
+    //
+    // The leak region is `n * 60` bytes, so it can leave the bump 4-byte-aligned; the
+    // state region opens with an `i64` and is re-aligned to 8.
     let belt_desc_base = align_up(total_bytes, u64::from(SLOT_SIZE))?;
     let belt_region_bytes = u32::try_from(conveyor_plans.len())
         .ok()
@@ -862,8 +852,17 @@ fn compile_with_passes(
                 .ok_or_else(too_large)?,
         )
         .ok_or_else(too_large)?;
-    total_bytes = belt_init_table_base
+    let belt_leak_base = belt_init_table_base
         .checked_add(ConveyorPass::init_table_bytes(conveyor_plans))
+        .ok_or_else(too_large)?;
+    let belt_state_base = align_up(
+        belt_leak_base
+            .checked_add(ConveyorPass::leak_region_bytes(conveyor_plans))
+            .ok_or_else(too_large)?,
+        u64::from(SLOT_SIZE),
+    )?;
+    total_bytes = belt_state_base
+        .checked_add(ConveyorPass::state_region_bytes(conveyor_plans))
         .ok_or_else(too_large)?;
 
     // The queue pass's two fixed-size regions: one 16-byte descriptor per FIFO,
@@ -972,8 +971,11 @@ fn compile_with_passes(
                 desc_save_base: belt_desc_save_base,
                 scratch_base: belt_scratch_base,
                 init_table_base: belt_init_table_base,
+                leak_base: belt_leak_base,
+                state_base: belt_state_base,
             },
             specs.dt,
+            specs.start,
             heap_alloc_fn.expect("the bump allocator is emitted whenever belts exist"),
             &mut helpers.functions,
         )
@@ -995,7 +997,12 @@ fn compile_with_passes(
         .map(ConveyorPass::init_table_data)
         .unwrap_or_default();
     let n_helpers = helpers.functions.len() as u32;
-    let passes = Passes::new(conveyor_pass, queue_pass, fault, heap_base);
+    // The coupling table the VM derives at plan-attach time, from the same two plan
+    // sets. Deriving it here rather than re-deriving the coupling from the plans is
+    // what keeps the two backends' admission priorities identical by construction.
+    let coupling = (conveyor_pass.is_some() && queue_pass.is_some())
+        .then(|| CouplingTable::build(conveyor_plans, queue_plans));
+    let passes = Passes::new(conveyor_pass, queue_pass, coupling, fault, heap_base);
 
     // Assemble the per-instance descriptors and the `(ModuleKey, StepPart) -> fn
     // index` map. The map is built for ALL instances before any function body is
@@ -1033,11 +1040,12 @@ fn compile_with_passes(
     // function -- the wasm analogue of `Vm::eval_initials_skipping` (`vm.rs:1731`),
     // which `run_initials` re-runs so that initials reading a side-table-derived
     // value see it rather than the compiled placeholder the first pass froze into
-    // `initial_values`. Two kinds of slot qualify, exactly as `vm.rs`'s
-    // `reconcile_skip_offsets` collects them: a queue's published container stocks
-    // (so `INIT(SUM(queue))` reads the start-of-run batch total), and a §7.2
+    // `initial_values`. Two kinds of slot qualify, exactly as `vm.rs:1616-1628`
+    // collects them: every published container stock, belt or FIFO (so
+    // `INIT(SUM(belt))` reads the start-of-run slat total), and a §7.2
     // list-initialized conveyor stock (so its belt-derived normalized total
     // survives, rather than being overwritten by the placeholder `<eqn>`).
+    // `ConveyorPass::reconcile_skip_offsets` carries both conveyor halves.
     let reconcile_skip: std::collections::HashSet<usize> = passes
         .queue
         .as_ref()
@@ -1561,6 +1569,11 @@ struct RunFnIndices {
 struct Passes<'a> {
     conveyor: Option<ConveyorPass<'a>>,
     queue: Option<QueuePass<'a>>,
+    /// The queue-conveyor coupling (`queues.md` §9), derived from the same two plan
+    /// sets the VM derives it from. `None` when either plan set is empty; `Some` with
+    /// `any() == false` when both exist but nothing couples, which selects the plain
+    /// belt-then-queue emission.
+    coupling: Option<CouplingTable>,
     /// Whether any pass in this set can raise a runtime error, i.e. whether the
     /// drivers must wrap the pass body in a block and guard on the channel. Held
     /// rather than recomputed so the layout (which reserves the preview `curr`
@@ -1591,17 +1604,23 @@ impl<'a> Passes<'a> {
     fn new(
         conveyor: Option<ConveyorPass<'a>>,
         queue: Option<QueuePass<'a>>,
+        coupling: Option<CouplingTable>,
         fault: Option<errors::FaultInjection>,
         heap_base: u32,
     ) -> Self {
         let has_conveyor = conveyor.is_some();
         let uses_heap = has_conveyor || queue.is_some();
+        debug_assert!(
+            coupling.is_none() || (has_conveyor && queue.is_some()),
+            "a coupling table without both plan sets would index out of bounds"
+        );
         Passes {
             can_error: pass_can_error(has_conveyor, &fault),
             needs_flows_before_init: pass_needs_flows_before_init(has_conveyor, &fault),
             heap_base: uses_heap.then_some(heap_base),
             conveyor,
             queue,
+            coupling,
             fault,
         }
     }
@@ -1623,13 +1642,15 @@ impl<'a> Passes<'a> {
     /// cannot fail. What matters is that it never runs over an UNBUILT one, which is
     /// what the drivers' error guards secure.
     ///
-    /// **Ordering.** There is deliberately NO conveyor branch here yet: container
-    /// access over a belt is rejected outright by `belt::reject_unsupported`, so a
-    /// lowered conveyor model has nothing to publish. When GH #923 adds one it must
-    /// go FIRST, before the queue's -- the VM publishes conveyor containers before
-    /// queue containers (`vm.rs:1553` then `vm.rs:1574`, and `vm.rs:916` then
-    /// `vm.rs:925`).
+    /// **Ordering.** Conveyors publish before queues, matching the VM
+    /// (`vm.rs:916` then `vm.rs:925` at step start; `vm.rs:1553` then `vm.rs:1574` at
+    /// init). The two write disjoint slots -- a container variable is a hidden stock
+    /// synthesized for exactly one owner -- so the order is not observable today; it
+    /// is the VM's, rather than resting on that argument.
     fn emit_publish_containers(&self, f: &mut Function) {
+        if let Some(c) = &self.conveyor {
+            c.emit_publish_containers(f);
+        }
         if let Some(q) = &self.queue {
             q.emit_publish_containers(f);
         }
@@ -1677,25 +1698,98 @@ impl<'a> Passes<'a> {
     /// the enclosing pass block (via `scope`) rather than returning, leaving each
     /// driver free to react differently. See `errors::ErrorScope`.
     ///
-    /// The BELT pass runs before the FIFO pass, mirroring
+    /// Without coupling the BELT pass runs before the FIFO pass, mirroring
     /// `queue_compile::run_coupled_passes`' uncoupled fast path (`cc::run_pass`
     /// then `run_queue_pass`). The order is observable whenever a belt's driven
     /// outflow is a queue's inflow.
+    ///
+    /// WITH coupling the two passes interleave; see [`Self::emit_coupled_step_body`].
     fn emit_step_body(
         &self,
         f: &mut Function,
         locals: QueuePassLocals,
         scope: Option<errors::ErrorScope>,
     ) {
-        if let Some(c) = &self.conveyor {
-            c.emit_step_pass(f, BELT_LOCALS, errors::expect_scope(scope));
-        }
-        if let Some(q) = &self.queue {
-            q.emit_step_pass(f, locals);
+        match (&self.conveyor, &self.queue) {
+            (Some(c), Some(q)) if self.coupling.as_ref().is_some_and(CouplingTable::any) => {
+                let coupling = self.coupling.as_ref().expect("checked by the guard");
+                Self::emit_coupled_step_body(f, c, q, coupling, locals, scope);
+            }
+            (c, q) => {
+                if let Some(c) = c {
+                    c.emit_step_pass(f, BELT_LOCALS, errors::expect_scope(scope));
+                }
+                if let Some(q) = q {
+                    q.emit_step_pass(f, locals, |_| false);
+                }
+            }
         }
         if let Some(fault) = &self.fault {
             fault.emit_step(f, scope);
         }
+    }
+
+    /// `queue_compile::run_coupled_passes`' interleaved body, unrolled (`queues.md`
+    /// §9, `conveyors.md` §11).
+    ///
+    /// 1. every belt's phase A, so leaks and exits have freed belt room before any
+    ///    queue sizes its budget against it;
+    /// 2. for each belt, in plan order: for each queue coupled to it, in the belt's
+    ///    `<inflow>` declaration order (the admission priority) --
+    ///    size `req` from THIS belt's phase A minus `prior` (what the belt's
+    ///    earlier-served queues already committed this DT), admit + serve the queue,
+    ///    debit the belt's per-time-unit `in_carry` by `taken`, accumulate `prior`;
+    /// 3. then that belt's phase B, which inserts every coupled `taken` (they are
+    ///    `queue_coupled` inflows, so phase B reads them from `curr` unconditionally);
+    /// 4. finally the uncoupled queues.
+    ///
+    /// The per-belt `prior` and the `req`/`desire`/`taken` triple are `run_to` locals,
+    /// not static memory: nothing about them survives the step, and the preview's
+    /// throwaway pass therefore needs no save/restore for them. What DOES survive is
+    /// `in_carry`, which rides the belt descriptor's save.
+    ///
+    /// Two orderings inside step 2 are load-bearing. `admit_inflows` runs before the
+    /// take, so material arriving this DT can cross the queue and board the belt in the
+    /// same DT (the §4.3 pass-through). And `desire` is measured before the take, on the
+    /// pre-take front, because the redirectable volume an `<overflow/>` sibling claims
+    /// is exactly what the belt's budget refused (§4.5). Sizing `req` before the admit
+    /// is NOT load-bearing -- the budget reads the belt's room, not the queue -- but it
+    /// is emitted in the VM's order anyway rather than resting on that argument.
+    ///
+    /// `emit_consume_inflow_budget` is emitted after the queue's secondary outflows
+    /// rather than before the shared-rate store where the VM calls it; the two touch
+    /// disjoint state (`in_carry` vs. the ring and `curr`) and nothing in between reads
+    /// `in_carry`.
+    fn emit_coupled_step_body(
+        f: &mut Function,
+        c: &ConveyorPass<'a>,
+        q: &QueuePass<'a>,
+        coupling: &CouplingTable,
+        locals: QueuePassLocals,
+        scope: Option<errors::ErrorScope>,
+    ) {
+        c.emit_phase_a_all(f, BELT_LOCALS, errors::expect_scope(scope));
+        for i in 0..c.n_plans() {
+            let serves = coupling.serves_for_conveyor(i);
+            if !serves.is_empty() {
+                c.emit_reset_prior(f, BELT_LOCALS);
+            }
+            for cs in serves {
+                c.emit_coupled_budget(f, i, BELT_LOCALS);
+                q.emit_coupled_serve(
+                    f,
+                    cs,
+                    locals,
+                    BELT_LOCALS.req,
+                    BELT_LOCALS.desire,
+                    BELT_LOCALS.taken,
+                );
+                c.emit_consume_inflow_budget(f, i, BELT_LOCALS.taken);
+                c.emit_add_prior(f, BELT_LOCALS);
+            }
+            c.emit_phase_b_at(f, i, BELT_LOCALS);
+        }
+        q.emit_step_pass(f, locals, |qi| coupling.queue_is_coupled(qi));
     }
 
     /// Rewind the bump pointer. Called from `reset`, which also clears
@@ -1889,8 +1983,15 @@ fn emit_run_initials(
             errors::close_pass_block(&mut f, scope);
             errors::emit_return_if_error(&mut f);
         }
-        // Publish the initialized FIFOs' container values, so the t=0 slot holds
-        // the start-of-step value even before the first Euler step re-publishes it.
+        // Publish the initialized belts' and FIFOs' container values, so the t=0 slot
+        // holds the start-of-step value even before the first Euler step re-publishes
+        // it -- and so the reconciliation below has something to reconcile against.
+        //
+        // The VM interleaves this with the init above (belt init, belt publish, queue
+        // init, queue publish -- `vm.rs:1542-1578`) where the blob runs both inits and
+        // then both publishes. Provably the same: `init_queues` takes `curr` by shared
+        // reference, so nothing it does can depend on, or disturb, a belt's published
+        // container slots.
         passes.emit_publish_containers(&mut f);
         if let Some(skipping_idx) = run_initials_skipping_idx {
             f.instruction(&I::I32Const(0));
@@ -1941,17 +2042,18 @@ fn emit_run_to(
     // at the index the per-step emitters expect.
     //
     // A special-stock model appends its pass locals AFTER that fixed prefix (a
-    // second i32 group followed by a second f64 group -- the locals declaration is a
-    // list of `(count, type)` runs, not a per-type partition), so `L_SAVED_TIME` and
-    // `L_RK_S` keep indices 3/4 and the shared RK emitters need no change. The
-    // error channel needs no locals (it is two globals), so a fault-injected model
-    // declares the plain prefix.
+    // second i32 group, then an f64 group, then the belt clock's lone i64 -- the
+    // locals declaration is a list of `(count, type)` runs, not a per-type
+    // partition), so `L_SAVED_TIME` and `L_RK_S` keep indices 3/4 and the shared RK
+    // emitters need no change. The error channel needs no locals (it is two globals),
+    // so a fault-injected model declares the plain prefix.
     let mut f = if passes.uses_heap() {
         Function::new([
             (2, ValType::I32),
             (2, ValType::F64),
             (1, ValType::I32),
-            (11, ValType::F64),
+            (N_BELT_F64_LOCALS, ValType::F64),
+            (1, ValType::I64),
         ])
     } else {
         Function::new([(2, ValType::I32), (2, ValType::F64)])

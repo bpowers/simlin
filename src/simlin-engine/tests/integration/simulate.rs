@@ -8,8 +8,10 @@ use std::io::BufReader;
 
 use simlin_engine::FilesystemDataProvider;
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+use simlin_engine::queue_compile::build_vm;
 use simlin_engine::serde::{deserialize, serialize};
-use simlin_engine::{Method, Results, SimSpecs as Specs, Vm, project_io};
+use simlin_engine::wasmgen::{WasmGenError, compile_datamodel_to_artifact};
+use simlin_engine::{ErrorCode, Method, Results, SimSpecs as Specs, Vm, project_io};
 use simlin_engine::{load_csv, load_dat, open_vensim, open_vensim_with_data, xmile};
 
 use crate::test_helpers::{
@@ -1268,9 +1270,10 @@ fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: 
 /// marker reaching that pipeline trips the hard `ConveyorNotExpanded` /
 /// `QueueNotExpanded` guard -- the VM would panic before this hook ever runs.
 /// They go through [`simulate_special_path`] instead, which builds the VM side
-/// via the unified dispatch (`queue_compile::build_sim`). Queue fixtures run
-/// through BOTH backends there; conveyor fixtures are still wasm-`Unsupported`
-/// (GH #884 phases 2-4 lower the belt pass) and so have no corpus entry yet.
+/// via the unified dispatch (`queue_compile::build_sim`). Both the queue AND the
+/// conveyor fixtures run through BOTH backends there (GH #924); the two conveyor
+/// fixtures that neither backend can simulate are listed, with the `ErrorCode`
+/// that blocks each, in [`BLOCKED_CONVEYOR_FIXTURES`].
 fn wasm_parity_hook(
     datamodel: &simlin_engine::datamodel::Project,
     expected: &Results,
@@ -1312,13 +1315,26 @@ fn wasm_parity_hook(
 ///    never see -- are themselves gated.
 ///
 /// A wasm `Unsupported` here is a hard failure, exactly as in [`wasm_parity_hook`]:
-/// a fixture only earns a corpus entry once both backends run it. Conveyor
-/// fixtures therefore have no entry yet (GH #884 phases 2-4).
+/// a fixture only earns a corpus entry once both backends run it. Since GH #924 that
+/// includes the conveyor fixtures -- the wasm public entry no longer rejects a belt,
+/// so a `test/conveyors/` model that cannot lower fails this gate loudly rather than
+/// sitting outside the corpus. The two fixtures that STILL cannot run are held in
+/// [`BLOCKED_CONVEYOR_FIXTURES`], pinned on the exact `ErrorCode` that blocks them.
 ///
-/// The comparator's bite was verified by fault injection during development:
-/// halving the emitted primary serve rate, and dropping the plan set on the wasm
-/// side, each make both queue entries fail. It is not a vacuous zeros-vs-zeros
-/// comparison.
+/// The comparator's bite was verified by fault injection. Halving the emitted primary
+/// serve rate, and dropping the plan set on the wasm side, each make both queue entries
+/// fail. Re-adding the conveyor reject makes exactly the conveyor entries fail here, on
+/// the `Unsupported` arm below -- a hard failure, not a skip. And adding a constant to
+/// the inserted cohort volume (`acc` in `belt::emit_phase_b_active`, after `conv_vol` and
+/// every equation-driven inflow are folded into it) makes all six conveyor entries fail in
+/// `ensure_results`.
+///
+/// That last site is chosen deliberately: `acc` is the one point every belt passes
+/// through. Perturbing only the equation-driven apportion loop would leave
+/// `simulates_queue_coupled_conveyor` GREEN, because that belt's sole inflow is
+/// queue-driven and contributes through `conv_vol` instead. It is not a vacuous
+/// zeros-vs-zeros comparison, but a fault injected upstream of the fold does not
+/// reach every fixture.
 fn simulate_special_path(xmile_path: &str) {
     eprintln!("model (special stocks): {xmile_path}");
 
@@ -1375,14 +1391,170 @@ fn simulate_special_path(xmile_path: &str) {
     }
 }
 
-#[test]
-fn simulates_queue_drain() {
-    simulate_special_path("../../test/queues/queue_drain.xmile");
+/// Declare one `#[test]` per special-stock fixture AND the `&[&str]` list of the
+/// filenames it covers, from a single source of truth. The two cannot drift: the
+/// name list IS what the directory-accounting tests below check `test/conveyors/`
+/// and `test/queues/` against, and it is generated from the same `name => "file"`
+/// lines that generate the tests. Mirrors the `corpus_tests!` macro above, but the
+/// path is a directory + a bare filename because the accounting needs the filename.
+macro_rules! special_stock_tests {
+    (
+        dir: $dir:literal;
+        list: $list:ident;
+        $($name:ident => $file:literal),* $(,)?
+    ) => {
+        static $list: &[&str] = &[$($file),*];
+        $(
+            #[test]
+            fn $name() {
+                simulate_special_path(concat!("../../", $dir, "/", $file));
+            }
+        )*
+    };
 }
 
+special_stock_tests! {
+    dir: "test/queues";
+    list: QUEUE_CORPUS_FIXTURES;
+    simulates_queue_drain => "queue_drain.xmile",
+    simulates_minimal_queue => "minimal_queue.xmile",
+}
+
+special_stock_tests! {
+    dir: "test/conveyors";
+    list: CONVEYOR_CORPUS_FIXTURES;
+    simulates_minimal_conveyor => "minimal_conveyor.xmile",
+    simulates_arrayed_conveyor => "arrayed_conveyor.xmile",
+    simulates_leaky_conveyor => "leaky_conveyor.xmile",
+    simulates_conveyor_containers => "conveyor_containers.xmile",
+    simulates_discrete_conveyor => "discrete_conveyor.xmile",
+    simulates_queue_coupled_conveyor => "queue_coupled_conveyor.xmile",
+}
+
+/// The `test/conveyors/` model files that NEITHER backend can simulate, each with
+/// the `ErrorCode` that blocks it. Both are real, authoritative Stella models
+/// (CC BY 4.0, see the directory README), and neither is blocked by anything to do
+/// with the wasm backend:
+///
+/// - `covid19_severity.stmx` sums its belts' conveyor-driven leak flows into an aux,
+///   which the engine refuses with `ConveyorDrivenFlowRead` (GH #944).
+/// - `sir_social_distancing_mixnot.stmx` puts its conveyors in sub-models, which
+///   expansion never descends into (`ConveyorInSubmodelUnsupported`, GH #941).
+///
+/// [`blocked_conveyor_fixtures_stay_blocked_for_their_stated_reason`] asserts the
+/// exact code rather than a bare `is_err()`, so resolving #944 or #941 turns this
+/// list RED and forces the fixture into [`CONVEYOR_CORPUS_FIXTURES`], instead of
+/// leaving it parked forever as a silently-tolerated "expected failure".
+static BLOCKED_CONVEYOR_FIXTURES: &[(&str, ErrorCode)] = &[
+    ("covid19_severity.stmx", ErrorCode::ConveyorDrivenFlowRead),
+    (
+        "sir_social_distancing_mixnot.stmx",
+        ErrorCode::ConveyorInSubmodelUnsupported,
+    ),
+];
+
+/// The `.xmile`/`.stmx` model files in `dir`, sorted. Everything else in a fixture
+/// directory (READMEs, the conveyor reference prototype, `__pycache__`) is not a
+/// model and is not accounted for.
+fn model_files_in(dir: &str) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read_dir {dir}: {e}"))
+        .map(|entry| entry.expect("dir entry").file_name())
+        .filter_map(|name| name.to_str().map(str::to_owned))
+        .filter(|name| name.ends_with(".xmile") || name.ends_with(".stmx"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Assert `dir` holds exactly the model files named by the corpus + blocked lists.
+fn assert_directory_accounted_for(dir: &str, corpus: &[&str], blocked: &[(&str, ErrorCode)]) {
+    let mut accounted: Vec<&str> = corpus.to_vec();
+    accounted.extend(blocked.iter().map(|(name, _)| *name));
+    accounted.sort();
+    assert_eq!(
+        model_files_in(dir),
+        accounted,
+        "every model file under {dir}/ must be either a corpus entry (declared in a \
+         special_stock_tests! block, which gives it a simulate_special_path test) or \
+         an explicitly-blocked fixture pinned on its ErrorCode"
+    );
+}
+
+/// Adding a fixture to a directory is not the same as running it: when the queue pass
+/// was lowered, both `test/queues/` fixtures turned out to be simulated by NEITHER
+/// backend, because the corpus excluded them entirely and they "passed" by never
+/// running. Corpus MEMBERSHIP was the gap, not the skip/fail disposition. These two
+/// tests close it structurally: every model file on disk is either a corpus entry
+/// (hence a `#[test]`) or an explicitly-blocked fixture, and a new file fails the
+/// build until someone classifies it.
 #[test]
-fn simulates_minimal_queue() {
-    simulate_special_path("../../test/queues/minimal_queue.xmile");
+fn conveyor_fixture_directory_is_fully_accounted_for() {
+    assert_directory_accounted_for(
+        "../../test/conveyors",
+        CONVEYOR_CORPUS_FIXTURES,
+        BLOCKED_CONVEYOR_FIXTURES,
+    );
+}
+
+/// The queue half. There is deliberately no "blocked" list: every `test/queues/`
+/// fixture runs on both backends.
+#[test]
+fn queue_fixture_directory_is_fully_accounted_for() {
+    assert_directory_accounted_for("../../test/queues", QUEUE_CORPUS_FIXTURES, &[]);
+}
+
+/// The two conveyor fixtures that cannot join the corpus, pinned on the EXACT
+/// `ErrorCode` that blocks each -- see [`BLOCKED_CONVEYOR_FIXTURES`]. A bare
+/// `is_err()` would keep passing if the fixture later failed for an unrelated
+/// reason, and would keep passing after #944/#941 are fixed; asserting the code
+/// makes the fixture's promotion to the corpus a test failure someone must act on.
+///
+/// Both backends are checked, because the block is in the SHARED dispatch
+/// (`queue_compile::compile_sim`) rather than in either backend: neither the VM nor
+/// the wasm lowering ever sees these models. That is the whole point -- a reader
+/// must not mistake "the engine refuses a real model" for "the wasm backend has a
+/// gap".
+///
+/// The wasm side asserts the CODE too, not merely `is_err()`. `compile_datamodel_to_artifact`
+/// wraps a dispatch failure as `Unsupported(format!("wasmgen: incremental compile failed:
+/// {{e:?}}"))`, and `Error`'s derived `Debug` carries the `ErrorCode` variant name, so the
+/// code is recoverable from the message. Without that check a blanket wasm-side conveyor
+/// reject -- exactly the thing this test's rustdoc claims to distinguish from a shared-dispatch
+/// block -- would satisfy `is_err()` and keep the test green.
+#[test]
+fn blocked_conveyor_fixtures_stay_blocked_for_their_stated_reason() {
+    for (name, expected_code) in BLOCKED_CONVEYOR_FIXTURES {
+        let path = format!("../../test/conveyors/{name}");
+        let datamodel = {
+            let f = File::open(&path).unwrap();
+            let mut f = BufReader::new(f);
+            xmile::project_from_reader(&mut f).unwrap_or_else(|e| panic!("parse {path}: {e}"))
+        };
+        let main = datamodel.models[0].name.clone();
+
+        let err = build_vm(&datamodel, &main)
+            .err()
+            .unwrap_or_else(|| panic!("{name}: the VM must still refuse this fixture"));
+        assert_eq!(
+            err.code, *expected_code,
+            "{name} must stay blocked for the reason its issue describes, got {err:?}"
+        );
+
+        let Err(WasmGenError::Unsupported(msg)) =
+            compile_datamodel_to_artifact(&datamodel, &main, false, false)
+        else {
+            panic!(
+                "{name}: the wasm entry routes through the same compile_sim dispatch, \
+                 so it must refuse the fixture too"
+            );
+        };
+        assert!(
+            msg.contains(&format!("{expected_code:?}")),
+            "{name}: the wasm entry must refuse the fixture for the SHARED-dispatch reason \
+             ({expected_code:?}), not because the wasm backend rejects conveyors; got: {msg}"
+        );
+    }
 }
 
 /// Load the reference series that sits beside a Vensim `.mdl` fixture.
