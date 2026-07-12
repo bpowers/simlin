@@ -2,8 +2,6 @@
 
 CLI tool for simulating and converting SD models. Primarily used for testing and debugging.
 
-**Last updated: 2026-05-20**
-
 For global development standards, see the root [CLAUDE.md](/CLAUDE.md).
 For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 
@@ -28,6 +26,12 @@ Uses [clap](https://docs.rs/clap) derive API. Each subcommand declares exactly t
 Commands that read model files (`simulate`, `convert`, `equations`, `debug`) share `InputArgs` via `#[command(flatten)]`:
 - Positional `PATH` (optional for `simulate`, reads stdin)
 - `--format <xmile|vensim|protobuf|systems>` -- auto-detected from file extension when omitted (`.mdl` -> vensim, `.pb`/`.bin` -> protobuf, `.txt` -> systems, everything else -> xmile). Systems format output shows only non-infinite stocks in declaration order.
+
+## Diagnostic reporting
+
+Every diagnostic goes to **STDERR**, warnings included: STDOUT carries the TSV result table, and interleaving a diagnostic would corrupt a redirected or piped run (the same rule the MDL export warnings follow, #856). The severity is not signalled by the stream but by the message itself -- `simlin_engine::errors` words each summary line from the diagnostic's own `DiagnosticSeverity`, so `--ltm` on a conveyor model prints `warning in model 'main': ...conveyor_ltm_degraded...` while a genuine equation error prints `error in model 'main' variable 'x': ...` and a bad `<units>` declaration prints `units error in model ...` (GH #919). The word tracks severity, not the kind of diagnostic, so an advisory is always scannable as one.
+
+Severity also gates behavior, not just wording: `FormattedErrors::push` raises `has_model_errors`/`has_variable_errors` for `Error`-severity diagnostics only, and `simulation_error_is_redundant` suppresses the generic `NotSimulatable` build failure only when a real model error was already printed. Before that gating, a model whose sole diagnostic was an advisory warning had its build failure silently swallowed -- the user saw "failed to create simulation" with no reason.
 
 ## External data resolution (Vensim `GET DIRECT *`)
 

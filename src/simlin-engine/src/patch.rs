@@ -114,19 +114,17 @@ pub fn apply_patch(project: &mut datamodel::Project, patch: ProjectPatch) -> Res
                     let model = get_model_mut(&mut staged, &model_patch.name)?;
                     match op {
                         ModelOperation::UpsertStock(mut stock) => {
-                            canonicalize_stock(&mut stock);
+                            canonicalize_stock_references(&mut stock);
                             upsert_variable(model, Variable::Stock(stock));
                         }
-                        ModelOperation::UpsertFlow(mut flow) => {
-                            canonicalize_flow(&mut flow);
+                        ModelOperation::UpsertFlow(flow) => {
                             upsert_variable(model, Variable::Flow(flow));
                         }
-                        ModelOperation::UpsertAux(mut aux) => {
-                            canonicalize_aux(&mut aux);
+                        ModelOperation::UpsertAux(aux) => {
                             upsert_variable(model, Variable::Aux(aux));
                         }
                         ModelOperation::UpsertModule(mut module) => {
-                            canonicalize_module(&mut module);
+                            canonicalize_module_references(&mut module);
                             upsert_variable(model, Variable::Module(module));
                         }
                         ModelOperation::DeleteVariable { ident } => {
@@ -167,8 +165,17 @@ fn canonicalize_ident(ident: &mut String) {
     *ident = canonicalize(ident.as_str()).into_owned();
 }
 
-fn canonicalize_stock(stock: &mut datamodel::Stock) {
-    canonicalize_ident(&mut stock.ident);
+// The variable's own `ident` is deliberately NOT canonicalized on upsert:
+// datamodel ident fields hold the human-facing display name (casing, spaces,
+// XMILE `\n` line breaks -- see the module comment in serde.rs and the XMILE
+// reader, which stores `name` attributes verbatim), and every consumer
+// canonicalizes at lookup time (`Model::get_variable`, `db/sync.rs`,
+// `layout/mod.rs`, ...). Canonicalizing in place destroyed the display name
+// on every upsert (GH #890). REFERENCE lists (stock inflows/outflows, module
+// `src`/`dst`) ARE canonicalized, mirroring the XMILE reader's convention for
+// those fields.
+
+fn canonicalize_stock_references(stock: &mut datamodel::Stock) {
     for inflow in stock.inflows.iter_mut() {
         canonicalize_ident(inflow);
     }
@@ -179,20 +186,11 @@ fn canonicalize_stock(stock: &mut datamodel::Stock) {
     stock.outflows.sort_unstable();
 }
 
-fn canonicalize_flow(flow: &mut datamodel::Flow) {
-    canonicalize_ident(&mut flow.ident);
-}
-
-fn canonicalize_aux(aux: &mut datamodel::Aux) {
-    canonicalize_ident(&mut aux.ident);
-}
-
-fn canonicalize_module(module: &mut datamodel::Module) {
-    canonicalize_ident(&mut module.ident);
-    // Canonicalize the reference endpoints too, mirroring `canonicalize_stock`'s
-    // inflow/outflow canonicalization. `src`/`dst` are variable idents (`dst` is
-    // the module-qualified `module·port` form); leaving them verbatim lets a
-    // non-canonical `src`/`dst` arriving via the FFI `apply_patch`
+fn canonicalize_module_references(module: &mut datamodel::Module) {
+    // Canonicalize the reference endpoints, mirroring
+    // `canonicalize_stock_references`. `src`/`dst` are variable idents (`dst`
+    // is the module-qualified `module·port` form); leaving them verbatim lets
+    // a non-canonical `src`/`dst` arriving via the FFI `apply_patch`
     // (pysimlin `upsert_module`) disagree with the canonical idents every
     // UI/engine consumer compares against. Empty placeholder endpoints
     // canonicalize to empty and are preserved.
@@ -480,6 +478,17 @@ fn apply_rename_variable(
     let new_ident = Ident::new(to);
 
     if old_ident == new_ident {
+        // Canonically-identical rename: only the display spelling changes
+        // (e.g. "students" -> "Students"). Every reference resolves through
+        // canonicalization, so no equation or reference rewrites are needed --
+        // just restamp the stored display name.
+        let model = get_model_mut(project, model_name)?;
+        let var = model
+            .get_variable_mut(from)
+            .ok_or_else(|| Error::new(ErrorKind::Model, ErrorCode::DoesNotExist, None))?;
+        if var.get_ident() != to {
+            var.set_ident(to.to_string());
+        }
         return Ok(());
     }
 
@@ -527,7 +536,10 @@ fn apply_rename_variable(
     rename_group_members(model, &old_ident, &new_ident);
 
     if let Some(var) = model.variables.get_mut(target_index) {
-        var.set_ident(new_ident.as_str().to_string());
+        // Store the caller's display spelling verbatim (ident fields hold
+        // display names; see the comment above `canonicalize_stock_references`).
+        // References below are rewritten with the canonical `new_ident`.
+        var.set_ident(to.to_string());
 
         // If the renamed variable is itself a module instance, its OWN input
         // references carry the module-qualified `{old}·{port}` dst prefix. The
@@ -3894,5 +3906,242 @@ mod tests {
 
         let result = apply_patch(&mut project, patch);
         assert!(result.is_err());
+    }
+
+    /// Datamodel `ident` fields hold the human-facing display name; every
+    /// consumer canonicalizes at lookup time. Upserting must therefore store
+    /// the caller's spelling verbatim -- casing, spaces, and XMILE `\n` line
+    /// breaks included (GH #890).
+    #[test]
+    fn upsert_preserves_display_name_spelling() {
+        let mut project = TestProject::new("test").build_datamodel();
+        let aux = datamodel::Aux {
+            ident: "Total Students".to_string(),
+            equation: Equation::Scalar("1".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        };
+        let flow = datamodel::Flow {
+            ident: "testing\\nassymptomatic".to_string(),
+            equation: Equation::Scalar("2".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        };
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![
+                    ModelOperation::UpsertAux(aux),
+                    ModelOperation::UpsertFlow(flow),
+                ],
+            }],
+        };
+
+        apply_patch(&mut project, patch).unwrap();
+        let model = project.get_model("main").unwrap();
+
+        // Stored spelling is the caller's display form...
+        let var = model.get_variable("total_students").unwrap();
+        assert_eq!(var.get_ident(), "Total Students");
+        let var = model.get_variable("testing_assymptomatic").unwrap();
+        assert_eq!(var.get_ident(), "testing\\nassymptomatic");
+
+        // ...and lookups by any spelling variant still resolve.
+        assert!(model.get_variable("Total Students").is_some());
+        assert!(model.get_variable("TOTAL_STUDENTS").is_some());
+        assert!(model.get_variable("testing\\nassymptomatic").is_some());
+    }
+
+    /// Upserting a variable whose name canonicalizes to an existing variable's
+    /// ident replaces that variable (no duplicate), and the stored spelling
+    /// follows the upsert payload -- the payload is authoritative for the
+    /// display form, just as it is for every other field.
+    #[test]
+    fn upsert_matches_existing_by_canonical_ident() {
+        let mut project = TestProject::new("test")
+            .stock("Students", "100", &[], &[], None)
+            .build_datamodel();
+
+        let make_stock = |ident: &str| datamodel::Stock {
+            ident: ident.to_string(),
+            equation: Equation::Scalar("100".to_string()),
+            documentation: "cohort pipeline".to_string(),
+            units: None,
+            inflows: vec![],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        };
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::UpsertStock(make_stock("Students"))],
+            }],
+        };
+        apply_patch(&mut project, patch).unwrap();
+
+        let model = project.get_model("main").unwrap();
+        assert_eq!(model.variables.len(), 1, "upsert must not duplicate");
+        match model.get_variable("students").unwrap() {
+            Variable::Stock(s) => {
+                assert_eq!(s.ident, "Students");
+                assert_eq!(s.documentation, "cohort pipeline");
+            }
+            _ => panic!("expected stock"),
+        }
+
+        // A canonically-equal but differently-spelled upsert also matches,
+        // and restamps the display form from the payload.
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::UpsertStock(make_stock("STUDENTS"))],
+            }],
+        };
+        apply_patch(&mut project, patch).unwrap();
+
+        let model = project.get_model("main").unwrap();
+        assert_eq!(model.variables.len(), 1);
+        assert_eq!(
+            model.get_variable("students").unwrap().get_ident(),
+            "STUDENTS"
+        );
+    }
+
+    /// Renaming stores the new name's display form verbatim while every
+    /// reference (equations, stock in/outflows) is rewritten canonically.
+    #[test]
+    fn rename_stores_display_form() {
+        let mut project = TestProject::new("test")
+            .flow("flow", "1", None)
+            .aux("watcher", "flow * 2", None)
+            .stock("stock", "0", &["flow"], &["flow"], None)
+            .build_datamodel();
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::RenameVariable {
+                    from: "flow".to_string(),
+                    to: "Enrollment Rate".to_string(),
+                }],
+            }],
+        };
+        apply_patch(&mut project, patch).unwrap();
+
+        let model = project.get_model("main").unwrap();
+        assert!(model.get_variable("flow").is_none());
+        assert_eq!(
+            model.get_variable("enrollment_rate").unwrap().get_ident(),
+            "Enrollment Rate"
+        );
+        match model.get_variable("watcher").unwrap() {
+            Variable::Aux(aux) => match &aux.equation {
+                Equation::Scalar(eqn) => assert_eq!(eqn, "enrollment_rate * 2"),
+                _ => panic!("expected scalar equation"),
+            },
+            _ => panic!("expected aux"),
+        }
+        match model.get_variable("stock").unwrap() {
+            Variable::Stock(stock) => {
+                assert_eq!(stock.inflows, vec!["enrollment_rate".to_string()]);
+                assert_eq!(stock.outflows, vec!["enrollment_rate".to_string()]);
+            }
+            _ => panic!("expected stock"),
+        }
+    }
+
+    /// A rename whose old and new names canonicalize identically only changes
+    /// the display spelling: no equation or reference rewrites are needed
+    /// because every reference resolves through canonicalization.
+    #[test]
+    fn rename_case_only_updates_display_name() {
+        let mut project = TestProject::new("test")
+            .aux("students", "1", None)
+            .aux("watcher", "students * 2", None)
+            .build_datamodel();
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::RenameVariable {
+                    from: "students".to_string(),
+                    to: "Students".to_string(),
+                }],
+            }],
+        };
+        apply_patch(&mut project, patch).unwrap();
+
+        let model = project.get_model("main").unwrap();
+        assert_eq!(
+            model.get_variable("students").unwrap().get_ident(),
+            "Students"
+        );
+        match model.get_variable("watcher").unwrap() {
+            Variable::Aux(aux) => match &aux.equation {
+                Equation::Scalar(eqn) => assert_eq!(eqn, "students * 2"),
+                _ => panic!("expected scalar equation"),
+            },
+            _ => panic!("expected aux"),
+        }
+    }
+
+    /// A same-name rename of an existing variable is an accepted no-op.
+    #[test]
+    fn rename_identity_is_noop() {
+        let mut project = TestProject::new("test")
+            .aux("x", "1", None)
+            .build_datamodel();
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::RenameVariable {
+                    from: "x".to_string(),
+                    to: "x".to_string(),
+                }],
+            }],
+        };
+        apply_patch(&mut project, patch).unwrap();
+        assert!(
+            project
+                .get_model("main")
+                .unwrap()
+                .get_variable("x")
+                .is_some()
+        );
+    }
+
+    /// A display-only rename of a variable that does not exist is an error,
+    /// consistent with every other rename.
+    #[test]
+    fn rename_case_only_missing_variable_errors() {
+        let mut project = TestProject::new("test").build_datamodel();
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::RenameVariable {
+                    from: "nope".to_string(),
+                    to: "Nope".to_string(),
+                }],
+            }],
+        };
+        let err = apply_patch(&mut project, patch).unwrap_err();
+        assert_eq!(err.code, ErrorCode::DoesNotExist);
     }
 }

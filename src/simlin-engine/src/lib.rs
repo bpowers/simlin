@@ -31,6 +31,10 @@ mod bytecode;
 pub mod common;
 pub mod compat;
 mod compiler;
+pub mod conveyor;
+pub mod conveyor_compile;
+#[cfg(test)]
+mod conveyor_tests;
 pub mod data_provider;
 pub mod datamodel;
 pub mod db;
@@ -67,6 +71,8 @@ mod project;
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[path = "project_io.gen.rs"]
 pub mod project_io;
+pub mod queue;
+pub mod queue_compile;
 #[doc(hidden)]
 pub mod rapidhash;
 mod results;
@@ -113,6 +119,7 @@ pub use self::patch::{
     ModelOperation, ModelPatch, ProjectOperation, ProjectPatch, apply_patch, is_view_only_patch,
 };
 pub use self::project::Project;
+pub use self::queue_compile::build_sim;
 pub use self::results::{Method, Results, Specs as SimSpecs};
 pub use self::variable::{
     DepClassification, Variable, classify_dependencies, identifier_set, previous_referenced_idents,

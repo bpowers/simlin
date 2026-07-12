@@ -5393,3 +5393,297 @@ fn slot_count_for(var: &LtmSyntheticVar, dims: &[datamodel::Dimension]) -> usize
         })
         .product()
 }
+
+// ---------------------------------------------------------------------------
+// Conveyor + LTM degradation warning (docs/design/conveyors.md §9.6)
+// ---------------------------------------------------------------------------
+
+/// Parse the minimal conveyor fixture into a datamodel. The `students`
+/// stock carries a `<conveyor>` block, so its `compat.conveyor` marker is
+/// present on the salsa diagnostic path (which never expands it).
+#[cfg(test)]
+fn minimal_conveyor_datamodel() -> datamodel::Project {
+    use std::io::BufReader;
+    let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+    crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes()))
+        .expect("parse minimal_conveyor.xmile")
+}
+
+/// Predicate: a diagnostic is the §9.6 conveyor-LTM-degraded `Warning`
+/// naming `conveyor_name`.
+#[cfg(test)]
+fn is_conveyor_ltm_degraded(d: &crate::db::Diagnostic, conveyor_name: &str) -> bool {
+    use crate::common::ErrorCode;
+    use crate::db::{DiagnosticError, DiagnosticSeverity};
+    d.severity == DiagnosticSeverity::Warning
+        && d.variable.as_deref() == Some(conveyor_name)
+        && matches!(
+            &d.error,
+            DiagnosticError::Model(err)
+                if err.code == ErrorCode::ConveyorLtmDegraded
+                    && err
+                        .get_details()
+                        .is_some_and(|m| m.contains(conveyor_name))
+        )
+}
+
+/// With LTM enabled, a model containing a conveyor stock must emit exactly
+/// one `ConveyorLtmDegraded` `Warning` naming the conveyor, reaching
+/// `collect_model_diagnostics` (the exact entry point libsimlin/simlin-mcp
+/// drive, and -- via the transient `ltm_enabled` re-enable --
+/// `simlin_project_get_errors`). §9.6.
+#[test]
+fn test_conveyor_ltm_degraded_warning_surfaces_under_ltm() {
+    use salsa::Setter;
+
+    let project = minimal_conveyor_datamodel();
+    let mut db = SimlinDb::default();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let diags = collect_model_diagnostics(&db, source_model, source_project);
+
+    let degraded: Vec<_> = diags
+        .iter()
+        .filter(|d| is_conveyor_ltm_degraded(d, "Students"))
+        .collect();
+    assert_eq!(
+        degraded.len(),
+        1,
+        "expected exactly one ConveyorLtmDegraded warning naming 'students'; got: {diags:?}"
+    );
+}
+
+/// The `ltm_enabled` gate scopes the warning to LTM callers: a project that
+/// never requested LTM must NOT pay LTM synthesis cost, so the conveyor
+/// degradation warning is absent. Mirrors
+/// `test_ltm_disabled_gate_suppresses_auto_flip_warning`.
+#[test]
+fn test_conveyor_ltm_degraded_warning_absent_without_ltm() {
+    let project = minimal_conveyor_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_model = sync.models["main"].source;
+
+    assert!(
+        !sync.project.ltm_enabled(&db),
+        "baseline: ltm_enabled must default to false"
+    );
+
+    let diags = collect_model_diagnostics(&db, source_model, sync.project);
+
+    let has_degraded = diags
+        .iter()
+        .any(|d| is_conveyor_ltm_degraded(d, "Students"));
+    assert!(
+        !has_degraded,
+        "LTM-disabled project must not emit the conveyor degradation warning; got: {diags:?}"
+    );
+}
+
+/// A conveyor living in a sub-model that a PARENT model references as a MODULE
+/// must surface EXACTLY ONE `ConveyorLtmDegraded` warning over the whole
+/// project -- not two.
+///
+/// Regression guard for the double-drain: `model_ltm_variables(parent)` reaches
+/// `model_ltm_variables(child)` transitively (a module-output read drives the
+/// parent's port/composite discovery into the child), so the child's memo sits
+/// in BOTH the parent's and the child's `model_all_diagnostics` accumulator
+/// DFS. Emitting from `model_ltm_variables` (drained once per memo but reachable
+/// from two models) reported the warning twice; emitting from the per-model
+/// `model_all_diagnostics` trigger (which `collect_all_diagnostics` drains
+/// exactly once per model and which is NOT invoked across module edges) reports
+/// it once regardless of nesting.
+#[test]
+fn test_conveyor_ltm_degraded_warning_emitted_once_across_module_boundary() {
+    use crate::db::collect_all_diagnostics;
+    use salsa::Setter;
+
+    // Child = the minimal conveyor model, named to match the module ident
+    // (`x_module` sets `model_name == ident`). The parent reads a child output
+    // (`belt·graduating`), which is what pulls the parent's LTM pass into the
+    // child's `model_ltm_variables`.
+    let fixture = minimal_conveyor_datamodel();
+    let sim_specs = fixture.sim_specs.clone();
+    let mut child = fixture.models.into_iter().next().expect("one model");
+    child.name = "belt".to_string();
+
+    let parent = x_model(
+        "main",
+        vec![
+            x_module("belt", &[], None),
+            x_aux("reader", "belt·graduating", None),
+        ],
+    );
+
+    let project = datamodel::Project {
+        name: "conveyor_module".to_string(),
+        sim_specs,
+        dimensions: vec![],
+        units: vec![],
+        models: vec![parent, child],
+        source: Default::default(),
+        ai_information: None,
+    };
+
+    let mut db = SimlinDb::default();
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let diags = collect_all_diagnostics(&db, source_project);
+
+    let degraded: Vec<_> = diags
+        .iter()
+        .filter(|d| is_conveyor_ltm_degraded(d, "Students"))
+        .collect();
+    assert_eq!(
+        degraded.len(),
+        1,
+        "a conveyor in a module-referenced sub-model must warn exactly once across the whole \
+         project; got: {diags:?}"
+    );
+}
+
+/// The warning is advisory, not a hard error: the same conveyor model still
+/// compiles and simulates through the special-stock build path (which expands
+/// the belt and clears the marker), independent of the LTM diagnostic overlay.
+#[test]
+fn test_conveyor_still_simulates_despite_ltm_degraded_warning() {
+    let project = minimal_conveyor_datamodel();
+    let main = project.models[0].name.clone();
+    let mut vm = crate::queue_compile::build_vm(&project, &main).expect("build conveyor vm");
+    vm.run_to_end().expect("run conveyor sim");
+
+    let students = vm
+        .get_series(&crate::common::Ident::new("students"))
+        .expect("students series");
+    // Steady state: init 1000 == inflow(250) * transit(4), so it holds flat.
+    assert!(students.len() > 40, "should have many saved steps");
+    assert!(
+        (students[students.len() - 1] - 1000.0).abs() < 1e-6,
+        "conveyor holds steady state; final students {}",
+        students[students.len() - 1]
+    );
+}
+
+/// Parse the queue-drain fixture into a datamodel. The `waiting` stock carries
+/// a `<queue/>` marker, so its `compat.queue` is present on the salsa
+/// diagnostic path (which never expands it).
+#[cfg(test)]
+fn queue_drain_datamodel() -> datamodel::Project {
+    use std::io::BufReader;
+    let xml = include_str!("../../../../test/queues/queue_drain.xmile");
+    crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes()))
+        .expect("parse queue_drain.xmile")
+}
+
+/// Predicate: a diagnostic is the §10.5 queue-LTM-degraded `Warning` naming
+/// `queue_name`.
+#[cfg(test)]
+fn is_queue_ltm_degraded(d: &crate::db::Diagnostic, queue_name: &str) -> bool {
+    use crate::common::ErrorCode;
+    use crate::db::{DiagnosticError, DiagnosticSeverity};
+    d.severity == DiagnosticSeverity::Warning
+        && d.variable.as_deref() == Some(queue_name)
+        && matches!(
+            &d.error,
+            DiagnosticError::Model(err)
+                if err.code == ErrorCode::QueueLtmDegraded
+                    && err.get_details().is_some_and(|m| m.contains(queue_name))
+        )
+}
+
+/// With LTM enabled, a model containing a queue stock must emit exactly one
+/// `QueueLtmDegraded` `Warning` naming the queue (§10.5), mirroring the
+/// conveyor twin.
+#[test]
+fn test_queue_ltm_degraded_warning_surfaces_under_ltm() {
+    use salsa::Setter;
+
+    let project = queue_drain_datamodel();
+    let mut db = SimlinDb::default();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let diags = collect_model_diagnostics(&db, source_model, source_project);
+
+    let degraded: Vec<_> = diags
+        .iter()
+        .filter(|d| is_queue_ltm_degraded(d, "waiting"))
+        .collect();
+    assert_eq!(
+        degraded.len(),
+        1,
+        "expected exactly one QueueLtmDegraded warning naming 'waiting'; got: {diags:?}"
+    );
+}
+
+/// The `ltm_enabled` gate scopes the queue warning to LTM callers: a project
+/// that never requested LTM must not emit it.
+#[test]
+fn test_queue_ltm_degraded_warning_absent_without_ltm() {
+    let project = queue_drain_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_model = sync.models["main"].source;
+
+    let diags = collect_model_diagnostics(&db, source_model, sync.project);
+
+    assert!(
+        !diags.iter().any(|d| is_queue_ltm_degraded(d, "waiting")),
+        "LTM-disabled project must not emit the queue degradation warning; got: {diags:?}"
+    );
+}
+
+/// A queue in a sub-model referenced as a MODULE by a parent must surface
+/// EXACTLY ONE `QueueLtmDegraded` warning over the whole project -- the same
+/// cross-module double-drain regression the conveyor twin guards, closed by
+/// emitting from the per-model `model_all_diagnostics` trigger.
+#[test]
+fn test_queue_ltm_degraded_warning_emitted_once_across_module_boundary() {
+    use crate::db::collect_all_diagnostics;
+    use salsa::Setter;
+
+    let fixture = queue_drain_datamodel();
+    let sim_specs = fixture.sim_specs.clone();
+    let mut child = fixture.models.into_iter().next().expect("one model");
+    child.name = "q".to_string();
+
+    let parent = x_model(
+        "main",
+        vec![x_module("q", &[], None), x_aux("reader", "q·served", None)],
+    );
+
+    let project = datamodel::Project {
+        name: "queue_module".to_string(),
+        sim_specs,
+        dimensions: vec![],
+        units: vec![],
+        models: vec![parent, child],
+        source: Default::default(),
+        ai_information: None,
+    };
+
+    let mut db = SimlinDb::default();
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let diags = collect_all_diagnostics(&db, source_project);
+
+    let degraded: Vec<_> = diags
+        .iter()
+        .filter(|d| is_queue_ltm_degraded(d, "waiting"))
+        .collect();
+    assert_eq!(
+        degraded.len(),
+        1,
+        "a queue in a module-referenced sub-model must warn exactly once across the whole \
+         project; got: {diags:?}"
+    );
+}

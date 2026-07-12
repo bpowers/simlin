@@ -754,6 +754,20 @@ pub unsafe extern "C" fn simlin_model_get_latex_equation(
         None => return ptr::null_mut(),
     };
 
+    // A conveyor stock whose <eqn> is a docs/design/conveyors.md section 7.2
+    // explicit init list ("10, 20, 30") has no scalar expression to render:
+    // the salsa parse path substitutes a constant placeholder (so diagnostics
+    // stay clean), and rendering that placeholder -- with eqnloc
+    // click-to-caret ranges mapped into the placeholder text -- would be
+    // confidently wrong. Return NULL instead (no preview beats a wrong one).
+    if source_var.compat(&*db_locked).conveyor.is_some()
+        && engine::conveyor_compile::equation_has_explicit_init_list(
+            source_var.equation(&*db_locked),
+        )
+    {
+        return ptr::null_mut();
+    }
+
     let empty_ctx = engine::db::ModuleIdentContext::new(&*db_locked, vec![]);
     let parsed = engine::db::parse_source_variable_with_module_context(
         &*db_locked,

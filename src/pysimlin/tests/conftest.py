@@ -108,3 +108,15 @@ def cross_element_ltm_path() -> Path:
 def arrayed_population_ltm_path() -> Path:
     """Return path to the arrayed (apply-to-all) population LTM model."""
     return get_repo_root() / "test" / "arrayed_population_ltm" / "arrayed_population.stmx"
+
+
+@pytest.fixture
+def conveyor_model_path() -> Path:
+    """Return path to a minimal XMILE conveyor model."""
+    return get_repo_root() / "test" / "conveyors" / "minimal_conveyor.xmile"
+
+
+@pytest.fixture
+def covid_conveyor_model_path() -> Path:
+    """Return path to a real Stella model with leak and spreadflow flows."""
+    return get_repo_root() / "test" / "conveyors" / "covid19_severity.stmx"

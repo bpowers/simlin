@@ -171,7 +171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(handle) = watcher_handle {
         // Drop the join handle's result silently; a panicking watcher
         // task is logged at the actor's source, not here.
-        let _ = handle.await;
+        let _ = handle.into_join_handle().await;
     }
 
     Ok(())

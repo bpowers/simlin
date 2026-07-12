@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header>
+    <name>queue coupled conveyor</name>
+    <vendor>test</vendor>
+    <product version="1.0">test</product>
+    <options>
+      <uses_conveyor/>
+      <uses_queue overflow="true"/>
+    </options>
+  </header>
+  <sim_specs method="Euler" time_units="Months">
+    <start>0</start>
+    <stop>6</stop>
+    <dt>0.5</dt>
+  </sim_specs>
+  <model>
+    <variables>
+      <!-- Queue -> discrete conveyor coupling (conveyors.md 11, queues.md 9). The
+           queue's primary outflow IS the belt's inflow, so neither side-table pass
+           can run to completion before the other: the belt's phase A must free the
+           exit slat's room, the queue then serves at most what the belt will admit,
+           and only then does the belt's phase B insert. Both backends unroll that
+           interleaving from the same `CouplingTable`.
+
+           The interleaving is OBSERVABLE at TIME = 1.5, which is why this fixture
+           is worth its corpus slot. The belt holds 1.75 against a capacity of 2.
+           Phase A discharges the exit slat's 0.75, leaving 1.0 of room, so the
+           queue serves 1.0 of volume and `boarding` reads 2.0. Had the serve run
+           BEFORE phase A it would have seen only 0.25 of room and `boarding` would
+           read 0.5. `balking` (the queue's `<overflow/>` sibling) claims the 0.25
+           the belt refused -- the only step at which it is non-zero, since the
+           capacity steps to 22 at TIME = 2 and the belt never fills again.
+
+           What this fixture does NOT exercise: FIFO backlog discipline, or any of
+           the four (one_at_a_time, batch_integrity) batch rules. `waiting` is 0 at
+           every step and structurally must be: an `<overflow/>` removes exactly the
+           volume the downstream conveyor rejected this DT (queues.md section 4.5),
+           so whatever the belt does not take, balking does -- the queue is empty at
+           the end of every DT and never holds more than the current DT's arrivals.
+           There is never a second cohort to choose between. Those rules are covered
+           only by the synthetic models in `wasmgen/belt_tests.rs`;
+           `test/queues/queue_wait.xmile`, the backlog oracle queues.md section 12
+           still asks for, does not exist.
+
+           `discrete="true"` here is a COUPLING GATE, not an observable: XMILE
+           3.7.2 requires a queue-fed belt to be discrete, and the engine enforces
+           it. It does not make this belt's contents integral. They run 0.5, 1.25,
+           1.75, 2.5 -- because the coupled admission path never quantizes, and
+           with the default batch_integrity="false" the queue splits its front
+           cohort to fill exactly the room the belt reports. conveyors.md section
+           6.4 rule 1 asserts the opposite ("slat contents therefore stay
+           integral"). Both backends agree on the fractional answer, so this is a
+           spec-vs-implementation divergence, not a parity bug; it is under review
+           as GH #950, and resolving it will change this fixture's trajectory. -->
+      <stock name="waiting">
+        <eqn>0</eqn>
+        <inflow>arrivals</inflow>
+        <outflow>boarding</outflow>
+        <outflow>balking</outflow>
+        <queue/>
+      </stock>
+      <flow name="arrivals">
+        <eqn>TIME + 1</eqn>
+      </flow>
+      <flow name="boarding">
+        <eqn>0</eqn>
+      </flow>
+      <flow name="balking">
+        <eqn>0</eqn>
+        <overflow/>
+      </flow>
+      <stock name="balked">
+        <eqn>0</eqn>
+        <inflow>balking</inflow>
+      </stock>
+      <stock name="belt">
+        <eqn>0</eqn>
+        <inflow>boarding</inflow>
+        <outflow>departing</outflow>
+        <conveyor discrete="true">
+          <len>1</len>
+          <capacity>2 + STEP(20, 2)</capacity>
+        </conveyor>
+      </stock>
+      <flow name="departing">
+      </flow>
+      <stock name="arrived">
+        <eqn>0</eqn>
+        <inflow>departing</inflow>
+      </stock>
+    </variables>
+  </model>
+</xmile>

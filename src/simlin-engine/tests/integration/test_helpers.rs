@@ -23,8 +23,11 @@ use simlin_engine::datamodel;
 use simlin_engine::db::LtmSyntheticVar;
 use simlin_engine::float::approx_eq_eps;
 use simlin_engine::ltm::CausalGraph;
-use simlin_engine::wasmgen::{WasmGenError, WasmLayout, compile_simulation};
+use simlin_engine::wasmgen::{
+    WasmGenError, WasmLayout, compile_datamodel_to_artifact, compile_simulation, decode_error_word,
+};
 use simlin_engine::{Results, SimSpecs, Vm};
+use wasm::addrs::ModuleAddr;
 use wasm::validate;
 
 /// Tolerance for `$⁚ltm⁚*` series-parity assertions between the wasm backend
@@ -283,6 +286,59 @@ pub fn wasm_results_for(
     Ok(wasm_results_from_slab(&artifact.layout, slab, specs))
 }
 
+/// VM oracle for a SPECIAL-STOCK (conveyor/queue) fixture.
+///
+/// [`wasm_results_for`]'s VM twin (simulate.rs `compile_vm`) calls
+/// `compile_project_incremental` directly, which is exactly the hard
+/// `ConveyorNotExpanded`/`QueueNotExpanded` guard's trigger: an un-expanded
+/// special-stock marker reaching the ordinary pipeline. This routes through the
+/// unified dispatch [`simlin_engine::build_sim`] instead -- the same entry point
+/// `libsimlin::simlin_sim_new` uses -- so the belt/FIFO stocks are expanded into
+/// driven flows and the resolved plans are ATTACHED to the returned `Vm`. Both
+/// details matter: an un-attached plan set would simulate the driven outflows as
+/// their (empty) equations and silently produce zeros.
+///
+/// Imperative Shell: drives the salsa compile pipeline and the VM.
+#[allow(dead_code)]
+pub fn vm_results_for_special(
+    datamodel: &simlin_engine::datamodel::Project,
+    model_name: &str,
+) -> Results {
+    use simlin_engine::db::{SimlinDb, sync_from_datamodel_incremental};
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    let mut vm = simlin_engine::build_sim(&mut db, sync.project, datamodel, model_name)
+        .expect("build_sim should compile a special-stock fixture");
+    vm.run_to_end()
+        .expect("Vm::run_to_end should succeed on a special-stock fixture");
+    vm.into_results()
+}
+
+/// wasm peer of [`vm_results_for_special`]: lower `datamodel` through the
+/// production datamodel entry point [`compile_datamodel_to_artifact`], which
+/// performs the SAME `queue_compile::compile_sim` dispatch, so the blob simulates
+/// the identical expanded project the VM does. `Err` carries the `Unsupported`
+/// message; the caller decides whether that is a skip (`simulate_special_path`
+/// treats it as a hard failure -- see its rustdoc).
+///
+/// Imperative Shell: drives the salsa compile pipeline and the wasm interpreter,
+/// delegating the reshape to the pure [`wasm_results_from_slab`].
+#[allow(dead_code)]
+pub fn wasm_results_for_special(
+    datamodel: &simlin_engine::datamodel::Project,
+    model_name: &str,
+) -> Result<Results, String> {
+    let artifact = match compile_datamodel_to_artifact(datamodel, model_name, false, false) {
+        Ok(artifact) => artifact,
+        Err(WasmGenError::Unsupported(msg)) => return Err(msg),
+    };
+
+    let slab = run_wasm_results(&artifact.wasm, &artifact.layout);
+    let specs = SimSpecs::from(&datamodel.sim_specs);
+    Ok(wasm_results_from_slab(&artifact.layout, slab, specs))
+}
+
 /// LTM-enabled VM oracle: compile `model_name` of `datamodel` with
 /// `ltm_enabled = true` on its freshly-synced salsa `SourceProject`, run it
 /// to completion in the bytecode VM, and return the resulting [`Results`].
@@ -503,6 +559,42 @@ pub fn ensure_wasm_matches(
     WasmRunOutcome::Ran
 }
 
+/// Poll the blob's runtime error channel (GH #921) and panic if it is set.
+///
+/// A wasm export cannot return a `Result`, so a host learns a run failed only by
+/// asking. Every corpus path runs its blob through [`run_wasm_results`] or
+/// [`run_wasm_results_segmented`], so checking here covers all of them: a raised
+/// error can never masquerade as a short-but-valid results slab.
+///
+/// The conveyor fixtures CAN raise in principle (the belt pass is the only pass with
+/// per-step runtime errors: `ConveyorTransitTooLong`, plus `ConveyorTransitNotPositive`
+/// from `init_belts`), but none of them does -- every corpus belt has a positive,
+/// in-bound transit. So this stays a tripwire rather than an expectation. It
+/// deliberately does NOT rebuild the VM's message: that needs the model's
+/// `ConveyorPlan` list, which neither `run_wasm_results` caller has to hand, and the
+/// panic below names the raw code and belt index, which is enough to identify a
+/// fixture that started raising. `simlin_engine::wasmgen::reconstruct_error` is the
+/// reconstruction, unit-tested against the VM's exact text in
+/// `wasmgen/errors_tests.rs`.
+fn assert_no_runtime_error(store: &mut Store<()>, inst: checked::Stored<ModuleAddr>) {
+    let f = store
+        .instance_export(inst, "get_error")
+        .expect("get_error export must exist")
+        .as_func()
+        .expect("get_error export must be a function");
+    let word = store
+        .invoke_simple_typed::<(), i64>(f, ())
+        .expect("invoke get_error");
+    if let Some(err) = decode_error_word(word) {
+        panic!(
+            "the wasm blob raised a runtime error during this run: code {} (ErrorCode \
+             discriminant), belt/plan index {}. Rebuild the message with \
+             `simlin_engine::wasmgen::reconstruct_error` against the model's ConveyorPlan list.",
+            err.code, err.belt
+        );
+    }
+}
+
 /// Instantiate `wasm` under the DLR-FT `checked::Store`, invoke the exported
 /// `run`, and copy `n_chunks * n_slots` f64 out of the results region (located
 /// via `layout.results_offset`). This is the wasm-execution side effect of
@@ -523,6 +615,7 @@ fn run_wasm_results(wasm: &[u8], layout: &WasmLayout) -> Vec<f64> {
     store
         .invoke_simple_typed::<(), ()>(run, ())
         .expect("run wasm");
+    assert_no_runtime_error(&mut store, inst);
     let mem = store
         .instance_export(inst, "memory")
         .expect("memory export must exist")
@@ -566,6 +659,7 @@ pub fn run_wasm_results_segmented(wasm: &[u8], layout: &WasmLayout, targets: &[f
     store
         .invoke_simple_typed::<(), ()>(run_initials, ())
         .expect("run_initials wasm");
+    assert_no_runtime_error(&mut store, inst);
     for &t in targets {
         let run_to = store
             .instance_export(inst, "run_to")
@@ -575,6 +669,9 @@ pub fn run_wasm_results_segmented(wasm: &[u8], layout: &WasmLayout, targets: &[f
         store
             .invoke_simple_typed::<(f64,), ()>(run_to, (t,))
             .expect("run_to wasm");
+        // Poll after EVERY segment: the channel is sticky, but a later `run_to`
+        // that returns immediately would otherwise look like a clean no-op.
+        assert_no_runtime_error(&mut store, inst);
     }
     let mem = store
         .instance_export(inst, "memory")

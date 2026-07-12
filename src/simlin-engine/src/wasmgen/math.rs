@@ -34,10 +34,14 @@
 //! ## Composition
 //!
 //! `tan = sin/cos`, `log10 = ln * (1/ln10)`, `asin = atan(x/sqrt(1-x^2))`,
-//! `acos = pi/2 - asin`, and `pow(x, y) = exp(y * ln x)`. `pow` therefore
-//! matches `f64::powf` only for a positive base; a negative base diverges
-//! (`ln` of a negative is NaN). That is a documented limitation -- no corpus
-//! model raises a negative base to a power -- so it is not chased here.
+//! `acos = pi/2 - asin`, and `pow(x, y) = +/- exp(y * ln |x|)` -- taking the
+//! magnitude and reapplying the sign, since `ln` of a negative is NaN but
+//! `(-x)^y` is perfectly well-defined for an integral `y`, and the VM
+//! (`f64::powf`) computes it. `pow` additionally special-cases an infinite
+//! exponent and the signed-zero / infinite base, so its SPECIAL-VALUE behavior
+//! agrees with `powf` bit-for-bit over the whole domain rather than only for a
+//! positive base. Its ordinary finite results remain approximations, like every
+//! other helper here. See [`emit_pow`].
 //!
 //! ## Wiring
 //!
@@ -872,21 +876,99 @@ pub(crate) fn emit_log10(ln_idx: u32) -> Function {
 
 const POW_X: u32 = 0;
 const POW_Y: u32 = 1;
+/// Scratch local holding the unsigned magnitude `|x| ^ y`.
+const POW_MAG: u32 = 2;
+/// Scratch local holding `|x|`.
+const POW_AX: u32 = 3;
+/// Scratch i32 local: is `x`'s IEEE sign bit set? (`x < 0` OR `x == -0.0`).
+const POW_NEG: u32 = 4;
 
-/// Emit `pow(x: f64, y: f64) -> f64` as `exp(y * ln x)`.
+/// Emit `pow(x: f64, y: f64) -> f64` as `+/- exp(y * ln |x|)`.
 ///
-/// Matches `f64::powf` for a positive base `x`. Special cases mirrored from
-/// `powf`: `y == 0 -> 1` (including `pow(anything, 0) == 1`), `x == 1 -> 1`.
-/// A negative base yields NaN (`ln` of a negative is NaN) -- this is the
-/// documented limitation; no corpus model raises a negative base to a power.
-/// Worst-case relative error over `x in [0.01, 100]`, `y in [-5, 5]`:
-/// `~2.3e-12`. Pinned by `pow_matches_f64`. `exp_idx`/`ln_idx` are the module
-/// function indices of [`emit_exp`] / [`emit_ln`].
+/// Reproduces `f64::powf`'s SPECIAL-VALUE behavior -- every IEEE-754 exact case
+/// (C99 F.10.4.4: signed zeros, infinities, NaN, and the `+/-1`/`+/-inf` corners)
+/// agrees bit-for-bit, pinned by `pow_matches_f64_on_special_values`. On ordinary
+/// finite inputs it is an APPROXIMATION of `powf`, not a bit-exact match: it is
+/// built from [`emit_exp`]/[`emit_ln`], so e.g. `pow(-3, 2)` yields
+/// `9.000000000000515` and `pow(2, -1074)` underflows to `0.0` (see `emit_exp`'s
+/// documented saturation). Accuracy is bounded by the module's stated bar, well
+/// inside the corpus tolerances the VM/wasm parity gate enforces.
+///
+/// Structure, in the order the guards fire:
+///
+/// 1. `y == 0 -> 1` and `x == 1 -> 1`, the two short-circuits that outrank even
+///    a NaN operand (`pow(NaN, 0) == 1`, `pow(1, NaN) == 1`).
+/// 2. **Infinite exponent** (`|y| == inf`): the result is `|x|^y`, which is never
+///    negative, and is exactly `1.0` when `|x| == 1` (`pow(-1, +/-inf) == 1`).
+///    Otherwise `exp(y * ln|x|)` gives the right limit unaided, since `ln` maps
+///    `0 -> -inf` and `+inf -> +inf`. This case MUST be taken before the
+///    integrality test below: `f64.trunc(inf) == inf`, so an infinite `y` looks
+///    integral, and then `y - 2*trunc(y/2)` is `inf - inf == NaN`, which
+///    `f64.ne 0` reports as TRUE -- the odd/even negate would fire on every
+///    infinite exponent and flip the sign of `(-2)^inf`.
+/// 3. **Negative FINITE NONZERO base, non-integral exponent** -> NaN (no real
+///    value), like `powf`. `trunc(y) != y` is also true for a NaN `y`, so
+///    `pow(-2, NaN)` is NaN by the same branch. Both ends of the magnitude range
+///    are exempt -- neither has a fractional part to make `(-x)^y` complex -- so
+///    the test is gated on `|x| != 0 && |x| != inf`: `pow(-0.0, 0.5) == +0.0` and
+///    `pow(-inf, 0.5) == +inf`, `pow(-inf, -0.5) == +0.0`.
+/// 4. `mag = exp(y * ln|x|)`, negated exactly when `x`'s **sign bit** is set and
+///    `y` is an odd integer.
+///
+/// Both the negative-base and the signed-zero-base paths are load-bearing rather
+/// than pedantic. `(-Time)^2` appears in `test/test-models/tests/arithmetics` and
+/// Vensim records a value for it, so `ln`-of-a-negative returning NaN would
+/// diverge from the VM on a real corpus model. And the sign of a zero survives
+/// into `1/x`, turning `-inf` into `+inf` -- which is why the sign test is
+/// `f64.copysign(1, x) < 0` rather than `x < 0` (`-0.0 < 0.0` is false).
+///
+/// The odd/even test is `y - 2*trunc(y/2) != 0`, guarded by `trunc(y) == y`
+/// (redundant for a strictly negative finite nonzero base, which already returned
+/// NaN above, but load-bearing for the `+/-0.0` and `+/-inf` bases, where a
+/// non-integral `y` reaches it). It is exact for every finite `y`, and for
+/// `|y| >= 2^53` -- where `y/2` is exact and `trunc` is the identity -- it reports
+/// "even", matching IEEE-754, under which no odd integer is representable at that
+/// magnitude.
+///
+/// Worst-case relative error over `x in [0.01, 100]`, `y in [-5, 5]`: `~2.3e-12`.
+/// Pinned by `pow_matches_f64` and `pow_matches_f64_on_special_values`.
+/// `exp_idx`/`ln_idx` are the module function indices of [`emit_exp`]/[`emit_ln`].
 pub(crate) fn emit_pow(exp_idx: u32, ln_idx: u32) -> Function {
     use wasm_encoder::BlockType;
-    let mut f = Function::new([]);
+    let mut f = Function::new([(2, ValType::F64), (1, ValType::I32)]);
 
-    // y == 0 -> 1.
+    /// Emit `mag = exp(y * ln(|x|))`, leaving the result on the stack.
+    fn emit_abs_pow(f: &mut Function, exp_idx: u32, ln_idx: u32) {
+        f.instruction(&Ins::LocalGet(POW_Y));
+        f.instruction(&Ins::LocalGet(POW_AX));
+        f.instruction(&Ins::Call(ln_idx));
+        f.instruction(&Ins::F64Mul);
+        f.instruction(&Ins::Call(exp_idx));
+    }
+
+    /// Emit the "`y` is an odd integer" predicate, leaving an i32 on the stack:
+    /// `trunc(y) == y && y - 2*trunc(y/2) != 0`.
+    fn emit_y_is_odd_integer(f: &mut Function) {
+        f.instruction(&Ins::LocalGet(POW_Y));
+        f.instruction(&Ins::LocalGet(POW_Y));
+        f.instruction(&Ins::F64Trunc);
+        f.instruction(&Ins::F64Eq);
+
+        f.instruction(&Ins::LocalGet(POW_Y));
+        f.instruction(&Ins::LocalGet(POW_Y));
+        f.instruction(&f64_const(0.5));
+        f.instruction(&Ins::F64Mul);
+        f.instruction(&Ins::F64Trunc);
+        f.instruction(&f64_const(2.0));
+        f.instruction(&Ins::F64Mul);
+        f.instruction(&Ins::F64Sub);
+        f.instruction(&f64_const(0.0));
+        f.instruction(&Ins::F64Ne);
+
+        f.instruction(&Ins::I32And);
+    }
+
+    // y == 0 -> 1 (even for a NaN base).
     f.instruction(&Ins::LocalGet(POW_Y));
     f.instruction(&f64_const(0.0));
     f.instruction(&Ins::F64Eq);
@@ -894,7 +976,7 @@ pub(crate) fn emit_pow(exp_idx: u32, ln_idx: u32) -> Function {
     f.instruction(&f64_const(1.0));
     f.instruction(&Ins::Return);
     f.instruction(&Ins::End);
-    // x == 1 -> 1.
+    // x == 1 -> 1 (even for a NaN exponent).
     f.instruction(&Ins::LocalGet(POW_X));
     f.instruction(&f64_const(1.0));
     f.instruction(&Ins::F64Eq);
@@ -903,12 +985,87 @@ pub(crate) fn emit_pow(exp_idx: u32, ln_idx: u32) -> Function {
     f.instruction(&Ins::Return);
     f.instruction(&Ins::End);
 
-    // exp(y * ln(x))
-    f.instruction(&Ins::LocalGet(POW_Y));
+    // ax = |x|
     f.instruction(&Ins::LocalGet(POW_X));
-    f.instruction(&Ins::Call(ln_idx));
-    f.instruction(&Ins::F64Mul);
-    f.instruction(&Ins::Call(exp_idx));
+    f.instruction(&Ins::F64Abs);
+    f.instruction(&Ins::LocalSet(POW_AX));
+    // neg = signbit(x), i.e. copysign(1, x) < 0. This is TRUE for `-0.0`, which
+    // a plain `x < 0.0` misses.
+    f.instruction(&f64_const(1.0));
+    f.instruction(&Ins::LocalGet(POW_X));
+    f.instruction(&Ins::F64Copysign);
+    f.instruction(&f64_const(0.0));
+    f.instruction(&Ins::F64Lt);
+    f.instruction(&Ins::LocalSet(POW_NEG));
+
+    // |y| == inf: the result is |x|^y (never negative), and 1.0 when |x| == 1.
+    // Taken BEFORE the integrality test -- see the rustdoc.
+    f.instruction(&Ins::LocalGet(POW_Y));
+    f.instruction(&Ins::F64Abs);
+    f.instruction(&f64_const(f64::INFINITY));
+    f.instruction(&Ins::F64Eq);
+    f.instruction(&Ins::If(BlockType::Empty));
+    {
+        f.instruction(&Ins::LocalGet(POW_AX));
+        f.instruction(&f64_const(1.0));
+        f.instruction(&Ins::F64Eq);
+        f.instruction(&Ins::If(BlockType::Empty));
+        f.instruction(&f64_const(1.0));
+        f.instruction(&Ins::Return);
+        f.instruction(&Ins::End);
+
+        // `ln` maps 0 -> -inf and +inf -> +inf, so the zero/infinite-base limits
+        // fall out of `exp(y * ln|x|)` with no further special-casing.
+        emit_abs_pow(&mut f, exp_idx, ln_idx);
+        f.instruction(&Ins::Return);
+    }
+    f.instruction(&Ins::End);
+
+    // A strictly negative FINITE, NONZERO base is real only for an integral
+    // exponent. Both ends of the magnitude range are exempt, for the same reason:
+    // neither has a fractional part for `(-x)^y` to make complex.
+    //   `pow(-0.0, 0.5)  == +0.0`   (not NaN)
+    //   `pow(-inf, 0.5)  == +inf`   (not NaN)
+    //   `pow(-inf, -0.5) == +0.0`   (not NaN)
+    // For both, `mag = exp(y * ln|x|)` yields the right limit unaided, and the
+    // odd/even negate below correctly declines a non-integral `y`.
+    f.instruction(&Ins::LocalGet(POW_NEG));
+    f.instruction(&Ins::LocalGet(POW_AX));
+    f.instruction(&f64_const(0.0));
+    f.instruction(&Ins::F64Ne);
+    f.instruction(&Ins::I32And);
+    f.instruction(&Ins::LocalGet(POW_AX));
+    f.instruction(&f64_const(f64::INFINITY));
+    f.instruction(&Ins::F64Ne);
+    f.instruction(&Ins::I32And);
+    f.instruction(&Ins::If(BlockType::Empty));
+    {
+        // trunc(y) != y -- also true for a NaN y, which must yield NaN.
+        f.instruction(&Ins::LocalGet(POW_Y));
+        f.instruction(&Ins::LocalGet(POW_Y));
+        f.instruction(&Ins::F64Trunc);
+        f.instruction(&Ins::F64Ne);
+        f.instruction(&Ins::If(BlockType::Empty));
+        f.instruction(&f64_const(f64::NAN));
+        f.instruction(&Ins::Return);
+        f.instruction(&Ins::End);
+    }
+    f.instruction(&Ins::End);
+
+    emit_abs_pow(&mut f, exp_idx, ln_idx);
+    f.instruction(&Ins::LocalSet(POW_MAG));
+
+    // Negate iff x's sign bit is set and y is an odd integer.
+    f.instruction(&Ins::LocalGet(POW_NEG));
+    emit_y_is_odd_integer(&mut f);
+    f.instruction(&Ins::I32And);
+    f.instruction(&Ins::If(BlockType::Empty));
+    f.instruction(&Ins::LocalGet(POW_MAG));
+    f.instruction(&Ins::F64Neg);
+    f.instruction(&Ins::Return);
+    f.instruction(&Ins::End);
+
+    f.instruction(&Ins::LocalGet(POW_MAG));
     f.instruction(&Ins::End);
     f
 }
@@ -1313,7 +1470,126 @@ mod tests {
                 }
             }
         }
-        // Known limitation: a negative base diverges (ln of negative is NaN).
-        assert!(run_pow(-2.0, 2.0).is_nan());
+        // A NEGATIVE base with an integral exponent is well-defined and the VM
+        // (`f64::powf`) computes it, so the wasm backend must agree or a model
+        // like `test/test-models/tests/arithmetics` ((-Time)^2) silently reads
+        // NaN on one backend and a number on the other.
+        assert_eq!(run_pow(-1.0, 2.0), 1.0);
+        assert_eq!(run_pow(-1.0, 3.0), -1.0);
+        assert_eq!(run_pow(-2.0, 0.0), 1.0);
+        for i in 0..40 {
+            for j in -8i32..=8 {
+                let x = -(0.01 + 100.0 * (i as f64) / 40.0);
+                let y = j as f64;
+                let want = x.powf(y);
+                if want.is_finite() && want != 0.0 {
+                    assert_close("pow", x, run_pow(x, y), want, 1e-9, 1e-9);
+                }
+            }
+        }
+        // A negative base with a NON-integral exponent has no real value: both
+        // `f64::powf` and the emitted helper produce NaN.
+        assert!(run_pow(-2.0, 0.5).is_nan());
+        assert!(run_pow(-2.0, 2.5).is_nan());
+        assert!(run_pow(-2.0, f64::NAN).is_nan());
+        // Very large exponents are even by IEEE rule (no odd integer is
+        // representable above 2^53), so the result stays positive.
+        assert_eq!(
+            run_pow(-1.0, 9007199254740994.0),
+            (-1.0f64).powf(9007199254740994.0)
+        );
+    }
+
+    /// `pow`'s IEEE-754 special values, compared BIT-exactly against `f64::powf`
+    /// (the VM's `Op2::Exp`).
+    ///
+    /// Bit equality -- not `assert_close` -- is the right bar here because every
+    /// case below has an exactly-representable result (`+/-0`, `+/-1`, `+/-inf`,
+    /// NaN). A `+0.0` where `powf` yields `-0.0` is not a rounding difference: a
+    /// downstream `1/x` turns it into `+inf` instead of `-inf`.
+    ///
+    /// Two families are easy to get wrong and are the reason this test exists:
+    ///
+    /// * **Infinite exponent.** `f64.trunc(inf) == inf`, so an infinite `y` looks
+    ///   integral; then `y - 2*trunc(y/2)` is `inf - inf == NaN`, and `f64.ne 0`
+    ///   is TRUE for NaN -- so a naive odd/even negate fires on *every* infinite
+    ///   exponent and flips the sign of `(-2)^inf`.
+    /// * **Signed-zero base.** `-0.0 < 0.0` is false, so a `x < 0` test misses it
+    ///   entirely and the sign is dropped: `(-0.0)^-1` must be `-inf`, not `+inf`.
+    #[test]
+    fn pow_matches_f64_on_special_values() {
+        let cases: &[(f64, f64)] = &[
+            // Infinite exponent: the result is |x|^y and never negative.
+            (-2.0, f64::INFINITY),
+            (-2.0, f64::NEG_INFINITY),
+            (-1.0, f64::INFINITY),
+            (-1.0, f64::NEG_INFINITY),
+            (-0.5, f64::INFINITY),
+            (-0.5, f64::NEG_INFINITY),
+            (2.0, f64::INFINITY),
+            (2.0, f64::NEG_INFINITY),
+            (0.5, f64::INFINITY),
+            (0.5, f64::NEG_INFINITY),
+            (1.0, f64::INFINITY),
+            (0.0, f64::INFINITY),
+            (0.0, f64::NEG_INFINITY),
+            (-0.0, f64::INFINITY),
+            (-0.0, f64::NEG_INFINITY),
+            // Signed-zero base: the sign survives an odd integral exponent.
+            (-0.0, -1.0),
+            (-0.0, 1.0),
+            (-0.0, 3.0),
+            (-0.0, -3.0),
+            (-0.0, 2.0),
+            (-0.0, -2.0),
+            // ... and is dropped by a non-integral one, which is legal for a zero
+            // base (unlike a strictly negative one, which is NaN).
+            (-0.0, 0.5),
+            (-0.0, -0.5),
+            (0.0, 1.0),
+            (0.0, -1.0),
+            (0.0, 0.5),
+            // Infinite base.
+            (f64::NEG_INFINITY, 3.0),
+            (f64::NEG_INFINITY, 2.0),
+            (f64::NEG_INFINITY, -1.0),
+            (f64::NEG_INFINITY, -2.0),
+            (f64::INFINITY, 2.0),
+            (f64::INFINITY, -2.0),
+            // A NEGATIVE INFINITE base with a non-integral exponent is NOT NaN:
+            // `-inf` has no fractional part to make `(-x)^y` complex, so IEEE-754
+            // gives `+inf` for `y > 0` and `+0` for `y < 0`. The "negative base
+            // needs an integral exponent" rule must therefore exempt it, exactly
+            // as it exempts a zero base.
+            (f64::NEG_INFINITY, 0.5),
+            (f64::NEG_INFINITY, -0.5),
+            (f64::NEG_INFINITY, 2.5),
+            (f64::NEG_INFINITY, 3.5),
+            (f64::INFINITY, 0.5),
+            (f64::INFINITY, -0.5),
+            // NaN propagation, and the two short-circuits that outrank it.
+            (f64::NAN, 2.0),
+            (2.0, f64::NAN),
+            (-2.0, f64::NAN),
+            (-0.0, f64::NAN),
+            (f64::NAN, 0.0),
+            (1.0, f64::NAN),
+            // Exact integral results on a negative base.
+            (-1.0, 2.0),
+            (-1.0, 3.0),
+        ];
+        for &(x, y) in cases {
+            let want = x.powf(y);
+            let got = run_pow(x, y);
+            if want.is_nan() {
+                assert!(got.is_nan(), "pow({x}, {y}): expected NaN, got {got}");
+            } else {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "pow({x}, {y}): got {got}, want {want}",
+                );
+            }
+        }
     }
 }

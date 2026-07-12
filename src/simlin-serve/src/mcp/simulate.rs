@@ -18,9 +18,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use simlin_engine::Vm;
+use simlin_engine::build_sim;
 use simlin_engine::datamodel;
-use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+use simlin_engine::db::{SimlinDb, sync_from_datamodel_incremental};
 use simlin_engine::json as ejson;
 use simlin_mcp_core::access::ProjectAccess;
 use simlin_mcp_core::errors::AccessError;
@@ -187,9 +187,12 @@ fn simulate_sync(
 ) -> Result<SimulateOutput, SimulateError> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let compiled = compile_project_incremental(&db, sync.project, model_name)
+    // `build_sim` routes conveyor/queue models through their special expansion
+    // build path and ordinary models through the incremental compile, so the MCP
+    // simulate tool handles the special stock types instead of tripping the
+    // NotExpanded guard.
+    let mut vm = build_sim(&mut db, sync.project, &project, model_name)
         .map_err(|e| SimulateError::Engine(format!("compile error: {e}")))?;
-    let mut vm = Vm::new(compiled).map_err(|e| SimulateError::Engine(format!("vm error: {e}")))?;
     vm.run_to_end()
         .map_err(|e| SimulateError::Engine(format!("sim error: {e}")))?;
     let results = vm.into_results();
@@ -326,6 +329,20 @@ mod tests {
         let out = run(&access, input).await.expect("simulate succeeds");
         assert!(out.time.len() > 1);
         assert!(out.variables.contains_key("teacup_temperature"));
+    }
+
+    /// F2: the MCP Simulate tool's synchronous pipeline must simulate a queue
+    /// model. Before the `build_sim` dispatch, `compile_project_incremental` hit
+    /// the `QueueNotExpanded` guard and this returned an `Engine` error for a
+    /// valid queue model that `simlin_sim_new` runs fine.
+    #[test]
+    fn simulate_sync_runs_a_queue_model() {
+        let xml = include_str!("../../../../test/queues/queue_drain.xmile");
+        let project = simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+            .expect("parse queue_drain.xmile");
+        let out = simulate_sync(project, "main", None).expect("queue model simulates");
+        assert!(out.time.len() > 1, "queue model must produce a time series");
+        assert!(out.variables.contains_key("waiting"));
     }
 
     #[tokio::test]

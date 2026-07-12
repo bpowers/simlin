@@ -25,6 +25,8 @@ from simlin.json_types import (
     ArrayedEquation,
     Auxiliary,
     Compat,
+    Conveyor,
+    DataSource,
     DeleteVariable,
     ElementEquation,
     Flow,
@@ -32,12 +34,15 @@ from simlin.json_types import (
     GraphicalFunctionScale,
     JsonModelPatch,
     JsonProjectPatch,
+    Leakage,
     MacroSpec,
     Model,
     ModelGroup,
     Module,
     ModuleReference,
+    Queue,
     RenameVariable,
+    SpreadFlow,
     Stock,
     UpsertFlow,
     UpsertStock,
@@ -687,6 +692,299 @@ class TestLegacyCompatMerge:
         aux = converter.structure(aux_json, Auxiliary)
         assert aux.compat is not None
         assert aux.compat.can_be_module_input is True
+
+
+class TestCompatConveyorWireFormat:
+    """Wire-format round-trip tests for the conveyor/queue Compat fields.
+
+    The input dicts below are byte-for-byte what the Rust serializer in
+    src/simlin-engine/src/json.rs emits (camelCase keys, skip-if-None /
+    skip-if-false omission).  Each test structures the JSON into the Python
+    dataclass, unstructures it back, and asserts the output equals the input
+    exactly -- so absent fields stay absent (no spurious nulls) and no field
+    is silently dropped.
+    """
+
+    def test_conveyor_stock_json_roundtrip(self) -> None:
+        """A conveyor stock's compat survives a structure/unstructure cycle."""
+        stock_json: dict[str, Any] = {
+            "name": "students",
+            "inflows": ["matriculating"],
+            "outflows": ["graduating"],
+            "initialEquation": "1000",
+            "compat": {
+                "conveyor": {
+                    "transitTime": "4",
+                    "capacity": "1200",
+                    "inflowLimit": "500",
+                    "discrete": True,
+                    "oneAtATime": True,
+                    "exponentialLeak": True,
+                }
+            },
+        }
+        stock = converter.structure(stock_json, Stock)
+        assert stock.compat is not None
+        assert stock.compat.conveyor == Conveyor(
+            transit_time="4",
+            capacity="1200",
+            inflow_limit="500",
+            discrete=True,
+            one_at_a_time=True,
+            exponential_leak=True,
+        )
+        assert converter.unstructure(stock) == stock_json
+
+    def test_conveyor_all_fields_roundtrip(self) -> None:
+        """Every Conveyor field survives, including sample/arrest and the
+        batchIntegrity/ignoreEarlierZoneLosses booleans."""
+        conveyor_json: dict[str, Any] = {
+            "transitTime": "tt",
+            "capacity": "cap",
+            "inflowLimit": "lim",
+            "sample": "s",
+            "arrest": "a",
+            "discrete": True,
+            "batchIntegrity": True,
+            "oneAtATime": True,
+            "exponentialLeak": True,
+            "ignoreEarlierZoneLosses": True,
+        }
+        conveyor = converter.structure(conveyor_json, Conveyor)
+        assert converter.unstructure(conveyor) == conveyor_json
+
+    def test_conveyor_minimal_omits_defaults(self) -> None:
+        """A transit-time-only conveyor emits only transitTime."""
+        conveyor = Conveyor(transit_time="4")
+        assert converter.unstructure(conveyor) == {"transitTime": "4"}
+        assert converter.structure({"transitTime": "4"}, Conveyor) == conveyor
+
+    def test_queue_stock_json_roundtrip(self) -> None:
+        """A queue stock's marker (compat.queue == {}) survives."""
+        stock_json: dict[str, Any] = {
+            "name": "backlog",
+            "inflows": ["arriving"],
+            "outflows": ["processing"],
+            "initialEquation": "0",
+            "compat": {"queue": {}},
+        }
+        stock = converter.structure(stock_json, Stock)
+        assert stock.compat is not None
+        assert stock.compat.queue == Queue()
+        assert converter.unstructure(stock) == stock_json
+
+    def test_leakage_flow_explicit_fraction_roundtrip(self) -> None:
+        """A leak flow with an explicit fraction and zone bounds survives."""
+        flow_json: dict[str, Any] = {
+            "name": "dropping_out",
+            "equation": "0.1",
+            "compat": {
+                "leakage": {
+                    "fraction": "0.1",
+                    "integers": True,
+                    "zoneStart": "1",
+                    "zoneEnd": "2",
+                }
+            },
+        }
+        flow = converter.structure(flow_json, Flow)
+        assert flow.compat is not None
+        assert flow.compat.leakage == Leakage(
+            fraction="0.1", integers=True, zone_start="1", zone_end="2"
+        )
+        assert converter.unstructure(flow) == flow_json
+
+    def test_leakage_flow_marker_only_roundtrip(self) -> None:
+        """A marker-only leak flow (leakage == {}, the equation-carries-the-
+        fraction encoding Stella uses) survives -- {} is falsy in Python, so
+        a truthiness check would silently drop it."""
+        flow_json: dict[str, Any] = {
+            "name": "contagious_deaths",
+            "equation": "0.01",
+            "compat": {"nonNegative": True, "leakage": {}},
+        }
+        flow = converter.structure(flow_json, Flow)
+        assert flow.compat is not None
+        assert flow.compat.leakage == Leakage()
+        assert flow.compat.non_negative is True
+        assert converter.unstructure(flow) == flow_json
+
+    @pytest.mark.parametrize("variant", ["beginning", "even", "dest", "source"])
+    def test_spreadflow_unit_variants_roundtrip(self, variant: str) -> None:
+        """The four payload-free spreadflow variants serialize as
+        {"type": <variant>} with no distribution key."""
+        flow_json: dict[str, Any] = {
+            "name": "arriving",
+            "equation": "250",
+            "compat": {"spreadflow": {"type": variant}},
+        }
+        flow = converter.structure(flow_json, Flow)
+        assert flow.compat is not None
+        assert flow.compat.spreadflow == SpreadFlow(type=variant)
+        assert converter.unstructure(flow) == flow_json
+
+    def test_spreadflow_dist_roundtrip(self) -> None:
+        """The dist variant is adjacently tagged: type + distribution."""
+        flow_json: dict[str, Any] = {
+            "name": "arriving",
+            "equation": "250",
+            "compat": {"spreadflow": {"type": "dist", "distribution": "1,2,1"}},
+        }
+        flow = converter.structure(flow_json, Flow)
+        assert flow.compat is not None
+        assert flow.compat.spreadflow == SpreadFlow(type="dist", distribution="1,2,1")
+        assert converter.unstructure(flow) == flow_json
+
+    def test_spreadflow_unknown_type_rejected(self) -> None:
+        """An unknown spreadflow type raises instead of passing through."""
+        with pytest.raises(Exception, match="spreadflow"):
+            converter.structure({"type": "sideways"}, SpreadFlow)
+
+    def test_spreadflow_dist_without_distribution_rejected(self) -> None:
+        """A dist spreadflow without its distribution payload raises on both
+        the structure and unstructure sides."""
+        with pytest.raises(Exception, match="dist"):
+            converter.structure({"type": "dist"}, SpreadFlow)
+        with pytest.raises(Exception, match="dist"):
+            converter.unstructure(SpreadFlow(type="dist"))
+
+    def test_overflow_flow_roundtrip(self) -> None:
+        """A queue outflow's overflow marker survives."""
+        flow_json: dict[str, Any] = {
+            "name": "overflowing",
+            "compat": {"overflow": True},
+        }
+        flow = converter.structure(flow_json, Flow)
+        assert flow.compat is not None
+        assert flow.compat.overflow is True
+        assert converter.unstructure(flow) == flow_json
+
+    def test_data_source_roundtrip(self) -> None:
+        """A variable's external dataSource survives."""
+        aux_json: dict[str, Any] = {
+            "name": "historic_sales",
+            "equation": "0",
+            "compat": {
+                "dataSource": {
+                    "kind": "data",
+                    "file": "sales.csv",
+                    "tabOrDelimiter": ",",
+                    "rowOrCol": "1",
+                    "cell": "A2",
+                }
+            },
+        }
+        aux = converter.structure(aux_json, Auxiliary)
+        assert aux.compat is not None
+        assert aux.compat.data_source == DataSource(
+            kind="data", file="sales.csv", tab_or_delimiter=",", row_or_col="1", cell="A2"
+        )
+        assert converter.unstructure(aux) == aux_json
+
+    def test_compat_dataclass_full_roundtrip(self) -> None:
+        """A Compat carrying every field round-trips Python -> JSON -> Python."""
+        compat = Compat(
+            active_initial="50",
+            non_negative=True,
+            can_be_module_input=True,
+            is_public=True,
+            data_source=DataSource(
+                kind="constants", file="c.csv", tab_or_delimiter="\t", row_or_col="A", cell="B1"
+            ),
+            conveyor=Conveyor(transit_time="4", capacity="10"),
+            leakage=Leakage(fraction="0.05"),
+            spreadflow=SpreadFlow(type="dist", distribution="1,1"),
+            queue=Queue(),
+            overflow=True,
+        )
+        json_dict = converter.unstructure(compat)
+        parsed = json.loads(json.dumps(json_dict))
+        assert converter.structure(parsed, Compat) == compat
+
+    def test_compat_omits_default_conveyor_fields(self) -> None:
+        """New Compat fields are omitted when default (no spurious nulls)."""
+        compat = Compat(non_negative=True)
+        json_dict = converter.unstructure(compat)
+        assert json_dict == {"nonNegative": True}
+
+    def test_conveyor_stock_survives_patch_roundtrip(self) -> None:
+        """The full patch envelope preserves a conveyor stock -- the shape
+        model.edit() actually sends to the engine."""
+        stock = Stock(
+            name="students",
+            inflows=["matriculating"],
+            outflows=["graduating"],
+            initial_equation="1000",
+            compat=Compat(conveyor=Conveyor(transit_time="4", one_at_a_time=True)),
+        )
+        patch = JsonProjectPatch(models=[JsonModelPatch(name="main", ops=[UpsertStock(stock)])])
+        parsed = json.loads(json.dumps(converter.unstructure(patch)))
+        reconstructed = converter.structure(parsed, JsonProjectPatch)
+        op = reconstructed.models[0].ops[0]
+        assert isinstance(op, UpsertStock)
+        assert op.stock == stock
+
+    def test_legacy_boolean_merge_preserves_conveyor(self) -> None:
+        """The legacy top-level boolean merge must not rebuild Compat with
+        only the four legacy fields, dropping the conveyor marker."""
+        stock_json: dict[str, Any] = {
+            "name": "students",
+            "inflows": [],
+            "outflows": [],
+            "compat": {"conveyor": {"transitTime": "4"}},
+            "nonNegative": True,
+        }
+        stock = converter.structure(stock_json, Stock)
+        assert stock.compat is not None
+        assert stock.compat.non_negative is True
+        assert stock.compat.conveyor == Conveyor(transit_time="4")
+
+
+class TestHasExceptDefault:
+    """ArrayedEquation.hasExceptDefault mirrors json.rs (Option<bool>)."""
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_has_except_default_roundtrip(self, value: bool) -> None:
+        aux_json: dict[str, Any] = {
+            "name": "arr",
+            "arrayedEquation": {
+                "dimensions": ["Region"],
+                "equation": "1",
+                "hasExceptDefault": value,
+            },
+        }
+        aux = converter.structure(aux_json, Auxiliary)
+        assert aux.arrayed_equation is not None
+        assert aux.arrayed_equation.has_except_default is value
+        assert converter.unstructure(aux) == aux_json
+
+    def test_has_except_default_absent_stays_absent(self) -> None:
+        """Legacy JSON without hasExceptDefault restores None and stays
+        omitted on re-serialization (matching serde's Option::is_none skip)."""
+        eq = converter.structure({"dimensions": ["Region"], "equation": "1"}, ArrayedEquation)
+        assert eq.has_except_default is None
+        assert "hasExceptDefault" not in converter.unstructure(eq)
+
+
+class TestElementCompatFullFields:
+    """Element- and array-level compat must structure the full Compat, not
+    just activeInitial."""
+
+    def test_element_equation_compat_keeps_non_negative(self) -> None:
+        ee = converter.structure(
+            {"subscript": "east", "equation": "5", "compat": {"nonNegative": True}},
+            ElementEquation,
+        )
+        assert ee.compat is not None
+        assert ee.compat.non_negative is True
+
+    def test_arrayed_equation_compat_keeps_non_negative(self) -> None:
+        eq = converter.structure(
+            {"dimensions": ["Region"], "equation": "1", "compat": {"nonNegative": True}},
+            ArrayedEquation,
+        )
+        assert eq.compat is not None
+        assert eq.compat.non_negative is True
 
 
 class TestNullValueHandling:

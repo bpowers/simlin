@@ -34,7 +34,9 @@ use simlin_serve::events::{ChangeSource, EventBus, WsMessage};
 use simlin_serve::handlers::AppState;
 use simlin_serve::mcp::RegistryAccess;
 use simlin_serve::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry};
-use simlin_serve::test_support::unavailable_git_probe;
+use simlin_serve::test_support::{
+    OS_EVENT_TIMEOUT, unavailable_git_probe, wait_for_watcher_ready, watcher_barrier,
+};
 use tempfile::TempDir;
 use tokio::sync::broadcast::Receiver;
 use tower::ServiceExt;
@@ -514,7 +516,6 @@ async fn watcher_merge_does_not_emit_diagnostics_changed_when_both_states_clean(
     use simlin_serve::hashing::content_hash;
     use simlin_serve::watcher::{ShutdownSignal, spawn_watcher};
     use tokio::sync::Notify;
-    use tokio::time::Duration;
 
     let temp = TempDir::new().expect("tempdir");
     let canonical_root = temp.path().canonicalize().expect("canon root");
@@ -553,18 +554,24 @@ async fn watcher_merge_does_not_emit_diagnostics_changed_when_both_states_clean(
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher((*state).clone(), shutdown.clone()).expect("spawn watcher");
+    let watcher = spawn_watcher((*state).clone(), shutdown.clone()).expect("spawn watcher");
+    let mut sightings = watcher.probe_sightings();
 
-    // Let the OS watch register before we trigger the disk edit.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Prove the OS watch is live, then edit immediately. Without this the disk
+    // edit can land before the watch registers, no event is ever generated, and
+    // the DiagnosticsChanged assertion below would hold vacuously -- passing
+    // for the wrong reason.
+    wait_for_watcher_ready(&state.root, &mut sightings)
+        .await
+        .expect("watcher becomes ready");
 
     // Write structurally-different but still clean content. The
     // watcher merges, ProjectChanged{Disk} fires, and the diagnostic
     // set goes from empty to empty → no DiagnosticsChanged.
     fs::write(&abs, FIXED_PLUS_VAR_SD_JSON).expect("write disk-edited content");
 
-    // Wait up to 5s for the disk-source ProjectChanged.
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // The positive half: the merge really did happen.
+    tokio::time::timeout(OS_EVENT_TIMEOUT, async {
         loop {
             match rx.recv().await {
                 Ok(WsMessage::ProjectChanged {
@@ -579,7 +586,13 @@ async fn watcher_merge_does_not_emit_diagnostics_changed_when_both_states_clean(
     .await
     .expect("project changed (disk) within timeout");
 
-    // No DiagnosticsChanged should follow within a 200ms window.
+    // The negative half. `maybe_emit_diagnostics_changed` runs synchronously
+    // after the ProjectChanged publish, so observing ProjectChanged already
+    // orders us past it; the barrier additionally rules out a *later* batch
+    // sneaking a DiagnosticsChanged in.
+    watcher_barrier(&state.root, &mut sightings)
+        .await
+        .expect("watcher drains every pending event");
     assert_no_event_for(
         &mut rx,
         |msg| matches!(msg, WsMessage::DiagnosticsChanged { .. }),
@@ -638,15 +651,18 @@ async fn watcher_merge_emits_diagnostics_changed_when_disk_fixes_existing_errors
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher((*state).clone(), shutdown.clone()).expect("spawn watcher");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let watcher = spawn_watcher((*state).clone(), shutdown.clone()).expect("spawn watcher");
+    let mut sightings = watcher.probe_sightings();
+    wait_for_watcher_ready(&state.root, &mut sightings)
+        .await
+        .expect("watcher becomes ready");
 
     // Disk-edit to the fixed content. Watcher merges, ProjectChanged
     // fires, then DiagnosticsChanged with errors:[] since the cached
     // set went from one entry to empty.
     fs::write(&abs, FIXED_SD_JSON).expect("write fix");
 
-    let pc = tokio::time::timeout(Duration::from_secs(5), async {
+    let pc = tokio::time::timeout(OS_EVENT_TIMEOUT, async {
         loop {
             match rx.recv().await {
                 Ok(

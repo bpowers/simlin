@@ -5986,3 +5986,9 @@ fn test_source_to_agg_polarity_discriminates_body_sign() {
         "the general analyzer must NOT adopt the convention Mul rule"
     );
 }
+
+/// Implicit WITH-LOOKUP link-polarity tests (GH #910), in a sibling file to
+/// keep this one under the project line-count lint. A child module, so
+/// `use super::*` reaches this file's private helpers.
+#[path = "with_lookup_tests.rs"]
+mod with_lookup;

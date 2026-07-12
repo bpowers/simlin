@@ -6,16 +6,17 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 
-#[cfg(feature = "file_io")]
 use simlin_engine::FilesystemDataProvider;
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+use simlin_engine::queue_compile::build_vm;
 use simlin_engine::serde::{deserialize, serialize};
-use simlin_engine::{Method, Results, SimSpecs as Specs, Vm, project_io};
+use simlin_engine::wasmgen::{WasmGenError, compile_datamodel_to_artifact};
+use simlin_engine::{ErrorCode, Method, Results, SimSpecs as Specs, Vm, project_io};
 use simlin_engine::{load_csv, load_dat, open_vensim, open_vensim_with_data, xmile};
 
 use crate::test_helpers::{
     WasmRunOutcome, ensure_results, ensure_results_excluding, ensure_wasm_matches,
-    wasm_results_for, wasm_results_for_segmented,
+    vm_results_for_special, wasm_results_for, wasm_results_for_segmented, wasm_results_for_special,
 };
 
 /// Generate one `#[test] fn` per corpus model so libtest (and nextest) schedule
@@ -1262,6 +1263,17 @@ fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: 
 /// (DELAY FIXED, GET DATA) is `#[ignore]`d and never reaches this hook, so it
 /// stays out of scope. A supported-but-divergent model panics inside
 /// `ensure_wasm_matches`.
+///
+/// Special-stock fixtures (`test/conveyors/`, `test/queues/`) must NOT be routed
+/// through `simulate_path`/`simulate_mdl_path`, because `compile_vm` calls
+/// `compile_project_incremental` directly and an un-expanded conveyor/queue
+/// marker reaching that pipeline trips the hard `ConveyorNotExpanded` /
+/// `QueueNotExpanded` guard -- the VM would panic before this hook ever runs.
+/// They go through [`simulate_special_path`] instead, which builds the VM side
+/// via the unified dispatch (`queue_compile::build_sim`). Both the queue AND the
+/// conveyor fixtures run through BOTH backends there (GH #924); the two conveyor
+/// fixtures that neither backend can simulate are listed, with the `ErrorCode`
+/// that blocks each, in [`BLOCKED_CONVEYOR_FIXTURES`].
 fn wasm_parity_hook(
     datamodel: &simlin_engine::datamodel::Project,
     expected: &Results,
@@ -1279,6 +1291,295 @@ fn wasm_parity_hook(
     }
 }
 
+/// Corpus entry point for a SPECIAL-STOCK (conveyor/queue) XMILE fixture: run it
+/// through the VM and the wasm backend and assert both agree, plus the protobuf
+/// and XMILE round-trips.
+///
+/// Three deliberate differences from [`simulate_path`]:
+///
+/// 1. **The VM side goes through the unified dispatch.** `compile_vm` calls
+///    `compile_project_incremental`, whose `ConveyorNotExpanded`/`QueueNotExpanded`
+///    guard exists precisely to catch an un-expanded marker reaching it. Special
+///    stocks compile via `queue_compile::build_sim`, which expands them into
+///    driven flows and ATTACHES the resolved plans to the `Vm`.
+/// 2. **The VM is the oracle.** No reference series is checked in beside these
+///    fixtures (no other SD tool writes the `simlin:`-flavoured queue XMILE we
+///    parse), so there is no cross-simulator gate to clear. The VM's queue pass
+///    is the reference implementation of `docs/design/queues.md`, unit-tested in
+///    `queue_compile.rs`; what this harness adds is that every OTHER path --
+///    protobuf round-trip, XMILE round-trip, wasm lowering -- reproduces it
+///    column-for-column, at the corpus comparator's existing epsilons.
+/// 3. **`ensure_results` iterates the VM baseline's offsets**, which for an
+///    expanded model include the synthetic container auxes and driven flows. So
+///    the pass-written slots -- the ones a plain stock-and-flow comparison would
+///    never see -- are themselves gated.
+///
+/// A wasm `Unsupported` here is a hard failure, exactly as in [`wasm_parity_hook`]:
+/// a fixture only earns a corpus entry once both backends run it. Since GH #924 that
+/// includes the conveyor fixtures -- the wasm public entry no longer rejects a belt,
+/// so a `test/conveyors/` model that cannot lower fails this gate loudly rather than
+/// sitting outside the corpus. The two fixtures that STILL cannot run are held in
+/// [`BLOCKED_CONVEYOR_FIXTURES`], pinned on the exact `ErrorCode` that blocks them.
+///
+/// The comparator's bite was verified by fault injection. Halving the emitted primary
+/// serve rate, and dropping the plan set on the wasm side, each make both queue entries
+/// fail. Re-adding the conveyor reject makes exactly the conveyor entries fail here, on
+/// the `Unsupported` arm below -- a hard failure, not a skip. And adding a constant to
+/// the inserted cohort volume (`acc` in `belt::emit_phase_b_active`, after `conv_vol` and
+/// every equation-driven inflow are folded into it) makes all six conveyor entries fail in
+/// `ensure_results`.
+///
+/// That last site is chosen deliberately: `acc` is the one point every belt passes
+/// through. Perturbing only the equation-driven apportion loop would leave
+/// `simulates_queue_coupled_conveyor` GREEN, because that belt's sole inflow is
+/// queue-driven and contributes through `conv_vol` instead. It is not a vacuous
+/// zeros-vs-zeros comparison, but a fault injected upstream of the fold does not
+/// reach every fixture.
+fn simulate_special_path(xmile_path: &str) {
+    eprintln!("model (special stocks): {xmile_path}");
+
+    let datamodel_project = {
+        let f = File::open(xmile_path).unwrap();
+        let mut f = BufReader::new(f);
+        xmile::project_from_reader(&mut f)
+            .unwrap_or_else(|e| panic!("failed to parse {xmile_path}: {e}"))
+    };
+
+    let baseline = vm_results_for_special(&datamodel_project, "main");
+
+    assert!(
+        baseline.step_count > 1,
+        "{xmile_path}: expected a multi-step baseline"
+    );
+
+    // protobuf round-trip: the queue/conveyor markers and the `<overflow/>` flag
+    // must survive serialization, or the re-compiled model silently loses its
+    // pass and drains as an ordinary stock.
+    let datamodel_proto = {
+        use simlin_engine::prost::Message;
+
+        let pb_project = serialize(&datamodel_project).unwrap();
+        let mut buf = Vec::with_capacity(pb_project.encoded_len());
+        pb_project.encode(&mut buf).unwrap();
+        deserialize(project_io::Project::decode(&*buf).unwrap())
+    };
+    assert_eq!(datamodel_project, datamodel_proto);
+    ensure_results(&baseline, &vm_results_for_special(&datamodel_proto, "main"));
+
+    // XMILE round-trip, then a byte-identical re-serialization.
+    let serialized_xmile = xmile::project_to_xmile(&datamodel_project).unwrap();
+    let roundtripped_project = {
+        let mut xmile_reader = BufReader::new(serialized_xmile.as_bytes());
+        xmile::project_from_reader(&mut xmile_reader).unwrap()
+    };
+    ensure_results(
+        &baseline,
+        &vm_results_for_special(&roundtripped_project, "main"),
+    );
+    let serialized_xmile2 = xmile::project_to_xmile(&roundtripped_project).unwrap();
+    assert_eq!(&serialized_xmile, &serialized_xmile2);
+
+    // wasm-backend parity, against the VM baseline.
+    match wasm_results_for_special(&datamodel_project, "main") {
+        Ok(wasm) => ensure_results(&baseline, &wasm),
+        Err(msg) => panic!(
+            "wasm parity gate: a VM-simulated special-stock fixture returned \
+             Unsupported from the wasm backend. A fixture earns a corpus entry \
+             only once both backends run it -- close the lowering gap or drop the \
+             entry. Reason: {msg}"
+        ),
+    }
+}
+
+/// Declare one `#[test]` per special-stock fixture AND the `&[&str]` list of the
+/// filenames it covers, from a single source of truth. The two cannot drift: the
+/// name list IS what the directory-accounting tests below check `test/conveyors/`
+/// and `test/queues/` against, and it is generated from the same `name => "file"`
+/// lines that generate the tests. Mirrors the `corpus_tests!` macro above, but the
+/// path is a directory + a bare filename because the accounting needs the filename.
+macro_rules! special_stock_tests {
+    (
+        dir: $dir:literal;
+        list: $list:ident;
+        $($name:ident => $file:literal),* $(,)?
+    ) => {
+        static $list: &[&str] = &[$($file),*];
+        $(
+            #[test]
+            fn $name() {
+                simulate_special_path(concat!("../../", $dir, "/", $file));
+            }
+        )*
+    };
+}
+
+special_stock_tests! {
+    dir: "test/queues";
+    list: QUEUE_CORPUS_FIXTURES;
+    simulates_queue_drain => "queue_drain.xmile",
+    simulates_minimal_queue => "minimal_queue.xmile",
+}
+
+special_stock_tests! {
+    dir: "test/conveyors";
+    list: CONVEYOR_CORPUS_FIXTURES;
+    simulates_minimal_conveyor => "minimal_conveyor.xmile",
+    simulates_arrayed_conveyor => "arrayed_conveyor.xmile",
+    simulates_leaky_conveyor => "leaky_conveyor.xmile",
+    simulates_conveyor_containers => "conveyor_containers.xmile",
+    simulates_discrete_conveyor => "discrete_conveyor.xmile",
+    simulates_queue_coupled_conveyor => "queue_coupled_conveyor.xmile",
+}
+
+/// The `test/conveyors/` model files that NEITHER backend can simulate, each with
+/// the `ErrorCode` that blocks it. Both are real, authoritative Stella models
+/// (CC BY 4.0, see the directory README), and neither is blocked by anything to do
+/// with the wasm backend:
+///
+/// - `covid19_severity.stmx` sums its belts' conveyor-driven leak flows into an aux,
+///   which the engine refuses with `ConveyorDrivenFlowRead` (GH #944).
+/// - `sir_social_distancing_mixnot.stmx` puts its conveyors in sub-models, which
+///   expansion never descends into (`ConveyorInSubmodelUnsupported`, GH #941).
+///
+/// [`blocked_conveyor_fixtures_stay_blocked_for_their_stated_reason`] asserts the
+/// exact code rather than a bare `is_err()`, so resolving #944 or #941 turns this
+/// list RED and forces the fixture into [`CONVEYOR_CORPUS_FIXTURES`], instead of
+/// leaving it parked forever as a silently-tolerated "expected failure".
+static BLOCKED_CONVEYOR_FIXTURES: &[(&str, ErrorCode)] = &[
+    ("covid19_severity.stmx", ErrorCode::ConveyorDrivenFlowRead),
+    (
+        "sir_social_distancing_mixnot.stmx",
+        ErrorCode::ConveyorInSubmodelUnsupported,
+    ),
+];
+
+/// The `.xmile`/`.stmx` model files in `dir`, sorted. Everything else in a fixture
+/// directory (READMEs, the conveyor reference prototype, `__pycache__`) is not a
+/// model and is not accounted for.
+fn model_files_in(dir: &str) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read_dir {dir}: {e}"))
+        .map(|entry| entry.expect("dir entry").file_name())
+        .filter_map(|name| name.to_str().map(str::to_owned))
+        .filter(|name| name.ends_with(".xmile") || name.ends_with(".stmx"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Assert `dir` holds exactly the model files named by the corpus + blocked lists.
+fn assert_directory_accounted_for(dir: &str, corpus: &[&str], blocked: &[(&str, ErrorCode)]) {
+    let mut accounted: Vec<&str> = corpus.to_vec();
+    accounted.extend(blocked.iter().map(|(name, _)| *name));
+    accounted.sort();
+    assert_eq!(
+        model_files_in(dir),
+        accounted,
+        "every model file under {dir}/ must be either a corpus entry (declared in a \
+         special_stock_tests! block, which gives it a simulate_special_path test) or \
+         an explicitly-blocked fixture pinned on its ErrorCode"
+    );
+}
+
+/// Adding a fixture to a directory is not the same as running it: when the queue pass
+/// was lowered, both `test/queues/` fixtures turned out to be simulated by NEITHER
+/// backend, because the corpus excluded them entirely and they "passed" by never
+/// running. Corpus MEMBERSHIP was the gap, not the skip/fail disposition. These two
+/// tests close it structurally: every model file on disk is either a corpus entry
+/// (hence a `#[test]`) or an explicitly-blocked fixture, and a new file fails the
+/// build until someone classifies it.
+#[test]
+fn conveyor_fixture_directory_is_fully_accounted_for() {
+    assert_directory_accounted_for(
+        "../../test/conveyors",
+        CONVEYOR_CORPUS_FIXTURES,
+        BLOCKED_CONVEYOR_FIXTURES,
+    );
+}
+
+/// The queue half. There is deliberately no "blocked" list: every `test/queues/`
+/// fixture runs on both backends.
+#[test]
+fn queue_fixture_directory_is_fully_accounted_for() {
+    assert_directory_accounted_for("../../test/queues", QUEUE_CORPUS_FIXTURES, &[]);
+}
+
+/// The two conveyor fixtures that cannot join the corpus, pinned on the EXACT
+/// `ErrorCode` that blocks each -- see [`BLOCKED_CONVEYOR_FIXTURES`]. A bare
+/// `is_err()` would keep passing if the fixture later failed for an unrelated
+/// reason, and would keep passing after #944/#941 are fixed; asserting the code
+/// makes the fixture's promotion to the corpus a test failure someone must act on.
+///
+/// Both backends are checked, because the block is in the SHARED dispatch
+/// (`queue_compile::compile_sim`) rather than in either backend: neither the VM nor
+/// the wasm lowering ever sees these models. That is the whole point -- a reader
+/// must not mistake "the engine refuses a real model" for "the wasm backend has a
+/// gap".
+///
+/// The wasm side asserts the CODE too, not merely `is_err()`. `compile_datamodel_to_artifact`
+/// wraps a dispatch failure as `Unsupported(format!("wasmgen: incremental compile failed:
+/// {{e:?}}"))`, and `Error`'s derived `Debug` carries the `ErrorCode` variant name, so the
+/// code is recoverable from the message. Without that check a blanket wasm-side conveyor
+/// reject -- exactly the thing this test's rustdoc claims to distinguish from a shared-dispatch
+/// block -- would satisfy `is_err()` and keep the test green.
+#[test]
+fn blocked_conveyor_fixtures_stay_blocked_for_their_stated_reason() {
+    for (name, expected_code) in BLOCKED_CONVEYOR_FIXTURES {
+        let path = format!("../../test/conveyors/{name}");
+        let datamodel = {
+            let f = File::open(&path).unwrap();
+            let mut f = BufReader::new(f);
+            xmile::project_from_reader(&mut f).unwrap_or_else(|e| panic!("parse {path}: {e}"))
+        };
+        let main = datamodel.models[0].name.clone();
+
+        let err = build_vm(&datamodel, &main)
+            .err()
+            .unwrap_or_else(|| panic!("{name}: the VM must still refuse this fixture"));
+        assert_eq!(
+            err.code, *expected_code,
+            "{name} must stay blocked for the reason its issue describes, got {err:?}"
+        );
+
+        let Err(WasmGenError::Unsupported(msg)) =
+            compile_datamodel_to_artifact(&datamodel, &main, false, false)
+        else {
+            panic!(
+                "{name}: the wasm entry routes through the same compile_sim dispatch, \
+                 so it must refuse the fixture too"
+            );
+        };
+        assert!(
+            msg.contains(&format!("{expected_code:?}")),
+            "{name}: the wasm entry must refuse the fixture for the SHARED-dispatch reason \
+             ({expected_code:?}), not because the wasm backend rejects conveyors; got: {msg}"
+        );
+    }
+}
+
+/// Load the reference series that sits beside a Vensim `.mdl` fixture.
+///
+/// The reference was produced by Vensim, so it is marked `is_vensim` whichever
+/// container it came from. That is also what the `.dat` branch below already
+/// does: `compat::load_dat` sets `is_vensim: true` unconditionally, while
+/// `compat::load_csv` sets `false` (it also reads Stella exports). Marking it
+/// here keeps the two branches of this one function consistent.
+///
+/// The flag selects `ensure_results`' relative epsilon, `max(5e-6 * magnitude,
+/// 2e-3)`, so it only ever LOOSENS the comparison, and only for values above
+/// ~400; below that the strict absolute 2e-3 bound still governs. Exactly one
+/// fixture needs it: `arithmetics_exp`, whose `expo[sub5]` is `(-1.3)^30` and
+/// whose Vensim `.tab` records `-2620` at ~6 significant figures where the true
+/// double is `-2619.995643649961`. (`arithmetics` has three columns above the
+/// threshold -- `262144`, `262144`, `4096` -- but all are exact powers of two, so
+/// they clear the absolute bound and never reach the relative arm.)
+///
+/// The sibling `.xmile` loader (`load_expected_results`) reads these SAME
+/// reference files and deliberately leaves `is_vensim = false`. Setting it there
+/// would loosen ~100 gates that today pass at the strict absolute bound -- a
+/// silent weakening in exchange for nothing, since none of them needs it. The
+/// flag is a tolerance knob, not a provenance record; it is turned on only where
+/// a fixture demonstrably requires it.
 fn load_expected_results_for_mdl(mdl_path: &str) -> Option<Results> {
     let mdl_name = std::path::Path::new(mdl_path).file_name().unwrap();
     let dir_path = &mdl_path[0..(mdl_path.len() - mdl_name.len())];
@@ -1289,7 +1590,9 @@ fn load_expected_results_for_mdl(mdl_path: &str) -> Option<Results> {
         if !output_path.exists() {
             continue;
         }
-        return Some(load_csv(&output_path.to_string_lossy(), *delimiter).unwrap());
+        let mut results = load_csv(&output_path.to_string_lossy(), *delimiter).unwrap();
+        results.is_vensim = true;
+        return Some(results);
     }
 
     let dat_file = mdl_path.replace(".mdl", ".dat");
@@ -1328,7 +1631,6 @@ fn simulate_mdl_path(mdl_path: &str) {
 
 /// Simulate a Vensim MDL file that references external data files.
 /// Uses FilesystemDataProvider to resolve GET DIRECT references.
-#[cfg(feature = "file_io")]
 fn simulate_mdl_path_with_data(mdl_path: &str) {
     eprintln!("model (vensim mdl with data): {mdl_path}");
 
@@ -1450,6 +1752,44 @@ fn simulates_lookup() {
 #[ignore]
 fn simulates_except_xmile() {
     simulate_path("../../test/sdeverywhere/models/except/except.xmile");
+}
+
+/// Vensim's operator-precedence and -associativity reference models. Neither was
+/// in any run set, which is why the XMILE parser's left-associative `^` silently
+/// disagreed with `output.tab` (`cons4^cons3^cons2` computed `4096` where Vensim
+/// records `262144 == 4^(3^2)`) and with the repo's own MDL reader. They are the
+/// regression guard for the whole "printed text re-parses to a different AST"
+/// class (#912/#913): every unary/`^`/parenthesization interaction Vensim
+/// distinguishes appears here as a separate `expo[subN]` / `product[subN]` slot
+/// with a checked-in expected value.
+#[test]
+fn simulates_arithmetics() {
+    simulate_mdl_path("../../test/test-models/tests/arithmetics/test_arithmetics.mdl");
+}
+
+#[test]
+fn simulates_arithmetics_exp() {
+    simulate_mdl_path("../../test/test-models/tests/arithmetics_exp/test_arithmetics_exp.mdl");
+}
+
+/// The `.mdl` twin of `tests_logicals_test_logicals` (which runs the `.xmile`).
+///
+/// Only the XMILE spelling was in the run set, so nothing carried `:AND:` /
+/// `:OR:` / `:NOT:` through the MDL importer's precedence-free `xmile_compat`
+/// re-emission at all -- the path where a disagreement between `mdl::parser` and
+/// the XMILE grammar silently changes an equation's meaning. Checked against
+/// Vensim's own `output.csv`.
+///
+/// It does NOT cover the precedence INTERACTION: `test_logicals.mdl` uses each of
+/// the three operators in isolation, never mixed with each other or with a
+/// relational, so it would pass with `and`/`or` sharing one level. The
+/// interaction is covered by the unit test
+/// `mdl::tests::logical_precedence_survives_the_mdl_to_xmile_laundering`. A
+/// corpus fixture with a Vensim reference for mixed logical/comparison
+/// precedence is wanted, and is tracked on #914.
+#[test]
+fn simulates_logicals_mdl() {
+    simulate_mdl_path("../../test/test-models/tests/logicals/test_logicals.mdl");
 }
 
 #[test]
@@ -1947,6 +2287,89 @@ fn simulates_getdata_xmile() {
 #[ignore]
 fn simulates_getdata_mdl() {
     simulate_mdl_path("../../test/sdeverywhere/models/getdata/getdata.mdl");
+}
+
+/// GH #907: an XMILE `<element>` without an `<eqn>` child (gf-only, as Stella
+/// exports for non-A2A graphical functions) is spec-legal (XMILE 4.5.2) and
+/// must not fail the whole-file parse. This vendored fixture's
+/// `Converter 1[Product]` carries one per-element gf per Product element plus
+/// a top-level `<eqn>TIME</eqn>`. The reader maps the absent per-element eqns
+/// to empty element equations and the top-level eqn to the EXCEPT default, so
+/// every element's INPUT equation is TIME.
+///
+/// A value-bearing arrayed variable with per-element gfs is the arrayed
+/// WITH LOOKUP shape: like Stella, the engine applies each element's own gf
+/// to that shared input, so `Converter 1[elem] == gf_elem(TIME)` -- linear
+/// interpolation over the element's `<ypts>` on the uniform x-grid 1..13
+/// (`<xscale min="1" max="13">` with 13 points).
+#[test]
+fn opens_and_simulates_non_a2a_gf() {
+    let path = "../../test/test-models/samples/arrays/non-a2a/non-a2a-gf.stmx";
+    let f = File::open(path).unwrap();
+    let mut f = BufReader::new(f);
+    let project = xmile::project_from_reader(&mut f)
+        .expect("gf-only <element> blocks must not fail the whole-file parse (GH #907)");
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main").expect("non-a2a-gf must compile");
+    let mut vm = Vm::new(compiled).expect("VM creation");
+    vm.run_to_end().expect("simulation must not panic or error");
+    let results = vm.into_results();
+
+    let offset_of = |name: &str| -> usize {
+        *results
+            .offsets
+            .iter()
+            .find(|(k, _)| k.as_str() == name)
+            .unwrap_or_else(|| panic!("missing {name}; have {:?}", results.offsets.keys()))
+            .1
+    };
+
+    // Ground truth: the fixture's per-element <ypts>, sampled on the uniform
+    // x-grid 1..13 (13 points), linearly interpolated -- the XMILE continuous
+    // graphical-function semantics. Time runs 1..13 at dt = 1/4, so every
+    // simulated time falls inside the table's x-range.
+    let pizza_y = [
+        97.3, 91.4, 86.5, 78.4, 71.9, 65.9, 57.8, 50.3, 43.8, 33.0, 20.0, 2.7, 0.0,
+    ];
+    let salad_y = [
+        2.2, 5.9, 10.3, 14.9, 19.5, 30.8, 45.4, 53.5, 62.2, 68.6, 80.0, 92.4, 100.0,
+    ];
+    let interp = |y: &[f64; 13], t: f64| -> f64 {
+        let pos = (t - 1.0).clamp(0.0, 12.0);
+        let i = pos.floor() as usize;
+        if i >= 12 {
+            y[12]
+        } else {
+            y[i] + (pos - i as f64) * (y[i + 1] - y[i])
+        }
+    };
+
+    let time_off = offset_of("time");
+    for (elem, ys) in [("pizza", &pizza_y), ("salad", &salad_y)] {
+        let conv_off = offset_of(&format!("converter_1[{elem}]"));
+        for row in results.iter() {
+            let t = row[time_off];
+            let expected = interp(ys, t);
+            assert!(
+                (row[conv_off] - expected).abs() < 1e-9,
+                "converter_1[{elem}] at t={t} must be gf_{elem}(TIME) = {expected}, \
+                 got {} (raw TIME would mean the per-element gf was dropped)",
+                row[conv_off]
+            );
+        }
+    }
+
+    // wasm-backend parity: the implicit arrayed WITH LOOKUP wrap lowers to the
+    // same scalar Lookup opcode the wasm backend already implements; assert
+    // the blob runs and matches the VM series exactly.
+    let outcome = ensure_wasm_matches(&project, "main", &results, &[]);
+    assert!(
+        matches!(outcome, WasmRunOutcome::Ran),
+        "non-a2a-gf must run through the wasm backend, got {outcome:?}"
+    );
 }
 
 #[test]
@@ -3760,6 +4183,78 @@ TIME STEP = 1 ~~|
     );
 }
 
+/// Issue #908 (end-to-end): a stock defined PIECEWISE over subranges of a
+/// parent dimension whose synthesized `<stock>_net_flow` kept the FIRST
+/// arm's subrange dims while carrying `Arrayed` entries for every arm.
+/// On the 2-D beer-game shape the extra entries were silently dropped by
+/// the compiler (surfaced by the #905 UnknownElementSubscript warning), so
+/// those elements integrated an implicit 0 net flow -- plausible-looking
+/// but wrong results; on this minimal 1-D fixture the same too-narrow dims
+/// instead hard-fail compile with MismatchedDimensions, which the compile
+/// assert below catches first. The subrange name deliberately
+/// contains a space (`Lower Levels`): the dims promotion compared/resolved
+/// FORMATTED names (`Lower_Levels`) against canonical-keyed tables, so it
+/// only misfired for non-trivially-named subranges (why the all-lowercase
+/// #559 fixtures never caught it).
+#[test]
+fn simulates_piecewise_subrange_stock_net_flow() {
+    use simlin_engine::common::ErrorCode;
+    let mdl = "\
+{UTF-8}
+Level: Retailer, Wholesaler, Factory ~~|
+Lower Levels: Retailer, Wholesaler ~~|
+stk[Lower Levels] = INTEG(10, 1) ~~|
+stk[Factory] = INTEG(20, 2) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 2 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let (compile_err, diags) = compile_diags(mdl);
+    assert!(!compile_err, "must compile; diagnostics: {diags:#?}");
+    let unknown: Vec<_> = diags
+        .iter()
+        .filter(|d| diag_code(d) == Some(ErrorCode::UnknownElementSubscript))
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "the net-flow dims must cover every arm's entries -- no entry may \
+         be dropped as an unknown element. Found: {unknown:#?}"
+    );
+
+    // Euler, dt=1: stk[lower levels] = 1 + t*10; stk[Factory] = 2 + t*20.
+    // Pre-fix the Factory net-flow entry is silently dropped (implicit 0),
+    // so stk[Factory] stays at its initial 2.
+    let r = run_inline_mdl(mdl);
+    assert_eq!(r.step_count, 3);
+    assert_eq!(element_series(&r, "stk[retailer]"), vec![1.0, 11.0, 21.0]);
+    assert_eq!(element_series(&r, "stk[wholesaler]"), vec![1.0, 11.0, 21.0]);
+    assert_eq!(element_series(&r, "stk[factory]"), vec![2.0, 22.0, 42.0]);
+}
+
+/// Issue #908 corpus verification: the beer-game model that exposed the
+/// piecewise-subrange net-flow bug (`Supply Line[Games,Lower Levels]` +
+/// `Supply Line[Games,Factory]` with `Lower Levels` a subrange of `Level`)
+/// must import with ZERO UnknownElementSubscript warnings -- every
+/// synthesized net-flow entry names a declared element combination.
+#[test]
+fn beer_game_import_has_no_unknown_element_subscripts() {
+    use simlin_engine::common::ErrorCode;
+    let mdl = std::fs::read_to_string("../../test/metasd/beer-game/RealBeer4-Sterman13.mdl")
+        .expect("beer-game model must be readable");
+    let (_compile_err, diags) = compile_diags(&mdl);
+    let unknown: Vec<_> = diags
+        .iter()
+        .filter(|d| diag_code(d) == Some(ErrorCode::UnknownElementSubscript))
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "beer-game import must not drop any arrayed-equation entries \
+         (pre-fix: 13 GameN,Factory net-flow entries dropped). Found: \
+         {unknown:#?}"
+    );
+}
+
 /// All test models that the monolithic compiler can handle.
 /// The incremental path must also handle these.
 static ALL_INCREMENTALLY_COMPILABLE_MODELS: &[&str] = &[
@@ -3788,7 +4283,6 @@ static ALL_INCREMENTALLY_COMPILABLE_MODELS: &[&str] = &[
 
 /// Verify that the salsa-based incremental compilation path successfully
 /// compiles every test model that the monolithic path handles.
-#[cfg(feature = "file_io")]
 #[test]
 fn incremental_compilation_covers_all_models() {
     let mut failures: Vec<(String, String)> = Vec::new();
@@ -5476,16 +5970,67 @@ fn corpus_clearn_macros_import() {
 /// flip of this number -- the #654 layout-slot ceiling (65,536 u16 slots)
 /// is the resource it protects.
 ///
-/// As-landed T6 numbers (vs parent `ad6bdeb8`): total LTM vars
-/// 6,605 -> 6,713 (+108, +1.64%) -- C-LEARN contains nine GH #525-family
-/// iterated+literal edges (`effective_target_year -> sorted_target_year`
-/// and friends), each flipping from ONE merged Bare-named conservative
-/// score to per-(row, full-target-element) scalars. The VAR count grows,
-/// but the LAYOUT (the #654 concern) shrinks: the per-step result-row
-/// width went 31,132 -> 30,928 slots (-204, -0.66%), because each retired
-/// merged score was a multi-slot A2A variable whose conservative partial
-/// also synthesized per-element capture-helper auxes, while the
-/// per-element scalars compile to direct LoadPrev reads.
+/// T6 numbers (vs parent `ad6bdeb8`): total LTM vars 6,605 -> 6,713
+/// (+108, +1.64%) -- C-LEARN contains nine GH #525-family iterated+literal
+/// edges (`effective_target_year -> sorted_target_year` and friends), each
+/// flipping from ONE merged Bare-named conservative score to per-(row,
+/// full-target-element) scalars. The VAR count grew, but the LAYOUT (the
+/// #654 concern) shrank: the per-step result-row width went 31,132 ->
+/// 30,928 slots (-204, -0.66%), because each retired merged score was a
+/// multi-slot A2A variable whose conservative partial also synthesized
+/// per-element capture-helper auxes, while the per-element scalars compile
+/// to direct LoadPrev reads.
+///
+/// **#912/#913 re-derivation, 6,713 -> 6,891 (+178).**
+///
+/// Read this as `+182 new` AND `448 corrected`, not as "nothing that was
+/// already emitted changed" -- because the far more serious half of #912/#913
+/// is that C-LEARN's existing link scores were WRONG. Measured by dumping
+/// every `model_ltm_variables` name+equation on clean HEAD and on this branch:
+/// 182 names new, 0 removed, and **448 of the 6,709 pre-existing variables now
+/// carry a different equation**. All 448 diverge at an inserted `(`, and all
+/// 448 contain an `if (`.
+///
+/// The mechanism for both halves is one printer defect. `print_eqn` emitted
+/// text the equation grammar reads differently (or not at all): `!a` for
+/// `Op1(Not, ..)` (the lexer has no `!`), `a != b` for `Neq` (only `<>`
+/// lexes), and -- the silent one -- an unparenthesized `If` under an operator,
+/// where the `if` swallows the trailing operator on re-parse. Every LTM link
+/// score is a *ceteris-paribus partial* built by re-parsing `print_eqn`
+/// output, so:
+///
+/// * The two unlexable spellings raised `PartialEquationError` and the
+///   variable was SKIPPED with a warning rather than emitted
+///   (`link_scores.rs`'s "did not parse" arm -- the deliberate refusal to emit
+///   a partial that would silently score a constant magnitude of 1). C-LEARN
+///   had **50** such failing edges (across ~8 target variables; a PerElement
+///   edge warns ONCE while dropping all 21 of its per-element siblings, so the
+///   78 -> 28 warning count under-reported the damage by 132). Those 50 edges
+///   are the +182 recovered link-score variables.
+/// * The `If` regrouping produced text that parses FINE and means something
+///   else, so those 448 variables compiled clean and scored the wrong
+///   function. `relative_target_for_equity[COP] = IF THEN ELSE(...) /
+///   Reference emissions[COP]` is `Div(If(..), C)`; HEAD's partial reads
+///   `... else (previous(B) / previous(C))` -- the division migrated INTO the
+///   else branch -- where this branch reads
+///   `(... else (previous(B))) / previous(C)`.
+///
+/// Nothing under `test/` pins the corrected values either way, so this exact
+/// count is the only tripwire for the recovery. It is a weak one: any emission
+/// change landing on 6,891 satisfies it. The real guard is the sibling
+/// `clearn_ltm_partials_all_parse`, which asserts the MECHANISM (zero
+/// `PartialEquationErrorKind::Parse` warnings) rather than a total.
+///
+/// Also folded into this number: `-4`, PRE-EXISTING. Some earlier
+/// `conveyor-engine` commit already moved the count to 6,709 without updating
+/// this pin. This gate is `#[ignore]`d, so neither pre-commit nor CI caught it
+/// (tracked separately -- an `#[ignore]`d exact-value pin that nothing runs is
+/// not a guardrail).
+///
+/// Layout impact (the resource this gate protects -- #654's VM limit of 65,536
+/// u16 result slots, NOT `wasmgen::lower`'s unrelated `MAX_UNROLL_UNITS`): the
+/// per-step result-row width goes 30,800 -> 31,198 slots (+398, +1.29%), still
+/// far below the ceiling.
 // Run with: cargo test --release -- --ignored clearn_ltm_var_count_guardrail
 #[test]
 #[ignore]
@@ -5511,10 +6056,57 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 6713,
+        total, 6891,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"
+    );
+}
+
+/// The other half of the #912/#913 story on C-LEARN, and the one that is
+/// actually load-bearing: **no** LTM link score may be dropped because
+/// `print_eqn` emitted text the engine's own parser rejects.
+///
+/// The var-count pin above would be satisfied by any emission change that
+/// happened to land on 6,891. This asserts the *mechanism*: zero
+/// `PartialEquationErrorKind::Parse` warnings. A regression in the printer
+/// (an operator spelled with a token the lexer lacks, a missing
+/// parenthesization) silently re-drops link scores, and the ceteris-paribus
+/// partial is skipped rather than emitted wrong -- so the failure mode is a
+/// hole in the attribution, with no numeric test to catch it.
+///
+/// C-LEARN had 50 such failures before #912/#913; the remaining 28
+/// partial-equation warnings are the separately-tracked non-parse kinds.
+// Run with: cargo test --release -- --ignored clearn_ltm_partials_all_parse
+#[test]
+#[ignore]
+fn clearn_ltm_partials_all_parse() {
+    use simlin_engine::db::{collect_all_diagnostics, set_project_ltm_enabled};
+
+    let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+    let datamodel_project =
+        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+
+    let unparseable: Vec<String> = collect_all_diagnostics(&db, sync.project)
+        .iter()
+        .map(|d| format!("{:?}", d.error))
+        .filter(|msg| msg.contains("did not parse"))
+        .collect();
+
+    assert!(
+        unparseable.is_empty(),
+        "{} LTM ceteris-paribus partial(s) were dropped because print_eqn \
+         emitted text the equation parser rejects. print_eqn's output is \
+         re-parsed all over the engine; every operator it emits must lex. \
+         First few: {:#?}",
+        unparseable.len(),
+        &unparseable[..unparseable.len().min(3)]
     );
 }
 

@@ -26,7 +26,9 @@ use simlin_serve::hashing::content_hash;
 use simlin_serve::registry::{
     GitState, ProjectFormat, ProjectMeta, ProjectRegistry, RegistryError,
 };
-use simlin_serve::test_support::unavailable_git_probe;
+use simlin_serve::test_support::{
+    OS_EVENT_TIMEOUT, unavailable_git_probe, wait_for_watcher_ready, watcher_barrier,
+};
 use simlin_serve::watcher::{ShutdownSignal, spawn_watcher};
 use tempfile::TempDir;
 use tokio::sync::Notify;
@@ -37,6 +39,14 @@ use tower::ServiceExt;
 // The save below uses these in its `Host:` header.
 const TEST_UI_PORT: u16 = 12345;
 const TEST_MCP_PORT: u16 = 12346;
+
+/// Grace window allowed after a `watcher_barrier` before declaring an event
+/// absent. The barrier already proves the watcher dispatched every event that
+/// preceded it, so anything the trigger produced is queued on `rx` by now; this
+/// only absorbs the scheduler hop between the actor's `publish` and a broadcast
+/// receiver observing it. It is deliberately *not* the thing that makes the
+/// absence assertion sound -- the barrier is.
+const POST_BARRIER_SETTLE: Duration = Duration::from_millis(200);
 
 /// Helper: build an `AppState` rooted at `dir` with a fresh registry, no
 /// git visibility, and an `EventBus`.
@@ -198,20 +208,23 @@ async fn external_disk_edit_triggers_disk_source_broadcast() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let mut sightings = watcher.probe_sightings();
 
-    // Give the OS-level watch a moment to register; otherwise the file
-    // write below races the watch setup and the event never arrives.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Prove the OS-level watch is live, then write immediately: a write issued
+    // before the watch registers is never reported.
+    wait_for_watcher_ready(&state.root, &mut sightings)
+        .await
+        .expect("watcher becomes ready");
 
     let updated = sd_json("renamed-on-disk");
     tokio::fs::write(&abs, &updated)
         .await
         .expect("write update");
 
-    let event = await_disk_event(&mut rx, Duration::from_secs(2))
+    let event = await_disk_event(&mut rx, OS_EVENT_TIMEOUT)
         .await
-        .expect("watcher emitted ProjectChanged{source: Disk} within 2s");
+        .expect("watcher emitted ProjectChanged{source: Disk}");
     match event {
         WsMessage::ProjectChanged { source, .. } => {
             assert_eq!(source, ChangeSource::Disk);
@@ -244,23 +257,28 @@ async fn echo_suppression_skips_byte_identical_disk_writes() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let mut sightings = watcher.probe_sightings();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_watcher_ready(&state.root, &mut sightings)
+        .await
+        .expect("watcher becomes ready");
 
     // Write the same bytes back. The watcher should see the event and
     // short-circuit because content_hash(bytes) == last_disk_hash.
     tokio::fs::write(&abs, &initial).await.expect("write echo");
 
-    // Wait long enough for the debouncer to flush + process; then assert
-    // that no Disk-source event arrived.
-    let no_event = tokio::time::timeout(
-        Duration::from_millis(800),
-        await_disk_event(&mut rx, Duration::from_millis(800)),
-    )
-    .await;
-    if let Ok(Some(_)) = no_event {
-        panic!("byte-identical disk write must not produce a Disk broadcast");
+    // The barrier is what makes this assertion meaningful: it blocks until the
+    // watcher has dispatched the echo write's event, so "no Disk broadcast" is
+    // a statement about echo-suppression rather than about how fast this host
+    // happens to be.
+    watcher_barrier(&state.root, &mut sightings)
+        .await
+        .expect("watcher processes the echo write");
+
+    let no_event = await_disk_event(&mut rx, POST_BARRIER_SETTLE).await;
+    if let Some(ev) = no_event {
+        panic!("byte-identical disk write must not produce a Disk broadcast; got: {ev:?}");
     }
 
     // Version still 0 (unchanged), confirming no merge ran.
@@ -295,9 +313,12 @@ async fn browser_and_disk_edits_both_preserved_via_merge() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let mut sightings = watcher.probe_sightings();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_watcher_ready(&state.root, &mut sightings)
+        .await
+        .expect("watcher becomes ready");
 
     // Simulate a browser save through the merge primitive: S1 gets
     // initialEquation = "100", S2 stays at "0". Then "echo" the result
@@ -332,9 +353,9 @@ async fn browser_and_disk_edits_both_preserved_via_merge() {
         .await
         .expect("write disk edit");
 
-    let event = await_disk_event(&mut rx, Duration::from_secs(2))
+    let event = await_disk_event(&mut rx, OS_EVENT_TIMEOUT)
         .await
-        .expect("watcher fires Disk-source ProjectChanged within 2s");
+        .expect("watcher fires Disk-source ProjectChanged");
     match event {
         WsMessage::ProjectChanged { source, .. } => assert_eq!(source, ChangeSource::Disk),
         other => panic!("expected ProjectChanged, got {other:?}"),
@@ -389,23 +410,27 @@ async fn invalid_json_disk_write_does_not_merge() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let mut sightings = watcher.probe_sightings();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_watcher_ready(&state.root, &mut sightings)
+        .await
+        .expect("watcher becomes ready");
 
     // Write garbage that's not valid JSON.
     tokio::fs::write(&abs, b"this is not json {{{")
         .await
         .expect("write garbage");
 
-    // No ProjectChanged{Disk} should arrive.
-    let no_event = tokio::time::timeout(
-        Duration::from_millis(800),
-        await_disk_event(&mut rx, Duration::from_millis(800)),
-    )
-    .await;
-    if let Ok(Some(_)) = no_event {
-        panic!("invalid disk write must not produce a Disk broadcast");
+    // Barrier first: without it, "no ProjectChanged{Disk}" would also hold on a
+    // host too slow to have delivered the event yet.
+    watcher_barrier(&state.root, &mut sightings)
+        .await
+        .expect("watcher processes the garbage write");
+
+    let no_event = await_disk_event(&mut rx, POST_BARRIER_SETTLE).await;
+    if let Some(ev) = no_event {
+        panic!("invalid disk write must not produce a Disk broadcast; got: {ev:?}");
     }
 
     // Version unchanged; doc still reflects the baseline.
@@ -441,22 +466,25 @@ async fn mdl_event_ignored_when_sidecar_exists() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let mut sightings = watcher.probe_sightings();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_watcher_ready(&state.root, &mut sightings)
+        .await
+        .expect("watcher becomes ready");
 
     // Touch the .mdl file. Sidecar exists -> the event must be ignored.
     tokio::fs::write(&mdl, b"{UTF-8}\n\nupdated_value=2\n  ~\n  ~|\n")
         .await
         .expect("touch mdl");
 
-    let no_event = tokio::time::timeout(
-        Duration::from_millis(800),
-        await_disk_event(&mut rx, Duration::from_millis(800)),
-    )
-    .await;
-    if let Ok(Some(_)) = no_event {
-        panic!("mdl event with sidecar present must not produce a Disk broadcast");
+    watcher_barrier(&state.root, &mut sightings)
+        .await
+        .expect("watcher processes the mdl write");
+
+    let no_event = await_disk_event(&mut rx, POST_BARRIER_SETTLE).await;
+    if let Some(ev) = no_event {
+        panic!("mdl event with sidecar present must not produce a Disk broadcast; got: {ev:?}");
     }
 
     shutdown.notify_waiters();
@@ -471,9 +499,12 @@ async fn create_event_for_new_path_adds_registry_entry_and_broadcasts() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let mut sightings = watcher.probe_sightings();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_watcher_ready(&state.root, &mut sightings)
+        .await
+        .expect("watcher becomes ready");
 
     // Create a brand-new .sd.json that's not yet in the registry.
     let new_path = state.root.join("brand_new.sd.json");
@@ -481,7 +512,7 @@ async fn create_event_for_new_path_adds_registry_entry_and_broadcasts() {
         .await
         .expect("create file");
 
-    let event = await_disk_event(&mut rx, Duration::from_secs(2))
+    let event = await_disk_event(&mut rx, OS_EVENT_TIMEOUT)
         .await
         .expect("watcher must broadcast for new file");
     match event {
@@ -539,17 +570,20 @@ async fn external_remove_drops_registry_entry_and_broadcasts_removed() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let mut sightings = watcher.probe_sightings();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_watcher_ready(&state.root, &mut sightings)
+        .await
+        .expect("watcher becomes ready");
 
     tokio::fs::remove_file(&abs)
         .await
         .expect("remove the model file");
 
-    let event = await_removed_event(&mut rx, Duration::from_secs(2))
+    let event = await_removed_event(&mut rx, OS_EVENT_TIMEOUT)
         .await
-        .expect("watcher must broadcast ProjectRemoved within 2s");
+        .expect("watcher must broadcast ProjectRemoved");
     match event {
         WsMessage::ProjectRemoved { path } => {
             assert_eq!(path, "doomed.sd.json");
@@ -581,19 +615,24 @@ async fn remove_of_untracked_path_is_silent() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let mut sightings = watcher.probe_sightings();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_watcher_ready(&state.root, &mut sightings)
+        .await
+        .expect("watcher becomes ready");
 
     tokio::fs::remove_file(&abs).await.expect("remove the file");
 
-    let no_event = tokio::time::timeout(
-        Duration::from_millis(800),
-        await_removed_event(&mut rx, Duration::from_millis(800)),
-    )
-    .await;
-    if let Ok(Some(_)) = no_event {
-        panic!("removing an untracked path must not produce a ProjectRemoved broadcast");
+    watcher_barrier(&state.root, &mut sightings)
+        .await
+        .expect("watcher processes the removal");
+
+    let no_event = await_removed_event(&mut rx, POST_BARRIER_SETTLE).await;
+    if let Some(ev) = no_event {
+        panic!(
+            "removing an untracked path must not produce a ProjectRemoved broadcast; got: {ev:?}"
+        );
     }
 
     shutdown.notify_waiters();
@@ -636,16 +675,18 @@ async fn save_handler_atomic_write_does_not_produce_disk_source_event() {
     );
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let mut sightings = watcher.probe_sightings();
 
     // Subscribe AFTER spawning the watcher so we don't pick up any startup
     // events; the broadcast channel has no replay.
     let mut rx = state.events.subscribe();
 
-    // Wait longer than the 100ms debounce window so any spurious events
-    // from watcher startup are flushed before the HTTP save drives the
-    // write we're actually testing against.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The probe file is inert (no model extension), so establishing readiness
+    // cannot itself put anything on `rx` for us to mistake for the save's echo.
+    wait_for_watcher_ready(&state.root, &mut sightings)
+        .await
+        .expect("watcher becomes ready");
 
     // Drive a save via the HTTP layer; version 0 -> 1.
     let router = build_router(state.clone());
@@ -668,16 +709,16 @@ async fn save_handler_atomic_write_does_not_produce_disk_source_event() {
         "save handler must return 200"
     );
 
-    // Wait long enough for the watcher debounce window to flush (100ms)
-    // plus a generous processing budget. A Disk-source event here would
-    // indicate the echo-suppression hash was stored AFTER the OS write
-    // event fired, triggering a spurious re-merge.
-    let no_disk_event = tokio::time::timeout(
-        Duration::from_millis(800),
-        await_disk_event(&mut rx, Duration::from_millis(800)),
-    )
-    .await;
-    if let Ok(Some(ev)) = no_disk_event {
+    // Block until the watcher has dispatched the save's atomic_write events. A
+    // Disk-source event surviving that barrier would mean the echo-suppression
+    // hash was stored AFTER the OS write event fired, triggering a spurious
+    // re-merge.
+    watcher_barrier(&state.root, &mut sightings)
+        .await
+        .expect("watcher processes the save's write");
+
+    let no_disk_event = await_disk_event(&mut rx, POST_BARRIER_SETTLE).await;
+    if let Some(ev) = no_disk_event {
         panic!("save handler must not produce a Disk-source event; got: {ev:?}");
     }
 
@@ -714,11 +755,13 @@ async fn primed_sidecar_placeholder_echo_suppresses_post_save_watcher_event() {
     );
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let mut sightings = watcher.probe_sightings();
     let mut rx = state.events.subscribe();
 
-    // Wait past startup so any debouncer settling does not poison rx.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_for_watcher_ready(&state.root, &mut sightings)
+        .await
+        .expect("watcher becomes ready");
 
     // Mimic the save handler's pre-write priming: prime both the .mdl
     // source key (legacy: in case anything still keys lookups there) and
@@ -738,15 +781,14 @@ async fn primed_sidecar_placeholder_echo_suppresses_post_save_watcher_event() {
     simlin_engine::io::atomic_write(&sidecar_path, sidecar_content.as_bytes())
         .expect("atomic_write sidecar");
 
-    // Wait past the watcher's debounce window plus generous processing
-    // budget. A Disk event here would mean echo-suppression failed — the
-    // exact bug the placeholder closes.
-    let no_disk_event = tokio::time::timeout(
-        Duration::from_millis(800),
-        await_disk_event(&mut rx, Duration::from_millis(800)),
-    )
-    .await;
-    if let Ok(Some(ev)) = no_disk_event {
+    // A Disk event surviving the barrier would mean echo-suppression failed —
+    // the exact bug the placeholder closes.
+    watcher_barrier(&state.root, &mut sightings)
+        .await
+        .expect("watcher processes the sidecar write");
+
+    let no_disk_event = await_disk_event(&mut rx, POST_BARRIER_SETTLE).await;
+    if let Some(ev) = no_disk_event {
         panic!("primed sidecar write must echo-suppress; got: {ev:?}");
     }
 
@@ -815,18 +857,21 @@ async fn external_rename_re_keys_registry_and_emits_project_renamed() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let mut sightings = watcher.probe_sightings();
 
-    // Give the OS-level watch a moment to register before the rename.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // A rename cannot be replayed, so readiness must be established before it.
+    wait_for_watcher_ready(&state.root, &mut sightings)
+        .await
+        .expect("watcher becomes ready");
 
     tokio::fs::rename(&from_abs, &to_abs)
         .await
         .expect("external rename");
 
-    let event = await_renamed_event(&mut rx, Duration::from_secs(2))
+    let event = await_renamed_event(&mut rx, OS_EVENT_TIMEOUT)
         .await
-        .expect("watcher emits ProjectRenamed within 2s");
+        .expect("watcher emits ProjectRenamed");
     match event {
         WsMessage::ProjectRenamed { from, to } => {
             assert_eq!(from, "a.sd.json");
@@ -913,9 +958,13 @@ async fn rename_over_tracked_destination_removes_both_and_rehydrates() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let mut sightings = watcher.probe_sightings();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // A rename cannot be replayed, so readiness must be established before it.
+    wait_for_watcher_ready(&state.root, &mut sightings)
+        .await
+        .expect("watcher becomes ready");
 
     // Rename a.sd.json -> b.sd.json (overwrites b on disk).
     tokio::fs::rename(&a_abs, &b_abs)
@@ -923,9 +972,8 @@ async fn rename_over_tracked_destination_removes_both_and_rehydrates() {
         .expect("rename a -> b");
 
     // Collect events until we see both ProjectRemoved paths and a
-    // ProjectChanged for the destination. Use a generous timeout so the
-    // test is reliable on slow CI machines.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    // ProjectChanged for the destination.
+    let deadline = tokio::time::Instant::now() + OS_EVENT_TIMEOUT;
     let mut removed_paths: Vec<String> = Vec::new();
     let mut saw_b_changed = false;
 
@@ -1014,9 +1062,13 @@ async fn rename_of_untracked_path_falls_through_to_created() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let mut sightings = watcher.probe_sightings();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // A rename cannot be replayed, so readiness must be established before it.
+    wait_for_watcher_ready(&state.root, &mut sightings)
+        .await
+        .expect("watcher becomes ready");
 
     tokio::fs::rename(&from_abs, &to_abs)
         .await
@@ -1025,7 +1077,7 @@ async fn rename_of_untracked_path_falls_through_to_created() {
     // Allow either a ProjectChanged{Disk} (Created path) or a
     // ProjectRenamed depending on which arm picks up. The contract is:
     // the destination must end up registered. Wait for either.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + OS_EVENT_TIMEOUT;
     let mut saw_event = false;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());

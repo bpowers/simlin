@@ -43,6 +43,7 @@ use notify_debouncer_full::notify::{self, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::discovery::{classify_extension, is_excluded_dir};
@@ -314,11 +315,103 @@ fn path_traverses_excluded_dir(path: &Path) -> bool {
     })
 }
 
+/// Filename prefix of the inert files used to observe whether the OS-level
+/// watch is actually delivering events yet.
+///
+/// Why this exists: `Watcher::watch` returning does *not* mean the watch is
+/// live. On macOS, `FSEventStreamStart` only hands the stream to `fseventsd`;
+/// registration completes asynchronously, and the stream's "since now" event
+/// id is resolved at registration, so every filesystem change between
+/// `watch()` returning and registration completing is lost permanently -- not
+/// delayed, never delivered. inotify and ReadDirectoryChangesW register
+/// synchronously, but nothing in the `notify` API surfaces the difference.
+///
+/// Measurements below were taken on 2026-07-08 on one macOS host whose
+/// `fseventsd` was saturated (~103% CPU, alongside `spotlightknowledged` at
+/// ~97%, persistently, with no tests running). All were reproduced against a
+/// raw `notify::RecommendedWatcher` with no debouncer, so
+/// `notify-debouncer-full` is not implicated. Treat them as one sick machine's
+/// worst case, not as typical numbers:
+///
+/// - `watch()` itself blocked for 3558ms before returning (single observation).
+/// - Once live, a write was reported ~1.3-1.7s later (dozens of observations).
+///
+/// A second effect makes a one-shot readiness check insufficient: a stream that
+/// is provably live still drops the next event it should report after an idle
+/// gap. Single isolated trigger write, misses out of N:
+///
+/// | | debounced | raw |
+/// |---|---|---|
+/// | `sleep(2s)`, then trigger | 6/6 | 3/4 |
+/// | probe until observed, then trigger immediately | **0/6** | **0/4** |
+/// | probe until observed, `sleep(2s)`, then trigger | 6/6 | 3/4 |
+///
+/// The third row is why callers must not sleep between establishing readiness
+/// and firing their trigger, and why "the stream registers once and then works"
+/// is the wrong mental model.
+///
+/// No OS gives us a "the stream is live" callback, and `notify` exposes
+/// neither the underlying `FSEventStreamRef` nor `FSEventStreamFlushSync`
+/// (the one Apple primitive that would answer this directly). So the only
+/// sound way to learn that a watch is live is to cause a filesystem event and
+/// wait until it comes back. A probe file is that event.
+///
+/// A probe file carries no recognized model extension, so [`classify`] maps it
+/// to [`ClassifiedEvent::Ignored`]. It never enters the registry, never parses,
+/// and never reaches the event bus. Its only job is to be seen.
+/// [`WatcherActor::handle_batch`] reports the sighting and then classifies the
+/// event as usual -- it does not skip classification, because one event may name
+/// both a probe and a real model.
+///
+/// The nonce suffix makes a sighting attributable to one specific probe round,
+/// which is what lets a caller use a probe as an ordering barrier rather than
+/// just a liveness check. See `test_support::watcher_barrier`.
+pub const PROBE_FILE_PREFIX: &str = ".simlin-watcher-probe-";
+
+/// Parse the nonce out of a probe path, or `None` when `path` is not a probe.
+fn probe_nonce(path: &Path) -> Option<u64> {
+    path.file_name()?
+        .to_str()?
+        .strip_prefix(PROBE_FILE_PREFIX)?
+        .parse()
+        .ok()
+}
+
+/// Handle to a spawned watcher actor.
+///
+/// Holds the actor's `JoinHandle` plus a `watch` channel reporting the highest
+/// probe nonce the OS watcher has delivered so far (see [`PROBE_FILE_PREFIX`]).
+/// Dropping the handle does not stop the actor; use the [`ShutdownSignal`].
+pub struct WatcherHandle {
+    join: JoinHandle<()>,
+    probe_sightings: watch::Receiver<u64>,
+}
+
+impl WatcherHandle {
+    /// Subscribe to probe-file sightings. The value is the highest probe nonce
+    /// the OS watcher has reported; it only ever increases.
+    ///
+    /// A caller that needs to know the watch is live creates a probe file and
+    /// waits for this value to reach its nonce. That is the only readiness
+    /// signal available: see [`PROBE_FILE_PREFIX`] for why a sleep is not one.
+    pub fn probe_sightings(&self) -> watch::Receiver<u64> {
+        self.probe_sightings.clone()
+    }
+
+    /// Consume the handle, yielding the actor's `JoinHandle` so callers can
+    /// await a graceful exit after firing the [`ShutdownSignal`].
+    pub fn into_join_handle(self) -> JoinHandle<()> {
+        self.join
+    }
+}
+
 /// Long-lived actor that bridges the OS filesystem watcher into tokio.
 pub struct WatcherActor {
     #[allow(dead_code)]
     state: AppState,
     rx: UnboundedReceiver<DebounceEventResult>,
+    /// Reports probe-file sightings to [`WatcherHandle::probe_sightings`].
+    probe_sightings: watch::Sender<u64>,
     /// Owned shutdown future captured *synchronously* in `spawn_watcher`
     /// before the actor task starts running. This closes a race that
     /// matters in tests (and could matter in production on a
@@ -350,6 +443,7 @@ impl WatcherActor {
         let WatcherActor {
             state,
             mut rx,
+            probe_sightings,
             shutdown,
             debouncer: _debouncer,
         } = self;
@@ -357,7 +451,7 @@ impl WatcherActor {
         loop {
             tokio::select! {
                 Some(result) = rx.recv() => {
-                    Self::handle_batch(&state, result).await;
+                    Self::handle_batch(&state, &probe_sightings, result).await;
                 }
                 _ = &mut shutdown => {
                     tracing::debug!("watcher actor: shutdown signal received");
@@ -380,7 +474,25 @@ impl WatcherActor {
     /// Takes `&AppState` rather than `&self` because `run` already
     /// destructured `self` into individual fields to keep the partial
     /// borrow checker happy across the `select!` arms.
-    async fn handle_batch(state: &AppState, result: DebounceEventResult) {
+    ///
+    /// Probe files (see [`PROBE_FILE_PREFIX`]) are recognized and reported
+    /// *inside* the per-event loop, in event order, rather than in a separate
+    /// pre-pass. That ordering is load-bearing: a caller that writes a real
+    /// change and then a probe relies on the change's broadcast having already
+    /// been published by the time the probe's nonce is observed. Hoisting the
+    /// probe scan above the classification loop would let the nonce advance
+    /// before this batch's earlier events were handled, silently breaking that
+    /// barrier -- `handle_batch_advances_probe_nonce_only_after_dispatching_earlier_events`
+    /// fails if you do.
+    ///
+    /// Reporting a sighting does not consume the event: it falls through to
+    /// `classify` like any other, because a single event can name both a probe
+    /// path and a real model path (a `RenameMode::Both` carries two).
+    async fn handle_batch(
+        state: &AppState,
+        probe_sightings: &watch::Sender<u64>,
+        result: DebounceEventResult,
+    ) {
         let events = match result {
             Ok(events) => events,
             Err(errors) => {
@@ -392,6 +504,25 @@ impl WatcherActor {
         };
 
         for event in &events {
+            if let Some(nonce) = event.paths.iter().find_map(|p| probe_nonce(p)) {
+                // Report the sighting, then FALL THROUGH to classification.
+                // The probe scan observes; it must never consume. An event can
+                // mention a probe path and a real model path at once -- a
+                // `RenameMode::Both` carries two paths (see `classify`) -- so
+                // `continue`ing here would silently drop the creation of a model
+                // renamed from a probe-shaped name. Falling through costs
+                // nothing: a probe carries no model extension, so `classify`
+                // independently maps it to `Ignored`
+                // (`probe_files_classify_as_ignored` pins this).
+                probe_sightings.send_if_modified(|highest| {
+                    if nonce > *highest {
+                        *highest = nonce;
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
             match classify(event) {
                 ClassifiedEvent::ModelFile {
                     path,
@@ -980,14 +1111,19 @@ impl WatcherActor {
 
 /// Construct and spawn the watcher actor.
 ///
-/// Returns the join handle for the spawned tokio task. The caller must
-/// hold onto it (for graceful shutdown / wait-on-exit) — dropping the
-/// handle does not abort the task. The debouncer is moved into the actor
+/// Returns a [`WatcherHandle`] carrying the spawned task's join handle. The
+/// caller must hold onto it (for graceful shutdown / wait-on-exit) — dropping
+/// the handle does not abort the task. The debouncer is moved into the actor
 /// and dropped when the task exits, releasing the OS-level watch.
+///
+/// Note that a successful return does **not** mean the OS-level watch is
+/// delivering events yet; see [`PROBE_FILE_PREFIX`]. Callers that must not
+/// miss a change made right after this returns have to establish liveness via
+/// [`WatcherHandle::probe_sightings`].
 pub fn spawn_watcher(
     state: AppState,
     shutdown: ShutdownSignal,
-) -> Result<JoinHandle<()>, WatcherError> {
+) -> Result<WatcherHandle, WatcherError> {
     let (tx, rx) = unbounded_channel::<DebounceEventResult>();
 
     // Bridge from the debouncer's `DebounceEventHandler` (called on the
@@ -1018,15 +1154,22 @@ pub fn spawn_watcher(
     // already counted, and the notification would be silently lost.
     let shutdown_future = shutdown.notified_owned();
 
+    // Nonces are positive, so 0 is an unambiguous "nothing seen yet" origin.
+    let (probe_tx, probe_rx) = watch::channel(0u64);
+
     let actor = WatcherActor {
         state,
         rx,
+        probe_sightings: probe_tx,
         shutdown: shutdown_future,
         debouncer,
     };
 
-    let handle = tokio::spawn(actor.run());
-    Ok(handle)
+    let join = tokio::spawn(actor.run());
+    Ok(WatcherHandle {
+        join,
+        probe_sightings: probe_rx,
+    })
 }
 
 #[cfg(test)]
@@ -1065,10 +1208,129 @@ mod tests {
 
         shutdown.notify_waiters();
 
-        tokio::time::timeout(Duration::from_millis(500), handle)
+        tokio::time::timeout(Duration::from_millis(500), handle.into_join_handle())
             .await
             .expect("actor exited within 500ms")
             .expect("actor task did not panic");
+    }
+
+    #[test]
+    fn probe_nonce_round_trips_and_rejects_non_probe_paths() {
+        assert_eq!(
+            probe_nonce(&PathBuf::from(format!("/repo/{PROBE_FILE_PREFIX}42"))),
+            Some(42)
+        );
+        // A probe file must not be mistaken for a model, and vice versa.
+        assert_eq!(probe_nonce(&PathBuf::from("/repo/models/x.stmx")), None);
+        assert_eq!(
+            probe_nonce(&PathBuf::from(format!(
+                "/repo/{PROBE_FILE_PREFIX}notanumber"
+            ))),
+            None
+        );
+    }
+
+    #[test]
+    fn probe_files_classify_as_ignored() {
+        // This is *why* `handle_batch` can report a probe sighting and still
+        // fall through to `classify`: probe files are inert on their own merits,
+        // because they carry no model extension. Nothing has to skip them.
+        let path = PathBuf::from(format!("/repo/{PROBE_FILE_PREFIX}7"));
+        let event = make_debounced(EventKind::Create(CreateKind::File), vec![path]);
+        assert_eq!(classify(&event), ClassifiedEvent::Ignored);
+    }
+
+    /// The barrier invariant: within one batch, the probe nonce must not advance
+    /// until every *earlier* event has been fully dispatched. `watcher_barrier`
+    /// (and therefore every absence assertion in the integration suite) is only
+    /// sound because of this. Hoisting the probe scan above the classification
+    /// loop would break it silently, so it needs a test that goes red when that
+    /// happens.
+    ///
+    /// The seam: pin the runtime to `current_thread` and park an observer task on
+    /// the nonce. The observer can only run when `handle_batch` yields, and
+    /// `handle_model_change` yields at its `tokio::fs::read`. So:
+    ///
+    /// - Correct order: the model event is dispatched (and `ProjectChanged`
+    ///   published) before `send_if_modified` runs, so when the observer finally
+    ///   wakes, the message is already on the bus -> `try_recv` yields it.
+    /// - Hoisted scan: the nonce advances before the loop, the observer wakes at
+    ///   the first `fs::read` yield with nothing published yet -> `try_recv` is
+    ///   `Empty` and this test fails.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_batch_advances_probe_nonce_only_after_dispatching_earlier_events() {
+        let dir = TempDir::new().expect("tempdir");
+        let state = build_app_state(dir.path());
+        let root = state.root.as_ref().clone();
+
+        let model = root.join("m.sd.json");
+        std::fs::write(
+            &model,
+            br#"{"name":"m","simSpecs":{"startTime":0,"endTime":1,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#,
+        )
+        .expect("write model");
+
+        let (tx, mut probe_rx) = watch::channel(0u64);
+        let mut events_rx = state.events.subscribe();
+
+        // The instant the nonce advances: has the model's broadcast landed yet?
+        let observer = tokio::spawn(async move {
+            probe_rx.changed().await.expect("sender alive");
+            events_rx.try_recv()
+        });
+
+        let events = vec![
+            make_debounced(EventKind::Create(CreateKind::File), vec![model.clone()]),
+            make_debounced(
+                EventKind::Create(CreateKind::File),
+                vec![root.join(format!("{PROBE_FILE_PREFIX}9"))],
+            ),
+        ];
+        WatcherActor::handle_batch(&state, &tx, Ok(events)).await;
+
+        let observed = observer.await.expect("observer task");
+        assert!(
+            matches!(
+                observed,
+                Ok(WsMessage::ProjectChanged {
+                    source: ChangeSource::Disk,
+                    ..
+                })
+            ),
+            "the nonce advanced before the earlier model event was dispatched; \
+             watcher_barrier is unsound. got: {observed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_batch_keeps_the_highest_probe_nonce() {
+        // Complements the ordering test above: only the highest nonce sticks, and
+        // non-probe events leave it alone.
+        let dir = TempDir::new().expect("tempdir");
+        let state = build_app_state(dir.path());
+        let (tx, rx) = watch::channel(0u64);
+
+        let events = vec![
+            make_debounced(
+                EventKind::Create(CreateKind::File),
+                vec![PathBuf::from(format!("/repo/{PROBE_FILE_PREFIX}5"))],
+            ),
+            make_debounced(
+                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                vec![PathBuf::from("/repo/notes.md")],
+            ),
+            make_debounced(
+                EventKind::Create(CreateKind::File),
+                vec![PathBuf::from(format!("/repo/{PROBE_FILE_PREFIX}3"))],
+            ),
+        ];
+        WatcherActor::handle_batch(&state, &tx, Ok(events)).await;
+
+        assert_eq!(
+            *rx.borrow(),
+            5,
+            "the highest nonce wins; it never regresses"
+        );
     }
 
     #[test]
@@ -1430,7 +1692,8 @@ mod tests {
             ),
         ];
         let result: DebounceEventResult = Ok(events);
-        WatcherActor::handle_batch(&state, result).await;
+        let (tx, _rx) = watch::channel(0u64);
+        WatcherActor::handle_batch(&state, &tx, result).await;
     }
 
     #[tokio::test]
@@ -1442,6 +1705,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let state = build_app_state(dir.path());
         let result: DebounceEventResult = Err(vec![notify::Error::generic("simulated failure")]);
-        WatcherActor::handle_batch(&state, result).await;
+        let (tx, _rx) = watch::channel(0u64);
+        WatcherActor::handle_batch(&state, &tx, result).await;
     }
 }

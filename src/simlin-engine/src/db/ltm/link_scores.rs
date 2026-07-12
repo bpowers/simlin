@@ -298,6 +298,44 @@ pub(super) fn try_cross_dimensional_link_scores(
     }
     let to_dims = variable_dimensions(db, *to_sv, project);
 
+    // GH #910: every reducer branch below builds its partial in the reducer's
+    // own (pre-graphical-function) units. When the reducer's owner is an
+    // implicit WITH-LOOKUP variable its compiled value is `gf(reducer)`, so
+    // the partial must be fed through the owner's table -- otherwise the
+    // score can carry the opposite sign to the polarity
+    // `compose_with_lookup_polarity` composes.
+    //
+    // The owner (and hence its wrap) is resolved LAZILY: reconstructing a
+    // variable is an untracked parse+lower, and most arrayed-source edges
+    // reaching this function return before any reducer branch fires (the
+    // `result_axis_names` dim-containment check below rejects same-dim A2A,
+    // broadcast, and mismatched-dim edges outright). One corner still pays for
+    // nothing: the T5 arm evaluates `owner_gf_ref()` as a call argument, so a
+    // projection-feeder edge whose `iterated_feeder_row_scores` declines (stale
+    // slice) forces the reconstruct and then falls through -- possibly to the
+    // `result_axis_names` early return. Restructuring the `&&` chain to defer it
+    // would be more obscure than the one reconstruct it saves on a rare shape.
+    let to_var_cell: std::cell::OnceCell<Option<crate::variable::Variable>> =
+        std::cell::OnceCell::new();
+    let to_var_of = || {
+        to_var_cell
+            .get_or_init(|| reconstruct_single_variable(db, model, project, to))
+            .as_ref()
+    };
+    let owner_wrap_cell: std::cell::OnceCell<crate::ltm_augment::WithLookupWrap> =
+        std::cell::OnceCell::new();
+    let owner_wrap = || {
+        owner_wrap_cell.get_or_init(|| {
+            to_var_of()
+                .map(crate::ltm_augment::with_lookup_reducer_owner_wrap)
+                .unwrap_or(crate::ltm_augment::WithLookupWrap::NoGf)
+        })
+    };
+    let owner_gf_ref = || match owner_wrap() {
+        crate::ltm_augment::WithLookupWrap::Wrap(r) => Some(r.as_str()),
+        _ => None,
+    };
+
     // T5 (GH #767): an ITERATED-DIM PROJECTION FEEDER edge into a
     // variable-backed reduce -- `frac → growth` for
     // `growth[D1] = SUM(matrix[D1,*] * frac[D1])`. The feeder's dims EQUAL
@@ -323,6 +361,7 @@ pub(super) fn try_cross_dimensional_link_scores(
             from_dims,
             vb_agg,
             unscoreable_edges,
+            owner_gf_ref(),
         )
     {
         // `Some(vec![])` can be the GH #780 loud doom: the edge was
@@ -365,11 +404,12 @@ pub(super) fn try_cross_dimensional_link_scores(
             source_vars,
             from,
             to,
+            to_var_of()?,
             from_dims,
             to_dims,
             vb_agg,
-            model,
             project,
+            owner_gf_ref(),
         );
     }
 
@@ -398,8 +438,8 @@ pub(super) fn try_cross_dimensional_link_scores(
 
     // The source is a reducer argument. Classify the reducing function
     // in the target's equation.
-    let to_var = reconstruct_single_variable(db, model, project, to)?;
-    let classified = crate::ltm_augment::classify_reducer(&to_var, from)?;
+    let to_var = to_var_of()?;
+    let classified = crate::ltm_augment::classify_reducer(to_var, from)?;
 
     if classified.kind == crate::ltm_augment::ReducerKind::Constant {
         // SIZE is constant; link score is always 0. Skip entirely.
@@ -515,6 +555,7 @@ pub(super) fn try_cross_dimensional_link_scores(
                         classified.name,
                         classified.is_bare,
                         Some(&body_ctx),
+                        owner_gf_ref(),
                     ),
                 )
             } else {
@@ -535,6 +576,7 @@ pub(super) fn try_cross_dimensional_link_scores(
                         classified.name,
                         classified.is_bare,
                         Some(&body_ctx),
+                        owner_gf_ref(),
                     ),
                 )
             };
@@ -615,6 +657,25 @@ pub(super) fn try_cross_dimensional_link_scores(
         return Some(vec![]);
     }
 
+    // GH #910 backstop, deliberately placed AFTER the GH #791/#792 decline: a
+    // with-lookup owner carrying PER-ELEMENT tables has no single expressible
+    // `LOOKUP` argument for the row-scoped cartesian partials below, so the edge
+    // must be declined rather than scored unwrapped (whose sign can contradict
+    // the composed polarity). But per-element tables imply a per-element-EQUATION
+    // (`Ast::Arrayed`) owner, which is exactly the GH #792 un-hoistable-reducer
+    // family, and THAT is the cause a modeler could act on -- removing the gf
+    // would not make the edge scoreable. `decline_unhoisted_reducer_edge` gets
+    // the first word so the diagnostic names that cause. See
+    // [`decline_with_lookup_reducer_edge`] for why this arm has no known live
+    // input today.
+    if matches!(
+        owner_wrap(),
+        crate::ltm_augment::WithLookupWrap::PerElementUndecidable
+    ) {
+        decline_with_lookup_reducer_edge(db, model, from, to, unscoreable_edges);
+        return Some(vec![]);
+    }
+
     let source_elements = cartesian_subscripts(&dim_element_lists);
 
     if result_axis_names.is_empty() {
@@ -643,6 +704,7 @@ pub(super) fn try_cross_dimensional_link_scores(
                 classified.name,
                 classified.is_bare,
                 Some(&body_ctx),
+                owner_gf_ref(),
             );
             cross_vars.push(LtmSyntheticVar {
                 name: var_name,
@@ -717,6 +779,7 @@ pub(super) fn try_cross_dimensional_link_scores(
             classified.name,
             classified.is_bare,
             Some(&body_ctx),
+            owner_gf_ref(),
         );
         cross_vars.push(LtmSyntheticVar {
             name: var_name,
@@ -765,14 +828,19 @@ fn emit_broadcast_reduce_link_scores(
     source_vars: &HashMap<String, SourceVariable>,
     from: &str,
     to: &str,
+    // The reducer's owner. Passed in rather than re-derived: only the inner
+    // parse is salsa-memoized, so a second `reconstruct_single_variable` would
+    // re-run `crate::model::lower_variable` for the same edge.
+    to_var: &crate::variable::Variable,
     from_dims: &[crate::dimensions::Dimension],
     to_dims: &[crate::dimensions::Dimension],
     vb_agg: &crate::ltm_agg::AggNode,
-    model: SourceModel,
     project: SourceProject,
+    // The implicit WITH-LOOKUP wrap for the reducer's owner (GH #910),
+    // resolved by the caller.
+    owner_gf_ref: Option<&str>,
 ) -> Option<Vec<LtmSyntheticVar>> {
-    let to_var = reconstruct_single_variable(db, model, project, to)?;
-    let classified = crate::ltm_augment::classify_reducer(&to_var, from)?;
+    let classified = crate::ltm_augment::classify_reducer(to_var, from)?;
     if classified.kind == crate::ltm_augment::ReducerKind::Constant {
         // SIZE is constant; link score is always 0. Skip entirely.
         return Some(vec![]);
@@ -840,6 +908,7 @@ fn emit_broadcast_reduce_link_scores(
                 classified.name,
                 classified.is_bare,
                 Some(&body_ctx),
+                owner_gf_ref,
             );
             cross_vars.push(LtmSyntheticVar {
                 name: var_name,
@@ -957,10 +1026,28 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
             from, agg.name
         );
+        // GH #910: the changed-last numerator subtracts a FULL re-evaluation
+        // of the reducer (pre-gf units) from the owner's compiled value, so a
+        // with-lookup owner must feed that evaluation through its table. The
+        // per-element-table decline below has no live input here (the
+        // `scalar_feeder_of_variable_backed_agg` gate implies a Scalar/A2A
+        // owner, which carries at most one table); see the fn doc.
+        let owner_wrap = reconstruct_single_variable(db, model, project, to)
+            .as_ref()
+            .map(crate::ltm_augment::with_lookup_reducer_owner_wrap);
+        if let Some(crate::ltm_augment::WithLookupWrap::PerElementUndecidable) = owner_wrap {
+            decline_with_lookup_reducer_edge(db, model, from, to, unscoreable_edges);
+            return Some(vec![]);
+        }
+        let owner_gf_ref: Option<&str> = match &owner_wrap {
+            Some(crate::ltm_augment::WithLookupWrap::Wrap(r)) => Some(r.as_str()),
+            _ => None,
+        };
         match crate::ltm_augment::generate_scalar_feeder_to_agg_equation(
             from,
             &agg.name,
             &agg.equation_text,
+            owner_gf_ref,
         ) {
             Ok(text) => {
                 // The score is ALWAYS arrayed here (`to_dims` is non-empty in
@@ -1088,6 +1175,8 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         .map(crate::ltm_augment::dimension_element_names)
         .collect();
     let elements = cartesian_subscripts(&dim_element_lists);
+    // GH #910: resolved once for the whole target -- see `WithLookupSlotRefs`.
+    let slot_refs = crate::ltm_augment::WithLookupSlotRefs::new(&to_var, target_ast_dims);
 
     // Build one `LtmSyntheticVar` for `element` from its equation text and
     // that text's dependency set. The element name is the only part of the
@@ -1120,6 +1209,15 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         let equation = if elem_text.is_empty() {
             "0".to_string()
         } else {
+            // GH #910: `elem_text` is the target's RAW element equation, but an
+            // implicit WITH-LOOKUP target's compiled value is `gf(elem_text)`.
+            // Wrap the per-element partial in THIS element's own table (the
+            // per-element-equation case) or the shared one, so the numerator
+            // and the `Δto[e]` denominator live on the same scale. A gf-less
+            // element (empty placeholder table) keeps its raw partial, exactly
+            // as `apply_implicit_with_lookup` leaves its value unwrapped.
+            let gf_table_ref =
+                slot_refs.for_element(&crate::common::CanonicalElementName::from_raw(element));
             match crate::ltm_augment::generate_scalar_to_element_equation(
                 from,
                 to,
@@ -1135,6 +1233,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 None,
                 &[],
                 Some(project_dimensions_context(db, project)),
+                gf_table_ref.as_deref(),
             ) {
                 Ok(eqn) => eqn,
                 Err(err) => {
@@ -1248,6 +1347,68 @@ pub(super) fn emit_unscoreable_disjoint_edge_warning(
          dynamic index or an un-hoisted reducer read, neither of which has a \
          per-element derivation here; this edge will have no link-score variable and \
          feedback loops through it will not be scored"
+    );
+    CompilationDiagnostic(Diagnostic {
+        model: model.name(db).clone(),
+        variable: None,
+        error: DiagnosticError::Assembly(msg),
+        severity: DiagnosticSeverity::Warning,
+    })
+    .accumulate(db);
+}
+
+/// Accumulate the GH #910 `Warning` for a reducer edge whose owning target is
+/// an implicit WITH-LOOKUP variable with PER-ELEMENT graphical functions.
+///
+/// The reducer emitters build ONE scalar partial per source row, in the
+/// reducer's own (pre-gf) units. Feeding it through the owner's gf needs a
+/// single `LOOKUP` table argument, but a per-element-table owner applies a
+/// DIFFERENT table per element, so no single argument is correct. Emitting
+/// the unwrapped partial would produce a score whose sign can contradict the
+/// link polarity that `ltm::polarity::compose_with_lookup_polarity` correctly
+/// composes -- strictly worse than no score at all. Following the GH #758/#780
+/// contract ([`emit_unscoreable_disjoint_edge_warning`]), the edge gets no
+/// link-score variable and is recorded so loops through it are dropped rather
+/// than stubbed to a warned constant 0.
+///
+/// # Reachability of the two call sites
+///
+/// Per-element tables require `Equation::Arrayed`, i.e. a per-element-EQUATION
+/// (`Ast::Arrayed`) owner. That single fact decides both callers:
+///
+/// - `try_scalar_to_arrayed_link_scores`' scalar-feeder arm is **dead**: it is
+///   gated on `scalar_feeder_of_variable_backed_agg`, and `enumerate_agg_nodes`
+///   never mints a variable-backed agg for an `Ast::Arrayed` owner (it mints a
+///   SYNTHETIC agg instead, whose `agg -> target` half is per-target-element and
+///   therefore wraps with that element's own table -- pinned by
+///   `test_with_lookup_per_element_gf_reducer_owner_scores_per_slot`). So the
+///   owner there is Scalar or ApplyToAll and carries at most one table.
+/// - `try_cross_dimensional_link_scores`' cartesian arm CAN see an
+///   `Ast::Arrayed` owner: `classify_reducer` accepts one whose EXCEPT-**default**
+///   expression is a reducer over `from`. But such an owner is also the GH #792
+///   un-hoistable-reducer family, and `decline_unhoisted_reducer_edge` -- called
+///   immediately before this arm -- claims it with the cause a modeler could act
+///   on. This arm is the backstop for any per-element-table owner that verdict
+///   does not claim.
+///
+/// The decline exists so a future change that re-admits either shape fails
+/// loudly rather than silently inverting a score's sign.
+fn decline_with_lookup_reducer_edge(
+    db: &dyn Db,
+    model: SourceModel,
+    from: &str,
+    to: &str,
+    unscoreable_edges: &mut HashSet<(String, String)>,
+) {
+    use salsa::Accumulator;
+    if !unscoreable_edges.insert((from.to_string(), to.to_string())) {
+        return;
+    }
+    let msg = format!(
+        "LTM link score for edge {from} -> {to} could not be computed: {to} applies a \
+         per-element graphical function to its reducer's result (a WITH LOOKUP variable), \
+         and the reducer's per-row partial cannot name a single element's table; this edge \
+         will have no link-score variable and feedback loops through it will not be scored"
     );
     CompilationDiagnostic(Diagnostic {
         model: model.name(db).clone(),
@@ -2155,6 +2316,8 @@ fn emit_per_element_link_scores(
         .iter()
         .map(|d| d.name().to_string())
         .collect();
+    // GH #910: resolved once for the whole target -- see `WithLookupSlotRefs`.
+    let slot_refs = crate::ltm_augment::WithLookupSlotRefs::new(&to_var, target_ast_dims);
     let dim_ctx = project_dimensions_context(db, project);
 
     // Arrayed deps sharing a target dim get element-pinned in the scalar
@@ -2220,6 +2383,12 @@ fn emit_per_element_link_scores(
             target_elem_by_dim.insert(dim.name().to_string(), ((*part).to_string(), idx));
         }
         let qualified_element = crate::ltm_augment::qualify_element_csv(element, &to_dims);
+        // GH #910: the partials below re-evaluate this element's RAW equation
+        // while the guard form ratios them against `Δto[e]` -- which is
+        // gf-applied. Feed each through this element's own table (`None` for a
+        // gf-less element, matching `apply_implicit_with_lookup`).
+        let gf_table_ref =
+            slot_refs.for_element(&crate::common::CanonicalElementName::from_raw(element));
 
         // Per-slot body text / deps for an `Ast::Arrayed` target.
         let slot_parts: Option<ElemEqnParts> = match ast {
@@ -2298,6 +2467,7 @@ fn emit_per_element_link_scores(
                 &target_elem_by_dim,
                 &target_iterated_dims,
                 dim_ctx,
+                gf_table_ref.as_deref(),
             ) {
                 Ok(equation) => edge_vars.push(LtmSyntheticVar {
                     name,
@@ -2382,6 +2552,7 @@ fn reducer_body_ctx_parts(
 /// exact #758-contract violation. Conservative, never silently wrong --
 /// the same reasoning as the per-shape edge-granularity decision in
 /// `emit_per_shape_link_scores`.
+#[allow(clippy::too_many_arguments)] // threads salsa keys + emission context
 fn iterated_feeder_row_scores(
     db: &dyn Db,
     model: SourceModel,
@@ -2390,6 +2561,10 @@ fn iterated_feeder_row_scores(
     from_dims: &[crate::dimensions::Dimension],
     agg: &crate::ltm_agg::AggNode,
     unscoreable_edges: &mut HashSet<(String, String)>,
+    // The implicit WITH-LOOKUP wrap for the agg's owner (GH #910). Always
+    // `None` for a synthetic `$⁚ltm⁚agg⁚{n}` (a synthetic agg carries no gf);
+    // `Some` only when `agg.name == to` and `to` is a with-lookup variable.
+    owner_gf_ref: Option<&str>,
 ) -> Option<Vec<LtmSyntheticVar>> {
     let slice = agg.source_read_slice(from);
     let dim_element_lists: Vec<Vec<String>> = from_dims
@@ -2431,6 +2606,7 @@ fn iterated_feeder_row_scores(
             &agg.equation_text,
             &iterated_dims,
             &slot_parts,
+            owner_gf_ref,
         ) {
             Ok(equation) => vars.push(LtmSyntheticVar {
                 name,
@@ -2512,6 +2688,13 @@ pub(super) fn emit_source_to_agg_link_scores(
             from,
             &agg.name,
             &agg.equation_text,
+            // A synthetic `$⁚ltm⁚agg⁚{n}` aux carries no graphical function,
+            // so there is no implicit WITH-LOOKUP application to compose
+            // (GH #910). Every caller of this emitter filters to synthetic
+            // aggs; a variable-backed agg's feeder halves are emitted by
+            // `try_cross_dimensional_link_scores` / `try_scalar_to_arrayed_link_scores`,
+            // which resolve the owner's wrap.
+            None,
         ) {
             Ok(text) => {
                 let equation = if agg.result_dims.is_empty() {
@@ -2557,8 +2740,17 @@ pub(super) fn emit_source_to_agg_link_scores(
     // A `None` from the row derivation (stale slice invariant) falls
     // through to the per-read-row machinery's own conservative fallback.
     if agg.source_is_projection_feeder(from)
-        && let Some(feeder_vars) =
-            iterated_feeder_row_scores(db, model, project, from, from_dims, agg, unscoreable_edges)
+        && let Some(feeder_vars) = iterated_feeder_row_scores(
+            db,
+            model,
+            project,
+            from,
+            from_dims,
+            agg,
+            unscoreable_edges,
+            // Synthetic agg: no graphical function to compose (GH #910).
+            None,
+        )
     {
         vars.extend(feeder_vars);
         return;
@@ -2708,6 +2900,8 @@ pub(super) fn emit_source_to_agg_link_scores(
                             classified.name,
                             classified.is_bare,
                             Some(&body_ctx),
+                            // Synthetic agg: no graphical function (GH #910).
+                            None,
                         ),
                     )
                 } else {
@@ -2726,6 +2920,8 @@ pub(super) fn emit_source_to_agg_link_scores(
                             classified.name,
                             classified.is_bare,
                             Some(&body_ctx),
+                            // Synthetic agg: no graphical function (GH #910).
+                            None,
                         ),
                     )
                 };
@@ -2786,6 +2982,8 @@ pub(super) fn emit_source_to_agg_link_scores(
                     classified.name,
                     classified.is_bare,
                     Some(&body_ctx),
+                    // Synthetic agg: no graphical function (GH #910).
+                    None,
                 ),
             )
         } else {
@@ -2804,6 +3002,8 @@ pub(super) fn emit_source_to_agg_link_scores(
                     classified.name,
                     classified.is_bare,
                     Some(&body_ctx),
+                    // Synthetic agg: no graphical function (GH #910).
+                    None,
                 ),
             )
         };
@@ -2881,6 +3081,21 @@ pub(super) fn emit_agg_to_target_link_scores(
     let target_ast_dims: &[crate::dimensions::Dimension] = match ast {
         Ast::Scalar(_) => &[],
         Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => dims,
+    };
+    // GH #910: when `to` is an implicit WITH-LOOKUP variable, the per-element
+    // partials below are full re-evaluations of its RAW element equation (with
+    // the reducer substituted by the agg name), while the guard form ratios them
+    // against `Δto[e]` -- which is gf-applied. Feed each element's partial
+    // through that element's own table. A gf-less element (empty placeholder)
+    // gets `None` and keeps its raw partial, matching `apply_implicit_with_lookup`.
+    // `None` for the `Ast::Scalar` arm below: a scalar target has no slots and
+    // takes its wrap from `with_lookup_table_ref` (the bare ident) instead.
+    let slot_refs = (!target_ast_dims.is_empty())
+        .then(|| crate::ltm_augment::WithLookupSlotRefs::new(&to_var, target_ast_dims));
+    let elem_gf_ref = |element: &str| -> Option<String> {
+        slot_refs
+            .as_ref()?
+            .for_element(&crate::common::CanonicalElementName::from_raw(element))
     };
     let base_deps = crate::variable::identifier_set(ast, target_ast_dims, None);
     let mut all_deps = base_deps.clone();
@@ -3140,6 +3355,9 @@ pub(super) fn emit_agg_to_target_link_scores(
                 &substituted,
                 &all_deps,
                 Some(project_dimensions_context(db, project)),
+                // GH #910: a scalar with-lookup target's single table,
+                // referenced by bare ident.
+                crate::ltm_augment::with_lookup_table_ref(&to_var).as_deref(),
             ) {
                 Ok(equation) => vars.push(LtmSyntheticVar {
                     name,
@@ -3209,6 +3427,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                     Some(&agg_source_ref_for_target(element)),
                     &source_pins_for_target(element),
                     Some(project_dimensions_context(db, project)),
+                    elem_gf_ref(element).as_deref(),
                 ) {
                     Ok(equation) => edge_vars.push(LtmSyntheticVar {
                         name,
@@ -3278,6 +3497,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                             Some(&agg_source_ref_for_target(element)),
                             &source_pins_for_target(element),
                             Some(project_dimensions_context(db, project)),
+                            elem_gf_ref(element).as_deref(),
                         )
                     }),
                 };

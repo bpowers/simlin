@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header>
+    <name>arrayed conveyor</name>
+    <vendor>test</vendor>
+    <product version="1.0">test</product>
+    <options>
+      <uses_conveyor/>
+    </options>
+  </header>
+  <sim_specs method="Euler" time_units="Months">
+    <start>0</start>
+    <stop>20</stop>
+    <dt>0.25</dt>
+  </sim_specs>
+  <dimensions>
+    <dim name="board">
+      <elem name="a"/>
+      <elem name="b"/>
+    </dim>
+  </dimensions>
+  <model>
+    <variables>
+      <!-- Per-element transit time: element a has a short belt (2), b a long one
+           (4). The conveyor's shared <len> references this arrayed aux, so each
+           element's belt gets its own transit -- verifying independent belts. -->
+      <aux name="transit">
+        <element subscript="a"><eqn>2</eqn></element>
+        <element subscript="b"><eqn>4</eqn></element>
+        <dimensions><dim name="board"/></dimensions>
+      </aux>
+      <stock name="belt">
+        <eqn>0</eqn>
+        <inflow>inflow_f</inflow>
+        <outflow>outflow_f</outflow>
+        <dimensions><dim name="board"/></dimensions>
+        <conveyor>
+          <len>transit</len>
+        </conveyor>
+      </stock>
+      <!-- Per-element inflow: a=100, b=250. -->
+      <flow name="inflow_f">
+        <element subscript="a"><eqn>100</eqn></element>
+        <element subscript="b"><eqn>250</eqn></element>
+        <dimensions><dim name="board"/></dimensions>
+      </flow>
+      <!-- Driven outflow: arrayed, empty equation (the pass fills each slot). -->
+      <flow name="outflow_f">
+        <dimensions><dim name="board"/></dimensions>
+      </flow>
+    </variables>
+  </model>
+</xmile>

@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header>
+    <name>discrete conveyor</name>
+    <vendor>test</vendor>
+    <product version="1.0">test</product>
+    <options>
+      <uses_conveyor/>
+    </options>
+  </header>
+  <sim_specs method="Euler" time_units="Months">
+    <start>0</start>
+    <stop>6</stop>
+    <dt>0.5</dt>
+  </sim_specs>
+  <model>
+    <variables>
+      <!-- A discrete belt (design doc 6.4) admits whole units only, so a
+           fractional per-step desire must accumulate in the per-inflow quantization
+           carry across steps rather than round away. The ramping arrival rate keeps
+           that carry moving, and the per-TIME-UNIT `<in_limit>` of 3 (doc 6.3)
+           starts clipping once the desire outruns it: two dts share one budget, so
+           an implementation that reset the carry each step, or charged the budget
+           per step rather than per time unit, diverges within the first few time
+           units. `<capacity>` is deliberately generous -- the clipping under test
+           is the inflow budget, not the capacity room. -->
+      <stock name="belt">
+        <eqn>0</eqn>
+        <inflow>arriving</inflow>
+        <outflow>departing</outflow>
+        <conveyor discrete="true">
+          <len>1</len>
+          <capacity>20</capacity>
+          <in_limit>3</in_limit>
+        </conveyor>
+      </stock>
+      <flow name="arriving">
+        <eqn>2 + TIME</eqn>
+      </flow>
+      <flow name="departing">
+      </flow>
+      <stock name="drained">
+        <eqn>0</eqn>
+        <inflow>departing</inflow>
+      </stock>
+      <aux name="on_belt">
+        <eqn>SUM(belt)</eqn>
+      </aux>
+    </variables>
+  </model>
+</xmile>

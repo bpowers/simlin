@@ -1001,7 +1001,16 @@ impl ModelStage0 {
             ident: Ident::new(&x_model.name),
             display_name: x_model.name.clone(),
             variables,
-            errors: None,
+            // The canonical-keyed map above collapses same-canonical twins
+            // last-wins; record the collision as a model error instead of
+            // silently building a different model (GH #891). Only DECLARED
+            // idents are scanned (mirroring the salsa gate's
+            // `declared_variable_idents`, GH #885) -- synthesized implicit
+            // vars are unique by construction.
+            errors: crate::common::duplicate_variable_errors(
+                &x_model.name,
+                x_model.variables.iter().map(|v| v.get_ident()),
+            ),
             implicit,
             is_macro: x_model.macro_spec.is_some(),
             macro_params: macro_param_idents(x_model.macro_spec.as_ref()),
@@ -1105,7 +1114,12 @@ impl ModelStage0 {
             ident: Ident::new(&x_model.name),
             display_name: x_model.name.clone(),
             variables,
-            errors: None,
+            // Same duplicate-canonical-ident guard as `new` (GH #891), so the
+            // direct and cached constructors stay behaviorally identical.
+            errors: crate::common::duplicate_variable_errors(
+                &x_model.name,
+                x_model.variables.iter().map(|v| v.get_ident()),
+            ),
             implicit,
             is_macro: x_model.macro_spec.is_some(),
             macro_params: macro_param_idents(x_model.macro_spec.as_ref()),
@@ -1171,8 +1185,12 @@ impl ModelStage1 {
 
         // use a Set to deduplicate problems we see in dt_deps and initial_deps
         let mut var_errors: HashMap<Ident<Canonical>, HashSet<EquationError>> = HashMap::new();
-        // model errors
-        let mut errors: Vec<Error> = Vec::new();
+        // Model errors: seed with any pre-existing model-level errors recorded
+        // at Stage0 construction (e.g. DuplicateVariable, GH #891) so this
+        // recompute extends rather than clobbers them. `set_dependencies` runs
+        // once per model (Project::from_salsa), so taking the list cannot
+        // double-report.
+        let mut errors: Vec<Error> = self.errors.take().unwrap_or_default();
 
         let instantiations = instantiations
             .iter()
@@ -1694,6 +1712,80 @@ fn test_new_cached_preserves_previous_helper_rewrite() {
         has_previous_helper(&direct),
         has_previous_helper(&cached),
         "cached parse should preserve PREVIOUS(module_var) helper rewriting"
+    );
+}
+
+/// GH #891: the monolithic `ModelStage0` constructors collapse variables into
+/// a canonical-keyed map (last-in-declaration-order wins), so two variables
+/// whose names canonicalize identically would silently produce a DIFFERENT
+/// model than the one written. Both constructors must record a
+/// `DuplicateVariable` model-level error naming the colliding spellings, and
+/// that error must survive `set_dependencies` (which recomputes model-level
+/// errors).
+#[test]
+fn test_stage0_records_duplicate_variable_error() {
+    let units_ctx = Context::new(&[], &Default::default()).0;
+    let main_model = x_model(
+        "main",
+        vec![x_aux("net flow", "1", None), x_aux("net_flow", "2", None)],
+    );
+
+    let direct = ModelStage0::new(&main_model, &[], &units_ctx, false);
+    let errors = direct
+        .errors
+        .as_ref()
+        .expect("duplicate canonical idents must record a model-level error");
+    assert_eq!(1, errors.len());
+    assert_eq!(ErrorCode::DuplicateVariable, errors[0].code);
+    let msg = errors[0].details.as_deref().unwrap_or("");
+    assert!(
+        msg.contains("'net flow'") && msg.contains("'net_flow'"),
+        "message should name both colliding spellings, got: {msg}"
+    );
+
+    // The salsa-cached constructor must agree with the direct one.
+    let project_datamodel = datamodel::Project {
+        name: "dup".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![main_model.clone()],
+        source: None,
+        ai_information: None,
+    };
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+    let cached = ModelStage0::new_cached(
+        &db,
+        sync.models["main"].source,
+        sync.project,
+        &main_model,
+        &[],
+        &units_ctx,
+        false,
+    );
+    assert_eq!(direct.errors, cached.errors);
+
+    // `set_dependencies` rebuilds the model-level error list; the Stage0
+    // duplicate error must be extended, not clobbered.
+    let models: HashMap<Ident<Canonical>, &ModelStage0> =
+        std::iter::once((Ident::new("main"), &direct)).collect();
+    let scope = ScopeStage0 {
+        models: &models,
+        dimensions: &Default::default(),
+        model_name: "main",
+    };
+    let mut model = ModelStage1::new(&scope, &direct);
+    let no_module_inputs: ModuleInputSet = BTreeSet::new();
+    let default_instantiation = [no_module_inputs].iter().cloned().collect();
+    model.set_dependencies(&HashMap::new(), &[], &default_instantiation);
+    assert!(
+        model
+            .errors
+            .as_ref()
+            .is_some_and(|errs| errs.iter().any(|e| e.code == ErrorCode::DuplicateVariable)),
+        "DuplicateVariable must survive set_dependencies, got: {:?}",
+        model.errors
     );
 }
 

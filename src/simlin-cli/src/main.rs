@@ -33,7 +33,7 @@ use simlin_engine::errors::{
     FormattedError, FormattedErrorKind, FormattedErrors, format_diagnostic, format_simulation_error,
 };
 use simlin_engine::prost::Message;
-use simlin_engine::{Error, ErrorCode, Result, Results, Vm, datamodel, project_io, serde};
+use simlin_engine::{Error, ErrorCode, Result, Results, build_sim, datamodel, project_io, serde};
 use simlin_engine::{
     load_csv, load_dat, open_vensim, open_vensim_with_data, open_xmile, to_mdl_with_warnings,
     to_xmile,
@@ -410,6 +410,14 @@ fn print_filtered_tsv_comparison(results: &Results, reference: &Results, visible
     }
 }
 
+/// Print one diagnostic to STDERR.
+///
+/// Everything goes to STDERR, warnings included: STDOUT carries the TSV result
+/// table, and a diagnostic interleaved with it would corrupt a redirected or
+/// piped run (the same reason the MDL export warnings go to STDERR, #856).
+/// `message` already opens with the diagnostic's own severity word, so a
+/// warning reads as a warning and `grep '^error'` finds only real errors
+/// (GH #919); `error.severity` is here for callers that need to route further.
 fn print_formatted_error(error: &FormattedError) {
     if matches!(
         error.kind,
@@ -430,6 +438,10 @@ fn report_formatted_errors(formatted: &FormattedErrors) {
 
 /// Collect diagnostics from the salsa accumulator path and convert them
 /// to the same `FormattedErrors` structure the CLI has always used.
+///
+/// `FormattedErrors::push` owns the severity rule, so an advisory `Warning`
+/// (a conveyor's LTM-degraded notice, a unit mismatch) is reported to the user
+/// but never raises `has_model_errors` / `has_variable_errors`.
 fn collect_diagnostics_as_formatted(
     db: &SimlinDb,
     source_project: SourceProject,
@@ -441,31 +453,42 @@ fn collect_diagnostics_as_formatted(
     let diagnostics = collect_all_diagnostics(db, sync.project);
     let mut formatted = FormattedErrors::default();
     for diag in &diagnostics {
-        let fe = format_diagnostic(diag);
-        if fe.kind == FormattedErrorKind::Variable {
-            formatted.has_variable_errors = true;
-        }
-        if fe.kind == FormattedErrorKind::Model {
-            formatted.has_model_errors = true;
-        }
-        formatted.errors.push(fe);
+        formatted.push(format_diagnostic(diag));
     }
     formatted
 }
 
 fn run_simulation(
-    db: &SimlinDb,
+    db: &mut SimlinDb,
     source_project: SourceProject,
+    project: &DatamodelProject,
     model_name: &str,
 ) -> StdResult<Results, Error> {
-    let compiled = compile_project_incremental(db, source_project, model_name)?;
-    let mut vm = Vm::new(compiled)?;
+    // `build_sim` routes conveyor/queue models through their special expansion
+    // build path and ordinary models through the incremental compile, so the CLI
+    // simulates the special stock types instead of tripping the NotExpanded guard.
+    let mut vm = build_sim(db, source_project, project, model_name)?;
     vm.run_to_end()?;
     Ok(vm.into_results())
 }
 
+/// Whether a VM-build failure is already explained by the diagnostics printed
+/// before it.
+///
+/// `NotSimulatable` is the generic "this model has model-level errors" signal,
+/// so it adds nothing once those errors have been printed. It is redundant only
+/// when a real *error* was printed: `has_model_errors` counts `Error`-severity
+/// diagnostics only, so a model whose sole diagnostic is an advisory warning
+/// still reports why its simulation could not be built (GH #919 -- warnings
+/// used to set the flag and swallow this).
+///
+/// pattern: Functional Core -- pure, so the suppression rule is directly testable.
+fn simulation_error_is_redundant(err: &Error, formatted: &FormattedErrors) -> bool {
+    err.code == ErrorCode::NotSimulatable && formatted.has_model_errors
+}
+
 fn handle_simulation_error(err: &Error, formatted: &FormattedErrors) {
-    if err.code == ErrorCode::NotSimulatable && formatted.has_model_errors {
+    if simulation_error_is_redundant(err, formatted) {
         return;
     }
     let formatted_error = format_simulation_error("main", err);
@@ -477,7 +500,7 @@ fn run_datamodel_with_errors(project: &DatamodelProject) -> Results {
     let sync_state = sync_from_datamodel_incremental(&mut db, project, None);
     let formatted = collect_diagnostics_as_formatted(&db, sync_state.project, &sync_state);
     report_formatted_errors(&formatted);
-    match run_simulation(&db, sync_state.project, "main") {
+    match run_simulation(&mut db, sync_state.project, project, "main") {
         Ok(results) => results,
         Err(err) => {
             handle_simulation_error(&err, &formatted);
@@ -507,11 +530,18 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
             }
         }
 
+        // Enable LTM BEFORE harvesting diagnostics. `model_all_diagnostics` emits
+        // the `ConveyorLtmDegraded`/`QueueLtmDegraded` warnings only inside its
+        // `project.ltm_enabled(db)` gate (`db/diagnostic.rs:194`), so collecting
+        // first meant a conveyor/queue model silently returned results with no
+        // loop scores and no explanation of why. With `--ltm` requested, the
+        // LTM-enabled project is the one whose diagnostics the user wants.
+        set_project_ltm_enabled(&mut db, source_project, true);
+
         let formatted = collect_diagnostics_as_formatted(&db, source_project, &sync_state);
         report_formatted_errors(&formatted);
 
-        set_project_ltm_enabled(&mut db, source_project, true);
-        match run_simulation(&db, source_project, "main") {
+        match run_simulation(&mut db, source_project, project, "main") {
             Ok(results) => return results,
             Err(err) => {
                 handle_simulation_error(&err, &formatted);
@@ -522,7 +552,7 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
 
         // LTM failed, fall back to non-LTM incremental simulation.
         set_project_ltm_enabled(&mut db, source_project, false);
-        match run_simulation(&db, source_project, "main") {
+        match run_simulation(&mut db, source_project, project, "main") {
             Ok(results) => return results,
             Err(err) => {
                 handle_simulation_error(&err, &formatted);
@@ -769,7 +799,7 @@ mod open_vensim_model_tests {
     fn run_to_first_row(project: &DatamodelProject) -> Results {
         let mut db = SimlinDb::default();
         let sync_state = sync_from_datamodel_incremental(&mut db, project, None);
-        run_simulation(&db, sync_state.project, "main")
+        run_simulation(&mut db, sync_state.project, project, "main")
             .unwrap_or_else(|e| panic!("simulation failed: {e}"))
     }
 
@@ -867,6 +897,149 @@ mod open_vensim_model_tests {
             msg.contains("no DataProvider configured"),
             "stdin must use the null provider (no FilesystemDataProvider built); \
              expected the 'no DataProvider configured' error, got: {msg}"
+        );
+    }
+
+    /// F2 regression: a queue model must simulate through the CLI's
+    /// `run_simulation` entry point, not only through `simlin_sim_new`. Before
+    /// the `build_sim` dispatch, `compile_project_incremental` hit the
+    /// `QueueNotExpanded` guard and `run_simulation` errored on a model the FFI
+    /// simulates fine.
+    #[test]
+    fn simulate_queue_model_via_run_simulation() {
+        let xml = include_str!("../../../test/queues/queue_drain.xmile");
+        let project = open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+            .expect("parse queue_drain.xmile");
+        let results = run_to_first_row(&project);
+        assert!(
+            results.step_count > 0,
+            "queue model must produce simulation results"
+        );
+    }
+
+    /// F2 regression twin for a conveyor model.
+    #[test]
+    fn simulate_conveyor_model_via_run_simulation() {
+        let xml = include_str!("../../../test/conveyors/minimal_conveyor.xmile");
+        let project = open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+            .expect("parse minimal_conveyor.xmile");
+        let results = run_to_first_row(&project);
+        // The minimal conveyor holds Students at its steady state of 1000.
+        assert!(
+            (scalar_value(&results, "students") - 1000.0).abs() < 1e-6,
+            "conveyor model must simulate to steady state"
+        );
+    }
+}
+
+/// GH #919: an advisory `Warning` must print as a warning and must not be
+/// counted as a model/variable error.
+#[cfg(test)]
+mod severity_reporting_tests {
+    use super::*;
+
+    /// Run the CLI's diagnostic pass exactly as `simulate(.., enable_ltm)` does,
+    /// including the LTM enable that makes the conveyor advisory reachable.
+    fn cli_diagnostics(project: &DatamodelProject, enable_ltm: bool) -> FormattedErrors {
+        let mut db = SimlinDb::default();
+        let sync_state = sync_from_datamodel_incremental(&mut db, project, None);
+        let source_project = sync_state.project;
+        if enable_ltm {
+            set_project_ltm_enabled(&mut db, source_project, true);
+        }
+        collect_diagnostics_as_formatted(&db, source_project, &sync_state)
+    }
+
+    fn messages(formatted: &FormattedErrors) -> Vec<String> {
+        formatted
+            .errors
+            .iter()
+            .filter_map(|e| e.message.clone())
+            .collect()
+    }
+
+    /// The issue's reproduce case, at the level the CLI actually decides things:
+    /// `--ltm` on a conveyor model emits the `conveyor_ltm_degraded` advisory,
+    /// which must render as a warning and leave the error flags clear (so the
+    /// run reports success and `handle_simulation_error` stays armed).
+    #[test]
+    fn conveyor_ltm_advisory_reports_as_a_warning() {
+        let xml = include_str!("../../../test/conveyors/minimal_conveyor.xmile");
+        let project = open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+            .expect("parse minimal_conveyor.xmile");
+
+        let formatted = cli_diagnostics(&project, true);
+        let messages = messages(&formatted);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("conveyor_ltm_degraded") && m.contains("warning in model")),
+            "the LTM-degraded advisory must render as a warning: {messages:?}"
+        );
+        assert!(
+            !messages.iter().any(|m| m.contains("error in model")),
+            "no diagnostic of this model is an error: {messages:?}"
+        );
+        assert!(
+            !formatted.has_model_errors && !formatted.has_variable_errors,
+            "an advisory warning must not raise the error flags"
+        );
+
+        // ...and the model still simulates, so the process exits 0. Route
+        // through `run_simulation` (which returns a Result) rather than
+        // `simulate`, whose failure paths call `die!` -> process::exit and
+        // would kill the whole test binary instead of failing this test.
+        let mut db = SimlinDb::default();
+        let sync_state = sync_from_datamodel_incremental(&mut db, &project, None);
+        let results = run_simulation(&mut db, sync_state.project, &project, "main")
+            .expect("the LTM run must produce results");
+        assert!(results.step_count > 0, "the LTM run must produce results");
+    }
+
+    /// The other direction: a genuine equation error still renders as an error
+    /// and still raises the variable-error flag.
+    #[test]
+    fn equation_error_still_reports_as_an_error() {
+        let project = simlin_engine::test_common::TestProject::new("cli-error")
+            .aux("bad", "1 + bogus", None)
+            .build_datamodel();
+
+        let formatted = cli_diagnostics(&project, false);
+        let messages = messages(&formatted);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("error in model 'main' variable 'bad'")),
+            "a real equation error must render as an error: {messages:?}"
+        );
+        assert!(
+            formatted.has_variable_errors,
+            "an Error-severity diagnostic raises the variable-error flag"
+        );
+    }
+
+    /// `NotSimulatable` is suppressed only when a real model error explained it.
+    /// A warning-only diagnostic set must let the failure through, or the user
+    /// is told "failed to create simulation" with no reason at all.
+    #[test]
+    fn only_real_model_errors_suppress_the_simulation_error() {
+        let not_simulatable = Error::new(ErrorKind::Simulation, ErrorCode::NotSimulatable, None);
+        let other = Error::new(ErrorKind::Simulation, ErrorCode::CircularDependency, None);
+
+        let clean = FormattedErrors::default();
+        assert!(!simulation_error_is_redundant(&not_simulatable, &clean));
+
+        let with_model_error = FormattedErrors {
+            has_model_errors: true,
+            ..Default::default()
+        };
+        assert!(simulation_error_is_redundant(
+            &not_simulatable,
+            &with_model_error
+        ));
+        assert!(
+            !simulation_error_is_redundant(&other, &with_model_error),
+            "only the generic NotSimulatable error is redundant"
         );
     }
 }

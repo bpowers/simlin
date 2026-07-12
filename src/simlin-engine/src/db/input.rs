@@ -184,6 +184,17 @@ pub struct SourceModel {
     pub variable_names: Vec<String>,
     #[returns(ref)]
     pub variables: HashMap<String, SourceVariable>,
+    /// The ordered, pre-dedup variable-ident list: one entry per datamodel
+    /// variable in declaration order, carrying the AS-WRITTEN ident. This is
+    /// the raw data `model_duplicate_variables` needs to detect two variables
+    /// whose names canonicalize to the same ident (GH #885) --
+    /// `variable_names`/`variables` are canonically keyed and collapse
+    /// exactly those twins, the same collapse
+    /// `SourceProject::macro_declarations` exists to undo for model names.
+    /// Declaration order is load-bearing: diagnostics list the colliding
+    /// spellings in document order.
+    #[returns(ref)]
+    pub declared_variable_idents: Vec<String>,
     /// Per-model sim_specs override (None means use project-level specs)
     #[returns(ref)]
     pub model_sim_specs: Option<datamodel::SimSpecs>,
@@ -289,17 +300,39 @@ pub fn datamodel_variable_from_source(db: &dyn Db, var: SourceVariable) -> datam
     compat.can_be_module_input = can_be_module_input;
 
     match var.kind(db) {
-        SourceVariableKind::Stock => datamodel::Variable::Stock(datamodel::Stock {
-            ident,
-            equation,
-            documentation: String::new(),
-            units,
-            inflows: var.inflows(db).clone(),
-            outflows: var.outflows(db).clone(),
-            ai_state: None,
-            uid: None,
-            compat,
-        }),
+        SourceVariableKind::Stock => {
+            // A conveyor stock's <eqn> may be a §7.2 explicit init list
+            // ("100, 200, 300"), which is not a scalar expression. The special
+            // build path (conveyor_compile::expand_conveyors) parses the list
+            // and compiles the stock with a constant raw-sum placeholder;
+            // mirror that rewrite here so the salsa DIAGNOSTIC path (which
+            // parses the UN-expanded project) accepts exactly the equations
+            // the runtime accepts instead of flagging a valid list as a parse
+            // error. A malformed list (or a non-list) is left untouched: the
+            // ordinary parse diagnostic fires, and the special path adds the
+            // precise ConveyorInitListUnsupported rejection. The ordinary
+            // COMPILE path is unaffected -- it hard-rejects any un-expanded
+            // conveyor marker before using this equation.
+            let equation = if compat.conveyor.is_some() {
+                match crate::conveyor_compile::explicit_init_list(&ident, &equation) {
+                    Ok(Some((_spec, placeholder))) => placeholder,
+                    _ => equation,
+                }
+            } else {
+                equation
+            };
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident,
+                equation,
+                documentation: String::new(),
+                units,
+                inflows: var.inflows(db).clone(),
+                outflows: var.outflows(db).clone(),
+                ai_state: None,
+                uid: None,
+                compat,
+            })
+        }
         SourceVariableKind::Flow => datamodel::Variable::Flow(datamodel::Flow {
             ident,
             equation,

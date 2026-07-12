@@ -58,13 +58,14 @@ import { ModuleDetails } from './ModuleDetails';
 import { ErrorDetails } from './ErrorDetails';
 import { ZoomBar } from './ZoomBar';
 import { Canvas, inCreationUid } from './drawing/Canvas';
-import { encodeNameNewlines, Point, searchableName } from './drawing/common';
+import { Point, searchableName } from './drawing/common';
 import { computeFlowAttachment } from './flow-attach';
 import { applyGroupMovement } from './group-movement';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
 import { isStdlibModel } from './module-navigation';
 import { countModelInstances } from './module-details-utils';
 import { buildModuleReferencePayload } from './module-wiring';
+import { buildVariableRenameOps } from './rename-ops';
 import { BreadcrumbBar } from './BreadcrumbBar';
 import { ProjectController, type ProjectSnapshot, type EngineApi } from './project-controller';
 
@@ -765,38 +766,13 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     }
 
     const view = defined(getView());
-    const oldIdent = canonicalize(oldName);
-    // Encode ALL line breaks to the stored backslash-n form -- the previous
-    // single-occurrence replace left raw newlines in multi-line names, which
-    // canonicalized into malformed idents.
-    newName = encodeNameNewlines(newName);
-
-    const elements = view.elements.map((element: ViewElement) => {
-      if (!isNamedViewElement(element)) {
-        return element;
-      }
-      if (element.ident !== oldIdent) {
-        return element;
-      }
-
-      return { ...element, name: newName };
-    });
-
-    const updatedView: StockFlowView = { ...view, elements };
-
-    const ops: JsonModelOperation[] = [
-      {
-        type: 'renameVariable',
-        payload: { from: oldIdent, to: canonicalize(newName) },
-      },
-      {
-        type: 'upsertView',
-        payload: { index: 0, view: stockFlowViewToJson(updatedView) },
-      },
-    ];
+    // buildVariableRenameOps sends the typed name RAW as the rename `to` (the
+    // engine preserves display spellings and matches canonically; issue #906)
+    // and keeps the sketch label in sync via the paired upsertView.
+    const { ops } = buildVariableRenameOps(view, oldName, newName);
 
     const patch: JsonProjectPatch = {
-      models: [{ name: modelName(), ops }],
+      models: [{ name: modelName(), ops: [...ops] }],
     };
 
     if (!(await applyPatchOrReportError(patch, 'rename'))) {

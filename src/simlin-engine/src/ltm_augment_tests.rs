@@ -672,6 +672,7 @@ fn test_generate_sum_equation() {
         "SUM",
         true,
         None,
+        None,
     );
     // Should contain the algebraic shortcut
     assert!(eq.contains("PREVIOUS(total_pop)"), "equation: {eq}");
@@ -700,6 +701,7 @@ fn test_generate_mean_equation() {
         "MEAN",
         true,
         None,
+        None,
     );
     // MEAN divides by N
     assert!(eq.contains("/ 3"), "equation: {eq}");
@@ -717,6 +719,7 @@ fn test_generate_min_equation() {
         &ReducerKind::Nonlinear,
         "MIN",
         true,
+        None,
         None,
     );
     // Should enumerate all elements with nested binary MIN calls
@@ -747,6 +750,7 @@ fn test_generate_max_equation() {
         "MAX",
         true,
         None,
+        None,
     );
     // boston is the current element, so nyc and la are wrapped
     // Nested binary calls: MAX(a, MAX(b, c))
@@ -775,6 +779,7 @@ fn test_generate_stddev_equation() {
         &ReducerKind::Nonlinear,
         "STDDEV",
         true,
+        None,
         None,
     );
     assert_eq!(
@@ -818,6 +823,167 @@ fn test_generate_rank_keeps_delta_ratio() {
     assert!(!partial.contains("PREVIOUS("), "partial: {partial}");
 }
 
+/// GH #910: the implicit WITH-LOOKUP wrap must be applied EXACTLY to the
+/// partials that are a full re-evaluation of the reducer (gf-input units) and
+/// NEVER to the delta-ratio stand-ins (which are the target's own, already
+/// gf-applied, value).
+#[test]
+fn with_lookup_reducer_wrap_applies_to_reevaluations_only() {
+    let elements = vec!["d1".to_string(), "d2".to_string()];
+    let gf = Some("total");
+
+    // SUM: the anchored shortcut is replaced by the enumerated inner partial
+    // (which has no `PREVIOUS(target)` anchor) fed through the gf.
+    let sum = generate_element_to_scalar_equation(
+        "s",
+        "total",
+        "d1",
+        &elements,
+        &ReducerKind::Linear,
+        "SUM",
+        true,
+        None,
+        gf,
+    );
+    assert!(
+        sum.contains("LOOKUP(total, ((s[d1]) + (PREVIOUS(s[d2]))))"),
+        "SUM's gf-aware partial must re-evaluate the reducer, not anchor on \
+         PREVIOUS(target); got {sum}"
+    );
+
+    // MEAN divides the enumerated inner partial by the co-reduced count.
+    let mean = generate_element_to_scalar_equation(
+        "s",
+        "total",
+        "d1",
+        &elements,
+        &ReducerKind::Linear,
+        "MEAN",
+        true,
+        None,
+        gf,
+    );
+    assert!(
+        mean.contains("LOOKUP(total, (((s[d1]) + (PREVIOUS(s[d2]))) / 2))"),
+        "MEAN's gf-aware inner partial divides by the co-reduced count; got {mean}"
+    );
+
+    // MIN's partial already re-evaluates the reducer, so it is simply wrapped.
+    let min = generate_element_to_scalar_equation(
+        "s",
+        "total",
+        "d1",
+        &elements,
+        &ReducerKind::Nonlinear,
+        "MIN",
+        true,
+        None,
+        gf,
+    );
+    assert!(
+        min.contains("LOOKUP(total, MIN(s[d1], PREVIOUS(s[d2])))"),
+        "MIN's re-evaluation partial is wrapped as-is; got {min}"
+    );
+
+    // RANK's stand-in IS the target: wrapping it would feed a gf-output value
+    // back through the gf.
+    let rank = generate_element_to_scalar_equation(
+        "s",
+        "total",
+        "d1",
+        &elements,
+        &ReducerKind::Nonlinear,
+        "RANK",
+        true,
+        None,
+        gf,
+    );
+    assert!(
+        !rank.contains("LOOKUP("),
+        "RANK's delta-ratio stand-in must never be gf-wrapped; got {rank}"
+    );
+
+    // A reducer nested in surrounding arithmetic also falls back to the
+    // delta-ratio, which must stay unwrapped.
+    let nested = generate_element_to_scalar_equation(
+        "s",
+        "total",
+        "d1",
+        &elements,
+        &ReducerKind::Linear,
+        "SUM",
+        false,
+        None,
+        gf,
+    );
+    assert!(
+        !nested.contains("LOOKUP("),
+        "a nested reducer's delta-ratio stand-in must never be gf-wrapped; got {nested}"
+    );
+
+    // Without a gf the emission is byte-identical to the pre-GH-#910 form
+    // (the anchored SUM shortcut).
+    let no_gf = generate_element_to_scalar_equation(
+        "s",
+        "total",
+        "d1",
+        &elements,
+        &ReducerKind::Linear,
+        "SUM",
+        true,
+        None,
+        None,
+    );
+    assert!(
+        no_gf.contains("PREVIOUS(total) + (s[d1] - PREVIOUS(s[d1]))") && !no_gf.contains("LOOKUP("),
+        "the gf-less emission must keep the anchored shortcut; got {no_gf}"
+    );
+}
+
+/// GH #910: `with_lookup_reducer_owner_wrap` classifies a reducer owner.
+#[test]
+fn with_lookup_reducer_owner_wrap_classifies_owners() {
+    use super::{WithLookupWrap, with_lookup_reducer_owner_wrap};
+
+    let plain = scalar_aux_from_text("total", "1");
+    assert!(matches!(
+        with_lookup_reducer_owner_wrap(&plain),
+        WithLookupWrap::NoGf
+    ));
+
+    let scalar_gf = scalar_with_lookup_var("total", "1", decreasing_dm_gf());
+    match with_lookup_reducer_owner_wrap(&scalar_gf) {
+        WithLookupWrap::Wrap(r) => assert_eq!(r, "total"),
+        _ => panic!("a scalar with-lookup owner wraps with its bare name"),
+    }
+
+    let dims = vec![region_dm_dimension()];
+    let a2a_gf = a2a_with_lookup_var("total", &dims, "1", decreasing_dm_gf());
+    match with_lookup_reducer_owner_wrap(&a2a_gf) {
+        // The single variable-level table applies to every element, so the
+        // reference pins element 1 (table index 0).
+        WithLookupWrap::Wrap(r) => assert_eq!(r, "total[1]"),
+        _ => panic!("an A2A with-lookup owner pins its single table"),
+    }
+
+    // Per-element tables have no single expressible reference. Unreachable in
+    // production today (a variable-backed reducer owner is Scalar/A2A, which
+    // can only carry one variable-level table), but the classifier must report
+    // it so the emitters can decline loudly rather than score wrong.
+    let per_element = arrayed_with_lookup_var(
+        "total",
+        &dims,
+        &[
+            ("NYC", "1", Some(decreasing_dm_gf())),
+            ("Boston", "2", Some(decreasing_dm_gf())),
+        ],
+    );
+    assert!(matches!(
+        with_lookup_reducer_owner_wrap(&per_element),
+        WithLookupWrap::PerElementUndecidable
+    ));
+}
+
 #[test]
 fn test_generate_constant_returns_zero() {
     let elements = vec!["nyc".to_string(), "boston".to_string(), "la".to_string()];
@@ -829,6 +995,7 @@ fn test_generate_constant_returns_zero() {
         &ReducerKind::Constant,
         "SIZE",
         true,
+        None,
         None,
     );
     assert_eq!(eq, "0");
@@ -848,6 +1015,7 @@ fn test_generate_nested_reducer_uses_delta_ratio() {
         &ReducerKind::Linear,
         "SUM",
         false, // nested reducer
+        None,
         None,
     );
     // Should NOT use the algebraic shortcut (PREVIOUS(target) + delta)
@@ -877,6 +1045,7 @@ fn test_generate_link_score_wrapping() {
         "SUM",
         true,
         None,
+        None,
     );
     // Should have initial time guard
     assert!(eq.contains("TIME = INITIAL_TIME"), "equation: {eq}");
@@ -904,6 +1073,7 @@ fn test_generate_special_chars_quoted() {
         &ReducerKind::Linear,
         "SUM",
         true,
+        None,
         None,
     );
     // Source name with special chars should be quoted
@@ -983,6 +1153,7 @@ fn test_body_aware_bare_source_matches_legacy() {
         "SUM",
         true,
         Some(&fixture.ctx()),
+        None,
     );
     let legacy = generate_element_to_scalar_equation(
         "pop",
@@ -992,6 +1163,7 @@ fn test_body_aware_bare_source_matches_legacy() {
         &ReducerKind::Linear,
         "SUM",
         true,
+        None,
         None,
     );
     assert_eq!(with_body, legacy, "bare body must keep the legacy shortcut");
@@ -1019,6 +1191,7 @@ fn test_body_aware_co_source_partial() {
         "SUM",
         true,
         Some(&fixture.ctx()),
+        None,
     );
     // Live evaluation: pop frozen, weight[row] live.
     assert!(
@@ -1058,6 +1231,7 @@ fn test_body_aware_scalar_feeder_coefficient() {
         "SUM",
         true,
         Some(&fixture.ctx()),
+        None,
     );
     assert!(
         eq.contains("pop[region·nyc] * PREVIOUS(scale)"),
@@ -1093,6 +1267,7 @@ fn test_body_aware_mean_divides_by_n() {
         "MEAN",
         true,
         Some(&fixture.ctx()),
+        None,
     );
     assert!(eq.contains(" / 3"), "equation: {eq}");
 }
@@ -1122,6 +1297,7 @@ fn test_body_aware_projection_feeder_dep_pins_by_dim_name() {
         "SUM",
         true,
         Some(&fixture.ctx()),
+        None,
     );
     let live = "matrix[d1·a, d2·x] * PREVIOUS(frac[d1·a])";
     let frozen = "PREVIOUS(matrix[d1·a, d2·x]) * PREVIOUS(frac[d1·a])";
@@ -1165,6 +1341,7 @@ fn test_body_aware_repeated_dim_feeder_pins_at_iterated_axis() {
         "SUM",
         true,
         Some(&fixture.ctx()),
+        None,
     );
     assert!(
         eq.contains("PREVIOUS(frac[d1·r2])"),
@@ -1198,6 +1375,7 @@ fn test_body_aware_ambiguous_dim_name_without_slice_falls_back() {
         "SUM",
         true,
         Some(&fixture.ctx()),
+        None,
     );
     assert!(
         eq.contains("SAFEDIV((growth - PREVIOUS(growth))"),
@@ -1230,6 +1408,7 @@ fn test_body_aware_unpinnable_falls_back_to_delta_ratio() {
         "SUM",
         true,
         Some(&fixture.ctx()),
+        None,
     );
     // Delta-ratio form: the partial IS the target, so the numerator is
     // (growth - PREVIOUS(growth)) and q/matrix bodies never appear.
@@ -1262,6 +1441,7 @@ fn test_body_aware_nested_reducer_falls_back_to_delta_ratio() {
         "SUM",
         true,
         Some(&fixture.ctx()),
+        None,
     );
     assert!(
         eq.contains("SAFEDIV((total - PREVIOUS(total))"),
@@ -1335,6 +1515,7 @@ fn test_generate_reduced_sum_equation() {
         "SUM",
         true,
         None,
+        None,
     );
     assert!(
         eq.contains("PREVIOUS(agg[a]) + (matrix[a,x] - PREVIOUS(matrix[a,x]))"),
@@ -1376,6 +1557,7 @@ fn test_generate_reduced_mean_equation() {
         "MEAN",
         true,
         None,
+        None,
     );
     assert!(
         eq.contains("PREVIOUS(row_mean[a]) + (matrix[a,x] - PREVIOUS(matrix[a,x])) / 2"),
@@ -1399,6 +1581,7 @@ fn test_generate_reduced_min_equation() {
         &ReducerKind::Nonlinear,
         "MIN",
         true,
+        None,
         None,
     );
     assert!(
@@ -1426,6 +1609,7 @@ fn test_generate_reduced_max_equation() {
         "MAX",
         true,
         None,
+        None,
     );
     assert!(
         eq.contains("MAX(PREVIOUS(matrix[b,x]), matrix[b,y])"),
@@ -1446,6 +1630,7 @@ fn test_generate_reduced_constant_returns_zero() {
         "SIZE",
         true,
         None,
+        None,
     );
     assert_eq!(eq, "0");
 }
@@ -1465,6 +1650,7 @@ fn test_generate_reduced_nested_uses_delta_ratio() {
         &ReducerKind::Linear,
         "SUM",
         false,
+        None,
         None,
     );
     assert!(
@@ -1491,6 +1677,7 @@ fn test_generate_full_reduce_unchanged_after_refactor() {
         &ReducerKind::Linear,
         "SUM",
         true,
+        None,
         None,
     );
     // A full reduce is the degenerate partial reduce where the result
@@ -2908,6 +3095,252 @@ fn generate_link_score_equation_for_link_normal_target_is_ok() {
     );
 }
 
+/// A decreasing continuous gf over x in [0, 2].
+fn decreasing_dm_gf() -> crate::datamodel::GraphicalFunction {
+    crate::datamodel::GraphicalFunction {
+        kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+        x_points: Some(vec![0.0, 1.0, 2.0]),
+        y_points: vec![4.0, 2.0, 0.0],
+        x_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+        y_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 4.0 },
+    }
+}
+
+/// Build a scalar `Aux` carrying BOTH a real equation and a variable-level
+/// graphical function -- the implicit WITH LOOKUP shape (GH #910).
+fn scalar_with_lookup_var(
+    ident: &str,
+    eqn_text: &str,
+    gf: crate::datamodel::GraphicalFunction,
+) -> Variable {
+    use crate::datamodel::{Aux, Equation as DmEquation, Variable as DmVariable};
+    let dm_var = DmVariable::Aux(Aux {
+        ident: ident.to_string(),
+        equation: DmEquation::Scalar(eqn_text.to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: Some(gf),
+        ai_state: None,
+        uid: None,
+        compat: crate::datamodel::Compat::default(),
+    });
+    lower_dm_var(dm_var, &[])
+}
+
+/// Build an apply-to-all `Aux` with a variable-level graphical function --
+/// the arrayed WITH LOOKUP shape sharing one table across all elements.
+fn a2a_with_lookup_var(
+    ident: &str,
+    dims: &[crate::datamodel::Dimension],
+    eqn_text: &str,
+    gf: crate::datamodel::GraphicalFunction,
+) -> Variable {
+    use crate::datamodel::{Aux, Equation as DmEquation, Variable as DmVariable};
+    let dm_var = DmVariable::Aux(Aux {
+        ident: ident.to_string(),
+        equation: DmEquation::ApplyToAll(
+            dims.iter().map(|d| d.name().to_string()).collect(),
+            eqn_text.to_string(),
+        ),
+        documentation: String::new(),
+        units: None,
+        gf: Some(gf),
+        ai_state: None,
+        uid: None,
+        compat: crate::datamodel::Compat::default(),
+    });
+    lower_dm_var(dm_var, dims)
+}
+
+/// Build a per-element-equation `Aux` where each element carries a real
+/// equation and an OPTIONAL per-element graphical function (GH #909's
+/// arrayed WITH LOOKUP shape; a gf-less element keeps its raw equation).
+fn arrayed_with_lookup_var(
+    ident: &str,
+    dims: &[crate::datamodel::Dimension],
+    elements: &[(&str, &str, Option<crate::datamodel::GraphicalFunction>)],
+) -> Variable {
+    use crate::datamodel::{Aux, Equation as DmEquation, Variable as DmVariable};
+    let equation = DmEquation::Arrayed(
+        dims.iter().map(|d| d.name().to_string()).collect(),
+        elements
+            .iter()
+            .map(|(e, eq, gf)| ((*e).to_string(), (*eq).to_string(), None, gf.clone()))
+            .collect(),
+        None,
+        false,
+    );
+    let dm_var = DmVariable::Aux(Aux {
+        ident: ident.to_string(),
+        equation,
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: crate::datamodel::Compat::default(),
+    });
+    lower_dm_var(dm_var, dims)
+}
+
+/// Shared parse+lower tail for the with-lookup fixture builders above,
+/// mirroring `scalar_aux_from_text` / `arrayed_var_from_text`.
+fn lower_dm_var(
+    dm_var: crate::datamodel::Variable,
+    dims: &[crate::datamodel::Dimension],
+) -> Variable {
+    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
+    let mut implicit_vars = Vec::new();
+    let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
+        dims,
+        &dm_var,
+        &mut implicit_vars,
+        &units_ctx,
+        |mi| Ok(Some(mi.clone())),
+    );
+    let dim_ctx = crate::dimensions::DimensionsContext::from(dims);
+    let models = HashMap::new();
+    let scope = crate::model::ScopeStage0 {
+        models: &models,
+        dimensions: &dim_ctx,
+        model_name: "test",
+    };
+    crate::model::lower_variable(&scope, &stage0)
+}
+
+/// GH #910: a scalar WITH-LOOKUP target's link-score partial must be
+/// wrapped in the same `LOOKUP(self_gf, ...)` application the compiler
+/// performs, so the numerator's partial delta and the actual target delta
+/// are commensurable (both in gf-output units).
+#[test]
+fn link_score_for_with_lookup_scalar_target_wraps_partial_in_lookup() {
+    let from = Ident::<Canonical>::new("source");
+    let to = Ident::<Canonical>::new("target");
+    let to_var = scalar_with_lookup_var("target", "source * other", decreasing_dm_gf());
+    let from_var = scalar_aux_from_text("source", "1");
+    let other_var = scalar_aux_from_text("other", "2");
+
+    let mut all_vars = HashMap::new();
+    all_vars.insert(from.clone(), from_var);
+    all_vars.insert(Ident::<Canonical>::new("other"), other_var);
+    all_vars.insert(to.clone(), to_var.clone());
+
+    let equation = generate_link_score_equation_for_link(
+        &from,
+        &to,
+        &RefShape::Bare,
+        &[],
+        &to_var,
+        &all_vars,
+        None,
+        None,
+    )
+    .expect("a with-lookup scalar target must produce a valid link-score equation");
+    let text = match &equation {
+        Equation::Scalar(t) => t.clone(),
+        other => panic!("expected a scalar link score, got {other:?}"),
+    };
+    assert!(
+        text.contains("LOOKUP(target, source * PREVIOUS(other))"),
+        "the partial must be fed through the target's own gf; got {text}"
+    );
+    assert!(
+        text.contains("- PREVIOUS(target)"),
+        "the numerator must still subtract the (gf-output-units) previous target; got {text}"
+    );
+}
+
+/// GH #910 arrayed shape 1: an apply-to-all WITH-LOOKUP target shares ONE
+/// variable-level table across all elements (the compiler applies table 0
+/// per element), so the partial pins the table reference to the first
+/// element rather than iterating per-element table offsets.
+#[test]
+fn link_score_for_with_lookup_a2a_target_pins_shared_table() {
+    let dims = vec![region_dm_dimension()];
+    let from = Ident::<Canonical>::new("source");
+    let to = Ident::<Canonical>::new("target");
+    let to_var = a2a_with_lookup_var("target", &dims, "source * 0.5", decreasing_dm_gf());
+    let from_var = scalar_aux_from_text("source", "1");
+
+    let mut all_vars = HashMap::new();
+    all_vars.insert(from.clone(), from_var);
+    all_vars.insert(to.clone(), to_var.clone());
+
+    let equation = generate_link_score_equation_for_link(
+        &from,
+        &to,
+        &RefShape::Bare,
+        &[],
+        &to_var,
+        &all_vars,
+        None,
+        None,
+    )
+    .expect("a with-lookup A2A target must produce a valid link-score equation");
+    let text = match &equation {
+        Equation::ApplyToAll(dim_names, t) => {
+            assert_eq!(dim_names, &["Region".to_string()]);
+            t.clone()
+        }
+        other => panic!("expected an apply-to-all link score, got {other:?}"),
+    };
+    assert!(
+        text.contains("LOOKUP(target[1], source * 0.5)"),
+        "the shared-gf partial must pin table 0 via the first element; got {text}"
+    );
+}
+
+/// GH #910 arrayed shape 2: a per-element-equation WITH-LOOKUP target
+/// wraps each slot's partial with THAT element's own table; a gf-less
+/// element keeps its raw (unwrapped) partial, exactly matching
+/// `apply_implicit_with_lookup`'s per-element rule.
+#[test]
+fn link_score_for_with_lookup_arrayed_target_wraps_per_slot() {
+    let dims = vec![region_dm_dimension()];
+    let from = Ident::<Canonical>::new("source");
+    let to = Ident::<Canonical>::new("target");
+    let to_var = arrayed_with_lookup_var(
+        "target",
+        &dims,
+        &[
+            ("NYC", "source * 0.01", Some(decreasing_dm_gf())),
+            ("Boston", "source * 0.02", None),
+        ],
+    );
+    let from_var = scalar_aux_from_text("source", "1");
+
+    let mut all_vars = HashMap::new();
+    all_vars.insert(from.clone(), from_var);
+    all_vars.insert(to.clone(), to_var.clone());
+
+    let equation = generate_link_score_equation_for_link(
+        &from,
+        &to,
+        &RefShape::Bare,
+        &[],
+        &to_var,
+        &all_vars,
+        None,
+        None,
+    )
+    .expect("a with-lookup arrayed target must produce a valid link-score equation");
+
+    let nyc = arrayed_slot(&equation, "nyc");
+    assert!(
+        nyc.contains("LOOKUP(target[nyc], source * 0.01)"),
+        "the gf-bearing NYC slot must wrap its partial in that element's table; got {nyc}"
+    );
+    let boston = arrayed_slot(&equation, "boston");
+    assert!(
+        !boston.contains("LOOKUP"),
+        "the gf-less Boston slot must keep its raw partial (no wrap); got {boston}"
+    );
+    assert!(
+        boston.contains("source * 0.02"),
+        "the gf-less Boston slot still carries its ceteris-paribus partial; got {boston}"
+    );
+}
+
 #[test]
 fn test_arrayed_link_score_population_to_migration_pressure_fixed_nyc() {
     // ltm-503-cross-element-agg.AC1.1
@@ -3788,6 +4221,7 @@ fn test_generate_scalar_feeder_to_agg_equation_freezes_only_feeder() {
         "scale",
         "$\u{205A}ltm\u{205A}agg\u{205A}0",
         "sum(pop[*] * scale)",
+        None,
     )
     .expect("the agg equation text must parse");
     // The frozen evaluation wraps the feeder, not the array reference.
@@ -3829,6 +4263,7 @@ fn test_generate_iterated_feeder_to_agg_equation_pins_slot_and_freezes_feeder() 
         "sum(matrix[d1, *] * frac[d1])",
         &["d1".to_string()],
         &["d1\u{B7}r1".to_string()],
+        None,
     )
     .expect("the agg equation text must parse");
     assert_eq!(
@@ -3854,6 +4289,7 @@ fn test_generate_iterated_feeder_to_agg_equation_unfreezable_without_occurrence(
         "sum(matrix[d1, *] * frac[d1])",
         &["d1".to_string()],
         &["d1\u{B7}r1".to_string()],
+        None,
     )
     .expect_err("a feeder with no occurrence must be unfreezable");
     assert_eq!(err.kind, PartialEquationErrorKind::UnfreezablePartial);
@@ -3875,6 +4311,7 @@ fn test_generate_iterated_feeder_to_agg_equation_bails_on_duplicate_dims() {
         "sum(cube[d1, d1, *] * frac[d1, d1])",
         &["d1".to_string(), "d1".to_string()],
         &["d1\u{B7}r1".to_string(), "d1\u{B7}r2".to_string()],
+        None,
     )
     .expect_err("an ambiguous duplicate-dim slot pin must fail loudly");
     assert_eq!(err.kind, PartialEquationErrorKind::UnfreezablePartial);
@@ -3923,6 +4360,7 @@ fn test_body_aware_fixed_literal_self_reference_falls_back() {
         "SUM",
         true,
         Some(&fixture.ctx()),
+        None,
     );
     assert!(
         eq.contains("SAFEDIV((total - PREVIOUS(total))"),
@@ -3958,6 +4396,7 @@ fn test_body_aware_pinned_slice_self_reference_still_pins() {
         "SUM",
         true,
         Some(&fixture.ctx()),
+        None,
     );
     // The bare fast path fires: legacy shortcut, not delta-ratio.
     assert!(
@@ -3987,6 +4426,7 @@ fn test_body_aware_nonlinear_bare_matches_legacy() {
             name,
             true,
             Some(&fixture.ctx()),
+            None,
         );
         let legacy = generate_element_to_scalar_equation(
             "pop",
@@ -3996,6 +4436,7 @@ fn test_body_aware_nonlinear_bare_matches_legacy() {
             &ReducerKind::Nonlinear,
             name,
             true,
+            None,
             None,
         );
         assert_eq!(with_body, legacy, "{name}: bare body must keep legacy form");
@@ -4024,6 +4465,7 @@ fn test_body_aware_min_coefficient_terms() {
         "MIN",
         true,
         Some(&fixture.ctx()),
+        None,
     );
     assert!(
         eq.contains(
@@ -4059,6 +4501,7 @@ fn test_body_aware_max_coefficient_terms() {
         "MAX",
         true,
         Some(&fixture.ctx()),
+        None,
     );
     assert!(
         eq.contains(
@@ -4090,6 +4533,7 @@ fn test_body_aware_stddev_coefficient_terms() {
         "STDDEV",
         true,
         Some(&fixture.ctx()),
+        None,
     );
     let live = "(pop[region·nyc] * PREVIOUS(scale))";
     let frozen = "(PREVIOUS(pop[region·boston]) * PREVIOUS(scale))";
@@ -4124,6 +4568,7 @@ fn test_body_aware_nonlinear_projection_feeder_dep_pins_by_dim_name() {
         "MIN",
         true,
         Some(&fixture.ctx()),
+        None,
     );
     let live = "(matrix[d1·a, d2·x] * PREVIOUS(frac[d1·a]))";
     let frozen = "(PREVIOUS(matrix[d1·a, d2·y]) * PREVIOUS(frac[d1·a]))";
@@ -4155,6 +4600,7 @@ fn test_body_aware_nonlinear_unpinnable_falls_back() {
         "MIN",
         true,
         Some(&fixture.ctx()),
+        None,
     );
     assert!(
         eq.contains("SAFEDIV((agg - PREVIOUS(agg))"),
@@ -4184,6 +4630,7 @@ fn test_body_aware_rank_keeps_delta_ratio() {
         "RANK",
         true,
         Some(&fixture.ctx()),
+        None,
     );
     assert!(
         eq.contains("SAFEDIV((agg - PREVIOUS(agg))"),
@@ -4229,6 +4676,7 @@ fn shaped_guard_form_falls_back_to_changed_last_for_unfreezable_co_source() {
         Some(&iter_ctx),
         None,
         "growth",
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -4260,6 +4708,7 @@ fn shaped_guard_form_keeps_changed_first_when_freezable() {
         None,
         None,
         "share",
+        None,
     )
     .unwrap();
     let expected_partial = build_partial_equation_shaped(
@@ -4310,6 +4759,7 @@ fn shaped_guard_form_rank_slice_arg_falls_back_to_changed_last() {
         None,
         None,
         "growth",
+        None,
     )
     .unwrap();
     assert!(
@@ -4342,6 +4792,7 @@ fn shaped_guard_form_errs_when_both_conventions_unfreezable() {
         None,
         None,
         "total",
+        None,
     )
     .unwrap_err();
     assert_eq!(err.kind, PartialEquationErrorKind::UnfreezablePartial);
@@ -4367,6 +4818,7 @@ fn shaped_guard_form_errs_when_no_live_occurrence_to_freeze() {
         None,
         None,
         "growth",
+        None,
     )
     .unwrap_err();
     assert_eq!(err.kind, PartialEquationErrorKind::UnfreezablePartial);
@@ -4517,6 +4969,7 @@ fn shaped_guard_form_declines_bare_arrayed_feeder_of_unhoisted_reducer() {
         Some(&iter_ctx),
         None,
         "growth",
+        None,
     )
     .unwrap_err();
     assert_eq!(
@@ -4552,6 +5005,7 @@ fn shaped_guard_form_scalar_feeder_inside_reducer_not_declined_by_gh779() {
         None,
         None,
         "growth",
+        None,
     );
     assert!(
         result.is_ok(),

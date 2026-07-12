@@ -293,14 +293,24 @@ fn test_error_kind_unit_consistency_error() {
             details.starts_with("computed units"),
             "details should be the bare reason: {details}"
         );
+        // Match the summary line on the severity-independent "in model" phrase:
+        // a unit consistency mismatch is Warning-severity, so pinning the word
+        // "error" here would pass vacuously (GH #919).
         assert!(
-            !details.contains('~') && !details.contains("units error in model"),
+            !details.contains('~') && !details.contains("in model"),
             "details must not carry snippet/summary formatting: {details}"
         );
         let message = CStr::from_ptr(consistency.message).to_str().unwrap();
         assert!(
             message.contains('~'),
             "message keeps the terminal-formatted snippet: {message}"
+        );
+        // The consistency mismatch does not block simulation, so its message
+        // must not claim to be an error.
+        assert_eq!(consistency.severity, SimlinErrorSeverity::Warning);
+        assert!(
+            message.contains("units warning in model") && !message.contains("units error in model"),
+            "a Warning-severity unit mismatch renders as a warning: {message}"
         );
 
         simlin_error_free(all_errors);
@@ -501,6 +511,166 @@ unsafe fn any_detail_message_contains(all_errors: *const SimlinError, needle: &s
             .map(|m| m.contains(needle))
             .unwrap_or(false)
     })
+}
+
+/// F2 regression: `simlin_project_get_errors` must NOT report the
+/// `QueueNotExpanded` guard error for a valid queue model. The queue fixtures
+/// emit no Error-severity diagnostic, so `get_errors` returns NULL (no errors).
+/// Before the `build_sim` dispatch, `get_errors` computed `vm_error` via the
+/// ordinary `compile_project_incremental`, which hit the guard and produced a
+/// spurious error for a model that simulates fine.
+#[test]
+fn test_get_errors_queue_model_reports_none() {
+    let xml = include_str!("../../../../test/queues/queue_drain.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse queue_drain.xmile");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "out_error must be null");
+        assert!(
+            all_errors.is_null(),
+            "valid queue model must report no errors"
+        );
+
+        if !all_errors.is_null() {
+            simlin_error_free(all_errors);
+        }
+        simlin_project_unref(proj);
+    }
+}
+
+/// F2 + F15 regression: `simlin_project_get_errors` must report NO errors for a
+/// valid conveyor model. F2 stopped the `ConveyorNotExpanded` guard error; F15
+/// stopped the phantom `empty_equation` diagnostics that the salsa diagnostic
+/// path emitted for each conveyor-driven outflow (the primary + leak flows carry
+/// no `<eqn>` by XMILE design). The minimal_conveyor fixture requests no LTM, so
+/// there is no LTM-degraded Warning either -- `get_errors` returns NULL.
+#[test]
+fn test_get_errors_conveyor_model_has_no_not_expanded() {
+    let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse minimal_conveyor.xmile");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "out_error must be null");
+        if !all_errors.is_null() {
+            let count = simlin_error_get_detail_count(all_errors);
+            let details = simlin_error_get_details(all_errors);
+            let messages: Vec<String> = std::slice::from_raw_parts(details, count)
+                .iter()
+                .filter_map(|d| {
+                    (!d.message.is_null())
+                        .then(|| CStr::from_ptr(d.message).to_str().ok().map(String::from))
+                        .flatten()
+                })
+                .collect();
+            simlin_error_free(all_errors);
+            panic!("valid conveyor model must report no errors; got: {messages:?}");
+        }
+        simlin_project_unref(proj);
+    }
+}
+
+/// A two-model XMILE whose main model instantiates `sub` as a module and whose
+/// `sub` model holds a `<conveyor>` stock. Conveyor/queue support is main-model
+/// only for now (an undocumented limitation, GH #940), so this must be rejected
+/// with a clear, user-facing limitation naming the stock and its model -- NOT the
+/// engine-internal "reached the ordinary compile path un-expanded" guard text.
+const CONVEYOR_IN_SUBMODEL_XMILE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>t</name><vendor>t</vendor><product version="1.0">t</product>
+    <options><uses_conveyor/></options></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>4</stop><dt>0.25</dt></sim_specs>
+  <model>
+    <variables>
+      <module name="sub"/>
+    </variables>
+  </model>
+  <model name="sub">
+    <variables>
+      <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+        <conveyor><len>4</len></conveyor></stock>
+      <flow name="in_f"><eqn>10</eqn></flow>
+      <flow name="out_f"><eqn>0</eqn></flow>
+    </variables>
+  </model>
+</xmile>"#;
+
+/// F3: a conveyor stock in a NON-main (module-referenced) model is permanently
+/// un-simulatable (support is main-model only), and every FFI surface must
+/// surface a CLEAR, user-facing limitation rather than the engine-internal
+/// `ConveyorNotExpanded` guard text. Before the fix the all-models guard tripped
+/// with "reached the ordinary compile path un-expanded", which reads like an
+/// engine bug. This pins both `simlin_project_get_errors` (a sensible message
+/// naming the stock + model) and `simlin_sim_new` + run (surfaces the same error,
+/// never a panic or a silent success).
+#[test]
+fn test_submodel_conveyor_surfaces_clear_error() {
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(
+        CONVEYOR_IN_SUBMODEL_XMILE.as_bytes(),
+    ))
+    .expect("parse conveyor-in-submodel xmile");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        // get_errors: a real error, with a message naming the stock and its
+        // model, and NOT the internal un-expanded guard text.
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "out_error must be null");
+        assert!(
+            !all_errors.is_null(),
+            "a submodel conveyor must report an error"
+        );
+        assert!(
+            any_detail_message_contains(all_errors, "belt"),
+            "the error must name the offending stock"
+        );
+        assert!(
+            any_detail_message_contains(all_errors, "main model"),
+            "the error must state the main-model-only limitation"
+        );
+        assert!(
+            !any_detail_message_contains(all_errors, "un-expanded"),
+            "the error must NOT be the engine-internal un-expanded guard text"
+        );
+        simlin_error_free(all_errors);
+
+        // simlin_sim_new + run: the sim is created (a latent vm_error), and
+        // running it surfaces the clear error -- never a panic or silent success.
+        let mut merr: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut merr as *mut *mut SimlinError);
+        assert!(merr.is_null(), "get_model must succeed");
+        let mut serr: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, false, &mut serr as *mut *mut SimlinError);
+        assert!(!sim.is_null(), "sim handle is created");
+
+        let mut rerr: *mut SimlinError = ptr::null_mut();
+        simlin_sim_run_to_end(sim, &mut rerr as *mut *mut SimlinError);
+        assert!(
+            !rerr.is_null(),
+            "running a submodel-conveyor sim must surface an error"
+        );
+        let msg = CStr::from_ptr(simlin_error_get_message(rerr))
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            !msg.contains("un-expanded"),
+            "run error must be the clear limitation, not the internal guard: {msg}"
+        );
+        simlin_error_free(rerr);
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
 }
 
 /// After creating an LTM-enabled simulation on a model that auto-flips to
@@ -839,6 +1009,381 @@ fn test_get_errors_auto_flip_warning_has_warning_severity() {
         simlin_error_free(all_errors);
         simlin_sim_unref(sim);
         simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F13: enable_ltm on a conveyor/queue model must latch ltm_requested so the
+// ConveyorLtmDegraded / QueueLtmDegraded warnings (docs/design/conveyors.md
+// §9.6, queues.md §10.5) become reachable through simlin_project_get_errors.
+//
+// A conveyor/queue model compiles through the dedicated special-stock build
+// path, which supplies the VM without LTM instrumentation -- LTM over a
+// non-INTEG stock is a documented degradation. Before the fix that branch
+// short-circuited the incremental-compile block that holds the sole
+// ltm_requested latch, so enable_ltm=true was silently honored-as-disabled:
+// the caller asked for analysis, got a sim with no LTM data, AND the degraded
+// warning that exists precisely for these models never reached get_errors
+// (ltm_requested stayed false, so the LtmEnabledGuard harvest never ran).
+// ---------------------------------------------------------------------------
+
+/// After an LTM-enabled sim is created on a conveyor model, `get_errors` must
+/// surface the `ConveyorLtmDegraded` warning naming the conveyor stock. RED
+/// before the latch fix: no diagnostic is reachable at all.
+#[test]
+fn test_get_errors_surfaces_conveyor_ltm_degraded_warning_after_ltm_sim() {
+    let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse minimal_conveyor.xmile");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        // Sanity: before any LTM sim, the degraded warning must be absent (the
+        // project has not requested LTM, so it pays no LTM cost).
+        let mut e0: *mut SimlinError = ptr::null_mut();
+        let pre = simlin_project_get_errors(proj, &mut e0 as *mut *mut SimlinError);
+        assert!(e0.is_null());
+        if !pre.is_null() {
+            assert!(
+                !any_detail_message_contains(pre, "is degraded"),
+                "the degraded warning must be absent before any LTM sim is created"
+            );
+            simlin_error_free(pre);
+        }
+
+        let mut me: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut me as *mut *mut SimlinError);
+        assert!(me.is_null());
+        assert!(!model.is_null());
+
+        // Create an LTM-enabled sim; this must latch the LTM request even
+        // though the special build supplies a non-LTM VM.
+        let mut se: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut se as *mut *mut SimlinError);
+        assert!(se.is_null(), "LTM conveyor sim creation should succeed");
+        assert!(!sim.is_null());
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(
+            !all_errors.is_null(),
+            "get_errors must return the conveyor LTM-degraded warning"
+        );
+        assert!(
+            any_detail_message_contains(all_errors, "conveyor stock")
+                && any_detail_message_contains(all_errors, "is degraded"),
+            "the ConveyorLtmDegraded warning must be reachable via get_errors after an LTM sim"
+        );
+
+        simlin_error_free(all_errors);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// The queue twin of the conveyor test above: after an LTM-enabled sim on a
+/// queue model, `get_errors` must surface the `QueueLtmDegraded` warning.
+#[test]
+fn test_get_errors_surfaces_queue_ltm_degraded_warning_after_ltm_sim() {
+    let xml = include_str!("../../../../test/queues/queue_drain.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse queue_drain.xmile");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut me: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut me as *mut *mut SimlinError);
+        assert!(me.is_null());
+        assert!(!model.is_null());
+
+        let mut se: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut se as *mut *mut SimlinError);
+        assert!(se.is_null(), "LTM queue sim creation should succeed");
+        assert!(!sim.is_null());
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(
+            !all_errors.is_null(),
+            "get_errors must return the queue LTM-degraded warning"
+        );
+        assert!(
+            any_detail_message_contains(all_errors, "queue stock")
+                && any_detail_message_contains(all_errors, "is degraded"),
+            "the QueueLtmDegraded warning must be reachable via get_errors after an LTM sim"
+        );
+
+        simlin_error_free(all_errors);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// The latch must not fire spuriously: a conveyor sim created with
+/// `enable_ltm = false` must NOT surface the degraded warning through
+/// `get_errors` (the project never requested LTM, so it pays no LTM cost).
+#[test]
+fn test_get_errors_no_conveyor_ltm_degraded_when_ltm_not_requested() {
+    let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse minimal_conveyor.xmile");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut me: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut me as *mut *mut SimlinError);
+        assert!(me.is_null());
+        assert!(!model.is_null());
+
+        // A NON-LTM sim must leave ltm_requested false.
+        let mut se: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, false, &mut se as *mut *mut SimlinError);
+        assert!(se.is_null());
+        assert!(!sim.is_null());
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        if !all_errors.is_null() {
+            assert!(
+                !any_detail_message_contains(all_errors, "is degraded"),
+                "the degraded warning must not surface when LTM was never requested"
+            );
+            simlin_error_free(all_errors);
+        }
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// The two spec-mandated compile-time conveyor advisories -- transit time not
+/// an integer multiple of dt (docs/design/conveyors.md §4.1) and constant
+/// linear leak fractions summing above 1 (§5.1) -- must reach callers through
+/// `simlin_project_get_errors` as Warning-severity details, with NO sim
+/// created: they ride the same salsa diagnostic accumulator as the unit
+/// warnings (the special conveyor build path returns a single hard error and
+/// has no warnings channel). Transit 1.3 at dt 0.25 quantizes to 5 slats, an
+/// effective transit of 1.25; leak fractions 0.7 + 0.5 sum to 1.2. The two
+/// leak flows deliberately use BOTH §3.3 encodings -- `leak_a` the explicit
+/// `<leak>0.7</leak>` fraction, `leak_b` a bare `<leak/>` marker with the
+/// fraction in the flow's own `<eqn>` (the form real Stella files use) -- so
+/// the sum only exceeds 1 when both encodings resolve.
+#[test]
+fn test_get_errors_surfaces_conveyor_spec_warnings() {
+    let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header>
+    <name>conveyor spec warnings</name>
+    <vendor>test</vendor>
+    <product version="1.0">test</product>
+    <options><uses_conveyor/></options>
+  </header>
+  <sim_specs method="Euler" time_units="Months">
+    <start>0</start>
+    <stop>12</stop>
+    <dt>0.25</dt>
+  </sim_specs>
+  <model>
+    <variables>
+      <stock name="belt">
+        <eqn>1000</eqn>
+        <inflow>in_f</inflow>
+        <outflow>out_f</outflow>
+        <outflow>leak_a</outflow>
+        <outflow>leak_b</outflow>
+        <conveyor>
+          <len>1.3</len>
+        </conveyor>
+      </stock>
+      <flow name="in_f">
+        <eqn>10</eqn>
+      </flow>
+      <flow name="out_f">
+      </flow>
+      <flow name="leak_a">
+        <leak>0.7</leak>
+      </flow>
+      <flow name="leak_b">
+        <eqn>0.5</eqn>
+        <leak/>
+      </flow>
+    </variables>
+  </model>
+</xmile>"#;
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse conveyor spec-warning fixture");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(
+            !all_errors.is_null(),
+            "the conveyor spec warnings must surface without any sim being created"
+        );
+
+        let count = simlin_error_get_detail_count(all_errors);
+        let details = simlin_error_get_details(all_errors);
+        let slice = std::slice::from_raw_parts(details, count);
+        // Returns the found detail's OWN message so the value assertions
+        // below are scoped to it -- a whole-error-object contains-check would
+        // be tautological (e.g. "1.2" is a substring of the transit
+        // message's "1.25").
+        let find = |needle: &str| {
+            slice.iter().find_map(|d| {
+                if d.message.is_null() {
+                    return None;
+                }
+                let msg = CStr::from_ptr(d.message).to_str().ok()?;
+                msg.contains(needle).then(|| (d, msg.to_string()))
+            })
+        };
+
+        let (transit, transit_msg) = find("not an integer multiple")
+            .expect("the ConveyorTransitNotDtMultiple warning must be present");
+        assert_eq!(
+            transit.severity,
+            SimlinErrorSeverity::Warning,
+            "the transit-quantization advisory must carry Warning severity through the FFI"
+        );
+        assert!(
+            transit_msg.contains("effective transit time of 1.25"),
+            "the transit warning must report the effective transit time 1.25: {transit_msg}"
+        );
+
+        let (leaks, leak_msg) = find("leak fractions")
+            .expect("the ConveyorLeakFractionsExceedOne warning must be present");
+        assert_eq!(
+            leaks.severity,
+            SimlinErrorSeverity::Warning,
+            "the leak-fraction-sum advisory must carry Warning severity through the FFI"
+        );
+        assert!(
+            leak_msg.contains("sum to 1.2,"),
+            "the leak warning must report the fraction sum 1.2: {leak_msg}"
+        );
+
+        simlin_error_free(all_errors);
+        simlin_project_unref(proj);
+    }
+}
+
+/// The honest LTM contract for conveyor/queue models: even with
+/// `enable_ltm = true`, the sim is created WITHOUT LTM instrumentation (the
+/// documented degradation), so `simlin_sim_get_ltm_mode` reports `Disabled`.
+/// The latch fix makes the degraded *warning* reachable via get_errors, but it
+/// must not fabricate an LTM mode. Pins the mode contract for both enable_ltm
+/// values and both special-stock types; this holds before and after the fix.
+#[test]
+fn test_conveyor_and_queue_ltm_sim_report_disabled_ltm_mode() {
+    for (xml, label) in [
+        (
+            include_str!("../../../../test/conveyors/minimal_conveyor.xmile") as &str,
+            "conveyor",
+        ),
+        (
+            include_str!("../../../../test/queues/queue_drain.xmile") as &str,
+            "queue",
+        ),
+    ] {
+        let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+            .unwrap_or_else(|_| panic!("parse {label} fixture"));
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut me: *mut SimlinError = ptr::null_mut();
+            let model =
+                simlin_project_get_model(proj, ptr::null(), &mut me as *mut *mut SimlinError);
+            assert!(me.is_null());
+            assert!(!model.is_null());
+
+            for enable_ltm in [false, true] {
+                let mut se: *mut SimlinError = ptr::null_mut();
+                let sim = simlin_sim_new(model, enable_ltm, &mut se as *mut *mut SimlinError);
+                assert!(se.is_null(), "{label} sim creation should succeed");
+                assert!(!sim.is_null());
+
+                let mut mode_err: *mut SimlinError = ptr::null_mut();
+                let mode = simlin_sim_get_ltm_mode(sim, &mut mode_err as *mut *mut SimlinError);
+                assert!(mode_err.is_null());
+                assert_eq!(
+                    mode,
+                    SimlinLtmMode::Disabled,
+                    "{label} model must report Disabled LTM mode (enable_ltm={enable_ltm}): LTM \
+                     over a non-INTEG stock is a documented degradation, not an active mode"
+                );
+
+                simlin_sim_unref(sim);
+            }
+
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+}
+
+// GH #885: two variables whose names canonicalize to the same identifier
+// (case/whitespace/underscore variants) must surface a loud DuplicateVariable
+// error through `simlin_project_get_errors` -- previously one twin was
+// silently dropped and the project simulated a different model than written.
+#[test]
+fn test_duplicate_canonical_idents_surface_through_get_errors() {
+    let datamodel = TestProject::new("dup_idents")
+        .aux("Attrition", "1", None)
+        .aux("attrition", "2", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(
+            !all_errors.is_null(),
+            "a duplicate canonical ident pair must produce errors"
+        );
+
+        let count = simlin_error_get_detail_count(all_errors);
+        assert!(count > 0);
+        let details = simlin_error_get_details(all_errors);
+        let detail_slice = std::slice::from_raw_parts(details, count);
+        let dup = detail_slice
+            .iter()
+            .find(|d| d.code == SimlinErrorCode::DuplicateVariable)
+            .expect("a DuplicateVariable detail must be reported");
+        assert_eq!(
+            dup.severity,
+            SimlinErrorSeverity::Error,
+            "a silently-wrong simulation is an Error, not a Warning"
+        );
+        let msg = CStr::from_ptr(dup.message).to_str().unwrap();
+        assert!(
+            msg.contains("Attrition") && msg.contains("attrition"),
+            "message must name both original spellings: {msg}"
+        );
+
+        // The project must not be simulatable: compile fails hard.
+        let model_name = std::ffi::CString::new("main").unwrap();
+        let mut sim_err: *mut SimlinError = ptr::null_mut();
+        let simulatable = simlin_project_is_simulatable(
+            proj,
+            model_name.as_ptr(),
+            &mut sim_err as *mut *mut SimlinError,
+        );
+        assert!(!simulatable, "duplicate idents must block simulation");
+        if !sim_err.is_null() {
+            simlin_error_free(sim_err);
+        }
+
+        simlin_error_free(all_errors);
         simlin_project_unref(proj);
     }
 }

@@ -26,7 +26,9 @@ use crate::variable::{Variable, identifier_set};
 
 use super::indexed::{IndexedCircuits, IndexedGraph, TruncatedByBudgetInternal};
 use super::partitions::{CyclePartitions, tarjan_scc};
-use super::polarity::{analyze_agg_consumer_polarity, analyze_link_polarity};
+use super::polarity::{
+    analyze_agg_consumer_polarity, analyze_link_polarity, compose_with_lookup_polarity,
+};
 use super::types::{
     Link, LinkPolarity, Loop, LoopPolarity, TruncatedByBudget, normalize_module_ref,
 };
@@ -1230,10 +1232,15 @@ impl CausalGraph {
                 return LinkPolarity::Positive;
             }
 
-            // General case: analyze the equation AST
+            // General case: analyze the equation AST. The AST is the RAW
+            // input equation; for an implicit WITH-LOOKUP target (tables
+            // present and a real equation) the compiler wraps it in
+            // `LOOKUP(self_gf, input)`, so compose the gf's monotonicity on
+            // top of the AST-derived polarity (GH #910).
             if let Some(ast) = to_var.ast() {
                 // Analyze how 'from' appears in the equation
-                return analyze_link_polarity(ast, from, &self.variables);
+                let input_polarity = analyze_link_polarity(ast, from, &self.variables);
+                return compose_with_lookup_polarity(input_polarity, to_var);
             }
         }
         LinkPolarity::Unknown
@@ -1263,7 +1270,12 @@ impl CausalGraph {
         let Some(ast) = consumer_var.ast() else {
             return LinkPolarity::Unknown;
         };
-        analyze_agg_consumer_polarity(ast, reducer_subexpr_text, agg_name, &self.variables)
+        // An implicit WITH-LOOKUP consumer's equation is wrapped in
+        // `LOOKUP(self_gf, ...)` at compile time, so the hop's polarity
+        // composes with the consumer's gf monotonicity too (GH #910).
+        let raw =
+            analyze_agg_consumer_polarity(ast, reducer_subexpr_text, agg_name, &self.variables);
+        compose_with_lookup_polarity(raw, consumer_var)
     }
 
     /// Polarity of a `feeder → $⁚ltm⁚agg` hop: the discriminating analysis of

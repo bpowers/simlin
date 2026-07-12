@@ -426,6 +426,7 @@ mod tests {
     #[test]
     fn error_output_from_formatted_error() {
         use simlin_engine::common::ErrorCode;
+        use simlin_engine::db::DiagnosticSeverity;
         use simlin_engine::errors::{FormattedError, FormattedErrorKind};
 
         let fe = FormattedError {
@@ -436,6 +437,7 @@ mod tests {
             start_offset: 4,
             end_offset: 9,
             kind: FormattedErrorKind::Variable,
+            severity: DiagnosticSeverity::Error,
             unit_error_kind: None,
             details: None,
         };
@@ -452,12 +454,16 @@ mod tests {
     ///
     /// Both MCP and pysimlin derive their error codes from `ErrorCode`.  MCP
     /// uses `Display` directly; pysimlin maps through `SimlinErrorCode` integer
-    /// values with matching semantics.  This test locks down the string
-    /// representation for the error codes most commonly encountered during
-    /// model editing, ensuring the MCP `code` field stays aligned.
+    /// values.  That mapping is one-to-one only for the commonly-encountered
+    /// codes this test covers -- `SimlinErrorCode` is a narrower enum, and the
+    /// codes outside it (the conveyor/queue diagnostics among them) all collapse
+    /// to `Generic = 32` at the C boundary, so pysimlin sees `Generic` where MCP
+    /// still reports the precise snake_case string.  This test locks down that
+    /// string representation, ensuring the MCP `code` field stays aligned.
     #[test]
     fn error_code_strings_align_with_pysimlin() {
         use simlin_engine::common::ErrorCode;
+        use simlin_engine::db::DiagnosticSeverity;
         use simlin_engine::errors::{FormattedError, FormattedErrorKind};
 
         let cases: Vec<(ErrorCode, &str)> = vec![
@@ -496,6 +502,7 @@ mod tests {
                 start_offset: 0,
                 end_offset: 0,
                 kind: FormattedErrorKind::Variable,
+                severity: DiagnosticSeverity::Error,
                 unit_error_kind: None,
                 details: None,
             };

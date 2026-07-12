@@ -4,11 +4,11 @@
 
 use crate::common::Result;
 use crate::datamodel::{
-    Aux, Compat, DataSource, DataSourceKind, Dimension, DimensionElements, DimensionMapping, Dt,
-    Equation, Extension, Flow, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
-    LoopMetadata, MacroSpec, Model, ModelGroup, Module, ModuleReference, Project, Rect, SimMethod,
-    SimSpecs, Source, Stock, StockFlow, Unit, Variable, View, ViewElement, Visibility,
-    view_element,
+    Aux, Compat, Conveyor, DataSource, DataSourceKind, Dimension, DimensionElements,
+    DimensionMapping, Dt, Equation, Extension, Flow, GraphicalFunction, GraphicalFunctionKind,
+    GraphicalFunctionScale, Leakage, LoopMetadata, MacroSpec, Model, ModelGroup, Module,
+    ModuleReference, Project, Queue, Rect, SimMethod, SimSpecs, Source, SpreadFlow, Stock,
+    StockFlow, Unit, Variable, View, ViewElement, Visibility, view_element,
 };
 use crate::project_io;
 
@@ -343,6 +343,91 @@ fn data_source_from_proto(ds: project_io::variable::DataSource) -> DataSource {
     }
 }
 
+fn conveyor_to_proto(c: &Conveyor) -> project_io::variable::Conveyor {
+    project_io::variable::Conveyor {
+        transit_time: c.transit_time.clone(),
+        capacity: c.capacity.clone(),
+        inflow_limit: c.inflow_limit.clone(),
+        sample: c.sample.clone(),
+        arrest: c.arrest.clone(),
+        discrete: c.discrete,
+        batch_integrity: c.batch_integrity,
+        one_at_a_time: c.one_at_a_time,
+        exponential_leak: c.exponential_leak,
+        ignore_earlier_zone_losses: c.ignore_earlier_zone_losses,
+    }
+}
+
+fn conveyor_from_proto(c: project_io::variable::Conveyor) -> Conveyor {
+    Conveyor {
+        transit_time: c.transit_time,
+        capacity: c.capacity,
+        inflow_limit: c.inflow_limit,
+        sample: c.sample,
+        arrest: c.arrest,
+        discrete: c.discrete,
+        batch_integrity: c.batch_integrity,
+        one_at_a_time: c.one_at_a_time,
+        exponential_leak: c.exponential_leak,
+        ignore_earlier_zone_losses: c.ignore_earlier_zone_losses,
+    }
+}
+
+fn leakage_to_proto(l: &Leakage) -> project_io::variable::Leakage {
+    project_io::variable::Leakage {
+        fraction: l.fraction.clone(),
+        integers: l.integers,
+        zone_start: l.zone_start.clone(),
+        zone_end: l.zone_end.clone(),
+    }
+}
+
+fn leakage_from_proto(l: project_io::variable::Leakage) -> Leakage {
+    Leakage {
+        fraction: l.fraction,
+        integers: l.integers,
+        zone_start: l.zone_start,
+        zone_end: l.zone_end,
+    }
+}
+
+fn spreadflow_to_proto(s: &SpreadFlow) -> project_io::variable::SpreadFlow {
+    use SpreadFlow::*;
+    use project_io::variable::spread_flow::Method;
+    let (method, distrib_eq) = match s {
+        Beginning => (Method::Beginning, None),
+        Even => (Method::Even, None),
+        Dest => (Method::Dest, None),
+        Dist(eq) => (Method::Dist, Some(eq.clone())),
+        Source => (Method::Source, None),
+    };
+    project_io::variable::SpreadFlow {
+        method: method as i32,
+        distrib_eq,
+    }
+}
+
+fn spreadflow_from_proto(s: project_io::variable::SpreadFlow) -> SpreadFlow {
+    use SpreadFlow::*;
+    use project_io::variable::spread_flow::Method;
+    match Method::try_from(s.method).unwrap_or(Method::Beginning) {
+        Method::Beginning => Beginning,
+        Method::Even => Even,
+        Method::Dest => Dest,
+        Method::Dist => Dist(s.distrib_eq.unwrap_or_default()),
+        Method::Source => Source,
+    }
+}
+
+fn queue_to_proto(_q: &Queue) -> project_io::variable::Queue {
+    // A queue has no options (XMILE §4.2); the message is a bare marker.
+    project_io::variable::Queue {}
+}
+
+fn queue_from_proto(_q: project_io::variable::Queue) -> Queue {
+    Queue {}
+}
+
 fn compat_to_proto(compat: &Compat) -> Option<project_io::variable::Compat> {
     if compat.is_empty() {
         return None;
@@ -353,6 +438,11 @@ fn compat_to_proto(compat: &Compat) -> Option<project_io::variable::Compat> {
         can_be_module_input: Some(compat.can_be_module_input),
         visibility: Some(project_io::variable::Visibility::from(compat.visibility) as i32),
         data_source: compat.data_source.as_ref().map(data_source_to_proto),
+        conveyor: compat.conveyor.as_ref().map(conveyor_to_proto),
+        leakage: compat.leakage.as_ref().map(leakage_to_proto),
+        spreadflow: compat.spreadflow.as_ref().map(spreadflow_to_proto),
+        queue: compat.queue.as_ref().map(queue_to_proto),
+        overflow: compat.overflow,
     })
 }
 
@@ -378,6 +468,11 @@ fn compat_from_proto(
                     )
                 }),
             data_source: c.data_source.map(data_source_from_proto),
+            conveyor: c.conveyor.map(conveyor_from_proto),
+            leakage: c.leakage.map(leakage_from_proto),
+            spreadflow: c.spreadflow.map(spreadflow_from_proto),
+            queue: c.queue.map(queue_from_proto),
+            overflow: c.overflow,
         },
         None => Compat {
             active_initial: legacy_ai,
@@ -387,6 +482,11 @@ fn compat_from_proto(
                 project_io::variable::Visibility::try_from(legacy_vis).unwrap_or_default(),
             ),
             data_source: None,
+            conveyor: None,
+            leakage: None,
+            spreadflow: None,
+            queue: None,
+            overflow: false,
         },
     }
 }
@@ -813,6 +913,55 @@ fn test_stock_proto_legacy_only_deserialization() {
     assert!(stock.compat.non_negative);
     assert!(stock.compat.can_be_module_input);
     assert_eq!(stock.compat.visibility, Visibility::Public);
+}
+
+#[test]
+fn test_queue_compat_proto_roundtrip() {
+    // A queue stock: datamodel -> proto -> datamodel must survive byte-identical,
+    // mirroring the conveyor proto contract. `is_empty()` must see the queue.
+    let stock = Stock {
+        ident: "waiting".to_string(),
+        equation: Equation::Scalar("0".to_string()),
+        documentation: String::new(),
+        units: None,
+        inflows: vec!["arrivals".to_string()],
+        outflows: vec!["into_service".to_string(), "balk".to_string()],
+        compat: Compat {
+            queue: Some(Queue {}),
+            ..Compat::default()
+        },
+        ai_state: None,
+        uid: None,
+    };
+    assert!(
+        !stock.compat.is_empty(),
+        "queue must count as non-empty compat"
+    );
+    let actual = Stock::from(project_io::variable::Stock::from(stock.clone()));
+    assert_eq!(stock, actual);
+    assert!(actual.compat.queue.is_some());
+
+    // The overflow bool rides on the outflow's compat.
+    let flow = Flow {
+        ident: "balk".to_string(),
+        equation: Equation::Scalar("0".to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        compat: Compat {
+            overflow: true,
+            ..Compat::default()
+        },
+        ai_state: None,
+        uid: None,
+    };
+    assert!(
+        !flow.compat.is_empty(),
+        "overflow must count as non-empty compat"
+    );
+    let actual = Flow::from(project_io::variable::Flow::from(flow.clone()));
+    assert_eq!(flow, actual);
+    assert!(actual.compat.overflow);
 }
 
 impl From<Flow> for project_io::variable::Flow {
@@ -3102,6 +3251,11 @@ fn test_protobuf_backward_compat_old_protos() {
         can_be_module_input: Some(false),
         visibility: Some(0),
         data_source: None,
+        conveyor: None,
+        leakage: None,
+        spreadflow: None,
+        queue: None,
+        overflow: false,
     };
     let compat = compat_from_proto(Some(old_compat), None, false, false, 0);
     assert_eq!(compat.data_source, None);

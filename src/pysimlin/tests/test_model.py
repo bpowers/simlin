@@ -28,6 +28,14 @@ def test_model(xmile_model_path) -> Model:
     return simlin.load(xmile_model_path)
 
 
+def _canonical(name: str) -> str:
+    """Approximate the engine's identifier canonicalization for
+    spelling-insensitive name matching. XMILE display names embed literal
+    backslash-n sequences for line breaks; those, like spaces, canonicalize
+    to underscores."""
+    return name.lower().replace("\\n", "_").replace(" ", "_")
+
+
 class TestModelVariables:
     """Test working with model variables."""
 
@@ -307,6 +315,91 @@ class TestModelEditing:
         # Project should be unchanged
         after_json = model.project.serialize_json()
         assert after_json == before_json
+
+    def test_edit_preserves_conveyor_marker(self, conveyor_model_path) -> None:
+        """Re-upserting a conveyor stock through edit() must not demote it to
+        a plain stock (GH #882: the converter silently dropped compat.conveyor)."""
+        model = simlin.load(conveyor_model_path)
+
+        with model.edit() as (current, patch):
+            students = current["Students"]
+            students.documentation = "cohort pipeline"
+            patch.upsert_stock(students)
+
+        # Match on the canonical form so this test is insensitive to display
+        # name spelling (patch application preserves it since GH #890).
+        after = json.loads(model.project.serialize_json().decode("utf-8"))
+        stock = next(s for s in after["models"][0]["stocks"] if _canonical(s["name"]) == "students")
+        assert stock.get("documentation") == "cohort pipeline"
+        conveyor = stock.get("compat", {}).get("conveyor")
+        assert conveyor is not None, "conveyor marker dropped by edit round-trip"
+        assert conveyor["transitTime"] == "4"
+        assert conveyor["capacity"] == "1200"
+        assert conveyor["oneAtATime"] is True
+
+    def test_edit_preserves_leakage_and_spreadflow_markers(self, covid_conveyor_model_path) -> None:
+        """Leak/spreadflow flow markers from a real Stella model survive an
+        unrelated documentation edit round-tripped through the converter."""
+        model = simlin.load(covid_conveyor_model_path)
+
+        before = json.loads(model.project.serialize_json().decode("utf-8"))
+        flows = before["models"][0]["flows"]
+        leak_flow = next(
+            f
+            for f in flows
+            if "leakage" in f.get("compat", {}) and "spreadflow" in f.get("compat", {})
+        )
+        name = leak_flow["name"]
+
+        with model.edit(allow_errors=True) as (current, patch):
+            flow = current[name]
+            flow.documentation = "edited"
+            patch.upsert_flow(flow)
+
+        after = json.loads(model.project.serialize_json().decode("utf-8"))
+        flow_after = next(
+            f for f in after["models"][0]["flows"] if _canonical(f["name"]) == _canonical(name)
+        )
+        assert flow_after.get("documentation") == "edited"
+        compat_after = flow_after.get("compat", {})
+        assert compat_after.get("leakage") == leak_flow["compat"]["leakage"], (
+            "leakage marker dropped by edit round-trip"
+        )
+        assert compat_after.get("spreadflow") == leak_flow["compat"]["spreadflow"], (
+            "spreadflow marker dropped by edit round-trip"
+        )
+        assert compat_after.get("nonNegative") == leak_flow["compat"].get("nonNegative")
+
+    def test_edit_preserves_display_names(
+        self, conveyor_model_path, covid_conveyor_model_path
+    ) -> None:
+        """An upsert must not rewrite the variable's display name: the stored
+        name keeps its casing and XMILE backslash-n line breaks (GH #890)."""
+        model = simlin.load(conveyor_model_path)
+
+        with model.edit() as (current, patch):
+            students = current["Students"]
+            students.documentation = "x"
+            patch.upsert_stock(students)
+
+        after = json.loads(model.project.serialize_json().decode("utf-8"))
+        names = [s["name"] for s in after["models"][0]["stocks"]]
+        assert "Students" in names, f"display name destroyed: {names}"
+
+        # A flow whose Stella display name embeds a literal backslash-n line
+        # break must survive an unrelated documentation edit verbatim.
+        model = simlin.load(covid_conveyor_model_path)
+        before = json.loads(model.project.serialize_json().decode("utf-8"))
+        name = next(f["name"] for f in before["models"][0]["flows"] if "\\n" in f["name"])
+
+        with model.edit(allow_errors=True) as (current, patch):
+            flow = current[name]
+            flow.documentation = "edited"
+            patch.upsert_flow(flow)
+
+        after = json.loads(model.project.serialize_json().decode("utf-8"))
+        names_after = [f["name"] for f in after["models"][0]["flows"]]
+        assert name in names_after, f"line-break display name destroyed: {names_after}"
 
     def test_apply_patch_json_invalid_json_raises(self, xmile_model_path) -> None:
         """Malformed JSON should raise an error."""

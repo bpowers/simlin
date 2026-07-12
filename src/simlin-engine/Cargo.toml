@@ -67,6 +67,37 @@ rand = { version = "0.9", default-features = false, features = ["std_rng"] }
 rayon = "1"
 
 [dev-dependencies]
+# Self dev-dependency: turns on `file_io` for this crate's own test, bench, and
+# example targets without turning it on for any production build. `file_io`
+# exists to keep the `csv` dependency (and filesystem access) out of the wasm
+# bundle -- it is a production dependency gate, not a test-coverage gate. The
+# integration corpus loads its expected-results fixtures through `load_dat` /
+# `load_csv` and exercises `FilesystemDataProvider`, so the tests need the
+# feature unconditionally; without this line a bare
+# `cargo test -p simlin-engine` silently compiled away the entire model corpus
+# (GH #925). Cargo permits a dev-dependency cycle back onto the same package.
+#
+# `default-features = false` is load-bearing, not cargo boilerplate: feature
+# selection is a union over every edge, so a default-features edge would silently
+# force `default` (schema, ai_info, debug-derive) back on for every dev target
+# even under an explicit `--no-default-features`, making the flag a no-op there
+# and hiding whatever a minimal-feature build would have caught. This edge must
+# add exactly `file_io` and nothing else. (Separately and pre-existing: the
+# crate's own unit tests do not compile without `debug-derive` -- thousands of
+# assert_eq!/{:?} sites -- so `--no-default-features --tests` fails on its own
+# merits. Feature-gating hygiene must be checked with `--lib`; see tech-debt 60.)
+#
+# Two properties this relies on:
+#   * The added feature is NOT unified into `cargo build`, `cargo check --lib`,
+#     or the wasm32 build -- but only because the workspace sets
+#     `resolver = "2"`. Under resolver v1 dev-dependency features unify into
+#     non-dev builds too, and `csv` would leak into the wasm bundle.
+#   * The edge puts a second, non-`cfg(test)` copy of this crate in the
+#     extern prelude of the unit-test target. Inside `src/`, always refer to
+#     this crate as `crate::`, never `simlin_engine::` -- the latter resolves
+#     to that second copy, whose `#[cfg(test)]` items do not exist and whose
+#     types are distinct from `crate::`'s.
+simlin-engine = { path = ".", default-features = false, features = ["file_io"] }
 csv = "1"
 rand = "0.9"
 # The VDF parity harness (tests/integration/vdf_parity.rs) requires

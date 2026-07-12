@@ -141,6 +141,25 @@ fn precedence_parens_emitted() {
     assert_mdl("(a + b) * c", "(a + b) * c");
 }
 
+/// `^` is right-associative in Vensim (and XMILE 3.3.1), so unlike every other
+/// binary operator it is the **left** operand that needs grouping at equal
+/// precedence -- and a prefix binds looser than `^`, so a negated base needs
+/// grouping too. Both rules live in `mdl_paren_if_necessary`, and dropping
+/// either one is a SILENT wrong answer rather than a parse error: the corrupted
+/// text is itself a re-write fixpoint, so neither the writer proptest (which
+/// compares renders 2 and 3) nor the corpus ratchets can see it. `(4^3)^2` =
+/// 4096 would export as `4^3^2` = 262144, and `(-a)^b` as the sign-flipped
+/// `-a^b` = `-(a^b)`.
+#[test]
+fn exponent_grouping_survives_the_mdl_round_trip() {
+    // Equal-precedence LEFT child needs parens; the right child does not.
+    assert_mdl("(a ^ b) ^ c", "(a ^ b) ^ c");
+    assert_mdl("a ^ b ^ c", "a ^ b ^ c");
+    // A prefixed base needs parens; a prefixed exponent does not.
+    assert_mdl("(-a) ^ b", "(-a) ^ b");
+    assert_mdl("a ^ -b", "a ^ -b");
+}
+
 #[test]
 fn nested_precedence() {
     assert_mdl("a * (b + c) / d", "a * (b + c) / d");
@@ -651,7 +670,12 @@ fn long_equation_variable_entry_uses_continuation() {
         "long equation should use multiline format: {buf}"
     );
     // The equation body should have a continuation if the MDL form exceeds 80 chars
-    let mdl_eqn = equation_to_mdl(long_eqn, &WriterContext::default());
+    let mdl_eqn = equation_to_mdl(
+        long_eqn,
+        "some computed value",
+        &WriterContext::default(),
+        &mut Vec::new(),
+    );
     if mdl_eqn.len() > 80 {
         assert!(
             buf.contains("\\\n\t\t"),
@@ -5790,6 +5814,114 @@ fn wildcard_subscript_without_context_falls_back_to_star() {
         .unwrap()
         .unwrap();
     assert_eq!(expr0_to_mdl(&ast), "SUM(a[*])");
+}
+
+/// An end-to-end guard on three MDL renders of a wildcard reduce over an
+/// arrayed variable. It is a CONJUNCTION guard, not a per-rule pin: it reddens
+/// only when BOTH `^` grouping rules in `mdl_paren_if_necessary` are broken
+/// (i.e. exactly origin/main). Each rule is pinned individually by
+/// `exponent_grouping_survives_the_mdl_round_trip`; this test exists because it
+/// is the shape that actually surfaced the bug, as a counterexample to the
+/// writer proptest's `equation_write_reparse_is_fixpoint`.
+///
+/// The measured chain on origin/main, for the stored equation below (note
+/// `print_eqn` is NOT in the path -- the equation is a string literal that
+/// `equation_to_mdl` re-parses with `Expr0::new`):
+///
+///   1. Render 1 drops the base parens, emitting `-(-0 ^ SUM(arr[DimA!]))`,
+///      because `mdl_paren_if_necessary` lacked the prefixed-`^`-base rule.
+///   2. `mdl::parser` binds a prefix looser than `^`, so that text re-reads as
+///      `-(-(0 ^ ...))` -- a SIGN FLIP. The stored XMILE becomes the doubly
+///      parenthesized `-(-(0 ^ SUM(arr[*])))`, which still parses.
+///   3. Render 2 prints that as the stacked-unary `--(0 ^ SUM(arr[DimA!]))`.
+///      It re-parses fine as MDL, so `parse_mdl(mdl2)` SUCCEEDS.
+///   4. Render 3 calls `Expr0::new("--(0 ^ SUM(arr[*]))")`. Before #912 the
+///      XMILE `parse_unary` did not recurse on its prefix arms, so `--` was a
+///      hard parse error; `equation_to_mdl` then fell back to emitting the
+///      stored XMILE verbatim -- leaking the XMILE-only `[*]` spelling, which
+///      the MDL reader rejects ("expected symbol in subscript list").
+///
+/// So the observable failure is the THIRD render: `mdl2 != mdl3`, with `mdl3`
+/// carrying the raw-text `[*]` leak.
+///
+/// The `ExportWarning` assertions pin the fallback-never-fires property on THIS
+/// branch only -- the unparseable-equation warning is itself a #912 change, so
+/// on origin/main render 3 degrades silently and the fixpoint assert is what
+/// catches it.
+///
+/// Independently of the `^` rules, this also pins that the #847 wildcard
+/// recovery survives the `ApplyToAll` -> `Equation::Arrayed` normalization: MDL
+/// has no apply-to-all syntax, so `arr[DimA] = 1` re-imports as one sub-equation
+/// per element, and every render after the first sees a different `Equation`
+/// variant than `WriterContext` first indexed.
+#[test]
+fn wildcard_reduce_over_apply_to_all_survives_re_rendering() {
+    let arr = Variable::Aux(Aux {
+        ident: "arr".to_owned(),
+        equation: Equation::ApplyToAll(vec!["DimA".to_owned()], "1".to_owned()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: Compat::default(),
+    });
+    let target = make_aux("target", "-((-0) ^ sum(arr[*]))", None, "");
+    let mut project = make_project(vec![make_model(vec![arr, target])]);
+    project.dimensions = vec![datamodel::Dimension {
+        name: "DimA".to_owned(),
+        elements: datamodel::DimensionElements::Named(vec!["A1".to_owned(), "A2".to_owned()]),
+        mappings: vec![],
+        parent: None,
+    }];
+
+    let (mdl1, warnings1) = crate::mdl::project_to_mdl_with_warnings(&project).unwrap();
+    assert!(warnings1.is_empty(), "first render warned: {warnings1:?}");
+    assert!(
+        mdl1.contains("SUM(arr[DimA!])"),
+        "first render lost the bang form:\n{mdl1}"
+    );
+
+    let p2 = crate::mdl::parse_mdl(&mdl1).expect("first render must re-parse");
+    let arr2 = p2.models[0]
+        .variables
+        .iter()
+        .find(|v| v.get_ident() == "arr")
+        .expect("arr survives the round trip");
+    assert!(
+        matches!(arr2.get_equation(), Some(Equation::Arrayed(..))),
+        "the apply-to-all must re-import as per-element sub-equations, else this \
+         test is not exercising the re-render shape: {:?}",
+        arr2.get_equation(),
+    );
+
+    let (mdl2, warnings2) = crate::mdl::project_to_mdl_with_warnings(&p2).unwrap();
+    assert!(
+        warnings2.is_empty(),
+        "second render fell back to raw text: {warnings2:?}"
+    );
+    assert!(
+        mdl2.contains("SUM(arr[DimA!])"),
+        "second render emitted a reader-rejected bare wildcard:\n{mdl2}"
+    );
+
+    let p3 = crate::mdl::parse_mdl(&mdl2).expect("second render must re-parse");
+    let (mdl3, warnings3) = crate::mdl::project_to_mdl_with_warnings(&p3).unwrap();
+    assert!(
+        warnings3.is_empty(),
+        "third render fell back to raw text: {warnings3:?}"
+    );
+
+    // Duplicated from `writer_proptest.rs`'s `equations_section` rather than
+    // shared: the two test modules are siblings mounted from `writer.rs` purely
+    // to stay under the per-file line cap, and reaching across would make the
+    // curated unit tests depend on the proptest module's internals.
+    let equations = |mdl: &str| mdl.split("\t.Control").next().unwrap_or(mdl).to_owned();
+    assert_eq!(
+        equations(&mdl2),
+        equations(&mdl3),
+        "the equations section must be a re-write fixpoint"
+    );
 }
 
 // ---- #850 / #853 builtin-vs-variable shadowing ----

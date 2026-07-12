@@ -2138,7 +2138,8 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
 
     if (uid === inCreationUid) {
       // Names persist line breaks as literal backslash-n (see displayName);
-      // the rename path encodes in Editor.handleRename, the create path here.
+      // the rename path encodes in rename-ops.ts (buildVariableRenameOps),
+      // the create path here.
       latest.current.props.onCreateVariable({ ...element, name: encodeNameNewlines(newName) } as ViewElement);
     } else {
       latest.current.props.onRenameVariable(oldName, newName);

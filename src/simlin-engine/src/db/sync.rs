@@ -212,6 +212,19 @@ fn pinned_loops_from_datamodel(model: &datamodel::Model) -> Vec<PinnedLoopSpec> 
         .collect()
 }
 
+/// Build the ordered, pre-dedup as-written variable-ident list for
+/// `SourceModel::declared_variable_idents` (GH #885): one entry per datamodel
+/// variable, in declaration order. This is the raw data the
+/// duplicate-canonical-ident check needs, which the canonical-keyed
+/// `variables` map collapses.
+fn declared_variable_idents(model: &datamodel::Model) -> Vec<String> {
+    model
+        .variables
+        .iter()
+        .map(|v| v.get_ident().to_string())
+        .collect()
+}
+
 /// Build the immutable stdlib model inputs ONCE, for `SimlinDb::stdlib_models`.
 ///
 /// Creates a `SourceModel`/`SourceVariable` salsa input set for every
@@ -245,6 +258,7 @@ pub(crate) fn build_stdlib_models(db: &SimlinDb) -> StdlibModels {
             full_name.clone(),
             variable_names,
             source_var_map,
+            declared_variable_idents(&dm_model),
             dm_model.sim_specs.clone(),
             None,
             // Stdlib models carry no diagram loop_metadata.
@@ -303,6 +317,7 @@ pub fn sync_from_datamodel(db: &SimlinDb, project: &datamodel::Project) -> SyncR
             dm_model.name.clone(),
             variable_names,
             source_var_map,
+            declared_variable_idents(dm_model),
             model_sim_specs,
             dm_model.macro_spec.clone(),
             pinned_loops_from_datamodel(dm_model),
@@ -641,6 +656,12 @@ pub fn sync_from_datamodel_incremental(
             if *source_model.variables(&*db) != source_var_map {
                 source_model.set_variables(db).to(source_var_map);
             }
+            let new_declared = declared_variable_idents(dm_model);
+            if *source_model.declared_variable_idents(&*db) != new_declared {
+                source_model
+                    .set_declared_variable_idents(db)
+                    .to(new_declared);
+            }
 
             new_models.insert(
                 canonical_model_name,
@@ -673,6 +694,7 @@ pub fn sync_from_datamodel_incremental(
                 dm_model.name.clone(),
                 variable_names,
                 source_var_map,
+                declared_variable_idents(dm_model),
                 model_sim_specs,
                 dm_model.macro_spec.clone(),
                 pinned_loops_from_datamodel(dm_model),

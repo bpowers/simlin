@@ -298,7 +298,12 @@ export function simlin_sim_get_series(sim: SimlinSimPtr, name: string, stepCount
 }
 
 /**
- * Set a value by offset.
+ * Set a simple-constant variable's value at the last saved timestep by offset.
+ *
+ * Edits the last row of the saved results in place, so it is only usable after
+ * run_to_end; it does not stage an override for the next reset (use
+ * simlin_sim_set_value for that). Computed variables' offsets are rejected
+ * with BadOverride, matching simlin_sim_set_value's validation.
  * @param sim Simulation pointer
  * @param offset Variable offset
  * @param value New value

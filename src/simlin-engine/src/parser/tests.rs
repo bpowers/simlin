@@ -468,18 +468,19 @@ fn test_parse_exponentiation() {
 }
 
 #[test]
-fn test_parse_exponentiation_left_associative() {
-    // 2^3^4 should parse as (2^3)^4 since it's left-associative
+fn test_parse_exponentiation_right_associative() {
+    // 2^3^4 parses as 2^(3^4): `^` associates right-to-left (XMILE 3.3.1), as
+    // in Vensim, Stella, and this crate's own MDL reader.
     let ast = parse_eq("2^3^4").unwrap().unwrap().strip_loc();
     let expected = Expr0::Op2(
         BinaryOp::Exp,
+        Box::new(Expr0::Const("2".to_string(), 2.0, Loc::default())),
         Box::new(Expr0::Op2(
             BinaryOp::Exp,
-            Box::new(Expr0::Const("2".to_string(), 2.0, Loc::default())),
             Box::new(Expr0::Const("3".to_string(), 3.0, Loc::default())),
+            Box::new(Expr0::Const("4".to_string(), 4.0, Loc::default())),
             Loc::default(),
         )),
-        Box::new(Expr0::Const("4".to_string(), 4.0, Loc::default())),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -657,10 +658,6 @@ fn test_parse_unary_not_keyword() {
     assert_eq!(ast, expected);
 }
 
-// Note: `--a` is NOT valid syntax in this language.
-// The grammar is Unary -> "-" Exp, and Exp -> ... App -> ... Atom
-// So after a unary operator, we expect an Exp (exponentiation) not another unary.
-// To write double negation, you must use parentheses: `-(-a)`
 #[test]
 fn test_parse_double_negative_with_parens() {
     let ast = parse_eq("-(-a)").unwrap().unwrap().strip_loc();
@@ -676,11 +673,291 @@ fn test_parse_double_negative_with_parens() {
     assert_eq!(ast, expected);
 }
 
+/// Helper: `Op1(op, inner)` with stripped locations.
+fn op1(op: UnaryOp, inner: Expr0) -> Expr0 {
+    Expr0::Op1(op, Box::new(inner), Loc::default())
+}
+
+fn var(name: &str) -> Expr0 {
+    Expr0::Var(RawIdent::new_from_str(name), Loc::default())
+}
+
+fn num(s: &str, v: f64) -> Expr0 {
+    Expr0::Const(s.to_string(), v, Loc::default())
+}
+
+/// A stacked unary minus is legal Vensim (`x = - -3`), and the MDL importer's
+/// `xmile_compat` formatter prints a nested negation unparenthesized (`--x`).
+/// The stored datamodel equation must therefore re-parse (#912).
 #[test]
-fn test_error_double_negative_without_parens() {
-    let err = parse_eq("--a").unwrap_err();
-    assert!(!err.is_empty());
-    assert_eq!(err[0].code, ErrorCode::UnrecognizedToken);
+fn test_parse_stacked_unary_minus() {
+    let ast = parse_eq("--a").unwrap().unwrap().strip_loc();
+    assert_eq!(
+        ast,
+        op1(UnaryOp::Negative, op1(UnaryOp::Negative, var("a")))
+    );
+}
+
+/// Vensim's own surface spelling: a space between the two minus signs. The
+/// lexer emits two separate `Minus` tokens either way, so this and `--3` must
+/// agree.
+#[test]
+fn test_parse_spaced_stacked_unary_minus() {
+    let ast = parse_eq("- -3").unwrap().unwrap().strip_loc();
+    assert_eq!(
+        ast,
+        op1(UnaryOp::Negative, op1(UnaryOp::Negative, num("3", 3.0)))
+    );
+    assert_eq!(ast, parse_eq("--3").unwrap().unwrap().strip_loc());
+}
+
+#[test]
+fn test_parse_triple_unary_minus() {
+    let ast = parse_eq("---a").unwrap().unwrap().strip_loc();
+    assert_eq!(
+        ast,
+        op1(
+            UnaryOp::Negative,
+            op1(UnaryOp::Negative, op1(UnaryOp::Negative, var("a")))
+        )
+    );
+}
+
+/// The `Plus` arm recurses too: `print_eqn`/`xmile_compat` emit a unary plus
+/// unparenthesized, so `-+x` and `+-x` are reachable stored equations.
+#[test]
+fn test_parse_mixed_unary_minus_plus() {
+    assert_eq!(
+        parse_eq("-+a").unwrap().unwrap().strip_loc(),
+        op1(UnaryOp::Negative, op1(UnaryOp::Positive, var("a")))
+    );
+    assert_eq!(
+        parse_eq("+-a").unwrap().unwrap().strip_loc(),
+        op1(UnaryOp::Positive, op1(UnaryOp::Negative, var("a")))
+    );
+}
+
+/// The `Not` arm recurses for the same reason.
+#[test]
+fn test_parse_stacked_not() {
+    assert_eq!(
+        parse_eq("not not a").unwrap().unwrap().strip_loc(),
+        op1(UnaryOp::Not, op1(UnaryOp::Not, var("a")))
+    );
+    assert_eq!(
+        parse_eq("not -a").unwrap().unwrap().strip_loc(),
+        op1(UnaryOp::Not, op1(UnaryOp::Negative, var("a")))
+    );
+}
+
+/// Recursing into `parse_unary` must not change precedence: a non-prefix token
+/// still falls through to `parse_exponentiation`, so `^` binds tighter than a
+/// leading unary minus.
+#[test]
+fn test_stacked_unary_does_not_change_exp_precedence() {
+    assert_eq!(
+        parse_eq("-x ^ 2").unwrap().unwrap().strip_loc(),
+        op1(
+            UnaryOp::Negative,
+            Expr0::Op2(
+                BinaryOp::Exp,
+                Box::new(var("x")),
+                Box::new(num("2", 2.0)),
+                Loc::default(),
+            )
+        )
+    );
+    // The inner operand of a stacked negation likewise absorbs the `^`.
+    assert_eq!(
+        parse_eq("--x ^ 2").unwrap().unwrap().strip_loc(),
+        op1(
+            UnaryOp::Negative,
+            op1(
+                UnaryOp::Negative,
+                Expr0::Op2(
+                    BinaryOp::Exp,
+                    Box::new(var("x")),
+                    Box::new(num("2", 2.0)),
+                    Loc::default(),
+                )
+            )
+        )
+    );
+    // Multiplicative binding is unchanged: `-a * b` is `(-a) * b`.
+    assert_eq!(
+        parse_eq("-a * b").unwrap().unwrap().strip_loc(),
+        Expr0::Op2(
+            BinaryOp::Mul,
+            Box::new(op1(UnaryOp::Negative, var("a"))),
+            Box::new(var("b")),
+            Loc::default(),
+        )
+    );
+    // Vensim pins this: `test/test-models/tests/exponentiation/output.tab`
+    // records `associativity = -2^2 = -4`, i.e. `-(2^2)`, NOT `(-2)^2 = 4`.
+    // Parenthesizing the base is the only way to negate it first.
+    assert_eq!(
+        parse_eq("-2 ^ 2").unwrap().unwrap().strip_loc(),
+        op1(
+            UnaryOp::Negative,
+            Expr0::Op2(
+                BinaryOp::Exp,
+                Box::new(num("2", 2.0)),
+                Box::new(num("2", 2.0)),
+                Loc::default(),
+            )
+        )
+    );
+    assert_eq!(
+        parse_eq("(-2) ^ 2").unwrap().unwrap().strip_loc(),
+        Expr0::Op2(
+            BinaryOp::Exp,
+            Box::new(op1(UnaryOp::Negative, num("2", 2.0))),
+            Box::new(num("2", 2.0)),
+            Loc::default(),
+        )
+    );
+}
+
+/// Binary minus followed by a unary minus stays a subtraction of a negation.
+#[test]
+fn test_binary_minus_then_unary_minus() {
+    assert_eq!(
+        parse_eq("2 - -3").unwrap().unwrap().strip_loc(),
+        Expr0::Op2(
+            BinaryOp::Sub,
+            Box::new(num("2", 2.0)),
+            Box::new(op1(UnaryOp::Negative, num("3", 3.0))),
+            Loc::default(),
+        )
+    );
+}
+
+/// The exponent operand admits a unary prefix (`2 ^ -3`), which Vensim and the
+/// MDL reader accept and which `print_eqn` emits unparenthesized for
+/// `Op2(Exp, a, Op1(Negative, b))`. Without it the printer's own output is
+/// unparseable -- the same defect class as the stacked unary (#912).
+#[test]
+fn test_exponent_operand_admits_unary_prefix() {
+    assert_eq!(
+        parse_eq("2 ^ -3").unwrap().unwrap().strip_loc(),
+        Expr0::Op2(
+            BinaryOp::Exp,
+            Box::new(num("2", 2.0)),
+            Box::new(op1(UnaryOp::Negative, num("3", 3.0))),
+            Loc::default(),
+        )
+    );
+    assert_eq!(
+        parse_eq("2 ^ --3").unwrap().unwrap().strip_loc(),
+        Expr0::Op2(
+            BinaryOp::Exp,
+            Box::new(num("2", 2.0)),
+            Box::new(op1(
+                UnaryOp::Negative,
+                op1(UnaryOp::Negative, num("3", 3.0))
+            )),
+            Loc::default(),
+        )
+    );
+}
+
+/// `^` is RIGHT-associative: `a ^ b ^ c` is `a ^ (b ^ c)`.
+///
+/// Authorities, all in agreement: the XMILE spec (3.3.1, "Exponentiation (right
+/// to left)"), Vensim (`test/test-models/tests/arithmetics/output.tab` records
+/// `cons4^cons3^cons2 == 262144 == 4^(3^2)`, not 4096), and this repo's own MDL
+/// reader (`mdl::parser::parse_power`, whose exponent recurses into
+/// `parse_unary`).
+#[test]
+fn test_exponentiation_is_right_associative() {
+    assert_eq!(
+        parse_eq("a ^ b ^ c").unwrap().unwrap().strip_loc(),
+        Expr0::Op2(
+            BinaryOp::Exp,
+            Box::new(var("a")),
+            Box::new(Expr0::Op2(
+                BinaryOp::Exp,
+                Box::new(var("b")),
+                Box::new(var("c")),
+                Loc::default(),
+            )),
+            Loc::default(),
+        )
+    );
+    // Parenthesizing the LEFT operand is what forces left grouping.
+    assert_eq!(
+        parse_eq("(a ^ b) ^ c").unwrap().unwrap().strip_loc(),
+        Expr0::Op2(
+            BinaryOp::Exp,
+            Box::new(Expr0::Op2(
+                BinaryOp::Exp,
+                Box::new(var("a")),
+                Box::new(var("b")),
+                Loc::default(),
+            )),
+            Box::new(var("c")),
+            Loc::default(),
+        )
+    );
+}
+
+/// A prefixed exponent chains right too: `a ^ -b ^ c` is `a ^ (-(b ^ c))`.
+/// Pinned against Vensim: `expo[sub6] = cons2^-cons2^-cons3` is `0.917004`
+/// (`2^(-(2^(-3)))`), not `64` (`(2^-2)^-3`).
+#[test]
+fn test_prefixed_exponent_associates_right() {
+    assert_eq!(
+        parse_eq("a ^ -b ^ c").unwrap().unwrap().strip_loc(),
+        Expr0::Op2(
+            BinaryOp::Exp,
+            Box::new(var("a")),
+            Box::new(op1(
+                UnaryOp::Negative,
+                Expr0::Op2(
+                    BinaryOp::Exp,
+                    Box::new(var("b")),
+                    Box::new(var("c")),
+                    Loc::default(),
+                )
+            )),
+            Loc::default(),
+        )
+    );
+}
+
+/// The exponent binds tighter than a multiplicative operator to its right, so
+/// right-associativity does not make `^` swallow the rest of the expression.
+#[test]
+fn test_exponent_does_not_swallow_multiplicative() {
+    assert_eq!(
+        parse_eq("2 ^ 3 * 4").unwrap().unwrap().strip_loc(),
+        Expr0::Op2(
+            BinaryOp::Mul,
+            Box::new(Expr0::Op2(
+                BinaryOp::Exp,
+                Box::new(num("2", 2.0)),
+                Box::new(num("3", 3.0)),
+                Loc::default(),
+            )),
+            Box::new(num("4", 4.0)),
+            Loc::default(),
+        )
+    );
+    assert_eq!(
+        parse_eq("2 ^ -3 * 4").unwrap().unwrap().strip_loc(),
+        Expr0::Op2(
+            BinaryOp::Mul,
+            Box::new(Expr0::Op2(
+                BinaryOp::Exp,
+                Box::new(num("2", 2.0)),
+                Box::new(op1(UnaryOp::Negative, num("3", 3.0))),
+                Loc::default(),
+            )),
+            Box::new(num("4", 4.0)),
+            Loc::default(),
+        )
+    );
 }
 
 // ============================================================================
@@ -1141,6 +1418,77 @@ fn test_chained_logical_or() {
             Loc::default(),
         )),
         Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+/// `and` binds tighter than `or` (XMILE 3.3.1, matching Vensim and the crate's
+/// own MDL reader, whose `parse_logic_and` sits inside `parse_logic_or`).
+///
+/// This matters beyond the direct XMILE path: `mdl::xmile_compat` re-emits an
+/// MDL AST *without* parentheses and relies on this grammar to re-establish the
+/// grouping. When both operators shared one left-associative level, the correct
+/// MDL tree `Or(1, And(0, 0))` printed as `1 or 0 and 0` and re-parsed as
+/// `And(Or(1, 0), 0)` -- a different value.
+#[test]
+fn test_and_binds_tighter_than_or() {
+    for src in ["a or b and c", "a || b && c"] {
+        let ast = parse_eq(src).unwrap().unwrap().strip_loc();
+        let expected = Expr0::Op2(
+            BinaryOp::Or,
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+            Box::new(Expr0::Op2(
+                BinaryOp::And,
+                Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+                Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
+                Loc::default(),
+            )),
+            Loc::default(),
+        );
+        assert_eq!(ast, expected, "parsing {src}");
+    }
+}
+
+/// The mirror of [`test_and_binds_tighter_than_or`]: an `and` on the LEFT of an
+/// `or` must not swallow the `or`'s right operand.
+#[test]
+fn test_or_does_not_bind_into_a_leading_and() {
+    let ast = parse_eq("a and b or c").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Op2(
+        BinaryOp::Or,
+        Box::new(Expr0::Op2(
+            BinaryOp::And,
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+            Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
+        Loc::default(),
+    );
+    assert_eq!(ast, expected);
+}
+
+/// `and`/`or` sit BELOW the comparisons, so a comparison never needs parens as a
+/// logical operand. (This is where `mdl::parser`'s own table disagrees with both
+/// Vensim and XMILE -- see GH #914 -- but the XMILE grammar here is correct.)
+#[test]
+fn test_logical_ops_bind_looser_than_comparisons() {
+    let ast = parse_eq("a > b and c < d").unwrap().unwrap().strip_loc();
+    let expected = Expr0::Op2(
+        BinaryOp::And,
+        Box::new(Expr0::Op2(
+            BinaryOp::Gt,
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
+            Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Op2(
+            BinaryOp::Lt,
+            Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
+            Box::new(Expr0::Var(RawIdent::new_from_str("d"), Loc::default())),
+            Loc::default(),
+        )),
         Loc::default(),
     );
     assert_eq!(ast, expected);

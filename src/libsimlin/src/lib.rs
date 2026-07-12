@@ -278,6 +278,36 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             // precise distinction is preserved in the engine-level `ErrorCode`
             // and the error's `details` message (issue #606).
             engine::ErrorCode::LookupReferencedWithoutArgument => SimlinErrorCode::Generic,
+            // Conveyor diagnostics collapse to the wire Generic code (the wire
+            // enum deliberately does not track the engine's growing tail).
+            engine::ErrorCode::ConveyorWithoutOutflow => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorNonEulerMethod => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorQueueUpstreamNotDiscrete => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorTransitNotPositive => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorTransitTooLong => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorTransitNotDtMultiple => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorLeakFractionsExceedOne => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorLtmDegraded => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorDrivenFlowRead => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorNotExpanded => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorSpreadflowUnsupported => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorArrayedDimensionUnresolved => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorContainerAccessUnsupported => SimlinErrorCode::Generic,
+            engine::ErrorCode::QueueNotExpanded => SimlinErrorCode::Generic,
+            engine::ErrorCode::QueueNonEulerMethod => SimlinErrorCode::Generic,
+            engine::ErrorCode::QueueDrivenFlowRead => SimlinErrorCode::Generic,
+            engine::ErrorCode::QueueOverflowNotOnQueue => SimlinErrorCode::Generic,
+            engine::ErrorCode::QueueLtmDegraded => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorInSubmodelUnsupported => SimlinErrorCode::Generic,
+            engine::ErrorCode::QueueInSubmodelUnsupported => SimlinErrorCode::Generic,
+            engine::ErrorCode::QueueSecondaryOutflowToConveyor => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorMultipleNonLeakOutflows => SimlinErrorCode::Generic,
+            engine::ErrorCode::StockBothConveyorAndQueue => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorInitListUnsupported => SimlinErrorCode::Generic,
+            // Unknown-element-subscript advisories likewise collapse to the
+            // wire Generic code; the specific engine code and the message
+            // carry the detail (GH #905).
+            engine::ErrorCode::UnknownElementSubscript => SimlinErrorCode::Generic,
         }
     }
 }
@@ -455,6 +485,17 @@ pub(crate) struct SimState {
     /// `simlin_sim_run_to_end`, `simlin_sim_reset`, and
     /// `simlin_sim_set_value_by_offset`.
     pub(crate) cached_partition_denominators: HashMap<(Option<usize>, usize), Vec<f64>>,
+    /// Resolved conveyor plans for a conveyor model (`None`/empty otherwise).
+    /// `run_to_end` consumes the VM (`into_results`) and `reset` recreates it
+    /// from `compiled`; a plain `Vm::new(compiled)` would drop the conveyor
+    /// pass, so reset re-attaches these plans to the recreated VM.
+    pub(crate) conveyor_plans: Option<Vec<engine::conveyor_compile::ConveyorPlan>>,
+    /// Resolved queue plans for a queue model (`None`/empty otherwise). Cached
+    /// alongside `conveyor_plans` for the same reason: `reset` recreates the VM
+    /// from `compiled`, and a plain `Vm::new(compiled)` would drop the queue
+    /// pass, so reset re-attaches these plans. A model with both conveyors and
+    /// queues carries both plan sets.
+    pub(crate) queue_plans: Option<Vec<engine::queue_compile::QueuePlan>>,
 }
 
 /// Opaque simulation structure

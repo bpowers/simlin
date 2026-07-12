@@ -13,11 +13,14 @@ import type { JsonModule } from '@simlin/engine';
  * full-replace by UID, so hand-listing fields silently drops anything omitted --
  * notably compat (canBeModuleInput / isPublic / dataSource), the same
  * silent-data-loss trap fixed elsewhere in this change. Basing the payload on
- * moduleToJson(existing) and overriding only name/modelName carries every field
- * forward. Falls back to a bare {name, modelName} when there is no existing
- * module (or the variable at that ident is not a module). Shared by the
- * create-model-for-module and duplicate-model-for-module handlers so the two
- * cannot drift apart again.
+ * moduleToJson(existing) and overriding only modelName carries every field
+ * forward -- including the module's preserved display-spelling `name`
+ * (callers pass `moduleIdent` as the canonical key the module was looked up
+ * under, so re-stamping `name` with it would erode a display name like
+ * "Hares Instance" to `hares_instance`; issue #906). Falls back to a bare
+ * {name, modelName} when there is no existing module (or the variable at that
+ * ident is not a module). Shared by the create-model-for-module and
+ * duplicate-model-for-module handlers so the two cannot drift apart again.
  */
 export function buildModuleReferencePayload(
   existing: Variable | undefined,
@@ -25,7 +28,7 @@ export function buildModuleReferencePayload(
   newModelName: string,
 ): JsonModule {
   if (existing && existing.type === 'module') {
-    return { ...moduleToJson(existing), name: moduleIdent, modelName: newModelName };
+    return { ...moduleToJson(existing), modelName: newModelName };
   }
   return { name: moduleIdent, modelName: newModelName };
 }

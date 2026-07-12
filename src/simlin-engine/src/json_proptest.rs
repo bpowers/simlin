@@ -181,6 +181,146 @@ fn arrayed_equation_strategy() -> impl Strategy<Value = ArrayedEquation> {
     ]
 }
 
+// Compat-extension strategies (conveyor/queue/leakage/spreadflow), so the
+// roundtrip properties cover the full datamodel::Compat surface.
+
+// These sub-strategies are `.boxed()` so their (deeply nested) value trees are
+// heap-allocated rather than embedded inline in the enclosing stock/flow/model/
+// project value trees. Without boxing, the 10-field conveyor tuple nested inside
+// every stock inside every model overflows the 2 MB proptest test-thread stack
+// during project generation.
+
+fn conveyor_strategy() -> BoxedStrategy<Conveyor> {
+    (
+        equation_strategy(),
+        prop::option::of(equation_strategy()),
+        prop::option::of(equation_strategy()),
+        prop::option::of(equation_strategy()),
+        prop::option::of(equation_strategy()),
+        any::<bool>(),
+        any::<bool>(),
+        any::<bool>(),
+        any::<bool>(),
+        any::<bool>(),
+    )
+        .prop_map(
+            |(
+                transit_time,
+                capacity,
+                inflow_limit,
+                sample,
+                arrest,
+                discrete,
+                batch_integrity,
+                one_at_a_time,
+                exponential_leak,
+                ignore_earlier_zone_losses,
+            )| Conveyor {
+                transit_time,
+                capacity,
+                inflow_limit,
+                sample,
+                arrest,
+                discrete,
+                batch_integrity,
+                one_at_a_time,
+                exponential_leak,
+                ignore_earlier_zone_losses,
+            },
+        )
+        .boxed()
+}
+
+fn leakage_strategy() -> BoxedStrategy<Leakage> {
+    (
+        prop::option::of(equation_strategy()),
+        any::<bool>(),
+        prop::option::of(equation_strategy()),
+        prop::option::of(equation_strategy()),
+    )
+        .prop_map(|(fraction, integers, zone_start, zone_end)| Leakage {
+            fraction,
+            integers,
+            zone_start,
+            zone_end,
+        })
+        .boxed()
+}
+
+fn spreadflow_strategy() -> BoxedStrategy<SpreadFlow> {
+    prop_oneof![
+        Just(SpreadFlow::Beginning),
+        Just(SpreadFlow::Even),
+        Just(SpreadFlow::Dest),
+        equation_strategy().prop_map(SpreadFlow::Dist),
+        Just(SpreadFlow::Source),
+    ]
+    .boxed()
+}
+
+/// Compat for a stock: the base access booleans plus the stock-only conveyor
+/// and queue markers. Returns `None` when nothing is set (matching the
+/// `is_empty()`-gated serialization).
+fn stock_compat_strategy() -> BoxedStrategy<Option<Compat>> {
+    (
+        any::<bool>(),
+        any::<bool>(),
+        any::<bool>(),
+        prop::option::of(conveyor_strategy()),
+        prop::option::of(Just(Queue {})),
+    )
+        .prop_map(
+            |(non_negative, can_be_module_input, is_public, conveyor, queue)| {
+                let compat = Compat {
+                    non_negative,
+                    can_be_module_input,
+                    is_public,
+                    conveyor,
+                    queue,
+                    ..Default::default()
+                };
+                if compat.is_empty() {
+                    None
+                } else {
+                    Some(compat)
+                }
+            },
+        )
+        .boxed()
+}
+
+/// Compat for a flow: the base access booleans plus the flow-only leakage,
+/// spreadflow, and overflow markers.
+fn flow_compat_strategy() -> BoxedStrategy<Option<Compat>> {
+    (
+        any::<bool>(),
+        any::<bool>(),
+        any::<bool>(),
+        prop::option::of(leakage_strategy()),
+        prop::option::of(spreadflow_strategy()),
+        any::<bool>(),
+    )
+        .prop_map(
+            |(non_negative, can_be_module_input, is_public, leakage, spreadflow, overflow)| {
+                let compat = Compat {
+                    non_negative,
+                    can_be_module_input,
+                    is_public,
+                    leakage,
+                    spreadflow,
+                    overflow,
+                    ..Default::default()
+                };
+                if compat.is_empty() {
+                    None
+                } else {
+                    Some(compat)
+                }
+            },
+        )
+        .boxed()
+}
+
 // Variable type strategies with XOR invariant: equation/initial_equation OR arrayed_equation
 
 fn stock_strategy() -> BoxedStrategy<Stock> {
@@ -193,37 +333,23 @@ fn stock_strategy() -> BoxedStrategy<Stock> {
             units_strategy(),
             prop::collection::vec(ident_strategy(), 0..3),
             prop::collection::vec(ident_strategy(), 0..3),
-            any::<bool>(),
             documentation_strategy(),
-            any::<bool>(),
-            any::<bool>(),
+            stock_compat_strategy(),
         )
             .prop_map(
-                |(uid, name, eq, units, inflows, outflows, non_neg, doc, can_input, is_pub)| {
-                    let compat = if non_neg || can_input || is_pub {
-                        Some(Compat {
-                            non_negative: non_neg,
-                            can_be_module_input: can_input,
-                            is_public: is_pub,
-                            ..Default::default()
-                        })
-                    } else {
-                        None
-                    };
-                    Stock {
-                        uid,
-                        name,
-                        initial_equation: eq,
-                        units,
-                        inflows,
-                        outflows,
-                        documentation: doc,
-                        arrayed_equation: None,
-                        compat,
-                        non_negative: false,
-                        can_be_module_input: false,
-                        is_public: false,
-                    }
+                |(uid, name, eq, units, inflows, outflows, doc, compat)| Stock {
+                    uid,
+                    name,
+                    initial_equation: eq,
+                    units,
+                    inflows,
+                    outflows,
+                    documentation: doc,
+                    arrayed_equation: None,
+                    compat,
+                    non_negative: false,
+                    can_be_module_input: false,
+                    is_public: false,
                 }
             ),
         // Arrayed stock: has arrayed_equation, empty initial_equation
@@ -234,37 +360,23 @@ fn stock_strategy() -> BoxedStrategy<Stock> {
             units_strategy(),
             prop::collection::vec(ident_strategy(), 0..3),
             prop::collection::vec(ident_strategy(), 0..3),
-            any::<bool>(),
             documentation_strategy(),
-            any::<bool>(),
-            any::<bool>(),
+            stock_compat_strategy(),
         )
             .prop_map(
-                |(uid, name, arr_eq, units, inflows, outflows, non_neg, doc, can_input, is_pub)| {
-                    let compat = if non_neg || can_input || is_pub {
-                        Some(Compat {
-                            non_negative: non_neg,
-                            can_be_module_input: can_input,
-                            is_public: is_pub,
-                            ..Default::default()
-                        })
-                    } else {
-                        None
-                    };
-                    Stock {
-                        uid,
-                        name,
-                        initial_equation: String::new(),
-                        units,
-                        inflows,
-                        outflows,
-                        documentation: doc,
-                        arrayed_equation: Some(arr_eq),
-                        compat,
-                        non_negative: false,
-                        can_be_module_input: false,
-                        is_public: false,
-                    }
+                |(uid, name, arr_eq, units, inflows, outflows, doc, compat)| Stock {
+                    uid,
+                    name,
+                    initial_equation: String::new(),
+                    units,
+                    inflows,
+                    outflows,
+                    documentation: doc,
+                    arrayed_equation: Some(arr_eq),
+                    compat,
+                    non_negative: false,
+                    can_be_module_input: false,
+                    is_public: false,
                 }
             ),
     ]
@@ -279,78 +391,46 @@ fn flow_strategy() -> BoxedStrategy<Flow> {
             ident_strategy(),
             equation_strategy(),
             units_strategy(),
-            any::<bool>(),
             prop::option::of(graphical_function_strategy()),
             documentation_strategy(),
-            any::<bool>(),
-            any::<bool>(),
+            flow_compat_strategy(),
         )
-            .prop_map(
-                |(uid, name, eq, units, non_neg, gf, doc, can_input, is_pub)| {
-                    let compat = if non_neg || can_input || is_pub {
-                        Some(Compat {
-                            non_negative: non_neg,
-                            can_be_module_input: can_input,
-                            is_public: is_pub,
-                            ..Default::default()
-                        })
-                    } else {
-                        None
-                    };
-                    Flow {
-                        uid,
-                        name,
-                        equation: eq,
-                        units,
-                        graphical_function: gf,
-                        documentation: doc,
-                        arrayed_equation: None,
-                        compat,
-                        non_negative: false,
-                        can_be_module_input: false,
-                        is_public: false,
-                    }
-                }
-            ),
+            .prop_map(|(uid, name, eq, units, gf, doc, compat)| Flow {
+                uid,
+                name,
+                equation: eq,
+                units,
+                graphical_function: gf,
+                documentation: doc,
+                arrayed_equation: None,
+                compat,
+                non_negative: false,
+                can_be_module_input: false,
+                is_public: false,
+            }),
         // Arrayed flow: has arrayed_equation, empty equation
         (
             any::<i32>(),
             ident_strategy(),
             arrayed_equation_strategy(),
             units_strategy(),
-            any::<bool>(),
             prop::option::of(graphical_function_strategy()),
             documentation_strategy(),
-            any::<bool>(),
-            any::<bool>(),
+            flow_compat_strategy(),
         )
-            .prop_map(
-                |(uid, name, arr_eq, units, non_neg, gf, doc, can_input, is_pub)| {
-                    let compat = if non_neg || can_input || is_pub {
-                        Some(Compat {
-                            non_negative: non_neg,
-                            can_be_module_input: can_input,
-                            is_public: is_pub,
-                            ..Default::default()
-                        })
-                    } else {
-                        None
-                    };
-                    Flow {
-                        uid,
-                        name,
-                        equation: String::new(),
-                        units,
-                        graphical_function: gf,
-                        documentation: doc,
-                        arrayed_equation: Some(arr_eq),
-                        compat,
-                        non_negative: false,
-                        can_be_module_input: false,
-                        is_public: false,
-                    }
-                }
-            ),
+            .prop_map(|(uid, name, arr_eq, units, gf, doc, compat)| Flow {
+                uid,
+                name,
+                equation: String::new(),
+                units,
+                graphical_function: gf,
+                documentation: doc,
+                arrayed_equation: Some(arr_eq),
+                compat,
+                non_negative: false,
+                can_be_module_input: false,
+                is_public: false,
+            }),
     ]
     .boxed()
 }
@@ -1763,6 +1843,156 @@ mod protobuf_roundtrip_tests {
         assert_eq!(compat.get("nonNegative").unwrap(), true);
         assert_eq!(compat.get("canBeModuleInput").unwrap(), true);
         assert_eq!(compat.get("isPublic").unwrap(), true);
+    }
+
+    /// A conveyor stock, a queue stock, and flows carrying leakage / spreadflow
+    /// / overflow markers must survive a datamodel -> json -> datamodel
+    /// round-trip. Regression for the json::Compat extension drop: json::Compat
+    /// did not mirror the five datamodel::Compat conveyor/queue extensions, so
+    /// `compat_to_json` discarded them and the reverse `From` impls silently
+    /// re-materialized them as None/false via `..Default::default()`.
+    #[test]
+    fn test_compat_extensions_survive_datamodel_json_roundtrip() {
+        use crate::datamodel::{
+            Compat as DmCompat, Conveyor, Equation, Leakage, Queue, SpreadFlow, Visibility,
+        };
+
+        // Every option field is populated so a dropped field is observable.
+        let conveyor_stock = datamodel::Stock {
+            ident: "belt".to_string(),
+            equation: Equation::Scalar("100".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["load".to_string()],
+            outflows: vec!["unload".to_string()],
+            ai_state: None,
+            uid: None,
+            compat: DmCompat {
+                conveyor: Some(Conveyor {
+                    transit_time: "4".to_string(),
+                    capacity: Some("1200".to_string()),
+                    inflow_limit: Some("50".to_string()),
+                    sample: Some("2".to_string()),
+                    arrest: Some("stopped".to_string()),
+                    discrete: true,
+                    batch_integrity: true,
+                    one_at_a_time: false,
+                    exponential_leak: true,
+                    ignore_earlier_zone_losses: true,
+                }),
+                ..Default::default()
+            },
+        };
+
+        let queue_stock = datamodel::Stock {
+            ident: "waiting".to_string(),
+            equation: Equation::Scalar("0".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec![],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: DmCompat {
+                queue: Some(Queue {}),
+                ..Default::default()
+            },
+        };
+
+        let leak_flow = datamodel::Flow {
+            ident: "leaking".to_string(),
+            equation: Equation::Scalar("0".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: DmCompat {
+                leakage: Some(Leakage {
+                    fraction: Some("0.1".to_string()),
+                    integers: true,
+                    zone_start: Some("0.2".to_string()),
+                    zone_end: Some("0.8".to_string()),
+                }),
+                ..Default::default()
+            },
+        };
+
+        let spread_inflow = datamodel::Flow {
+            ident: "loading".to_string(),
+            equation: Equation::Scalar("10".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: DmCompat {
+                spreadflow: Some(SpreadFlow::Dist("uniform".to_string())),
+                ..Default::default()
+            },
+        };
+
+        let overflow_outflow = datamodel::Flow {
+            ident: "spilling".to_string(),
+            equation: Equation::Scalar("0".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: DmCompat {
+                overflow: true,
+                visibility: Visibility::Public,
+                ..Default::default()
+            },
+        };
+
+        let roundtrip_stock = |s: datamodel::Stock| -> datamodel::Stock {
+            let j: Stock = s.into();
+            j.into()
+        };
+        let roundtrip_flow = |f: datamodel::Flow| -> datamodel::Flow {
+            let j: Flow = f.into();
+            j.into()
+        };
+
+        assert_eq!(conveyor_stock.clone(), roundtrip_stock(conveyor_stock));
+        assert_eq!(queue_stock.clone(), roundtrip_stock(queue_stock));
+        assert_eq!(leak_flow.clone(), roundtrip_flow(leak_flow));
+        assert_eq!(spread_inflow.clone(), roundtrip_flow(spread_inflow));
+        assert_eq!(overflow_outflow.clone(), roundtrip_flow(overflow_outflow));
+    }
+
+    /// Each SpreadFlow variant round-trips through json, including the `Dist`
+    /// payload carried in the adjacently-tagged JSON representation.
+    #[test]
+    fn test_spreadflow_variants_survive_datamodel_json_roundtrip() {
+        use crate::datamodel::{Compat as DmCompat, Equation, SpreadFlow};
+
+        for sf in [
+            SpreadFlow::Beginning,
+            SpreadFlow::Even,
+            SpreadFlow::Dest,
+            SpreadFlow::Dist("my dist".to_string()),
+            SpreadFlow::Source,
+        ] {
+            let flow = datamodel::Flow {
+                ident: "loading".to_string(),
+                equation: Equation::Scalar("1".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: DmCompat {
+                    spreadflow: Some(sf.clone()),
+                    ..Default::default()
+                },
+            };
+            let j: Flow = flow.clone().into();
+            let back: datamodel::Flow = j.into();
+            assert_eq!(flow, back, "spreadflow variant {:?} must round-trip", sf);
+        }
     }
 }
 

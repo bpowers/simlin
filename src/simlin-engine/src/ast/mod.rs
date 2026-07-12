@@ -288,30 +288,85 @@ pub trait Visitor<T> {
 }
 
 /// Determine if a child expression needs parentheses given the parent's
-/// precedence.  For right children of non-commutative operators (-, /, mod),
-/// parenthesize at equal precedence to preserve grouping:
-/// `a - (b - c)` must not become `a - b - c`.
+/// precedence.
+///
+/// At equal precedence the operator's ASSOCIATIVITY decides which side must be
+/// grouped: it is always the side the parser would NOT have chosen on its own.
+///
+/// * `^` associates right-to-left (XMILE 3.3.1), so it groups its LEFT child:
+///   `(a ^ b) ^ c` must not become `a ^ b ^ c`, which re-parses as `a ^ (b ^ c)`
+///   -- `(4^3)^2 = 4096` printed as `4^(3^2) = 262144`.
+/// * Every other binary operator associates left-to-right, so it groups its
+///   RIGHT child: `a - (b - c)` must not become `a - b - c`.
+///
+/// The right-child rule applies to `+` and `*` too, not just the obviously
+/// non-associative `-` / `/` / `mod`. Floating-point addition and multiplication
+/// are NOT associative, so re-printing `a + (b + c)` as `a + b + c` silently
+/// reassociates the sum. Only an AST the parser would rebuild identically may go
+/// unparenthesized.
 fn needs_parens_for_op(parent_op: &BinaryOp, child_op: &BinaryOp, is_right_child: bool) -> bool {
     let parent_prec = parent_op.precedence();
     let child_prec = child_op.precedence();
     if parent_prec > child_prec {
         return true;
     }
-    if is_right_child && parent_prec == child_prec {
-        return matches!(parent_op, BinaryOp::Sub | BinaryOp::Div | BinaryOp::Mod);
+    if parent_prec == child_prec {
+        return if matches!(parent_op, BinaryOp::Exp) {
+            !is_right_child
+        } else {
+            is_right_child
+        };
     }
     false
 }
 
+/// Whether `op` is a PREFIX unary operator (as opposed to the postfix `'`).
+///
+/// A prefix binds looser than `^` and a postfix binds tighter than everything,
+/// so the two need opposite parenthesization treatment.
+fn is_prefix_unary(op: &UnaryOp) -> bool {
+    !matches!(op, UnaryOp::Transpose)
+}
+
+/// Parenthesize an `Expr0` child of a unary/binary operator when the operator's
+/// precedence, associativity, or the grammar requires it.
+///
+/// The engine re-parses `print_eqn` output constantly (LTM partial-equation
+/// synthesis, `patch`'s equation normalization, `builtins_visitor`'s synthesized
+/// helper auxes, the MDL writer), and the invariant is `parse(print(e)) == e` --
+/// text that parses to a *different* AST is a silent semantic corruption. Three
+/// grammar facts drive the non-precedence cases:
+///
+/// * **`If` is not an atom.** `parse_expr` accepts it only at the top of an
+///   expression; everywhere else it must already be delimited (a paren group, a
+///   call argument, a subscript). So an `If` directly under an operator ALWAYS
+///   needs parens -- `-if (a) then (1) else (0)` is text `Expr0::new` rejects.
+/// * **A prefix unary binds looser than `^`.** `(-a) ^ b` printed bare would
+///   re-parse as `-(a ^ b)`: a sign flip, not a parse error.
+/// * **The postfix transpose binds tighter than everything.** `(a + b)'` printed
+///   bare would transpose only `b`. Its operand must additionally be one of the
+///   things `parse_postfix` can reach: a `Const`, `Var`, or `Subscript`. A CALL is
+///   NOT among them -- `parse_app` returns an `App` before `parse_postfix` ever
+///   runs, so `abs(a)'` is a parse error while `(abs(a))'` is fine.
 fn paren_if_necessary(parent: &Expr0, child: &Expr0, is_right_child: bool, eqn: String) -> String {
     let needs = match parent {
         Expr0::Const(_, _, _) | Expr0::Var(_, _) => false,
         Expr0::App(_, _) | Expr0::Subscript(_, _, _) => false,
-        Expr0::Op1(_, _, _) => matches!(child, Expr0::Op2(_, _, _, _)),
+        Expr0::Op1(UnaryOp::Transpose, _, _) => !matches!(
+            child,
+            Expr0::Const(_, _, _) | Expr0::Var(_, _) | Expr0::Subscript(_, _, _)
+        ),
+        Expr0::Op1(_, _, _) => matches!(child, Expr0::Op2(_, _, _, _) | Expr0::If(_, _, _, _)),
         Expr0::Op2(parent_op, _, _, _) => match child {
             Expr0::Op2(child_op, _, _, _) => {
                 needs_parens_for_op(parent_op, child_op, is_right_child)
             }
+            // Only the BASE of `^` needs it: the exponent is parsed as a full
+            // unary expression, so `a ^ -b` already round-trips.
+            Expr0::Op1(child_op, _, _) => {
+                matches!(parent_op, BinaryOp::Exp) && !is_right_child && is_prefix_unary(child_op)
+            }
+            Expr0::If(_, _, _, _) => true,
             _ => false,
         },
         Expr0::If(_, _, _, _) => false,
@@ -319,15 +374,43 @@ fn paren_if_necessary(parent: &Expr0, child: &Expr0, is_right_child: bool, eqn: 
     if needs { format!("({eqn})") } else { eqn }
 }
 
+/// The LaTeX-rendering sibling of [`paren_if_necessary`]. LaTeX output is never
+/// re-parsed, so this is a *readability* rule rather than a correctness one, but
+/// it shares `needs_parens_for_op` and therefore the same associativity facts:
+/// `(a^b)^c` must not render as the ambiguous `a^{b}^{c}`, and a negated base
+/// must render as `(-a)^{b}` so a reader groups it the way the engine does.
+///
+/// The transpose-parent arm mirrors [`paren_if_necessary`]'s: `^T` renders as a
+/// superscript, which visually binds to the single token it follows, so any
+/// operand other than a `Const`/`Var`/`Subscript` must be grouped -- `(-a)'`
+/// rendered as `-a^T` reads as negating the transpose, not transposing the
+/// negation.
+///
+/// Every arm mirrors its [`paren_if_necessary`] twin, `If`-under-an-operator
+/// included, even though nothing here re-parses. A model rendered through the
+/// `Expr2` printer and the same model rendered through the `Expr0` one must not
+/// disagree about where the parentheses go, and "these two arms differ because
+/// only one of them has to be correct" is a distinction no reader of the output
+/// can see. Pinned by `test_latex_printers_agree_on_if_under_an_operator`.
 fn paren_if_necessary1(parent: &Expr2, child: &Expr2, is_right_child: bool, eqn: String) -> String {
     let needs = match parent {
         Expr2::Const(_, _, _) | Expr2::Var(_, _, _) => false,
         Expr2::App(_, _, _) | Expr2::Subscript(_, _, _, _) => false,
-        Expr2::Op1(_, _, _, _) => matches!(child, Expr2::Op2(_, _, _, _, _)),
+        Expr2::Op1(UnaryOp::Transpose, _, _, _) => !matches!(
+            child,
+            Expr2::Const(_, _, _) | Expr2::Var(_, _, _) | Expr2::Subscript(_, _, _, _)
+        ),
+        Expr2::Op1(_, _, _, _) => {
+            matches!(child, Expr2::Op2(_, _, _, _, _) | Expr2::If(_, _, _, _, _))
+        }
         Expr2::Op2(parent_op, _, _, _, _) => match child {
             Expr2::Op2(child_op, _, _, _, _) => {
                 needs_parens_for_op(parent_op, child_op, is_right_child)
             }
+            Expr2::Op1(child_op, _, _, _) => {
+                matches!(parent_op, BinaryOp::Exp) && !is_right_child && is_prefix_unary(child_op)
+            }
+            Expr2::If(_, _, _, _, _) => true,
             _ => false,
         },
         Expr2::If(_, _, _, _, _) => false,
@@ -429,21 +512,17 @@ impl Visitor<String> for PrintVisitor {
                 format!("{}[{}]", print_ident(id.as_str()), args.join(", "))
             }
             Expr0::Op1(op, l, _) => {
+                // The operand is parenthesized through the shared rule in both
+                // arms: the postfix `'` binds tighter than any operator, so a
+                // non-atomic operand must be grouped (`(a + b)'`).
+                let l = paren_if_necessary(expr, l, false, self.walk(l));
                 match op {
-                    UnaryOp::Transpose => {
-                        let l = self.walk(l);
-                        format!("{l}'")
-                    }
-                    _ => {
-                        let l = paren_if_necessary(expr, l, false, self.walk(l));
-                        let op: &str = match op {
-                            UnaryOp::Positive => "+",
-                            UnaryOp::Negative => "-",
-                            UnaryOp::Not => "!",
-                            UnaryOp::Transpose => unreachable!(), // handled above
-                        };
-                        format!("{op}{l}")
-                    }
+                    UnaryOp::Transpose => format!("{l}'"),
+                    // `not `, NOT `!`: the equation lexer has no `!` rule at all
+                    // (GH #913), so the bang form was unparseable text.
+                    UnaryOp::Not => format!("not {l}"),
+                    UnaryOp::Positive => format!("+{l}"),
+                    UnaryOp::Negative => format!("-{l}"),
                 }
             }
             Expr0::Op2(op, l, r, _) => {
@@ -461,7 +540,9 @@ impl Visitor<String> for PrintVisitor {
                     BinaryOp::Gte => ">=",
                     BinaryOp::Lte => "<=",
                     BinaryOp::Eq => "=",
-                    BinaryOp::Neq => "!=",
+                    // `<>`, NOT `!=`: the lexer produces `Neq` only from `<>`
+                    // (GH #913).
+                    BinaryOp::Neq => "<>",
                     BinaryOp::And => "&&",
                     BinaryOp::Or => "||",
                 };
@@ -572,8 +653,10 @@ fn test_print_eqn() {
             Loc::new(0, 2),
         ))
     );
+    // `not a`, not `!a`: the equation lexer has no `!` rule at all, so the
+    // bang form was text `Expr0::new` could never accept (GH #913).
     assert_eq!(
-        "!a",
+        "not a",
         print_eqn(&Expr0::Op1(
             UnaryOp::Not,
             Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::new(1, 2))),
@@ -605,6 +688,224 @@ fn test_print_eqn() {
             Loc::new(0, 14),
         ))
     );
+}
+
+/// `print_eqn`'s output is fed straight back into `Expr0::new` all over the
+/// engine (LTM partial-equation synthesis, `patch`'s equation normalization,
+/// `builtins_visitor`'s synthesized helper auxes, the MDL writer). The invariant
+/// is therefore not merely "the text parses" but `parse(print(e)) == e`: text
+/// that parses to a DIFFERENT AST is a silent semantic corruption, which is
+/// strictly worse than a loud parse error.
+#[cfg(test)]
+fn assert_print_reparse_roundtrip(expr: &Expr0, expected_text: &str) {
+    use crate::lexer::LexerType;
+
+    let printed = print_eqn(expr);
+    assert_eq!(expected_text, printed);
+    let reparsed = Expr0::new(&printed, LexerType::Equation)
+        .unwrap_or_else(|e| panic!("print_eqn output {printed:?} did not re-parse: {e:?}"))
+        .expect("non-empty");
+    assert_eq!(
+        expr.clone().strip_loc(),
+        reparsed.strip_loc(),
+        "print_eqn output {printed:?} re-parsed to a DIFFERENT AST"
+    );
+}
+
+#[cfg(test)]
+fn t_var(name: &str) -> Expr0 {
+    Expr0::Var(crate::common::RawIdent::new_from_str(name), Loc::default())
+}
+
+#[cfg(test)]
+fn t_op2(op: BinaryOp, l: Expr0, r: Expr0) -> Expr0 {
+    Expr0::Op2(op, Box::new(l), Box::new(r), Loc::default())
+}
+
+#[cfg(test)]
+fn t_op1(op: UnaryOp, inner: Expr0) -> Expr0 {
+    Expr0::Op1(op, Box::new(inner), Loc::default())
+}
+
+#[cfg(test)]
+fn t_if() -> Expr0 {
+    Expr0::If(
+        Box::new(t_var("a")),
+        Box::new(Expr0::Const("1".to_string(), 1.0, Loc::default())),
+        Box::new(Expr0::Const("0".to_string(), 0.0, Loc::default())),
+        Loc::default(),
+    )
+}
+
+/// An `If` is not an atom in the equation grammar -- it is only legal at the top
+/// of an expression, inside parentheses, or as a call argument -- so an `If`
+/// sitting directly under a unary or binary operator must be parenthesized or
+/// the printer emits text its own parser rejects (#912's defect class).
+#[test]
+fn test_print_eqn_parenthesizes_if_under_an_operator() {
+    assert_print_reparse_roundtrip(
+        &t_op1(UnaryOp::Negative, t_if()),
+        "-(if (a) then (1) else (0))",
+    );
+    assert_print_reparse_roundtrip(
+        &t_op2(
+            BinaryOp::Add,
+            Expr0::Const("1".to_string(), 1.0, Loc::default()),
+            t_if(),
+        ),
+        "1 + (if (a) then (1) else (0))",
+    );
+
+    // A bare top-level `If`, and an `If` as a call argument, stay unwrapped:
+    // both positions already accept it.
+    assert_print_reparse_roundtrip(&t_if(), "if (a) then (1) else (0)");
+    assert_print_reparse_roundtrip(
+        &Expr0::App(
+            UntypedBuiltinFn("abs".to_string(), vec![t_if()]),
+            Loc::default(),
+        ),
+        "abs(if (a) then (1) else (0))",
+    );
+}
+
+/// A stacked unary prefix prints unparenthesized (`--a`) and the parser accepts
+/// it, so `print_eqn` needs no extra parens there (#912). Pinned because the
+/// alternative -- parenthesizing -- would churn every MDL equation the writer
+/// emits and move the corpus round-trip ratchets.
+#[test]
+fn test_print_eqn_stacked_unary_is_unparenthesized_and_reparses() {
+    assert_print_reparse_roundtrip(
+        &t_op1(UnaryOp::Negative, t_op1(UnaryOp::Negative, t_var("a"))),
+        "--a",
+    );
+}
+
+/// `^` is right-associative and binds tighter than any prefix operator, so the
+/// side that needs grouping is the mirror image of the `-`/`/`/`mod` case:
+///
+///   * a LEFT `^` operand that is itself a `^` needs parens (`(a^b)^c`),
+///     while the right one does not (`a ^ b ^ c` already means `a^(b^c)`);
+///   * a LEFT operand carrying a prefix needs parens (`(-a) ^ b`), or the text
+///     re-parses as `-(a^b)` -- a SIGN FLIP, `(-2)^2 = 4` printed as `-4`;
+///   * a RIGHT operand carrying a prefix does not (`a ^ -b` is already correct,
+///     the exponent is parsed as a full unary expression).
+#[test]
+fn test_print_eqn_exponent_associativity_and_unary_base() {
+    let a = || t_var("a");
+    let b = || t_var("b");
+    let c = || t_var("c");
+
+    assert_print_reparse_roundtrip(
+        &t_op2(BinaryOp::Exp, t_op2(BinaryOp::Exp, a(), b()), c()),
+        "(a ^ b) ^ c",
+    );
+    assert_print_reparse_roundtrip(
+        &t_op2(BinaryOp::Exp, a(), t_op2(BinaryOp::Exp, b(), c())),
+        "a ^ b ^ c",
+    );
+    assert_print_reparse_roundtrip(
+        &t_op2(BinaryOp::Exp, t_op1(UnaryOp::Negative, a()), b()),
+        "(-a) ^ b",
+    );
+    assert_print_reparse_roundtrip(
+        &t_op2(BinaryOp::Exp, a(), t_op1(UnaryOp::Negative, b())),
+        "a ^ -b",
+    );
+    // A prefix OUTSIDE the `^` still prints bare (unary binds looser).
+    assert_print_reparse_roundtrip(
+        &t_op1(UnaryOp::Negative, t_op2(BinaryOp::Exp, a(), b())),
+        "-(a ^ b)",
+    );
+    // A lower-precedence operand of `^` is grouped on either side.
+    assert_print_reparse_roundtrip(
+        &t_op2(BinaryOp::Exp, t_op2(BinaryOp::Mul, a(), b()), c()),
+        "(a * b) ^ c",
+    );
+    assert_print_reparse_roundtrip(
+        &t_op2(BinaryOp::Exp, a(), t_op2(BinaryOp::Mul, b(), c())),
+        "a ^ (b * c)",
+    );
+}
+
+/// Floating-point `+` and `*` are NOT associative, so a right-nested sum is a
+/// different computation from a left-nested one. Re-printing `a + (b + c)` as
+/// the bare `a + b + c` silently reassociates it -- exactly the corruption the
+/// AST-equality property (`writer_proptest.rs`) exists to catch.
+#[test]
+fn test_print_eqn_preserves_right_nested_associative_operators() {
+    let a = || t_var("a");
+    let b = || t_var("b");
+    let c = || t_var("c");
+
+    assert_print_reparse_roundtrip(
+        &t_op2(BinaryOp::Add, a(), t_op2(BinaryOp::Add, b(), c())),
+        "a + (b + c)",
+    );
+    assert_print_reparse_roundtrip(
+        &t_op2(BinaryOp::Mul, a(), t_op2(BinaryOp::Mul, b(), c())),
+        "a * (b * c)",
+    );
+    // The left-nested (parser-natural) shape still prints bare.
+    assert_print_reparse_roundtrip(
+        &t_op2(BinaryOp::Add, t_op2(BinaryOp::Add, a(), b()), c()),
+        "a + b + c",
+    );
+    assert_print_reparse_roundtrip(
+        &t_op2(BinaryOp::Mul, t_op2(BinaryOp::Mul, a(), b()), c()),
+        "a * b * c",
+    );
+}
+
+/// GH #913: the printer must spell operators the way the lexer reads them.
+/// The equation lexer has no `!` rule at all (only the `not` keyword, and only
+/// `<>` for inequality), so `!a` / `a != b` were unconditionally unparseable.
+#[test]
+fn test_print_eqn_not_and_neq_use_lexable_spellings() {
+    assert_print_reparse_roundtrip(&t_op1(UnaryOp::Not, t_var("a")), "not a");
+    assert_print_reparse_roundtrip(
+        &t_op1(UnaryOp::Not, t_op1(UnaryOp::Not, t_var("a"))),
+        "not not a",
+    );
+    assert_print_reparse_roundtrip(
+        &t_op1(UnaryOp::Not, t_op2(BinaryOp::Gt, t_var("a"), t_var("b"))),
+        "not (a > b)",
+    );
+    assert_print_reparse_roundtrip(&t_op2(BinaryOp::Neq, t_var("a"), t_var("b")), "a <> b");
+}
+
+/// GH #913: the postfix transpose arm bypassed `paren_if_necessary` entirely, so
+/// `Op1(Transpose, a + b)` printed `a + b'` -- transposing only `b`. Transpose
+/// binds tighter than every infix and prefix operator, so any non-atomic operand
+/// must be grouped.
+#[test]
+fn test_print_eqn_parenthesizes_transpose_operand() {
+    assert_print_reparse_roundtrip(
+        &t_op1(
+            UnaryOp::Transpose,
+            t_op2(BinaryOp::Add, t_var("a"), t_var("b")),
+        ),
+        "(a + b)'",
+    );
+    assert_print_reparse_roundtrip(
+        &t_op1(UnaryOp::Transpose, t_op1(UnaryOp::Negative, t_var("a"))),
+        "(-a)'",
+    );
+    // A CALL operand needs parens for a different reason than precedence:
+    // `parse_app` returns the `App` before `parse_postfix` runs, so `abs(a)'` is
+    // a hard parse error (pinned by `test_illegal_transpose_on_function_result`)
+    // while `(abs(a))'` re-parses to the same AST.
+    assert_print_reparse_roundtrip(
+        &t_op1(
+            UnaryOp::Transpose,
+            Expr0::App(
+                UntypedBuiltinFn("abs".to_string(), vec![t_var("a")]),
+                Loc::default(),
+            ),
+        ),
+        "(abs(a))'",
+    );
+    // A bare identifier operand still prints without parens.
+    assert_print_reparse_roundtrip(&t_op1(UnaryOp::Transpose, t_var("a")), "a'");
 }
 
 #[test]
@@ -686,21 +987,15 @@ impl LatexVisitor {
                 format!("{}[{}]", id.as_str(), args.join(", "))
             }
             Expr2::Op1(op, l, _, _) => {
+                // The operand is grouped through the shared rule in both arms:
+                // the postfix `^T` binds tighter than any infix, so `(a + b)^T`
+                // must keep its parentheses or it reads as transposing only `b`.
+                let l = paren_if_necessary1(expr, l, false, self.walk(l));
                 match op {
-                    UnaryOp::Transpose => {
-                        let l = self.walk(l);
-                        format!("{l}^T")
-                    }
-                    _ => {
-                        let l = paren_if_necessary1(expr, l, false, self.walk(l));
-                        let op: &str = match op {
-                            UnaryOp::Positive => "+",
-                            UnaryOp::Negative => "-",
-                            UnaryOp::Not => "\\neg ",
-                            UnaryOp::Transpose => unreachable!(), // handled above
-                        };
-                        format!("{op}{l}")
-                    }
+                    UnaryOp::Transpose => format!("{l}^T"),
+                    UnaryOp::Positive => format!("+{l}"),
+                    UnaryOp::Negative => format!("-{l}"),
+                    UnaryOp::Not => format!("\\neg {l}"),
                 }
             }
             Expr2::Op2(op, l, r, _, _) => {
@@ -774,19 +1069,18 @@ pub fn latex_eqn_expr0(expr: &Expr0) -> String {
                 .collect();
             format!("{id}[{}]", rendered.join(", "))
         }
-        Expr0::Op1(op, inner_expr, _) => match op {
-            UnaryOp::Transpose => format!("{}^T", latex_eqn_expr0(inner_expr)),
-            _ => {
-                let inner =
-                    paren_if_necessary(expr, inner_expr, false, latex_eqn_expr0(inner_expr));
-                match op {
-                    UnaryOp::Positive => format!("+{inner}"),
-                    UnaryOp::Negative => format!("-{inner}"),
-                    UnaryOp::Not => format!("\\neg {inner}"),
-                    UnaryOp::Transpose => unreachable!(), // handled above
-                }
+        Expr0::Op1(op, inner_expr, _) => {
+            // Every arm groups through the shared rule, transpose included: the
+            // `^T` superscript binds to the token it follows, so `(a + b)'` left
+            // ungrouped renders as `a + b^T` -- transposing `b` alone.
+            let inner = paren_if_necessary(expr, inner_expr, false, latex_eqn_expr0(inner_expr));
+            match op {
+                UnaryOp::Transpose => format!("{inner}^T"),
+                UnaryOp::Positive => format!("+{inner}"),
+                UnaryOp::Negative => format!("-{inner}"),
+                UnaryOp::Not => format!("\\neg {inner}"),
             }
-        },
+        }
         Expr0::Op2(op, l, r, _) => {
             let l = paren_if_necessary(expr, l, false, latex_eqn_expr0(l));
             let r = paren_if_necessary(expr, r, true, latex_eqn_expr0(r));
@@ -885,31 +1179,39 @@ pub fn latex_eqn_expr0_annotated(expr: &Expr0) -> String {
                 .collect();
             format!("{id}[{}]", rendered.join(", "))
         }
-        Expr0::Op1(op, inner_expr, _) => match op {
-            UnaryOp::Transpose => format!("{}^T", latex_eqn_expr0_annotated(inner_expr)),
-            _ => {
-                let op_str: &str = match op {
-                    UnaryOp::Positive => "+",
-                    UnaryOp::Negative => "-",
-                    UnaryOp::Not => "\\neg ",
-                    UnaryOp::Transpose => unreachable!(), // handled above
-                };
-                // the operator token sits somewhere in [Op1.start, operand.start)
-                let op_anno = latex_html_data(
-                    HtmlDataAttr::Op,
-                    loc.start,
-                    inner_expr.get_loc().start,
-                    op_str,
-                );
-                let inner_rendered = paren_if_necessary(
-                    expr,
-                    inner_expr,
-                    false,
-                    latex_eqn_expr0_annotated(inner_expr),
-                );
-                format!("{op_anno}{inner_rendered}")
+        Expr0::Op1(op, inner_expr, _) => {
+            // The operand groups through the shared rule in every arm -- see the
+            // twin in `latex_eqn_expr0`. This function backs the FFI
+            // `simlin_model_get_latex_equation`, so an ungrouped transpose operand
+            // is what a user sees rendered.
+            let inner_rendered = paren_if_necessary(
+                expr,
+                inner_expr,
+                false,
+                latex_eqn_expr0_annotated(inner_expr),
+            );
+            match op {
+                // Postfix: there is no operator token BEFORE the operand to
+                // annotate, so `^T` is emitted plain (as it always has been).
+                UnaryOp::Transpose => format!("{inner_rendered}^T"),
+                _ => {
+                    let op_str: &str = match op {
+                        UnaryOp::Positive => "+",
+                        UnaryOp::Negative => "-",
+                        UnaryOp::Not => "\\neg ",
+                        UnaryOp::Transpose => unreachable!(), // handled above
+                    };
+                    // the operator token sits somewhere in [Op1.start, operand.start)
+                    let op_anno = latex_html_data(
+                        HtmlDataAttr::Op,
+                        loc.start,
+                        inner_expr.get_loc().start,
+                        op_str,
+                    );
+                    format!("{op_anno}{inner_rendered}")
+                }
             }
-        },
+        }
         Expr0::Op2(op, l, r, _) => {
             let l_rendered = paren_if_necessary(expr, l, false, latex_eqn_expr0_annotated(l));
             let r_rendered = paren_if_necessary(expr, r, true, latex_eqn_expr0_annotated(r));
@@ -1147,6 +1449,188 @@ fn test_latex_eqn_expr0_annotated() {
         "\\htmlData{eqnloc=1_11}{(\\htmlData{eqnloc=1_6}{\\htmlData{eqnloc=1_2}{\\mathrm{a}} \\htmlData{oploc=2_5}{+} \\htmlData{eqnloc=5_6}{\\mathrm{b}}}) \\htmlData{oploc=6_10}{\\cdot} \\htmlData{eqnloc=10_11}{\\mathrm{c}}}",
         latex_eqn_expr0_annotated(&parse("(a + b) * c"))
     );
+}
+
+/// All THREE LaTeX printers must group a transpose operand, not just the `Expr2`
+/// one. `latex_eqn_expr0_annotated` backs the FFI `simlin_model_get_latex_equation`,
+/// so an ungrouped operand is what a user sees rendered: `(a + b)'` displayed as
+/// `a + b^T` claims the model transposes `b` alone.
+#[test]
+fn test_latex_printers_group_the_transpose_operand() {
+    use crate::lexer::LexerType;
+
+    let parse = |eqn: &str| Expr0::new(eqn, LexerType::Equation).unwrap().unwrap();
+
+    let sum = parse("(a + b)'");
+    assert_eq!(
+        "(\\mathrm{a} + \\mathrm{b})^T",
+        latex_eqn_expr0(&sum),
+        "latex_eqn_expr0 must parenthesize a non-atomic transpose operand"
+    );
+    assert!(
+        latex_eqn_expr0_annotated(&sum).contains("})^T"),
+        "latex_eqn_expr0_annotated must parenthesize too, got {}",
+        latex_eqn_expr0_annotated(&sum)
+    );
+
+    // A transpose of a PREFIX unary is the same hazard one level down: `(-a)'`
+    // rendered as `-a^T` reads as negating the transpose.
+    let negated = t_op1(UnaryOp::Transpose, t_op1(UnaryOp::Negative, t_var("a")));
+    assert_eq!("(-\\mathrm{a})^T", latex_eqn_expr0(&negated));
+
+    // An atom needs no parens.
+    assert_eq!("\\mathrm{a}^T", latex_eqn_expr0(&parse("a'")));
+}
+
+/// The `Expr2` LaTeX printer's transpose arm must group a prefix-unary operand,
+/// not only an `Op2` one -- its `Expr0` twin already emits `(-a)'` here.
+#[test]
+fn test_latex_eqn_groups_transpose_of_a_prefix_unary() {
+    let a = Expr2::Var(crate::common::Ident::new("a"), None, Loc::default());
+    let negated = Expr2::Op1(UnaryOp::Negative, Box::new(a), None, Loc::default());
+    let transposed = Expr2::Op1(UnaryOp::Transpose, Box::new(negated), None, Loc::default());
+    assert_eq!("(-\\mathrm{a})^T", latex_eqn(&transposed));
+}
+
+/// The `Expr0` and `Expr2` LaTeX printers must agree on where parentheses go.
+/// `paren_if_necessary`'s `If`-under-an-operator rule exists for CORRECTNESS on
+/// the `print_eqn` path it shares, but `paren_if_necessary1` has no such
+/// obligation -- and dropping the rule there made the same model render two
+/// different ways depending on which lowering stage it happened to be in.
+#[test]
+fn test_latex_printers_agree_on_if_under_an_operator() {
+    use crate::common::Ident;
+    use crate::lexer::LexerType;
+
+    let cases2 = Expr2::If(
+        Box::new(Expr2::Var(Ident::new("a"), None, Loc::default())),
+        Box::new(Expr2::Const("1".to_string(), 1.0, Loc::default())),
+        Box::new(Expr2::Const("0".to_string(), 0.0, Loc::default())),
+        None,
+        Loc::default(),
+    );
+    let sum2 = Expr2::Op2(
+        BinaryOp::Add,
+        Box::new(Expr2::Var(Ident::new("b"), None, Loc::default())),
+        Box::new(cases2),
+        None,
+        Loc::default(),
+    );
+
+    let expr0 = Expr0::new("b + (if a then 1 else 0)", LexerType::Equation)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        latex_eqn_expr0(&expr0),
+        latex_eqn(&sum2),
+        "the two LaTeX printers must parenthesize an `If` operand identically"
+    );
+    assert!(
+        latex_eqn(&sum2).contains("(\\begin{cases}"),
+        "the cases block must be grouped, got {}",
+        latex_eqn(&sum2)
+    );
+}
+
+/// `parse(print_eqn(e)) == e` over the FULL operator set.
+///
+/// The MDL writer's fixpoint proptest (`mdl::writer_proptest`) re-reads with
+/// `mdl::parser`, whose binary precedence table is inverted (GH #914), so its
+/// generator is restricted to arithmetic. That leaves `Not`, `Neq`, `Transpose`,
+/// `Mod`, the comparisons, and `and`/`or` -- most of `print_eqn`'s surface, and
+/// three of the four #913 shapes -- unexercised by any property. This module
+/// re-parses with the XMILE grammar, which `print_eqn` targets, so it can cover
+/// everything.
+#[cfg(test)]
+mod print_eqn_proptest {
+    use super::*;
+    use crate::common::RawIdent;
+    use crate::lexer::LexerType;
+    use proptest::prelude::*;
+
+    /// Every `BinaryOp`, so a new variant cannot be silently skipped: the match is
+    /// exhaustive and adding a variant is a compile error here.
+    fn all_binary_ops() -> Vec<BinaryOp> {
+        use BinaryOp::*;
+        let all = [
+            Add, Sub, Mul, Div, Mod, Exp, Gt, Lt, Gte, Lte, Eq, Neq, And, Or,
+        ];
+        // Exhaustiveness guard: destructuring forces an update when a variant lands.
+        for op in all {
+            match op {
+                Add | Sub | Mul | Div | Mod | Exp | Gt | Lt | Gte | Lte | Eq | Neq | And | Or => {}
+            }
+        }
+        all.to_vec()
+    }
+
+    fn expr_strategy() -> impl Strategy<Value = Expr0> {
+        let leaf = prop_oneof![
+            prop::sample::select(&["a", "b", "c"][..])
+                .prop_map(|n| Expr0::Var(RawIdent::new_from_str(n), Loc::default())),
+            prop::sample::select(&[0.0f64, 1.0, 2.5][..]).prop_map(|v| Expr0::Const(
+                format!("{v}"),
+                v,
+                Loc::default()
+            )),
+        ];
+
+        leaf.prop_recursive(5, 64, 4, |inner| {
+            let bin_op = prop::sample::select(all_binary_ops());
+            let un_op = prop_oneof![
+                Just(UnaryOp::Negative),
+                Just(UnaryOp::Positive),
+                Just(UnaryOp::Not),
+                Just(UnaryOp::Transpose),
+            ];
+            prop_oneof![
+                (bin_op, inner.clone(), inner.clone()).prop_map(|(op, l, r)| Expr0::Op2(
+                    op,
+                    Box::new(l),
+                    Box::new(r),
+                    Loc::default()
+                )),
+                (un_op, inner.clone()).prop_map(|(op, l)| Expr0::Op1(
+                    op,
+                    Box::new(l),
+                    Loc::default()
+                )),
+                (
+                    prop::sample::select(&["abs", "exp", "ln"][..]),
+                    inner.clone()
+                )
+                    .prop_map(|(f, e)| Expr0::App(
+                        UntypedBuiltinFn(f.to_owned(), vec![e]),
+                        Loc::default()
+                    )),
+                (inner.clone(), inner.clone(), inner.clone()).prop_map(|(c, t, f)| Expr0::If(
+                    Box::new(c),
+                    Box::new(t),
+                    Box::new(f),
+                    Loc::default()
+                )),
+            ]
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn print_eqn_roundtrips_over_the_full_operator_set(expr in expr_strategy()) {
+            let printed = print_eqn(&expr);
+            let reparsed = Expr0::new(&printed, LexerType::Equation);
+            prop_assert!(
+                matches!(reparsed, Ok(Some(_))),
+                "print_eqn output did not re-parse: {printed:?} ({reparsed:?})"
+            );
+            prop_assert_eq!(
+                expr.clone().strip_loc(),
+                reparsed.unwrap().unwrap().strip_loc(),
+                "print_eqn output re-parsed to a DIFFERENT AST: {}",
+                printed
+            );
+        }
+    }
 }
 
 #[cfg(test)]

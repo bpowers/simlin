@@ -129,6 +129,12 @@ fn test_non_a2a_arrays_json_roundtrip() {
     test_xmile_json_roundtrip("test/test-models/samples/arrays/non-a2a/non-a2a.stmx");
 }
 
+// gf-only <element> blocks (per-element <gf> with no <eqn>) -- GH #907
+#[test]
+fn test_non_a2a_gf_arrays_json_roundtrip() {
+    test_xmile_json_roundtrip("test/test-models/samples/arrays/non-a2a/non-a2a-gf.stmx");
+}
+
 #[test]
 fn test_subscript_1d_arrays_json_roundtrip() {
     test_xmile_json_roundtrip(

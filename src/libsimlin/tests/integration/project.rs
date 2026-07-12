@@ -12,7 +12,7 @@ use simlin_engine::serde as engine_serde;
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{self as engine};
 
-use crate::common::open_project_from_datamodel;
+use crate::common::{expect_no_error, open_project_from_datamodel};
 
 #[test]
 fn test_project_lifecycle() {
@@ -51,17 +51,7 @@ fn test_project_lifecycle() {
             buf.len(),
             &mut err as *mut *mut SimlinError,
         );
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("project open failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "project open");
         assert!(!proj.is_null());
         // Test reference counting
         simlin_project_ref(proj);
@@ -75,30 +65,17 @@ fn test_project_lifecycle() {
 
 #[test]
 fn test_import_xmile() {
-    // Load the SIR XMILE model
+    // Load the SIR XMILE model. Hard failure, not a skip: a silently
+    // skipped fixture turns this test into a no-op pass (GH #897).
     let xmile_path = std::path::Path::new("testdata/SIR.stmx");
-    if !xmile_path.exists() {
-        eprintln!("missing SIR.stmx fixture; skipping");
-        return;
-    }
-    let data = std::fs::read(xmile_path).unwrap();
+    let data = std::fs::read(xmile_path).expect("SIR.stmx fixture must exist");
 
     unsafe {
         // Import XMILE
         let mut err: *mut SimlinError = ptr::null_mut();
         let proj =
             simlin_project_open_xmile(data.as_ptr(), data.len(), &mut err as *mut *mut SimlinError);
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("project_open_xmile failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "project_open_xmile");
         assert!(!proj.is_null());
 
         // Get model and verify we can create a simulation from the imported project
@@ -116,17 +93,7 @@ fn test_import_xmile() {
         // Run simulation to verify it's valid
         err = ptr::null_mut();
         simlin_sim_run_to_end(sim, &mut err as *mut *mut SimlinError);
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("sim_run_to_end failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "sim_run_to_end");
 
         // Check we have expected variables
         err = ptr::null_mut();
@@ -138,17 +105,7 @@ fn test_import_xmile() {
             &mut var_count as *mut usize,
             &mut err as *mut *mut SimlinError,
         );
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("get_var_count failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "get_var_count");
         assert!(var_count > 0);
 
         // Clean up
@@ -160,13 +117,9 @@ fn test_import_xmile() {
 
 #[test]
 fn test_import_mdl() {
-    // Load the SIR MDL model
+    // Load the SIR MDL model (hard failure, not a skip -- GH #897).
     let mdl_path = std::path::Path::new("testdata/SIR.mdl");
-    if !mdl_path.exists() {
-        eprintln!("missing SIR.mdl fixture; skipping");
-        return;
-    }
-    let data = std::fs::read(mdl_path).unwrap();
+    let data = std::fs::read(mdl_path).expect("SIR.mdl fixture must exist");
 
     unsafe {
         // Import MDL
@@ -176,17 +129,7 @@ fn test_import_mdl() {
             data.len(),
             &mut err as *mut *mut SimlinError,
         );
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("project_open_vensim failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "project_open_vensim");
         assert!(!proj.is_null());
 
         // Get model and verify we can create a simulation from the imported project
@@ -204,17 +147,7 @@ fn test_import_mdl() {
         // Run simulation to verify it's valid
         err = ptr::null_mut();
         simlin_sim_run_to_end(sim, &mut err as *mut *mut SimlinError);
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("sim_run_to_end failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "sim_run_to_end");
 
         // Check we have expected variables
         err = ptr::null_mut();
@@ -226,17 +159,7 @@ fn test_import_mdl() {
             &mut var_count as *mut usize,
             &mut err as *mut *mut SimlinError,
         );
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("get_var_count failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "get_var_count");
         assert!(var_count > 0);
 
         // Clean up
@@ -285,17 +208,7 @@ fn test_project_add_model() {
             buf.len(),
             &mut err as *mut *mut SimlinError,
         );
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("project open failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "project open");
         assert!(!proj.is_null());
 
         // Verify initial model count
@@ -534,10 +447,7 @@ fn test_project_json_open() {
             ptr::null(),
             &mut err_get_model as *mut *mut SimlinError,
         );
-        if !err_get_model.is_null() {
-            simlin_error_free(err_get_model);
-            panic!("get_model failed");
-        }
+        expect_no_error(err_get_model, "get_model");
         assert!(!model.is_null());
 
         // Verify variable count
@@ -550,10 +460,7 @@ fn test_project_json_open() {
             &mut var_count as *mut usize,
             &mut err_get_var_count as *mut *mut SimlinError,
         );
-        if !err_get_var_count.is_null() {
-            simlin_error_free(err_get_var_count);
-            panic!("get_var_count failed");
-        }
+        expect_no_error(err_get_var_count, "get_var_count");
         assert!(var_count > 0, "expected variables in model");
 
         // Clean up
@@ -666,10 +573,7 @@ fn test_project_json_open_sdai_format() {
             ptr::null(),
             &mut err_get_model as *mut *mut SimlinError,
         );
-        if !err_get_model.is_null() {
-            simlin_error_free(err_get_model);
-            panic!("get_model failed");
-        }
+        expect_no_error(err_get_model, "get_model");
         assert!(!model.is_null());
 
         // Verify variable count (at least 4 variables, may include built-ins)
@@ -682,10 +586,7 @@ fn test_project_json_open_sdai_format() {
             &mut var_count as *mut usize,
             &mut err_get_var_count as *mut *mut SimlinError,
         );
-        if !err_get_var_count.is_null() {
-            simlin_error_free(err_get_var_count);
-            panic!("get_var_count failed");
-        }
+        expect_no_error(err_get_var_count, "get_var_count");
         assert!(
             var_count >= 4,
             "expected at least 4 variables, got {}",
@@ -790,6 +691,47 @@ fn test_is_simulatable_invalid_project() {
             simlin_project_is_simulatable(proj, ptr::null(), &mut err as *mut *mut SimlinError);
         assert!(err.is_null(), "should not have error in out_error");
         assert!(!is_sim, "invalid project should not be simulatable");
+
+        simlin_project_unref(proj);
+    }
+}
+
+/// F2 regression: `simlin_project_is_simulatable` must return true for a model
+/// that contains a queue stock. Before the `build_sim` dispatch, the ordinary
+/// `compile_project_incremental` path hit the `QueueNotExpanded` guard, so this
+/// returned false for a model that `simlin_sim_new` simulates correctly.
+#[test]
+fn test_is_simulatable_queue_model() {
+    let xml = include_str!("../../../../test/queues/queue_drain.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse queue_drain.xmile");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let is_sim =
+            simlin_project_is_simulatable(proj, ptr::null(), &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "should not have error");
+        assert!(is_sim, "queue model must be simulatable");
+
+        simlin_project_unref(proj);
+    }
+}
+
+/// F2 regression twin for a conveyor stock.
+#[test]
+fn test_is_simulatable_conveyor_model() {
+    let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse minimal_conveyor.xmile");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let is_sim =
+            simlin_project_is_simulatable(proj, ptr::null(), &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "should not have error");
+        assert!(is_sim, "conveyor model must be simulatable");
 
         simlin_project_unref(proj);
     }
@@ -937,17 +879,7 @@ fn test_project_open_roundtrip() {
             buf.len(),
             &mut err as *mut *mut SimlinError,
         );
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("project open failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "project open");
         assert!(!proj.is_null());
 
         // Verify reference counting starts at 1
@@ -969,10 +901,7 @@ fn test_project_open_roundtrip() {
             ptr::null(),
             &mut err_get_model as *mut *mut SimlinError,
         );
-        if !err_get_model.is_null() {
-            simlin_error_free(err_get_model);
-            panic!("get_model failed");
-        }
+        expect_no_error(err_get_model, "get_model");
         assert!(!model.is_null());
         // Model creation should increment project ref count
         assert_eq!((*proj).ref_count.load(Ordering::SeqCst), 2);
@@ -986,17 +915,7 @@ fn test_project_open_roundtrip() {
         // Run to completion
         err = ptr::null_mut();
         simlin_sim_run_to_end(sim, &mut err as *mut *mut SimlinError);
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("sim_run_to_end failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "sim_run_to_end");
 
         // Verify time series
         let c_name = CString::new("population").unwrap();
@@ -1036,30 +955,16 @@ fn test_project_open_roundtrip() {
 
 #[test]
 fn test_import_export_roundtrip() {
-    // Load XMILE model
+    // Load XMILE model (hard failure, not a skip -- GH #897).
     let xmile_path = std::path::Path::new("testdata/SIR.stmx");
-    if !xmile_path.exists() {
-        eprintln!("missing SIR.stmx fixture; skipping");
-        return;
-    }
-    let data = std::fs::read(xmile_path).unwrap();
+    let data = std::fs::read(xmile_path).expect("SIR.stmx fixture must exist");
 
     unsafe {
         // Import XMILE
         let mut err: *mut SimlinError = ptr::null_mut();
         let proj1 =
             simlin_project_open_xmile(data.as_ptr(), data.len(), &mut err as *mut *mut SimlinError);
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("project_open_xmile failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "project_open_xmile");
         assert!(!proj1.is_null());
 
         // Export to XMILE
@@ -1072,39 +977,13 @@ fn test_import_export_roundtrip() {
             &mut output_len as *mut usize,
             &mut err as *mut *mut SimlinError,
         );
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!(
-                "project_serialize_xmile failed with error {:?}: {}",
-                code, msg
-            );
-        }
+        expect_no_error(err, "project_serialize_xmile");
 
         // Import the exported XMILE
         err = ptr::null_mut();
         let proj2 =
             simlin_project_open_xmile(output, output_len, &mut err as *mut *mut SimlinError);
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!(
-                "project_open_xmile (2nd) failed with error {:?}: {}",
-                code, msg
-            );
-        }
+        expect_no_error(err, "project_open_xmile (2nd)");
         assert!(!proj2.is_null());
 
         // Get models and verify both projects can simulate
@@ -1130,31 +1009,11 @@ fn test_import_export_roundtrip() {
 
         err = ptr::null_mut();
         simlin_sim_run_to_end(sim1, &mut err as *mut *mut SimlinError);
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("sim_run_to_end (1st) failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "sim_run_to_end (1st)");
 
         err = ptr::null_mut();
         simlin_sim_run_to_end(sim2, &mut err as *mut *mut SimlinError);
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("sim_run_to_end (2nd) failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "sim_run_to_end (2nd)");
 
         // Clean up
         simlin_sim_unref(sim1);
@@ -1292,17 +1151,7 @@ fn test_error_api_with_valid_project() {
             buf.len(),
             &mut err as *mut *mut SimlinError,
         );
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("project open failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "project open");
         assert!(!proj.is_null());
 
         // Test getting all errors

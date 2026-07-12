@@ -13,12 +13,10 @@ use crate::common::open_project_from_datamodel;
 
 #[test]
 fn test_diagram_sync_sir_model() {
+    // Hard failure, not a skip: a silently skipped fixture turns this test
+    // into a no-op pass (GH #897).
     let xmile_path = std::path::Path::new("testdata/SIR.stmx");
-    if !xmile_path.exists() {
-        eprintln!("missing SIR.stmx fixture; skipping");
-        return;
-    }
-    let data = std::fs::read(xmile_path).unwrap();
+    let data = std::fs::read(xmile_path).expect("SIR.stmx fixture must exist");
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();

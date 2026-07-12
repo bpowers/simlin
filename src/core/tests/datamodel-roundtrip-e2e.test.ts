@@ -23,7 +23,7 @@ import * as path from 'path';
 
 import type { JsonProjectPatch } from '@simlin/engine';
 
-import { projectFromJson, projectToJson, auxToJson, stockToJson, moduleToJson } from '../datamodel';
+import { projectFromJson, projectToJson, auxToJson, flowToJson, stockToJson, moduleToJson } from '../datamodel';
 
 // This e2e drives the REAL WASM engine, so it needs `pnpm build` to have
 // produced the engine package (lib/) and libsimlin.wasm. Keep `pnpm --filter
@@ -71,8 +71,68 @@ const BASE_PROJECT = JSON.stringify({
           // [1] ACTIVE INITIAL on a stock.
           compat: { activeInitial: '5' },
         },
+        {
+          name: 'belt',
+          inflows: ['loading'],
+          outflows: ['shipping', 'leak'],
+          initialEquation: '0',
+          // [6] conveyor stock: every belt option set, to catch key-name typos.
+          compat: {
+            conveyor: {
+              transitTime: '5',
+              capacity: '100',
+              inflowLimit: '10',
+              sample: '1',
+              arrest: '2',
+              discrete: true,
+              batchIntegrity: true,
+              oneAtATime: true,
+              exponentialLeak: true,
+              ignoreEarlierZoneLosses: true,
+            },
+          },
+        },
+        {
+          name: 'backlog',
+          inflows: [],
+          outflows: ['serve', 'spill'],
+          initialEquation: '0',
+          // [7] queue stock: the marker is a bare empty object.
+          compat: { queue: {} },
+        },
+        {
+          // [11] display-spelling stock name (issue #906): the engine stores
+          // names verbatim, so a TS-side canonicalization to `reservoir_level`
+          // would surface as a changed name below.
+          name: 'Reservoir Level',
+          inflows: [],
+          outflows: [],
+          initialEquation: '0',
+        },
       ],
-      flows: [],
+      flows: [
+        {
+          name: 'loading',
+          equation: '1',
+          // [8] spreadflow inflow placement (dist carries a payload).
+          compat: { spreadflow: { type: 'dist', distribution: '1 + 2' } },
+        },
+        // The conveyor's primary outflow is pass-driven: no equation.
+        { name: 'shipping' },
+        {
+          name: 'leak',
+          // [9] conveyor leakage outflow with every option set.
+          compat: { leakage: { fraction: '0.1', integers: true, zoneStart: '0', zoneEnd: '1' } },
+        },
+        { name: 'serve', equation: '1' },
+        {
+          name: 'spill',
+          // [10] queue overflow outflow.
+          compat: { overflow: true },
+        },
+        // [11] display-spelling flow name (issue #906).
+        { name: 'Fill Rate', equation: '1' },
+      ],
       auxiliaries: [
         {
           name: 'imported',
@@ -106,6 +166,10 @@ const BASE_PROJECT = JSON.stringify({
             ],
           },
         },
+        // [11] display-spelling aux names (issue #906), including the encoded
+        // line-break form imported Stella models carry.
+        { name: 'Total Students', equation: '2' },
+        { name: 'testing\\nassymptomatic', equation: '3' },
       ],
       modules: [
         {
@@ -124,6 +188,8 @@ const BASE_PROJECT = JSON.stringify({
             },
           },
         },
+        // [11] display-spelling module name (issue #906).
+        { name: 'Sub Copy', modelName: 'sub' },
       ],
     },
     {
@@ -151,7 +217,19 @@ interface ParsedAux {
 }
 interface ParsedStock {
   name: string;
-  compat?: { activeInitial?: string };
+  compat?: {
+    activeInitial?: string;
+    conveyor?: Record<string, unknown>;
+    queue?: Record<string, unknown>;
+  };
+}
+interface ParsedFlow {
+  name: string;
+  compat?: {
+    leakage?: Record<string, unknown>;
+    spreadflow?: Record<string, unknown>;
+    overflow?: boolean;
+  };
 }
 interface ParsedModule {
   name: string;
@@ -160,6 +238,7 @@ interface ParsedModule {
 interface ParsedModel {
   name: string;
   stocks: ParsedStock[];
+  flows: ParsedFlow[];
   auxiliaries: ParsedAux[];
   modules?: ParsedModule[];
 }
@@ -184,9 +263,43 @@ function findAux(parsed: ParsedProject, name: string): ParsedAux {
   return aux;
 }
 
+function findFlow(parsed: ParsedProject, name: string): ParsedFlow {
+  const flow = parsed.models[0].flows.find((f) => f.name === name);
+  if (!flow) {
+    throw new Error(`flow ${name} not found`);
+  }
+  return flow;
+}
+
 function assertAllFieldsPresent(parsed: ParsedProject): void {
   const stock = parsed.models[0].stocks.find((s) => s.name === 'level');
   expect(stock?.compat?.activeInitial).toBe('5');
+
+  const belt = parsed.models[0].stocks.find((s) => s.name === 'belt');
+  expect(belt?.compat?.conveyor).toEqual({
+    transitTime: '5',
+    capacity: '100',
+    inflowLimit: '10',
+    sample: '1',
+    arrest: '2',
+    discrete: true,
+    batchIntegrity: true,
+    oneAtATime: true,
+    exponentialLeak: true,
+    ignoreEarlierZoneLosses: true,
+  });
+
+  const backlog = parsed.models[0].stocks.find((s) => s.name === 'backlog');
+  expect(backlog?.compat?.queue).toEqual({});
+
+  expect(findFlow(parsed, 'loading').compat?.spreadflow).toEqual({ type: 'dist', distribution: '1 + 2' });
+  expect(findFlow(parsed, 'leak').compat?.leakage).toEqual({
+    fraction: '0.1',
+    integers: true,
+    zoneStart: '0',
+    zoneEnd: '1',
+  });
+  expect(findFlow(parsed, 'spill').compat?.overflow).toBe(true);
 
   const imported = findAux(parsed, 'imported');
   expect(imported.compat?.dataSource).toEqual({
@@ -203,6 +316,16 @@ function assertAllFieldsPresent(parsed: ParsedProject): void {
   const north = arrayed.arrayedEquation?.elements?.find((e) => e.subscript === 'north');
   expect(north?.graphicalFunction?.yPoints).toEqual([0, 1, 2]);
   expect(north?.compat?.activeInitial).toBe('3');
+
+  // [11] Display spellings survive verbatim (issues #890/#906): the engine
+  // stores the payload's `name` as-is and matches canonically, so a TS-side
+  // canonicalization anywhere on the load -> upsert path shows up here as a
+  // downgraded name (e.g. `total_students`).
+  expect(parsed.models[0].stocks.some((s) => s.name === 'Reservoir Level')).toBe(true);
+  expect(parsed.models[0].flows.some((f) => f.name === 'Fill Rate')).toBe(true);
+  expect(parsed.models[0].auxiliaries.some((a) => a.name === 'Total Students')).toBe(true);
+  expect(parsed.models[0].auxiliaries.some((a) => a.name === 'testing\\nassymptomatic')).toBe(true);
+  expect(parsed.models[0].modules?.some((m) => m.name === 'Sub Copy')).toBe(true);
 
   const module = parsed.models[0].modules?.find((m) => m.name === 'sub_inst');
   expect(module?.compat?.canBeModuleInput).toBe(true);
@@ -248,14 +371,35 @@ describeIfEngine('datamodel round-trip through the real engine serializer', () =
       }
 
       const level = model.variables.get('level');
+      const belt = model.variables.get('belt');
+      const backlog = model.variables.get('backlog');
+      const loading = model.variables.get('loading');
+      const leak = model.variables.get('leak');
+      const spill = model.variables.get('spill');
       const imported = model.variables.get('imported');
       const arrayed = model.variables.get('arrayed');
       const subInst = model.variables.get('sub_inst');
+      // Display-named variables live under their CANONICAL Map keys.
+      const reservoir = model.variables.get('reservoir_level');
+      const fillRate = model.variables.get('fill_rate');
+      const totalStudents = model.variables.get('total_students');
+      const testingAssym = model.variables.get('testing_assymptomatic');
+      const subCopy = model.variables.get('sub_copy');
       if (
         level?.type !== 'stock' ||
+        belt?.type !== 'stock' ||
+        backlog?.type !== 'stock' ||
+        loading?.type !== 'flow' ||
+        leak?.type !== 'flow' ||
+        spill?.type !== 'flow' ||
         imported?.type !== 'aux' ||
         arrayed?.type !== 'aux' ||
-        subInst?.type !== 'module'
+        subInst?.type !== 'module' ||
+        reservoir?.type !== 'stock' ||
+        fillRate?.type !== 'flow' ||
+        totalStudents?.type !== 'aux' ||
+        testingAssym?.type !== 'aux' ||
+        subCopy?.type !== 'module'
       ) {
         throw new Error('expected variables missing');
       }
@@ -269,9 +413,21 @@ describeIfEngine('datamodel round-trip through the real engine serializer', () =
             name: 'main',
             ops: [
               { type: 'upsertStock', payload: { stock: stockToJson(level) } },
+              { type: 'upsertStock', payload: { stock: stockToJson(belt) } },
+              { type: 'upsertStock', payload: { stock: stockToJson(backlog) } },
+              { type: 'upsertFlow', payload: { flow: flowToJson(loading) } },
+              { type: 'upsertFlow', payload: { flow: flowToJson(leak) } },
+              { type: 'upsertFlow', payload: { flow: flowToJson(spill) } },
               { type: 'upsertAux', payload: { aux: auxToJson(imported) } },
               { type: 'upsertAux', payload: { aux: auxToJson(arrayed) } },
               { type: 'upsertModule', payload: { module: moduleToJson(subInst) } },
+              // The issue #906 erosion: before rawName, these upserts sent the
+              // canonical ident as `name`, downgrading the display spelling.
+              { type: 'upsertStock', payload: { stock: stockToJson(reservoir) } },
+              { type: 'upsertFlow', payload: { flow: flowToJson(fillRate) } },
+              { type: 'upsertAux', payload: { aux: auxToJson(totalStudents) } },
+              { type: 'upsertAux', payload: { aux: auxToJson(testingAssym) } },
+              { type: 'upsertModule', payload: { module: moduleToJson(subCopy) } },
             ],
           },
         ],

@@ -1399,6 +1399,17 @@ void simlin_project_render_png(SimlinProject *project,
 
 // Creates a new simulation context
 //
+// `enable_ltm` requests Loops That Matter instrumentation. For an ordinary
+// model this produces a sim whose results carry the LTM link/loop-score
+// series. For a model containing a conveyor or queue stock, LTM is a
+// documented degradation: the flow-to-stock link-score formula assumes plain
+// INTEG under Euler, which neither special stock is, so the sim is created
+// WITHOUT LTM instrumentation and `simlin_sim_get_ltm_mode` reports
+// `Disabled`. `enable_ltm = true` is still honored as a request in that case:
+// `simlin_project_get_errors` will surface a `ConveyorLtmDegraded` /
+// `QueueLtmDegraded` `Warning` naming the offending stock, so the caller learns
+// why scores are absent instead of the request being silently dropped.
+//
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel
 SimlinSim *simlin_sim_new(SimlinModel *model, bool enable_ltm, SimlinError **out_error);
@@ -1478,7 +1489,19 @@ void simlin_sim_set_value(SimlinSim *sim, const char *name, double val, SimlinEr
 // - `sim` must be a valid pointer to a SimlinSim
 void simlin_sim_clear_values(SimlinSim *sim, SimlinError **out_error);
 
-// Sets the value for a variable at the last saved timestep by offset
+// Sets the value for a simple-constant variable at the last saved timestep
+// by data-buffer offset.
+//
+// This edits the LAST ROW of the saved results table in place -- it is only
+// usable after `simlin_sim_run_to_end` has produced results, and it does NOT
+// stage an override for the next `simlin_sim_reset` (use
+// `simlin_sim_set_value` for the persistent-override contract).
+//
+// The offset is validated the same way `simlin_sim_set_value` validates a
+// name: only a simple-constant offset (per the compiled simulation's
+// overridable-constant set, which excludes conveyor/queue pass-driven flows)
+// is writable; any computed variable's offset rejects with `BadOverride` so
+// saved simulation output cannot be silently rewritten.
 //
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim

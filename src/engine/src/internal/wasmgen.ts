@@ -70,11 +70,50 @@ export interface WasmBlobExports {
    */
   set_value(offset: number, value: number): number;
   clear_values(): void;
+  /**
+   * The blob's runtime error channel: `(beltIndex << 32) | errorCode`, or 0n when
+   * the run raised nothing. A wasm export cannot return a `Result`, so a raising
+   * `run_to`/`run_initials` returns normally after abandoning the failing step --
+   * the host learns of the failure only by asking. Decode with
+   * {@link decodeWasmError}, and see the Rust `wasmgen::errors` module.
+   */
+  get_error(): bigint;
   n_slots: WebAssembly.Global;
   n_chunks: WebAssembly.Global;
   results_offset: WebAssembly.Global;
   /** Live count of saved rows: 0 before any run / after `reset`, `n_chunks` after a full run. */
   saved_steps: WebAssembly.Global;
+}
+
+/** A runtime error a wasm blob reported through `get_error`. */
+export interface WasmRuntimeError {
+  /** The engine `ErrorCode`'s discriminant. Never 0. */
+  code: number;
+  /** Index into the model's conveyor plan list of the belt that raised. */
+  belt: number;
+}
+
+/**
+ * Unpack the `get_error()` word.
+ *
+ * Functional core: the exact inverse of the packing the blob's `get_error`
+ * performs (Rust `wasmgen::errors::emit_get_error`), and the TypeScript twin of
+ * `wasmgen::errors::decode_error_word`.
+ *
+ * `undefined` means no error was raised. The test is on the CODE half alone, not
+ * the whole word: a swallowed mid-run preview failure clears the code but a host
+ * reading a stale belt index must not see that as a failure.
+ *
+ * Unlike the Rust host this does NOT rebuild the VM's message text -- that needs
+ * the model's `ConveyorPlan` list, which does not cross the FFI boundary. The
+ * caller surfaces the code and belt index instead.
+ */
+export function decodeWasmError(word: bigint): WasmRuntimeError | undefined {
+  const code = Number(BigInt.asUintN(32, word));
+  if (code === 0) {
+    return undefined;
+  }
+  return { code, belt: Number(BigInt.asUintN(32, word >> 32n)) };
 }
 
 /**

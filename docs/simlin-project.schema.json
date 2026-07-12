@@ -289,6 +289,54 @@
               "type": "null"
             }
           ]
+        },
+        "conveyor": {
+          "description": "Present on a stock iff it is a conveyor. Mirrors [`datamodel::Compat::conveyor`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Conveyor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "leakage": {
+          "description": "Present on a flow iff it is a conveyor leakage outflow. Mirrors [`datamodel::Compat::leakage`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Leakage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "spreadflow": {
+          "description": "Present on a conveyor inflow that selects a non-default placement. Mirrors [`datamodel::Compat::spreadflow`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpreadFlow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "queue": {
+          "description": "Present on a stock iff it is a queue. Mirrors [`datamodel::Compat::queue`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Queue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "overflow": {
+          "description": "True on a queue outflow marked overflow. Mirrors [`datamodel::Compat::overflow`].",
+          "type": "boolean"
         }
       }
     },
@@ -319,6 +367,157 @@
         "cell"
       ]
     },
+    "Conveyor": {
+      "description": "A conveyor stock. Mirrors [`datamodel::Conveyor`]; the fields hold XMILE\nexpression strings, and `None`/`false` means the option was absent (the\ndocumented default applies). New optional fields are additive to the Go `sd`\npackage schema.",
+      "type": "object",
+      "properties": {
+        "transitTime": {
+          "type": "string"
+        },
+        "capacity": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inflowLimit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sample": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "arrest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "discrete": {
+          "type": "boolean"
+        },
+        "batchIntegrity": {
+          "type": "boolean"
+        },
+        "oneAtATime": {
+          "type": "boolean"
+        },
+        "exponentialLeak": {
+          "type": "boolean"
+        },
+        "ignoreEarlierZoneLosses": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "transitTime"
+      ]
+    },
+    "Leakage": {
+      "description": "Marks a flow as a conveyor leakage outflow. Mirrors [`datamodel::Leakage`].",
+      "type": "object",
+      "properties": {
+        "fraction": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "integers": {
+          "type": "boolean"
+        },
+        "zoneStart": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "zoneEnd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "SpreadFlow": {
+      "description": "Conveyor inflow-placement method. Mirrors [`datamodel::SpreadFlow`].\nAdjacently tagged (`{\"type\": \"...\", \"distribution\": \"...\"}`) because the\n`Dist` variant carries a payload the internally-tagged style this file uses\nfor its other enums cannot represent.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "beginning"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "even"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "dest"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "dist"
+            },
+            "distribution": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "distribution"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "source"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "Queue": {
+      "description": "A queue stock. Mirrors [`datamodel::Queue`]: a bare marker with no options\n(XMILE §4.2). Kept a struct rather than a bool so a future vendor attribute\ndoes not churn every construction site.",
+      "type": "object"
+    },
     "ElementEquation": {
       "type": "object",
       "properties": {
@@ -329,6 +528,7 @@
           "type": "string"
         },
         "compat": {
+          "description": "Per-element compat carries `active_initial` ONLY: the datamodel's\n`Equation::Arrayed` element tuple has a slot for nothing else, and\nevery other `Compat` field is a variable-level concept (conveyor and\nqueue mark whole stocks, leakage/spreadflow/overflow whole flows,\ndata_source/is_public/can_be_module_input whole variables). The\ndatamodel conversions below deliberately read just `active_initial`\nfrom an element's compat; other fields hand-authored here are\ntolerated by serde and dropped.",
           "anyOf": [
             {
               "$ref": "#/$defs/Compat"

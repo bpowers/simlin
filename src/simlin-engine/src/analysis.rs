@@ -335,20 +335,23 @@ fn run_ltm_pipeline(
     // LTM flags are set by the caller (analyze_model) before this function
     // is called, and restored after it returns.
 
-    // A compile failure here is the actionable case GH #660 cares about: the
-    // GH #486 non-Euler hard-fail (and any other compile error) carries a
-    // specific, user-facing message that must reach the caller rather than
-    // collapsing into an empty "no loops" result. Surface it as `Err`.
-    let compiled_sim = crate::db::compile_project_incremental(db, source_project, &canonical_name)
-        .map_err(|e| {
-            // `Error::details` carries the rich message (e.g. the Euler guidance);
-            // fall back to the code's Display when a bare error has no details.
-            e.details.unwrap_or_else(|| e.code.to_string())
-        })?;
-    // `Vm::new`/`run_to_end` failures land in `analysis_error` too, so format
-    // them the same way as the compile path: prefer the rich `details`, fall
-    // back to the code's Display when a bare error carries none.
-    let mut vm = crate::vm::Vm::new(compiled_sim)
+    // `build_sim` routes a conveyor/queue model through its special expansion
+    // build path -- so the model compiles and runs correctly rather than tripping
+    // the ordinary path's NotExpanded guard (which previously surfaced here as a
+    // spurious `analysis_error`) -- while an ordinary model still compiles through
+    // the incremental path with the caller's `ltm_enabled` intact. The special
+    // path compiles the db's EXPANDED `SourceProject`, whose `ltm_enabled` is
+    // always false, so it synthesizes no LTM variables: a conveyor/queue model's
+    // loop analysis degrades to empty loops (conveyor/queue + LTM is a documented
+    // degradation) but no longer reports a false error.
+    //
+    // A compile failure here is still the actionable GH #660 case: the GH #486
+    // non-Euler hard-fail (and any other compile/`Vm::new`/`run_to_end` error)
+    // carries a specific, user-facing message that must reach the caller rather
+    // than collapsing into an empty "no loops" result. Format it the same way
+    // regardless of origin: prefer the rich `details` (e.g. the Euler guidance),
+    // fall back to the code's Display when a bare error carries none.
+    let mut vm = crate::build_sim(db, source_project, project, &canonical_name)
         .map_err(|e| e.details.unwrap_or_else(|| e.code.to_string()))?;
     vm.run_to_end()
         .map_err(|e| e.details.unwrap_or_else(|| e.code.to_string()))?;
@@ -659,6 +662,29 @@ mod tests {
         let sync = crate::db::sync_from_datamodel(&db, project);
         let sp = sync.project;
         (db, sp)
+    }
+
+    /// F2: `analyze_model` on a conveyor model must NOT report a spurious
+    /// `analysis_error`. Before the `build_sim` dispatch, the LTM pipeline's
+    /// `compile_project_incremental` hit the `ConveyorNotExpanded` guard, so
+    /// `analyze_model` caught the `Err` and degraded to a false `analysis_error`.
+    /// It now compiles and runs the model through the special build path. LTM
+    /// synthesis is not available on that path (conveyor/queue + LTM is a
+    /// documented degradation), so the loop analysis is empty -- but that is "no
+    /// loops", NOT "could not analyse".
+    #[test]
+    fn analyze_model_conveyor_reports_no_spurious_error() {
+        let xml = include_str!("../../../test/conveyors/minimal_conveyor.xmile");
+        let project = crate::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+            .expect("parse minimal_conveyor.xmile");
+        let (mut db, sp) = synced_db(&project);
+        let analysis =
+            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model must succeed");
+        assert!(
+            analysis.analysis_error.is_none(),
+            "conveyor model must not report a spurious analysis error: {:?}",
+            analysis.analysis_error
+        );
     }
 
     fn broken_project() -> datamodel::Project {

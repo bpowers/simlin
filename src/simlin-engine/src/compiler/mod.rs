@@ -796,30 +796,12 @@ impl Var {
                     if ast.is_none() {
                         return sim_err!(EmptyEquation, var.ident().to_string());
                     }
-                    match ast.as_ref().unwrap() {
+                    let exprs = match ast.as_ref().unwrap() {
                         Ast::Scalar(ast) => {
                             let mut exprs = ctx.lower(ast)?;
                             let main_expr = exprs.pop().unwrap();
                             let main_expr =
                                 hoist_nested_array_builtins_in_scalar(main_expr, &mut exprs);
-                            // WITH LOOKUP (`var = WITH LOOKUP(input, table)`): a
-                            // tables-bearing variable WITH a real input equation
-                            // lowers to `LOOKUP(self, input)`. (A standalone
-                            // lookup-only table has no input and is handled above;
-                            // ordinary auxes have no tables.)
-                            let main_expr = if !tables.is_empty() {
-                                let loc = main_expr.get_loc();
-                                Expr::App(
-                                    BuiltinFn::Lookup(
-                                        Box::new(Expr::Var(off, loc)),
-                                        Box::new(main_expr),
-                                        loc,
-                                    ),
-                                    loc,
-                                )
-                            } else {
-                                main_expr
-                            };
                             exprs.push(Expr::AssignCurr(off, Box::new(main_expr)));
                             exprs
                         }
@@ -836,7 +818,14 @@ impl Var {
                                 off,
                             )?
                         }
-                    }
+                    };
+                    // WITH LOOKUP (`var = WITH LOOKUP(input, table)`): a
+                    // tables-bearing variable WITH a real input equation lowers
+                    // to `LOOKUP(self, input)` -- per element for arrayed
+                    // shapes (GH #909). (A standalone lookup-only table has no
+                    // input and is handled above; ordinary auxes have no
+                    // tables.)
+                    apply_implicit_with_lookup(exprs, off, tables)
                 }
             }
         };
@@ -852,6 +841,90 @@ impl Var {
             ast,
         })
     }
+}
+
+/// Implicit WITH LOOKUP application (GH #909): rewrite each per-element
+/// assignment of a tables-bearing, value-bearing variable so the element's
+/// input equation is fed through the variable's graphical function, matching
+/// Stella (`value = gf(input)`):
+///
+/// - scalar, or arrayed with a single VARIABLE-level gf: one shared table
+///   (`tables.len() == 1`); every element looks up table index 0;
+/// - non-A2A PER-ELEMENT gfs: `tables` holds one table per element at the
+///   element's row-major declared-dimension index (`variable::build_tables` /
+///   `reorder_arrayed_element_tables`), so element `i` looks up table `i`. An
+///   element WITHOUT a gf carries an empty placeholder table and keeps its raw
+///   input equation -- Stella has nothing to apply there (wrapping would turn
+///   its value into NaN, the empty-table lookup result).
+///
+/// A table with NO points is deliberately treated as ABSENT for every shape,
+/// scalars included: the variable evaluates its raw input equation rather
+/// than NaN. (The pre-#909 scalar wrap keyed only on `tables` being
+/// non-empty, so a degenerate zero-point gf produced NaN; the rule now
+/// matches the arrayed empty-placeholder handling.)
+///
+/// A gf-BEARING element whose input equation is MISSING (an XMILE gf-only
+/// `<element>`, GH #907, in a variable where other elements carry real
+/// equations and there is no EXCEPT default) receives the arrayed
+/// expansion's fabricated `Const(0.0)` input and therefore evaluates
+/// `gf(0)`: the wrap applies uniformly to whatever input the expansion
+/// produced. Both the old `0` and the new `gf(0)` are silent fabrications
+/// (Stella rejects that element shape outright); the zero-fill itself, and
+/// a diagnostic for this class, are the open remainder of GH #905.
+///
+/// Only the per-element `AssignCurr` nodes the expansion paths emit are
+/// rewritten; hoisted pre-computations (`AssignTemp`) feed those assignments
+/// and stay untouched. The table reference is `Expr::Var(base + table_idx)`:
+/// codegen's `extract_table_info` resolves it by offset-range containment to
+/// `(table_ident, element_offset)` -- exactly the resolution an explicit
+/// `LOOKUP(var[elem], x)` call site gets -- and emits the same scalar `Lookup`
+/// opcode (`graphical_functions[base_gf + element_offset]`), so both the VM
+/// and the wasm backend evaluate it with no new lowering.
+fn apply_implicit_with_lookup(
+    exprs: Vec<Expr>,
+    base_off: usize,
+    tables: &[crate::variable::Table],
+) -> Vec<Expr> {
+    if tables.is_empty() {
+        return exprs;
+    }
+    exprs
+        .into_iter()
+        .map(|expr| match expr {
+            // The guard filters nothing in practice: every `AssignCurr` a
+            // Var fragment emits targets the variable's own offset range
+            // (pre-computations are `AssignTemp`). It exists purely as
+            // defense so a hypothetical foreign-offset assignment could
+            // never wrap against a nonsense element index.
+            Expr::AssignCurr(off, value) if off >= base_off => {
+                let elem = off - base_off;
+                let table_idx = if tables.len() == 1 { 0 } else { elem };
+                // `false` for an out-of-range index (defensive: `tables` is
+                // either 1 or the element count) and for an empty placeholder.
+                let has_table = tables
+                    .get(table_idx)
+                    .map(|t| !t.x.is_empty())
+                    .unwrap_or(false);
+                if has_table {
+                    let loc = value.get_loc();
+                    Expr::AssignCurr(
+                        off,
+                        Box::new(Expr::App(
+                            BuiltinFn::Lookup(
+                                Box::new(Expr::Var(base_off + table_idx, loc)),
+                                value,
+                                loc,
+                            ),
+                            loc,
+                        )),
+                    )
+                } else {
+                    Expr::AssignCurr(off, value)
+                }
+            }
+            other => other,
+        })
+        .collect()
 }
 
 /// For scalar equations, hoist nested array-producing builtins only where the

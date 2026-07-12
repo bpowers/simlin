@@ -404,6 +404,181 @@ pub enum ErrorCode {
     /// table has no scalar value of its own; it must be called, e.g.
     /// `LOOKUP(my_table, x)` or `my_table(x)` (issue #606).
     LookupReferencedWithoutArgument,
+    /// A conveyor stock has no non-leakage outflow (no outflows at all, or every
+    /// outflow is `<leak/>`-marked). A conveyor needs one primary outflow that
+    /// the belt drives (docs/design/conveyors.md §3.3).
+    ConveyorWithoutOutflow,
+    /// A conveyor is present under RK2/RK4 integration. The slat model is
+    /// defined per-DT and has no meaning under Runge-Kutta substeps, so
+    /// conveyors require Euler (docs/design/conveyors.md §9.4).
+    ConveyorNonEulerMethod,
+    /// A queue is directly upstream of a non-discrete conveyor
+    /// (docs/design/conveyors.md §11 / §6.4).
+    ConveyorQueueUpstreamNotDiscrete,
+    /// A conveyor's transit time (`<len>`) is not positive at compile time
+    /// (docs/design/conveyors.md §4.1).
+    ConveyorTransitNotPositive,
+    /// A conveyor's latched transit time implies more belt slats
+    /// (`round(transit/dt)`) than the engine will allocate. The slat count sizes
+    /// the belt `Vec`; an enormous `transit/dt` (a hostile or typo'd `<len>`)
+    /// would otherwise request an unbounded allocation -- a `usize`-saturating
+    /// count panics `vec![0.0; usize::MAX]` -> host abort under `panic = "abort"`,
+    /// and a merely-huge finite one OOMs. Rejected loudly at belt init / latch
+    /// time rather than silently saturating the belt geometry (see
+    /// `conveyor::MAX_SLATS_PER_BELT`, docs/design/conveyors.md §4.1).
+    ConveyorTransitTooLong,
+    /// A conveyor's transit time is not an integer multiple of DT; the belt is
+    /// DT-quantized to the nearest whole slat count. Warning-level
+    /// (docs/design/conveyors.md §4.1).
+    ConveyorTransitNotDtMultiple,
+    /// A conveyor's constant linear leak fractions sum above 1. Warning-level;
+    /// the primary outflow will be starved (docs/design/conveyors.md §5.1).
+    ConveyorLeakFractionsExceedOne,
+    /// LTM analysis was requested on a model containing conveyors; the belt's
+    /// internal dynamics are not scored as INTEG. Warning-level
+    /// (docs/design/conveyors.md §9.6).
+    ConveyorLtmDegraded,
+    /// Another equation references a conveyor-driven flow (the primary outflow
+    /// or a leak flow) by name. The conveyor pass runs after the flows phase, so
+    /// such a reader would read the pre-pass placeholder 0 rather than the
+    /// belt-driven rate. Rejected loudly rather than silently mis-computed
+    /// (docs/design/conveyors.md §4.3 "Visibility to other equations").
+    ConveyorDrivenFlowRead,
+    /// A conveyor stock reached the ordinary compile path without being expanded
+    /// by the special-stock build path. An INTERNAL invariant guard, not a
+    /// backend or model limitation: every backend (the bytecode VM and wasmgen
+    /// alike) routes a conveyor model through `queue_compile::compile_sim`, which
+    /// expands it. Any other path would integrate the belt as a plain stock and
+    /// silently mis-simulate, so it is rejected (docs/design/conveyors.md §9.3).
+    ConveyorNotExpanded,
+    /// A conveyor inflow requests an `isee:spreadflow` placement whose runtime
+    /// wiring is not yet available (`dist` needs the distribution graphical
+    /// function evaluated per slat; `source` needs upstream-leak coupling).
+    /// Rejected loudly rather than silently placed at the entry
+    /// (docs/design/conveyors.md §8).
+    ConveyorSpreadflowUnsupported,
+    /// An arrayed conveyor stock (or one of its driven flows) is declared over a
+    /// dimension the project does not define, so the per-element belt layout
+    /// cannot be resolved. An internal-consistency guard on the arrayed-conveyor
+    /// expansion (docs/design/conveyors.md §10).
+    ConveyorArrayedDimensionUnresolved,
+    /// An equation uses a conveyor stock as a **container** in a form that cannot
+    /// be lowered. The supported forms -- `SUM`/`MIN`/`MAX`/`MEAN`/`STDDEV`/`SIZE`
+    /// over a single belt, and `conv[j]` for a compile-time-constant slat index --
+    /// are rewritten to synthesized hidden stocks the passes publish at step
+    /// start, on both backends. What stays rejected is a reducer over an
+    /// EXPRESSION involving the belt, a dynamic slat index, a range/wildcard over
+    /// slats, and a bare arrayed-conveyor reducer other than `SUM`: the belt lives
+    /// in a side table with a runtime-dynamic length, not in the fixed-dimension
+    /// data buffer. Rejected loudly rather than silently mis-resolving (`SIZE` ->
+    /// 1, `MEAN` -> the belt total) or erroring opaquely
+    /// (docs/design/conveyors.md §10).
+    ConveyorContainerAccessUnsupported,
+    /// A queue stock reached the ordinary compile path without being expanded by
+    /// the special-stock build path. An INTERNAL invariant guard on every backend,
+    /// which all route a queue model through `queue_compile::compile_sim`; any
+    /// other path would integrate the FIFO as a plain stock and silently
+    /// mis-simulate, so it is rejected (mirrors [`ConveyorNotExpanded`],
+    /// docs/design/queues.md §10.3).
+    QueueNotExpanded,
+    /// A queue is present under RK2/RK4 integration. The per-DT admit-then-serve
+    /// batch model is defined per-DT and has no meaning under Runge-Kutta
+    /// substeps, so queues require Euler (mirrors [`ConveyorNonEulerMethod`],
+    /// docs/design/queues.md §10.3).
+    QueueNonEulerMethod,
+    /// Another equation references a queue-driven outflow by name. The queue pass
+    /// runs after the flows phase, so such a reader would read the pre-pass
+    /// placeholder 0 rather than the served rate. Rejected loudly rather than
+    /// silently mis-computed (mirrors [`ConveyorDrivenFlowRead`],
+    /// docs/design/queues.md §2 "Driven outflow"). The structural
+    /// `<inflow>`/`<outflow>` stock linkage is NOT a reference and is not caught
+    /// here: a stock fed by the driven outflow via INTEG is correct (the Stocks
+    /// phase runs after the pass).
+    QueueDrivenFlowRead,
+    /// An `<overflow/>` marker appears on a flow that is NOT a queue outflow, or on
+    /// a queue's FIRST (highest-priority) outflow. XMILE (§4.3) allows `<overflow/>`
+    /// only on a queue outflow, and never on the first one: an overflow is by
+    /// definition a lower-priority sibling that activates when a higher-priority
+    /// outflow is blocked (docs/design/queues.md §3.3, §10.7). Rejected loudly at
+    /// queue-expansion time.
+    QueueOverflowNotOnQueue,
+    /// LTM (Loops That Matter) analysis was requested on a model containing a
+    /// queue. A queue is a stock with non-INTEG dynamics (a FIFO of batches),
+    /// so the flow-to-stock link-score numerator assumes plain INTEG under
+    /// Euler and any score touching the queue may be wrong. Emitted as a
+    /// Warning naming the queue, mirroring `ConveyorLtmDegraded`
+    /// (docs/design/queues.md §10.5).
+    QueueLtmDegraded,
+    /// A conveyor stock is defined in a model that is NOT the main model -- a
+    /// module-referenced sub-model, or a model defined but never instantiated.
+    /// Conveyor expansion (`conveyor_compile::expand_conveyors`) rewrites only the
+    /// main model, so a conveyor anywhere else can never be expanded and would
+    /// otherwise trip the internal [`ConveyorNotExpanded`] guard with an
+    /// engine-internal message. Support for conveyors inside sub-models is a
+    /// deferred feature, not an engine bug, so it is rejected up front with the
+    /// offending stock's name and model rather than the internal invariant error.
+    /// The spec does not yet state the limitation anywhere; GH #940 tracks writing
+    /// it down, and GH #941 is the real-world fixture it blocks.
+    ConveyorInSubmodelUnsupported,
+    /// A queue stock is defined in a model that is NOT the main model. Queue
+    /// simulation is currently supported only in the main model (mirrors
+    /// [`ConveyorInSubmodelUnsupported`]; undocumented in the spec, GH #940).
+    QueueInSubmodelUnsupported,
+    /// A queue outflow OTHER THAN the primary (first, highest-priority) feeds a
+    /// conveyor -- an `<overflow/>` sibling or a second ordinary outflow whose
+    /// destination is a conveyor stock. Only a queue's first outflow may feed a
+    /// conveyor (docs/design/queues.md §4.4/§9): the combined queue-conveyor pass
+    /// couples exactly the primary, so a secondary conveyor destination is neither
+    /// discipline-guarded nor served under the batch rules. The spec sketches an
+    /// overflow-to-conveyor (§4.5) but does not define how a secondary's
+    /// redirectable budget interleaves with a (possibly distinct) second belt's
+    /// admission budget, so it is rejected loudly at coupling-detection time rather
+    /// than silently mis-accounted (which desyncs the queue FIFO / belt stock from
+    /// its side table). Fires whether the destination conveyor is discrete or
+    /// continuous, and whether the secondary is an overflow or an ordinary outflow.
+    QueueSecondaryOutflowToConveyor,
+    /// A conveyor stock has more than one NON-leak outflow. The slat model has
+    /// exactly one primary (belt-end) outflow that the belt drives, plus any
+    /// number of `<leak/>`-marked leakage flows; a second plain outflow has no
+    /// place in the model (docs/design/conveyors.md §3.3). Left unhandled it
+    /// would stay an ordinary equation-driven outflow of the expanded INTEG
+    /// stock: the Stocks phase drains the stock by that rate while the belt side
+    /// table never sheds the material, so the reported stock diverges below the
+    /// belt total permanently. Rejected loudly at conveyor-expansion time,
+    /// naming the conveyor, its primary outflow, and every extra non-leak
+    /// outflow (mark the extras with `<leak/>` if leakage was intended).
+    ConveyorMultipleNonLeakOutflows,
+    /// One stock carries BOTH a `<conveyor>` block and a `<queue/>` marker. XMILE
+    /// defines conveyors and queues as distinct stock TYPES; a stock has exactly
+    /// one type (docs/design/queues.md §10.7). The two markers are independent
+    /// optional fields the reader/proto carry side by side, and the two expansion
+    /// passes each clear only their OWN marker
+    /// ([`crate::conveyor_compile::expand_conveyors`] clears the conveyor block,
+    /// [`crate::queue_compile::expand_queues`] clears the queue marker), so a
+    /// both-marked stock would be expanded TWICE -- given both a `ConveyorPlan`
+    /// AND a `QueuePlan` over the same stock and shared outflow slot -- and the two
+    /// runtime passes would each drive the shared flow (the last writer winning
+    /// while belt and FIFO advance under different rates): silent garbage with no
+    /// diagnostic. Rejected loudly BEFORE either expansion, naming the stock.
+    StockBothConveyorAndQueue,
+    /// A conveyor stock's initial `<eqn>` is a §7.2 explicit comma-separated
+    /// init list that cannot be used as written: an entry is not a numeric
+    /// constant (the list is evaluated once at belt-init time, so only
+    /// compile-time constants are supported), or the list-initialized
+    /// conveyor's `<len>` is not a compile-time constant (the list-length
+    /// interpretation and the initial total depend on the slat count).
+    /// Rejected loudly at conveyor-expansion time rather than surfacing as
+    /// an opaque equation parse error on the stock
+    /// (docs/design/conveyors.md §7.2).
+    ConveyorInitListUnsupported,
+    /// A non-apply-to-all arrayed variable has an `<element>` entry whose
+    /// subscript names no declared element combination of the variable's
+    /// dimensions. Every consumer of the per-element list (the compiler's
+    /// arrayed expansion, per-element graphical-function table layout, and
+    /// conveyor per-element init lists) matches entries by exact canonical
+    /// key and silently DROPS an unmatched one, so a one-character typo
+    /// simulates plausibly-but-wrong with no signal. Warning-level (GH #905).
+    UnknownElementSubscript,
 }
 
 impl fmt::Display for ErrorCode {
@@ -465,6 +640,31 @@ impl fmt::Display for ErrorCode {
             UnsupportedForSerialization => "unsupported_for_serialization",
             DuplicateMacroName => "duplicate_macro_name",
             LookupReferencedWithoutArgument => "lookup_referenced_without_argument",
+            ConveyorWithoutOutflow => "conveyor_without_outflow",
+            ConveyorNonEulerMethod => "conveyor_non_euler_method",
+            ConveyorQueueUpstreamNotDiscrete => "conveyor_queue_upstream_not_discrete",
+            ConveyorTransitNotPositive => "conveyor_transit_not_positive",
+            ConveyorTransitTooLong => "conveyor_transit_too_long",
+            ConveyorTransitNotDtMultiple => "conveyor_transit_not_dt_multiple",
+            ConveyorLeakFractionsExceedOne => "conveyor_leak_fractions_exceed_one",
+            ConveyorLtmDegraded => "conveyor_ltm_degraded",
+            ConveyorDrivenFlowRead => "conveyor_driven_flow_read",
+            ConveyorNotExpanded => "conveyor_not_expanded",
+            ConveyorSpreadflowUnsupported => "conveyor_spreadflow_unsupported",
+            ConveyorArrayedDimensionUnresolved => "conveyor_arrayed_dimension_unresolved",
+            ConveyorContainerAccessUnsupported => "conveyor_container_access_unsupported",
+            QueueNotExpanded => "queue_not_expanded",
+            QueueNonEulerMethod => "queue_non_euler_method",
+            QueueDrivenFlowRead => "queue_driven_flow_read",
+            QueueOverflowNotOnQueue => "queue_overflow_not_on_queue",
+            QueueLtmDegraded => "queue_ltm_degraded",
+            ConveyorInSubmodelUnsupported => "conveyor_in_submodel_unsupported",
+            QueueInSubmodelUnsupported => "queue_in_submodel_unsupported",
+            QueueSecondaryOutflowToConveyor => "queue_secondary_outflow_to_conveyor",
+            ConveyorMultipleNonLeakOutflows => "conveyor_multiple_non_leak_outflows",
+            StockBothConveyorAndQueue => "stock_both_conveyor_and_queue",
+            ConveyorInitListUnsupported => "conveyor_init_list_unsupported",
+            UnknownElementSubscript => "unknown_element_subscript",
         };
 
         write!(f, "{name}")
@@ -698,6 +898,152 @@ pub fn canonicalize(name: &str) -> Cow<'_, str> {
     }
 
     Cow::Owned(canonicalized_name)
+}
+
+/// Group a variable-ident list by canonical form and return the colliding
+/// groups: for each canonical ident declared more than once, the canonical
+/// form plus every as-written spelling, in declaration order (GH #885).
+///
+/// [`canonicalize`] collapses case, whitespace, and underscores, so
+/// `Attrition`/`attrition` or `net flow`/`net_flow` are the SAME variable
+/// identifier -- every canonical-keyed map downstream (salsa sync, ModelStage0)
+/// silently keeps only one such twin. Callers use the returned groups to
+/// reject the model loudly instead. Group order follows the first occurrence
+/// of each colliding canonical so diagnostics are deterministic for a given
+/// declaration order.
+pub(crate) fn duplicate_variable_groups<'a, I>(idents: I) -> Vec<(String, Vec<String>)>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    for ident in idents {
+        let canonical = canonicalize(ident).into_owned();
+        let entry = groups.entry(canonical.clone()).or_default();
+        if entry.is_empty() {
+            order.push(canonical);
+        }
+        entry.push(ident.to_string());
+    }
+    order
+        .into_iter()
+        .filter_map(|canonical| {
+            let spellings = groups.remove(&canonical)?;
+            (spellings.len() > 1).then_some((canonical, spellings))
+        })
+        .collect()
+}
+
+/// The user-facing message for one duplicate-canonical-ident group, shared by
+/// the hard compile error (`compile_project_incremental`,
+/// `queue_compile::build_compiled`) and the accumulated diagnostic
+/// (`model_all_diagnostics`) so every surface reports identical text.
+/// Build one model-level `DuplicateVariable` [`Error`] per colliding
+/// canonical-ident group, or `None` when every declared ident is distinct
+/// (GH #891).
+///
+/// This is the `ModelStage0`-construction twin of the salsa-layer gate
+/// (`compile_project_incremental` / `emit_duplicate_variable_diagnostics`,
+/// GH #885): the monolithic constructors and `Project::from_salsa` collapse
+/// variables into a canonical-keyed map last-wins, so callers seed the
+/// model's error list with this result instead of silently building a
+/// different model than the one declared. The message text is shared via
+/// [`duplicate_variable_message`], so every surface reports identically.
+pub(crate) fn duplicate_variable_errors_from_groups(
+    model_name: &str,
+    groups: &[(String, Vec<String>)],
+) -> Option<Vec<Error>> {
+    if groups.is_empty() {
+        return None;
+    }
+    Some(
+        groups
+            .iter()
+            .map(|(canonical, spellings)| {
+                Error::new(
+                    ErrorKind::Model,
+                    ErrorCode::DuplicateVariable,
+                    Some(duplicate_variable_message(model_name, canonical, spellings)),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// [`duplicate_variable_errors_from_groups`] over a raw declared-ident list:
+/// groups the idents by canonical form first. Used by the datamodel-driven
+/// `ModelStage0` constructors -- which are themselves `#[cfg(test)]`, hence
+/// the gate here -- while the salsa-driven path (`Project::from_salsa`) feeds
+/// the memoized `db::model_duplicate_variables` groups directly.
+#[cfg(test)]
+pub(crate) fn duplicate_variable_errors<'a, I>(model_name: &str, idents: I) -> Option<Vec<Error>>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    duplicate_variable_errors_from_groups(model_name, &duplicate_variable_groups(idents))
+}
+
+pub(crate) fn duplicate_variable_message(
+    model_name: &str,
+    canonical: &str,
+    spellings: &[String],
+) -> String {
+    let list = spellings
+        .iter()
+        .map(|s| format!("'{s}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "variables {list} in model '{model_name}' all canonicalize to the same identifier \
+         '{canonical}' (variable names are case-, whitespace-, and underscore-insensitive); \
+         simulating would silently keep only one of them, so rename them to be distinct"
+    )
+}
+
+#[test]
+fn test_duplicate_variable_groups() {
+    // No collisions: distinct canonicals yield no groups.
+    assert!(duplicate_variable_groups(["a", "b", "c"]).is_empty());
+    assert!(duplicate_variable_groups([]).is_empty());
+
+    // Case, whitespace, and underscore variants collide; spellings are
+    // reported in declaration order.
+    let groups = duplicate_variable_groups(["Attrition", "x", "attrition"]);
+    assert_eq!(
+        groups,
+        vec![(
+            "attrition".to_string(),
+            vec!["Attrition".to_string(), "attrition".to_string()]
+        )]
+    );
+    let groups = duplicate_variable_groups(["net flow", "net_flow"]);
+    assert_eq!(
+        groups,
+        vec![(
+            "net_flow".to_string(),
+            vec!["net flow".to_string(), "net_flow".to_string()]
+        )]
+    );
+
+    // Byte-identical twins (the shape an MDL space/underscore pair imports
+    // as) are also a collision.
+    let groups = duplicate_variable_groups(["net_flow", "net_flow"]);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].1.len(), 2);
+
+    // Multiple groups keep first-occurrence order; a three-way collision is
+    // one group with all three spellings.
+    let groups = duplicate_variable_groups(["B b", "a", "A", "b_B", "B_B"]);
+    assert_eq!(
+        groups,
+        vec![
+            (
+                "b_b".to_string(),
+                vec!["B b".to_string(), "b_B".to_string(), "B_B".to_string()]
+            ),
+            ("a".to_string(), vec!["a".to_string(), "A".to_string()]),
+        ]
+    );
 }
 
 #[test]

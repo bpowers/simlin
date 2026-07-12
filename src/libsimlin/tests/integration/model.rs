@@ -12,7 +12,7 @@ use simlin::*;
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{self as engine};
 
-use crate::common::open_project_from_datamodel;
+use crate::common::{expect_no_error, open_project_from_datamodel};
 
 #[test]
 fn test_model_get_latex_equation() {
@@ -63,6 +63,71 @@ fn test_model_get_latex_equation_nonexistent_var() {
 
         // Should return null for nonexistent variable
         assert!(latex_ptr.is_null(), "expected null for nonexistent var");
+
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_model_get_latex_equation_null_for_conveyor_init_list_stock() {
+    // A conveyor stock's <eqn> may be a section 7.2 explicit init list
+    // ("10, 20, 30"), which is not a scalar expression. The salsa parse path
+    // substitutes a constant placeholder so diagnostics stay clean, but a
+    // LaTeX preview of that placeholder -- with eqnloc click-to-caret ranges
+    // mapped into the placeholder text -- would be confidently wrong. The
+    // LaTeX surface must return NULL for a list-initialized conveyor stock
+    // (no preview beats a wrong one); ordinary variables keep their preview.
+    let xmile = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>t</name><vendor>t</vendor><product version="1.0">t</product>
+    <options><uses_conveyor/></options></header>
+  <sim_specs method="Euler"><start>0</start><stop>4</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="belt"><eqn>10, 20, 30</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+      <conveyor><len>3</len></conveyor></stock>
+    <flow name="in_f"><eqn>0</eqn></flow>
+    <flow name="out_f"><eqn>0</eqn></flow>
+  </variables></model>
+</xmile>"#;
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_xmile(
+            xmile.as_ptr(),
+            xmile.len(),
+            &mut err as *mut *mut SimlinError,
+        );
+        assert!(err.is_null(), "open_xmile should not error");
+        assert!(!proj.is_null());
+
+        let mut get_model_error: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut get_model_error);
+        assert!(get_model_error.is_null());
+        assert!(!model.is_null());
+
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        let ident = CString::new("belt").unwrap();
+        let latex_ptr = simlin_model_get_latex_equation(model, ident.as_ptr(), &mut out_error);
+        assert!(
+            latex_ptr.is_null(),
+            "list-initialized conveyor stock must yield NULL latex, got: {:?}",
+            CStr::from_ptr(latex_ptr).to_str()
+        );
+        if !out_error.is_null() {
+            simlin_error_free(out_error);
+        }
+
+        // An ordinary variable in the same model still renders.
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        let ident = CString::new("in_f").unwrap();
+        let latex_ptr = simlin_model_get_latex_equation(model, ident.as_ptr(), &mut out_error);
+        assert!(out_error.is_null());
+        assert!(
+            !latex_ptr.is_null(),
+            "ordinary variables keep their latex preview"
+        );
+        simlin_free_string(latex_ptr);
 
         simlin_model_unref(model);
         simlin_project_unref(proj);
@@ -879,17 +944,7 @@ fn test_model_functions() {
             buf.len(),
             &mut err as *mut *mut SimlinError,
         );
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("project open failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "project open");
         assert!(!proj.is_null());
 
         // Test simlin_project_get_model_count
@@ -946,10 +1001,7 @@ fn test_model_functions() {
             ptr::null(),
             &mut err_get_model_default as *mut *mut SimlinError,
         );
-        if !err_get_model_default.is_null() {
-            simlin_error_free(err_get_model_default);
-            panic!("get_model failed");
-        }
+        expect_no_error(err_get_model_default, "get_model");
         assert!(!model_default.is_null());
         assert_eq!((*model_default).model_name.as_str(), "model1");
 

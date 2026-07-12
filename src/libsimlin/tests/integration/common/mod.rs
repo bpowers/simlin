@@ -8,6 +8,41 @@ use simlin_engine::serde as engine_serde;
 use std::ffi::CStr;
 use std::ptr;
 
+/// Consume `err`, panicking with `ctx` if it is non-null.
+///
+/// Copies the code and message out of the error BEFORE freeing it: reading
+/// the message pointer after `simlin_error_free` is a use-after-free, and an
+/// earlier revision of these tests did exactly that -- a failing test printed
+/// garbage bytes instead of the diagnostic (GH #898).
+///
+/// # Safety
+/// `err` must be null or a valid `*mut SimlinError` owned by the caller.
+pub unsafe fn expect_no_error(err: *mut SimlinError, ctx: &str) {
+    if err.is_null() {
+        return;
+    }
+    let code = simlin_error_get_code(err);
+    let msg_ptr = simlin_error_get_message(err);
+    let msg = if msg_ptr.is_null() {
+        String::new()
+    } else {
+        CStr::from_ptr(msg_ptr).to_string_lossy().into_owned()
+    };
+    simlin_error_free(err);
+    panic!("{ctx} failed with error {code:?}: {msg}");
+}
+
+/// Assert `err` is non-null and carries exactly `expected`; frees it.
+///
+/// # Safety
+/// `err` must be null or a valid `*mut SimlinError` owned by the caller.
+pub unsafe fn expect_error_code(err: *mut SimlinError, expected: SimlinErrorCode, ctx: &str) {
+    assert!(!err.is_null(), "{ctx}: expected an error but got success");
+    let code = simlin_error_get_code(err);
+    simlin_error_free(err);
+    assert_eq!(code, expected, "{ctx}: unexpected error code");
+}
+
 pub fn open_project_from_datamodel(
     project: &simlin_engine::datamodel::Project,
 ) -> *mut SimlinProject {
@@ -21,18 +56,8 @@ pub fn open_project_from_datamodel(
             buf.len(),
             &mut err as *mut *mut SimlinError,
         );
+        expect_no_error(err, "project open");
         assert!(!proj.is_null(), "project open failed");
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if !msg_ptr.is_null() {
-                CStr::from_ptr(msg_ptr).to_str().unwrap_or("")
-            } else {
-                ""
-            };
-            simlin_error_free(err);
-            panic!("project open failed with code {:?}: {}", code, msg);
-        }
         proj
     }
 }

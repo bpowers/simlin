@@ -226,4 +226,112 @@ outflow = 5
             assert_eq!(s.outflows, vec!["outflow"]);
         }
     }
+
+    /// Vensim accepts a space-separated stacked unary minus (`x = - -3`), and
+    /// the importer's `xmile_compat` formatter renders a nested negation
+    /// unparenthesized -- so the stored datamodel equation is `--3`. The
+    /// engine's own equation parser must accept what its importer produces,
+    /// otherwise the variable never compiles AND the MDL writer's
+    /// unparseable-equation fallback leaks raw XMILE back into the `.mdl`
+    /// (#912). Confirms the whole chain: import -> re-parse -> compile ->
+    /// simulate to 3.
+    #[test]
+    fn stacked_unary_minus_imports_reparses_compiles_and_simulates() {
+        use crate::datamodel::{Equation, Variable};
+        use crate::db::{compile_project_incremental, sync_from_datamodel_incremental};
+        use crate::lexer::LexerType;
+        use crate::vm::Vm;
+
+        let mdl = "x = - -3
+~ Dmnl
+~ A stacked unary minus |
+\\\\\\---///
+";
+        let project = parse_mdl(mdl).expect("MDL with `- -3` must import");
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x")
+            .expect("x should be imported");
+        let Variable::Aux(aux) = x else {
+            panic!("x should be an aux, got {x:?}")
+        };
+        let Equation::Scalar(eqn) = &aux.equation else {
+            panic!("x should have a scalar equation")
+        };
+        assert_eq!(eqn, "--3", "the importer stores the collapsed form");
+
+        // The invariant every stored datamodel equation must satisfy.
+        assert!(
+            matches!(
+                crate::ast::Expr0::new(eqn, LexerType::Equation),
+                Ok(Some(_))
+            ),
+            "the importer's own output must re-parse: {eqn:?}"
+        );
+
+        let mut db = crate::db::SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        let model_name = project.models[0].name.clone();
+        let compiled = compile_project_incremental(&db, sync.project, &model_name)
+            .expect("the imported project must compile");
+        let mut vm = Vm::new(compiled).expect("VM creation");
+        vm.run_to_end().expect("VM run");
+        let series = crate::test_common::collect_results(&vm.into_results());
+        let x_series = series.get("x").expect("x should have a saved series");
+        assert!(
+            x_series.iter().all(|v| (*v - 3.0).abs() < 1e-12),
+            "`- -3` must evaluate to 3, got {:?}",
+            &x_series[..x_series.len().min(4)]
+        );
+    }
+
+    /// `mdl::xmile_compat` re-emits an MDL AST *without* parentheses and leans on
+    /// the XMILE grammar to re-establish Vensim's grouping (see the long note on
+    /// `format_binary_ctx` and GH #914). That laundering is only sound where the
+    /// two grammars agree.
+    ///
+    /// `:AND:` binds tighter than `:OR:` in Vensim and in `mdl::parser`, so
+    /// `1 :OR: 0 :AND: 0` is `Or(1, And(0, 0))` = 1. When the XMILE parser gave
+    /// `and`/`or` a single shared left-associative level, the flat re-emission
+    /// `1 or 0 and 0` re-parsed as `And(Or(1, 0), 0)` = 0 -- the laundering
+    /// silently DESTROYED a correct MDL AST. Pins the whole chain end to end.
+    #[test]
+    fn logical_precedence_survives_the_mdl_to_xmile_laundering() {
+        use crate::db::{compile_project_incremental, sync_from_datamodel_incremental};
+        use crate::vm::Vm;
+
+        let mdl = "x = 1 :OR: 0 :AND: 0
+~ Dmnl
+~ |
+y = 1 :OR: 1 :AND: 0
+~ Dmnl
+~ |
+z = 0 :OR: 1 :AND: 0
+~ Dmnl
+~ |
+\\\\\\---///
+";
+        let project = parse_mdl(mdl).expect("MDL with :OR:/:AND: must import");
+
+        let mut db = crate::db::SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        let model_name = project.models[0].name.clone();
+        let compiled = compile_project_incremental(&db, sync.project, &model_name)
+            .expect("the imported project must compile");
+        let mut vm = Vm::new(compiled).expect("VM creation");
+        vm.run_to_end().expect("VM run");
+        let series = crate::test_common::collect_results(&vm.into_results());
+
+        // Vensim's answers. `x`/`y` discriminate (a shared left-associative level
+        // yields 0 for both); `z` guards against a grammar that just always says 1.
+        for (name, want) in [("x", 1.0), ("y", 1.0), ("z", 0.0)] {
+            let got = series.get(name).expect("saved series");
+            assert!(
+                got.iter().all(|v| (*v - want).abs() < 1e-12),
+                "{name} must be {want}, got {:?}",
+                &got[..got.len().min(4)]
+            );
+        }
+    }
 }

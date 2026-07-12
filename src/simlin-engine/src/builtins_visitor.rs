@@ -1429,6 +1429,65 @@ mod tests {
         }
     }
 
+    /// GH #913: a module-backed builtin's argument is serialized with
+    /// `print_eqn` into a synthesized helper aux, whose equation text is then
+    /// RE-PARSED. So every operator the printer spells differently from the way
+    /// the lexer reads it turns a perfectly legal model into a hard compile
+    /// failure ("failed to compile fragments for variables: $⁚s⁚0⁚arg0"), not a
+    /// cosmetic printer nit. `<>` used to print as `!=` and `not` as `!`, and
+    /// the lexer accepts neither -- so `<>`/`not` inside any SMTH*/DELAY*/TREND
+    /// argument was unusable.
+    #[test]
+    fn module_backed_builtin_argument_survives_print_and_reparse() {
+        let project = TestProject::new("printer_reparse")
+            .aux("a", "1", None)
+            .aux("b", "2", None)
+            .aux("neq", "SMTH1(IF (a <> b) THEN 1 ELSE 0, 3)", None)
+            .aux("negated", "SMTH1(IF (not (a > b)) THEN 1 ELSE 0, 3)", None)
+            .aux("exponent", "SMTH1(a ^ b ^ 2, 3)", None);
+
+        project.assert_compiles_incremental();
+    }
+
+    /// The same #913 print-and-reparse round trip, but the shape that fails
+    /// **SILENTLY** -- and therefore the most important test in this change.
+    ///
+    /// `If` is not an atom in the equation grammar: it is legal only at the top
+    /// of an expression, inside parentheses, or as a call argument. `print_eqn`
+    /// used to emit it bare under an operator, so the argument AST
+    /// `Div(If(1>0, 10, 20), 2)` printed as
+    ///
+    /// ```text
+    /// if (1 > 0) then (10) else (20) / 2
+    /// ```
+    ///
+    /// which re-parses as `If(1>0, 10, 20/2)` -- the division migrated INTO the
+    /// else branch. Unlike `<>` / `not` / chained `^` (which produce text the
+    /// lexer rejects, so the model fails loudly to compile), this text parses
+    /// fine. It just means something different.
+    ///
+    /// The result is a plain user model, with no arrays and no LTM, that
+    /// compiles clean, runs clean, and reports the wrong number: `10` instead of
+    /// `5`. Nothing anywhere in the engine would have caught it.
+    #[test]
+    fn module_backed_builtin_if_argument_is_not_regrouped() {
+        // SMTH1's input is a constant 5, so the smooth sits at its initial value
+        // (= the input) for the whole run. A regrouped `if` yields 10.
+        let project = TestProject::new("printer_reparse_if").aux(
+            "x",
+            "SMTH1((IF (1 > 0) THEN 10 ELSE 20) / 2, 1)",
+            None,
+        );
+
+        let x = project.vm_result_incremental("x");
+        assert!(
+            x.iter().all(|v| (*v - 5.0).abs() < 1e-12),
+            "`SMTH1((IF (1 > 0) THEN 10 ELSE 20) / 2, 1)` must be 5: the `/ 2` \
+             applies to the whole `if`, not just its else branch. Got {:?}",
+            &x[..x.len().min(4)]
+        );
+    }
+
     /// Test that arrayed DELAY1 compiles and simulates
     /// d[SubA] = DELAY1(input[SubA], delay_time, init)
     #[test]

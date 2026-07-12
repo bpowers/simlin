@@ -977,6 +977,783 @@ fn compute_link_polarities_negative_dependency() {
     );
 }
 
+/// GH #910 end-to-end: an implicit WITH-LOOKUP variable (`effect` carries
+/// BOTH a real input equation and a gf, so the compiler lowers it to
+/// `LOOKUP(effect_gf, input)`).
+///
+/// (a) Structural polarity: the gf is monotone DECREASING, so the
+/// `input -> effect` link polarity must be Negative even though the raw
+/// equation text (`input`) reads as Positive.
+///
+/// (b) Runtime link score: the ceteris-paribus partial must be fed
+/// through the same gf, so partial and actual deltas are commensurable.
+/// `input` is a stock ramping 0, 1, 2, ... (LTM bails early on a fully
+/// stateless model) and `gf(x) = 10 - x` over [0, 10], so
+/// `effect_t = 10 - t`, `Δeffect = -1`, and the partial (the only dep is
+/// the live source, nothing to freeze) equals `effect_t` exactly -- the
+/// score is `SAFEDIV(-1, |-1|) * SIGN(+1) = -1` at every step >= 1 (and 0
+/// at the initial step by the guard). The pre-fix unwrapped partial
+/// (`input_t` -- gf-INPUT units against gf-OUTPUT deltas) scored
+/// `2t - 11` instead (-9 at t=1).
+#[test]
+fn test_with_lookup_link_polarity_and_score_gf_aware() {
+    use crate::test_common::TestProject;
+    use salsa::Setter;
+
+    let decreasing_gf = datamodel::GraphicalFunction {
+        kind: datamodel::GraphicalFunctionKind::Continuous,
+        x_points: Some(vec![0.0, 10.0]),
+        y_points: vec![10.0, 0.0],
+        x_scale: datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: 10.0,
+        },
+        y_scale: datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: 10.0,
+        },
+    };
+    let tp = TestProject::new("with_lookup_ltm")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .stock("input", "0", &["one"], &[], None)
+        .flow("one", "1", None)
+        .aux_with_gf("effect", "input", decreasing_gf);
+    let project = tp.build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_project = sync.project;
+    let source_model = sync.models["main"].source;
+
+    // (a) Structural polarity composes the decreasing gf.
+    let polarities = compute_link_polarities(&db, source_model, source_project);
+    assert_eq!(
+        polarities.get(&("input".to_string(), "effect".to_string())),
+        Some(&crate::ltm::LinkPolarity::Negative),
+        "a decreasing with-lookup gf must flip the input -> effect polarity"
+    );
+
+    // (b) Runtime link score: discovery mode scores every causal edge
+    // (this two-variable model has no loops).
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let compiled = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM compile of the with-lookup model should succeed");
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end()
+        .expect("simulation should run to completion");
+    let results = vm.into_results();
+
+    let score_name = "$\u{205A}ltm\u{205A}link_score\u{205A}input\u{2192}effect";
+    let offset = *compiled
+        .offsets
+        .get(&crate::common::Ident::<crate::common::Canonical>::new(
+            score_name,
+        ))
+        .unwrap_or_else(|| {
+            panic!(
+                "missing {score_name} in compiled offsets: {:?}",
+                compiled.offsets.keys().collect::<Vec<_>>()
+            )
+        });
+    let series: Vec<f64> = results.iter().map(|row| row[offset]).collect();
+
+    assert!(
+        (series[0] - 0.0).abs() < 1e-10,
+        "guard: the link score is 0 at the initial step; got {series:?}"
+    );
+    for (step, val) in series.iter().enumerate().skip(1) {
+        assert!(
+            (val - (-1.0)).abs() < 1e-10,
+            "gf-aware score must be exactly -1 at step {step} (the link fully \
+             explains the target's change); got {val} in {series:?}"
+        );
+    }
+}
+
+/// GH #910 arrayed end-to-end: both arrayed WITH-LOOKUP shapes produce
+/// compiling, gf-aware link scores.
+///
+/// (a) A2A target with ONE shared variable-level decreasing gf: the score
+/// is the ApplyToAll form whose partial pins table 0 (`LOOKUP(effect[1],
+/// ...)`); every element scores exactly -1 from step 1 on (same algebra
+/// as the scalar twin, per element).
+///
+/// (b) Per-element-equation target where r1's gf is DECREASING and r2's
+/// is INCREASING: r1's slot scores -1 and r2's +1 -- each slot wrapped by
+/// its OWN element's table (`LOOKUP(effect2[r1], ...)`).
+#[test]
+fn test_with_lookup_arrayed_link_scores_gf_aware() {
+    use crate::test_common::TestProject;
+    use salsa::Setter;
+
+    let gf = |y0: f64, y1: f64| datamodel::GraphicalFunction {
+        kind: datamodel::GraphicalFunctionKind::Continuous,
+        x_points: Some(vec![0.0, 10.0]),
+        y_points: vec![y0, y1],
+        x_scale: datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: 10.0,
+        },
+        y_scale: datamodel::GraphicalFunctionScale {
+            min: y0.min(y1),
+            max: y0.max(y1),
+        },
+    };
+
+    let tp = TestProject::new("with_lookup_arrayed_ltm")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .array_stock("input[Region]", "0", &["one"], &[], None)
+        .array_flow("one[Region]", "1", None);
+    let mut project = tp.build_datamodel();
+    // (a) A2A effect with a shared variable-level decreasing gf.
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "effect".to_string(),
+            equation: datamodel::Equation::ApplyToAll(
+                vec!["Region".to_string()],
+                "input[Region]".to_string(),
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: Some(gf(10.0, 0.0)),
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+    // (b) Per-element-equation effect2 with per-element gfs: r1
+    // decreasing, r2 increasing.
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "effect2".to_string(),
+            equation: datamodel::Equation::Arrayed(
+                vec!["Region".to_string()],
+                vec![
+                    (
+                        "r1".to_string(),
+                        "input[r1]".to_string(),
+                        None,
+                        Some(gf(10.0, 0.0)),
+                    ),
+                    (
+                        "r2".to_string(),
+                        "input[r2]".to_string(),
+                        None,
+                        Some(gf(0.0, 10.0)),
+                    ),
+                ],
+                None,
+                false,
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_project = sync.project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let compiled = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM compile of the arrayed with-lookup model should succeed");
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end()
+        .expect("simulation should run to completion");
+    let results = vm.into_results();
+
+    // (a) The A2A score is arrayed over Region: each element's slot is
+    // laid out contiguously after the base offset.
+    let base = "$\u{205A}ltm\u{205A}link_score\u{205A}input\u{2192}effect";
+    for (elem_off, elem) in ["r1", "r2"].iter().enumerate() {
+        let offset = *compiled
+            .offsets
+            .get(&crate::common::Ident::<crate::common::Canonical>::new(base))
+            .unwrap_or_else(|| panic!("missing {base} in compiled offsets"))
+            + elem_off;
+        let series: Vec<f64> = results.iter().map(|row| row[offset]).collect();
+        for (step, val) in series.iter().enumerate().skip(1) {
+            assert!(
+                (val - (-1.0)).abs() < 1e-10,
+                "shared-gf A2A score[{elem}] must be -1 at step {step}; got {val} in {series:?}"
+            );
+        }
+    }
+
+    // (b) The per-element-equation target's slots reference `input[r1]` /
+    // `input[r2]` (FixedIndex shapes), so the emitted scores carry the
+    // bracketed-from names, each arrayed over the target's dims with only
+    // the matching slot live: r1's decreasing gf slot scores -1, r2's
+    // increasing gf slot scores +1.
+    for (elem_off, (elem, expected)) in [("r1", -1.0f64), ("r2", 1.0f64)].iter().enumerate() {
+        let name = format!("$\u{205A}ltm\u{205A}link_score\u{205A}input[{elem}]\u{2192}effect2");
+        let base_off = *compiled
+            .offsets
+            .get(&crate::common::Ident::<crate::common::Canonical>::new(
+                &name,
+            ))
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing {name} in compiled offsets: {:?}",
+                    compiled.offsets.keys().collect::<Vec<_>>()
+                )
+            });
+        let series: Vec<f64> = results.iter().map(|row| row[base_off + elem_off]).collect();
+        for (step, val) in series.iter().enumerate().skip(1) {
+            assert!(
+                (val - expected).abs() < 1e-10,
+                "per-element-gf score {name}[{elem}] must be {expected} at step {step}; \
+                 got {val} in {series:?}"
+            );
+        }
+    }
+}
+
+/// A shallow DECREASING gf whose output range (`[1, 0]`) is far below its
+/// input range (`[0, x_max]`). The mismatch is what makes an UNWRAPPED
+/// partial (gf-input units) score with the OPPOSITE sign to the composed
+/// link polarity (gf-output units) once the input outgrows the output --
+/// the GH #910 sign contradiction the wrap must remove.
+fn shallow_decreasing_gf(x_max: f64) -> datamodel::GraphicalFunction {
+    datamodel::GraphicalFunction {
+        kind: datamodel::GraphicalFunctionKind::Continuous,
+        x_points: Some(vec![0.0, x_max]),
+        y_points: vec![1.0, 0.0],
+        x_scale: datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: x_max,
+        },
+        y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+    }
+}
+
+/// Read a link score's per-step series out of a compiled+run LTM model.
+fn ltm_score_series(
+    compiled: &crate::CompiledSimulation,
+    results: &crate::results::Results,
+    name: &str,
+) -> Vec<f64> {
+    let offset = *compiled
+        .offsets
+        .get(&crate::common::Ident::<crate::common::Canonical>::new(name))
+        .unwrap_or_else(|| {
+            panic!(
+                "missing {name} in compiled offsets: {:?}",
+                compiled.offsets.keys().collect::<Vec<_>>()
+            )
+        });
+    results.iter().map(|row| row[offset]).collect()
+}
+
+/// GH #910 (scalar source -> arrayed WITH-LOOKUP target): the per-target-element
+/// link scores `try_scalar_to_arrayed_link_scores` emits must be built from the
+/// LOWERED (`LOOKUP(self, input)`) equation, not the raw input.
+///
+/// `drive` ramps 0, 1, 2, ... and `effect[Region] = drive` carries a shared
+/// decreasing gf mapping `[0, 10] -> [1, 0]`, so `effect_t = 1 - t/10`.
+/// The composed link polarity is Negative. With the gf-aware partial
+/// (`LOOKUP(effect[1], drive)` == `effect_t`) the numerator is `Δeffect`
+/// and the score is exactly -1 at every step >= 1.
+///
+/// The pre-fix unwrapped partial was `drive_t` -- gf-INPUT units measured
+/// against a gf-OUTPUT anchor `PREVIOUS(effect)` -- scoring
+/// `(t - effect_{t-1}) / |Δeffect|`, i.e. +11 at t=2: a POSITIVE score on a
+/// Negative-polarity link. That internal contradiction is what this test
+/// pins shut.
+#[test]
+fn test_with_lookup_scalar_to_arrayed_link_score_sign_matches_polarity() {
+    use crate::test_common::TestProject;
+    use salsa::Setter;
+
+    let tp = TestProject::new("with_lookup_scalar_to_arrayed")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .stock("drive", "0", &["one"], &[], None)
+        .flow("one", "1", None);
+    let mut project = tp.build_datamodel();
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "effect".to_string(),
+            equation: datamodel::Equation::ApplyToAll(
+                vec!["Region".to_string()],
+                "drive".to_string(),
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: Some(shallow_decreasing_gf(10.0)),
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_project = sync.project;
+    let source_model = sync.models["main"].source;
+
+    let polarity = *compute_link_polarities(&db, source_model, source_project)
+        .get(&("drive".to_string(), "effect".to_string()))
+        .expect("drive -> effect edge");
+    assert_eq!(
+        polarity,
+        crate::ltm::LinkPolarity::Negative,
+        "a decreasing with-lookup gf flips the drive -> effect polarity"
+    );
+
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+    let compiled = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM compile of the scalar->arrayed with-lookup model should succeed");
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+
+    for elem in ["r1", "r2"] {
+        let name = format!("$\u{205A}ltm\u{205A}link_score\u{205A}drive\u{2192}effect[{elem}]");
+        let series = ltm_score_series(&compiled, &results, &name);
+        for (step, val) in series.iter().enumerate().skip(1) {
+            assert!(
+                (val - (-1.0)).abs() < 1e-10,
+                "gf-aware score {name} must be -1 at step {step}; got {val} in {series:?}"
+            );
+            assert!(
+                *val < 0.0,
+                "score {name} must not contradict the Negative link polarity at step {step}: \
+                 got {val}"
+            );
+        }
+    }
+}
+
+/// GH #910 (variable-backed reducer whose owner is a WITH-LOOKUP target):
+/// `total = SUM(pop[*])` carrying a decreasing gf lowers to
+/// `total = gf(SUM(pop[*]))`, so the reducer emitters' per-row partial --
+/// which is expressed in the reducer's own (gf-INPUT) units -- must be fed
+/// through the gf before it is compared against `PREVIOUS(total)`.
+///
+/// `pop[r1]`, `pop[r2]` each ramp 0, 1, 2, ...; the gf maps `[0, 20] -> [1, 0]`,
+/// so `total_t = 1 - 2t/20` and `Δtotal = -0.1`. The gf-aware per-row partial
+/// evaluates the reducer with only `pop[r1]` live -- `pop[r1]_t +
+/// PREVIOUS(pop[r2])` = `2t - 1` -- through the gf, giving a numerator of
+/// `-0.05` and a score of exactly `-0.5` per row (the two rows summing to the
+/// whole `Δtotal`). The composed link polarity is Negative and the score
+/// agrees.
+///
+/// The pre-fix SUM shortcut partial (`PREVIOUS(total) + Δpop[r1]`) mixes a
+/// gf-OUTPUT anchor with a gf-INPUT delta, yielding a numerator of `+1` and a
+/// score of `+10` -- a POSITIVE score on a Negative-polarity link.
+#[test]
+fn test_with_lookup_variable_backed_reducer_link_score_sign_matches_polarity() {
+    use crate::test_common::TestProject;
+    use salsa::Setter;
+
+    let tp = TestProject::new("with_lookup_variable_backed_reducer")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .array_stock("pop[Region]", "0", &["grow"], &[], None)
+        .array_flow("grow[Region]", "1", None);
+    let mut project = tp.build_datamodel();
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "total".to_string(),
+            equation: datamodel::Equation::Scalar("SUM(pop[*])".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: Some(shallow_decreasing_gf(20.0)),
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_project = sync.project;
+    let source_model = sync.models["main"].source;
+
+    let polarity = *compute_link_polarities(&db, source_model, source_project)
+        .get(&("pop".to_string(), "total".to_string()))
+        .expect("pop -> total edge");
+    assert_eq!(
+        polarity,
+        crate::ltm::LinkPolarity::Negative,
+        "a decreasing with-lookup gf flips the pop -> total polarity"
+    );
+
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+    let compiled = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM compile of the with-lookup reducer model should succeed");
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+
+    for elem in ["r1", "r2"] {
+        let name = format!("$\u{205A}ltm\u{205A}link_score\u{205A}pop[{elem}]\u{2192}total");
+        let series = ltm_score_series(&compiled, &results, &name);
+        for (step, val) in series.iter().enumerate().skip(1) {
+            assert!(
+                (val - (-0.5)).abs() < 1e-10,
+                "gf-aware reducer row score {name} must be -0.5 at step {step}; \
+                 got {val} in {series:?}"
+            );
+            assert!(
+                *val < 0.0,
+                "score {name} must not contradict the Negative link polarity at step {step}: \
+                 got {val}"
+            );
+        }
+    }
+}
+
+/// GH #910: a reducer owned by a per-element-equation WITH-LOOKUP variable
+/// with PER-ELEMENT graphical functions.
+///
+/// This shape never reaches the reducer emitters: `enumerate_agg_nodes`
+/// declines the variable-backed form for a per-element-equation owner and
+/// mints a SYNTHETIC agg instead, so the edge routes
+/// `pop[r] -> $\u{205A}ltm\u{205A}agg\u{205A}0 -> total[e]`. The `agg -> total[e]`
+/// half is a per-target-element ceteris-paribus partial, which CAN name that
+/// element's own table -- so the wrap is fully expressible and the edge is
+/// scored, not declined.
+///
+/// `total[r1]` applies a DECREASING gf and `total[r2]` an INCREASING one over
+/// the same `SUM(pop[*])`, so the two slots' scores must have opposite signs
+/// (-1 and +1). Before the wrap both slots' partials were the raw
+/// (gf-input-units) agg value, scoring identically -- and contradicting
+/// `total[r1]`'s Negative hop.
+#[test]
+fn test_with_lookup_per_element_gf_reducer_owner_scores_per_slot() {
+    use crate::test_common::TestProject;
+    use salsa::Setter;
+
+    let increasing = datamodel::GraphicalFunction {
+        kind: datamodel::GraphicalFunctionKind::Continuous,
+        x_points: Some(vec![0.0, 20.0]),
+        y_points: vec![0.0, 1.0],
+        x_scale: datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: 20.0,
+        },
+        y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+    };
+    let tp = TestProject::new("with_lookup_per_element_reducer")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .array_stock("pop[Region]", "0", &["grow"], &[], None)
+        .array_flow("grow[Region]", "1", None);
+    let mut project = tp.build_datamodel();
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "total".to_string(),
+            equation: datamodel::Equation::Arrayed(
+                vec!["Region".to_string()],
+                vec![
+                    (
+                        "r1".to_string(),
+                        "SUM(pop[*])".to_string(),
+                        None,
+                        Some(shallow_decreasing_gf(20.0)),
+                    ),
+                    (
+                        "r2".to_string(),
+                        "SUM(pop[*])".to_string(),
+                        None,
+                        Some(increasing),
+                    ),
+                ],
+                None,
+                false,
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_project = sync.project;
+    let source_model = sync.models["main"].source;
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    // Nothing is declined: the synthetic-agg split makes every half wrappable.
+    let diags = crate::db::collect_model_diagnostics(&db, source_model, source_project);
+    assert!(
+        diags.is_empty(),
+        "the per-element-gf agg split must score cleanly; got {diags:?}"
+    );
+
+    let compiled = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM compile of the per-element-gf reducer owner should succeed");
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+
+    for (elem, expected) in [("r1", -1.0f64), ("r2", 1.0f64)] {
+        let name = format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}total[{elem}]"
+        );
+        let series = ltm_score_series(&compiled, &results, &name);
+        for (step, val) in series.iter().enumerate().skip(1) {
+            assert!(
+                (val - expected).abs() < 1e-10,
+                "per-element-gf agg->target score {name} must be {expected} at step {step}; \
+                 got {val} in {series:?}"
+            );
+        }
+    }
+}
+
+/// GH #910 (`$⁚ltm⁚agg⁚{n}` -> SCALAR with-lookup target): a scalar target
+/// that holds a reducer as a SUB-expression hoists the reducer into a
+/// synthetic agg, and the `agg -> target` half is built by
+/// `generate_agg_to_scalar_target_equation` -- a full re-evaluation of the
+/// target's (gf-input-units) equation text, which must be fed through the
+/// target's own table before it is ratioed against the target's
+/// (gf-output-units) deltas.
+///
+/// `pop[r1]`, `pop[r2]` each ramp 0, 1, 2, ...; `total = 2 * SUM(pop[*])`
+/// carries a decreasing gf mapping `[0, 40] -> [1, 0]`, so `total_t = 1 - 0.1t`
+/// and the composed `agg -> total` polarity is Negative. Wrapping collapses the
+/// numerator to exactly `Δtotal`, giving a score of -1 at every step.
+///
+/// Pre-fix the unwrapped partial was `2 * agg0 = 4t`, scoring
+/// `(4t - total_{t-1}) / |Δtotal|` -- a POSITIVE score 30-194x outside the
+/// `[-1, 1]` normalization on a Negative-polarity link.
+#[test]
+fn test_with_lookup_agg_to_scalar_target_link_score_sign_matches_polarity() {
+    use crate::test_common::TestProject;
+    use salsa::Setter;
+
+    let tp = TestProject::new("with_lookup_agg_to_scalar")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .array_stock("pop[Region]", "0", &["grow"], &[], None)
+        .array_flow("grow[Region]", "1", None);
+    let mut project = tp.build_datamodel();
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "total".to_string(),
+            equation: datamodel::Equation::Scalar("2 * SUM(pop[*])".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: Some(shallow_decreasing_gf(40.0)),
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_project = sync.project;
+    let source_model = sync.models["main"].source;
+
+    let polarity = *compute_link_polarities(&db, source_model, source_project)
+        .get(&("pop".to_string(), "total".to_string()))
+        .expect("pop -> total edge");
+    assert_eq!(
+        polarity,
+        crate::ltm::LinkPolarity::Negative,
+        "a decreasing with-lookup gf flips the pop -> total polarity"
+    );
+
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+    let compiled = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM compile of the agg->scalar with-lookup model should succeed");
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+
+    let name =
+        "$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}total";
+    let series = ltm_score_series(&compiled, &results, name);
+    for (step, val) in series.iter().enumerate().skip(1) {
+        assert!(
+            (val - (-1.0)).abs() < 1e-10,
+            "gf-aware agg->scalar score {name} must be -1 at step {step}; got {val} in {series:?}"
+        );
+        assert!(
+            val.abs() <= 1.0 + 1e-10,
+            "a fully-explanatory hop's score must stay within [-1, 1]; got {val} at step {step}"
+        );
+    }
+}
+
+/// GH #910 (`RefShape::PerElement` source read into an arrayed with-lookup
+/// target): `emit_per_element_link_scores` builds one scalar link score per
+/// `(source row, target element)` via `generate_per_element_link_equation` --
+/// another full re-evaluation of the target's (gf-input-units) equation that
+/// must pass through the target's table.
+///
+/// `pop[Region, Age]` ramps 0, 1, 2, ...; `effect[Region] = pop[Region, young]`
+/// carries a decreasing gf mapping `[0, 20] -> [1, 0]`, so `effect_t = 1 - t/20`
+/// and the composed polarity is Negative. Wrapping collapses the numerator to
+/// `Δeffect`, giving -1 at every step.
+///
+/// Pre-fix the numerator was `t - effect_{t-1}` (gf-input minus gf-output),
+/// scoring +21 .. +84: a POSITIVE score on a Negative-polarity link.
+#[test]
+fn test_with_lookup_per_element_source_read_link_score_sign_matches_polarity() {
+    use crate::test_common::TestProject;
+    use salsa::Setter;
+
+    let tp = TestProject::new("with_lookup_per_element_read")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension("Age", &["young", "old"])
+        .array_stock("pop[Region,Age]", "0", &["grow"], &[], None)
+        .array_flow("grow[Region,Age]", "1", None);
+    let mut project = tp.build_datamodel();
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "effect".to_string(),
+            equation: datamodel::Equation::ApplyToAll(
+                vec!["Region".to_string()],
+                "pop[Region, young]".to_string(),
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: Some(shallow_decreasing_gf(20.0)),
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_project = sync.project;
+    let source_model = sync.models["main"].source;
+
+    let polarity = *compute_link_polarities(&db, source_model, source_project)
+        .get(&("pop".to_string(), "effect".to_string()))
+        .expect("pop -> effect edge");
+    assert_eq!(
+        polarity,
+        crate::ltm::LinkPolarity::Negative,
+        "a decreasing with-lookup gf flips the pop -> effect polarity"
+    );
+
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+    let compiled = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM compile of the per-element with-lookup model should succeed");
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+
+    for elem in ["r1", "r2"] {
+        let name = format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}pop[{elem},young]\u{2192}effect[{elem}]"
+        );
+        let series = ltm_score_series(&compiled, &results, &name);
+        for (step, val) in series.iter().enumerate().skip(1) {
+            assert!(
+                (val - (-1.0)).abs() < 1e-10,
+                "gf-aware per-element score {name} must be -1 at step {step}; \
+                 got {val} in {series:?}"
+            );
+            assert!(
+                val.abs() <= 1.0 + 1e-10,
+                "a fully-explanatory hop's score must stay within [-1, 1]; \
+                 got {val} at step {step}"
+            );
+        }
+    }
+}
+
+/// GH #910 / GH #792: a per-element-equation target whose EXCEPT default holds an
+/// un-hoistable reducer AND whose slots carry per-element graphical functions is
+/// declined either way -- but the diagnostic must name the cause a modeler could
+/// act on. Removing the gf would NOT make this edge scoreable (the per-element
+/// equations' un-hoisted reducer reads still have no per-slot derivation), so
+/// `decline_unhoisted_reducer_edge` must win over the with-lookup decline.
+///
+/// `SUM(matrix[Region,*])` inside an `Ast::Arrayed` slot reads `matrix` through a
+/// DIM-NAMED index, which `enumerate_agg_nodes` refuses to hoist (each slot pins
+/// the dim to its own element), so no aggregate node exists and the edge lands on
+/// the cartesian arm of `try_cross_dimensional_link_scores`.
+#[test]
+fn test_with_lookup_per_element_owner_declines_naming_the_unhoisted_reducer() {
+    use crate::test_common::TestProject;
+    use salsa::Setter;
+
+    let tp = TestProject::new("with_lookup_unhoisted_default_reducer")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension("Sector", &["s1", "s2"])
+        .array_stock("matrix[Region,Sector]", "0", &["grow"], &[], None)
+        .array_flow("grow[Region,Sector]", "1", None);
+    let mut project = tp.build_datamodel();
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "total".to_string(),
+            equation: datamodel::Equation::Arrayed(
+                vec!["Region".to_string()],
+                vec![(
+                    "r1".to_string(),
+                    "SUM(matrix[Region,*])".to_string(),
+                    None,
+                    Some(shallow_decreasing_gf(20.0)),
+                )],
+                Some("SUM(matrix[Region,*])".to_string()),
+                true,
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_project = sync.project;
+    let source_model = sync.models["main"].source;
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let diags = crate::db::collect_model_diagnostics(&db, source_model, source_project);
+    let messages: Vec<String> = diags
+        .iter()
+        .map(|d| match &d.error {
+            crate::db::DiagnosticError::Assembly(m) => m.clone(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("that could not be hoisted into an aggregate")),
+        "the decline must name the un-hoistable reducer, the cause a modeler can act on; \
+         got {messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.contains("per-element graphical function")),
+        "the gf is NOT the reason this edge is unscoreable; got {messages:?}"
+    );
+}
+
 /// Regression test: PREVIOUS(SELF, expr) where expr depends on another
 /// variable. The initials runlist must include transitive deps of implicit
 /// variables so the stdlib module's stock is initialized correctly.

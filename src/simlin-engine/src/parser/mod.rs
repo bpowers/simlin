@@ -210,20 +210,43 @@ impl<'input> Parser<'input> {
         ))
     }
 
-    /// Parse logical operators (&&, ||, and, or) - lowest precedence binary ops
+    /// Parse `||`/`or` -- the lowest-precedence binary operator.
+    ///
+    /// `and` binds tighter than `or` (XMILE 3.3.1; likewise Vensim and this
+    /// crate's MDL reader, whose `parse_logic_and` nests inside `parse_logic_or`).
+    /// They previously shared one left-associative level here, which silently
+    /// re-grouped `a or b and c` as `(a or b) and c` -- and, because
+    /// `mdl::xmile_compat` re-emits an MDL AST unparenthesized and lets this
+    /// grammar re-establish the grouping, it corrupted a correctly-parsed MDL
+    /// equation on import.
     fn parse_logical(&mut self) -> Result<Expr0, EquationError> {
+        let mut left = self.parse_logical_and()?;
+
+        loop {
+            if self.peek_kind() != Some(TokenKind::Or) {
+                break;
+            }
+            self.advance();
+            let right = self.parse_logical_and()?;
+            let loc = Loc::new(left.get_loc().start as usize, right.get_loc().end as usize);
+            left = Expr0::Op2(BinaryOp::Or, Box::new(left), Box::new(right), loc);
+        }
+
+        Ok(left)
+    }
+
+    /// Parse `&&`/`and`, which binds tighter than `or` and looser than equality.
+    fn parse_logical_and(&mut self) -> Result<Expr0, EquationError> {
         let mut left = self.parse_equality()?;
 
         loop {
-            let op = match self.peek_kind() {
-                Some(TokenKind::And) => BinaryOp::And,
-                Some(TokenKind::Or) => BinaryOp::Or,
-                _ => break,
-            };
+            if self.peek_kind() != Some(TokenKind::And) {
+                break;
+            }
             self.advance();
             let right = self.parse_equality()?;
             let loc = Loc::new(left.get_loc().start as usize, right.get_loc().end as usize);
-            left = Expr0::Op2(op, Box::new(left), Box::new(right), loc);
+            left = Expr0::Op2(BinaryOp::And, Box::new(left), Box::new(right), loc);
         }
 
         Ok(left)
@@ -328,55 +351,81 @@ impl<'input> Parser<'input> {
         Ok(left)
     }
 
-    /// Parse unary operators (+, -, !, not)
-    fn parse_unary(&mut self) -> Result<Expr0, EquationError> {
+    /// The unary operator a token introduces, if any.
+    fn peek_unary_op(&self) -> Option<UnaryOp> {
         match self.peek_kind() {
-            Some(TokenKind::Plus) => {
-                let (lpos, _, _) = *self.advance().unwrap();
-                let operand = self.parse_exponentiation()?;
-                let rpos = operand.get_loc().end as usize;
-                Ok(Expr0::Op1(
-                    UnaryOp::Positive,
-                    Box::new(operand),
-                    Loc::new(lpos, rpos),
-                ))
-            }
-            Some(TokenKind::Minus) => {
-                let (lpos, _, _) = *self.advance().unwrap();
-                let operand = self.parse_exponentiation()?;
-                let rpos = operand.get_loc().end as usize;
-                Ok(Expr0::Op1(
-                    UnaryOp::Negative,
-                    Box::new(operand),
-                    Loc::new(lpos, rpos),
-                ))
-            }
-            Some(TokenKind::Not) => {
-                let (lpos, _, _) = *self.advance().unwrap();
-                let operand = self.parse_exponentiation()?;
-                let rpos = operand.get_loc().end as usize;
-                Ok(Expr0::Op1(
-                    UnaryOp::Not,
-                    Box::new(operand),
-                    Loc::new(lpos, rpos),
-                ))
-            }
-            _ => self.parse_exponentiation(),
+            Some(TokenKind::Plus) => Some(UnaryOp::Positive),
+            Some(TokenKind::Minus) => Some(UnaryOp::Negative),
+            Some(TokenKind::Not) => Some(UnaryOp::Not),
+            _ => None,
         }
     }
 
-    /// Parse exponentiation operator (^) - left associative per current grammar
+    /// Parse unary operators (+, -, not).
+    ///
+    /// The operand recurses back into `parse_unary`, so a *stacked* prefix
+    /// parses: `- -3`, `--3`, `-+x`, `not not x`. All three arms recurse because
+    /// all three are reachable: `print_eqn` and the MDL importer's `xmile_compat`
+    /// formatter both render a nested prefix WITHOUT parentheses, so any of them
+    /// can appear in a stored datamodel equation -- and Vensim itself accepts
+    /// `x = - -3`, which the importer collapses to `--3`. Rejecting that made the
+    /// engine reject its own importer's output, and sent the MDL writer down its
+    /// raw-text fallback, leaking XMILE syntax into the `.mdl` (#912). The MDL
+    /// reader's own `mdl::parser::parse_unary` has always recursed on all three
+    /// arms; this makes the two parsers agree.
+    ///
+    /// A prefix binds LOOSER than `^`: a non-prefix token falls through to
+    /// `parse_exponentiation`, so `-2 ^ 2` is `-(2 ^ 2) == -4`. Vensim pins this
+    /// (`test/test-models/tests/exponentiation/output.tab`: `associativity` is
+    /// `-4`), so `(-2) ^ 2` needs explicit parentheses to mean `4`.
+    fn parse_unary(&mut self) -> Result<Expr0, EquationError> {
+        let Some(op) = self.peek_unary_op() else {
+            return self.parse_exponentiation();
+        };
+        let (lpos, _, _) = *self.advance().unwrap();
+        let operand = self.parse_unary()?;
+        let rpos = operand.get_loc().end as usize;
+        Ok(Expr0::Op1(op, Box::new(operand), Loc::new(lpos, rpos)))
+    }
+
+    /// Parse the exponentiation operator (`^`), which is **right**-associative:
+    /// `a ^ b ^ c` is `a ^ (b ^ c)`.
+    ///
+    /// Every authority agrees, including this repo's own checked-in Vensim
+    /// reference data:
+    ///
+    /// * the XMILE spec (`docs/reference/xmile-v1.0.html` 3.3.1): "Exponentiation
+    ///   (right to left)"; "All but exponentiation and the unary operators have
+    ///   left-to-right associativity";
+    /// * `test/test-models/tests/arithmetics/output.tab`: with `cons2..cons4` =
+    ///   2, 3, 4, Vensim records `cons4^cons3^cons2 == 262144` (`4^(3^2)`), and
+    ///   `cons2^-cons2^-cons3 == 0.917004` (`2^(-(2^(-3)))`);
+    /// * `mdl::parser::parse_power`, the MDL reader in this crate, whose exponent
+    ///   already recurses into its own `parse_unary`.
+    ///
+    /// The exponent is a full unary expression (`parse_unary`), which is what
+    /// both admits a prefix (`2 ^ -3`) and produces the right-associativity: the
+    /// recursion re-enters `parse_exponentiation` beneath any prefix chain. It
+    /// does not swallow the rest of the expression, because `parse_unary` bottoms
+    /// out at `parse_exponentiation` -> `parse_app` and never consumes a `*`.
     fn parse_exponentiation(&mut self) -> Result<Expr0, EquationError> {
-        let mut left = self.parse_app()?;
+        let base = self.parse_app()?;
 
-        while self.peek_kind() == Some(TokenKind::Exp) {
-            self.advance();
-            let right = self.parse_app()?;
-            let loc = Loc::new(left.get_loc().start as usize, right.get_loc().end as usize);
-            left = Expr0::Op2(BinaryOp::Exp, Box::new(left), Box::new(right), loc);
+        if self.peek_kind() != Some(TokenKind::Exp) {
+            return Ok(base);
         }
-
-        Ok(left)
+        self.advance();
+        let exponent = self.parse_unary()?;
+        let loc = Loc::new(
+            base.get_loc().start as usize,
+            exponent.get_loc().end as usize,
+        );
+        Ok(Expr0::Op2(
+            BinaryOp::Exp,
+            Box::new(base),
+            Box::new(exponent),
+            loc,
+        ))
     }
 
     /// Check for a multi-word function name at the current position.

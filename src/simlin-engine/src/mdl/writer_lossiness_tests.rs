@@ -8,10 +8,23 @@
 
 use super::tests::{make_aux, make_model, make_project, make_stock};
 use crate::datamodel::{
-    self, Aux, Compat, Equation, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
-    Variable,
+    self, Aux, Compat, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
+    GraphicalFunctionScale, Variable,
 };
 use crate::mdl::{ExportWarning, project_to_mdl_with_warnings};
+
+fn make_flow(ident: &str, eqn: &str) -> Variable {
+    Variable::Flow(Flow {
+        ident: ident.to_owned(),
+        equation: Equation::Scalar(eqn.to_owned()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: Compat::default(),
+    })
+}
 /// Build a graphical function with a specific interpolation kind.
 fn make_gf_kind(kind: GraphicalFunctionKind) -> GraphicalFunction {
     GraphicalFunction {
@@ -458,6 +471,157 @@ fn group_multiword_name_and_doc_warn() {
     );
 }
 
+// ---- #887: conveyor/queue compat dropped on export ----
+
+/// A conveyor block with only the required transit time set.
+fn minimal_conveyor() -> datamodel::Conveyor {
+    datamodel::Conveyor {
+        transit_time: "4".to_owned(),
+        capacity: None,
+        inflow_limit: None,
+        sample: None,
+        arrest: None,
+        discrete: false,
+        batch_integrity: false,
+        one_at_a_time: true,
+        exponential_leak: false,
+        ignore_earlier_zone_losses: false,
+    }
+}
+
+#[test]
+fn conveyor_stock_warns_and_still_parses() {
+    let mut stock = make_stock("students", "1000", None, "");
+    if let Variable::Stock(s) = &mut stock {
+        s.inflows = vec!["matriculating".to_owned()];
+        s.outflows = vec!["graduating".to_owned()];
+        s.compat.conveyor = Some(minimal_conveyor());
+    }
+    let inflow = make_flow("matriculating", "250");
+    let outflow = make_flow("graduating", "0");
+    let project = make_project(vec![make_model(vec![stock, inflow, outflow])]);
+
+    let (mdl, warnings) = project_to_mdl_with_warnings(&project).expect("write");
+    let w = message_mentioning(&warnings, "students").expect("conveyor warning expected");
+    assert!(
+        w.message.contains("conveyor") && w.message.contains("INTEG"),
+        "warning should say the conveyor became a plain INTEG stock: {}",
+        w.message
+    );
+    // The degraded export must still be valid MDL.
+    crate::mdl::parse_mdl(&mdl).expect("exported MDL must reparse");
+}
+
+#[test]
+fn queue_stock_warns() {
+    let mut stock = make_stock("backlog", "0", None, "");
+    if let Variable::Stock(s) = &mut stock {
+        s.inflows = vec!["arriving".to_owned()];
+        s.compat.queue = Some(datamodel::Queue {});
+    }
+    let inflow = make_flow("arriving", "5");
+    let project = make_project(vec![make_model(vec![stock, inflow])]);
+    let warnings = warnings_of(&project);
+    let w = message_mentioning(&warnings, "backlog").expect("queue warning expected");
+    assert!(
+        w.message.contains("queue") && w.message.contains("INTEG"),
+        "warning should say the queue became a plain INTEG stock: {}",
+        w.message
+    );
+}
+
+#[test]
+fn leak_flow_explicit_fraction_warns() {
+    // The `<leak>0.1</leak>` encoding: the fraction rides in compat.leakage.
+    let mut flow = make_flow("dropping_out", "");
+    if let Variable::Flow(f) = &mut flow {
+        f.compat.leakage = Some(datamodel::Leakage {
+            fraction: Some("0.1".to_owned()),
+            integers: false,
+            zone_start: None,
+            zone_end: None,
+        });
+    }
+    let project = make_project(vec![make_model(vec![flow])]);
+    let warnings = warnings_of(&project);
+    let w = message_mentioning(&warnings, "dropping out").expect("leak warning expected");
+    assert!(
+        w.message.contains("leak"),
+        "warning should name the leak marker: {}",
+        w.message
+    );
+}
+
+#[test]
+fn leak_flow_bare_marker_warns() {
+    // The bare `<leak/>` marker encoding: the fraction lives in the flow's
+    // own equation and compat.leakage.fraction is None.
+    let mut flow = make_flow("evaporating", "0.05");
+    if let Variable::Flow(f) = &mut flow {
+        f.compat.leakage = Some(datamodel::Leakage {
+            fraction: None,
+            integers: false,
+            zone_start: None,
+            zone_end: None,
+        });
+    }
+    let project = make_project(vec![make_model(vec![flow])]);
+    let warnings = warnings_of(&project);
+    let w = message_mentioning(&warnings, "evaporating").expect("leak warning expected");
+    assert!(
+        w.message.contains("leak"),
+        "warning should name the leak marker: {}",
+        w.message
+    );
+}
+
+#[test]
+fn spreadflow_flow_warns() {
+    let mut flow = make_flow("loading", "10");
+    if let Variable::Flow(f) = &mut flow {
+        f.compat.spreadflow = Some(datamodel::SpreadFlow::Even);
+    }
+    let project = make_project(vec![make_model(vec![flow])]);
+    let warnings = warnings_of(&project);
+    let w = message_mentioning(&warnings, "loading").expect("spreadflow warning expected");
+    assert!(
+        w.message.contains("placement"),
+        "warning should name the inflow-placement marker: {}",
+        w.message
+    );
+}
+
+#[test]
+fn overflow_flow_warns() {
+    let mut flow = make_flow("spilling", "0");
+    if let Variable::Flow(f) = &mut flow {
+        f.compat.overflow = true;
+    }
+    let project = make_project(vec![make_model(vec![flow])]);
+    let warnings = warnings_of(&project);
+    let w = message_mentioning(&warnings, "spilling").expect("overflow warning expected");
+    assert!(
+        w.message.contains("overflow"),
+        "warning should name the overflow marker: {}",
+        w.message
+    );
+}
+
+#[test]
+fn plain_stock_and_flow_do_not_warn() {
+    // A conveyor-free stock/flow pair must export with no new warnings.
+    let mut stock = make_stock("level", "100", None, "");
+    if let Variable::Stock(s) = &mut stock {
+        s.inflows = vec!["filling".to_owned()];
+    }
+    let flow = make_flow("filling", "3");
+    let project = make_project(vec![make_model(vec![stock, flow])]);
+    assert!(
+        warnings_of(&project).is_empty(),
+        "an ordinary stock/flow model must export with no warnings"
+    );
+}
+
 #[test]
 fn single_word_group_without_doc_does_not_warn() {
     let mut model = make_model(vec![make_aux("x", "1", None, "")]);
@@ -472,5 +636,178 @@ fn single_word_group_without_doc_does_not_warn() {
     assert!(
         warnings_of(&project).is_empty(),
         "a single-word group with no doc round-trips losslessly"
+    );
+}
+
+// ---- #912: unparseable-equation fallback ----
+
+/// The writer's last-resort fallback emits the raw XMILE equation text when
+/// `Expr0::new` cannot parse it. XMILE syntax is not MDL syntax, so that text
+/// means something different on re-import (the builtin-rename table -- `int` ->
+/// `INTEGER`, `smth1` -> `SMOOTH` -- is exactly what gets skipped, and Vensim
+/// reads an unknown call as a lookup of an undefined table). The writer cannot
+/// vouch for it, so it must say so rather than degrade silently.
+#[test]
+fn unparseable_equation_warns_and_names_the_variable() {
+    let project = make_project(vec![make_model(vec![make_aux("target", "1 +", None, "")])]);
+    let warnings = warnings_of(&project);
+    let w = message_mentioning(&warnings, "'target'").expect("unparseable-equation warning");
+    assert!(
+        w.message.contains("1 +"),
+        "warning should quote the offending equation: {}",
+        w.message
+    );
+    assert!(
+        w.message.contains("could not be parsed"),
+        "warning should say the equation could not be parsed: {}",
+        w.message
+    );
+}
+
+/// Warnings are a side channel: the emitted text is byte-identical with and
+/// without them, so this cannot perturb the corpus round-trip ratchets.
+#[test]
+fn unparseable_equation_warning_does_not_change_emitted_text() {
+    let project = make_project(vec![make_model(vec![make_aux("target", "1 +", None, "")])]);
+    let text_only = crate::mdl::project_to_mdl(&project).expect("plain write");
+    let (text_warn, warnings) = project_to_mdl_with_warnings(&project).expect("warn write");
+    assert_eq!(text_only, text_warn);
+    assert!(!warnings.is_empty());
+}
+
+/// A stacked unary minus is what the MDL importer produces for the legal Vensim
+/// `x = - -3` (#912). Once the equation grammar accepts it, the writer parses it
+/// like any other equation -- no fallback, no warning, and `INTEGER` is properly
+/// restored from the XMILE `int`.
+#[test]
+fn stacked_unary_equation_parses_and_does_not_warn() {
+    let project = make_project(vec![make_model(vec![make_aux(
+        "target",
+        "--(0 ^ int(0))",
+        None,
+        "",
+    )])]);
+    let (text, warnings) = project_to_mdl_with_warnings(&project).expect("write");
+    assert!(
+        warnings.is_empty(),
+        "a parseable equation must not warn: {warnings:?}"
+    );
+    assert!(
+        text.contains("INTEGER(0)"),
+        "the builtin-rename table must have run (no raw-text fallback):\n{text}"
+    );
+    assert!(
+        !text.contains("INT(0)"),
+        "the raw XMILE `int` must not leak into the MDL:\n{text}"
+    );
+}
+
+/// Opaque data equations (GET DIRECT DATA, GET XLS, ...) are unparseable *by
+/// design* -- the writer emits them verbatim and that is correct, so they take
+/// the early-return path and must not warn.
+#[test]
+fn data_equation_does_not_warn() {
+    let project = make_project(vec![make_model(vec![make_aux(
+        "imported",
+        "{GET DIRECT DATA('data.csv', ',', 'A', '2')}",
+        None,
+        "",
+    )])]);
+    assert!(
+        warnings_of(&project).is_empty(),
+        "a GET DIRECT data equation is opaque by design and must not warn"
+    );
+}
+
+/// The warning fires for every equation-bearing shape the writer renders, not
+/// just the scalar aux path: a stock's INITIAL, an arrayed element equation.
+#[test]
+fn unparseable_equation_warns_from_stock_and_arrayed_paths() {
+    let mut stock = make_stock("level", "1 +", None, "");
+    if let Variable::Stock(s) = &mut stock {
+        s.inflows = vec!["filling".to_owned()];
+    }
+    let flow = make_flow("filling", "3");
+    let project = make_project(vec![make_model(vec![stock, flow])]);
+    assert!(
+        message_mentioning(&warnings_of(&project), "'level'").is_some(),
+        "a stock's unparseable INITIAL must warn"
+    );
+
+    let arrayed = Variable::Aux(Aux {
+        ident: "arr".to_owned(),
+        equation: Equation::Arrayed(
+            vec!["DimA".to_owned()],
+            vec![("a1".to_owned(), "1 +".to_owned(), None, None)],
+            None,
+            false,
+        ),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: Compat::default(),
+    });
+    let mut project = make_project(vec![make_model(vec![arrayed])]);
+    project.dimensions = vec![datamodel::Dimension {
+        name: "DimA".to_owned(),
+        elements: datamodel::DimensionElements::Named(vec!["a1".to_owned()]),
+        mappings: vec![],
+        parent: None,
+    }];
+    assert!(
+        message_mentioning(&warnings_of(&project), "'arr'").is_some(),
+        "an arrayed element's unparseable equation must warn"
+    );
+}
+
+// ---- #913: transpose has no Vensim equivalent ----
+
+/// Vensim has no transpose operator -- `mdl::parser` has no token for `'` and no
+/// `Transpose` AST node -- so an equation carrying one CANNOT be represented in
+/// MDL. The export is degraded no matter what text we emit, and the writer's job
+/// in that situation is to say so.
+///
+/// It is also grouped, so the text at least denotes the tree the model has: the
+/// postfix `'` binds tighter than any infix, so the bare `a + b'` reads as
+/// transposing `b` alone.
+#[test]
+fn transpose_warns_and_is_grouped() {
+    let project = make_project(vec![make_model(vec![make_aux(
+        "moved", "(a + b)'", None, "",
+    )])]);
+    let (text, warnings) = project_to_mdl_with_warnings(&project).expect("write");
+    let w = message_mentioning(&warnings, "'moved'").expect("transpose warning");
+    assert!(
+        w.message.contains("transpose"),
+        "warning should name the construct: {}",
+        w.message
+    );
+    assert!(
+        text.contains("(a + b)'"),
+        "the transpose operand must stay grouped, got:\n{text}"
+    );
+}
+
+/// The grouping rule is the same one `ast::paren_if_necessary` applies: any
+/// non-atomic operand, including a prefix unary.
+#[test]
+fn transpose_of_a_prefix_unary_is_grouped() {
+    let project = make_project(vec![make_model(vec![make_aux("moved", "(-a)'", None, "")])]);
+    let (text, _) = project_to_mdl_with_warnings(&project).expect("write");
+    assert!(
+        text.contains("(-a)'"),
+        "a negated transpose operand must stay grouped, got:\n{text}"
+    );
+}
+
+/// An equation with no transpose must not warn.
+#[test]
+fn no_transpose_does_not_warn() {
+    let project = make_project(vec![make_model(vec![make_aux("plain", "a + b", None, "")])]);
+    assert!(
+        warnings_of(&project).is_empty(),
+        "an ordinary equation must not warn"
     );
 }

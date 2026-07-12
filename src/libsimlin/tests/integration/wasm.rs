@@ -483,6 +483,209 @@ fn compile_to_wasm_unsupported_ltm_model_surfaces_error() {
     }
 }
 
+/// GH #924, the inverse of the GH #884 reject this test used to pin: a CONVEYOR
+/// model compiles to wasm through the FFI, and the blob's series -- including the
+/// belt's pass-driven outflow, whose equation is empty by XMILE design -- match
+/// `simlin_sim_new`'s VM run. This is the FFI-level proof that the belt half of the
+/// special-stock dispatch is wired through `simlin_model_compile_to_wasm`, not just
+/// through the engine's in-crate entry point. Engine-level twin:
+/// `conveyor_models_lower_through_the_datamodel_entry_point` (wasmgen `module.rs`).
+///
+/// `minimal_conveyor.xmile` starts at its steady state (init `1000 == 250 * 4`), so
+/// `graduating` holds the inflow rate and `students` stays flat -- the VM series are
+/// the real gate, but a blob that dropped the belt pass entirely would drain
+/// `students` to zero and be caught even by inspection.
+#[test]
+fn compile_to_wasm_conveyor_model_runs() {
+    let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let project = simlin_project_open_xmile(xml.as_ptr(), xml.len(), &mut err);
+        assert!(err.is_null(), "open_xmile must succeed");
+        assert!(!project.is_null());
+
+        let model_name = std::ffi::CString::new("main").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(project, model_name.as_ptr(), &mut err);
+        assert!(err.is_null(), "get_model must succeed");
+        assert!(!model.is_null());
+
+        let mut out_wasm: *mut u8 = ptr::null_mut();
+        let mut out_wasm_len: usize = 0;
+        let mut out_layout: *mut u8 = ptr::null_mut();
+        let mut out_layout_len: usize = 0;
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_model_compile_to_wasm(
+            model,
+            false,
+            false,
+            &mut out_wasm,
+            &mut out_wasm_len,
+            &mut out_layout,
+            &mut out_layout_len,
+            &mut err,
+        );
+        assert!(err.is_null(), "a conveyor model must compile to wasm");
+        assert!(!out_wasm.is_null() && out_wasm_len > 0);
+        assert!(!out_layout.is_null() && out_layout_len > 0);
+
+        let wasm = std::slice::from_raw_parts(out_wasm, out_wasm_len).to_vec();
+        let layout = parse_layout(std::slice::from_raw_parts(out_layout, out_layout_len));
+        let offset_of = |name: &str| -> usize {
+            layout
+                .var_offsets
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("{name} in layout"))
+                .1
+        };
+
+        // The driven outflow carries the belt's discharge rate (250 at the steady
+        // state), never the placeholder 0 its empty equation compiles to.
+        let graduating = run_and_stride(&wasm, &layout, offset_of("graduating"));
+        assert!(
+            graduating.iter().all(|v| (v - 250.0).abs() < 1e-9),
+            "graduating must be the pass-driven exit rate, got {graduating:?}"
+        );
+
+        let sim = simlin_sim_new(model, false, &mut err);
+        assert!(
+            err.is_null() && !sim.is_null(),
+            "sim_new on a conveyor model"
+        );
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(err.is_null(), "VM run of the conveyor model");
+        let mut n: usize = 0;
+        simlin_sim_get_stepcount(sim, &mut n, &mut err);
+        assert!(err.is_null());
+        assert_eq!(n, layout.n_chunks, "the two backends save the same rows");
+        for name in ["students", "alumni", "matriculating", "graduating"] {
+            let cname = std::ffi::CString::new(name).unwrap();
+            let mut vm_series = vec![0.0f64; n];
+            let mut written: usize = 0;
+            simlin_sim_get_series(
+                sim,
+                cname.as_ptr(),
+                vm_series.as_mut_ptr(),
+                n,
+                &mut written,
+                &mut err,
+            );
+            assert!(err.is_null(), "VM series for {name}");
+            assert_eq!(written, n);
+            let wasm_series = run_and_stride(&wasm, &layout, offset_of(name));
+            for (i, (v, w)) in vm_series.iter().zip(&wasm_series).enumerate() {
+                assert!((v - w).abs() < 1e-9, "{name} at step {i}: vm={v} wasm={w}");
+            }
+        }
+
+        simlin_free(out_wasm);
+        simlin_free(out_layout);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(project);
+    }
+}
+
+/// GH #884 (queue half): a queue model compiles to wasm through the FFI, and the
+/// blob's series -- including the pass-driven outflow, whose equation is a
+/// placeholder `0` the FIFO pass overwrites every step -- match `simlin_sim_new`'s
+/// VM run. This is the FFI-level proof that the special-stock dispatch is wired
+/// through `simlin_model_compile_to_wasm`, not just through the engine's in-crate
+/// entry point.
+#[test]
+fn compile_to_wasm_queue_model_runs() {
+    let xml = include_str!("../../../../test/queues/queue_drain.xmile");
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let project = simlin_project_open_xmile(xml.as_ptr(), xml.len(), &mut err);
+        assert!(
+            err.is_null(),
+            "open_xmile must succeed for the queue fixture"
+        );
+        assert!(!project.is_null());
+
+        let model_name = std::ffi::CString::new("main").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(project, model_name.as_ptr(), &mut err);
+        assert!(err.is_null(), "get_model must succeed");
+        assert!(!model.is_null());
+
+        let mut out_wasm: *mut u8 = ptr::null_mut();
+        let mut out_wasm_len: usize = 0;
+        let mut out_layout: *mut u8 = ptr::null_mut();
+        let mut out_layout_len: usize = 0;
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_model_compile_to_wasm(
+            model,
+            false,
+            false,
+            &mut out_wasm,
+            &mut out_wasm_len,
+            &mut out_layout,
+            &mut out_layout_len,
+            &mut err,
+        );
+        assert!(err.is_null(), "a queue model must compile to wasm");
+        assert!(!out_wasm.is_null() && out_wasm_len > 0);
+        assert!(!out_layout.is_null() && out_layout_len > 0);
+
+        let wasm = std::slice::from_raw_parts(out_wasm, out_wasm_len).to_vec();
+        let layout = parse_layout(std::slice::from_raw_parts(out_layout, out_layout_len));
+        let offset_of = |name: &str| -> usize {
+            layout
+                .var_offsets
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("{name} in layout"))
+                .1
+        };
+
+        // The driven outflow carries the served rate (the constant inflow, 10),
+        // never the placeholder 0 its equation compiles to.
+        let served = run_and_stride(&wasm, &layout, offset_of("into_service"));
+        assert!(
+            served.iter().all(|v| (v - 10.0).abs() < 1e-9),
+            "into_service must be the pass-driven served rate, got {served:?}"
+        );
+
+        // Cross-check the queue stock and the downstream stock against the VM.
+        let sim = simlin_sim_new(model, false, &mut err);
+        assert!(err.is_null() && !sim.is_null(), "sim_new on a queue model");
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(err.is_null(), "VM run of the queue model");
+        let mut n: usize = 0;
+        simlin_sim_get_stepcount(sim, &mut n, &mut err);
+        assert!(err.is_null());
+        assert_eq!(n, layout.n_chunks, "the two backends save the same rows");
+        for name in ["waiting", "served", "arrivals", "into_service"] {
+            let cname = std::ffi::CString::new(name).unwrap();
+            let mut vm_series = vec![0.0f64; n];
+            let mut written: usize = 0;
+            simlin_sim_get_series(
+                sim,
+                cname.as_ptr(),
+                vm_series.as_mut_ptr(),
+                n,
+                &mut written,
+                &mut err,
+            );
+            assert!(err.is_null(), "VM series for {name}");
+            assert_eq!(written, n);
+            let wasm_series = run_and_stride(&wasm, &layout, offset_of(name));
+            for (i, (v, w)) in vm_series.iter().zip(&wasm_series).enumerate() {
+                assert!((v - w).abs() < 1e-9, "{name} at step {i}: vm={v} wasm={w}");
+            }
+        }
+
+        simlin_free(out_wasm);
+        simlin_free(out_layout);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(project);
+    }
+}
+
 /// NULL output pointers are rejected with an error rather than a crash.
 #[test]
 fn compile_to_wasm_null_outputs_error() {
@@ -550,11 +753,15 @@ fn run_and_stride(wasm: &[u8], layout: &ParsedLayout, off: usize) -> Vec<f64> {
 }
 
 /// Assert the FFI-compiled blob carries every original export (at its original
-/// kind) plus the two resumable functions added in Subcomponent A. The original
-/// set is `run`/`set_value`/`reset`/`clear_values` (funcs), `memory`, and the
-/// geometry globals `n_slots`/`n_chunks`/`results_offset`; the additions are
-/// `run_to`/`run_initials` (funcs) and `saved_steps` (the live saved-row counter
+/// kind) plus the functions added since. The original set is
+/// `run`/`set_value`/`reset`/`clear_values` (funcs), `memory`, and the geometry
+/// globals `n_slots`/`n_chunks`/`results_offset`; the additions are
+/// `run_to`/`run_initials` (Subcomponent A) and `get_error` (the runtime error
+/// channel, GH #921) as funcs, plus `saved_steps` (the live saved-row counter
 /// global). This pins the export-set growth as purely additive.
+///
+/// `get_error` is emitted for EVERY model, whether or not any of its passes can
+/// raise, so a host polls it unconditionally rather than feature-detecting.
 fn assert_blob_exports(wasm: &[u8]) {
     let info = validate(wasm).expect("validate");
     let mut store = Store::new(());
@@ -569,6 +776,7 @@ fn assert_blob_exports(wasm: &[u8]) {
         "clear_values",
         "run_to",
         "run_initials",
+        "get_error",
     ] {
         let exp = store
             .instance_export(inst, name)

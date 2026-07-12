@@ -964,6 +964,61 @@ pub(super) fn analyze_graphical_function_polarity(table: &crate::variable::Table
     }
 }
 
+/// Compose the polarity of a link INTO an implicit WITH-LOOKUP target with
+/// the target's graphical-function monotonicity (GH #910).
+///
+/// A value-bearing, tables-carrying variable (`var = WITH LOOKUP(input,
+/// table)`: tables present AND a real input equation) lowers at compile
+/// time to `LOOKUP(self_gf, input)` -- per element for arrayed shapes
+/// (`compiler::apply_implicit_with_lookup`, GH #909). The equation text
+/// contains no `LOOKUP` call, so the AST walk alone sees only the raw
+/// input polarity; the gf's monotonicity must be composed on top, exactly
+/// as the explicit-`LOOKUP` arm composes `lookup_table_polarity`.
+///
+/// `input_polarity` is the AST-derived polarity of the raw input equation
+/// with respect to the link source. Rules, mirroring the compiler's wrap:
+///
+/// - not a `Variable::Var`, table-only (a static table, no implicit wrap),
+///   or no tables: `input_polarity` unchanged;
+/// - no non-empty table at all: a zero-point gf is treated as ABSENT by
+///   the compiler (the raw input evaluates unwrapped), so `input_polarity`
+///   stands;
+/// - per-element tables with at least one empty placeholder (a gf-less
+///   element keeps its raw input equation): gf-bearing elements compose
+///   while placeholder elements stay raw -- the two agree only when the
+///   folded table polarity is `Positive` (composition is then the
+///   identity); otherwise `Unknown`;
+/// - otherwise: plain sign composition with the folded table polarity
+///   (one shared table, or direction-agreeing per-element tables; a
+///   non-monotone or disagreeing fold absorbs to `Unknown`).
+pub(super) fn compose_with_lookup_polarity(
+    input_polarity: LinkPolarity,
+    to_var: &Variable,
+) -> LinkPolarity {
+    let Variable::Var {
+        tables,
+        is_table_only: false,
+        ..
+    } = to_var
+    else {
+        return input_polarity;
+    };
+    if tables.is_empty() || !tables.iter().any(|t| !t.x.is_empty()) {
+        return input_polarity;
+    }
+    let gf_polarity = fold_per_element_table_polarity(tables);
+    let has_unwrapped_element = tables.len() > 1 && tables.iter().any(|t| t.x.is_empty());
+    if has_unwrapped_element {
+        if gf_polarity == LinkPolarity::Positive {
+            input_polarity
+        } else {
+            LinkPolarity::Unknown
+        }
+    } else {
+        input_polarity.compose(gf_polarity)
+    }
+}
+
 /// Aggregate the per-element graphical-function tables of an arrayed GF into a
 /// single link polarity, mirroring the `Ast::Arrayed` per-element fold in
 /// [`analyze_link_polarity`]: adopt the first concrete polarity, and if two

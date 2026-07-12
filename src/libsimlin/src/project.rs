@@ -746,11 +746,20 @@ pub unsafe extern "C" fn simlin_project_is_simulatable(
         }
     };
 
-    let db_locked = proj.db.lock().unwrap();
+    // Lock the datamodel before the db (the order `get_errors`/`apply_patch`
+    // use) so `build_sim` can route a conveyor/queue model through its special
+    // expansion build path -- which needs the datamodel -- rather than tripping
+    // the `Conveyor/QueueNotExpanded` guard on the ordinary compile path.
+    let datamodel_locked = proj.datamodel.lock().unwrap();
+    let mut db_locked = proj.db.lock().unwrap();
     if let Some(source_project) = db_locked.current_source_project() {
-        engine::db::compile_project_incremental(&db_locked, source_project, model_name)
-            .and_then(engine::Vm::new)
-            .is_ok()
+        engine::build_sim(
+            &mut db_locked,
+            source_project,
+            &datamodel_locked,
+            model_name,
+        )
+        .is_ok()
     } else {
         false
     }
@@ -796,11 +805,11 @@ pub unsafe extern "C" fn simlin_project_get_errors(
     // non-Euler hard `Err` from `assemble_simulation`) would masquerade as a
     // project error on a model that simulates fine. `simlin_sim_new` already
     // leaves the salsa `ltm_enabled` input false, so this compile is LTM-off.
-    let vm_error = match engine::db::compile_project_incremental(&db_locked, source_project, "main")
-    {
-        Ok(compiled) => engine::Vm::new(compiled).err(),
-        Err(err) => Some(err),
-    };
+    // `build_sim` additionally routes a conveyor/queue model through its special
+    // expansion build path (also LTM-off), so a valid special-stock model is not
+    // mis-reported as a project error by the ordinary path's NotExpanded guard.
+    let vm_error =
+        engine::build_sim(&mut db_locked, source_project, &datamodel_locked, "main").err();
 
     // The LTM *diagnostics* (auto-flip-to-discovery advisory, synthetic-fragment
     // compile failures, GH #311 partial-equation warnings) accumulate via
