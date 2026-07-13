@@ -16,6 +16,7 @@ import { apiRouter } from '../api';
 import type { Application } from '../application';
 import authz from '../authz';
 import type { Database } from '../models/db-interfaces';
+import { AlreadyExistsError } from '../models/table';
 import { createProjectRouteHandler } from '../route-handlers';
 import { seshcookie } from '../seshcookie/seshcookie';
 import { sessionAuth, setSessionUser } from '../session-auth';
@@ -30,6 +31,9 @@ export function makeUser(id: string): User {
   const user = new User();
   user.setId(id);
   user.setEmail(`${id}@example.com`);
+  // Mirror the post-onboarding state (PATCH /api/user grants this); no test
+  // distinguishes on it, and without it POST /api/projects can't be tested.
+  user.setCanCreateProjects(true);
   return user;
 }
 
@@ -39,6 +43,9 @@ export function makeProject(id: string, ownerId: string, isPublic: boolean, file
   project.setOwnerId(ownerId);
   project.setIsPublic(isPublic);
   project.setFileId(fileId);
+  // Mirror createProject's seeding; tests exercising the proto3-default
+  // version 0 of legacy rows override this explicitly.
+  project.setVersion(1);
   return project;
 }
 
@@ -59,6 +66,9 @@ export function makePreview(id: string): Preview {
 
 export interface Harness {
   app: express.Express;
+  // The Database the app was built with, so tests can wrap individual
+  // table methods (e.g. to interleave a concurrent writer mid-request).
+  db: Database;
   users: Map<string, User>;
   projects: Map<string, Project>;
   files: Map<string, File>;
@@ -85,10 +95,6 @@ export function createHarness(): Harness {
   previews.set('bob/climate', makePreview('bob/climate'));
   previews.set('alice/secret', makePreview('alice/secret'));
 
-  const byId = <T>(records: Map<string, T>) => ({
-    findOne: (id: string): Promise<T | undefined> => Promise.resolve(records.get(id)),
-  });
-
   const app = express() as unknown as Application;
   app.use(
     seshcookie({
@@ -100,11 +106,22 @@ export function createHarness(): Harness {
     }),
   );
   app.use(express.json());
+  // Every findOne deserializes a fresh instance, mirroring Firestore reads.
+  // This is load-bearing where handlers mutate what they fetched (the save
+  // handler's Project, the rename handler's User) -- handing out the stored
+  // instance would leak those mutations into the "stored" record -- and
+  // cheap insurance everywhere else.
   app.db = {
     // The user table also backs PATCH /api/user's rename (create + delete).
     user: {
-      ...byId(users),
+      findOne: (id: string): Promise<User | undefined> => {
+        const stored = users.get(id);
+        return Promise.resolve(stored && User.deserializeBinary(stored.serializeBinary()));
+      },
       create: (id: string, user: User): Promise<void> => {
+        if (users.has(id)) {
+          return Promise.reject(new AlreadyExistsError(`user/${id} already exists`));
+        }
         users.set(id, user);
         return Promise.resolve();
       },
@@ -114,13 +131,68 @@ export function createHarness(): Harness {
       },
     },
     project: {
-      ...byId(projects),
+      findOne: (id: string): Promise<Project | undefined> => {
+        const stored = projects.get(id);
+        return Promise.resolve(stored && Project.deserializeBinary(stored.serializeBinary()));
+      },
+      create: (id: string, pb: Project): Promise<void> => {
+        if (projects.has(id)) {
+          return Promise.reject(new AlreadyExistsError(`project/${id} already exists`));
+        }
+        projects.set(id, Project.deserializeBinary(pb.serializeBinary()));
+        return Promise.resolve();
+      },
       // Backs GET /api/projects (list-by-owner does a prefix scan).
       find: (idPrefix: string): Promise<Project[]> =>
         Promise.resolve([...projects.values()].filter((p) => p.getId().startsWith(idPrefix))),
+      // Mirrors FirestoreTable.update: compare each cond entry against the
+      // stored document's hoisted fields inside a transaction, yielding
+      // null (not an exception) when a precondition fails. Stored via a
+      // serialize round-trip for the same no-aliasing reason as findOne.
+      update: (id: string, cond: Record<string, unknown>, pb: Project): Promise<Project | null> => {
+        const stored = projects.get(id);
+        if (stored === undefined) {
+          return Promise.resolve(null);
+        }
+        const doc = stored.toObject() as unknown as Record<string, unknown>;
+        for (const [key, expected] of Object.entries(cond)) {
+          if (doc[key] !== expected) {
+            return Promise.resolve(null);
+          }
+        }
+        projects.set(id, Project.deserializeBinary(pb.serializeBinary()));
+        return Promise.resolve(pb);
+      },
     },
-    file: byId(files),
-    preview: byId(previews),
+    file: {
+      findOne: (id: string): Promise<File | undefined> => {
+        const stored = files.get(id);
+        return Promise.resolve(stored && File.deserializeBinary(stored.serializeBinary()));
+      },
+      // Firestore's docRef.create rejects an already-existing id; the real
+      // table maps that onto AlreadyExistsError, which callers branch on.
+      create: (id: string, file: File): Promise<void> => {
+        if (files.has(id)) {
+          return Promise.reject(new AlreadyExistsError(`file/${id} already exists`));
+        }
+        files.set(id, file);
+        return Promise.resolve();
+      },
+      deleteOne: (id: string): Promise<void> => {
+        files.delete(id);
+        return Promise.resolve();
+      },
+    },
+    preview: {
+      findOne: (id: string): Promise<Preview | undefined> => {
+        const stored = previews.get(id);
+        return Promise.resolve(stored && Preview.deserializeBinary(stored.serializeBinary()));
+      },
+      deleteOne: (id: string): Promise<void> => {
+        previews.delete(id);
+        return Promise.resolve();
+      },
+    },
   } as unknown as Database;
   app.use(sessionAuth(app.db.user));
 
@@ -149,6 +221,7 @@ export function createHarness(): Harness {
 
   return {
     app: app as unknown as express.Express,
+    db: app.db,
     users,
     projects,
     files,

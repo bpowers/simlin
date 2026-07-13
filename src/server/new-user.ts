@@ -48,7 +48,24 @@ async function populateExample(db: Database, user: User, exampleModelPath: strin
   const file = await fileFromXmile(db.file, project.getId(), userId, modelContents);
 
   project.setFileId(file.getId());
-  await db.project.create(project.getId(), project);
+  try {
+    await db.project.create(project.getId(), project);
+  } catch (err) {
+    // Without a project row naming it, this File would never be reaped by
+    // deleteProjectAndFiles. Unlike the API save/create paths, no guards
+    // are needed before deleting: seeding runs once per user (PATCH
+    // /api/user's temp- gate admits a single rename, so concurrent
+    // same-user seeding is impossible), examples are processed
+    // sequentially, and any later re-seed stamps a different creation
+    // millisecond and therefore a different file id -- so this id can
+    // only be this call's own write, unreferenced by any surviving row.
+    try {
+      await db.file.deleteOne(file.getId());
+    } catch (cleanupErr) {
+      logger.warn(`unable to delete orphaned file ${file.getId()} for ${project.getId()}: ${cleanupErr}`);
+    }
+    throw err;
+  }
 
   return Promise.resolve(undefined);
 }

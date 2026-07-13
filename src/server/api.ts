@@ -6,9 +6,10 @@ import { Request, Response, Router } from 'express';
 import { Timestamp } from 'google-protobuf/google/protobuf/timestamp_pb';
 import * as logger from './logger';
 
-import { validateCreateProjectBody, validateUserPatchBody } from './api-validation';
+import { validateCreateProjectBody, validateSaveProjectBody, validateUserPatchBody } from './api-validation';
 import { Application } from './application';
 import { Database } from './models/db-interfaces';
+import { AlreadyExistsError } from './models/table';
 import { populateExamples } from './new-user';
 import { createFile, createProject, emptyProject } from './project-creation';
 import { renderToPNG } from './render';
@@ -33,16 +34,6 @@ function getErrorMessage(error: unknown): string {
     }
   }
   return String(error);
-}
-
-function getErrorCode(error: unknown): string | undefined {
-  if (typeof error === 'object' && error !== null) {
-    const code = (error as Record<string, unknown>).code;
-    if (typeof code === 'string') {
-      return code;
-    }
-  }
-  return undefined;
 }
 
 export async function updatePreview(db: Database, project: ProjectPb): Promise<PreviewPb> {
@@ -119,6 +110,17 @@ export const apiRouter = (app: Application): Router => {
     try {
       const project = createProject(user, projectName, projectDescription, isPublic);
 
+      // Fast-fail before any write: a taken name is the common create
+      // failure, and detecting it only at project.create below would leave
+      // the just-written File orphaned with no project doc to reap it
+      // through. Concurrent creates of the same name can still slip past
+      // this read; project.create stays the source of truth and the loser
+      // cleans up its File.
+      if (await app.db.project.findOne(project.getId())) {
+        res.status(400).json({ error: 'project name already taken' });
+        return;
+      }
+
       let sdPB: Buffer | undefined;
       if (req.body.projectPB) {
         sdPB = Buffer.from(req.body.projectPB, 'base64');
@@ -128,18 +130,53 @@ export const apiRouter = (app: Application): Router => {
 
       const filePb = createFile(project.getId(), user.getId(), undefined, sdPB);
 
-      await app.db.file.create(filePb.getId(), filePb);
+      // File ids hash content plus creation-millisecond, so a duplicate-id
+      // rejection means a byte-identical doc already exists; reusing it is
+      // sound because the two are interchangeable by construction.
+      let createdFile = true;
+      try {
+        await app.db.file.create(filePb.getId(), filePb);
+      } catch (err) {
+        if (!(err instanceof AlreadyExistsError)) {
+          throw err;
+        }
+        createdFile = false;
+      }
 
       project.setFileId(filePb.getId());
-      await app.db.project.create(project.getId(), project);
+      try {
+        await app.db.project.create(project.getId(), project);
+      } catch (err) {
+        // Same cleanup rule as the save path's 409 branch: delete only a
+        // File this request actually wrote, and never one the winning row
+        // references (an identical concurrent create in the same
+        // millisecond shares our file id). A crash before this delete
+        // leaks the File PERMANENTLY -- unlike save-path leaks, which are
+        // at least reaped when their project is deleted, this File's
+        // project row was never created, so nothing scans for it (unless
+        // a same-named project is later created and then deleted).
+        // Closing the window needs a cross-table transaction the Table
+        // interface doesn't expose.
+        if (createdFile) {
+          try {
+            const winner = await app.db.project.findOne(project.getId());
+            if (winner?.getFileId() !== filePb.getId()) {
+              await app.db.file.deleteOne(filePb.getId());
+            }
+          } catch (cleanupErr) {
+            logger.warn(`unable to delete orphaned file ${filePb.getId()} for ${project.getId()}: ${cleanupErr}`);
+          }
+        }
+        if (err instanceof AlreadyExistsError) {
+          res.status(400).json({ error: 'project name already taken' });
+          return;
+        }
+        throw err;
+      }
 
       res.status(200).json(project.toObject());
     } catch (error) {
-      if (getErrorCode(error) === 'wut') {
-        res.status(400).json({ error: 'project name already taken' });
-        return;
-      }
-      logger.error(':ohno:');
+      logger.error(`POST /projects (${user.getId()}, ${projectName}): ${getErrorMessage(error)}`);
       logger.error(error);
       throw error;
     }
@@ -174,7 +211,7 @@ export const apiRouter = (app: Application): Router => {
     if (!projectModel?.getIsPublic()) {
       // TODO: implement collaborators
       if (requestUser?.getId() !== authorUser.getId()) {
-        res.status(401).json({});
+        res.status(401).json({ error: 'unauthorized' });
         return;
       }
     }
@@ -217,7 +254,7 @@ export const apiRouter = (app: Application): Router => {
     if (!projectModel?.getIsPublic()) {
       // TODO: implement collaborators
       if (requestUser.getId() !== authorUser.getId()) {
-        res.status(401).json({});
+        res.status(401).json({ error: 'unauthorized' });
         return;
       }
     }
@@ -233,7 +270,7 @@ export const apiRouter = (app: Application): Router => {
         previewModel = await updatePreview(app.db, projectModel);
       } catch (err) {
         logger.error(`updatePreview: ${err}`);
-        res.status(500).json({});
+        res.status(500).json({ error: 'unable to render preview' });
         return;
       }
     }
@@ -248,7 +285,7 @@ export const apiRouter = (app: Application): Router => {
     const user = getUser(req, res);
     // TODO
     if (user.getId() !== req.params.username) {
-      res.status(401).json({});
+      res.status(401).json({ error: 'unauthorized' });
       return;
     }
     const projectSlug = `${req.params.username}/${req.params.projectName}`;
@@ -258,40 +295,105 @@ export const apiRouter = (app: Application): Router => {
       return;
     }
 
-    if (!req.body || !req.body.currVersion) {
-      res.status(400).json({ error: 'currVersion is required' });
-      return;
-    }
-
-    if (!req.body.projectPB) {
-      res.status(400).json({ error: 'projectPB is required' });
+    const saveBodyError = validateSaveProjectBody(req.body);
+    if (saveBodyError) {
+      res.status(400).json({ error: saveBodyError });
       return;
     }
 
     const projectVersion = req.body.currVersion as number;
     const newVersion = projectVersion + 1;
+    const staleVersionError = `error saving model: changes based on old version. refresh page to reload`;
 
-    let pbContents: Buffer | undefined;
-    if (req.body.projectPB) {
-      pbContents = Buffer.from(req.body.projectPB, 'base64');
+    // Fast-fail before persisting anything: without this, every save from a
+    // stale tab wrote a File document that nothing would ever point at. Two
+    // concurrent saves can still both pass this read-then-compare; the
+    // conditional update below stays the source of truth for that race.
+    if (projectModel.getVersion() !== projectVersion) {
+      res.status(409).json({ error: staleVersionError });
+      return;
     }
 
+    const pbContents = Buffer.from(req.body.projectPB as string, 'base64');
+
+    // The project row must reference an already-persisted File, and the
+    // Table interface offers no cross-table transaction, so the File is
+    // written first and only becomes reachable if the conditional update
+    // succeeds; the loser of a version race cleans up below. The remaining
+    // orphan window is a crash between these two writes.
     const file = createFile(projectModel.getId(), user.getId(), undefined, pbContents);
-    await app.db.file.create(file.getId(), file);
+
+    // File ids hash content plus creation-millisecond, so a duplicate-id
+    // rejection means a byte-identical doc already exists (an identical
+    // save landed in the same millisecond); reusing it is sound because
+    // the two are interchangeable by construction.
+    let createdFile = true;
+    try {
+      await app.db.file.create(file.getId(), file);
+    } catch (err) {
+      if (!(err instanceof AlreadyExistsError)) {
+        throw err;
+      }
+      createdFile = false;
+    }
+
+    // Two-guard orphan cleanup, shared by the conflict (null) and
+    // transport-failure (throw) outcomes of the conditional update: never
+    // delete a doc another request wrote (createdFile), and never delete
+    // the doc the row now references -- a concurrent winner that saved
+    // identical content in the same millisecond carries the SAME file id.
+    // Residual windows: a crash before the delete leaks one File, and a
+    // same-id winner committing between the re-read and the delete could
+    // lose one; both need a cross-table transaction the Table interface
+    // doesn't expose, and both require identical same-millisecond saves.
+    const cleanupUnreferencedFile = async (): Promise<void> => {
+      if (!createdFile) {
+        return;
+      }
+      try {
+        const winner = await app.db.project.findOne(projectSlug);
+        if (winner?.getFileId() !== file.getId()) {
+          await app.db.file.deleteOne(file.getId());
+        }
+      } catch (err) {
+        logger.warn(`unable to delete orphaned file ${file.getId()} for ${projectSlug}: ${err}`);
+      }
+    };
 
     // only update if the version matches
     projectModel.setFileId(file.getId());
     projectModel.setVersion(newVersion);
 
-    const result = await app.db.project.update(
-      projectModel.getId(),
-      {
-        version: projectVersion,
-      },
-      projectModel,
-    );
+    let result: ProjectPb | null;
+    try {
+      result = await app.db.project.update(
+        projectModel.getId(),
+        {
+          version: projectVersion,
+        },
+        projectModel,
+      );
+    } catch (err) {
+      // A rejected update is a transport failure, not a version conflict
+      // (the table maps precondition misses to null): clean up and let it
+      // surface as a 500 rather than steering the client into its
+      // destructive conflict-recovery flow.
+      await cleanupUnreferencedFile();
+      throw err;
+    }
 
-    // remove our preview
+    // if the result is null we weren't able to find a matching
+    // version in the DB, probably due to concurrent modification in
+    // a different browser tab
+    if (result === null) {
+      await cleanupUnreferencedFile();
+      res.status(409).json({ error: staleVersionError });
+      return;
+    }
+
+    // The cached preview renders the file the project row points at, so it
+    // only goes stale when the row actually changed; failed saves above
+    // must leave it in place.
     setTimeout(async () => {
       try {
         await app.db.preview.deleteOne(projectModel.getId());
@@ -299,16 +401,6 @@ export const apiRouter = (app: Application): Router => {
         logger.warn(`unable to delete preview for ${req.params.projectName}`);
       }
     });
-
-    // if the result is null we weren't able to find a matching
-    // version in the DB, probably due to concurrent modification in
-    // a different browser tab
-    if (result === null) {
-      res.status(409).json({
-        error: `error saving model: changes based on old version. refresh page to reload`,
-      });
-      return;
-    }
 
     res.status(200).json({ version: newVersion });
   });
@@ -353,13 +445,16 @@ export const apiRouter = (app: Application): Router => {
       await app.db.user.deleteOne(origUserId);
       logger.error(`done deleting old user ${origUserId}`);
     } catch (error) {
-      if (getErrorCode(error) === 'wut') {
+      if (error instanceof AlreadyExistsError) {
         res.status(400).json({ error: 'username already taken' });
         return;
-      } else {
-        res.status(400).json({ error: 'username is already taken' });
-        return;
       }
+      // Anything else here (including the deleteOne after a successful
+      // create) is not "name taken"; reporting it as such told users to
+      // pick a different name when retrying the same one was fine.
+      logger.error(`PATCH /user rename ${origUserId} -> ${userModel.getId()}: ${getErrorMessage(error)}`);
+      res.status(500).json({ error: 'internal error' });
+      return;
     }
 
     // re-key the session to the user's chosen id (their old temp- record

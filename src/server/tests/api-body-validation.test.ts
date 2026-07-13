@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from '@rstest/core';
 
-import { validateCreateProjectBody, validateUserPatchBody } from '../api-validation';
+import { validateCreateProjectBody, validateSaveProjectBody, validateUserPatchBody } from '../api-validation';
 
 // Regression coverage for issue #691: after the body-parser 1 -> 2 upgrade,
 // `req.body` is `undefined` (not `{}`) for empty-body or wrong-Content-Type
@@ -40,6 +40,44 @@ describe('validateCreateProjectBody', () => {
     expect(
       validateCreateProjectBody({ projectName: 'My Model', description: 'd', isPublic: true, projectPB: 'AA==' }),
     ).toBeUndefined();
+  });
+});
+
+describe('validateSaveProjectBody', () => {
+  it('rejects an undefined body (empty / wrong Content-Type request)', () => {
+    expect(validateSaveProjectBody(undefined)).toBe('currVersion is required');
+  });
+
+  it('rejects a null body', () => {
+    expect(validateSaveProjectBody(null)).toBe('currVersion is required');
+  });
+
+  it('rejects an empty object', () => {
+    expect(validateSaveProjectBody({})).toBe('currVersion is required');
+  });
+
+  it('rejects a non-numeric currVersion', () => {
+    expect(validateSaveProjectBody({ currVersion: '1', projectPB: 'AA==' })).toBe('currVersion must be an integer');
+    expect(validateSaveProjectBody({ currVersion: null, projectPB: 'AA==' })).toBe('currVersion must be an integer');
+  });
+
+  it('rejects a non-integer currVersion (the token the server increments by 1)', () => {
+    expect(validateSaveProjectBody({ currVersion: 1.5, projectPB: 'AA==' })).toBe('currVersion must be an integer');
+    expect(validateSaveProjectBody({ currVersion: NaN, projectPB: 'AA==' })).toBe('currVersion must be an integer');
+  });
+
+  it('accepts currVersion 0: legacy rows predate version seeding, so 0 is legitimate', () => {
+    expect(validateSaveProjectBody({ currVersion: 0, projectPB: 'AA==' })).toBeUndefined();
+  });
+
+  it('rejects a missing, empty, or non-string projectPB', () => {
+    expect(validateSaveProjectBody({ currVersion: 1 })).toBe('projectPB is required');
+    expect(validateSaveProjectBody({ currVersion: 1, projectPB: '' })).toBe('projectPB is required');
+    expect(validateSaveProjectBody({ currVersion: 1, projectPB: 42 })).toBe('projectPB is required');
+  });
+
+  it('accepts an integer currVersion plus base64 projectPB', () => {
+    expect(validateSaveProjectBody({ currVersion: 3, projectPB: 'AA==' })).toBeUndefined();
   });
 });
 

@@ -21,6 +21,28 @@ export function validateCreateProjectBody(body: unknown): string | undefined {
   return undefined;
 }
 
+export function validateSaveProjectBody(body: unknown): string | undefined {
+  if (typeof body !== 'object' || body === null) {
+    return 'currVersion is required';
+  }
+  const fields = body as Record<string, unknown>;
+  if (fields.currVersion === undefined) {
+    return 'currVersion is required';
+  }
+  // currVersion is the optimistic-concurrency token; the server increments
+  // it by 1 on each save, so integers are the invariant to enforce. 0 is a
+  // legitimate value -- rows created before versions were seeded at 1 carry
+  // proto3's implicit default -- which is why presence is checked by type
+  // rather than truthiness (a falsy check bricked saves of those rows).
+  if (typeof fields.currVersion !== 'number' || !Number.isInteger(fields.currVersion)) {
+    return 'currVersion must be an integer';
+  }
+  if (typeof fields.projectPB !== 'string' || fields.projectPB === '') {
+    return 'projectPB is required';
+  }
+  return undefined;
+}
+
 export function validateUserPatchBody(body: unknown): string | undefined {
   // A user PATCH may only carry two fields. This validator enforces "exactly two
   // keys, one of which is a truthy `username`"; the handler separately requires
