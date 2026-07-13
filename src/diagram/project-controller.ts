@@ -7,7 +7,8 @@
 // ProjectController is the headless coordination layer extracted from
 // Editor.tsx. It owns the WASM engine lifecycle, the apply-patch ->
 // serialize -> rebuild pipeline, the save queue, undo/redo history, sim
-// runs, the cached-error derivation, version/generation bookkeeping, and
+// runs, the cached-error derivation, version/generation bookkeeping (the
+// fractional render-cache key plus the server-acknowledged save version), and
 // the module-navigation stack. It has ZERO React and ZERO DOM dependencies
 // (no document/window; setTimeout is allowed for deferred dispatch) so the
 // async coordination can be unit-tested against a fake engine without jsdom.
@@ -39,7 +40,7 @@ import {
   stockFlowViewFromJson,
   stockFlowViewToJson,
 } from '@simlin/core/datamodel';
-import { defined, mapSet, setsEqual, toInt, uint8ArraysEqual, type Series } from '@simlin/core/common';
+import { defined, mapSet, setsEqual, uint8ArraysEqual, type Series } from '@simlin/core/common';
 import { first, getOrThrow } from '@simlin/core/collections';
 import type { JsonProjectPatch, JsonModelOperation, ErrorDetail, JsonProject } from '@simlin/engine';
 import { SimlinErrorKind, SimlinUnitErrorKind } from '@simlin/engine';
@@ -83,9 +84,19 @@ export interface CachedErrorDetails {
  */
 export interface ProjectSnapshot {
   readonly project: Project | undefined;
-  // The fractional cache-key scheme (+0.01 for content edits, +0.001 for
-  // view-only updates) is preserved: Canvas keys render caches off this.
+  // PURELY the render-cache key: the fractional scheme (+0.01 for content
+  // edits, +0.001 for view-only updates) that Canvas invalidates caches off.
+  // It never resets and carries no server meaning -- the integer version the
+  // server holds is `serverVersion` below. (Deriving the save version from
+  // this value was issue #958: ~100 unsaved edits drifted the fraction past
+  // the next integer, corrupting the optimistic-concurrency check.)
   readonly projectVersion: number;
+  // The last server-ACKNOWLEDGED integer version: seeded from the initial
+  // load and advanced only by a successful save's returned version. This is
+  // the sole source of the `currVersion` a save sends. Local edits, view
+  // updates, and undo/redo never move it -- the server's version doesn't
+  // change when the user edits locally.
+  readonly serverVersion: number;
   // Increments exactly when project *content* changes (real edits and
   // undo/redo) -- not on view-only updates or save-version bookkeeping.
   // The Editor keys the details panels on this so a pan frame or autosave
@@ -290,6 +301,8 @@ export class ProjectController {
   private projectHistory: readonly Readonly<Uint8Array>[];
   private projectOffset = 0;
   private projectVersion: number;
+  // Last server-acknowledged integer version (see ProjectSnapshot.serverVersion).
+  private serverVersion: number;
   private projectGeneration = 0;
   private status: 'ok' | 'error' | 'disabled' = 'disabled';
   private cachedErrors: CachedErrorDetails = EMPTY_CACHED_ERRORS;
@@ -330,7 +343,11 @@ export class ProjectController {
 
   constructor(config: ProjectControllerConfig) {
     this.config = config;
+    // Both versions seed from the load: projectVersion then drifts fractionally
+    // as a cache key while serverVersion stays integer, tracking only what the
+    // server has acknowledged.
     this.projectVersion = config.initialProjectVersion;
+    this.serverVersion = config.initialProjectVersion;
     this.projectHistory = config.input.format === 'protobuf' ? [config.input.data] : [];
     this.snapshot = this.buildSnapshot();
   }
@@ -354,6 +371,7 @@ export class ProjectController {
     return {
       project: this.project,
       projectVersion: this.projectVersion,
+      serverVersion: this.serverVersion,
       projectGeneration: this.projectGeneration,
       status: this.status,
       cachedErrors: this.cachedErrors,
@@ -726,9 +744,9 @@ export class ProjectController {
       return;
     }
 
-    // Fractionally increase the version -- the server only sends back integer
-    // versions, but this lets the Canvas use a simple version check to
-    // invalidate caches.
+    // Fractionally increase the render-cache key so the Canvas invalidates
+    // with a simple version check. This is display bookkeeping only: the
+    // integer version the save path sends lives in `serverVersion` (#958).
     const projectVersion = this.projectVersion + 0.01;
 
     this.batch(() => {
@@ -881,29 +899,37 @@ export class ProjectController {
   // --- save queue ---
 
   /**
-   * Schedule a save on the current version. Deferred via setTimeout so a burst
-   * of edits coalesces. The continuation short-circuits if the controller was
-   * disposed before it fired.
+   * Schedule a save. Deferred via setTimeout so a burst of edits coalesces.
+   * The continuation short-circuits if the controller was disposed before it
+   * fired. The version to send is NOT captured here: save() reads the live
+   * `serverVersion` at flush time, so a save acknowledged between scheduling
+   * and flushing is reflected.
    */
   scheduleSave(): void {
-    const projectVersion = this.projectVersion;
     setTimeout(() => {
       if (this.disposed) {
         return;
       }
-      void this.save(toInt(projectVersion));
+      void this.save();
     });
   }
 
   /**
-   * Serialize and hand off to the host's save callback. A save already in
-   * flight queues exactly one flush. inSave is released in a finally block: a
-   * thrown save (e.g. host-side network failure) must not leave inSave stuck
-   * true, otherwise every subsequent edit silently queues forever. The queued
-   * retry uses `version ?? currVersion` so a save that errored before the
-   * server returned a new version still attempts to flush the next edit.
+   * Serialize and hand off to the host's save callback, sending the last
+   * server-ACKNOWLEDGED version (`serverVersion`) as the optimistic-concurrency
+   * check -- never a value derived from the fractional `projectVersion` cache
+   * key, whose drift used to cross integer boundaries after ~100 unsaved edits
+   * and corrupt the check (issue #958). A returned version advances
+   * serverVersion; a failed save (rejection or resolved-undefined) leaves it
+   * untouched so the next attempt re-sends the same still-valid version.
+   *
+   * A save already in flight queues exactly one flush. inSave is released in a
+   * finally block: a thrown save (e.g. host-side network failure) must not
+   * leave inSave stuck true, otherwise every subsequent edit silently queues
+   * forever. The queued retry re-reads serverVersion, picking up whatever this
+   * save's outcome left there.
    */
-  async save(currVersion: number): Promise<void> {
+  async save(): Promise<void> {
     if (this.inSave) {
       this.saveQueued = true;
       return;
@@ -911,16 +937,17 @@ export class ProjectController {
 
     this.inSave = true;
 
-    let version: number | undefined;
     try {
       const engine = defined(this.engine);
+      const currVersion = this.serverVersion;
+      let version: number | undefined;
       if (this.config.input.format === 'json') {
         version = await this.config.save({ format: 'json', data: await engine.serializeJson() }, currVersion);
       } else {
         version = await this.config.save({ format: 'protobuf', data: await engine.serializeProtobuf() }, currVersion);
       }
       if (version) {
-        this.projectVersion = version;
+        this.serverVersion = version;
         this.notify();
       }
     } catch (err) {
@@ -929,7 +956,7 @@ export class ProjectController {
       this.inSave = false;
       if (this.saveQueued) {
         this.saveQueued = false;
-        await this.save(version ?? currVersion);
+        await this.save();
       }
     }
   }

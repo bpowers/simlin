@@ -36,11 +36,24 @@ rs.mock('@firebase/auth', () => ({
   signOut: rs.fn(async () => {}),
 }));
 
-// Stub HostedWebEditor: pulls in Editor.tsx + tons of CSS modules.
+// Stub HostedWebEditor: pulls in Editor.tsx + tons of CSS modules. It surfaces
+// the auth-derived props as data attributes so tests can observe the app's
+// "auth improved" signal (issue #933: authenticatedUserId is what tells a
+// deep-linked editor to retry a load that failed before the session existed)
+// and the owner's readOnlyMode flip through the DOM.
 rs.mock('@simlin/diagram/HostedWebEditor', () => {
   const React = require('react');
   return {
-    HostedWebEditor: () => React.createElement('div', { 'data-testid': 'hosted-editor' }, 'Editor'),
+    HostedWebEditor: (props: { authenticatedUserId?: string; readOnlyMode?: boolean }) =>
+      React.createElement(
+        'div',
+        {
+          'data-testid': 'hosted-editor',
+          'data-auth-user': props.authenticatedUserId ?? '',
+          'data-read-only': String(!!props.readOnlyMode),
+        },
+        'Editor',
+      ),
   };
 });
 
@@ -106,7 +119,7 @@ import { memoryLocation } from 'wouter/memory-location';
 import { signOut } from '@firebase/auth';
 import { App, InnerApp } from '../App';
 
-import { userResponse, type FetchImpl } from './fetch-stub';
+import { textResponse, userResponse, type FetchImpl } from './fetch-stub';
 
 // fetch is called at module load by UserInfoSingleton's constructor and again by
 // getUserInfo / handleLogout. Per test we set the /api/user response that drives
@@ -414,6 +427,138 @@ describe('InnerApp auth-state-changed error handling', () => {
     expect(consoleErrorSpy).toHaveBeenCalled();
 
     unmount();
+  });
+});
+
+describe('maybeLogin /session failure surfacing (#927)', () => {
+  // The /session error contract is a JSON {error} envelope, but the
+  // response body is not under the client's control (older servers used
+  // res.sendStatus, and proxies/load balancers can answer with plain text
+  // or HTML): parsing must never throw past maybeLogin's error handling,
+  // or loginError is never set and a failed login looks like a silent
+  // no-op on the Login screen.
+  let consoleErrorSpy: MockInstance;
+
+  beforeEach(() => {
+    consoleErrorSpy = rs.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleErrorSpy.mockRestore();
+    setFetchRoutes({});
+  });
+
+  // Route /api/user -> 401 (signed out) and the /session POST -> the
+  // response under test (an Error rejects the fetch, simulating a
+  // network-level failure with no HTTP status), then drive the auth flow
+  // through the captured Firebase listener exactly as the real SDK would.
+  async function driveLoginWithSessionResponse(response: Response | Error): Promise<void> {
+    fetchMock.mockReset();
+    fetchMock.mockImplementation(async (input: unknown, init?: { method?: string }) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/session') && method === 'POST') {
+        if (response instanceof Error) {
+          throw response;
+        }
+        return response;
+      }
+      return userResponse(401, {});
+    });
+
+    renderApp('/');
+    await waitFor(() => {
+      expect(loginIsDisabled()).toBe('false');
+    });
+    await act(async () => {
+      await latestAuthListener()(makeFirebaseUser());
+      await flushMacrotasks();
+    });
+  }
+
+  test('a plain-text 500 body still surfaces the generic loginError', async () => {
+    await driveLoginWithSessionResponse(textResponse(500, 'Internal Server Error'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('login').getAttribute('data-error')).toBe(
+        "We couldn't finish signing you in (HTTP 500). Please try again.",
+      );
+    });
+  });
+
+  test('a JSON {error} body surfaces the server-provided message', async () => {
+    await driveLoginWithSessionResponse(userResponse(403, { error: 'This account has been disabled.' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('login').getAttribute('data-error')).toBe('This account has been disabled.');
+    });
+  });
+
+  test('a JSON body with a non-string error field falls back to the generic message', async () => {
+    await driveLoginWithSessionResponse(userResponse(500, { error: { code: 13 } }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('login').getAttribute('data-error')).toBe(
+        "We couldn't finish signing you in (HTTP 500). Please try again.",
+      );
+    });
+  });
+
+  test('a network-level fetch failure (no HTTP status) surfaces a loginError', async () => {
+    // fetch rejecting entirely (offline, DNS failure, CORS) used to escape
+    // maybeLogin and die in authStateChanged's console.error-only catch, so
+    // the user saw nothing.
+    await driveLoginWithSessionResponse(new TypeError('Failed to fetch'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('login').getAttribute('data-error')).toBe(
+        "We couldn't reach the server to finish signing you in. Please check your connection and try again.",
+      );
+    });
+  });
+});
+
+describe('deep-link auth recovery (#933)', () => {
+  afterEach(() => {
+    setFetchRoutes({});
+  });
+
+  test('renders the editor route without waiting for auth, then surfaces the signed-in identity as a prop', async () => {
+    // /api/user would answer 200, but the userInfo singleton still caches the
+    // signed-out result from resetUserInfoCache -- exactly the deep-link
+    // situation: the server session does not exist yet when the route mounts,
+    // and only maybeLogin's success path (POST /session -> invalidate ->
+    // getUserInfo) later commits the user.
+    setFetchRoutes({ user: { status: 200, body: { id: 'alice' } } });
+    renderApp('/alice/widgets');
+
+    // The two-segment project path bypasses the auth gate: the editor mounts
+    // immediately -- authUnknown is still true here (the deferred getUserInfo
+    // has not run) -- anonymous and read-only.
+    const editor = screen.getByTestId('hosted-editor');
+    expect(editor.getAttribute('data-auth-user')).toBe('');
+    expect(editor.getAttribute('data-read-only')).toBe('true');
+    expect(screen.queryByTestId('login')).toBeNull();
+
+    // authUnknown resolves to "no user" (cached signed-out /api/user): the
+    // editor stays mounted and anonymous -- public projects never wait on auth.
+    await act(async () => {
+      await flushMacrotasks();
+    });
+    expect(screen.getByTestId('hosted-editor').getAttribute('data-auth-user')).toBe('');
+
+    // Firebase restores the client identity; maybeLogin re-mints the server
+    // session and commits the user. The editor route must see the new identity
+    // as a prop change -- HostedWebEditor's signal to retry a failed load.
+    await act(async () => {
+      await latestAuthListener()(makeFirebaseUser());
+      await flushMacrotasks();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('hosted-editor').getAttribute('data-auth-user')).toBe('alice');
+    });
+    // The owner also regains edit rights in the same commit.
+    expect(screen.getByTestId('hosted-editor').getAttribute('data-read-only')).toBe('false');
   });
 });
 

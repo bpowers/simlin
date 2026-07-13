@@ -57,8 +57,13 @@ export default function SpeedDial(props: SpeedDialProps): React.ReactElement {
       >
         {enrichedIcon}
       </button>
+      {/* The open dial is a cluster of independent, directly-tabbable tool
+          buttons -- not an ARIA menu (no roving focus, no arrow-key
+          navigation), and the former role="menu"/"menuitem" pair was also
+          structurally invalid (the menuitem was a div wrapping the real
+          button). role="group" just names the boundary for assistive tech. */}
       {open && (
-        <div className={styles.actions} role="menu">
+        <div className={styles.actions} role="group" aria-label={ariaLabel}>
           {children}
         </div>
       )}
@@ -77,7 +82,9 @@ interface SpeedDialActionProps {
 export function SpeedDialAction(props: SpeedDialActionProps): React.ReactElement {
   const { icon, title, className, onClick, selected } = props;
   return (
-    <div className={styles.action} role="menuitem">
+    // Purely presentational wrapper (positions the tooltip next to the
+    // button); the button below is the interactive, labeled element.
+    <div className={styles.action}>
       <button
         className={clsx(
           styles.actionButton,

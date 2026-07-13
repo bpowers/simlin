@@ -37,3 +37,19 @@
 .optionHighlighted {
   background: var(--color-option-highlight);
 }
+
+/* On touch/coarse pointers, grow each option to the 44px target (WCAG /
+   Material) with REAL height: options stack flush, so overlapping transparent
+   overlays would route a tap on one row to the next. Symmetric padding keeps
+   the text vertically centered without a flex container (which would defeat
+   the ellipsis above). Geometry: 1rem (16px) * 1.5 line-height + 2 * 10px
+   padding = 44px; min-height covers hosts without the global reset, where
+   line-height computes smaller. */
+@media (pointer: coarse) {
+  .option {
+    box-sizing: border-box;
+    min-height: 44px;
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+}

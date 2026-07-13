@@ -216,6 +216,13 @@ interface RenderDerivation {
 
 export interface CanvasProps {
   embedded: boolean;
+  // The host says the displayed model must not be mutated (read-only viewer,
+  // stdlib model, embed). The Editor already hands a read-only Canvas no-op
+  // mutation callbacks and no selectedTool; this flag additionally suppresses
+  // the UI-only entry points Canvas owns itself -- today the inline label
+  // editor a label double-click opens -- which would otherwise LOOK editable
+  // while the eventual onRenameVariable commit silently no-ops (issue #935).
+  readOnly?: boolean;
   project: Project;
   model: Model;
   view: StockFlowView;
@@ -1904,7 +1911,10 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     // the pure selection decisions (decideMouseDownSelection,
     // resolveSelectionForReattachment); the discrete *mode* it lands in is then
     // expressed through the tagged union, not loose flags.
-    let isEditingName = !!isText;
+    // A read-only canvas never opens the inline label editor: the rename it
+    // would eventually request is a no-op there, so offering the editing UI
+    // would be the "editable but unsavable" trap issue #935 closes.
+    let isEditingName = !!isText && !latest.current.props.readOnly;
     let nextEditingName: Array<CustomElement> = [];
     let draggingArrowEndpoint = !!isArrowhead;
     let draggingSourceEndpoint = !!isSource;

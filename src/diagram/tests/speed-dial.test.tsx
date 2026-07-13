@@ -67,7 +67,7 @@ describe('SpeedDial', () => {
     expect(fab).not.toBeNull();
   });
 
-  test('renders actions when open', () => {
+  test('renders actions when open, as labeled buttons in a group', () => {
     render(
       <SpeedDial ariaLabel="Test SpeedDial" open={true} icon={<span>+</span>}>
         <SpeedDialAction icon={<span>A</span>} title="Action A" />
@@ -75,8 +75,24 @@ describe('SpeedDial', () => {
       </SpeedDial>,
     );
 
-    const actions = screen.getAllByRole('menuitem');
-    expect(actions.length).toBe(2);
+    const group = screen.getByRole('group', { name: 'Test SpeedDial' });
+    expect(group.querySelectorAll('button').length).toBe(2);
+    expect(screen.getByRole('button', { name: 'Action A' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Action B' })).not.toBeNull();
+  });
+
+  test('the open dial does not claim ARIA menu semantics', () => {
+    // The actions are independent, directly-tabbable buttons; the old
+    // role="menu"/"menuitem" pair was invalid (the menuitem was a div wrapping
+    // the real button) and promised arrow-key behavior that does not exist.
+    render(
+      <SpeedDial ariaLabel="Test SpeedDial" open={true} icon={<span>+</span>}>
+        <SpeedDialAction icon={<span>A</span>} title="Action A" />
+      </SpeedDial>,
+    );
+
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(screen.queryAllByRole('menuitem').length).toBe(0);
   });
 
   test('does not render actions when closed', () => {
@@ -86,8 +102,8 @@ describe('SpeedDial', () => {
       </SpeedDial>,
     );
 
-    const actions = screen.queryAllByRole('menuitem');
-    expect(actions.length).toBe(0);
+    expect(screen.queryByRole('group')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Action A' })).toBeNull();
   });
 
   test('calls onClick when FAB is clicked', () => {

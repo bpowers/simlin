@@ -6,6 +6,7 @@ import { NextFunction, Request, Response } from 'express';
 import * as logger from './logger';
 
 import { interceptWriteHeaders } from './headers';
+import { getSessionUserId } from './session-auth';
 
 function now(): number {
   const time: [number, number] = process.hrtime();
@@ -13,10 +14,12 @@ function now(): number {
 }
 
 function maybeGetUser(req: Request): string {
-  if (!req.session || !req.session.passport || !req.session.passport.user) {
-    return '';
-  }
-  return ` user="${req.session.passport.user.id}"`;
+  // requestLogger sits before seshcookie in app.ts, so a response
+  // written before the session middleware runs would log with no
+  // session at all; never assume it exists or is well-formed here
+  // (getSessionUserId tolerates both).
+  const id = getSessionUserId(req);
+  return id === undefined ? '' : ` user="${id}"`;
 }
 
 export function requestLogger(req: Request, res: Response, next: NextFunction): void {

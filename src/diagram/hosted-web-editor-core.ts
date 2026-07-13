@@ -12,23 +12,29 @@
 // and the window navigation.
 
 import { fromUint8Array, toUint8Array } from '@simlin/core/base64';
-import { defined } from '@simlin/core/common';
 
 import { ProtobufProjectData } from './Editor';
-
-// Extends the built-in Error so instances carry a stack trace and satisfy
-// `instanceof Error`. The explicit name assignment survives minification.
-export class HostedWebEditorError extends Error {
-  constructor(msg: string) {
-    super(msg);
-    this.name = 'HostedWebEditorError';
-  }
-}
 
 export interface ProjectEndpoint {
   base: string;
   username: string;
   projectName: string;
+}
+
+// Failure classification for loadProject(), mirroring saveProject's. It must
+// match what the server actually answers (src/server/api.ts, GET
+// /projects/:username/:projectName): a private project fetched without a live
+// owner session is a 401 -- the deep-link-before-session-restore race of issue
+// #933, which the shell recovers from by retrying when its host's auth identity
+// improves -- while a nonexistent user or file is a 404, which no amount of
+// signing in can fix. 403 is grouped with 401 for symmetry with SaveErrorReason.
+export type LoadErrorReason = 'unauthorized' | 'other';
+
+function classifyLoadStatus(status: number): LoadErrorReason {
+  if (status === 401 || status === 403) {
+    return 'unauthorized';
+  }
+  return 'other';
 }
 
 // The result of loadProject(). loadProject never rejects: a network error, a
@@ -37,7 +43,7 @@ export interface ProjectEndpoint {
 // to leave the editor permanently blank).
 export type LoadResult =
   | { kind: 'loaded'; projectBinary: Readonly<Uint8Array>; projectVersion: number }
-  | { kind: 'error'; message: string };
+  | { kind: 'error'; reason: LoadErrorReason; message: string };
 
 export function projectApiPath(endpoint: ProjectEndpoint): string {
   return `${endpoint.base}/api/projects/${endpoint.username}/${endpoint.projectName}`;
@@ -48,59 +54,97 @@ export async function loadProject(endpoint: ProjectEndpoint): Promise<LoadResult
   try {
     const response = await fetch(apiPath);
     if (response.status >= 400) {
-      return { kind: 'error', message: `unable to load ${apiPath}` };
+      return { kind: 'error', reason: classifyLoadStatus(response.status), message: `unable to load ${apiPath}` };
     }
 
     const projectResponse = (await response.json()) as { pb?: unknown; version?: unknown };
     if (typeof projectResponse?.pb !== 'string' || typeof projectResponse?.version !== 'number') {
-      return { kind: 'error', message: `malformed project response from ${apiPath}` };
+      return { kind: 'error', reason: 'other', message: `malformed project response from ${apiPath}` };
     }
 
     const projectBinary = toUint8Array(projectResponse.pb);
     return { kind: 'loaded', projectBinary, projectVersion: projectResponse.version };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return { kind: 'error', message: `unable to load ${apiPath}: ${msg}` };
+    return { kind: 'error', reason: 'other', message: `unable to load ${apiPath}: ${msg}` };
   }
 }
 
-// The result of saveProject(). A failed save reports an `error` (which the shell
-// appends to the service-error list and treats as "no new version") rather than
-// throwing, mirroring the class's appendModelError-then-return-undefined.
-export type SaveResult = { kind: 'saved'; version: number } | { kind: 'error'; message: string };
+// Failure classification for saveProject(), so the shell can offer the right
+// recovery: `conflict` (409 -- the server's currVersion check failed because the
+// project changed in another tab/session), `unauthorized` (401/403 -- an
+// expired/cleared session; see src/server/authz.ts), and `other` (everything
+// else: 5xx, malformed bodies, network failures) which the next edit retries.
+export type SaveErrorReason = 'conflict' | 'unauthorized' | 'other';
+
+// The result of saveProject(). Like loadProject, saveProject never rejects: the
+// save queue treats a resolved-undefined as "failed, retry with the next edit",
+// but a rejection escaped before the failure was recorded anywhere (issue #928)
+// -- a non-JSON error body (proxy HTML page, empty 502) made the unguarded
+// response.json() throw out of the non-2xx branch, and a malformed 2xx body
+// threw out of the success branch.
+export type SaveResult =
+  | { kind: 'saved'; version: number }
+  | { kind: 'error'; reason: SaveErrorReason; message: string };
+
+function classifySaveStatus(status: number): SaveErrorReason {
+  if (status === 409) {
+    return 'conflict';
+  }
+  if (status === 401 || status === 403) {
+    return 'unauthorized';
+  }
+  return 'other';
+}
 
 export async function saveProject(
   endpoint: ProjectEndpoint,
   project: ProtobufProjectData,
   currVersion: number,
 ): Promise<SaveResult> {
-  const bodyContents = {
-    currVersion,
-    projectPB: fromUint8Array(project.data as Uint8Array),
-  };
-
   const apiPath = projectApiPath(endpoint);
-  const response = await fetch(apiPath, {
-    credentials: 'same-origin',
-    method: 'POST',
-    cache: 'no-cache',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(bodyContents),
-  });
+  try {
+    const bodyContents = {
+      currVersion,
+      projectPB: fromUint8Array(project.data as Uint8Array),
+    };
 
-  const status = response.status;
-  if (!(status >= 200 && status < 400)) {
-    const body = await response.json();
-    const message =
-      body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
-    return { kind: 'error', message };
+    const response = await fetch(apiPath, {
+      credentials: 'same-origin',
+      method: 'POST',
+      cache: 'no-cache',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(bodyContents),
+    });
+
+    const status = response.status;
+    if (!(status >= 200 && status < 400)) {
+      // The error body is best-effort: a proxy or load balancer can answer with
+      // HTML or an empty body, so a JSON parse failure keeps the status-bearing
+      // fallback instead of escaping as a rejection.
+      let message = `HTTP ${status} while saving`;
+      try {
+        const body = (await response.json()) as { error?: unknown };
+        if (typeof body?.error === 'string' && body.error !== '') {
+          message = body.error;
+        }
+      } catch {
+        // keep the status-bearing fallback
+      }
+      return { kind: 'error', reason: classifySaveStatus(status), message };
+    }
+
+    const projectResponse = (await response.json()) as { version?: unknown };
+    if (typeof projectResponse?.version !== 'number') {
+      return { kind: 'error', reason: 'other', message: `malformed save response from ${apiPath}` };
+    }
+    return { kind: 'saved', version: projectResponse.version };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { kind: 'error', reason: 'other', message: `unable to save ${apiPath}: ${msg}` };
   }
-
-  const projectResponse = await response.json();
-  const version = defined(projectResponse.version) as number;
-  return { kind: 'saved', version };
 }
 
 // Issues the DELETE and returns the URL the caller should navigate to on
@@ -142,4 +186,21 @@ export async function deleteProject(endpoint: ProjectEndpoint): Promise<string> 
 // installed on this export is observed.
 export function redirectToHome(url: string): void {
   window.location.assign(url);
+}
+
+// Full-page reload, the recovery for a version conflict: it discards the
+// in-memory edits and picks up the server's newer version. A seam for the same
+// reason as redirectToHome (jsdom's window.location.reload is unimplemented and
+// non-spyable); the shell calls it through the module namespace.
+export function reloadPage(): void {
+  window.location.reload();
+}
+
+// Opens the app's sign-in page (the app root renders Login when the session is
+// dead) in a NEW tab: a same-tab navigation would unload the editor and destroy
+// the unsaved in-memory work the user is trying to rescue. After signing in
+// there, this tab's same-origin session cookie is fresh again and the next
+// edit's autosave succeeds.
+export function openSignInPage(url: string): void {
+  window.open(url, '_blank', 'noopener');
 }

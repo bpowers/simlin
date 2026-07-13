@@ -1,5 +1,10 @@
 .content {
-  width: 375px;
+  /* Clamp to the viewport: the sheet's natural width is 375px, but on a 320px
+     phone a fixed 375px overflowed and clipped the right column (the close
+     button). The 48px margin keeps a visible strip of backdrop exposed so
+     tap-outside-to-dismiss survives (320px viewport -> 272px sheet); any
+     viewport >= 423px still gets the full 375px. */
+  width: min(375px, calc(100vw - 48px));
 }
 
 .imageWrap {
@@ -52,10 +57,6 @@
 
 .propsForm {
   padding: 32px;
-}
-
-.exitLink {
-  color: inherit;
 }
 
 .downloadButton {

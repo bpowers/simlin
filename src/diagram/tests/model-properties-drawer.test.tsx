@@ -71,6 +71,19 @@ describe('ModelPropertiesDrawer', () => {
       });
       expect(onDelete).toHaveBeenCalledTimes(1);
     });
+
+    test('the Exit affordance is a single link, not a button nested in an anchor', () => {
+      // The old markup wrapped an IconButton (<button>) inside the router
+      // Link's <a> -- invalid interactive content that assistive tech
+      // announces twice. Link asChild + IconButton's href mode collapse it to
+      // one <a> styled as an icon button.
+      renderDrawer();
+      const exit = screen.getByRole('link', { name: /exit/i });
+      expect(exit.tagName).toBe('A');
+      expect(exit.getAttribute('href')).toBe('/');
+      expect(exit.querySelector('button')).toBeNull();
+      expect(screen.queryByRole('button', { name: /exit/i })).toBeNull();
+    });
   });
 
   describe('sim-specs draft commit (issue #55)', () => {
@@ -271,6 +284,39 @@ describe('ModelPropertiesDrawer', () => {
       expect(onSimSpecCommit).toHaveBeenCalledTimes(1);
       unmount();
       expect(onSimSpecCommit).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('read-only mode (issue #935)', () => {
+    test('sim-specs fields are disabled', () => {
+      renderDrawer({ readOnly: true });
+      expect(getField(/start time/i).disabled).toBe(true);
+      expect(getField(/stop time/i).disabled).toBe(true);
+      expect(getField(/^dt$/i).disabled).toBe(true);
+      expect(getField(/time units/i).disabled).toBe(true);
+    });
+
+    test('sim-specs fields still display the model values', () => {
+      renderDrawer({ readOnly: true });
+      expect(getField(/start time/i).value).toBe('0');
+      expect(getField(/stop time/i).value).toBe('100');
+    });
+
+    test('a forced change event never commits', () => {
+      // React does not deliver change events for disabled inputs, so this is
+      // belt and suspenders: even a synthesized change followed by blur must
+      // not reach onSimSpecCommit.
+      const onSimSpecCommit = rs.fn();
+      renderDrawer({ readOnly: true, onSimSpecCommit });
+      const field = getField(/start time/i);
+      fireEvent.change(field, { target: { value: '1900' } });
+      fireEvent.blur(field);
+      expect(onSimSpecCommit).not.toHaveBeenCalled();
+    });
+
+    test('the model download stays available', () => {
+      renderDrawer({ readOnly: true });
+      expect(screen.getByRole('button', { name: /download model/i })).not.toBeNull();
     });
   });
 });

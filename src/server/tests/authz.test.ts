@@ -27,11 +27,25 @@ type SessionShape = {
 
 type RequestWithSession = Request & { session: SessionShape };
 
-function installSession(app: express.Express, sessionFactory: () => SessionShape): void {
+// Simulates the middleware that runs before authz in app.ts: seshcookie
+// (req.session) and, when userFactory is given, sessionAuth (req.user).
+// Returns a handle on the last request seen so tests can observe authz's
+// session clearing even when authz itself terminates the request.
+function installSession(
+  app: express.Express,
+  sessionFactory: () => SessionShape,
+  userFactory?: () => unknown,
+): { lastRequest: () => RequestWithSession | undefined } {
+  let last: RequestWithSession | undefined;
   app.use((req, _res, next) => {
     (req as RequestWithSession).session = sessionFactory();
+    if (userFactory !== undefined) {
+      req.user = userFactory();
+    }
+    last = req as RequestWithSession;
     next();
   });
+  return { lastRequest: () => last };
 }
 
 function makeRequest(server: http.Server, method: string, path: string): Promise<{ status: number; body: unknown }> {
@@ -93,7 +107,11 @@ describe('authz middleware', () => {
 
   it('lets authenticated requests through to the downstream handler', async () => {
     const app = express();
-    installSession(app, () => ({ passport: { user: { id: 'test-user' } } }));
+    installSession(
+      app,
+      () => ({ passport: { user: { id: 'test-user' } } }),
+      () => ({ getId: () => 'test-user' }),
+    );
     app.use('/api', authz, (_req, res) => {
       res.status(200).json({ reachedDownstream: true });
     });
@@ -103,6 +121,47 @@ describe('authz middleware', () => {
       const res = await makeRequest(server, 'POST', '/api/projects');
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ reachedDownstream: true });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('returns 401 for a stale session: valid shape but no deserialized user (#930)', async () => {
+    // sessionAuth leaves req.user unset when the session names a user
+    // that no longer exists in the DB. Authorization must key off the
+    // deserialized user, not the session shape, or every API call from a
+    // deleted account turns into a 500 downstream.
+    const app = express();
+    const { lastRequest } = installSession(app, () => ({ passport: { user: { id: 'deleted-user' } } }));
+    app.use('/api', authz, (_req, res) => {
+      res.status(200).json({ reachedDownstream: true });
+    });
+
+    const server = app.listen(0);
+    try {
+      const res = await makeRequest(server, 'POST', '/api/projects');
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual({ error: 'unauthorized' });
+      // authz must empty the session so seshcookie expires the dead cookie.
+      expect(lastRequest()?.session).toEqual({});
+    } finally {
+      server.close();
+    }
+  });
+
+  it('treats a stale session as unauthenticated on the GET /projects/* carve-out', async () => {
+    const app = express();
+    const { lastRequest } = installSession(app, () => ({ passport: { user: { id: 'deleted-user' } } }));
+    app.use('/api', authz, (req, res) => {
+      res.status(200).json({ sawUser: req.user !== undefined });
+    });
+
+    const server = app.listen(0);
+    try {
+      const res = await makeRequest(server, 'GET', '/api/projects/alice/my-model');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ sawUser: false });
+      expect(lastRequest()?.session).toEqual({});
     } finally {
       server.close();
     }
@@ -120,6 +179,36 @@ describe('authz middleware', () => {
       const res = await makeRequest(server, 'GET', '/api/projects/alice/my-model');
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ reachedDownstream: true });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('matches the carve-out exactly as Express dispatches project routes', async () => {
+    // Express routing is non-strict and case-insensitive, so the
+    // carve-out must accept the same aliases of the public detail route
+    // (case variants, one trailing slash) while rejecting everything
+    // else under /projects/ -- notably the bare LIST alias /projects/,
+    // which dispatches to a handler that requires authentication.
+    const app = express();
+    installSession(app, () => ({}));
+    app.use('/api', authz, (_req, res) => {
+      res.status(200).json({ reachedDownstream: true });
+    });
+
+    const allowed = ['/api/projects/alice/my-model', '/api/PROJECTS/alice/my-model', '/api/projects/alice/my-model/'];
+    const denied = ['/api/projects/', '/api/projects', '/api/projects/alice', '/api/projects/alice/my-model/extra'];
+
+    const server = app.listen(0);
+    try {
+      for (const path of allowed) {
+        const res = await makeRequest(server, 'GET', path);
+        expect([path, res.status]).toEqual([path, 200]);
+      }
+      for (const path of denied) {
+        const res = await makeRequest(server, 'GET', path);
+        expect([path, res.status]).toEqual([path, 401]);
+      }
     } finally {
       server.close();
     }

@@ -22,11 +22,23 @@ interface StatusProps {
 // the near-white #DCDCDC, which barely showed on the white search bar) when the
 // model is not simulatable. Inlined rather than via var() because this fills an
 // SVG presentation attribute; the dot only ever renders on the light search bar.
+//
+// The dot is a real <button> (it toggles the errors panel): the former bare
+// <svg onClick> was invisible to keyboard and assistive-tech users, and the
+// aria-label carries the status the color alone can't.
 export const Status = React.memo(function Status({ status, onClick }: StatusProps): React.ReactElement {
   const fill = status === 'ok' ? '#2e7d32' : status === 'error' ? '#c62828' : '#bdbdbd';
+  const label =
+    status === 'ok'
+      ? 'Model status: no errors'
+      : status === 'error'
+        ? 'Model status: errors found'
+        : 'Model status: simulation unavailable';
   return (
-    <svg className={styles.status}>
-      <circle cx={12} cy={12} r={12} fill={fill} onClick={onClick} />
-    </svg>
+    <button type="button" className={styles.status} aria-label={label} onClick={onClick}>
+      <svg className={styles.statusIcon} aria-hidden="true">
+        <circle cx={12} cy={12} r={12} fill={fill} />
+      </svg>
+    </button>
   );
 });

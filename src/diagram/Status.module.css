@@ -1,7 +1,48 @@
+/* Button reset: the status dot is a real button (keyboard/AT reachable), but
+   its visual stays the bare 24px circle -- no chrome of its own. */
 .status {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
+  position: relative;
   height: 24px;
   width: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.status:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: 50%;
+}
+
+.statusIcon {
+  display: block;
+  height: 24px;
+  width: 24px;
+}
+
+/* On touch/coarse pointers, expand the 24px dot's hit area to 44x44px (WCAG /
+   Material target size) with the same centered transparent overlay pattern as
+   IconButton, leaving the visual unchanged. The overlay extends 10px beyond
+   each edge; the nearest neighbor to the left is the non-interactive 1px
+   divider across the bar's 8px flex gap, and the search box's edge sits
+   8px + 1px + 8px = 17px away, so the 10px reach stops 7px short of it --
+   no interactive neighbor is captured. */
+@media (pointer: coarse) {
+  .status::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 100%;
+    height: 100%;
+    min-width: 44px;
+    min-height: 44px;
+  }
 }

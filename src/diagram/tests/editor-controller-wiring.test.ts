@@ -110,12 +110,11 @@ describe('Editor controller config wiring', () => {
     expect(screen.getByText('boom')).toBeTruthy();
   });
 
-  it('appends the read-only toast exactly once, even under StrictMode', () => {
-    // The class appended the read-only toast on each componentDidMount; the
-    // function component appends it from the mount effect, guarded by a
-    // per-instance latch so React 18 StrictMode's mount/unmount/mount (state
-    // preserved across the cycle) does not double-append. Render under
-    // StrictMode and assert a single toast.
+  it('renders one persistent "View only" pill (no transient toast), even under StrictMode', () => {
+    // The read-only indication used to be a toast latched once at mount, which
+    // went stale when readOnlyMode flipped after identity resolution (issue
+    // #935); it is now a persistent pill derived from the CURRENT prop each
+    // render. Render under StrictMode and assert exactly one pill and no toast.
     rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
     rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
     rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
@@ -126,7 +125,7 @@ describe('Editor controller config wiring', () => {
       );
     });
 
-    const toastText = "This is a read-only version. Any changes you make won't be saved.";
-    expect(screen.getAllByText(toastText)).toHaveLength(1);
+    expect(screen.getAllByText('View only')).toHaveLength(1);
+    expect(screen.queryByText(/read-only version/i)).toBeNull();
   });
 });

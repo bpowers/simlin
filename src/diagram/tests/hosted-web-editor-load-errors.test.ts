@@ -77,3 +77,52 @@ describe('loadProject error handling', () => {
     }
   });
 });
+
+describe('loadProject failure classification (#933)', () => {
+  // The shell retries an `unauthorized` load when its host's auth identity
+  // improves (a deep link to a private project races the session re-mint), so
+  // the classification must match what the server actually answers: 401 for a
+  // private project without a live owner session (403 is grouped with it for
+  // symmetry with saveProject), 404 for a nonexistent user or file -- which no
+  // amount of signing in can fix.
+  async function reasonFor(status: number): Promise<string | undefined> {
+    installFetch(async () => ({ status, json: async () => ({}) }));
+    const result = await loadProject(endpoint);
+    expect(result.kind).toBe('error');
+    return result.kind === 'error' ? result.reason : undefined;
+  }
+
+  it('classifies a 401 as unauthorized', async () => {
+    expect(await reasonFor(401)).toBe('unauthorized');
+  });
+
+  it('classifies a 403 as unauthorized', async () => {
+    expect(await reasonFor(403)).toBe('unauthorized');
+  });
+
+  it('classifies a 404 as other', async () => {
+    expect(await reasonFor(404)).toBe('other');
+  });
+
+  it('classifies a 500 as other', async () => {
+    expect(await reasonFor(500)).toBe('other');
+  });
+
+  it('classifies a network-level failure as other', async () => {
+    installFetch(() => Promise.reject(new Error('connection refused')));
+    const result = await loadProject(endpoint);
+    expect(result.kind).toBe('error');
+    if (result.kind === 'error') {
+      expect(result.reason).toBe('other');
+    }
+  });
+
+  it('classifies a malformed 2xx body as other', async () => {
+    installFetch(async () => ({ status: 200, json: async () => ({}) }));
+    const result = await loadProject(endpoint);
+    expect(result.kind).toBe('error');
+    if (result.kind === 'error') {
+      expect(result.reason).toBe('other');
+    }
+  });
+});

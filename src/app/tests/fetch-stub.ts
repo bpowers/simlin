@@ -24,3 +24,17 @@ export function userResponse(status: number, body: unknown): Response {
     },
   } as unknown as Response;
 }
+
+/**
+ * A plain-text response, e.g. express's res.sendStatus(500) body of
+ * "Internal Server Error": json() rejects with a SyntaxError exactly as
+ * real fetch does on a non-JSON body (#927).
+ */
+export function textResponse(status: number, body: string): Response {
+  return {
+    status,
+    async json() {
+      throw new SyntaxError(`Unexpected token 'I', "${body}" is not valid JSON`);
+    },
+  } as unknown as Response;
+}

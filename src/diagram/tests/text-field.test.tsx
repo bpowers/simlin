@@ -108,4 +108,45 @@ describe('TextField', () => {
     fireEvent.change(input, { target: { value: 'new value' } });
     expect(onChange).toHaveBeenCalledTimes(1);
   });
+
+  describe('error/helper-text association', () => {
+    test.each(['outlined', 'standard'] as const)(
+      '%s: helper text is programmatically associated via aria-describedby',
+      (variant) => {
+        render(<TextField variant={variant} error helperText="Something is wrong" data-testid="text-field" id="fld" />);
+
+        const input = screen.getByTestId('text-field');
+        expect(input.getAttribute('aria-invalid')).toBe('true');
+        const describedBy = input.getAttribute('aria-describedby');
+        expect(describedBy).toBe('fld-helper');
+        // The reference must not dangle: the id points at the rendered text.
+        expect(document.getElementById(describedBy!)!.textContent).toBe('Something is wrong');
+      },
+    );
+
+    test('helper text without error is still described, but not invalid', () => {
+      render(<TextField helperText="Just a hint" data-testid="text-field" id="fld" />);
+
+      const input = screen.getByTestId('text-field');
+      expect(input.getAttribute('aria-invalid')).toBeNull();
+      expect(document.getElementById(input.getAttribute('aria-describedby')!)!.textContent).toBe('Just a hint');
+    });
+
+    test('no helper text means no aria-describedby (no dangling reference)', () => {
+      render(<TextField data-testid="text-field" />);
+      expect(screen.getByTestId('text-field').getAttribute('aria-describedby')).toBeNull();
+    });
+
+    test('a consumer-supplied aria-describedby (external error element) wins', () => {
+      render(
+        <TextField
+          error
+          helperText="internal"
+          inputProps={{ 'aria-describedby': 'external-error' }}
+          data-testid="text-field"
+        />,
+      );
+      expect(screen.getByTestId('text-field').getAttribute('aria-describedby')).toBe('external-error');
+    });
+  });
 });

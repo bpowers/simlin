@@ -1,0 +1,3 @@
+[project]
+name = "population"
+description = "The classic one stock population model."

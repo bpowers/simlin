@@ -127,11 +127,19 @@ export function NewUser(props: NewUserProps): React.JSX.Element {
             label="Username"
             type="text"
             error={errorMsg !== undefined}
+            // The error text renders in the DialogContentText line below (not
+            // as field helperText), so the association is wired explicitly.
+            inputProps={errorMsg !== undefined ? { 'aria-describedby': 'new-user-error' } : undefined}
             onKeyPress={handleKeyPress}
             fullWidth
           />
           <DialogContentText>
-            <b>&nbsp;{warningText}</b>
+            {/* Always-rendered live region (nbsp when empty) so a validation
+                failure is announced; DialogContentText doesn't forward ids, so
+                the target id lives on the inner element. */}
+            <b id="new-user-error" aria-live="polite">
+              &nbsp;{warningText}
+            </b>
           </DialogContentText>
           <FormControlLabel
             control={

@@ -349,10 +349,21 @@ export function LineChart(props: LineChartProps): React.ReactElement {
           })}
         </g>
 
-        {/* Series lines */}
+        {/* Series lines. The color goes through inline style, NOT the stroke
+            presentation attribute: attribute values never substitute var(),
+            so a token color like var(--color-primary) would fall back to
+            none and the line would silently vanish (the same gotcha
+            Status.tsx documents for fill). Style accepts hex and var()
+            alike, matching the tooltip swatch below. */}
         <g className="series-lines" clipPath={`url(#${clipId})`} transform={`translate(${margin.left},${margin.top})`}>
           {series.map((s, i) => (
-            <path key={i} d={buildPath(s.points, xScale, yScale)} fill="none" stroke={s.color} strokeWidth={1.5} />
+            <path
+              key={i}
+              d={buildPath(s.points, xScale, yScale)}
+              fill="none"
+              style={{ stroke: s.color }}
+              strokeWidth={1.5}
+            />
           ))}
         </g>
 

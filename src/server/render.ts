@@ -17,11 +17,12 @@ export { previewDimensions, parseSvgDimensions } from './preview-geometry';
 /**
  * TOTAL wall-clock budget for one preview request, measured from the
  * renderToPNG call -- it covers time queued for a render slot plus the render
- * itself, enforced by terminating the worker. Generous -- a routine preview,
- * including the worker compiling its own WASM instance, finishes well under a
- * second -- but bounded, so a pathological or adversarial model costs one
- * failed request instead of pinning a render slot (and, before issue #694,
- * the whole event loop).
+ * itself. While queued it is enforced by the limiter's per-waiter deadline
+ * timer (issue #929); once running, by terminating the worker. Generous -- a
+ * routine preview, including the worker compiling its own WASM instance,
+ * finishes well under a second -- but bounded, so a pathological or
+ * adversarial model costs one failed request instead of pinning a render slot
+ * (and, before issue #694, the whole event loop).
  */
 export const RENDER_TIMEOUT_MS = 10_000;
 
@@ -39,13 +40,37 @@ export const RENDER_TIMEOUT_MS = 10_000;
 const MAX_CONCURRENT_RENDERS = 2;
 
 export interface RenderLimiter {
-  run<T>(task: () => Promise<T>): Promise<T>;
+  /**
+   * Run `task` once a concurrency slot is free. `deadline` (epoch ms) bounds
+   * the wait for that slot: if it passes first, the returned promise rejects
+   * with RenderSlotTimeoutError, the task never runs, and no slot is
+   * consumed. Without a deadline the caller waits indefinitely.
+   */
+  run<T>(task: () => Promise<T>, deadline?: number): Promise<T>;
+}
+
+/**
+ * Rejection for a run() whose deadline expired before it acquired a slot. A
+ * distinct class so renderToPNG can translate queue-wait expiry into its
+ * user-facing timeout message without string matching.
+ */
+export class RenderSlotTimeoutError extends Error {
+  constructor() {
+    super('deadline expired while waiting for a render slot');
+    this.name = 'RenderSlotTimeoutError';
+  }
 }
 
 /**
  * Minimal FIFO concurrency limiter. A slot is released when the task settles
  * (resolve or reject), so a failed or timed-out render can never leak a slot.
- * Exported for direct unit testing.
+ * A queued waiter's deadline is enforced by its own timer (issue #929): the
+ * timer removes the waiter from the queue, so a slot freed later is handed to
+ * the next live waiter instead of being burned on a dead one. Timer expiry
+ * and grant are mutually exclusive settles -- grant() clears the timer, and
+ * a fired timer takes the waiter out of release()'s reach -- so each run()
+ * settles exactly once and `active` stays exact. Exported for direct unit
+ * testing.
  */
 export function createRenderLimiter(maxConcurrent: number): RenderLimiter {
   if (!Number.isInteger(maxConcurrent) || maxConcurrent <= 0) {
@@ -53,18 +78,52 @@ export function createRenderLimiter(maxConcurrent: number): RenderLimiter {
   }
 
   let active = 0;
-  const waiters: Array<() => void> = [];
+  interface Waiter {
+    grant: () => void;
+  }
+  const waiters: Waiter[] = [];
 
-  const acquire = (): Promise<void> => {
+  const acquire = (deadline?: number): Promise<void> => {
+    if (deadline !== undefined && Date.now() >= deadline) {
+      // Budget already spent; refuse even when a slot is free so a doomed
+      // request never consumes capacity.
+      return Promise.reject(new RenderSlotTimeoutError());
+    }
     if (active < maxConcurrent) {
       active++;
       return Promise.resolve();
     }
-    return new Promise((resolve) => {
-      waiters.push(() => {
-        active++;
-        resolve();
-      });
+    return new Promise((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const waiter: Waiter = {
+        grant: () => {
+          clearTimeout(timer);
+          active++;
+          resolve();
+        },
+      };
+      if (deadline !== undefined) {
+        // Assumes a finite, near-future deadline (the sole caller derives it
+        // from Date.now() + RENDER_TIMEOUT_MS). A NaN or >2^31-1ms delay is
+        // clamped by Node to ~1ms, i.e. an instant spurious rejection; we
+        // document rather than guard because a correct guard needs timer
+        // re-arming (a bare clamp reproduces the same early rejection), and
+        // for an HTTP-facing queue failing fast on a nonsense deadline beats
+        // waiting forever.
+        timer = setTimeout(() => {
+          const idx = waiters.indexOf(waiter);
+          if (idx === -1) {
+            // Defensive: grant() clears this timer before dequeueing the
+            // waiter, so a fired callback should always find it. Bailing out
+            // here matters because splice(-1, 1) below would otherwise evict
+            // some other waiter and strand this settled one in the queue.
+            return;
+          }
+          waiters.splice(idx, 1);
+          reject(new RenderSlotTimeoutError());
+        }, deadline - Date.now());
+      }
+      waiters.push(waiter);
     });
   };
 
@@ -72,13 +131,13 @@ export function createRenderLimiter(maxConcurrent: number): RenderLimiter {
     active--;
     const next = waiters.shift();
     if (next) {
-      next();
+      next.grant();
     }
   };
 
   return {
-    async run<T>(task: () => Promise<T>): Promise<T> {
-      await acquire();
+    async run<T>(task: () => Promise<T>, deadline?: number): Promise<T> {
+      await acquire(deadline);
       try {
         return await task();
       } finally {
@@ -193,12 +252,23 @@ export async function renderToPNG(fileDoc: File, options?: RenderOptions): Promi
   const workerScript = options?.workerScript ?? resolveWorkerScript();
   // Capture the deadline before enqueueing so queue wait counts against the
   // budget: the client has been waiting the whole time, and a request whose
-  // deadline lapsed in the queue must not burn a slot on a doomed render.
+  // deadline lapses in the queue must reject then (issue #929), not linger
+  // pending until a slot frees.
   const deadline = Date.now() + timeoutMs;
-  return renderLimiter.run(() => {
-    if (Date.now() >= deadline) {
-      return Promise.reject(new Error(`preview render timed out after ${timeoutMs}ms waiting for a render slot`));
+  try {
+    return await renderLimiter.run(() => {
+      if (Date.now() >= deadline) {
+        // The limiter's own deadline timer normally fires first; this guards
+        // the sliver between being granted a slot and the task starting, so
+        // we never spawn a worker with no remaining budget.
+        return Promise.reject(new RenderSlotTimeoutError());
+      }
+      return runRenderWorker(projectContents, deadline, timeoutMs, workerScript);
+    }, deadline);
+  } catch (err) {
+    if (err instanceof RenderSlotTimeoutError) {
+      throw new Error(`preview render timed out after ${timeoutMs}ms waiting for a render slot`);
     }
-    return runRenderWorker(projectContents, deadline, timeoutMs, workerScript);
-  });
+    throw err;
+  }
 }

@@ -213,6 +213,9 @@ export function NewProject(props: NewProjectProps): React.JSX.Element {
           label="Project Name"
           type="text"
           error={errorMsg !== undefined}
+          // The error text renders in the shared warning line below the form
+          // (not as field helperText), so the association is wired explicitly.
+          inputProps={errorMsg !== undefined ? { 'aria-describedby': 'new-project-error' } : undefined}
           onKeyPress={handleKeyPress}
           fullWidth
           InputProps={{
@@ -263,7 +266,11 @@ export function NewProject(props: NewProjectProps): React.JSX.Element {
           </AccordionDetails>
         </Accordion>
 
-        <p className={clsx(typography.subtitle2, styles.warning)}>
+        {/* Always-rendered live region (nbsp when empty): a failed import or
+            create populates it, and aria-live announces the change since focus
+            stays wherever the user left it. The id is the aria-describedby
+            target of the Project Name field above. */}
+        <p id="new-project-error" aria-live="polite" className={clsx(typography.subtitle2, styles.warning)}>
           <b>{warningText || '\xa0'}</b>
         </p>
         <div className={styles.actions}>

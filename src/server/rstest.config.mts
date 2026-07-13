@@ -14,6 +14,18 @@ export default defineConfig({
   // The vendored seshcookie library keeps its tests next to its source
   // (see seshcookie/seshcookie.ts for provenance).
   include: ['tests/**/*.test.ts', 'seshcookie/**/*.test.ts'],
+  output: {
+    // In the node environment rstest externalizes node_modules, so named
+    // imports go through Node's ESM-CJS interop, which detects exports with
+    // cjs-module-lexer. timestamp_pb's `goog.object.extend(exports, ...)` is
+    // invisible to that static analysis, leaving `Timestamp` undefined at
+    // runtime (production is unaffected: tsc emits plain `require`). Bundling
+    // just this subpath routes it through rspack's dynamic CJS interop -- the
+    // same path the local schemas/*_pb.js already take -- while the jspb
+    // runtime it requires stays external, so there is still exactly one copy
+    // of the google-protobuf runtime in the process.
+    bundleDependencies: ['google-protobuf/google/protobuf/timestamp_pb'],
+  },
   resolve: {
     // tsconfig `paths` maps @simlin/* onto source and Rsbuild prefers tsconfig
     // over `alias`; the server exercises the built output, as it did under jest.

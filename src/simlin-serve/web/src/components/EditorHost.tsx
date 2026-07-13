@@ -310,7 +310,8 @@ export function EditorHost(props: EditorHostProps): React.ReactElement | null {
         // Track the post-save server version so the WS echo of our own
         // save (which arrives with the same version) does not trigger a
         // refetch. `setState` here only matters for the WS gate; the
-        // Editor itself owns its `projectVersion` via `result.version`.
+        // Editor's controller advances its own `serverVersion` (the
+        // last server-acknowledged save version) via `result.version`.
         // Skip the gate update when the user navigated away during the
         // POST: the version belongs to a path we no longer display.
         if (loadKey === r.currentLoadKey && latest.current.props.path === path) {

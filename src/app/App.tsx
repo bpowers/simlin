@@ -226,23 +226,50 @@ export function InnerApp(): React.JSX.Element {
 
     const base = getBaseURL();
     const apiPath = `${base}/session`;
-    const response = await fetch(apiPath, {
-      credentials: 'same-origin',
-      method: 'POST',
-      cache: 'no-cache',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(bodyContents),
-    });
+    let response: Response;
+    try {
+      response = await fetch(apiPath, {
+        credentials: 'same-origin',
+        method: 'POST',
+        cache: 'no-cache',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(bodyContents),
+      });
+    } catch (err) {
+      // A network-level failure (fetch rejects; there is no HTTP status)
+      // must surface like a server-reported error: letting it propagate
+      // lands in authStateChanged's console.error-only catch and the login
+      // looks like a silent no-op. Scoped to the POST itself so the rest of
+      // the auth transition keeps its deliberate no-setState behavior.
+      const errorMsg =
+        "We couldn't reach the server to finish signing you in. Please check your connection and try again.";
+      console.error(`session error: ${errorMsg}`, err);
+      setState({ loginError: errorMsg });
+      return undefined;
+    }
 
     const status = response.status;
     if (!(status >= 200 && status < 400)) {
-      const body = await response.json();
-      const errorMsg =
-        body && body.error
-          ? (body.error as string)
-          : `We couldn't finish signing you in (HTTP ${status}). Please try again.`;
+      // The server's contract is a JSON {error} envelope, but the body is not
+      // under our control (proxies and load balancers can answer with plain
+      // text or HTML): parsing must never throw past this branch, or
+      // loginError is never set and the failed login looks like a silent
+      // no-op on the Login screen (#927).
+      let serverError: string | undefined;
+      try {
+        const body: unknown = await response.json();
+        if (typeof body === 'object' && body !== null) {
+          const error = (body as { error?: unknown }).error;
+          if (typeof error === 'string' && error !== '') {
+            serverError = error;
+          }
+        }
+      } catch {
+        // non-JSON body: fall through to the generic message below
+      }
+      const errorMsg = serverError ?? `We couldn't finish signing you in (HTTP ${status}). Please try again.`;
       // Surface to the login screen rather than swallowing to the console: the
       // user authenticated with the IdP but the server session failed and they
       // get bounced back to Login, where without this it looks like a no-op.
@@ -368,6 +395,13 @@ export function InnerApp(): React.JSX.Element {
         projectName={projectName}
         baseURL={getBaseURL()}
         readOnlyMode={readOnlyMode}
+        // The "auth improved" signal (issue #933): this route renders without
+        // waiting on the auth gate (public projects must open anonymously), so
+        // a deep link to a PRIVATE project can fire its first load before
+        // maybeLogin re-mints the server session. maybeLogin's success path
+        // commits state.user, which changes this prop and tells the editor to
+        // retry a load that failed auth-shaped.
+        authenticatedUserId={user?.id}
         // Module creation is still maturing: keep it in development builds but
         // hide it in production. RSBuild inlines NODE_ENV and tree-shakes the
         // unused branch, so production bundles ship with the tool disabled.

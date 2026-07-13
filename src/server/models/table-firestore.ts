@@ -5,7 +5,22 @@
 import { CollectionReference, FieldPath, Firestore } from 'firebase-admin/firestore';
 import { Message } from 'google-protobuf';
 
-import { Query, SerializableClass, Table } from './table';
+import { AlreadyExistsError, PreconditionFailedError, Query, SerializableClass, Table } from './table';
+
+// A duplicate-id create is rejected by the backend with gRPC status
+// ALREADY_EXISTS, surfaced as a NUMERIC `code` of 6 in this dependency
+// tree (google-gax build/src/status.js pins Status.ALREADY_EXISTS = 6;
+// @google-cloud/firestore build/src/status-code.d.ts carries an internal
+// copy of the same enum, and nothing in its write path remaps it to a
+// string). The string form is accepted too as insurance against the SDK
+// someday adopting firebase-admin-style string codes.
+function isAlreadyExistsRejection(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+  const code = (error as Record<string, unknown>).code;
+  return code === 6 || code === 'already-exists';
+}
 
 interface FirestoreTableOptions {
   readonly db: Firestore;
@@ -134,7 +149,14 @@ export class FirestoreTable<T extends Message> implements Table<T> {
 
   async create(id: string, pb: T): Promise<void> {
     const docRef = this.docRef(id);
-    await docRef.create(this.doc(id, pb));
+    try {
+      await docRef.create(this.doc(id, pb));
+    } catch (err) {
+      if (isAlreadyExistsRejection(err)) {
+        throw new AlreadyExistsError(`${this.opts.name}/${firestoreDocumentId(id)} already exists`);
+      }
+      throw err;
+    }
   }
 
   async update(id: string, cond: Query, pb: T): Promise<T | null> {
@@ -145,14 +167,25 @@ export class FirestoreTable<T extends Message> implements Table<T> {
         for (const [key, expected] of Object.entries(cond)) {
           const current = doc.get(key);
           if (current !== expected) {
-            throw new Error(`precondition ${key} failed: ${expected} != ${current}`);
+            // A code-less error thrown here rejects runTransaction as-is,
+            // unretried and unwrapped: the SDK's attempt loop only retries
+            // errors carrying a retryable numeric gRPC code (verified
+            // against @google-cloud/firestore 7.11.6 transaction.js). A
+            // retryable COMMIT failure re-runs this callback, which
+            // re-reads the doc and re-evaluates the condition -- still
+            // correct.
+            throw new PreconditionFailedError(`precondition ${key} failed: ${expected} != ${current}`);
           }
         }
         tx.update(docRef, this.doc(id, pb));
       });
-    } catch {
-      // our precondition failed
-      return null;
+    } catch (err) {
+      if (err instanceof PreconditionFailedError) {
+        return null;
+      }
+      // A transport or backend failure is not a failed precondition;
+      // mapping it to null made outages read as version conflicts.
+      throw err;
     }
 
     return pb;

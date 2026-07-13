@@ -9,7 +9,7 @@ import * as path from 'path';
 
 import { Project as EngineProject } from '@simlin/engine';
 
-import { createRenderLimiter, renderToPNG } from '../render';
+import { createRenderLimiter, renderToPNG, RenderSlotTimeoutError } from '../render';
 import { File } from '../schemas/file_pb';
 
 const FIXTURES_DIR = path.join(__dirname, 'fixtures');
@@ -51,6 +51,22 @@ function deferred(): Deferred {
     reject = rej;
   });
   return { promise, resolve, reject };
+}
+
+// Observe a promise's settlement state without awaiting it. Attaching the
+// rejection handler up front also keeps an early rejection from tripping the
+// runner's unhandled-rejection detection before the test awaits the promise.
+function track<T>(promise: Promise<T>): { promise: Promise<T>; state: () => 'pending' | 'fulfilled' | 'rejected' } {
+  let state: 'pending' | 'fulfilled' | 'rejected' = 'pending';
+  promise.then(
+    () => {
+      state = 'fulfilled';
+    },
+    () => {
+      state = 'rejected';
+    },
+  );
+  return { promise, state: () => state };
 }
 
 describe('createRenderLimiter', () => {
@@ -98,6 +114,204 @@ describe('createRenderLimiter', () => {
     const limiter = createRenderLimiter(1);
     await expect(limiter.run(() => Promise.resolve(42))).resolves.toBe(42);
   });
+});
+
+describe('createRenderLimiter deadlines', () => {
+  it('rejects an already-expired deadline without running the task or taking a slot', async () => {
+    const limiter = createRenderLimiter(1);
+    let ran = false;
+    await expect(
+      limiter.run(() => {
+        ran = true;
+        return Promise.resolve();
+      }, Date.now() - 1),
+    ).rejects.toThrow(RenderSlotTimeoutError);
+    expect(ran).toBe(false);
+
+    // The refusal must not have consumed the (free) slot.
+    await expect(limiter.run(() => Promise.resolve('probe'))).resolves.toBe('probe');
+  });
+
+  it('rejects a queued waiter at its deadline while every slot is still busy', async () => {
+    const limiter = createRenderLimiter(2);
+    const gate = deferred();
+    const holders = [track(limiter.run(() => gate.promise)), track(limiter.run(() => gate.promise))];
+    let ran = false;
+
+    // Before issue #929 this promise stayed pending until a holder released
+    // its slot; with no timer of its own the await below would hang.
+    await expect(
+      limiter.run(() => {
+        ran = true;
+        return Promise.resolve();
+      }, Date.now() + 30),
+    ).rejects.toThrow(RenderSlotTimeoutError);
+
+    // The rejection came from the deadline, not from a freed slot: both
+    // holders are still running and the queued task never started.
+    expect(ran).toBe(false);
+    expect(holders[0].state()).toBe('pending');
+    expect(holders[1].state()).toBe('pending');
+
+    gate.resolve();
+    await Promise.all(holders.map((h) => h.promise));
+  }, 2_000);
+
+  it('a timed-out waiter never runs and hands its queue position to the next live waiter', async () => {
+    const limiter = createRenderLimiter(1);
+    const started: string[] = [];
+    const gateA = deferred();
+    const gateC = deferred();
+
+    const runA = limiter.run(() => {
+      started.push('a');
+      return gateA.promise;
+    });
+    const runB = track(
+      limiter.run(() => {
+        started.push('b');
+        return Promise.resolve();
+      }, Date.now() + 20),
+    );
+    const runC = limiter.run(() => {
+      started.push('c');
+      return gateC.promise;
+    });
+
+    await expect(runB.promise).rejects.toThrow(RenderSlotTimeoutError);
+    expect(started).toEqual(['a']);
+
+    // When A's slot frees it must go to C, the next live waiter -- not be
+    // stranded on (or burned by) the already-rejected B.
+    gateA.resolve();
+    await runA;
+    await flush();
+    expect(started).toEqual(['a', 'c']);
+
+    gateC.resolve();
+    await runC;
+
+    // Slot accounting is intact: on this cap-1 limiter a fresh task starts
+    // without waiting, so B's timeout neither leaked nor double-freed a slot.
+    let probeStarted = false;
+    const probe = limiter.run(() => {
+      probeStarted = true;
+      return Promise.resolve();
+    });
+    await flush();
+    expect(probeStarted).toBe(true);
+    await probe;
+  }, 2_000);
+
+  it('mixed-deadline queue: expired waiters reject at their own deadlines, live ones run FIFO', async () => {
+    const limiter = createRenderLimiter(2);
+    const started: string[] = [];
+    const rejectedOrder: string[] = [];
+    let running = 0;
+    let maxRunning = 0;
+
+    const gates = { h1: deferred(), h2: deferred(), w2: deferred(), w4: deferred() };
+    const gatedTask = (name: keyof typeof gates) => async () => {
+      started.push(name);
+      running++;
+      maxRunning = Math.max(maxRunning, running);
+      try {
+        await gates[name].promise;
+      } finally {
+        running--;
+      }
+    };
+    const instantTask = (name: string) => () => {
+      started.push(name);
+      return Promise.resolve();
+    };
+
+    const h1 = limiter.run(gatedTask('h1'));
+    const h2 = limiter.run(gatedTask('h2'));
+    // Queue [expired, live, expired, live]: w1/w3's deadlines lapse while
+    // they wait; w2/w4 stay live until a slot frees.
+    const w1 = track(limiter.run(instantTask('w1'), Date.now() + 15));
+    const w2 = limiter.run(gatedTask('w2'), Date.now() + 5_000);
+    const w3 = track(limiter.run(instantTask('w3'), Date.now() + 30));
+    const w4 = limiter.run(gatedTask('w4'));
+
+    void w1.promise.catch(() => rejectedOrder.push('w1'));
+    void w3.promise.catch(() => rejectedOrder.push('w3'));
+
+    await expect(w1.promise).rejects.toThrow(RenderSlotTimeoutError);
+    await expect(w3.promise).rejects.toThrow(RenderSlotTimeoutError);
+    // Node fires timers in expiry order, so the 15ms deadline rejects first,
+    // and both rejected while the holders still owned every slot.
+    expect(rejectedOrder).toEqual(['w1', 'w3']);
+    expect(started).toEqual(['h1', 'h2']);
+
+    gates.h1.resolve();
+    await h1;
+    await flush();
+    expect(started).toEqual(['h1', 'h2', 'w2']);
+
+    gates.h2.resolve();
+    await h2;
+    await flush();
+    expect(started).toEqual(['h1', 'h2', 'w2', 'w4']);
+
+    gates.w2.resolve();
+    gates.w4.resolve();
+    await Promise.all([w2, w4]);
+    expect(maxRunning).toBe(2);
+  }, 2_000);
+
+  // The deadline timer and the slot release land in the same timer turn. Node
+  // fires same-expiry timers in creation order, but rather than pin who wins,
+  // assert the invariants that must hold either way: the waiter settles
+  // exactly one way (ran-and-fulfilled XOR rejected-without-running) and the
+  // slot is neither leaked nor double-granted. The two cases flip the
+  // creation order to steer the race toward each winner.
+  const raceCase = (timerFirst: boolean) => async () => {
+    const limiter = createRenderLimiter(1);
+    const gate = deferred();
+    const holder = limiter.run(() => gate.promise);
+
+    const delayMs = 20;
+    let ran = false;
+    if (!timerFirst) {
+      setTimeout(() => gate.resolve(), delayMs);
+    }
+    const waiter = limiter.run(() => {
+      ran = true;
+      return Promise.resolve();
+    }, Date.now() + delayMs);
+    if (timerFirst) {
+      setTimeout(() => gate.resolve(), delayMs);
+    }
+
+    const [holderResult, waiterResult] = await Promise.allSettled([holder, waiter]);
+    expect(holderResult.status).toBe('fulfilled');
+    if (waiterResult.status === 'fulfilled') {
+      expect(ran).toBe(true);
+    } else {
+      expect(ran).toBe(false);
+      expect((waiterResult as PromiseRejectedResult).reason).toBeInstanceOf(RenderSlotTimeoutError);
+    }
+
+    // Whichever side won, the slot must be free again: a new task on this
+    // cap-1 limiter starts without waiting.
+    let probeStarted = false;
+    const probe = limiter.run(() => {
+      probeStarted = true;
+      return Promise.resolve();
+    });
+    await flush();
+    expect(probeStarted).toBe(true);
+    await probe;
+  };
+
+  it('deadline firing as a slot frees settles once and leaks nothing (timer scheduled first)', raceCase(true), 2_000);
+  it(
+    'deadline firing as a slot frees settles once and leaks nothing (release scheduled first)',
+    raceCase(false),
+    2_000,
+  );
 });
 
 describe('renderToPNG worker orchestration', () => {
@@ -156,11 +370,34 @@ describe('renderToPNG worker orchestration', () => {
     expect(Array.from(png)).toEqual([9, 9, 9]);
   });
 
+  it('rejects a queued render at its own deadline while both slots are still busy', async () => {
+    // Two hung renders own both slots for ~500ms; the third request's entire
+    // 50ms budget elapses in the queue. Before issue #929 its promise simply
+    // stayed pending until a slot freed; now the limiter's deadline timer
+    // must reject it while the hung renders are still in flight.
+    const hangs = [
+      track(renderToPNG(makeFile(new Uint8Array([1])), { workerScript: fixture('worker-hang.js'), timeoutMs: 500 })),
+      track(renderToPNG(makeFile(new Uint8Array([2])), { workerScript: fixture('worker-hang.js'), timeoutMs: 500 })),
+    ];
+
+    await expect(
+      renderToPNG(makeFile(new Uint8Array([3])), { workerScript: fixture('worker-success.js'), timeoutMs: 50 }),
+    ).rejects.toThrow(/timed out after 50ms waiting for a render slot/);
+
+    // Rejected at its own deadline, not because a slot freed.
+    expect(hangs[0].state()).toBe('pending');
+    expect(hangs[1].state()).toBe('pending');
+
+    const settled = await Promise.allSettled(hangs.map((h) => h.promise));
+    expect(rejectionMessage(settled[0])).toMatch(/timed out after 500ms/);
+    expect(rejectionMessage(settled[1])).toMatch(/timed out after 500ms/);
+  });
+
   it('rejects a render whose total deadline lapsed while queued, without spawning a worker', async () => {
     // Occupy both slots with hung workers for ~300ms. The third render's
-    // 50ms budget expires while it waits in the queue, so when a slot frees
-    // it must fail fast with the distinct waiting-for-slot message -- even
-    // though its worker script would succeed instantly if spawned.
+    // 50ms budget expires while it waits in the queue, so the limiter's
+    // deadline timer fails it with the distinct waiting-for-slot message --
+    // even though its worker script would succeed instantly if spawned.
     // allSettled for the same unhandled-rejection reason as above.
     const results = await Promise.allSettled([
       renderToPNG(makeFile(new Uint8Array([1])), { workerScript: fixture('worker-hang.js'), timeoutMs: 300 }),

@@ -153,11 +153,25 @@ describe('LineChart rendering', () => {
     expect(paths.length).toBe(2);
   });
 
-  test('sets correct stroke color on paths', () => {
+  test('sets correct stroke color on paths via inline style', () => {
     const { container } = render(<LineChart height={300} series={multiSeries} yDomain={[0, 25]} />);
-    const paths = container.querySelectorAll('.series-lines path');
-    expect(paths[0]?.getAttribute('stroke')).toBe('#ff0000');
-    expect(paths[1]?.getAttribute('stroke')).toBe('#0000ff');
+    const paths = container.querySelectorAll<SVGPathElement>('.series-lines path');
+    // The CSSOM serializes hex colors back as rgb(); the input was #ff0000 /
+    // #0000ff.
+    expect(paths[0]?.style.stroke).toBe('rgb(255, 0, 0)');
+    expect(paths[1]?.style.stroke).toBe('rgb(0, 0, 255)');
+  });
+
+  test('a var() token series color survives as an inline style, never a stroke attribute', () => {
+    // var() does not substitute inside SVG presentation attributes, so a
+    // token color applied as stroke="var(--...)" falls back to none and the
+    // line vanishes (LookupEditor passes var(--color-primary)). Pin the
+    // style-based application so a revert to the attribute form fails here.
+    const tokenSeries: ChartSeries[] = [{ name: 'y', color: 'var(--color-primary)', points: simpleSeries[0].points }];
+    const { container } = render(<LineChart height={300} series={tokenSeries} yDomain={[0, 30]} />);
+    const path = container.querySelector<SVGPathElement>('.series-lines path');
+    expect(path?.style.stroke).toBe('var(--color-primary)');
+    expect(path?.getAttribute('stroke')).toBeNull();
   });
 
   test('renders with empty series', () => {

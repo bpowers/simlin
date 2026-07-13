@@ -415,6 +415,7 @@ export interface HarnessOptions {
   selection?: ReadonlySet<UID>;
   selectedTool?: CanvasProps['selectedTool'];
   embedded?: boolean;
+  readOnly?: boolean;
   variables?: ReadonlyMap<string, Variable>;
   /**
    * When true (the default), `onSetSelection` commits the new selection back
@@ -484,6 +485,7 @@ export function renderCanvas(opts: HarnessOptions): CanvasHarness {
 
   const buildProps = (): CanvasProps => ({
     embedded: opts.embedded ?? false,
+    readOnly: opts.readOnly,
     project,
     model,
     view: currentView,
