@@ -252,6 +252,12 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
   const { variable, viewElement, getLatexEquation, onDelete, onEquationChange, onTableChange, activeTab } = props;
   const readOnly = !!props.readOnly;
 
+  // Prefix for the error/warning row ids that aria-describedby on the
+  // equation/units editors points at. React.useId (not the variable ident)
+  // because idents aren't guaranteed unique across panels: several sd-model
+  // embeds on one page can each show a details panel.
+  const fieldIdPrefix = React.useId();
+
   // The original (props-derived) document for each field. These seed the editors
   // on mount and are what the discard path (Cancel/Escape) restores, so the
   // seeding and the revert stay in lockstep -- including the error/warning
@@ -507,11 +513,24 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
     // The bare details string ("computed units 'x' don't match specified
     // units") already says what went wrong; the code description is the
     // fallback for errors that carry no details.
+    // Each warning/error row carries an id so the field it describes can
+    // reference it via aria-describedby: the red/orange highlight alone is
+    // color-only and never announced. Unit warnings describe the units field;
+    // equation errors (below) describe the equation editor. The id lists are
+    // exactly the rendered rows, so the references can never dangle.
     const unitWarnings = detailsView.unitWarnings.map((error, i) => (
-      <div key={`unit-${i}`} className={styles.errorList}>
+      <div key={`unit-${i}`} id={`${fieldIdPrefix}-unit-warning-${i}`} className={styles.errorList}>
         unit error: {error.details ?? errorCodeDescription(error.code)}
       </div>
     ));
+    const unitWarningIds =
+      detailsView.unitWarnings.length > 0
+        ? detailsView.unitWarnings.map((_, i) => `${fieldIdPrefix}-unit-warning-${i}`).join(' ')
+        : undefined;
+    const equationErrorIds =
+      detailsView.equationErrors.length > 0
+        ? detailsView.equationErrors.map((_, i) => `${fieldIdPrefix}-eqn-error-${i}`).join(' ')
+        : undefined;
 
     // Sketch-connector drift is a non-fatal warning: the variable still
     // simulates, so it renders beside the chart like unit warnings rather than
@@ -529,7 +548,7 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
       // Equation/compile errors mean the variable produced no valid data, so
       // the error list replaces the chart.
       const errorList = detailsView.equationErrors.map((error, i) => (
-        <div key={`eqn-${i}`} className={styles.errorList}>
+        <div key={`eqn-${i}`} id={`${fieldIdPrefix}-eqn-error-${i}`} className={styles.errorList}>
           error: {errorCodeDescription(error.code)}
         </div>
       ));
@@ -591,6 +610,12 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
               spellCheck={false}
               readOnly={readOnly}
               autoFocus={!readOnly}
+              // Equation errors pin this editor open, and the error rows
+              // render below (in place of the chart); associate them so the
+              // failure isn't conveyed by the red highlight alone. Slate
+              // passes unknown props through to the contenteditable div.
+              aria-invalid={detailsView.equationErrors.length > 0 || undefined}
+              aria-describedby={equationErrorIds}
               onBlur={(e) => {
                 // An intra-panel focus move (to another field or the action
                 // buttons) neither commits nor collapses the raw editor: the
@@ -641,6 +666,10 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
             placeholder="Enter units..."
             spellCheck={false}
             readOnly={readOnly}
+            // Unit problems are non-fatal warnings, so the field is described
+            // by the warning rows but not marked aria-invalid (the text still
+            // parses and the variable still simulates).
+            aria-describedby={unitWarningIds}
             onBlur={handleFieldBlur}
             onKeyDown={(e) => {
               // Escape discards, matching the equation field and the Cancel

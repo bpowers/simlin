@@ -71,6 +71,19 @@ describe('ModelPropertiesDrawer', () => {
       });
       expect(onDelete).toHaveBeenCalledTimes(1);
     });
+
+    test('the Exit affordance is a single link, not a button nested in an anchor', () => {
+      // The old markup wrapped an IconButton (<button>) inside the router
+      // Link's <a> -- invalid interactive content that assistive tech
+      // announces twice. Link asChild + IconButton's href mode collapse it to
+      // one <a> styled as an icon button.
+      renderDrawer();
+      const exit = screen.getByRole('link', { name: /exit/i });
+      expect(exit.tagName).toBe('A');
+      expect(exit.getAttribute('href')).toBe('/');
+      expect(exit.querySelector('button')).toBeNull();
+      expect(screen.queryByRole('button', { name: /exit/i })).toBeNull();
+    });
   });
 
   describe('sim-specs draft commit (issue #55)', () => {

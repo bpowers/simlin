@@ -39,3 +39,16 @@
   opacity: 0.38;
   cursor: not-allowed;
 }
+
+/* On touch/coarse pointers, grow each item to the 44px target (WCAG /
+   Material) with REAL height rather than the transparent-overlay pattern:
+   items stack flush, so overlapping overlays would route a tap on one item
+   to whichever sibling paints later. Geometry: 0.875rem (14px) * 1.5
+   line-height + 2 * 8px padding = 37px; min-height supplies the remaining
+   7px (border-box so the padding counts even without the global reset). */
+@media (pointer: coarse) {
+  .menuItem {
+    box-sizing: border-box;
+    min-height: 44px;
+  }
+}

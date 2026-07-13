@@ -203,7 +203,11 @@ export function ModelPropertiesDrawer(props: ModelPropertiesDrawerProps): React.
             </div>
             <div className={styles.modelName}>Simlin</div>
           </div>
-          <Link to="/" className={styles.exitLink}>
+          {/* asChild: the Link injects href/onClick into the IconButton, whose
+              href mode renders a single <a> styled as an icon button. The
+              previous <a><button/></a> nesting was invalid interactive
+              content (and double-announced to assistive tech). */}
+          <Link to="/" asChild>
             <IconButton className={styles.menuButton} color="inherit" aria-label="Exit">
               <ArrowBackIcon />
             </IconButton>

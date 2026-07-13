@@ -241,3 +241,35 @@
   --color-secondary-hover: rgba(220, 0, 78, 0.16);
   --color-error-hover: rgba(198, 40, 40, 0.16);
 }
+
+/*
+ * Reduced-motion policy (single global rule, not per-component opt-ins).
+ *
+ * Before this block only two spots honored the preference (reset.css's smooth
+ * scroll and the CircularProgress spinner) while every other transition and
+ * keyframe animation ignored it. Rather than chase each stylesheet, the
+ * DECORATIVE motion -- hover fades, dial/drawer/dialog enter-exit, the tab
+ * indicator slide -- is neutralized here in one place. theme.css is the right
+ * home because it is the one stylesheet every host is contractually required
+ * to load (package-root side-effect import, or a deep-importing host's own
+ * theme.css import; see diagram/CLAUDE.md), including inside the sd-model
+ * shadow root, where a rule in the page's own CSS could not reach.
+ *
+ * Durations collapse to 0.01ms instead of `none`/`0s` so transitionend /
+ * animationend still fire and anything sequenced on them cannot hang, and
+ * animation-iteration-count: 1 ends infinite loops (a 0.01ms infinite spin
+ * would still burn compositor work). CircularProgress keeps its own stronger
+ * `animation: none` override. Deliberately NOT covered: the canvas pan/zoom
+ * momentum coast, which is JS/rAF interaction physics (direct manipulation
+ * responding to a gesture), not CSS decoration.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

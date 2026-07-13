@@ -27,6 +27,27 @@
   outline-offset: 2px;
 }
 
+/* On touch/coarse pointers, grow the hit area to at least 44px tall (WCAG /
+   Material target size) with a centered transparent overlay so the visual
+   box is unchanged. Geometry: the smallest variant (.sizeSmall) is
+   13px font * 1.75 line-height + 2 * 4px padding = ~30.75px tall, so the
+   overlay adds ~6.6px above and below. Width deliberately stays the visual
+   width (no min-width): every size already meets 44px via min-width: 64px,
+   and sibling buttons (e.g. a Cancel/Save pair) sit flush horizontally, so
+   widening would misroute taps at the shared edge. */
+@media (pointer: coarse) {
+  .button::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 100%;
+    height: 100%;
+    min-height: 44px;
+  }
+}
+
 /* Size variants */
 .sizeSmall {
   padding: 4px 10px;

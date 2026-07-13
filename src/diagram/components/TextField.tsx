@@ -63,22 +63,30 @@ export default function TextField(props: TextFieldProps): React.ReactElement {
   // mirroring the old constructor's one-shot counter bump.
   const [generatedId] = React.useState(() => `textfield-${++textFieldIdCounter}`);
 
+  // onFocus/onBlur are pulled out of inputProps because the rendered input's
+  // focus handlers must be OURS (they drive the label/underline focus styling);
+  // the external handlers are chained inside them. Everything else passes
+  // through via restInputProps.
+  const { onFocus: externalOnFocus, onBlur: externalOnBlur, ...restInputProps } = inputProps || {};
+
   const handleFocus = (event: React.FocusEvent<HTMLInputElement>): void => {
     setIsFocused(true);
-    // Chain with any external handler from inputProps
-    inputProps?.onFocus?.(event);
+    externalOnFocus?.(event);
   };
 
   const handleBlur = (event: React.FocusEvent<HTMLInputElement>): void => {
     setIsFocused(false);
-    // Chain with any external handler from inputProps
-    inputProps?.onBlur?.(event);
+    externalOnBlur?.(event);
   };
 
   const inputId = id || generatedId;
-
-  // Extract onFocus/onBlur from inputProps since we chain them in our handlers
-  const { onFocus: _onFocus, onBlur: _onBlur, ...restInputProps } = inputProps || {};
+  // Programmatic error association: when helper text is rendered the input
+  // points at it via aria-describedby, and the error flag is mirrored to
+  // aria-invalid, so screen readers announce the message with the field
+  // instead of it being color-only. Both sit BEFORE the inputProps spread so
+  // a consumer that manages its own association (an external error element)
+  // can override them.
+  const helperTextId = helperText ? `${inputId}-helper` : undefined;
 
   const startAdornment = InputProps?.startAdornment;
 
@@ -127,6 +135,8 @@ export default function TextField(props: TextFieldProps): React.ReactElement {
               autoComplete={autoComplete}
               name={name}
               onKeyPress={onKeyPress}
+              aria-invalid={error || undefined}
+              aria-describedby={helperTextId}
               {...rest}
               {...restInputProps}
               // After the spreads: restInputProps (the combobox
@@ -138,7 +148,11 @@ export default function TextField(props: TextFieldProps): React.ReactElement {
             />
           </div>
         </div>
-        {helperText && <p className={clsx(styles.helperText, error && styles.helperTextError)}>{helperText}</p>}
+        {helperText && (
+          <p id={helperTextId} className={clsx(styles.helperText, error && styles.helperTextError)}>
+            {helperText}
+          </p>
+        )}
       </div>
     );
   }
@@ -176,6 +190,8 @@ export default function TextField(props: TextFieldProps): React.ReactElement {
             autoComplete={autoComplete}
             name={name}
             onKeyPress={onKeyPress}
+            aria-invalid={error || undefined}
+            aria-describedby={helperTextId}
             {...rest}
             {...restInputProps}
             // See the standard variant: id must survive the spreads so the
@@ -184,7 +200,11 @@ export default function TextField(props: TextFieldProps): React.ReactElement {
           />
         </div>
       </div>
-      {helperText && <p className={clsx(styles.helperText, error && styles.helperTextError)}>{helperText}</p>}
+      {helperText && (
+        <p id={helperTextId} className={clsx(styles.helperText, error && styles.helperTextError)}>
+          {helperText}
+        </p>
+      )}
     </div>
   );
 }

@@ -365,9 +365,15 @@ export function LookupEditor(props: LookupEditorProps): React.ReactElement {
           margin="normal"
           inputProps={inputProps}
         />
+        {/* Series color is the brand token rather than a literal, so the
+            editing chart follows the theme. This relies on LineChart applying
+            the color via inline style (style stroke on the path, background
+            on the tooltip swatch): var() never substitutes inside an SVG
+            presentation attribute, where it would fall back to none and hide
+            the curve. */}
         <LineChart
           height={CHART_HEIGHT}
-          series={[{ name: 'y', color: '#8884d8', points: series }]}
+          series={[{ name: 'y', color: 'var(--color-primary)', points: series }]}
           yDomain={[yMinChart, yMaxChart]}
           tooltipFormatter={formatValue}
           onPointDrag={readOnly ? undefined : handlePointDrag}

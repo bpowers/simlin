@@ -162,6 +162,23 @@
   background: var(--color-primary-hover);
 }
 
+/* On touch/coarse pointers, grow the breadcrumb link to the 44px target (WCAG
+   / Material) with real vertical padding: the link's overflow: hidden (needed
+   for text-overflow: ellipsis) would clip the transparent-overlay pattern the
+   icon buttons use. Geometry: 13px font * 1.5 line-height + 2 * 12px padding
+   = 43.5px, with min-height covering hosts whose bundle lacks the global
+   reset (line-height then computes smaller); border-box keeps that 44px
+   independent of the reset too. The 48px search bar centers it with room to
+   spare, and growth is vertical only, so adjacent segments don't collide. */
+@media (pointer: coarse) {
+  .breadcrumbLink {
+    box-sizing: border-box;
+    min-height: 44px;
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
+}
+
 .breadcrumbCurrent {
   padding: 2px 4px;
   font-weight: 500;
