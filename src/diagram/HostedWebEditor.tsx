@@ -65,15 +65,15 @@ export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement
   const [projectVersion, setProjectVersion] = React.useState<number>(-1);
   const [saveFailure, setSaveFailure] = React.useState<SaveFailure | undefined>(undefined);
   // Set when a save 409s: the server has a newer version than `currVersion`.
-  // The editor only learns a new version from a successful save, so in
-  // practice every autosave after a conflict carries this same stale version
-  // and would just 409 again -- handleSave suppresses those instead of
-  // hammering the server. Not quite an invariant: the controller's fractional
-  // +0.01 cache-key bumps can drift toInt(projectVersion) across an integer
-  // boundary after ~100 edits (issue #958), which is why suppression matches
-  // this exact version instead of latching -- a drifted version POSTs once,
-  // 409s again, and re-arms suppression at the new value. Cleared on a
-  // successful save and irrelevant after the reload recovery.
+  // The editor's controller sends its last server-ACKNOWLEDGED version and
+  // only learns a new one from a successful save (render-cache drift can no
+  // longer leak into it -- issue #958), so every autosave after a conflict
+  // carries exactly this stale version and would just 409 again -- handleSave
+  // suppresses those instead of hammering the server. Suppression matches the
+  // exact version rather than latching a boolean as defense in depth: if a
+  // different version ever did arrive, it deserves one honest POST (and a
+  // re-arm at the new value on another 409) rather than silent suppression.
+  // Cleared on a successful save and irrelevant after the reload recovery.
   const staleVersion = React.useRef<number | undefined>(undefined);
 
   const getBaseURL = (): string => props.baseURL ?? baseURL;
@@ -234,7 +234,11 @@ export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement
     core.redirectToHome(homeUrl);
   };
 
-  if (!projectBinary || !projectVersion) {
+  // Version 0 is a legitimate project version (legacy rows predate server
+  // version stamping and carry the proto3 default), so the loaded-gate must
+  // distinguish "not yet loaded" (the -1 initial state) from 0 -- a falsy
+  // check left version-0 projects on the loading spinner forever (issue #960).
+  if (!projectBinary || projectVersion < 0) {
     // A load failure used to render bare, unstyled error text; the in-flight
     // state used to be a blank <div/>. Both now render a styled, centered
     // surface. In embedded mode it fills the embed element (no fixed-viewport

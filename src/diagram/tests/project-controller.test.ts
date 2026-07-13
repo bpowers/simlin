@@ -485,18 +485,22 @@ describe('ProjectController save queue', () => {
     const controller = new ProjectController(config);
     await controller.openInitialProject();
 
-    const first = controller.save(1);
+    const first = controller.save();
     // Two concurrent saves while the first is in flight -> only one queued.
-    void controller.save(2);
-    void controller.save(3);
+    void controller.save();
+    void controller.save();
     // Let the first save reach its awaited config.save() before resolving it.
     await flushTimers();
     resolveFirst(2);
     await first;
     await flushTimers();
 
-    // First save + exactly one queued flush == 2 invocations.
+    // First save + exactly one queued flush == 2 invocations, and the flush
+    // reads serverVersion at flush time: it carries the version the first
+    // save's success just acknowledged, not the one it was requested under.
     expect(save).toHaveBeenCalledTimes(2);
+    expect(save).toHaveBeenNthCalledWith(1, expect.anything(), 1);
+    expect(save).toHaveBeenNthCalledWith(2, expect.anything(), 2);
     await controller.dispose();
   });
 
@@ -515,8 +519,8 @@ describe('ProjectController save queue', () => {
     const controller = new ProjectController(config);
     await controller.openInitialProject();
 
-    const first = controller.save(0);
-    void controller.save(1); // queue one
+    const first = controller.save();
+    void controller.save(); // queue one
     await first;
     await flushTimers();
 
@@ -555,7 +559,7 @@ describe('ProjectController save queue', () => {
     expect(displayProject?.models.has(FAKE_STDLIB_MODEL_NAME)).toBe(true);
     expect([...(displayProject?.models.keys() ?? [])].some(isStdlibModel)).toBe(true);
 
-    await controller.save(1);
+    await controller.save();
 
     // The save path serialized with includeStdlib=false, so its payload omits
     // the stdlib model -- it is never persisted.
@@ -566,6 +570,177 @@ describe('ProjectController save queue', () => {
     // save-path (false) call.
     expect(calls).toContain(true);
     expect(calls).toContain(false);
+    await controller.dispose();
+  });
+});
+
+describe('ProjectController server-version bookkeeping (#958)', () => {
+  // A serialized snapshot distinct per i (two bytes so i can exceed 255's
+  // single-byte space and never collide with the fake engine's own counter).
+  function editSnap(i: number): Uint8Array {
+    return new Uint8Array([1, i]);
+  }
+
+  it('keeps sending the last server-acknowledged version after 100+ unsaved content edits', async () => {
+    // The drift bug: projectVersion is ALSO the fractional render-cache key
+    // (+0.01 per content edit), and the save path derived its integer version
+    // from it. After ~100 edits with no successful save (offline stretch,
+    // expired session), toInt(projectVersion) crossed to the NEXT integer and
+    // the save carried a version the server never issued -- a bogus 409 at
+    // best, a silent overwrite of another session's committed save at worst.
+    const engine = makeFakeEngine();
+    const sentVersions: number[] = [];
+    const { config } = makeControllerConfig({
+      engine,
+      format: 'protobuf',
+      initialData: snap(1),
+      initialVersion: 5,
+      save: async (_project, currVersion) => {
+        sentVersions.push(currVersion);
+        // Resolved-undefined is the host's "save failed, retry with the next
+        // edit" signal (see hosted-web-editor-core saveProject).
+        return undefined;
+      },
+    });
+    const controller = new ProjectController(config);
+    await controller.openInitialProject();
+
+    for (let i = 0; i < 110; i++) {
+      await controller.updateProject(editSnap(i));
+    }
+    await flushTimers();
+
+    expect(sentVersions.length).toBeGreaterThan(0);
+    // Every attempt carries the version the server actually holds.
+    expect(sentVersions.every((v) => v === 5)).toBe(true);
+    expect(controller.getSnapshot().serverVersion).toBe(5);
+    await controller.dispose();
+  });
+
+  it('a successful save updates serverVersion and later saves send the returned value', async () => {
+    const engine = makeFakeEngine();
+    const sentVersions: number[] = [];
+    let nextResponse: number | undefined = 9;
+    const { config } = makeControllerConfig({
+      engine,
+      format: 'protobuf',
+      initialData: snap(1),
+      initialVersion: 5,
+      save: async (_project, currVersion) => {
+        sentVersions.push(currVersion);
+        const response = nextResponse;
+        nextResponse = undefined;
+        return response;
+      },
+    });
+    const controller = new ProjectController(config);
+    await controller.openInitialProject();
+
+    await controller.save();
+    expect(sentVersions).toEqual([5]);
+    expect(controller.getSnapshot().serverVersion).toBe(9);
+
+    await controller.save();
+    expect(sentVersions).toEqual([5, 9]);
+    await controller.dispose();
+  });
+
+  it('view-only updates bump the render key but never the server version', async () => {
+    const engine = makeFakeEngine();
+    const sentVersions: number[] = [];
+    const { config } = makeControllerConfig({
+      engine,
+      format: 'protobuf',
+      initialData: snap(1),
+      initialVersion: 5,
+      save: async (_project, currVersion) => {
+        sentVersions.push(currVersion);
+        return undefined;
+      },
+    });
+    const controller = new ProjectController(config);
+    await controller.openInitialProject();
+
+    const view = controller.getView() as StockFlowView;
+    const before = controller.getSnapshot();
+    for (let i = 0; i < 20; i++) {
+      await controller.queueViewUpdate({ ...view, zoom: 1 + i });
+    }
+    await flushTimers();
+
+    const after = controller.getSnapshot();
+    // The render-cache key advanced (Canvas invalidation) ...
+    expect(after.projectVersion).toBeGreaterThan(before.projectVersion);
+    // ... but the viewport stream neither saved nor moved the server version.
+    expect(sentVersions).toHaveLength(0);
+    expect(after.serverVersion).toBe(5);
+    await controller.dispose();
+  });
+
+  it('a successful save no longer resets the fractional render-cache key', async () => {
+    // projectVersion is now PURELY the render-cache key; the server ack lands
+    // in serverVersion only. (Canvas's single-slot equality cache would even
+    // tolerate a save ack rewriting the key -- the justification is purity of
+    // purpose: one counter, one meaning, so drift bugs like #958 have nowhere
+    // to start.)
+    const engine = makeFakeEngine();
+    const { config } = makeControllerConfig({
+      engine,
+      format: 'protobuf',
+      initialData: snap(1),
+      initialVersion: 5,
+      save: async () => 9,
+    });
+    const controller = new ProjectController(config);
+    await controller.openInitialProject();
+    await controller.updateProject(editSnap(0), { scheduleSave: false });
+
+    const before = controller.getSnapshot().projectVersion;
+    await controller.save();
+
+    expect(controller.getSnapshot().serverVersion).toBe(9);
+    expect(controller.getSnapshot().projectVersion).toBe(before);
+    await controller.dispose();
+  });
+
+  it('undo does not rewind the server-acknowledged version', async () => {
+    // Undo restores older CONTENT, but the server still holds the version it
+    // last acknowledged -- the post-undo save must carry that version, not a
+    // value rewound (or re-derived) from restored state.
+    const engine = makeFakeEngine();
+    const sentVersions: number[] = [];
+    let acked = false;
+    const { config } = makeControllerConfig({
+      engine,
+      format: 'protobuf',
+      initialData: snap(1),
+      initialVersion: 5,
+      save: async (_project, currVersion) => {
+        sentVersions.push(currVersion);
+        if (!acked) {
+          acked = true;
+          return 6;
+        }
+        return undefined;
+      },
+    });
+    const controller = new ProjectController(config);
+    await controller.openInitialProject();
+
+    // First edit's autosave succeeds: the server moves to 6.
+    await controller.updateProject(editSnap(0));
+    await flushTimers();
+    expect(controller.getSnapshot().serverVersion).toBe(6);
+
+    // A second edit (its save fails), then undo it. The undo-scheduled save
+    // must still send 6.
+    await controller.updateProject(editSnap(1));
+    await flushTimers();
+    controller.undoRedo('undo');
+    await flushTimers();
+
+    expect(controller.getSnapshot().serverVersion).toBe(6);
+    expect(sentVersions[sentVersions.length - 1]).toBe(6);
     await controller.dispose();
   });
 });

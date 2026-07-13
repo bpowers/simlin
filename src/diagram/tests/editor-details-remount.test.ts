@@ -84,6 +84,7 @@ function makeSnapshot(projectGeneration: number, projectVersion: number): Projec
   return {
     project,
     projectVersion,
+    serverVersion: 1,
     projectGeneration,
     status: 'ok',
     cachedErrors: { simError: undefined, modelErrors: [], varErrors: new Map(), unitErrors: new Map() },

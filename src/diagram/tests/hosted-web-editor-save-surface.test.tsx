@@ -25,6 +25,8 @@ import { render, screen, act, fireEvent } from '@testing-library/react';
 import { fromUint8Array } from '@simlin/core/base64';
 import type { ProtobufProjectData } from '../Editor';
 import * as core from '../hosted-web-editor-core';
+import { ProjectController, type EngineApi } from '../project-controller';
+import { makeFakeEngine } from './fake-engine';
 
 interface CapturedEditorProps {
   onSave: (project: ProtobufProjectData, currVersion: number) => Promise<number | undefined>;
@@ -164,11 +166,12 @@ describe('HostedWebEditor save-failure surface', () => {
   });
 
   test('after a 409, further autosaves against the same stale version are suppressed', async () => {
-    // In practice every autosave after a conflict carries the same currVersion
-    // (the editor only learns a new version from a successful save; fractional
-    // cache-key drift, issue #958, is the rare exception), so re-POSTing would
-    // just 409 again. The shell suppresses exact matches: no request, banner
-    // stays. This is the deliberate "don't hammer a known-stale version" policy.
+    // Every autosave after a conflict carries the same currVersion: the
+    // controller sends its last server-acknowledged version, which only a
+    // successful save can change (render-cache drift no longer leaks into it,
+    // issue #958). Re-POSTing would just 409 again, so the shell suppresses
+    // exact matches: no request, banner stays. This is the deliberate "don't
+    // hammer a known-stale version" policy.
     const { fetchMock } = await renderLoaded(
       fetchWithPost(async () => jsonResponse(409, { error: 'version conflict' })),
     );
@@ -231,6 +234,103 @@ describe('HostedWebEditor save-failure surface', () => {
     expect(returned).toBe(6);
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.getByTestId('editor-stub')).not.toBeNull();
+  });
+
+  test('a legacy version-0 project loads and saves against currVersion 0 (#960)', async () => {
+    // Legacy rows created before the server stamped versions carry the proto3
+    // default 0, a legitimate version this branch's server work accepts for
+    // saves. The shell's loaded-gate used a falsy check on projectVersion, so
+    // a version-0 project never left the loading spinner (#960).
+    const postVersions: number[] = [];
+    await renderLoaded(async (_input: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        postVersions.push((JSON.parse(init.body as string) as { currVersion: number }).currVersion);
+        return jsonResponse(200, { version: 1 });
+      }
+      return loadedResponse(0);
+    });
+
+    // The editor mounts (no permanent spinner) with the version-0 seed.
+    expect(screen.getByTestId('editor-stub')).not.toBeNull();
+    expect(captured!.initialProjectVersion).toBe(0);
+
+    // And the optimistic-concurrency check round-trips version 0 honestly.
+    const returned = await save(0);
+    expect(postVersions).toEqual([0]);
+    expect(returned).toBe(1);
+  });
+
+  test('local edit drift cannot corrupt the save version across a session recovery (#958)', async () => {
+    // The end-to-end #958 scenario, driving a REAL ProjectController against
+    // the shell's onSave (wired exactly as Editor.tsx's makeController does).
+    // The session expires at server version 5, the user keeps editing (>100
+    // content edits -- enough that the fractional render-cache key crosses the
+    // next integer), then re-authenticates. The retry save must carry 5 -- the
+    // version the server actually holds -- not a locally-drifted 6, which
+    // would bogus-409 into the dead-end conflict banner (defeating the #928
+    // session-expiry rescue) or, if another session had committed 6, silently
+    // overwrite that session's save.
+    let signedIn = false;
+    let serverVersion = 5;
+    const postVersions: number[] = [];
+    await renderLoaded(async (_input: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        const body = JSON.parse(init.body as string) as { currVersion: number };
+        postVersions.push(body.currVersion);
+        if (!signedIn) {
+          return jsonResponse(401, { error: 'unauthorized' });
+        }
+        // Emulate the server's optimistic-concurrency check: only the version
+        // it holds is accepted; anything else conflicts.
+        if (body.currVersion !== serverVersion) {
+          return jsonResponse(409, { error: 'version conflict' });
+        }
+        serverVersion += 1;
+        return jsonResponse(200, { version: serverVersion });
+      }
+      return loadedResponse(5);
+    });
+
+    const engine = makeFakeEngine();
+    const controller = new ProjectController({
+      initialProjectVersion: captured!.initialProjectVersion,
+      input: { format: 'protobuf', data: new Uint8Array([1]) },
+      openProtobuf: async () => engine as unknown as EngineApi,
+      openJson: async () => engine as unknown as EngineApi,
+      // Read `captured` at call time: the shell recreates onSave per render.
+      save: async (project, currVersion) =>
+        captured!.onSave({ format: 'protobuf', data: project.data as Uint8Array }, currVersion),
+      onError: () => {},
+    });
+    await act(async () => {
+      await controller.openInitialProject();
+    });
+
+    // The signed-out stretch: every autosave 401s while the edits pile up.
+    await act(async () => {
+      for (let i = 0; i < 110; i++) {
+        await controller.updateProject(new Uint8Array([1, i]));
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.getByRole('alert').textContent).toMatch(/session expired/i);
+
+    // Re-auth, then one more edit triggers the retry save.
+    signedIn = true;
+    await act(async () => {
+      await controller.updateProject(new Uint8Array([2, 0]));
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(postVersions[postVersions.length - 1]).toBe(5);
+    // The save succeeded: no conflict banner, the session-expired banner cleared.
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(serverVersion).toBe(6);
+    await act(async () => {
+      await controller.dispose();
+    });
   });
 
   test('a save failure never surfaces in read-only mode (save is a no-op)', async () => {

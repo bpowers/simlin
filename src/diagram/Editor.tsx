@@ -147,8 +147,8 @@ function getErrorDetails(error: unknown): ErrorDetailsLike {
 // (see the function component) with a class-like merging setState helper.
 interface EditorState {
   // The latest immutable snapshot published by the ProjectController. Holds
-  // project, projectVersion, projectGeneration, status, cachedErrors, data,
-  // modelName, modelStack, and the undo/redo predicates.
+  // project, projectVersion, serverVersion, projectGeneration, status,
+  // cachedErrors, data, modelName, modelStack, and the undo/redo predicates.
   controllerSnapshot: ProjectSnapshot;
   // Toast-style transient errors. These STAY in the Editor as UI state: the
   // controller surfaces errors via its onError config callback, which appends
@@ -1287,7 +1287,10 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         // oh well
       }
       a.href = url;
-      a.download = `${latest.current.props.name}-${latest.current.state.controllerSnapshot.projectVersion | 0}.stmx`;
+      // Stamp the filename with the server-acknowledged version: the
+      // fractional projectVersion is a render-cache key whose integer part
+      // drifts with unsaved local edits (#958).
+      a.download = `${latest.current.props.name}-${latest.current.state.controllerSnapshot.serverVersion}.stmx`;
       a.click();
       window.URL.revokeObjectURL(url);
     } catch (err: unknown) {

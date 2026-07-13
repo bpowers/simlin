@@ -76,6 +76,7 @@ function makeSnapshot(navResetSeq = 0): ProjectSnapshot {
   return {
     project,
     projectVersion: 1,
+    serverVersion: 1,
     projectGeneration: 0,
     status: 'ok',
     cachedErrors: { simError: undefined, modelErrors: [], varErrors: new Map(), unitErrors: new Map() },
