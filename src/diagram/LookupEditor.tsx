@@ -71,6 +71,10 @@ function tableFrom(gf: GraphicalFunction): GFTable | undefined {
 interface LookupEditorProps {
   variable: Variable;
   onLookupChange: (ident: string, newTable: GraphicalFunction | null) => void;
+  // Inspection-only mode (issue #935): the lookup chart and its scale values
+  // stay visible, but point dragging is off, the scale/count inputs are
+  // disabled, and the Remove/Cancel/Save row is hidden.
+  readOnly?: boolean;
 }
 
 const CHART_HEIGHT = 300;
@@ -191,6 +195,7 @@ function seedFromVariable(variable: Variable): LookupEditorSeed {
 
 export function LookupEditor(props: LookupEditorProps): React.ReactElement {
   const { variable, onLookupChange } = props;
+  const readOnly = !!props.readOnly;
 
   // Seed the editable state once per mount from props, exactly as the class
   // constructor did. The panel is remounted (keyed) when the underlying
@@ -342,6 +347,11 @@ export function LookupEditor(props: LookupEditorProps): React.ReactElement {
 
   const isSaveDisabled = !lookupActionsEnabled || xScaleError || yScaleError || datapointCountError;
 
+  // Read-only: LineChart only enables point dragging when onPointDrag is
+  // supplied, so withholding the drag callbacks makes the chart inert while
+  // keeping the tooltip inspection behavior.
+  const inputProps = readOnly ? { disabled: true } : undefined;
+
   return (
     <div>
       <div className={styles.cardContent}>
@@ -353,15 +363,16 @@ export function LookupEditor(props: LookupEditorProps): React.ReactElement {
           onChange={handleYMaxChange}
           type="number"
           margin="normal"
+          inputProps={inputProps}
         />
         <LineChart
           height={CHART_HEIGHT}
           series={[{ name: 'y', color: '#8884d8', points: series }]}
           yDomain={[yMinChart, yMaxChart]}
           tooltipFormatter={formatValue}
-          onPointDrag={handlePointDrag}
-          onDragStart={handleDragStart}
-          onDragEnd={handleDragEnd}
+          onPointDrag={readOnly ? undefined : handlePointDrag}
+          onDragStart={readOnly ? undefined : handleDragStart}
+          onDragEnd={readOnly ? undefined : handleDragEnd}
         />
         <TextField
           className={styles.yAxisMin}
@@ -371,6 +382,7 @@ export function LookupEditor(props: LookupEditorProps): React.ReactElement {
           onChange={handleYMinChange}
           type="number"
           margin="normal"
+          inputProps={inputProps}
         />
         <div className={styles.xAxisRow}>
           <TextField
@@ -381,6 +393,7 @@ export function LookupEditor(props: LookupEditorProps): React.ReactElement {
             type="number"
             margin="normal"
             fullWidth
+            inputProps={inputProps}
           />
           <TextField
             error={xScaleError}
@@ -390,6 +403,7 @@ export function LookupEditor(props: LookupEditorProps): React.ReactElement {
             type="number"
             margin="normal"
             fullWidth
+            inputProps={inputProps}
           />
           <TextField
             error={datapointCountError}
@@ -399,22 +413,25 @@ export function LookupEditor(props: LookupEditorProps): React.ReactElement {
             type="number"
             margin="normal"
             fullWidth
+            inputProps={inputProps}
           />
         </div>
       </div>
-      <div className={styles.cardActions}>
-        <Button size="small" color="error" onClick={handleLookupRemove} className={styles.buttonLeft}>
-          Remove
-        </Button>
-        <div className={styles.buttonRight}>
-          <Button size="small" color="primary" disabled={!lookupActionsEnabled} onClick={handleLookupCancel}>
-            Cancel
+      {!readOnly && (
+        <div className={styles.cardActions}>
+          <Button size="small" color="error" onClick={handleLookupRemove} className={styles.buttonLeft}>
+            Remove
           </Button>
-          <Button size="small" color="primary" disabled={isSaveDisabled} onClick={handleLookupSave}>
-            Save
-          </Button>
+          <div className={styles.buttonRight}>
+            <Button size="small" color="primary" disabled={!lookupActionsEnabled} onClick={handleLookupCancel}>
+              Cancel
+            </Button>
+            <Button size="small" color="primary" disabled={isSaveDisabled} onClick={handleLookupSave}>
+              Save
+            </Button>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

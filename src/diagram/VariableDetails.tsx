@@ -53,6 +53,13 @@ interface VariableDetailsProps {
   onTableChange: (ident: string, newTable: GraphicalFunction | null) => void;
   activeTab: number;
   onActiveTabChange: (newActiveTab: number) => void;
+  // Inspection-only mode (issue #935): the panel still shows the equation
+  // preview, chart, units, docs, and lookup shape, but every editing
+  // affordance is inert -- the Slate fields are non-editable, the preview
+  // click does not open the raw editor, and the Delete/Cancel/Save row and
+  // lookup editing are hidden. The Editor keys this panel on the flag, so a
+  // mid-session flip remounts (re-seeds) it rather than toggling in place.
+  readOnly?: boolean;
 }
 
 function stringFromDescendants(children: Descendant[]): string {
@@ -243,6 +250,7 @@ function caretOffsetForPreviewClick(host: HTMLElement, clientX: number, clientY:
 
 export function VariableDetails(props: VariableDetailsProps): React.ReactElement {
   const { variable, viewElement, getLatexEquation, onDelete, onEquationChange, onTableChange, activeTab } = props;
+  const readOnly = !!props.readOnly;
 
   // The original (props-derived) document for each field. These seed the editors
   // on mount and are what the discard path (Cancel/Escape) restores, so the
@@ -389,6 +397,12 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
   };
 
   const handleEquationSave = (): void => {
+    // Backstop: with the fields non-editable the contents cannot diverge from
+    // the initial values, but a save must still never fire in read-only mode
+    // (tab switches and blurs route through here unconditionally).
+    if (readOnly) {
+      return;
+    }
     const initialEquation = scalarEquationFor(variable);
     const initialUnits = variable.units;
     const initialDocs = variable.documentation;
@@ -567,12 +581,16 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
           </div>
         ) : (
           <Slate editor={equationEditor} initialValue={equationContents} onChange={handleEquationChange}>
+            {/* readOnly can render this branch when an equation error pins the
+                raw editor open: the highlighted source stays visible for
+                inspection, just not editable. */}
             <Editable
               className={styles.eqnEditor}
               renderLeaf={renderLeaf}
               placeholder="Enter an equation..."
               spellCheck={false}
-              autoFocus
+              readOnly={readOnly}
+              autoFocus={!readOnly}
               onBlur={(e) => {
                 // An intra-panel focus move (to another field or the action
                 // buttons) neither commits nor collapses the raw editor: the
@@ -622,6 +640,7 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
             renderLeaf={renderLeaf}
             placeholder="Enter units..."
             spellCheck={false}
+            readOnly={readOnly}
             onBlur={handleFieldBlur}
             onKeyDown={(e) => {
               // Escape discards, matching the equation field and the Cancel
@@ -640,6 +659,7 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
             renderLeaf={renderLeaf}
             placeholder="Documentation"
             spellCheck={false}
+            readOnly={readOnly}
             onBlur={handleFieldBlur}
             onKeyDown={(e) => {
               // Escape discards, matching the equation field and the Cancel
@@ -659,43 +679,48 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
           />
         </Slate>
 
-        <div className={styles.cardActions}>
-          {/* preventDefault on pointer-down keeps focus on the editor for
-              mouse/touch, so pressing an action button does not blur-commit the
-              field before the click runs (macOS in particular does not focus a
-              button on click, so a plain blur would otherwise fire). The keyboard
-              path is handled by focusLeftPanel above. Delete gets it too so a
-              pending edit is not committed on the way to deleting the variable. */}
-          <Button
-            size="small"
-            color="error"
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={handleVariableDelete}
-            className={styles.buttonLeft}
-          >
-            Delete
-          </Button>
-          <div className={styles.buttonRight}>
+        {/* Read-only hides the whole action row: Delete/Cancel/Save are pure
+            mutation affordances, and permanently-disabled buttons would just
+            be noise on an inspection panel. */}
+        {!readOnly && (
+          <div className={styles.cardActions}>
+            {/* preventDefault on pointer-down keeps focus on the editor for
+                mouse/touch, so pressing an action button does not blur-commit the
+                field before the click runs (macOS in particular does not focus a
+                button on click, so a plain blur would otherwise fire). The keyboard
+                path is handled by focusLeftPanel above. Delete gets it too so a
+                pending edit is not committed on the way to deleting the variable. */}
             <Button
               size="small"
-              color="primary"
-              disabled={!equationActionsEnabled}
+              color="error"
               onMouseDown={(e) => e.preventDefault()}
-              onClick={handleEquationCancel}
+              onClick={handleVariableDelete}
+              className={styles.buttonLeft}
             >
-              Cancel
+              Delete
             </Button>
-            <Button
-              size="small"
-              color="primary"
-              disabled={!equationActionsEnabled}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={handleEquationSave}
-            >
-              Save
-            </Button>
+            <div className={styles.buttonRight}>
+              <Button
+                size="small"
+                color="primary"
+                disabled={!equationActionsEnabled}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={handleEquationCancel}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="small"
+                color="primary"
+                disabled={!equationActionsEnabled}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={handleEquationSave}
+              >
+                Save
+              </Button>
+            </div>
           </div>
-        </div>
+        )}
 
         <div className={styles.chartDivider} />
         {chartOrErrors}
@@ -704,6 +729,11 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
   };
 
   const handlePreviewClick = (e: React.MouseEvent<HTMLDivElement>, equationStr: string): void => {
+    // Read-only: the preview never converts into the raw editor -- inspection
+    // keeps the rendered equation, and there is nothing to place a caret for.
+    if (readOnly) {
+      return;
+    }
     const target = e.currentTarget as HTMLElement;
     const offset = caretOffsetForPreviewClick(target, e.clientX, e.clientY, equationStr);
 
@@ -737,7 +767,15 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
   const renderLookup = (): React.ReactElement => {
     let table;
     if (variableGf(variable)) {
-      table = <LookupEditor variable={variable} onLookupChange={handleLookupChange} />;
+      table = <LookupEditor variable={variable} onLookupChange={handleLookupChange} readOnly={readOnly} />;
+    } else if (readOnly) {
+      // No lookup and no way to add one: say so instead of dangling a dead
+      // creation affordance.
+      table = (
+        <div className={styles.cardContent}>
+          <i>This variable has no lookup table.</i>
+        </div>
+      );
     } else {
       table = (
         <div className={styles.cardContent}>

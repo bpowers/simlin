@@ -36,6 +36,10 @@ interface ModelPropertiesDrawerProps {
   // can't (or shouldn't) delete -- read-only viewers, embeds, the local
   // file-backed viewer -- simply leave this undefined.
   onDelete?: () => Promise<void>;
+  // Read-only viewers (issue #935) still see the sim specs and can download
+  // the model, but the fields are disabled: sim specs are project content and
+  // a draft that silently never commits would misrepresent editability.
+  readOnly?: boolean;
 }
 
 interface SimSpecDraftFieldProps {
@@ -44,6 +48,7 @@ interface SimSpecDraftFieldProps {
   value: number | string;
   type?: string;
   onCommit: (field: SimSpecField, value: number | string) => void;
+  disabled?: boolean;
 }
 
 // A single sim-specs field: controlled from `value` (the model) when idle, but
@@ -54,7 +59,7 @@ interface SimSpecDraftFieldProps {
 // component instance each) makes those semantics fall out structurally: an
 // engine refresh only releases the drafts of fields that are not focused.
 function SimSpecDraftField(props: SimSpecDraftFieldProps): React.ReactElement {
-  const { field, label, value, type, onCommit } = props;
+  const { field, label, value, type, onCommit, disabled } = props;
 
   // `undefined` means "not editing -- show the model value". A string means an
   // edit is in flight (or a just-committed value awaiting the model catching up).
@@ -88,6 +93,12 @@ function SimSpecDraftField(props: SimSpecDraftFieldProps): React.ReactElement {
   const display = draft ?? formatSimSpecValue(value);
 
   const commit = (): void => {
+    // A disabled field never delivers change events through React, so `draft`
+    // stays undefined and the check below already suffices; the explicit gate
+    // is defense in depth against a synthesized event slipping a draft in.
+    if (disabled) {
+      return;
+    }
     // `draft` is read from the current render's closure. Every keystroke
     // re-renders (onChange -> setDraft), so by the time a blur/Enter fires this
     // closure has the latest text.
@@ -119,6 +130,7 @@ function SimSpecDraftField(props: SimSpecDraftFieldProps): React.ReactElement {
         setDraft(e.target.value);
       }}
       inputProps={{
+        disabled,
         onFocus: () => {
           focusedRef.current = true;
           // Seed from the current display so refocusing before the model
@@ -170,6 +182,7 @@ export function ModelPropertiesDrawer(props: ModelPropertiesDrawerProps): React.
     onSimSpecCommit,
     onDownloadXmile,
     onDelete,
+    readOnly,
   } = props;
 
   const handleOpen = (): void => {
@@ -208,6 +221,7 @@ export function ModelPropertiesDrawer(props: ModelPropertiesDrawerProps): React.
             value={startTime}
             type="number"
             onCommit={onSimSpecCommit}
+            disabled={readOnly}
           />
           <SimSpecDraftField
             field="stopTime"
@@ -215,9 +229,23 @@ export function ModelPropertiesDrawer(props: ModelPropertiesDrawerProps): React.
             value={stopTime}
             type="number"
             onCommit={onSimSpecCommit}
+            disabled={readOnly}
           />
-          <SimSpecDraftField field="dt" label="dt" value={dt} type="number" onCommit={onSimSpecCommit} />
-          <SimSpecDraftField field="timeUnits" label="Time Units" value={timeUnits} onCommit={onSimSpecCommit} />
+          <SimSpecDraftField
+            field="dt"
+            label="dt"
+            value={dt}
+            type="number"
+            onCommit={onSimSpecCommit}
+            disabled={readOnly}
+          />
+          <SimSpecDraftField
+            field="timeUnits"
+            label="Time Units"
+            value={timeUnits}
+            onCommit={onSimSpecCommit}
+            disabled={readOnly}
+          />
           <br />
           <br />
           <Button

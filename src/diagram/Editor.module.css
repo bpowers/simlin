@@ -185,6 +185,28 @@
   white-space: nowrap;
 }
 
+/* Persistent "View only" indication for read-only viewers (issue #935).
+   Placement: IN-FLOW inside the search bar's flex row (after the breadcrumb /
+   hamburger, before the search box), not floating over the canvas. In-flow
+   means no collision geometry to manage: the save-failure banner and the
+   shared-model banner both start below the bar (--shared-model-banner-top),
+   the details panels sit under it, and on narrow viewports -- where the bar
+   spans nearly the full width -- the search box simply flexes narrower.
+   Quiet by design (muted text on the field surface): it states a mode, not a
+   warning. Distinct from .readOnlyBadge, which marks a stdlib MODEL within an
+   otherwise editable project. */
+.viewOnlyPill {
+  flex: 0 0 auto;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: var(--color-field-bg);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-caption);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
 .sharedModelBanner {
   position: absolute;
   top: var(--shared-model-banner-top);

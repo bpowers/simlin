@@ -304,12 +304,6 @@ interface EditorRefs {
   // value and leak one URL; reading and revoking this field synchronously in
   // setSnapshotUrl is race-free.
   liveSnapshotUrl: string | undefined;
-  // Guards the read-only toast to a single append for the lifetime of this
-  // Editor instance. The class appended it in componentDidMount; under React
-  // 18 StrictMode (mount -> unmount -> mount on the same fiber, state
-  // preserved) the mount effect runs twice, so this latch keeps the
-  // documented "appended once on mount" invariant.
-  readOnlyToastAppended: boolean;
 }
 
 // The snapshot of props + state that escaped callbacks (the controller
@@ -394,7 +388,6 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       nextErrorKey: 1,
       errorKeys: new WeakMap<Error, number>(),
       liveSnapshotUrl: undefined,
-      readOnlyToastAppended: false,
     };
     makeController(props);
   }
@@ -479,20 +472,13 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       }
     });
 
-    // Append the read-only toast exactly once per Editor instance. The class
-    // appended it on each componentDidMount; under StrictMode (state preserved
-    // across the double mount) that would double-append, so the latch keeps the
-    // documented "appended once on mount" behavior. Functional updater so it
-    // composes with any concurrent error append.
-    if (latest.current.props.readOnlyMode && !r.readOnlyToastAppended) {
-      r.readOnlyToastAppended = true;
-      setState((prev) => ({
-        modelErrors: [
-          ...prev.modelErrors,
-          new Error("This is a read-only version. Any changes you make won't be saved."),
-        ],
-      }));
-    }
+    // NOTE: the read-only indication is deliberately NOT appended here. It
+    // used to be a toast latched once at mount, which went stale whenever
+    // readOnlyMode changed after mount -- an owner whose identity resolves a
+    // beat later saw a "read-only" toast over an editable project, and a
+    // mid-session flip to read-only showed nothing (issue #935). The
+    // indication is now the persistent "View only" pill in getSearchBar(),
+    // derived from the CURRENT prop on every render.
 
     document.addEventListener('keydown', handleKeyDown);
 
@@ -601,6 +587,30 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     }
   }, [navResetSeq]);
 
+  // ---- Post-commit effect: readOnlyMode flips ------------------------------
+  // readOnlyMode can change while the Editor is mounted, in both directions:
+  // the app derives it from the resolved user identity, so an owner deep-link
+  // starts read-only and flips editable a beat later, and a session change can
+  // flip the other way. Most consequences are render-derived from the current
+  // prop (the pill, hidden toolbars, noop canvas handlers, read-only panels),
+  // but the armed creation tool and the flow-creation staging are STATE, so a
+  // flip to read-only must clear them explicitly -- otherwise flipping back to
+  // editable would silently resurrect a tool armed before the flip, and the
+  // suppressed details panel would stay suppressed. Selection is deliberately
+  // preserved (it is a read capability). Guarded by a prev-value ref so this
+  // fires on change, not on mount (docs/dev/typescript.md).
+  const readOnlyModeNow = !!props.readOnlyMode;
+  const prevReadOnlyModeRef = React.useRef(readOnlyModeNow);
+  React.useEffect(() => {
+    if (prevReadOnlyModeRef.current === readOnlyModeNow) {
+      return;
+    }
+    prevReadOnlyModeRef.current = readOnlyModeNow;
+    if (readOnlyModeNow) {
+      setState({ selectedTool: undefined, dialOpen: false, flowStillBeingCreated: false });
+    }
+  }, [readOnlyModeNow]);
+
   // ---- Handlers (formerly bound class methods) ----------------------------
   // Each is wrapped in useCallback([]) so its identity is stable across
   // renders -- exactly as the class's bound methods were -- which preserves the
@@ -619,7 +629,12 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
 
     const action = detectUndoRedo(e);
     if (action) {
-      const isEnabled = action === 'undo' ? isUndoEnabled() : isRedoEnabled();
+      // Undo/redo MUTATE the project (they move the history cursor and reopen
+      // the engine from a snapshot), so a read-only viewer gets neither; the
+      // UndoRedoBar is hidden alongside (getMetaActionsBar). Project-scoped:
+      // gated on readOnlyMode, not isReadOnly, so undoing a parent-model edit
+      // while VIEWING a stdlib model stays available (see isReadOnly's doc).
+      const isEnabled = !p.readOnlyMode && (action === 'undo' ? isUndoEnabled() : isRedoEnabled());
       if (isEnabled) {
         e.preventDefault();
         handleUndoRedo(action);
@@ -642,8 +657,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     // delete affordance for unnamed elements (clouds) and for elements whose
     // details panel cannot open, so it must not depend on the panel.
     if (e.key === 'Delete' || e.key === 'Backspace') {
-      const readOnly = p.readOnlyMode || isStdlibModel(modelName());
-      if (!readOnly && state.selection.size > 0) {
+      if (!isReadOnly() && state.selection.size > 0) {
         e.preventDefault();
         void handleSelectionDelete();
       }
@@ -703,6 +717,33 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     return latest.current.state.controllerSnapshot.modelName;
   };
 
+  // The active MODEL cannot be edited and its details panels must not open:
+  // stdlib models are immutable library code, and embedded mode renders an
+  // inert diagram with no chrome. Distinct from isReadOnly below because a
+  // read-only VIEWER (readOnlyMode) keeps inspection -- opening the details
+  // panels to READ stays available -- so panel-open affordances gate on THIS
+  // predicate while mutation affordances gate on isReadOnly.
+  const isModelLocked = (): boolean => {
+    return !!latest.current.props.embedded || isStdlibModel(modelName());
+  };
+
+  // THE editor-wide mutation gate (issue #935): readOnlyMode (viewing someone
+  // else's project -- persistence is a host-side no-op, so local edits would
+  // silently evaporate) OR a locked model. Every handler and affordance that
+  // can change project content consults this: the canvas handlers and
+  // creation tools, keyboard delete, rename, the details-panel edit callbacks,
+  // and module wiring. The op-building handlers ALSO check it internally as
+  // defense in depth, so no future wiring mistake can reopen the gap.
+  // Deliberately preserved as capabilities: selection, pan/zoom, drill-in
+  // navigation, opening details to read, snapshot/download, and sim runs
+  // (running a simulation is analysis -- results live outside the serialized
+  // project). Undo/redo and sim-specs are PROJECT-scoped and gate on
+  // readOnlyMode alone (see handleUndoRedo/applySimSpecChange): while viewing
+  // a stdlib model in your own project they remain legitimately available.
+  const isReadOnly = (): boolean => {
+    return !!latest.current.props.readOnlyMode || isModelLocked();
+  };
+
   // Thin delegating wrappers so the Editor's op-building handlers can keep
   // their shape. All engine/save/sim/history coordination lives in the
   // controller. Each is a no-op when no controller is mounted.
@@ -756,7 +797,11 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   }, []);
 
   const handleRename = React.useCallback(async (oldName: string, newName: string): Promise<void> => {
-    if (oldName === newName) {
+    // Defense in depth (issue #935): the canvas wiring already substitutes
+    // no-ops when read-only, but every op-building handler re-checks so a
+    // stale-closure commit (e.g. a blur that lands after a flip to read-only)
+    // can never mutate the project. Same guard on every mutation handler below.
+    if (isReadOnly() || oldName === newName) {
       return;
     }
 
@@ -830,6 +875,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   }, []);
 
   const handleSelectionDelete = React.useCallback(async (): Promise<void> => {
+    if (isReadOnly()) {
+      return;
+    }
     const selection = latest.current.state.selection;
     const mName = modelName();
     const view = defined(getView());
@@ -916,6 +964,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
 
   const handleMoveLabel = React.useCallback(
     async (uid: UID, side: 'top' | 'left' | 'bottom' | 'right'): Promise<void> => {
+      if (isReadOnly()) {
+        return;
+      }
       const view = defined(getView());
 
       const elements = view.elements.map((element: ViewElement) => {
@@ -939,6 +990,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       inCreation: boolean,
       isSourceAttach?: boolean,
     ): Promise<void> => {
+      if (isReadOnly()) {
+        return;
+      }
       const view = defined(getView());
       const model = defined(getModel());
 
@@ -995,6 +1049,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   );
 
   const handleLinkAttach = React.useCallback(async (link: LinkViewElement, newTarget: string): Promise<void> => {
+    if (isReadOnly()) {
+      return;
+    }
     let { selection } = latest.current.state;
     let view = defined(getView());
 
@@ -1036,6 +1093,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   }, []);
 
   const handleCreateVariable = React.useCallback(async (element: ViewElement): Promise<void> => {
+    if (isReadOnly()) {
+      return;
+    }
     const view = defined(getView());
     // Parity with the pre-refactor `if (!engine) return`: bail before the
     // optimistic view update if the engine hasn't finished opening yet, so a
@@ -1113,6 +1173,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
 
   const handleSelectionMove = React.useCallback(
     async (delta: Point, arcPoint?: Point, segmentIndex?: number): Promise<void> => {
+      if (isReadOnly()) {
+        return;
+      }
       const view = defined(getView());
       const selection = latest.current.state.selection;
 
@@ -1137,6 +1200,13 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   }, []);
 
   const applySimSpecChange = async (updates: Partial<JsonSimSpecs>): Promise<void> => {
+    // Sim specs are PROJECT content: read-only viewers cannot change them
+    // (the drawer also renders its fields disabled). Gated on readOnlyMode,
+    // not isReadOnly -- editing your own project's sim specs while viewing a
+    // stdlib model remains legitimate.
+    if (latest.current.props.readOnlyMode) {
+      return;
+    }
     // The engine is re-checked inside applyPatchAndRefresh; here we only
     // need the project to read the current sim specs.
     const project = getProject();
@@ -1258,6 +1328,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         onSimSpecCommit={handleSimSpecCommit}
         onDownloadXmile={handleDownloadXmile}
         onDelete={onDelete}
+        // Sim specs are project content; the download stays available (it is
+        // a read). Project-scoped like undo/redo: readOnlyMode, not isReadOnly.
+        readOnly={!!latest.current.props.readOnlyMode}
       />
     );
   };
@@ -1327,9 +1400,12 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       return;
     }
 
-    // Stdlib models are read-only: disable all mutation handlers while
-    // keeping selection, viewbox, and drill-in navigation active.
-    const readOnly = embedded || isStdlibModel(modelName());
+    // The unified mutation gate (issue #935): read-only viewers, embeds, and
+    // stdlib models all get no-op mutation handlers while keeping selection,
+    // viewbox, and drill-in navigation active. Opening the details panel is
+    // gated on isModelLocked, NOT isReadOnly: a read-only viewer may still
+    // open it for inspection (the panel itself renders read-only).
+    const readOnly = isReadOnly();
     const onRenameVariable = !readOnly ? handleRename : noopRename;
     const onSetSelection = !embedded ? handleSelection : noopSetSelection;
     const onMoveSelection = !readOnly ? handleSelectionMove : noopMoveSelection;
@@ -1339,13 +1415,14 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     const onCreateVariable = !readOnly ? handleCreateVariable : noopCreateVariable;
     const onClearSelectedTool = !readOnly ? handleClearSelectedTool : noop;
     const onDeleteSelection = !readOnly ? handleSelectionDelete : noop;
-    const onShowVariableDetails = !readOnly ? handleShowVariableDetails : noop;
+    const onShowVariableDetails = !isModelLocked() ? handleShowVariableDetails : noop;
     const onViewBoxChange = !embedded ? handleViewBoxChange : noopViewBoxChange;
     const onDrillIntoModule = !embedded ? handleDrillIntoModule : noopDrillIntoModule;
 
     return (
       <Canvas
         embedded={!!embedded}
+        readOnly={readOnly}
         project={project}
         model={model}
         view={view}
@@ -1544,17 +1621,17 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       const element = getNamedElement(canonicalize(newValue));
       handleSelection(element ? new Set([element.uid]) : new Set());
       if (element) {
-        // Don't open the mutation-capable details panel for read-only
-        // models (stdlib models, embedded mode). The Canvas-level guard
-        // at line ~1480 handles double-click, but search bypasses it.
+        // Locked models (stdlib, embedded) never open the details panel; the
+        // Canvas-level guard handles double-click, but search bypasses it.
+        // A read-only VIEWER (readOnlyMode) deliberately still opens it: the
+        // panel renders read-only, and inspection is a preserved capability.
         //
         // Only open the panel when the search resolved to an element. When it
         // did not, handleSelection already cleared the selection (and, via its
         // own empty-selection close-all, showDetails); setting showDetails here
         // would strand a 'variable' panel over an empty selection.
-        const readOnly = latest.current.props.embedded || isStdlibModel(modelName());
         setState({
-          showDetails: readOnly ? undefined : 'variable',
+          showDetails: isModelLocked() ? undefined : 'variable',
         });
         await centerVariable(element);
       }
@@ -1593,6 +1670,29 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
 
     const status = latest.current.state.controllerSnapshot.status;
 
+    // The persistent read-only indication (issue #935). Derived from the
+    // CURRENT readOnlyMode prop each render -- never latched -- so it appears
+    // and disappears exactly when the mode flips (the old mount-latched toast
+    // went stale for owners whose identity resolved after mount). It lives
+    // IN-FLOW inside the search bar's flex row, so it cannot collide with the
+    // save-failure banner or the shared-model banner (both sit BELOW the bar
+    // at --shared-model-banner-top) or the details panels; the search box
+    // simply flexes narrower to make room. role="status" (a polite live
+    // region) means a mid-session flip to read-only is announced by assistive
+    // tech when the pill appears; the aria-label carries the full explanation
+    // so it is not tooltip-only, and the title stays as a pointer-hover
+    // supplement for sighted users.
+    const viewOnlyPill = latest.current.props.readOnlyMode ? (
+      <span
+        className={styles.viewOnlyPill}
+        role="status"
+        aria-label="View only: you are viewing someone else's project, and changes are disabled."
+        title="You are viewing someone else's project. Changes are disabled."
+      >
+        View only
+      </span>
+    ) : undefined;
+
     return (
       <div className={styles.searchBar}>
         <BreadcrumbBar
@@ -1602,6 +1702,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
           onNavigateToLevel={handleNavigateToLevel}
           onShowDrawer={handleShowDrawer}
         />
+        {viewOnlyPill}
         <div className={styles.searchBox}>
           <Autocomplete
             key={name}
@@ -1654,6 +1755,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       newUnits: string | undefined,
       newDocs: string | undefined,
     ): Promise<void> => {
+      if (isReadOnly()) {
+        return;
+      }
       const model = getModel();
       if (!model) {
         return;
@@ -1743,6 +1847,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
 
   const handleTableChange = React.useCallback(
     async (ident: string, newTable: GraphicalFunction | null): Promise<void> => {
+      if (isReadOnly()) {
+        return;
+      }
       const model = getModel();
       if (!model) {
         return;
@@ -1809,6 +1916,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   // Updates the model reference for a module variable.
   const handleModuleModelReferenceChange = React.useCallback(
     async (ident: string, newModelName: string): Promise<void> => {
+      if (isReadOnly()) {
+        return;
+      }
       const model = getModel();
       if (!model) return;
       const variable = model.variables.get(ident);
@@ -1837,6 +1947,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   // Updates units and/or documentation for a module variable.
   const handleModuleUnitsDocsChange = React.useCallback(
     async (ident: string, newUnits: string | undefined, newDocs: string | undefined): Promise<void> => {
+      if (isReadOnly()) {
+        return;
+      }
       const model = getModel();
       if (!model) return;
       const variable = model.variables.get(ident);
@@ -1868,6 +1981,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   // complete module with the new references array.
   const handleModuleReferencesChange = React.useCallback(
     async (ident: string, newReferences: ReadonlyArray<ModuleReference>): Promise<void> => {
+      if (isReadOnly()) {
+        return;
+      }
       const model = getModel();
       if (!model) return;
       const variable = model.variables.get(ident);
@@ -1897,6 +2013,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   // The engine processes projectOps before model ops (see patch.rs),
   // so AddModel creates the model before upsertModule references it.
   const handleCreateModelForModule = React.useCallback(async (moduleIdent: string): Promise<void> => {
+    if (isReadOnly()) {
+      return;
+    }
     const project = getProject();
     if (!project) return;
 
@@ -1936,6 +2055,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   // Copies all variables and the primary view from the source model.
   const handleDuplicateModelForModule = React.useCallback(
     async (moduleIdent: string, sourceModelName: string): Promise<void> => {
+      if (isReadOnly()) {
+        return;
+      }
       const project = getProject();
       if (!project) return;
 
@@ -2109,15 +2231,25 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       return;
     }
 
+    // The read-only flag is part of the panel key: the panels seed their Slate
+    // editors once per mount (see "Details panels are keyed by
+    // projectGeneration" in diagram/CLAUDE.md), so a mid-session readOnlyMode
+    // flip REMOUNTS an open panel rather than toggling it in place. That makes
+    // the flip deterministic: any in-flight typed text is discarded and the
+    // panel re-seeds from the committed model state.
+    const readOnly = isReadOnly();
+    const keySuffix = readOnly ? '-ro' : '';
+
     if (variable.type === 'module') {
       return (
         <div className={varDetailsClassName}>
           <ModuleDetails
-            key={`md-${latest.current.state.controllerSnapshot.projectGeneration}-${ident}`}
+            key={`md-${latest.current.state.controllerSnapshot.projectGeneration}-${ident}${keySuffix}`}
             variable={variable}
             viewElement={namedElement}
             project={defined(getProject())}
             currentModelName={modelName()}
+            readOnly={readOnly}
             onDelete={handleVariableDelete}
             onModelReferenceChange={handleModuleModelReferenceChange}
             onUnitsDocsChange={handleModuleUnitsDocsChange}
@@ -2135,11 +2267,12 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     return (
       <div className={varDetailsClassName}>
         <VariableDetails
-          key={`vd-${latest.current.state.controllerSnapshot.projectGeneration}-${ident}`}
+          key={`vd-${latest.current.state.controllerSnapshot.projectGeneration}-${ident}${keySuffix}`}
           variable={variable}
           viewElement={namedElement}
           getLatexEquation={getLatexEquation}
           activeTab={activeTab}
+          readOnly={readOnly}
           onActiveTabChange={handleVariableDetailsActiveTabChange}
           onDelete={handleVariableDelete}
           onEquationChange={handleEquationChange}
@@ -2209,6 +2342,13 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   // and bumps navResetSeq, which the navReset effect observes to clear the
   // Editor's selection/details/tool UI state.
   const handleUndoRedo = React.useCallback((kind: 'undo' | 'redo'): void => {
+    // Undo/redo rewrite project content; a read-only viewer gets neither
+    // (issue #935). This is the single choke point covering the UndoRedoBar
+    // buttons and the keyboard shortcut alike. Project-scoped gate: see the
+    // keyboard handler's comment for why stdlib views keep undo.
+    if (latest.current.props.readOnlyMode) {
+      return;
+    }
     r.controller?.undoRedo(kind);
   }, []);
 
@@ -2334,16 +2474,23 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   void handleSnapshot;
 
   const getMetaActionsBar = (): React.ReactElement | undefined => {
-    const { embedded } = props;
+    const { embedded, readOnlyMode } = props;
     if (embedded) {
       return undefined;
     }
 
     const zoom = getView()?.zoom || 1;
 
+    // Undo/redo mutates project content, so the bar is HIDDEN (not merely
+    // disabled) for read-only viewers -- matching the hidden SpeedDial, and
+    // keeping the chrome quiet rather than showing permanently-dead buttons.
+    // The keyboard path and handleUndoRedo are gated alongside. Zoom is a
+    // view capability and stays.
     return (
       <div className={styles.undoRedoBar}>
-        <UndoRedoBar undoEnabled={isUndoEnabled()} redoEnabled={isRedoEnabled()} onUndoRedo={handleUndoRedo} />
+        {!readOnlyMode && (
+          <UndoRedoBar undoEnabled={isUndoEnabled()} redoEnabled={isRedoEnabled()} onUndoRedo={handleUndoRedo} />
+        )}
         {/*<Snapshotter onSnapshot={handleSnapshot} />*/}
         <ZoomBar zoom={zoom} onChangeZoom={handleZoomChange} />
       </div>
@@ -2351,10 +2498,11 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   };
 
   const getEditorControls = (): React.ReactElement | undefined => {
-    const { embedded } = props;
     const { dialOpen, dialVisible, selectedTool } = state;
 
-    if (embedded || isStdlibModel(modelName())) {
+    // The creation toolbar is pure mutation affordance: hidden for read-only
+    // viewers, embeds, and stdlib models alike (the unified gate).
+    if (isReadOnly()) {
       return undefined;
     }
 

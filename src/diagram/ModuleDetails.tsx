@@ -43,6 +43,12 @@ interface ModuleDetailsProps {
   onCreateModel: (moduleName: string) => void;
   onDuplicateModel: (moduleIdent: string, sourceModelName: string) => void;
   onReferencesChange: (ident: string, newReferences: ReadonlyArray<ModuleReference>) => void;
+  // Inspection-only mode (issue #935): the model reference, wiring, output
+  // ports, and units/docs stay visible (and Open Model still drills in), but
+  // the reference selector is disabled, the wiring rows render as static text
+  // without add/remove, the units/docs fields are non-editable, and the
+  // module-delete affordance is hidden.
+  readOnly?: boolean;
 }
 
 export function ModuleDetails(props: ModuleDetailsProps): React.ReactElement {
@@ -58,6 +64,7 @@ export function ModuleDetails(props: ModuleDetailsProps): React.ReactElement {
     onDuplicateModel,
     onReferencesChange,
   } = props;
+  const readOnly = !!props.readOnly;
 
   // Seed the Slate editors and their contents from props exactly once per mount
   // (lazy useState initializers), mirroring the old constructor. The Editor keys
@@ -134,6 +141,7 @@ export function ModuleDetails(props: ModuleDetailsProps): React.ReactElement {
           className={styles.modelRefSelect}
           value={variable.modelName || ''}
           onChange={handleModelRefChange}
+          disabled={readOnly}
           data-testid="model-ref-select"
         >
           <option value="">Select a model to instantiate</option>
@@ -218,53 +226,71 @@ export function ModuleDetails(props: ModuleDetailsProps): React.ReactElement {
             <tbody>
               {variable.references.map((ref, i) => (
                 <tr key={i} className={styles.wiringRow}>
-                  <td className={styles.wiringDropdown}>
-                    <Autocomplete
-                      value={ref.src || null}
-                      options={[...availableSrcVars]}
-                      onChange={(_: React.SyntheticEvent | null, newValue: string | null) => {
-                        if (newValue) {
-                          handleSrcChange(i, newValue);
-                        }
-                      }}
-                      renderInput={(params) => (
-                        <TextField {...params} variant="standard" placeholder="Select variable" />
-                      )}
-                    />
-                  </td>
-                  <td className={styles.wiringDropdown}>
-                    <Autocomplete
-                      value={unqualifyDst(ref.dst) || null}
-                      options={dstOptions}
-                      onChange={(_: React.SyntheticEvent | null, newValue: string | null) => {
-                        if (newValue) {
-                          handleDstChange(i, newValue);
-                        }
-                      }}
-                      renderInput={(params) => <TextField {...params} variant="standard" placeholder="Select input" />}
-                    />
-                  </td>
-                  <td>
-                    <IconButton size="small" aria-label="Remove reference" onClick={() => handleRemoveReference(i)}>
-                      <RemoveIcon />
-                    </IconButton>
-                  </td>
+                  {readOnly ? (
+                    // Static text instead of dropdowns: the Autocomplete has no
+                    // disabled state, and an interactive-looking combobox whose
+                    // change silently no-ops is exactly the "editable but
+                    // unsavable" trap read-only mode must not present.
+                    <>
+                      <td className={styles.wiringDropdown}>{ref.src}</td>
+                      <td className={styles.wiringDropdown}>{unqualifyDst(ref.dst)}</td>
+                      <td></td>
+                    </>
+                  ) : (
+                    <>
+                      <td className={styles.wiringDropdown}>
+                        <Autocomplete
+                          value={ref.src || null}
+                          options={[...availableSrcVars]}
+                          onChange={(_: React.SyntheticEvent | null, newValue: string | null) => {
+                            if (newValue) {
+                              handleSrcChange(i, newValue);
+                            }
+                          }}
+                          renderInput={(params) => (
+                            <TextField {...params} variant="standard" placeholder="Select variable" />
+                          )}
+                        />
+                      </td>
+                      <td className={styles.wiringDropdown}>
+                        <Autocomplete
+                          value={unqualifyDst(ref.dst) || null}
+                          options={dstOptions}
+                          onChange={(_: React.SyntheticEvent | null, newValue: string | null) => {
+                            if (newValue) {
+                              handleDstChange(i, newValue);
+                            }
+                          }}
+                          renderInput={(params) => (
+                            <TextField {...params} variant="standard" placeholder="Select input" />
+                          )}
+                        />
+                      </td>
+                      <td>
+                        <IconButton size="small" aria-label="Remove reference" onClick={() => handleRemoveReference(i)}>
+                          <RemoveIcon />
+                        </IconButton>
+                      </td>
+                    </>
+                  )}
                 </tr>
               ))}
             </tbody>
           </table>
         )}
-        <div className={styles.addInputButton}>
-          <Button
-            size="small"
-            variant="outlined"
-            startIcon={<AddIcon />}
-            onClick={handleAddReference}
-            data-testid="add-input-button"
-          >
-            Add Input
-          </Button>
-        </div>
+        {!readOnly && (
+          <div className={styles.addInputButton}>
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<AddIcon />}
+              onClick={handleAddReference}
+              data-testid="add-input-button"
+            >
+              Add Input
+            </Button>
+          </div>
+        )}
       </div>
     );
   };
@@ -304,7 +330,8 @@ export function ModuleDetails(props: ModuleDetailsProps): React.ReactElement {
             className={styles.unitsEditor}
             placeholder="Enter units..."
             spellCheck={false}
-            onBlur={handleUnitDocsSave}
+            readOnly={readOnly}
+            onBlur={readOnly ? undefined : handleUnitDocsSave}
           />
         </Slate>
 
@@ -313,7 +340,8 @@ export function ModuleDetails(props: ModuleDetailsProps): React.ReactElement {
             className={styles.notesEditor}
             placeholder="Documentation"
             spellCheck={false}
-            onBlur={handleUnitDocsSave}
+            readOnly={readOnly}
+            onBlur={readOnly ? undefined : handleUnitDocsSave}
           />
         </Slate>
       </>
@@ -346,11 +374,13 @@ export function ModuleDetails(props: ModuleDetailsProps): React.ReactElement {
 
         {renderUnitsDocsEditors()}
 
-        <div className={styles.cardActions}>
-          <Button size="small" color="error" onClick={handleDelete} className={styles.deleteButton}>
-            Delete Module
-          </Button>
-        </div>
+        {!readOnly && (
+          <div className={styles.cardActions}>
+            <Button size="small" color="error" onClick={handleDelete} className={styles.deleteButton}>
+              Delete Module
+            </Button>
+          </div>
+        )}
       </div>
     </div>
   );
