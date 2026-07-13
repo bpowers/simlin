@@ -58,3 +58,85 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* Embedded variant of the loaded-editor wrapper: positioned (but otherwise
+   layout-neutral) so the absolutely-positioned save banner anchors to the
+   embed element instead of the host page, mirroring .centerEmbedded. */
+.embedHost {
+  position: relative;
+}
+
+/* Persistent save-failure surface (issue #928). Floats over the canvas without
+   blocking editing; bottom-center belongs to the transient toast viewport, and
+   a full-viewport overlay would hide the very work the user needs to keep.
+
+   Placement: horizontally centered, vertically BELOW the top chrome band via
+   the same token the Editor's shared-model banner uses
+   (--shared-model-banner-top = 8px bar top + --searchbar-height + 4px gap).
+   The search bar's left edge holds the hamburger -- the only route to
+   ModelPropertiesDrawer / "Download model", i.e. the one non-destructive
+   rescue while a conflict is showing -- so the banner must never occlude the
+   bar at ANY width. It can't: the bar spans y 8..(8 + --searchbar-height) and
+   the banner starts below that line. jsdom cannot test layout, so the
+   width-by-width math lives here (banner width = min(max-content, 520px,
+   100% - 16px), centered; bar width = min(--panel-width-*, 100vw - 16px),
+   anchored right: 8px; x-ranges below, banner strictly lower in all cases):
+     320px:  banner x 8..312    bar x 8..312     (same x-range, separated in y)
+     768px:  banner x 124..644  bar x 401..760   (x overlap, separated in y)
+     1366px: banner x 423..943  bar x 878..1358  (x overlap, separated in y)
+     1920px: banner x 700..1220 bar x 1432..1912 (fully clear; holds for
+             vw >= 536px + 2*panel-width = 1496px with the 480px lg panel)
+   Below the chrome line the banner may overlap the left edge of an open
+   detail panel (or the shared-model banner) on viewports under that 1496px
+   bound; deliberate -- the persistent failure surface outranks panel content,
+   and the panel stays usable and closable. tests/panel-css.test.ts pins the
+   token derivation and the clears-the-bar arithmetic.
+
+   z-index sits above the editor chrome (sharedModelBanner is 1) but below
+   drawers/dialogs (1200+) and toasts (1400) on the component library's
+   layering scale. */
+.saveBanner {
+  position: absolute;
+  top: var(--shared-model-banner-top);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1150;
+  width: max-content;
+  max-width: min(520px, calc(100% - var(--spacing-2)));
+  box-sizing: border-box;
+  padding: var(--spacing-1-5) var(--spacing-2);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-3);
+}
+
+.saveBannerTitle {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-error);
+}
+
+.saveBannerBody {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* The raw transport/server message for unclassified failures; muted because it
+   is diagnostic detail, not the user-facing guidance. */
+.saveBannerDetail {
+  margin: 4px 0 0;
+  font-size: var(--font-size-caption);
+  line-height: 1.4;
+  color: var(--color-text-muted);
+  word-break: break-word;
+}
+
+.saveBannerActions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--spacing-1);
+}

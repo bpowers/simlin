@@ -134,6 +134,33 @@ describe('shared-model banner inset contract', () => {
   });
 });
 
+describe('hosted save-banner clearance contract', () => {
+  // The persistent save-failure banner (issue #928) is horizontally centered,
+  // so at common viewport widths it shares x-range with the right-anchored
+  // search bar -- whose left edge holds the hamburger, the only route to
+  // ModelPropertiesDrawer/"Download model" and thus the sole non-destructive
+  // rescue while a conflict is showing. Occlusion is prevented VERTICALLY: the
+  // banner must start below the search-bar band (top 8px + --searchbar-height)
+  // at every width. jsdom can't do layout, so these pin the stylesheet text
+  // and the resolved token arithmetic; the width-by-width geometry lives in
+  // the .saveBanner comment in HostedWebEditor.module.css.
+  const hostedCss = readCss('HostedWebEditor.module.css');
+  const themeCss = readCss('theme.css');
+
+  it('.saveBanner top derives from the shared chrome token (no literal offset)', () => {
+    const [block] = blocksFor(hostedCss, '.saveBanner');
+    expect(block).toBeDefined();
+    expect(block).toContain('top: var(--shared-model-banner-top)');
+  });
+
+  it('the banner top clears the search-bar band', () => {
+    const bannerTop = resolvePxToken(themeCss, '--shared-model-banner-top');
+    const barHeight = resolvePxToken(themeCss, '--searchbar-height');
+    // The search bar spans y 8..(8 + barHeight); the banner must begin below it.
+    expect(bannerTop).toBeGreaterThanOrEqual(8 + barHeight);
+  });
+});
+
 describe('equation preview overflow contracts', () => {
   const css = readCss('VariableDetails.module.css');
 

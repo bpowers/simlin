@@ -11,7 +11,13 @@ import { Editor, ProtobufProjectData } from './Editor';
 import Button from './components/Button';
 import CircularProgress from './components/CircularProgress';
 import { ErrorBoundary } from './ErrorBoundary';
-import { HostedWebEditorError, ProjectEndpoint, loadProject, saveProject } from './hosted-web-editor-core';
+import {
+  HostedWebEditorError,
+  ProjectEndpoint,
+  SaveErrorReason,
+  loadProject,
+  saveProject,
+} from './hosted-web-editor-core';
 // Imported as a namespace so the delete-flow navigation and DELETE go through
 // `core.*`, which a test can intercept with a spy (jsdom's
 // window.location.assign is itself non-spyable).
@@ -30,12 +36,33 @@ interface HostedWebEditorProps {
   moduleCreationEnabled?: boolean;
 }
 
+// A save failure the loaded editor must keep visible until a later save
+// succeeds (issue #928): serviceErrors only render in the pre-load placeholder,
+// so routing save failures there made them invisible exactly when the user had
+// work to lose.
+interface SaveFailure {
+  reason: SaveErrorReason;
+  message: string;
+}
+
 export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement {
   const { username, projectName, embedded, readOnlyMode, moduleCreationEnabled } = props;
 
   const [serviceErrors, setServiceErrors] = React.useState<readonly Error[]>([]);
   const [projectBinary, setProjectBinary] = React.useState<Readonly<Uint8Array> | undefined>(undefined);
   const [projectVersion, setProjectVersion] = React.useState<number>(-1);
+  const [saveFailure, setSaveFailure] = React.useState<SaveFailure | undefined>(undefined);
+  // Set when a save 409s: the server has a newer version than `currVersion`.
+  // The editor only learns a new version from a successful save, so in
+  // practice every autosave after a conflict carries this same stale version
+  // and would just 409 again -- handleSave suppresses those instead of
+  // hammering the server. Not quite an invariant: the controller's fractional
+  // +0.01 cache-key bumps can drift toInt(projectVersion) across an integer
+  // boundary after ~100 edits (issue #958), which is why suppression matches
+  // this exact version instead of latching -- a drifted version POSTs once,
+  // 409s again, and re-arms suppression at the new value. Cleared on a
+  // successful save and irrelevant after the reload recovery.
+  const staleVersion = React.useRef<number | undefined>(undefined);
 
   const getBaseURL = (): string => props.baseURL ?? baseURL;
 
@@ -95,11 +122,23 @@ export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement
   const handleSave = async (project: ProtobufProjectData, currVersion: number): Promise<number | undefined> => {
     if (readOnlyMode) return undefined;
 
-    const result = await saveProject(makeEndpoint(), project, currVersion);
-    if (result.kind === 'error') {
-      appendServiceError(result.message);
+    if (staleVersion.current === currVersion) {
+      // A known-stale version: re-POSTing would just 409 again (see the
+      // staleVersion comment above). The conflict banner is already up; keep
+      // the editor's in-memory work intact and skip the request.
       return undefined;
     }
+
+    const result = await saveProject(makeEndpoint(), project, currVersion);
+    if (result.kind === 'error') {
+      if (result.reason === 'conflict') {
+        staleVersion.current = currVersion;
+      }
+      setSaveFailure({ reason: result.reason, message: result.message });
+      return undefined;
+    }
+    staleVersion.current = undefined;
+    setSaveFailure(undefined);
     setProjectVersion(result.version);
     return result.version;
   };
@@ -144,7 +183,71 @@ export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement
     );
   }
 
-  const classNames = embedded ? undefined : styles.bg;
+  // The persistent save-failure banner (issue #928). It floats over the top of
+  // the canvas without blocking editing, and it is deliberately NOT dismissible:
+  // while saves are failing the honest state is "your work is not being saved",
+  // and only a subsequent successful save (or the reload recovery) clears it.
+  // The Editor's own toast list is transient and Editor-internal, so the shell
+  // owns this surface.
+  const getSaveFailureBanner = (): React.ReactNode => {
+    if (!saveFailure) {
+      return undefined;
+    }
+
+    let title: string;
+    let body: string;
+    let action: React.ReactNode;
+    switch (saveFailure.reason) {
+      case 'conflict':
+        title = 'This project changed somewhere else';
+        body =
+          'A newer version of this project exists, usually from an edit in another tab or window. ' +
+          "You can keep editing here, but new changes won't be saved. " +
+          'Reloading picks up the latest version and discards your unsaved changes in this window.';
+        // Reload discards local work, so it is styled as a destructive choice,
+        // not the primary happy path; "keep editing" is simply not clicking.
+        action = (
+          <Button variant="outlined" color="error" size="small" onClick={() => core.reloadPage()}>
+            Reload and discard my changes
+          </Button>
+        );
+        break;
+      case 'unauthorized':
+        title = 'Your session expired';
+        body =
+          "Your work is still here, but it can't be saved until you sign in again. " +
+          'Sign in from a new tab so this window keeps your changes, then make any edit to save.';
+        action = (
+          <Button
+            variant="contained"
+            color="primary"
+            size="small"
+            onClick={() => core.openSignInPage(`${getBaseURL()}/`)}
+          >
+            Sign in in a new tab
+          </Button>
+        );
+        break;
+      default:
+        title = 'Changes not saved';
+        body = "We couldn't save your latest changes. We'll try again as you keep editing.";
+        action = undefined;
+    }
+
+    return (
+      <div className={styles.saveBanner} role="alert">
+        <p className={styles.saveBannerTitle}>{title}</p>
+        <p className={styles.saveBannerBody}>{body}</p>
+        {saveFailure.reason === 'other' ? <p className={styles.saveBannerDetail}>{saveFailure.message}</p> : undefined}
+        {action ? <div className={styles.saveBannerActions}>{action}</div> : undefined}
+      </div>
+    );
+  };
+
+  // Embedded hosts get a positioned (but otherwise layout-neutral) wrapper so
+  // the absolutely-positioned save banner anchors to the embed element instead
+  // of escaping to the page, mirroring the .centerEmbedded rationale.
+  const classNames = embedded ? styles.embedHost : styles.bg;
 
   return (
     <div className={classNames}>
@@ -161,6 +264,7 @@ export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement
           moduleCreationEnabled={moduleCreationEnabled}
         />
       </ErrorBoundary>
+      {getSaveFailureBanner()}
     </div>
   );
 }
