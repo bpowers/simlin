@@ -106,7 +106,7 @@ import { memoryLocation } from 'wouter/memory-location';
 import { signOut } from '@firebase/auth';
 import { App, InnerApp } from '../App';
 
-import { userResponse, type FetchImpl } from './fetch-stub';
+import { textResponse, userResponse, type FetchImpl } from './fetch-stub';
 
 // fetch is called at module load by UserInfoSingleton's constructor and again by
 // getUserInfo / handleLogout. Per test we set the /api/user response that drives
@@ -414,6 +414,94 @@ describe('InnerApp auth-state-changed error handling', () => {
     expect(consoleErrorSpy).toHaveBeenCalled();
 
     unmount();
+  });
+});
+
+describe('maybeLogin /session failure surfacing (#927)', () => {
+  // The /session error contract is a JSON {error} envelope, but the
+  // response body is not under the client's control (older servers used
+  // res.sendStatus, and proxies/load balancers can answer with plain text
+  // or HTML): parsing must never throw past maybeLogin's error handling,
+  // or loginError is never set and a failed login looks like a silent
+  // no-op on the Login screen.
+  let consoleErrorSpy: MockInstance;
+
+  beforeEach(() => {
+    consoleErrorSpy = rs.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleErrorSpy.mockRestore();
+    setFetchRoutes({});
+  });
+
+  // Route /api/user -> 401 (signed out) and the /session POST -> the
+  // response under test (an Error rejects the fetch, simulating a
+  // network-level failure with no HTTP status), then drive the auth flow
+  // through the captured Firebase listener exactly as the real SDK would.
+  async function driveLoginWithSessionResponse(response: Response | Error): Promise<void> {
+    fetchMock.mockReset();
+    fetchMock.mockImplementation(async (input: unknown, init?: { method?: string }) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/session') && method === 'POST') {
+        if (response instanceof Error) {
+          throw response;
+        }
+        return response;
+      }
+      return userResponse(401, {});
+    });
+
+    renderApp('/');
+    await waitFor(() => {
+      expect(loginIsDisabled()).toBe('false');
+    });
+    await act(async () => {
+      await latestAuthListener()(makeFirebaseUser());
+      await flushMacrotasks();
+    });
+  }
+
+  test('a plain-text 500 body still surfaces the generic loginError', async () => {
+    await driveLoginWithSessionResponse(textResponse(500, 'Internal Server Error'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('login').getAttribute('data-error')).toBe(
+        "We couldn't finish signing you in (HTTP 500). Please try again.",
+      );
+    });
+  });
+
+  test('a JSON {error} body surfaces the server-provided message', async () => {
+    await driveLoginWithSessionResponse(userResponse(403, { error: 'This account has been disabled.' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('login').getAttribute('data-error')).toBe('This account has been disabled.');
+    });
+  });
+
+  test('a JSON body with a non-string error field falls back to the generic message', async () => {
+    await driveLoginWithSessionResponse(userResponse(500, { error: { code: 13 } }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('login').getAttribute('data-error')).toBe(
+        "We couldn't finish signing you in (HTTP 500). Please try again.",
+      );
+    });
+  });
+
+  test('a network-level fetch failure (no HTTP status) surfaces a loginError', async () => {
+    // fetch rejecting entirely (offline, DNS failure, CORS) used to escape
+    // maybeLogin and die in authStateChanged's console.error-only catch, so
+    // the user saw nothing.
+    await driveLoginWithSessionResponse(new TypeError('Failed to fetch'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('login').getAttribute('data-error')).toBe(
+        "We couldn't reach the server to finish signing you in. Please check your connection and try again.",
+      );
+    });
   });
 });
 
