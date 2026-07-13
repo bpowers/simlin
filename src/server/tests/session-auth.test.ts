@@ -138,7 +138,7 @@ describe('seshcookie-backed session auth', () => {
     }
   });
 
-  it('a session naming an unknown user does not populate req.user', async () => {
+  it('a session naming an unknown user is unauthenticated and gets its cookie cleared', async () => {
     const app = express();
     app.use(
       seshcookie({
@@ -165,6 +165,17 @@ describe('seshcookie-backed session auth', () => {
       const cookieHeader = Array.isArray(cookies) ? cookies.join('; ') : String(cookies);
       const checkRes = await request(server, 'GET', '/check', { cookie: cookieHeader });
       expect(checkRes.status).toBe(401);
+
+      // The dead cookie must not keep coming back (#930): sessionAuth
+      // empties the stale session, and seshcookie answers an emptied
+      // session (on a request that carried a cookie) with an expiring
+      // Set-Cookie.
+      const cleared = checkRes.headers['set-cookie'];
+      expect(cleared).toBeDefined();
+      const clearing = (Array.isArray(cleared) ? cleared : [String(cleared)]).find(
+        (c) => c.startsWith('test_session=;') && c.includes('Max-Age=0'),
+      );
+      expect(clearing).toBeDefined();
     } finally {
       server.close();
     }

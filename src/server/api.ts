@@ -13,6 +13,7 @@ import { populateExamples } from './new-user';
 import { createFile, createProject, emptyProject } from './project-creation';
 import { renderToPNG } from './render';
 import { createDeleteProjectHandler } from './route-handlers';
+import { setSessionUser } from './session-auth';
 import { Preview as PreviewPb } from './schemas/preview_pb';
 import { Project as ProjectPb } from './schemas/project_pb';
 import { User as UserPb } from './schemas/user_pb';
@@ -81,8 +82,13 @@ export const maybeGetUser = (req: Request, _res: Response): UserPb | undefined =
 export const getUser = (req: Request, res: Response): UserPb => {
   const user = req.user as unknown as UserPb | undefined;
   if (!user) {
+    // Reachable only if authz's public carve-out admits a path whose
+    // handler assumes authentication -- the carve-out pattern in authz.ts
+    // is kept aligned with the router's dispatch to prevent exactly that
+    // -- so this is defense in depth, answering with the same {error}
+    // envelope as the rest of the API.
     logger.warn(`user not found, but passed authz?`);
-    res.status(500).json({});
+    res.status(500).json({ error: 'internal error' });
     throw new Error(`user not found, but passed authz?`);
   }
   return user;
@@ -192,8 +198,11 @@ export const apiRouter = (app: Application): Router => {
   });
 
   api.get('/preview/:username/:projectName', async (req: Request, res: Response): Promise<void> => {
-    let authorUser: UserPb | undefined = getUser(req, res);
-    if (authorUser.getId() !== req.params.username) {
+    const requestUser = getUser(req, res);
+    // avoid doing 2 DB queries to look up the same user, if the
+    // author is the one making this request
+    let authorUser: UserPb | undefined = requestUser;
+    if (requestUser.getId() !== req.params.username) {
       authorUser = await app.db.user.findOne(req.params.username as string);
     }
     if (!authorUser) {
@@ -207,12 +216,7 @@ export const apiRouter = (app: Application): Router => {
     // the username check is skipped if the model exists and is public
     if (!projectModel?.getIsPublic()) {
       // TODO: implement collaborators
-      if (
-        !req.session ||
-        !req.session.passport ||
-        !req.session.passport.user ||
-        authorUser.getId() !== req.session.passport.user.id
-      ) {
+      if (requestUser.getId() !== authorUser.getId()) {
         res.status(401).json({});
         return;
       }
@@ -358,7 +362,9 @@ export const apiRouter = (app: Application): Router => {
       }
     }
 
-    req.session.passport.user.id = userModel.getId();
+    // re-key the session to the user's chosen id (their old temp- record
+    // is gone, so the pre-rename cookie would otherwise go stale)
+    setSessionUser(req, userModel.getId());
 
     const defaultProjectsDir = app.get('defaultProjectsDir') as string;
     // this error shouldn't ever happen, but also shouldn't be fatal

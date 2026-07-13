@@ -4,6 +4,8 @@
 
 import { Request, Response } from 'express';
 
+import { getSessionUserId } from './session-auth';
+
 /**
  * Information about the authenticated user extracted from the session.
  */
@@ -27,32 +29,16 @@ function isUserRecord(obj: unknown): obj is UserRecord {
  * Check if the request has a valid authenticated session.
  * Returns the authenticated user info if present, undefined otherwise.
  *
- * This safely checks all levels of the session object to avoid TypeError
- * when accessing properties on undefined/null objects.
- *
  * Login stores { id: userId } under session.passport.user (see
- * session-auth.ts for why the key keeps its historic name), so we check
- * for that field to confirm the session is authenticated. The full user
- * object (with getId(), getEmail(), etc.) is on req.user, populated by
- * the sessionAuth middleware.
+ * session-auth.ts, which owns that wire shape and reads it here via
+ * getSessionUserId), so we check for that field to confirm the session
+ * is authenticated. The full user object (with getId(), getEmail(),
+ * etc.) is on req.user, populated by the sessionAuth middleware; both
+ * must be present -- a stale session whose user was deleted has the
+ * shape but no req.user, and is treated as unauthenticated.
  */
 export function getAuthenticatedUser(req: Request): AuthenticatedUser | undefined {
-  if (!req.session) {
-    return undefined;
-  }
-
-  const passport = (req.session as Record<string, unknown>).passport;
-  if (!passport || typeof passport !== 'object') {
-    return undefined;
-  }
-
-  const passportUser = (passport as Record<string, unknown>).user;
-  if (!passportUser || typeof passportUser !== 'object') {
-    return undefined;
-  }
-
-  const sessionId = (passportUser as Record<string, unknown>).id;
-  if (typeof sessionId !== 'string') {
+  if (getSessionUserId(req) === undefined) {
     return undefined;
   }
 

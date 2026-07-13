@@ -62,10 +62,24 @@ export function setSessionUser(req: Request, id: string): void {
 }
 
 /**
+ * The authentication predicate for authorization decisions: true only
+ * when sessionAuth() resolved this request's session to a live user
+ * record. The raw session shape is NOT sufficient evidence -- a session
+ * naming a since-deleted user still has valid shape, and treating it as
+ * authenticated turned every API call from a dead cookie into a 500
+ * downstream (issue #930).
+ */
+export function isAuthenticated(req: Request): boolean {
+  return req.user !== undefined && req.user !== null;
+}
+
+/**
  * Middleware that deserializes the session's user id into req.user on
  * every request. A session naming a user that no longer exists is
  * treated as unauthenticated rather than an error, matching the
- * previous passport deserializeUser behavior.
+ * previous passport deserializeUser behavior; the session is emptied so
+ * seshcookie expires the dead cookie instead of it coming back on every
+ * request (issue #930).
  */
 export function sessionAuth<T>(users: UserLookup<T>): RequestHandler {
   return (req: Request, _res: Response, next: NextFunction): void => {
@@ -80,7 +94,8 @@ export function sessionAuth<T>(users: UserLookup<T>): RequestHandler {
         if (user) {
           req.user = user;
         } else {
-          logger.info(`couldn't find user '${id}' in DB`);
+          logger.info(`couldn't find user '${id}' in DB; clearing stale session`);
+          req.session = {};
         }
         next();
       })
