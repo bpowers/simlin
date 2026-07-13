@@ -1593,8 +1593,10 @@ fn mdl_format_roundtrip() {
 // the CLI). Fixtures larger than `MAX_FIXTURE_BYTES` are skipped so a debug
 // build stays within the per-test "few seconds" budget; in practice this skips
 // only `C-LEARN` (1.4 MB). Every other corpus file (the largest re-parseable
-// one is ~195 KB) parses in tens of milliseconds, and the whole walk completes
-// in ~2 s on a debug build.
+// one is ~195 KB) parses in tens of milliseconds. The two ratchets share ONE
+// memoized, rayon-parallel corpus pass (`corpus_outcomes`): their walks were
+// identical up through the second parse, and running the full walk twice
+// serially made these the two slowest tests in the integration binary.
 
 /// Skip fixtures larger than this so the debug-build walk stays within the
 /// per-test time budget. Only `test/xmutil_test_models/C-LEARN` (1.4 MB)
@@ -1787,6 +1789,81 @@ fn collect_mdl_fixtures() -> Vec<String> {
     out
 }
 
+/// Per-fixture classification from the shared parse -> write -> re-parse ->
+/// write pass both ratchets read. The two ratchets' corpus walks were
+/// byte-identical up through the second parse (the idempotence walk strictly
+/// extends the re-parse walk), and each full walk costs seconds on a debug
+/// build -- so the pass runs ONCE, in parallel, and each ratchet projects the
+/// sets it gates on out of the shared outcomes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FixtureOutcome {
+    /// Size cap, unreadable, or the SOURCE does not parse: a source-side /
+    /// external-data issue, not a writer bug -- outside both ratchets.
+    SourceSkipped,
+    /// Source parsed but the writer produced no output or output that fails
+    /// to re-parse: the re-parse ratchet's failure set.
+    ReparseFailed,
+    /// Re-parseable, but the second write differs from the first (or the
+    /// second write errored, which should never happen and must surface).
+    NonIdempotent,
+    /// Re-parseable and a writer fixpoint.
+    Idempotent,
+}
+
+fn classify_fixture(path: &str) -> FixtureOutcome {
+    let file_path = resolve_path(path);
+    let Ok(meta) = fs::metadata(&file_path) else {
+        return FixtureOutcome::SourceSkipped;
+    };
+    if meta.len() > MAX_FIXTURE_BYTES {
+        return FixtureOutcome::SourceSkipped;
+    }
+    let Ok(source) = fs::read_to_string(&file_path) else {
+        return FixtureOutcome::SourceSkipped;
+    };
+    let Ok(project1) = mdl::parse_mdl(&source) else {
+        return FixtureOutcome::SourceSkipped;
+    };
+    // The output "re-parses cleanly" iff the writer produced text AND that
+    // text parses. A writer error (never observed today) counts as a re-parse
+    // failure because no re-parseable output exists.
+    let Ok(write1) = mdl::project_to_mdl(&project1) else {
+        return FixtureOutcome::ReparseFailed;
+    };
+    let Ok(project2) = mdl::parse_mdl(&write1) else {
+        return FixtureOutcome::ReparseFailed;
+    };
+    // Idempotence is only defined over the re-parseable set. Writing an
+    // already-parsed model should never error; treat it as non-idempotence so
+    // it surfaces rather than being swallowed.
+    let Ok(write2) = mdl::project_to_mdl(&project2) else {
+        return FixtureOutcome::NonIdempotent;
+    };
+    if write1 != write2 {
+        FixtureOutcome::NonIdempotent
+    } else {
+        FixtureOutcome::Idempotent
+    }
+}
+
+/// The shared corpus pass, memoized so whichever ratchet runs first pays for
+/// it and the other reads it for free, and parallelized because each
+/// fixture's classification is independent.
+fn corpus_outcomes() -> &'static Vec<(String, FixtureOutcome)> {
+    use rayon::prelude::*;
+    static OUTCOMES: std::sync::OnceLock<Vec<(String, FixtureOutcome)>> =
+        std::sync::OnceLock::new();
+    OUTCOMES.get_or_init(|| {
+        collect_mdl_fixtures()
+            .into_par_iter()
+            .map(|path| {
+                let outcome = classify_fixture(&path);
+                (path, outcome)
+            })
+            .collect()
+    })
+}
+
 /// CORPUS RE-PARSE RATCHET. For every corpus `.mdl` whose SOURCE parses (a
 /// source that does not parse is skipped -- an external-data / GET DIRECT /
 /// missing-CSV issue is not the writer's fault), assert that the writer's
@@ -1802,32 +1879,16 @@ fn corpus_reparse_ratchet() {
     let mut attempted: HashSet<String> = HashSet::new();
     let mut failed: HashSet<String> = HashSet::new();
 
-    for path in collect_mdl_fixtures() {
-        let file_path = resolve_path(&path);
-        let Ok(meta) = fs::metadata(&file_path) else {
-            continue;
-        };
-        if meta.len() > MAX_FIXTURE_BYTES {
-            continue;
-        }
-        let Ok(source) = fs::read_to_string(&file_path) else {
-            continue;
-        };
-        // A source that does not parse is a source-side / external-data issue,
-        // not a writer bug: skip it entirely.
-        let Ok(project) = mdl::parse_mdl(&source) else {
-            continue;
-        };
-        attempted.insert(path.clone());
-
-        // The output "re-parses cleanly" iff the writer produced text AND that
-        // text parses. A writer error (never observed today) counts as a
-        // failure because no re-parseable output exists.
-        let reparses = mdl::project_to_mdl(&project)
-            .ok()
-            .is_some_and(|output| mdl::parse_mdl(&output).is_ok());
-        if !reparses {
-            failed.insert(path);
+    for (path, outcome) in corpus_outcomes() {
+        match outcome {
+            FixtureOutcome::SourceSkipped => {}
+            FixtureOutcome::ReparseFailed => {
+                attempted.insert(path.clone());
+                failed.insert(path.clone());
+            }
+            FixtureOutcome::NonIdempotent | FixtureOutcome::Idempotent => {
+                attempted.insert(path.clone());
+            }
         }
     }
 
@@ -1891,42 +1952,21 @@ fn corpus_reparse_ratchet() {
 #[test]
 fn writer_output_idempotence_ratchet() {
     // Re-parseable fixtures and, of those, the ones whose writer output is not
-    // a fixpoint.
+    // a fixpoint. A fixture whose first output does not parse is the re-parse
+    // ratchet's job and lands in neither set.
     let mut reparseable: HashSet<String> = HashSet::new();
     let mut non_idempotent: HashSet<String> = HashSet::new();
 
-    for path in collect_mdl_fixtures() {
-        let file_path = resolve_path(&path);
-        let Ok(meta) = fs::metadata(&file_path) else {
-            continue;
-        };
-        if meta.len() > MAX_FIXTURE_BYTES {
-            continue;
-        }
-        let Ok(source) = fs::read_to_string(&file_path) else {
-            continue;
-        };
-        let Ok(project1) = mdl::parse_mdl(&source) else {
-            continue;
-        };
-        let Ok(write1) = mdl::project_to_mdl(&project1) else {
-            continue;
-        };
-        // Idempotence is only defined over the re-parseable set: a fixture
-        // whose first output does not parse is the re-parse ratchet's job.
-        let Ok(project2) = mdl::parse_mdl(&write1) else {
-            continue;
-        };
-        reparseable.insert(path.clone());
-
-        let Ok(write2) = mdl::project_to_mdl(&project2) else {
-            // Writing an already-parsed model should never error; treat it as
-            // a non-idempotence so it surfaces rather than being swallowed.
-            non_idempotent.insert(path);
-            continue;
-        };
-        if write1 != write2 {
-            non_idempotent.insert(path);
+    for (path, outcome) in corpus_outcomes() {
+        match outcome {
+            FixtureOutcome::SourceSkipped | FixtureOutcome::ReparseFailed => {}
+            FixtureOutcome::NonIdempotent => {
+                reparseable.insert(path.clone());
+                non_idempotent.insert(path.clone());
+            }
+            FixtureOutcome::Idempotent => {
+                reparseable.insert(path.clone());
+            }
         }
     }
 

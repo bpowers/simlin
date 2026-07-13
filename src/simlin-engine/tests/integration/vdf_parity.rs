@@ -8,10 +8,11 @@
 //!
 //! The two implementations decode the same undocumented format and were
 //! brought into behavioral agreement; nothing else keeps them aligned going
-//! forward. This test walks every run-file VDF (0x52 simulation results and
-//! any future 0x53 sensitivity run) under `test/`, invokes
-//! `python3 tools/vdf_xray.py --extract-json` ONCE for the whole corpus (one
-//! interpreter launch amortizes startup), and requires:
+//! forward. One test per corpus root walks every run-file VDF (0x52
+//! simulation results and any future 0x53 sensitivity run) under that root,
+//! invokes `python3 tools/vdf_xray.py --extract-json` ONCE per root (one
+//! interpreter launch amortizes startup, and the per-root tests run
+//! concurrently under libtest), and requires:
 //!
 //! - identical result-column NAME SETS (after canonicalizing the Python
 //!   display names with the same `Ident` rules the Rust emitter uses), in
@@ -29,6 +30,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rayon::prelude::*;
 use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::vdf::{VdfFile, VdfKind, probe_vdf_kind};
 
@@ -145,33 +147,63 @@ fn python_extract_json(paths: &[PathBuf]) -> serde_json::Map<String, serde_json:
     }
 }
 
-#[test]
-fn parity_python_and_rust_vdf_extraction_agree() {
+/// The run-file fixtures under one corpus root, sorted. Empty when the root
+/// does not exist (the third_party corpora are an optional checkout).
+///
+/// Every run-file KIND participates: 0x52 simulation results and 0x53
+/// sensitivity runs (both readers parse 0x53 with the 0x52 rules, so a future
+/// 0x53 fixture under test/ must not be silently excluded -- today there are
+/// none; they live in third_party, see vdf_sensitivity.rs). Dataset (0x41)
+/// files use a different container and are skipped.
+fn run_file_fixtures_under(root: &str) -> Vec<PathBuf> {
     let mut fixtures: Vec<PathBuf> = Vec::new();
-    for root in parity_corpus_roots() {
-        let root_path = Path::new(root);
-        if !root_path.exists() {
+    let root_path = Path::new(root);
+    if !root_path.exists() {
+        return fixtures;
+    }
+    for path in collect_vdf_files(root_path) {
+        let Ok(data) = std::fs::read(&path) else {
             continue;
-        }
-        for path in collect_vdf_files(root_path) {
-            let Ok(data) = std::fs::read(&path) else {
-                continue;
-            };
-            // Every run-file KIND participates: 0x52 simulation results and
-            // 0x53 sensitivity runs (both readers parse 0x53 with the 0x52
-            // rules, so a future 0x53 fixture under test/ must not be
-            // silently excluded -- today there are none; they live in
-            // third_party, see vdf_sensitivity.rs). Dataset (0x41) files use
-            // a different container and are skipped.
-            if matches!(
-                probe_vdf_kind(&data),
-                Some(VdfKind::SimulationResults | VdfKind::SensitivityRun)
-            ) {
-                fixtures.push(path);
-            }
+        };
+        if matches!(
+            probe_vdf_kind(&data),
+            Some(VdfKind::SimulationResults | VdfKind::SensitivityRun)
+        ) {
+            fixtures.push(path);
         }
     }
     fixtures.sort();
+    fixtures
+}
+
+/// Extract every fixture with the Python inspector (one interpreter launch
+/// per corpus), then verify each fixture's Rust extraction against it.
+///
+/// The per-fixture verification runs in parallel: each fixture's Rust parse +
+/// bitwise compare is independent, and a panic in any rayon worker still
+/// fails the test.
+fn assert_corpus_parity(fixtures: &[PathBuf]) {
+    if fixtures.is_empty() {
+        // Absent optional checkout: nothing to extract, and python3 would
+        // reject an empty path list.
+        return;
+    }
+    let payload = python_extract_json(fixtures);
+    fixtures
+        .par_iter()
+        .for_each(|path| verify_fixture_against_payload(path, &payload));
+}
+
+// One `#[test]` per corpus root rather than a single all-roots test: the
+// Python extraction is the dominant cost (its pure-Python VDF decode takes
+// several seconds for the combined corpus) and it is serial within one
+// invocation, so splitting by root lets libtest run the three extractions
+// concurrently. Coverage is unchanged -- the union of the three roots is
+// exactly the old combined corpus.
+
+#[test]
+fn parity_test_corpus_agrees() {
+    let fixtures = run_file_fixtures_under(parity_corpus_roots()[0]);
 
     assert!(
         fixtures.len() >= 40,
@@ -192,9 +224,34 @@ fn parity_python_and_rust_vdf_extraction_agree() {
         );
     }
 
-    let payload = python_extract_json(&fixtures);
+    assert_corpus_parity(&fixtures);
+}
 
-    for path in &fixtures {
+#[test]
+fn parity_zambaqui_corpus_agrees() {
+    // Optional checkout (existence-continue convention, see
+    // `parity_corpus_roots`): an absent third_party tree is a pass, an empty
+    // PRESENT tree would be caught by the walk returning no fixtures only if
+    // the checkout itself vanished -- the `test/` floor above is the
+    // anti-vacuity gate for the always-present corpus.
+    let fixtures = run_file_fixtures_under(parity_corpus_roots()[1]);
+    assert_corpus_parity(&fixtures);
+}
+
+#[test]
+fn parity_spring_2008_corpus_agrees() {
+    let fixtures = run_file_fixtures_under(parity_corpus_roots()[2]);
+    assert_corpus_parity(&fixtures);
+}
+
+/// Verify one fixture's Rust extraction against its `--extract-json` entry:
+/// name-set agreement in both directions, then bitwise value agreement for
+/// every shared column at every step.
+fn verify_fixture_against_payload(
+    path: &Path,
+    payload: &serde_json::Map<String, serde_json::Value>,
+) {
+    {
         let path_key = path.to_string_lossy();
         let entries = payload
             .get(path_key.as_ref())

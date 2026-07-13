@@ -371,6 +371,18 @@ proptest! {
 
 }
 
+/// The compiled schema validator, built once per process: the schema is a
+/// deterministic function of the type definitions, and `validator_for` is
+/// expensive enough that rebuilding it inside the proptest closure (256
+/// cases) dominated the test's runtime.
+#[cfg(feature = "schema")]
+static SCHEMA_VALIDATOR: std::sync::LazyLock<jsonschema::Validator> =
+    std::sync::LazyLock::new(|| {
+        let schema = generate_schema();
+        let schema_value = serde_json::to_value(&schema).unwrap();
+        jsonschema::validator_for(&schema_value).expect("schema should be valid")
+    });
+
 #[cfg(feature = "schema")]
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
@@ -380,12 +392,8 @@ proptest! {
     #[test]
     fn generated_json_validates_against_schema(model in sdai_model_strategy()) {
         let json_value = serde_json::to_value(&model).unwrap();
-        let schema = generate_schema();
-        let schema_value = serde_json::to_value(&schema).unwrap();
-        let validator = jsonschema::validator_for(&schema_value)
-            .expect("schema should be valid");
         prop_assert!(
-            validator.is_valid(&json_value),
+            SCHEMA_VALIDATOR.is_valid(&json_value),
             "Generated JSON failed schema validation"
         );
     }

@@ -26,3 +26,20 @@ strip = true
 [profile.bench]
 debug = true
 strip = false
+
+# Optimize a few hot DEPENDENCIES in dev/test builds. Workspace crates stay at
+# opt-level 0 (fast incremental rebuilds); these are external crates that
+# rarely recompile but sit on test-suite critical paths, where debug-build
+# slowdown is 10-30x:
+#   - serde_json: the VDF parity harness decodes a multi-megabyte
+#     --extract-json payload (with float_roundtrip) on every `cargo test`.
+#   - wasm-interpreter/checked: every wasmgen parity test executes an emitted
+#     blob under this pure-Rust interpreter.
+[profile.dev.package.serde_json]
+opt-level = 3
+
+[profile.dev.package.wasm-interpreter]
+opt-level = 3
+
+[profile.dev.package.checked]
+opt-level = 3

@@ -4340,76 +4340,103 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_readers_are_total_on_truncated_and_mutated_input() {
-        // Malformed input must produce Err (or a degraded-but-valid Results),
-        // never panic: libsimlin release builds compile with panic = "abort",
-        // so a panic in this code aborts the whole host process (e.g. a
-        // Python interpreter importing a corrupt VDF). This sweep is the real
-        // enforcement of that contract -- the FFI-level catch_unwind is only
-        // defense-in-depth for unwind builds.
-        let fixtures = [
-            "../../test/bobby/vdf/water/Current.vdf",
-            "../../test/bobby/vdf/subscripts/subscripts.vdf",
-            "../../test/bobby/vdf/econ/data.vdf",
-            // Larger fixtures cover the lookup-record, exogenous-data-block,
-            // and stale-name-table paths.
-            "../../test/bobby/vdf/econ/risk2.vdf",
-            "../../test/bobby/vdf/lookups/lookup_ex.vdf",
-        ];
-        for path in fixtures {
-            let data = std::fs::read(path).unwrap();
+    /// Sweep one fixture through truncations and byte corruptions, asserting
+    /// the readers return instead of panicking. Malformed input must produce
+    /// Err (or a degraded-but-valid Results), never panic: libsimlin release
+    /// builds compile with panic = "abort", so a panic in this code aborts
+    /// the whole host process (e.g. a Python interpreter importing a corrupt
+    /// VDF). This sweep is the real enforcement of that contract -- the
+    /// FFI-level catch_unwind is only defense-in-depth for unwind builds.
+    ///
+    /// One `#[test]` per fixture (below) rather than one loop over all five:
+    /// the combined sweep was the single longest test in the crate's unit
+    /// binary, and a serial mega-test sets the binary's parallel wall-clock
+    /// floor. Splitting lets libtest run the fixtures concurrently.
+    fn sweep_readers_total_on(path: &str) {
+        let data = std::fs::read(path).unwrap();
 
-            // Every truncation length for small files; a coarser stride
-            // (plus the final 128 lengths) for larger ones to stay inside
-            // the test time budget.
-            let stride = data.len().div_ceil(2_048);
-            let mut lengths: Vec<usize> = (0..data.len()).step_by(stride).collect();
-            lengths.extend(data.len().saturating_sub(128)..=data.len());
-            for len in lengths {
-                exercise_vdf_readers(&data[..len]);
-            }
-
-            // Deterministic single-byte corruptions across the whole file,
-            // plus a burst of corruptions in the header region (where offsets
-            // and counts live).
-            let mut rng: u64 = 0x9e3779b97f4a7c15;
-            let mut next = move || {
-                rng ^= rng << 13;
-                rng ^= rng >> 7;
-                rng ^= rng << 17;
-                rng
-            };
-            // Larger fixtures cost more per parse, so scale the corruption
-            // rounds down to keep the whole sweep inside the time budget.
-            let rounds = if data.len() > 16_384 { 64 } else { 512 };
-            for _ in 0..rounds {
-                let mut mutated = data.clone();
-                let pos = (next() as usize) % mutated.len();
-                mutated[pos] ^= (next() as u8) | 1;
-                exercise_vdf_readers(&mutated);
-            }
-            for _ in 0..rounds {
-                let mut mutated = data.clone();
-                let pos = (next() as usize) % FILE_HEADER_SIZE.min(mutated.len());
-                mutated[pos] = next() as u8;
-                exercise_vdf_readers(&mutated);
-            }
-
-            // Deterministic worst-case pokes of the grid-count header words
-            // (0x74 data grid, 0x78 saved grid, 0x7C block grid): setting a
-            // high byte to 0xFF requests a multi-gigabyte grid. The random
-            // rounds above cannot reliably prove this class safe -- on Linux,
-            // overcommit lets a lazily-zeroed oversized allocation "succeed"
-            // locally while aborting in constrained environments -- so the
-            // readers must reject these structurally (count bounds), not
-            // survive them by allocator luck.
-            for pos in 0x74..0x80usize {
-                let mut mutated = data.clone();
-                mutated[pos] = 0xFF;
-                exercise_vdf_readers(&mutated);
-            }
+        // Every truncation length for small files; a coarser stride
+        // (plus the final 128 lengths) for larger ones to stay inside
+        // the test time budget. The point count ALSO scales down with
+        // size (mirroring the corruption `rounds` scaling below): each
+        // truncated parse costs O(len), so a fixed 2048 points made a
+        // single 60KB fixture parse ~130MB and dominate the unit
+        // binary's wall clock.
+        let points = if data.len() > 16_384 { 512 } else { 2_048 };
+        let stride = data.len().div_ceil(points);
+        let mut lengths: Vec<usize> = (0..data.len()).step_by(stride).collect();
+        lengths.extend(data.len().saturating_sub(128)..=data.len());
+        for len in lengths {
+            exercise_vdf_readers(&data[..len]);
         }
+
+        // Deterministic single-byte corruptions across the whole file,
+        // plus a burst of corruptions in the header region (where offsets
+        // and counts live).
+        let mut rng: u64 = 0x9e3779b97f4a7c15;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        // Larger fixtures cost more per parse, so scale the corruption
+        // rounds down to keep the whole sweep inside the time budget.
+        let rounds = if data.len() > 16_384 { 64 } else { 512 };
+        for _ in 0..rounds {
+            let mut mutated = data.clone();
+            let pos = (next() as usize) % mutated.len();
+            mutated[pos] ^= (next() as u8) | 1;
+            exercise_vdf_readers(&mutated);
+        }
+        for _ in 0..rounds {
+            let mut mutated = data.clone();
+            let pos = (next() as usize) % FILE_HEADER_SIZE.min(mutated.len());
+            mutated[pos] = next() as u8;
+            exercise_vdf_readers(&mutated);
+        }
+
+        // Deterministic worst-case pokes of the grid-count header words
+        // (0x74 data grid, 0x78 saved grid, 0x7C block grid): setting a
+        // high byte to 0xFF requests a multi-gigabyte grid. The random
+        // rounds above cannot reliably prove this class safe -- on Linux,
+        // overcommit lets a lazily-zeroed oversized allocation "succeed"
+        // locally while aborting in constrained environments -- so the
+        // readers must reject these structurally (count bounds), not
+        // survive them by allocator luck.
+        for pos in 0x74..0x80usize {
+            let mut mutated = data.clone();
+            mutated[pos] = 0xFF;
+            exercise_vdf_readers(&mutated);
+        }
+    }
+
+    #[test]
+    fn test_readers_total_on_mutated_water_current() {
+        sweep_readers_total_on("../../test/bobby/vdf/water/Current.vdf");
+    }
+
+    #[test]
+    fn test_readers_total_on_mutated_subscripts() {
+        sweep_readers_total_on("../../test/bobby/vdf/subscripts/subscripts.vdf");
+    }
+
+    #[test]
+    fn test_readers_total_on_mutated_econ_data() {
+        sweep_readers_total_on("../../test/bobby/vdf/econ/data.vdf");
+    }
+
+    // The larger fixtures cover the lookup-record, exogenous-data-block,
+    // and stale-name-table paths.
+
+    #[test]
+    fn test_readers_total_on_mutated_econ_risk2() {
+        sweep_readers_total_on("../../test/bobby/vdf/econ/risk2.vdf");
+    }
+
+    #[test]
+    fn test_readers_total_on_mutated_lookup_ex() {
+        sweep_readers_total_on("../../test/bobby/vdf/lookups/lookup_ex.vdf");
     }
 
     /// A corrupt run file whose header time-point count (0x78) AND Time

@@ -37,6 +37,22 @@ cargo test --workspace 2>&1 | grep 'finished in'
 
 Anything over a few seconds is worth looking at.
 
+For PER-TEST durations, run the compiled test binary directly with libtest's
+(nightly-gated, but stable-toolchain-accessible) report-time flag:
+
+```bash
+# run from the crate directory (src/simlin-engine), NOT the repo root --
+# several packages have a tests/integration/main.rs with the same file name,
+# and fixture paths resolve relative to the crate
+RUSTC_BOOTSTRAP=1 ../../target/debug/deps/<binary> -Z unstable-options --report-time \
+  2>&1 | grep 'ok <' | sort -t'<' -k2 -rn | head -20
+```
+
+A binary's parallel wall clock is `max(longest single test, total/threads)`, so
+one serial mega-test sets the floor no matter how many cores are available.
+Prefer one `#[test]` per fixture (or a rayon `par_iter` inside a corpus test)
+over a single test that loops a fixture list serially.
+
 #### Testing threshold gates without building giant fixtures
 
 If you have a production gate like `MAX_FOO = 10_000`, do NOT test it by constructing a fixture with 10,001 items -- that ties test runtime to the production constant and makes every test run pay the full gate cost. PR #461 was reverted for exactly this: a test built 10,001 disjoint 3-cycles (~30k variables) so that `model_ltm_variables` would trip `MAX_LTM_TOTAL_CIRCUITS`, and the binary took 44 minutes.
