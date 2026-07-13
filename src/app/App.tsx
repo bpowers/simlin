@@ -395,6 +395,13 @@ export function InnerApp(): React.JSX.Element {
         projectName={projectName}
         baseURL={getBaseURL()}
         readOnlyMode={readOnlyMode}
+        // The "auth improved" signal (issue #933): this route renders without
+        // waiting on the auth gate (public projects must open anonymously), so
+        // a deep link to a PRIVATE project can fire its first load before
+        // maybeLogin re-mints the server session. maybeLogin's success path
+        // commits state.user, which changes this prop and tells the editor to
+        // retry a load that failed auth-shaped.
+        authenticatedUserId={user?.id}
         // Module creation is still maturing: keep it in development builds but
         // hide it in production. RSBuild inlines NODE_ENV and tree-shakes the
         // unused branch, so production bundles ship with the tool disabled.

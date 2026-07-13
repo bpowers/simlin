@@ -5,19 +5,12 @@
 import * as React from 'react';
 
 import { baseURL } from '@simlin/core/common';
-import { first } from '@simlin/core/collections';
 
 import { Editor, ProtobufProjectData } from './Editor';
 import Button from './components/Button';
 import CircularProgress from './components/CircularProgress';
 import { ErrorBoundary } from './ErrorBoundary';
-import {
-  HostedWebEditorError,
-  ProjectEndpoint,
-  SaveErrorReason,
-  loadProject,
-  saveProject,
-} from './hosted-web-editor-core';
+import { LoadErrorReason, ProjectEndpoint, SaveErrorReason, loadProject, saveProject } from './hosted-web-editor-core';
 // Imported as a namespace so the delete-flow navigation and DELETE go through
 // `core.*`, which a test can intercept with a spy (jsdom's
 // window.location.assign is itself non-spyable).
@@ -34,10 +27,21 @@ interface HostedWebEditorProps {
   // Forwarded to Editor: gates the module-creation tool. The app supplies this
   // from its build environment so production hides the still-maturing feature.
   moduleCreationEnabled?: boolean;
+  // The host's signed-in user id (undefined while signed out or still unknown).
+  // The server owns authorization -- this is never consulted for access
+  // decisions; a CHANGE in its value is the signal that a load which failed
+  // with an auth-shaped status may now succeed. On a deep link to a private
+  // project the first GET can race the host's session restoration (Firebase
+  // identity -> POST /session) and 401 even for the owner; when the host later
+  // commits the signed-in user this prop changes and the shell retries the load
+  // -- at most once per identity change, so a genuinely-forbidden project
+  // settles on the error placeholder instead of looping (issue #933). Embeds
+  // and other anonymous hosts simply leave it undefined.
+  authenticatedUserId?: string;
 }
 
 // A save failure the loaded editor must keep visible until a later save
-// succeeds (issue #928): serviceErrors only render in the pre-load placeholder,
+// succeeds (issue #928): load failures only render in the pre-load placeholder,
 // so routing save failures there made them invisible exactly when the user had
 // work to lose.
 interface SaveFailure {
@@ -45,10 +49,18 @@ interface SaveFailure {
   message: string;
 }
 
-export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement {
-  const { username, projectName, embedded, readOnlyMode, moduleCreationEnabled } = props;
+// A load failure the pre-load placeholder renders. The reason is retained so
+// the auth-recovery retry (issue #933) can distinguish auth-shaped failures
+// from genuinely-missing projects.
+interface LoadFailure {
+  reason: LoadErrorReason;
+  message: string;
+}
 
-  const [serviceErrors, setServiceErrors] = React.useState<readonly Error[]>([]);
+export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement {
+  const { username, projectName, embedded, readOnlyMode, moduleCreationEnabled, authenticatedUserId } = props;
+
+  const [loadFailure, setLoadFailure] = React.useState<LoadFailure | undefined>(undefined);
   const [projectBinary, setProjectBinary] = React.useState<Readonly<Uint8Array> | undefined>(undefined);
   const [projectVersion, setProjectVersion] = React.useState<number>(-1);
   const [saveFailure, setSaveFailure] = React.useState<SaveFailure | undefined>(undefined);
@@ -74,15 +86,55 @@ export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement
     projectName,
   });
 
-  const appendServiceError = (msg: string): void => {
-    setServiceErrors((prev) => [...prev, new HostedWebEditorError(msg)]);
-  };
-
   // Mount guard for post-await setState, mirroring the class's `unmounted` flag.
   // Cleared in the effect cleanup so a load that already left the macrotask queue
   // (the timer drained before unmount) short-circuits instead of setState-ing on
   // an unmounted tree.
   const mounted = React.useRef(false);
+
+  // Refreshed every render so the load continuation (an escaped async callback)
+  // compares against the CURRENT host identity, not the one captured when the
+  // attempt was issued -- the session can be re-minted while a load is in flight.
+  const latestAuth = React.useRef(authenticatedUserId);
+  latestAuth.current = authenticatedUserId;
+
+  // The identity the most recent load attempt was ISSUED under. Comparing it
+  // with latestAuth is what bounds the auth recovery: a failed attempt only
+  // re-fires when the identity has changed since it was issued, so each
+  // identity change retries at most once and a genuinely-forbidden project
+  // settles instead of looping.
+  const loadAttemptAuth = React.useRef(authenticatedUserId);
+
+  // Serializes load attempts: an identity change that lands while an attempt is
+  // in flight must not race a second request -- the in-flight attempt's
+  // completion re-checks the identity and owns the retry decision.
+  const loadInFlight = React.useRef(false);
+
+  // Issue one load attempt. On an auth-shaped failure, retry immediately if the
+  // identity changed while the attempt was in flight (skipping the failure
+  // commit keeps the loading placeholder up instead of flashing the error box);
+  // otherwise commit the failure and leave any later retry to the
+  // identity-change effect below.
+  const runLoad = async (): Promise<void> => {
+    loadAttemptAuth.current = latestAuth.current;
+    loadInFlight.current = true;
+    const result = await loadProject(makeEndpoint());
+    loadInFlight.current = false;
+    if (!mounted.current) {
+      return;
+    }
+    if (result.kind === 'loaded') {
+      setProjectBinary(result.projectBinary);
+      setProjectVersion(result.projectVersion);
+      setLoadFailure(undefined);
+      return;
+    }
+    if (result.reason === 'unauthorized' && loadAttemptAuth.current !== latestAuth.current) {
+      void runLoad();
+      return;
+    }
+    setLoadFailure({ reason: result.reason, message: result.message });
+  };
 
   // Kick off the project load, deferred a macrotask exactly as the class's
   // componentDidMount setTimeout(0) was. The deferral is what makes the request
@@ -96,18 +148,7 @@ export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement
     mounted.current = true;
 
     const timer = setTimeout(() => {
-      void (async () => {
-        const result = await loadProject(makeEndpoint());
-        if (!mounted.current) {
-          return;
-        }
-        if (result.kind === 'loaded') {
-          setProjectBinary(result.projectBinary);
-          setProjectVersion(result.projectVersion);
-        } else {
-          appendServiceError(result.message);
-        }
-      })();
+      void runLoad();
     });
 
     return () => {
@@ -118,6 +159,44 @@ export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement
     // baseURL are captured via makeEndpoint at call time; a host that swaps them
     // remounts via the App route, not an in-place rerender.
   }, []);
+
+  // Retry a previously-unauthorized load when the host's auth identity changes
+  // (issue #933). Mount safety -- including StrictMode's doubled mount-effect
+  // runs -- comes from the unauthorized-failure guard below, not from
+  // change-gating: when any mount pass of this effect runs, the initial load is
+  // still a scheduled macrotask (or was cancelled by the StrictMode cleanup),
+  // so `loadFailure` is necessarily undefined and the pass is a no-op. The
+  // retry LOOP bound likewise lives in runLoad's completion stamp check
+  // (attempt identity vs current identity), not here. The prev-value ref and
+  // the loadAttemptAuth equality check below are defensive redundancy on top of
+  // those mechanisms, kept per the repo's "fire on change, not on mount" effect
+  // pattern (docs/dev/typescript.md).
+  const prevAuth = React.useRef(authenticatedUserId);
+  React.useEffect(() => {
+    if (prevAuth.current === authenticatedUserId) {
+      return;
+    }
+    prevAuth.current = authenticatedUserId;
+    if (projectBinary !== undefined) {
+      // Already loaded; an identity change must not disturb the open editor.
+      return;
+    }
+    if (loadInFlight.current) {
+      // The in-flight attempt's completion re-checks the identity itself.
+      return;
+    }
+    if (loadFailure?.reason !== 'unauthorized') {
+      // Nothing has failed (initial load still pending or not yet issued) or
+      // the failure is not auth-shaped (e.g. 404) -- signing in cannot fix
+      // those. This is also what makes the mount runs of this effect no-ops.
+      return;
+    }
+    if (loadAttemptAuth.current === authenticatedUserId) {
+      // Redundant with runLoad's stamp check; kept as defense in depth.
+      return;
+    }
+    void runLoad();
+  }, [authenticatedUserId]);
 
   const handleSave = async (project: ProtobufProjectData, currVersion: number): Promise<number | undefined> => {
     if (readOnlyMode) return undefined;
@@ -148,7 +227,7 @@ export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement
 
     // deleteProject throws on failure so the in-editor confirmation dialog (which
     // stays open for a retry) can surface the message; once a project loads,
-    // serviceErrors are no longer rendered. On success it returns the home URL.
+    // loadFailure is no longer rendered. On success it returns the home URL.
     const homeUrl = await core.deleteProject(makeEndpoint());
     // Full navigation back to the project list so it refetches without the
     // just-deleted project. Routed through the core namespace so it is mockable.
@@ -163,12 +242,12 @@ export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement
     // mirroring the success branch, which also drops the full-viewport `.bg`
     // when embedded.
     const placeholderClass = embedded ? styles.centerEmbedded : styles.center;
-    if (serviceErrors.length > 0) {
+    if (loadFailure) {
       return (
         <div className={placeholderClass}>
           <div className={styles.errorBox} role="alert">
             <p className={styles.errorTitle}>We couldn&apos;t open this model</p>
-            <p className={styles.errorMessage}>{first(serviceErrors).message}</p>
+            <p className={styles.errorMessage}>{loadFailure.message}</p>
             <Button variant="contained" color="primary" onClick={() => window.location.reload()}>
               Reload
             </Button>

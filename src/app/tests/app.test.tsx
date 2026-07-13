@@ -36,11 +36,24 @@ rs.mock('@firebase/auth', () => ({
   signOut: rs.fn(async () => {}),
 }));
 
-// Stub HostedWebEditor: pulls in Editor.tsx + tons of CSS modules.
+// Stub HostedWebEditor: pulls in Editor.tsx + tons of CSS modules. It surfaces
+// the auth-derived props as data attributes so tests can observe the app's
+// "auth improved" signal (issue #933: authenticatedUserId is what tells a
+// deep-linked editor to retry a load that failed before the session existed)
+// and the owner's readOnlyMode flip through the DOM.
 rs.mock('@simlin/diagram/HostedWebEditor', () => {
   const React = require('react');
   return {
-    HostedWebEditor: () => React.createElement('div', { 'data-testid': 'hosted-editor' }, 'Editor'),
+    HostedWebEditor: (props: { authenticatedUserId?: string; readOnlyMode?: boolean }) =>
+      React.createElement(
+        'div',
+        {
+          'data-testid': 'hosted-editor',
+          'data-auth-user': props.authenticatedUserId ?? '',
+          'data-read-only': String(!!props.readOnlyMode),
+        },
+        'Editor',
+      ),
   };
 });
 
@@ -502,6 +515,50 @@ describe('maybeLogin /session failure surfacing (#927)', () => {
         "We couldn't reach the server to finish signing you in. Please check your connection and try again.",
       );
     });
+  });
+});
+
+describe('deep-link auth recovery (#933)', () => {
+  afterEach(() => {
+    setFetchRoutes({});
+  });
+
+  test('renders the editor route without waiting for auth, then surfaces the signed-in identity as a prop', async () => {
+    // /api/user would answer 200, but the userInfo singleton still caches the
+    // signed-out result from resetUserInfoCache -- exactly the deep-link
+    // situation: the server session does not exist yet when the route mounts,
+    // and only maybeLogin's success path (POST /session -> invalidate ->
+    // getUserInfo) later commits the user.
+    setFetchRoutes({ user: { status: 200, body: { id: 'alice' } } });
+    renderApp('/alice/widgets');
+
+    // The two-segment project path bypasses the auth gate: the editor mounts
+    // immediately -- authUnknown is still true here (the deferred getUserInfo
+    // has not run) -- anonymous and read-only.
+    const editor = screen.getByTestId('hosted-editor');
+    expect(editor.getAttribute('data-auth-user')).toBe('');
+    expect(editor.getAttribute('data-read-only')).toBe('true');
+    expect(screen.queryByTestId('login')).toBeNull();
+
+    // authUnknown resolves to "no user" (cached signed-out /api/user): the
+    // editor stays mounted and anonymous -- public projects never wait on auth.
+    await act(async () => {
+      await flushMacrotasks();
+    });
+    expect(screen.getByTestId('hosted-editor').getAttribute('data-auth-user')).toBe('');
+
+    // Firebase restores the client identity; maybeLogin re-mints the server
+    // session and commits the user. The editor route must see the new identity
+    // as a prop change -- HostedWebEditor's signal to retry a failed load.
+    await act(async () => {
+      await latestAuthListener()(makeFirebaseUser());
+      await flushMacrotasks();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('hosted-editor').getAttribute('data-auth-user')).toBe('alice');
+    });
+    // The owner also regains edit rights in the same commit.
+    expect(screen.getByTestId('hosted-editor').getAttribute('data-read-only')).toBe('false');
   });
 });
 

@@ -15,19 +15,26 @@ import { fromUint8Array, toUint8Array } from '@simlin/core/base64';
 
 import { ProtobufProjectData } from './Editor';
 
-// Extends the built-in Error so instances carry a stack trace and satisfy
-// `instanceof Error`. The explicit name assignment survives minification.
-export class HostedWebEditorError extends Error {
-  constructor(msg: string) {
-    super(msg);
-    this.name = 'HostedWebEditorError';
-  }
-}
-
 export interface ProjectEndpoint {
   base: string;
   username: string;
   projectName: string;
+}
+
+// Failure classification for loadProject(), mirroring saveProject's. It must
+// match what the server actually answers (src/server/api.ts, GET
+// /projects/:username/:projectName): a private project fetched without a live
+// owner session is a 401 -- the deep-link-before-session-restore race of issue
+// #933, which the shell recovers from by retrying when its host's auth identity
+// improves -- while a nonexistent user or file is a 404, which no amount of
+// signing in can fix. 403 is grouped with 401 for symmetry with SaveErrorReason.
+export type LoadErrorReason = 'unauthorized' | 'other';
+
+function classifyLoadStatus(status: number): LoadErrorReason {
+  if (status === 401 || status === 403) {
+    return 'unauthorized';
+  }
+  return 'other';
 }
 
 // The result of loadProject(). loadProject never rejects: a network error, a
@@ -36,7 +43,7 @@ export interface ProjectEndpoint {
 // to leave the editor permanently blank).
 export type LoadResult =
   | { kind: 'loaded'; projectBinary: Readonly<Uint8Array>; projectVersion: number }
-  | { kind: 'error'; message: string };
+  | { kind: 'error'; reason: LoadErrorReason; message: string };
 
 export function projectApiPath(endpoint: ProjectEndpoint): string {
   return `${endpoint.base}/api/projects/${endpoint.username}/${endpoint.projectName}`;
@@ -47,19 +54,19 @@ export async function loadProject(endpoint: ProjectEndpoint): Promise<LoadResult
   try {
     const response = await fetch(apiPath);
     if (response.status >= 400) {
-      return { kind: 'error', message: `unable to load ${apiPath}` };
+      return { kind: 'error', reason: classifyLoadStatus(response.status), message: `unable to load ${apiPath}` };
     }
 
     const projectResponse = (await response.json()) as { pb?: unknown; version?: unknown };
     if (typeof projectResponse?.pb !== 'string' || typeof projectResponse?.version !== 'number') {
-      return { kind: 'error', message: `malformed project response from ${apiPath}` };
+      return { kind: 'error', reason: 'other', message: `malformed project response from ${apiPath}` };
     }
 
     const projectBinary = toUint8Array(projectResponse.pb);
     return { kind: 'loaded', projectBinary, projectVersion: projectResponse.version };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return { kind: 'error', message: `unable to load ${apiPath}: ${msg}` };
+    return { kind: 'error', reason: 'other', message: `unable to load ${apiPath}: ${msg}` };
   }
 }
 
