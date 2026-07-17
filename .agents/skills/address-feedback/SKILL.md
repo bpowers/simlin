@@ -67,7 +67,7 @@ Then run the review command and collect its output:
 
 **Codex review** -- run with a 30-minute timeout:
 ```bash
-codex -c 'model="gpt-5.3-codex"' -c 'model_reasoning_effort="xhigh"' exec review --json --base origin/main | tee /tmp/codex.stdout | jq -r 'select(.type=="item.completed" and .item.type=="agent_message") | .item.text'
+codex -c 'model="gpt-5.6-sol"' -c 'model_reasoning_effort="xhigh"' exec review --json --base origin/main | tee /tmp/codex.stdout | jq -r 'select(.type=="item.completed" and .item.type=="agent_message") | .item.text'
 ```
 
 ### Step 2: Evaluate feedback
