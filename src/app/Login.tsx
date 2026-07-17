@@ -144,6 +144,10 @@ export function Login(props: LoginProps): React.JSX.Element {
   // (provider misconfig, network errors, unauthorized domain) surface into
   // emailError so the user sees them.
   const oauthLoginClick = async (provider: AuthProvider, genericError: string) => {
+    // A fresh attempt starts with a clean slate: without this, a cancelled
+    // popup's early return below would leave a PREVIOUS attempt's failure on
+    // screen, misattributed to the action the user just harmlessly dismissed.
+    setState({ emailError: undefined });
     try {
       await signInWithPopup(latest.current.props.auth, provider);
     } catch (popupErr) {

@@ -230,6 +230,27 @@ describe('Login OAuth click handlers (landing)', () => {
     });
   });
 
+  // A new attempt must clear the previous attempt's error up front: without
+  // that, a failed Google attempt followed by a CANCELLED attempt (even an
+  // Apple one) leaves the old failure on screen, misattributing it to the
+  // action the user just harmlessly dismissed.
+  test('starting a new OAuth attempt clears the previous attempt error, even when cancelled', async () => {
+    firebaseAuth.signInWithPopup.mockRejectedValueOnce(new Error('provider misconfigured'));
+
+    render(<Login disabled={false} auth={makeAuth()} />);
+    fireEvent.click(screen.getByText('Sign in with Google'));
+    await waitFor(() => {
+      expect(screen.queryByText(/provider misconfigured/i)).not.toBeNull();
+    });
+
+    firebaseAuth.signInWithPopup.mockRejectedValueOnce(firebaseError('auth/popup-closed-by-user'));
+    fireEvent.click(screen.getByText('Sign in with Apple'));
+    await waitFor(() => {
+      expect(firebaseAuth.signInWithPopup).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.queryByText(/provider misconfigured/i)).toBeNull();
+  });
+
   test('closing the popup is treated as a cancel, not an error', async () => {
     for (const code of ['auth/popup-closed-by-user', 'auth/cancelled-popup-request']) {
       firebaseAuth.signInWithPopup.mockReset();
