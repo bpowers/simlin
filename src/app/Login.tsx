@@ -6,9 +6,11 @@ import * as React from 'react';
 import clsx from 'clsx';
 
 import {
+  signInWithPopup,
   signInWithRedirect,
   GoogleAuthProvider,
   OAuthProvider,
+  AuthProvider,
   Auth as FirebaseAuth,
   createUserWithEmailAndPassword,
   updateProfile,
@@ -130,28 +132,44 @@ export function Login(props: LoginProps): React.JSX.Element {
   );
   latest.current = { props, state };
 
-  // Surface OAuth redirect failures (provider misconfig, popup blocked,
-  // network errors, expired auth domain) into emailError so the user sees them.
-  const appleLoginClick = async () => {
-    const provider = appleProvider();
+  // OAuth uses the POPUP flow: the result comes back to the opener via
+  // postMessage, which needs no storage shared with auth.simlin.com. The
+  // redirect flow's result pickup reads storage the auth.simlin.com helper
+  // wrote while it was the top-level page, through an auth.simlin.com iframe
+  // embedded under app.simlin.com -- and WebKit partitions storage per-ORIGIN
+  // (Chromium partitions per-site), so on Safari/iOS that iframe sees an empty
+  // partition and the sign-in silently never completes (firebase-js-sdk #7824).
+  // Redirect remains only as the fallback when a popup blocker rejects the
+  // popup; a user cancelling the popup is not an error. Real failures
+  // (provider misconfig, network errors, unauthorized domain) surface into
+  // emailError so the user sees them.
+  const oauthLoginClick = async (provider: AuthProvider, genericError: string) => {
     try {
-      await signInWithRedirect(latest.current.props.auth, provider);
-    } catch (err) {
+      await signInWithPopup(latest.current.props.auth, provider);
+    } catch (popupErr) {
+      let err: unknown = popupErr;
+      const code = firebaseErrorCode(err);
+      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+        return;
+      }
+      if (code === 'auth/popup-blocked') {
+        try {
+          await signInWithRedirect(latest.current.props.auth, provider);
+          return;
+        } catch (redirectErr) {
+          err = redirectErr;
+        }
+      }
       setState({
-        emailError: err instanceof Error ? err.message : 'Sign in with Apple failed',
+        emailError: err instanceof Error ? err.message : genericError,
       });
     }
   };
-  const googleLoginClick = async () => {
+  const appleLoginClick = () => oauthLoginClick(appleProvider(), 'Sign in with Apple failed');
+  const googleLoginClick = () => {
     const provider = new GoogleAuthProvider();
     provider.addScope('profile');
-    try {
-      await signInWithRedirect(latest.current.props.auth, provider);
-    } catch (err) {
-      setState({
-        emailError: err instanceof Error ? err.message : 'Sign in with Google failed',
-      });
-    }
+    return oauthLoginClick(provider, 'Sign in with Google failed');
   };
   // Entering the email flow lands directly on the combined sign-in card. Clear
   // any stale OAuth error from the landing screen so it doesn't reappear under
@@ -510,9 +528,9 @@ export function Login(props: LoginProps): React.JSX.Element {
               Sign in with email
             </Button>
             {/* Visible error sink for OAuth click handlers. Without this, a
-             * rejected signInWithRedirect (popup blocked, provider misconfig,
-             * network failure) would set emailError but stay invisible because
-             * no email-flow card is mounted to render it. */}
+             * rejected signInWithPopup (provider misconfig, unauthorized
+             * domain, network failure) would set emailError but stay invisible
+             * because no email-flow card is mounted to render it. */}
             {state.emailError !== undefined && (
               <p role="alert" className={clsx(typography.body2, styles.formError)}>
                 {state.emailError}
