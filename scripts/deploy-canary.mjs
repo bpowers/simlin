@@ -11,8 +11,12 @@
 //   That host is NOT in Firebase's Authorized domains list, so Firebase OAuth
 //   (signInWithRedirect via auth.simlin.com) rejects the calling origin and the
 //   operator cannot actually log in to test the canary.
-// - The fix is to add the canary's host to the Identity Toolkit
-//   `authorizedDomains` list for the duration of the test, then remove it.
+// - Login is gated TWICE: the Identity Toolkit `authorizedDomains` list (the
+//   OAuth origin check) AND the browser API key's HTTP-referrer allowlist,
+//   which blocks identitytoolkit requests from unlisted hosts with
+//   auth/requests-from-referer-...-are-blocked before OAuth even starts
+//   (issue #967). The fix is to add the canary's host to BOTH for the
+//   duration of the test, then remove it from both.
 //
 // This deliberately uses the OPERATOR's own credentials (`gcloud auth
 // print-access-token`), NOT the CI deploy service account: mutating Firebase
@@ -38,13 +42,18 @@
 // ---------------------------------------------------------------------------
 
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(SCRIPT_DIR, '..');
 
 const IDENTITY_TOOLKIT_BASE = 'https://identitytoolkit.googleapis.com/admin/v2';
+const API_KEYS_BASE = 'https://apikeys.googleapis.com/v2';
+// Where the shipped SPA hardcodes its Firebase web API key (see issue #381).
+const FIREBASE_CONFIG_SOURCE = path.join(REPO_ROOT, 'src/app/App.tsx');
 
 // ===========================================================================
 // PURE CORE -- no I/O, deterministic, unit-tested.
@@ -100,6 +109,78 @@ export function addAuthorizedDomain(domains, host) {
 export function removeAuthorizedDomain(domains, host) {
   const base = Array.isArray(domains) ? domains : [];
   return base.filter((d) => d !== host);
+}
+
+/**
+ * Extract the Firebase web API key string from app source (src/app/App.tsx
+ * hardcodes it in the firebase `config` literal). The canary flow needs the
+ * KEY STRING to find the corresponding GCP API key via keys:lookupKey -- that
+ * key's HTTP-referrer restrictions are a second login gate on the canary host,
+ * independent of Firebase authorizedDomains. Returns undefined when absent.
+ */
+export function extractFirebaseApiKey(source) {
+  if (typeof source !== 'string') return undefined;
+  const m = source.match(/apiKey:\s*['"]([^'"]+)['"]/);
+  return m ? m[1] : undefined;
+}
+
+/**
+ * The API-key referrer entry for a host. Referrer restrictions are URL
+ * patterns, not bare hostnames like authorizedDomains, so the whole-site form
+ * is `<host>/*`. Throws on empty input (a blank pattern would be meaningless
+ * and a `/*` entry would allow everything).
+ */
+export function referrerForHost(host) {
+  if (typeof host !== 'string' || host.trim() === '') {
+    throw new Error('referrerForHost: expected a non-empty host');
+  }
+  return `${host.trim()}/*`;
+}
+
+/**
+ * New `restrictions` object for an API key with `referrer` added to
+ * browserKeyRestrictions.allowedReferrers, preserving apiTargets and any other
+ * sibling fields. Returns null when no PATCH is needed OR safe:
+ * - the referrer is already present (idempotent re-run), or
+ * - the key has no non-empty referrer allowlist. An unrestricted key does not
+ *   block the canary, and PATCHing a list onto it would RESTRICT a key that
+ *   was deliberately open -- never do that as a side effect.
+ * Never mutates the input.
+ */
+export function addAllowedReferrer(restrictions, referrer) {
+  const current = restrictions?.browserKeyRestrictions?.allowedReferrers;
+  if (!Array.isArray(current) || current.length === 0) return null;
+  if (current.includes(referrer)) return null;
+  return {
+    ...restrictions,
+    browserKeyRestrictions: {
+      ...restrictions.browserKeyRestrictions,
+      allowedReferrers: addAuthorizedDomain(current, referrer),
+    },
+  };
+}
+
+/**
+ * New `restrictions` object with `referrer` removed from
+ * browserKeyRestrictions.allowedReferrers, preserving everything else. Returns
+ * null when no PATCH is needed OR safe:
+ * - the referrer is absent (idempotent re-run), or
+ * - removing it would EMPTY the list, which the API treats as "no referrer
+ *   restriction at all" -- cleanup must never silently un-restrict the key.
+ * Never mutates the input.
+ */
+export function removeAllowedReferrer(restrictions, referrer) {
+  const current = restrictions?.browserKeyRestrictions?.allowedReferrers;
+  if (!Array.isArray(current) || !current.includes(referrer)) return null;
+  const next = removeAuthorizedDomain(current, referrer);
+  if (next.length === 0) return null;
+  return {
+    ...restrictions,
+    browserKeyRestrictions: {
+      ...restrictions.browserKeyRestrictions,
+      allowedReferrers: next,
+    },
+  };
 }
 
 /** First non-blank, trimmed line of text (or '' for blank/non-string input). */
@@ -340,15 +421,15 @@ function serviceTrafficAllocations(project) {
 }
 
 /**
- * Auth headers for Identity Toolkit calls. Tokens from `gcloud auth
- * print-access-token` are user credentials minted via the gcloud CLI's own
- * OAuth client, so without an explicit quota project Google attributes API
- * quota to THAT client's project (where identitytoolkit is not enabled) and
- * the call 403s with SERVICE_DISABLED. `x-goog-user-project` pins quota to the
- * target project instead; it requires serviceusage.services.use there, which
- * the operator (owner/editor) has.
+ * Auth headers for Google REST API calls (Identity Toolkit, API Keys). Tokens
+ * from `gcloud auth print-access-token` are user credentials minted via the
+ * gcloud CLI's own OAuth client, so without an explicit quota project Google
+ * attributes API quota to THAT client's project (where these APIs are not
+ * enabled) and the call 403s with SERVICE_DISABLED. `x-goog-user-project` pins
+ * quota to the target project instead; it requires serviceusage.services.use
+ * there, which the operator (owner/editor) has.
  */
-function identityHeaders(project, token) {
+function googleAuthHeaders(project, token) {
   return { authorization: `Bearer ${token}`, 'x-goog-user-project': project };
 }
 
@@ -359,7 +440,7 @@ function identityHeaders(project, token) {
  */
 async function getIdentityConfig(project, token) {
   const res = await fetch(`${IDENTITY_TOOLKIT_BASE}/projects/${encodeURIComponent(project)}/config`, {
-    headers: identityHeaders(project, token),
+    headers: googleAuthHeaders(project, token),
   });
   if (!res.ok) {
     const body = await res.text();
@@ -392,7 +473,7 @@ async function patchAuthorizedDomains(project, token, domains) {
     `${IDENTITY_TOOLKIT_BASE}/projects/${encodeURIComponent(project)}/config?updateMask=authorizedDomains`,
     {
       method: 'PATCH',
-      headers: { ...identityHeaders(project, token), 'content-type': 'application/json' },
+      headers: { ...googleAuthHeaders(project, token), 'content-type': 'application/json' },
       body: JSON.stringify({ authorizedDomains: domains }),
     },
   );
@@ -402,6 +483,137 @@ async function patchAuthorizedDomains(project, token, domains) {
   }
   // The response body is discarded, so do NOT parse it: a successful PATCH whose
   // body isn't JSON must not be reported as a failure AFTER the change applied.
+}
+
+/**
+ * Shared fetch wrapper for Google REST APIs: attaches the operator token and
+ * the x-goog-user-project quota header, and turns any non-2xx into a die()
+ * with the response body (Google error bodies name the missing role/API).
+ */
+async function googleApi(url, project, token, { method = 'GET', body } = {}) {
+  const res = await fetch(url, {
+    method,
+    headers: {
+      ...googleAuthHeaders(project, token),
+      ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    die(`${method} ${url} failed: ${res.status} ${res.statusText}\n${text}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    die(`${method} ${url} returned ${res.status} with a non-JSON body:\n${text}`);
+  }
+}
+
+/**
+ * Resolve the browser API key the shipped SPA authenticates with: read the key
+ * STRING out of src/app/App.tsx, then keys:lookupKey to its GCP resource name.
+ * This targets exactly the key whose referrer restrictions gate canary login
+ * (Firebase's auto-created browser key), never a lookalike picked by display
+ * name.
+ */
+async function lookupBrowserKey(project, token) {
+  let source;
+  try {
+    source = readFileSync(FIREBASE_CONFIG_SOURCE, 'utf8');
+  } catch (err) {
+    die(`could not read ${FIREBASE_CONFIG_SOURCE}: ${err.message}`);
+  }
+  const keyString = extractFirebaseApiKey(source);
+  if (!keyString) {
+    die(`could not find the firebase apiKey in ${FIREBASE_CONFIG_SOURCE}`);
+  }
+  const lookup = await googleApi(
+    `${API_KEYS_BASE}/keys:lookupKey?keyString=${encodeURIComponent(keyString)}`,
+    project,
+    token,
+  );
+  if (!lookup.name) {
+    die(`keys:lookupKey returned no key name for the apiKey in ${FIREBASE_CONFIG_SOURCE}`);
+  }
+  return lookup.name; // projects/<number>/locations/global/keys/<uid>
+}
+
+/** GET the API key resource (including .restrictions). */
+async function getApiKey(project, token, keyName) {
+  return googleApi(`${API_KEYS_BASE}/${keyName}`, project, token);
+}
+
+/**
+ * PATCH the key's restrictions and wait for the returned long-running
+ * operation to finish, so the operator isn't told "authorized" while the
+ * change is still unapplied. The updateMask scopes the write to
+ * `restrictions`, and like the authorizedDomains PATCH it REPLACES the whole
+ * field -- callers must pass the full desired restrictions (the pure
+ * add/removeAllowedReferrer helpers build it from a fresh GET, preserving
+ * apiTargets).
+ */
+async function patchApiKeyRestrictions(project, token, keyName, restrictions) {
+  const op = await googleApi(`${API_KEYS_BASE}/${keyName}?updateMask=restrictions`, project, token, {
+    method: 'PATCH',
+    body: { restrictions },
+  });
+  let current = op;
+  for (let i = 0; i < 30 && current.name && !current.done; i++) {
+    await sleep(1000);
+    current = await googleApi(`${API_KEYS_BASE}/${current.name}`, project, token);
+  }
+  if (current.error) {
+    die(`API key restrictions update failed: ${JSON.stringify(current.error)}`);
+  }
+  if (current.name && !current.done) {
+    console.log('    (the API key update operation is still finalizing; it should apply within a minute)');
+  }
+}
+
+/**
+ * Authorize `host` on the browser key's referrer allowlist (the second canary
+ * login gate, after authorizedDomains -- see issue #967). Fresh GET then PATCH
+ * of the merged list; a no-op (already present, or the key is not
+ * referrer-restricted) skips the PATCH.
+ */
+async function authorizeReferrer(project, token, host) {
+  console.log('\n==> Authorizing the canary host on the Firebase browser API key (referrer allowlist)');
+  const keyName = await lookupBrowserKey(project, token);
+  const key = await getApiKey(project, token, keyName);
+  const before = key.restrictions?.browserKeyRestrictions?.allowedReferrers ?? [];
+  const next = addAllowedReferrer(key.restrictions, referrerForHost(host));
+  printDomains('before', before);
+  if (next === null) {
+    console.log(
+      before.length === 0
+        ? '    key has no referrer restrictions -- nothing to authorize.'
+        : `    ${referrerForHost(host)} is already allowed -- no change.`,
+    );
+    return;
+  }
+  await patchApiKeyRestrictions(project, token, keyName, next);
+  printDomains('after', next.browserKeyRestrictions.allowedReferrers);
+}
+
+/**
+ * Remove `host` from the browser key's referrer allowlist (cleanup inverse of
+ * authorizeReferrer). removeAllowedReferrer also refuses to empty the list, so
+ * cleanup can never leave the key unrestricted.
+ */
+async function deauthorizeReferrer(project, token, host) {
+  console.log('\n==> Removing the canary host from the Firebase browser API key (referrer allowlist)');
+  const keyName = await lookupBrowserKey(project, token);
+  const key = await getApiKey(project, token, keyName);
+  const before = key.restrictions?.browserKeyRestrictions?.allowedReferrers ?? [];
+  const next = removeAllowedReferrer(key.restrictions, referrerForHost(host));
+  printDomains('before', before);
+  if (next === null) {
+    console.log(`    ${referrerForHost(host)} is not in the allowlist -- no change.`);
+    return;
+  }
+  await patchApiKeyRestrictions(project, token, keyName, next);
+  printDomains('after', next.browserKeyRestrictions.allowedReferrers);
 }
 
 function printDomains(label, domains) {
@@ -422,10 +634,11 @@ function printHelp() {
       'Usage:',
       '  node scripts/deploy-canary.mjs [--project <id>]',
       '      Build + deploy HEAD with --no-promote, then add the canary host to',
-      '      Firebase authorizedDomains so you can log in and smoke-test it.',
+      '      Firebase authorizedDomains AND the browser API key referrer allowlist',
+      '      so you can log in and smoke-test it.',
       '',
       '  node scripts/deploy-canary.mjs --cleanup <version> [--project <id>]',
-      '      Remove that version host from authorizedDomains, then delete the version',
+      '      Remove that version host from both lists, then delete the version',
       '      UNLESS it is serving traffic (a promoted canary is production; the delete',
       '      is refused so cleanup can never cause an outage).',
       '',
@@ -439,11 +652,16 @@ function printHelp() {
 }
 
 async function runDeployMode(project, token) {
-  // Preflight: validate Firebase access BEFORE the (long) deploy, so a missing
-  // firebaseauth.admin grant fails in seconds rather than after an upload.
+  // Preflight: validate Firebase + API Keys access BEFORE the (long) deploy,
+  // so a missing grant or disabled API fails in seconds rather than after an
+  // upload.
   console.log('==> Preflight: reading current Firebase authorized domains');
   const preflight = await getIdentityConfig(project, token);
   printDomains('current authorizedDomains', preflight.authorizedDomains ?? []);
+
+  console.log('\n==> Preflight: reading the Firebase browser API key restrictions');
+  const preflightKey = await getApiKey(project, token, await lookupBrowserKey(project, token));
+  printDomains('current allowedReferrers', preflightKey.restrictions?.browserKeyRestrictions?.allowedReferrers ?? []);
 
   deployStagedNoPromote(project);
 
@@ -466,6 +684,11 @@ async function runDeployMode(project, token) {
     await patchAuthorizedDomains(project, token, after);
     printDomains('after', after);
   }
+
+  // Second login gate: the browser API key's HTTP-referrer allowlist blocks
+  // identitytoolkit requests from the canary host before OAuth even starts
+  // (auth/requests-from-referer-...-are-blocked). Authorize it too.
+  await authorizeReferrer(project, token, host);
 
   printPostDeploy(project, versionId, url);
 }
@@ -504,7 +727,8 @@ function printPostDeploy(project, versionId, url) {
       `        gcloud app versions delete <previous-version> --service=default ${projectFlag}`,
       '',
       'NOTE: keep the canary host authorized only as long as you are testing it;',
-      'leaving stale appspot hosts in authorizedDomains widens the OAuth surface.',
+      'stale appspot hosts in authorizedDomains or the API-key referrer allowlist',
+      'needlessly widen the OAuth surface. --cleanup removes both.',
     ].join('\n'),
   );
 }
@@ -526,6 +750,8 @@ async function runCleanupMode(project, token, versionId) {
     await patchAuthorizedDomains(project, token, after);
     printDomains('after', after);
   }
+
+  await deauthorizeReferrer(project, token, host);
 
   // Guard the delete: if the operator promoted this canary, it is now serving
   // production traffic and deleting it is a full-site outage. De-authorizing the

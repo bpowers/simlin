@@ -9,6 +9,10 @@ import {
   extractUrl,
   parseArgs,
   versionTrafficShare,
+  extractFirebaseApiKey,
+  referrerForHost,
+  addAllowedReferrer,
+  removeAllowedReferrer,
 } from '../deploy-canary.mjs';
 
 describe('hostFromUrl', () => {
@@ -187,6 +191,105 @@ describe('parseArgs', () => {
     assert.throws(() => parseArgs(['--project', '']), /--project requires a value/);
     assert.throws(() => parseArgs(['--project=']), /--project requires a value/);
     assert.throws(() => parseArgs(['--project=   ']), /--project requires a value/);
+  });
+});
+
+describe('extractFirebaseApiKey', () => {
+  it('pulls the apiKey out of the App.tsx firebase config', () => {
+    const src = "const config = {\n  apiKey: 'AIzaSyFAKEKEYFAKEKEYFAKEKEYFAKEKEYFAKE12',\n  authDomain: 'auth.simlin.com',\n};\n";
+    assert.equal(extractFirebaseApiKey(src), 'AIzaSyFAKEKEYFAKEKEYFAKEKEYFAKEKEYFAKE12');
+  });
+
+  it('tolerates double quotes and extra whitespace', () => {
+    assert.equal(extractFirebaseApiKey('apiKey:   "AIzaFoo"'), 'AIzaFoo');
+  });
+
+  it('returns undefined when no apiKey is present', () => {
+    assert.equal(extractFirebaseApiKey('const config = {};'), undefined);
+    assert.equal(extractFirebaseApiKey(undefined), undefined);
+  });
+});
+
+describe('referrerForHost', () => {
+  it('appends /* to a bare host', () => {
+    assert.equal(referrerForHost('v1-dot-p.uc.r.appspot.com'), 'v1-dot-p.uc.r.appspot.com/*');
+  });
+
+  it('throws on empty input', () => {
+    assert.throws(() => referrerForHost(''));
+    assert.throws(() => referrerForHost(undefined));
+  });
+});
+
+describe('addAllowedReferrer', () => {
+  const base = {
+    apiTargets: [{ service: 'identitytoolkit' }, { service: 'securetoken.googleapis.com' }],
+    browserKeyRestrictions: { allowedReferrers: ['*.simlin.com/*'] },
+  };
+
+  it('appends the referrer while preserving apiTargets and other fields', () => {
+    const out = addAllowedReferrer(base, 'v1-dot-p.appspot.com/*');
+    assert.deepEqual(out, {
+      apiTargets: [{ service: 'identitytoolkit' }, { service: 'securetoken.googleapis.com' }],
+      browserKeyRestrictions: { allowedReferrers: ['*.simlin.com/*', 'v1-dot-p.appspot.com/*'] },
+    });
+  });
+
+  it('returns null when the referrer is already present (no PATCH needed)', () => {
+    const restrictions = {
+      browserKeyRestrictions: { allowedReferrers: ['*.simlin.com/*', 'v1-dot-p.appspot.com/*'] },
+    };
+    assert.equal(addAllowedReferrer(restrictions, 'v1-dot-p.appspot.com/*'), null);
+  });
+
+  it('returns null for a key with no referrer restrictions (never RESTRICTS an open key)', () => {
+    assert.equal(addAllowedReferrer(undefined, 'v1/*'), null);
+    assert.equal(addAllowedReferrer({}, 'v1/*'), null);
+    assert.equal(addAllowedReferrer({ apiTargets: [{ service: 'identitytoolkit' }] }, 'v1/*'), null);
+    assert.equal(addAllowedReferrer({ browserKeyRestrictions: { allowedReferrers: [] } }, 'v1/*'), null);
+  });
+
+  it('does not mutate the input', () => {
+    addAllowedReferrer(base, 'v1/*');
+    assert.deepEqual(base.browserKeyRestrictions.allowedReferrers, ['*.simlin.com/*']);
+  });
+
+  it('preserves other browserKeyRestrictions siblings if any exist', () => {
+    const restrictions = { browserKeyRestrictions: { allowedReferrers: ['a/*'], future: true } };
+    const out = addAllowedReferrer(restrictions, 'b/*');
+    assert.equal(out.browserKeyRestrictions.future, true);
+  });
+});
+
+describe('removeAllowedReferrer', () => {
+  it('removes the referrer while preserving apiTargets', () => {
+    const restrictions = {
+      apiTargets: [{ service: 'identitytoolkit' }],
+      browserKeyRestrictions: { allowedReferrers: ['*.simlin.com/*', 'v1-dot-p.appspot.com/*'] },
+    };
+    const out = removeAllowedReferrer(restrictions, 'v1-dot-p.appspot.com/*');
+    assert.deepEqual(out, {
+      apiTargets: [{ service: 'identitytoolkit' }],
+      browserKeyRestrictions: { allowedReferrers: ['*.simlin.com/*'] },
+    });
+  });
+
+  it('returns null when the referrer is absent (no PATCH needed)', () => {
+    const restrictions = { browserKeyRestrictions: { allowedReferrers: ['*.simlin.com/*'] } };
+    assert.equal(removeAllowedReferrer(restrictions, 'nope/*'), null);
+    assert.equal(removeAllowedReferrer(undefined, 'nope/*'), null);
+    assert.equal(removeAllowedReferrer({}, 'nope/*'), null);
+  });
+
+  it('refuses to empty the list entirely (would UNRESTRICT the key)', () => {
+    const restrictions = { browserKeyRestrictions: { allowedReferrers: ['only.example.com/*'] } };
+    assert.equal(removeAllowedReferrer(restrictions, 'only.example.com/*'), null);
+  });
+
+  it('does not mutate the input', () => {
+    const restrictions = { browserKeyRestrictions: { allowedReferrers: ['a/*', 'b/*'] } };
+    removeAllowedReferrer(restrictions, 'b/*');
+    assert.deepEqual(restrictions.browserKeyRestrictions.allowedReferrers, ['a/*', 'b/*']);
   });
 });
 
