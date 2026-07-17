@@ -12,6 +12,7 @@
 // reaches for the deprecated, enumeration-leaking API again (issue #692).
 
 rs.mock('@firebase/auth', () => ({
+  signInWithPopup: rs.fn(),
   signInWithRedirect: rs.fn(),
   GoogleAuthProvider: class {
     addScope() {}
@@ -103,6 +104,7 @@ import { Login, GoogleIcon } from '../Login';
 // rs.mock replaced the module above, so importing it normally yields the mock.
 // (jest.requireMock had no async equivalent -- rs.importMock returns a promise.)
 const firebaseAuth = firebaseAuthModule as unknown as {
+  signInWithPopup: Mock;
   signInWithRedirect: Mock;
   fetchSignInMethodsForEmail: Mock;
   sendPasswordResetEmail: Mock;
@@ -125,6 +127,7 @@ function firebaseError(code: string, message = code): Error {
 }
 
 function resetAllMocks(): void {
+  firebaseAuth.signInWithPopup.mockReset();
   firebaseAuth.signInWithRedirect.mockReset();
   firebaseAuth.fetchSignInMethodsForEmail.mockReset();
   firebaseAuth.sendPasswordResetEmail.mockReset();
@@ -147,37 +150,64 @@ function openSignInCard(email?: string, password?: string): void {
 describe('Login OAuth click handlers (landing)', () => {
   beforeEach(resetAllMocks);
 
-  test('Google sign-in surfaces an error to UI when signInWithRedirect rejects', async () => {
-    firebaseAuth.signInWithRedirect.mockRejectedValueOnce(new Error('popup blocked'));
+  // signInWithPopup, not signInWithRedirect: the redirect flow's result pickup
+  // reads storage the auth.simlin.com helper wrote while it was the top-level
+  // page, through an iframe of that origin embedded under app.simlin.com.
+  // WebKit partitions storage per-ORIGIN (not per-site like Chromium), so on
+  // Safari/iOS that iframe sees an empty partition and the sign-in silently
+  // never completes. The popup flow hands the result back via postMessage and
+  // needs no shared storage, so it works everywhere.
+  test('Google sign-in uses the popup flow, not the redirect flow', async () => {
+    firebaseAuth.signInWithPopup.mockResolvedValueOnce({ user: {} });
 
     render(<Login disabled={false} auth={makeAuth()} />);
     fireEvent.click(screen.getByText('Sign in with Google'));
 
     await waitFor(() => {
-      expect(firebaseAuth.signInWithRedirect).toHaveBeenCalledTimes(1);
-      expect(screen.queryByText(/popup blocked/i)).not.toBeNull();
+      expect(firebaseAuth.signInWithPopup).toHaveBeenCalledTimes(1);
     });
+    expect(firebaseAuth.signInWithRedirect).not.toHaveBeenCalled();
   });
 
-  test('Apple sign-in surfaces an error to UI when signInWithRedirect rejects', async () => {
-    firebaseAuth.signInWithRedirect.mockRejectedValueOnce(new Error('apple unavailable'));
+  test('Apple sign-in uses the popup flow, not the redirect flow', async () => {
+    firebaseAuth.signInWithPopup.mockResolvedValueOnce({ user: {} });
 
     render(<Login disabled={false} auth={makeAuth()} />);
     fireEvent.click(screen.getByText('Sign in with Apple'));
 
     await waitFor(() => {
-      expect(firebaseAuth.signInWithRedirect).toHaveBeenCalledTimes(1);
+      expect(firebaseAuth.signInWithPopup).toHaveBeenCalledTimes(1);
+    });
+    expect(firebaseAuth.signInWithRedirect).not.toHaveBeenCalled();
+  });
+
+  test('Google sign-in surfaces an error to UI when signInWithPopup rejects', async () => {
+    firebaseAuth.signInWithPopup.mockRejectedValueOnce(new Error('provider misconfigured'));
+
+    render(<Login disabled={false} auth={makeAuth()} />);
+    fireEvent.click(screen.getByText('Sign in with Google'));
+
+    await waitFor(() => {
+      expect(firebaseAuth.signInWithPopup).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText(/provider misconfigured/i)).not.toBeNull();
+    });
+  });
+
+  test('Apple sign-in surfaces an error to UI when signInWithPopup rejects', async () => {
+    firebaseAuth.signInWithPopup.mockRejectedValueOnce(new Error('apple unavailable'));
+
+    render(<Login disabled={false} auth={makeAuth()} />);
+    fireEvent.click(screen.getByText('Sign in with Apple'));
+
+    await waitFor(() => {
+      expect(firebaseAuth.signInWithPopup).toHaveBeenCalledTimes(1);
       expect(screen.queryByText(/apple unavailable/i)).not.toBeNull();
     });
   });
 
-  test('Google sign-in awaits the redirect promise (no fire-and-forget setTimeout)', async () => {
-    let resolveSignIn: () => void = () => {};
-    firebaseAuth.signInWithRedirect.mockReturnValueOnce(
-      new Promise<void>((resolve) => {
-        resolveSignIn = resolve;
-      }),
-    );
+  test('a blocked popup falls back to the redirect flow without showing an error', async () => {
+    firebaseAuth.signInWithPopup.mockRejectedValueOnce(firebaseError('auth/popup-blocked'));
+    firebaseAuth.signInWithRedirect.mockResolvedValueOnce(undefined);
 
     render(<Login disabled={false} auth={makeAuth()} />);
     fireEvent.click(screen.getByText('Sign in with Google'));
@@ -185,8 +215,57 @@ describe('Login OAuth click handlers (landing)', () => {
     await waitFor(() => {
       expect(firebaseAuth.signInWithRedirect).toHaveBeenCalledTimes(1);
     });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
 
-    resolveSignIn();
+  test('a rejected redirect fallback still surfaces its error', async () => {
+    firebaseAuth.signInWithPopup.mockRejectedValueOnce(firebaseError('auth/popup-blocked'));
+    firebaseAuth.signInWithRedirect.mockRejectedValueOnce(new Error('redirect also failed'));
+
+    render(<Login disabled={false} auth={makeAuth()} />);
+    fireEvent.click(screen.getByText('Sign in with Google'));
+
+    await waitFor(() => {
+      expect(screen.queryByText(/redirect also failed/i)).not.toBeNull();
+    });
+  });
+
+  // A new attempt must clear the previous attempt's error up front: without
+  // that, a failed Google attempt followed by a CANCELLED attempt (even an
+  // Apple one) leaves the old failure on screen, misattributing it to the
+  // action the user just harmlessly dismissed.
+  test('starting a new OAuth attempt clears the previous attempt error, even when cancelled', async () => {
+    firebaseAuth.signInWithPopup.mockRejectedValueOnce(new Error('provider misconfigured'));
+
+    render(<Login disabled={false} auth={makeAuth()} />);
+    fireEvent.click(screen.getByText('Sign in with Google'));
+    await waitFor(() => {
+      expect(screen.queryByText(/provider misconfigured/i)).not.toBeNull();
+    });
+
+    firebaseAuth.signInWithPopup.mockRejectedValueOnce(firebaseError('auth/popup-closed-by-user'));
+    fireEvent.click(screen.getByText('Sign in with Apple'));
+    await waitFor(() => {
+      expect(firebaseAuth.signInWithPopup).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.queryByText(/provider misconfigured/i)).toBeNull();
+  });
+
+  test('closing the popup is treated as a cancel, not an error', async () => {
+    for (const code of ['auth/popup-closed-by-user', 'auth/cancelled-popup-request']) {
+      firebaseAuth.signInWithPopup.mockReset();
+      firebaseAuth.signInWithPopup.mockRejectedValueOnce(firebaseError(code));
+
+      const { unmount } = render(<Login disabled={false} auth={makeAuth()} />);
+      fireEvent.click(screen.getByText('Sign in with Google'));
+
+      await waitFor(() => {
+        expect(firebaseAuth.signInWithPopup).toHaveBeenCalledTimes(1);
+      });
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(firebaseAuth.signInWithRedirect).not.toHaveBeenCalled();
+      unmount();
+    }
   });
 });
 
@@ -597,7 +676,7 @@ describe('Login miscellaneous error paths', () => {
   });
 
   test('a non-Error OAuth rejection falls back to a generic provider message', async () => {
-    firebaseAuth.signInWithRedirect.mockRejectedValueOnce('nope');
+    firebaseAuth.signInWithPopup.mockRejectedValueOnce('nope');
 
     render(<Login disabled={false} auth={makeAuth()} />);
     fireEvent.click(screen.getByText('Sign in with Google'));
@@ -608,7 +687,7 @@ describe('Login miscellaneous error paths', () => {
   });
 
   test('a non-Error Apple OAuth rejection falls back to a generic provider message', async () => {
-    firebaseAuth.signInWithRedirect.mockRejectedValueOnce('nope');
+    firebaseAuth.signInWithPopup.mockRejectedValueOnce('nope');
 
     render(<Login disabled={false} auth={makeAuth()} />);
     fireEvent.click(screen.getByText('Sign in with Apple'));
