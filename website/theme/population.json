@@ -1,0 +1,88 @@
+{
+  "name": "logistic-growth",
+  "simSpecs": { "startTime": 0.0, "endTime": 100.0 },
+  "models": [
+    {
+      "name": "main",
+      "stocks": [{ "name": "population", "initialEquation": "5", "inflows": ["net_birth_rate"], "outflows": [] }],
+      "flows": [{ "name": "net_birth_rate", "equation": "fractional_growth_rate * population" }],
+      "auxiliaries": [
+        { "name": "carrying_capacity", "equation": "1000" },
+        { "name": "fraction_of_carrying_capacity_used", "equation": "population/carrying_capacity" },
+        {
+          "name": "fractional_growth_rate",
+          "equation": "maximum_growth_rate * (1 - fraction_of_carrying_capacity_used)"
+        },
+        { "name": "maximum_growth_rate", "equation": ".12" }
+      ],
+      "views": [
+        {
+          "kind": "stock_flow",
+          "elements": [
+            {
+              "type": "stock",
+              "uid": 1,
+              "name": "Population",
+              "x": 602.4000244140625,
+              "y": 259.8000183105469,
+              "labelSide": "top"
+            },
+            {
+              "type": "flow",
+              "uid": 2,
+              "name": "net birth rate",
+              "x": 518.2726610523725,
+              "y": 258.60003662109375,
+              "labelSide": "top",
+              "points": [
+                { "x": 456.79998779296875, "y": 258.60003662109375, "attachedToUid": 13 },
+                { "x": 579.9000244140625, "y": 258.60003662109375, "attachedToUid": 1 }
+              ]
+            },
+            {
+              "type": "aux",
+              "uid": 3,
+              "name": "maximum\ngrowth rate",
+              "x": 463.2000244140625,
+              "y": 400.44000244140625,
+              "labelSide": "left"
+            },
+            {
+              "type": "aux",
+              "uid": 4,
+              "name": "carrying capacity",
+              "x": 651.8400146484374,
+              "y": 399.23996582031253,
+              "labelSide": "right"
+            },
+            {
+              "type": "aux",
+              "uid": 5,
+              "name": "fractional \ngrowth rate",
+              "x": 498.0,
+              "y": 344.20001220703125,
+              "labelSide": "left"
+            },
+            {
+              "type": "aux",
+              "uid": 6,
+              "name": "fraction of carrying\ncapacity used",
+              "x": 610.800048828125,
+              "y": 344.6000061035156,
+              "labelSide": "right"
+            },
+            { "type": "link", "uid": 7, "fromUid": 4, "toUid": 6, "arc": 230.32515249820716 },
+            { "type": "link", "uid": 8, "fromUid": 1, "toUid": 6, "arc": 49.638563408603886 },
+            { "type": "link", "uid": 9, "fromUid": 6, "toUid": 5, "arc": 131.65921988573643 },
+            { "type": "link", "uid": 10, "fromUid": 3, "toUid": 5, "arc": 300.9615515537398 },
+            { "type": "link", "uid": 11, "fromUid": 5, "toUid": 2, "arc": 241.17801396704323 },
+            { "type": "link", "uid": 12, "fromUid": 1, "toUid": 2, "arc": 102.57380061282629 },
+            { "type": "cloud", "uid": 13, "flowUid": 2, "x": 456.79998779296875, "y": 258.60003662109375 }
+          ],
+          "viewBox": { "x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0 },
+          "zoom": 1.0
+        }
+      ]
+    }
+  ]
+}

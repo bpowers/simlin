@@ -11,11 +11,14 @@
     "lint": "eslint .",
     "format": "find . -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?|engine/core)/' | xargs prettier --write"
   },
+  "dependencies": {
+    "@simlin/diagram": "workspace:*",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
   "devDependencies": {
     "eslint": "^9.0.0",
     "@types/react": "^19.0.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
     "prettier": "^3.8.1",
     "rspress": "^1.44.0",
     "typescript": "npm:@typescript/typescript6@^6.0.2"

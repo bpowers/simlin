@@ -18,17 +18,19 @@ import * as actualEngine from '@simlin/engine' with { rstest: 'importActual' };
 
 import { validProjectJson } from './fake-engine';
 
-// The no-SSR-project path calls EngineProject.openProtobuf() and awaits it. We
-// never want the real WASM engine in this unit test, so mock openProtobuf with
-// a controllable deferred: tests that exercise the resolved-load path settle it
-// with a fake engine-project (serializeJson + dispose); tests that exercise the
-// pending / cancelled-guard path leave it unsettled. A module-level `pending`
-// box lets each test resolve the in-flight open explicitly.
+// The no-SSR-project path calls EngineProject.openProtobuf() (or openJson())
+// and awaits it. We never want the real WASM engine in this unit test, so mock
+// both open functions with a controllable deferred: tests that exercise the
+// resolved-load path settle it with a fake engine-project (serializeJson +
+// dispose); tests that exercise the pending / cancelled-guard path leave it
+// unsettled. A module-level `pending` box lets each test resolve the in-flight
+// open explicitly, and records which open function was invoked.
 interface FakeEngineProject {
   serializeJson(): Promise<string>;
+  mainModel(): Promise<{ run(): Promise<{ results: ReadonlyMap<string, Float64Array> }> }>;
   dispose(): Promise<void>;
 }
-let pendingOpen: { resolve: (p: FakeEngineProject) => void } | undefined;
+let pendingOpen: { via: 'protobuf' | 'json'; resolve: (p: FakeEngineProject) => void } | undefined;
 let disposeCalls = 0;
 
 rs.mock('@simlin/engine', () => ({
@@ -38,20 +40,36 @@ rs.mock('@simlin/engine', () => ({
     openProtobuf: rs.fn(
       () =>
         new Promise<FakeEngineProject>((resolve) => {
-          pendingOpen = { resolve };
+          pendingOpen = { via: 'protobuf', resolve };
+        }),
+    ),
+    openJson: rs.fn(
+      () =>
+        new Promise<FakeEngineProject>((resolve) => {
+          pendingOpen = { via: 'json', resolve };
         }),
     ),
   },
 }));
 
-function makeFakeEngineProject(): FakeEngineProject {
-  return {
-    serializeJson: () => Promise.resolve(validProjectJson()),
+let runCalls = 0;
+
+function makeFakeEngineProject(opts: { json?: string; runResults?: ReadonlyMap<string, Float64Array> } = {}) {
+  const project: FakeEngineProject = {
+    serializeJson: () => Promise.resolve(opts.json ?? validProjectJson()),
+    mainModel: () =>
+      Promise.resolve({
+        run: () => {
+          runCalls += 1;
+          return Promise.resolve({ results: opts.runResults ?? new Map<string, Float64Array>() });
+        },
+      }),
     dispose: () => {
       disposeCalls += 1;
       return Promise.resolve();
     },
   };
+  return project;
 }
 
 // StaticDiagram's job is choosing what to render (null until a project exists,
@@ -67,16 +85,35 @@ rs.mock('../drawing/Canvas', () => ({
   },
 }));
 
-import { StaticDiagram } from '../StaticDiagram';
+import { StaticDiagram, runResultsToSeries } from '../StaticDiagram';
 
 function makeProject(): Project {
   return projectFromJson(JSON.parse(validProjectJson()) as JsonProject);
+}
+
+// A minimal project whose main model has one auxiliary, for asserting that
+// simulate-attached series land on the variable Canvas renders.
+function auxProjectJson(): string {
+  return JSON.stringify({
+    name: 'sim-test',
+    simSpecs: { startTime: 0, endTime: 2, dt: '1' },
+    models: [
+      {
+        name: 'main',
+        stocks: [],
+        flows: [],
+        auxiliaries: [{ name: 'growth rate', equation: '1' }],
+        views: [{ elements: [] }],
+      },
+    ],
+  });
 }
 
 beforeEach(() => {
   lastCanvasProject = undefined;
   pendingOpen = undefined;
   disposeCalls = 0;
+  runCalls = 0;
 });
 
 describe('StaticDiagram', () => {
@@ -166,5 +203,101 @@ describe('StaticDiagram', () => {
     } finally {
       errorSpy.mockRestore();
     }
+  });
+
+  test('a projectJson source loads through Project.openJson, not openProtobuf', async () => {
+    const { container } = render(<StaticDiagram projectJson={validProjectJson()} />);
+    expect(container.firstChild).toBeNull();
+
+    await waitFor(() => expect(pendingOpen).not.toBeUndefined());
+    expect(pendingOpen!.via).toBe('json');
+
+    await act(async () => {
+      pendingOpen!.resolve(makeFakeEngineProject());
+    });
+
+    await waitFor(() => expect(lastCanvasProject).not.toBeUndefined());
+    expect(disposeCalls).toBe(1);
+  });
+
+  test('simulate runs the model and attaches the results as series data', async () => {
+    const time = new Float64Array([0, 1, 2]);
+    const values = new Float64Array([1, 1, 1]);
+    const results = new Map<string, Float64Array>([
+      ['time', time],
+      ['growth_rate', values],
+    ]);
+
+    render(<StaticDiagram projectJson={auxProjectJson()} simulate={true} />);
+    await waitFor(() => expect(pendingOpen).not.toBeUndefined());
+    await act(async () => {
+      pendingOpen!.resolve(makeFakeEngineProject({ json: auxProjectJson(), runResults: results }));
+    });
+
+    await waitFor(() => expect(lastCanvasProject).not.toBeUndefined());
+    expect(runCalls).toBe(1);
+    expect(disposeCalls).toBe(1);
+
+    const model = lastCanvasProject!.models.get('main');
+    const variable = model!.variables.get('growth_rate');
+    expect(variable).not.toBeUndefined();
+    expect(variable!.data).not.toBeUndefined();
+    expect(variable!.data!.length).toBe(1);
+    expect(Array.from(variable!.data![0].values)).toEqual([1, 1, 1]);
+  });
+
+  test('an explicit data prop wins over simulate (the model is not run)', async () => {
+    render(<StaticDiagram projectJson={auxProjectJson()} simulate={true} data={new Map()} />);
+    await waitFor(() => expect(pendingOpen).not.toBeUndefined());
+    await act(async () => {
+      pendingOpen!.resolve(makeFakeEngineProject({ json: auxProjectJson() }));
+    });
+
+    await waitFor(() => expect(lastCanvasProject).not.toBeUndefined());
+    expect(runCalls).toBe(0);
+  });
+
+  test('a failed simulation still renders the diagram, without series data', async () => {
+    const errorSpy = rs.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const failing = makeFakeEngineProject({ json: auxProjectJson() });
+      failing.mainModel = () => Promise.reject(new Error('model has errors'));
+
+      render(<StaticDiagram projectJson={auxProjectJson()} simulate={true} />);
+      await waitFor(() => expect(pendingOpen).not.toBeUndefined());
+      await act(async () => {
+        pendingOpen!.resolve(failing);
+      });
+
+      await waitFor(() => expect(lastCanvasProject).not.toBeUndefined());
+      expect(disposeCalls).toBe(1);
+      const variable = lastCanvasProject!.models.get('main')!.variables.get('growth_rate');
+      expect(variable!.data).toBeUndefined();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});
+
+describe('runResultsToSeries', () => {
+  test('builds a Series per result keyed by name, sharing the time array', () => {
+    const time = new Float64Array([0, 1]);
+    const population = new Float64Array([5, 6]);
+    const series = runResultsToSeries(
+      new Map<string, Float64Array>([
+        ['time', time],
+        ['population', population],
+      ]),
+    );
+
+    expect(series.size).toBe(2);
+    const pop = series.get('population')!;
+    expect(pop.name).toBe('population');
+    expect(pop.time).toBe(time);
+    expect(pop.values).toBe(population);
+  });
+
+  test('throws when the results lack a time series', () => {
+    expect(() => runResultsToSeries(new Map([['population', new Float64Array([1])]]))).toThrow(/time/);
   });
 });

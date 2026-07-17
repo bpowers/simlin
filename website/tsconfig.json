@@ -11,16 +11,8 @@
     "strict": true,
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
-    "forceConsistentCasingInFileNames": true,
-    // "baseUrl" was removed in TypeScript 7. Without it these targets resolve
-    // relative to this file, so they must be written relative (TS5090).
-    "paths": {
-      "@/*": ["./src/*"],
-      "@simlin/core": ["../src/core"],
-      "@simlin/diagram": ["../src/diagram"],
-      "@simlin/engine": ["../src/engine"]
-    }
+    "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/", "docs/", "rspress.config.ts"],
+  "include": ["src/", "docs/", "theme/", "rspress.config.ts"],
   "exclude": ["node_modules", "build"]
 }
