@@ -18,13 +18,41 @@ import { Canvas } from './drawing/Canvas';
 
 interface DiagramProps {
   isDarkTheme?: boolean;
-  projectPbBase64: string;
+  /** Base64-encoded protobuf project bytes. */
+  projectPbBase64?: string;
+  /** Native-format JSON project text (the format Project.serializeJson emits). */
+  projectJson?: string;
   project?: Project; // Pre-loaded project for SSR
   data?: ReadonlyMap<string, Series>;
+  /**
+   * Run the model's base case and attach the results as series data
+   * (sparklines) once loaded. Only applies on the async engine-load path
+   * (i.e. when no pre-loaded `project` is supplied), and an explicit `data`
+   * prop takes precedence. A simulation failure degrades to rendering the
+   * diagram without data rather than rendering nothing.
+   */
+  simulate?: boolean;
+}
+
+/**
+ * Convert a completed run's results into the Series map the Canvas consumes.
+ * Every result variable becomes a Series sharing the run's time array.
+ * @throws Error when the results contain no `time` series.
+ */
+export function runResultsToSeries(results: ReadonlyMap<string, Float64Array>): ReadonlyMap<string, Series> {
+  const time = results.get('time');
+  if (!time) {
+    throw new Error('run results are missing a time series');
+  }
+  const series = new Map<string, Series>();
+  for (const [name, values] of results) {
+    series.set(name, { name, time, values });
+  }
+  return series;
 }
 
 export function StaticDiagram(props: DiagramProps): React.ReactElement | null {
-  const { isDarkTheme, projectPbBase64, project: ssrProject, data } = props;
+  const { isDarkTheme, projectPbBase64, projectJson, project: ssrProject, data, simulate } = props;
 
   // Seed from the pre-loaded SSR project (attaching data if provided) exactly
   // once, mirroring the old constructor's one-shot derivation. A lazy
@@ -48,14 +76,30 @@ export function StaticDiagram(props: DiagramProps): React.ReactElement | null {
     }
     let cancelled = false;
     void (async () => {
-      const serializedProject = toUint8Array(projectPbBase64);
-      const engineProject = await EngineProject.openProtobuf(serializedProject);
+      const engineProject =
+        projectJson !== undefined
+          ? await EngineProject.openJson(projectJson)
+          : await EngineProject.openProtobuf(toUint8Array(projectPbBase64 ?? ''));
       const json = JSON.parse(await engineProject.serializeJson()) as JsonProject;
       let loaded = projectFromJson(json);
+
+      // An explicit data prop wins; otherwise simulate the base case so the
+      // embed can show results without precomputed series. A model that fails
+      // to simulate still renders as a plain diagram.
+      let attach = data;
+      if (attach === undefined && simulate) {
+        try {
+          const model = await engineProject.mainModel();
+          const run = await model.run();
+          attach = runResultsToSeries(run.results);
+        } catch (err) {
+          console.error('StaticDiagram: simulation failed, rendering without data:', err);
+        }
+      }
       await engineProject.dispose();
 
-      if (data !== undefined) {
-        loaded = projectAttachData(loaded, data, 'main');
+      if (attach !== undefined) {
+        loaded = projectAttachData(loaded, attach, 'main');
       }
 
       if (!cancelled) {
