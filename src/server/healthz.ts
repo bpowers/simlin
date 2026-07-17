@@ -24,7 +24,12 @@ export function healthResponse(engineReady: boolean): HealthResponse {
 }
 
 /**
- * Unauthenticated GET /healthz handler for Cloud Monitoring uptime checks.
+ * Unauthenticated GET /api/healthz handler for Cloud Monitoring uptime checks.
+ *
+ * Mounted at /api/healthz, not /healthz: the bare /healthz path is reserved
+ * by Google's Front End on App Engine, which answers it with its own 404
+ * before the request ever reaches the app (verified against production
+ * 2026-07-16).
  *
  * app.yaml serves '/' as a GAE static file, so '/' stays green even when
  * every Express instance is crash-looping; this route is what proves the

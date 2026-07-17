@@ -128,16 +128,19 @@ class App {
       backend: 'firestore',
     });
 
-    // /healthz comes first: uptime checks poll it constantly, so keep it
-    // out of the request log and outside the session/auth middleware.
+    // The health route comes first: uptime checks poll it constantly, so keep
+    // it out of the request log and outside the session/auth middleware.
     // (GAE's edge 301s plain-http before Express ever sees it, so sitting
     // ahead of redirectToHttps only matters when running off-GAE.)
+    // The path is /api/healthz, NOT /healthz: the bare /healthz path is a
+    // reserved path that Google's Front End intercepts on App Engine (it
+    // serves its own 404 and the request never reaches the app).
     // Because initializeServerDependencies() above throws on preload
     // failure -- aborting boot before this route mounts -- a broken WASM
     // preload surfaces as an instance that never listens (connection
     // failure / GAE 5xx), not as a 503 here; the isReady() probe is
     // cheap defense-in-depth, not the expected failure signal.
-    this.app.get('/healthz', healthz(isReady));
+    this.app.get('/api/healthz', healthz(isReady));
 
     // put the redirect before the request logger to remove noise
     this.app.use(redirectToHttps);

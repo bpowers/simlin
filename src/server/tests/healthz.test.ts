@@ -49,9 +49,12 @@ describe('healthz route', () => {
   beforeAll(() => {
     engineReady = true;
 
+    // Mounted at /api/healthz, mirroring app.ts: the bare /healthz path is
+    // intercepted by Google's Front End on App Engine (reserved path) and
+    // never reaches the app, so production must serve health under /api/.
     const app = express();
     app.get(
-      '/healthz',
+      '/api/healthz',
       healthz(() => engineReady),
     );
     server = app.listen(0);
@@ -65,7 +68,7 @@ describe('healthz route', () => {
 
   it('returns 200 ok when the readiness probe passes', async () => {
     engineReady = true;
-    const res = await request(server, 'GET', '/healthz');
+    const res = await request(server, 'GET', '/api/healthz');
     expect(res.status).toBe(200);
     expect(res.body).toBe('ok');
     expect(res.headers['content-type']).toContain('text/plain');
@@ -75,7 +78,7 @@ describe('healthz route', () => {
 
   it('returns 503 when the readiness probe fails', async () => {
     engineReady = false;
-    const res = await request(server, 'GET', '/healthz');
+    const res = await request(server, 'GET', '/api/healthz');
     expect(res.status).toBe(503);
     expect(res.body).toBe('engine not ready');
     expect(res.headers['cache-control']).toBe('no-store');
@@ -83,13 +86,13 @@ describe('healthz route', () => {
 
   it('answers HEAD requests with the same status and no body', async () => {
     engineReady = true;
-    const res = await request(server, 'HEAD', '/healthz');
+    const res = await request(server, 'HEAD', '/api/healthz');
     expect(res.status).toBe(200);
     expect(res.body).toBe('');
   });
 
   it('is scoped to GET/HEAD: POST is not handled', async () => {
-    const res = await request(server, 'POST', '/healthz');
+    const res = await request(server, 'POST', '/api/healthz');
     expect(res.status).toBe(404);
   });
 });
