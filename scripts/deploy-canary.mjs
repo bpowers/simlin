@@ -340,13 +340,26 @@ function serviceTrafficAllocations(project) {
 }
 
 /**
+ * Auth headers for Identity Toolkit calls. Tokens from `gcloud auth
+ * print-access-token` are user credentials minted via the gcloud CLI's own
+ * OAuth client, so without an explicit quota project Google attributes API
+ * quota to THAT client's project (where identitytoolkit is not enabled) and
+ * the call 403s with SERVICE_DISABLED. `x-goog-user-project` pins quota to the
+ * target project instead; it requires serviceusage.services.use there, which
+ * the operator (owner/editor) has.
+ */
+function identityHeaders(project, token) {
+  return { authorization: `Bearer ${token}`, 'x-goog-user-project': project };
+}
+
+/**
  * GET the project's Identity Toolkit config. This MUST succeed before any
  * PATCH: the read-modify-write below depends on a real current list, never an
  * assumed-empty one. Returns the parsed config object.
  */
 async function getIdentityConfig(project, token) {
   const res = await fetch(`${IDENTITY_TOOLKIT_BASE}/projects/${encodeURIComponent(project)}/config`, {
-    headers: { authorization: `Bearer ${token}` },
+    headers: identityHeaders(project, token),
   });
   if (!res.ok) {
     const body = await res.text();
@@ -379,7 +392,7 @@ async function patchAuthorizedDomains(project, token, domains) {
     `${IDENTITY_TOOLKIT_BASE}/projects/${encodeURIComponent(project)}/config?updateMask=authorizedDomains`,
     {
       method: 'PATCH',
-      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      headers: { ...identityHeaders(project, token), 'content-type': 'application/json' },
       body: JSON.stringify({ authorizedDomains: domains }),
     },
   );
