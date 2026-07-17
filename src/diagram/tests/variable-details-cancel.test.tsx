@@ -36,7 +36,7 @@ beforeAll(() => {
 });
 
 import * as React from 'react';
-import { render, act, fireEvent } from '@testing-library/react';
+import { render, act, fireEvent, waitFor } from '@testing-library/react';
 import { Editor, Transforms } from 'slate';
 import { HistoryEditor } from 'slate-history';
 import { ELEMENT_TO_NODE } from 'slate-dom';
@@ -111,7 +111,7 @@ function editorFor(container: HTMLElement, selector: string): Editor {
   return ELEMENT_TO_NODE.get(el as HTMLElement) as unknown as Editor;
 }
 
-async function appendText(editor: Editor, text: string): Promise<void> {
+async function appendText(container: HTMLElement, editor: Editor, text: string): Promise<void> {
   await act(async () => {
     Transforms.insertText(editor, text, { at: Editor.end(editor, []) });
     // Slate defers its onChange to a microtask; nudge it and flush so the
@@ -119,6 +119,11 @@ async function appendText(editor: Editor, text: string): Promise<void> {
     editor.onChange();
     await Promise.resolve();
   });
+  // Condition-based wait, not a fixed flush: Cancel's enabled bit derives from
+  // the same React contents state the blur-commit reads, so once it flips the
+  // pending edit is definitely visible to handleEquationSave. Under parallel
+  // test load a single microtask turn was intermittently not enough (#968).
+  await waitFor(() => expect(buttonByText(container, 'Cancel').disabled).toBe(false));
 }
 
 function stripZeroWidth(s: string | null): string {
@@ -148,7 +153,7 @@ describe('VariableDetails discard (Cancel / Escape)', () => {
   it('click Cancel discards the equation edit and reverts the field', async () => {
     const { container, onEquationChange } = renderDetails(makeAux('x', 'a + b', { errors: forceEditorOpen }));
     const editor = editorFor(container, '.eqnEditor');
-    await appendText(editor, 'Z');
+    await appendText(container, editor, 'Z');
 
     const editable = container.querySelector('.eqnEditor') as HTMLElement;
     expect(editable.textContent).toBe('a + bZ');
@@ -174,7 +179,7 @@ describe('VariableDetails discard (Cancel / Escape)', () => {
   it('keyboard-activated Cancel (no pointer-down) also discards', async () => {
     const { container, onEquationChange } = renderDetails(makeAux('x', 'a + b', { errors: forceEditorOpen }));
     const editor = editorFor(container, '.eqnEditor');
-    await appendText(editor, 'Z');
+    await appendText(container, editor, 'Z');
 
     const editable = container.querySelector('.eqnEditor') as HTMLElement;
     const cancel = buttonByText(container, 'Cancel');
@@ -195,7 +200,7 @@ describe('VariableDetails discard (Cancel / Escape)', () => {
     const { container, onEquationChange } = renderDetails(makeAux('x', 'a + b'));
     await openEquationEditorViaPreview(container);
     const editor = editorFor(container, '.eqnEditor');
-    await appendText(editor, 'Z');
+    await appendText(container, editor, 'Z');
     expect((container.querySelector('.eqnEditor') as HTMLElement).textContent).toBe('a + bZ');
 
     await act(async () => {
@@ -218,7 +223,7 @@ describe('VariableDetails discard (Cancel / Escape)', () => {
     // above. The revert must land in the still-mounted editor.
     const { container, onEquationChange } = renderDetails(makeAux('x', 'a + b', { errors: forceEditorOpen }));
     const editor = editorFor(container, '.eqnEditor');
-    await appendText(editor, 'Z');
+    await appendText(container, editor, 'Z');
     expect((container.querySelector('.eqnEditor') as HTMLElement).textContent).toBe('a + bZ');
 
     await act(async () => {
@@ -240,7 +245,7 @@ describe('VariableDetails discard (Cancel / Escape)', () => {
     // by the next keyed remount. Changing tabs must commit, like blur-away.
     const { container, onEquationChange } = renderDetails(makeAux('x', 'a + b', { errors: forceEditorOpen }));
     const editor = editorFor(container, '.eqnEditor');
-    await appendText(editor, 'Z');
+    await appendText(container, editor, 'Z');
 
     const editable = container.querySelector('.eqnEditor') as HTMLElement;
     const lookupTab = buttonByText(container, 'Lookup Function');
@@ -258,7 +263,7 @@ describe('VariableDetails discard (Cancel / Escape)', () => {
   it('blur to the canvas (focus leaves the panel) still commits the edit', async () => {
     const { container, onEquationChange } = renderDetails(makeAux('x', 'a + b', { errors: forceEditorOpen }));
     const editor = editorFor(container, '.eqnEditor');
-    await appendText(editor, 'Z');
+    await appendText(container, editor, 'Z');
 
     const editable = container.querySelector('.eqnEditor') as HTMLElement;
     // relatedTarget null models focus moving to a non-focusable canvas / nowhere.
@@ -274,7 +279,7 @@ describe('VariableDetails discard (Cancel / Escape)', () => {
   it('Save commits the edited equation exactly once', async () => {
     const { container, onEquationChange } = renderDetails(makeAux('x', 'a + b', { errors: forceEditorOpen }));
     const editor = editorFor(container, '.eqnEditor');
-    await appendText(editor, 'Z');
+    await appendText(container, editor, 'Z');
 
     const editable = container.querySelector('.eqnEditor') as HTMLElement;
     const save = buttonByText(container, 'Save');
@@ -293,7 +298,7 @@ describe('VariableDetails discard (Cancel / Escape)', () => {
   it('Cancel discards an in-progress units edit', async () => {
     const { container, onEquationChange } = renderDetails(makeAux('x', 'a + b'));
     const unitsEditor = editorFor(container, '.unitsEditor');
-    await appendText(unitsEditor, 'kg');
+    await appendText(container, unitsEditor, 'kg');
 
     const unitsEditable = container.querySelector('.unitsEditor') as HTMLElement;
     expect(unitsEditable.textContent).toBe('kg');
@@ -315,7 +320,7 @@ describe('VariableDetails discard (Cancel / Escape)', () => {
   it('Escape in the notes field discards its edit', async () => {
     const { container, onEquationChange } = renderDetails(makeAux('x', 'a + b'));
     const notesEditor = editorFor(container, '.notesEditor');
-    await appendText(notesEditor, 'hello');
+    await appendText(container, notesEditor, 'hello');
 
     const notesEditable = container.querySelector('.notesEditor') as HTMLElement;
     expect(notesEditable.textContent).toBe('hello');
@@ -335,7 +340,7 @@ describe('VariableDetails discard (Cancel / Escape)', () => {
     // abandoned text back -- and a later blur would then commit it.
     const { container, onEquationChange } = renderDetails(makeAux('x', 'a + b'));
     const unitsEditor = editorFor(container, '.unitsEditor');
-    await appendText(unitsEditor, 'kg');
+    await appendText(container, unitsEditor, 'kg');
 
     const cancel = buttonByText(container, 'Cancel');
     await act(async () => {
@@ -366,7 +371,7 @@ describe('VariableDetails discard (Cancel / Escape)', () => {
     const { container, onEquationChange } = renderDetails(makeAux('x', 'a + b'));
     await openEquationEditorViaPreview(container);
     const editor = editorFor(container, '.eqnEditor');
-    await appendText(editor, 'Z');
+    await appendText(container, editor, 'Z');
 
     // Blur toward another field inside the panel: no commit, and the raw editor
     // stays open showing the pending edit rather than snapping to the preview.
