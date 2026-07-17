@@ -41,7 +41,7 @@ The script names `deploy:assemble` / `deploy:clean` / `deploy:web` use a colon b
 
 Pass extra flags through to `gcloud` after `--`, e.g. `pnpm deploy:web --no-promote`.
 
-### Smaller deploy: `pnpm deploy:web:staged` (proven locally, pending a real gcloud test)
+### Smaller deploy: `pnpm deploy:web:staged` (proven in production)
 
 `pnpm deploy:web` deploys from the workspace root, so GAE's instance `pnpm install` installs every workspace package's dependency closure (~590 MB / 1171 packages) even though the server's runtime closure is ~8 packages. App Engine standard always reinstalls from the deployed `package.json` + lockfile (no vendored-`node_modules` option), so the fix is to deploy a self-contained directory whose `package.json` is just the server's prod closure.
 
@@ -49,7 +49,7 @@ Pass extra flags through to `gcloud` after `--`, e.g. `pnpm deploy:web --no-prom
 
 Result locally: **80 MB / 230 packages** installed (vs 590 MB / 1171), a 28.7 MB upload payload; the staged server boots and serves `/`, `/api/user` (401), the embed component, and static assets. This also keeps the upload well under GAE's 10k-file cap.
 
-What's NOT yet verified: the real `gcloud` upload and the nodejs24 buildpack honoring `packageManager: pnpm@10.6.0` (corepack) + accepting the frozen lockfile. Run `pnpm deploy:web:staged --no-promote`, watch the build log to confirm the instance ran a successful frozen `pnpm install`, then run the post-deploy smoke test before switching traffic. Until that passes, `pnpm deploy:web` is the default/fallback.
+The staged path is production-proven: the 2026-07-16 cutover (version `20260716t201746`) deployed through it via `pnpm deploy:canary` -- the nodejs24 buildpack honored the pnpm `packageManager` pin and the frozen lockfile, and the version was smoke-tested and promoted to 100% of traffic. `pnpm deploy:web` remains available as the fallback if the staging assembly ever misbehaves.
 
 ### Recommended: deploy without promoting, smoke-test, then switch traffic
 
@@ -169,6 +169,6 @@ The `frontend` job in [`.github/workflows/ci.yaml`](/.github/workflows/ci.yaml) 
 
 Things to know that don't have a clean fix yet:
 
-- `pnpm deploy:web` deploys from the workspace root, so GAE's Node buildpack installs the *whole workspace's* dependency set on the instance -- `@rsbuild/*`, `slate`, `radix`, rspress, vite, and every other package's deps (~590 MB / 1171 packages), none needed by the server at runtime. App Engine standard always reinstalls from the deployed `package.json` + lockfile and has no vendored-`node_modules` escape hatch, so the only lever is the deployed manifest. The smaller-deploy fix is implemented as **`pnpm deploy:web:staged`** (see below); it is locally proven but still pending a real `gcloud --no-promote` test, so `deploy:web` remains the default. Tracked in [docs/tech-debt.md](/docs/tech-debt.md) "Web deploy uploads the whole monorepo and GAE installs the full dep set".
+- `pnpm deploy:web` deploys from the workspace root, so GAE's Node buildpack installs the *whole workspace's* dependency set on the instance -- `@rsbuild/*`, `slate`, `radix`, rspress, vite, and every other package's deps (~590 MB / 1171 packages), none needed by the server at runtime. App Engine standard always reinstalls from the deployed `package.json` + lockfile and has no vendored-`node_modules` escape hatch, so the only lever is the deployed manifest. The smaller-deploy fix is **`pnpm deploy:web:staged`** (see above), production-proven since the 2026-07-16 cutover; prefer it (or `pnpm deploy:canary`, which uses it) and treat root-based `deploy:web` as the fallback. Tracked in [docs/tech-debt.md](/docs/tech-debt.md) "Web deploy uploads the whole monorepo and GAE installs the full dep set".
 - Server-side PNG preview (`src/server/render.ts`) renders user-uploaded models in per-request `worker_threads` workers (each with its own WASM instance) with a 10 s total wall-clock budget per request (queue wait included) and at most 2 concurrent renders -- restoring the isolation the 2022 deploy had (issue #694). What remains rough: there's no model-complexity cap below the 10 MB request body limit, so a pathological model still costs a bounded 10 s worker per attempt before failing with a 500.
 - There's no error reporting or alerting. Cloud Logging and the GAE metrics dashboard are it. The Express `/healthz` route exists as an uptime-check target (see the smoke test above), but no Cloud Monitoring notification channel, uptime check, or alerting policy points at it yet -- that ops-side setup is tracked in [issue #693](https://github.com/bpowers/simlin/issues/693).
