@@ -1,29 +1,184 @@
-/* stylelint-disable docusaurus/copyright-header */
 /**
- * Any CSS included here will be global. The classic template
- * bundles Infima by default. Infima is a CSS framework designed to
- * work well for content-centric websites.
+ * Global styles for the Simlin site, matching the classic Docusaurus-era
+ * design: Simlin red as the brand color, a red hero banner, and a dark
+ * multi-column footer.
  */
 
-/* You can override the default Infima variables here. */
 :root {
-  --ifm-color-primary: #c83639;
-  --ifm-color-primary-dark: rgb(33, 175, 144);
-  --ifm-color-primary-darker: rgb(31, 165, 136);
-  --ifm-color-primary-darkest: rgb(26, 136, 112);
-  --ifm-color-primary-light: rgb(70, 203, 174);
-  --ifm-color-primary-lighter: rgb(102, 212, 189);
-  --ifm-color-primary-lightest: rgb(146, 224, 208);
-  --ifm-code-font-size: 95%;
+  --rp-c-brand: #c83639;
+  --rp-c-brand-dark: #b43033;
+  --rp-c-brand-darker: #a02b2e;
+  --rp-c-brand-light: #d05457;
+  --rp-c-brand-lighter: #d87275;
+  --rp-c-brand-tint: rgba(200, 54, 57, 0.08);
 }
 
-.docusaurus-highlight-code-line {
-  background-color: rgb(72, 77, 91);
-  display: block;
-  margin: 0 calc(-1 * var(--ifm-pre-padding));
-  padding: 0 var(--ifm-pre-padding);
+/* Shared centered content column (Infima-style container). */
+.simlin-container {
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 0 1rem;
+  width: 100%;
 }
 
-.hero__title {
+/* Brand-colored links in the homepage prose (outside the hero). */
+main > .simlin-container a {
+  color: var(--rp-c-brand);
+}
+
+main > .simlin-container a:hover {
+  color: var(--rp-c-brand-dark);
+}
+
+/* --- Hero banner --- */
+
+.simlin-hero {
+  background-color: #c83639;
+  color: #ffffff;
+  padding: 4rem 0;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.simlin-hero-container {
+  max-width: 760px;
+}
+
+.simlin-hero-title {
   font-size: 5rem;
+  font-weight: 700;
+  margin: 0;
+  line-height: 1.1;
+}
+
+.simlin-hero-subtitle {
+  font-size: 1.5rem;
+  margin: 1rem 0;
+}
+
+.simlin-hero a {
+  color: #ffffff;
+}
+
+.simlin-hero-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1.5rem;
+}
+
+.simlin-get-started {
+  display: inline-block;
+  border: 1px solid #ffffff;
+  border-radius: 0.4rem;
+  color: #ffffff;
+  font-size: 1.2rem;
+  font-weight: 700;
+  padding: 0.75rem 1.5rem;
+  text-decoration: none;
+  transition: background-color 0.2s ease;
+}
+
+.simlin-get-started:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+@media screen and (max-width: 966px) {
+  .simlin-hero {
+    padding: 2rem;
+  }
+
+  .simlin-hero-title {
+    font-size: 3rem;
+  }
+}
+
+/* --- Embedded model diagram --- */
+
+.simlin-diagram-container {
+  max-width: 760px;
+  /* Reserve the diagram's aspect-ratio-derived height so the page doesn't
+     jump when the WASM engine finishes loading and the canvas appears. */
+  min-height: 360px;
+}
+
+/* --- Features --- */
+
+.simlin-features {
+  display: flex;
+  align-items: center;
+  padding: 2rem 0;
+  width: 100%;
+}
+
+.simlin-features-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 2rem;
+}
+
+.simlin-feature {
+  flex: 1 1 0;
+  min-width: 16rem;
+}
+
+.simlin-feature h3 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+}
+
+.simlin-feature a {
+  color: var(--rp-c-brand);
+}
+
+/* --- Footer --- */
+
+.simlin-footer {
+  background-color: #303846;
+  color: #ebedf0;
+  padding: 2rem 0;
+}
+
+.simlin-footer-columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem 2rem;
+}
+
+.simlin-footer-column {
+  flex: 1 1 0;
+  min-width: 12rem;
+}
+
+.simlin-footer-title {
+  color: #ffffff;
+  font-weight: 700;
+  margin-bottom: 0.75rem;
+}
+
+.simlin-footer-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.simlin-footer-items li {
+  margin-bottom: 0.5rem;
+}
+
+.simlin-footer a {
+  color: #ebedf0;
+  text-decoration: none;
+}
+
+.simlin-footer a:hover {
+  color: #ffffff;
+  text-decoration: underline;
+}
+
+.simlin-footer-copyright {
+  margin-top: 1.5rem;
+  text-align: center;
 }

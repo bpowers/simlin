@@ -98,9 +98,7 @@ simlin-cli  simlin-mcp  simlin-serve
 @simlin/diagram
   ^       ^         ^
   |       |         |
-@simlin/app   @simlin/server   @simlin/serve-web
-
-simlin-site (standalone)
+@simlin/app   @simlin/server   @simlin/serve-web   simlin-site
 ```
 
 - `@simlin/engine` -> (none)
@@ -109,7 +107,7 @@ simlin-site (standalone)
 - `@simlin/app` -> `@simlin/core`, `@simlin/diagram`, `@simlin/engine`
 - `@simlin/server` -> `@simlin/core`, `@simlin/diagram`, `@simlin/engine`
 - `@simlin/serve-web` -> `@simlin/core`, `@simlin/diagram`, `@simlin/engine`
-- `simlin-site` -> (none)
+- `simlin-site` -> `@simlin/diagram` (embeds live model diagrams on the website)
 
 ## Test Models
 

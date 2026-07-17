@@ -16,19 +16,15 @@ export default defineConfig({
     light: '/img/logo.svg',
     dark: '/img/logo.svg',
   },
+  logoText: 'Simlin',
   globalStyles: path.join(__dirname, 'src/css/custom.css'),
   themeConfig: {
+    // The production site is light-only; hide the appearance toggle.
+    darkMode: false,
+    // Match the deployed site's navbar: no search box (GitHub lives in the
+    // footer's More column instead of a nav icon).
+    search: false,
     enableContentAnimation: true,
-    footer: {
-      message: '© Bobby Powers',
-    },
-    socialLinks: [
-      {
-        icon: 'github',
-        mode: 'link',
-        content: GithubBase,
-      },
-    ],
     nav: [
       {
         text: 'App',
@@ -36,33 +32,29 @@ export default defineConfig({
       },
       {
         text: 'Docs',
-        link: '/guide/',
+        link: '/docs',
       },
       {
         text: 'Blog',
-        link: '/blog/',
+        link: '/blog',
       },
     ],
     sidebar: {
-      '/guide/': [
+      '/docs': [
         {
           text: 'Getting Started',
           items: [
             {
-              text: 'Introduction',
-              link: '/guide/',
+              text: 'The Simlin App',
+              link: '/docs',
             },
             {
-              text: 'First Model',
-              link: '/guide/first-model',
+              text: 'Your First Model',
+              link: '/docs/first-model',
             },
             {
-              text: 'Simlin App',
-              link: '/guide/simlin-app',
-            },
-            {
-              text: 'Cheat Sheet',
-              link: '/guide/cheat-sheet',
+              text: 'Editor Cheat Sheet',
+              link: '/docs/cheat-sheet',
             },
           ],
         },
@@ -74,15 +66,27 @@ export default defineConfig({
     },
   },
   builderConfig: {
-    resolve: {
-      alias: {
-        '@simlin/core': path.resolve(__dirname, '../src/core'),
-        '@simlin/diagram': path.resolve(__dirname, '../src/diagram'),
-        '@simlin/engine': path.resolve(__dirname, '../src/engine'),
-        '@': path.resolve(__dirname, 'src'),
-      },
+    html: {
+      // Google Analytics. Rspress has no first-class analytics option, so
+      // inject the gtag snippet directly into every page.
+      tags: [
+        {
+          tag: 'script',
+          attrs: { async: true, src: 'https://www.googletagmanager.com/gtag/js?id=G-DYC89XS4YM' },
+        },
+        {
+          tag: 'script',
+          children:
+            "window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag('js',new Date());gtag('config','G-DYC89XS4YM');",
+        },
+      ],
     },
     tools: {
+      bundlerChain(chain, { CHAIN_ID }) {
+        // Keep the Node-build CSS stubs out of the CSS pipeline (see the
+        // javascript/auto rule below for why they exist).
+        chain.module.rule(CHAIN_ID.RULE.CSS).exclude.add(/diagram[\\/]lib[\\/].*\.css$/);
+      },
       rspack: {
         experiments: {
           asyncWebAssembly: true,
@@ -93,6 +97,17 @@ export default defineConfig({
               test: /\.wasm$/,
               type: 'webassembly/async',
             },
+            // @simlin/diagram's Node build (lib/) stubs its CSS files with
+            // CommonJS shims so Node can require() them; only the browser
+            // build (lib.browser/) carries real CSS. The SSG bundle resolves
+            // the Node build, so parse those stubs as JavaScript instead of
+            // feeding them to the CSS pipeline. The web bundle never sees
+            // lib/ (it resolves the `browser` condition), so this rule is
+            // inert there.
+            {
+              test: /diagram[\\/]lib[\\/].*\.css$/,
+              type: 'javascript/auto',
+            },
           ],
         },
       },
@@ -100,18 +115,13 @@ export default defineConfig({
   },
   // Plugins
   plugins: [],
-  // Routes for non-doc pages
+  // Extensionless links, matching the URLs the site has always served
+  // (GitHub Pages resolves /terms to terms.html).
   route: {
-    include: ['**/*.tsx', '**/*.md', '**/*.mdx'],
+    cleanUrls: true,
   },
   // Output configuration
   outDir: 'build',
-  // Analytics
-  analytics: {
-    ga: {
-      measurementId: 'G-DYC89XS4YM',
-    },
-  },
   // Generate sitemap
   ssg: true,
 });

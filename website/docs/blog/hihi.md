@@ -1,17 +1,15 @@
 ---
-date: 2021-04-19
 title: Hi Hi
-tag:
-  - introduction
-  - announcement
-author: Bobby Powers
+date: 2021-04-19
 ---
 
 # Hi Hi
 
+April 19, 2021 · Bobby Powers
+
 Simlin is an web-first system dynamics modeling editor and engine.
 The goals are to:
-1. Lower the barrier to entry for System Dynamics by creating a full-featured yet inexpensive model editor 
+1. Lower the barrier to entry for System Dynamics by creating a full-featured yet inexpensive model editor
 2. Widen the reach for existing System Dynamics content by making it easier to embed simulations in websites (and in interactive content in general)
 3. Enable cross-pollination with other technology and modeling approaches by making the full engine and editor [available](https://github.com/bpowers/simlin) as open-source software
 

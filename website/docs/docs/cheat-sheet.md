@@ -1,6 +1,7 @@
 ---
-id: cheat-sheet
 title: Editor Cheat Sheet
 ---
+
+# Editor Cheat Sheet
 
 TODO as well

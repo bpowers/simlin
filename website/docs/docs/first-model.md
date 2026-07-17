@@ -1,7 +1,8 @@
 ---
-id: first-model
 title: Your First Model
 ---
+
+# Your First Model
 
 This is how you make a model.
 
