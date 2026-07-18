@@ -5908,3 +5908,14 @@ fn generate_nonlinear_partial(
 #[cfg(test)]
 #[path = "ltm_augment_tests.rs"]
 mod tests;
+
+// The Track-A differential gate: the Expr2 and Expr0 access-shape classifier
+// families must agree per non-reducer reference occurrence, so the
+// ceteris-paribus live reference survives PREVIOUS-wrapping instead of
+// silently zeroing the link score. Mounted here (not in `ltm_ir`) so it sees
+// this module's private Expr0 classifier (`classify_expr0_subscript_shape`)
+// and `IteratedDimCtx`; it reaches the Expr2 side through `pub(crate)`
+// `db::ltm_ir`.
+#[cfg(test)]
+#[path = "ltm_classifier_agreement_tests.rs"]
+mod classifier_agreement_tests;
