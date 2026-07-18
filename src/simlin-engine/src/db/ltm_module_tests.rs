@@ -1738,3 +1738,124 @@ fn test_pinned_loop_through_stockless_passthrough_still_rejected() {
         "rejection must carry the clear no-stock reason; got: {reason}"
     );
 }
+
+/// GH #971: when a target reads MORE THAN ONE output of a single module
+/// instance, `module_link_score_equation`'s module->variable branch holds ONE
+/// output live (its change is what the score attributes) and freezes the
+/// rest. The live output was formerly chosen by an arbitrary `.find()` over
+/// `identifier_set`'s per-process-random `HashSet`, so the emitted score --
+/// and every loop score through it -- flapped between processes. The fix
+/// selects the DOCUMENT-order-first output from the reference-site IR's
+/// per-occurrence enumeration (`OccurrenceRef::ModuleOutput`, walk order).
+///
+/// This pins the fix by building two models that differ ONLY in the order the
+/// target reads the module's two outputs and asserting they hold DIFFERENT
+/// sources live. That distinguishes document order from BOTH stable-but-wrong
+/// alternatives: an alphabetical sort would pick `out_a` in both, and the old
+/// hash order could not depend on reading order at all. The live source is
+/// identifiable because it -- and only it -- drives the guard form's SIGN
+/// normalizer `(src - PREVIOUS(src))`; the frozen output appears solely inside
+/// a `PREVIOUS(...)`.
+#[test]
+fn test_multi_output_module_link_score_holds_document_order_first_live() {
+    use salsa::Setter;
+
+    let build_link_eqn = |combined_eqn: &str| -> String {
+        let project = datamodel::Project {
+            name: "multi_output".to_string(),
+            sim_specs: datamodel::SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                x_model(
+                    "main",
+                    vec![
+                        x_stock("level", "50", &["adjustment"], &[], None),
+                        x_aux("combined", combined_eqn, None),
+                        x_flow("adjustment", "combined / 5", None),
+                        x_module("multi_out", &[("level", "multi_out.input")], None),
+                    ],
+                ),
+                x_model(
+                    "multi_out",
+                    vec![
+                        datamodel::Variable::Aux(datamodel::Aux {
+                            ident: "input".to_string(),
+                            equation: datamodel::Equation::Scalar("0".to_string()),
+                            documentation: String::new(),
+                            units: None,
+                            gf: None,
+                            ai_state: None,
+                            uid: None,
+                            compat: datamodel::Compat {
+                                can_be_module_input: true,
+                                ..datamodel::Compat::default()
+                            },
+                        }),
+                        x_aux("out_a", "input * 2", None),
+                        x_aux("out_b", "input * 3", None),
+                    ],
+                ),
+            ],
+            source: None,
+            ai_information: None,
+        };
+
+        let mut db = SimlinDb::default();
+        let (source_project, main_model) = {
+            let sync = sync_from_datamodel(&db, &project);
+            (sync.project, sync.models["main"].source)
+        };
+        source_project.set_ltm_enabled(&mut db).to(true);
+
+        let ltm_vars = model_ltm_variables(&db, main_model, source_project);
+        let link = ltm_vars
+            .vars
+            .iter()
+            .find(|v| v.name.contains("multi_out\u{2192}combined"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "must emit the multi_out->combined link score; got: {:?}",
+                    ltm_vars.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+                )
+            });
+        match &link.equation {
+            datamodel::Equation::Scalar(text) => text.clone(),
+            other => panic!("module link score should be scalar, got {other:?}"),
+        }
+    };
+
+    // The live source is the sole reference spelled as `(src - PREVIOUS(src))`
+    // (the SIGN normalizer); a frozen output only ever appears wrapped in
+    // `PREVIOUS(...)`.
+    let live_diff =
+        |out: &str| format!("\"multi_out\u{00B7}{out}\" - PREVIOUS(\"multi_out\u{00B7}{out}\")");
+
+    let eqn_ab = build_link_eqn("multi_out.out_a + multi_out.out_b");
+    assert!(
+        eqn_ab.contains(&live_diff("out_a")),
+        "reads out_a first, so out_a is held live: {eqn_ab}"
+    );
+    assert!(
+        !eqn_ab.contains(&live_diff("out_b")),
+        "out_b (read second) is frozen, never the SIGN source: {eqn_ab}"
+    );
+
+    let eqn_ba = build_link_eqn("multi_out.out_b + multi_out.out_a");
+    assert!(
+        eqn_ba.contains(&live_diff("out_b")),
+        "reads out_b first, so out_b is held live -- document order, not \
+         alphabetical (which would pick out_a): {eqn_ba}"
+    );
+    assert!(
+        !eqn_ba.contains(&live_diff("out_a")),
+        "out_a (read second) is frozen: {eqn_ba}"
+    );
+}

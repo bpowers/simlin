@@ -660,6 +660,43 @@ fn module_composite_ports(
         .collect()
 }
 
+/// The first `{module}·port` output composite that `to`'s equation reads, in
+/// DOCUMENT order (left-to-right over `to`'s reconstructed AST), or `None`
+/// when `to` reads no output of `module`.
+///
+/// This is the deterministic replacement (GH #971) for
+/// [`module_link_score_equation`]'s former pick -- an arbitrary
+/// `{module}·`-prefixed dependency out of `identifier_set`'s `HashSet`, whose
+/// iteration order is per-process random. When `to` reads MORE THAN ONE
+/// output of one module instance the choice decides which output's change the
+/// link score attributes (the others are frozen), so the random pick made the
+/// emitted score -- and every loop score through it -- flap between processes.
+/// The reference-site IR already enumerates the module-output composites as
+/// `OccurrenceRef::ModuleOutput` occurrences in the walk's stable
+/// left-to-right order, so taking the first that names `module` is a
+/// reproducible choice over the SAME set the old scan considered.
+fn module_output_ref_in_document_order(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    module: &str,
+    to_name: &str,
+) -> Option<String> {
+    let ref_sites = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
+    ref_sites
+        .occurrences
+        .get(to_name)?
+        .iter()
+        .find_map(|occ| match &occ.reference {
+            crate::db::ltm_ir::OccurrenceRef::ModuleOutput {
+                module: occ_module,
+                composite,
+                ..
+            } if occ_module == module => Some(composite.clone()),
+            _ => None,
+        })
+}
+
 /// Equation for a module-involved link score (`from` and/or `to` is a
 /// module node in the parent causal graph). Shared verbatim by the
 /// `(from, to)`-keyed [`link_score_equation_text`] and the per-shape
@@ -805,15 +842,29 @@ pub(crate) fn module_link_score_equation(
         // module output via `module·port`. Prefer a ceteris-paribus
         // partial on that equation (the exact link score); fall back to
         // the unit transfer if the reference can't be located.
-        let from_output = to_var
-            .ast()
-            .map(|ast| crate::variable::identifier_set(ast, &[], None))
-            .and_then(|deps| {
-                let prefix = format!("{from_name}\u{00B7}");
-                deps.into_iter()
-                    .find(|d| d.as_str().starts_with(&prefix))
-                    .map(|d| d.to_string())
-            });
+        //
+        // Which output to hold live (GH #971): the reference-site IR
+        // enumerates the module-output composites in DOCUMENT order, so take
+        // the first that names `from` -- a deterministic pick across
+        // processes, unlike the former `identifier_set().find()` over a
+        // per-process-random `HashSet`. The `identifier_set` scan is kept
+        // only as a defensive fallback for the (unexpected) case where the IR
+        // recorded no matching `ModuleOutput` occurrence for `to`, preserving
+        // the historical set of edges that receive a real partial.
+        let from_output = module_output_ref_in_document_order(
+            db, model, project, from_name, to_name,
+        )
+        .or_else(|| {
+            to_var
+                .ast()
+                .map(|ast| crate::variable::identifier_set(ast, &[], None))
+                .and_then(|deps| {
+                    let prefix = format!("{from_name}\u{00B7}");
+                    deps.into_iter()
+                        .find(|d| d.as_str().starts_with(&prefix))
+                        .map(|d| d.to_string())
+                })
+        });
         match from_output {
             Some(output_ref) => {
                 let output_ident = Ident::<Canonical>::new(&output_ref);
