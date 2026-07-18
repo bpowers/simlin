@@ -317,7 +317,7 @@ struct WalkCtx<'a> {
 /// left-to-right DFS over the AST, matching `enumerate_agg_nodes`, so the
 /// per-source site `Vec`s are deterministic (a salsa requirement on the
 /// cached IR result).
-fn collect_all_reference_sites(
+pub(crate) fn collect_all_reference_sites(
     target_var: &crate::variable::Variable,
     variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
     dim_ctx: &crate::dimensions::DimensionsContext,

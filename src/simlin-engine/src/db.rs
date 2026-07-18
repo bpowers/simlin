@@ -42,7 +42,11 @@ mod dep_graph;
 mod element_graph_proptest;
 mod invariance;
 pub(crate) use invariance::model_flows_invariant;
-mod ltm_ir;
+// `pub(crate)` (not private-to-`db`) so the Track-A classifier-agreement gate,
+// mounted under `crate::ltm_augment`, can reach the production Expr2 walker
+// (`collect_all_reference_sites`) and the reference-site IR entry
+// (`model_ltm_reference_sites`) it compares the Expr0 partial builder against.
+pub(crate) mod ltm_ir;
 mod macro_registry;
 mod units;
 mod var_fragment;

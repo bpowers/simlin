@@ -51,7 +51,7 @@ pub(crate) fn macro_param_idents(
 /// ModelStage0 converts a datamodel::Model to one with a map of canonicalized
 /// identifiers to Variables where module dependencies haven't been resolved.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub struct ModelStage0 {
     pub ident: Ident<Canonical>,
     pub display_name: String,
@@ -74,7 +74,7 @@ pub struct ModelStage0 {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub struct ModelStage1 {
     pub name: Ident<Canonical>,
     pub display_name: String,
@@ -2259,4 +2259,45 @@ fn test_all_deps() {
     verify_all_deps(&expected_deps_list, true, &models, Some(&module_inputs));
 
     // test non-existant variables
+}
+
+/// Compile-time proof that the two name-keyed, pre-layout model-compilation
+/// stages and the plain diagnostic `Error` implement `salsa::Update`.
+///
+/// This is the enabling derive for GH #966: the per-project Stage0/Stage1 maps
+/// are about to be cached as `#[salsa::tracked]` `returns(ref)` queries (so
+/// whole-project unit diagnostics stop being quadratic in the model count).
+///
+/// NOTE: salsa 0.26 does NOT require the `Update` derive to store these as a
+/// tracked function's `returns(ref)` value. All three are `'static + PartialEq`,
+/// and salsa's derive/dispatch resolves an update through the method-dispatch
+/// hack: with no `Update` impl it falls back to the `UpdateFallback` blanket impl
+/// for `'static + PartialEq` (compare-and-replace), so a `returns(ref)` query
+/// over any of them compiles unchanged even with the derive removed. At runtime a
+/// tracked function's memo is backdated purely by `PartialEq` (`values_equal`) and
+/// never calls `maybe_update`. So the box-2 cached queries would NOT catch a
+/// dropped derive -- this test is the SOLE guard pinning all three derives (and,
+/// through the reasoning below, the `compiler::Expr` prohibition).
+///
+/// What the derive actually buys: it opts each type into salsa's recursive
+/// in-place `maybe_update` path instead of the compare-and-replace fallback, and
+/// makes it eligible for every salsa position -- including a future tracked-STRUCT
+/// field, which IS updated through `maybe_update` at runtime (unlike a tracked-fn
+/// return). Keeping the derives is cheap and forward-compatible; the point of the
+/// test is that nothing else forces them to stay.
+///
+/// The offset-keyed lowered-expression layer (`compiler::Expr` and everything
+/// downstream of variable layout) must NEVER derive `salsa::Update`, even
+/// though it mechanically could: those values are only meaningful relative to
+/// ONE model-global slot layout, so caching one and reusing it after a layout
+/// change would silently return a value keyed to a stale layout. `ModelStage0`
+/// and `ModelStage1` are keyed by canonical name and built before layout, and
+/// `Error` is layout-independent diagnostic data, so the derive is
+/// semantically sound only for these three.
+#[test]
+fn stage_types_and_error_implement_salsa_update() {
+    fn assert_update<T: salsa::Update>() {}
+    assert_update::<ModelStage0>();
+    assert_update::<ModelStage1>();
+    assert_update::<crate::common::Error>();
 }
