@@ -702,7 +702,7 @@ pub enum ErrorKind {
     Variable,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub struct Error {
     pub kind: ErrorKind,
     pub code: ErrorCode,
