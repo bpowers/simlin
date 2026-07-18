@@ -890,3 +890,707 @@ mod model_ltm_reference_sites_tests {
         });
     }
 }
+
+// ── Layer 3: the per-occurrence enumeration (Track A2a) ────────────────────
+//
+// The `occurrences` view is the finer, per-reference-occurrence enumeration
+// over a whole target equation that the ceteris-paribus transform will consume
+// in A2b. Each test drives a hard shape and pins the one field it adds; every
+// pin would fail without the corresponding addition.
+mod occurrence_ir_tests {
+    use super::*;
+    use crate::datamodel;
+    use crate::db::ltm_ir::{OccurrenceAxis, OccurrenceRef, OccurrenceRouting, OccurrenceSite};
+    use crate::testutils::{x_aux, x_flow, x_model, x_module, x_stock};
+
+    /// Sync `datamodel`, run `model_ltm_reference_sites`, and return the
+    /// occurrence stream for `target` in `model_name` (empty if none).
+    fn occ_from_datamodel(
+        datamodel: &datamodel::Project,
+        model_name: &str,
+        target: &str,
+    ) -> Vec<OccurrenceSite> {
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, datamodel);
+        let model = sync.models[model_name].source;
+        let proj = sync.project;
+        let ir = model_ltm_reference_sites(&db, model, proj);
+        ir.occurrences.get(target).cloned().unwrap_or_default()
+    }
+
+    /// `occ_from_datamodel` for the `main` model of a `TestProject`.
+    fn occ_of(project: &TestProject, target: &str) -> Vec<OccurrenceSite> {
+        occ_from_datamodel(&project.build_datamodel(), "main", target)
+    }
+
+    /// Run `model_ltm_reference_sites` for `project`'s `main` model and hand the
+    /// full IR plus `target`'s occurrence stream to `body` (for tests that need
+    /// to cross-check the occurrence view against the per-edge `sites` view).
+    fn with_ir_and_occ(
+        project: &TestProject,
+        target: &str,
+        body: impl FnOnce(&LtmReferenceSitesResult, &[OccurrenceSite]),
+    ) {
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let model = sync.models["main"].source;
+        let proj = sync.project;
+        let ir = model_ltm_reference_sites(&db, model, proj);
+        let occs = ir.occurrences.get(target).cloned().unwrap_or_default();
+        body(ir, &occs);
+    }
+
+    fn var_occs<'a>(occs: &'a [OccurrenceSite], name: &str) -> Vec<&'a OccurrenceSite> {
+        occs.iter()
+            .filter(|o| matches!(&o.reference, OccurrenceRef::Variable(v) if v == name))
+            .collect()
+    }
+
+    #[test]
+    fn enumerates_every_occurrence_with_stable_distinct_site_ids() {
+        // `relative_pop[Region] = population / population[nyc]`: two occurrences
+        // of `population` -- the bare numerator (document-first) then the
+        // FixedIndex denominator -- enumerated per occurrence over the whole
+        // equation, with distinct, deterministic `SiteId`s.
+        let project = TestProject::new("main")
+            .named_dimension("Region", &["nyc", "boston"])
+            .array_aux("population[Region]", "100")
+            .array_aux("relative_pop[Region]", "population / population[nyc]");
+        let occs = occ_of(&project, "relative_pop");
+        let pop = var_occs(&occs, "population");
+        assert_eq!(pop.len(), 2, "occs: {occs:?}");
+        assert_eq!(pop[0].shape, RefShape::Bare, "numerator is document-first");
+        assert_eq!(pop[1].shape, RefShape::FixedIndex(vec!["nyc".to_string()]));
+        assert_ne!(
+            pop[0].site_id, pop[1].site_id,
+            "two same-source occurrences must have distinct SiteIds"
+        );
+        // Determinism (a salsa requirement): a fresh build yields the identical
+        // stream, SiteIds included.
+        let occs2 = occ_of(&project, "relative_pop");
+        assert_eq!(
+            occs, occs2,
+            "the occurrence stream (including SiteIds) must be deterministic"
+        );
+    }
+
+    #[test]
+    fn reducer_enclosure_surfaced_even_when_routing_is_direct() {
+        // `z = SUM(pop[idx, *])` with `idx` a scalar: the reducer is NOT hoisted
+        // (dynamic index), so the occurrence routes `Direct` -- yet it must
+        // still surface `in_reducer` + `reducer_keys` (the #517/#779
+        // "inside a scalar reducer" fact the per-edge `ClassifiedSite` folds
+        // away by reclassifying Wildcard->DynamicIndex and dropping the bit).
+        let project = TestProject::new("main")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y"])
+            .array_aux("pop[D1, D2]", "1")
+            .scalar_aux("idx", "1")
+            .scalar_aux("z", "SUM(pop[idx, *])");
+        with_ir_and_occ(&project, "z", |ir, occs| {
+            let pop = var_occs(occs, "pop");
+            assert_eq!(pop.len(), 1, "occs: {occs:?}");
+            let o = pop[0];
+            assert_eq!(
+                o.shape,
+                RefShape::Wildcard,
+                "the occurrence keeps the RAW walker shape, unlike ClassifiedSite"
+            );
+            assert!(o.in_reducer, "the SUM argument sits inside a reducer");
+            assert_eq!(o.reducer_keys.len(), 1, "one enclosing reducer");
+            assert_eq!(
+                o.routing,
+                OccurrenceRouting::Direct,
+                "the dynamic-index reducer is not hoisted"
+            );
+            // The per-edge view folds the enclosure away: it reclassifies to
+            // DynamicIndex, discarding the reducer-enclosure bit.
+            let sites = ir.sites.get(&("pop".to_string(), "z".to_string())).unwrap();
+            assert!(
+                sites.iter().any(|s| s.shape == RefShape::DynamicIndex),
+                "ClassifiedSite reclassifies the unhoisted Wildcard to DynamicIndex"
+            );
+        });
+    }
+
+    #[test]
+    fn hoisted_reducer_occurrence_routes_through_agg() {
+        // `share[Region] = pop / SUM(pop[*])`: the bare numerator is Direct/Bare;
+        // the SUM's wildcard arg is hoisted, so its occurrence routes ThroughAgg
+        // while KEEPING the raw Wildcard shape.
+        let project = TestProject::new("main")
+            .named_dimension("Region", &["nyc", "boston"])
+            .array_aux("pop[Region]", "100")
+            .array_aux("share[Region]", "pop / SUM(pop[*])");
+        with_ir_and_occ(&project, "share", |_ir, occs| {
+            let pop = var_occs(occs, "pop");
+            assert_eq!(pop.len(), 2, "occs: {occs:?}");
+            let bare = pop.iter().find(|o| !o.in_reducer).expect("bare numerator");
+            assert_eq!(bare.routing, OccurrenceRouting::Direct);
+            assert_eq!(bare.shape, RefShape::Bare);
+            let reduced = pop.iter().find(|o| o.in_reducer).expect("SUM argument");
+            assert!(
+                matches!(reduced.routing, OccurrenceRouting::ThroughAgg { .. }),
+                "a hoisted reducer occurrence routes through its synthetic agg"
+            );
+            assert_eq!(
+                reduced.shape,
+                RefShape::Wildcard,
+                "the raw walker shape is preserved on the occurrence"
+            );
+        });
+    }
+
+    #[test]
+    fn already_lagged_marks_previous_and_init_contents() {
+        // `to = from + PREVIOUS(g) + INIT(h)`: `from` is live/unlagged; the
+        // occurrences inside PREVIOUS and INIT are `already_lagged` (so the
+        // transform will not re-wrap and double-lag them).
+        let project = TestProject::new("main")
+            .scalar_aux("from", "1")
+            .scalar_aux("g", "2")
+            .scalar_aux("h", "3")
+            .scalar_aux("to", "from + PREVIOUS(g) + INIT(h)");
+        with_ir_and_occ(&project, "to", |_ir, occs| {
+            let get = |name: &str| {
+                var_occs(occs, name)
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| panic!("no occurrence for {name}: {occs:?}"))
+            };
+            assert!(!get("from").already_lagged, "the bare `from` is not lagged");
+            assert!(get("g").already_lagged, "g sits inside PREVIOUS");
+            assert!(get("h").already_lagged, "h sits inside INIT");
+        });
+    }
+
+    #[test]
+    fn index_nested_marks_subscript_index_occurrence() {
+        // `to = SUM(w[from]) + from`: the `from` inside `w[from]` is reachable
+        // ONLY through a subscript index (`index_nested`), while the bare `from`
+        // outside is not -- the distinction the transform needs to name the
+        // normalizer and to whole-freeze a reducer whose only live occurrence is
+        // index-nested (Q4).
+        let project = TestProject::new("main")
+            .named_dimension("Region", &["nyc", "boston"])
+            .array_aux("w[Region]", "1")
+            .scalar_aux("from", "1")
+            .scalar_aux("to", "SUM(w[from]) + from");
+        with_ir_and_occ(&project, "to", |_ir, occs| {
+            let froms = var_occs(occs, "from");
+            assert_eq!(froms.len(), 2, "occs: {occs:?}");
+            let nested = froms
+                .iter()
+                .find(|o| o.index_nested)
+                .expect("the from inside w[from]");
+            assert!(nested.in_reducer, "w[from] sits inside SUM");
+            let bare = froms
+                .iter()
+                .find(|o| !o.index_nested)
+                .expect("the bare `+ from`");
+            assert!(!bare.in_reducer, "the bare `from` is outside the reducer");
+        });
+    }
+
+    #[test]
+    fn mismatched_iterated_axis_is_distinct_from_dynamic() {
+        // A transposed subscript `arr[D2, D1]` (arr declared `[D1, D2]`) inside
+        // an A2A-over-`[D1, D2]` target: the coarse shape collapses to
+        // DynamicIndex (unchanged), but the per-axis record marks each axis
+        // `MismatchedIterated`, so `classify_other_dep_iterated_dim_subscript`'s
+        // `Mismatch` verdict is derivable from the IR (distinct from a genuine
+        // dynamic index below).
+        let project = TestProject::new("main")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y"])
+            .array_aux("arr[D1, D2]", "1")
+            .array_aux_direct(
+                "t",
+                vec!["D1".to_string(), "D2".to_string()],
+                "arr[D2, D1] * 2",
+                None,
+            );
+        with_ir_and_occ(&project, "t", |_ir, occs| {
+            let arr = var_occs(occs, "arr");
+            assert_eq!(arr.len(), 1, "occs: {occs:?}");
+            assert_eq!(
+                arr[0].shape,
+                RefShape::DynamicIndex,
+                "coarse shape unchanged"
+            );
+            assert_eq!(
+                arr[0].axes,
+                vec![
+                    OccurrenceAxis::MismatchedIterated {
+                        dim: "d2".to_string()
+                    },
+                    OccurrenceAxis::MismatchedIterated {
+                        dim: "d1".to_string()
+                    },
+                ],
+                "a transposed iterated subscript is per-axis MismatchedIterated"
+            );
+        });
+
+        // A genuinely dynamic index (`pp[k + 1]`) is `Dynamic`, not
+        // MismatchedIterated -- the distinction the transform must act on.
+        let dyn_project = TestProject::new("main")
+            .indexed_dimension("Idx", 3)
+            .array_aux("pp[Idx]", "1")
+            .scalar_aux("k", "1")
+            .array_aux_direct("dref", vec!["Idx".to_string()], "pp[k + 1]", None);
+        with_ir_and_occ(&dyn_project, "dref", |_ir, occs| {
+            let pp = var_occs(occs, "pp");
+            assert_eq!(pp.len(), 1, "occs: {occs:?}");
+            assert_eq!(pp[0].shape, RefShape::DynamicIndex);
+            assert_eq!(
+                pp[0].axes,
+                vec![OccurrenceAxis::Dynamic],
+                "an arithmetic index is Dynamic, never MismatchedIterated"
+            );
+        });
+    }
+
+    /// A multi-output module whose parent aux reads TWO of its output ports:
+    /// the module-qualified live channel `db::module_link_score_equation`
+    /// selects today via a per-process-random HashSet `.find()` (GH #971). The
+    /// occurrence stream enumerates both composites in document order so A2b has
+    /// a deterministic IR source of truth.
+    fn two_output_module_project() -> datamodel::Project {
+        datamodel::Project {
+            name: "two_output".to_string(),
+            sim_specs: datamodel::SimSpecs {
+                start: 0.0,
+                stop: 1.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                x_model(
+                    "main",
+                    vec![
+                        x_stock("level", "50", &[], &["adjustment"], None),
+                        // `combined` reads out_a THEN out_b (document order).
+                        x_aux("combined", "multi_out.out_a + multi_out.out_b", None),
+                        x_flow("adjustment", "combined / 5", None),
+                        x_module("multi_out", &[("level", "multi_out.input")], None),
+                    ],
+                ),
+                x_model(
+                    "multi_out",
+                    vec![
+                        datamodel::Variable::Aux(datamodel::Aux {
+                            ident: "input".to_string(),
+                            equation: datamodel::Equation::Scalar("0".to_string()),
+                            documentation: String::new(),
+                            units: None,
+                            gf: None,
+                            ai_state: None,
+                            uid: None,
+                            compat: datamodel::Compat {
+                                can_be_module_input: true,
+                                ..datamodel::Compat::default()
+                            },
+                        }),
+                        x_aux("out_a", "input * 2", None),
+                        x_aux("out_b", "input * 3", None),
+                    ],
+                ),
+            ],
+            source: None,
+            ai_information: None,
+        }
+    }
+
+    #[test]
+    fn module_output_occurrences_recorded_in_document_order() {
+        let project = two_output_module_project();
+        let occs = occ_from_datamodel(&project, "main", "combined");
+        let module_occs: Vec<(String, String, String)> = occs
+            .iter()
+            .filter_map(|o| match &o.reference {
+                OccurrenceRef::ModuleOutput {
+                    module,
+                    port,
+                    composite,
+                } => Some((module.clone(), port.clone(), composite.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            module_occs,
+            vec![
+                (
+                    "multi_out".to_string(),
+                    "out_a".to_string(),
+                    "multi_out\u{00B7}out_a".to_string()
+                ),
+                (
+                    "multi_out".to_string(),
+                    "out_b".to_string(),
+                    "multi_out\u{00B7}out_b".to_string()
+                ),
+            ],
+            "both module-output composites are enumerated in document order \
+             (out_a before out_b); no ClassifiedSite exists for these"
+        );
+    }
+
+    /// The dominant production shape: an IMPLICIT stdlib expansion. `smoothed =
+    /// SMTH1(input, 5) * 2` desugars (in the builtins visitor) to an implicit
+    /// `Variable::Module` named `$⁚smoothed⁚0⁚smth1` whose `·output` composite
+    /// the rewritten parent equation reads. Where
+    /// `module_output_occurrences_recorded_in_document_order` pins an EXPLICIT
+    /// author-written multi-output module, this pins the implicit path -- and it
+    /// needs its own pin because it ADDITIONALLY depends on
+    /// `reconstruct_model_variables`' implicit-var loop reconstructing that
+    /// SMOOTH-expanded `Variable::Module`. `module_output_parts` only enumerates
+    /// a `·`-composite whose head resolves to a module-kind variable in the
+    /// reconstructed map; if a future change to that loop stopped rebuilding the
+    /// implicit modules, the composite head would go unresolved and this channel
+    /// would empty silently for the case that dominates real models -- with the
+    /// explicit-module pin still green. Direct routing: the composite read sits
+    /// outside any reducer.
+    #[test]
+    fn implicit_stdlib_module_output_occurrence_recorded_in_document_order() {
+        let project = TestProject::new("main")
+            .scalar_aux("input", "3")
+            .scalar_aux("smoothed", "SMTH1(input, 5) * 2");
+        let occs = occ_of(&project, "smoothed");
+        let module_occs: Vec<(String, String, String)> = occs
+            .iter()
+            .filter_map(|o| match &o.reference {
+                OccurrenceRef::ModuleOutput {
+                    module,
+                    port,
+                    composite,
+                } => Some((module.clone(), port.clone(), composite.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            module_occs,
+            vec![(
+                "$\u{205A}smoothed\u{205A}0\u{205A}smth1".to_string(),
+                "output".to_string(),
+                "$\u{205A}smoothed\u{205A}0\u{205A}smth1\u{00B7}output".to_string(),
+            )],
+            "the SMTH1 expansion's `·output` composite is enumerated exactly once \
+             as a ModuleOutput occurrence; no ClassifiedSite exists for it: {occs:?}"
+        );
+        let module_occ = occs
+            .iter()
+            .find(|o| matches!(&o.reference, OccurrenceRef::ModuleOutput { .. }))
+            .expect("the module-output occurrence");
+        assert_eq!(
+            module_occ.routing,
+            OccurrenceRouting::Direct,
+            "the composite read is not inside a reducer"
+        );
+    }
+
+    #[test]
+    fn element_selector_index_is_not_a_causal_occurrence() {
+        // Runtime pin: `pick = population[nyc]` reads the ELEMENT even though a
+        // variable `nyc = 2` exists. Element interpretation -> population's nyc
+        // slot (100); a variable-index interpretation would read population[2]
+        // (boston, 200). Simulation confirms 100.
+        let project = TestProject::new("main")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("Region", &["nyc", "boston"])
+            .array_with_ranges_direct(
+                "population",
+                vec!["Region".to_string()],
+                vec![("nyc", "100"), ("boston", "200")],
+                None,
+            )
+            .scalar_aux("nyc", "2")
+            .scalar_aux("pick", "population[nyc]");
+        assert_eq!(
+            project.vm_result_incremental("pick")[0],
+            100.0,
+            "execution reads the element population[nyc]=100, not variable nyc"
+        );
+        // Edge-set pin: the walker and the ceteris-paribus transform now AGREE
+        // the element selector is not a site, keeping the occurrence stream A2b
+        // live-selects from faithful to execution. This is NOT the removal of a
+        // consumer-visible causal edge: variable-level dep extraction
+        // (`variable.rs` `ClassifyVisitor::is_dimension_or_element`, over all
+        // project dims) already filtered the element-colliding index ident, so
+        // the pre-fix walker's `nyc -> pick` site was an orphan no keyed
+        // consumer ever read -- no `nyc -> pick` edge existed before either.
+        // Only `population -> pick` FixedIndex remains.
+        with_ir_and_occ(&project, "pick", |ir, occs| {
+            assert!(
+                var_occs(occs, "nyc").is_empty(),
+                "the element selector `nyc` in population[nyc] is not a causal \
+                 occurrence: {occs:?}"
+            );
+            assert!(
+                !ir.sites
+                    .contains_key(&("nyc".to_string(), "pick".to_string())),
+                "no spurious nyc -> pick causal edge"
+            );
+            assert!(
+                ir.sites
+                    .contains_key(&("population".to_string(), "pick".to_string())),
+                "the real population -> pick edge remains"
+            );
+        });
+    }
+
+    #[test]
+    fn colliding_element_index_skipped_but_bare_variable_kept() {
+        // `collide[Region] = population[nyc] * nyc`: the index `nyc` is an
+        // element selector (skipped), but the bare `* nyc` is a genuine variable
+        // reference (kept). Exactly one `nyc` occurrence, and it is not
+        // index-nested.
+        let project = TestProject::new("main")
+            .named_dimension("Region", &["nyc", "boston"])
+            .scalar_aux("nyc", "3")
+            .array_aux("population[Region]", "100")
+            .array_aux("collide[Region]", "population[nyc] * nyc");
+        with_ir_and_occ(&project, "collide", |ir, occs| {
+            let nyc = var_occs(occs, "nyc");
+            assert_eq!(
+                nyc.len(),
+                1,
+                "only the bare `* nyc` is causal, not the element selector: {occs:?}"
+            );
+            assert!(
+                !nyc[0].index_nested,
+                "the surviving nyc occurrence is the bare multiplication"
+            );
+            let sites = ir
+                .sites
+                .get(&("nyc".to_string(), "collide".to_string()))
+                .expect("the bare nyc -> collide edge");
+            assert_eq!(sites.len(), 1, "one Bare nyc site, not the pre-fix two");
+            assert_eq!(sites[0].shape, RefShape::Bare);
+        });
+    }
+
+    // ── Other-dep verdict derivation (the A2b contract on `axes`) ───────────
+    //
+    // `OccurrenceAxis`'s rustdoc states the rule by which A2b will derive
+    // `ltm_augment::classify_other_dep_iterated_dim_subscript`'s
+    // `Collapse`/`Mismatch`/`NotIterated` verdict from an occurrence's `axes`
+    // (after deleting the Expr0 mirror classifier). The tests below are the
+    // executable form of that contract: [`derive_other_dep_verdict`] is the
+    // reference derivation, and the two corner tests pin the `axes` the walker
+    // actually produces for the arity shapes where a rule keyed on the per-axis
+    // arms ALONE (all-`Iterated` ⇒ Collapse, any-`MismatchedIterated` ⇒
+    // Mismatch) diverges from the transform. Deriving the verdict requires the
+    // two arity facts the occurrence does not itself carry -- the dep's declared
+    // arity and the target's iterated-dim count -- both of which A2b holds.
+
+    /// The three verdicts of `ltm_augment::OtherDepIteratedVerdict`, mirrored
+    /// here so the derivation contract is testable without reaching into
+    /// `ltm_augment`'s private types.
+    #[derive(Debug, PartialEq, Eq)]
+    enum DerivedVerdict {
+        Collapse,
+        Mismatch,
+        NotIterated,
+    }
+
+    /// Reference implementation of the `OccurrenceAxis` rustdoc's derivation
+    /// rule -- the verdict A2b must compute for a subscript occurrence's
+    /// `axes`, given the dep's declared arity (`None` = un-threadable: the dep
+    /// is absent from the variable map / has no declared dims) and the target's
+    /// iterated-dim count. It reproduces
+    /// `classify_other_dep_iterated_dim_subscript` (`ltm_augment.rs`) exactly,
+    /// including the two arity guards a per-axis-only rule would miss:
+    /// - `axes.len() > target_iterated_count` ⇒ `NotIterated` (mirrors the
+    ///   `indices.len() > target_iterated_dims.len()` gate, ltm_augment.rs:268);
+    /// - a threadable dep whose declared arity differs from `axes.len()` ⇒
+    ///   `Mismatch` (mirrors `index_dims.len() != dep_dims.len()`,
+    ///   ltm_augment.rs:288) -- checked BEFORE the per-axis lineup so an
+    ///   over-declared-arity subscript (whose trailing indices are
+    ///   `MismatchedIterated` from a missing source axis) is a `Mismatch`, not
+    ///   mislabelled by the per-axis arms.
+    fn derive_other_dep_verdict(
+        axes: &[OccurrenceAxis],
+        dep_arity: Option<usize>,
+        target_iterated_count: usize,
+    ) -> DerivedVerdict {
+        // Precondition (else normal subscript handling): a non-empty subscript,
+        // no more indices than the target has iterated dims, and every index a
+        // bare target-iterated-dim name -- i.e. every axis `Iterated` or
+        // `MismatchedIterated` (a `Pinned`/`Reduced`/`Dynamic` axis is a
+        // literal, wildcard, or dynamic index).
+        if axes.is_empty() || axes.len() > target_iterated_count {
+            return DerivedVerdict::NotIterated;
+        }
+        let all_iterated_or_mismatched = axes.iter().all(|a| {
+            matches!(
+                a,
+                OccurrenceAxis::Iterated { .. } | OccurrenceAxis::MismatchedIterated { .. }
+            )
+        });
+        if !all_iterated_or_mismatched {
+            return DerivedVerdict::NotIterated;
+        }
+        // The dep's declared arity gates the collapse: un-threadable keeps the
+        // transform's permissive collapse; a differing arity is a `Mismatch`.
+        let Some(arity) = dep_arity else {
+            return DerivedVerdict::Collapse;
+        };
+        if axes.len() != arity {
+            return DerivedVerdict::Mismatch;
+        }
+        if axes
+            .iter()
+            .any(|a| matches!(a, OccurrenceAxis::MismatchedIterated { .. }))
+        {
+            return DerivedVerdict::Mismatch;
+        }
+        DerivedVerdict::Collapse
+    }
+
+    fn iterated(dim: &str) -> OccurrenceAxis {
+        OccurrenceAxis::Iterated {
+            dim: dim.to_string(),
+            source_dim: dim.to_string(),
+        }
+    }
+
+    fn mismatched(dim: &str) -> OccurrenceAxis {
+        OccurrenceAxis::MismatchedIterated {
+            dim: dim.to_string(),
+        }
+    }
+
+    #[test]
+    fn other_dep_verdict_rule_covers_every_branch() {
+        // Natural equal-arity iterated subscript (`arr[D1,D2]` for arr [D1,D2],
+        // target [D1,D2]): all `Iterated`, arity matches ⇒ Collapse.
+        assert_eq!(
+            derive_other_dep_verdict(&[iterated("d1"), iterated("d2")], Some(2), 2),
+            DerivedVerdict::Collapse,
+        );
+        // Transposed equal-arity (`arr[D2,D1]`): a `MismatchedIterated` axis
+        // with matching arity ⇒ Mismatch (the GH #526 wrong-element freeze).
+        assert_eq!(
+            derive_other_dep_verdict(&[mismatched("d2"), mismatched("d1")], Some(2), 2),
+            DerivedVerdict::Mismatch,
+        );
+        // Under-arity (corner a): all `Iterated` but fewer indices than the
+        // dep's declared arity ⇒ Mismatch, NOT the Collapse the all-`Iterated`
+        // arms alone would give.
+        assert_eq!(
+            derive_other_dep_verdict(&[iterated("d1")], Some(2), 2),
+            DerivedVerdict::Mismatch,
+        );
+        // Over-target-arity (corner b): more indices than the target has
+        // iterated dims ⇒ NotIterated, NOT the Mismatch the `MismatchedIterated`
+        // arm alone would give.
+        assert_eq!(
+            derive_other_dep_verdict(&[iterated("d1"), mismatched("d1")], Some(2), 1),
+            DerivedVerdict::NotIterated,
+        );
+        // A non-iterated axis (a `Pinned` literal / `Dynamic` index) anywhere ⇒
+        // NotIterated: not an iterated-dim subscript at all.
+        assert_eq!(
+            derive_other_dep_verdict(
+                &[iterated("d1"), OccurrenceAxis::Pinned("young".to_string())],
+                Some(2),
+                2,
+            ),
+            DerivedVerdict::NotIterated,
+        );
+        assert_eq!(
+            derive_other_dep_verdict(&[OccurrenceAxis::Dynamic], Some(1), 1),
+            DerivedVerdict::NotIterated,
+        );
+        // Un-threadable dep (declared dims unknown) keeps the permissive
+        // collapse regardless of the per-axis arms.
+        assert_eq!(
+            derive_other_dep_verdict(&[iterated("d1"), mismatched("d2")], None, 2),
+            DerivedVerdict::Collapse,
+        );
+    }
+
+    #[test]
+    fn under_arity_iterated_subscript_is_mismatch_not_collapse() {
+        // Corner (a): `arr[D1]` for arr declared [D1,D2], inside an
+        // A2A-over-[D1,D2] target. The single index lines up with arr's first
+        // axis, so the occurrence's axes are all-`Iterated` -- yet the dep's
+        // declared arity is 2, so
+        // `classify_other_dep_iterated_dim_subscript` returns `Mismatch`
+        // (ltm_augment.rs:288, `index_dims.len() != dep_dims.len()`), NOT the
+        // Collapse a rule keyed on the per-axis arms alone would derive.
+        // Freezing the wrong element here is the GH #526 silent magnitude error.
+        let project = TestProject::new("main")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y"])
+            .array_aux("arr[D1, D2]", "1")
+            .array_aux_direct(
+                "t",
+                vec!["D1".to_string(), "D2".to_string()],
+                "arr[D1] * 2",
+                None,
+            );
+        with_ir_and_occ(&project, "t", |_ir, occs| {
+            let arr = var_occs(occs, "arr");
+            assert_eq!(arr.len(), 1, "occs: {occs:?}");
+            assert_eq!(
+                arr[0].shape,
+                RefShape::DynamicIndex,
+                "coarse shape unchanged"
+            );
+            assert_eq!(
+                arr[0].axes,
+                vec![iterated("d1")],
+                "the single lined-up index is `Iterated`"
+            );
+            // dep arity 2, target iterated-dim count 2.
+            assert_eq!(
+                derive_other_dep_verdict(&arr[0].axes, Some(2), 2),
+                DerivedVerdict::Mismatch,
+                "under-arity must derive Mismatch, not Collapse"
+            );
+        });
+    }
+
+    #[test]
+    fn over_target_arity_iterated_subscript_is_not_iterated() {
+        // Corner (b): `arr[D1,D1]` for arr declared [D1,D2], inside an
+        // A2A-over-[D1] target. Position 0 lines up (`Iterated`); position 1's
+        // `D1` names the source's `D2` axis, so it is `MismatchedIterated`.
+        // But the subscript has MORE indices (2) than the target has iterated
+        // dims (1), so `classify_other_dep_iterated_dim_subscript` short-circuits
+        // to `NotIterated` (ltm_augment.rs:268, normal wrap), NOT the Mismatch
+        // the `MismatchedIterated` arm alone would derive.
+        let project = TestProject::new("main")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y"])
+            .array_aux("arr[D1, D2]", "1")
+            .array_aux_direct("t", vec!["D1".to_string()], "arr[D1, D1] * 2", None);
+        with_ir_and_occ(&project, "t", |_ir, occs| {
+            let arr = var_occs(occs, "arr");
+            assert_eq!(arr.len(), 1, "occs: {occs:?}");
+            assert_eq!(
+                arr[0].shape,
+                RefShape::DynamicIndex,
+                "coarse shape unchanged"
+            );
+            assert_eq!(
+                arr[0].axes,
+                vec![iterated("d1"), mismatched("d1")],
+                "position 1's D1 names the source's D2 axis: MismatchedIterated"
+            );
+            // dep arity 2, target iterated-dim count 1.
+            assert_eq!(
+                derive_other_dep_verdict(&arr[0].axes, Some(2), 1),
+                DerivedVerdict::NotIterated,
+                "an over-target-arity subscript must derive NotIterated, not Mismatch"
+            );
+        });
+    }
+}

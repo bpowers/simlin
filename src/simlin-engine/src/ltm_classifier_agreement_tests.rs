@@ -186,9 +186,13 @@ fn expr0_routes_through_agg(name: &str, arity: usize) -> bool {
 /// `collect_all_reference_sites`:
 ///
 /// * a bare `Var` head is a `Bare` occurrence;
-/// * a `Subscript` head records its indices, THEN recurses into them (so an
-///   index-nested model variable -- `other[from]` -- is recorded too, exactly
-///   as the Expr2 walker recurses index expressions);
+/// * a `Subscript` head records its indices, THEN recurses into the
+///   non-element-selector ones (so an index-nested model variable --
+///   `other[from]` -- is recorded too, exactly as the Expr2 walker recurses
+///   index expressions). An index that resolves to a literal element of the
+///   subscripted variable's axis is an element SELECTOR, not a causal
+///   reference, and is skipped on BOTH families (the A2a element-vs-variable
+///   collision resolution -- see the `Subscript` arm below);
 /// * a reducer `App` makes its arguments `in_reducer` (sticky through nested
 ///   reducers), matching the Expr2 walker's `reducer_keys` propagation;
 /// * a `LOOKUP` call's first (table) argument is skipped, matching the Expr2
@@ -224,7 +228,27 @@ fn collect_expr0_occurrences(
                     in_reducer,
                 });
             }
-            for idx in indices {
+            // Mirror the Expr2 walker's element-selector skip: an index that
+            // resolves to a literal element of the subscripted variable's axis
+            // is an element SELECTOR (execution resolves it to a static offset,
+            // element taking priority over any like-named variable), not a
+            // causal reference -- so it is NOT an occurrence, even when it
+            // collides with a like-named variable (`arr[nyc]` with a variable
+            // `nyc`). This uses the Expr0 sibling resolver
+            // (`resolve_literal_element_index`), so this side of the gate skips
+            // exactly the token the production transform
+            // (`wrap_index_non_matching_in_previous`) leaves verbatim -- both
+            // classifier families agree it is not a site (the A2a element-vs-
+            // variable-collision resolution).
+            let source_dim_elements: Vec<Vec<String>> =
+                source_dims_of(variables, canonical.as_str())
+                    .iter()
+                    .map(dimension_element_names)
+                    .collect();
+            for (i, idx) in indices.iter().enumerate() {
+                if resolve_literal_element_index(idx, i, &source_dim_elements).is_some() {
+                    continue;
+                }
                 match idx {
                     IndexExpr0::Expr(e) => collect_expr0_occurrences(e, variables, in_reducer, out),
                     IndexExpr0::Range(l, r, _) => {
@@ -775,16 +799,34 @@ fn agree_dimension_name_index_gh759() {
 #[test]
 fn agree_element_variable_name_collision() {
     // A model variable named identically to a dimension element (`nyc`): the
-    // subscript `population[nyc]` is a FixedIndex element reference while the
-    // bare `nyc` is a variable reference. Both families must keep them
-    // distinct (element in subscript, variable outside).
+    // subscript `population[nyc]` selects the ELEMENT (execution resolves it to
+    // a static offset, element taking priority over the like-named variable),
+    // while the bare `nyc` outside the subscript is a genuine variable
+    // reference. Both families must agree: `population -> collide` is a
+    // FixedIndex site; `nyc -> collide` is ONE Bare site (the bare `* nyc`
+    // multiplication), NOT two -- the index-nested `nyc` is an element
+    // selector, not a causal reference. Before the A2a fix the Expr2 walker
+    // minted an extra `nyc -> collide` Bare site from the subscript index that
+    // disagreed with the transform; both families now skip it. That site was an
+    // orphan -- variable-level dep extraction already filtered the element
+    // token, so no keyed consumer ever read it -- not a consumer-visible edge.
     let tp = TestProject::new("main")
         .with_sim_time(0.0, 3.0, 1.0)
         .named_dimension("Region", &["nyc", "boston"])
         .scalar_aux("nyc", "3")
         .array_aux("population[Region]", "100")
         .array_aux("collide[Region]", "population[nyc] * nyc");
-    assert_classifier_families_agree(&tp);
+    let compared = assert_classifier_families_agree(&tp);
+    // Non-vacuity anchor: exactly one Bare `nyc -> collide` site (the bare
+    // multiplication), not the pre-fix two. If the element-selector skip
+    // regresses on either family, this pin (or the agreement assertion) fails.
+    pin_edge(&compared, "nyc", "collide", &[RefShape::Bare]);
+    pin_edge(
+        &compared,
+        "population",
+        "collide",
+        &[RefShape::FixedIndex(vec!["nyc".to_string()])],
+    );
 }
 
 #[test]
