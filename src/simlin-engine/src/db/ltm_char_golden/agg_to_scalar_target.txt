@@ -1,0 +1,2 @@
+$⁚ltm⁚link_score⁚$⁚ltm⁚agg⁚0→total
+scalar: if (TIME = INITIAL_TIME) then 0 else if ((total - PREVIOUS(total)) = 0) OR (("$⁚ltm⁚agg⁚0" - PREVIOUS("$⁚ltm⁚agg⁚0")) = 0) then 0 else SAFEDIV((("$⁚ltm⁚agg⁚0" * 2) - PREVIOUS(total)), ABS((total - PREVIOUS(total))), 0) * SIGN(("$⁚ltm⁚agg⁚0" - PREVIOUS("$⁚ltm⁚agg⁚0")))

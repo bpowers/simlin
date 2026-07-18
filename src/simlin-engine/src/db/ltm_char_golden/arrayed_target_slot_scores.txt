@@ -1,0 +1,10 @@
+$⁚ltm⁚link_score⁚pop[boston]→mp  dims=[Region]
+arrayed[Region] (apply_default=true):
+    boston => if (TIME = INITIAL_TIME) then 0 else if ((mp - PREVIOUS(mp)) = 0) OR ((pop[region·boston] - PREVIOUS(pop[region·boston])) = 0) then 0 else SAFEDIV((((pop[boston] - PREVIOUS(pop[region·nyc])) * 0.01) - PREVIOUS(mp)), ABS((mp - PREVIOUS(mp))), 0) * SIGN((pop[region·boston] - PREVIOUS(pop[region·boston])))
+    nyc => if (TIME = INITIAL_TIME) then 0 else if ((mp - PREVIOUS(mp)) = 0) OR ((pop[region·boston] - PREVIOUS(pop[region·boston])) = 0) then 0 else SAFEDIV((((PREVIOUS(pop[region·nyc]) - pop[boston]) * 0.01) - PREVIOUS(mp)), ABS((mp - PREVIOUS(mp))), 0) * SIGN((pop[region·boston] - PREVIOUS(pop[region·boston])))
+    <default> => if (TIME = INITIAL_TIME) then 0 else if ((mp - PREVIOUS(mp)) = 0) OR ((pop[region·boston] - PREVIOUS(pop[region·boston])) = 0) then 0 else SAFEDIV(((0) - PREVIOUS(mp)), ABS((mp - PREVIOUS(mp))), 0) * SIGN((pop[region·boston] - PREVIOUS(pop[region·boston])))
+$⁚ltm⁚link_score⁚pop[nyc]→mp  dims=[Region]
+arrayed[Region] (apply_default=true):
+    boston => if (TIME = INITIAL_TIME) then 0 else if ((mp - PREVIOUS(mp)) = 0) OR ((pop[region·nyc] - PREVIOUS(pop[region·nyc])) = 0) then 0 else SAFEDIV((((PREVIOUS(pop[region·boston]) - pop[nyc]) * 0.01) - PREVIOUS(mp)), ABS((mp - PREVIOUS(mp))), 0) * SIGN((pop[region·nyc] - PREVIOUS(pop[region·nyc])))
+    nyc => if (TIME = INITIAL_TIME) then 0 else if ((mp - PREVIOUS(mp)) = 0) OR ((pop[region·nyc] - PREVIOUS(pop[region·nyc])) = 0) then 0 else SAFEDIV((((pop[nyc] - PREVIOUS(pop[region·boston])) * 0.01) - PREVIOUS(mp)), ABS((mp - PREVIOUS(mp))), 0) * SIGN((pop[region·nyc] - PREVIOUS(pop[region·nyc])))
+    <default> => if (TIME = INITIAL_TIME) then 0 else if ((mp - PREVIOUS(mp)) = 0) OR ((pop[region·nyc] - PREVIOUS(pop[region·nyc])) = 0) then 0 else SAFEDIV(((0) - PREVIOUS(mp)), ABS((mp - PREVIOUS(mp))), 0) * SIGN((pop[region·nyc] - PREVIOUS(pop[region·nyc])))

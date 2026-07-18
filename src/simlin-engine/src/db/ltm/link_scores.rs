@@ -1225,6 +1225,10 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 // LoadPrev, no helper auxes); the NAME below keeps the bare form.
                 &crate::ltm_augment::qualify_element_csv(element, &to_dims),
                 elem_text,
+                // A true scalar source has no hoisted reducers, so the wrap
+                // holds `from` live as an ident and the post-transform
+                // substitution is a no-op.
+                &std::collections::HashMap::new(),
                 elem_deps,
                 deps_to_sub,
                 // A true scalar source: the bare `quote_ident(from)`
@@ -3316,19 +3320,12 @@ pub(super) fn emit_agg_to_target_link_scores(
             .collect()
     };
 
-    // Helper: substitute the reducers in a slot expr's canonical text, to
-    // build the agg→target link-score equation for one target element (or the
-    // scalar case when `element` is `None`). Propagates a `PartialEquationError`
-    // when the reducer substitution can't parse its input -- the caller skips
-    // the variable and warns rather than emitting a partial that keeps the
-    // inline reducer live instead of the hoisted agg node (GH #661).
-    let slot_text =
-        |expr: &crate::ast::Expr2| -> Result<String, crate::ltm_augment::PartialEquationError> {
-            crate::ltm_augment::substitute_reducers_in_equation(
-                &crate::patch::expr2_to_string(expr),
-                &reducer_subst,
-            )
-        };
+    // Track A stage 1: reducer -> agg-name substitution is now a POST-transform
+    // lowering INSIDE the generators (`generate_agg_to_scalar_target_equation` /
+    // `generate_scalar_to_element_equation`), which run the wrap on `to`'s OWN
+    // equation and then substitute. Each branch therefore threads the
+    // un-substituted slot text + `reducer_subst` rather than pre-substituting
+    // here (the old caller-side `slot_text` helper).
 
     match ast {
         Ast::Scalar(expr) => {
@@ -3340,19 +3337,16 @@ pub(super) fn emit_agg_to_target_link_scores(
                 "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
                 agg.name, to
             );
-            let substituted = match slot_text(expr) {
-                Ok(substituted) => substituted,
-                Err(err) => {
-                    if unscoreable_edges.insert((agg.name.clone(), to.to_string())) {
-                        emit_ltm_partial_equation_warning(db, model, &name, &err);
-                    }
-                    return;
-                }
-            };
+            // Track A stage 1: the generator now runs the wrap on `to`'s OWN
+            // equation and substitutes the reducers -> agg names AFTER the wrap,
+            // so we pass the un-substituted text + `reducer_subst` (the prior
+            // caller-side `slot_text`/`substitute_reducers_in_equation` step and
+            // its parse-failure handling move inside the generator's `Err`).
             match crate::ltm_augment::generate_agg_to_scalar_target_equation(
                 &agg.name,
                 to,
-                &substituted,
+                &crate::patch::expr2_to_string(expr),
+                &reducer_subst,
                 &all_deps,
                 Some(project_dimensions_context(db, project)),
                 // GH #910: a scalar with-lookup target's single table,
@@ -3374,24 +3368,14 @@ pub(super) fn emit_agg_to_target_link_scores(
             }
         }
         Ast::ApplyToAll(_, expr) => {
-            // One shared body; emit one per-target-element scalar var. A
-            // substitution parse failure here fails the whole edge (the body
-            // is shared across every element), so warn once on the base
-            // `agg → to` name and skip rather than emit a partial that keeps
-            // the inline reducer live (GH #661).
-            let substituted = match slot_text(expr) {
-                Ok(substituted) => substituted,
-                Err(err) => {
-                    let name = format!(
-                        "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
-                        agg.name, to
-                    );
-                    if unscoreable_edges.insert((agg.name.clone(), to.to_string())) {
-                        emit_ltm_partial_equation_warning(db, model, &name, &err);
-                    }
-                    return;
-                }
-            };
+            // One shared body; emit one per-target-element scalar var. Track A
+            // stage 1: the generator runs the wrap on this OWN A2A body and
+            // substitutes reducers -> agg names AFTER the wrap, so we thread the
+            // un-substituted text + `reducer_subst`. An own-text parse failure
+            // (unreachable -- the text is a `print_eqn` of a compiled AST) then
+            // surfaces on the first element's generator `Err` and dooms the edge
+            // once, via the same GH #661 warning path the per-element loop uses.
+            let to_own_text = crate::patch::expr2_to_string(expr);
             if to_dims.is_empty() {
                 return;
             }
@@ -3421,7 +3405,8 @@ pub(super) fn emit_agg_to_target_link_scores(
                     to,
                     // Qualified for equation text; the name keeps the bare form.
                     &crate::ltm_augment::qualify_element_csv(element, &to_dims),
-                    &substituted,
+                    &to_own_text,
+                    &reducer_subst,
                     &all_deps,
                     &deps_to_subscript,
                     Some(&agg_source_ref_for_target(element)),
@@ -3466,16 +3451,20 @@ pub(super) fn emit_agg_to_target_link_scores(
                 // iff there is no slot expression.
                 let equation = match per_elem.get(&canonical_elem).or(default_expr.as_ref()) {
                     None => Ok("0".to_string()),
-                    // A substitution parse failure rides the same `Result` the
-                    // equation builder returns, so the `match equation` below
-                    // converts it into the per-element `Warning` + skip (GH
-                    // #661) -- no separate error handling needed here.
-                    Some(slot_expr) => slot_text(slot_expr).and_then(|substituted| {
+                    // Track A stage 1: the generator runs the wrap on this OWN
+                    // slot text and substitutes the reducers -> agg names AFTER
+                    // the wrap, so we thread the un-substituted slot text +
+                    // `reducer_subst`. An own-text parse failure rides the same
+                    // `Result` the equation builder returns, so the `match
+                    // equation` below converts it into the per-element `Warning`
+                    // + skip (GH #661) -- no separate error handling needed here.
+                    Some(slot_expr) => {
                         // Re-derive per-slot deps (the union over all slots
                         // would over-freeze refs absent from this slot),
                         // then extend with this agg's name and every other
-                        // agg referenced in the (substituted) slot text so
-                        // they are all PREVIOUS-wrapped (ceteris paribus).
+                        // agg name so they are all PREVIOUS-wrapped (ceteris
+                        // paribus); the reducer-source vars are already in the
+                        // own-slot deps.
                         let mut slot_deps = crate::variable::classify_dependencies(
                             &Ast::Scalar(slot_expr.clone()),
                             target_ast_dims,
@@ -3491,7 +3480,8 @@ pub(super) fn emit_agg_to_target_link_scores(
                             to,
                             // Qualified for equation text; the name keeps the bare form.
                             &crate::ltm_augment::qualify_element_csv(element, &to_dims),
-                            &substituted,
+                            &crate::patch::expr2_to_string(slot_expr),
+                            &reducer_subst,
                             &slot_deps,
                             &deps_to_subscript,
                             Some(&agg_source_ref_for_target(element)),
@@ -3499,7 +3489,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                             Some(project_dimensions_context(db, project)),
                             elem_gf_ref(element).as_deref(),
                         )
-                    }),
+                    }
                 };
                 let name = format!(
                     "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",

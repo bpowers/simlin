@@ -1432,6 +1432,8 @@ mod fragment_cache_tests;
 #[cfg(test)]
 mod incremental_compile_tests;
 #[cfg(test)]
+mod ltm_char_tests;
+#[cfg(test)]
 mod ltm_module_tests;
 #[cfg(test)]
 mod ltm_unified_tests;
