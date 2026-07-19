@@ -2892,13 +2892,14 @@ fn partial_equation_does_not_rewrap_inside_previous() {
 ///
 /// `to = SUM(w[from]) + from` with live source `from` (Bare): `from` occurs
 /// bare (outside the reducer -- the live occurrence) AND index-nested inside
-/// `w[from]`. `expr0_contains_live_match`'s Subscript arm matches only a
-/// subscript whose HEAD is the live source, so the index-nested `from` never
-/// makes the reducer "hold the live reference": the whole reducer is frozen
-/// (`PREVIOUS(sum(w[from]))`) and only the bare `from` stays live.
+/// `w[from]`. The reducer-freeze check (`OccurrenceLookup::subtree_has_live_shape`)
+/// EXCLUDES `index_nested` occurrences, so the index-nested `from` never makes
+/// the reducer "hold the live reference": the whole reducer is frozen
+/// (`PREVIOUS(sum(w[from]))`) and only the bare `from` stays live. (The retired
+/// `expr0_contains_live_match` reproduced this by only inspecting subscript
+/// HEADS; the occurrence switch reproduces it via `occ.index_nested`.)
 ///
-/// This is the exact silent-drift the stage-2 occurrence switch must reproduce
-/// via `occ.index_nested`. The scalar-element `SUM(w[from])` form (as opposed
+/// The scalar-element `SUM(w[from])` form (as opposed
 /// to the array-slice `SUM(w[from, *])` production golden) is the one that
 /// compiles under BOTH the correct and the mutated behavior -- so nothing but
 /// this exact-text pin catches a selector that mishandles `index_nested` here:
@@ -3121,6 +3122,7 @@ fn generate_link_score_equation_for_link_empty_target_is_err() {
         &all_vars,
         None,
         None,
+        &[],
     );
     assert!(
         result.is_err(),
@@ -3154,6 +3156,7 @@ fn generate_link_score_equation_for_link_normal_target_is_ok() {
         &all_vars,
         None,
         None,
+        &[],
     )
     .expect("a normal scalar target must produce a valid link-score equation");
     let text = match &equation {
@@ -3311,6 +3314,7 @@ fn link_score_for_with_lookup_scalar_target_wraps_partial_in_lookup() {
         &all_vars,
         None,
         None,
+        &[],
     )
     .expect("a with-lookup scalar target must produce a valid link-score equation");
     let text = match &equation {
@@ -3352,6 +3356,7 @@ fn link_score_for_with_lookup_a2a_target_pins_shared_table() {
         &all_vars,
         None,
         None,
+        &[],
     )
     .expect("a with-lookup A2A target must produce a valid link-score equation");
     let text = match &equation {
@@ -3399,6 +3404,7 @@ fn link_score_for_with_lookup_arrayed_target_wraps_per_slot() {
         &all_vars,
         None,
         None,
+        &[],
     )
     .expect("a with-lookup arrayed target must produce a valid link-score equation");
 
@@ -3452,6 +3458,7 @@ fn test_arrayed_link_score_population_to_migration_pressure_fixed_nyc() {
         &to_var,
         None,
         None,
+        &test_occurrences_for_var(&to_var, &from, &source_dim_elements),
     )
     .unwrap();
 
@@ -3530,6 +3537,7 @@ fn test_arrayed_link_score_population_to_migration_pressure_fixed_boston() {
         &to_var,
         None,
         None,
+        &test_occurrences_for_var(&to_var, &from, &source_dim_elements),
     )
     .unwrap();
 
@@ -3595,6 +3603,7 @@ fn test_arrayed_link_score_stock_to_flow_per_element_partials() {
         &births,
         None,
         None,
+        &test_occurrences_for_var(&births, &stock, &source_dim_elements),
     )
     .unwrap();
 
@@ -3646,6 +3655,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         &scalar_to,
         None,
         None,
+        &[],
     )
     .unwrap();
     assert!(
@@ -3692,6 +3702,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         &a2a_to,
         None,
         None,
+        &[],
     )
     .unwrap();
     match equation {
@@ -4715,6 +4726,114 @@ fn test_body_aware_rank_keeps_delta_ratio() {
     );
 }
 
+/// Test wrapper around `shaped_guard_form_text`: reconstructs the occurrence IR
+/// the production wrap consumes from the raw equation text (production callers
+/// get it from `model_ltm_reference_sites`; slot-0 body) and threads it in, so
+/// these focused text-in/text-out tests keep exercising the real chooser.
+#[allow(clippy::too_many_arguments)]
+fn sgft(
+    equation_text: &str,
+    deps: &HashSet<Ident<Canonical>>,
+    from: &Ident<Canonical>,
+    shape: &RefShape,
+    source_dim_elements: &[Vec<String>],
+    source_dim_names: &[String],
+    iter_ctx: Option<&IteratedDimCtx<'_>>,
+    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
+    target_ref: &str,
+    gf_table_ref: Option<&str>,
+) -> Result<String, PartialEquationError> {
+    let occ_sites =
+        build_wrap_test_occurrences(equation_text, from, deps, source_dim_elements, iter_ctx);
+    let occ = OccurrenceLookup::for_slot(&occ_sites, 0);
+    shaped_guard_form_text(
+        equation_text,
+        deps,
+        from,
+        shape,
+        source_dim_elements,
+        source_dim_names,
+        iter_ctx,
+        dims_ctx,
+        target_ref,
+        gf_table_ref,
+        &occ,
+    )
+}
+
+/// Finding 1 (loud-degradation, not silent-zero): a live-source subscript node
+/// with NO occurrence at its tracked structural path -- on a NON-empty
+/// occurrence stream -- is a walker desync (the reparsed-`Expr0` walk drifted
+/// from the IR's `Expr2` `SiteId` numbering). On a miss the shape lookup returns
+/// `None`, `node_shape == Some(live_shape)` fails, and the live reference would
+/// be silently FROZEN -- a clean-compiling `PREVIOUS(...)` that zeroes the
+/// score. That silent zero is exactly what the single-classifier flip must not
+/// regress, so the miss surfaces LOUDLY (the `missing_occurrence` outcome and an
+/// `Err` at the caller boundary, which the db-bearing emitters turn into a
+/// skip-and-warn).
+///
+/// `assert_occurrence_stream_aligns` proves the streams align corpus-wide, so a
+/// miss is only reachable on a NOVEL production shape the gate cannot cover --
+/// which is precisely why the guard exists. It is simulated here by dropping the
+/// live source's occurrence from an otherwise-aligned stream; its `helper`
+/// co-dep survives, so the lookup stays NON-empty (the guard's `is_empty()`
+/// scope, which excludes the legitimate source-free-slot miss, is satisfied).
+#[test]
+fn wrap_missing_live_source_occurrence_is_loud_not_silent_freeze() {
+    let equation = "pop[nyc] * helper";
+    let deps = deps_set(&["helper"]);
+    let live = Ident::<Canonical>::new("pop");
+    let shape = RefShape::FixedIndex(vec!["nyc".to_string()]);
+    let source_dims = vec![vec!["nyc".to_string(), "boston".to_string()]];
+
+    // A correctly-aligned stream, then drop pop's occurrence: the lookup stays
+    // non-empty (helper survives) but `pop[nyc]`'s node lookup now misses.
+    let desynced: Vec<OccurrenceSite> =
+        build_wrap_test_occurrences(equation, &live, &deps, &source_dims, None)
+            .into_iter()
+            .filter(|o| !matches!(&o.reference, OccurrenceRef::Variable(v) if v == "pop"))
+            .collect();
+    let occ = OccurrenceLookup::for_slot(&desynced, 0);
+    assert!(
+        !occ.is_empty(),
+        "the guard scope requires a non-empty lookup -- helper must survive the drop"
+    );
+
+    let (_ast, out) =
+        wrap_changed_first_ast(equation, &deps, &live, &shape, None, None, None, &occ)
+            .expect("the equation parses");
+    assert!(
+        out.missing_occurrence,
+        "a live-source subscript path-miss on a non-empty lookup must flag the desync"
+    );
+    assert!(
+        out.live_ref.is_none(),
+        "the missed live source was frozen -- there is no live reference to normalize by"
+    );
+
+    // The flag becomes a LOUD `Err` at the shaped-guard caller boundary (the
+    // db-bearing emitters convert it to a skip-and-warn), NOT an Ok silent-zero
+    // changed-first partial. Changed-last is not even attempted: it would read
+    // the SAME desynced stream.
+    let err = shaped_guard_form_text(
+        equation,
+        &deps,
+        &live,
+        &shape,
+        &source_dims,
+        &["region".to_string()],
+        None,
+        None,
+        "combined",
+        None,
+        &occ,
+    );
+    assert!(
+        err.is_err(),
+        "the missing-occurrence desync must surface as a loud Err, never Ok(silent-zero): {err:?}"
+    );
+}
+
 // -- shaped_guard_form_text: attribution-convention chooser (GH #743) --
 //
 // The chooser builds the standard changed-first guard form, but when the
@@ -4743,7 +4862,7 @@ fn shaped_guard_form_falls_back_to_changed_last_for_unfreezable_co_source() {
         dim_ctx: None,
         dep_dims: None,
     };
-    let text = shaped_guard_form_text(
+    let text = sgft(
         "SUM(matrix[D1, *] * frac[D1])",
         &deps,
         &live,
@@ -4775,7 +4894,7 @@ fn shaped_guard_form_keeps_changed_first_when_freezable() {
     // `population / SUM(population[*])`: the live ref is OUTSIDE the
     // reducer occurrence that matters, and the whole reducer is frozen as
     // `PREVIOUS(sum(population[*]))` -- PREVIOUS of a scalar, freezable.
-    let text = shaped_guard_form_text(
+    let text = sgft(
         "population / SUM(population[*])",
         &deps,
         &live,
@@ -4826,7 +4945,7 @@ fn shaped_guard_form_keeps_changed_first_when_freezable() {
 fn shaped_guard_form_rank_slice_arg_falls_back_to_changed_last() {
     let deps = deps_set(&["matrix", "frac"]);
     let live = Ident::<Canonical>::new("frac");
-    let text = shaped_guard_form_text(
+    let text = sgft(
         "frac * RANK(matrix[d1, *], 1)",
         &deps,
         &live,
@@ -4859,7 +4978,7 @@ fn shaped_guard_form_rank_slice_arg_falls_back_to_changed_last() {
 fn shaped_guard_form_errs_when_both_conventions_unfreezable() {
     let deps = deps_set(&["arr", "brr"]);
     let live = Ident::<Canonical>::new("arr");
-    let err = shaped_guard_form_text(
+    let err = sgft(
         "SUM(arr[*] * brr[d1, *])",
         &deps,
         &live,
@@ -4883,7 +5002,7 @@ fn shaped_guard_form_errs_when_both_conventions_unfreezable() {
 fn shaped_guard_form_errs_when_no_live_occurrence_to_freeze() {
     let deps = deps_set(&["matrix"]);
     let live = Ident::<Canonical>::new("frac");
-    let err = shaped_guard_form_text(
+    let err = sgft(
         // A naked (non-reducer-enclosed) wildcard slice; `frac` absent.
         // Not a compilable model equation, but exercises the guard.
         "matrix[d1, *] * 2",
@@ -5036,7 +5155,7 @@ fn shaped_guard_form_declines_bare_arrayed_feeder_of_unhoisted_reducer() {
         dim_ctx: None,
         dep_dims: None,
     };
-    let err = shaped_guard_form_text(
+    let err = sgft(
         "SUM(matrix[D1, *] * frac)",
         &deps,
         &live,
@@ -5072,7 +5191,7 @@ fn shaped_guard_form_scalar_feeder_inside_reducer_not_declined_by_gh779() {
     let deps = deps_set(&["matrix", "scale"]);
     let live = Ident::<Canonical>::new("scale");
     // `scale` SCALAR -> empty source dims, so the GH #779 gate is inert.
-    let result = shaped_guard_form_text(
+    let result = sgft(
         "SUM(matrix[D1, *] * scale)",
         &deps,
         &live,

@@ -902,6 +902,22 @@ pub(crate) fn module_link_score_equation(
                 let mut all_vars = HashMap::new();
                 all_vars.insert(to_ident.clone(), to_var.clone());
                 let dim_ctx = project_dimensions_context(db, project);
+                // The target's per-occurrence access-shape IR. The live source
+                // here is a `module·port` composite (an `OccurrenceRef::ModuleOutput`),
+                // so the ceteris-paribus wrap's GH #517 reducer-freeze arm
+                // (`subtree_has_live_shape`) must see it to reproduce the historical
+                // recursion when the composite is read bare inside a reducer
+                // (`to = SUM(arr[*] * module·port)`) -- an empty stream froze the
+                // reducer whole, silently converting a would-be loud degradation
+                // into a clean-compiling zero. This branch already read
+                // `model_ltm_reference_sites` (via `module_output_ref_in_document_order`
+                // above), so threading the stream adds no new salsa dependency.
+                let ref_sites = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
+                let to_occurrences: &[crate::db::ltm_ir::OccurrenceSite] = ref_sites
+                    .occurrences
+                    .get(to_name)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
                 match crate::ltm_augment::generate_link_score_equation_for_link(
                     &output_ident,
                     &to_ident,
@@ -913,6 +929,7 @@ pub(crate) fn module_link_score_equation(
                     // Module-link partials are scalar-context; the GH #526
                     // other-dep check keeps its permissive legacy collapse.
                     None,
+                    to_occurrences,
                 ) {
                     Ok(eqn) => return Some(ltm::scalarize_ltm_equation(eqn)),
                     // The target's equation couldn't be parsed for the
@@ -987,6 +1004,23 @@ pub fn link_score_equation_text<'db>(
         all_vars.insert(from_ident.clone(), fv.clone());
     }
     all_vars.insert(to_ident.clone(), to_var.clone());
+    // The target's per-occurrence access-shape IR -- the SAME single classifier
+    // family the shaped twin (`link_score_equation_text_shaped`) threads. It is
+    // NOT optional: the ceteris-paribus wrap's GH #517 reducer-freeze arm
+    // (`subtree_has_live_shape`) consults the stream unconditionally, so passing
+    // an empty stream here (the pre-fix bug) made the wrap freeze a reducer whole
+    // where the shaped query recursed into it -- deriving a DIFFERENT partial for
+    // the very same scalar Bare score whenever the live source appears bare inside
+    // a reducer of the target's equation. Assembly compiles this legacy fragment
+    // while `model_ltm_variables` reports the shaped one, so the divergence made
+    // the VM simulate an equation that disagreed with the one reported. Threading
+    // the real stream single-sources the two.
+    let ref_sites = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
+    let to_occurrences: &[crate::db::ltm_ir::OccurrenceSite] = ref_sites
+        .occurrences
+        .get(to_name)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
     // A `PartialEquationError` here means the target's equation text could
     // not be parsed for the ceteris-paribus partial (GH #311). Skip the
     // link-score variable and surface a `Warning` instead of emitting a
@@ -1002,8 +1036,11 @@ pub fn link_score_equation_text<'db>(
         None,
         // Legacy (from, to)-keyed path: no dims context is threaded at
         // all, so the GH #526 other-dep check keeps the permissive
-        // collapse here too.
+        // collapse here too. (This path is only consumed for a SCALAR target,
+        // whose empty iterated-dim space makes the other-dep verdict
+        // `NotIterated` regardless of `dep_dims`, so omitting it is sound.)
         None,
+        to_occurrences,
     ) {
         Ok(eqn) => eqn,
         Err(err) => {

@@ -30,6 +30,57 @@ use super::parse::{
     ltm_equation_dimensions, reconstruct_ltm_var_lowered, retarget_ltm_equation_dims,
 };
 
+/// The occurrence-stream slot each target element maps to when the
+/// ceteris-paribus wrap walks one slot's expression at a time.
+///
+/// `build_arrayed_link_score_equation` wraps each `Ast::Arrayed` slot
+/// separately, so the per-element slots are numbered in canonical
+/// element-key-sorted order (the SiteId slot prefix
+/// [`crate::ltm_augment::OccurrenceLookup::for_slot`] strips) with the default
+/// equation the slot AFTER the last element; a scalar / `ApplyToAll` target is a
+/// single slot `0`. Shared by every per-element link-score emitter
+/// (`try_scalar_to_arrayed_link_scores`, `emit_per_element_link_scores`,
+/// `emit_agg_to_target_link_scores`) so the slot map and `OccurrenceLookup::for_slot`
+/// cannot disagree.
+struct ArrayedSlotMap {
+    /// `None` for a scalar / `ApplyToAll` target (one slot `0`); otherwise the
+    /// canonical-element-key -> slot map plus the default slot (`keys.len()`,
+    /// the slot after the last explicit element).
+    slots: Option<(HashMap<String, u16>, u16)>,
+}
+
+impl ArrayedSlotMap {
+    fn new<E>(ast: &crate::ast::Ast<E>) -> Self {
+        use crate::ast::Ast;
+        let slots = if let Ast::Arrayed(_, per_elem, _, _) = ast {
+            let mut keys: Vec<&crate::common::CanonicalElementName> = per_elem.keys().collect();
+            keys.sort();
+            let map = keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| (k.as_str().to_string(), i as u16))
+                .collect();
+            Some((map, keys.len() as u16))
+        } else {
+            None
+        };
+        ArrayedSlotMap { slots }
+    }
+
+    /// The slot for `element` (raw/unqualified -- the `per_elem` key form): its
+    /// own slot for an explicit `Ast::Arrayed` element, the default slot for an
+    /// unlisted one, or `0` for a scalar / `ApplyToAll` target.
+    fn slot_for(&self, element: &str) -> u16 {
+        match &self.slots {
+            None => 0,
+            Some((map, default_slot)) => {
+                let ce = crate::common::CanonicalElementName::from_raw(element);
+                map.get(ce.as_str()).copied().unwrap_or(*default_slot)
+            }
+        }
+    }
+}
+
 /// Determine the dimensions a link score should carry.
 ///
 /// Returns the target's dimension names when the edge is
@@ -1178,6 +1229,20 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     // GH #910: resolved once for the whole target -- see `WithLookupSlotRefs`.
     let slot_refs = crate::ltm_augment::WithLookupSlotRefs::new(&to_var, target_ast_dims);
 
+    // The target's per-occurrence access-shape IR the ceteris-paribus wrap
+    // consumes (the single classifier family). `from` is a scalar model
+    // `Variable` that can appear bare inside a reducer of `to`'s equation, so
+    // the wrap's GH #517 reducer-freeze arm must see the real stream to recurse
+    // (matching the shaped per-shape path) instead of freezing the reducer whole
+    // -- an empty stream silently zeroed such a score.
+    let ref_sites = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
+    let to_occurrences: &[crate::db::ltm_ir::OccurrenceSite] = ref_sites
+        .occurrences
+        .get(to)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let slot_map = ArrayedSlotMap::new(ast);
+
     // Build one `LtmSyntheticVar` for `element` from its equation text and
     // that text's dependency set. The element name is the only part of the
     // generated equation/name that varies between elements.
@@ -1218,6 +1283,10 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             // as `apply_implicit_with_lookup` leaves its value unwrapped.
             let gf_table_ref =
                 slot_refs.for_element(&crate::common::CanonicalElementName::from_raw(element));
+            let occ = crate::ltm_augment::OccurrenceLookup::for_slot(
+                to_occurrences,
+                slot_map.slot_for(element),
+            );
             match crate::ltm_augment::generate_scalar_to_element_equation(
                 from,
                 to,
@@ -1238,6 +1307,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 &[],
                 Some(project_dimensions_context(db, project)),
                 gf_table_ref.as_deref(),
+                &occ,
             ) {
                 Ok(eqn) => eqn,
                 Err(err) => {
@@ -2324,6 +2394,16 @@ fn emit_per_element_link_scores(
     let slot_refs = crate::ltm_augment::WithLookupSlotRefs::new(&to_var, target_ast_dims);
     let dim_ctx = project_dimensions_context(db, project);
 
+    // The target's per-occurrence access-shape IR the ceteris-paribus wrap
+    // consumes (the single classifier family).
+    let ref_sites = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
+    let to_occurrences: &[crate::db::ltm_ir::OccurrenceSite] = ref_sites
+        .occurrences
+        .get(to)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let slot_map = ArrayedSlotMap::new(ast);
+
     // Arrayed deps sharing a target dim get element-pinned in the scalar
     // per-element equation (mirroring `try_scalar_to_arrayed_link_scores`);
     // the source itself is excluded -- its occurrences are pinned per-row
@@ -2458,6 +2538,10 @@ fn emit_per_element_link_scores(
             if !emitted.insert(name.clone()) {
                 continue;
             }
+            let occ = crate::ltm_augment::OccurrenceLookup::for_slot(
+                to_occurrences,
+                slot_map.slot_for(element),
+            );
             match crate::ltm_augment::generate_per_element_link_equation(
                 from,
                 to,
@@ -2472,6 +2556,7 @@ fn emit_per_element_link_scores(
                 &target_iterated_dims,
                 dim_ctx,
                 gf_table_ref.as_deref(),
+                &occ,
             ) {
                 Ok(equation) => edge_vars.push(LtmSyntheticVar {
                     name,
@@ -3086,6 +3171,24 @@ pub(super) fn emit_agg_to_target_link_scores(
         Ast::Scalar(_) => &[],
         Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => dims,
     };
+    // The target slot's occurrence stream the ceteris-paribus wrap consumes --
+    // the SAME single classifier family every other emitter threads. The live
+    // source here is the synthetic agg (`$⁚ltm⁚agg⁚n`), which is never a recorded
+    // occurrence (it is held live by `reducer_subst` text-matching, and during
+    // the wrap the reducer that became it is still spelled `SUM(...)`), so the
+    // wrap's `subtree_has_live_shape`/`get` for the agg never hit and the stream
+    // is behavior-neutral for it -- exactly why the retired `OccurrenceLookup::empty()`
+    // was byte-equivalent here. Threading the real stream instead removes the
+    // empty-stream constructor (and the "my source is never in a reducer" footgun
+    // that mis-fired at the three scalar/module sites) rather than paying it with
+    // a parallel code path.
+    let ref_sites = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
+    let to_occurrences: &[crate::db::ltm_ir::OccurrenceSite] = ref_sites
+        .occurrences
+        .get(to)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let slot_map = ArrayedSlotMap::new(ast);
     // GH #910: when `to` is an implicit WITH-LOOKUP variable, the per-element
     // partials below are full re-evaluations of its RAW element equation (with
     // the reducer substituted by the agg name), while the guard form ratios them
@@ -3352,6 +3455,10 @@ pub(super) fn emit_agg_to_target_link_scores(
                 // GH #910: a scalar with-lookup target's single table,
                 // referenced by bare ident.
                 crate::ltm_augment::with_lookup_table_ref(&to_var).as_deref(),
+                // Agg source: the live thing is the synthetic agg, never a
+                // recorded occurrence, so the real stream is behavior-neutral
+                // (the wrap's agg lookups all miss). A scalar target is slot 0.
+                &crate::ltm_augment::OccurrenceLookup::for_slot(to_occurrences, 0),
             ) {
                 Ok(equation) => vars.push(LtmSyntheticVar {
                     name,
@@ -3413,6 +3520,13 @@ pub(super) fn emit_agg_to_target_link_scores(
                     &source_pins_for_target(element),
                     Some(project_dimensions_context(db, project)),
                     elem_gf_ref(element).as_deref(),
+                    // Agg source: the live thing is the synthetic agg, never a
+                    // recorded occurrence, so the real stream is behavior-neutral
+                    // (the wrap's agg lookups all miss). A2A body is slot 0.
+                    &crate::ltm_augment::OccurrenceLookup::for_slot(
+                        to_occurrences,
+                        slot_map.slot_for(element),
+                    ),
                 ) {
                     Ok(equation) => edge_vars.push(LtmSyntheticVar {
                         name,
@@ -3488,6 +3602,13 @@ pub(super) fn emit_agg_to_target_link_scores(
                             &source_pins_for_target(element),
                             Some(project_dimensions_context(db, project)),
                             elem_gf_ref(element).as_deref(),
+                            // Agg source: the live thing is the synthetic agg,
+                            // never a recorded occurrence, so the real stream is
+                            // behavior-neutral (the wrap's agg lookups all miss).
+                            &crate::ltm_augment::OccurrenceLookup::for_slot(
+                                to_occurrences,
+                                slot_map.slot_for(element),
+                            ),
                         )
                     }
                 };

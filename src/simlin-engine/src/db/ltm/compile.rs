@@ -300,6 +300,17 @@ pub fn link_score_equation_text_shaped<'db>(
     // would compile cleanly, so `model_ltm_fragment_diagnostics` would not
     // catch it, and degrading dependent loops to warned constant-0 stubs
     // would look like legitimate values.
+    // The target's per-occurrence access-shape IR (the single classifier
+    // family the ceteris-paribus wrap consumes). Empty for a target with no
+    // recorded occurrences (a structural edge); the wrap then makes no
+    // shape-driven decision.
+    let ref_sites = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
+    let to_occurrences: &[crate::db::ltm_ir::OccurrenceSite] = ref_sites
+        .occurrences
+        .get(to_name)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
     let equation = match crate::ltm_augment::generate_link_score_equation_for_link(
         &from_ident,
         &to_ident,
@@ -309,6 +320,7 @@ pub fn link_score_equation_text_shaped<'db>(
         &all_vars,
         Some(dim_ctx),
         Some(&dep_dims),
+        to_occurrences,
     ) {
         Ok(eqn) => eqn,
         Err(err) => {

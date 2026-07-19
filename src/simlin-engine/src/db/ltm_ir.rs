@@ -663,6 +663,29 @@ fn walk_all_in_expr(
                     index_nested,
                 );
             } else if let Some((module, port)) = module_output_parts(ident.as_str(), ctx) {
+                // Classify a subscripted module output's axes the SAME way a
+                // model-variable subscript's are (empty `from_dims`, since a
+                // `module·port` composite is not a variable key -- so a bare
+                // iterated-dim index lands `MismatchedIterated`, an over-arity
+                // or non-iterated index `Dynamic`). This preserves byte parity
+                // with the retired Expr0 `classify_other_dep_iterated_dim_subscript`,
+                // which likewise built iterated axes for ANY subscripted
+                // iterated-dim head: the wrap's `other_dep_verdict` on those
+                // axes (dep arity always `None` for a non-variable head) then
+                // permissively collapses `mod·out[Region]` to `PREVIOUS(mod·out)`
+                // rather than freezing the uncompilable dim-name subscript. An
+                // empty `axes` here (the pre-flip stage-2 state) instead derived
+                // `NotIterated`, a silent divergence on an arrayed user-module
+                // output referenced by an iterated subscript. Pinned at the IR
+                // level by `subscripted_arrayed_module_output_axes_derive_collapse`;
+                // no simulate-corpus fixture exercises the end-to-end score, so
+                // both LTM suites stayed byte-green either way.
+                let axes = classify_occurrence_axes(
+                    indices,
+                    &from_dims,
+                    &ctx.target_iterated_dims,
+                    ctx.dim_ctx,
+                );
                 acc.push_occurrence(
                     OccurrenceRef::ModuleOutput {
                         module,
@@ -670,7 +693,7 @@ fn walk_all_in_expr(
                         composite: ident.as_str().to_string(),
                     },
                     RefShape::Bare,
-                    Vec::new(),
+                    axes,
                     target_element,
                     reducer_keys,
                     already_lagged,
@@ -1089,37 +1112,19 @@ pub(crate) enum OtherDepVerdict {
 /// absent from the variable map / has no declared dims) and the target's
 /// iterated-dim count `target_iterated_count`.
 ///
-/// `ltm_augment::classify_other_dep_iterated_dim_subscript` (the Expr0-side
-/// classifier the ceteris-paribus wrap consults) builds `axes` from the parsed
-/// subscript and delegates here. That wrap-side axis construction is still a
-/// textual mirror of the IR walker's [`classify_occurrence_axes`] -- Track A3
-/// stage 2 has not yet retargeted the wrap onto the occurrence stream -- but the
-/// two derivations provably cannot produce a different VERDICT, the only value
-/// the wrap consumes:
+/// The ceteris-paribus wrap (`ltm_augment::other_dep_verdict`) reads a
+/// non-live-dep subscript occurrence's `axes` straight off the occurrence IR
+/// (via `OccurrenceLookup`) and calls this -- there is no longer an Expr0-side
+/// re-derivation of the verdict on the live path, so the wrap and the edge
+/// emitter cannot drift: they consume the SAME classification. (The Expr0
+/// `axes` builder survives only `#[cfg(test)]`, to reconstruct occurrences for
+/// the text-level wrap unit tests, and is proven in step with `classify_occurrence_axes`
+/// by the alignment gate.)
 ///
-/// - Every IN-arity position (index `< dep_arity`) agrees: both derivations gate
-///   the iterated-dim lineup on the identical [`crate::ltm_agg::iterated_axis_slot_elements`]
-///   (compare [`crate::ltm_agg::classify_axis_access`]'s `Var` arm with
-///   `ltm_augment::other_dep_axis_lines_up`), so they label each such index the
-///   same `Iterated` / `MismatchedIterated`.
-/// - The two disagree ONLY on an OVER-declared-arity index (index `>= dep_arity`):
-///   the mirror's `dep_dims.get(i) == None` arm labels it `Iterated{d,d}`, the
-///   IR's `source_dims.get(i) == None` arm labels it `MismatchedIterated{d}`.
-///   But such a position exists only when `axes.len() > dep_arity`, and the
-///   arity check below returns `Mismatch` for that whole case BEFORE inspecting
-///   the per-axis arms.
-///
-/// So the arity guard DOMINATES the sole labeling difference: the silent-zero
-/// drift the two-family "must stay in sync" contract guarded against is
-/// structurally impossible for this verdict, whichever family built `axes`.
-/// Stage 2 will still delete the wrap-side axis construction (collapsing to one
-/// classifier family), but the verdict itself is already single-sourced here.
 /// See [`OccurrenceAxis`]'s rustdoc for the full rule; the two load-bearing
 /// arity corners (under-arity all-`Iterated` => `Mismatch`; over-target-arity =>
 /// `NotIterated`) are pinned by `under_arity_iterated_subscript_is_mismatch_not_collapse`
-/// / `over_target_arity_iterated_subscript_is_not_iterated`, and the
-/// dominance argument by `verdict_ignores_over_arity_axis_labeling`, in
-/// `db::ltm_ir_tests`.
+/// / `over_target_arity_iterated_subscript_is_not_iterated` in `db::ltm_ir_tests`.
 pub(crate) fn derive_other_dep_verdict(
     axes: &[OccurrenceAxis],
     dep_arity: Option<usize>,

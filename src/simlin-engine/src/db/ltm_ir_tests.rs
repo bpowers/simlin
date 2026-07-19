@@ -1098,8 +1098,8 @@ mod occurrence_ir_tests {
         // A transposed subscript `arr[D2, D1]` (arr declared `[D1, D2]`) inside
         // an A2A-over-`[D1, D2]` target: the coarse shape collapses to
         // DynamicIndex (unchanged), but the per-axis record marks each axis
-        // `MismatchedIterated`, so `classify_other_dep_iterated_dim_subscript`'s
-        // `Mismatch` verdict is derivable from the IR (distinct from a genuine
+        // `MismatchedIterated`, so `derive_other_dep_verdict`'s
+        // `Mismatch` is derivable from the IR (distinct from a genuine
         // dynamic index below).
         let project = TestProject::new("main")
             .named_dimension("D1", &["a", "b"])
@@ -1241,6 +1241,96 @@ mod occurrence_ir_tests {
         );
     }
 
+    /// An ARRAYED user-module output referenced by an iterated-dim subscript
+    /// as a NON-live dep of an A2A target (finding 3 / byte-parity restore).
+    /// The walker classifies a subscripted `module·port` composite's axes
+    /// EXACTLY like a model-variable subscript's: `module·port` is never a
+    /// variable key, so `from_dims` is empty and a bare iterated-dim index
+    /// (`Region`) lands `MismatchedIterated`. With a non-variable head the dep
+    /// arity is `None`, so `derive_other_dep_verdict` permissively COLLAPSES
+    /// the subscript -- the ceteris-paribus wrap then rewrites
+    /// `mod·out[Region]` to a bare `PREVIOUS(mod·out)`, matching the retired
+    /// Expr0 `classify_other_dep_iterated_dim_subscript`. The pre-fix stage-2
+    /// state pushed EMPTY `axes` for a module-output subscript, which derived
+    /// `NotIterated` and froze the uncompilable dim-name subscript verbatim --
+    /// a silent divergence no corpus fixture covered (both suites stayed
+    /// byte-green either way).
+    #[test]
+    fn subscripted_arrayed_module_output_axes_derive_collapse() {
+        use datamodel::{Aux, Equation, Variable};
+        let arrayed_aux = |ident: &str, eqn: &str, can_input: bool| -> Variable {
+            Variable::Aux(Aux {
+                ident: ident.to_string(),
+                equation: Equation::ApplyToAll(vec!["Region".to_string()], eqn.to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat {
+                    can_be_module_input: can_input,
+                    ..datamodel::Compat::default()
+                },
+            })
+        };
+        let project = datamodel::Project {
+            name: "arrayed_mod".to_string(),
+            sim_specs: datamodel::SimSpecs {
+                start: 0.0,
+                stop: 1.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+            dimensions: vec![datamodel::Dimension::named(
+                "Region".to_string(),
+                vec!["nyc".to_string(), "boston".to_string()],
+            )],
+            units: vec![],
+            models: vec![
+                x_model(
+                    "main",
+                    vec![
+                        arrayed_aux("live", "1", false),
+                        // A2A over `Region`, referencing the arrayed module
+                        // output by an iterated-dim subscript as a non-live dep.
+                        arrayed_aux("combined", "live[Region] + sub.out[Region]", false),
+                        x_module("sub", &[("live", "sub.input")], None),
+                    ],
+                ),
+                x_model(
+                    "sub",
+                    vec![
+                        arrayed_aux("input", "0", true),
+                        arrayed_aux("out", "input[Region] * 2", false),
+                    ],
+                ),
+            ],
+            source: None,
+            ai_information: None,
+        };
+        let occs = occ_from_datamodel(&project, "main", "combined");
+        let mod_occ = occs
+            .iter()
+            .find(|o| matches!(&o.reference, OccurrenceRef::ModuleOutput { .. }))
+            .unwrap_or_else(|| {
+                panic!("expected a ModuleOutput occurrence for sub·out; occs: {occs:?}")
+            });
+        assert!(
+            !mod_occ.axes.is_empty(),
+            "a subscripted module output must carry classified axes (not empty), \
+             else the verdict silently derives NotIterated: {mod_occ:?}"
+        );
+        // Dep arity is `None` (a `module·port` composite is not a variable key),
+        // so the verdict permissively collapses -- byte-parity with HEAD.
+        assert_eq!(
+            derive_other_dep_verdict(&mod_occ.axes, None, 1),
+            OtherDepVerdict::Collapse,
+            "an iterated-dim subscript on an unthreadable module output collapses"
+        );
+    }
+
     /// The dominant production shape: an IMPLICIT stdlib expansion. `smoothed =
     /// SMTH1(input, 5) * 2` desugars (in the builtins visitor) to an implicit
     /// `Variable::Module` named `$⁚smoothed⁚0⁚smth1` whose `·output` composite
@@ -1378,8 +1468,8 @@ mod occurrence_ir_tests {
     // ── Other-dep verdict derivation (the contract on `axes`) ──────────────
     //
     // `OccurrenceAxis`'s rustdoc states the rule by which the transform derives
-    // `ltm_augment::classify_other_dep_iterated_dim_subscript`'s
-    // `Collapse`/`Mismatch`/`NotIterated` verdict from an occurrence's `axes`.
+    // `derive_other_dep_verdict`'s
+    // `Collapse`/`Mismatch`/`NotIterated` from an occurrence's `axes`.
     // Track A3 stage 2 promoted the reference derivation to the production
     // `db::ltm_ir::derive_other_dep_verdict` -- the Expr0-side classifier now
     // builds `axes` from the parsed subscript and DELEGATES to it, so the wrap
@@ -1461,8 +1551,8 @@ mod occurrence_ir_tests {
         // A2A-over-[D1,D2] target. The single index lines up with arr's first
         // axis, so the occurrence's axes are all-`Iterated` -- yet the dep's
         // declared arity is 2, so
-        // `classify_other_dep_iterated_dim_subscript` returns `Mismatch`
-        // (ltm_augment.rs:288, `index_dims.len() != dep_dims.len()`), NOT the
+        // `derive_other_dep_verdict` returns `Mismatch`
+        // (`axes.len() != dep_arity`, checked before the per-axis arms), NOT the
         // Collapse a rule keyed on the per-axis arms alone would derive.
         // Freezing the wrong element here is the GH #526 silent magnitude error.
         let project = TestProject::new("main")
@@ -1503,8 +1593,8 @@ mod occurrence_ir_tests {
         // A2A-over-[D1] target. Position 0 lines up (`Iterated`); position 1's
         // `D1` names the source's `D2` axis, so it is `MismatchedIterated`.
         // But the subscript has MORE indices (2) than the target has iterated
-        // dims (1), so `classify_other_dep_iterated_dim_subscript` short-circuits
-        // to `NotIterated` (ltm_augment.rs:268, normal wrap), NOT the Mismatch
+        // dims (1), so `derive_other_dep_verdict` short-circuits
+        // to `NotIterated` (`axes.len() > target_iterated_count`), NOT the Mismatch
         // the `MismatchedIterated` arm alone would derive.
         let project = TestProject::new("main")
             .named_dimension("D1", &["a", "b"])
@@ -1536,8 +1626,8 @@ mod occurrence_ir_tests {
     #[test]
     fn verdict_ignores_over_arity_axis_labeling() {
         // Track A3 stage 2 / finding-3 verdict-equivalence. The Expr0-side
-        // mirror (`ltm_augment::classify_other_dep_iterated_dim_subscript`) and
-        // the IR walker (`classify_occurrence_axes`) can LABEL a per-axis index
+        // `#[cfg(test)]` axis builder (`ltm_augment::other_dep_occurrence_axes`)
+        // and the IR walker (`classify_occurrence_axes`) can LABEL a per-axis index
         // differently at exactly ONE kind of position: an index that overflows
         // the dep's declared arity. The mirror's `dep_dims.get(i) == None` arm
         // marks it `Iterated{d,d}`; the IR's `source_dims.get(i) == None` arm
@@ -1550,11 +1640,13 @@ mod occurrence_ir_tests {
         // dep_arity`, and the arity check in `derive_other_dep_verdict` returns
         // `Mismatch` for that whole case BEFORE inspecting the per-axis arms. So
         // the sole labeling difference is dominated: the verdict cannot differ
-        // between the two derivations. That is what makes the shared verdict
-        // rule single-sourced -- the "silent drift" the two-family "must stay in
-        // sync" contract guards against is structurally impossible for the
-        // VERDICT (the only value the wrap consumes), whichever family built the
-        // `axes`.
+        // between the two derivations. Production now reads `axes` straight off
+        // the occurrence IR (one classifier family), so this only guards the
+        // `#[cfg(test)]` Expr0 axis builder (`other_dep_occurrence_axes`) that
+        // reconstructs occurrences for the text-level wrap unit tests: it stays
+        // VERDICT-equivalent to `classify_occurrence_axes` even where the two
+        // label an over-arity axis differently, so the reconstructed occurrence
+        // is a faithful stand-in.
         //
         // 3 indices, dep declared arity 2 (index 2 overflows), target
         // iterated-dim count 3.

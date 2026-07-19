@@ -70,6 +70,116 @@ fn test_model_ltm_variables_stdlib_module() {
     );
 }
 
+/// Finding-2 regression (scalar source -> arrayed target, un-hoisted reducer):
+/// `try_scalar_to_arrayed_link_scores` -> `generate_scalar_to_element_equation`
+/// used an EMPTY occurrence stream, so the ceteris-paribus wrap's GH #517
+/// reducer-freeze arm froze the reducer whole even when the scalar live source
+/// `scale` appears bare inside it. That silently converted a would-be loud
+/// degradation (HEAD recursed into the reducer, producing an uncompilable
+/// `PREVIOUS`-of-wildcard-slice fragment that surfaces as a `model_ltm_fragment_diagnostics`
+/// Warning) into a clean-compiling silent zero holding no live occurrence.
+/// Threading the real per-slot occurrence stream restores the recursion, so the
+/// edge degrades LOUDLY (the repo's standard) instead.
+#[test]
+fn scalar_to_arrayed_reducer_source_recurses_and_degrades_loudly() {
+    use salsa::Setter;
+    let mut db = SimlinDb::default();
+    let project = TestProject::new("scalar_to_arrayed_reducer")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["c", "d"])
+        .aux("idx", "1", None)
+        .aux("scale", "pop * 0.01", None)
+        .array_aux("pop2[D1,D2]", "pop")
+        // Dynamic index `idx` keeps the reducer un-hoisted, routing the
+        // `scale -> share` edge through `try_scalar_to_arrayed_link_scores`.
+        // `scale` appears ONLY inside the reducer.
+        .array_aux("share[D1]", "1 + SUM(pop2[idx,*] * scale)")
+        .flow("growth", "SUM(share[*]) * 0.001", None)
+        .stock("pop", "1", &["growth"], &[], None)
+        .build_datamodel();
+    let sync = sync_from_datamodel(&db, &project);
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    let model = sync.models["main"].source;
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    let share_score = ltm
+        .vars
+        .iter()
+        .find(|v| v.name.contains("scale") && v.name.contains("share"))
+        .expect("scale -> share[a] link score should be emitted");
+    let eqn = share_score.equation.source_text();
+    // The reducer is recursed into (its `scale`-frozen inner slice re-prints
+    // as `previous(pop2[...])`), NOT frozen whole as `previous(sum(...))`.
+    assert!(
+        eqn.contains("previous(pop2"),
+        "the reducer must be recursed into (other-dep frozen inside it), got: {eqn}"
+    );
+    assert!(
+        !eqn.to_lowercase().contains("previous(sum("),
+        "the reducer must NOT be frozen whole, got: {eqn}"
+    );
+
+    // The recursed partial is an uncompilable `PREVIOUS`-of-wildcard-slice, so
+    // assembly surfaces a LOUD fragment-diagnostics Warning rather than a silent
+    // clean-compiling zero.
+    let diags = collect_model_diagnostics(&db, model, sync.project);
+    assert!(
+        diags.iter().any(|d| matches!(
+            &d.error,
+            crate::db::DiagnosticError::Assembly(m)
+                if m.contains("scale") && m.contains("share") && m.contains("failed to compile")
+        )),
+        "a loud fragment-compile Warning should name the scale -> share edge; got {:?}",
+        diags.iter().map(|d| &d.error).collect::<Vec<_>>()
+    );
+}
+
+/// Finding-2 regression (module output read bare inside a reducer):
+/// `module_link_score_equation`'s `module -> variable` branch passed an EMPTY
+/// occurrence stream AND `subtree_has_live_shape` matched only `Variable`
+/// occurrences, so a module-output composite read bare inside a reducer
+/// (`total = SUM(arr[*] * SMTH1(x, 3))`) froze the reducer whole -- dropping the
+/// live occurrence and silently zeroing the score. Threading the real stream and
+/// teaching `subtree_has_live_shape` to also match `ModuleOutput` composites
+/// restores HEAD's recursion: the changed-last partial keeps the reducer live
+/// and freezes only the (scalar) module output, so the score is real.
+#[test]
+fn module_output_bare_in_reducer_recurses() {
+    use salsa::Setter;
+    let mut db = SimlinDb::default();
+    let project = TestProject::new("mod_output_in_reducer")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .array_aux("arr[D1]", "1")
+        .aux("x", "pop * 0.5", None)
+        .aux("total", "SUM(arr[*] * SMTH1(x, 3))", None)
+        .flow("growth", "total * 0.001", None)
+        .stock("pop", "1", &["growth"], &[], None)
+        .build_datamodel();
+    let sync = sync_from_datamodel(&db, &project);
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    let model = sync.models["main"].source;
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    let mod_score = ltm
+        .vars
+        .iter()
+        .find(|v| v.name.contains("smth1") && v.name.ends_with("total"))
+        .expect("smth1 -> total module link score should be emitted");
+    let eqn = mod_score.equation.source_text();
+    // The reducer is kept live (recursed) with only the scalar module output
+    // frozen (`sum(arr[*] * PREVIOUS(...·output))`), NOT frozen whole.
+    assert!(
+        eqn.contains("\u{B7}output") && eqn.to_lowercase().contains("sum(arr[*]"),
+        "the module-output reducer must be recursed into, got: {eqn}"
+    );
+    assert!(
+        !eqn.to_lowercase().contains("previous(sum("),
+        "the reducer must NOT be frozen whole, got: {eqn}"
+    );
+}
+
 #[test]
 fn test_model_ltm_variables_passthrough_module() {
     let db = SimlinDb::default();

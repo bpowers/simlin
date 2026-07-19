@@ -748,3 +748,49 @@ fn collect_agg_petals_groups_single_agg_circuits() {
         assert_eq!(p.nodes[0], agg, "petal rotated to start at the agg");
     }
 }
+
+/// Finding-1 regression: the `(from, to)`-keyed legacy `link_score_equation_text`
+/// and the shape-aware `link_score_equation_text_shaped(.., Bare)` must derive
+/// the SAME equation for a standard scalar Bare link score. The two twins had
+/// silently drifted: the legacy query passed an EMPTY occurrence stream, so the
+/// ceteris-paribus wrap's GH #517 reducer-freeze arm (`subtree_has_live_shape`)
+/// froze a reducer whole, while the shaped query threaded the real stream and
+/// recursed into it -- producing a different partial for `scale -> total`
+/// whenever the live source `scale` appears bare inside a reducer of `total`.
+/// The compiled fragment (assembly routes the standard scalar Bare score through
+/// the legacy query) would then simulate an equation that disagrees with the one
+/// `model_ltm_variables` reports/serializes.
+#[test]
+fn legacy_and_shaped_bare_score_agree_when_source_bare_in_reducer() {
+    let project = TestProject::new("bare_source_in_reducer")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .array_aux("arr[D1]", "1")
+        .aux("scale", "pop * 0.01", None)
+        .aux("total", "scale + SUM(arr[*] * scale)", None)
+        .flow("growth", "total * 0.001", None)
+        .stock("pop", "1", &["growth"], &[], None)
+        .build_datamodel();
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_model = sync.models["main"].source;
+
+    let link_id = LtmLinkId::new(&db, "scale".to_string(), "total".to_string());
+    let legacy = link_score_equation_text(&db, link_id, source_model, sync.project)
+        .as_ref()
+        .expect("legacy scale -> total link score should exist");
+    let shaped =
+        link_score_equation_text_shaped(&db, link_id, RefShape::Bare, source_model, sync.project);
+    let ShapedLinkScore::Scored(shaped) = shaped else {
+        panic!("shaped scale -> total Bare link score should be Scored");
+    };
+
+    assert_eq!(
+        legacy.equation.source_text(),
+        shaped.equation.source_text(),
+        "the legacy (compiled/assembled) and shaped (emitted/reported) Bare link \
+         scores must be byte-identical -- a divergence means the VM simulates a \
+         different equation than is reported"
+    );
+}

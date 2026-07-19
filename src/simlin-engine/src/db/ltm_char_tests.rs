@@ -1276,3 +1276,51 @@ fn char_already_lagged_other_dep() {
     );
     assert_golden("already_lagged_other_dep", &actual);
 }
+
+// ---------------------------------------------------------------------------
+// Model H (Track A3 stage 2b, finding 1): a SCALAR feeder read BARE both
+// OUTSIDE and INSIDE a HOISTED reducer of a SCALAR target.
+//
+// `total = scale + SUM(arr[*] * scale)`: `scale` appears bare (outside the
+// reducer) AND as the reducer's scalar feeder inside `SUM(arr[*] * scale)`. The
+// `scale -> total` Bare link score is the finding-1 probe. With an empty
+// occurrence stream the LEGACY `link_score_equation_text` (which assembly
+// compiles) froze the whole `SUM(...)` reducer -- changed-FIRST -- while the
+// SHAPED emitter (which `model_ltm_variables` reports/serializes) threaded the
+// real stream and recursed into it -- changed-LAST. So the COMPILED fragment
+// disagreed with the REPORTED equation: the VM simulated one derivation and the
+// report showed another. Threading the real stream makes the legacy query
+// changed-LAST too. This golden pins the emitted (changed-LAST) text -- the
+// numerator subtracts `PREVIOUS(scale) + sum(arr[*] * PREVIOUS(scale))` from the
+// live `total`, i.e. `scale` is held live in BOTH occurrences -- and
+// `legacy_and_shaped_bare_score_agree_when_source_bare_in_reducer` (in
+// `db::ltm_tests`) pins that the legacy (compiled) query now returns the
+// identical bytes. GH #517/#743: the changed-LAST convention is the correct one
+// (freeze the target's OTHER inputs, hold the scored source live everywhere it
+// appears), so the drift is resolved onto the shaped semantics, not HEAD's.
+// ---------------------------------------------------------------------------
+
+fn scalar_feeder_bare_in_hoisted_reducer_model() -> datamodel::Project {
+    TestProject::new("scalar_bare_in_reducer_char")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .array_aux("arr[D1]", "1")
+        .aux("scale", "pop * 0.01", None)
+        .aux("total", "scale + SUM(arr[*] * scale)", None)
+        .flow("growth", "total * 0.001", None)
+        .stock("pop", "1", &["growth"], &[], None)
+        .build_datamodel()
+}
+
+#[test]
+fn char_scalar_feeder_bare_in_hoisted_reducer() {
+    // Every `scale -> X` score: the site-1 `scale -> total` Bare score (both
+    // occurrences held live, changed-LAST) plus the `scale -> $⁚ltm⁚agg⁚0`
+    // scalar-feeder score, so the whole feeder attribution is frozen.
+    let actual = dump_synthetic_vars(
+        scalar_feeder_bare_in_hoisted_reducer_model(),
+        true,
+        "link_score\u{205A}scale",
+    );
+    assert_golden("scalar_feeder_bare_in_hoisted_reducer", &actual);
+}

@@ -2,34 +2,34 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Track-A differential gate: the two LTM access-shape classifier families
-//! agree on every non-reducer reference occurrence.
+//! Track-A differential gate: the `#[cfg(test)]` Expr0 access-shape classifier
+//! stays in step with the production occurrence IR on every non-reducer
+//! reference occurrence.
 //!
-//! # The failure mode this gate retires
+//! # What this gate now guards
 //!
-//! An LTM causal edge's access shape is decided TWICE, on two ASTs, by two
-//! mirrored classifier families:
+//! PRODUCTION decides an LTM causal edge's access shape ONCE, on the target's
+//! `Expr2` AST ([`crate::db::ltm_ir`]: `resolve_literal_index` /
+//! `classify_subscript_shape` / `classify_iterated_dim_shape`, composed by the
+//! walker `collect_all_reference_sites` and cached in the salsa query
+//! `model_ltm_reference_sites`). Both consumers -- causal-edge emission AND the
+//! ceteris-paribus wrap -- read that single classification: the wrap tracks each
+//! occurrence's structural `SiteId` path and looks its shape up in
+//! `model_ltm_reference_sites`' occurrence stream (`OccurrenceLookup`), so it can
+//! no longer drift from the edge emitter (the historical two-family silent-zero
+//! class -- GH #759 dimension-name indices, GH #913 printer/parser asymmetry, the
+//! `pop[01]` indexed-literal canonicalization -- is structurally impossible).
 //!
-//! * **Expr2 side** ([`crate::db::ltm_ir`]) -- `resolve_literal_index` /
-//!   `classify_subscript_shape` / `classify_iterated_dim_shape`, composed by
-//!   the production walker `collect_all_reference_sites` and consumed through
-//!   the salsa query `model_ltm_reference_sites`. This drives causal-edge
-//!   emission and the per-shape link-score selection: `emit_per_shape_link_scores`
-//!   feeds each site's `shape` into the partial builder as `live_shape`.
-//! * **Expr0 side** ([`super`]) -- `resolve_literal_element_index` /
-//!   `classify_expr0_subscript_shape` / `classify_expr0_per_element_axes` /
-//!   `is_live_source_iterated_dim_subscript`, consumed by
-//!   `wrap_non_matching_in_previous` on the *printed-and-reparsed* target
-//!   equation text. This re-derives each occurrence's shape and keeps live
-//!   only the occurrences whose shape EQUALS `live_shape`.
-//!
-//! If the families drift, no Expr0 occurrence matches `live_shape`, every
-//! reference to the source is PREVIOUS-wrapped, and the link score silently
-//! collapses to a constant (see the "must stay in sync" docstring on
-//! `super::resolve_literal_element_index`). Historical drift bugs, all of
-//! this class: GH #759 (dimension-name indices), GH #913 (printer/parser
-//! asymmetry dropping attribution), the `pop[01]` indexed-literal
-//! canonicalization.
+//! The Expr0 classifier family (`resolve_literal_element_index` /
+//! `classify_expr0_subscript_shape` / `classify_expr0_per_element_axes` /
+//! `is_live_source_iterated_dim_subscript` in [`super`]) now survives only
+//! `#[cfg(test)]`: it reconstructs an occurrence stream on the printed-and-reparsed
+//! target text for the focused wrap unit tests (`ltm_augment_wrap_test_support`).
+//! Those tests exercise the real production wrap, so the reconstructed stream
+//! must carry the same shapes/paths the IR would. This gate is what proves it:
+//! it classifies each occurrence with BOTH families over the corpus and asserts
+//! they agree, so the `#[cfg(test)]` reconstruction cannot silently diverge from
+//! the IR and feed the wrap a shape production never would.
 //!
 //! # What this gate compares, and why it is drift-complete
 //!
@@ -72,12 +72,13 @@
 //!   their shape is inconsequential. A `Direct`, not-hoisted reducer argument
 //!   (the dynamic-index carve-out, `SUM(pop[idx,*])`) keeps its shape all the
 //!   way to `emit_per_shape_link_scores`, which feeds it as `live_shape` into
-//!   the partial builder; `wrap_non_matching_in_previous`'s reducer arm then
-//!   keeps the reducer live only if the in-reducer occurrence's Expr0 shape
-//!   (`expr0_contains_live_match` -> `classify_expr0_subscript_shape`) EQUALS
-//!   that `live_shape`, so a drift on that occurrence WOULD silently zero the
-//!   score. The exclusion is sound for a different reason: both classifier
-//!   families are reducer-context-FREE (`classify_subscript_shape` /
+//!   the wrap; the wrap's reducer arm then keeps the reducer live only if the
+//!   in-reducer occurrence's IR shape EQUALS that `live_shape` (production reads
+//!   it from the occurrence lookup; the `#[cfg(test)]` reconstruction classifies
+//!   it with `classify_expr0_subscript_shape`), so a reconstruction drift on
+//!   that occurrence would feed the wrap a shape the IR never produced. The
+//!   exclusion is sound for a different reason: both classifier families are
+//!   reducer-context-FREE (`classify_subscript_shape` /
 //!   `classify_iterated_dim_shape` / `resolve_literal_index` on Expr2,
 //!   `classify_expr0_subscript_shape` / `resolve_literal_element_index` on
 //!   Expr0 -- none takes an `in_reducer` input), so any drift on a
@@ -146,7 +147,8 @@ use crate::db::ltm_ir::{
     model_ltm_reference_sites,
 };
 use crate::db::{
-    SimlinDb, project_dimensions_context, reconstruct_model_variables, sync_from_datamodel,
+    DiagnosticSeverity, SimlinDb, collect_all_diagnostics, project_dimensions_context,
+    reconstruct_model_variables, sync_from_datamodel,
 };
 use crate::dimensions::{Dimension, DimensionsContext};
 use crate::ltm_agg::{AxisRead, ReducerKind, reducer_kind_from_name};
@@ -165,6 +167,12 @@ struct Expr0Occurrence {
     source: String,
     indices: Option<Vec<IndexExpr0>>,
     in_reducer: bool,
+    /// The structural child-index path from the target's slot root down to
+    /// this occurrence node, built to mirror `walk_all_in_expr`'s `SiteId`
+    /// construction exactly (slot prefix + descent chain). Stage 2's wrap
+    /// consults the occurrence IR by this path, so it must equal the IR's
+    /// `SiteId`; the alignment sweep pins that.
+    path: Vec<u16>,
 }
 
 /// Whether `name`/`arity` names a reducer whose references route through an
@@ -208,6 +216,7 @@ fn collect_expr0_occurrences(
     expr: &Expr0,
     variables: &HashMap<Ident<Canonical>, Variable>,
     in_reducer: bool,
+    path: &mut Vec<u16>,
     out: &mut Vec<Expr0Occurrence>,
 ) {
     match expr {
@@ -219,6 +228,7 @@ fn collect_expr0_occurrences(
                     source: canonical.as_str().to_string(),
                     indices: None,
                     in_reducer,
+                    path: path.clone(),
                 });
             }
         }
@@ -229,6 +239,7 @@ fn collect_expr0_occurrences(
                     source: canonical.as_str().to_string(),
                     indices: Some(indices.clone()),
                     in_reducer,
+                    path: path.clone(),
                 });
             }
             // Mirror the Expr2 walker's element-selector skip: an index that
@@ -252,16 +263,24 @@ fn collect_expr0_occurrences(
                 if resolve_literal_element_index(idx, i, &source_dim_elements).is_some() {
                     continue;
                 }
+                path.push(i as u16);
                 match idx {
-                    IndexExpr0::Expr(e) => collect_expr0_occurrences(e, variables, in_reducer, out),
+                    IndexExpr0::Expr(e) => {
+                        collect_expr0_occurrences(e, variables, in_reducer, path, out)
+                    }
                     IndexExpr0::Range(l, r, _) => {
-                        collect_expr0_occurrences(l, variables, in_reducer, out);
-                        collect_expr0_occurrences(r, variables, in_reducer, out);
+                        path.push(0);
+                        collect_expr0_occurrences(l, variables, in_reducer, path, out);
+                        path.pop();
+                        path.push(1);
+                        collect_expr0_occurrences(r, variables, in_reducer, path, out);
+                        path.pop();
                     }
                     IndexExpr0::Wildcard(_)
                     | IndexExpr0::StarRange(_, _)
                     | IndexExpr0::DimPosition(_, _) => {}
                 }
+                path.pop();
             }
         }
         Expr0::App(UntypedBuiltinFn(name, args), _) => {
@@ -275,18 +294,30 @@ fn collect_expr0_occurrences(
                 if skip_first && i == 0 {
                     continue;
                 }
-                collect_expr0_occurrences(arg, variables, child_in_reducer, out);
+                path.push(i as u16);
+                collect_expr0_occurrences(arg, variables, child_in_reducer, path, out);
+                path.pop();
             }
         }
-        Expr0::Op1(_, inner, _) => collect_expr0_occurrences(inner, variables, in_reducer, out),
+        Expr0::Op1(_, inner, _) => {
+            path.push(0);
+            collect_expr0_occurrences(inner, variables, in_reducer, path, out);
+            path.pop();
+        }
         Expr0::Op2(_, l, r, _) => {
-            collect_expr0_occurrences(l, variables, in_reducer, out);
-            collect_expr0_occurrences(r, variables, in_reducer, out);
+            path.push(0);
+            collect_expr0_occurrences(l, variables, in_reducer, path, out);
+            path.pop();
+            path.push(1);
+            collect_expr0_occurrences(r, variables, in_reducer, path, out);
+            path.pop();
         }
         Expr0::If(cond, then_e, else_e, _) => {
-            collect_expr0_occurrences(cond, variables, in_reducer, out);
-            collect_expr0_occurrences(then_e, variables, in_reducer, out);
-            collect_expr0_occurrences(else_e, variables, in_reducer, out);
+            for (child, sub) in [cond, then_e, else_e].into_iter().enumerate() {
+                path.push(child as u16);
+                collect_expr0_occurrences(sub, variables, in_reducer, path, out);
+                path.pop();
+            }
         }
     }
 }
@@ -314,12 +345,13 @@ fn target_iterated_dims_of(to_var: &Variable) -> Vec<String> {
     }
 }
 
-/// Classify one reparsed Expr0 occurrence of `source` with the production
-/// Expr0 classifier, using the SAME context construction the production caller
-/// builds. A bare occurrence is `Bare` by construction (matching the Expr2
-/// walker's `Var` arm). `dep_dims` is `None`: it feeds only the *non-live-dep*
-/// collapse in `classify_other_dep_iterated_dim_subscript`, never the live
-/// source's shape, which is all this classifies.
+/// Classify one reparsed Expr0 occurrence of `source` with the `#[cfg(test)]`
+/// Expr0 classifier, using the SAME context construction the production wrap's
+/// occurrence lookup was built against. A bare occurrence is `Bare` by
+/// construction (matching the Expr2 walker's `Var` arm). `dep_dims` is `None`:
+/// it feeds only the *non-live-dep* verdict (`other_dep_occurrence_axes` +
+/// `derive_other_dep_verdict`), never the live source's shape, which is all
+/// this classifies.
 fn classify_expr0_occurrence(
     occ: &Expr0Occurrence,
     to_var: &Variable,
@@ -364,17 +396,21 @@ fn expr0_occurrences_for_target(
     let Some(ast) = to_var.ast() else {
         return out;
     };
-    let mut walk_text = |text: &str| {
+    // `slot` is the first `SiteId` path element (`walk_all_in_expr`: slot 0 for
+    // a scalar/A2A body, the sorted element index for each `Ast::Arrayed` slot,
+    // then the default slot after the last element).
+    let mut walk_text = |slot: u16, text: &str| {
         let parsed = Expr0::new(text, crate::lexer::LexerType::Equation).unwrap_or_else(|e| {
             panic!("target '{to_name}' printed text failed to reparse (GH #913 drift class): text={text:?}, err={e:?}")
         });
         if let Some(expr0) = parsed {
-            collect_expr0_occurrences(&expr0, variables, false, &mut out);
+            let mut path = vec![slot];
+            collect_expr0_occurrences(&expr0, variables, false, &mut path, &mut out);
         }
     };
     match ast {
         Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
-            walk_text(&crate::patch::expr2_to_string(expr));
+            walk_text(0, &crate::patch::expr2_to_string(expr));
         }
         Ast::Arrayed(_, per_elem, default_expr, _) => {
             // Deterministic slot order (matches the sorted walk in
@@ -382,11 +418,11 @@ fn expr0_occurrences_for_target(
             // per-edge multiset but keeps failure output stable.
             let mut keys: Vec<_> = per_elem.keys().collect();
             keys.sort();
-            for k in keys {
-                walk_text(&crate::patch::expr2_to_string(&per_elem[k]));
+            for (slot, k) in keys.iter().enumerate() {
+                walk_text(slot as u16, &crate::patch::expr2_to_string(&per_elem[*k]));
             }
             if let Some(default) = default_expr {
-                walk_text(&crate::patch::expr2_to_string(default));
+                walk_text(keys.len() as u16, &crate::patch::expr2_to_string(default));
             }
         }
     }
@@ -502,6 +538,19 @@ fn assert_occurrence_stream_aligns(
             ir_src, &e0_occ.source,
             "occurrence-stream SOURCE mismatch for target '{to_str}' (IR vs reparsed Expr0)"
         );
+        // The SiteId-keyed bridge stage 2 consumes: the wrap looks the
+        // occurrence up by the structural child-index path it walks. That path
+        // must equal the IR's `SiteId`, computed on the Expr2 AST -- so the
+        // print->reparse round trip must be child-index-isomorphic at every
+        // occurrence node. A mismatch would make the wrap's SiteId lookup miss
+        // (or hit the wrong occurrence) despite the streams aligning positionally.
+        assert_eq!(
+            &ir_occ.site_id.0[..],
+            &e0_occ.path[..],
+            "occurrence-stream SiteId PATH mismatch for {ir_src} -> {to_str}: the reparsed-Expr0 \
+             child-index path does not equal the IR's Expr2 SiteId, so a SiteId-keyed wrap lookup \
+             would desync"
+        );
         assert_eq!(
             ir_occ.in_reducer, e0_occ.in_reducer,
             "occurrence-stream in_reducer mismatch for {ir_src} -> {to_str}"
@@ -530,15 +579,33 @@ fn assert_occurrence_streams_align(tp: &TestProject) {
     let model = sync.models["main"].source;
     let project = sync.project;
 
+    // Non-vacuity guard 1 (fail loudly, never skip silently): a fixture
+    // equation that fails to parse leaves its target with NO AST, so
+    // `expr0_occurrences_for_target` returns empty and every alignment
+    // assertion below passes trivially (0 == 0). Catch that at the source: an
+    // Error-severity diagnostic surfaces exactly a parse failure (the
+    // grammar-rejected `IF`-as-operand shape was the concrete instance).
+    let errors: Vec<_> = collect_all_diagnostics(&db, project)
+        .into_iter()
+        .filter(|d| d.severity == DiagnosticSeverity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "alignment fixture has compile errors -- a target that fails to parse would \
+         silently vacate the alignment sweep (empty occurrence stream): {errors:?}"
+    );
+
     let variables = reconstruct_model_variables(&db, model, project);
     let dim_ctx = project_dimensions_context(&db, project);
     let ir = model_ltm_reference_sites(&db, model, project);
 
+    let mut total_occurrences = 0usize;
     let mut to_names: Vec<&Ident<Canonical>> = variables.keys().collect();
     to_names.sort();
     for to_name in to_names {
         let to_var = &variables[to_name];
         let expr0_occs = expr0_occurrences_for_target(to_name.as_str(), to_var, &variables);
+        total_occurrences += expr0_occs.len();
         assert_occurrence_stream_aligns(
             to_name.as_str(),
             to_var,
@@ -548,6 +615,18 @@ fn assert_occurrence_streams_align(tp: &TestProject) {
             &expr0_occs,
         );
     }
+
+    // Non-vacuity guard 2: even with every equation parsing, a fixture whose
+    // targets reference no model variables (all-constant) produces an empty
+    // occurrence stream model-wide, so the per-target length assertions all
+    // compare 0 == 0. Every alignment fixture exists to exercise the SiteId-path
+    // / shape zip on REAL occurrences, so require at least one.
+    assert!(
+        total_occurrences > 0,
+        "alignment fixture produced NO occurrences model-wide: the SiteId-path / shape \
+         assertions never run (every per-target stream is empty, so the length checks \
+         pass 0 == 0)"
+    );
 }
 
 #[test]
@@ -566,6 +645,39 @@ fn align_already_lagged_and_index_nested_streams() {
         .array_aux("other[Slot]", "7")
         .array_aux("lagged[Region]", "pop + PREVIOUS(g) + INIT(g)")
         .array_aux("nested[Region]", "pop + other[idx]");
+    assert_occurrence_streams_align(&tp);
+}
+
+#[test]
+fn align_precedence_and_nesting_streams() {
+    // The SiteId-zip bridge assumes the print->reparse round trip is
+    // child-index-isomorphic to the Expr2 AST. Operator precedence,
+    // parenthesization, unary minus, and `IF THEN ELSE` nesting are where a
+    // printer/parser asymmetry would reshape the tree and desync the SiteId
+    // path even when the flat occurrence stream still aligns positionally, so
+    // stress those explicitly (the `align_*` fixtures assert full SiteId-path
+    // equality, not just positional order).
+    let tp = TestProject::new("main")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .array_aux("pop[Region]", "100")
+        .scalar_aux("a", "1")
+        .scalar_aux("b", "2")
+        .scalar_aux("c", "3")
+        .scalar_aux("d", "4")
+        .array_aux(
+            "mixed[Region]",
+            // The `IF ... THEN ... ELSE ...` operand is parenthesized because
+            // the grammar accepts `IF` only at the head of an expression, never
+            // as a bare binary operand (`parser::parse_expr`): the unparenthesized
+            // form fails to parse, leaving `mixed` with no AST and an EMPTY
+            // occurrence stream -- which would vacate this whole fixture (the
+            // alignment loop would compare 0 == 0 and never run the SiteId-path /
+            // shape assertions the fixture exists to stress). The parenthesized
+            // form round-trips through the printer (an `If` child under an `Op2`
+            // parent is always re-parenthesized, `ast::paren_if_necessary`).
+            "a * (b + c) - -d + pop / (a - b * c) + (IF a > b THEN pop * c ELSE d - a)",
+        );
     assert_occurrence_streams_align(&tp);
 }
 
