@@ -50,21 +50,25 @@ impl LtmArm {
     /// Parse `text` into the authoritative AST once, at the generation
     /// (source-format) boundary.
     pub fn new(text: String) -> Self {
-        let expr = match Expr0::new(&text, LexerType::Equation) {
-            Ok(expr) => expr,
-            Err(_) => {
-                // A generated LTM equation is always a `print_eqn` re-print or
-                // a guard-form assembly of already-parsed sub-expressions, so a
-                // parse failure here means a bug in the augmentation layer, not
-                // bad user input. Degrade exactly as the old text path did (an
-                // unparseable equation carried no AST and compiled to no
-                // bytecode -> the fragment is dropped and
-                // `model_ltm_fragment_diagnostics` warns) rather than panicking
-                // -- libsimlin release builds are panic=abort.
-                debug_assert!(false, "LTM generated equation failed to parse: {text}");
-                None
-            }
-        };
+        // Degrade exactly as the old text path did: an unparseable equation
+        // carries no AST and compiles to no bytecode, so `compile_phase` sees an
+        // empty expr list, `flow_bytecodes` stays `None`, and
+        // `model_ltm_fragment_diagnostics` warns that the variable keeps a
+        // layout slot with no bytecode. That warning IS the loud path -- there
+        // is deliberately no assertion here.
+        //
+        // An earlier revision did `debug_assert!(false, ..)`, on the theory that
+        // a generated equation is always a `print_eqn` re-print and so a parse
+        // failure could only be an augmentation-layer bug. That theory was
+        // wrong, and the assert made a VALID model abort a debug build: a
+        // canonical name the lexer cannot read bare (`1stock`) was emitted
+        // unquoted by `ltm_augment::quote_ident`. The root cause is fixed there
+        // (it now shares `ast::needs_quoting` with `print_ident`), but the
+        // degradation stays non-fatal on principle -- this runs inside a salsa
+        // query on the ordinary read path, where aborting on user input is
+        // strictly worse than the warning, and libsimlin release builds are
+        // panic=abort.
+        let expr = Expr0::new(&text, LexerType::Equation).unwrap_or_default();
         Self { text, expr }
     }
 }

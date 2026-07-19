@@ -563,6 +563,63 @@ fn test_scalarize_ltm_equation_arrayed_collapse() {
     );
 }
 
+/// A canonical name that cannot be spelled as a BARE identifier -- one whose
+/// first character is not `XID_Start` -- must be quoted in every generated LTM
+/// equation, so the equation parses.
+///
+/// XMILE lets a modeler quote any name, so `"1stock"` is a legal variable and
+/// canonicalizes to `1stock`. The equation lexer, though, only starts an
+/// identifier on `XID_Start`/`_`: bare `1stock` lexes as the number `1`
+/// followed by the identifier `stock`, which is a parse error. `quote_ident`
+/// used to test "every char is alphanumeric or `_`", which a leading digit
+/// satisfies, so the guard form was emitted with a bare `1stock` and the whole
+/// link score failed to parse -- the score silently degraded, and once
+/// `LtmEquation` began parsing each arm eagerly it also tripped an
+/// augmentation-bug `debug_assert` on a VALID model. `quote_ident` now also
+/// consults `ast::needs_quoting`, the leading-character rule the `print_eqn`
+/// path already uses, so the two spellings of one name in a single generated
+/// equation agree.
+///
+/// This asserts the real property -- the generated arm has a parsed AST -- not
+/// merely that the text contains a quote, so it fails for ANY unparseable
+/// generated equation rather than only this spelling.
+#[test]
+fn link_score_quotes_a_canonical_name_that_cannot_be_bare() {
+    let project = TestProject::new("digit_leading_ident")
+        .stock("1stock", "0", &["inflow"], &[], None)
+        .flow("inflow", "\"1stock\" * 0.1", None)
+        .build_datamodel();
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    // The `1stock -> inflow` edge: the guard form spells both endpoints.
+    let link_id = LtmLinkId::new(&db, "1stock".to_string(), "inflow".to_string());
+    let scored = link_score_equation_text_shaped(&db, link_id, RefShape::Bare, model, sync.project);
+    let ShapedLinkScore::Scored(lsv) = scored else {
+        panic!("the 1stock -> inflow link score should be scored, got: {scored:?}");
+    };
+
+    let crate::db::LtmEquation::Scalar(arm) = &lsv.equation else {
+        panic!(
+            "a scalar target's link score should be Scalar, got: {:?}",
+            lsv.name
+        );
+    };
+    assert!(
+        arm.text.contains("\"1stock\""),
+        "a name that cannot be bare must be quoted in the generated text, got: {}",
+        arm.text
+    );
+    assert!(
+        arm.expr.is_some(),
+        "the generated link-score equation must PARSE (an unparseable arm carries no \
+         AST, compiles to no bytecode, and silently zeroes the score); text was: {}",
+        arm.text
+    );
+}
+
 /// Build a `StitchPetal<&str>` from `[agg, x1, ..., xm]`.
 fn petal<'a>(nodes: &[&'a str]) -> super::StitchPetal<&'a str> {
     super::StitchPetal {

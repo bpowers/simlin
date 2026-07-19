@@ -2999,10 +2999,30 @@ fn live_reducer_text_for_agg<'a>(
         .map(|(text, _)| text.as_str())
 }
 
-/// Quote an identifier for use in an equation string.
-/// Identifiers with special characters (like $, ⁚) need double quotes.
+/// Quote a canonical identifier for use in a generated equation string.
+/// Identifiers the equation lexer cannot read bare need double quotes: special
+/// characters (`$`, `⁚`, `·`) and ALSO a name whose first character cannot START
+/// an identifier (`1stock` -- a legal quoted XMILE name, but bare the lexer
+/// reads the number `1` then the identifier `stock`).
+///
+/// The leading-character rule is [`crate::ast::needs_quoting`], the same
+/// predicate the `print_eqn` path's `print_ident` uses -- so the two spellings
+/// of one name inside a single generated equation cannot disagree. They did:
+/// this used to test only "every char is alphanumeric or `_`", which a leading
+/// digit satisfies, so a guard form emitted `print_eqn`'s quoted `"1stock"` in
+/// the partial beside a bare `1stock` in the `SIGN(...)` factor -- an
+/// unparseable equation, hence a silently-zeroed link score on a valid model.
+///
+/// This deliberately stays MORE conservative than `print_ident` rather than
+/// delegating outright: `·` (U+00B7) IS `XID_Continue`, so `needs_quoting`
+/// alone would spell a module-output composite bare (`mod·out1`). That parses,
+/// but it would rewrite the emitted text of every module-composite link score
+/// -- a behavior change with no bug behind it. So a name is bare only when BOTH
+/// predicates allow it; the conjunction can only ever add quotes.
 pub(crate) fn quote_ident(ident: &str) -> String {
-    if ident.chars().all(|c| c.is_alphanumeric() || c == '_') {
+    let bare_spellable =
+        ident.chars().all(|c| c.is_alphanumeric() || c == '_') && !crate::ast::needs_quoting(ident);
+    if bare_spellable {
         ident.to_string()
     } else {
         format!("\"{ident}\"")

@@ -457,8 +457,18 @@ fn binary_op_latex(op: BinaryOp) -> BinaryOpLatex {
 
 /// Check whether a canonicalized identifier needs double-quoting to be
 /// re-parseable.  Names containing characters outside XID_Start/XID_Continue
-/// (like `$`, `⁚`, `/`) must be quoted.
-fn needs_quoting(canonical: &str) -> bool {
+/// (like `$`, `⁚`, `/`) must be quoted -- as must a name whose FIRST character
+/// is not `XID_Start` even if every character is alphanumeric (`1stock`, a legal
+/// quoted XMILE name: bare, the lexer reads the number `1` then the identifier
+/// `stock`).
+///
+/// `pub(crate)` because this is the single "can this name be spelled bare"
+/// predicate: `print_ident` uses it for the `print_eqn` path and
+/// `ltm_augment::quote_ident` for LTM's generated guard forms. A second
+/// implementation drifts -- `quote_ident` previously tested "alphanumeric or
+/// `_`", which a leading digit satisfies, so an LTM equation mixed a
+/// `print_eqn`-quoted `"1stock"` with a bare `1stock` and failed to parse.
+pub(crate) fn needs_quoting(canonical: &str) -> bool {
     let mut chars = canonical.chars();
     match chars.next() {
         None => return true,
