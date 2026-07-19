@@ -1188,9 +1188,20 @@ pub(crate) enum OccurrenceRouting {
 /// One classified reference occurrence over a target equation, the finer
 /// substrate both LTM consumers project from (edge emission is a per-edge
 /// dedup of these; the transform selects a live SET by shape and names the
-/// first non-index-nested occurrence as the normalizer). Every field maps to
-/// a spec §3 requirement with a named A2b/A3 consumer -- there are no
-/// speculative fields.
+/// first non-index-nested occurrence as the normalizer). Every field maps to a
+/// spec §3 requirement, but they are not all consumed by the same code today:
+/// the ceteris-paribus wrap reads `site_id` (by path), `reference`, `shape`,
+/// `axes`, and `index_nested`; `db::module_link_score_equation` reads
+/// `reference` for the document-order module-output pick. `target_element`,
+/// `routing`, `in_reducer`, `reducer_keys`, and `already_lagged` are classified
+/// facts the wrap does not *need* to read -- it reaches the same decisions
+/// structurally (it never descends into a `PREVIOUS`/`INIT` call, so
+/// `already_lagged` content is untouched by construction; the reducer-freeze arm
+/// asks `subtree_has_live_shape` rather than reading `in_reducer`). They are
+/// carried because they are the same walk's output and the remaining GH #965
+/// generation-half work consumes them, and each is pinned at the IR level
+/// (`db::ltm_ir_tests`) so a walker regression is caught even with no production
+/// reader. Do not add a field with neither a production consumer nor an IR pin.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub(crate) struct OccurrenceSite {
     /// Stable, deterministic occurrence identity within `to`'s equation.

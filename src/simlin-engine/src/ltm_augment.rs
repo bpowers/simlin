@@ -452,31 +452,6 @@ fn other_dep_axis_lines_up(
     crate::ltm_agg::iterated_axis_slot_elements(d, dep_dim_name.as_ref(), &elems, dim_ctx).is_some()
 }
 
-/// Classify an `Expr0` subscript's shape based on its indices.
-///
-/// Mirrors `db::ltm_ir::resolve_literal_index`'s classification logic but at
-/// the `Expr0` (parsed-AST) level. `#[cfg(test)]`: the ceteris-paribus wrap no
-/// longer re-derives shape on `Expr0` (it reads the occurrence IR); this sibling
-/// survives only for the wrap unit tests' occurrence builder and the alignment
-/// gate -- see [`resolve_literal_element_index`]. Each input string in
-/// `source_dim_elements` is the canonical lowercase element name for the
-/// corresponding source dimension, in source-declared order.
-///
-/// Rules:
-/// - any `IndexExpr0::Wildcard` → `RefShape::Wildcard`
-/// - all indices are literal element names that match the source's
-///   declared elements (or parseable integer literals for indexed
-///   dimensions) → `RefShape::FixedIndex(canonical_names)`
-/// - otherwise (StarRange, DimPosition, Range, non-literal Expr, or a
-///   literal that doesn't match) → `RefShape::DynamicIndex`
-///
-/// The match tries each index against the dimension at that position
-/// first, then falls back to scanning all dimensions. This keeps the
-/// classifier robust when callers pass dimensions in source-declared
-/// order but the subscript indices may not align 1:1 with dimension
-/// positions in unusual cases. Defensive `DynamicIndex` for unknown
-/// names ensures the worst case is over-conservative wrapping rather
-/// than incorrectly matching the live shape.
 /// Whether a single subscript index is a "literal element" reference --
 /// i.e., a `Var` naming a known dimension element or an integer literal.
 /// These are dimension references at runtime, not variable references,
@@ -558,6 +533,33 @@ fn resolve_literal_element_index(
     }
 }
 
+/// Classify an `Expr0` subscript's shape based on its indices.
+///
+/// Mirrors `db::ltm_ir::resolve_literal_index`'s classification logic but at
+/// the `Expr0` (parsed-AST) level. `#[cfg(test)]`: the ceteris-paribus wrap no
+/// longer re-derives shape on `Expr0` (it reads the occurrence IR); this sibling
+/// survives only for the wrap unit tests' occurrence builder and the alignment
+/// gate -- see [`resolve_literal_element_index`]. Each input string in
+/// `source_dim_elements` is the canonical lowercase element name for the
+/// corresponding source dimension, in source-declared order.
+///
+/// Rules:
+/// - any `IndexExpr0::Wildcard` → `RefShape::Wildcard`
+/// - an iterated-dimension subscript on the live source (all axes iterated)
+///   → `RefShape::Bare`; a mixed iterated+literal one → `RefShape::PerElement`
+/// - all indices are literal element names that match the source's
+///   declared elements (or parseable integer literals for indexed
+///   dimensions) → `RefShape::FixedIndex(canonical_names)`
+/// - otherwise (StarRange, DimPosition, Range, non-literal Expr, or a
+///   literal that doesn't match) → `RefShape::DynamicIndex`
+///
+/// The literal pass tries each index against the dimension at that position
+/// first, then falls back to scanning all dimensions. This keeps the
+/// classifier robust when callers pass dimensions in source-declared
+/// order but the subscript indices may not align 1:1 with dimension
+/// positions in unusual cases. Defensive `DynamicIndex` for unknown
+/// names ensures the worst case is over-conservative wrapping rather
+/// than incorrectly matching the live shape.
 #[cfg(test)]
 fn classify_expr0_subscript_shape(
     indices: &[IndexExpr0],
@@ -764,51 +766,6 @@ fn child_path(path: &[u16], i: u16) -> Vec<u16> {
     v
 }
 
-/// Walk an `Expr0` tree and wrap variable references in `PREVIOUS()` except
-/// those whose access shape matches the live shape for the given source,
-/// recording into `out.live_ref` the *first* `live_source` occurrence left
-/// live (in document order, after the transform) and into
-/// `out.other_dep_mismatch` whether a GH #526 mismatched other-dep
-/// subscript doomed the changed-first form.
-///
-/// `live_source` identifies the source variable whose live shape is held
-/// out from `PREVIOUS` wrapping. `live_shape` declares which AST occurrences
-/// of that source remain live; all other occurrences (and all references
-/// to other sources in the same expression) are wrapped.
-///
-/// `other_deps` is the set of canonical idents for non-`live_source`
-/// dependencies that must be wrapped; nodes referencing names not in this
-/// set and not equal to `live_source` are left alone (function names and
-/// unknown identifiers). Indices of subscripts are recursively transformed
-/// even when the outer subscript matches the live shape, so nested
-/// references like `arr[other_var]` still get wrapped.
-///
-/// `iter_ctx` carries the GH #511 iterated-dimension context (the live
-/// source's declared dimension names + the target equation's iterated
-/// dimensions + a `DimensionsContext` for the mapped case); when `Some`,
-/// an iterated-dimension subscript is normalized to a bare `Var` *before*
-/// the live/PREVIOUS dispatch -- so `row_sum[D1]` (a same-element reference
-/// over the target's own `D1`) becomes either the live ref (`live_shape ==
-/// Bare`) or `PREVIOUS(Var(row_sum))` (a `Var` arg, which codegen accepts,
-/// vs the `PREVIOUS(Subscript(...))` the pre-#511 code produced). Pass
-/// `None` for callers whose live source is scalar (no source subscripts).
-///
-/// `out.live_ref` ends up holding the bare `Var(live_source)` for a `Bare`
-/// shape, or the (already index-transformed) `Subscript(live_source, ...)`
-/// for `FixedIndex`/`Wildcard`/`DynamicIndex`. Callers use this captured
-/// subtree to build the link-score's source-side normalizer: it is the
-/// source reference *as the partial isolates it*, so `Δ(live_ref)` is the
-/// exact source velocity feeding the `SIGN` factor -- crucially, a
-/// per-element / per-slice expression rather than the (possibly
-/// multi-dimensional) bare `live_source`, which would be a dimension error
-/// in a scalar link-score equation.
-///
-/// `dims_ctx` is the project-wide dimensions context used by
-/// [`qualify_element_index`] to recognize (and qualify) subscript indices
-/// that name dimension elements -- so they are never PREVIOUS-wrapped as if
-/// they were causal references (GH #587). `None` (test-only callers, or
-/// paths without project dims in scope) disables qualification, keeping the
-/// conservative wrapping behavior.
 /// The `Collapse` / `Mismatch` / `NotIterated` verdict for an iterated-dimension
 /// subscript on a NON-live-source dependency, derived from the occurrence IR's
 /// per-axis classification (`node_occ.axes`) plus the two arity facts the
@@ -832,6 +789,60 @@ fn other_dep_verdict(
     derive_other_dep_verdict(&occ.axes, dep_arity, ic.target_iterated_dims.len())
 }
 
+/// Walk an `Expr0` tree and wrap variable references in `PREVIOUS()` except
+/// those whose access shape matches the live shape for the given source,
+/// recording into `out.live_ref` the *first* `live_source` occurrence left
+/// live (in document order, after the transform) and into
+/// `out.other_dep_mismatch` whether a GH #526 mismatched other-dep
+/// subscript doomed the changed-first form.
+///
+/// `ctx.live_source` identifies the source variable whose live shape is held
+/// out from `PREVIOUS` wrapping. `ctx.live_shape` declares which AST
+/// occurrences of that source remain live; all other occurrences (and all
+/// references to other sources in the same expression) are wrapped.
+///
+/// `ctx.other_deps` is the set of canonical idents for non-`live_source`
+/// dependencies that must be wrapped; nodes referencing names not in this
+/// set and not equal to `live_source` are left alone (function names and
+/// unknown identifiers). Indices of subscripts are recursively transformed
+/// even when the outer subscript matches the live shape, so nested
+/// references like `arr[other_var]` still get wrapped.
+///
+/// `ctx.iter_ctx` carries the GH #511 iterated-dimension context (the live
+/// source's declared dimension names + the target equation's iterated
+/// dimensions + a `DimensionsContext` for the mapped case). An
+/// iterated-dimension subscript on the live source is normalized to a bare
+/// `Var` *before* the live/PREVIOUS dispatch -- so `row_sum[D1]` (a
+/// same-element reference over the target's own `D1`) becomes either the live
+/// ref (`live_shape == Bare`) or `PREVIOUS(Var(row_sum))` (a `Var` arg, which
+/// codegen accepts, vs the `PREVIOUS(Subscript(...))` the pre-#511 code
+/// produced). The normalization itself is driven by the occurrence IR's shape
+/// (`ctx.occ`), not by `iter_ctx`; `iter_ctx` remains the other-dep verdict's
+/// arity/mapping source and the dimension-name index guard's fallback. Pass
+/// `None` for callers whose live source is scalar (no source subscripts).
+///
+/// `ctx.occ` is the occurrence IR for the slot being wrapped -- the single
+/// classifier family. `path` is the structural child-index path of `expr`
+/// within that slot (empty at the slot root), tracked as the recursion
+/// descends so it equals the occurrence's `SiteId`; see [`OccurrenceLookup`]
+/// and [`child_path`].
+///
+/// `out.live_ref` ends up holding the bare `Var(live_source)` for a `Bare`
+/// shape, or the (already index-transformed) `Subscript(live_source, ...)`
+/// for `FixedIndex`/`Wildcard`/`DynamicIndex`. Callers use this captured
+/// subtree to build the link-score's source-side normalizer: it is the
+/// source reference *as the partial isolates it*, so `Δ(live_ref)` is the
+/// exact source velocity feeding the `SIGN` factor -- crucially, a
+/// per-element / per-slice expression rather than the (possibly
+/// multi-dimensional) bare `live_source`, which would be a dimension error
+/// in a scalar link-score equation.
+///
+/// `ctx.dims_ctx` is the project-wide dimensions context used by
+/// [`qualify_element_index`] to recognize (and qualify) subscript indices
+/// that name dimension elements -- so they are never PREVIOUS-wrapped as if
+/// they were causal references (GH #587). `None` (test-only callers, or
+/// paths without project dims in scope) disables qualification, keeping the
+/// conservative wrapping behavior.
 fn wrap_non_matching_in_previous(
     expr: Expr0,
     ctx: &WrapCtx<'_>,

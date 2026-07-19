@@ -3493,8 +3493,9 @@ pub(super) fn emit_agg_to_target_link_scores(
                 .collect();
             let mut edge_vars: Vec<LtmSyntheticVar> = Vec::new();
             for element in &cartesian_subscripts(&dim_element_lists) {
-                // The partial is built around the *bare* agg names (which is
-                // what `substituted` holds); `source_pins_for_target` then
+                // The partial is built around the *bare* agg names (what the
+                // generator's post-transform `reducer_subst` lowering yields);
+                // `source_pins_for_target` then
                 // pins each arrayed agg -- the live one AND any frozen
                 // co-agg -- to its projected `agg[<slot>]`, matching
                 // `agg_name_for_target` for the live agg (the full element
