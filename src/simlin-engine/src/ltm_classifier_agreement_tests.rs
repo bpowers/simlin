@@ -141,7 +141,10 @@
 use super::*;
 use crate::ast::Ast;
 use crate::common::{Canonical, Ident};
-use crate::db::ltm_ir::{ReferenceSite, collect_all_reference_sites, model_ltm_reference_sites};
+use crate::db::ltm_ir::{
+    OccurrenceRef, OccurrenceSite, ReferenceSite, collect_all_reference_sites,
+    model_ltm_reference_sites,
+};
 use crate::db::{
     SimlinDb, project_dimensions_context, reconstruct_model_variables, sync_from_datamodel,
 };
@@ -441,6 +444,177 @@ fn pin_edge(compared: &ComparedShapes, from: &str, to: &str, expected: &[RefShap
     );
 }
 
+/// Assert the occurrence IR's per-occurrence stream for `to` aligns
+/// position-for-position with the reparsed-Expr0 stream the ceteris-paribus
+/// wrap runs on -- the corpus proof of the SiteId-zip bridge stage 2 consumes.
+///
+/// Both streams are a left-to-right DFS over the target's slots (a scalar/A2A
+/// target is one slot; an `Ast::Arrayed` target's slots are sorted then the
+/// default). The IR stream (`model_ltm_reference_sites(..).occurrences[to]`)
+/// comes from the Expr2 walk; the Expr0 stream from the production-printed,
+/// reparsed text. Filtering the IR stream to `OccurrenceRef::Variable` (the
+/// Expr0 walk records no module-qualified occurrence) leaves two streams that
+/// must be equal length and, at each position, name the same source with the
+/// same `in_reducer` context and -- off the reducer path -- the same shape. A
+/// length or per-position mismatch is precisely the GH #913 / walker-divergence
+/// desync a positional or SiteId zip must never silently tolerate, so it fails
+/// loudly here.
+fn assert_occurrence_stream_aligns(
+    to_str: &str,
+    to_var: &Variable,
+    variables: &HashMap<Ident<Canonical>, Variable>,
+    dim_ctx: &DimensionsContext,
+    ir: &crate::db::ltm_ir::LtmReferenceSitesResult,
+    expr0_occs: &[Expr0Occurrence],
+) {
+    let ir_var_occs: Vec<&OccurrenceSite> = ir
+        .occurrences
+        .get(to_str)
+        .map(|v| {
+            v.iter()
+                .filter(|o| matches!(o.reference, OccurrenceRef::Variable(_)))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        ir_var_occs.len(),
+        expr0_occs.len(),
+        "occurrence-stream LENGTH mismatch for target '{to_str}' (IR Expr2 walk vs reparsed \
+         Expr0 walk): the per-occurrence SiteId zip the stage-2 deletion relies on would \
+         desync.\n  IR sources: {:?}\n  Expr0 sources: {:?}",
+        ir_var_occs
+            .iter()
+            .map(|o| match &o.reference {
+                OccurrenceRef::Variable(s) => s.as_str(),
+                _ => "?",
+            })
+            .collect::<Vec<_>>(),
+        expr0_occs
+            .iter()
+            .map(|o| o.source.as_str())
+            .collect::<Vec<_>>(),
+    );
+    for (ir_occ, e0_occ) in ir_var_occs.iter().zip(expr0_occs) {
+        let OccurrenceRef::Variable(ir_src) = &ir_occ.reference else {
+            unreachable!("filtered to Variable above");
+        };
+        assert_eq!(
+            ir_src, &e0_occ.source,
+            "occurrence-stream SOURCE mismatch for target '{to_str}' (IR vs reparsed Expr0)"
+        );
+        assert_eq!(
+            ir_occ.in_reducer, e0_occ.in_reducer,
+            "occurrence-stream in_reducer mismatch for {ir_src} -> {to_str}"
+        );
+        if !ir_occ.in_reducer {
+            let e0_shape = classify_expr0_occurrence(e0_occ, to_var, variables, dim_ctx);
+            assert_eq!(
+                ir_occ.shape, e0_shape,
+                "occurrence-stream SHAPE mismatch for {ir_src} -> {to_str}: the wrap's IR lookup \
+                 would return a shape the Expr0 classifier disagrees with"
+            );
+        }
+    }
+}
+
+/// Assert the occurrence-IR / reparsed-Expr0 stream alignment (the SiteId-zip
+/// bridge) for EVERY target of `tp`'s `main` model, WITHOUT the per-edge
+/// multiset gate. Lets the bridge be stress-tested on shapes the multiset gate
+/// does not construct (module outputs, `PREVIOUS`/`INIT`-lagged references,
+/// index-nested references, `LOOKUP` tables), where only the per-occurrence
+/// alignment is the relevant property.
+fn assert_occurrence_streams_align(tp: &TestProject) {
+    let datamodel = tp.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let project = sync.project;
+
+    let variables = reconstruct_model_variables(&db, model, project);
+    let dim_ctx = project_dimensions_context(&db, project);
+    let ir = model_ltm_reference_sites(&db, model, project);
+
+    let mut to_names: Vec<&Ident<Canonical>> = variables.keys().collect();
+    to_names.sort();
+    for to_name in to_names {
+        let to_var = &variables[to_name];
+        let expr0_occs = expr0_occurrences_for_target(to_name.as_str(), to_var, &variables);
+        assert_occurrence_stream_aligns(
+            to_name.as_str(),
+            to_var,
+            &variables,
+            dim_ctx,
+            ir,
+            &expr0_occs,
+        );
+    }
+}
+
+#[test]
+fn align_already_lagged_and_index_nested_streams() {
+    // Occurrences inside `PREVIOUS(...)`/`INIT(...)` (already-lagged) and inside
+    // another reference's subscript index (index-nested) are the transform-only
+    // contexts the reports (fig2 Q3/Q4) flag as the subtle SiteId-zip cases.
+    // Both walkers must enumerate them in the SAME order for the zip to be sound.
+    let tp = TestProject::new("main")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .indexed_dimension("Slot", 4)
+        .array_aux("pop[Region]", "100")
+        .scalar_aux("g", "5")
+        .scalar_aux("idx", "1")
+        .array_aux("other[Slot]", "7")
+        .array_aux("lagged[Region]", "pop + PREVIOUS(g) + INIT(g)")
+        .array_aux("nested[Region]", "pop + other[idx]");
+    assert_occurrence_streams_align(&tp);
+}
+
+#[test]
+fn align_reducer_and_lookup_streams() {
+    // A `LOOKUP` table argument is skipped by both walkers; reducer arguments
+    // are `in_reducer` on both; a multi-arg builtin (`MAX`) exercises the
+    // `walk_builtin_expr` (Expr2) vs positional (Expr0) child ordering the A2b
+    // bridge flags as the alignment subtlety.
+    let curve = datamodel::GraphicalFunction {
+        kind: datamodel::GraphicalFunctionKind::Continuous,
+        x_points: Some(vec![0.0, 10.0]),
+        y_points: vec![0.0, 5.0],
+        x_scale: datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: 10.0,
+        },
+        y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 5.0 },
+    };
+    let tp = TestProject::new("main")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .array_aux("pop[Region]", "100")
+        .scalar_aux("total", "SUM(pop[*])")
+        .scalar_aux("driver", "3")
+        .scalar_aux("g", "4")
+        .aux_with_gf("curve", "driver", curve)
+        .scalar_aux(
+            "looked_up",
+            "LOOKUP(curve, driver) + total + MAX(driver, g)",
+        );
+    assert_occurrence_streams_align(&tp);
+}
+
+#[test]
+fn align_smooth_module_output_streams() {
+    // A SMOOTH expands to a module whose output is a `module·port` composite:
+    // the IR enumerates it as `OccurrenceRef::ModuleOutput` (filtered out of the
+    // Variable stream), while the Expr0 walk records no site for it. The
+    // remaining model-variable occurrences must still align, so the module
+    // occurrence does not desync the zip.
+    let tp = TestProject::new("main")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .scalar_aux("level", "10")
+        .scalar_aux("other", "2")
+        .aux("smoothed", "SMTH1(level, 3) + other", None);
+    assert_occurrence_streams_align(&tp);
+}
+
 /// Drive both classifier families over every causal edge of `tp`'s `main`
 /// model and assert per-edge non-reducer shape agreement.
 ///
@@ -502,6 +676,24 @@ fn assert_classifier_families_agree(tp: &TestProject) -> ComparedShapes {
                 .or_default()
                 .push((shape, occ.in_reducer));
         }
+
+        // Stage-2 groundwork: the per-occurrence SiteId-zip bridge, corpus-validated.
+        //
+        // Stage 2 replaces the ceteris-paribus wrap's Expr0 re-classification
+        // with a lookup into the occurrence IR (`OccurrenceSite`) by the
+        // occurrence's structural position, so there is ONE classifier family.
+        // That zip is sound only if the IR's per-occurrence stream
+        // (`occurrences[to]`, from the Expr2 walk) and the reparsed-Expr0 stream
+        // the wrap runs on ALIGN position-for-position. This is exactly the A2b
+        // bridge assumption, which was previously validated only on paper. Assert
+        // it here across every fixture: same length (no print/reparse GH #913
+        // desync, no walker divergence), same source and `in_reducer` at each
+        // position, and -- for DIRECT (non-reducer) references -- the same shape
+        // the wrap would read from the IR instead of re-deriving. The reducer-arg
+        // `StarRange`->`Wildcard` AC1.4 asymmetry (the one deliberate divergence,
+        // module doc) is confined to `in_reducer` occurrences, so shape agreement
+        // is asserted only off the reducer path, matching the multiset gate above.
+        assert_occurrence_stream_aligns(to_str, to_var, &variables, dim_ctx, ir, &expr0_occs);
 
         // Every source of an edge, from either side.
         let mut sources: std::collections::BTreeSet<String> = Default::default();

@@ -1060,6 +1060,108 @@ impl OccurrenceAxis {
     }
 }
 
+/// The `Collapse` / `Mismatch` / `NotIterated` verdict for an iterated-dimension
+/// subscript on a NON-live-source dependency (`pop[Region,Age]` in
+/// `growth[Region,Age] = row_sum[Region] * c * pop[Region,Age]` while scoring
+/// `(row_sum, growth)`). See [`derive_other_dep_verdict`] and [`OccurrenceAxis`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OtherDepVerdict {
+    /// Collapse the subscript to a bare `Var(dep)` before the `PREVIOUS()` wrap
+    /// (the indices correspond position-for-position to the dep's declared axes,
+    /// or the dep's dims are un-threadable and the historical permissive
+    /// collapse applies).
+    Collapse,
+    /// Not an iterated-dim subscript at all (a literal, wildcard, dynamic index,
+    /// a name outside the target's iterated dims, or more indices than the
+    /// target has iterated dims): normal subscript handling.
+    NotIterated,
+    /// Every index names a target-iterated dimension, but the dep's declared
+    /// axes provably do NOT correspond positionally (transposed / arity-
+    /// mismatched / mapped without a usable positional correspondence).
+    /// Collapsing would freeze the WRONG element (GH #526).
+    Mismatch,
+}
+
+/// The single source of truth for the other-dep iterated-subscript verdict,
+/// derived from a subscript occurrence's per-axis [`OccurrenceAxis`]
+/// classification plus the two arity facts the occurrence does not itself carry
+/// -- the dep's declared arity `dep_arity` (`None` = un-threadable: the dep is
+/// absent from the variable map / has no declared dims) and the target's
+/// iterated-dim count `target_iterated_count`.
+///
+/// `ltm_augment::classify_other_dep_iterated_dim_subscript` (the Expr0-side
+/// classifier the ceteris-paribus wrap consults) builds `axes` from the parsed
+/// subscript and delegates here. That wrap-side axis construction is still a
+/// textual mirror of the IR walker's [`classify_occurrence_axes`] -- Track A3
+/// stage 2 has not yet retargeted the wrap onto the occurrence stream -- but the
+/// two derivations provably cannot produce a different VERDICT, the only value
+/// the wrap consumes:
+///
+/// - Every IN-arity position (index `< dep_arity`) agrees: both derivations gate
+///   the iterated-dim lineup on the identical [`crate::ltm_agg::iterated_axis_slot_elements`]
+///   (compare [`crate::ltm_agg::classify_axis_access`]'s `Var` arm with
+///   `ltm_augment::other_dep_axis_lines_up`), so they label each such index the
+///   same `Iterated` / `MismatchedIterated`.
+/// - The two disagree ONLY on an OVER-declared-arity index (index `>= dep_arity`):
+///   the mirror's `dep_dims.get(i) == None` arm labels it `Iterated{d,d}`, the
+///   IR's `source_dims.get(i) == None` arm labels it `MismatchedIterated{d}`.
+///   But such a position exists only when `axes.len() > dep_arity`, and the
+///   arity check below returns `Mismatch` for that whole case BEFORE inspecting
+///   the per-axis arms.
+///
+/// So the arity guard DOMINATES the sole labeling difference: the silent-zero
+/// drift the two-family "must stay in sync" contract guarded against is
+/// structurally impossible for this verdict, whichever family built `axes`.
+/// Stage 2 will still delete the wrap-side axis construction (collapsing to one
+/// classifier family), but the verdict itself is already single-sourced here.
+/// See [`OccurrenceAxis`]'s rustdoc for the full rule; the two load-bearing
+/// arity corners (under-arity all-`Iterated` => `Mismatch`; over-target-arity =>
+/// `NotIterated`) are pinned by `under_arity_iterated_subscript_is_mismatch_not_collapse`
+/// / `over_target_arity_iterated_subscript_is_not_iterated`, and the
+/// dominance argument by `verdict_ignores_over_arity_axis_labeling`, in
+/// `db::ltm_ir_tests`.
+pub(crate) fn derive_other_dep_verdict(
+    axes: &[OccurrenceAxis],
+    dep_arity: Option<usize>,
+    target_iterated_count: usize,
+) -> OtherDepVerdict {
+    // Precondition (else normal subscript handling): a non-empty subscript, no
+    // more indices than the target has iterated dims, and every index a bare
+    // target-iterated-dim name -- i.e. every axis `Iterated` or
+    // `MismatchedIterated` (a `Pinned`/`Reduced`/`Dynamic` axis is a literal,
+    // wildcard, or dynamic index).
+    if axes.is_empty() || axes.len() > target_iterated_count {
+        return OtherDepVerdict::NotIterated;
+    }
+    let all_iterated_or_mismatched = axes.iter().all(|a| {
+        matches!(
+            a,
+            OccurrenceAxis::Iterated { .. } | OccurrenceAxis::MismatchedIterated { .. }
+        )
+    });
+    if !all_iterated_or_mismatched {
+        return OtherDepVerdict::NotIterated;
+    }
+    // The dep's declared arity gates the collapse: un-threadable keeps the
+    // transform's permissive collapse; a differing arity is a `Mismatch`
+    // (checked BEFORE the per-axis lineup so an over-declared-arity subscript
+    // whose trailing indices are `MismatchedIterated` from a missing source
+    // axis is a `Mismatch`, not mislabelled by the per-axis arms).
+    let Some(arity) = dep_arity else {
+        return OtherDepVerdict::Collapse;
+    };
+    if axes.len() != arity {
+        return OtherDepVerdict::Mismatch;
+    }
+    if axes
+        .iter()
+        .any(|a| matches!(a, OccurrenceAxis::MismatchedIterated { .. }))
+    {
+        return OtherDepVerdict::Mismatch;
+    }
+    OtherDepVerdict::Collapse
+}
+
 /// How a per-occurrence reference routes, the occurrence-faithful counterpart
 /// of [`SiteRouting`]. Unlike `SiteRouting` (which the edge consumers split
 /// into one entry per routed agg), a single syntactic occurrence keeps ONE

@@ -1375,83 +1375,22 @@ mod occurrence_ir_tests {
         });
     }
 
-    // ── Other-dep verdict derivation (the A2b contract on `axes`) ───────────
+    // ── Other-dep verdict derivation (the contract on `axes`) ──────────────
     //
-    // `OccurrenceAxis`'s rustdoc states the rule by which A2b will derive
+    // `OccurrenceAxis`'s rustdoc states the rule by which the transform derives
     // `ltm_augment::classify_other_dep_iterated_dim_subscript`'s
-    // `Collapse`/`Mismatch`/`NotIterated` verdict from an occurrence's `axes`
-    // (after deleting the Expr0 mirror classifier). The tests below are the
-    // executable form of that contract: [`derive_other_dep_verdict`] is the
-    // reference derivation, and the two corner tests pin the `axes` the walker
-    // actually produces for the arity shapes where a rule keyed on the per-axis
-    // arms ALONE (all-`Iterated` ⇒ Collapse, any-`MismatchedIterated` ⇒
-    // Mismatch) diverges from the transform. Deriving the verdict requires the
+    // `Collapse`/`Mismatch`/`NotIterated` verdict from an occurrence's `axes`.
+    // Track A3 stage 2 promoted the reference derivation to the production
+    // `db::ltm_ir::derive_other_dep_verdict` -- the Expr0-side classifier now
+    // builds `axes` from the parsed subscript and DELEGATES to it, so the wrap
+    // and the IR cannot drift. The tests below exercise that promoted helper
+    // directly (via `use super::*`), and the two corner tests pin the `axes` the
+    // walker actually produces for the arity shapes where a rule keyed on the
+    // per-axis arms ALONE (all-`Iterated` ⇒ Collapse, any-`MismatchedIterated`
+    // ⇒ Mismatch) diverges from the transform. Deriving the verdict requires the
     // two arity facts the occurrence does not itself carry -- the dep's declared
-    // arity and the target's iterated-dim count -- both of which A2b holds.
-
-    /// The three verdicts of `ltm_augment::OtherDepIteratedVerdict`, mirrored
-    /// here so the derivation contract is testable without reaching into
-    /// `ltm_augment`'s private types.
-    #[derive(Debug, PartialEq, Eq)]
-    enum DerivedVerdict {
-        Collapse,
-        Mismatch,
-        NotIterated,
-    }
-
-    /// Reference implementation of the `OccurrenceAxis` rustdoc's derivation
-    /// rule -- the verdict A2b must compute for a subscript occurrence's
-    /// `axes`, given the dep's declared arity (`None` = un-threadable: the dep
-    /// is absent from the variable map / has no declared dims) and the target's
-    /// iterated-dim count. It reproduces
-    /// `classify_other_dep_iterated_dim_subscript` (`ltm_augment.rs`) exactly,
-    /// including the two arity guards a per-axis-only rule would miss:
-    /// - `axes.len() > target_iterated_count` ⇒ `NotIterated` (mirrors the
-    ///   `indices.len() > target_iterated_dims.len()` gate, ltm_augment.rs:268);
-    /// - a threadable dep whose declared arity differs from `axes.len()` ⇒
-    ///   `Mismatch` (mirrors `index_dims.len() != dep_dims.len()`,
-    ///   ltm_augment.rs:288) -- checked BEFORE the per-axis lineup so an
-    ///   over-declared-arity subscript (whose trailing indices are
-    ///   `MismatchedIterated` from a missing source axis) is a `Mismatch`, not
-    ///   mislabelled by the per-axis arms.
-    fn derive_other_dep_verdict(
-        axes: &[OccurrenceAxis],
-        dep_arity: Option<usize>,
-        target_iterated_count: usize,
-    ) -> DerivedVerdict {
-        // Precondition (else normal subscript handling): a non-empty subscript,
-        // no more indices than the target has iterated dims, and every index a
-        // bare target-iterated-dim name -- i.e. every axis `Iterated` or
-        // `MismatchedIterated` (a `Pinned`/`Reduced`/`Dynamic` axis is a
-        // literal, wildcard, or dynamic index).
-        if axes.is_empty() || axes.len() > target_iterated_count {
-            return DerivedVerdict::NotIterated;
-        }
-        let all_iterated_or_mismatched = axes.iter().all(|a| {
-            matches!(
-                a,
-                OccurrenceAxis::Iterated { .. } | OccurrenceAxis::MismatchedIterated { .. }
-            )
-        });
-        if !all_iterated_or_mismatched {
-            return DerivedVerdict::NotIterated;
-        }
-        // The dep's declared arity gates the collapse: un-threadable keeps the
-        // transform's permissive collapse; a differing arity is a `Mismatch`.
-        let Some(arity) = dep_arity else {
-            return DerivedVerdict::Collapse;
-        };
-        if axes.len() != arity {
-            return DerivedVerdict::Mismatch;
-        }
-        if axes
-            .iter()
-            .any(|a| matches!(a, OccurrenceAxis::MismatchedIterated { .. }))
-        {
-            return DerivedVerdict::Mismatch;
-        }
-        DerivedVerdict::Collapse
-    }
+    // arity and the target's iterated-dim count -- both of which the transform
+    // holds.
 
     fn iterated(dim: &str) -> OccurrenceAxis {
         OccurrenceAxis::Iterated {
@@ -1472,27 +1411,27 @@ mod occurrence_ir_tests {
         // target [D1,D2]): all `Iterated`, arity matches ⇒ Collapse.
         assert_eq!(
             derive_other_dep_verdict(&[iterated("d1"), iterated("d2")], Some(2), 2),
-            DerivedVerdict::Collapse,
+            OtherDepVerdict::Collapse,
         );
         // Transposed equal-arity (`arr[D2,D1]`): a `MismatchedIterated` axis
         // with matching arity ⇒ Mismatch (the GH #526 wrong-element freeze).
         assert_eq!(
             derive_other_dep_verdict(&[mismatched("d2"), mismatched("d1")], Some(2), 2),
-            DerivedVerdict::Mismatch,
+            OtherDepVerdict::Mismatch,
         );
         // Under-arity (corner a): all `Iterated` but fewer indices than the
         // dep's declared arity ⇒ Mismatch, NOT the Collapse the all-`Iterated`
         // arms alone would give.
         assert_eq!(
             derive_other_dep_verdict(&[iterated("d1")], Some(2), 2),
-            DerivedVerdict::Mismatch,
+            OtherDepVerdict::Mismatch,
         );
         // Over-target-arity (corner b): more indices than the target has
         // iterated dims ⇒ NotIterated, NOT the Mismatch the `MismatchedIterated`
         // arm alone would give.
         assert_eq!(
             derive_other_dep_verdict(&[iterated("d1"), mismatched("d1")], Some(2), 1),
-            DerivedVerdict::NotIterated,
+            OtherDepVerdict::NotIterated,
         );
         // A non-iterated axis (a `Pinned` literal / `Dynamic` index) anywhere ⇒
         // NotIterated: not an iterated-dim subscript at all.
@@ -1502,17 +1441,17 @@ mod occurrence_ir_tests {
                 Some(2),
                 2,
             ),
-            DerivedVerdict::NotIterated,
+            OtherDepVerdict::NotIterated,
         );
         assert_eq!(
             derive_other_dep_verdict(&[OccurrenceAxis::Dynamic], Some(1), 1),
-            DerivedVerdict::NotIterated,
+            OtherDepVerdict::NotIterated,
         );
         // Un-threadable dep (declared dims unknown) keeps the permissive
         // collapse regardless of the per-axis arms.
         assert_eq!(
             derive_other_dep_verdict(&[iterated("d1"), mismatched("d2")], None, 2),
-            DerivedVerdict::Collapse,
+            OtherDepVerdict::Collapse,
         );
     }
 
@@ -1552,7 +1491,7 @@ mod occurrence_ir_tests {
             // dep arity 2, target iterated-dim count 2.
             assert_eq!(
                 derive_other_dep_verdict(&arr[0].axes, Some(2), 2),
-                DerivedVerdict::Mismatch,
+                OtherDepVerdict::Mismatch,
                 "under-arity must derive Mismatch, not Collapse"
             );
         });
@@ -1588,9 +1527,52 @@ mod occurrence_ir_tests {
             // dep arity 2, target iterated-dim count 1.
             assert_eq!(
                 derive_other_dep_verdict(&arr[0].axes, Some(2), 1),
-                DerivedVerdict::NotIterated,
+                OtherDepVerdict::NotIterated,
                 "an over-target-arity subscript must derive NotIterated, not Mismatch"
             );
         });
+    }
+
+    #[test]
+    fn verdict_ignores_over_arity_axis_labeling() {
+        // Track A3 stage 2 / finding-3 verdict-equivalence. The Expr0-side
+        // mirror (`ltm_augment::classify_other_dep_iterated_dim_subscript`) and
+        // the IR walker (`classify_occurrence_axes`) can LABEL a per-axis index
+        // differently at exactly ONE kind of position: an index that overflows
+        // the dep's declared arity. The mirror's `dep_dims.get(i) == None` arm
+        // marks it `Iterated{d,d}`; the IR's `source_dims.get(i) == None` arm
+        // marks the SAME over-arity index `MismatchedIterated{d}`. Every
+        // in-arity position agrees (both derivations gate the lineup on the
+        // identical `ltm_agg::iterated_axis_slot_elements`; see
+        // `classify_axis_access` vs `other_dep_axis_lines_up`).
+        //
+        // But an over-declared-arity position exists only when `axes.len() >
+        // dep_arity`, and the arity check in `derive_other_dep_verdict` returns
+        // `Mismatch` for that whole case BEFORE inspecting the per-axis arms. So
+        // the sole labeling difference is dominated: the verdict cannot differ
+        // between the two derivations. That is what makes the shared verdict
+        // rule single-sourced -- the "silent drift" the two-family "must stay in
+        // sync" contract guards against is structurally impossible for the
+        // VERDICT (the only value the wrap consumes), whichever family built the
+        // `axes`.
+        //
+        // 3 indices, dep declared arity 2 (index 2 overflows), target
+        // iterated-dim count 3.
+        let mirror = [iterated("d1"), iterated("d2"), iterated("d3")];
+        let ir = [iterated("d1"), iterated("d2"), mismatched("d3")];
+        assert_ne!(
+            mirror[2], ir[2],
+            "the two families label the over-arity index differently"
+        );
+        assert_eq!(
+            derive_other_dep_verdict(&mirror, Some(2), 3),
+            derive_other_dep_verdict(&ir, Some(2), 3),
+            "the arity guard dominates the labeling difference: same verdict either way"
+        );
+        assert_eq!(
+            derive_other_dep_verdict(&ir, Some(2), 3),
+            OtherDepVerdict::Mismatch,
+            "axes.len() (3) != dep arity (2) => Mismatch"
+        );
     }
 }

@@ -1,0 +1,2 @@
+$⁚ltm⁚link_score⁚from→to
+scalar: if (TIME = INITIAL_TIME) then 0 else if ((to - PREVIOUS(to)) = 0) OR ((from - PREVIOUS(from)) = 0) then 0 else SAFEDIV(((PREVIOUS(sum(w[from, *])) + from) - PREVIOUS(to)), ABS((to - PREVIOUS(to))), 0) * SIGN((from - PREVIOUS(from)))

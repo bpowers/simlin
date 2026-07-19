@@ -855,7 +855,18 @@ pub(crate) fn module_link_score_equation(
             db, model, project, from_name, to_name,
         )
         .or_else(|| {
-            to_var
+            // GH #971 / Track A stage 3 prep: the deterministic IR pick above
+            // should name the live output for every module->variable edge that
+            // receives a real partial (the occurrence IR enumerates every
+            // module-output composite `to` reads, in document order). The
+            // per-process-random `identifier_set` scan survives ONLY as a
+            // defensive fallback for the (expected-unreachable) case where the
+            // IR recorded no `ModuleOutput` occurrence for `to`. Mark LOUDLY
+            // whenever the scan actually RESCUES (IR missed, scan found one):
+            // stage 3 needs a fired-or-not signal before it can delete the scan
+            // with confidence. The rescued ref itself is unchanged -- this only
+            // warns; it never alters the emitted score.
+            let rescued = to_var
                 .ast()
                 .map(|ast| crate::variable::identifier_set(ast, &[], None))
                 .and_then(|deps| {
@@ -863,7 +874,27 @@ pub(crate) fn module_link_score_equation(
                     deps.into_iter()
                         .find(|d| d.as_str().starts_with(&prefix))
                         .map(|d| d.to_string())
-                })
+                });
+            if rescued.is_some() {
+                // In test/debug builds the assertion is the loud marker (the
+                // scan is meant to be dead, so a fired assert is real signal a
+                // module-output occurrence is missing from the IR). In release
+                // builds `debug_assert!` is a no-op, so also emit a warning line
+                // -- the repo's `eprintln!` idiom for an unexpected internal
+                // condition (cf. `model.rs`, `dimensions.rs`).
+                debug_assert!(
+                    false,
+                    "GH #971: module-output IR pick missed `{from_name}\u{00B7}` \
+                     in `{to_name}`; the identifier_set fallback rescued it. The \
+                     occurrence IR should enumerate every module-output composite \
+                     (Track A stage 3 deletes this fallback once it is proven dead)."
+                );
+                eprintln!(
+                    "warning: LTM module-output IR pick missed `{from_name}\u{00B7}` \
+                     in `{to_name}`; used the identifier_set fallback (GH #971)."
+                );
+            }
+            rescued
         });
         match from_output {
             Some(output_ref) => {

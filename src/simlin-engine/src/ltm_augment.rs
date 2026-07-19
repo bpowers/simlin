@@ -20,6 +20,7 @@ use crate::variable::{Variable, identifier_set};
 use std::collections::{HashMap, HashSet};
 
 use crate::db::RefShape;
+use crate::db::ltm_ir::{OccurrenceAxis, OtherDepVerdict, derive_other_dep_verdict};
 
 /// The implicit WITH-LOOKUP rules (GH #910), in their own file only to keep this
 /// one under the project line-count lint. Re-exported below so callers keep
@@ -212,35 +213,10 @@ fn classify_expr0_per_element_axes(
     Some(axes)
 }
 
-/// Verdict of [`classify_other_dep_iterated_dim_subscript`] for an
-/// iterated-dimension subscript on a non-live-source dependency.
-#[derive(Debug, PartialEq, Eq)]
-enum OtherDepIteratedVerdict {
-    /// Collapse the subscript to a bare `Var(dep)` before the `PREVIOUS()`
-    /// wrap: the indices correspond position-for-position to the dep's
-    /// declared axes (so the bare reference reads the same element under
-    /// the target's A2A expansion), or the dep's dims are un-threadable
-    /// and the historical permissive collapse applies.
-    Collapse,
-    /// Not an iterated-dim subscript at all (a literal, wildcard, or
-    /// dynamic index, or a name outside the target's iterated dims):
-    /// normal subscript handling.
-    NotIterated,
-    /// Every index names a target-iterated dimension, but the dep's known
-    /// declared axes provably do NOT correspond positionally -- a
-    /// transposed (`arr[D2,D1]` for `arr[D1,D2]`) or
-    /// position-mismatched-mapped reference. Collapsing would freeze the
-    /// WRONG element (a silent magnitude error, GH #526); the caller
-    /// abandons the changed-first partial instead (the changed-last
-    /// fallback keeps the dep live and verbatim, or the partial fails
-    /// loudly).
-    Mismatch,
-}
-
 /// Classify an iterated-dimension subscript on a *non-live-source*
 /// dependency (e.g. `pop[Region,Age]` in `growth[Region,Age] =
 /// row_sum[Region] * c * pop[Region,Age]` while building the partial for
-/// `(row_sum, growth)`). On [`OtherDepIteratedVerdict::Collapse`],
+/// `(row_sum, growth)`). On [`OtherDepVerdict::Collapse`],
 /// `wrap_non_matching_in_previous` collapses the subscript to a bare
 /// `Var(dep)` before wrapping it in `PREVIOUS()` -- avoiding the
 /// `PREVIOUS(Subscript(...))` codegen assertion.
@@ -248,7 +224,7 @@ enum OtherDepIteratedVerdict {
 /// The firing precondition is unchanged from the pre-GH#526 recognizer:
 /// every index is a bare `Var` naming one of the target's iterated
 /// dimensions, with at most as many indices as the target has iterated
-/// dimensions (anything else is [`OtherDepIteratedVerdict::NotIterated`]).
+/// dimensions (anything else is [`OtherDepVerdict::NotIterated`]).
 ///
 /// What the verdict adds (GH #526) is the position-and-mapping
 /// correspondence check against the dep's DECLARED dimensions
@@ -275,43 +251,70 @@ enum OtherDepIteratedVerdict {
 /// source->agg per-row partials in `generate_nonlinear_body_partial`;
 /// this is the other-dep iterated-subscript collapse in target-equation
 /// partials.)
+///
+/// Track A3 stage 2 status: the verdict RULE is single-sourced on
+/// [`derive_other_dep_verdict`] (`db::ltm_ir`) -- the same rule the occurrence
+/// IR's `axes` feed -- so the verdict cannot drift whichever family builds
+/// `axes` (that rustdoc proves the shared arity guard dominates the sole
+/// per-axis labeling difference; `verdict_ignores_over_arity_axis_labeling`
+/// pins it). What is NOT yet single-sourced is the per-axis [`OccurrenceAxis`]
+/// construction below -- still a textual mirror of `classify_occurrence_axes`;
+/// retiring it needs the SiteId occurrence bridge into the wrap (deferred
+/// stage-2 work; see the stage-2 report for why the wrap-surface + per-element
+/// lowering conversion is multi-round).
 fn classify_other_dep_iterated_dim_subscript(
     dep: &Ident<Canonical>,
     indices: &[IndexExpr0],
     ctx: Option<&IteratedDimCtx<'_>>,
-) -> OtherDepIteratedVerdict {
+) -> OtherDepVerdict {
     let Some(ctx) = ctx else {
-        return OtherDepIteratedVerdict::NotIterated;
+        return OtherDepVerdict::NotIterated;
     };
+    // Short-circuit before touching `dep_dims`: a non-empty subscript with no
+    // more indices than the target has iterated dims. (`derive_other_dep_verdict`
+    // re-checks these, but building the axes below already assumes them.)
     if indices.is_empty() || indices.len() > ctx.target_iterated_dims.len() {
-        return OtherDepIteratedVerdict::NotIterated;
+        return OtherDepVerdict::NotIterated;
     }
-    let mut index_dims: Vec<String> = Vec::with_capacity(indices.len());
-    for idx in indices {
-        match idx {
-            IndexExpr0::Expr(Expr0::Var(name, _)) => {
-                let d = canonicalize(name.as_str()).into_owned();
-                if !ctx.target_iterated_dims.iter().any(|t| t == &d) {
-                    return OtherDepIteratedVerdict::NotIterated;
+    let dep_dims = ctx.dep_dims.and_then(|m| m.get(dep.as_str()));
+    // Build the per-axis classification the promoted verdict rule consumes: an
+    // index lined up (by name or positional mapping) with the dep's declared
+    // axis at that position is `Iterated`, else `MismatchedIterated`. An index
+    // that is NOT a bare target-iterated-dim `Var` makes the whole subscript
+    // `NotIterated`. When the dep is un-threadable (`dep_dims` is `None`) the
+    // verdict's `None`-arity arm collapses regardless of the per-axis marking,
+    // and a position with no declared dep axis (an over-dep-arity index) is
+    // caught by the verdict's arity check first -- so marking those `Iterated`
+    // is sound (it only needs to keep every axis iterated/mismatched).
+    let mut axes: Vec<OccurrenceAxis> = Vec::with_capacity(indices.len());
+    for (i, idx) in indices.iter().enumerate() {
+        let IndexExpr0::Expr(Expr0::Var(name, _)) = idx else {
+            return OtherDepVerdict::NotIterated;
+        };
+        let d = canonicalize(name.as_str()).into_owned();
+        if !ctx.target_iterated_dims.iter().any(|t| t == &d) {
+            return OtherDepVerdict::NotIterated;
+        }
+        let axis = match dep_dims.and_then(|dd| dd.get(i)) {
+            Some(dep_dim) if other_dep_axis_lines_up(&d, dep_dim, ctx) => {
+                OccurrenceAxis::Iterated {
+                    dim: d,
+                    source_dim: canonicalize(dep_dim.name()).into_owned(),
                 }
-                index_dims.push(d);
             }
-            _ => return OtherDepIteratedVerdict::NotIterated,
-        }
+            Some(_) => OccurrenceAxis::MismatchedIterated { dim: d },
+            None => OccurrenceAxis::Iterated {
+                dim: d.clone(),
+                source_dim: d,
+            },
+        };
+        axes.push(axis);
     }
-    let Some(dep_dims) = ctx.dep_dims.and_then(|m| m.get(dep.as_str())) else {
-        // Un-threadable dep dims: the historical permissive collapse.
-        return OtherDepIteratedVerdict::Collapse;
-    };
-    if index_dims.len() != dep_dims.len() {
-        return OtherDepIteratedVerdict::Mismatch;
-    }
-    for (d, dep_dim) in index_dims.iter().zip(dep_dims) {
-        if !other_dep_axis_lines_up(d, dep_dim, ctx) {
-            return OtherDepIteratedVerdict::Mismatch;
-        }
-    }
-    OtherDepIteratedVerdict::Collapse
+    derive_other_dep_verdict(
+        &axes,
+        dep_dims.map(|dd| dd.len()),
+        ctx.target_iterated_dims.len(),
+    )
 }
 
 /// Does iterated-dimension index `d` (canonical) line up with a non-live
@@ -381,14 +384,24 @@ fn is_literal_element_index(
 
 /// Resolve a single subscript index to a literal element name, mirroring
 /// `db::ltm_ir::resolve_literal_index` (the Expr2 sibling) so both
-/// classifiers agree on what counts as a "literal element". The two
-/// must stay in sync: the edge emitter uses the Expr2 classifier and
-/// the partial-equation builder uses this Expr0 sibling -- if they
-/// disagree (for example on out-of-range integer literals), the edge
-/// emitter classifies as `DynamicIndex` while the partial builder
-/// classifies as `FixedIndex(...)`, the shape comparison in
-/// `wrap_non_matching_in_previous` fails, and the live reference is
-/// wrapped in `PREVIOUS()` -- silently zeroing the link score.
+/// classifiers agree on what counts as a "literal element".
+///
+/// Two-family invariant (the tracked Track A3 stage-2/3 surface): the edge
+/// emitter classifies each reference on the `Expr2` AST (`db::ltm_ir`), while
+/// the ceteris-paribus wrap re-derives the shape on the printed-and-reparsed
+/// `Expr0` via this sibling. If they disagree (e.g. on an out-of-range integer
+/// literal -- `Expr2` -> `DynamicIndex`, `Expr0` -> `FixedIndex(...)`), the
+/// shape comparison in `wrap_non_matching_in_previous` fails, every occurrence
+/// of the source is `PREVIOUS`-wrapped, and the link score silently zeroes.
+/// The A1 differential gate (`ltm_classifier_agreement_tests`) turns any drift
+/// on a corpus-covered shape into a LOUD test failure; what it cannot cover is
+/// a novel PRODUCTION shape, which is exactly why stage 2 deletes this Expr0
+/// sibling -- routing the shape/literal decision through the `db::ltm_ir`
+/// occurrence stream (the SiteId bridge) makes the drift structurally
+/// impossible for EVERY shape, not just the covered ones. (The other-dep
+/// VERDICT is already single-sourced on `db::ltm_ir::derive_other_dep_verdict`;
+/// the residual per-element lowering blocker is documented in the stage-2
+/// report.)
 ///
 /// Element names appear as `Var` nodes; integer literals appear as
 /// `Const` nodes whose text is the integer. Either form is validated
@@ -638,7 +651,7 @@ struct WrapOutcome {
     /// [`wrap_non_matching_in_previous`].
     live_ref: Option<Expr0>,
     /// GH #526: set when a KNOWN position-mismatched other-dep iterated
-    /// subscript was encountered ([`OtherDepIteratedVerdict::Mismatch`]).
+    /// subscript was encountered ([`OtherDepVerdict::Mismatch`]).
     /// The changed-first partial is then unusable -- collapsing would
     /// freeze the wrong element, and not collapsing leaves a
     /// `PREVIOUS(Subscript(dim-name indices))` whose capture helper cannot
@@ -848,10 +861,10 @@ fn wrap_non_matching_in_previous(expr: Expr0, ctx: &WrapCtx<'_>, out: &mut WrapO
                 // fire on this path anyway (its `dep_dims` are `None`), so
                 // skipping the whole verdict preserves behavior.
                 match classify_other_dep_iterated_dim_subscript(&canonical, &indices, iter_ctx) {
-                    OtherDepIteratedVerdict::Collapse => {
+                    OtherDepVerdict::Collapse => {
                         return wrap_non_matching_in_previous(Expr0::Var(ident, loc), ctx, out);
                     }
-                    OtherDepIteratedVerdict::Mismatch => {
+                    OtherDepVerdict::Mismatch => {
                         // GH #526: collapsing would freeze the WRONG element.
                         // Record the doom and fall through to the normal
                         // wrap; the caller abandons this changed-first form
@@ -860,7 +873,7 @@ fn wrap_non_matching_in_previous(expr: Expr0, ctx: &WrapCtx<'_>, out: &mut WrapO
                         // emitted.
                         out.other_dep_mismatch = true;
                     }
-                    OtherDepIteratedVerdict::NotIterated => {}
+                    OtherDepVerdict::NotIterated => {}
                 }
             }
             // Classify the subscript's shape using the ORIGINAL indices

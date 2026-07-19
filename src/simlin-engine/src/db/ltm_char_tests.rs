@@ -1118,3 +1118,161 @@ fn char_arrayed_target_slot_scores() {
     let actual = dump_synthetic_vars(arrayed_target_model(), true, "link_score\u{205A}pop");
     assert_golden("arrayed_target_slot_scores", &actual);
 }
+
+// ---------------------------------------------------------------------------
+// Model F (Track A3 stage 2, review finding 2): the GH #517 whole-reducer
+// freeze over an INDEX-NESTED live-source occurrence (Fig. 2 Q4).
+//
+// `to = SUM(w[from, *]) + from`, edge `(from -> to)`, `Bare` shape. `from`
+// (the live source) occurs TWICE in `to`'s equation:
+//   * bare, outside any reducer (`+ from`) -- the live occurrence;
+//   * index-nested, inside the reducer's subscript (`w[from, *]`).
+//
+// The changed-first partial must FREEZE THE WHOLE REDUCER --
+// `PREVIOUS(SUM(w[from, *])) + from` -- because `expr0_contains_live_match`'s
+// Subscript arm matches only a subscript whose HEAD is the live source, never
+// an index-nested occurrence (`ltm_augment.rs`). Recursing into the reducer
+// instead would emit `SUM(PREVIOUS(w[from, *]))` (a PREVIOUS of an array view,
+// which has no LoadPrev path -- a loud compile failure and a silently-zeroed
+// score, GH #517).
+//
+// This pins the exact Fig. 2 Q4 selection semantics the stage-2 occurrence
+// switch must reproduce via `occ.index_nested`: an index-nested occurrence is
+// excluded from the reducer-containment test AND from live selection. Before
+// this golden, mutating `expr0_contains_live_match` to count index-nested
+// occurrences (the exact stage-2 `occ.index_nested` mishandling) passed the
+// entire corpus green while changing this text -- verified: the mutation flips
+// this golden's numerator from the changed-first whole-reducer freeze
+// `PREVIOUS(sum(w[from, *])) + from` to the changed-LAST form
+// `to - (sum(w[from, *]) + PREVIOUS(from))` (the reducer held live, the bare
+// `from` frozen). Both COMPILE and are non-zero, so only this exact-text pin
+// catches the drift -- a runtime compile/non-zero guard would not. The
+// scalar-element form (`SUM(w[from])`) is pinned directly at the wrap level by
+// `partial_freezes_whole_reducer_over_index_nested_live_source` in
+// `ltm_augment_tests.rs`; the runtime guard below is a separate silent-zero
+// backstop that this shape's score stays materially live.
+// ---------------------------------------------------------------------------
+
+fn reducer_index_nested_model() -> datamodel::Project {
+    TestProject::new("reducer_index_nested_char")
+        .named_dimension("Slot", &["s1", "s2"])
+        .named_dimension("K", &["k1", "k2"])
+        .array_aux("w[Slot,K]", "0.5")
+        .aux("from", "1", None)
+        .aux("to", "SUM(w[from, *]) + from", None)
+        .stock("acc", "0", &["toflow"], &[], None)
+        .flow("toflow", "to", None)
+        .build_datamodel()
+}
+
+#[test]
+fn char_reducer_index_nested_freeze() {
+    let actual = dump_synthetic_vars(
+        reducer_index_nested_model(),
+        true,
+        "link_score\u{205A}from\u{2192}to",
+    );
+    assert_golden("reducer_index_nested_freeze", &actual);
+}
+
+// Finding 2 materiality guard for the index-nested reducer-freeze shape,
+// mirroring the `agg_nested_reducer_preserves_loud_failure_not_silent_zero`
+// idiom: the byte-parity behavior of `to = SUM(w[from, *]) + from` is a LOUD
+// failure, not a silent compile. Because `from` is a dynamic index, the frozen
+// `PREVIOUS(sum(w[from, *]))` desugars to a synthesized scalar PREVIOUS-helper
+// over a dynamic-index reducer, which the engine cannot compile (a pre-existing
+// dynamic-index-reducer limitation) and reports as a `Warning`.
+//
+// NOTE on scope: the specific index-nested-exclusion drift (recursing into the
+// reducer to hold the index-nested `from` live) is a TEXT-only change at
+// runtime -- verified: it flips the wrap to the changed-last form
+// `to - (sum(w[from, *]) + PREVIOUS(from))`, which STILL fails to compile (a
+// dynamic-index reducer inline in a scalar guard equation), so both baseline
+// and mutation loud-fail. That drift is caught by the `reducer_index_nested_freeze`
+// text golden and the wrap unit test, not here. This guard is the complementary
+// silent-vs-loud backstop: it pins that this Fig. 2 Q4 shape LOUDLY fails rather
+// than silently compiling to a wrong-valued score -- the codebase's preferred
+// degradation (GH #311/#661/#743). A future selector that made this shape
+// silently compile (dropping the warning) turns this red.
+
+fn reducer_index_nested_feedback_model() -> datamodel::Project {
+    TestProject::new("reducer_index_nested_feedback")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Slot", &["s1", "s2"])
+        .named_dimension("K", &["k1", "k2"])
+        .array_aux("w[Slot,K]", "0.5")
+        .aux("from", "1 + (TIME MOD 2)", None)
+        .aux("to", "SUM(w[from, *]) + from", None)
+        .stock("acc", "0", &["toflow"], &[], None)
+        .flow("toflow", "to", None)
+        .build_datamodel()
+}
+
+#[test]
+fn reducer_index_nested_freeze_preserves_loud_failure_not_silent_compile() {
+    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
+    use salsa::Setter;
+
+    let project = reducer_index_nested_feedback_model();
+    let mut db = SimlinDb::default();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let diags = collect_model_diagnostics(&db, source_model, source_project);
+    let from_to_failures: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(
+                    &d.error,
+                    DiagnosticError::Assembly(msg) if msg.contains("failed to compile")
+                )
+        })
+        .filter_map(|d| d.variable.clone())
+        .filter(|v| v.contains("link_score\u{205A}from\u{2192}to"))
+        .collect();
+    assert!(
+        !from_to_failures.is_empty(),
+        "the changed-first whole-reducer freeze over a dynamic index-nested live \
+         source must preserve HEAD's loud compile-failure warning (not silently \
+         compile the changed-last form that holds the reducer live); a missing \
+         warning means the index-nested occurrence was held live"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Model G (Track A3 stage 2, review finding 2): an already-lagged other-dep
+// (Fig. 2 Q3).
+//
+// `to = from + PREVIOUS(g)`, edge `(from -> to)`, `Bare` shape. `g` occurs
+// only inside `PREVIOUS(g)` -- it is already lagged. The changed-first partial
+// holds `from` live and must LEAVE `PREVIOUS(g)` untouched
+// (`from + PREVIOUS(g)`), NOT re-wrap it to `PREVIOUS(PREVIOUS(g))` (a t-2
+// read). This pins the `already_lagged` selection semantics the stage-2 switch
+// must reproduce via `occ.already_lagged`: it suppresses the wrap/freeze of an
+// already-lagged occurrence but not its live selection.
+// ---------------------------------------------------------------------------
+
+fn already_lagged_other_dep_model() -> datamodel::Project {
+    TestProject::new("already_lagged_char")
+        .aux("g", "3", None)
+        .aux("from", "1", None)
+        .aux("to", "from + PREVIOUS(g)", None)
+        .stock("acc", "0", &["toflow"], &[], None)
+        .flow("toflow", "to", None)
+        .build_datamodel()
+}
+
+#[test]
+fn char_already_lagged_other_dep() {
+    let actual = dump_synthetic_vars(
+        already_lagged_other_dep_model(),
+        true,
+        "link_score\u{205A}from\u{2192}to",
+    );
+    assert_golden("already_lagged_other_dep", &actual);
+}

@@ -2885,6 +2885,83 @@ fn partial_equation_does_not_rewrap_inside_previous() {
     );
 }
 
+/// GH #517 / Fig. 2 Q4 (Track A3 stage 2, review finding 2): an INDEX-NESTED
+/// occurrence of the live source must be EXCLUDED from the reducer-containment
+/// test, so a reducer whose only live-source occurrence is index-nested freezes
+/// WHOLE rather than recursing.
+///
+/// `to = SUM(w[from]) + from` with live source `from` (Bare): `from` occurs
+/// bare (outside the reducer -- the live occurrence) AND index-nested inside
+/// `w[from]`. `expr0_contains_live_match`'s Subscript arm matches only a
+/// subscript whose HEAD is the live source, so the index-nested `from` never
+/// makes the reducer "hold the live reference": the whole reducer is frozen
+/// (`PREVIOUS(sum(w[from]))`) and only the bare `from` stays live.
+///
+/// This is the exact silent-drift the stage-2 occurrence switch must reproduce
+/// via `occ.index_nested`. The scalar-element `SUM(w[from])` form (as opposed
+/// to the array-slice `SUM(w[from, *])` production golden) is the one that
+/// compiles under BOTH the correct and the mutated behavior -- so nothing but
+/// this exact-text pin catches a selector that mishandles `index_nested` here:
+/// recursing would emit `sum(PREVIOUS(w[from])) + from` (the index-nested
+/// `from` held live), a compiling but value-divergent partial.
+#[test]
+fn partial_freezes_whole_reducer_over_index_nested_live_source() {
+    let deps = deps_set(&["w", "from"]);
+    let live = Ident::<Canonical>::new("from");
+    let shape = RefShape::Bare;
+
+    let partial =
+        build_partial_equation_shaped("SUM(w[from]) + from", &deps, &live, &shape, &[], None, None)
+            .unwrap();
+
+    assert_eq!(
+        partial, "PREVIOUS(sum(w[from])) + from",
+        "an index-nested live-source occurrence must not make the reducer hold \
+         the live ref -- the whole reducer freezes and only the bare `from` \
+         stays live; got: {partial}"
+    );
+    // Belt-and-suspenders: the index-nested `from` must NOT be individually
+    // held live inside a recursed reducer.
+    assert!(
+        !partial.to_lowercase().contains("sum(previous(w"),
+        "the reducer must not recurse to hold the index-nested occurrence live; \
+         got: {partial}"
+    );
+}
+
+/// Fig. 2 Q3 (Track A3 stage 2, review finding 2): an already-lagged other-dep
+/// occurrence -- one that sits inside an ORIGINAL `PREVIOUS(...)` -- must be
+/// left untouched (its live selection is suppressed AND it is never re-wrapped),
+/// so the changed-first partial does not double-lag it to a t-2 read.
+///
+/// `to = from + PREVIOUS(g)` with live source `from` (Bare): `from` stays live;
+/// the already-lagged `PREVIOUS(g)` survives verbatim, NOT wrapped again as
+/// `PREVIOUS(PREVIOUS(g))`. This complements
+/// `partial_equation_does_not_rewrap_inside_previous` (which uses the
+/// two-argument SAMPLE-IF-TRUE `PREVIOUS(target, input)` shape) with the exact
+/// `to = from + PREVIOUS(g)` shape the stage-2 `occ.already_lagged` field must
+/// reproduce.
+#[test]
+fn partial_leaves_already_lagged_other_dep_untouched() {
+    let deps = deps_set(&["from", "g"]);
+    let live = Ident::<Canonical>::new("from");
+    let shape = RefShape::Bare;
+
+    let partial =
+        build_partial_equation_shaped("from + PREVIOUS(g)", &deps, &live, &shape, &[], None, None)
+            .unwrap();
+
+    assert_eq!(
+        partial, "from + previous(g)",
+        "the already-lagged `PREVIOUS(g)` must survive verbatim and `from` must \
+         stay live; got: {partial}"
+    );
+    assert!(
+        !partial.to_lowercase().contains("previous(previous(g"),
+        "an already-lagged occurrence must not be double-wrapped; got: {partial}"
+    );
+}
+
 // -- Arrayed-target link scores: per-element partial equations --
 //
 // For a per-element-equation (`Ast::Arrayed`) target, the link score
