@@ -24,26 +24,37 @@ use crate::datamodel;
 use crate::test_common::TestProject;
 
 /// Render one synthetic variable's equation as a stable, fully-structured
-/// string: `Scalar`/`ApplyToAll` are their text; `Arrayed` lists each
-/// `element => eqn` slot (element-sorted, as the generator emits) plus the
+/// string: `Scalar`/`ApplyToAll` are their diagnostic text; `Arrayed` lists
+/// each `element => eqn` slot (element-sorted, as the generator emits) plus the
 /// optional `default => eqn`. Dimensions are prefixed so a shape change is
 /// visible in the pin.
-fn render_equation(eq: &datamodel::Equation) -> String {
+///
+/// Renders the arm's diagnostic `text` (the generator's exact source-form
+/// spelling), NOT `print_eqn` of the parsed AST, so the golden pins the same
+/// bytes the augmentation layer produced -- the AST is the compiled form, the
+/// text the diagnostic serialization (see [`crate::db::LtmEquation`]).
+fn render_equation(eq: &crate::db::LtmEquation) -> String {
+    use crate::db::LtmEquation;
     match eq {
-        datamodel::Equation::Scalar(s) => format!("scalar: {s}"),
-        datamodel::Equation::ApplyToAll(dims, s) => {
-            format!("a2a[{}]: {s}", dims.join(","))
+        LtmEquation::Scalar(arm) => format!("scalar: {}", arm.text),
+        LtmEquation::ApplyToAll(dims, arm) => {
+            format!("a2a[{}]: {}", dims.join(","), arm.text)
         }
-        datamodel::Equation::Arrayed(dims, elements, default, apply_default) => {
+        LtmEquation::Arrayed {
+            dims,
+            elements,
+            default,
+            has_except_default,
+        } => {
             let mut out = format!(
-                "arrayed[{}] (apply_default={apply_default}):",
+                "arrayed[{}] (apply_default={has_except_default}):",
                 dims.join(",")
             );
-            for (elem, eqn, _, _) in elements {
-                out.push_str(&format!("\n    {elem} => {eqn}"));
+            for (elem, arm) in elements {
+                out.push_str(&format!("\n    {elem} => {}", arm.text));
             }
-            if let Some(default_eqn) = default {
-                out.push_str(&format!("\n    <default> => {default_eqn}"));
+            if let Some(default_arm) = default {
+                out.push_str(&format!("\n    <default> => {}", default_arm.text));
             }
             out
         }
@@ -1283,21 +1294,21 @@ fn char_already_lagged_other_dep() {
 //
 // `total = scale + SUM(arr[*] * scale)`: `scale` appears bare (outside the
 // reducer) AND as the reducer's scalar feeder inside `SUM(arr[*] * scale)`. The
-// `scale -> total` Bare link score is the finding-1 probe. With an empty
-// occurrence stream the LEGACY `link_score_equation_text` (which assembly
-// compiles) froze the whole `SUM(...)` reducer -- changed-FIRST -- while the
-// SHAPED emitter (which `model_ltm_variables` reports/serializes) threaded the
-// real stream and recursed into it -- changed-LAST. So the COMPILED fragment
-// disagreed with the REPORTED equation: the VM simulated one derivation and the
-// report showed another. Threading the real stream makes the legacy query
-// changed-LAST too. This golden pins the emitted (changed-LAST) text -- the
-// numerator subtracts `PREVIOUS(scale) + sum(arr[*] * PREVIOUS(scale))` from the
-// live `total`, i.e. `scale` is held live in BOTH occurrences -- and
-// `legacy_and_shaped_bare_score_agree_when_source_bare_in_reducer` (in
-// `db::ltm_tests`) pins that the legacy (compiled) query now returns the
-// identical bytes. GH #517/#743: the changed-LAST convention is the correct one
-// (freeze the target's OTHER inputs, hold the scored source live everywhere it
-// appears), so the drift is resolved onto the shaped semantics, not HEAD's.
+// `scale -> total` Bare link score is the finding-1 probe. Historically the
+// LEGACY `(from, to)`-keyed `link_score_equation_text` query (which assembly
+// compiled) passed an empty occurrence stream and froze the whole `SUM(...)`
+// reducer -- changed-FIRST -- while the SHAPED emitter (which
+// `model_ltm_variables` reports/serializes) threaded the real stream and
+// recursed into it -- changed-LAST. Stage 2b re-aligned the legacy query onto
+// the shaped derivation; Track A3 stage 3a then DELETED the legacy query
+// outright: assembly's sub-case (a) now sources from
+// `link_score_equation_text_shaped(.., Bare)` directly, so the compiled and
+// reported equations are one value and cannot drift. This golden pins the
+// emitted (changed-LAST) text -- the numerator subtracts
+// `PREVIOUS(scale) + sum(arr[*] * PREVIOUS(scale))` from the live `total`, i.e.
+// `scale` is held live in BOTH occurrences. GH #517/#743: the changed-LAST
+// convention is the correct one (freeze the target's OTHER inputs, hold the
+// scored source live everywhere it appears).
 // ---------------------------------------------------------------------------
 
 fn scalar_feeder_bare_in_hoisted_reducer_model() -> datamodel::Project {
@@ -1323,4 +1334,98 @@ fn char_scalar_feeder_bare_in_hoisted_reducer() {
         "link_score\u{205A}scale",
     );
     assert_golden("scalar_feeder_bare_in_hoisted_reducer", &actual);
+}
+
+// ---------------------------------------------------------------------------
+// Model H2 (Track A3 stage 3a, finding 1): the ARRAYED-target sibling of
+// Model H -- a SCALAR feeder read BARE alongside a HOISTED reducer, but now
+// inside an A2A (arrayed) target rather than a scalar one.
+//
+// `share[D1] = SUM(arr[*] * scale) + scale`: the `+ scale` is a Bare read of
+// the scalar `scale` in an A2A-over-`D1` body, so `scale -> share` has a Bare
+// site whose ceteris-paribus partial the shaped query builds as an
+// `ApplyToAll(["D1"], ..)` (the target is arrayed). But `link_score_dimensions`
+// returns `[]` for a scalar-source -> arrayed-target edge (the feeder carries
+// no dimensions to inherit), so `emit_per_shape_link_scores` REPORTS the score
+// as a dims-empty SCALAR var (`retarget_ltm_equation_dims(.., [])` collapses the
+// A2A equation to `Scalar`) laid out with one slot, and the assembly fragment
+// compiler routes it through sub-case (a) -> the salsa-cached
+// `compile_ltm_var_fragment`.
+//
+// The regression this pins: when `compile_ltm_var_fragment` compiled the shaped
+// Bare query's RAW `ApplyToAll` equation (writing element offsets 0 AND 1 into
+// a 1-slot var) while the emission loop scalarized the same score, the compiled
+// fragment disagreed with the reported var and `compile_project_incremental`
+// hard-failed with `NotSimulatable` ("element_offset 1 out of bounds"). Sourcing
+// the fragment from `scalarize_ltm_equation(shaped_raw)` -- identical to the
+// reported `retarget_ltm_equation_dims(shaped_raw, [])` for the dims-empty
+// sub-case (a) var, and a no-op for a scalar target -- keeps compiled == reported
+// by construction, so the score degrades gracefully (the scalarized A2A text
+// references `arr[*]` in scalar context, so it warn-stubs to constant 0, exactly
+// as the reported var does) instead of aborting the whole model's compilation.
+// ---------------------------------------------------------------------------
+
+fn scalar_feeder_bare_in_arrayed_reducer_model() -> datamodel::Project {
+    TestProject::new("scalar_bare_in_arrayed_reducer_char")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .array_aux("arr[D1]", "1")
+        .aux("scale", "pop * 0.01", None)
+        .array_aux("share[D1]", "SUM(arr[*] * scale) + scale")
+        .flow("growth", "SUM(share[*]) * 0.001", None)
+        .stock("pop", "1", &["growth"], &[], None)
+        .build_datamodel()
+}
+
+#[test]
+fn scalar_feeder_bare_in_arrayed_reducer_compiles_and_simulates() {
+    use salsa::Setter;
+
+    let project = scalar_feeder_bare_in_arrayed_reducer_model();
+    let mut db = SimlinDb::default();
+    let (source_project, _source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    // The core regression: a scalar feeder read bare beside a hoisted reducer in
+    // an arrayed A2A target must NOT turn LTM compilation into a hard failure.
+    // Pre-fix this `.expect` panicked on `NotSimulatable` ("element_offset 1 out
+    // of bounds for variable $⁚ltm⁚link_score⁚scale→share (size 1)").
+    let compiled = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM incremental compilation should succeed for an arrayed target");
+
+    // The dims-empty scalar `scale -> share` score exists in the layout with a
+    // single slot -- the shape the emission loop reports.
+    let share_score_offsets: Vec<usize> = compiled
+        .offsets
+        .iter()
+        .filter(|(k, _)| k.as_str() == "$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}share")
+        .map(|(_, v)| *v)
+        .collect();
+    assert_eq!(
+        share_score_offsets.len(),
+        1,
+        "expected exactly one scalar scale->share link score slot"
+    );
+
+    // Simulation runs to completion and the model's OWN variables are
+    // unperturbed by the degraded score.
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end()
+        .expect("simulation should run to completion");
+    let results = vm.into_results();
+    for (key, off) in &compiled.offsets {
+        if key.as_str().starts_with("$\u{205A}ltm") {
+            continue;
+        }
+        for row in results.iter() {
+            assert!(
+                row[*off].is_finite(),
+                "model variable {key} must stay finite; the LTM overlay must not \
+                 perturb the base simulation"
+            );
+        }
+    }
 }

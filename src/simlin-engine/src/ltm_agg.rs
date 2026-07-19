@@ -2410,7 +2410,7 @@ fn first_active_bare_arrayed_reducer(
 /// [`PerElementReducerRead`]: UnhoistedSourceRead::PerElementReducerRead
 ///
 /// Salsa-tracked, keyed on the interned [`LtmLinkId`] (the
-/// `link_score_equation_text` idiom): the body's `reconstruct_model_variables`
+/// per-link `compile_ltm_var_fragment` idiom): the body's `reconstruct_model_variables`
 /// is the codebase's one UN-tracked whole-model reconstruction (O(all model
 /// vars)), and this is its first per-edge caller -- tracking bounds that cost
 /// to once per `(edge, revision)` so the pinned-loop pass's and discovery

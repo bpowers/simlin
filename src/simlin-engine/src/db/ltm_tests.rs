@@ -5,7 +5,7 @@
 use super::{compile_ltm_equation_fragment, scalarize_ltm_equation};
 use crate::datamodel;
 use crate::db::{
-    LtmLinkId, RefShape, ShapedLinkScore, SimlinDb, compute_layout, link_score_equation_text,
+    LtmLinkId, RefShape, ShapedLinkScore, SimlinDb, compute_layout,
     link_score_equation_text_shaped, sync_from_datamodel,
 };
 use crate::test_common::TestProject;
@@ -86,7 +86,7 @@ fn test_ltm_previous_module_var_uses_helper_rewrite() {
     let fragment = compile_ltm_equation_fragment(
         &db,
         "$⁚ltm⁚test_prev_module",
-        &datamodel::Equation::Scalar("PREVIOUS(producer)".to_string()),
+        &crate::db::LtmEquation::scalar("PREVIOUS(producer)".to_string()),
         source_model,
         sync.project,
     )
@@ -134,7 +134,10 @@ fn test_a2a_ltm_equation_fragment_compiles() {
     let fragment = compile_ltm_equation_fragment(
         &db,
         "$\u{205A}ltm\u{205A}test_a2a_link_score",
-        &datamodel::Equation::ApplyToAll(dims.clone(), "PREVIOUS(population) * 0.5".to_string()),
+        &crate::db::LtmEquation::apply_to_all(
+            dims.clone(),
+            "PREVIOUS(population) * 0.5".to_string(),
+        ),
         source_model,
         sync.project,
     )
@@ -260,7 +263,10 @@ fn test_a2a_ltm_previous_per_element() {
     let fragment = compile_ltm_equation_fragment(
         &db,
         "$\u{205A}ltm\u{205A}test_prev_per_elem",
-        &datamodel::Equation::ApplyToAll(dims.clone(), "PREVIOUS(population) * 0.5".to_string()),
+        &crate::db::LtmEquation::apply_to_all(
+            dims.clone(),
+            "PREVIOUS(population) * 0.5".to_string(),
+        ),
         source_model,
         sync.project,
     )
@@ -344,13 +350,16 @@ fn test_stock_to_flow_link_score_handles_apply_to_all() {
     let sync = sync_from_datamodel(&db, &project);
     let source_model = sync.models["main"].source;
 
-    // The stock-to-flow direction: population -> births
+    // The stock-to-flow direction: population -> births. The scalar Bare score
+    // (what assembly's sub-case (a) compiles) comes from the shape-aware query;
+    // stock-to-flow ignores `RefShape`, so `Bare` yields the same generator
+    // output as the (deleted) legacy `(from, to)`-keyed query did.
     let link_id = LtmLinkId::new(&db, "population".to_string(), "births".to_string());
-    let lsv = link_score_equation_text(&db, link_id, source_model, sync.project);
-
-    let lsv = lsv
-        .as_ref()
-        .expect("stock-to-flow link score should be generated for arrayed model");
+    let ShapedLinkScore::Scored(lsv) =
+        link_score_equation_text_shaped(&db, link_id, RefShape::Bare, source_model, sync.project)
+    else {
+        panic!("stock-to-flow link score should be generated for arrayed model");
+    };
 
     // Before the fix, the equation would contain only "0" terms because
     // the flow_equation was "0" (ApplyToAll fell through the Scalar-only
@@ -465,8 +474,8 @@ fn test_stock_to_flow_link_score_handles_arrayed() {
 
     // Each `births[e]` references `population[e]` -- a FixedIndex(e) ref --
     // so the per-shape emission yields `population[e] -> births` link
-    // scores. The non-shaped `link_score_equation_text` would `scalarize`
-    // the result; use the shaped entry point so the arrayed equation
+    // scores. The scalar Bare score would `scalarize` the result; use the
+    // shaped entry point with the FixedIndex shape so the arrayed equation
     // survives intact.
     let link_id = LtmLinkId::new(&db, "population".to_string(), "births".to_string());
     let result = link_score_equation_text_shaped(
@@ -481,16 +490,17 @@ fn test_stock_to_flow_link_score_handles_arrayed() {
     };
 
     let elements = match &lsv.equation {
-        datamodel::Equation::Arrayed(_, elements, _, _) => elements,
+        crate::db::LtmEquation::Arrayed { elements, .. } => elements,
         other => {
-            panic!("stock-to-arrayed-flow link score must be Equation::Arrayed, got: {other:?}")
+            panic!("stock-to-arrayed-flow link score must be LtmEquation::Arrayed, got: {other:?}")
         }
     };
     assert!(
         !elements.is_empty(),
         "arrayed link score should have per-element slots"
     );
-    for (elem, slot_eqn, _, _) in elements {
+    for (elem, arm) in elements {
+        let slot_eqn = &arm.text;
         // The flow's actual equation contents (`population`) must show up
         // in every slot -- before the fix this was a constant `(0)`.
         assert!(
@@ -508,40 +518,48 @@ fn test_stock_to_flow_link_score_handles_arrayed() {
 
 #[test]
 fn test_scalarize_ltm_equation_arrayed_collapse() {
-    use datamodel::Equation::{ApplyToAll, Arrayed, Scalar};
+    use crate::db::LtmEquation;
 
+    // Uses parseable equation bodies (`LtmEquation` parses each arm eagerly, so
+    // a placeholder like "first slot" would trip the augmentation-bug guard);
+    // scalarize only ever selects an arm, so the exact expression is irrelevant.
+    //
     // Arrayed with multiple per-element slots collapses to the *first* slot's text.
-    let multi = Arrayed(
+    let multi = LtmEquation::arrayed(
         vec!["region".to_string()],
         vec![
-            ("nyc".to_string(), "first slot".to_string(), None, None),
-            ("boston".to_string(), "second slot".to_string(), None, None),
+            ("nyc".to_string(), "first_slot".to_string()),
+            ("boston".to_string(), "second_slot".to_string()),
         ],
         None,
         false,
     );
-    assert!(matches!(scalarize_ltm_equation(multi), Scalar(text) if text == "first slot"));
+    assert!(
+        matches!(scalarize_ltm_equation(multi), LtmEquation::Scalar(arm) if arm.text == "first_slot")
+    );
 
     // Arrayed with no slots but a Some(default) falls back to the default text.
-    let default_only = Arrayed(
+    let default_only = LtmEquation::arrayed(
         vec!["region".to_string()],
         vec![],
-        Some("default eqn".to_string()),
+        Some("default_eqn".to_string()),
         false,
     );
-    assert!(matches!(scalarize_ltm_equation(default_only), Scalar(text) if text == "default eqn"));
+    assert!(
+        matches!(scalarize_ltm_equation(default_only), LtmEquation::Scalar(arm) if arm.text == "default_eqn")
+    );
 
     // Arrayed with neither slots nor a default falls back to "0".
-    let empty = Arrayed(vec!["region".to_string()], vec![], None, false);
-    assert!(matches!(scalarize_ltm_equation(empty), Scalar(text) if text == "0"));
+    let empty = LtmEquation::arrayed(vec!["region".to_string()], vec![], None, false);
+    assert!(matches!(scalarize_ltm_equation(empty), LtmEquation::Scalar(arm) if arm.text == "0"));
 
     // ApplyToAll and Scalar inputs are preserved (text kept, dims dropped).
     assert!(matches!(
-        scalarize_ltm_equation(ApplyToAll(vec!["region".to_string()], "a2a eqn".to_string())),
-        Scalar(text) if text == "a2a eqn"
+        scalarize_ltm_equation(LtmEquation::apply_to_all(vec!["region".to_string()], "a2a_eqn".to_string())),
+        LtmEquation::Scalar(arm) if arm.text == "a2a_eqn"
     ));
     assert!(
-        matches!(scalarize_ltm_equation(Scalar("scalar eqn".to_string())), Scalar(text) if text == "scalar eqn")
+        matches!(scalarize_ltm_equation(LtmEquation::scalar("scalar_eqn".to_string())), LtmEquation::Scalar(arm) if arm.text == "scalar_eqn")
     );
 }
 
@@ -749,48 +767,12 @@ fn collect_agg_petals_groups_single_agg_circuits() {
     }
 }
 
-/// Finding-1 regression: the `(from, to)`-keyed legacy `link_score_equation_text`
-/// and the shape-aware `link_score_equation_text_shaped(.., Bare)` must derive
-/// the SAME equation for a standard scalar Bare link score. The two twins had
-/// silently drifted: the legacy query passed an EMPTY occurrence stream, so the
-/// ceteris-paribus wrap's GH #517 reducer-freeze arm (`subtree_has_live_shape`)
-/// froze a reducer whole, while the shaped query threaded the real stream and
-/// recursed into it -- producing a different partial for `scale -> total`
-/// whenever the live source `scale` appears bare inside a reducer of `total`.
-/// The compiled fragment (assembly routes the standard scalar Bare score through
-/// the legacy query) would then simulate an equation that disagrees with the one
-/// `model_ltm_variables` reports/serializes.
-#[test]
-fn legacy_and_shaped_bare_score_agree_when_source_bare_in_reducer() {
-    let project = TestProject::new("bare_source_in_reducer")
-        .with_sim_time(0.0, 10.0, 1.0)
-        .named_dimension("D1", &["a", "b"])
-        .array_aux("arr[D1]", "1")
-        .aux("scale", "pop * 0.01", None)
-        .aux("total", "scale + SUM(arr[*] * scale)", None)
-        .flow("growth", "total * 0.001", None)
-        .stock("pop", "1", &["growth"], &[], None)
-        .build_datamodel();
-
-    let db = SimlinDb::default();
-    let sync = sync_from_datamodel(&db, &project);
-    let source_model = sync.models["main"].source;
-
-    let link_id = LtmLinkId::new(&db, "scale".to_string(), "total".to_string());
-    let legacy = link_score_equation_text(&db, link_id, source_model, sync.project)
-        .as_ref()
-        .expect("legacy scale -> total link score should exist");
-    let shaped =
-        link_score_equation_text_shaped(&db, link_id, RefShape::Bare, source_model, sync.project);
-    let ShapedLinkScore::Scored(shaped) = shaped else {
-        panic!("shaped scale -> total Bare link score should be Scored");
-    };
-
-    assert_eq!(
-        legacy.equation.source_text(),
-        shaped.equation.source_text(),
-        "the legacy (compiled/assembled) and shaped (emitted/reported) Bare link \
-         scores must be byte-identical -- a divergence means the VM simulates a \
-         different equation than is reported"
-    );
-}
+// The Track A3 stage-2b regression `legacy_and_shaped_bare_score_agree_when_
+// source_bare_in_reducer` was removed here: it pinned that the deleted
+// `(from, to)`-keyed `link_score_equation_text` and `link_score_equation_text_
+// shaped(.., Bare)` derived byte-identical equations. With the legacy query
+// gone, assembly's sub-case (a) reads the shaped query directly, so the two
+// derivations are one -- the divergence the test guarded against is now
+// structurally impossible. The emitted (changed-LAST) text for that probe is
+// still pinned by the `scalar_feeder_bare_in_hoisted_reducer` characterization
+// golden (`db::ltm_char_tests`).

@@ -9,6 +9,7 @@
 
 use super::*;
 use crate::common::{CanonicalDimensionName, CanonicalElementName};
+use crate::db::LtmEquation;
 use crate::dimensions::{Dimension, NamedDimension};
 
 fn make_named_dimension(name: &str, elements: &[&str]) -> Dimension {
@@ -3041,16 +3042,17 @@ fn arrayed_var_from_text(
 /// Look up the slot equation for `element` in an `Equation::Arrayed`,
 /// failing the test loudly if the equation isn't `Arrayed` or the slot
 /// is missing.
-fn arrayed_slot<'a>(equation: &'a Equation, element: &str) -> &'a str {
+fn arrayed_slot<'a>(equation: &'a crate::db::LtmEquation, element: &str) -> &'a str {
+    use crate::db::LtmEquation;
     match equation {
-        Equation::Arrayed(_, elements, _, _) => elements
+        LtmEquation::Arrayed { elements, .. } => elements
             .iter()
-            .find(|(e, _, _, _)| e == element)
-            .map(|(_, eqn, _, _)| eqn.as_str())
+            .find(|(e, _)| e == element)
+            .map(|(_, arm)| arm.text.as_str())
             .unwrap_or_else(|| {
                 panic!("no slot for element {element:?} in arrayed equation: {equation:?}")
             }),
-        other => panic!("expected Equation::Arrayed, got: {other:?}"),
+        other => panic!("expected LtmEquation::Arrayed, got: {other:?}"),
     }
 }
 
@@ -3160,7 +3162,7 @@ fn generate_link_score_equation_for_link_normal_target_is_ok() {
     )
     .expect("a normal scalar target must produce a valid link-score equation");
     let text = match &equation {
-        Equation::Scalar(t) => t.clone(),
+        LtmEquation::Scalar(arm) => arm.text.clone(),
         other => panic!("expected a scalar link score, got {other:?}"),
     };
     // The non-source dep is frozen; the source stays live -- the partial
@@ -3318,7 +3320,7 @@ fn link_score_for_with_lookup_scalar_target_wraps_partial_in_lookup() {
     )
     .expect("a with-lookup scalar target must produce a valid link-score equation");
     let text = match &equation {
-        Equation::Scalar(t) => t.clone(),
+        LtmEquation::Scalar(arm) => arm.text.clone(),
         other => panic!("expected a scalar link score, got {other:?}"),
     };
     assert!(
@@ -3360,9 +3362,9 @@ fn link_score_for_with_lookup_a2a_target_pins_shared_table() {
     )
     .expect("a with-lookup A2A target must produce a valid link-score equation");
     let text = match &equation {
-        Equation::ApplyToAll(dim_names, t) => {
+        LtmEquation::ApplyToAll(dim_names, arm) => {
             assert_eq!(dim_names, &["Region".to_string()]);
-            t.clone()
+            arm.text.clone()
         }
         other => panic!("expected an apply-to-all link score, got {other:?}"),
     };
@@ -3463,11 +3465,15 @@ fn test_arrayed_link_score_population_to_migration_pressure_fixed_nyc() {
     .unwrap();
 
     match &equation {
-        Equation::Arrayed(eq_dims, _, default, _) => {
+        LtmEquation::Arrayed {
+            dims: eq_dims,
+            default,
+            ..
+        } => {
             assert_eq!(eq_dims, &["Region".to_string()]);
             assert!(default.is_none(), "no EXCEPT default expected");
         }
-        other => panic!("expected Equation::Arrayed, got: {other:?}"),
+        other => panic!("expected LtmEquation::Arrayed, got: {other:?}"),
     }
 
     let nyc_slot = arrayed_slot(&equation, "nyc");
@@ -3659,7 +3665,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
     )
     .unwrap();
     assert!(
-        matches!(equation, Equation::Scalar(_)),
+        matches!(equation, LtmEquation::Scalar(_)),
         "scalar target must yield Equation::Scalar; got: {equation:?}"
     );
 
@@ -3706,7 +3712,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
     )
     .unwrap();
     match equation {
-        Equation::ApplyToAll(d, _) => assert_eq!(d, vec!["Region".to_string()]),
+        LtmEquation::ApplyToAll(d, _) => assert_eq!(d, vec!["Region".to_string()]),
         other => panic!("ApplyToAll target must yield Equation::ApplyToAll; got: {other:?}"),
     }
 }
@@ -3776,11 +3782,11 @@ fn test_flow_to_stock_arrayed_subscripts_references() {
 
     let equation = generate_flow_to_stock_equation("growth", "pop", &flow, &stock);
     let text = match &equation {
-        Equation::ApplyToAll(dims, text) => {
+        LtmEquation::ApplyToAll(dims, arm) => {
             assert_eq!(dims, &vec!["region".to_string()]);
-            text
+            &arm.text
         }
-        other => panic!("arrayed stock must yield Equation::ApplyToAll; got: {other:?}"),
+        other => panic!("arrayed stock must yield LtmEquation::ApplyToAll; got: {other:?}"),
     };
 
     // Every stock/flow occurrence carries the dimension subscript --
@@ -3817,7 +3823,7 @@ fn test_flow_to_stock_scalar_stays_bare() {
 
     let equation = generate_flow_to_stock_equation("births", "s", &flow, &stock);
     let text = match &equation {
-        Equation::Scalar(text) => text,
+        LtmEquation::Scalar(arm) => &arm.text,
         other => panic!("scalar stock must yield Equation::Scalar; got: {other:?}"),
     };
 
@@ -3853,7 +3859,7 @@ fn test_flow_to_stock_arrayed_outflow_sign() {
 
     let equation = generate_flow_to_stock_equation("deaths", "pop", &flow, &stock);
     let text = match &equation {
-        Equation::ApplyToAll(_, text) => text,
+        LtmEquation::ApplyToAll(_, arm) => &arm.text,
         other => panic!("arrayed stock must yield Equation::ApplyToAll; got: {other:?}"),
     };
 
@@ -3926,9 +3932,9 @@ fn loop_score_variables_scalar_loop_yields_scalar_equation() {
     let (name, equation) = &vars[0];
     assert_eq!(name, "$\u{205A}ltm\u{205A}loop_score\u{205A}r1");
     match equation {
-        Equation::Scalar(text) => {
+        LtmEquation::Scalar(arm) => {
             assert_eq!(
-                text,
+                &arm.text,
                 &format!(
                     "\"{}\" * \"{}\"",
                     ls_name("pop", "births"),
@@ -3937,7 +3943,7 @@ fn loop_score_variables_scalar_loop_yields_scalar_equation() {
                 "scalar loop score must be the plain product of Bare link-score refs"
             );
         }
-        other => panic!("scalar loop must yield Equation::Scalar; got: {other:?}"),
+        other => panic!("scalar loop must yield LtmEquation::Scalar; got: {other:?}"),
     }
 }
 
@@ -4005,10 +4011,10 @@ fn loop_score_variables_a2a_without_slot_links_yields_apply_to_all() {
     assert_eq!(vars.len(), 1);
     let (_, equation) = &vars[0];
     match equation {
-        Equation::ApplyToAll(eq_dims, text) => {
+        LtmEquation::ApplyToAll(eq_dims, arm) => {
             assert_eq!(eq_dims, &vec!["region".to_string()]);
             assert_eq!(
-                text,
+                &arm.text,
                 &format!(
                     "\"{}\" * \"{}\"",
                     ls_name("pop", "births"),
@@ -4017,7 +4023,7 @@ fn loop_score_variables_a2a_without_slot_links_yields_apply_to_all() {
                 "Bare-A2A loop score must keep the compact ApplyToAll product form"
             );
         }
-        other => panic!("Bare-A2A loop must yield Equation::ApplyToAll; got: {other:?}"),
+        other => panic!("Bare-A2A loop must yield LtmEquation::ApplyToAll; got: {other:?}"),
     }
 }
 
@@ -4079,7 +4085,12 @@ fn loop_score_variables_slot_links_yield_arrayed_per_slot_equations() {
     let (name, equation) = &vars[0];
     assert_eq!(name, "$\u{205A}ltm\u{205A}loop_score\u{205A}pin1");
     match equation {
-        Equation::Arrayed(eq_dims, elements, default, _) => {
+        LtmEquation::Arrayed {
+            dims: eq_dims,
+            elements,
+            default,
+            ..
+        } => {
             assert_eq!(eq_dims, &vec!["scenario".to_string()]);
             assert!(default.is_none());
             assert_eq!(
@@ -4093,7 +4104,7 @@ fn loop_score_variables_slot_links_yield_arrayed_per_slot_equations() {
             // The det slot references det's FixedIndex link scores
             // subscripted at det (they are arrayed vars), and must not
             // reference low's.
-            let det_eq = &elements[0].1;
+            let det_eq = &elements[0].1.text;
             assert!(
                 det_eq.contains(&format!("\"{}\"[det]", ls_name("heat[det]", "temp"))),
                 "det slot must reference heat[det]→temp subscripted at [det]; got: {det_eq}"
@@ -4102,13 +4113,13 @@ fn loop_score_variables_slot_links_yield_arrayed_per_slot_equations() {
                 !det_eq.contains("low"),
                 "det slot must not reference the low element's link scores; got: {det_eq}"
             );
-            let low_eq = &elements[1].1;
+            let low_eq = &elements[1].1.text;
             assert!(
                 low_eq.contains(&format!("\"{}\"[low]", ls_name("heat[low]", "temp"))),
                 "low slot must reference heat[low]→temp subscripted at [low]; got: {low_eq}"
             );
         }
-        other => panic!("slot_links loop must yield Equation::Arrayed; got: {other:?}"),
+        other => panic!("slot_links loop must yield LtmEquation::Arrayed; got: {other:?}"),
     }
 }
 
@@ -4148,11 +4159,11 @@ fn loop_score_variables_missing_slot_scores_zero() {
     );
     let (_, equation) = &vars[0];
     match equation {
-        Equation::Arrayed(_, elements, _, _) => {
+        LtmEquation::Arrayed { elements, .. } => {
             assert_eq!(elements.len(), 3, "every declared element gets a slot");
             let by_elem: std::collections::HashMap<&str, &str> = elements
                 .iter()
-                .map(|(e, eq, _, _)| (e.as_str(), eq.as_str()))
+                .map(|(e, arm)| (e.as_str(), arm.text.as_str()))
                 .collect();
             assert!(by_elem["det"].contains("link_score"));
             assert_eq!(
@@ -4161,7 +4172,7 @@ fn loop_score_variables_missing_slot_scores_zero() {
             );
             assert_eq!(by_elem["high"], "0");
         }
-        other => panic!("expected Equation::Arrayed; got: {other:?}"),
+        other => panic!("expected LtmEquation::Arrayed; got: {other:?}"),
     }
 }
 
@@ -4213,24 +4224,24 @@ fn loop_score_variables_multi_dim_slot_tuples() {
     );
     let (_, equation) = &vars[0];
     match equation {
-        Equation::Arrayed(_, elements, _, _) => {
+        LtmEquation::Arrayed { elements, .. } => {
             // Row-major over declared order: nyc,young / nyc,old /
             // boston,young / boston,old.
-            let keys: Vec<&str> = elements.iter().map(|(e, _, _, _)| e.as_str()).collect();
+            let keys: Vec<&str> = elements.iter().map(|(e, _)| e.as_str()).collect();
             assert_eq!(
                 keys,
                 vec!["nyc,young", "nyc,old", "boston,young", "boston,old"]
             );
             let by_elem: std::collections::HashMap<&str, &str> = elements
                 .iter()
-                .map(|(e, eq, _, _)| (e.as_str(), eq.as_str()))
+                .map(|(e, arm)| (e.as_str(), arm.text.as_str()))
                 .collect();
             assert!(by_elem["nyc,young"].contains("link_score"));
             assert_eq!(by_elem["nyc,old"], "0");
             assert_eq!(by_elem["boston,young"], "0");
             assert!(by_elem["boston,old"].contains("link_score"));
         }
-        other => panic!("expected Equation::Arrayed; got: {other:?}"),
+        other => panic!("expected LtmEquation::Arrayed; got: {other:?}"),
     }
 }
 
@@ -4281,10 +4292,10 @@ fn loop_score_variables_prefer_apply_to_all_when_all_links_bare() {
     );
     let (_, equation) = &vars[0];
     match equation {
-        Equation::ApplyToAll(eq_dims, text) => {
+        LtmEquation::ApplyToAll(eq_dims, arm) => {
             assert_eq!(eq_dims, &vec!["region".to_string()]);
             assert_eq!(
-                text,
+                &arm.text,
                 &format!(
                     "\"{}\" * \"{}\"",
                     ls_name("pop", "births"),

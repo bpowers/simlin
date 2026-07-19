@@ -14,12 +14,12 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::common::{Canonical, Ident};
-use crate::datamodel;
 
 use crate::db::{
-    CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, LtmLinkId,
-    LtmSyntheticVar, RefShape, SourceModel, SourceProject, SourceVariable, SourceVariableKind,
-    project_dimensions_context, reconstruct_single_variable, variable_dimensions,
+    CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, LtmEquation,
+    LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject, SourceVariable,
+    SourceVariableKind, project_dimensions_context, reconstruct_single_variable,
+    variable_dimensions,
 };
 
 use super::compile::{ShapedLinkScore, link_score_equation_text_shaped};
@@ -633,7 +633,7 @@ pub(super) fn try_cross_dimensional_link_scores(
             };
             cross_vars.push(LtmSyntheticVar {
                 name: var_name,
-                equation: datamodel::Equation::Scalar(equation),
+                equation: LtmEquation::scalar(equation),
                 dimensions: vec![], // scalar -- one variable per read row
                 // bracketed name -> routed direct by `assemble_module`.
                 compile_directly: false,
@@ -759,7 +759,7 @@ pub(super) fn try_cross_dimensional_link_scores(
             );
             cross_vars.push(LtmSyntheticVar {
                 name: var_name,
-                equation: datamodel::Equation::Scalar(equation),
+                equation: LtmEquation::scalar(equation),
                 dimensions: vec![], // scalar -- one variable per element
                 // bracketed name -> routed direct by `assemble_module`'s
                 // element-subscript check; the flag is irrelevant here.
@@ -834,7 +834,7 @@ pub(super) fn try_cross_dimensional_link_scores(
         );
         cross_vars.push(LtmSyntheticVar {
             name: var_name,
-            equation: datamodel::Equation::Scalar(equation),
+            equation: LtmEquation::scalar(equation),
             dimensions: vec![], // scalar -- one variable per (reduced-elem, result-elem)
             // bracketed name -> routed direct by `assemble_module`.
             compile_directly: false,
@@ -963,7 +963,7 @@ fn emit_broadcast_reduce_link_scores(
             );
             cross_vars.push(LtmSyntheticVar {
                 name: var_name,
-                equation: datamodel::Equation::Scalar(equation),
+                equation: LtmEquation::scalar(equation),
                 dimensions: vec![], // scalar -- one variable per (read-row, target-element)
                 // bracketed name -> routed direct by `assemble_module`.
                 compile_directly: false,
@@ -1140,7 +1140,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 };
                 return Some(vec![LtmSyntheticVar {
                     name,
-                    equation: datamodel::Equation::ApplyToAll(equation_dims.clone(), text),
+                    equation: LtmEquation::apply_to_all(equation_dims.clone(), text),
                     dimensions: equation_dims,
                     // The non-empty `dimensions` route this through the A2A
                     // arm of `compile_ltm_synthetic_fragment`, which compiles
@@ -1318,7 +1318,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         };
         Some(LtmSyntheticVar {
             name,
-            equation: datamodel::Equation::Scalar(equation),
+            equation: LtmEquation::scalar(equation),
             dimensions: vec![], // scalar -- one variable per target element
             // bracketed name -> routed direct by `assemble_module`.
             compile_directly: false,
@@ -2282,8 +2282,9 @@ pub(super) fn emit_per_shape_link_scores(
                 // behavior where such edges produced a scalar link score.
                 lsv.equation = retarget_ltm_equation_dims(lsv.equation, &target_dims);
                 // A non-`Bare` shape carries a partial that the (from, to)-
-                // keyed salsa compilation path (`link_score_equation_text`,
-                // always `RefShape::Bare`) cannot reproduce: a
+                // keyed salsa compilation path (`compile_ltm_var_fragment` ->
+                // `link_score_equation_text_shaped(.., Bare)`) cannot
+                // reproduce: a
                 // `Wildcard`/`DynamicIndex` reference into a scalar target
                 // would have its whole subscript wrapped in `PREVIOUS()` and
                 // the ceteris-paribus numerator zeroed. Force `assemble_module`
@@ -2560,7 +2561,7 @@ fn emit_per_element_link_scores(
             ) {
                 Ok(equation) => edge_vars.push(LtmSyntheticVar {
                     name,
-                    equation: datamodel::Equation::Scalar(equation),
+                    equation: LtmEquation::scalar(equation),
                     dimensions: vec![], // scalar -- one variable per (row, element)
                     // bracketed name -> routed direct by `assemble_module`.
                     compile_directly: false,
@@ -2699,7 +2700,7 @@ fn iterated_feeder_row_scores(
         ) {
             Ok(equation) => vars.push(LtmSyntheticVar {
                 name,
-                equation: datamodel::Equation::Scalar(equation),
+                equation: LtmEquation::scalar(equation),
                 dimensions: vec![], // scalar -- one variable per read row
                 // bracketed name -> routed direct by `assemble_module`.
                 compile_directly: false,
@@ -2787,14 +2788,14 @@ pub(super) fn emit_source_to_agg_link_scores(
         ) {
             Ok(text) => {
                 let equation = if agg.result_dims.is_empty() {
-                    datamodel::Equation::Scalar(text)
+                    LtmEquation::scalar(text)
                 } else {
                     // An arrayed agg's feeder score is per-slot: the agg's own
                     // equation text is already ApplyToAll-compatible over
                     // `result_dims` (it is the agg aux's own equation shape),
                     // and the bare agg/feeder references resolve same-element
                     // / broadcast respectively in A2A context.
-                    datamodel::Equation::ApplyToAll(agg.result_dims.clone(), text)
+                    LtmEquation::apply_to_all(agg.result_dims.clone(), text)
                 };
                 vars.push(LtmSyntheticVar {
                     name,
@@ -2854,9 +2855,9 @@ pub(super) fn emit_source_to_agg_link_scores(
     // would be emitted (silently zeroing the synthetic agg's loop score).
     // Mirrors the agg-aux emission above.
     let agg_eqn = if agg.result_dims.is_empty() {
-        datamodel::Equation::Scalar(agg.equation_text.clone())
+        LtmEquation::scalar(agg.equation_text.clone())
     } else {
-        datamodel::Equation::ApplyToAll(agg.result_dims.clone(), agg.equation_text.clone())
+        LtmEquation::apply_to_all(agg.result_dims.clone(), agg.equation_text.clone())
     };
     let Some(agg_var) = reconstruct_ltm_var_lowered(db, &agg.name, &agg_eqn, model, project) else {
         return;
@@ -3016,7 +3017,7 @@ pub(super) fn emit_source_to_agg_link_scores(
                 };
                 vars.push(LtmSyntheticVar {
                     name: var_name,
-                    equation: datamodel::Equation::Scalar(equation),
+                    equation: LtmEquation::scalar(equation),
                     dimensions: vec![],
                     compile_directly: false,
                 });
@@ -3098,7 +3099,7 @@ pub(super) fn emit_source_to_agg_link_scores(
         };
         vars.push(LtmSyntheticVar {
             name: var_name,
-            equation: datamodel::Equation::Scalar(equation),
+            equation: LtmEquation::scalar(equation),
             dimensions: vec![],
             // bracketed name (+ subscripted synthetic agg) -> routed direct.
             compile_directly: false,
@@ -3462,7 +3463,7 @@ pub(super) fn emit_agg_to_target_link_scores(
             ) {
                 Ok(equation) => vars.push(LtmSyntheticVar {
                     name,
-                    equation: datamodel::Equation::Scalar(equation),
+                    equation: LtmEquation::scalar(equation),
                     dimensions: vec![],
                     // synthetic agg on the `from` side -> routed direct already.
                     compile_directly: false,
@@ -3530,7 +3531,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                 ) {
                     Ok(equation) => edge_vars.push(LtmSyntheticVar {
                         name,
-                        equation: datamodel::Equation::Scalar(equation),
+                        equation: LtmEquation::scalar(equation),
                         dimensions: vec![],
                         // synthetic agg on `from` + bracketed `to` -> routed direct.
                         compile_directly: false,
@@ -3621,7 +3622,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                 match equation {
                     Ok(equation) => edge_vars.push(LtmSyntheticVar {
                         name,
-                        equation: datamodel::Equation::Scalar(equation),
+                        equation: LtmEquation::scalar(equation),
                         dimensions: vec![],
                         // synthetic agg on `from` + bracketed `to` -> routed direct.
                         compile_directly: false,

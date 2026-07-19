@@ -1807,9 +1807,9 @@ fn source_to_agg_hop_polarity(
     // not a model variable, so the graph's variable map has no AST for it).
     // Mirrors `emit_source_to_agg_link_scores`' reconstruction.
     let agg_eqn = if agg.result_dims.is_empty() {
-        datamodel::Equation::Scalar(agg.equation_text.clone())
+        super::LtmEquation::scalar(agg.equation_text.clone())
     } else {
-        datamodel::Equation::ApplyToAll(agg.result_dims.clone(), agg.equation_text.clone())
+        super::LtmEquation::apply_to_all(agg.result_dims.clone(), agg.equation_text.clone())
     };
     let Some(agg_var) =
         super::parse::reconstruct_ltm_var_lowered(db, &agg.name, &agg_eqn, model, project)

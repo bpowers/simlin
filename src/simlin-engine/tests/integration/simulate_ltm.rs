@@ -17,7 +17,7 @@ use simlin_engine::common::{Canonical, Ident};
 #[allow(deprecated)]
 use simlin_engine::db::model_element_loop_circuits;
 use simlin_engine::db::{
-    DetectedLoop, DetectedLoopPolarity, SimlinDb, causal_graph_from_edges,
+    DetectedLoop, DetectedLoopPolarity, LtmEquation, SimlinDb, causal_graph_from_edges,
     causal_graph_from_element_edges, compile_project_incremental, model_causal_edges,
     model_cycle_partitions, model_detected_loops, model_element_causal_edges,
     model_element_cycle_partitions, model_loop_circuits, model_loop_circuits_tiered,
@@ -6856,7 +6856,8 @@ fn test_iterated_dim_subscript_link_score_is_bare_and_simulates() {
     // The `level -> row_val` edge is same-dimension A2A (both over Region),
     // so the link score is `Equation::ApplyToAll` over Region (per-element).
     match &level_to_row_val.equation {
-        simlin_engine::datamodel::Equation::ApplyToAll(dims, text) => {
+        LtmEquation::ApplyToAll(dims, arm) => {
+            let text = &arm.text;
             assert_eq!(
                 dims,
                 &vec!["Region".to_string()],
@@ -7311,7 +7312,7 @@ fn test_disjoint_dim_arrayed_target_per_source_element_link_scores() {
     );
     // Each per-source-element link score is Equation::Arrayed over target's dims.
     match &m_var.equation {
-        simlin_engine::datamodel::Equation::Arrayed(dims, elements, _, _) => {
+        LtmEquation::Arrayed { dims, elements, .. } => {
             assert_eq!(
                 dims,
                 &vec!["D1".to_string(), "D2".to_string()],
@@ -7324,8 +7325,8 @@ fn test_disjoint_dim_arrayed_target_per_source_element_link_scores() {
             let slot = |elem: &str| -> &str {
                 elements
                     .iter()
-                    .find(|(e, _, _, _)| e == elem)
-                    .map(|(_, eq, _, _)| eq.as_str())
+                    .find(|(e, _)| e == elem)
+                    .map(|(_, arm)| arm.text.as_str())
                     .unwrap_or_else(|| panic!("slot {elem:?} not found in {elements:?}"))
             };
             let ax = slot("a,x");

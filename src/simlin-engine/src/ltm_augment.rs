@@ -19,6 +19,7 @@ use crate::ltm::{Loop, normalize_module_ref, split_node_subscript, strip_subscri
 use crate::variable::{Variable, identifier_set};
 use std::collections::{HashMap, HashSet};
 
+use crate::db::LtmEquation;
 use crate::db::RefShape;
 use crate::db::ltm_ir::{
     OccurrenceAxis, OccurrenceRef, OccurrenceSite, OtherDepVerdict, derive_other_dep_verdict,
@@ -3056,7 +3057,7 @@ pub(crate) fn link_score_var_name(from: &str, to: &str, shape: &RefShape) -> Str
 /// Generate absolute loop score variables for all loops.
 ///
 /// Emits one `$⁚ltm⁚loop_score⁚{id}` entry per loop, returning the variable
-/// name plus the *dimension-shaped* `datamodel::Equation` it should carry:
+/// name plus the *dimension-shaped* typed [`LtmEquation`] it should carry:
 ///
 /// - **Scalar loops** (`dimensions` empty): `Equation::Scalar`, the product of
 ///   the loop's link-score references.
@@ -3091,7 +3092,7 @@ pub(crate) fn generate_loop_score_variables(
     emitted_link_score_names: &HashSet<String>,
     dm_dims: &[datamodel::Dimension],
     overrides: &LoopLinkOverrides,
-) -> Vec<(String, datamodel::Equation)> {
+) -> Vec<(String, LtmEquation)> {
     let mut loop_vars = Vec::with_capacity(loops.len());
 
     // Loop-score tracing is a benchmarking/diagnostic aid compiled in only
@@ -3131,8 +3132,6 @@ pub(crate) fn generate_loop_score_variables(
 /// at power-of-two sample points plus every 10,000 loops. Enable it with
 /// `cargo run --release --example ltm_full_bench --features ltm_bench -- <mdl>`.
 mod loop_score_trace {
-    use crate::datamodel;
-
     #[cfg(feature = "ltm_bench")]
     pub(super) struct LoopScoreTrace {
         loop_score_bytes: u64,
@@ -3153,7 +3152,7 @@ mod loop_score_trace {
 
         /// Accumulate `equation`'s text bytes and, on a sample point, log the
         /// running total alongside RSS. `n` is the 1-based loop index.
-        pub(super) fn record(&mut self, n: usize, equation: &datamodel::Equation) {
+        pub(super) fn record(&mut self, n: usize, equation: &crate::db::LtmEquation) {
             self.loop_score_bytes += equation_text_len(equation) as u64;
             if should_trace(n) {
                 eprintln!(
@@ -3176,16 +3175,20 @@ mod loop_score_trace {
         }
     }
 
-    /// Total equation-text bytes of a `datamodel::Equation`.
+    /// Total equation-text bytes of an `LtmEquation` (the diagnostic text).
     #[cfg(feature = "ltm_bench")]
-    fn equation_text_len(equation: &datamodel::Equation) -> usize {
+    fn equation_text_len(equation: &crate::db::LtmEquation) -> usize {
+        use crate::db::LtmEquation;
         match equation {
-            datamodel::Equation::Scalar(text) | datamodel::Equation::ApplyToAll(_, text) => {
-                text.len()
-            }
-            datamodel::Equation::Arrayed(_, elements, default, _) => {
-                elements.iter().map(|(_, eq, _, _)| eq.len()).sum::<usize>()
-                    + default.as_ref().map(String::len).unwrap_or(0)
+            LtmEquation::Scalar(arm) | LtmEquation::ApplyToAll(_, arm) => arm.text.len(),
+            LtmEquation::Arrayed {
+                elements, default, ..
+            } => {
+                elements
+                    .iter()
+                    .map(|(_, arm)| arm.text.len())
+                    .sum::<usize>()
+                    + default.as_ref().map(|a| a.text.len()).unwrap_or(0)
             }
         }
     }
@@ -3244,7 +3247,7 @@ mod loop_score_trace {
             LoopScoreTrace
         }
         #[inline(always)]
-        pub(super) fn record(&mut self, _n: usize, _equation: &datamodel::Equation) {}
+        pub(super) fn record(&mut self, _n: usize, _equation: &crate::db::LtmEquation) {}
         #[inline(always)]
         pub(super) fn done(&self, _loop_count: usize) {}
     }
@@ -3271,17 +3274,17 @@ fn all_links_resolve_bare(loop_item: &Loop, emitted: &HashSet<String>) -> bool {
     })
 }
 
-/// Build the dimension-shaped `datamodel::Equation` for one loop's score
+/// Build the dimension-shaped typed [`LtmEquation`] for one loop's score
 /// variable. See [`generate_loop_score_variables`] for the three cases.
 fn generate_dimensioned_loop_score_equation(
     loop_item: &Loop,
     emitted: &HashSet<String>,
     dm_dims: &[datamodel::Dimension],
     overrides: &LoopLinkOverrides,
-) -> Option<datamodel::Equation> {
+) -> Option<LtmEquation> {
     if loop_item.dimensions.is_empty() {
         return try_generate_loop_score_equation(loop_item, emitted, overrides)
-            .map(datamodel::Equation::Scalar);
+            .map(LtmEquation::scalar);
     }
     // Prefer the compact ApplyToAll form whenever it is correct (every link
     // resolves through a Bare A2A name), regardless of whether per-slot
@@ -3293,7 +3296,7 @@ fn generate_dimensioned_loop_score_equation(
     // compilation can synthesize a missing-dependency zero stub.
     if loop_item.slot_links.is_empty() || all_links_resolve_bare(loop_item, emitted) {
         return try_generate_loop_score_equation(loop_item, emitted, overrides)
-            .map(|text| datamodel::Equation::ApplyToAll(loop_item.dimensions.clone(), text));
+            .map(|text| LtmEquation::apply_to_all(loop_item.dimensions.clone(), text));
     }
 
     // Per-slot equations: enumerate the loop's full dimension element space
@@ -3319,15 +3322,15 @@ fn generate_dimensioned_loop_score_equation(
         .iter()
         .map(|(t, l)| (t.as_str(), l.as_slice()))
         .collect();
-    let mut elements = Vec::with_capacity(slot_keys.len());
+    let mut elements: Vec<(String, String)> = Vec::with_capacity(slot_keys.len());
     for tuple in &slot_keys {
         let text = match by_tuple.get(tuple.as_str()) {
             Some(links) => generate_link_product(links, emitted, None)?,
             None => "0".to_string(),
         };
-        elements.push((tuple.clone(), text, None, None));
+        elements.push((tuple.clone(), text));
     }
-    Some(datamodel::Equation::Arrayed(
+    Some(LtmEquation::arrayed(
         loop_item.dimensions.clone(),
         elements,
         None,
@@ -3366,9 +3369,9 @@ fn target_iterated_dim_names_canonical(to_var: &Variable) -> Vec<String> {
 /// Exposed as `generate_link_score_equation_for_link` for use by tracked
 /// functions in `db.rs`.
 ///
-/// Returns a [`datamodel::Equation`] whose variant matches the *target*
-/// variable's shape: `Equation::Scalar` for a scalar target,
-/// `Equation::ApplyToAll(target_dims, _)` for an arrayed target (so the
+/// Returns a typed [`LtmEquation`] whose variant matches the *target*
+/// variable's shape: scalar for a scalar target,
+/// apply-to-all over `target_dims` for an arrayed target (so the
 /// compiler expands the formula per element). `target_dims` uses the
 /// target's datamodel dimension names; the link emission loop overwrites
 /// them with the link-score-dimensions policy result, which is the same
@@ -3404,7 +3407,7 @@ pub(crate) fn generate_link_score_equation_for_link(
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
     dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
     to_occurrences: &[OccurrenceSite],
-) -> Result<Equation, PartialEquationError> {
+) -> Result<LtmEquation, PartialEquationError> {
     generate_link_score_equation(
         from,
         to,
@@ -3436,7 +3439,7 @@ fn generate_link_score_equation(
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
     dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
     to_occurrences: &[OccurrenceSite],
-) -> Result<Equation, PartialEquationError> {
+) -> Result<LtmEquation, PartialEquationError> {
     // Check if this is a stock-to-flow link
     let is_stock_to_flow = matches!(all_vars.get(from), Some(Variable::Stock { .. }))
         && matches!(to_var, Variable::Var { is_flow: true, .. });
@@ -3557,10 +3560,10 @@ fn target_equation_dims(var: &Variable) -> Option<Vec<String>> {
 /// Build the link-score [`Equation`] for a target with the given guard-form
 /// equation `text`: `Equation::Scalar` for a scalar target,
 /// `Equation::ApplyToAll(target_dims, text)` for an arrayed target.
-fn link_score_equation_for_target(text: String, to_var: &Variable) -> Equation {
+fn link_score_equation_for_target(text: String, to_var: &Variable) -> LtmEquation {
     match target_equation_dims(to_var) {
-        Some(dims) => Equation::ApplyToAll(dims, text),
-        None => Equation::Scalar(text),
+        Some(dims) => LtmEquation::apply_to_all(dims, text),
+        None => LtmEquation::scalar(text),
     }
 }
 
@@ -3626,7 +3629,7 @@ fn build_arrayed_link_score_equation(
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
     dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
     to_occurrences: &[OccurrenceSite],
-) -> Result<Equation, PartialEquationError> {
+) -> Result<LtmEquation, PartialEquationError> {
     // The #511 iterated-dimension context for the per-slot partials: each
     // per-element slot can itself reference `from` by an iterated dimension
     // of the *target*'s dimension space. `target_ast_dims`' canonical names
@@ -3707,12 +3710,7 @@ fn build_arrayed_link_score_equation(
         per_elem.iter().collect();
     sorted_slots.sort_by(|a, b| a.0.cmp(b.0));
 
-    let elements: Vec<(
-        String,
-        String,
-        Option<String>,
-        Option<datamodel::GraphicalFunction>,
-    )> = sorted_slots
+    let elements: Vec<(String, String)> = sorted_slots
         .iter()
         .enumerate()
         .map(|(slot, (elem, expr))| {
@@ -3720,8 +3718,6 @@ fn build_arrayed_link_score_equation(
             Ok((
                 elem.as_str().to_string(),
                 slot_equation(expr, gf_table_ref.as_deref(), slot as u16)?,
-                None,
-                None,
             ))
         })
         .collect::<Result<_, PartialEquationError>>()?;
@@ -3737,7 +3733,7 @@ fn build_arrayed_link_score_equation(
         })
         .transpose()?;
 
-    Ok(Equation::Arrayed(
+    Ok(LtmEquation::arrayed(
         target_dim_names,
         elements,
         default_slot,
@@ -3854,7 +3850,7 @@ fn generate_auxiliary_to_auxiliary_equation(
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
     dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
     to_occurrences: &[OccurrenceSite],
-) -> Result<Equation, PartialEquationError> {
+) -> Result<LtmEquation, PartialEquationError> {
     use crate::ast::Ast;
 
     let to_q = quote_ident(to.as_str());
@@ -4090,7 +4086,7 @@ fn generate_flow_to_stock_equation(
     stock: &str,
     flow_var: &Variable,
     stock_var: &Variable,
-) -> Equation {
+) -> LtmEquation {
     // Check if this flow is an inflow or outflow
     let is_inflow = if let Variable::Stock { inflows, .. } = stock_var {
         inflows.iter().any(|f| f.as_str() == flow)
@@ -4161,7 +4157,7 @@ fn generate_stock_to_flow_equation(
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
     dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
     to_occurrences: &[OccurrenceSite],
-) -> Result<Equation, PartialEquationError> {
+) -> Result<LtmEquation, PartialEquationError> {
     // For stock-to-flow, we need to calculate how the stock influences the flow
     // This is similar to auxiliary-to-auxiliary but we know the 'from' is a stock
     use crate::ast::Ast;

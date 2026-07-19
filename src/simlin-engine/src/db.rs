@@ -112,9 +112,9 @@ pub use dep_graph::{ModelDepGraphResult, ResolvedScc, SccPhase, model_dependency
 mod ltm;
 use ltm::*;
 pub use ltm::{
-    LtmImplicitVarMeta, ShapedLinkScore, compile_ltm_var_fragment, link_score_equation_text_shaped,
-    model_ltm_implicit_module_refs, model_ltm_implicit_var_info, model_ltm_mode,
-    model_ltm_var_name_index, model_ltm_variables,
+    LtmArm, LtmEquation, LtmImplicitVarMeta, ShapedLinkScore, compile_ltm_var_fragment,
+    link_score_equation_text_shaped, model_ltm_implicit_module_refs, model_ltm_implicit_var_info,
+    model_ltm_mode, model_ltm_var_name_index, model_ltm_variables,
 };
 // The cross-agg petal-stitching core, shared with `crate::ltm_finding`'s
 // discovery-mode recovery (GH #696).
@@ -384,18 +384,24 @@ impl Db for SimlinDb {}
 
 /// A single LTM synthetic variable definition (name + equation).
 ///
-/// `equation` carries its own dimensionality (`Equation::Scalar`,
-/// `Equation::ApplyToAll`, or `Equation::Arrayed`). The redundant
-/// `dimensions` field is retained because layout sizing (`compute_layout`)
-/// and discovery-time offset parsing (`parse_link_offsets`) key off it;
-/// every constructor keeps `equation`'s dimension names in lockstep with
+/// `equation` is a typed [`LtmEquation`] -- the authoritative, already-parsed
+/// `Expr0` AST the fragment compiler and the layout implicit-var scan consume
+/// directly. LTM generated equations are internal compiler artifacts, not
+/// user-authored source, so normal operation never prints them to
+/// `datamodel::Equation` text and re-parses them back to compile (GH #965
+/// storage/compile boundary; the former transient-`Aux` reparse ran 2-3 times
+/// per equation, GH #655 finding 3). The equation carries its own
+/// dimensionality (`LtmEquation::{Scalar, ApplyToAll, Arrayed}`); the redundant
+/// `dimensions` field is retained because layout sizing (`compute_layout`) and
+/// discovery-time offset parsing (`parse_link_offsets`) key off it, and every
+/// constructor keeps `equation`'s dimension names in lockstep with
 /// `dimensions`. When `dimensions` is non-empty the variable occupies
 /// `product(dim_lengths)` layout slots instead of 1.
 ///
 /// `compile_directly` forces `assemble_module`'s LTM pass to compile this
 /// var's `equation` verbatim instead of re-deriving it from the
 /// `(from, to)`-keyed salsa cache (`compile_ltm_var_fragment` ->
-/// `link_score_equation_text`, which always uses `RefShape::Bare`). It is
+/// `link_score_equation_text_shaped(.., Bare)`). It is
 /// set by `emit_per_shape_link_scores` for a scalar link score whose
 /// underlying reference shape is *not* `Bare` -- a `Wildcard`/`DynamicIndex`
 /// reference into a scalar target (e.g. `total = arr[idx]`), where the salsa
@@ -403,15 +409,15 @@ impl Db for SimlinDb {}
 /// ceteris-paribus numerator. (Element-subscripted / `$⁚ltm⁚agg⁚{n}` link
 /// scores already route directly via name checks; setting it for them is harmless.)
 //
-// `equation: datamodel::Equation` blocks deriving `Eq` (the embedded
-// `GraphicalFunction` carries `f64` points) and unconditional `Debug`
-// (datamodel types only derive `Debug` under `debug-derive`, off in WASM /
-// pysimlin). Salsa only needs `PartialEq` for incrementality.
+// `equation: LtmEquation` blocks deriving `Eq` (the embedded `Expr0` carries
+// `f64` constants) and unconditional `Debug` (its sub-types only derive `Debug`
+// under `debug-derive`, off in WASM / pysimlin). Salsa only needs `PartialEq`
+// for incrementality.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, salsa::Update)]
 pub struct LtmSyntheticVar {
     pub name: String,
-    pub equation: datamodel::Equation,
+    pub equation: LtmEquation,
     pub dimensions: Vec<String>,
     pub compile_directly: bool,
 }
@@ -698,13 +704,12 @@ fn module_output_ref_in_document_order(
 }
 
 /// Equation for a module-involved link score (`from` and/or `to` is a
-/// module node in the parent causal graph). Shared verbatim by the
-/// `(from, to)`-keyed [`link_score_equation_text`] and the per-shape
-/// [`crate::db::link_score_equation_text_shaped`] so the two never drift
-/// (the shaped twin's `RefShape` does not change a module link's
-/// equation: modules are scalar nodes whose composite-reference /
-/// ceteris-paribus / unit-transfer formulas don't reach into the target's
-/// AST shape).
+/// module node in the parent causal graph). Called by the per-shape
+/// [`crate::db::link_score_equation_text_shaped`]; a module link's equation
+/// is independent of `RefShape` (modules are scalar nodes whose
+/// composite-reference / ceteris-paribus / unit-transfer formulas don't
+/// reach into the target's AST shape), so the scalar Bare score the compile
+/// path reads and the reported score are the same value.
 ///
 /// Three cases, each preferring a faithful link score and only falling
 /// back to the magnitude-1 [`black_box_unit_transfer_equation`] (NOT the
@@ -735,7 +740,7 @@ pub(crate) fn module_link_score_equation(
     to_name: &str,
     from_var: Option<&crate::variable::Variable>,
     to_var: &crate::variable::Variable,
-) -> Option<datamodel::Equation> {
+) -> Option<LtmEquation> {
     use crate::common::{Canonical, Ident};
 
     let from_ident = Ident::<Canonical>::new(from_name);
@@ -808,9 +813,10 @@ pub(crate) fn module_link_score_equation(
     let equation = if !from_is_module && to_is_module {
         // variable -> module: the edge feeds one of `to`'s input ports.
         let crate::variable::Variable::Module { inputs, .. } = to_var else {
-            return Some(datamodel::Equation::Scalar(
-                black_box_unit_transfer_equation(from_name, &module_output_ref(to_name)),
-            ));
+            return Some(LtmEquation::scalar(black_box_unit_transfer_equation(
+                from_name,
+                &module_output_ref(to_name),
+            )));
         };
         match inputs.iter().find(|i| i.src == from_ident) {
             Some(input) => match composite_ref_for_port(to_name, input.dst.as_str()) {
@@ -826,9 +832,10 @@ pub(crate) fn module_link_score_equation(
         // module node rather than the bare name.
         let from_output = module_output_ref(from_name);
         let crate::variable::Variable::Module { inputs, .. } = to_var else {
-            return Some(datamodel::Equation::Scalar(
-                black_box_unit_transfer_equation(&from_output, &module_output_ref(to_name)),
-            ));
+            return Some(LtmEquation::scalar(black_box_unit_transfer_equation(
+                &from_output,
+                &module_output_ref(to_name),
+            )));
         };
         let matching_input = inputs
             .iter()
@@ -844,58 +851,18 @@ pub(crate) fn module_link_score_equation(
         // the unit transfer if the reference can't be located.
         //
         // Which output to hold live (GH #971): the reference-site IR
-        // enumerates the module-output composites in DOCUMENT order, so take
-        // the first that names `from` -- a deterministic pick across
-        // processes, unlike the former `identifier_set().find()` over a
-        // per-process-random `HashSet`. The `identifier_set` scan is kept
-        // only as a defensive fallback for the (unexpected) case where the IR
-        // recorded no matching `ModuleOutput` occurrence for `to`, preserving
-        // the historical set of edges that receive a real partial.
-        let from_output = module_output_ref_in_document_order(
-            db, model, project, from_name, to_name,
-        )
-        .or_else(|| {
-            // GH #971 / Track A stage 3 prep: the deterministic IR pick above
-            // should name the live output for every module->variable edge that
-            // receives a real partial (the occurrence IR enumerates every
-            // module-output composite `to` reads, in document order). The
-            // per-process-random `identifier_set` scan survives ONLY as a
-            // defensive fallback for the (expected-unreachable) case where the
-            // IR recorded no `ModuleOutput` occurrence for `to`. Mark LOUDLY
-            // whenever the scan actually RESCUES (IR missed, scan found one):
-            // stage 3 needs a fired-or-not signal before it can delete the scan
-            // with confidence. The rescued ref itself is unchanged -- this only
-            // warns; it never alters the emitted score.
-            let rescued = to_var
-                .ast()
-                .map(|ast| crate::variable::identifier_set(ast, &[], None))
-                .and_then(|deps| {
-                    let prefix = format!("{from_name}\u{00B7}");
-                    deps.into_iter()
-                        .find(|d| d.as_str().starts_with(&prefix))
-                        .map(|d| d.to_string())
-                });
-            if rescued.is_some() {
-                // In test/debug builds the assertion is the loud marker (the
-                // scan is meant to be dead, so a fired assert is real signal a
-                // module-output occurrence is missing from the IR). In release
-                // builds `debug_assert!` is a no-op, so also emit a warning line
-                // -- the repo's `eprintln!` idiom for an unexpected internal
-                // condition (cf. `model.rs`, `dimensions.rs`).
-                debug_assert!(
-                    false,
-                    "GH #971: module-output IR pick missed `{from_name}\u{00B7}` \
-                     in `{to_name}`; the identifier_set fallback rescued it. The \
-                     occurrence IR should enumerate every module-output composite \
-                     (Track A stage 3 deletes this fallback once it is proven dead)."
-                );
-                eprintln!(
-                    "warning: LTM module-output IR pick missed `{from_name}\u{00B7}` \
-                     in `{to_name}`; used the identifier_set fallback (GH #971)."
-                );
-            }
-            rescued
-        });
+        // (`model_ltm_reference_sites`) enumerates every module-output
+        // composite `to` reads, in DOCUMENT order, so take the first that
+        // names `from` -- a deterministic pick across processes. This is the
+        // single source of the live-output choice: the former
+        // `identifier_set().find()` fallback scan (a per-process-random
+        // `HashSet` walk kept behind a loud marker while GH #971 proved the IR
+        // pick dominant) is deleted. A `None` here means the IR recorded no
+        // module-output occurrence for `to` -- a genuine structural miss that
+        // falls through to the unit transfer, exactly as an unlocatable
+        // reference always did.
+        let from_output =
+            module_output_ref_in_document_order(db, model, project, from_name, to_name);
         match from_output {
             Some(output_ref) => {
                 let output_ident = Ident::<Canonical>::new(&output_ref);
@@ -943,124 +910,7 @@ pub(crate) fn module_link_score_equation(
         }
     };
 
-    Some(datamodel::Equation::Scalar(equation))
-}
-
-#[salsa::tracked(returns(ref))]
-pub fn link_score_equation_text<'db>(
-    db: &'db dyn Db,
-    link_id: LtmLinkId<'db>,
-    model: SourceModel,
-    project: SourceProject,
-) -> Option<LtmSyntheticVar> {
-    use crate::common::{Canonical, Ident};
-
-    let from_name = link_id.link_from(db);
-    let to_name = link_id.link_to(db);
-    let from_ident = Ident::<Canonical>::new(from_name);
-    let to_ident = Ident::<Canonical>::new(to_name);
-
-    let from_var = reconstruct_single_variable(db, model, project, from_name);
-    let to_var = reconstruct_single_variable(db, model, project, to_name)?;
-
-    let var_name = format!(
-        "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
-        from_name, to_name
-    );
-
-    let from_is_module = from_var.as_ref().is_some_and(|v| v.is_module());
-    let to_is_module = to_var.is_module();
-
-    // Module-involved links: composite reference, ceteris-paribus, or the
-    // signed unit-transfer fallback, decided by `module_link_score_equation`
-    // (shared with the per-shape twin so the two never drift).
-    if from_is_module || to_is_module {
-        return module_link_score_equation(
-            db,
-            model,
-            project,
-            from_name,
-            to_name,
-            from_var.as_ref(),
-            &to_var,
-        )
-        .map(|equation| LtmSyntheticVar {
-            name: var_name,
-            equation,
-            dimensions: vec![],
-            compile_directly: false,
-        });
-    }
-
-    // Standard ceteris-paribus formula for non-module links.
-    //
-    // `link_score_equation_text` keys by `(from, to)` only -- no per-shape
-    // info. The Bare shape, empty `source_dim_elements`, and `None`
-    // iterated-dim context reproduce the original pre-Phase-3 behavior (the
-    // GH #511 context is `None`-safe here: this legacy path is only reached
-    // for scalar-target link scores). Per-shape callers use the `_shaped` fn.
-    let mut all_vars = HashMap::new();
-    if let Some(ref fv) = from_var {
-        all_vars.insert(from_ident.clone(), fv.clone());
-    }
-    all_vars.insert(to_ident.clone(), to_var.clone());
-    // The target's per-occurrence access-shape IR -- the SAME single classifier
-    // family the shaped twin (`link_score_equation_text_shaped`) threads. It is
-    // NOT optional: the ceteris-paribus wrap's GH #517 reducer-freeze arm
-    // (`subtree_has_live_shape`) consults the stream unconditionally, so passing
-    // an empty stream here (the pre-fix bug) made the wrap freeze a reducer whole
-    // where the shaped query recursed into it -- deriving a DIFFERENT partial for
-    // the very same scalar Bare score whenever the live source appears bare inside
-    // a reducer of the target's equation. Assembly compiles this legacy fragment
-    // while `model_ltm_variables` reports the shaped one, so the divergence made
-    // the VM simulate an equation that disagreed with the one reported. Threading
-    // the real stream single-sources the two.
-    let ref_sites = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
-    let to_occurrences: &[crate::db::ltm_ir::OccurrenceSite] = ref_sites
-        .occurrences
-        .get(to_name)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    // A `PartialEquationError` here means the target's equation text could
-    // not be parsed for the ceteris-paribus partial (GH #311). Skip the
-    // link-score variable and surface a `Warning` instead of emitting a
-    // silently non-ceteris-paribus score; `model_ltm_fragment_diagnostics`
-    // never sees this case because the bad equation would compile cleanly.
-    let equation = match crate::ltm_augment::generate_link_score_equation_for_link(
-        &from_ident,
-        &to_ident,
-        &RefShape::Bare,
-        &[],
-        &to_var,
-        &all_vars,
-        None,
-        // Legacy (from, to)-keyed path: no dims context is threaded at
-        // all, so the GH #526 other-dep check keeps the permissive
-        // collapse here too. (This path is only consumed for a SCALAR target,
-        // whose empty iterated-dim space makes the other-dep verdict
-        // `NotIterated` regardless of `dep_dims`, so omitting it is sound.)
-        None,
-        to_occurrences,
-    ) {
-        Ok(eqn) => eqn,
-        Err(err) => {
-            emit_ltm_partial_equation_warning(db, model, &var_name, &err);
-            return None;
-        }
-    };
-
-    // This legacy entry always emits a scalar link score. If the generator
-    // produced an arrayed variant for an arrayed target, collapse it to a
-    // scalar equation referencing the array vars directly -- the pre-Phase-3
-    // behavior this function reproduces.
-    let equation = ltm::scalarize_ltm_equation(equation);
-
-    Some(LtmSyntheticVar {
-        name: var_name,
-        equation,
-        dimensions: vec![],
-        compile_directly: false,
-    })
+    Some(LtmEquation::scalar(equation))
 }
 
 // `link_score_equation_text_shaped` lives in `db/ltm/compile.rs` (where
@@ -1134,7 +984,7 @@ fn generate_max_abs_selection(
                 let acc = acc_name(helpers.len());
                 helpers.push(LtmSyntheticVar {
                     name: acc.clone(),
-                    equation: datamodel::Equation::Scalar(selection),
+                    equation: LtmEquation::scalar(selection),
                     dimensions: vec![],
                     compile_directly: false,
                 });
@@ -1145,7 +995,7 @@ fn generate_max_abs_selection(
             let final_acc = acc_name(helpers.len());
             helpers.push(LtmSyntheticVar {
                 name: final_acc.clone(),
-                equation: datamodel::Equation::Scalar(selection),
+                equation: LtmEquation::scalar(selection),
                 dimensions: vec![],
                 compile_directly: false,
             });

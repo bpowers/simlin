@@ -697,13 +697,13 @@ fn test_parse_link_offsets_a2a_expansion() {
     let ltm_vars = vec![
         crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}link_score\u{205A}birth_rate\u{2192}births".to_string(),
-            equation: datamodel::Equation::Scalar(String::new()),
+            equation: crate::db::LtmEquation::scalar(String::new()),
             dimensions: vec!["Region".to_string()],
             compile_directly: false,
         },
         crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}link_score\u{205A}scalar_a\u{2192}scalar_b".to_string(),
-            equation: datamodel::Equation::Scalar(String::new()),
+            equation: crate::db::LtmEquation::scalar(String::new()),
             dimensions: vec![],
             compile_directly: false,
         },
@@ -846,7 +846,7 @@ fn test_parse_link_offsets_scalar_source_projects_to_bare() {
 
     let ltm_vars = vec![crate::db::LtmSyntheticVar {
         name: "$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}growth".to_string(),
-        equation: datamodel::Equation::Scalar(String::new()),
+        equation: crate::db::LtmEquation::scalar(String::new()),
         dimensions: vec!["D1".to_string()],
         compile_directly: false,
     }];
@@ -910,7 +910,7 @@ fn test_parse_link_offsets_lower_dim_source_projects_and_broadcasts() {
 
     let ltm_vars = vec![crate::db::LtmSyntheticVar {
         name: "$\u{205A}ltm\u{205A}link_score\u{205A}boost\u{2192}growth".to_string(),
-        equation: datamodel::Equation::Scalar(String::new()),
+        equation: crate::db::LtmEquation::scalar(String::new()),
         dimensions: vec!["Region".to_string(), "Age".to_string()],
         compile_directly: false,
     }];
@@ -986,7 +986,7 @@ fn test_parse_link_offsets_fixed_index_from_a2a_expansion() {
 
     let ltm_vars = vec![crate::db::LtmSyntheticVar {
         name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}rel_pop".to_string(),
-        equation: datamodel::Equation::Scalar(String::new()),
+        equation: crate::db::LtmEquation::scalar(String::new()),
         dimensions: vec!["Region".to_string()],
         compile_directly: false,
     }];
@@ -1055,7 +1055,7 @@ fn test_parse_link_offsets_fixed_index_from_scalar() {
 
     let ltm_vars = vec![crate::db::LtmSyntheticVar {
         name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}total".to_string(),
-        equation: datamodel::Equation::Scalar(String::new()),
+        equation: crate::db::LtmEquation::scalar(String::new()),
         dimensions: vec![],
         compile_directly: false,
     }];
@@ -1187,13 +1187,13 @@ fn test_parse_link_offsets_dedupes_a2a_bare_over_fixed_index() {
     let ltm_vars = vec![
         crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share".to_string(),
-            equation: datamodel::Equation::Scalar(String::new()),
+            equation: crate::db::LtmEquation::scalar(String::new()),
             dimensions: vec!["Region".to_string()],
             compile_directly: false,
         },
         crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}share".to_string(),
-            equation: datamodel::Equation::Scalar(String::new()),
+            equation: crate::db::LtmEquation::scalar(String::new()),
             dimensions: vec!["Region".to_string()],
             compile_directly: false,
         },
