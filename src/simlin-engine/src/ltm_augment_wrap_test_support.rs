@@ -165,11 +165,7 @@ fn test_occurrence(
         reference: OccurrenceRef::Variable(ident.as_str().to_string()),
         shape,
         axes,
-        target_element: None,
-        routing: crate::db::ltm_ir::OccurrenceRouting::Direct,
         in_reducer: false,
-        reducer_keys: Vec::new(),
-        already_lagged: false,
         index_nested,
     }
 }

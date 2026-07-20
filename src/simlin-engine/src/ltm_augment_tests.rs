@@ -2941,7 +2941,7 @@ fn partial_freezes_whole_reducer_over_index_nested_live_source() {
 /// `PREVIOUS(PREVIOUS(g))`. This complements
 /// `partial_equation_does_not_rewrap_inside_previous` (which uses the
 /// two-argument SAMPLE-IF-TRUE `PREVIOUS(target, input)` shape) with the exact
-/// `to = from + PREVIOUS(g)` shape the stage-2 `occ.already_lagged` field must
+/// `to = from + PREVIOUS(g)` shape the wrap's structural PREVIOUS/INIT skip must
 /// reproduce.
 #[test]
 fn partial_leaves_already_lagged_other_dep_untouched() {
@@ -5307,18 +5307,14 @@ fn gh526_natural_and_unthreadable_other_deps_keep_collapse() {
 /// `arrayed_target_slot_scores` characterization golden.
 #[test]
 fn slot_occurrence_index_groups_every_slot() {
-    use crate::db::ltm_ir::{OccurrenceRouting, OccurrenceSite, SiteId};
+    use crate::db::ltm_ir::{OccurrenceSite, SiteId};
 
     let occ_at = |path: &[u16], name: &str| OccurrenceSite {
         site_id: SiteId(path.to_vec().into_boxed_slice()),
         reference: OccurrenceRef::Variable(name.to_string()),
         shape: RefShape::Bare,
         axes: Vec::new(),
-        target_element: None,
-        routing: OccurrenceRouting::Direct,
         in_reducer: false,
-        reducer_keys: Vec::new(),
-        already_lagged: false,
         index_nested: false,
     };
 

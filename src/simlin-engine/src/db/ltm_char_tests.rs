@@ -1433,8 +1433,8 @@ fn reducer_index_nested_freeze_preserves_loud_failure_not_silent_compile() {
 // only inside `PREVIOUS(g)` -- it is already lagged. The changed-first partial
 // holds `from` live and must LEAVE `PREVIOUS(g)` untouched
 // (`from + PREVIOUS(g)`), NOT re-wrap it to `PREVIOUS(PREVIOUS(g))` (a t-2
-// read). This pins the `already_lagged` selection semantics the stage-2 switch
-// must reproduce via `occ.already_lagged`: it suppresses the wrap/freeze of an
+// read). This pins the already-lagged selection semantics the wrap reproduces by
+// recognizing a `PREVIOUS`/`INIT` node structurally: it suppresses the wrap of an
 // already-lagged occurrence but not its live selection.
 // ---------------------------------------------------------------------------
 
