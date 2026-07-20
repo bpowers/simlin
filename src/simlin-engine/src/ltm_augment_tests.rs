@@ -5491,7 +5491,14 @@ fn per_element_pin_descends_into_range_endpoints() {
         "the fixture must record the range-bound occurrence, or the pin has \
          nothing to read and this test passes vacuously"
     );
-    let lowered = super::post_transform::pin_only_source_refs(ast, &ctx, &occ, &[]);
+    let mut unlowerable = false;
+    let lowered =
+        super::post_transform::pin_only_source_refs(ast, &ctx, &occ, &[], &mut unlowerable);
+    assert!(
+        !unlowerable,
+        "the range-bound occurrence IS recorded, so the pin must lower it rather than \
+         reporting it unlowerable"
+    );
     let text = print_eqn(&lowered);
 
     assert!(
@@ -5626,5 +5633,129 @@ fn per_element_pin_reaches_inside_a_whole_frozen_reducer() {
     assert!(
         text.contains("pop[boston, young]"),
         "the LIVE occurrence must keep the bare row spelling; got: {text}"
+    );
+}
+
+/// A `PerElement` source occurrence inside a `LOOKUP` **table** argument is
+/// declined LOUDLY, never emitted un-pinned.
+///
+/// `db::ltm_ir` records no occurrence under a table argument
+/// (`BuiltinContents::LookupTable(_) => {}` -- "a graphical-function table
+/// reference is static data, not a causal edge"). That is right about
+/// ATTRIBUTION, but the pin such a reference needs is about COMPILABILITY: with
+/// no per-axis classification to pin it, `pop[region, young]` keeps its
+/// DIMENSION-name subscript, which cannot resolve in a scalar link-score
+/// fragment. The fragment is then dropped, the variable keeps a layout slot with
+/// no bytecode, and the score reads a constant 0.
+///
+/// This was a REGRESSION introduced when the row pinning moved into the wrap: the
+/// previous pass over the wrapped tree re-classified with the Expr0 classifier,
+/// which needs no occurrence, so it pinned the table argument regardless. The
+/// wrap's IR-driven pinning correctly refuses to guess -- so it must say so
+/// through `WrapOutcome::missing_occurrence`, which the caller turns into a
+/// warned skip. No char golden reaches this shape (none has a `LOOKUP` inside a
+/// partial at all), so nothing else catches it.
+#[test]
+fn per_element_pin_declines_loudly_inside_a_lookup_table_arg() {
+    use crate::dimensions::DimensionsContext;
+    use crate::ltm_agg::AxisRead;
+
+    let region = make_named_dimension("region", &["nyc", "boston"]);
+    let age = make_named_dimension("age", &["young", "old"]);
+    let from_dims = vec![region, age];
+    let source_dim_elements = vec![
+        vec!["nyc".to_string(), "boston".to_string()],
+        vec!["young".to_string(), "old".to_string()],
+    ];
+    let source_dim_names = vec!["region".to_string(), "age".to_string()];
+    let target_iterated_dims = vec!["region".to_string()];
+    let dim_ctx = DimensionsContext::from(
+        [
+            datamodel::Dimension::named(
+                "region".to_string(),
+                vec!["nyc".to_string(), "boston".to_string()],
+            ),
+            datamodel::Dimension::named(
+                "age".to_string(),
+                vec!["young".to_string(), "old".to_string()],
+            ),
+        ]
+        .as_slice(),
+    );
+    let iter_ctx = IteratedDimCtx {
+        source_dim_names: &source_dim_names,
+        target_iterated_dims: &target_iterated_dims,
+        dep_dims: None,
+    };
+    let from = Ident::<Canonical>::new("pop");
+    let site_axes = vec![
+        AxisRead::Iterated {
+            dim: "region".to_string(),
+            source_dim: "region".to_string(),
+        },
+        AxisRead::Pinned("young".to_string()),
+    ];
+    let row_parts_bare = vec!["boston".to_string(), "young".to_string()];
+    let mut target_elem_by_dim = HashMap::new();
+    target_elem_by_dim.insert("region".to_string(), ("boston".to_string(), 1usize));
+
+    let deps = deps_set(&["input"]);
+    let ast = Expr0::new(
+        "pop[Region, young] + LOOKUP(pop[Region, young], input)",
+        LexerType::Equation,
+    )
+    .expect("fixture parses")
+    .expect("fixture is non-empty");
+    // The occurrence builder mirrors the IR's table-argument skip, so the
+    // table-arg occurrence is absent here exactly as it is in production.
+    let occurrences = build_wrap_test_occurrences(
+        &ast,
+        &from,
+        &deps,
+        &source_dim_elements,
+        Some(&iter_ctx),
+        Some(&dim_ctx),
+    );
+    let slot_occurrences = SlotOccurrences::new(&occurrences);
+    let occ = slot_occurrences.for_slot(0);
+    // Non-vacuity: the LIVE occurrence outside the LOOKUP is recorded (so the
+    // stream is not simply empty), while the table-argument one is not.
+    assert_eq!(
+        occurrences
+            .iter()
+            .filter(
+                |o| matches!(&o.reference, crate::db::ltm_ir::OccurrenceRef::Variable(v) if v == "pop")
+            )
+            .count(),
+        1,
+        "exactly the non-table occurrence is recorded: {occurrences:?}"
+    );
+
+    let err = generate_per_element_link_equation(
+        "pop",
+        "growth",
+        &site_axes,
+        &row_parts_bare,
+        "region\u{B7}boston",
+        &ast,
+        &deps,
+        &HashSet::new(),
+        &from_dims,
+        &target_elem_by_dim,
+        &target_iterated_dims,
+        &dim_ctx,
+        None,
+        &occ,
+    );
+    assert!(
+        matches!(
+            err,
+            Err(PartialEquationError {
+                kind: PartialEquationErrorKind::UnfreezablePartial,
+                ..
+            })
+        ),
+        "an un-pinnable source reference in a LOOKUP table argument must be a loud \
+         Err, never an Ok equation carrying a dimension-name subscript: {err:?}"
     );
 }

@@ -309,11 +309,29 @@ pub(super) fn pin_bare_source_ref(ctx: &PerElementRefCtx<'_>) -> Option<Vec<Inde
 /// occurrence -- a second representation of the classification, keyed on a
 /// coordinate the wrap rewrites, with its own drift surface. This carries no map
 /// and writes no tag; it reads the one IR by path and does the actual work.
+///
+/// `unlowerable` is set when a SUBSCRIPTED reference to the source has no
+/// recorded occurrence at its path, so there is no per-axis classification to pin
+/// it with. The caller turns that into `WrapOutcome::missing_occurrence`, i.e. a
+/// warned skip. It must not be silent: an un-pinned reference keeps its
+/// DIMENSION-name subscript (`pop[region, young]`), which cannot resolve in a
+/// scalar link-score fragment -- the fragment is dropped, the variable keeps a
+/// layout slot with no bytecode, and the score reads a constant 0.
+///
+/// The one reachable trigger is a `LOOKUP` TABLE argument: `db::ltm_ir` records
+/// no occurrence under one (`BuiltinContents::LookupTable(_) => {}` -- "a
+/// graphical-function table reference is static data, not a causal edge"), which
+/// is right about attribution, but the pin such a reference needs is about
+/// COMPILABILITY. The two other pin-only descents (a pre-existing
+/// `PREVIOUS`/`INIT` call, a whole-frozen reducer) are walked by the IR, so they
+/// cannot trip this. A BARE `Var` cannot either: [`pin_bare_source_ref`] pins it
+/// structurally from the source's own declared dims, needing no occurrence.
 pub(super) fn pin_only_source_refs(
     expr: Expr0,
     ctx: &PerElementRefCtx<'_>,
     occ: &OccurrenceLookup<'_>,
     path: &[u16],
+    unlowerable: &mut bool,
 ) -> Expr0 {
     match expr {
         Expr0::Const(..) => expr,
@@ -341,12 +359,28 @@ pub(super) fn pin_only_source_refs(
                     .map(|(i, idx)| {
                         let idx_path = super::child_path(path, i);
                         match idx {
-                            IndexExpr0::Expr(e) => {
-                                IndexExpr0::Expr(pin_only_source_refs(e, ctx, occ, &idx_path))
-                            }
+                            IndexExpr0::Expr(e) => IndexExpr0::Expr(pin_only_source_refs(
+                                e,
+                                ctx,
+                                occ,
+                                &idx_path,
+                                unlowerable,
+                            )),
                             IndexExpr0::Range(l, r, rloc) => IndexExpr0::Range(
-                                pin_only_source_refs(l, ctx, occ, &super::child_path(&idx_path, 0)),
-                                pin_only_source_refs(r, ctx, occ, &super::child_path(&idx_path, 1)),
+                                pin_only_source_refs(
+                                    l,
+                                    ctx,
+                                    occ,
+                                    &super::child_path(&idx_path, 0),
+                                    unlowerable,
+                                ),
+                                pin_only_source_refs(
+                                    r,
+                                    ctx,
+                                    occ,
+                                    &super::child_path(&idx_path, 1),
+                                    unlowerable,
+                                ),
                                 rloc,
                             ),
                             // Wildcard / star-range / `@N` carry no `Expr0`.
@@ -356,9 +390,15 @@ pub(super) fn pin_only_source_refs(
                     .collect();
                 return Expr0::Subscript(ident, indices, loc);
             }
+            let node_occ = occ.get(path);
+            if node_occ.is_none() {
+                // No per-axis classification to pin with -- see the fn docs. Loud,
+                // never a silently un-pinned dimension-name subscript.
+                *unlowerable = true;
+            }
             let indices = pin_source_subscript_indices(
                 indices,
-                occ.get(path),
+                node_occ,
                 ctx,
                 // Inside a frozen subtree nothing can be the live reference.
                 false,
@@ -369,8 +409,20 @@ pub(super) fn pin_only_source_refs(
                     let idx_path = super::child_path(path, i);
                     match idx {
                         IndexExpr0::Range(l, r, rloc) => IndexExpr0::Range(
-                            pin_only_source_refs(l, ctx, occ, &super::child_path(&idx_path, 0)),
-                            pin_only_source_refs(r, ctx, occ, &super::child_path(&idx_path, 1)),
+                            pin_only_source_refs(
+                                l,
+                                ctx,
+                                occ,
+                                &super::child_path(&idx_path, 0),
+                                unlowerable,
+                            ),
+                            pin_only_source_refs(
+                                r,
+                                ctx,
+                                occ,
+                                &super::child_path(&idx_path, 1),
+                                unlowerable,
+                            ),
                             rloc,
                         ),
                         other => other,
@@ -383,7 +435,9 @@ pub(super) fn pin_only_source_refs(
             let args = args
                 .into_iter()
                 .enumerate()
-                .map(|(i, a)| pin_only_source_refs(a, ctx, occ, &super::child_path(path, i)))
+                .map(|(i, a)| {
+                    pin_only_source_refs(a, ctx, occ, &super::child_path(path, i), unlowerable)
+                })
                 .collect();
             Expr0::App(UntypedBuiltinFn(name, args), loc)
         }
@@ -394,6 +448,7 @@ pub(super) fn pin_only_source_refs(
                 ctx,
                 occ,
                 &super::child_path(path, 0),
+                unlowerable,
             )),
             loc,
         ),
@@ -404,12 +459,14 @@ pub(super) fn pin_only_source_refs(
                 ctx,
                 occ,
                 &super::child_path(path, 0),
+                unlowerable,
             )),
             Box::new(pin_only_source_refs(
                 *r,
                 ctx,
                 occ,
                 &super::child_path(path, 1),
+                unlowerable,
             )),
             loc,
         ),
@@ -419,18 +476,21 @@ pub(super) fn pin_only_source_refs(
                 ctx,
                 occ,
                 &super::child_path(path, 0),
+                unlowerable,
             )),
             Box::new(pin_only_source_refs(
                 *t,
                 ctx,
                 occ,
                 &super::child_path(path, 1),
+                unlowerable,
             )),
             Box::new(pin_only_source_refs(
                 *f,
                 ctx,
                 occ,
                 &super::child_path(path, 2),
+                unlowerable,
             )),
             loc,
         ),

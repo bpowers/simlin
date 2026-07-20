@@ -662,9 +662,13 @@ fn wrap_non_matching_in_previous(
                 // same occurrence IR, and wraps nothing.
                 let call = Expr0::App(UntypedBuiltinFn(name, args), loc);
                 return match ctx.pin {
-                    Some(pin_ctx) => {
-                        post_transform::pin_only_source_refs(call, pin_ctx, ctx.occ, path)
-                    }
+                    Some(pin_ctx) => post_transform::pin_only_source_refs(
+                        call,
+                        pin_ctx,
+                        ctx.occ,
+                        path,
+                        &mut out.missing_occurrence,
+                    ),
                     None => call,
                 };
             }
@@ -700,6 +704,7 @@ fn wrap_non_matching_in_previous(
                                     pin_ctx,
                                     ctx.occ,
                                     &child_path(path, i),
+                                    &mut out.missing_occurrence,
                                 ),
                                 None => a,
                             }
@@ -752,9 +757,13 @@ fn wrap_non_matching_in_previous(
                 // occurrence inside it). Pin-only descent, always qualified: it is
                 // inside a freeze, so nothing in here is the live reference.
                 let reducer = match ctx.pin {
-                    Some(pin_ctx) => {
-                        post_transform::pin_only_source_refs(reducer, pin_ctx, ctx.occ, path)
-                    }
+                    Some(pin_ctx) => post_transform::pin_only_source_refs(
+                        reducer,
+                        pin_ctx,
+                        ctx.occ,
+                        path,
+                        &mut out.missing_occurrence,
+                    ),
                     None => reducer,
                 };
                 return Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![reducer]), loc);
