@@ -872,7 +872,19 @@ fn assert_pin_index_verdicts(fx: &PinFixture, live_ref: &str, cases: &[PinIndexC
 /// the rule sorts an index into exactly one of
 /// [`super::post_transform::IndexVerdict`]'s four outcomes, and the outcome
 /// depends on the index's spelling and (for `RuntimeRead` alone) on whether the
-/// subtree is already frozen. Two columns, fifteen rows, no gaps.
+/// subtree is already frozen. Two columns, sixteen rows, no gaps.
+///
+/// "No gaps" is a checkable claim, not a hope: `IndexExpr0` has exactly five
+/// variants and every one has a row -- `Wildcard`, `StarRange`, `Range`,
+/// `DimPosition`, and `Expr` (which fans out into the `Const` / `Var` / compound
+/// rows, and the `Var` rows into every way a name can or cannot resolve). What the
+/// table does NOT vary is subscript ARITY beyond the over-arity row, and that is
+/// deliberate: `codegen::extract_table_info` accepts only a table argument
+/// selecting exactly ONE element (a resolved `Var`, a `StaticSubscript` of
+/// `view.size() == 1`, or a `Subscript` whose every index is
+/// `SubscriptIndex::Single`), so an UNDER-arity subscript is `BadTable` for the same
+/// reason the range/wildcard/star-range rows are unreachable. Rowing it would state
+/// a verdict about a shape no compilable model produces.
 ///
 /// The table came back all-green once while still being wrong twice, which is
 /// worth stating plainly: a mutation probe proves a table CONSTRAINS the code, and
@@ -909,7 +921,7 @@ fn assert_pin_index_verdicts(fx: &PinFixture, live_ref: &str, cases: &[PinIndexC
 /// static selector alone, and that is what the cell pins.
 #[test]
 fn per_element_pin_index_verdict_enumeration() {
-    let cases: [PinIndexCell<'_>; 15] = [
+    let cases: [PinIndexCell<'_>; 16] = [
         // --- static selectors: pinned, and identical in both contexts ----------
         (
             "the axis's own dimension name",
@@ -1020,6 +1032,12 @@ fn per_element_pin_index_verdict_enumeration() {
         (
             "a wildcard index (UNREACHABLE: codegen rejects it as a table index)",
             "pop[Region, *]",
+            None,
+            Some("pop[region\u{B7}boston,"),
+        ),
+        (
+            "a star-range index (UNREACHABLE: codegen rejects it as a table index)",
+            "pop[Region, *:Age]",
             None,
             Some("pop[region\u{B7}boston,"),
         ),

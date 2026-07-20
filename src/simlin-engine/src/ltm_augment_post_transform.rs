@@ -437,8 +437,10 @@ fn pin_dimension_name_indices(
                     (crate::common::canonicalize(name.as_str()).to_string(), *loc)
                 }
                 // A compound index expression selects the element at runtime. (A
-                // range or wildcard cannot be a table index at all -- codegen
-                // rejects it -- so treating it the same way costs nothing.)
+                // range, wildcard or star-range cannot be a table index at all --
+                // `codegen::extract_table_info` needs a subscript selecting exactly
+                // ONE element and rejects anything wider as `BadTable` -- so
+                // treating them the same way costs nothing.)
                 _ => {
                     return verdict_into_index(
                         IndexVerdict::RuntimeRead,
