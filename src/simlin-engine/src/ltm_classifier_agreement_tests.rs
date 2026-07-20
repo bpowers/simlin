@@ -361,9 +361,9 @@ fn classify_expr0_occurrence(
     to_var: &Variable,
     variables: &HashMap<Ident<Canonical>, Variable>,
     dim_ctx: &DimensionsContext,
-) -> RefShape {
+) -> (RefShape, Vec<OccurrenceAxis>) {
     let Some(indices) = &occ.indices else {
-        return RefShape::Bare;
+        return (RefShape::Bare, Vec::new());
     };
     let source_dims = source_dims_of(variables, &occ.source);
     let source_dim_names: Vec<String> = source_dims.iter().map(|d| d.name().to_string()).collect();
@@ -375,12 +375,29 @@ fn classify_expr0_occurrence(
         target_iterated_dims: &target_iterated_dims,
         dep_dims: None,
     };
-    classify_expr0_subscript_shape(
+    let shape = classify_expr0_subscript_shape(
         indices,
         &source_dim_elements,
         Some(&iter_ctx),
         Some(dim_ctx),
-    )
+    );
+    // The per-axis vector the `#[cfg(test)]` occurrence builder synthesizes, via
+    // the SAME function it uses -- so the gate proves what the builder actually
+    // produces, not a third derivation of it.
+    let axes = indices
+        .iter()
+        .enumerate()
+        .map(|(i, idx)| {
+            live_source_occurrence_axis(
+                idx,
+                i,
+                &source_dim_elements,
+                Some(&iter_ctx),
+                Some(dim_ctx),
+            )
+        })
+        .collect();
+    (shape, axes)
 }
 
 /// The reparsed `Expr0` occurrences of every model variable in one target
@@ -663,11 +680,23 @@ fn assert_occurrence_stream_aligns(
             "occurrence-stream in_reducer mismatch for {ir_src} -> {to_str}"
         );
         if !ir_occ.in_reducer {
-            let e0_shape = classify_expr0_occurrence(e0_occ, to_var, variables, dim_ctx);
+            let (e0_shape, e0_axes) = classify_expr0_occurrence(e0_occ, to_var, variables, dim_ctx);
             assert_eq!(
                 ir_occ.shape, e0_shape,
                 "occurrence-stream SHAPE mismatch for {ir_src} -> {to_str}: the wrap's IR lookup \
                  would return a shape the Expr0 classifier disagrees with"
+            );
+            // The PER-AXIS classification, not just the coarse shape. Since the
+            // `PerElement` row pinning moved into the ceteris-paribus wrap it reads
+            // `OccurrenceSite::axes` to decide which index is a projected
+            // coordinate and which is a fixed literal, so the reconstruction the
+            // wrap unit tests feed the real wrap has to agree here too -- a
+            // divergence would exercise a pinning production never performs.
+            assert_eq!(
+                ir_occ.axes, e0_axes,
+                "occurrence-stream AXES mismatch for {ir_src} -> {to_str}: the row pinning reads \
+                 these, so the test-side reconstruction would drive a lowering production never \
+                 would"
             );
         }
     }
@@ -1013,7 +1042,7 @@ fn assert_classifier_families_agree(tp: &TestProject) -> ComparedShapes {
         let expr0_occs = expr0_occurrences_for_target(to_str, to_var, &variables);
         let mut expr0_by_source: HashMap<String, Vec<(RefShape, bool)>> = HashMap::new();
         for occ in &expr0_occs {
-            let shape = classify_expr0_occurrence(occ, to_var, &variables, dim_ctx);
+            let (shape, _axes) = classify_expr0_occurrence(occ, to_var, &variables, dim_ctx);
             expr0_by_source
                 .entry(occ.source.clone())
                 .or_default()

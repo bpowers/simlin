@@ -1203,7 +1203,7 @@ mod wrap_test_support;
 #[cfg(test)]
 pub(crate) use wrap_test_support::{
     build_wrap_test_occurrences, classify_expr0_subscript_shape, is_literal_element_index,
-    resolve_literal_element_index, test_occurrences_for_var,
+    live_source_occurrence_axis, resolve_literal_element_index, test_occurrences_for_var,
 };
 
 /// The shared changed-first transform: filter `deps` down to the

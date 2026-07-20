@@ -1272,7 +1272,7 @@ pub(crate) struct OccurrenceSite {
     /// (`ltm_agg::reducer_collapses_to_scalar` includes `SIZE` and excludes
     /// `RANK`; `builtin_routes_through_agg`, which sets this bit, does the
     /// opposite), so consuming it there would flip a bare source inside
-    /// `RANK(...)` from scored to loudly declined. Tracked separately.
+    /// `RANK(...)` from scored to loudly declined. Tracked as GH #982.
     pub in_reducer: bool,
     /// `true` iff the occurrence is reachable ONLY through another reference's
     /// subscript index (`other_arr[from]`). Such an occurrence is excluded

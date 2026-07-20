@@ -124,7 +124,7 @@ pub(crate) fn test_occurrences_for_var(
 /// silently, and only in the tests, which is the worst place for a divergence
 /// from production to hide.
 #[cfg(test)]
-fn live_source_occurrence_axis(
+pub(crate) fn live_source_occurrence_axis(
     idx: &IndexExpr0,
     i: usize,
     source_dim_elements: &[Vec<String>],
@@ -133,14 +133,24 @@ fn live_source_occurrence_axis(
 ) -> OccurrenceAxis {
     if let (Some(ic), IndexExpr0::Expr(Expr0::Var(name, _))) = (iter_ctx, idx) {
         let d = crate::canonicalize(name.as_str()).into_owned();
-        if ic.target_iterated_dims.iter().any(|t| t == &d)
-            && i < ic.source_dim_names.len()
-            && expr0_iterated_axis_lines_up(&d, i, source_dim_elements, ic, dim_ctx)
-        {
-            return OccurrenceAxis::Iterated {
-                dim: d,
-                source_dim: ic.source_dim_names[i].clone(),
-            };
+        if ic.target_iterated_dims.iter().any(|t| t == &d) {
+            // A target-iterated dimension NAME. It is `Iterated` when it lines up
+            // with the source's axis at this position, and `MismatchedIterated`
+            // when it does not (the GH #526 transposed / arity-mismatched /
+            // unusably-mapped case) -- NOT `Dynamic`, which is what a genuine
+            // `pop[i+1]` is. Every consumer currently treats the two the same
+            // ("not describable per axis"), so conflating them was invisible;
+            // `classify_occurrence_axes` distinguishes them, and the corpus gate
+            // compares this against it field for field.
+            if i < ic.source_dim_names.len()
+                && expr0_iterated_axis_lines_up(&d, i, source_dim_elements, ic, dim_ctx)
+            {
+                return OccurrenceAxis::Iterated {
+                    dim: d,
+                    source_dim: ic.source_dim_names[i].clone(),
+                };
+            }
+            return OccurrenceAxis::MismatchedIterated { dim: d };
         }
     }
     match resolve_literal_element_index(idx, i, source_dim_elements) {
