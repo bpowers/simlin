@@ -20,16 +20,20 @@
 //! class -- GH #759 dimension-name indices, GH #913 printer/parser asymmetry, the
 //! `pop[01]` indexed-literal canonicalization -- is structurally impossible).
 //!
-//! The Expr0 classifier family (`resolve_literal_element_index` /
-//! `classify_expr0_subscript_shape` / `classify_expr0_per_element_axes` /
-//! `is_live_source_iterated_dim_subscript` in [`super`]) now survives only
-//! `#[cfg(test)]`: it reconstructs an occurrence stream on the printed-and-reparsed
-//! target text for the focused wrap unit tests (`ltm_augment_wrap_test_support`).
-//! Those tests exercise the real production wrap, so the reconstructed stream
-//! must carry the same shapes/paths the IR would. This gate is what proves it:
-//! it classifies each occurrence with BOTH families over the corpus and asserts
-//! they agree, so the `#[cfg(test)]` reconstruction cannot silently diverge from
-//! the IR and feed the wrap a shape production never would.
+//! The Expr0 classifier family is `#[cfg(test)]` ENTIRELY, and it now lives in
+//! `ltm_augment_wrap_test_support` beside its only consumer: it reconstructs an
+//! occurrence stream on a parsed `Expr0` so the focused wrap unit tests can drive
+//! the real production wrap without a db. Those tests exercise production code,
+//! so the reconstructed stream must carry the same shapes and paths the IR would.
+//! This gate is what proves it: it classifies each occurrence with BOTH families
+//! over the corpus and asserts they agree, so the `#[cfg(test)]` reconstruction
+//! cannot silently diverge from the IR and feed the wrap a shape production never
+//! would.
+//!
+//! The gate also carries the property that makes the print->reparse deletion
+//! byte-neutral ([`assert_lowering_matches_reparse`]): every fixture slot is
+//! checked for structural equality between the direct `Expr2` -> `Expr0` lowering
+//! production now feeds the wrap and the printed-then-reparsed form it used to.
 //!
 //! # What this gate compares, and why it is drift-complete
 //!
@@ -369,10 +373,14 @@ fn classify_expr0_occurrence(
     let iter_ctx = IteratedDimCtx {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated_dims,
-        dim_ctx: Some(dim_ctx),
         dep_dims: None,
     };
-    classify_expr0_subscript_shape(indices, &source_dim_elements, Some(&iter_ctx))
+    classify_expr0_subscript_shape(
+        indices,
+        &source_dim_elements,
+        Some(&iter_ctx),
+        Some(dim_ctx),
+    )
 }
 
 /// The reparsed `Expr0` occurrences of every model variable in one target

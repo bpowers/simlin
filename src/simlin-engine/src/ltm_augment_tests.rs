@@ -83,7 +83,7 @@ fn classify_expr0_rejects_out_of_range_integer_literal() {
         Loc::default(),
     ))];
 
-    let shape = classify_expr0_subscript_shape(&indices, &dims, None);
+    let shape = classify_expr0_subscript_shape(&indices, &dims, None, None);
     assert_eq!(
         shape,
         RefShape::DynamicIndex,
@@ -103,7 +103,7 @@ fn classify_expr0_rejects_out_of_range_integer_literal() {
         1.0,
         Loc::default(),
     ))];
-    let in_range_shape = classify_expr0_subscript_shape(&in_range, &dims, None);
+    let in_range_shape = classify_expr0_subscript_shape(&in_range, &dims, None, None);
     assert_eq!(
         in_range_shape,
         RefShape::FixedIndex(vec!["1".to_string()]),
@@ -139,7 +139,7 @@ fn classify_expr0_canonicalizes_integer_literal_subscript() {
         Loc::default(),
     ))];
 
-    let shape = classify_expr0_subscript_shape(&indices, &dims, None);
+    let shape = classify_expr0_subscript_shape(&indices, &dims, None, None);
     assert_eq!(
         shape,
         RefShape::FixedIndex(vec!["1".to_string()]),
@@ -1808,7 +1808,6 @@ fn test_partial_equation_iterated_dim_source_normalized_to_bare() {
     let iter_ctx = IteratedDimCtx {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated_dims,
-        dim_ctx: None,
         dep_dims: None,
     };
 
@@ -4762,7 +4761,8 @@ fn sgft(
     else {
         return Err(PartialEquationError::new(equation_text));
     };
-    let occ_sites = build_wrap_test_occurrences(&ast, from, deps, source_dim_elements, iter_ctx);
+    let occ_sites =
+        build_wrap_test_occurrences(&ast, from, deps, source_dim_elements, iter_ctx, dims_ctx);
     let slot_occurrences = SlotOccurrences::new(&occ_sites);
     let occ = slot_occurrences.for_slot(0);
     shaped_guard_form_text(
@@ -4811,7 +4811,7 @@ fn wrap_missing_live_source_occurrence_is_loud_not_silent_freeze() {
         .expect("the equation parses")
         .expect("the equation is non-empty");
     let desynced: Vec<OccurrenceSite> =
-        build_wrap_test_occurrences(&ast, &live, &deps, &source_dims, None)
+        build_wrap_test_occurrences(&ast, &live, &deps, &source_dims, None, None)
             .into_iter()
             .filter(|o| !matches!(&o.reference, OccurrenceRef::Variable(v) if v == "pop"))
             .collect();
@@ -4823,7 +4823,7 @@ fn wrap_missing_live_source_occurrence_is_loud_not_silent_freeze() {
     );
 
     let (_wrapped, out) =
-        wrap_changed_first_ast(&ast, &deps, &live, &shape, None, None, None, &occ);
+        wrap_changed_first_ast(&ast, &deps, &live, &shape, None, None, None, &occ, None);
     assert!(
         out.missing_occurrence,
         "a live-source subscript path-miss on a non-empty lookup must flag the desync"
@@ -4881,7 +4881,6 @@ fn shaped_guard_form_falls_back_to_changed_last_for_unfreezable_co_source() {
     let iter_ctx = IteratedDimCtx {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated,
-        dim_ctx: None,
         dep_dims: None,
     };
     let text = sgft(
@@ -5068,7 +5067,6 @@ fn gh526_transposed_other_dep_with_threaded_dims_is_unfreezable() {
     let iter_ctx = IteratedDimCtx {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated_dims,
-        dim_ctx: None,
         dep_dims: Some(&dep_dims),
     };
     let result = build_partial_equation_shaped(
@@ -5174,7 +5172,6 @@ fn shaped_guard_form_declines_bare_arrayed_feeder_of_unhoisted_reducer() {
     let iter_ctx = IteratedDimCtx {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated,
-        dim_ctx: None,
         dep_dims: None,
     };
     let err = sgft(
@@ -5255,7 +5252,6 @@ fn gh526_natural_and_unthreadable_other_deps_keep_collapse() {
     let iter_ctx = IteratedDimCtx {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated_dims,
-        dim_ctx: None,
         dep_dims: Some(&dep_dims),
     };
     let partial = build_partial_equation_shaped(
@@ -5279,7 +5275,6 @@ fn gh526_natural_and_unthreadable_other_deps_keep_collapse() {
     let iter_ctx_unthreaded = IteratedDimCtx {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated_dims,
-        dim_ctx: None,
         dep_dims: Some(&empty_dep_dims),
     };
     let partial = build_partial_equation_shaped(
@@ -5412,18 +5407,21 @@ fn child_path_maps_over_arity_child_to_the_unaddressable_sentinel() {
     );
 }
 
-/// The per-element row-pinning lowering must descend into a subscript RANGE's
-/// endpoints, not just its plain expression indices.
+/// The per-element row pinning must descend into a subscript RANGE's endpoints,
+/// not just its plain expression indices.
 ///
 /// A source reference can hide in a range bound under another variable's
 /// subscript (`other[pop[region]:3]`). The IR walker records an occurrence there
 /// (`IndexExpr2::Range` pushes children 0 and 1) and the sibling lowering
-/// `substitute_reducers_in_expr0` descends both endpoints -- but
-/// `rewrite_per_element_source_refs` matched only `IndexExpr0::Expr` and passed
-/// a `Range` through untouched. The recorded occurrence was then left un-pinned:
-/// its dimension-name subscript survived into the scalar per-element equation,
-/// which either fails to compile (a `PREVIOUS`-of-dim-name capture helper) or
-/// reads the wrong element.
+/// `substitute_reducers_in_expr0` descends both endpoints -- but the pinning
+/// once matched only `IndexExpr0::Expr` and passed a `Range` through untouched.
+/// The recorded occurrence was then left un-pinned: its dimension-name subscript
+/// survived into the scalar per-element equation, which either fails to compile
+/// (a `PREVIOUS`-of-dim-name capture helper) or reads the wrong element.
+///
+/// Exercised through [`pin_only_source_refs`], the descent the wrap runs under a
+/// subtree it froze -- which is where a range bound under a frozen other-dep
+/// lands.
 #[test]
 fn per_element_pin_descends_into_range_endpoints() {
     use crate::dimensions::DimensionsContext;
@@ -5444,7 +5442,6 @@ fn per_element_pin_descends_into_range_endpoints() {
     let iter_ctx = IteratedDimCtx {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated_dims,
-        dim_ctx: Some(&dim_ctx),
         dep_dims: None,
     };
     let from = Ident::<Canonical>::new("pop");
@@ -5460,10 +5457,8 @@ fn per_element_pin_descends_into_range_endpoints() {
         from: &from,
         site_axes: &site_axes,
         row_parts_bare: &row_parts_bare,
-        source_dim_elements: &source_dim_elements,
         from_dims: &from_dims,
         target_elem_by_dim: &target_elem_by_dim,
-        iter_ctx: &iter_ctx,
         dim_ctx: &dim_ctx,
     };
 
@@ -5471,7 +5466,25 @@ fn per_element_pin_descends_into_range_endpoints() {
     let ast = Expr0::new("other[pop[region]:3]", LexerType::Equation)
         .expect("fixture parses")
         .expect("fixture is non-empty");
-    let lowered = super::post_transform::rewrite_per_element_source_refs(ast, &ctx, false);
+    // The occurrence stream the pinning reads: `pop[region]` is recorded at the
+    // range's lower-bound child of `other`'s first index.
+    let deps = deps_set(&["other"]);
+    let occurrences = build_wrap_test_occurrences(
+        &ast,
+        &from,
+        &deps,
+        &source_dim_elements,
+        Some(&iter_ctx),
+        Some(&dim_ctx),
+    );
+    let slot_occurrences = SlotOccurrences::new(&occurrences);
+    let occ = slot_occurrences.for_slot(0);
+    assert!(
+        !occ.is_empty(),
+        "the fixture must record the range-bound occurrence, or the pin has \
+         nothing to read and this test passes vacuously"
+    );
+    let lowered = super::post_transform::pin_only_source_refs(ast, &ctx, &occ, &[]);
     let text = print_eqn(&lowered);
 
     assert!(
@@ -5483,5 +5496,128 @@ fn per_element_pin_descends_into_range_endpoints() {
         text.contains("boston"),
         "the range-bound occurrence must be pinned to this instantiation's row; \
          got: {text}"
+    );
+}
+
+/// A `PerElement` source occurrence nested inside a WHOLE-FROZEN array reducer
+/// must still be row-pinned.
+///
+/// `growth[Region] = pop[Region, young] + SUM(other[pop[Region, young], *])` has
+/// two occurrences of the emitting site's shape. The first is the live one. The
+/// second sits in a subscript INDEX inside the reducer, and
+/// `OccurrenceLookup::subtree_has_live_shape` excludes index-nested occurrences
+/// (the GH #517 / Fig. 2 Q4 rule), so the reducer carries no live reference and
+/// the wrap freezes it WHOLE without descending.
+///
+/// The wrap therefore has to pin that occurrence through its pin-only descent.
+/// Left un-pinned, `pop[region, young]` -- a DIMENSION-name subscript -- survives
+/// into a scalar link-score fragment, where it needs a `PREVIOUS`-of-dim-name
+/// capture helper that cannot compile: the fragment is dropped, the variable
+/// keeps a layout slot with no bytecode, and the score reads a constant 0. That
+/// is the silent-zero class this track exists to delete, and no char golden
+/// reaches this shape -- deleting the descent leaves the whole corpus green.
+#[test]
+fn per_element_pin_reaches_inside_a_whole_frozen_reducer() {
+    use crate::dimensions::DimensionsContext;
+    use crate::ltm_agg::AxisRead;
+
+    let region = make_named_dimension("region", &["nyc", "boston"]);
+    let age = make_named_dimension("age", &["young", "old"]);
+    let from_dims = vec![region.clone(), age.clone()];
+    let source_dim_elements = vec![
+        vec!["nyc".to_string(), "boston".to_string()],
+        vec!["young".to_string(), "old".to_string()],
+    ];
+    let source_dim_names = vec!["region".to_string(), "age".to_string()];
+    let target_iterated_dims = vec!["region".to_string()];
+    let dim_ctx = DimensionsContext::from(
+        [
+            datamodel::Dimension::named(
+                "region".to_string(),
+                vec!["nyc".to_string(), "boston".to_string()],
+            ),
+            datamodel::Dimension::named(
+                "age".to_string(),
+                vec!["young".to_string(), "old".to_string()],
+            ),
+        ]
+        .as_slice(),
+    );
+    let iter_ctx = IteratedDimCtx {
+        source_dim_names: &source_dim_names,
+        target_iterated_dims: &target_iterated_dims,
+        dep_dims: None,
+    };
+    let from = Ident::<Canonical>::new("pop");
+    let site_axes = vec![
+        AxisRead::Iterated {
+            dim: "region".to_string(),
+            source_dim: "region".to_string(),
+        },
+        AxisRead::Pinned("young".to_string()),
+    ];
+    let row_parts_bare = vec!["boston".to_string(), "young".to_string()];
+    let mut target_elem_by_dim = HashMap::new();
+    target_elem_by_dim.insert("region".to_string(), ("boston".to_string(), 1usize));
+
+    let deps = deps_set(&["other"]);
+    let ast = Expr0::new(
+        "pop[Region, young] + SUM(other[pop[Region, young], *])",
+        LexerType::Equation,
+    )
+    .expect("fixture parses")
+    .expect("fixture is non-empty");
+    let occurrences = build_wrap_test_occurrences(
+        &ast,
+        &from,
+        &deps,
+        &source_dim_elements,
+        Some(&iter_ctx),
+        Some(&dim_ctx),
+    );
+    let slot_occurrences = SlotOccurrences::new(&occurrences);
+    let occ = slot_occurrences.for_slot(0);
+    // Non-vacuity: the reducer-nested occurrence must actually be recorded, and
+    // recorded as index-nested -- that bit is what makes the reducer freeze whole.
+    assert!(
+        occurrences.iter().any(|o| o.index_nested
+            && matches!(&o.reference, crate::db::ltm_ir::OccurrenceRef::Variable(v) if v == "pop")),
+        "the fixture must record an index-nested `pop` occurrence, or the reducer \
+         would not freeze whole and this test would not exercise the descent"
+    );
+
+    let text = generate_per_element_link_equation(
+        "pop",
+        "growth",
+        &site_axes,
+        &row_parts_bare,
+        "region\u{B7}boston",
+        &ast,
+        &deps,
+        // Nothing to element-pin by name: the source's pinning is the wrap's job.
+        &HashSet::new(),
+        &from_dims,
+        &target_elem_by_dim,
+        &target_iterated_dims,
+        &dim_ctx,
+        None,
+        &occ,
+    )
+    .expect("the per-element equation is derivable");
+
+    assert!(
+        !text.contains("pop[region, young]"),
+        "the occurrence inside the whole-frozen reducer kept its DIMENSION-name \
+         subscript, which cannot compile in a scalar fragment (a silent zero); \
+         got: {text}"
+    );
+    assert!(
+        text.contains("pop[region\u{B7}boston, age\u{B7}young]"),
+        "the reducer-nested occurrence must be pinned to this instantiation's row, \
+         QUALIFIED so the freeze compiles to a direct LoadPrev; got: {text}"
+    );
+    assert!(
+        text.contains("pop[boston, young]"),
+        "the LIVE occurrence must keep the bare row spelling; got: {text}"
     );
 }

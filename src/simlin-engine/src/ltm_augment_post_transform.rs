@@ -2,33 +2,40 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Post-transform lowering for LTM link-score equations (Track A stage 1).
+//! Concrete-form lowerings for LTM link-score equations.
 //!
 //! The `agg → target` and `PerElement` link-score generators in `ltm_augment`
 //! were inverted by the "transform-first" restructuring: the ceteris-paribus
-//! wrap (`wrap_changed_first_ast`) now runs on the target's OWN equation text
-//! -- hoisted reducers still spelled `SUM(...)`, the live source's occurrence
-//! held at its actual shape -- and the concrete-form rewrite runs AFTERWARD, on
-//! the already-wrapped `Expr0`. This module owns those post-transform lowerings:
+//! wrap (`wrap_changed_first_ast`) runs on the target's OWN equation -- hoisted
+//! reducers still spelled `SUM(...)`, the live source's occurrence held at its
+//! actual shape -- and the concrete-form rewrite happens around it. This module
+//! owns those lowerings:
 //!
 //! - [`substitute_reducers_in_expr0`] rewrites each hoisted reducer subtree in
 //!   the wrapped AST to its synthetic aggregate node's bare name (the held-live
 //!   reducer to `agg`, each frozen `PREVIOUS(SUM(..))` to `PREVIOUS(agg)`);
-//! - [`rewrite_per_element_source_refs`] row-pins every live/frozen source
-//!   occurrence of a `PerElement` edge to its concrete per-element subscript,
+//! - the `PerElement` ROW PINNING -- [`pin_source_subscript_indices`] for one
+//!   occurrence and [`pin_only_source_refs`] for a subtree the wrap froze --
 //!   supported by [`PerElementRefCtx`], [`per_element_row_for_target`] (the
 //!   single row derivation the link-score NAME and equation both consume), and
-//!   [`qualify_axis_element`].
+//!   [`qualify_axis_element`]. These are called FROM the ceteris-paribus wrap as
+//!   it descends, not as a pass over its output: the wrap is the only place that
+//!   knows both the occurrence (by path) and whether it is about to freeze the
+//!   reference, and that second fact is what selects the bare-row spelling for
+//!   the live occurrence over the qualified-row spelling for every other one.
+//!   Running them afterward forced the lowering to re-derive each occurrence's
+//!   per-axis access with an Expr0 classifier, since a `SiteId` computed on the
+//!   original AST cannot address a tree the wrap has inserted `PREVIOUS` nodes
+//!   into; that classifier is now deleted.
 //!
-//! Running the wrap on the own text and lowering afterward keeps the emitted
-//! equation byte-identical while making the wrap occurrence-addressable -- it is
-//! now keyed on the target's OWN occurrence stream. That is the whole point of
-//! the inversion: stage 2/3 can retarget the wrap onto the `db::ltm_ir`
-//! occurrence IR without touching these lowerings, because they deliberately do
-//! NOT re-classify (each is a pure text-keyed / shape-keyed AST rewrite). See
-//! the generators in `ltm_augment` -- `generate_agg_to_scalar_target_equation`,
+//! Running the wrap on the target's own equation is what makes it
+//! occurrence-addressable: it is keyed on the target's OWN occurrence stream, so
+//! every decision comes from `db::ltm_ir`'s one classification. NONE of the
+//! lowerings here re-classifies -- the agg substitution is a pure text-keyed AST
+//! rewrite, and the row pinning reads `OccurrenceSite::axes`. See the generators
+//! in `ltm_augment` -- `generate_agg_to_scalar_target_equation`,
 //! `generate_scalar_to_element_equation`, and `generate_per_element_link_equation`
-//! -- for the wrap-then-lower composition that calls these.
+//! -- for the compositions that call these.
 //!
 //! Split out of `ltm_augment.rs` to keep that file under the project
 //! line-count lint; included via `#[path]`, so `super::*` resolves the parent's
@@ -38,23 +45,26 @@ use std::collections::HashMap;
 
 use crate::ast::{Expr0, IndexExpr0, print_eqn};
 use crate::builtins::UntypedBuiltinFn;
-use crate::canonicalize;
 use crate::common::{Canonical, Ident, RawIdent};
 
-use super::{
-    IteratedDimCtx, classify_expr0_per_element_axes, expr0_iterated_axis_lines_up,
-    qualify_element_csv,
-};
+use super::{OccurrenceLookup, qualify_element_csv};
+use crate::db::ltm_ir::{OccurrenceAxis, OccurrenceSite};
 
 #[cfg(test)]
 use super::PartialEquationError;
 #[cfg(test)]
 use crate::lexer::LexerType;
 
-/// Read-only context for [`rewrite_per_element_source_refs`]: everything the
-/// walker needs to substitute the live source's subscript indices for one
+/// Read-only context for the `PerElement` row-pinning lowering: everything it
+/// needs to substitute the live source's subscript indices for one
 /// `(site, target element)` instantiation of a `PerElement` link score
 /// (GH #525, T6 of the shape-expressiveness design).
+///
+/// Notably absent since the lowering became IR-driven: the source's per-axis
+/// element-name lists and the iterated-dim recognition context. Those were the
+/// inputs to the Expr0 per-axis CLASSIFIER this lowering used to run; the
+/// per-axis truth now comes off the occurrence IR (`OccurrenceSite::axes`), so
+/// only the projection data survives.
 pub(super) struct PerElementRefCtx<'a> {
     /// The live source variable (canonical).
     pub(super) from: &'a Ident<Canonical>,
@@ -62,21 +72,16 @@ pub(super) struct PerElementRefCtx<'a> {
     /// ([`RefShape::PerElement`]'s `axes`).
     pub(super) site_axes: &'a [crate::ltm_agg::AxisRead],
     /// The row this `(site, e)` instantiation reads -- BARE element names,
-    /// one per source axis (parallel to `site_axes`). The wrap already held
-    /// the `site_axes`-shaped occurrence live (its shape equals `site_axes`);
-    /// this lowering rewrites that live occurrence to exactly these bare
-    /// indices so it re-prints as the historical `from[<row>]`.
+    /// one per source axis (parallel to `site_axes`). The wrap holds the
+    /// `site_axes`-shaped occurrence live (its shape equals `site_axes`); the
+    /// lowering rewrites that live occurrence to exactly these bare indices so
+    /// it prints as the historical `from[<row>]`.
     pub(super) row_parts_bare: &'a [String],
-    /// Element-name lists per source axis (position-strict resolution).
-    pub(super) source_dim_elements: &'a [Vec<String>],
     /// The source's declared dimensions (for index qualification).
     pub(super) from_dims: &'a [crate::dimensions::Dimension],
     /// Target-iterated dim (canonical) -> (element of `e` for that dim,
     /// its index within the dim) -- the projection data `e` supplies.
     pub(super) target_elem_by_dim: &'a HashMap<String, (String, usize)>,
-    /// The iterated-dim recognition context (live source's axes + target
-    /// iterated dims + mapping context).
-    pub(super) iter_ctx: &'a IteratedDimCtx<'a>,
     pub(super) dim_ctx: &'a crate::dimensions::DimensionsContext,
 }
 
@@ -101,7 +106,7 @@ pub(super) fn qualify_axis_element(elem: &str, dim: &crate::dimensions::Dimensio
 /// This is the SINGLE row derivation for the `PerElement` family's
 /// emission: the link-score NAME's row (computed by
 /// `emit_per_element_link_scores`) and the equation's live-reference row
-/// (computed by [`rewrite_per_element_source_refs`]) both come from here,
+/// (computed by [`pin_source_subscript_indices`]) both come from here,
 /// so they cannot disagree.
 pub(crate) fn per_element_row_for_target(
     axes: &[crate::ltm_agg::AxisRead],
@@ -130,228 +135,303 @@ pub(crate) fn per_element_row_for_target(
         .collect()
 }
 
-/// Row-pin every reference to the live source inside a `PerElement` link
-/// score's target body so the final scalar equation is well-formed for one
-/// `(site, target element)` instantiation -- the index-substitution mechanism
-/// of `pin_body_to_row` (the GH #744 reducer-body machinery) lifted to
-/// target-equation bodies (T6 of the shape-expressiveness design).
+/// The per-axis [`crate::ltm_agg::AxisRead`] slice of a live-source subscript
+/// occurrence, or `None` when the occurrence is not fully describable per axis.
 ///
-/// This runs as a POST-transform lowering of the already-wrapped AST (Track A
-/// stage 1): the ceteris-paribus wrap (`wrap_changed_first_ast` with
-/// `PerElement { site_axes }` held live) already held the emitting site's
-/// occurrence live and froze every other reference at `PREVIOUS`; this pass
-/// then substitutes each source occurrence's iterated-dim indices for concrete
-/// elements. The distinction the wrap already encoded -- live occurrence not
-/// nested in a wrap-inserted `PREVIOUS`, frozen occurrences nested inside one
-/// -- lines up with the `force_qualified` flag below, so the lowering reads
-/// "live vs frozen" off `PREVIOUS`-nesting rather than re-deciding it:
+/// This is the IR-driven replacement for the retired Expr0 per-axis classifier
+/// (`classify_expr0_per_element_axes`). The equivalence is exact rather than
+/// approximate: that classifier accepted an index only when it was an
+/// iterated-dimension name lined up with the source's axis at that position, or
+/// a literal element of that axis, with the arity matching on all of
+/// indices / source dims / source element lists. The IR reaches the SAME
+/// per-axis verdict through [`crate::ltm_agg::classify_axis_access`] -- the
+/// shared classifier the retired `expr0_iterated_axis_lines_up` mirrored gate
+/// for gate -- so "every axis `Iterated` or `Pinned`, arity equal to the
+/// source's declared arity" is the same predicate. A `Reduced` axis (a wildcard
+/// or star-range index), a `MismatchedIterated` one, and a `Dynamic` one all
+/// fall out here exactly as they produced `None` there. An over-arity index can
+/// never be `Iterated` (the IR only consults `classify_axis_access` where the
+/// source has an axis at that position), so the old `i < from_dims.len()` guard
+/// is implied rather than dropped.
+fn axes_as_read_slice(occ: &OccurrenceSite, arity: usize) -> Option<Vec<crate::ltm_agg::AxisRead>> {
+    use crate::ltm_agg::AxisRead;
+    if occ.axes.is_empty() || occ.axes.len() != arity {
+        return None;
+    }
+    occ.axes
+        .iter()
+        .map(|a| match a {
+            OccurrenceAxis::Pinned(e) => Some(AxisRead::Pinned(e.clone())),
+            OccurrenceAxis::Iterated { dim, source_dim } => Some(AxisRead::Iterated {
+                dim: dim.clone(),
+                source_dim: source_dim.clone(),
+            }),
+            OccurrenceAxis::Reduced { .. }
+            | OccurrenceAxis::MismatchedIterated { .. }
+            | OccurrenceAxis::Dynamic => None,
+        })
+        .collect()
+}
+
+/// The row indices for one occurrence of the live source, QUALIFIED
+/// (`region\u{B7}a`) so a frozen read compiles to a direct LoadPrev in the
+/// scalar fragment.
+fn qualified_row_indices(row: &[String], ctx: &PerElementRefCtx<'_>) -> Vec<IndexExpr0> {
+    row.iter()
+        .zip(ctx.from_dims)
+        .map(|(part, dim)| {
+            IndexExpr0::Expr(Expr0::Var(
+                RawIdent::new_from_str(&qualify_axis_element(part, dim)),
+                crate::ast::Loc::default(),
+            ))
+        })
+        .collect()
+}
+
+/// Row-pin ONE subscript occurrence of the live source for a `PerElement` link
+/// score, given the occurrence the IR recorded at its node
+/// (GH #525, T6 of the shape-expressiveness design).
 ///
-/// - an occurrence whose per-axis classification EQUALS the emitting site's
-///   `axes` (and is not `force_qualified`, i.e. the wrap left it live) is
-///   rewritten to the row's BARE element indices, so it re-prints as the
-///   historical `from[<row>]`;
-/// - any other fully-classifiable occurrence (a different `PerElement`
-///   shape, an all-`Iterated` Bare-shaped subscript, an all-`Pinned`
-///   literal subscript) is rewritten to ITS OWN row for this target
-///   element, QUALIFIED (`region\u{B7}a`) so its wrap-inserted `PREVIOUS(...)`
-///   freeze compiles to a direct LoadPrev in the scalar fragment;
-/// - a BARE `Var` occurrence of the source (the mixed `Bare`+`PerElement`
-///   edge's other site) is pinned to the target element's projection onto
-///   the source's own axes when every axis resolves (same-element
-///   semantics), qualified -- else left as the wrap's conservative freeze;
-/// - a partially-classifiable subscript (a wildcard slice, a dynamic
-///   index) gets only its resolvable iterated-dim indices substituted
-///   (qualified; meaning-preserving -- the iterated dim IS that element
-///   in this slot), leaving the rest as the wrap left it.
+/// `live` is whether the ceteris-paribus wrap is leaving this occurrence LIVE --
+/// its shape equals the emitting site's AND it is not inside a subtree the wrap
+/// froze. Only the wrap can answer that, which is why the pinning runs inside
+/// the wrap's own traversal rather than as a pass over the wrapped tree; see
+/// the module docs.
 ///
-/// Inside `PREVIOUS(...)`/`INIT(...)` calls (both the wrap-inserted freezes and
-/// any already in the source equation) the live-match rewrite is suppressed
-/// (`force_qualified`): the contents are lagged/frozen and could never be the
-/// live reference -- qualified substitution keeps the frozen read compiling to
-/// a direct slot.
-pub(super) fn rewrite_per_element_source_refs(
+/// - the LIVE occurrence is rewritten to the row's BARE element indices, so it
+///   prints as the historical `from[<row>]`;
+/// - any other fully-describable occurrence (a different `PerElement` shape, an
+///   all-`Iterated` Bare-shaped subscript, an all-`Pinned` literal subscript) is
+///   rewritten to ITS OWN row for this target element, QUALIFIED, so the freeze
+///   the wrap puts around it compiles to a direct LoadPrev;
+/// - a partially-describable subscript (a wildcard slice, a dynamic index) gets
+///   only its `Iterated` indices substituted (qualified; meaning-preserving --
+///   the iterated dim IS that element in this slot) and leaves the rest to
+///   `recurse_index`, which is the wrap's own index pass, so a genuinely dynamic
+///   index still gets its `PREVIOUS(idx)` lag.
+///
+/// A node with NO recorded occurrence is left completely untouched. That is the
+/// loud path, not a silent one: the wrap's own `missing_occurrence` guard fires
+/// on a live-source subscript whose path misses on a non-empty stream, and the
+/// caller abandons the partial with a warning.
+pub(super) fn pin_source_subscript_indices(
+    indices: Vec<IndexExpr0>,
+    node_occ: Option<&OccurrenceSite>,
+    ctx: &PerElementRefCtx<'_>,
+    live: bool,
+    mut recurse_index: impl FnMut(usize, IndexExpr0) -> IndexExpr0,
+) -> Vec<IndexExpr0> {
+    let describable = node_occ.and_then(|o| axes_as_read_slice(o, ctx.from_dims.len()));
+    if let Some(occ_axes) = describable {
+        if live && occ_axes == ctx.site_axes {
+            return ctx
+                .row_parts_bare
+                .iter()
+                .map(|p| {
+                    IndexExpr0::Expr(Expr0::Var(
+                        RawIdent::new_from_str(p),
+                        crate::ast::Loc::default(),
+                    ))
+                })
+                .collect();
+        }
+        if let Some(row) =
+            per_element_row_for_target(&occ_axes, ctx.target_elem_by_dim, ctx.dim_ctx)
+        {
+            return qualified_row_indices(&row, ctx);
+        }
+        return indices;
+    }
+    // Partially describable: substitute only the axes the IR classified
+    // `Iterated`, and hand every other index to the wrap's own index pass.
+    let axes = node_occ.map(|o| o.axes.as_slice()).unwrap_or(&[]);
+    indices
+        .into_iter()
+        .enumerate()
+        .map(|(i, idx)| {
+            let substituted = match (axes.get(i), ctx.from_dims.get(i)) {
+                (Some(OccurrenceAxis::Iterated { dim, source_dim }), Some(from_dim)) => {
+                    let ax = crate::ltm_agg::AxisRead::Iterated {
+                        dim: dim.clone(),
+                        source_dim: source_dim.clone(),
+                    };
+                    per_element_row_for_target(
+                        std::slice::from_ref(&ax),
+                        ctx.target_elem_by_dim,
+                        ctx.dim_ctx,
+                    )
+                    .map(|row| qualify_axis_element(&row[0], from_dim))
+                }
+                _ => None,
+            };
+            match substituted {
+                Some(part) => IndexExpr0::Expr(Expr0::Var(
+                    RawIdent::new_from_str(&part),
+                    crate::ast::Loc::default(),
+                )),
+                None => recurse_index(i, idx),
+            }
+        })
+        .collect()
+}
+
+/// Row-pin a BARE `Var` reference to the live source (the mixed
+/// `Bare`+`PerElement` edge's other site): each axis reads the target element's
+/// coordinate for that axis's own dimension (same-element semantics), qualified.
+/// `None` when some axis does not resolve -- the caller then leaves the bare
+/// reference for the wrap's conservative freeze.
+pub(super) fn pin_bare_source_ref(ctx: &PerElementRefCtx<'_>) -> Option<Vec<IndexExpr0>> {
+    let bare_axes: Vec<crate::ltm_agg::AxisRead> = ctx
+        .from_dims
+        .iter()
+        .map(|d| crate::ltm_agg::AxisRead::Iterated {
+            dim: d.name().to_string(),
+            source_dim: d.name().to_string(),
+        })
+        .collect();
+    per_element_row_for_target(&bare_axes, ctx.target_elem_by_dim, ctx.dim_ctx)
+        .map(|row| qualified_row_indices(&row, ctx))
+}
+
+/// Row-pin the live source's references inside a subtree the ceteris-paribus
+/// wrap declines to descend into -- a pre-existing `PREVIOUS`/`INIT` call, the
+/// GH #517 whole-frozen reducer, or a `LOOKUP` table argument.
+///
+/// This is the pin-only descent: it performs the lowering the wrap would have
+/// performed had it recursed, driven by the SAME structural path cursor and the
+/// SAME occurrence IR, and it wraps nothing. Everything it reaches is inside a
+/// frozen subtree (or is static table data), so no occurrence here can be the
+/// live reference -- every pin is qualified.
+///
+/// Why this rather than tagging the tree during the wrap (the alternative
+/// `86df68bf`'s rustdoc weighed): a tag needs either a descent whose only
+/// purpose is to write tags, or a `Loc`-keyed side map from node position to
+/// occurrence -- a second representation of the classification, keyed on a
+/// coordinate the wrap rewrites, with its own drift surface. This carries no map
+/// and writes no tag; it reads the one IR by path and does the actual work.
+pub(super) fn pin_only_source_refs(
     expr: Expr0,
     ctx: &PerElementRefCtx<'_>,
-    force_qualified: bool,
+    occ: &OccurrenceLookup<'_>,
+    path: &[u16],
 ) -> Expr0 {
-    let qualify_row = |row: &[String]| -> Vec<IndexExpr0> {
-        row.iter()
-            .zip(ctx.from_dims)
-            .map(|(part, dim)| {
-                IndexExpr0::Expr(Expr0::Var(
-                    RawIdent::new_from_str(&qualify_axis_element(part, dim)),
-                    crate::ast::Loc::default(),
-                ))
-            })
-            .collect()
-    };
     match expr {
         Expr0::Const(..) => expr,
         Expr0::Var(ref ident, loc) => {
             if &Ident::<Canonical>::new(ident.as_str()) != ctx.from {
                 return expr;
             }
-            // Same-element pin of a bare source reference: each axis reads
-            // the target element's coordinate for that axis's own dim.
-            let bare_axes: Vec<crate::ltm_agg::AxisRead> = ctx
-                .from_dims
-                .iter()
-                .map(|d| crate::ltm_agg::AxisRead::Iterated {
-                    dim: d.name().to_string(),
-                    source_dim: d.name().to_string(),
-                })
-                .collect();
-            match per_element_row_for_target(&bare_axes, ctx.target_elem_by_dim, ctx.dim_ctx) {
-                Some(row) => Expr0::Subscript(ident.clone(), qualify_row(&row), loc),
+            match pin_bare_source_ref(ctx) {
+                Some(indices) => Expr0::Subscript(ident.clone(), indices, loc),
                 None => expr,
             }
         }
         Expr0::Subscript(ident, indices, loc) => {
             if &Ident::<Canonical>::new(ident.as_str()) != ctx.from {
-                // Another variable's subscript: recurse into expression
-                // indices (a nested source reference can hide there) AND into a
-                // range's two endpoints, which are also `Expr0`
-                // (`other[from[D, young]:3]`). The IR walker records occurrences
-                // under both (`IndexExpr2::Range` pushes children 0 and 1), and
-                // the sibling `substitute_reducers_in_expr0` descends both, so
-                // skipping them here left a recorded source occurrence
-                // un-pinned: its dimension-name subscript survived into the
-                // scalar equation, which either fails to compile or reads the
-                // wrong element.
-                let indices =
-                    indices
-                        .into_iter()
-                        .map(|idx| match idx {
-                            IndexExpr0::Expr(e) => IndexExpr0::Expr(
-                                rewrite_per_element_source_refs(e, ctx, force_qualified),
-                            ),
-                            IndexExpr0::Range(l, r, loc) => IndexExpr0::Range(
-                                rewrite_per_element_source_refs(l, ctx, force_qualified),
-                                rewrite_per_element_source_refs(r, ctx, force_qualified),
-                                loc,
+                // Another variable's subscript: descend into expression indices
+                // and range endpoints, where a nested source reference can hide
+                // (`other[from[D, young]]`, `other[from[a]:3]`). The IR records
+                // occurrences under both, so skipping them would leave a
+                // recorded source occurrence un-pinned -- its dimension-name
+                // subscript would survive into the scalar equation, which either
+                // fails to compile or reads the wrong element.
+                let indices = indices
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, idx)| {
+                        let idx_path = super::child_path(path, i);
+                        match idx {
+                            IndexExpr0::Expr(e) => {
+                                IndexExpr0::Expr(pin_only_source_refs(e, ctx, occ, &idx_path))
+                            }
+                            IndexExpr0::Range(l, r, rloc) => IndexExpr0::Range(
+                                pin_only_source_refs(l, ctx, occ, &super::child_path(&idx_path, 0)),
+                                pin_only_source_refs(r, ctx, occ, &super::child_path(&idx_path, 1)),
+                                rloc,
                             ),
                             // Wildcard / star-range / `@N` carry no `Expr0`.
                             other => other,
-                        })
-                        .collect();
-                return Expr0::Subscript(ident, indices, loc);
-            }
-            if let Some(occ_axes) =
-                classify_expr0_per_element_axes(&indices, ctx.source_dim_elements, ctx.iter_ctx)
-            {
-                if !force_qualified && occ_axes == ctx.site_axes {
-                    // The emitting site's own shape: lower the occurrence
-                    // (already held live or frozen by the preceding
-                    // ceteris-paribus wrap) to the concrete row this score
-                    // targets, spelled as bare elements.
-                    let indices = ctx
-                        .row_parts_bare
-                        .iter()
-                        .map(|p| {
-                            IndexExpr0::Expr(Expr0::Var(
-                                RawIdent::new_from_str(p),
-                                crate::ast::Loc::default(),
-                            ))
-                        })
-                        .collect();
-                    return Expr0::Subscript(ident, indices, loc);
-                }
-                if let Some(row) =
-                    per_element_row_for_target(&occ_axes, ctx.target_elem_by_dim, ctx.dim_ctx)
-                {
-                    return Expr0::Subscript(ident, qualify_row(&row), loc);
-                }
-                return Expr0::Subscript(ident, indices, loc);
-            }
-            // Partially classifiable: substitute only the resolvable
-            // iterated-dim indices (qualified), leave the rest (wildcards,
-            // literals, dynamic expressions) for the wrap's conservative
-            // handling.
-            let indices = indices
-                .into_iter()
-                .enumerate()
-                .map(|(i, idx)| {
-                    let substituted = match &idx {
-                        IndexExpr0::Expr(Expr0::Var(name, _)) => {
-                            let d = canonicalize(name.as_str()).into_owned();
-                            if i < ctx.from_dims.len()
-                                && ctx.iter_ctx.target_iterated_dims.contains(&d)
-                                && expr0_iterated_axis_lines_up(
-                                    &d,
-                                    i,
-                                    ctx.source_dim_elements,
-                                    ctx.iter_ctx,
-                                )
-                            {
-                                let ax = crate::ltm_agg::AxisRead::Iterated {
-                                    dim: d,
-                                    source_dim: ctx.iter_ctx.source_dim_names[i].clone(),
-                                };
-                                per_element_row_for_target(
-                                    std::slice::from_ref(&ax),
-                                    ctx.target_elem_by_dim,
-                                    ctx.dim_ctx,
-                                )
-                                .map(|row| qualify_axis_element(&row[0], &ctx.from_dims[i]))
-                            } else {
-                                None
-                            }
                         }
-                        _ => None,
-                    };
-                    match substituted {
-                        Some(part) => IndexExpr0::Expr(Expr0::Var(
-                            RawIdent::new_from_str(&part),
-                            crate::ast::Loc::default(),
-                        )),
-                        // Not a resolvable iterated-dim index. A nested source
-                        // reference can still hide inside a range endpoint
-                        // (`from[a:from[b]]`), and the IR records it, so descend
-                        // rather than leaving it un-pinned -- same reason as the
-                        // other-variable branch above. An `Expr` index that did
-                        // not substitute is left to the wrap's conservative
-                        // handling (recursing would double-pin the source's own
-                        // axis).
-                        None => match idx {
-                            IndexExpr0::Range(l, r, rloc) => IndexExpr0::Range(
-                                rewrite_per_element_source_refs(l, ctx, force_qualified),
-                                rewrite_per_element_source_refs(r, ctx, force_qualified),
-                                rloc,
-                            ),
-                            other => other,
-                        },
+                    })
+                    .collect();
+                return Expr0::Subscript(ident, indices, loc);
+            }
+            let indices = pin_source_subscript_indices(
+                indices,
+                occ.get(path),
+                ctx,
+                // Inside a frozen subtree nothing can be the live reference.
+                false,
+                |i, idx| {
+                    // An index this occurrence's axes did not resolve: descend
+                    // for a nested source reference, exactly as the
+                    // other-variable arm above does.
+                    let idx_path = super::child_path(path, i);
+                    match idx {
+                        IndexExpr0::Range(l, r, rloc) => IndexExpr0::Range(
+                            pin_only_source_refs(l, ctx, occ, &super::child_path(&idx_path, 0)),
+                            pin_only_source_refs(r, ctx, occ, &super::child_path(&idx_path, 1)),
+                            rloc,
+                        ),
+                        other => other,
                     }
-                })
-                .collect();
+                },
+            );
             Expr0::Subscript(ident, indices, loc)
         }
         Expr0::App(UntypedBuiltinFn(name, args), loc) => {
-            let lagged = name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init");
             let args = args
                 .into_iter()
-                .map(|a| rewrite_per_element_source_refs(a, ctx, force_qualified || lagged))
+                .enumerate()
+                .map(|(i, a)| pin_only_source_refs(a, ctx, occ, &super::child_path(path, i)))
                 .collect();
             Expr0::App(UntypedBuiltinFn(name, args), loc)
         }
         Expr0::Op1(op, inner, loc) => Expr0::Op1(
             op,
-            Box::new(rewrite_per_element_source_refs(
+            Box::new(pin_only_source_refs(
                 *inner,
                 ctx,
-                force_qualified,
+                occ,
+                &super::child_path(path, 0),
             )),
             loc,
         ),
         Expr0::Op2(op, l, r, loc) => Expr0::Op2(
             op,
-            Box::new(rewrite_per_element_source_refs(*l, ctx, force_qualified)),
-            Box::new(rewrite_per_element_source_refs(*r, ctx, force_qualified)),
+            Box::new(pin_only_source_refs(
+                *l,
+                ctx,
+                occ,
+                &super::child_path(path, 0),
+            )),
+            Box::new(pin_only_source_refs(
+                *r,
+                ctx,
+                occ,
+                &super::child_path(path, 1),
+            )),
             loc,
         ),
         Expr0::If(c, t, f, loc) => Expr0::If(
-            Box::new(rewrite_per_element_source_refs(*c, ctx, force_qualified)),
-            Box::new(rewrite_per_element_source_refs(*t, ctx, force_qualified)),
-            Box::new(rewrite_per_element_source_refs(*f, ctx, force_qualified)),
+            Box::new(pin_only_source_refs(
+                *c,
+                ctx,
+                occ,
+                &super::child_path(path, 0),
+            )),
+            Box::new(pin_only_source_refs(
+                *t,
+                ctx,
+                occ,
+                &super::child_path(path, 1),
+            )),
+            Box::new(pin_only_source_refs(
+                *f,
+                ctx,
+                occ,
+                &super::child_path(path, 2),
+            )),
             loc,
         ),
     }
