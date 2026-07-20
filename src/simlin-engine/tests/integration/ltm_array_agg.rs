@@ -5842,20 +5842,24 @@ fn per_element_source_also_read_as_a_lookup_table_keeps_its_scores() {
     }
 }
 
-/// The `@N` twin of [`per_element_source_also_read_as_a_lookup_table_keeps_its_scores`]:
-/// the `LOOKUP` table argument selects its `Age` element by POSITION rather than by
-/// name (`effect[Region, @2]` -- `@2` is `Age`'s second element, `old`).
+/// The shared body of the STATIC-SELECTOR twins of
+/// [`per_element_source_also_read_as_a_lookup_table_keeps_its_scores`]: the same
+/// model, but the `LOOKUP` table argument picks its `Age` element with something
+/// other than a name -- `table_index` as written, expected to survive VERBATIM in
+/// the emitted fragment beside the pinned `region·{r}`.
 ///
-/// `@N` reached the pin rule's catch-all and scored a RUNTIME read, so a bare table
-/// argument declined and the edge's per-element scores were dropped. It is in fact
-/// a static selector: `compiler::context`'s subscript lowering resolves
-/// `DimPosition` to a concrete element offset in scalar context, which a link-score
-/// fragment is. This test is what makes that a measured claim rather than a read of
-/// the compiler -- the emitted fragment carries `@2` verbatim beside a pinned
-/// `region·{r}`, and the empty-warnings assertion is the compile.
-#[test]
-fn per_element_source_read_as_a_lookup_table_by_position_keeps_its_scores() {
-    let mut project = TestProject::new("per_element_lookup_table_arg_by_position")
+/// Both selectors reached the pin rule's catch-all and scored a RUNTIME read, so a
+/// bare table argument declined and the edge's per-element scores were dropped.
+/// Neither reads model state at the current step, so neither is a ceteris-paribus
+/// hazard, and neither needs a pin. These tests are what make that a MEASURED claim
+/// rather than a read of the compiler: the `warnings.is_empty()` assertion is the
+/// compile, and the score-existence assertion is the dropped edge.
+fn assert_static_table_index_keeps_its_scores(
+    fixture: &str,
+    table_index: &str,
+    expect_verbatim: &str,
+) {
+    let mut project = TestProject::new(fixture)
         .with_sim_time(0.0, 8.0, 1.0)
         .named_dimension("Region", &["a", "b"])
         .named_dimension("Age", &["young", "old"])
@@ -5863,7 +5867,7 @@ fn per_element_source_read_as_a_lookup_table_by_position_keeps_its_scores() {
         .array_aux("effect[Region, Age]", "pop[Region, Age]")
         .array_aux(
             "target[Region]",
-            "effect[Region, young] + LOOKUP(effect[Region, @2], time)",
+            &format!("effect[Region, young] + LOOKUP(effect[Region, {table_index}], time)"),
         )
         .array_flow("growth[Region, Age]", "target[Region] * 0.0001", None)
         .array_stock("pop[Region, Age]", "100", &["growth"], &[], None)
@@ -5874,15 +5878,16 @@ fn per_element_source_read_as_a_lookup_table_by_position_keeps_its_scores() {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("a position-indexed table argument must compile with LTM");
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap_or_else(|e| {
+        panic!("a `{table_index}`-indexed table argument must compile with LTM: {e:?}")
+    });
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
         warnings.is_empty(),
-        "every LTM fragment must compile -- an `@N` table index the pin refuses \
-         makes the whole partial a warned skip, and one it MIS-pins would fail to \
-         compile here; got: {warnings:?}"
+        "every LTM fragment must compile -- a `{table_index}` table index the pin \
+         refuses makes the whole partial a warned skip, and one it MIS-pins would \
+         fail to compile here; got: {warnings:?}"
     );
 
     let source_model = sync.models["main"].source_model;
@@ -5896,8 +5901,8 @@ fn per_element_source_read_as_a_lookup_table_by_position_keeps_its_scores() {
         let name = format!("{LINK_SCORE_PREFIX}effect[{region},young]\u{2192}target[{region}]");
         let var = ltm.vars.iter().find(|v| v.name == name).unwrap_or_else(|| {
             panic!(
-                "the PerElement site must be scored -- declining the `@N` table index \
-                 drops this whole edge; emitted: {:?}",
+                "the PerElement site must be scored -- declining the `{table_index}` \
+                 table index drops this whole edge; emitted: {:?}",
                 ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
             )
         });
@@ -5906,10 +5911,10 @@ fn per_element_source_read_as_a_lookup_table_by_position_keeps_its_scores() {
             other => panic!("{name} must be a scalar score; got {other:?}"),
         };
         assert!(
-            text.contains(&format!("effect[region\u{B7}{region}, @2]")),
-            "the position index must survive VERBATIM beside the pinned row -- the \
-             compiler that owns `@N` resolves it, and re-spelling it here would be a \
-             second implementation; got: {text}"
+            text.contains(&format!("effect[region\u{B7}{region}, {expect_verbatim}]")),
+            "the static index must survive VERBATIM beside the pinned row -- it \
+             already selects a fixed element, and re-spelling it here would be a \
+             second implementation of what the compiler resolves; got: {text}"
         );
         assert!(
             !text.contains("effect[region,"),
@@ -5928,6 +5933,32 @@ fn per_element_source_read_as_a_lookup_table_by_position_keeps_its_scores() {
              is the silent zero this shape regressed into; got {series:?}"
         );
     }
+}
+
+/// `@N` POSITION syntax as the table argument's element selector
+/// (`effect[Region, @2]` -- `@2` is `Age`'s second element, `old`).
+/// `compiler::context`'s subscript lowering resolves `DimPosition` to a concrete
+/// element offset in scalar context, which a link-score fragment is.
+#[test]
+fn per_element_source_read_as_a_lookup_table_by_position_keeps_its_scores() {
+    assert_static_table_index_keeps_its_scores(
+        "per_element_lookup_table_arg_by_position",
+        "@2",
+        "@2",
+    );
+}
+
+/// A CONSTANT ARITHMETIC expression as the table argument's element selector
+/// (`effect[Region, 1 + 1]`). It reads no variable at any step, so it is exactly as
+/// static as the bare literal `2` the rule already left alone -- the catch-all just
+/// never looked inside the expression.
+#[test]
+fn per_element_source_read_as_a_lookup_table_by_constant_expr_keeps_its_scores() {
+    assert_static_table_index_keeps_its_scores(
+        "per_element_lookup_table_arg_const_expr",
+        "1 + 1",
+        "1 + 1",
+    );
 }
 
 /// The MAPPED twin of [`per_element_source_also_read_as_a_lookup_table_keeps_its_scores`]:

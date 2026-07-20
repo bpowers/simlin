@@ -872,7 +872,7 @@ fn assert_pin_index_verdicts(fx: &PinFixture, live_ref: &str, cases: &[PinIndexC
 /// the rule sorts an index into exactly one of
 /// [`super::post_transform::IndexVerdict`]'s four outcomes, and the outcome
 /// depends on the index's spelling and (for `RuntimeRead` alone) on whether the
-/// subtree is already frozen. Two columns, sixteen rows, no gaps.
+/// subtree is already frozen. Two columns, eighteen rows, no gaps.
 ///
 /// "No gaps" is a checkable claim, not a hope: `IndexExpr0` has exactly five
 /// variants and every one has a row -- `Wildcard`, `StarRange`, `Range`,
@@ -921,7 +921,7 @@ fn assert_pin_index_verdicts(fx: &PinFixture, live_ref: &str, cases: &[PinIndexC
 /// static selector alone, and that is what the cell pins.
 #[test]
 fn per_element_pin_index_verdict_enumeration() {
-    let cases: [PinIndexCell<'_>; 16] = [
+    let cases: [PinIndexCell<'_>; 18] = [
         // --- static selectors: pinned, and identical in both contexts ----------
         (
             "the axis's own dimension name",
@@ -959,6 +959,30 @@ fn per_element_pin_index_verdict_enumeration() {
             "pop[Region, @2]",
             Some("pop[region\u{B7}boston, @2]"),
             Some("pop[region\u{B7}boston, @2]"),
+        ),
+        (
+            // The same defect in a different spelling: the catch-all never looked
+            // INSIDE a compound index, so arithmetic over literals scored a runtime
+            // read though it is exactly as static as the bare `1` two rows up.
+            "constant arithmetic over literals",
+            "pop[Region, 1 + 1]",
+            Some("pop[region\u{B7}boston, 1 + 1]"),
+            Some("pop[region\u{B7}boston, 1 + 1]"),
+        ),
+        (
+            // A 0-arity BUILTIN index is where the widening deliberately STOPS.
+            // `reify_0_arity_builtins` turns `time` into an `Expr0::App` before this
+            // rule sees it, and telling `TIME` (varies every step) from `PI` (does
+            // not) inside `App` would mean a fourth copy of the builtin
+            // classification `builtins`/`compiler::invariance` own. So the arm stays
+            // loud in the bare column -- the CONSERVATIVE direction, a warned skip
+            // rather than a confident wrong score. A stated boundary, not a gap: if
+            // this ever needs to pin, the fix is to consult that classification, not
+            // to guess here.
+            "a 0-arity builtin index (deliberately still loud)",
+            "pop[Region, TIME]",
+            None,
+            Some("pop[region\u{B7}boston, time()]"),
         ),
         // --- unspellable: a COMPILABILITY verdict, so loud in BOTH contexts ----
         (

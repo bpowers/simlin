@@ -368,12 +368,15 @@ enum IndexVerdict {
 ///   tried FIRST, mirroring `classify_axis_access`'s own precedence, so a name that
 ///   is both an iterated dimension and some axis's element resolves the same way in
 ///   both;
-/// - a numeric literal index is already static and is kept verbatim, and so is an
-///   `@N` POSITION index: `compiler::context`'s subscript lowering resolves
-///   `DimPosition` to a concrete element offset in scalar context (which a
-///   link-score fragment is), so `@N` needs no pin at all. Spelling it out as an
-///   element name here would be a SECOND implementation of position syntax living
-///   outside the compiler that owns it; keeping it verbatim leaves the one.
+/// - an index that selects a FIXED element is kept verbatim, because it needs no pin
+///   and reads nothing at the current step. Three spellings qualify: a numeric
+///   literal, arithmetic over numeric literals (`1 + 1` -- see
+///   [`index_expr_selects_a_fixed_element`], whose base case is that literal), and an
+///   `@N` POSITION index, which `compiler::context`'s subscript lowering resolves to
+///   a concrete element offset in scalar context (which a link-score fragment is).
+///   Spelling `@N` out as an element name here would be a SECOND implementation of
+///   position syntax living outside the compiler that owns it; keeping it verbatim
+///   leaves the one.
 ///
 /// Everything else is one of the two loud verdicts on [`IndexVerdict`], and
 /// `frozen` is what separates them. `IndexVerdict::Unspellable` is loud
@@ -427,19 +430,22 @@ fn pin_dimension_name_indices(
         .enumerate()
         .map(|(i, idx)| {
             let (name, loc) = match &idx {
-                // A numeric selector is static: nothing to pin, nothing to lag.
-                IndexExpr0::Expr(Expr0::Const(..)) => return idx,
-                // An `@N` POSITION selector is static too -- `compiler::context`
+                // An `@N` POSITION selector is static -- `compiler::context`
                 // resolves it to a concrete element offset in scalar context -- so
                 // it neither needs a pin nor reads anything at the current step.
                 IndexExpr0::DimPosition(..) => return idx,
                 IndexExpr0::Expr(Expr0::Var(name, loc)) => {
                     (crate::common::canonicalize(name.as_str()).to_string(), *loc)
                 }
-                // A compound index expression selects the element at runtime. (A
-                // range, wildcard or star-range cannot be a table index at all --
-                // `codegen::extract_table_info` needs a subscript selecting exactly
-                // ONE element and rejects anything wider as `BadTable` -- so
+                // A numeric selector, and arithmetic over numeric selectors, is
+                // static: nothing to pin, nothing to lag. See
+                // [`index_expr_selects_a_fixed_element`] -- the bare `Const` is just
+                // its base case.
+                IndexExpr0::Expr(e) if index_expr_selects_a_fixed_element(e) => return idx,
+                // Any other compound index expression selects the element at
+                // runtime. (A range, wildcard or star-range cannot be a table index
+                // at all -- `codegen::extract_table_info` needs a subscript selecting
+                // exactly ONE element and rejects anything wider as `BadTable` -- so
                 // treating them the same way costs nothing.)
                 _ => {
                     return verdict_into_index(
@@ -507,6 +513,51 @@ fn pin_dimension_name_indices(
         })
         .collect();
     (indices, discharged)
+}
+
+/// Whether a subscript index expression selects a FIXED element -- built entirely
+/// from numeric literals, so it reads nothing at any step and cannot vary with the
+/// ceteris-paribus wrap's choice of what to hold live.
+///
+/// This is the predicate behind `IndexVerdict::Static` for a compound index. Its
+/// base case is the bare `Const` the rule always left alone; `LOOKUP(pop[Region,
+/// 1 + 1], x)` is exactly as static as `LOOKUP(pop[Region, 2], x)` and the rule used
+/// to decline the first only because its catch-all never looked inside.
+///
+/// It is deliberately the NARROWEST sound predicate, not a general invariance test.
+/// `compiler::invariance::exprs_are_invariant` is the engine's run-invariance
+/// derivation, but it consumes LOWERED `Expr` plus an offset-classification
+/// callback, neither of which exists in this position -- and its notion is *wider*
+/// than this rule's obligation anyway: `Dt`, `StartTime` and `INIT(x)` of any
+/// variable are all run-invariant, yet whether a table index may read a variable's
+/// init buffer is an ATTRIBUTION question, and attribution is the wrap's vocabulary,
+/// not this rule's. So this decides only the half it can decide alone.
+///
+/// The match is exhaustive over `Expr0` on purpose -- no catch-all -- so a new
+/// variant forces a decision here rather than silently inheriting `false`:
+///
+/// - `Var` reads model state (or names an element, which the caller's own name arms
+///   resolved before reaching this predicate);
+/// - `Subscript` reads an array element;
+/// - `App` is where a 0-arity builtin lands after `reify_0_arity_builtins`, and
+///   `TIME` and `PI` are indistinguishable here without re-implementing the builtin
+///   classification that `builtins`/`compiler::invariance` own. So the whole arm
+///   stays `false`: a `PI`-indexed table declines CONSERVATIVELY (a loud skip, the
+///   safe direction) rather than being sorted by a fourth copy of that knowledge.
+fn index_expr_selects_a_fixed_element(expr: &Expr0) -> bool {
+    match expr {
+        Expr0::Const(..) => true,
+        Expr0::Op1(_, inner, _) => index_expr_selects_a_fixed_element(inner),
+        Expr0::Op2(_, lhs, rhs, _) => {
+            index_expr_selects_a_fixed_element(lhs) && index_expr_selects_a_fixed_element(rhs)
+        }
+        Expr0::If(cond, then_e, else_e, _) => {
+            index_expr_selects_a_fixed_element(cond)
+                && index_expr_selects_a_fixed_element(then_e)
+                && index_expr_selects_a_fixed_element(else_e)
+        }
+        Expr0::Var(..) | Expr0::Subscript(..) | Expr0::App(..) => false,
+    }
 }
 
 /// Apply a non-rewriting [`IndexVerdict`]: keep the index as it stands, and clear
