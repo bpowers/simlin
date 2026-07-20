@@ -344,6 +344,19 @@ struct WalkAccum<'a> {
     sites: &'a mut HashMap<String, Vec<ReferenceSite>>,
     occurrences: &'a mut Vec<RawOccurrence>,
     path: Vec<u16>,
+    /// `> 0` while the walk is inside a builtin child whose index a [`SiteId`]
+    /// element cannot address (see [`site_child_index`]).
+    ///
+    /// Only the OCCURRENCE view is suppressed there; `push_ref_site` keeps
+    /// running, so the per-edge view -- and therefore `model_edge_shapes` and
+    /// the element causal graph -- still sees every reference with its real
+    /// shape. Suppressing the ref site too would leave the IR with no entry for
+    /// the edge, and consumers default a missing entry to a single `Bare` site,
+    /// which would MISCLASSIFY a `FixedIndex`/`DynamicIndex` reference and emit
+    /// wrong element edges. It is a depth COUNTER rather than a flag because the
+    /// suppression must cover the unaddressable child's whole subtree: emitting
+    /// a nested occurrence at a truncated path would alias a sibling's `SiteId`.
+    suppress_occurrences: usize,
 }
 
 impl WalkAccum<'_> {
@@ -376,6 +389,12 @@ impl WalkAccum<'_> {
         already_lagged: bool,
         index_nested: bool,
     ) {
+        // Inside an unaddressable builtin child, record NO occurrence: its path
+        // could not be reproduced by a consumer, and emitting it at a truncated
+        // path would alias a sibling. See `suppress_occurrences`.
+        if self.suppress_occurrences > 0 {
+            return;
+        }
         self.occurrences.push(RawOccurrence {
             site_id: SiteId(self.path.clone().into_boxed_slice()),
             reference,
@@ -430,6 +449,7 @@ fn collect_all_reference_sites_and_occurrences(
             sites: &mut sites,
             occurrences: &mut occurrences,
             path: Vec::new(),
+            suppress_occurrences: 0,
         };
         match ast {
             crate::ast::Ast::Scalar(expr) | crate::ast::Ast::ApplyToAll(_, expr) => {
@@ -565,6 +585,14 @@ fn classify_occurrence_axes(
         .collect()
 }
 
+/// The reserved [`SiteId`] path component meaning "this child is not
+/// addressable". [`site_child_index`] NEVER returns it, so a path containing it
+/// cannot equal any recorded occurrence's `SiteId` -- which is exactly what lets
+/// the ceteris-paribus wrap append it for an over-arity child and be *certain*
+/// the lookup misses instead of aliasing an unrelated sibling
+/// (`ltm_augment::child_path`).
+pub(crate) const UNADDRESSABLE_CHILD: u16 = u16::MAX;
+
 /// The [`SiteId`] child index for a builtin's `n`-th content, or `None` when the
 /// arity exceeds what one path element can address.
 ///
@@ -593,8 +621,12 @@ fn classify_occurrence_axes(
 /// occurrence IR is salsa-cached per model and every occurrence carries a boxed
 /// path, so widening doubles that footprint on every model to serve an arity no
 /// real model reaches -- and it would not remove the case, only move it.
-fn site_child_index(n: usize) -> Option<u16> {
-    u16::try_from(n).ok()
+///
+/// [`UNADDRESSABLE_CHILD`] is excluded from the addressable range so it remains a
+/// value no recorded `SiteId` can contain; that reserves one child index out of
+/// 65,536 and buys the consumer a provably-unmatchable path to descend under.
+pub(crate) fn site_child_index(n: usize) -> Option<u16> {
+    u16::try_from(n).ok().filter(|&i| i != UNADDRESSABLE_CHILD)
 }
 
 /// `true` iff `builtin` is `PREVIOUS(...)` / `INIT(...)`: everything inside is
@@ -812,11 +844,16 @@ fn walk_all_in_expr(
             // that child -- see its rustdoc for why that is the loud outcome.
             let mut child_n: usize = 0;
             walk_builtin_expr(builtin, |contents| {
-                let Some(child) = site_child_index(child_n) else {
-                    child_n += 1;
-                    return;
-                };
-                acc.path.push(child);
+                // An unaddressable child still gets its REFERENCE SITES walked
+                // (edges and their shapes must stay complete); only the
+                // SiteId-keyed occurrence view is suppressed, for it and its
+                // whole subtree.
+                let addressable = site_child_index(child_n);
+                let suppressed = addressable.is_none();
+                if suppressed {
+                    acc.suppress_occurrences += 1;
+                }
+                acc.path.push(addressable.unwrap_or(UNADDRESSABLE_CHILD));
                 match contents {
                     BuiltinContents::Ident(id, _) => {
                         let canonical = Ident::<Canonical>::new(id);
@@ -864,6 +901,9 @@ fn walk_all_in_expr(
                     BuiltinContents::LookupTable(_) => {}
                 }
                 acc.path.pop();
+                if suppressed {
+                    acc.suppress_occurrences -= 1;
+                }
                 child_n += 1;
             });
             if pushed_reducer_key {

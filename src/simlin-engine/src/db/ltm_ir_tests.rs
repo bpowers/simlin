@@ -1686,11 +1686,103 @@ fn site_child_index_declines_rather_than_wrapping() {
 
     assert_eq!(site_child_index(0), Some(0));
     assert_eq!(site_child_index(1), Some(1));
-    // The last addressable child.
-    assert_eq!(site_child_index(65_535), Some(u16::MAX));
-    // One past it must DECLINE, not wrap to 0 (which would collide with the
+    // The last addressable child: one below `UNADDRESSABLE_CHILD`, which is
+    // reserved as the consumer's provably-unmatchable sentinel (see the sibling
+    // test `unaddressable_child_sentinel_is_never_a_real_child_index`).
+    assert_eq!(site_child_index(65_534), Some(65_534));
+    assert_eq!(site_child_index(65_535), None);
+    // Past the range must DECLINE, not wrap to 0 (which would collide with the
     // first child's SiteId and silently mis-address the occurrence).
     assert_eq!(site_child_index(65_536), None);
     assert_eq!(site_child_index(65_537), None);
     assert_eq!(site_child_index(usize::MAX), None);
+}
+
+/// The unaddressable-child sentinel must be a value `site_child_index` NEVER
+/// emits. That reservation is what makes the consumer's fallback provable: the
+/// ceteris-paribus wrap appends `UNADDRESSABLE_CHILD` for an over-arity child, so
+/// if the producer could also emit it, a recorded occurrence would share the
+/// path and the lookup would alias exactly the sibling it is trying to avoid.
+#[test]
+fn unaddressable_child_sentinel_is_never_a_real_child_index() {
+    use super::{UNADDRESSABLE_CHILD, site_child_index};
+
+    // The last ADDRESSABLE index is one below the sentinel.
+    assert_eq!(site_child_index(65_534), Some(65_534));
+    assert_eq!(UNADDRESSABLE_CHILD, u16::MAX);
+    // The sentinel's own numeric position is declined, not returned.
+    assert_eq!(site_child_index(UNADDRESSABLE_CHILD as usize), None);
+    // ...so no `n` whatsoever maps to it.
+    for n in [0usize, 1, 65_534, 65_535, 65_536, usize::MAX] {
+        assert_ne!(
+            site_child_index(n),
+            Some(UNADDRESSABLE_CHILD),
+            "n = {n} must not map to the reserved sentinel"
+        );
+    }
+}
+
+/// Occurrence suppression inside an unaddressable builtin child must NOT
+/// suppress the per-EDGE reference site.
+///
+/// The two views serve different consumers. The occurrence view is
+/// SiteId-keyed, so a child the path cannot address must record nothing (else
+/// the wrap aliases a sibling). The per-edge view is name-keyed and feeds
+/// `model_edge_shapes` and the element causal graph -- and a MISSING IR entry
+/// there does not mean "no reference": consumers default it to a single `Bare`
+/// site, which would misclassify a `FixedIndex`/`DynamicIndex` reference and
+/// emit wrong element edges and link scores. So the edge must keep its real
+/// shape even when its occurrence is dropped.
+///
+/// Pinned on the accumulator rather than through a 65,536-argument builtin: the
+/// suppression counter is only ever raised at that arity, so a fixture-driven
+/// test would be enormous while this asserts the exact invariant.
+#[test]
+fn suppressed_occurrences_still_record_edge_sites() {
+    use super::{RefShape, ReferenceSite, WalkAccum};
+    use std::collections::HashMap;
+
+    let mut sites: HashMap<String, Vec<ReferenceSite>> = HashMap::new();
+    let mut occurrences = Vec::new();
+    {
+        let mut acc = WalkAccum {
+            sites: &mut sites,
+            occurrences: &mut occurrences,
+            path: vec![0],
+            // As if inside a builtin child whose index cannot be addressed.
+            suppress_occurrences: 1,
+        };
+        acc.push_ref_site(
+            "pop",
+            RefShape::FixedIndex(vec!["nyc".to_string()]),
+            None,
+            &[],
+        );
+        acc.push_occurrence(
+            super::OccurrenceRef::Variable("pop".to_string()),
+            RefShape::FixedIndex(vec!["nyc".to_string()]),
+            Vec::new(),
+            None,
+            &[],
+            false,
+            false,
+        );
+    }
+
+    // The occurrence is dropped (it could not be addressed)...
+    assert!(
+        occurrences.is_empty(),
+        "an unaddressable child must record no occurrence"
+    );
+    // ...but the edge site survives, WITH its real shape.
+    let pop_sites = sites.get("pop").expect(
+        "the per-edge reference site must survive suppression -- a missing IR \
+         entry is defaulted to `Bare` by consumers, misclassifying the reference",
+    );
+    assert_eq!(pop_sites.len(), 1);
+    assert_eq!(
+        pop_sites[0].shape,
+        RefShape::FixedIndex(vec!["nyc".to_string()]),
+        "the edge must keep its real shape, not degrade to Bare"
+    );
 }

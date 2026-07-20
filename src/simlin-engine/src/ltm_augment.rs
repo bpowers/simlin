@@ -641,17 +641,37 @@ struct WrapCtx<'a> {
     occ: &'a OccurrenceLookup<'a>,
 }
 
-/// Append `i` to `path`, yielding the child node's structural path. The wrap's
-/// recursion mirrors `db::ltm_ir::walk_all_in_expr`'s child-index construction
-/// exactly, so the path at any node equals that occurrence's `SiteId` (minus
-/// the slot prefix, which [`OccurrenceLookup::for_slot`] already stripped) --
-/// the invariant `classifier_agreement_tests::assert_occurrence_stream_aligns`
-/// proves corpus-wide. Cloning per descent is cheap: LTM equations are short.
-fn child_path(path: &[u16], i: u16) -> Vec<u16> {
+/// Append child index `i` to `path`, yielding the child node's structural path.
+/// The wrap's recursion mirrors `db::ltm_ir::walk_all_in_expr`'s child-index
+/// construction exactly, so the path at any node equals that occurrence's
+/// `SiteId` (minus the slot prefix, which [`SlotOccurrences::for_slot`] already
+/// stripped) -- the invariant
+/// `classifier_agreement_tests::assert_occurrence_stream_aligns` proves
+/// corpus-wide. Cloning per descent is cheap: LTM equations are short.
+///
+/// `i` is a `usize` and the conversion is CHECKED, mapping an over-arity child
+/// (a variadic builtin with 65,536+ arguments) to
+/// [`db::ltm_ir::UNADDRESSABLE_CHILD`] rather than letting `as u16` wrap. That
+/// matters because wrapping produced an EARLIER sibling's path: the lookup would
+/// return an unrelated occurrence, `missing_occurrence` would never fire, and
+/// the wrap would freeze the wrong reference and emit a plausible wrong score.
+/// The sentinel is a value `site_child_index` never emits, so every lookup at or
+/// below such a child provably MISSES -- which turns the case into the existing
+/// loud skip-and-warn. Callers additionally flag it directly (see the `App` arms)
+/// rather than relying only on the downstream miss.
+fn child_path(path: &[u16], i: usize) -> Vec<u16> {
     let mut v = Vec::with_capacity(path.len() + 1);
     v.extend_from_slice(path);
-    v.push(i);
+    v.push(u16::try_from(i).unwrap_or(crate::db::ltm_ir::UNADDRESSABLE_CHILD));
     v
+}
+
+/// Whether builtin child index `i` can be addressed by a `SiteId` element. The
+/// wrap's `App` arms set [`WrapOutcome::missing_occurrence`] when this is false,
+/// so the partial is abandoned LOUDLY at the overflow point instead of depending
+/// on a lookup miss further down.
+fn child_is_addressable(i: usize) -> bool {
+    crate::db::ltm_ir::site_child_index(i).is_some()
 }
 
 /// The `Collapse` / `Mismatch` / `NotIterated` verdict for an iterated-dimension
@@ -902,7 +922,7 @@ fn wrap_non_matching_in_previous(
                                 ctx,
                                 out,
                                 false,
-                                &child_path(path, i as u16),
+                                &child_path(path, i),
                             )
                         }
                     })
@@ -960,7 +980,7 @@ fn wrap_non_matching_in_previous(
                         ctx,
                         out,
                         skip_index_qualification,
-                        &child_path(path, i as u16),
+                        &child_path(path, i),
                     )
                 })
                 .collect();
@@ -1011,7 +1031,10 @@ fn wrap_non_matching_in_previous(
                         if i == 0 {
                             a
                         } else {
-                            wrap_non_matching_in_previous(a, ctx, out, &child_path(path, i as u16))
+                            if !child_is_addressable(i) {
+                                out.missing_occurrence = true;
+                            }
+                            wrap_non_matching_in_previous(a, ctx, out, &child_path(path, i))
                         }
                     })
                     .collect();
@@ -1054,7 +1077,13 @@ fn wrap_non_matching_in_previous(
                 .into_iter()
                 .enumerate()
                 .map(|(i, a)| {
-                    wrap_non_matching_in_previous(a, ctx, out, &child_path(path, i as u16))
+                    // An over-arity child cannot be addressed by a `SiteId`, so
+                    // every occurrence decision inside it is unavailable: abandon
+                    // the partial loudly rather than wrap on a guessed path.
+                    if !child_is_addressable(i) {
+                        out.missing_occurrence = true;
+                    }
+                    wrap_non_matching_in_previous(a, ctx, out, &child_path(path, i))
                 })
                 .collect();
             Expr0::App(UntypedBuiltinFn(name, args), loc)
@@ -1798,7 +1827,7 @@ fn wrap_live_shaped_in_previous(
                         live_shape,
                         frozen_ref,
                         occ,
-                        &child_path(path, i as u16),
+                        &child_path(path, i),
                     )
                 })
                 .collect();
