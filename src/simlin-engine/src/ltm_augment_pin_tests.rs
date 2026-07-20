@@ -695,3 +695,180 @@ fn per_element_pin_descends_into_a_source_subscript_index_expression() {
         "the LIVE occurrence must keep the bare row spelling; got: {text}"
     );
 }
+
+/// The full ENUMERATION: every index kind the rule can meet, in both freeze
+/// contexts, with a stated verdict for each cell.
+///
+/// Every previous finding in this machinery -- the `391bc3c1` regression and both
+/// review findings on this branch -- was a CELL, not a logic error: one shape
+/// landing in the wrong bucket. Each was fixed after someone supplied the
+/// counterexample. This test exists so the space is stated rather than sampled:
+/// the rule sorts an index into exactly one of
+/// [`super::post_transform::IndexVerdict`]'s four outcomes, and the outcome
+/// depends on the index's spelling and (for `RuntimeRead` alone) on whether the
+/// subtree is already frozen. Two columns, thirteen rows, no gaps.
+///
+/// Reading the table: `Some(spelling)` means the partial is EMITTED and its text
+/// contains that spelling; `None` means the partial is DECLINED
+/// (`UnfreezablePartial` -> warned skip). The unfrozen column is a bare `LOOKUP`
+/// table argument; the frozen column is the same argument inside a pre-existing
+/// `PREVIOUS`. Only the runtime-read rows differ between columns -- that is the
+/// whole content of the compilability-vs-ceteris-paribus split.
+///
+/// Two rows are marked UNREACHABLE and assert current behavior rather than a
+/// derived requirement, because a compilable model cannot produce them: codegen's
+/// `extract_table_info` rejects a range or wildcard table index outright
+/// (`BadTable`, "range subscripts not supported in lookup tables"), so the
+/// TARGET's own equation would fail to compile long before its link scores are
+/// generated. Their frozen cells are therefore honestly uncertain: the rule
+/// currently accepts them, and if they ever became reachable the failure would
+/// surface as a fragment-compile Warning rather than a warned skip -- loud either
+/// way, through a different channel. Left as-is deliberately rather than guessed
+/// into `Unspellable`, since no reachable shape distinguishes the two choices.
+///
+/// One further row (the numeric literal) is about the RULE's verdict, not about
+/// downstream compilability: a numeric index into a NAMED dimension is not
+/// resolvable by the compiler, but that is a property of the target's own
+/// equation, which carries the same index. The rule's job is only to leave a
+/// static selector alone, and that is what the cell pins.
+#[test]
+fn per_element_pin_index_verdict_enumeration() {
+    // (label, the source subscript as written in the table argument,
+    //  expected outside a freeze, expected inside a freeze)
+    let cases: [(&str, &str, Option<&str>, Option<&str>); 13] = [
+        // --- static selectors: pinned, and identical in both contexts ----------
+        (
+            "the axis's own dimension name",
+            "pop[Region, young]",
+            Some("pop[region\u{B7}boston, age\u{B7}young]"),
+            Some("pop[region\u{B7}boston, age\u{B7}young]"),
+        ),
+        (
+            "an element that axis declares",
+            "pop[Region, old]",
+            Some("pop[region\u{B7}boston, age\u{B7}old]"),
+            Some("pop[region\u{B7}boston, age\u{B7}old]"),
+        ),
+        (
+            "an already dim\u{B7}elem-qualified element",
+            "pop[Region, age\u{B7}old]",
+            Some("pop[region\u{B7}boston, age\u{B7}old]"),
+            Some("pop[region\u{B7}boston, age\u{B7}old]"),
+        ),
+        (
+            "a numeric literal (rule verdict only -- see fn docs)",
+            "pop[Region, 1]",
+            Some("pop[region\u{B7}boston, 1]"),
+            Some("pop[region\u{B7}boston, 1]"),
+        ),
+        // --- unspellable: a COMPILABILITY verdict, so loud in BOTH contexts ----
+        (
+            "the source's own dim at a position the target does not project",
+            "pop[Region, Age]",
+            None,
+            None,
+        ),
+        ("another dimension's name", "pop[State, young]", None, None),
+        (
+            "the source's own dims TRANSPOSED",
+            "pop[Age, young]",
+            None,
+            None,
+        ),
+        (
+            "an over-arity index no axis owns",
+            "pop[Region, young, young]",
+            None,
+            None,
+        ),
+        // --- runtime reads: a CETERIS-PARIBUS verdict, so context decides ------
+        (
+            "an undeclared bare name -- a variable selecting the element",
+            "pop[Region, idx]",
+            None,
+            Some("pop[region\u{B7}boston, idx]"),
+        ),
+        (
+            "an arithmetic index expression",
+            "pop[Region, idx + 1]",
+            None,
+            Some("pop[region\u{B7}boston, idx + 1]"),
+        ),
+        (
+            "a nested source subscript selecting the element",
+            "pop[Region, pop[Region, young]]",
+            None,
+            Some("pop[region\u{B7}boston, pop[region\u{B7}boston, age\u{B7}young]]"),
+        ),
+        // --- UNREACHABLE from a compilable model -- see fn docs ---------------
+        (
+            "a range index (UNREACHABLE: codegen rejects it as a table index)",
+            "pop[Region, 1:2]",
+            None,
+            Some("pop[region\u{B7}boston,"),
+        ),
+        (
+            "a wildcard index (UNREACHABLE: codegen rejects it as a table index)",
+            "pop[Region, *]",
+            None,
+            Some("pop[region\u{B7}boston,"),
+        ),
+    ];
+
+    // `state` rides along in every cell so the "another dimension's name" row has
+    // a real dimension to name; it changes no other row, since the rule resolves
+    // an index against the source's OWN axis at that position.
+    let fx = PinFixture::new(vec![datamodel::Dimension::named(
+        "state".to_string(),
+        vec!["ny".to_string(), "ma".to_string()],
+    )]);
+
+    for (label, subscript, expect_bare, expect_frozen) in cases {
+        for (frozen, expected) in [(false, expect_bare), (true, expect_frozen)] {
+            let ctx = if frozen { "inside a freeze" } else { "bare" };
+            let eqn = if frozen {
+                format!("pop[Region, young] + PREVIOUS(LOOKUP({subscript}, input))")
+            } else {
+                format!("pop[Region, young] + LOOKUP({subscript}, input)")
+            };
+            let (ast, deps, occurrences) = fx.parse(&eqn, &["input", "idx"]);
+            // Non-vacuity, every cell: the table argument is the reference the IR
+            // records NOTHING for, so the rule is what decides -- not the IR.
+            assert_eq!(
+                PinFixture::source_occurrences(&occurrences),
+                1,
+                "{label} ({ctx}): only the live occurrence outside the LOOKUP may be \
+                 recorded, or this cell tests the IR rather than the rule: \
+                 {occurrences:?}"
+            );
+            let slot_occurrences = SlotOccurrences::new(&occurrences);
+            let got = fx.generate(&ast, &deps, &slot_occurrences.for_slot(0));
+            match expected {
+                Some(spelling) => {
+                    let text = got.unwrap_or_else(|e| {
+                        panic!("{label} ({ctx}): expected an emitted partial: {e:?}")
+                    });
+                    assert!(
+                        text.contains(spelling),
+                        "{label} ({ctx}): expected {spelling:?} in the partial; got: {text}"
+                    );
+                    assert!(
+                        !text.contains("pop[region,"),
+                        "{label} ({ctx}): no DIMENSION-name subscript may survive into a \
+                         scalar fragment; got: {text}"
+                    );
+                }
+                None => assert!(
+                    matches!(
+                        got,
+                        Err(PartialEquationError {
+                            kind: PartialEquationErrorKind::UnfreezablePartial,
+                            ..
+                        })
+                    ),
+                    "{label} ({ctx}): expected a loud UnfreezablePartial decline; got: {got:?}"
+                ),
+            }
+        }
+    }
+}
