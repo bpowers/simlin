@@ -1599,3 +1599,47 @@ fn scalar_feeder_bare_in_arrayed_reducer_compiles_and_simulates() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Model P: a source whose canonical name CANNOT be spelled as a bare
+// identifier.
+//
+// A clone of Model A (the `PerElement` mixed iterated+literal shape) with the
+// source renamed `pop` -> `1pop`. XMILE lets a modeler quote any name, so
+// `"1pop"` is legal and canonicalizes to `1pop`; the equation lexer, though,
+// only starts an identifier on `XID_Start`, so bare `1pop` lexes as the number
+// `1` followed by the identifier `pop`.
+//
+// This fixture exists to make the CORPUS sensitive to the unquotable-generation
+// class, which two independent bugs hit in one day (the `1pop`-style leading
+// digit fixed in `17d4e7c0`, and the bare-keyword class of GH #976). The other
+// fifteen fixtures are structurally blind to it: they pin generated TEXT, and a
+// generated equation that is stably unparseable keeps its golden green forever
+// while its fragment compiles to no bytecode and the score reads a constant 0.
+// Verified: re-introducing the `quote_ident` regression leaves every other
+// fixture green and fails THIS one, via the `AllCompile` expectation.
+//
+// Deliberately a leading DIGIT and not a keyword: a keyword-named source would
+// fail today against open GH #976 (`ast::needs_quoting` has no keyword check),
+// which is out of scope here. This fixture must be green on correct code.
+// ---------------------------------------------------------------------------
+
+fn unquotable_source_name_model() -> datamodel::Project {
+    TestProject::new("unquotable_source_name_char")
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("Age", &["young", "old"])
+        .array_aux("1pop[Region,Age]", "10")
+        .array_flow("growth[Region]", "\"1pop\"[Region, young] * 0.1", None)
+        .array_stock("stock[Region]", "0", &["growth"], &[], None)
+        .build_datamodel()
+}
+
+#[test]
+fn char_unquotable_source_name() {
+    assert_char_fixture(
+        "unquotable_source_name",
+        unquotable_source_name_model(),
+        "link_score\u{205A}1pop",
+        FragmentExpectation::AllCompile,
+    );
+}
