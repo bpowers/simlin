@@ -296,6 +296,29 @@ pub(super) fn pin_bare_source_ref(ctx: &PerElementRefCtx<'_>) -> Option<Vec<Inde
         .map(|row| qualified_row_indices(&row, ctx))
 }
 
+/// What [`pin_dimension_name_indices`] can say about ONE index of a source
+/// subscript the occurrence IR records nothing for.
+enum IndexVerdict {
+    /// A static selector this rule rewrites: an iterated coordinate, or a literal
+    /// element qualified with its own axis.
+    Pinned(String),
+    /// A static selector already spelled the way this rule would spell it (a
+    /// numeric literal, an already-`dim·elem` name).
+    Static,
+    /// No pin can spell it -- another dimension's name (deciding whether `State`
+    /// reads `Region` through a positional mapping is the per-axis classification
+    /// `db::ltm_ir` owns), an axis whose element this target does not project, an
+    /// index no axis owns. Left alone it keeps a DIMENSION-name subscript, which
+    /// cannot resolve in a scalar fragment, so this is loud ALWAYS -- a
+    /// compilability verdict, independent of freezing.
+    Unspellable,
+    /// A RUNTIME read selecting the element: a variable (`pop[Region, idx]`) or a
+    /// nested expression (`pop[Region, pop[Region, old]]`). It COMPILES as it
+    /// stands, so this is purely a ceteris-paribus question -- see the `frozen`
+    /// discussion on [`pin_dimension_name_indices`].
+    RuntimeRead,
+}
+
 /// Row-pin a source subscript the occurrence IR deliberately records NOTHING
 /// for, by NAME alone. Returns the rewritten indices plus whether the rule
 /// DISCHARGED the subscript.
@@ -311,8 +334,7 @@ pub(super) fn pin_bare_source_ref(ctx: &PerElementRefCtx<'_>) -> Option<Vec<Inde
 /// are two separate obligations, and discharging the second does not require the
 /// first -- which is why this asks the IR for nothing.
 ///
-/// It consults NO occurrence and infers NO shape, and it discharges ONLY a
-/// subscript every index of which is STATICALLY resolvable. Per index, by name:
+/// It consults NO occurrence and infers NO shape. Per index, by name:
 ///
 /// - an index spelling the dimension the source declares AT THAT POSITION is
 ///   replaced by this target element's coordinate for that dimension -- exactly
@@ -330,20 +352,26 @@ pub(super) fn pin_bare_source_ref(ctx: &PerElementRefCtx<'_>) -> Option<Vec<Inde
 ///   is the conservative thing for a regression fix to be;
 /// - a numeric literal index is already static and is kept verbatim.
 ///
-/// EVERYTHING ELSE is declined (`discharged == false`), and the reason is not
-/// merely that this rule cannot spell it. A `LOOKUP` table argument is the ONE of
-/// the three pin-only descents that is **not inside a freeze** -- the wrap holds
-/// it verbatim rather than wrapping it -- so a RUNTIME read in one of its indices
-/// (`LOOKUP(pop[Region, pop[Region, old]], x)`, or a plain `pop[Region, idx]`)
-/// stays LIVE in the emitted partial. `codegen::extract_table_info` evaluates that
-/// index to select the table element, so the partial for the `young` site would
-/// vary with the current-step value of `old` -- a ceteris-paribus violation that
-/// misattributes one row's influence to another. A descent that wraps nothing
-/// cannot fix that, and a compilable-but-wrong score is worse than none (GH #311 /
-/// #661 / #743), so the partial is abandoned LOUDLY instead. The two descents that
-/// ARE inside a freeze need no such refusal: everything under a pre-existing
-/// `PREVIOUS`/`INIT` or a whole-frozen reducer is already lagged, index reads
-/// included, so [`pin_only_source_refs`] pins them and stops there.
+/// Everything else is one of the two loud verdicts on [`IndexVerdict`], and
+/// `frozen` is what separates them. `IndexVerdict::Unspellable` is loud
+/// unconditionally: it is a COMPILABILITY verdict. `IndexVerdict::RuntimeRead` is
+/// loud only when `frozen` is false, and that is a CETERIS-PARIBUS verdict:
+///
+/// - a bare `LOOKUP` table argument is NOT inside a freeze -- the wrap holds it
+///   verbatim rather than wrapping it, since a `PREVIOUS` of a table has no value
+///   slot -- so a runtime index there stays LIVE in the emitted partial.
+///   `codegen::extract_table_info` evaluates it to select the table element, so
+///   the partial isolating one row would vary with the current-step value of
+///   another. A descent that wraps nothing cannot fix that, and a
+///   compilable-but-wrong score is worse than none (GH #311 / #661 / #743), so the
+///   partial is abandoned;
+/// - but the SAME `LOOKUP` nested inside a pre-existing `PREVIOUS`/`INIT`, inside
+///   a whole-frozen reducer, or inside a frozen other-dep's subscript, IS already
+///   lagged -- index reads included -- so ceteris paribus already holds and
+///   refusing would drop a perfectly good score for no reason.
+///
+/// So the caller passes the freeze context it alone knows, exactly as the wrap
+/// threads its own `frozen` flag beside `path`.
 ///
 /// There is no `RefShape` here, no axis vocabulary, and no live-vs-frozen
 /// decision, and this can never make the reference live-selectable (the pin-only
@@ -351,14 +379,11 @@ pub(super) fn pin_bare_source_ref(ctx: &PerElementRefCtx<'_>) -> Option<Vec<Inde
 /// second classifier family was deleted on purpose (`391bc3c1`).
 ///
 /// The caller turns `discharged == false` into `WrapOutcome::missing_occurrence`,
-/// i.e. a warned skip. That also covers the cases where the rule simply has no
-/// answer: a mapped or transposed axis name (deciding that `State` reads `Region`
-/// through a positional mapping is the per-axis classification `db::ltm_ir` owns),
-/// an axis whose element this target element does not project, and an over-arity
-/// index no axis owns.
+/// i.e. a warned skip.
 fn pin_dimension_name_indices(
     indices: Vec<IndexExpr0>,
     ctx: &PerElementRefCtx<'_>,
+    frozen: bool,
 ) -> (Vec<IndexExpr0>, bool) {
     let mut discharged = true;
     let indices = indices
@@ -366,70 +391,99 @@ fn pin_dimension_name_indices(
         .enumerate()
         .map(|(i, idx)| {
             let (name, loc) = match &idx {
-                // A numeric selector is static: nothing to pin, nothing to freeze.
+                // A numeric selector is static: nothing to pin, nothing to lag.
                 IndexExpr0::Expr(Expr0::Const(..)) => return idx,
                 IndexExpr0::Expr(Expr0::Var(name, loc)) => {
                     (crate::common::canonicalize(name.as_str()).to_string(), *loc)
                 }
-                // An arithmetic index, a range, a wildcard: either a runtime read
-                // this descent cannot freeze, or not a table index at all (codegen
-                // rejects a range in a lookup table). Decline -- see the fn docs.
+                // A compound index expression selects the element at runtime. (A
+                // range or wildcard cannot be a table index at all -- codegen
+                // rejects it -- so treating it the same way costs nothing.)
                 _ => {
-                    discharged = false;
-                    return idx;
+                    return verdict_into_index(
+                        IndexVerdict::RuntimeRead,
+                        idx,
+                        frozen,
+                        &mut discharged,
+                    );
                 }
             };
             let Some(dim) = ctx.from_dims.get(i) else {
                 // Over-arity: no axis owns this index, so nothing names its owner
                 // and there is nothing to resolve it against.
-                discharged = false;
-                return idx;
+                return verdict_into_index(IndexVerdict::Unspellable, idx, frozen, &mut discharged);
             };
-            let pinned = if ctx.dim_ctx.lookup(&name).is_some() {
-                // Already `dim·elem`: a static selector, spelled the way this rule
-                // would spell it.
-                Some(name.clone())
+            let verdict = if ctx.dim_ctx.lookup(&name).is_some() {
+                IndexVerdict::Static
             } else if dim.name() == name {
                 // The identity axis: the index names the dimension the source
-                // declares here, so it reads this target element's own
-                // coordinate for that dimension. Routed through the ONE row
-                // derivation, so a name-directed pin and an occurrence-driven
-                // one cannot spell the same row differently.
+                // declares here, so it reads this target element's own coordinate
+                // for that dimension. Routed through the ONE row derivation, so a
+                // name-directed pin and an occurrence-driven one cannot spell the
+                // same row differently.
                 let axis = crate::ltm_agg::AxisRead::Iterated {
                     dim: name.clone(),
                     source_dim: name.clone(),
                 };
-                per_element_row_for_target(
+                match per_element_row_for_target(
                     std::slice::from_ref(&axis),
                     ctx.target_elem_by_dim,
                     ctx.dim_ctx,
-                )
-                .map(|row| qualify_axis_element(&row[0], dim))
+                ) {
+                    Some(row) => IndexVerdict::Pinned(qualify_axis_element(&row[0], dim)),
+                    None => IndexVerdict::Unspellable,
+                }
             } else {
-                // A literal element selector of THIS axis qualifies to
-                // `dim·elem`; `qualify_axis_element` returns the name unchanged
-                // for anything the axis does not declare, and an unchanged name
-                // here means the index is NOT a static selector -- another
-                // dimension's name, or a variable read selecting the element at
-                // runtime. Both are declined.
+                // A literal element selector of THIS axis qualifies to `dim·elem`;
+                // `qualify_axis_element` returns the name unchanged for anything
+                // the axis does not declare. An unchanged name is therefore NOT a
+                // static selector: either another dimension's name (unspellable),
+                // or a variable read selecting the element at runtime.
                 let qualified = qualify_axis_element(&name, dim);
-                (qualified != name).then_some(qualified)
+                if qualified != name {
+                    IndexVerdict::Pinned(qualified)
+                } else if ctx.dim_ctx.is_dimension_name(&name) {
+                    IndexVerdict::Unspellable
+                } else {
+                    IndexVerdict::RuntimeRead
+                }
             };
-            match pinned {
-                // Rebuild the index only when the name actually changes, so a
-                // spelling this rule agrees with keeps its own node.
-                Some(part) if part != name => {
+            let verdict = match verdict {
+                // A pin that changes nothing keeps its own node.
+                IndexVerdict::Pinned(part) if part == name => IndexVerdict::Static,
+                other => other,
+            };
+            match verdict {
+                IndexVerdict::Pinned(part) => {
                     IndexExpr0::Expr(Expr0::Var(RawIdent::new_from_str(&part), loc))
                 }
-                Some(_) => idx,
-                None => {
-                    discharged = false;
-                    idx
-                }
+                other => verdict_into_index(other, idx, frozen, &mut discharged),
             }
         })
         .collect();
     (indices, discharged)
+}
+
+/// Apply a non-rewriting [`IndexVerdict`]: keep the index as it stands, and clear
+/// `discharged` when the verdict is loud in this freeze context (see
+/// [`pin_dimension_name_indices`] -- `Unspellable` always, `RuntimeRead` only
+/// outside a freeze).
+fn verdict_into_index(
+    verdict: IndexVerdict,
+    idx: IndexExpr0,
+    frozen: bool,
+    discharged: &mut bool,
+) -> IndexExpr0 {
+    match verdict {
+        IndexVerdict::Pinned(_) | IndexVerdict::Static => {}
+        IndexVerdict::Unspellable => *discharged = false,
+        IndexVerdict::RuntimeRead => {
+            if !frozen {
+                *discharged = false;
+            }
+        }
+    }
+    idx
 }
 
 /// Row-pin the live source's references inside a subtree the ceteris-paribus
@@ -475,6 +529,7 @@ pub(super) fn pin_only_source_refs(
     occ: &OccurrenceLookup<'_>,
     path: &[u16],
     unlowerable: &mut bool,
+    frozen: bool,
 ) -> Expr0 {
     match expr {
         Expr0::Const(..) => expr,
@@ -508,6 +563,7 @@ pub(super) fn pin_only_source_refs(
                                 occ,
                                 &idx_path,
                                 unlowerable,
+                                frozen,
                             )),
                             IndexExpr0::Range(l, r, rloc) => IndexExpr0::Range(
                                 pin_only_source_refs(
@@ -516,6 +572,7 @@ pub(super) fn pin_only_source_refs(
                                     occ,
                                     &super::child_path(&idx_path, 0),
                                     unlowerable,
+                                    frozen,
                                 ),
                                 pin_only_source_refs(
                                     r,
@@ -523,6 +580,7 @@ pub(super) fn pin_only_source_refs(
                                     occ,
                                     &super::child_path(&idx_path, 1),
                                     unlowerable,
+                                    frozen,
                                 ),
                                 rloc,
                             ),
@@ -542,7 +600,7 @@ pub(super) fn pin_only_source_refs(
             // entirely, so nothing the IR classifies changes spelling.
             let (indices, discharged) = match node_occ {
                 Some(_) => (indices, true),
-                None => pin_dimension_name_indices(indices, ctx),
+                None => pin_dimension_name_indices(indices, ctx, frozen),
             };
             if !discharged {
                 *unlowerable = true;
@@ -571,6 +629,7 @@ pub(super) fn pin_only_source_refs(
                             occ,
                             &idx_path,
                             unlowerable,
+                            frozen,
                         )),
                         IndexExpr0::Range(l, r, rloc) => IndexExpr0::Range(
                             pin_only_source_refs(
@@ -579,6 +638,7 @@ pub(super) fn pin_only_source_refs(
                                 occ,
                                 &super::child_path(&idx_path, 0),
                                 unlowerable,
+                                frozen,
                             ),
                             pin_only_source_refs(
                                 r,
@@ -586,6 +646,7 @@ pub(super) fn pin_only_source_refs(
                                 occ,
                                 &super::child_path(&idx_path, 1),
                                 unlowerable,
+                                frozen,
                             ),
                             rloc,
                         ),
@@ -601,7 +662,14 @@ pub(super) fn pin_only_source_refs(
                 .into_iter()
                 .enumerate()
                 .map(|(i, a)| {
-                    pin_only_source_refs(a, ctx, occ, &super::child_path(path, i), unlowerable)
+                    pin_only_source_refs(
+                        a,
+                        ctx,
+                        occ,
+                        &super::child_path(path, i),
+                        unlowerable,
+                        frozen,
+                    )
                 })
                 .collect();
             Expr0::App(UntypedBuiltinFn(name, args), loc)
@@ -614,6 +682,7 @@ pub(super) fn pin_only_source_refs(
                 occ,
                 &super::child_path(path, 0),
                 unlowerable,
+                frozen,
             )),
             loc,
         ),
@@ -625,6 +694,7 @@ pub(super) fn pin_only_source_refs(
                 occ,
                 &super::child_path(path, 0),
                 unlowerable,
+                frozen,
             )),
             Box::new(pin_only_source_refs(
                 *r,
@@ -632,6 +702,7 @@ pub(super) fn pin_only_source_refs(
                 occ,
                 &super::child_path(path, 1),
                 unlowerable,
+                frozen,
             )),
             loc,
         ),
@@ -642,6 +713,7 @@ pub(super) fn pin_only_source_refs(
                 occ,
                 &super::child_path(path, 0),
                 unlowerable,
+                frozen,
             )),
             Box::new(pin_only_source_refs(
                 *t,
@@ -649,6 +721,7 @@ pub(super) fn pin_only_source_refs(
                 occ,
                 &super::child_path(path, 1),
                 unlowerable,
+                frozen,
             )),
             Box::new(pin_only_source_refs(
                 *f,
@@ -656,6 +729,7 @@ pub(super) fn pin_only_source_refs(
                 occ,
                 &super::child_path(path, 2),
                 unlowerable,
+                frozen,
             )),
             loc,
         ),

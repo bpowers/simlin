@@ -674,6 +674,10 @@ fn wrap_non_matching_in_previous(
                         ctx.occ,
                         path,
                         &mut out.missing_occurrence,
+                        // This call lags (or freezes) everything inside it,
+                        // subscript index reads included, so a runtime table
+                        // index in there is already ceteris-paribus.
+                        true,
                     ),
                     None => call,
                 };
@@ -711,6 +715,13 @@ fn wrap_non_matching_in_previous(
                                     ctx.occ,
                                     &child_path(path, i),
                                     &mut out.missing_occurrence,
+                                    // The wrap holds the table arg VERBATIM, so
+                                    // it inherits the enclosing freeze and
+                                    // nothing more: a runtime index in a bare
+                                    // table argument stays live (declined), the
+                                    // same argument inside a frozen subtree is
+                                    // already lagged (kept).
+                                    frozen,
                                 ),
                                 None => a,
                             }
@@ -769,6 +780,8 @@ fn wrap_non_matching_in_previous(
                         ctx.occ,
                         path,
                         &mut out.missing_occurrence,
+                        // Frozen whole, one line below.
+                        true,
                     ),
                     None => reducer,
                 };
