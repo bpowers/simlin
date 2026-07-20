@@ -2790,6 +2790,15 @@ pub(crate) fn generate_per_element_link_equation(
     // full-tuple pin over-subscript a subset-dims dep), so the mismatch doom
     // can never fire here; the `out.other_dep_mismatch` check below is retained
     // defensively to preserve `wrap_changed_first_ast`'s doom contract.
+    //
+    // `out.missing_occurrence` is checked with it, and is NOT merely defensive:
+    // a live-source occurrence the IR could not record (a walker desync, or a
+    // child index a `SiteId` cannot address) leaves the source looking non-live,
+    // so the wrap freezes it at `PREVIOUS` and the score comes out a clean ZERO.
+    // Every other wrap caller already dooms on it (`shaped_guard_form_text`,
+    // `generate_scalar_to_element_equation`,
+    // `build_partial_equation_shaped_with_live_ref`); this path omitting it was
+    // the one hole through which that silent zero could still reach an emitter.
     let live_shape = RefShape::PerElement {
         axes: site_axes.to_vec(),
     };
@@ -2803,7 +2812,7 @@ pub(crate) fn generate_per_element_link_equation(
         Some(dims_ctx),
         occ,
     )?;
-    if out.other_dep_mismatch {
+    if out.other_dep_mismatch || out.missing_occurrence {
         return Err(PartialEquationError::unfreezable(to_elem_eqn_text));
     }
     // POST-transform row-pinning lowering: rewrite the wrapped AST's live and

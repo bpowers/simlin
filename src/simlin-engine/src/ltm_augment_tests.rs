@@ -5403,3 +5403,77 @@ fn child_path_maps_over_arity_child_to_the_unaddressable_sentinel() {
         "the producer must decline the same child the consumer sentinels"
     );
 }
+
+/// The per-element row-pinning lowering must descend into a subscript RANGE's
+/// endpoints, not just its plain expression indices.
+///
+/// A source reference can hide in a range bound under another variable's
+/// subscript (`other[pop[region]:3]`). The IR walker records an occurrence there
+/// (`IndexExpr2::Range` pushes children 0 and 1) and the sibling lowering
+/// `substitute_reducers_in_expr0` descends both endpoints -- but
+/// `rewrite_per_element_source_refs` matched only `IndexExpr0::Expr` and passed
+/// a `Range` through untouched. The recorded occurrence was then left un-pinned:
+/// its dimension-name subscript survived into the scalar per-element equation,
+/// which either fails to compile (a `PREVIOUS`-of-dim-name capture helper) or
+/// reads the wrong element.
+#[test]
+fn per_element_pin_descends_into_range_endpoints() {
+    use crate::dimensions::DimensionsContext;
+    use crate::ltm_agg::AxisRead;
+
+    let region = make_named_dimension("region", &["nyc", "boston"]);
+    let from_dims = vec![region.clone()];
+    let source_dim_elements = vec![vec!["nyc".to_string(), "boston".to_string()]];
+    let source_dim_names = vec!["region".to_string()];
+    let target_iterated_dims = vec!["region".to_string()];
+    let dim_ctx = DimensionsContext::from(
+        [datamodel::Dimension::named(
+            "region".to_string(),
+            vec!["nyc".to_string(), "boston".to_string()],
+        )]
+        .as_slice(),
+    );
+    let iter_ctx = IteratedDimCtx {
+        source_dim_names: &source_dim_names,
+        target_iterated_dims: &target_iterated_dims,
+        dim_ctx: Some(&dim_ctx),
+        dep_dims: None,
+    };
+    let from = Ident::<Canonical>::new("pop");
+    let site_axes = vec![AxisRead::Iterated {
+        dim: "region".to_string(),
+        source_dim: "region".to_string(),
+    }];
+    let row_parts_bare = vec!["boston".to_string()];
+    let mut target_elem_by_dim = HashMap::new();
+    target_elem_by_dim.insert("region".to_string(), ("boston".to_string(), 1usize));
+
+    let ctx = super::post_transform::PerElementRefCtx {
+        from: &from,
+        site_axes: &site_axes,
+        row_parts_bare: &row_parts_bare,
+        source_dim_elements: &source_dim_elements,
+        from_dims: &from_dims,
+        target_elem_by_dim: &target_elem_by_dim,
+        iter_ctx: &iter_ctx,
+        dim_ctx: &dim_ctx,
+    };
+
+    // `pop[region]` sits in the LOWER bound of a range index of `other`.
+    let ast = Expr0::new("other[pop[region]:3]", LexerType::Equation)
+        .expect("fixture parses")
+        .expect("fixture is non-empty");
+    let lowered = super::post_transform::rewrite_per_element_source_refs(ast, &ctx, false);
+    let text = print_eqn(&lowered);
+
+    assert!(
+        !text.contains("pop[region]"),
+        "the source reference inside the range bound must be pinned, not left \
+         with its dimension-name subscript; got: {text}"
+    );
+    assert!(
+        text.contains("boston"),
+        "the range-bound occurrence must be pinned to this instantiation's row; \
+         got: {text}"
+    );
+}

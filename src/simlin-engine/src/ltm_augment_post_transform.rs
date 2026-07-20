@@ -209,7 +209,15 @@ pub(super) fn rewrite_per_element_source_refs(
         Expr0::Subscript(ident, indices, loc) => {
             if &Ident::<Canonical>::new(ident.as_str()) != ctx.from {
                 // Another variable's subscript: recurse into expression
-                // indices (a nested source reference can hide there).
+                // indices (a nested source reference can hide there) AND into a
+                // range's two endpoints, which are also `Expr0`
+                // (`other[from[D, young]:3]`). The IR walker records occurrences
+                // under both (`IndexExpr2::Range` pushes children 0 and 1), and
+                // the sibling `substitute_reducers_in_expr0` descends both, so
+                // skipping them here left a recorded source occurrence
+                // un-pinned: its dimension-name subscript survived into the
+                // scalar equation, which either fails to compile or reads the
+                // wrong element.
                 let indices =
                     indices
                         .into_iter()
@@ -217,6 +225,12 @@ pub(super) fn rewrite_per_element_source_refs(
                             IndexExpr0::Expr(e) => IndexExpr0::Expr(
                                 rewrite_per_element_source_refs(e, ctx, force_qualified),
                             ),
+                            IndexExpr0::Range(l, r, loc) => IndexExpr0::Range(
+                                rewrite_per_element_source_refs(l, ctx, force_qualified),
+                                rewrite_per_element_source_refs(r, ctx, force_qualified),
+                                loc,
+                            ),
+                            // Wildcard / star-range / `@N` carry no `Expr0`.
                             other => other,
                         })
                         .collect();
@@ -290,7 +304,22 @@ pub(super) fn rewrite_per_element_source_refs(
                             RawIdent::new_from_str(&part),
                             crate::ast::Loc::default(),
                         )),
-                        None => idx,
+                        // Not a resolvable iterated-dim index. A nested source
+                        // reference can still hide inside a range endpoint
+                        // (`from[a:from[b]]`), and the IR records it, so descend
+                        // rather than leaving it un-pinned -- same reason as the
+                        // other-variable branch above. An `Expr` index that did
+                        // not substitute is left to the wrap's conservative
+                        // handling (recursing would double-pin the source's own
+                        // axis).
+                        None => match idx {
+                            IndexExpr0::Range(l, r, rloc) => IndexExpr0::Range(
+                                rewrite_per_element_source_refs(l, ctx, force_qualified),
+                                rewrite_per_element_source_refs(r, ctx, force_qualified),
+                                rloc,
+                            ),
+                            other => other,
+                        },
                     }
                 })
                 .collect();

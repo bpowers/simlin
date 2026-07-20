@@ -681,6 +681,22 @@ fn module_composite_ports(
 /// `OccurrenceRef::ModuleOutput` occurrences in the walk's stable
 /// left-to-right order, so taking the first that names `module` is a
 /// reproducible choice over the SAME set the old scan considered.
+///
+/// One case this CANNOT distinguish, deliberately: a composite read from a
+/// builtin child index no `SiteId` element can address (a variadic call with
+/// 65,536+ arguments) has its occurrence suppressed by `walk_all_in_expr`, so it
+/// looks identical here to "`to` reads no output of `module`". Both yield `None`
+/// and [`module_link_score_equation`] falls through to the signed magnitude-1
+/// `black_box_unit_transfer_equation` instead of a real ceteris-paribus partial.
+///
+/// That is accepted rather than fixed. The outcome is the SAME documented
+/// fallback an unlocatable reference has always taken -- an approximation, not a
+/// plausible-looking wrong number -- and distinguishing the two would mean
+/// threading an "unaddressable" marker through the IR and this query to serve an
+/// arity no real model reaches (a 65,536-argument builtin; note the arity is also
+/// far past where LTM generation is tractable at all, see GH #977). If a future
+/// change makes such a marker cheap, the honest behavior is to skip the edge
+/// LOUDLY here rather than silently approximate it.
 fn module_output_ref_in_document_order(
     db: &dyn Db,
     model: SourceModel,
