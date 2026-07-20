@@ -337,7 +337,29 @@ enum IndexVerdict {
 ///
 /// It consults NO occurrence and infers NO shape. Per index, by name:
 ///
-/// - an index spelling one of the TARGET's ITERATED dimensions is replaced by the
+/// - an index the source's axis at that position DECLARES as an element (or an
+///   already-`dim·elem`-qualified one) is a literal selector, qualified with that
+///   axis (`old` -> `age·old`). This is tried FIRST, because it is the order
+///   `compiler::subscript`'s own `normalize_subscripts3` resolves a subscript index
+///   in: it looks the name up in the axis's `indexed_elements` and only falls back to
+///   the dimension-name (A2A `ActiveDimRef`) reading if that misses. The two readings
+///   collide when a dimension declares an element whose name is ALSO a dimension the
+///   target iterates (`Category = [Region, x]` beside a `Region` dimension), and
+///   there the element must win or this rule spells a row the simulation never reads.
+///   (`ltm_agg::classify_axis_access` has the opposite order -- GH #986. That is a
+///   precision gap rather than a wrong answer TODAY: its dimension-first reading then
+///   finds no mapping and declines the axis, so the reference falls to the
+///   conservative path instead of being mis-resolved. It is filed rather than fixed
+///   here because that classifier feeds reducer hoisting, the reference-shape IR, and
+///   element-edge emission, so reordering it moves decisions well outside this rule.)
+///   Qualifying rather than leaving the element bare matters even though it would very
+///   likely resolve bare (see `wrap_non_matching_in_previous`'s
+///   `skip_index_qualification`): the wrap's generic `qualify_element_index` cannot
+///   qualify an element name several dimensions declare, so a half-qualified subscript
+///   is the one spelling whose compilability depends on the model's element names.
+///   Qualifying here also makes this rule's output byte-identical to the
+///   pre-`391bc3c1` pass's, which is the conservative thing for a regression fix to be;
+/// - otherwise, an index spelling one of the TARGET's ITERATED dimensions is replaced by the
 ///   source element this target element reads on that axis -- derived by handing
 ///   an [`crate::ltm_agg::AxisRead::Iterated`] for the `(index dim, source axis
 ///   dim)` pair to [`per_element_row_for_target`], the SAME single row derivation
@@ -355,19 +377,6 @@ enum IndexVerdict {
 ///   positionally and ignores it), a transposition, a dimension this target does
 ///   not iterate -- is `IndexVerdict::Unspellable`, and it is unspellable because
 ///   the SHARED derivation says so, not because the name differs;
-/// - otherwise, an index the source's axis at that position DECLARES as an element
-///   (or an already-`dim·elem`-qualified one) is a literal selector, qualified with
-///   that axis (`old` -> `age·old`). It would very likely resolve bare too, but the
-///   pin qualifies EVERY index of a row for a reason (see
-///   `wrap_non_matching_in_previous`'s `skip_index_qualification`): the wrap's
-///   generic `qualify_element_index` cannot qualify an element name several
-///   dimensions declare, so a half-qualified subscript is the one spelling whose
-///   compilability depends on the model's element names. Qualifying here also
-///   makes this rule's output byte-identical to the pre-`391bc3c1` pass's, which
-///   is the conservative thing for a regression fix to be. The iterated-dim arm is
-///   tried FIRST, mirroring `classify_axis_access`'s own precedence, so a name that
-///   is both an iterated dimension and some axis's element resolves the same way in
-///   both;
 /// - an index that selects a FIXED element is kept verbatim, because it needs no pin
 ///   and reads nothing at the current step. Three spellings qualify: a numeric
 ///   literal, arithmetic over numeric literals (`1 + 1` -- see
@@ -461,8 +470,16 @@ fn pin_dimension_name_indices(
                 // and there is nothing to resolve it against.
                 return verdict_into_index(IndexVerdict::Unspellable, idx, frozen, &mut discharged);
             };
+            // A literal element selector of THIS axis qualifies to `dim·elem`;
+            // `qualify_axis_element` returns the name unchanged for anything the axis
+            // does not declare, testing exactly the axis's own `indexed_elements` --
+            // the same membership `compiler::subscript`'s own resolution tests, and
+            // it is tried BEFORE the dimension-name reading for the same reason.
+            let axis_element = qualify_axis_element(&name, dim);
             let verdict = if ctx.dim_ctx.lookup(&name).is_some() {
                 IndexVerdict::Static
+            } else if axis_element != name {
+                IndexVerdict::Pinned(axis_element)
             } else if ctx.target_elem_by_dim.contains_key(&name) {
                 // The index names one of the TARGET's ITERATED dimensions, so this
                 // axis reads whatever element this target element projects onto it.
@@ -483,21 +500,13 @@ fn pin_dimension_name_indices(
                     Some(row) => IndexVerdict::Pinned(qualify_axis_element(&row[0], dim)),
                     None => IndexVerdict::Unspellable,
                 }
+            } else if ctx.dim_ctx.is_dimension_name(&name) {
+                // A dimension name no target coordinate projects onto this axis.
+                IndexVerdict::Unspellable
             } else {
-                // A literal element selector of THIS axis qualifies to `dim·elem`;
-                // `qualify_axis_element` returns the name unchanged for anything
-                // the axis does not declare. An unchanged name is therefore NOT a
-                // static selector: either a dimension name no target coordinate
-                // projects onto this axis (unspellable), or a variable read
+                // Neither an element of this axis nor a dimension: a variable read
                 // selecting the element at runtime.
-                let qualified = qualify_axis_element(&name, dim);
-                if qualified != name {
-                    IndexVerdict::Pinned(qualified)
-                } else if ctx.dim_ctx.is_dimension_name(&name) {
-                    IndexVerdict::Unspellable
-                } else {
-                    IndexVerdict::RuntimeRead
-                }
+                IndexVerdict::RuntimeRead
             };
             let verdict = match verdict {
                 // A pin that changes nothing keeps its own node.

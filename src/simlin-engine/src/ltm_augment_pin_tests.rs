@@ -273,6 +273,58 @@ impl PinFixture {
         }
     }
 
+    /// The NAME-COLLISION twin of [`PinFixture::new`]: the source's second axis is
+    /// `Bucket = [region, old]`, so its element `region` is spelled exactly like the
+    /// `Region` DIMENSION the target iterates. Source `pop[Region, Bucket]`, target
+    /// `growth[Region]` at `region·boston`, emitting site `pop[Region, old]`.
+    ///
+    /// XMILE lets an element name collide with a dimension name, and
+    /// `compiler::subscript`'s `normalize_subscripts3` resolves the collision by
+    /// looking the index up in the AXIS's own elements FIRST (`get_element_index`,
+    /// "takes priority") and only then as a dimension name. So `pop[Region, region]`
+    /// reads `Bucket`'s `region` element -- not an iteration over `Region` -- and a
+    /// pin that reads it the other way either drops the edge or spells a row the
+    /// simulation never reads.
+    fn colliding_element() -> Self {
+        use crate::ltm_agg::AxisRead;
+        let project_dims = vec![
+            datamodel::Dimension::named(
+                "region".to_string(),
+                vec!["nyc".to_string(), "boston".to_string()],
+            ),
+            datamodel::Dimension::named(
+                "bucket".to_string(),
+                vec!["region".to_string(), "old".to_string()],
+            ),
+        ];
+        let mut target_elem_by_dim = HashMap::new();
+        target_elem_by_dim.insert("region".to_string(), ("boston".to_string(), 1usize));
+        PinFixture {
+            from: Ident::<Canonical>::new("pop"),
+            from_dims: vec![
+                make_named_dimension("region", &["nyc", "boston"]),
+                make_named_dimension("bucket", &["region", "old"]),
+            ],
+            source_dim_elements: vec![
+                vec!["nyc".to_string(), "boston".to_string()],
+                vec!["region".to_string(), "old".to_string()],
+            ],
+            source_dim_names: vec!["region".to_string(), "bucket".to_string()],
+            target_iterated_dims: vec!["region".to_string()],
+            dim_ctx: crate::dimensions::DimensionsContext::from(project_dims.as_slice()),
+            site_axes: vec![
+                AxisRead::Iterated {
+                    dim: "region".to_string(),
+                    source_dim: "region".to_string(),
+                },
+                AxisRead::Pinned("old".to_string()),
+            ],
+            row_parts_bare: vec!["boston".to_string(), "old".to_string()],
+            target_elem_by_dim,
+            target_element: "region\u{B7}boston".to_string(),
+        }
+    }
+
     fn iter_ctx(&self) -> IteratedDimCtx<'_> {
         IteratedDimCtx {
             source_dim_names: &self.source_dim_names,
@@ -1088,6 +1140,49 @@ fn per_element_pin_index_verdict_enumeration() {
     );
 
     assert_pin_index_verdicts(&fx, "pop[Region, young]", &cases);
+}
+
+/// The NAME-COLLISION half of the enumeration: an index name that is BOTH an element
+/// of the source's axis at that position AND a dimension the target iterates.
+///
+/// XMILE permits the collision, and `compiler::subscript`'s `normalize_subscripts3`
+/// breaks it toward the ELEMENT: it looks the index up in the axis's own
+/// `indexed_elements` first ("takes priority") and only falls back to the
+/// dimension-name `ActiveDimRef` reading. The pin has to break it the same way or it
+/// contradicts the equation's actual meaning -- and both wrong outcomes are bad in
+/// the two directions this branch cares about. Reading `region` as an iteration over
+/// `Region` finds no `Region`/`Bucket` mapping and declines, dropping every score on
+/// a valid edge (the silent-zero direction); and if such a mapping DID exist it would
+/// pin the correspondence's element instead of the literal one, which is a compilable
+/// CONFIDENTLY WRONG row -- the outcome worse than none.
+///
+/// The control row beside it is the same axis's OTHER element, which no dimension is
+/// named after: it must resolve identically, so a fix that merely special-cased the
+/// colliding name would not pass both.
+#[test]
+fn per_element_pin_colliding_element_name_verdict_enumeration() {
+    let fx = PinFixture::colliding_element();
+    assert!(
+        fx.dim_ctx.is_dimension_name("region"),
+        "the collision needs `region` to be a real DIMENSION name as well as an \
+         element of the `bucket` axis, or this test proves nothing"
+    );
+
+    let cases: [PinIndexCell<'_>; 2] = [
+        (
+            "an axis element whose name is also an iterated dimension",
+            "pop[Region, region]",
+            Some("pop[region\u{B7}boston, bucket\u{B7}region]"),
+            Some("pop[region\u{B7}boston, bucket\u{B7}region]"),
+        ),
+        (
+            "the control: the same axis's non-colliding element",
+            "pop[Region, old]",
+            Some("pop[region\u{B7}boston, bucket\u{B7}old]"),
+            Some("pop[region\u{B7}boston, bucket\u{B7}old]"),
+        ),
+    ];
+    assert_pin_index_verdicts(&fx, "pop[Region, old]", &cases);
 }
 
 /// The MAPPED half of the enumeration: the same rule, asked about an index naming a
