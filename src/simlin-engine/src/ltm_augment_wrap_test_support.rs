@@ -20,10 +20,10 @@ use super::*;
 use crate::db::ltm_ir::OccurrenceRef;
 
 /// Reconstruct the occurrence-IR stream ([`OccurrenceSite`]s) for one target
-/// equation from its raw text, for the `#[cfg(test)]` wrap unit tests
+/// equation's parsed `Expr0`, for the `#[cfg(test)]` wrap unit tests
 /// ([`build_partial_equation_shaped`]). Production gets the stream from
 /// `db::ltm_ir::model_ltm_reference_sites` (the `Expr2` walk); this rebuilds an
-/// equivalent stream on the reparsed `Expr0` so those focused text-in/text-out
+/// equivalent stream on the parsed `Expr0` so those focused text-in/text-out
 /// tests keep exercising the real production wrap with byte-identical inputs.
 ///
 /// The paths start at slot `0` (mirroring `walk_all_in_expr`'s single-body slot
@@ -34,22 +34,19 @@ use crate::db::ltm_ir::OccurrenceRef;
 /// [`other_dep_occurrence_axes`] (only its verdict is consumed).
 #[cfg(test)]
 pub(crate) fn build_wrap_test_occurrences(
-    equation_text: &str,
+    ast: &Expr0,
     live_source: &Ident<Canonical>,
     deps: &HashSet<Ident<Canonical>>,
     source_dim_elements: &[Vec<String>],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
 ) -> Vec<OccurrenceSite> {
-    let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
-        return Vec::new();
-    };
     let mut recorded = deps.clone();
     recorded.insert(live_source.clone());
     let mut out = Vec::new();
     // Slot 0 for a scalar/A2A body (matching `walk_all_in_expr`).
     let mut path = vec![0u16];
     walk_wrap_test_occurrences(
-        &ast,
+        ast,
         live_source,
         &recorded,
         source_dim_elements,
@@ -80,41 +77,32 @@ pub(crate) fn test_occurrences_for_var(
     let Some(ast) = to_var.ast() else {
         return out;
     };
-    let walk_slot = |text: &str, slot: u16, out: &mut Vec<OccurrenceSite>| {
-        if let Ok(Some(e0)) = Expr0::new(text, LexerType::Equation) {
-            let mut path = vec![slot];
-            walk_wrap_test_occurrences(
-                &e0,
-                from,
-                &recorded,
-                source_dim_elements,
-                None,
-                false,
-                &mut path,
-                out,
-            );
-        }
+    let walk_slot = |expr: &crate::ast::Expr2, slot: u16, out: &mut Vec<OccurrenceSite>| {
+        let e0 = crate::patch::expr2_to_expr0(expr);
+        let mut path = vec![slot];
+        walk_wrap_test_occurrences(
+            &e0,
+            from,
+            &recorded,
+            source_dim_elements,
+            None,
+            false,
+            &mut path,
+            out,
+        );
     };
     match ast {
         Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
-            walk_slot(&crate::patch::expr2_to_string(expr), 0, &mut out);
+            walk_slot(expr, 0, &mut out);
         }
         Ast::Arrayed(_, per_elem, default_expr, _) => {
             let mut keys: Vec<_> = per_elem.keys().collect();
             keys.sort();
             for (slot, k) in keys.iter().enumerate() {
-                walk_slot(
-                    &crate::patch::expr2_to_string(&per_elem[*k]),
-                    slot as u16,
-                    &mut out,
-                );
+                walk_slot(&per_elem[*k], slot as u16, &mut out);
             }
             if let Some(def) = default_expr {
-                walk_slot(
-                    &crate::patch::expr2_to_string(def),
-                    keys.len() as u16,
-                    &mut out,
-                );
+                walk_slot(def, keys.len() as u16, &mut out);
             }
         }
     }

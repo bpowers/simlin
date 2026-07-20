@@ -1461,22 +1461,24 @@ pub(crate) fn build_partial_equation_shaped_with_live_ref(
     iter_ctx: Option<&IteratedDimCtx<'_>>,
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
 ) -> Result<(String, Option<Expr0>), PartialEquationError> {
-    // Reconstruct the occurrence IR the production wrap consumes from the raw
-    // equation text (the production callers get it from `model_ltm_reference_sites`;
-    // this text-level test entry rebuilds an equivalent stream on the reparsed
-    // Expr0, using the `#[cfg(test)]` Expr0 classifiers the alignment gate proves
-    // stay in step with the IR). Slot-0 body, matching `wrap_changed_first_ast`.
-    let occurrences = build_wrap_test_occurrences(
-        equation_text,
-        live_source,
-        deps,
-        source_dim_elements,
-        iter_ctx,
-    );
+    // This is a genuine TEXT entry point (the unit tests spell the target
+    // equation as a string), so the parse happens here, once, rather than inside
+    // the transform: production hands `wrap_changed_first_ast` an `Expr0` lowered
+    // straight from the target's `Expr2`.
+    let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
+        return Err(PartialEquationError::new(equation_text));
+    };
+    // Reconstruct the occurrence IR the production wrap consumes (the production
+    // callers get it from `model_ltm_reference_sites`; this text-level test entry
+    // rebuilds an equivalent stream on the parsed Expr0, using the `#[cfg(test)]`
+    // Expr0 classifiers the alignment gate proves stay in step with the IR).
+    // Slot-0 body, matching `wrap_changed_first_ast`.
+    let occurrences =
+        build_wrap_test_occurrences(&ast, live_source, deps, source_dim_elements, iter_ctx);
     let slot_occurrences = SlotOccurrences::new(&occurrences);
     let occ = slot_occurrences.for_slot(0);
     let (transformed, out) = wrap_changed_first_ast(
-        equation_text,
+        &ast,
         deps,
         live_source,
         live_shape,
@@ -1484,7 +1486,7 @@ pub(crate) fn build_partial_equation_shaped_with_live_ref(
         iter_ctx,
         dims_ctx,
         &occ,
-    )?;
+    );
     if out.other_dep_mismatch || out.missing_occurrence {
         return Err(PartialEquationError::unfreezable(equation_text));
     }
@@ -1498,27 +1500,40 @@ mod wrap_test_support;
 pub(crate) use wrap_test_support::{build_wrap_test_occurrences, test_occurrences_for_var};
 
 /// The shared changed-first transform: filter `deps` down to the
-/// other-deps set, parse `equation_text`, and PREVIOUS-wrap via
+/// other-deps set and PREVIOUS-wrap `target_expr` via
 /// [`wrap_non_matching_in_previous`] -- returning the transformed AST (not
 /// printed text) plus the [`WrapOutcome`] out-channels (the captured live
 /// reference and the GH #526 mismatch doom flag). The single
 /// implementation behind both `build_partial_equation_shaped_with_live_ref`
 /// (which prints it) and [`shaped_guard_form_text`] (which doom-checks the
-/// AST before printing), so the two can never drift on dep filtering,
-/// parse-failure handling, or the wrap itself.
+/// AST before printing), so the two can never drift on dep filtering or the
+/// wrap itself.
 ///
-/// A parse failure (`Err`) or an empty equation (`Ok(None)`) leaves no AST
-/// to PREVIOUS-wrap, so the ceteris-paribus partial cannot be built.
-/// Returning the input unchanged would silently produce a non-ceteris-
-/// paribus "partial" identical to the full equation (link score magnitude
-/// == 1); fail loudly instead so the caller skips the variable and warns.
+/// `target_expr` is the target equation's own AST, lowered from its `Expr2`
+/// by [`crate::patch::expr2_to_expr0`] -- **not** parsed from printed text.
+/// Track A's generation half deleted that round trip: `patch::expr2_to_string`
+/// IS `print_eqn(expr2_to_expr0(..))`, so parsing its output back was a parse of
+/// our own print of the very tree we already had in this shape. Two things
+/// follow, and the second is the load-bearing one:
+///
+/// 1. There is no parse to fail here, so this is infallible (the caller's
+///    `PartialEquationError::Parse` channel now fires only where a genuine
+///    source-format text boundary remains -- see
+///    [`scalar_or_a2a_target_expr`]).
+/// 2. The tree the wrap walks is structurally IDENTICAL to the `Expr2` tree
+///    `db::ltm_ir::walk_all_in_expr` computed the occurrence `SiteId`s on, so
+///    the wrap's tracked child-index path equals the occurrence's `SiteId` **by
+///    construction** rather than by a corpus-proven print/reparse isomorphism.
+///    The property that makes the swap byte-neutral is pinned by
+///    `classifier_agreement_tests::assert_lowering_matches_reparse`.
+///
 /// `live_reducer_text` (Track A stage 1) opts the wrap into holding a
 /// designated hoisted reducer subexpression LIVE verbatim (matched by
 /// canonical text) instead of an ident -- see [`WrapCtx::live_reducer_text`].
 /// `None` is the ordinary ident-live behavior; every non-agg caller passes it.
 #[allow(clippy::too_many_arguments)]
 fn wrap_changed_first_ast(
-    equation_text: &str,
+    target_expr: &Expr0,
     deps: &HashSet<Ident<Canonical>>,
     live_source: &Ident<Canonical>,
     live_shape: &RefShape,
@@ -1526,16 +1541,14 @@ fn wrap_changed_first_ast(
     iter_ctx: Option<&IteratedDimCtx<'_>>,
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
     occ: &OccurrenceLookup<'_>,
-) -> Result<(Expr0, WrapOutcome), PartialEquationError> {
+) -> (Expr0, WrapOutcome) {
     let other_deps: HashSet<Ident<Canonical>> = deps
         .iter()
         .filter(|d| *d != live_source && normalize_module_ref(d) != *live_source)
         .cloned()
         .collect();
 
-    let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
-        return Err(PartialEquationError::new(equation_text));
-    };
+    let ast = target_expr.clone();
 
     let ctx = WrapCtx {
         live_source,
@@ -1551,7 +1564,7 @@ fn wrap_changed_first_ast(
     // lookup was already rebased to slot-local paths, so the root path is
     // empty.
     let transformed = wrap_non_matching_in_previous(ast, &ctx, &mut out, &[]);
-    Ok((transformed, out))
+    (transformed, out)
 }
 
 /// Is `expr` *array-slice-valued* -- does it contain a wildcard/star-range
@@ -1940,7 +1953,7 @@ fn wrap_live_shaped_in_previous(
 /// leaves the partial unwrapped (an ordinary target).
 #[allow(clippy::too_many_arguments)] // threads the link-score generation context
 fn shaped_guard_form_text(
-    equation_text: &str,
+    target_expr: &Expr0,
     deps: &HashSet<Ident<Canonical>>,
     from: &Ident<Canonical>,
     shape: &RefShape,
@@ -1958,8 +1971,12 @@ fn shaped_guard_form_text(
             None => partial,
         }
     };
+    // The diagnostic text a loud skip names. Printed only on a failure path:
+    // the transform itself consumes the AST, so the source spelling is needed
+    // solely to make the warning name the offending equation.
+    let err_text = || print_eqn(target_expr);
     let (changed_first, out) = wrap_changed_first_ast(
-        equation_text,
+        target_expr,
         deps,
         from,
         shape,
@@ -1967,13 +1984,13 @@ fn shaped_guard_form_text(
         iter_ctx,
         dims_ctx,
         occ,
-    )?;
+    );
     // A walker desync (finding 1): the changed-first partial silently froze the
     // live reference, and the changed-last dual would read the SAME desynced
     // occurrence stream, so BOTH conventions are corrupt. Skip loudly rather
     // than emit either silent zero.
     if out.missing_occurrence {
-        return Err(PartialEquationError::unfreezable(equation_text));
+        return Err(PartialEquationError::unfreezable(&err_text()));
     }
     if !out.other_dep_mismatch && !contains_unfreezable_previous(&changed_first) {
         let source_ref = source_ref_for_guard(
@@ -1990,15 +2007,15 @@ fn shaped_guard_form_text(
         ));
     }
 
-    // Changed-last fallback: freeze only the live source. Re-parse the
-    // (already proven parseable) equation text rather than threading the
-    // pristine AST out of `wrap_changed_first_ast` -- this leg is the rare
-    // doomed path, and a second cheap parse keeps the shared helper's
-    // signature identical to `build_partial_equation_shaped_with_live_ref`'s
-    // needs.
-    let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
-        return Err(PartialEquationError::new(equation_text));
-    };
+    // Changed-last fallback: freeze only the live source, starting from the
+    // SAME pristine target AST the changed-first leg wrapped. This used to
+    // re-parse the equation text here -- justified at the time as a cheap second
+    // parse on a rare doomed path, which was true of the cost but not of the
+    // structure: the "cheap re-parse" was reconstructing a tree the caller
+    // already owned, and it was the only reason this function needed the text at
+    // all. Taking the AST as the parameter removes both the parse and the
+    // possibility that the two conventions ever walk different trees.
+    let ast = target_expr.clone();
 
     // GH #779: decline the BARE-spelled feeder of an un-hoisted multi-source
     // reducer. When the live source is referenced BARE (unsubscripted) and is
@@ -2021,7 +2038,7 @@ fn shaped_guard_form_text(
         && !source_dim_names.is_empty()
         && references_bare_source_inside_reducer(&ast, from, false)
     {
-        return Err(PartialEquationError::bare_reducer_feeder(equation_text));
+        return Err(PartialEquationError::bare_reducer_feeder(&err_text()));
     }
 
     let mut frozen_ref: Option<Expr0> = None;
@@ -2029,10 +2046,10 @@ fn shaped_guard_form_text(
     let Some(frozen) = frozen_ref else {
         // No matching occurrence: the "frozen" equation would be the
         // target's own equation, scoring a silent constant 0.
-        return Err(PartialEquationError::unfreezable(equation_text));
+        return Err(PartialEquationError::unfreezable(&err_text()));
     };
     if contains_unfreezable_previous(&changed_last) {
-        return Err(PartialEquationError::unfreezable(equation_text));
+        return Err(PartialEquationError::unfreezable(&err_text()));
     }
     let source_ref = source_ref_for_guard(
         from,
@@ -2559,11 +2576,11 @@ fn subscript_idents_in_expr0(
 /// `$⁚ltm⁚link_score⁚{from}→{to}[{element}]`, mirroring the arrayed->scalar
 /// `{from}[{elem}]→{to}` convention from `generate_element_to_scalar_equation`.
 ///
-/// `to_elem_eqn_text` is the target's OWN equation text for this element (the
-/// hoisted reducers still spelled `SUM(...)`, NOT agg-substituted -- Track A
-/// stage 1): the shared A2A body for an `Equation::ApplyToAll` target, or the
-/// matching per-element slot's text (or the default slot) for an
-/// `Equation::Arrayed` one. `reducer_subst` maps each hoisted reducer's
+/// `to_elem_eqn` is the target's OWN equation AST for this element (the hoisted
+/// reducers still spelled `SUM(...)`, NOT agg-substituted -- Track A stage 1),
+/// lowered straight from its `Expr2` by [`crate::patch::expr2_to_expr0`]: the
+/// shared A2A body for an `Equation::ApplyToAll` target, or the matching
+/// per-element slot (or the default slot) for an `Equation::Arrayed` one. `reducer_subst` maps each hoisted reducer's
 /// canonical text to its agg name; it is empty for a true scalar `from`. `to_deps`
 /// is the full dependency set of that equation (computed with the target's AST
 /// dimensions so element-name subscripts are not mistaken for variables), plus
@@ -2624,7 +2641,7 @@ pub(crate) fn generate_scalar_to_element_equation(
     from: &str,
     to: &str,
     element: &str,
-    to_elem_eqn_text: &str,
+    to_elem_eqn: &Expr0,
     reducer_subst: &HashMap<String, String>,
     to_deps: &HashSet<Ident<Canonical>>,
     to_deps_to_subscript: &HashSet<Ident<Canonical>>,
@@ -2639,8 +2656,8 @@ pub(crate) fn generate_scalar_to_element_equation(
     let to_q = quote_ident(to);
     let to_elem = format!("{to_q}[{element}]");
 
-    // Composition inverted (Track A stage 1): `to_elem_eqn_text` is the target
-    // element's OWN equation (reducers still spelled `SUM(...)`). When `from`
+    // Composition inverted (Track A stage 1): `to_elem_eqn` is the target
+    // element's OWN equation AST (reducers still spelled `SUM(...)`). When `from`
     // is an arrayed/scalar agg, the reducer that became it is held LIVE by the
     // wrap (matched by text via `reducer_subst`); a true scalar `from` (empty
     // `reducer_subst`) keeps the ident-live `RefShape::Bare` wrap. Either way
@@ -2657,7 +2674,7 @@ pub(crate) fn generate_scalar_to_element_equation(
     // separate empty-stream path.
     let live_reducer_text = live_reducer_text_for_agg(reducer_subst, from);
     let (wrapped, out) = wrap_changed_first_ast(
-        to_elem_eqn_text,
+        to_elem_eqn,
         to_deps,
         &from_canonical,
         &RefShape::Bare,
@@ -2665,7 +2682,7 @@ pub(crate) fn generate_scalar_to_element_equation(
         None,
         dims_ctx,
         occ,
-    )?;
+    );
     // Loud degradation over a silent zero (matching `shaped_guard_form_text` /
     // `build_partial_equation_shaped_with_live_ref`): a walker desync
     // (`missing_occurrence`) or a GH #526 mismatched other-dep
@@ -2674,7 +2691,7 @@ pub(crate) fn generate_scalar_to_element_equation(
     // `missing_occurrence` cannot fire, and `iter_ctx` is `None`), so this only
     // affects the scalar-source path.
     if out.missing_occurrence || out.other_dep_mismatch {
-        return Err(PartialEquationError::unfreezable(to_elem_eqn_text));
+        return Err(PartialEquationError::unfreezable(&print_eqn(to_elem_eqn)));
     }
     let partial = print_eqn(&substitute_reducers_in_expr0(wrapped, reducer_subst));
     let mut partial = subscript_idents_at_element(&partial, to_deps_to_subscript, element)?;
@@ -2739,7 +2756,7 @@ pub(crate) fn generate_per_element_link_equation(
     site_axes: &[crate::ltm_agg::AxisRead],
     row_parts_bare: &[String],
     element_qualified: &str,
-    to_elem_eqn_text: &str,
+    to_elem_eqn: &Expr0,
     to_deps: &HashSet<Ident<Canonical>>,
     to_deps_to_subscript: &HashSet<Ident<Canonical>>,
     from_dims: &[crate::dimensions::Dimension],
@@ -2803,7 +2820,7 @@ pub(crate) fn generate_per_element_link_equation(
         axes: site_axes.to_vec(),
     };
     let (wrapped, out) = wrap_changed_first_ast(
-        to_elem_eqn_text,
+        to_elem_eqn,
         to_deps,
         &from_canonical,
         &live_shape,
@@ -2811,9 +2828,9 @@ pub(crate) fn generate_per_element_link_equation(
         Some(&iter_ctx),
         Some(dims_ctx),
         occ,
-    )?;
+    );
     if out.other_dep_mismatch || out.missing_occurrence {
-        return Err(PartialEquationError::unfreezable(to_elem_eqn_text));
+        return Err(PartialEquationError::unfreezable(&print_eqn(to_elem_eqn)));
     }
     // POST-transform row-pinning lowering: rewrite the wrapped AST's live and
     // frozen source occurrences (including those the wrap moved inside
@@ -2843,10 +2860,10 @@ pub(crate) fn generate_per_element_link_equation(
 /// everything else PREVIOUS. The result is `Equation::Scalar`-shaped text,
 /// named `$⁚ltm⁚link_score⁚{agg}→{to}`.
 ///
-/// Composition inverted (Track A stage 1): `to_own_eqn_text` is `to`'s OWN
-/// equation text (hoisted reducers still spelled `SUM(...)`), and
+/// Composition inverted (Track A stage 1): `to_own_eqn` is `to`'s OWN
+/// equation AST (hoisted reducers still spelled `SUM(...)`), and
 /// `reducer_subst` maps each hoisted reducer's canonical text to its agg name.
-/// The ceteris-paribus wrap runs on that own text with the reducer that became
+/// The ceteris-paribus wrap runs on that own AST with the reducer that became
 /// `agg_name` held LIVE verbatim (matched by text; every co-reducer freezes
 /// whole via the GH #517 path), and the agg substitution is a POST-transform
 /// lowering ([`substitute_reducers_in_expr0`]) of the wrapped AST -- the
@@ -2877,7 +2894,7 @@ pub(crate) fn generate_per_element_link_equation(
 pub(crate) fn generate_agg_to_scalar_target_equation(
     agg_name: &str,
     to_name: &str,
-    to_own_eqn_text: &str,
+    to_own_eqn: &Expr0,
     reducer_subst: &HashMap<String, String>,
     to_deps: &HashSet<Ident<Canonical>>,
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
@@ -2894,7 +2911,7 @@ pub(crate) fn generate_agg_to_scalar_target_equation(
     // is a scalar -- referenced bare, no iterated-dim context.
     let live_reducer_text = live_reducer_text_for_agg(reducer_subst, agg_name);
     let (wrapped, _out) = wrap_changed_first_ast(
-        to_own_eqn_text,
+        to_own_eqn,
         to_deps,
         &agg_canonical,
         &RefShape::Bare,
@@ -2902,7 +2919,7 @@ pub(crate) fn generate_agg_to_scalar_target_equation(
         None,
         dims_ctx,
         occ,
-    )?;
+    );
     let mut partial = print_eqn(&substitute_reducers_in_expr0(wrapped, reducer_subst));
     if let Some(table_ref) = gf_table_ref {
         partial = format!("LOOKUP({table_ref}, {partial})");
@@ -3628,7 +3645,7 @@ fn build_arrayed_link_score_equation(
                          gf_table_ref: Option<&str>,
                          slot: u16|
      -> Result<String, PartialEquationError> {
-        let elem_eqn_text = crate::patch::expr2_to_string(expr);
+        let elem_eqn = crate::patch::expr2_to_expr0(expr);
         // Per-element dependency set: walk *only this slot's* expression
         // (the union over all elements -- what `identifier_set` on the
         // whole `Ast::Arrayed` returns -- would over-freeze refs absent
@@ -3646,7 +3663,7 @@ fn build_arrayed_link_score_equation(
         .collect();
         let occ = slot_occurrences.for_slot(slot);
         shaped_guard_form_text(
-            &elem_eqn_text,
+            &elem_eqn,
             &deps_e,
             from,
             shape,
@@ -3703,31 +3720,39 @@ fn build_arrayed_link_score_equation(
     ))
 }
 
-/// Extract the equation text of a Scalar/ApplyToAll target's AST.
+/// The ceteris-paribus wrap's input AST for a Scalar/ApplyToAll target.
 ///
 /// `Ast::Arrayed` targets are routed through
 /// [`build_arrayed_link_score_equation`] before this is reached, so the
 /// `Arrayed` AST arm here is dead in practice.
 ///
-/// The `eqn`-text fallbacks (both the `Ast::Arrayed` arm and the no-AST
-/// branch) cover the degenerate case where the target failed to lower --
-/// `ast()` is `None`, or it's an `Ast::Arrayed` we didn't intercept --
-/// but its datamodel `eqn` is still a plain scalar string. Returning that
-/// raw text gives the link-score guard form *something* to differentiate,
-/// which is strictly more useful than a `"0"` partial; the stock-to-flow
-/// path has always done this for the same variable shape. A target with no
-/// usable scalar equation at all (a stub, or an arrayed `eqn` we can't
-/// flatten here) falls through to `"0"` -- the link score then degrades to
-/// the historical placeholder rather than producing a parse error.
-fn scalar_or_a2a_target_equation_text(target_var: &Variable) -> String {
+/// The lowered case ([`crate::patch::expr2_to_expr0`]) is the normal path and
+/// involves no text at all -- that is the print->reparse deletion. The
+/// `eqn`-TEXT fallbacks (both the `Ast::Arrayed` arm and the no-AST branch)
+/// cover the degenerate case where the target failed to lower -- `ast()` is
+/// `None`, or it's an `Ast::Arrayed` we didn't intercept -- but its datamodel
+/// `eqn` is still a plain scalar string. Parsing that raw text gives the
+/// link-score guard form *something* to differentiate, which is strictly more
+/// useful than a `"0"` partial; the stock-to-flow path has always done this for
+/// the same variable shape. A target with no usable scalar equation at all (a
+/// stub, or an arrayed `eqn` we can't flatten here) falls through to `"0"` -- the
+/// link score then degrades to the historical placeholder.
+///
+/// This fallback is the ONE remaining parse on this path, and it is the
+/// legitimate kind: it reads USER-authored `datamodel` source text that no
+/// compiled AST exists for, i.e. exactly the "unavoidable source-format
+/// boundary" GH #965 carves out, not a re-parse of engine output. A genuine
+/// failure there still surfaces as the loud `PartialEquationError::Parse` the
+/// db-bearing caller turns into a warned skip.
+fn scalar_or_a2a_target_expr(target_var: &Variable) -> Result<Expr0, PartialEquationError> {
     use crate::ast::Ast;
-    if let Some(ast) = target_var.ast() {
-        match ast {
-            Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => crate::patch::expr2_to_string(expr),
-            _ => scalar_eqn_text_or_zero(target_var),
-        }
-    } else {
-        scalar_eqn_text_or_zero(target_var)
+    if let Some(Ast::Scalar(expr) | Ast::ApplyToAll(_, expr)) = target_var.ast() {
+        return Ok(crate::patch::expr2_to_expr0(expr));
+    }
+    let text = scalar_eqn_text_or_zero(target_var);
+    match Expr0::new(&text, LexerType::Equation) {
+        Ok(Some(expr)) => Ok(expr),
+        _ => Err(PartialEquationError::new(&text)),
     }
 }
 
@@ -3784,7 +3809,7 @@ fn scalar_or_a2a_target_deps(
 }
 
 /// The target's datamodel `eqn` text when it is a plain `Equation::Scalar`,
-/// else `"0"`. See [`scalar_or_a2a_target_equation_text`] for why this
+/// else `"0"`. See [`scalar_or_a2a_target_expr`] for why this
 /// fallback exists (a variable that failed to lower).
 fn scalar_eqn_text_or_zero(target_var: &Variable) -> String {
     match target_var {
@@ -3847,7 +3872,7 @@ fn generate_auxiliary_to_auxiliary_equation(
     // "SMTH1(x, 5)") while the AST holds the post-module-expansion form
     // (e.g., Var("$⁚s⁚0⁚smth1·output")).  Using the AST-derived text
     // ensures the identifiers in the equation match those in `deps`.
-    let to_equation = scalar_or_a2a_target_equation_text(to_var);
+    let to_equation = scalar_or_a2a_target_expr(to_var)?;
 
     // Dependencies of the 'to' variable, with the target's and source's
     // dimension/element names filtered out (GH #759).
@@ -4149,11 +4174,11 @@ fn generate_stock_to_flow_equation(
         );
     }
 
-    // Get the flow equation text.  Prefer the AST when available because
-    // it handles both Scalar and ApplyToAll (arrayed) equations, whereas
+    // The flow's own equation AST.  Prefer the lowered AST when available
+    // because it handles both Scalar and ApplyToAll (arrayed) equations, whereas
     // the raw `eqn` field only covers Scalar.  Without this, arrayed flows
     // fall through to "0" and produce a zero link score.
-    let flow_equation = scalar_or_a2a_target_equation_text(flow_var);
+    let flow_equation = scalar_or_a2a_target_expr(flow_var)?;
 
     // Dependencies of the flow variable, with the flow's and stock's
     // dimension/element names filtered out (GH #759).

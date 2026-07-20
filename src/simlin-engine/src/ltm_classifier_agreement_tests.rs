@@ -399,8 +399,12 @@ fn expr0_occurrences_for_target(
     // `slot` is the first `SiteId` path element (`walk_all_in_expr`: slot 0 for
     // a scalar/A2A body, the sorted element index for each `Ast::Arrayed` slot,
     // then the default slot after the last element).
-    let mut walk_text = |slot: u16, text: &str| {
-        let parsed = Expr0::new(text, crate::lexer::LexerType::Equation).unwrap_or_else(|e| {
+    let mut walk_slot = |slot: u16, expr: &crate::ast::Expr2| {
+        // Every fixture slot doubles as a corpus sample for the round-trip
+        // fidelity property the print->reparse deletion rests on.
+        assert_lowering_matches_reparse(&format!("target '{to_name}' slot {slot}"), expr);
+        let text = crate::patch::expr2_to_string(expr);
+        let parsed = Expr0::new(&text, crate::lexer::LexerType::Equation).unwrap_or_else(|e| {
             panic!("target '{to_name}' printed text failed to reparse (GH #913 drift class): text={text:?}, err={e:?}")
         });
         if let Some(expr0) = parsed {
@@ -410,7 +414,7 @@ fn expr0_occurrences_for_target(
     };
     match ast {
         Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
-            walk_text(0, &crate::patch::expr2_to_string(expr));
+            walk_slot(0, expr);
         }
         Ast::Arrayed(_, per_elem, default_expr, _) => {
             // Deterministic slot order (matches the sorted walk in
@@ -419,14 +423,109 @@ fn expr0_occurrences_for_target(
             let mut keys: Vec<_> = per_elem.keys().collect();
             keys.sort();
             for (slot, k) in keys.iter().enumerate() {
-                walk_text(slot as u16, &crate::patch::expr2_to_string(&per_elem[*k]));
+                walk_slot(slot as u16, &per_elem[*k]);
             }
             if let Some(default) = default_expr {
-                walk_text(keys.len() as u16, &crate::patch::expr2_to_string(default));
+                walk_slot(keys.len() as u16, default);
             }
         }
     }
     out
+}
+
+/// Rebuild `expr` with every `Loc` reset to the default and every raw
+/// identifier canonicalized, so two `Expr0` trees can be compared for
+/// STRUCTURAL equality with the derived `PartialEq`.
+///
+/// Two coordinates are deliberately erased, because they are exactly the two an
+/// `Expr0` consumer never reads directly:
+///
+/// * **`Loc`** -- a direct `Expr2` -> `Expr0` lowering carries the ORIGINAL
+///   model text's spans while a print->reparse carries the printed text's. No
+///   LTM consumer reads them.
+/// * **Raw identifier SPELLING** -- `RawIdent` is pre-canonical by definition.
+///   `Ident::<Canonical>::to_source_repr` renders the module separator `·` back
+///   as `.`, and the parser hands back a quoted name WITH its quotes, so a
+///   module-output composite is `$⁚m⁚0⁚smth1.output` on the lowering side and
+///   `"$⁚m⁚0⁚smth1·output"` on the reparse side. Every consumer reads such a
+///   head through `canonicalize` / `Ident::new` and prints it through
+///   `print_ident` (which canonicalizes), so the two spellings are the same
+///   identifier everywhere it matters -- including in the emitted text.
+fn strip_locs(expr: &Expr0) -> Expr0 {
+    let d = crate::ast::Loc::default();
+    match expr {
+        Expr0::Const(s, v, _) => Expr0::Const(s.clone(), *v, d),
+        Expr0::Var(id, _) => Expr0::Var(canonical_raw(id), d),
+        Expr0::App(UntypedBuiltinFn(name, args), _) => Expr0::App(
+            UntypedBuiltinFn(name.clone(), args.iter().map(strip_locs).collect()),
+            d,
+        ),
+        Expr0::Subscript(id, indices, _) => Expr0::Subscript(
+            canonical_raw(id),
+            indices.iter().map(strip_index_locs).collect(),
+            d,
+        ),
+        Expr0::Op1(op, inner, _) => Expr0::Op1(*op, Box::new(strip_locs(inner)), d),
+        Expr0::Op2(op, l, r, _) => {
+            Expr0::Op2(*op, Box::new(strip_locs(l)), Box::new(strip_locs(r)), d)
+        }
+        Expr0::If(c, t, e, _) => Expr0::If(
+            Box::new(strip_locs(c)),
+            Box::new(strip_locs(t)),
+            Box::new(strip_locs(e)),
+            d,
+        ),
+    }
+}
+
+/// The canonical spelling of a raw identifier, as every `Expr0` consumer reads
+/// it. See [`strip_locs`] for why spelling is normalized away.
+fn canonical_raw(id: &crate::common::RawIdent) -> crate::common::RawIdent {
+    crate::common::RawIdent::new_from_str(canonicalize(id.as_str()).as_ref())
+}
+
+fn strip_index_locs(index: &IndexExpr0) -> IndexExpr0 {
+    let d = crate::ast::Loc::default();
+    match index {
+        IndexExpr0::Wildcard(_) => IndexExpr0::Wildcard(d),
+        IndexExpr0::StarRange(id, _) => IndexExpr0::StarRange(canonical_raw(id), d),
+        IndexExpr0::Range(l, r, _) => IndexExpr0::Range(strip_locs(l), strip_locs(r), d),
+        IndexExpr0::DimPosition(n, _) => IndexExpr0::DimPosition(*n, d),
+        IndexExpr0::Expr(e) => IndexExpr0::Expr(strip_locs(e)),
+    }
+}
+
+/// Assert that lowering `expr` straight to `Expr0` (`patch::expr2_to_expr0`) is
+/// STRUCTURALLY identical to printing it and re-parsing the text -- the property
+/// that makes the print->reparse round trip deletable without changing a single
+/// generated byte.
+///
+/// Every LTM equation transform runs on an `Expr0`, and today that `Expr0` comes
+/// from `Expr0::new(expr2_to_string(expr))` -- a print followed by a parse of our
+/// own output. The direct lowering is the same function minus the two string
+/// steps (`expr2_to_string` IS `print_eqn(expr2_to_expr0(..))`), so if the two
+/// results are structurally equal then swapping them cannot change any wrap
+/// decision, any occurrence path, or any printed byte.
+///
+/// Note the asymmetry in what a failure would mean: the DIRECT lowering is
+/// structurally isomorphic to the `Expr2` tree by construction, so it is the one
+/// that matches `db::ltm_ir::walk_all_in_expr`'s `SiteId` paths. A mismatch here
+/// therefore reports a print/reparse infidelity in TODAY's path, not a defect in
+/// the replacement.
+#[track_caller]
+fn assert_lowering_matches_reparse(what: &str, expr: &crate::ast::Expr2) {
+    let lowered = crate::patch::expr2_to_expr0(expr);
+    let text = crate::ast::print_eqn(&lowered);
+    let reparsed = Expr0::new(&text, crate::lexer::LexerType::Equation)
+        .unwrap_or_else(|e| panic!("{what}: printed text {text:?} failed to reparse: {e:?}"))
+        .unwrap_or_else(|| panic!("{what}: printed text {text:?} parsed to nothing"));
+    assert_eq!(
+        strip_locs(&lowered),
+        strip_locs(&reparsed),
+        "{what}: the direct Expr2->Expr0 lowering and the print->reparse round trip \
+         disagree structurally on {text:?}; deleting the round trip would change the \
+         tree the LTM wrap walks"
+    );
 }
 
 /// Sort a shape multiset for order-insensitive comparison. `RefShape` derives
@@ -626,6 +725,130 @@ fn assert_occurrence_streams_align(tp: &TestProject) {
         "alignment fixture produced NO occurrences model-wide: the SiteId-path / shape \
          assertions never run (every per-target stream is empty, so the length checks \
          pass 0 == 0)"
+    );
+}
+
+/// Assert [`assert_lowering_matches_reparse`] for every slot of every variable
+/// of `tp`'s `main` model, and return how many slots were checked so a caller
+/// can prove the sweep was not vacuous.
+fn assert_lowering_matches_reparse_everywhere(tp: &TestProject) -> usize {
+    let datamodel = tp.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let project = sync.project;
+
+    // A fixture equation that fails to parse leaves its variable with NO AST, so
+    // it contributes no slot and would silently shrink the sweep.
+    let errors: Vec<_> = collect_all_diagnostics(&db, project)
+        .into_iter()
+        .filter(|d| d.severity == DiagnosticSeverity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "round-trip fixture has compile errors -- a variable that fails to lower \
+         contributes no slot to the sweep: {errors:?}"
+    );
+
+    let variables = reconstruct_model_variables(&db, model, project);
+    let mut names: Vec<&Ident<Canonical>> = variables.keys().collect();
+    names.sort();
+    let mut slots = 0usize;
+    for name in names {
+        let Some(ast) = variables[name].ast() else {
+            continue;
+        };
+        let mut check = |slot: &str, expr: &crate::ast::Expr2| {
+            assert_lowering_matches_reparse(&format!("{name} {slot}"), expr);
+            slots += 1;
+        };
+        match ast {
+            Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => check("body", expr),
+            Ast::Arrayed(_, per_elem, default_expr, _) => {
+                let mut keys: Vec<_> = per_elem.keys().collect();
+                keys.sort();
+                for k in keys {
+                    check(k.as_str(), &per_elem[k]);
+                }
+                if let Some(default) = default_expr {
+                    check("<default>", default);
+                }
+            }
+        }
+    }
+    slots
+}
+
+#[test]
+fn direct_lowering_matches_reparse_on_print_sensitive_shapes() {
+    // The print->reparse deletion is byte-neutral only if the direct
+    // `Expr2` -> `Expr0` lowering IS the reparse of the printed form. The shapes
+    // most likely to break that are the ones where `print_eqn` renders something
+    // the parser could plausibly re-associate differently: a negated constant
+    // (`-3`, which could re-lex as a single negative literal), the zero-argument
+    // builtins (printed `time()`, which could re-parse as a bare `Var`), the
+    // word-spelled operators (`not`, `mod`), the two-character comparisons
+    // (`<>`, `>=`), right-associative `^`, an `If` nested as an operand, the
+    // variadic builtins, `LOOKUP`'s table argument, and every subscript index
+    // form (wildcard, star-range, range, `@N` position, literal, dynamic).
+    let curve = datamodel::GraphicalFunction {
+        kind: datamodel::GraphicalFunctionKind::Continuous,
+        x_points: Some(vec![0.0, 10.0]),
+        y_points: vec![0.0, 5.0],
+        x_scale: datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: 10.0,
+        },
+        y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 5.0 },
+    };
+    let tp = TestProject::new("main")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("Sub", &["nyc"])
+        .indexed_dimension("Slot", 4)
+        .scalar_aux("a", "2")
+        .scalar_aux("b", "3")
+        .scalar_aux("c", "4")
+        .array_aux("pop[Region]", "10")
+        .array_aux("wide[Slot]", "1")
+        .scalar_aux("idx", "2")
+        .aux_with_gf("curve", "a", curve)
+        // Unary minus on a constant AND on a compound operand.
+        .scalar_aux("negs", "-3 + -a * -(b + c)")
+        // Zero-argument builtins.
+        .scalar_aux("times", "TIME + TIME_STEP + INITIAL_TIME + FINAL_TIME + PI")
+        // Word operators, two-character comparisons, right-associative `^`,
+        // and an `If` in operand position.
+        .scalar_aux("ops", "a mod b + a ^ b ^ c")
+        .scalar_aux("cmps", "if (a <> b) AND (a >= c) then 1 else 0")
+        .scalar_aux("nots", "if NOT (a > b) then 1 else 0")
+        .scalar_aux(
+            "nested_if",
+            "a * (if a > b then (if b > c then 1 else 2) else 3)",
+        )
+        // Variadic / optional-argument builtins and the LOOKUP table slot.
+        .scalar_aux(
+            "builtins",
+            "MAX(a, b) + MIN(a, b) + MEAN(a, b, c) + PULSE(a, b) + PULSE(a, b, c) \
+             + SAFEDIV(a, b) + SAFEDIV(a, b, c) + LOOKUP(curve, a) + ABS(-a) + SQRT(a)",
+        )
+        // Every subscript index form.
+        .scalar_aux("reduce_all", "SUM(pop[*])")
+        .scalar_aux("reduce_sub", "SUM(pop[*:Sub])")
+        .scalar_aux("literal_idx", "pop[nyc]")
+        .scalar_aux("dyn_idx", "wide[idx + 1]")
+        .scalar_aux("range_idx", "SUM(wide[1:3])")
+        .scalar_aux("pos_idx", "wide[@2]")
+        // A name the lexer cannot read bare, so `print_ident` quotes it.
+        .array_aux("\"1pop\"[Region]", "5")
+        .array_aux("quoted_reader[Region]", "\"1pop\" * 2");
+
+    let slots = assert_lowering_matches_reparse_everywhere(&tp);
+    // Non-vacuity: the sweep must actually have visited the fixture's variables
+    // (a fixture whose equations all failed to lower would pass trivially).
+    assert!(
+        slots >= 20,
+        "expected the print-sensitive fixture to contribute >= 20 slots, got {slots}"
     );
 }
 

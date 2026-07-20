@@ -4755,12 +4755,18 @@ fn sgft(
     target_ref: &str,
     gf_table_ref: Option<&str>,
 ) -> Result<String, PartialEquationError> {
-    let occ_sites =
-        build_wrap_test_occurrences(equation_text, from, deps, source_dim_elements, iter_ctx);
+    // A genuine text entry point: the tests spell the target equation as a
+    // string, so it is parsed here once. Production hands the transform an
+    // `Expr0` lowered straight from the target's `Expr2`.
+    let Ok(Some(ast)) = crate::ast::Expr0::new(equation_text, crate::lexer::LexerType::Equation)
+    else {
+        return Err(PartialEquationError::new(equation_text));
+    };
+    let occ_sites = build_wrap_test_occurrences(&ast, from, deps, source_dim_elements, iter_ctx);
     let slot_occurrences = SlotOccurrences::new(&occ_sites);
     let occ = slot_occurrences.for_slot(0);
     shaped_guard_form_text(
-        equation_text,
+        &ast,
         deps,
         from,
         shape,
@@ -4801,8 +4807,11 @@ fn wrap_missing_live_source_occurrence_is_loud_not_silent_freeze() {
 
     // A correctly-aligned stream, then drop pop's occurrence: the lookup stays
     // non-empty (helper survives) but `pop[nyc]`'s node lookup now misses.
+    let ast = crate::ast::Expr0::new(equation, crate::lexer::LexerType::Equation)
+        .expect("the equation parses")
+        .expect("the equation is non-empty");
     let desynced: Vec<OccurrenceSite> =
-        build_wrap_test_occurrences(equation, &live, &deps, &source_dims, None)
+        build_wrap_test_occurrences(&ast, &live, &deps, &source_dims, None)
             .into_iter()
             .filter(|o| !matches!(&o.reference, OccurrenceRef::Variable(v) if v == "pop"))
             .collect();
@@ -4813,9 +4822,8 @@ fn wrap_missing_live_source_occurrence_is_loud_not_silent_freeze() {
         "the guard scope requires a non-empty lookup -- helper must survive the drop"
     );
 
-    let (_ast, out) =
-        wrap_changed_first_ast(equation, &deps, &live, &shape, None, None, None, &occ)
-            .expect("the equation parses");
+    let (_wrapped, out) =
+        wrap_changed_first_ast(&ast, &deps, &live, &shape, None, None, None, &occ);
     assert!(
         out.missing_occurrence,
         "a live-source subscript path-miss on a non-empty lookup must flag the desync"
@@ -4830,7 +4838,7 @@ fn wrap_missing_live_source_occurrence_is_loud_not_silent_freeze() {
     // changed-first partial. Changed-last is not even attempted: it would read
     // the SAME desynced stream.
     let err = shaped_guard_form_text(
-        equation,
+        &ast,
         &deps,
         &live,
         &shape,
