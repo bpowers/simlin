@@ -5895,3 +5895,56 @@ fn per_element_pin_stays_loud_for_a_table_arg_index_naming_another_dimension() {
          Ok equation carrying a dimension-name subscript: {err:?}"
     );
 }
+
+/// The pin-only descent must reach a source reference nested inside a source
+/// subscript's own INDEX EXPRESSION, not just inside a range bound.
+///
+/// `LOOKUP(pop[Region, pop[Region, young]], input)` is a table reference with a
+/// DYNAMIC element index -- a shape `codegen::extract_table_info` supports on
+/// purpose (its `Expr::Subscript` arm computes the element offset from the index
+/// expressions). The outer subscript is pinned by the structural rule; the INNER
+/// `pop[Region, young]` sits in the index, which no axis of the outer occurrence
+/// describes, so it reaches the descent's index closure.
+///
+/// That closure descended a `Range`'s two endpoints but passed a plain `Expr`
+/// index through untouched -- while its own comment claimed it descended "exactly
+/// as the other-variable arm above does", and that arm handles both. The nested
+/// reference therefore kept its DIMENSION-name subscript, in a scalar fragment
+/// that cannot compile, with nothing set loud either: the same silent zero the
+/// outer reference had.
+#[test]
+fn per_element_pin_descends_into_a_source_subscript_index_expression() {
+    let fx = PinFixture::new(vec![]);
+    let (ast, deps, occurrences) = fx.parse(
+        "pop[Region, young] + LOOKUP(pop[Region, pop[Region, young]], input)",
+        &["input"],
+    );
+    // Non-vacuity: everything under the table argument is skipped by the IR, so
+    // BOTH nested references are un-recorded and the descent is the only thing
+    // that can lower them.
+    assert_eq!(
+        PinFixture::source_occurrences(&occurrences),
+        1,
+        "only the live occurrence outside the LOOKUP is recorded: {occurrences:?}"
+    );
+    let slot_occurrences = SlotOccurrences::new(&occurrences);
+    let text = fx
+        .generate(&ast, &deps, &slot_occurrences.for_slot(0))
+        .expect("both table-argument references are lowerable structurally");
+
+    assert!(
+        !text.contains("pop[region,"),
+        "a source reference nested in the table argument's INDEX kept its \
+         DIMENSION-name subscript, which cannot resolve in a scalar fragment (a \
+         silent zero); got: {text}"
+    );
+    assert!(
+        text.contains("pop[region\u{B7}boston, pop[region\u{B7}boston, age\u{B7}young]]"),
+        "both the outer table reference and the reference inside its index must be \
+         pinned to this target element's row, QUALIFIED; got: {text}"
+    );
+    assert!(
+        text.contains("pop[boston, young]"),
+        "the LIVE occurrence must keep the bare row spelling; got: {text}"
+    );
+}

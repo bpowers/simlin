@@ -532,9 +532,22 @@ pub(super) fn pin_only_source_refs(
                 |i, idx| {
                     // An index this occurrence's axes did not resolve: descend
                     // for a nested source reference, exactly as the
-                    // other-variable arm above does.
+                    // other-variable arm above does -- BOTH an expression index
+                    // and a range bound. A source reference nested in an
+                    // expression index is reachable (a dynamic table element,
+                    // `LOOKUP(pop[Region, pop[Region, young]], x)`, which
+                    // `codegen::extract_table_info`'s `Expr::Subscript` arm
+                    // supports), and skipping it left its dimension-name
+                    // subscript in the scalar fragment with nothing set loud.
                     let idx_path = super::child_path(path, i);
                     match idx {
+                        IndexExpr0::Expr(e) => IndexExpr0::Expr(pin_only_source_refs(
+                            e,
+                            ctx,
+                            occ,
+                            &idx_path,
+                            unlowerable,
+                        )),
                         IndexExpr0::Range(l, r, rloc) => IndexExpr0::Range(
                             pin_only_source_refs(
                                 l,
@@ -552,6 +565,7 @@ pub(super) fn pin_only_source_refs(
                             ),
                             rloc,
                         ),
+                        // Wildcard / star-range / `@N` carry no `Expr0`.
                         other => other,
                     }
                 },
