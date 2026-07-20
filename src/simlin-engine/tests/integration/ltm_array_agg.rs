@@ -5639,6 +5639,200 @@ fn gh525_two_reference_partially_iterated_row_sum_scores() {
     );
 }
 
+/// A monotone two-point GF over the model's whole operating range, so a
+/// per-element table neither saturates nor flattens the loop it sits in.
+/// `slope` scales the identity so each element's table is distinguishable.
+fn identity_gf(slope: f64) -> datamodel::GraphicalFunction {
+    datamodel::GraphicalFunction {
+        kind: datamodel::GraphicalFunctionKind::Continuous,
+        x_points: Some(vec![0.0, 400.0]),
+        y_points: vec![0.0, 400.0 * slope],
+        x_scale: datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: 400.0,
+        },
+        y_scale: datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: 400.0 * slope,
+        },
+    }
+}
+
+/// A `PerElement` source read BOTH as a value and as a `LOOKUP` **table**
+/// argument in the same target keeps its per-element scores.
+///
+/// `target[Region] = effect[Region,young] + LOOKUP(effect[Region,old], time)`,
+/// where `effect[Region,Age]` is value-bearing AND carries a per-element
+/// graphical function (a real equation plus tables -- an implicit WITH LOOKUP,
+/// which is exactly what makes it both a causal source and a legal table
+/// reference; `compiler::codegen::extract_table_info` resolves such an argument
+/// by offset -> owning ident and has a deliberate `StaticSubscript` arm for
+/// `LOOKUP(g[<single element>], x)`).
+///
+/// The FIRST term is an ordinary, perfectly scoreable `PerElement` site. The
+/// SECOND is a table argument, which `db::ltm_ir` deliberately records no
+/// occurrence for ("static data, not a causal edge") -- correctly: it carries no
+/// causal edge and earns no score. What it DOES need is to compile, and a
+/// dimension-name subscript (`effect[region, old]`) cannot resolve in a scalar
+/// link-score fragment.
+///
+/// Conflating those two obligations is the regression this pins. `391bc3c1` moved
+/// the row pinning inside the wrap, where it is IR-driven, so the table argument
+/// came out un-pinned; `8d3ee4ab` then made the whole partial decline loudly,
+/// which threw away the FIRST term's scores too -- every per-element score of a
+/// valid edge dropped because the same target also mentions the source in a table
+/// argument. The structural (name-directed) pin discharges the lowering without
+/// inventing an occurrence, so both the compile and the scores survive.
+///
+/// No char golden reaches this shape (none has a `LOOKUP` inside a partial at
+/// all), which is why nothing else catches it.
+#[test]
+fn per_element_source_also_read_as_a_lookup_table_keeps_its_scores() {
+    let mut project = TestProject::new("per_element_lookup_table_arg")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        // Placeholder: replaced below by the per-element table-bearing form.
+        .array_aux("effect[Region, Age]", "pop[Region, Age]")
+        .array_aux(
+            "target[Region]",
+            "effect[Region, young] + LOOKUP(effect[Region, old], time)",
+        )
+        .array_flow("growth[Region, Age]", "target[Region] * 0.0001", None)
+        .array_stock("pop[Region, Age]", "100", &["growth"], &[], None)
+        .build_datamodel();
+
+    // `effect` must carry ONE TABLE PER ELEMENT: a single whole-variable gf on an
+    // arrayed variable has `table_count == 1`, so every element past the first
+    // reads NaN (the same reason `ltm_augment_with_lookup` pins a shared table as
+    // `to[1,...]`). A per-element gf rides an `Equation::Arrayed`, so each
+    // element's equation names its own `pop` cell.
+    let effect = project.models[0]
+        .variables
+        .iter_mut()
+        .find(|v| v.get_ident() == "effect")
+        .expect("the fixture declares effect");
+    let datamodel::Variable::Aux(effect) = effect else {
+        panic!("effect is declared as an aux");
+    };
+    let elements: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<datamodel::GraphicalFunction>,
+    )> = [
+        ("a", "young", 1.0),
+        ("a", "old", 1.1),
+        ("b", "young", 0.9),
+        ("b", "old", 1.2),
+    ]
+    .into_iter()
+    .map(|(r, age, slope)| {
+        (
+            format!("{r},{age}"),
+            format!("pop[{r},{age}]"),
+            None,
+            Some(identity_gf(slope)),
+        )
+    })
+    .collect();
+    effect.equation = datamodel::Equation::Arrayed(
+        vec!["Region".to_string(), "Age".to_string()],
+        elements,
+        None,
+        false,
+    );
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("a per-element-table source read in a LOOKUP must compile with LTM");
+
+    // The direct silent-zero guard: a fragment that fails to compile is dropped
+    // and its variable reads a constant 0.
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "every LTM fragment must compile -- an un-pinned dimension-name subscript \
+         in the table argument is exactly what does not; got: {warnings:?}"
+    );
+
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // The edge's per-element scores exist AT ALL -- this is what the interim loud
+    // decline dropped -- and each pins the table argument to ITS OWN region.
+    for region in ["a", "b"] {
+        let name = format!("{LINK_SCORE_PREFIX}effect[{region},young]\u{2192}target[{region}]");
+        let var = ltm.vars.iter().find(|v| v.name == name).unwrap_or_else(|| {
+            panic!(
+                "the direct PerElement site must still be scored; emitted: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            )
+        });
+        let text = match &var.equation {
+            LtmEquation::Scalar(arm) => arm.text.clone(),
+            other => panic!("{name} must be a scalar score; got {other:?}"),
+        };
+        assert!(
+            text.contains(&format!("effect[region\u{B7}{region}, age\u{B7}old]")),
+            "the table argument must be pinned to THIS target element's own row \
+             (region\u{B7}{region}), qualified; got: {text}"
+        );
+        assert!(
+            !text.contains("effect[region,"),
+            "no dimension-name subscript may survive into the scalar fragment; \
+             got: {text}"
+        );
+        assert!(
+            text.contains(&format!("effect[{region}, young]")),
+            "the live site must keep its bare row spelling; got: {text}"
+        );
+
+        let series = series_at(&results, offset_of(&results, &name));
+        assert!(
+            series.iter().all(|v| v.is_finite()),
+            "{name} must stay finite; got {series:?}"
+        );
+        assert!(
+            series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0),
+            "{name} must carry a real non-zero value -- an identically-zero series \
+             is the silent zero this shape regressed into; got {series:?}"
+        );
+    }
+
+    // ...and the loops the edge closes are scored too (one per region: only the
+    // `young` cells carry an `effect -> target` edge, since the table argument
+    // deliberately contributes none).
+    let loop_scores: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(
+        !loop_scores.is_empty(),
+        "the pop -> effect -> target -> growth -> pop loops must be scored"
+    );
+    for lv in &loop_scores {
+        let series = series_at(&results, offset_of(&results, &lv.name));
+        assert!(
+            series.iter().all(|v| v.is_finite()),
+            "loop score {} must stay finite; got {series:?}",
+            lv.name
+        );
+        assert!(
+            series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0),
+            "loop score {} must carry real non-zero values; got {series:?}",
+            lv.name
+        );
+    }
+}
+
 /// GH #525 (T6, BROADCAST): a `PerElement` reference whose Iterated dims
 /// are a strict SUBSET of the target's -- `mid[D1,D2] = pop[D1, young] *
 /// 0.05` (`D1` iterated, `Age` pinned, `D2` broadcast). One row feeds every

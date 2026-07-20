@@ -5513,6 +5513,147 @@ fn per_element_pin_descends_into_range_endpoints() {
     );
 }
 
+/// The shared `(Region, Age)` context for the `PerElement` pin-only-descent
+/// tests: source `pop[Region, Age]` (`region = [nyc, boston]`,
+/// `age = [young, old]`), target `growth[Region]` instantiated at
+/// `region\u{B7}boston`, emitting site `pop[Region, young]` (one `Iterated` axis,
+/// one `Pinned`).
+///
+/// The descents differ only in the EQUATION they walk, so the context lives here
+/// once. Spelled out per test it is ~60 lines of identical scaffolding, which is
+/// exactly where the one interesting line gets lost.
+struct PinFixture {
+    from: Ident<Canonical>,
+    from_dims: Vec<crate::dimensions::Dimension>,
+    source_dim_elements: Vec<Vec<String>>,
+    source_dim_names: Vec<String>,
+    target_iterated_dims: Vec<String>,
+    dim_ctx: crate::dimensions::DimensionsContext,
+    site_axes: Vec<crate::ltm_agg::AxisRead>,
+    row_parts_bare: Vec<String>,
+    target_elem_by_dim: HashMap<String, (String, usize)>,
+}
+
+impl PinFixture {
+    /// `extra_dims` are project dimensions BEYOND the source's own two: a test
+    /// needs one to reach the "index names another dimension" arm, and the
+    /// source's `from_dims` deliberately stay `[region, age]` so such an index
+    /// is genuinely un-resolvable by name.
+    fn new(extra_dims: Vec<datamodel::Dimension>) -> Self {
+        use crate::ltm_agg::AxisRead;
+        let mut project_dims = vec![
+            datamodel::Dimension::named(
+                "region".to_string(),
+                vec!["nyc".to_string(), "boston".to_string()],
+            ),
+            datamodel::Dimension::named(
+                "age".to_string(),
+                vec!["young".to_string(), "old".to_string()],
+            ),
+        ];
+        project_dims.extend(extra_dims);
+        let mut target_elem_by_dim = HashMap::new();
+        target_elem_by_dim.insert("region".to_string(), ("boston".to_string(), 1usize));
+        PinFixture {
+            from: Ident::<Canonical>::new("pop"),
+            from_dims: vec![
+                make_named_dimension("region", &["nyc", "boston"]),
+                make_named_dimension("age", &["young", "old"]),
+            ],
+            source_dim_elements: vec![
+                vec!["nyc".to_string(), "boston".to_string()],
+                vec!["young".to_string(), "old".to_string()],
+            ],
+            source_dim_names: vec!["region".to_string(), "age".to_string()],
+            target_iterated_dims: vec!["region".to_string()],
+            dim_ctx: crate::dimensions::DimensionsContext::from(project_dims.as_slice()),
+            site_axes: vec![
+                AxisRead::Iterated {
+                    dim: "region".to_string(),
+                    source_dim: "region".to_string(),
+                },
+                AxisRead::Pinned("young".to_string()),
+            ],
+            row_parts_bare: vec!["boston".to_string(), "young".to_string()],
+            target_elem_by_dim,
+        }
+    }
+
+    fn iter_ctx(&self) -> IteratedDimCtx<'_> {
+        IteratedDimCtx {
+            source_dim_names: &self.source_dim_names,
+            target_iterated_dims: &self.target_iterated_dims,
+            // The `PerElement` live shape suppresses the GH #526 other-dep
+            // collapse entirely, so the verdict's `dep_dims` are never consulted.
+            dep_dims: None,
+        }
+    }
+
+    /// Parse `eqn` and build the occurrence stream `db::ltm_ir` would record for
+    /// it -- the builder mirrors the IR, `LOOKUP` table-argument skip included,
+    /// so the streams these tests read are the production ones.
+    fn parse(
+        &self,
+        eqn: &str,
+        deps: &[&str],
+    ) -> (
+        Expr0,
+        HashSet<Ident<Canonical>>,
+        Vec<crate::db::ltm_ir::OccurrenceSite>,
+    ) {
+        let deps = deps_set(deps);
+        let ast = Expr0::new(eqn, LexerType::Equation)
+            .expect("fixture parses")
+            .expect("fixture is non-empty");
+        let occurrences = build_wrap_test_occurrences(
+            &ast,
+            &self.from,
+            &deps,
+            &self.source_dim_elements,
+            Some(&self.iter_ctx()),
+            Some(&self.dim_ctx),
+        );
+        (ast, deps, occurrences)
+    }
+
+    /// How many occurrences of the SOURCE the stream records -- every test's
+    /// non-vacuity check, since a stream that recorded nothing would let a
+    /// do-nothing pin pass.
+    fn source_occurrences(occurrences: &[crate::db::ltm_ir::OccurrenceSite]) -> usize {
+        occurrences
+            .iter()
+            .filter(
+                |o| matches!(&o.reference, crate::db::ltm_ir::OccurrenceRef::Variable(v) if v == "pop"),
+            )
+            .count()
+    }
+
+    fn generate(
+        &self,
+        ast: &Expr0,
+        deps: &HashSet<Ident<Canonical>>,
+        occ: &OccurrenceLookup<'_>,
+    ) -> Result<String, PartialEquationError> {
+        generate_per_element_link_equation(
+            "pop",
+            "growth",
+            &self.site_axes,
+            &self.row_parts_bare,
+            "region\u{B7}boston",
+            ast,
+            deps,
+            // Nothing to element-pin by name: the source's pinning is the wrap's job.
+            &HashSet::new(),
+            &self.from_dims,
+            &self.target_elem_by_dim,
+            &self.target_iterated_dims,
+            &self.dim_ctx,
+            None,
+            occ,
+        )
+    }
+}
+
 /// A `PerElement` source occurrence nested inside a WHOLE-FROZEN array reducer
 /// must still be row-pinned.
 ///
@@ -5532,65 +5673,11 @@ fn per_element_pin_descends_into_range_endpoints() {
 /// reaches this shape -- deleting the descent leaves the whole corpus green.
 #[test]
 fn per_element_pin_reaches_inside_a_whole_frozen_reducer() {
-    use crate::dimensions::DimensionsContext;
-    use crate::ltm_agg::AxisRead;
-
-    let region = make_named_dimension("region", &["nyc", "boston"]);
-    let age = make_named_dimension("age", &["young", "old"]);
-    let from_dims = vec![region.clone(), age.clone()];
-    let source_dim_elements = vec![
-        vec!["nyc".to_string(), "boston".to_string()],
-        vec!["young".to_string(), "old".to_string()],
-    ];
-    let source_dim_names = vec!["region".to_string(), "age".to_string()];
-    let target_iterated_dims = vec!["region".to_string()];
-    let dim_ctx = DimensionsContext::from(
-        [
-            datamodel::Dimension::named(
-                "region".to_string(),
-                vec!["nyc".to_string(), "boston".to_string()],
-            ),
-            datamodel::Dimension::named(
-                "age".to_string(),
-                vec!["young".to_string(), "old".to_string()],
-            ),
-        ]
-        .as_slice(),
-    );
-    let iter_ctx = IteratedDimCtx {
-        source_dim_names: &source_dim_names,
-        target_iterated_dims: &target_iterated_dims,
-        dep_dims: None,
-    };
-    let from = Ident::<Canonical>::new("pop");
-    let site_axes = vec![
-        AxisRead::Iterated {
-            dim: "region".to_string(),
-            source_dim: "region".to_string(),
-        },
-        AxisRead::Pinned("young".to_string()),
-    ];
-    let row_parts_bare = vec!["boston".to_string(), "young".to_string()];
-    let mut target_elem_by_dim = HashMap::new();
-    target_elem_by_dim.insert("region".to_string(), ("boston".to_string(), 1usize));
-
-    let deps = deps_set(&["other"]);
-    let ast = Expr0::new(
+    let fx = PinFixture::new(vec![]);
+    let (ast, deps, occurrences) = fx.parse(
         "pop[Region, young] + SUM(other[pop[Region, young], *])",
-        LexerType::Equation,
-    )
-    .expect("fixture parses")
-    .expect("fixture is non-empty");
-    let occurrences = build_wrap_test_occurrences(
-        &ast,
-        &from,
-        &deps,
-        &source_dim_elements,
-        Some(&iter_ctx),
-        Some(&dim_ctx),
+        &["other"],
     );
-    let slot_occurrences = SlotOccurrences::new(&occurrences);
-    let occ = slot_occurrences.for_slot(0);
     // Non-vacuity: the reducer-nested occurrence must actually be recorded, and
     // recorded as index-nested -- that bit is what makes the reducer freeze whole.
     assert!(
@@ -5599,25 +5686,10 @@ fn per_element_pin_reaches_inside_a_whole_frozen_reducer() {
         "the fixture must record an index-nested `pop` occurrence, or the reducer \
          would not freeze whole and this test would not exercise the descent"
     );
-
-    let text = generate_per_element_link_equation(
-        "pop",
-        "growth",
-        &site_axes,
-        &row_parts_bare,
-        "region\u{B7}boston",
-        &ast,
-        &deps,
-        // Nothing to element-pin by name: the source's pinning is the wrap's job.
-        &HashSet::new(),
-        &from_dims,
-        &target_elem_by_dim,
-        &target_iterated_dims,
-        &dim_ctx,
-        None,
-        &occ,
-    )
-    .expect("the per-element equation is derivable");
+    let slot_occurrences = SlotOccurrences::new(&occurrences);
+    let text = fx
+        .generate(&ast, &deps, &slot_occurrences.for_slot(0))
+        .expect("the per-element equation is derivable");
 
     assert!(
         !text.contains("pop[region, young]"),
@@ -5636,117 +5708,181 @@ fn per_element_pin_reaches_inside_a_whole_frozen_reducer() {
     );
 }
 
-/// A `PerElement` source occurrence inside a `LOOKUP` **table** argument is
-/// declined LOUDLY, never emitted un-pinned.
+/// A `PerElement` source occurrence inside a PRE-EXISTING `PREVIOUS`/`INIT` call
+/// must still be row-pinned.
+///
+/// `growth[Region] = pop[Region, young] + PREVIOUS(pop[Region, young]) +
+/// INIT(pop[Region, old])` -- the wrap deliberately does not descend into an
+/// already-lagged or already-frozen call (wrapping its contents again would read
+/// two steps back and force a nested-PREVIOUS helper chain), so the row pinning
+/// has to reach in through the pin-only descent. Left un-pinned,
+/// `pop[region, young]` -- a DIMENSION-name subscript -- survives into a scalar
+/// link-score fragment, which cannot compile: the fragment is dropped, the
+/// variable keeps a layout slot with no bytecode, and the score reads a constant
+/// 0.
+///
+/// This descent was the ONE of the three that no test and no char golden reached:
+/// deleting it left all 5274 lib tests and all 634 integration tests green. Both
+/// call names ride the same arm, so the fixture exercises `PREVIOUS` and `INIT`
+/// together.
+#[test]
+fn per_element_pin_reaches_inside_a_pre_existing_previous_or_init() {
+    let fx = PinFixture::new(vec![]);
+    let (ast, deps, occurrences) = fx.parse(
+        "pop[Region, young] + PREVIOUS(pop[Region, young]) + INIT(pop[Region, old])",
+        &[],
+    );
+    // Non-vacuity: all three references are recorded, so the descent has real
+    // occurrences to pin rather than silently doing nothing.
+    assert_eq!(
+        PinFixture::source_occurrences(&occurrences),
+        3,
+        "the fixture must record all three `pop` occurrences: {occurrences:?}"
+    );
+    let slot_occurrences = SlotOccurrences::new(&occurrences);
+    let text = fx
+        .generate(&ast, &deps, &slot_occurrences.for_slot(0))
+        .expect("the per-element equation is derivable");
+
+    assert!(
+        !text.contains("pop[region, young]") && !text.contains("pop[region, old]"),
+        "an occurrence inside a pre-existing PREVIOUS/INIT kept its DIMENSION-name \
+         subscript, which cannot compile in a scalar fragment (a silent zero); \
+         got: {text}"
+    );
+    assert!(
+        text.contains("previous(pop[region\u{B7}boston, age\u{B7}young])"),
+        "the PREVIOUS-nested occurrence must be pinned to this instantiation's row, \
+         QUALIFIED so the lagged read compiles to a direct LoadPrev; got: {text}"
+    );
+    assert!(
+        text.contains("init(pop[region\u{B7}boston, age\u{B7}old])"),
+        "the INIT-nested occurrence rides the same arm and must be pinned to ITS OWN \
+         row for this target element; got: {text}"
+    );
+    assert!(
+        text.contains("pop[boston, young]"),
+        "the LIVE occurrence must keep the bare row spelling; got: {text}"
+    );
+}
+
+/// A `PerElement` source reference inside a `LOOKUP` **table** argument is
+/// row-pinned STRUCTURALLY, and the partial is emitted.
 ///
 /// `db::ltm_ir` records no occurrence under a table argument
 /// (`BuiltinContents::LookupTable(_) => {}` -- "a graphical-function table
 /// reference is static data, not a causal edge"). That is right about
-/// ATTRIBUTION, but the pin such a reference needs is about COMPILABILITY: with
-/// no per-axis classification to pin it, `pop[region, young]` keeps its
-/// DIMENSION-name subscript, which cannot resolve in a scalar link-score
-/// fragment. The fragment is then dropped, the variable keeps a layout slot with
-/// no bytecode, and the score reads a constant 0.
+/// ATTRIBUTION -- the reference is not a causal edge and earns no score -- but the
+/// pin it needs is about COMPILABILITY: left un-pinned, `pop[region, old]` keeps
+/// its DIMENSION-name subscript, which cannot resolve in a scalar link-score
+/// fragment. The fragment is dropped, the variable keeps a layout slot with no
+/// bytecode, and the score reads a constant 0.
 ///
-/// This was a REGRESSION introduced when the row pinning moved into the wrap: the
-/// previous pass over the wrapped tree re-classified with the Expr0 classifier,
-/// which needs no occurrence, so it pinned the table argument regardless. The
-/// wrap's IR-driven pinning correctly refuses to guess -- so it must say so
-/// through `WrapOutcome::missing_occurrence`, which the caller turns into a
-/// warned skip. No char golden reaches this shape (none has a `LOOKUP` inside a
-/// partial at all), so nothing else catches it.
+/// Both facts hold at once, so `pin_dimension_name_indices` discharges the
+/// lowering by NAME (the source's own declared dims) without recording an
+/// occurrence or classifying a shape -- the same thing `pin_bare_source_ref` does
+/// for a bare `Var`. This is the shape that regressed when the row pinning moved
+/// into the wrap (`391bc3c1`): the previous pass over the wrapped tree
+/// re-classified with the Expr0 classifier, which needs no occurrence, so it
+/// pinned the table argument regardless.
+///
+/// The interim fix declined the whole partial LOUDLY instead, which threw away
+/// more than the un-scoreable reference: this fixture's FIRST term is a perfectly
+/// good scoreable site, and declining dropped every per-element score of the
+/// `pop → growth` edge with it. So the assertion here is the pinned form AND the
+/// live row's survival. No char golden reaches this shape (none has a `LOOKUP`
+/// inside a partial at all), so nothing else catches it.
 #[test]
-fn per_element_pin_declines_loudly_inside_a_lookup_table_arg() {
-    use crate::dimensions::DimensionsContext;
-    use crate::ltm_agg::AxisRead;
-
-    let region = make_named_dimension("region", &["nyc", "boston"]);
-    let age = make_named_dimension("age", &["young", "old"]);
-    let from_dims = vec![region, age];
-    let source_dim_elements = vec![
-        vec!["nyc".to_string(), "boston".to_string()],
-        vec!["young".to_string(), "old".to_string()],
-    ];
-    let source_dim_names = vec!["region".to_string(), "age".to_string()];
-    let target_iterated_dims = vec!["region".to_string()];
-    let dim_ctx = DimensionsContext::from(
-        [
-            datamodel::Dimension::named(
-                "region".to_string(),
-                vec!["nyc".to_string(), "boston".to_string()],
-            ),
-            datamodel::Dimension::named(
-                "age".to_string(),
-                vec!["young".to_string(), "old".to_string()],
-            ),
-        ]
-        .as_slice(),
+fn per_element_pin_lowers_structurally_inside_a_lookup_table_arg() {
+    let fx = PinFixture::new(vec![]);
+    // The table argument reads a DIFFERENT element than the live site does
+    // (`old` vs `young`), so a pin that merely echoed the site's own row would
+    // pass vacuously. This is codex's exact shape: a target reading the source
+    // both normally and in a table argument.
+    let (ast, deps, occurrences) = fx.parse(
+        "pop[Region, young] + LOOKUP(pop[Region, old], input)",
+        &["input"],
     );
-    let iter_ctx = IteratedDimCtx {
-        source_dim_names: &source_dim_names,
-        target_iterated_dims: &target_iterated_dims,
-        dep_dims: None,
-    };
-    let from = Ident::<Canonical>::new("pop");
-    let site_axes = vec![
-        AxisRead::Iterated {
-            dim: "region".to_string(),
-            source_dim: "region".to_string(),
-        },
-        AxisRead::Pinned("young".to_string()),
-    ];
-    let row_parts_bare = vec!["boston".to_string(), "young".to_string()];
-    let mut target_elem_by_dim = HashMap::new();
-    target_elem_by_dim.insert("region".to_string(), ("boston".to_string(), 1usize));
-
-    let deps = deps_set(&["input"]);
-    let ast = Expr0::new(
-        "pop[Region, young] + LOOKUP(pop[Region, young], input)",
-        LexerType::Equation,
-    )
-    .expect("fixture parses")
-    .expect("fixture is non-empty");
-    // The occurrence builder mirrors the IR's table-argument skip, so the
-    // table-arg occurrence is absent here exactly as it is in production.
-    let occurrences = build_wrap_test_occurrences(
-        &ast,
-        &from,
-        &deps,
-        &source_dim_elements,
-        Some(&iter_ctx),
-        Some(&dim_ctx),
-    );
-    let slot_occurrences = SlotOccurrences::new(&occurrences);
-    let occ = slot_occurrences.for_slot(0);
     // Non-vacuity: the LIVE occurrence outside the LOOKUP is recorded (so the
     // stream is not simply empty), while the table-argument one is not.
     assert_eq!(
-        occurrences
-            .iter()
-            .filter(
-                |o| matches!(&o.reference, crate::db::ltm_ir::OccurrenceRef::Variable(v) if v == "pop")
-            )
-            .count(),
+        PinFixture::source_occurrences(&occurrences),
         1,
         "exactly the non-table occurrence is recorded: {occurrences:?}"
     );
+    let slot_occurrences = SlotOccurrences::new(&occurrences);
+    let text = fx
+        .generate(&ast, &deps, &slot_occurrences.for_slot(0))
+        .expect(
+            "the table-argument reference is lowerable structurally, so the partial must \
+             be emitted -- declining it also drops the live site's own score",
+        );
 
-    let err = generate_per_element_link_equation(
-        "pop",
-        "growth",
-        &site_axes,
-        &row_parts_bare,
-        "region\u{B7}boston",
-        &ast,
-        &deps,
-        &HashSet::new(),
-        &from_dims,
-        &target_elem_by_dim,
-        &target_iterated_dims,
-        &dim_ctx,
-        None,
-        &occ,
+    assert!(
+        !text.contains("pop[region,"),
+        "the table-argument reference kept its DIMENSION-name subscript, which \
+         cannot resolve in a scalar fragment (a silent zero); got: {text}"
     );
+    assert!(
+        text.contains("pop[region\u{B7}boston, age\u{B7}old]"),
+        "the table-argument reference must be pinned to THIS target element's own \
+         coordinate for the iterated axis, with its literal element selector \
+         qualified by the axis that declares it; got: {text}"
+    );
+    assert!(
+        text.contains("lookup(pop[region\u{B7}boston, age\u{B7}old]"),
+        "the pin must land inside the LOOKUP's table argument, which the wrap holds \
+         verbatim; got: {text}"
+    );
+    assert!(
+        text.contains("pop[boston, young]"),
+        "the LIVE occurrence outside the LOOKUP must keep its bare row spelling -- \
+         its score is exactly what the interim loud decline threw away; got: {text}"
+    );
+    assert!(
+        !text.contains("previous(pop[region\u{B7}boston, age\u{B7}old]"),
+        "a table argument is static data, never a value read, so the wrap must not \
+         freeze it (a PREVIOUS of a table has no value slot); got: {text}"
+    );
+}
+
+/// The loud net BEHIND the structural pin: a table-argument index naming a
+/// dimension the rule cannot resolve is still declined LOUDLY.
+///
+/// `pin_dimension_name_indices` is name-directed on purpose -- it substitutes an
+/// index that spells the dimension the source declares AT THAT POSITION, and
+/// nothing else. `pop[State, old]` on a source declared over `[Region, Age]` is
+/// outside that: deciding that `State` reads `Region` through a positional
+/// mapping (rather than being a mismatched or transposed axis) is precisely the
+/// per-axis CLASSIFICATION `db::ltm_ir` owns -- and it recorded nothing here. So
+/// the rule declines, `WrapOutcome::missing_occurrence` fires, and the caller
+/// skips with a warning.
+///
+/// This is the half that keeps the fix from degenerating into "pin whatever looks
+/// pinnable": the reachable shape is discharged structurally, and the rest of the
+/// class stays loud rather than silently emitting an un-pinned dimension-name
+/// subscript (a dropped fragment reading a constant 0).
+#[test]
+fn per_element_pin_stays_loud_for_a_table_arg_index_naming_another_dimension() {
+    // `state` is a real project dimension, positionally parallel to `region` --
+    // the shape whose resolution would need the mapping classifier.
+    let fx = PinFixture::new(vec![datamodel::Dimension::named(
+        "state".to_string(),
+        vec!["ny".to_string(), "ma".to_string()],
+    )]);
+    let (ast, deps, occurrences) = fx.parse(
+        "pop[Region, young] + LOOKUP(pop[State, old], input)",
+        &["input"],
+    );
+    // Non-vacuity: the table-argument reference is the one WITHOUT an occurrence,
+    // exactly as in production, so the loud net is what must catch it.
+    assert_eq!(
+        PinFixture::source_occurrences(&occurrences),
+        1,
+        "exactly the non-table occurrence is recorded: {occurrences:?}"
+    );
+    let slot_occurrences = SlotOccurrences::new(&occurrences);
+    let err = fx.generate(&ast, &deps, &slot_occurrences.for_slot(0));
     assert!(
         matches!(
             err,
@@ -5755,7 +5891,7 @@ fn per_element_pin_declines_loudly_inside_a_lookup_table_arg() {
                 ..
             })
         ),
-        "an un-pinnable source reference in a LOOKUP table argument must be a loud \
-         Err, never an Ok equation carrying a dimension-name subscript: {err:?}"
+        "an index the name-directed rule cannot resolve must be a loud Err, never an \
+         Ok equation carrying a dimension-name subscript: {err:?}"
     );
 }

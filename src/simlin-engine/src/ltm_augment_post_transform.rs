@@ -210,10 +210,13 @@ fn qualified_row_indices(row: &[String], ctx: &PerElementRefCtx<'_>) -> Vec<Inde
 ///   `recurse_index`, which is the wrap's own index pass, so a genuinely dynamic
 ///   index still gets its `PREVIOUS(idx)` lag.
 ///
-/// A node with NO recorded occurrence is left completely untouched. That is the
-/// loud path, not a silent one: the wrap's own `missing_occurrence` guard fires
-/// on a live-source subscript whose path misses on a non-empty stream, and the
-/// caller abandons the partial with a warning.
+/// A node with NO recorded occurrence is left untouched HERE. That is the loud
+/// path, not a silent one: the wrap's own `missing_occurrence` guard fires on a
+/// live-source subscript whose path misses on a non-empty stream, and the caller
+/// abandons the partial with a warning. ([`pin_only_source_refs`] is the one
+/// caller that first substitutes such a subscript's indices structurally, by
+/// name, because a `LOOKUP` table argument legitimately has no occurrence and
+/// still has to compile; see [`pin_dimension_name_indices`].)
 pub(super) fn pin_source_subscript_indices(
     indices: Vec<IndexExpr0>,
     node_occ: Option<&OccurrenceSite>,
@@ -293,6 +296,118 @@ pub(super) fn pin_bare_source_ref(ctx: &PerElementRefCtx<'_>) -> Option<Vec<Inde
         .map(|row| qualified_row_indices(&row, ctx))
 }
 
+/// Row-pin a source subscript the occurrence IR deliberately records NOTHING
+/// for, by NAME alone. Returns the rewritten indices plus whether the rule
+/// DISCHARGED the subscript.
+///
+/// This is a lowering-COMPLETENESS rule, not a classifier, and that distinction
+/// is the whole reason it exists. `db::ltm_ir` records no occurrence under a
+/// `LOOKUP` TABLE argument (`BuiltinContents::LookupTable(_) => {}` -- "a
+/// graphical-function table reference is static data, not a causal edge"), and it
+/// is RIGHT: such a reference carries no causal edge, so it earns no attribution,
+/// no element edge and no score. But the lowering is still obliged to emit a
+/// COMPILABLE scalar fragment, and a dimension-name subscript
+/// (`effect[region, old]`) cannot resolve in one. Compilability and attribution
+/// are two separate obligations, and discharging the second does not require the
+/// first -- which is why this asks the IR for nothing.
+///
+/// It consults NO occurrence and infers NO shape. Per index, by name only:
+///
+/// - an index spelling the dimension the source declares AT THAT POSITION is
+///   replaced by this target element's coordinate for that dimension -- exactly
+///   the structural substitution [`pin_bare_source_ref`] already performs for a
+///   bare `Var`, generalized to a subscript's indices;
+/// - an index the source's axis at that position DECLARES as an element is a
+///   literal selector, qualified with that axis (`old` -> `age·old`). It would
+///   very likely resolve bare too, but the pin qualifies EVERY index of a row for
+///   a reason (see `wrap_non_matching_in_previous`'s `skip_index_qualification`):
+///   the wrap's generic `qualify_element_index` cannot qualify an element name
+///   several dimensions declare, so a half-qualified subscript is the one spelling
+///   whose compilability depends on the model's element names. Qualifying here
+///   also makes this rule's output byte-identical to the pre-`391bc3c1` pass's,
+///   which is the conservative thing for a regression fix to be.
+///
+/// There is no `RefShape` here, no axis vocabulary, and no live-vs-frozen
+/// decision, and this can never make the reference live-selectable (the pin-only
+/// descent records no `live_ref`). Do NOT grow it into a per-axis classifier: the
+/// second classifier family was deleted on purpose (`391bc3c1`).
+///
+/// `discharged == false` when a bare index still NAMES a dimension the rule could
+/// not resolve -- a mapped or transposed axis name, an axis whose element this
+/// target element does not project, an over-arity index. Only the IR knows what
+/// such an index reads, and it recorded nothing, so the caller keeps that case
+/// LOUD (`WrapOutcome::missing_occurrence` -> warned skip) rather than guessing.
+/// An index naming no dimension at all (a literal element, a wildcard, an
+/// arithmetic expression) does NOT make the subscript unlowerable: it is already
+/// as concrete as the target's own equation spelled it, and a genuinely dynamic
+/// one is left to the caller's index pass.
+fn pin_dimension_name_indices(
+    indices: Vec<IndexExpr0>,
+    ctx: &PerElementRefCtx<'_>,
+) -> (Vec<IndexExpr0>, bool) {
+    let mut discharged = true;
+    let indices = indices
+        .into_iter()
+        .enumerate()
+        .map(|(i, idx)| {
+            let (name, loc) = match &idx {
+                IndexExpr0::Expr(Expr0::Var(name, loc)) => {
+                    (crate::common::canonicalize(name.as_str()).to_string(), *loc)
+                }
+                _ => return idx,
+            };
+            let Some(dim) = ctx.from_dims.get(i) else {
+                // Over-arity: no axis owns this index, so nothing names its
+                // owner and there is nothing to pin it from.
+                if ctx.dim_ctx.is_dimension_name(&name) {
+                    discharged = false;
+                }
+                return idx;
+            };
+            let pinned = if dim.name() == name {
+                // The identity axis: the index names the dimension the source
+                // declares here, so it reads this target element's own
+                // coordinate for that dimension. Routed through the ONE row
+                // derivation, so a name-directed pin and an occurrence-driven
+                // one cannot spell the same row differently.
+                let axis = crate::ltm_agg::AxisRead::Iterated {
+                    dim: name.clone(),
+                    source_dim: name.clone(),
+                };
+                per_element_row_for_target(
+                    std::slice::from_ref(&axis),
+                    ctx.target_elem_by_dim,
+                    ctx.dim_ctx,
+                )
+                .map(|row| qualify_axis_element(&row[0], dim))
+            } else if ctx.dim_ctx.is_dimension_name(&name) {
+                // Some OTHER dimension's name: a mapped or transposed axis,
+                // whose read only the IR can describe. Stay loud.
+                None
+            } else {
+                // A literal element selector when this axis declares the name;
+                // `qualify_axis_element` is a no-op for anything else (a
+                // dynamic scalar index), which is what leaves it to the
+                // caller's index pass.
+                Some(qualify_axis_element(&name, dim))
+            };
+            match pinned {
+                // Rebuild the index only when the name actually changes, so an
+                // index this rule has nothing to say about keeps its own node.
+                Some(part) if part != name => {
+                    IndexExpr0::Expr(Expr0::Var(RawIdent::new_from_str(&part), loc))
+                }
+                Some(_) => idx,
+                None => {
+                    discharged = false;
+                    idx
+                }
+            }
+        })
+        .collect();
+    (indices, discharged)
+}
+
 /// Row-pin the live source's references inside a subtree the ceteris-paribus
 /// wrap declines to descend into -- a pre-existing `PREVIOUS`/`INIT` call, the
 /// GH #517 whole-frozen reducer, or a `LOOKUP` table argument.
@@ -310,21 +425,25 @@ pub(super) fn pin_bare_source_ref(ctx: &PerElementRefCtx<'_>) -> Option<Vec<Inde
 /// coordinate the wrap rewrites, with its own drift surface. This carries no map
 /// and writes no tag; it reads the one IR by path and does the actual work.
 ///
-/// `unlowerable` is set when a SUBSCRIPTED reference to the source has no
-/// recorded occurrence at its path, so there is no per-axis classification to pin
-/// it with. The caller turns that into `WrapOutcome::missing_occurrence`, i.e. a
-/// warned skip. It must not be silent: an un-pinned reference keeps its
-/// DIMENSION-name subscript (`pop[region, young]`), which cannot resolve in a
-/// scalar link-score fragment -- the fragment is dropped, the variable keeps a
-/// layout slot with no bytecode, and the score reads a constant 0.
+/// A SUBSCRIPTED reference to the source with NO recorded occurrence has no
+/// per-axis classification to pin it with, and must never be emitted un-pinned:
+/// its DIMENSION-name subscript (`pop[region, young]`) cannot resolve in a scalar
+/// link-score fragment -- the fragment is dropped, the variable keeps a layout
+/// slot with no bytecode, and the score reads a constant 0. Two mechanisms cover
+/// it, in order:
 ///
-/// The one reachable trigger is a `LOOKUP` TABLE argument: `db::ltm_ir` records
-/// no occurrence under one (`BuiltinContents::LookupTable(_) => {}` -- "a
-/// graphical-function table reference is static data, not a causal edge"), which
-/// is right about attribution, but the pin such a reference needs is about
-/// COMPILABILITY. The two other pin-only descents (a pre-existing
-/// `PREVIOUS`/`INIT` call, a whole-frozen reducer) are walked by the IR, so they
-/// cannot trip this. A BARE `Var` cannot either: [`pin_bare_source_ref`] pins it
+/// - [`pin_dimension_name_indices`] discharges it STRUCTURALLY when every
+///   dimension-name index spells one of the source's own declared dims. That is
+///   the reachable case -- a `LOOKUP` TABLE argument, which the IR skips as
+///   static data. Compilability, not attribution: the reference is still not a
+///   causal edge and still earns no score, it just has to compile.
+/// - anything the rule cannot discharge sets `unlowerable`, which the caller
+///   turns into `WrapOutcome::missing_occurrence`, i.e. a warned skip. The known
+///   shape is fixed; the unknown class stays LOUD.
+///
+/// The two other pin-only descents (a pre-existing `PREVIOUS`/`INIT` call, a
+/// whole-frozen reducer) are walked by the IR, so they reach neither mechanism. A
+/// BARE `Var` reaches neither either: [`pin_bare_source_ref`] pins it
 /// structurally from the source's own declared dims, needing no occurrence.
 pub(super) fn pin_only_source_refs(
     expr: Expr0,
@@ -391,9 +510,17 @@ pub(super) fn pin_only_source_refs(
                 return Expr0::Subscript(ident, indices, loc);
             }
             let node_occ = occ.get(path);
-            if node_occ.is_none() {
-                // No per-axis classification to pin with -- see the fn docs. Loud,
-                // never a silently un-pinned dimension-name subscript.
+            // With no recorded occurrence there is no per-axis classification to
+            // pin with, but the fragment still has to COMPILE, so the structural
+            // rule substitutes the source's own dimension-name indices by name.
+            // What it cannot discharge stays loud -- see the fn docs and
+            // [`pin_dimension_name_indices`]. `Some` occurrences bypass it
+            // entirely, so nothing the IR classifies changes spelling.
+            let (indices, discharged) = match node_occ {
+                Some(_) => (indices, true),
+                None => pin_dimension_name_indices(indices, ctx),
+            };
+            if !discharged {
                 *unlowerable = true;
             }
             let indices = pin_source_subscript_indices(

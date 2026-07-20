@@ -182,6 +182,12 @@ struct WrapOutcome {
     /// `build_partial_equation_shaped_with_live_ref` returns
     /// `UnfreezablePartial`), and the db-bearing emitters turn that into a
     /// skip-and-warn.
+    ///
+    /// The pin-only descents set it for a second, non-desync reason: a source
+    /// subscript the IR records NOTHING for (a `LOOKUP` table argument) that
+    /// `post_transform::pin_dimension_name_indices` could not lower by name
+    /// either. Same contract, same reason -- an un-pinned dimension-name
+    /// subscript in a scalar fragment is the same silent zero.
     missing_occurrence: bool,
 }
 
