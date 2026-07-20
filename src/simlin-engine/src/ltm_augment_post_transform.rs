@@ -303,14 +303,15 @@ enum IndexVerdict {
     /// element qualified with its own axis.
     Pinned(String),
     /// A static selector already spelled the way this rule would spell it (a
-    /// numeric literal, an already-`dim·elem` name).
+    /// numeric literal, an `@N` position, an already-`dim·elem` name).
     Static,
-    /// No pin can spell it -- another dimension's name (deciding whether `State`
-    /// reads `Region` through a positional mapping is the per-axis classification
-    /// `db::ltm_ir` owns), an axis whose element this target does not project, an
-    /// index no axis owns. Left alone it keeps a DIMENSION-name subscript, which
-    /// cannot resolve in a scalar fragment, so this is loud ALWAYS -- a
-    /// compilability verdict, independent of freezing.
+    /// No pin can spell it, because the SHARED row derivation
+    /// ([`per_element_row_for_target`]) cannot resolve the axis: a dimension the
+    /// target does not iterate, an iterated dimension with no usable positional
+    /// correspondence to this source axis (unmapped, element-mapped, or a
+    /// transposition), an index no axis owns. Left alone it keeps a
+    /// DIMENSION-name subscript, which cannot resolve in a scalar fragment, so
+    /// this is loud ALWAYS -- a compilability verdict, independent of freezing.
     Unspellable,
     /// A RUNTIME read selecting the element: a variable (`pop[Region, idx]`) or a
     /// nested expression (`pop[Region, pop[Region, old]]`). It COMPILES as it
@@ -336,21 +337,43 @@ enum IndexVerdict {
 ///
 /// It consults NO occurrence and infers NO shape. Per index, by name:
 ///
-/// - an index spelling the dimension the source declares AT THAT POSITION is
-///   replaced by this target element's coordinate for that dimension -- exactly
-///   the structural substitution [`pin_bare_source_ref`] already performs for a
-///   bare `Var`, generalized to a subscript's indices;
-/// - an index the source's axis at that position DECLARES as an element (or an
-///   already-`dim·elem`-qualified one) is a literal selector, qualified with that
-///   axis (`old` -> `age·old`). It would very likely resolve bare too, but the pin
-///   qualifies EVERY index of a row for a reason (see
+/// - an index spelling one of the TARGET's ITERATED dimensions is replaced by the
+///   source element this target element reads on that axis -- derived by handing
+///   an [`crate::ltm_agg::AxisRead::Iterated`] for the `(index dim, source axis
+///   dim)` pair to [`per_element_row_for_target`], the SAME single row derivation
+///   the occurrence-driven pin uses. That is what makes the identity axis
+///   (`pop[Region, ..]` over a `Region` axis, the structural substitution
+///   [`pin_bare_source_ref`] performs for a bare `Var`) and a positionally-MAPPED
+///   axis (`effect[State, ..]` over a `Region` axis with a `State`/`Region`
+///   mapping, either declaration direction -- GH #527 / #757) ONE arm rather than
+///   two: the derivation resolves both through
+///   `DimensionsContext::mapped_element_correspondence`, so this rule accepts
+///   EXACTLY the mapped pairs `ltm_agg::classify_axis_access` accepts (that
+///   classifier's `Iterated` arm gates on `iterated_axis_slot_elements`, the
+///   preimage inversion of the same correspondence). An axis the derivation
+///   declines -- no mapping, an explicit element map (GH #756: execution resolves
+///   positionally and ignores it), a transposition, a dimension this target does
+///   not iterate -- is `IndexVerdict::Unspellable`, and it is unspellable because
+///   the SHARED derivation says so, not because the name differs;
+/// - otherwise, an index the source's axis at that position DECLARES as an element
+///   (or an already-`dim·elem`-qualified one) is a literal selector, qualified with
+///   that axis (`old` -> `age·old`). It would very likely resolve bare too, but the
+///   pin qualifies EVERY index of a row for a reason (see
 ///   `wrap_non_matching_in_previous`'s `skip_index_qualification`): the wrap's
 ///   generic `qualify_element_index` cannot qualify an element name several
 ///   dimensions declare, so a half-qualified subscript is the one spelling whose
 ///   compilability depends on the model's element names. Qualifying here also
 ///   makes this rule's output byte-identical to the pre-`391bc3c1` pass's, which
-///   is the conservative thing for a regression fix to be;
-/// - a numeric literal index is already static and is kept verbatim.
+///   is the conservative thing for a regression fix to be. The iterated-dim arm is
+///   tried FIRST, mirroring `classify_axis_access`'s own precedence, so a name that
+///   is both an iterated dimension and some axis's element resolves the same way in
+///   both;
+/// - a numeric literal index is already static and is kept verbatim, and so is an
+///   `@N` POSITION index: `compiler::context`'s subscript lowering resolves
+///   `DimPosition` to a concrete element offset in scalar context (which a
+///   link-score fragment is), so `@N` needs no pin at all. Spelling it out as an
+///   element name here would be a SECOND implementation of position syntax living
+///   outside the compiler that owns it; keeping it verbatim leaves the one.
 ///
 /// Everything else is one of the two loud verdicts on [`IndexVerdict`], and
 /// `frozen` is what separates them. `IndexVerdict::Unspellable` is loud
@@ -373,10 +396,23 @@ enum IndexVerdict {
 /// So the caller passes the freeze context it alone knows, exactly as the wrap
 /// threads its own `frozen` flag beside `path`.
 ///
-/// There is no `RefShape` here, no axis vocabulary, and no live-vs-frozen
-/// decision, and this can never make the reference live-selectable (the pin-only
-/// descent records no `live_ref`). Do NOT grow it into a per-axis classifier: the
-/// second classifier family was deleted on purpose (`391bc3c1`).
+/// There is no `RefShape` here, no live-vs-frozen decision, and this can never
+/// make the reference live-selectable (the pin-only descent records no
+/// `live_ref`). It builds an `AxisRead` only to ASK the shared row derivation a
+/// question; it never decides an access shape. Do NOT grow it into a per-axis
+/// classifier: the second classifier family was deleted on purpose (`391bc3c1`),
+/// and every per-axis question it needs answered is already answered by
+/// [`per_element_row_for_target`] and the `DimensionsContext` beneath it.
+///
+/// (`ltm_agg::classify_axis_access` -- the per-axis classifier the IR itself uses
+/// -- is deliberately NOT the helper consulted here, for two reasons. It consumes
+/// `IndexExpr2`, and this descent walks the `Expr0` the wrap lowered. More
+/// importantly it answers a DIFFERENT question: "is this axis access statically
+/// describable enough to hoist a reducer / emit an element edge?" -- which is why
+/// it declines `@N`, correctly for hoisting and wrongly for compilability, and why
+/// it has a `Reduced` verdict that means nothing to a pin. The shared answer this
+/// rule needs is one level down, at the row derivation and the correspondence, and
+/// both classifiers bottom out there.)
 ///
 /// The caller turns `discharged == false` into `WrapOutcome::missing_occurrence`,
 /// i.e. a warned skip.
@@ -393,6 +429,10 @@ fn pin_dimension_name_indices(
             let (name, loc) = match &idx {
                 // A numeric selector is static: nothing to pin, nothing to lag.
                 IndexExpr0::Expr(Expr0::Const(..)) => return idx,
+                // An `@N` POSITION selector is static too -- `compiler::context`
+                // resolves it to a concrete element offset in scalar context -- so
+                // it neither needs a pin nor reads anything at the current step.
+                IndexExpr0::DimPosition(..) => return idx,
                 IndexExpr0::Expr(Expr0::Var(name, loc)) => {
                     (crate::common::canonicalize(name.as_str()).to_string(), *loc)
                 }
@@ -415,15 +455,17 @@ fn pin_dimension_name_indices(
             };
             let verdict = if ctx.dim_ctx.lookup(&name).is_some() {
                 IndexVerdict::Static
-            } else if dim.name() == name {
-                // The identity axis: the index names the dimension the source
-                // declares here, so it reads this target element's own coordinate
-                // for that dimension. Routed through the ONE row derivation, so a
-                // name-directed pin and an occurrence-driven one cannot spell the
-                // same row differently.
+            } else if ctx.target_elem_by_dim.contains_key(&name) {
+                // The index names one of the TARGET's ITERATED dimensions, so this
+                // axis reads whatever element this target element projects onto it.
+                // WHICH element that is -- the identity for a same-named axis, the
+                // positional correspondence for a mapped one -- is the shared row
+                // derivation's answer, not this rule's: it declines an unmapped or
+                // element-mapped pair, and a name-directed pin therefore accepts
+                // exactly the pairs the occurrence-driven one does.
                 let axis = crate::ltm_agg::AxisRead::Iterated {
                     dim: name.clone(),
-                    source_dim: name.clone(),
+                    source_dim: dim.name().to_string(),
                 };
                 match per_element_row_for_target(
                     std::slice::from_ref(&axis),
@@ -437,8 +479,9 @@ fn pin_dimension_name_indices(
                 // A literal element selector of THIS axis qualifies to `dim·elem`;
                 // `qualify_axis_element` returns the name unchanged for anything
                 // the axis does not declare. An unchanged name is therefore NOT a
-                // static selector: either another dimension's name (unspellable),
-                // or a variable read selecting the element at runtime.
+                // static selector: either a dimension name no target coordinate
+                // projects onto this axis (unspellable), or a variable read
+                // selecting the element at runtime.
                 let qualified = qualify_axis_element(&name, dim);
                 if qualified != name {
                     IndexVerdict::Pinned(qualified)

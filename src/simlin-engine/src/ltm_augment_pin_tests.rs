@@ -144,6 +144,9 @@ struct PinFixture {
     site_axes: Vec<crate::ltm_agg::AxisRead>,
     row_parts_bare: Vec<String>,
     target_elem_by_dim: HashMap<String, (String, usize)>,
+    /// The QUALIFIED target element this instantiation emits for -- `region·boston`
+    /// for [`PinFixture::new`], `state·ma` for [`PinFixture::mapped`].
+    target_element: String,
 }
 
 impl PinFixture {
@@ -188,6 +191,85 @@ impl PinFixture {
             ],
             row_parts_bare: vec!["boston".to_string(), "young".to_string()],
             target_elem_by_dim,
+            target_element: "region\u{B7}boston".to_string(),
+        }
+    }
+
+    /// The MAPPED twin of [`PinFixture::new`]: the same source `pop[Region, Age]`,
+    /// but the target iterates `State` (`[ny, ma]`) instead of `Region`, with a
+    /// declared `State`/`Region` dimension mapping, instantiated at `state·ma`.
+    /// Under the POSITIONAL correspondence that reads source row
+    /// `[boston, young]` -- `ma` is `State`'s second element and `boston` is
+    /// `Region`'s -- so a `State`-named index of a `Region` axis is spellable even
+    /// though the two names differ.
+    ///
+    /// `declare_on_state` picks the DECLARATION DIRECTION: `true` declares the
+    /// mapping on `State` toward `Region`, `false` on `Region` toward `State`.
+    /// `mapped_element_correspondence` honors both (GH #757), so both must pin.
+    /// A non-empty `element_map` makes the mapping an EXPLICIT element map, which
+    /// the correspondence declines (GH #756: the executed A2A lowering resolves
+    /// positionally and ignores the map, so following it would spell a row the
+    /// simulation never reads).
+    fn mapped(declare_on_state: bool, element_map: Vec<(String, String)>) -> Self {
+        use crate::ltm_agg::AxisRead;
+        let mut state = datamodel::Dimension::named(
+            "state".to_string(),
+            vec!["ny".to_string(), "ma".to_string()],
+        );
+        let mut region = datamodel::Dimension::named(
+            "region".to_string(),
+            vec!["nyc".to_string(), "boston".to_string()],
+        );
+        let mapping = |target: &str, element_map: Vec<(String, String)>| {
+            vec![datamodel::DimensionMapping {
+                target: target.to_string(),
+                element_map,
+            }]
+        };
+        if declare_on_state {
+            state.mappings = mapping("region", element_map);
+        } else {
+            region.mappings = mapping(
+                "state",
+                element_map
+                    .into_iter()
+                    .map(|(a, b)| (b, a))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let project_dims = vec![
+            region,
+            datamodel::Dimension::named(
+                "age".to_string(),
+                vec!["young".to_string(), "old".to_string()],
+            ),
+            state,
+        ];
+        let mut target_elem_by_dim = HashMap::new();
+        target_elem_by_dim.insert("state".to_string(), ("ma".to_string(), 1usize));
+        PinFixture {
+            from: Ident::<Canonical>::new("pop"),
+            from_dims: vec![
+                make_named_dimension("region", &["nyc", "boston"]),
+                make_named_dimension("age", &["young", "old"]),
+            ],
+            source_dim_elements: vec![
+                vec!["nyc".to_string(), "boston".to_string()],
+                vec!["young".to_string(), "old".to_string()],
+            ],
+            source_dim_names: vec!["region".to_string(), "age".to_string()],
+            target_iterated_dims: vec!["state".to_string()],
+            dim_ctx: crate::dimensions::DimensionsContext::from(project_dims.as_slice()),
+            site_axes: vec![
+                AxisRead::Iterated {
+                    dim: "state".to_string(),
+                    source_dim: "region".to_string(),
+                },
+                AxisRead::Pinned("young".to_string()),
+            ],
+            row_parts_bare: vec!["boston".to_string(), "young".to_string()],
+            target_elem_by_dim,
+            target_element: "state\u{B7}ma".to_string(),
         }
     }
 
@@ -251,7 +333,7 @@ impl PinFixture {
             "growth",
             &self.site_axes,
             &self.row_parts_bare,
-            "region\u{B7}boston",
+            &self.target_element,
             ast,
             deps,
             // Nothing to element-pin by name: the source's pinning is the wrap's job.
@@ -696,21 +778,115 @@ fn per_element_pin_descends_into_a_source_subscript_index_expression() {
     );
 }
 
+/// One row of a pin-index verdict enumeration: a label, the source subscript as
+/// written in the `LOOKUP` table argument, and the expected outcome in each freeze
+/// context. `Some(spelling)` means the partial is EMITTED and its text contains
+/// that spelling; `None` means it is DECLINED (`UnfreezablePartial` -> warned
+/// skip).
+type PinIndexCell<'a> = (&'a str, &'a str, Option<&'a str>, Option<&'a str>);
+
+/// Run one enumeration table against `fx`, both freeze columns per row.
+///
+/// `live_ref` is the source reference the emitting site holds LIVE, spelled at
+/// `fx`'s own shape -- it is what makes the equation a `PerElement` target at all,
+/// and it is deliberately not the cell under test. The cell under test is the
+/// table argument, which the IR records NOTHING for.
+fn assert_pin_index_verdicts(fx: &PinFixture, live_ref: &str, cases: &[PinIndexCell<'_>]) {
+    // A DIMENSION-name subscript surviving into a scalar fragment is the silent
+    // zero this whole rule exists to prevent, so every cell forbids one on any
+    // dimension in play -- the source's own axes and the target's iterated dims.
+    let forbidden: Vec<String> = fx
+        .source_dim_names
+        .iter()
+        .chain(fx.target_iterated_dims.iter())
+        .map(|d| format!("pop[{d},"))
+        .collect();
+    for (label, subscript, expect_bare, expect_frozen) in cases {
+        for (frozen, expected) in [(false, expect_bare), (true, expect_frozen)] {
+            let ctx = if frozen { "inside a freeze" } else { "bare" };
+            let eqn = if frozen {
+                format!("{live_ref} + PREVIOUS(LOOKUP({subscript}, input))")
+            } else {
+                format!("{live_ref} + LOOKUP({subscript}, input)")
+            };
+            let (ast, deps, occurrences) = fx.parse(&eqn, &["input", "idx"]);
+            // Non-vacuity, every cell: the table argument is the reference the IR
+            // records NOTHING for, so the rule is what decides -- not the IR.
+            assert_eq!(
+                PinFixture::source_occurrences(&occurrences),
+                1,
+                "{label} ({ctx}): only the live occurrence outside the LOOKUP may be \
+                 recorded, or this cell tests the IR rather than the rule: \
+                 {occurrences:?}"
+            );
+            let slot_occurrences = SlotOccurrences::new(&occurrences);
+            let got = fx.generate(&ast, &deps, &slot_occurrences.for_slot(0));
+            match expected {
+                Some(spelling) => {
+                    let text = got.unwrap_or_else(|e| {
+                        panic!("{label} ({ctx}): expected an emitted partial: {e:?}")
+                    });
+                    assert!(
+                        text.contains(spelling),
+                        "{label} ({ctx}): expected {spelling:?} in the partial; got: {text}"
+                    );
+                    for bad in &forbidden {
+                        assert!(
+                            !text.contains(bad.as_str()),
+                            "{label} ({ctx}): no DIMENSION-name subscript ({bad:?}) may \
+                             survive into a scalar fragment; got: {text}"
+                        );
+                    }
+                    // The emitting site must actually be held LIVE at its bare row,
+                    // or the cell is not a `PerElement` instantiation at all and the
+                    // table argument's verdict was reached in the wrong context.
+                    assert!(
+                        text.contains(&format!("pop[{}]", fx.row_parts_bare.join(", "))),
+                        "{label} ({ctx}): the live occurrence must keep the bare row \
+                         spelling, or this fixture is not a PerElement instantiation; \
+                         got: {text}"
+                    );
+                }
+                None => assert!(
+                    matches!(
+                        got,
+                        Err(PartialEquationError {
+                            kind: PartialEquationErrorKind::UnfreezablePartial,
+                            ..
+                        })
+                    ),
+                    "{label} ({ctx}): expected a loud UnfreezablePartial decline; got: {got:?}"
+                ),
+            }
+        }
+    }
+}
+
 /// The full ENUMERATION: every index kind the rule can meet, in both freeze
 /// contexts, with a stated verdict for each cell.
 ///
-/// Every previous finding in this machinery -- the `391bc3c1` regression and both
-/// review findings on this branch -- was a CELL, not a logic error: one shape
+/// Every previous finding in this machinery -- the `391bc3c1` regression and the
+/// four review findings on this branch -- was a CELL, not a logic error: one shape
 /// landing in the wrong bucket. Each was fixed after someone supplied the
 /// counterexample. This test exists so the space is stated rather than sampled:
 /// the rule sorts an index into exactly one of
 /// [`super::post_transform::IndexVerdict`]'s four outcomes, and the outcome
 /// depends on the index's spelling and (for `RuntimeRead` alone) on whether the
-/// subtree is already frozen. Two columns, thirteen rows, no gaps.
+/// subtree is already frozen. Two columns, fifteen rows, no gaps.
 ///
-/// Reading the table: `Some(spelling)` means the partial is EMITTED and its text
-/// contains that spelling; `None` means the partial is DECLINED
-/// (`UnfreezablePartial` -> warned skip). The unfrozen column is a bare `LOOKUP`
+/// The table came back all-green once while still being wrong twice, which is
+/// worth stating plainly: a mutation probe proves a table CONSTRAINS the code, and
+/// nothing more. Whether each cell asserts the RIGHT verdict is a review question,
+/// and whether the rows cover the space is a completeness question. Both defects
+/// were of the second kind -- `@N` and a mapped dimension name were simply not
+/// rows -- so a row added here is worth more than an assertion added to an
+/// existing one. The MAPPED axis needs a different target dimension than the
+/// source's, so its rows live in the sibling
+/// [`per_element_pin_mapped_axis_verdict_enumeration`] over
+/// [`PinFixture::mapped`]; everything resolvable against the source's own axis
+/// names is here.
+///
+/// Reading the table: see [`PinIndexCell`]. The unfrozen column is a bare `LOOKUP`
 /// table argument; the frozen column is the same argument inside a pre-existing
 /// `PREVIOUS`. Only the runtime-read rows differ between columns -- that is the
 /// whole content of the compilability-vs-ceteris-paribus split.
@@ -733,9 +909,7 @@ fn per_element_pin_descends_into_a_source_subscript_index_expression() {
 /// static selector alone, and that is what the cell pins.
 #[test]
 fn per_element_pin_index_verdict_enumeration() {
-    // (label, the source subscript as written in the table argument,
-    //  expected outside a freeze, expected inside a freeze)
-    let cases: [(&str, &str, Option<&str>, Option<&str>); 13] = [
+    let cases: [PinIndexCell<'_>; 15] = [
         // --- static selectors: pinned, and identical in both contexts ----------
         (
             "the axis's own dimension name",
@@ -761,6 +935,19 @@ fn per_element_pin_index_verdict_enumeration() {
             Some("pop[region\u{B7}boston, 1]"),
             Some("pop[region\u{B7}boston, 1]"),
         ),
+        (
+            // `@N` reached the catch-all and was scored a RUNTIME read, so a bare
+            // table argument declined and every link score on the edge was dropped
+            // -- even though `compiler::context`'s subscript lowering resolves
+            // `DimPosition` to a concrete element offset in scalar context. It
+            // selects a FIXED element and reads nothing at the current step, so it
+            // is static in both senses the rule cares about, and needs no pin: the
+            // compiler that owns position syntax resolves it.
+            "an `@N` position index",
+            "pop[Region, @2]",
+            Some("pop[region\u{B7}boston, @2]"),
+            Some("pop[region\u{B7}boston, @2]"),
+        ),
         // --- unspellable: a COMPILABILITY verdict, so loud in BOTH contexts ----
         (
             "the source's own dim at a position the target does not project",
@@ -768,7 +955,30 @@ fn per_element_pin_index_verdict_enumeration() {
             None,
             None,
         ),
-        ("another dimension's name", "pop[State, young]", None, None),
+        (
+            // The target iterates `Region`, not `State`, so nothing says WHICH
+            // `State` element this instantiation reads. Contrast the mapped table's
+            // rows, where the target DOES iterate `State`: there the shared
+            // correspondence names the element and the same spelling pins.
+            "another dimension's name the target does not iterate",
+            "pop[State, young]",
+            None,
+            None,
+        ),
+        (
+            // A SUBDIMENSION name gets no special treatment: it is a dimension the
+            // target does not iterate, so it names no coordinate. (`bigcity` is a
+            // proper subdimension of the `region` axis by element containment.)
+            // Neither does the shared classifier treat one specially -- only its
+            // `StarRange` arm resolves a subdimension (`*:Sub`, GH #766), and a
+            // plain `Var` index naming one declines there too, so a target
+            // ITERATING a subdimension of the source axis cannot produce a
+            // `PerElement` site at all and never reaches this rule.
+            "a subdimension name of the source's axis",
+            "pop[BigCity, young]",
+            None,
+            None,
+        ),
         (
             "the source's own dims TRANSPOSED",
             "pop[Age, young]",
@@ -815,60 +1025,102 @@ fn per_element_pin_index_verdict_enumeration() {
         ),
     ];
 
-    // `state` rides along in every cell so the "another dimension's name" row has
-    // a real dimension to name; it changes no other row, since the rule resolves
-    // an index against the source's OWN axis at that position.
-    let fx = PinFixture::new(vec![datamodel::Dimension::named(
-        "state".to_string(),
-        vec!["ny".to_string(), "ma".to_string()],
-    )]);
+    // `state` and `bigcity` ride along in every cell so the two rows that name
+    // another dimension have real dimensions to name; they change no other row,
+    // since the rule resolves an index against the source's OWN axis at that
+    // position and neither is one of the target's iterated dims.
+    let fx = PinFixture::new(vec![
+        datamodel::Dimension::named(
+            "state".to_string(),
+            vec!["ny".to_string(), "ma".to_string()],
+        ),
+        datamodel::Dimension::named("bigcity".to_string(), vec!["nyc".to_string()]),
+    ]);
+    assert!(
+        fx.dim_ctx.is_subdimension_of(
+            &crate::common::CanonicalDimensionName::from_raw("bigcity"),
+            &crate::common::CanonicalDimensionName::from_raw("region"),
+        ),
+        "the subdimension row needs `bigcity` to genuinely be a subdimension of the \
+         source's `region` axis, or it duplicates the unrelated-dimension row"
+    );
 
-    for (label, subscript, expect_bare, expect_frozen) in cases {
-        for (frozen, expected) in [(false, expect_bare), (true, expect_frozen)] {
-            let ctx = if frozen { "inside a freeze" } else { "bare" };
-            let eqn = if frozen {
-                format!("pop[Region, young] + PREVIOUS(LOOKUP({subscript}, input))")
-            } else {
-                format!("pop[Region, young] + LOOKUP({subscript}, input)")
-            };
-            let (ast, deps, occurrences) = fx.parse(&eqn, &["input", "idx"]);
-            // Non-vacuity, every cell: the table argument is the reference the IR
-            // records NOTHING for, so the rule is what decides -- not the IR.
-            assert_eq!(
-                PinFixture::source_occurrences(&occurrences),
-                1,
-                "{label} ({ctx}): only the live occurrence outside the LOOKUP may be \
-                 recorded, or this cell tests the IR rather than the rule: \
-                 {occurrences:?}"
-            );
-            let slot_occurrences = SlotOccurrences::new(&occurrences);
-            let got = fx.generate(&ast, &deps, &slot_occurrences.for_slot(0));
-            match expected {
-                Some(spelling) => {
-                    let text = got.unwrap_or_else(|e| {
-                        panic!("{label} ({ctx}): expected an emitted partial: {e:?}")
-                    });
-                    assert!(
-                        text.contains(spelling),
-                        "{label} ({ctx}): expected {spelling:?} in the partial; got: {text}"
-                    );
-                    assert!(
-                        !text.contains("pop[region,"),
-                        "{label} ({ctx}): no DIMENSION-name subscript may survive into a \
-                         scalar fragment; got: {text}"
-                    );
-                }
-                None => assert!(
-                    matches!(
-                        got,
-                        Err(PartialEquationError {
-                            kind: PartialEquationErrorKind::UnfreezablePartial,
-                            ..
-                        })
-                    ),
-                    "{label} ({ctx}): expected a loud UnfreezablePartial decline; got: {got:?}"
-                ),
-            }
-        }
+    assert_pin_index_verdicts(&fx, "pop[Region, young]", &cases);
+}
+
+/// The MAPPED half of the enumeration: the same rule, asked about an index naming a
+/// dimension the target ITERATES that is not the source axis's own name.
+///
+/// This is the second review finding, and it is the case a name comparison cannot
+/// decide. `growth[State] = pop[State, young] + LOOKUP(pop[State, old], input)` over
+/// a source declared `pop[Region, Age]` is a perfectly good model when a positional
+/// `State`/`Region` mapping exists: the executed simulation reads `Region`'s element
+/// at the same position as the `State` element being computed. The rule used to
+/// judge `State` unspellable purely because the name differed from `Region`, which
+/// dropped the whole `pop -> growth` score edge.
+///
+/// The verdicts are not this rule's opinion. Each row is whatever
+/// `DimensionsContext::mapped_element_correspondence` says, reached through
+/// [`super::post_transform::per_element_row_for_target`] -- the SAME derivation the
+/// occurrence-driven pin and the link-score NAME use, and the same one
+/// `ltm_agg::classify_axis_access` gates its `Iterated` arm on (through
+/// `iterated_axis_slot_elements`, the correspondence's preimage inversion). So the
+/// rows below double as an agreement statement: a mapped pair this rule pins is
+/// exactly a mapped pair the classifier calls `Iterated`, in both declaration
+/// directions, and an element-mapped pair declines in both.
+///
+/// Both columns are the SAME for every row here, and that is the point: these are
+/// `Pinned` and `Unspellable` verdicts, neither of which the freeze context can
+/// change. A mapped index is a static selector once the correspondence names its
+/// element, and unspellable when it does not.
+#[test]
+fn per_element_pin_mapped_axis_verdict_enumeration() {
+    // `ma` is `State`'s second element, so the positional correspondence reads
+    // `Region`'s second -- `boston`. A row that pins must say so.
+    let positional: [PinIndexCell<'_>; 2] = [
+        (
+            "a mapped dimension name (the iterated axis)",
+            "pop[State, old]",
+            Some("pop[region\u{B7}boston, age\u{B7}old]"),
+            Some("pop[region\u{B7}boston, age\u{B7}old]"),
+        ),
+        (
+            // The mapped axis composes with the ordinary literal-element arm rather
+            // than replacing it: only the axis whose index names an iterated dim
+            // goes through the correspondence.
+            "a mapped dimension name beside a literal element",
+            "pop[State, age\u{B7}old]",
+            Some("pop[region\u{B7}boston, age\u{B7}old]"),
+            Some("pop[region\u{B7}boston, age\u{B7}old]"),
+        ),
+    ];
+    let declined: [PinIndexCell<'_>; 1] = [(
+        "an element-mapped (non-positional) pair",
+        "pop[State, old]",
+        None,
+        None,
+    )];
+
+    // Declaration direction must not matter: `mapped_element_correspondence`
+    // honors a mapping declared on either dimension (GH #757), so a reverse-declared
+    // positional pair pins identically. A forward-only gate here would silently drop
+    // half the mapped models.
+    for declare_on_state in [true, false] {
+        let fx = PinFixture::mapped(declare_on_state, vec![]);
+        assert_pin_index_verdicts(&fx, "pop[State, young]", &positional);
+
+        // An EXPLICIT element map is declined even though it names a correspondence:
+        // the executed A2A lowering resolves mapped references POSITIONALLY and
+        // ignores the map (GH #756), so pinning the row the map names would spell a
+        // read the simulation never performs -- a compilable, confidently wrong
+        // score, which is the one outcome worse than none.
+        let fx = PinFixture::mapped(
+            declare_on_state,
+            vec![
+                ("ny".to_string(), "boston".to_string()),
+                ("ma".to_string(), "nyc".to_string()),
+            ],
+        );
+        assert_pin_index_verdicts(&fx, "pop[State, young]", &declined);
     }
 }

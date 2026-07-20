@@ -5658,6 +5658,54 @@ fn identity_gf(slope: f64) -> datamodel::GraphicalFunction {
     }
 }
 
+/// Replace `effect`'s placeholder equation with the per-element TABLE-bearing form
+/// the three `LOOKUP`-table-argument tests share: one graphical function per
+/// `(Region, Age)` element, each element's equation naming its own `pop` cell.
+///
+/// `effect` must carry ONE TABLE PER ELEMENT. A single whole-variable gf on an
+/// arrayed variable has `table_count == 1`, so every element past the first reads
+/// NaN (the same reason `ltm_augment_with_lookup` pins a shared table as
+/// `to[1,...]`); a per-element gf rides an `Equation::Arrayed`. Being both
+/// value-bearing AND table-bearing is what makes `effect` simultaneously a causal
+/// source and a legal table reference, which is the whole premise of these tests.
+fn give_effect_per_element_tables(project: &mut datamodel::Project) {
+    let effect = project.models[0]
+        .variables
+        .iter_mut()
+        .find(|v| v.get_ident() == "effect")
+        .expect("the fixture declares effect");
+    let datamodel::Variable::Aux(effect) = effect else {
+        panic!("effect is declared as an aux");
+    };
+    let elements: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<datamodel::GraphicalFunction>,
+    )> = [
+        ("a", "young", 1.0),
+        ("a", "old", 1.1),
+        ("b", "young", 0.9),
+        ("b", "old", 1.2),
+    ]
+    .into_iter()
+    .map(|(r, age, slope)| {
+        (
+            format!("{r},{age}"),
+            format!("pop[{r},{age}]"),
+            None,
+            Some(identity_gf(slope)),
+        )
+    })
+    .collect();
+    effect.equation = datamodel::Equation::Arrayed(
+        vec!["Region".to_string(), "Age".to_string()],
+        elements,
+        None,
+        false,
+    );
+}
+
 /// A `PerElement` source read BOTH as a value and as a `LOOKUP` **table**
 /// argument in the same target keeps its per-element scores.
 ///
@@ -5702,46 +5750,7 @@ fn per_element_source_also_read_as_a_lookup_table_keeps_its_scores() {
         .array_stock("pop[Region, Age]", "100", &["growth"], &[], None)
         .build_datamodel();
 
-    // `effect` must carry ONE TABLE PER ELEMENT: a single whole-variable gf on an
-    // arrayed variable has `table_count == 1`, so every element past the first
-    // reads NaN (the same reason `ltm_augment_with_lookup` pins a shared table as
-    // `to[1,...]`). A per-element gf rides an `Equation::Arrayed`, so each
-    // element's equation names its own `pop` cell.
-    let effect = project.models[0]
-        .variables
-        .iter_mut()
-        .find(|v| v.get_ident() == "effect")
-        .expect("the fixture declares effect");
-    let datamodel::Variable::Aux(effect) = effect else {
-        panic!("effect is declared as an aux");
-    };
-    let elements: Vec<(
-        String,
-        String,
-        Option<String>,
-        Option<datamodel::GraphicalFunction>,
-    )> = [
-        ("a", "young", 1.0),
-        ("a", "old", 1.1),
-        ("b", "young", 0.9),
-        ("b", "old", 1.2),
-    ]
-    .into_iter()
-    .map(|(r, age, slope)| {
-        (
-            format!("{r},{age}"),
-            format!("pop[{r},{age}]"),
-            None,
-            Some(identity_gf(slope)),
-        )
-    })
-    .collect();
-    effect.equation = datamodel::Equation::Arrayed(
-        vec!["Region".to_string(), "Age".to_string()],
-        elements,
-        None,
-        false,
-    );
+    give_effect_per_element_tables(&mut project);
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
@@ -5829,6 +5838,200 @@ fn per_element_source_also_read_as_a_lookup_table_keeps_its_scores() {
             series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0),
             "loop score {} must carry real non-zero values; got {series:?}",
             lv.name
+        );
+    }
+}
+
+/// The `@N` twin of [`per_element_source_also_read_as_a_lookup_table_keeps_its_scores`]:
+/// the `LOOKUP` table argument selects its `Age` element by POSITION rather than by
+/// name (`effect[Region, @2]` -- `@2` is `Age`'s second element, `old`).
+///
+/// `@N` reached the pin rule's catch-all and scored a RUNTIME read, so a bare table
+/// argument declined and the edge's per-element scores were dropped. It is in fact
+/// a static selector: `compiler::context`'s subscript lowering resolves
+/// `DimPosition` to a concrete element offset in scalar context, which a link-score
+/// fragment is. This test is what makes that a measured claim rather than a read of
+/// the compiler -- the emitted fragment carries `@2` verbatim beside a pinned
+/// `region·{r}`, and the empty-warnings assertion is the compile.
+#[test]
+fn per_element_source_read_as_a_lookup_table_by_position_keeps_its_scores() {
+    let mut project = TestProject::new("per_element_lookup_table_arg_by_position")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        // Placeholder: replaced below by the per-element table-bearing form.
+        .array_aux("effect[Region, Age]", "pop[Region, Age]")
+        .array_aux(
+            "target[Region]",
+            "effect[Region, young] + LOOKUP(effect[Region, @2], time)",
+        )
+        .array_flow("growth[Region, Age]", "target[Region] * 0.0001", None)
+        .array_stock("pop[Region, Age]", "100", &["growth"], &[], None)
+        .build_datamodel();
+
+    give_effect_per_element_tables(&mut project);
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("a position-indexed table argument must compile with LTM");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "every LTM fragment must compile -- an `@N` table index the pin refuses \
+         makes the whole partial a warned skip, and one it MIS-pins would fail to \
+         compile here; got: {warnings:?}"
+    );
+
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    for region in ["a", "b"] {
+        let name = format!("{LINK_SCORE_PREFIX}effect[{region},young]\u{2192}target[{region}]");
+        let var = ltm.vars.iter().find(|v| v.name == name).unwrap_or_else(|| {
+            panic!(
+                "the PerElement site must be scored -- declining the `@N` table index \
+                 drops this whole edge; emitted: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            )
+        });
+        let text = match &var.equation {
+            LtmEquation::Scalar(arm) => arm.text.clone(),
+            other => panic!("{name} must be a scalar score; got {other:?}"),
+        };
+        assert!(
+            text.contains(&format!("effect[region\u{B7}{region}, @2]")),
+            "the position index must survive VERBATIM beside the pinned row -- the \
+             compiler that owns `@N` resolves it, and re-spelling it here would be a \
+             second implementation; got: {text}"
+        );
+        assert!(
+            !text.contains("effect[region,"),
+            "no dimension-name subscript may survive into the scalar fragment; \
+             got: {text}"
+        );
+
+        let series = series_at(&results, offset_of(&results, &name));
+        assert!(
+            series.iter().all(|v| v.is_finite()),
+            "{name} must stay finite; got {series:?}"
+        );
+        assert!(
+            series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0),
+            "{name} must carry a real non-zero value -- an identically-zero series \
+             is the silent zero this shape regressed into; got {series:?}"
+        );
+    }
+}
+
+/// The MAPPED twin of [`per_element_source_also_read_as_a_lookup_table_keeps_its_scores`]:
+/// the target iterates `State` while the source is declared over `Region`, joined
+/// by a positional `State -> Region` mapping.
+///
+/// `target[State] = effect[State,young] + LOOKUP(effect[State,old], time)` over an
+/// `effect[Region,Age]` source is a valid model -- the executed simulation reads
+/// `Region`'s element at the same position as the `State` element being computed.
+/// The name-directed table-argument pin nonetheless judged `State` unspellable
+/// SOLELY because the name differed from the source axis's `Region`, so the whole
+/// partial declined and every `effect -> target` per-element score on the edge was
+/// dropped: exactly the same silent-zero outcome the un-mapped twin regressed into,
+/// reached by a different route.
+///
+/// The fix is that the pin asks `per_element_row_for_target` -- hence
+/// `DimensionsContext::mapped_element_correspondence` -- which source element an
+/// axis reads, instead of comparing names. That is the same derivation the score's
+/// NAME comes from, which is why the assertions below can pair `s1` with `a` and
+/// `s2` with `b` and expect the name and the pinned row to agree.
+#[test]
+fn mapped_per_element_source_read_as_a_lookup_table_keeps_its_scores() {
+    let mut project = TestProject::new("mapped_per_element_lookup_table_arg")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        // Placeholder: replaced below by the per-element table-bearing form.
+        .array_aux("effect[Region, Age]", "pop[Region, Age]")
+        .array_aux(
+            "target[State]",
+            "effect[State, young] + LOOKUP(effect[State, old], time)",
+        )
+        // The loop closes through a whole-extent reduce so it needs no second
+        // mapped reference: the mapped axis under test is the one in `target`.
+        .array_flow("growth[Region, Age]", "SUM(target[*]) * 0.0001", None)
+        .array_stock("pop[Region, Age]", "100", &["growth"], &[], None)
+        .build_datamodel();
+
+    give_effect_per_element_tables(&mut project);
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("a mapped per-element-table source read in a LOOKUP must compile with LTM");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "every LTM fragment must compile -- a mapped dimension-name index the pin \
+         declines makes the whole partial a warned skip; got: {warnings:?}"
+    );
+
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // `s1` is `State`'s first element and `a` is `Region`'s, so the positional
+    // correspondence pairs them -- in the score's NAME and in the pinned table row
+    // alike, since both come from the one row derivation.
+    for (state, region) in [("s1", "a"), ("s2", "b")] {
+        let name = format!("{LINK_SCORE_PREFIX}effect[{region},young]\u{2192}target[{state}]");
+        let var = ltm.vars.iter().find(|v| v.name == name).unwrap_or_else(|| {
+            panic!(
+                "the mapped PerElement site must be scored -- declining the table \
+                 argument's mapped index drops this whole edge; emitted: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            )
+        });
+        let text = match &var.equation {
+            LtmEquation::Scalar(arm) => arm.text.clone(),
+            other => panic!("{name} must be a scalar score; got {other:?}"),
+        };
+        assert!(
+            text.contains(&format!("effect[region\u{B7}{region}, age\u{B7}old]")),
+            "the table argument's `State` index must be pinned to the SOURCE element \
+             the mapping corresponds it to (region\u{B7}{region}), not to the target's \
+             own {state}; got: {text}"
+        );
+        for dim in ["region", "state"] {
+            assert!(
+                !text.contains(&format!("effect[{dim},")),
+                "no dimension-name subscript may survive into the scalar fragment; \
+                 got: {text}"
+            );
+        }
+        assert!(
+            text.contains(&format!("effect[{region}, young]")),
+            "the live site must keep its bare row spelling; got: {text}"
+        );
+
+        let series = series_at(&results, offset_of(&results, &name));
+        assert!(
+            series.iter().all(|v| v.is_finite()),
+            "{name} must stay finite; got {series:?}"
+        );
+        assert!(
+            series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0),
+            "{name} must carry a real non-zero value -- an identically-zero series \
+             is the silent zero this shape regressed into; got {series:?}"
         );
     }
 }
