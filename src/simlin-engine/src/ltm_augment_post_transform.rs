@@ -311,36 +311,51 @@ pub(super) fn pin_bare_source_ref(ctx: &PerElementRefCtx<'_>) -> Option<Vec<Inde
 /// are two separate obligations, and discharging the second does not require the
 /// first -- which is why this asks the IR for nothing.
 ///
-/// It consults NO occurrence and infers NO shape. Per index, by name only:
+/// It consults NO occurrence and infers NO shape, and it discharges ONLY a
+/// subscript every index of which is STATICALLY resolvable. Per index, by name:
 ///
 /// - an index spelling the dimension the source declares AT THAT POSITION is
 ///   replaced by this target element's coordinate for that dimension -- exactly
 ///   the structural substitution [`pin_bare_source_ref`] already performs for a
 ///   bare `Var`, generalized to a subscript's indices;
-/// - an index the source's axis at that position DECLARES as an element is a
-///   literal selector, qualified with that axis (`old` -> `age·old`). It would
-///   very likely resolve bare too, but the pin qualifies EVERY index of a row for
-///   a reason (see `wrap_non_matching_in_previous`'s `skip_index_qualification`):
-///   the wrap's generic `qualify_element_index` cannot qualify an element name
-///   several dimensions declare, so a half-qualified subscript is the one spelling
-///   whose compilability depends on the model's element names. Qualifying here
-///   also makes this rule's output byte-identical to the pre-`391bc3c1` pass's,
-///   which is the conservative thing for a regression fix to be.
+/// - an index the source's axis at that position DECLARES as an element (or an
+///   already-`dim·elem`-qualified one) is a literal selector, qualified with that
+///   axis (`old` -> `age·old`). It would very likely resolve bare too, but the pin
+///   qualifies EVERY index of a row for a reason (see
+///   `wrap_non_matching_in_previous`'s `skip_index_qualification`): the wrap's
+///   generic `qualify_element_index` cannot qualify an element name several
+///   dimensions declare, so a half-qualified subscript is the one spelling whose
+///   compilability depends on the model's element names. Qualifying here also
+///   makes this rule's output byte-identical to the pre-`391bc3c1` pass's, which
+///   is the conservative thing for a regression fix to be;
+/// - a numeric literal index is already static and is kept verbatim.
+///
+/// EVERYTHING ELSE is declined (`discharged == false`), and the reason is not
+/// merely that this rule cannot spell it. A `LOOKUP` table argument is the ONE of
+/// the three pin-only descents that is **not inside a freeze** -- the wrap holds
+/// it verbatim rather than wrapping it -- so a RUNTIME read in one of its indices
+/// (`LOOKUP(pop[Region, pop[Region, old]], x)`, or a plain `pop[Region, idx]`)
+/// stays LIVE in the emitted partial. `codegen::extract_table_info` evaluates that
+/// index to select the table element, so the partial for the `young` site would
+/// vary with the current-step value of `old` -- a ceteris-paribus violation that
+/// misattributes one row's influence to another. A descent that wraps nothing
+/// cannot fix that, and a compilable-but-wrong score is worse than none (GH #311 /
+/// #661 / #743), so the partial is abandoned LOUDLY instead. The two descents that
+/// ARE inside a freeze need no such refusal: everything under a pre-existing
+/// `PREVIOUS`/`INIT` or a whole-frozen reducer is already lagged, index reads
+/// included, so [`pin_only_source_refs`] pins them and stops there.
 ///
 /// There is no `RefShape` here, no axis vocabulary, and no live-vs-frozen
 /// decision, and this can never make the reference live-selectable (the pin-only
 /// descent records no `live_ref`). Do NOT grow it into a per-axis classifier: the
 /// second classifier family was deleted on purpose (`391bc3c1`).
 ///
-/// `discharged == false` when a bare index still NAMES a dimension the rule could
-/// not resolve -- a mapped or transposed axis name, an axis whose element this
-/// target element does not project, an over-arity index. Only the IR knows what
-/// such an index reads, and it recorded nothing, so the caller keeps that case
-/// LOUD (`WrapOutcome::missing_occurrence` -> warned skip) rather than guessing.
-/// An index naming no dimension at all (a literal element, a wildcard, an
-/// arithmetic expression) does NOT make the subscript unlowerable: it is already
-/// as concrete as the target's own equation spelled it, and a genuinely dynamic
-/// one is left to the caller's index pass.
+/// The caller turns `discharged == false` into `WrapOutcome::missing_occurrence`,
+/// i.e. a warned skip. That also covers the cases where the rule simply has no
+/// answer: a mapped or transposed axis name (deciding that `State` reads `Region`
+/// through a positional mapping is the per-axis classification `db::ltm_ir` owns),
+/// an axis whose element this target element does not project, and an over-arity
+/// index no axis owns.
 fn pin_dimension_name_indices(
     indices: Vec<IndexExpr0>,
     ctx: &PerElementRefCtx<'_>,
@@ -351,20 +366,30 @@ fn pin_dimension_name_indices(
         .enumerate()
         .map(|(i, idx)| {
             let (name, loc) = match &idx {
+                // A numeric selector is static: nothing to pin, nothing to freeze.
+                IndexExpr0::Expr(Expr0::Const(..)) => return idx,
                 IndexExpr0::Expr(Expr0::Var(name, loc)) => {
                     (crate::common::canonicalize(name.as_str()).to_string(), *loc)
                 }
-                _ => return idx,
+                // An arithmetic index, a range, a wildcard: either a runtime read
+                // this descent cannot freeze, or not a table index at all (codegen
+                // rejects a range in a lookup table). Decline -- see the fn docs.
+                _ => {
+                    discharged = false;
+                    return idx;
+                }
             };
             let Some(dim) = ctx.from_dims.get(i) else {
-                // Over-arity: no axis owns this index, so nothing names its
-                // owner and there is nothing to pin it from.
-                if ctx.dim_ctx.is_dimension_name(&name) {
-                    discharged = false;
-                }
+                // Over-arity: no axis owns this index, so nothing names its owner
+                // and there is nothing to resolve it against.
+                discharged = false;
                 return idx;
             };
-            let pinned = if dim.name() == name {
+            let pinned = if ctx.dim_ctx.lookup(&name).is_some() {
+                // Already `dim·elem`: a static selector, spelled the way this rule
+                // would spell it.
+                Some(name.clone())
+            } else if dim.name() == name {
                 // The identity axis: the index names the dimension the source
                 // declares here, so it reads this target element's own
                 // coordinate for that dimension. Routed through the ONE row
@@ -380,20 +405,19 @@ fn pin_dimension_name_indices(
                     ctx.dim_ctx,
                 )
                 .map(|row| qualify_axis_element(&row[0], dim))
-            } else if ctx.dim_ctx.is_dimension_name(&name) {
-                // Some OTHER dimension's name: a mapped or transposed axis,
-                // whose read only the IR can describe. Stay loud.
-                None
             } else {
-                // A literal element selector when this axis declares the name;
-                // `qualify_axis_element` is a no-op for anything else (a
-                // dynamic scalar index), which is what leaves it to the
-                // caller's index pass.
-                Some(qualify_axis_element(&name, dim))
+                // A literal element selector of THIS axis qualifies to
+                // `dim·elem`; `qualify_axis_element` returns the name unchanged
+                // for anything the axis does not declare, and an unchanged name
+                // here means the index is NOT a static selector -- another
+                // dimension's name, or a variable read selecting the element at
+                // runtime. Both are declined.
+                let qualified = qualify_axis_element(&name, dim);
+                (qualified != name).then_some(qualified)
             };
             match pinned {
-                // Rebuild the index only when the name actually changes, so an
-                // index this rule has nothing to say about keeps its own node.
+                // Rebuild the index only when the name actually changes, so a
+                // spelling this rule agrees with keeps its own node.
                 Some(part) if part != name => {
                     IndexExpr0::Expr(Expr0::Var(RawIdent::new_from_str(&part), loc))
                 }

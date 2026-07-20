@@ -5846,102 +5846,146 @@ fn per_element_pin_lowers_structurally_inside_a_lookup_table_arg() {
     );
 }
 
-/// The loud net BEHIND the structural pin: a table-argument index naming a
-/// dimension the rule cannot resolve is still declined LOUDLY.
+/// The loud net BEHIND the structural pin: every table-argument index the rule
+/// cannot discharge STATICALLY is declined, and the whole partial is abandoned.
 ///
-/// `pin_dimension_name_indices` is name-directed on purpose -- it substitutes an
-/// index that spells the dimension the source declares AT THAT POSITION, and
-/// nothing else. `pop[State, old]` on a source declared over `[Region, Age]` is
-/// outside that: deciding that `State` reads `Region` through a positional
-/// mapping (rather than being a mismatched or transposed axis) is precisely the
-/// per-axis CLASSIFICATION `db::ltm_ir` owns -- and it recorded nothing here. So
-/// the rule declines, `WrapOutcome::missing_occurrence` fires, and the caller
-/// skips with a warning.
+/// The rule resolves exactly three index forms -- the axis's own dimension name,
+/// an element that axis declares, and a numeric literal. Everything else is
+/// declined, for one of two reasons:
 ///
-/// This is the half that keeps the fix from degenerating into "pin whatever looks
-/// pinnable": the reachable shape is discharged structurally, and the rest of the
-/// class stays loud rather than silently emitting an un-pinned dimension-name
-/// subscript (a dropped fragment reading a constant 0).
+/// - it is a RUNTIME read (`pop[Region, idx]`, `pop[Region, pop[Region, old]]`).
+///   A `LOOKUP` table argument is the one pin-only descent NOT inside a freeze --
+///   the wrap holds it verbatim, since a `PREVIOUS` of a table has no value slot
+///   -- so such an index stays LIVE, and `codegen::extract_table_info` evaluates it
+///   to select the table element. The `young` partial would then vary with the
+///   current-step value of `old`, misattributing one row's influence to another. A
+///   descent that wraps nothing cannot fix that, and a compilable-but-wrong score
+///   is worse than none (GH #311 / #661 / #743). Pinning these purely because it
+///   made the fragment COMPILE is what a reviewer caught on this branch;
+/// - or the rule has no answer: `pop[State, old]` on a source declared over
+///   `[Region, Age]` would need to decide that `State` reads `Region` through a
+///   positional mapping rather than being a mismatched or transposed axis, and
+///   that per-axis CLASSIFICATION is `db::ltm_ir`'s -- which recorded nothing here.
+///
+/// Together with
+/// [`per_element_pin_lowers_structurally_inside_a_lookup_table_arg`] this is the
+/// whole contract: the statically-resolvable table argument is pinned and scored,
+/// and everything else in the class stays loud instead of emitting either an
+/// un-pinned dimension-name subscript (a dropped fragment reading 0) or a
+/// plausible wrong score.
 #[test]
-fn per_element_pin_stays_loud_for_a_table_arg_index_naming_another_dimension() {
-    // `state` is a real project dimension, positionally parallel to `region` --
-    // the shape whose resolution would need the mapping classifier.
-    let fx = PinFixture::new(vec![datamodel::Dimension::named(
-        "state".to_string(),
-        vec!["ny".to_string(), "ma".to_string()],
-    )]);
-    let (ast, deps, occurrences) = fx.parse(
-        "pop[Region, young] + LOOKUP(pop[State, old], input)",
-        &["input"],
-    );
-    // Non-vacuity: the table-argument reference is the one WITHOUT an occurrence,
-    // exactly as in production, so the loud net is what must catch it.
-    assert_eq!(
-        PinFixture::source_occurrences(&occurrences),
-        1,
-        "exactly the non-table occurrence is recorded: {occurrences:?}"
-    );
-    let slot_occurrences = SlotOccurrences::new(&occurrences);
-    let err = fx.generate(&ast, &deps, &slot_occurrences.for_slot(0));
-    assert!(
-        matches!(
-            err,
-            Err(PartialEquationError {
-                kind: PartialEquationErrorKind::UnfreezablePartial,
-                ..
-            })
+fn per_element_pin_declines_every_non_static_table_arg_index() {
+    // Each case is `(label, equation, deps, extra project dims)`. `state` is a
+    // real dimension positionally parallel to `region` -- the shape whose
+    // resolution would need the mapping classifier.
+    let cases: [(&str, &str, &[&str], Vec<datamodel::Dimension>); 3] = [
+        (
+            "a variable index -- the simplest runtime element read",
+            "pop[Region, young] + LOOKUP(pop[Region, idx], input)",
+            &["input", "idx"],
+            vec![],
         ),
-        "an index the name-directed rule cannot resolve must be a loud Err, never an \
-         Ok equation carrying a dimension-name subscript: {err:?}"
-    );
+        (
+            "a nested source read selecting the element at runtime",
+            "pop[Region, young] + LOOKUP(pop[Region, pop[Region, old]], input)",
+            &["input"],
+            vec![],
+        ),
+        (
+            "another dimension's name, which only the IR can classify",
+            "pop[Region, young] + LOOKUP(pop[State, old], input)",
+            &["input"],
+            vec![datamodel::Dimension::named(
+                "state".to_string(),
+                vec!["ny".to_string(), "ma".to_string()],
+            )],
+        ),
+    ];
+
+    for (label, eqn, deps, extra_dims) in cases {
+        let fx = PinFixture::new(extra_dims);
+        let (ast, deps, occurrences) = fx.parse(eqn, deps);
+        // Non-vacuity: the table argument is the reference WITHOUT an occurrence
+        // (the IR skips it whole), so the decline must come from the structural
+        // rule rather than from the IR.
+        assert_eq!(
+            PinFixture::source_occurrences(&occurrences),
+            1,
+            "{label}: only the live occurrence outside the LOOKUP is recorded: \
+             {occurrences:?}"
+        );
+        let slot_occurrences = SlotOccurrences::new(&occurrences);
+        let err = fx.generate(&ast, &deps, &slot_occurrences.for_slot(0));
+        assert!(
+            matches!(
+                err,
+                Err(PartialEquationError {
+                    kind: PartialEquationErrorKind::UnfreezablePartial,
+                    ..
+                })
+            ),
+            "{label}: must be a loud Err, never an Ok equation carrying an \
+             un-pinned subscript or an unattributed live read: {err:?}"
+        );
+    }
 }
 
 /// The pin-only descent must reach a source reference nested inside a source
-/// subscript's own INDEX EXPRESSION, not just inside a range bound.
+/// subscript's own INDEX EXPRESSION, not just inside a range bound -- inside a
+/// FREEZE, where pinning is the whole job.
 ///
-/// `LOOKUP(pop[Region, pop[Region, young]], input)` is a table reference with a
-/// DYNAMIC element index -- a shape `codegen::extract_table_info` supports on
-/// purpose (its `Expr::Subscript` arm computes the element offset from the index
-/// expressions). The outer subscript is pinned by the structural rule; the INNER
-/// `pop[Region, young]` sits in the index, which no axis of the outer occurrence
-/// describes, so it reaches the descent's index closure.
+/// `PREVIOUS(pop[Region, pop[Region, young]])` reads a dynamically-selected
+/// element of the source. The outer occurrence's second axis is not describable
+/// per axis (it is an expression, not a coordinate), so that index reaches the
+/// descent's index closure, and the INNER `pop[Region, young]` is a recorded
+/// occurrence sitting in it.
 ///
-/// That closure descended a `Range`'s two endpoints but passed a plain `Expr`
-/// index through untouched -- while its own comment claimed it descended "exactly
-/// as the other-variable arm above does", and that arm handles both. The nested
-/// reference therefore kept its DIMENSION-name subscript, in a scalar fragment
-/// that cannot compile, with nothing set loud either: the same silent zero the
-/// outer reference had.
+/// The closure descended a `Range`'s two endpoints but passed a plain `Expr` index
+/// through untouched -- while its own comment claimed it descended "exactly as the
+/// other-variable arm above does", and that arm handles both. The nested reference
+/// therefore kept its DIMENSION-name subscript, in a scalar fragment that cannot
+/// compile, with nothing set loud either.
+///
+/// Everything here is already lagged by the enclosing `PREVIOUS`, index reads
+/// included, so pinning is sufficient and NO further freeze is wanted (a nested
+/// `PREVIOUS` would read two steps back). That is exactly what distinguishes this
+/// from the table-argument case, which is not inside a freeze and is therefore
+/// declined -- see
+/// [`per_element_pin_declines_a_table_arg_with_a_runtime_index`].
 #[test]
 fn per_element_pin_descends_into_a_source_subscript_index_expression() {
     let fx = PinFixture::new(vec![]);
     let (ast, deps, occurrences) = fx.parse(
-        "pop[Region, young] + LOOKUP(pop[Region, pop[Region, young]], input)",
-        &["input"],
+        "pop[Region, young] + PREVIOUS(pop[Region, pop[Region, young]])",
+        &[],
     );
-    // Non-vacuity: everything under the table argument is skipped by the IR, so
-    // BOTH nested references are un-recorded and the descent is the only thing
-    // that can lower them.
-    assert_eq!(
-        PinFixture::source_occurrences(&occurrences),
-        1,
-        "only the live occurrence outside the LOOKUP is recorded: {occurrences:?}"
+    // Non-vacuity: the index-nested occurrence must be recorded, or the closure
+    // would have nothing to pin and this test would pass on an empty walk.
+    assert!(
+        occurrences.iter().any(|o| o.index_nested
+            && matches!(&o.reference, crate::db::ltm_ir::OccurrenceRef::Variable(v) if v == "pop")),
+        "the fixture must record an index-nested `pop` occurrence: {occurrences:?}"
     );
     let slot_occurrences = SlotOccurrences::new(&occurrences);
     let text = fx
         .generate(&ast, &deps, &slot_occurrences.for_slot(0))
-        .expect("both table-argument references are lowerable structurally");
+        .expect("the per-element equation is derivable");
 
     assert!(
         !text.contains("pop[region,"),
-        "a source reference nested in the table argument's INDEX kept its \
-         DIMENSION-name subscript, which cannot resolve in a scalar fragment (a \
-         silent zero); got: {text}"
+        "a source reference nested in an INDEX EXPRESSION kept its DIMENSION-name \
+         subscript, which cannot resolve in a scalar fragment (a silent zero); \
+         got: {text}"
     );
     assert!(
         text.contains("pop[region\u{B7}boston, pop[region\u{B7}boston, age\u{B7}young]]"),
-        "both the outer table reference and the reference inside its index must be \
+        "both the outer frozen read and the reference inside its index must be \
          pinned to this target element's row, QUALIFIED; got: {text}"
+    );
+    assert!(
+        !text.contains("previous(pop[region\u{B7}boston, age\u{B7}young])"),
+        "the enclosing PREVIOUS already lags the index read, so the descent must \
+         NOT add a second freeze (that would read two steps back); got: {text}"
     );
     assert!(
         text.contains("pop[boston, young]"),
