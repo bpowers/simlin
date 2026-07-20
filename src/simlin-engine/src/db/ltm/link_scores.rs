@@ -503,7 +503,7 @@ pub(super) fn try_cross_dimensional_link_scores(
     // (`SUM(pop[*] * (1 - weight[*]))` w.r.t. `weight` has the
     // sign-flipping coefficient `-pop[e]`).
     let (arrayed_dep_dims, model_deps) =
-        reducer_body_ctx_parts(db, source_vars, project, &classified.body_text);
+        reducer_body_ctx_parts(db, source_vars, project, &classified.body);
     let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
     // The live source's accepted slice, when `to` IS a variable-backed agg
     // reading `from`: lets the body partial resolve a mismatched-arity
@@ -522,7 +522,7 @@ pub(super) fn try_cross_dimensional_link_scores(
         .find(|a| !a.is_synthetic && a.name == to && a.reads_var(from))
         .map(|a| a.source_read_slice(from));
     let body_ctx = crate::ltm_augment::ReducerBodyCtx {
-        body_text: &classified.body_text,
+        body: &classified.body,
         live_source: from,
         arrayed_dep_dims: &arrayed_dep_dims,
         model_deps: &model_deps,
@@ -902,10 +902,10 @@ fn emit_broadcast_reduce_link_scores(
     // changed-first partial must account for. Mirrors
     // `try_cross_dimensional_link_scores`' setup.
     let (arrayed_dep_dims, model_deps) =
-        reducer_body_ctx_parts(db, source_vars, project, &classified.body_text);
+        reducer_body_ctx_parts(db, source_vars, project, &classified.body);
     let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
     let body_ctx = crate::ltm_augment::ReducerBodyCtx {
-        body_text: &classified.body_text,
+        body: &classified.body,
         live_source: from,
         arrayed_dep_dims: &arrayed_dep_dims,
         model_deps: &model_deps,
@@ -2603,11 +2603,11 @@ fn reducer_body_ctx_parts(
     db: &dyn Db,
     source_vars: &HashMap<String, SourceVariable>,
     project: SourceProject,
-    body_text: &str,
+    body: &crate::ast::Expr0,
 ) -> (HashMap<String, usize>, HashSet<String>) {
     let mut arrayed_dep_dims: HashMap<String, usize> = HashMap::new();
     let mut model_deps: HashSet<String> = HashSet::new();
-    for ident in crate::ltm_augment::expr_reference_idents(body_text) {
+    for ident in crate::ltm_augment::expr_reference_idents(body) {
         if let Some(sv) = source_vars.get(&ident) {
             model_deps.insert(ident.clone());
             let dims = variable_dimensions(db, *sv, project);
@@ -2887,10 +2887,10 @@ pub(super) fn emit_source_to_agg_link_scores(
     // Linear arm build the true changed-first row partial instead of
     // asserting ∂agg/∂from[e] = 1.
     let (arrayed_dep_dims, model_deps) =
-        reducer_body_ctx_parts(db, source_vars, project, &classified.body_text);
+        reducer_body_ctx_parts(db, source_vars, project, &classified.body);
     let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
     let body_ctx = crate::ltm_augment::ReducerBodyCtx {
-        body_text: &classified.body_text,
+        body: &classified.body,
         live_source: from,
         arrayed_dep_dims: &arrayed_dep_dims,
         model_deps: &model_deps,

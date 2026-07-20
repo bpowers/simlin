@@ -4275,7 +4275,10 @@ pub(crate) fn qualify_element_csv(
 /// The result of [`classify_reducer`]: which array reducer the target's
 /// equation applies to the source, plus the two pieces of context the
 /// per-element link-score generators need to build a correct partial.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Eq` is deliberately absent: [`Expr0`] carries an `f64` on `Const`, so it is
+/// `PartialEq` only. No consumer needs total equality here.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
 pub(crate) struct ClassifiedReducer {
     pub kind: ReducerKind,
     /// Uppercase function name (e.g. "SUM", "MIN").
@@ -4286,9 +4289,12 @@ pub(crate) struct ClassifiedReducer {
     /// coefficient to the source (`SUM(pop[*] * scale)`) -- that is what
     /// `body_text` is for (GH #744).
     pub is_bare: bool,
-    /// Canonical printed text of the reducer's array argument (its "body"),
-    /// e.g. `pop[*] * (1 - weight[*])` for `SUM(pop[*] * (1 - weight[*]))`.
-    pub body_text: String,
+    /// The reducer's array argument (its "body") -- e.g. the AST of
+    /// `pop[*] * (1 - weight[*])` for `SUM(pop[*] * (1 - weight[*]))`, lowered
+    /// straight from the target's `Expr2` by [`crate::patch::expr2_to_expr0`].
+    /// It used to be that AST's printed TEXT, which every consumer immediately
+    /// parsed back -- a parse of our own print of a tree we already held.
+    pub body: Expr0,
 }
 
 /// Examine the target variable's Expr2 AST to find the array-reducing function
@@ -4299,7 +4305,7 @@ pub(crate) struct ClassifiedReducer {
 /// variable (identified by canonical name). Returns the [`ClassifiedReducer`]:
 /// the `ReducerKind`, the uppercase function name (e.g., "SUM", "MIN"),
 /// whether the reducer is the top-level expression (`is_bare`), and the
-/// reducer argument's canonical text (`body_text`).
+/// reducer argument's AST (`body`).
 ///
 /// When `is_bare` is false, the reducer is nested inside other arithmetic
 /// (e.g., `2 * SUM(population[*])`). Callers should fall back to the
@@ -4307,7 +4313,7 @@ pub(crate) struct ClassifiedReducer {
 /// ignores the surrounding arithmetic and produces wrong link scores.
 /// Arithmetic INSIDE the reducer argument is a separate concern: the linear
 /// shortcut is exact only for a bare-source body, so callers supply the
-/// generators a [`ReducerBodyCtx`] built from `body_text` and the body-aware
+/// generators a [`ReducerBodyCtx`] built from `body` and the body-aware
 /// partial handles non-unit coefficients (GH #744).
 ///
 /// Returns `None` if no reducing builtin is found for the given source.
@@ -4347,14 +4353,14 @@ fn classify_reducer_in_expr(
         Expr2::App(builtin, _, _) => {
             // Check if this builtin is a reducer whose argument references
             // the source variable.
-            if let Some((kind, name, body_text)) =
+            if let Some((kind, name, body)) =
                 classify_builtin_if_references_source(builtin, source_ident)
             {
                 return Some(ClassifiedReducer {
                     kind,
                     name,
                     is_bare: is_top_level,
-                    body_text,
+                    body,
                 });
             }
             // Even if this particular App node isn't the reducer we want,
@@ -4401,7 +4407,7 @@ fn classify_reducer_in_expr(
 fn classify_builtin_if_references_source(
     builtin: &crate::builtins::BuiltinFn<crate::ast::Expr2>,
     source_ident: &str,
-) -> Option<(ReducerKind, &'static str, String)> {
+) -> Option<(ReducerKind, &'static str, Expr0)> {
     use crate::builtins::BuiltinFn;
 
     let kind = crate::ltm_agg::reducer_kind(builtin)?;
@@ -4428,7 +4434,7 @@ fn classify_builtin_if_references_source(
     if !expr_references_var(array_arg, canonical_source.as_ref()) {
         return None;
     }
-    Some((kind, upper, crate::patch::expr2_to_string(array_arg)))
+    Some((kind, upper, crate::patch::expr2_to_expr0(array_arg)))
 }
 
 /// Check if an Expr2 references a variable with the given canonical name,
@@ -4461,17 +4467,15 @@ fn expr_references_var(expr: &crate::ast::Expr2, canonical_name: &str) -> bool {
     }
 }
 
-/// Canonical head identifiers of every `Var`/`Subscript` reference in
-/// `equation_text`, recursing into subscript index expressions. Function
-/// names are not collected (they are `App` nodes, not `Var`s); subscript
-/// *index* identifiers (dimension and element names) ARE collected, so
-/// callers must intersect the result with the model-variable map before
-/// treating an entry as a variable reference. Returns an empty set when the
-/// text does not parse.
+/// Canonical head identifiers of every `Var`/`Subscript` reference in `expr`,
+/// recursing into subscript index expressions. Function names are not collected
+/// (they are `App` nodes, not `Var`s); subscript *index* identifiers (dimension
+/// and element names) ARE collected, so callers must intersect the result with
+/// the model-variable map before treating an entry as a variable reference.
 ///
 /// Used by the link-score emitters to discover which of a reducer body's
 /// references are arrayed model variables (the [`ReducerBodyCtx`] inputs).
-pub(crate) fn expr_reference_idents(equation_text: &str) -> HashSet<String> {
+pub(crate) fn expr_reference_idents(expr: &Expr0) -> HashSet<String> {
     fn walk(expr: &Expr0, out: &mut HashSet<String>) {
         match expr {
             Expr0::Const(..) => {}
@@ -4511,9 +4515,7 @@ pub(crate) fn expr_reference_idents(equation_text: &str) -> HashSet<String> {
         }
     }
     let mut out = HashSet::new();
-    if let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) {
-        walk(&ast, &mut out);
-    }
+    walk(expr, &mut out);
     out
 }
 
@@ -4526,9 +4528,8 @@ pub(crate) fn expr_reference_idents(equation_text: &str) -> HashSet<String> {
 /// hoisted `$⁚ltm⁚agg⁚{n}`, `try_cross_dimensional_link_scores` for a
 /// variable-backed whole-RHS reducer); all names are canonical.
 pub(crate) struct ReducerBodyCtx<'a> {
-    /// The reducer's array argument, canonical text (from
-    /// [`ClassifiedReducer::body_text`]).
-    pub body_text: &'a str,
+    /// The reducer's array argument AST (from [`ClassifiedReducer::body`]).
+    pub body: &'a Expr0,
     /// The live source variable (the row whose partial is being built).
     pub live_source: &'a str,
     /// Declared dimension count for every ARRAYED model variable referenced
@@ -4980,9 +4981,7 @@ fn pinned_body_row_terms(
     current_element: &str,
     all_elements: &[String],
 ) -> Option<PinnedRowTerms> {
-    let Ok(Some(ast)) = Expr0::new(ctx.body_text, LexerType::Equation) else {
-        return None;
-    };
+    let ast = ctx.body.clone();
     let row_parts_of =
         |elem: &str| -> Vec<String> { elem.split(',').map(|p| p.trim().to_string()).collect() };
     let current_parts = row_parts_of(current_element);
@@ -5114,9 +5113,7 @@ fn generate_linear_body_partial(
     n_elements: usize,
     reducer_name: &str,
 ) -> Option<String> {
-    let Ok(Some(ast)) = Expr0::new(ctx.body_text, LexerType::Equation) else {
-        return None;
-    };
+    let ast = ctx.body.clone();
     let row_parts: Vec<String> = current_element
         .split(',')
         .map(|p| p.trim().to_string())

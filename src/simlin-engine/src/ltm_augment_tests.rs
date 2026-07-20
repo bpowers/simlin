@@ -1086,7 +1086,7 @@ fn test_generate_special_chars_quoted() {
 
 /// Owned backing storage for a [`ReducerBodyCtx`] in tests.
 struct BodyCtxFixture {
-    body_text: String,
+    body: Expr0,
     live_source: String,
     arrayed_dep_dims: std::collections::HashMap<String, usize>,
     model_deps: HashSet<String>,
@@ -1110,7 +1110,9 @@ impl BodyCtxFixture {
             .chain(scalars.iter().map(|s| s.to_string()))
             .collect();
         BodyCtxFixture {
-            body_text: body_text.to_string(),
+            body: Expr0::new(body_text, LexerType::Equation)
+                .expect("the fixture body parses")
+                .expect("the fixture body is non-empty"),
             live_source: live_source.to_string(),
             arrayed_dep_dims,
             model_deps,
@@ -1129,7 +1131,7 @@ impl BodyCtxFixture {
 
     fn ctx(&self) -> ReducerBodyCtx<'_> {
         ReducerBodyCtx {
-            body_text: &self.body_text,
+            body: &self.body,
             live_source: &self.live_source,
             arrayed_dep_dims: &self.arrayed_dep_dims,
             model_deps: &self.model_deps,
@@ -1453,7 +1455,7 @@ fn test_body_aware_nested_reducer_falls_back_to_delta_ratio() {
 
 /// `classify_reducer` must surface the reducer argument's canonical text.
 #[test]
-fn test_classify_reducer_returns_body_text() {
+fn test_classify_reducer_returns_body_ast() {
     let pop = subscript_wildcard("pop");
     let weight = subscript_wildcard("weight");
     let one = Expr2::Const("1".to_string(), 1.0, Loc::default());
@@ -1474,14 +1476,23 @@ fn test_classify_reducer_returns_body_text() {
     let expr = Expr2::App(BuiltinFn::Sum(Box::new(body)), None, Loc::default());
     let var = var_with_expr(expr);
     let result = classify_reducer(&var, "weight").expect("expected a classified reducer");
-    assert_eq!(result.body_text, "pop[*] * (1 - weight[*])");
+    // The classifier now hands back the body's AST rather than its printed
+    // text; printing it is how this test states the expectation, not how the
+    // consumers read it.
+    assert_eq!(print_eqn(&result.body), "pop[*] * (1 - weight[*])");
 }
 
 /// `expr_reference_idents` collects canonical heads (including inside
 /// subscript index expressions) but not function names.
 #[test]
 fn test_expr_reference_idents() {
-    let idents = expr_reference_idents("pop[*] * SAFEDIV(scale, other[idx + 1], 0)");
+    let body = Expr0::new(
+        "pop[*] * SAFEDIV(scale, other[idx + 1], 0)",
+        LexerType::Equation,
+    )
+    .expect("the fixture parses")
+    .expect("the fixture is non-empty");
+    let idents = expr_reference_idents(&body);
     assert!(idents.contains("pop"));
     assert!(idents.contains("scale"));
     assert!(idents.contains("other"));
