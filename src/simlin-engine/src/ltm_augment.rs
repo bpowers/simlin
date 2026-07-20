@@ -22,129 +22,17 @@ use std::collections::{HashMap, HashSet};
 use crate::db::LtmEquation;
 use crate::db::RefShape;
 use crate::db::ltm_ir::{
-    OccurrenceAxis, OccurrenceRef, OccurrenceSite, OtherDepVerdict, derive_other_dep_verdict,
+    OccurrenceAxis, OccurrenceSite, OtherDepVerdict, derive_other_dep_verdict,
 };
 
-/// The ceteris-paribus wrap's view of the occurrence IR for ONE slot of a
-/// target equation: the per-occurrence access shape and per-axis
-/// classification `db::ltm_ir` already decided on the target's `Expr2` AST,
-/// keyed by the structural child-index path with the slot prefix stripped.
-///
-/// This is the SINGLE classifier family the wrap consumes. The wrap runs on
-/// the target's printed-and-reparsed `Expr0`; rather than re-deriving each
-/// occurrence's shape on that `Expr0` (the retired Expr0 mirror classifiers),
-/// it tracks the same left-to-right child-index path `db::ltm_ir::walk_all_in_expr`
-/// builds and looks the occurrence up here. The print->reparse round trip is
-/// child-index-isomorphic to the `Expr2` walk (proved corpus-wide by
-/// `classifier_agreement_tests::assert_occurrence_stream_aligns`), so a path
-/// hit returns exactly the shape/axes the edge emitter used -- the two
-/// families cannot drift because there is only one.
-///
-/// A path MISS on a live-source subscript is the one residual production hazard
-/// -- a novel shape the alignment gate cannot cover could make the reparse
-/// non-isomorphic. That is NOT silently tolerated: the subscript arm flags it
-/// (`WrapOutcome::missing_occurrence`) on a non-empty stream, so the partial is
-/// abandoned with a loud skip-and-warn instead of freezing the live reference
-/// into a constant-0 score.
-///
-/// `for_slot` rebases to slot-local paths because the wrap walks a single
-/// slot's expression from its root: an `Ast::Scalar`/`ApplyToAll` target is
-/// slot `0`; an `Ast::Arrayed` target's per-element slots are numbered in
-/// canonical element-key-sorted order (`build_arrayed_link_score_equation`
-/// wraps each slot separately), matching the SiteId slot prefix.
-pub(crate) struct OccurrenceLookup<'a> {
-    /// `(slot-local path, occurrence)` for every occurrence in this slot, in
-    /// document order. LTM equations are short, so a linear scan is cheaper
-    /// than hashing and keeps the borrow lifetimes trivial.
-    entries: Vec<(&'a [u16], &'a OccurrenceSite)>,
-}
+/// The wrap's read side of the occurrence IR ([`SlotOccurrences`] /
+/// [`OccurrenceLookup`]), in its own file only to keep this one under the
+/// project line-count lint. Re-exported so callers keep naming them
+/// `crate::ltm_augment::*`.
+#[path = "ltm_augment_occurrence.rs"]
+mod occurrence;
 
-impl<'a> OccurrenceLookup<'a> {
-    /// Build the lookup for `slot` of `occs` (the target's whole occurrence
-    /// stream), rebasing each occurrence's SiteId to its slot-local path.
-    pub(crate) fn for_slot(occs: &'a [OccurrenceSite], slot: u16) -> Self {
-        let entries = occs
-            .iter()
-            .filter(|o| o.site_id.0.first() == Some(&slot))
-            .map(|o| (&o.site_id.0[1..], o))
-            .collect();
-        OccurrenceLookup { entries }
-    }
-
-    /// The occurrence at exactly `path`, if any (a genuine causal reference at
-    /// that node). `None` for a node that is not a recorded occurrence (a
-    /// function name, a dimension name, a literal element selector, or a
-    /// deeper index the walk skipped).
-    fn get(&self, path: &[u16]) -> Option<&'a OccurrenceSite> {
-        self.entries
-            .iter()
-            .find(|(p, _)| *p == path)
-            .map(|(_, o)| *o)
-    }
-
-    /// Whether this slot recorded NO occurrences. `true` for a genuinely
-    /// source-free slot -- an EXCEPT default that never references `from`, whose
-    /// trivial-zero guard form is legitimate, or an AGG-source generator whose
-    /// live source (the synthetic agg) is never a recorded occurrence. A miss on
-    /// a NON-empty lookup, by contrast, is a walker desync -- the `missing_occurrence`
-    /// guard in the subscript arm keys on this so it never false-fires on a
-    /// legitimately source-free slot.
-    fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Does any occurrence of the live source (a model `Variable` or a
-    /// `ModuleOutput` composite) STRICTLY under `prefix` carry access shape
-    /// `shape`? This is the occurrence-IR form of the retired
-    /// `expr0_contains_live_match` lookahead: an array-reducer `App` at
-    /// `prefix` is frozen whole (GH #517) unless it genuinely holds the live
-    /// reference, which is exactly "a live-shaped occurrence lives in its
-    /// subtree".
-    ///
-    /// Index-nested occurrences (`other_arr[live]`) are EXCLUDED: the retired
-    /// `expr0_contains_live_match` only inspected subscript *heads*, never
-    /// recursing into a subscript's index expressions, so an index-nested
-    /// `live` never made the enclosing reducer "hold the live ref". The
-    /// occurrence IR marks those `index_nested`, so filtering on it reproduces
-    /// that boundary exactly (the reducer freezes whole and the bare `live`
-    /// stays live -- `char_reducer_index_nested_freeze`).
-    ///
-    /// A `live` source can be either a model `Variable` (the ordinary link
-    /// score) or a `module·port` composite (`OccurrenceRef::ModuleOutput`, the
-    /// `db::module_link_score_equation` live channel). The retired
-    /// `expr0_contains_live_match` matched on the bare-`Var` ident text and so
-    /// treated BOTH the same -- a composite read bare inside a reducer made the
-    /// reducer hold the live ref. Matching on the occurrence's resolved name
-    /// (whichever variant) reproduces that: a module-output live source inside a
-    /// reducer recurses just like a variable one, instead of freezing whole.
-    fn subtree_has_live_shape(
-        &self,
-        prefix: &[u16],
-        live: &Ident<Canonical>,
-        shape: &RefShape,
-    ) -> bool {
-        self.entries.iter().any(|(p, o)| {
-            p.len() > prefix.len()
-                && p.starts_with(prefix)
-                && !o.index_nested
-                && &o.shape == shape
-                && occurrence_names_source(&o.reference, live)
-        })
-    }
-}
-
-/// Whether occurrence reference `reference` names the live source `live` --
-/// either a model `Variable` or a `module·port` composite
-/// (`OccurrenceRef::ModuleOutput`). The wrap treats both alike (a bare read of
-/// either is a live match), so the occurrence-IR predicates must too.
-fn occurrence_names_source(reference: &OccurrenceRef, live: &Ident<Canonical>) -> bool {
-    match reference {
-        OccurrenceRef::Variable(v) => &Ident::<Canonical>::new(v) == live,
-        OccurrenceRef::ModuleOutput { composite, .. } => {
-            &Ident::<Canonical>::new(composite) == live
-        }
-    }
-}
+pub(crate) use occurrence::{OccurrenceLookup, SlotOccurrences};
 
 /// The implicit WITH-LOOKUP rules (GH #910), in their own file only to keep this
 /// one under the project line-count lint. Re-exported below so callers keep
@@ -1556,7 +1444,8 @@ pub(crate) fn build_partial_equation_shaped_with_live_ref(
         source_dim_elements,
         iter_ctx,
     );
-    let occ = OccurrenceLookup::for_slot(&occurrences, 0);
+    let slot_occurrences = SlotOccurrences::new(&occurrences);
+    let occ = slot_occurrences.for_slot(0);
     let (transformed, out) = wrap_changed_first_ast(
         equation_text,
         deps,
@@ -3689,6 +3578,10 @@ fn build_arrayed_link_score_equation(
         .map(String::as_str)
         .chain(source_dim_names.iter().map(String::as_str))
         .collect();
+    // Group the target's occurrences by slot ONCE, outside the per-element
+    // closure below: this is the arrayed target whose N slots made the old
+    // per-slot rescan quadratic (see `SlotOccurrences`).
+    let slot_occurrences = SlotOccurrences::new(to_occurrences);
     // `slot` is the per-element occurrence-stream slot: `walk_all_in_expr`
     // numbers `Ast::Arrayed` slots in canonical element-key-sorted order (then
     // the default after the last element), so the wrap for element `slot`
@@ -3713,7 +3606,7 @@ fn build_arrayed_link_score_equation(
         .into_iter()
         .filter(|d| !source_dim_token_set.contains(d.as_str()))
         .collect();
-        let occ = OccurrenceLookup::for_slot(to_occurrences, slot);
+        let occ = slot_occurrences.for_slot(slot);
         shaped_guard_form_text(
             &elem_eqn_text,
             &deps_e,
@@ -3933,7 +3826,8 @@ fn generate_auxiliary_to_auxiliary_equation(
     };
     // A scalar / `Ast::ApplyToAll` target is a single body -- slot 0 of the
     // occurrence stream.
-    let occ = OccurrenceLookup::for_slot(to_occurrences, 0);
+    let slot_occurrences = SlotOccurrences::new(to_occurrences);
+    let occ = slot_occurrences.for_slot(0);
     let text = shaped_guard_form_text(
         &to_equation,
         &deps,
@@ -4245,7 +4139,8 @@ fn generate_stock_to_flow_equation(
     // error -- see `source_ref_for_guard` (applied inside
     // `shaped_guard_form_text`, which also handles the GH #743
     // changed-last fallback for an unfreezable changed-first partial).
-    let occ = OccurrenceLookup::for_slot(to_occurrences, 0);
+    let slot_occurrences = SlotOccurrences::new(to_occurrences);
+    let occ = slot_occurrences.for_slot(0);
     let text = shaped_guard_form_text(
         &flow_equation,
         &deps,

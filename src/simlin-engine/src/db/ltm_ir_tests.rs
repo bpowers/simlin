@@ -1668,3 +1668,29 @@ mod occurrence_ir_tests {
         );
     }
 }
+
+/// F3: a `SiteId` child index must never WRAP. The addressable range is pinned
+/// at its exact boundary, so a variadic builtin's 65,536th content declines to
+/// be addressed rather than re-using child 0's path.
+///
+/// Pinned on the pure boundary function rather than by building a 65,536-argument
+/// `MEAN` call: the fixture would be enormous and slow (the 3-minute suite cap),
+/// while the boundary is the entire property. The consequence of getting this
+/// wrong is silent -- a wrapped index makes the wrap's lookup return a different
+/// occurrence, so it holds or freezes the wrong reference and emits a plausible
+/// wrong score -- which is why the guard returns `None` instead of a wrapped
+/// value, and why the walker records no occurrence for such a child.
+#[test]
+fn site_child_index_declines_rather_than_wrapping() {
+    use super::site_child_index;
+
+    assert_eq!(site_child_index(0), Some(0));
+    assert_eq!(site_child_index(1), Some(1));
+    // The last addressable child.
+    assert_eq!(site_child_index(65_535), Some(u16::MAX));
+    // One past it must DECLINE, not wrap to 0 (which would collide with the
+    // first child's SiteId and silently mis-address the occurrence).
+    assert_eq!(site_child_index(65_536), None);
+    assert_eq!(site_child_index(65_537), None);
+    assert_eq!(site_child_index(usize::MAX), None);
+}

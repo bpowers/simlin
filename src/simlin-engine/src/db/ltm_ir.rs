@@ -565,6 +565,38 @@ fn classify_occurrence_axes(
         .collect()
 }
 
+/// The [`SiteId`] child index for a builtin's `n`-th content, or `None` when the
+/// arity exceeds what one path element can address.
+///
+/// A `SiteId` element is a `u16`, which every AST-shaped child count fits by
+/// construction (`Op1`/`Op2`/`If`/`Subscript` arity is bounded by the node).
+/// Builtin arity is NOT: `MEAN`/`SUM` and friends are variadic, so a call with
+/// 65,536+ arguments is representable in the AST.
+///
+/// Returning `None` -- rather than wrapping -- is the whole point. A wrapped
+/// index would RE-USE an earlier child's `SiteId`, so the wrap's path lookup
+/// would silently return a DIFFERENT occurrence: if the two children carry
+/// different subscript shapes, the wrap holds or freezes the wrong reference and
+/// emits a plausible, wrong link score. That is silent corruption, the failure
+/// class this IR exists to eliminate.
+///
+/// The caller records NO occurrence for an unaddressable child. That is the loud
+/// outcome, because it routes into machinery that already exists: a live-source
+/// subscript with no occurrence at its tracked path (on a non-empty stream) sets
+/// `WrapOutcome::missing_occurrence`, so the partial is abandoned and the
+/// db-bearing emitter warns and skips. The per-EDGE `ReferenceSite` view is
+/// unaffected (the caller still pushes those), so the causal graph keeps every
+/// edge -- only the SiteId-addressable occurrence view declines to name a child
+/// it cannot address.
+///
+/// Widening the path element to `u32` was the alternative. It is rejected: the
+/// occurrence IR is salsa-cached per model and every occurrence carries a boxed
+/// path, so widening doubles that footprint on every model to serve an arity no
+/// real model reaches -- and it would not remove the case, only move it.
+fn site_child_index(n: usize) -> Option<u16> {
+    u16::try_from(n).ok()
+}
+
 /// `true` iff `builtin` is `PREVIOUS(...)` / `INIT(...)`: everything inside is
 /// already lagged (read at t-1) or frozen (read at t=0). Used to set the
 /// `already_lagged` occurrence marker so the transform does not re-wrap it.
@@ -773,8 +805,17 @@ fn walk_all_in_expr(
             }
             // Contents of a PREVIOUS/INIT call are already lagged/frozen.
             let child_lagged = already_lagged || builtin_is_previous_or_init(builtin);
-            let mut child: u16 = 0;
+            // Builtin arity is the one child count not bounded by the AST shape
+            // (`MEAN(a, b, ...)` is variadic), so it is the only place a `SiteId`
+            // element can run out of range. `site_child_index` returns `None`
+            // past the addressable range and we then record NO occurrence for
+            // that child -- see its rustdoc for why that is the loud outcome.
+            let mut child_n: usize = 0;
             walk_builtin_expr(builtin, |contents| {
+                let Some(child) = site_child_index(child_n) else {
+                    child_n += 1;
+                    return;
+                };
                 acc.path.push(child);
                 match contents {
                     BuiltinContents::Ident(id, _) => {
@@ -823,7 +864,7 @@ fn walk_all_in_expr(
                     BuiltinContents::LookupTable(_) => {}
                 }
                 acc.path.pop();
-                child += 1;
+                child_n += 1;
             });
             if pushed_reducer_key {
                 reducer_keys.pop();

@@ -17,6 +17,7 @@
 //! resolves the parent's private items.
 
 use super::*;
+use crate::db::ltm_ir::OccurrenceRef;
 
 /// Reconstruct the occurrence-IR stream ([`OccurrenceSite`]s) for one target
 /// equation from its raw text, for the `#[cfg(test)]` wrap unit tests

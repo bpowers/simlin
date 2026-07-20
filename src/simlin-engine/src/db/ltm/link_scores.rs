@@ -1242,6 +1242,10 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     let slot_map = ArrayedSlotMap::new(ast);
+    // Group the target's occurrences by slot ONCE (see `SlotOccurrences`):
+    // the per-element loops below index it per slot instead of rescanning
+    // the whole stream, which was quadratic in the element count.
+    let slot_occurrences = crate::ltm_augment::SlotOccurrences::new(to_occurrences);
 
     // Build one `LtmSyntheticVar` for `element` from its equation text and
     // that text's dependency set. The element name is the only part of the
@@ -1283,10 +1287,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             // as `apply_implicit_with_lookup` leaves its value unwrapped.
             let gf_table_ref =
                 slot_refs.for_element(&crate::common::CanonicalElementName::from_raw(element));
-            let occ = crate::ltm_augment::OccurrenceLookup::for_slot(
-                to_occurrences,
-                slot_map.slot_for(element),
-            );
+            let occ = slot_occurrences.for_slot(slot_map.slot_for(element));
             match crate::ltm_augment::generate_scalar_to_element_equation(
                 from,
                 to,
@@ -2404,6 +2405,10 @@ fn emit_per_element_link_scores(
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     let slot_map = ArrayedSlotMap::new(ast);
+    // Group the target's occurrences by slot ONCE (see `SlotOccurrences`):
+    // the per-element loops below index it per slot instead of rescanning
+    // the whole stream, which was quadratic in the element count.
+    let slot_occurrences = crate::ltm_augment::SlotOccurrences::new(to_occurrences);
 
     // Arrayed deps sharing a target dim get element-pinned in the scalar
     // per-element equation (mirroring `try_scalar_to_arrayed_link_scores`);
@@ -2539,10 +2544,7 @@ fn emit_per_element_link_scores(
             if !emitted.insert(name.clone()) {
                 continue;
             }
-            let occ = crate::ltm_augment::OccurrenceLookup::for_slot(
-                to_occurrences,
-                slot_map.slot_for(element),
-            );
+            let occ = slot_occurrences.for_slot(slot_map.slot_for(element));
             match crate::ltm_augment::generate_per_element_link_equation(
                 from,
                 to,
@@ -3190,6 +3192,10 @@ pub(super) fn emit_agg_to_target_link_scores(
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     let slot_map = ArrayedSlotMap::new(ast);
+    // Group the target's occurrences by slot ONCE (see `SlotOccurrences`):
+    // the per-element loops below index it per slot instead of rescanning
+    // the whole stream, which was quadratic in the element count.
+    let slot_occurrences = crate::ltm_augment::SlotOccurrences::new(to_occurrences);
     // GH #910: when `to` is an implicit WITH-LOOKUP variable, the per-element
     // partials below are full re-evaluations of its RAW element equation (with
     // the reducer substituted by the agg name), while the guard form ratios them
@@ -3459,7 +3465,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                 // Agg source: the live thing is the synthetic agg, never a
                 // recorded occurrence, so the real stream is behavior-neutral
                 // (the wrap's agg lookups all miss). A scalar target is slot 0.
-                &crate::ltm_augment::OccurrenceLookup::for_slot(to_occurrences, 0),
+                &slot_occurrences.for_slot(0),
             ) {
                 Ok(equation) => vars.push(LtmSyntheticVar {
                     name,
@@ -3525,10 +3531,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                     // Agg source: the live thing is the synthetic agg, never a
                     // recorded occurrence, so the real stream is behavior-neutral
                     // (the wrap's agg lookups all miss). A2A body is slot 0.
-                    &crate::ltm_augment::OccurrenceLookup::for_slot(
-                        to_occurrences,
-                        slot_map.slot_for(element),
-                    ),
+                    &slot_occurrences.for_slot(slot_map.slot_for(element)),
                 ) {
                     Ok(equation) => edge_vars.push(LtmSyntheticVar {
                         name,
@@ -3607,10 +3610,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                             // Agg source: the live thing is the synthetic agg,
                             // never a recorded occurrence, so the real stream is
                             // behavior-neutral (the wrap's agg lookups all miss).
-                            &crate::ltm_augment::OccurrenceLookup::for_slot(
-                                to_occurrences,
-                                slot_map.slot_for(element),
-                            ),
+                            &slot_occurrences.for_slot(slot_map.slot_for(element)),
                         )
                     }
                 };

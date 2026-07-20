@@ -31,11 +31,20 @@ use crate::lexer::LexerType;
 
 /// One equation arm: the authoritative parsed AST plus its diagnostic text.
 ///
-/// See the module docs for why both are carried. `expr` is `None` for an
-/// empty equation (`Expr0::new("")` yields `Ok(None)`, e.g. a discovery-only
-/// stub) or the effectively-unreachable case of a generated equation that
-/// fails to parse -- both compile to no bytecode, mirroring how the old text
-/// path handled an empty/bad `datamodel::Equation`.
+/// See the module docs for why both are carried. `expr` is `None` in two
+/// materially DIFFERENT cases, which [`LtmArm::parse_error`] distinguishes:
+///
+/// - an **empty** equation (`Expr0::new("")` yields `Ok(None)`, e.g. a
+///   discovery-only stub) -- legitimate, no errors, and dropped from an
+///   `Arrayed` slot map exactly as `variable::parse_equation` drops it;
+/// - a **failed parse** -- `parse_error` is `Some`, and [`LtmEquation::to_flow_ast`]
+///   surfaces it so the fragment is REJECTED rather than silently
+///   zero-filled.
+///
+/// Conflating the two is what made a bad arm silent: with siblings that parse,
+/// an `Arrayed` equation still produced bytecode, so the "no bytecode ⇒
+/// `model_ltm_fragment_diagnostics` warns" path never fired and that element's
+/// score read a constant 0 with no diagnostic at all.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, salsa::Update)]
 pub struct LtmArm {
@@ -44,18 +53,29 @@ pub struct LtmArm {
     pub text: String,
     /// The authoritative compiled AST (`Expr0::new(text)`).
     pub expr: Option<Expr0>,
+    /// `Some` iff `text` FAILED to parse -- never merely because it was empty.
+    /// Preserved (rather than discarded at construction) so the arm that failed
+    /// can reject its whole equation; see the type docs.
+    ///
+    /// The FIRST error only, deliberately: this is a boolean-with-provenance,
+    /// since the emitted diagnostic names the variable and its text rather than
+    /// the parse position, and the whole equation is rejected regardless of how
+    /// many arms or positions failed. Keeping a `Vec` here inflated
+    /// `LtmSyntheticVar` (hence `ShapedLinkScore`) past clippy's
+    /// `large_enum_variant` threshold for data no consumer reads.
+    pub parse_error: Option<EquationError>,
 }
 
 impl LtmArm {
     /// Parse `text` into the authoritative AST once, at the generation
     /// (source-format) boundary.
     pub fn new(text: String) -> Self {
-        // Degrade exactly as the old text path did: an unparseable equation
-        // carries no AST and compiles to no bytecode, so `compile_phase` sees an
-        // empty expr list, `flow_bytecodes` stays `None`, and
-        // `model_ltm_fragment_diagnostics` warns that the variable keeps a
-        // layout slot with no bytecode. That warning IS the loud path -- there
-        // is deliberately no assertion here.
+        // Degradation is non-fatal but LOUD: the parse errors are RETAINED and
+        // `to_flow_ast` returns them, so the fragment is rejected and
+        // `model_ltm_fragment_diagnostics` warns. Retaining them (rather than
+        // collapsing the failure into a bare `expr: None`) is what makes the
+        // ARRAYED case loud too -- with siblings that parse, a dropped arm would
+        // leave the fragment alive and that element's score reading a silent 0.
         //
         // An earlier revision did `debug_assert!(false, ..)`, on the theory that
         // a generated equation is always a `print_eqn` re-print and so a parse
@@ -66,10 +86,19 @@ impl LtmArm {
         // (it now shares `ast::needs_quoting` with `print_ident`), but the
         // degradation stays non-fatal on principle -- this runs inside a salsa
         // query on the ordinary read path, where aborting on user input is
-        // strictly worse than the warning, and libsimlin release builds are
+        // strictly worse than a diagnostic, and libsimlin release builds are
         // panic=abort.
-        let expr = Expr0::new(&text, LexerType::Equation).unwrap_or_default();
-        Self { text, expr }
+        let (expr, parse_error) = match Expr0::new(&text, LexerType::Equation) {
+            Ok(expr) => (expr, None),
+            // `Expr0::new` reports every position it found; keep the first as
+            // the failure's provenance (see the field docs).
+            Err(errs) => (None, errs.into_iter().next()),
+        };
+        Self {
+            text,
+            expr,
+            parse_error,
+        }
     }
 }
 
@@ -236,6 +265,26 @@ impl LtmEquation {
         }
     }
 
+    /// Every arm's retained parse errors, in arm order (elements then default).
+    /// Non-empty means at least one arm's generated text failed to parse -- an
+    /// augmentation-layer bug -- as distinct from an arm that is legitimately
+    /// EMPTY (which carries no error).
+    fn arm_parse_errors(&self) -> Vec<EquationError> {
+        let arms: Vec<&LtmArm> = match self {
+            LtmEquation::Scalar(arm) | LtmEquation::ApplyToAll(_, arm) => vec![arm],
+            LtmEquation::Arrayed {
+                elements, default, ..
+            } => elements
+                .iter()
+                .map(|(_, arm)| arm)
+                .chain(default.as_ref())
+                .collect(),
+        };
+        arms.iter()
+            .filter_map(|arm| arm.parse_error.clone())
+            .collect()
+    }
+
     /// Build the flow-phase `Ast<Expr0>` for compilation and the layout
     /// implicit-var scan, resolving the dimension NAMES to `Dimension`s against
     /// the project datamodel dims. Mirrors `variable::parse_equation` MINUS the
@@ -243,13 +292,29 @@ impl LtmEquation {
     /// dimension-resolution error alongside (so the compiler drops the fragment
     /// and the diagnostic pass warns, exactly as a text parse error did).
     ///
-    /// `None` ast is an empty/unparseable equation (no arm expr): it compiles
-    /// to no bytecode. LTM synthetic variables are flow-phase only, so there is
-    /// no init-phase ast to build.
+    /// A FAILED arm parse is returned as an error and yields NO ast, for every
+    /// shape. That is load-bearing for `Arrayed`: dropping the bad arm and
+    /// keeping its parsing siblings (which is what `variable::parse_equation`
+    /// does for an EMPTY arm) would leave the fragment with bytecode, so the
+    /// compiler would zero-fill the missing slot, `flow_bytecodes` would stay
+    /// `Some`, and `model_ltm_fragment_diagnostics` would emit nothing -- a
+    /// silent per-element zero. An arm that is legitimately EMPTY still just
+    /// drops, exactly as `parse_equation` drops it.
+    ///
+    /// `None` ast with no errors is an empty equation: it compiles to no
+    /// bytecode. LTM synthetic variables are flow-phase only, so there is no
+    /// init-phase ast to build.
     pub fn to_flow_ast(
         &self,
         dimensions: &[datamodel::Dimension],
     ) -> (Option<Ast<Expr0>>, Vec<EquationError>) {
+        // A generated arm that failed to parse rejects the whole equation,
+        // BEFORE any shape-specific assembly -- see the note above on why the
+        // `Arrayed` slot map must not simply drop it.
+        let parse_errors = self.arm_parse_errors();
+        if !parse_errors.is_empty() {
+            return (None, parse_errors);
+        }
         match self {
             LtmEquation::Scalar(arm) => (arm.expr.clone().map(Ast::Scalar), vec![]),
             LtmEquation::ApplyToAll(dims, arm) => {
@@ -268,7 +333,8 @@ impl LtmEquation {
                 has_except_default,
             } => {
                 // Mirror `parse_equation`'s Arrayed arm: drop element slots with
-                // no expr (an empty/unparseable body) rather than error.
+                // no expr. Reaching here means no arm FAILED to parse, so a
+                // missing expr is an empty body only.
                 let map: HashMap<CanonicalElementName, Expr0> = elements
                     .iter()
                     .filter_map(|(subscript, arm)| {

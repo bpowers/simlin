@@ -620,6 +620,209 @@ fn link_score_quotes_a_canonical_name_that_cannot_be_bare() {
     );
 }
 
+/// An unparseable generated arm degrades LOUDLY and WITHOUT PANICKING, for the
+/// scalar shape AND for an `Arrayed` equation whose OTHER arms parse fine.
+///
+/// This pins the fallback deliberately kept in place of the deleted
+/// `debug_assert!`. Two properties, and the arrayed one is the sharp edge:
+///
+/// - the arm retains its parse errors (so `expr` being `None` is
+///   distinguishable from a legitimately EMPTY arm, which must still drop
+///   silently);
+/// - `to_flow_ast` therefore yields NO ast and surfaces the errors, so
+///   `compile_ltm_equation_fragment` returns `None` -- the condition
+///   `model_ltm_fragment_diagnostics` turns into its "keeps a layout slot but
+///   no bytecode" Warning.
+///
+/// Before this, `LtmArm::new` collapsed a parse failure into a bare
+/// `expr: None` and the `Arrayed` slot map silently dropped it. With siblings
+/// that parsed, the fragment still had bytecode, so the compiler zero-filled
+/// the missing slot and NO diagnostic fired: a silent per-element zero, the
+/// exact defect class the typed-equation work exists to remove. The scalar case
+/// was loud only incidentally -- it had no surviving sibling to keep the
+/// fragment alive.
+///
+/// Constructing the degenerate value is legitimate through the public API:
+/// `LtmArm::new` takes an arbitrary `String`, so there is no "cannot be built"
+/// escape hatch here.
+#[test]
+fn unparseable_generated_arm_degrades_loudly_without_panicking() {
+    use crate::db::{LtmArm, LtmEquation};
+
+    // Unparseable for the same reason the `1stock` bug was: a bare leading
+    // digit lexes as a number followed by an identifier.
+    let bad = "1stock * 0.1";
+
+    // (a) The arm itself: no panic, no AST, errors RETAINED.
+    let arm = LtmArm::new(bad.to_string());
+    assert!(arm.expr.is_none(), "unparseable text must yield no AST");
+    assert!(
+        arm.parse_error.is_some(),
+        "the parse error must be retained -- discarding it is what made the \
+         arrayed case silent"
+    );
+    // An EMPTY arm is the legitimate `expr == None` and must NOT carry errors.
+    let empty = LtmArm::new(String::new());
+    assert!(empty.expr.is_none() && empty.parse_error.is_none());
+
+    let project = TestProject::new("bad_arm_degradation")
+        .named_dimension("Region", &["nyc", "boston"])
+        .array_aux("pop[Region]", "10")
+        .aux("other", "1", None)
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+    let dims = crate::db::project_datamodel_dims(&db, sync.project);
+
+    // (b) Scalar: no ast, errors surfaced, fragment rejected.
+    let scalar = LtmEquation::scalar(bad.to_string());
+    let (ast, errs) = scalar.to_flow_ast(dims);
+    assert!(
+        ast.is_none() && !errs.is_empty(),
+        "scalar must reject loudly"
+    );
+    assert!(
+        compile_ltm_equation_fragment(&db, "$⁚ltm⁚bad⁚scalar", &scalar, model, sync.project)
+            .is_none(),
+        "a rejected equation must not produce a fragment (the diagnostic pass \
+         reports the missing bytecode)"
+    );
+
+    // (c) Arrayed with ONE bad arm and one GOOD sibling -- the case that was
+    // silent. The whole equation must be rejected, not zero-filled.
+    let arrayed = LtmEquation::arrayed(
+        vec!["Region".to_string()],
+        vec![
+            ("nyc".to_string(), bad.to_string()),
+            ("boston".to_string(), "other * 2".to_string()),
+        ],
+        None,
+        false,
+    );
+    let (ast, errs) = arrayed.to_flow_ast(dims);
+    assert!(
+        ast.is_none() && !errs.is_empty(),
+        "one unparseable arm must reject the whole arrayed equation rather than \
+         drop the slot and let the surviving sibling keep the fragment alive"
+    );
+    assert!(
+        compile_ltm_equation_fragment(&db, "$⁚ltm⁚bad⁚arrayed", &arrayed, model, sync.project)
+            .is_none(),
+        "the arrayed fragment must be rejected -- otherwise the missing slot is \
+         zero-filled and no diagnostic fires"
+    );
+
+    // (d) An arrayed equation whose arms ALL parse is unaffected: an empty
+    // default still drops silently and the fragment compiles.
+    let good = LtmEquation::arrayed(
+        vec!["Region".to_string()],
+        vec![
+            ("nyc".to_string(), "other * 2".to_string()),
+            ("boston".to_string(), "other * 3".to_string()),
+        ],
+        Some(String::new()),
+        false,
+    );
+    let (ast, errs) = good.to_flow_ast(dims);
+    assert!(
+        ast.is_some() && errs.is_empty(),
+        "an all-parsing arrayed equation with an EMPTY default must still build"
+    );
+}
+
+/// Reproducible timing harness for per-element LTM generation over a WIDE
+/// dimension -- the shape whose occurrence lookup was quadratic.
+///
+/// `build_arrayed_link_score_equation` wraps each of an `Ast::Arrayed` target's
+/// N element equations separately, and each wrap needs that slot's occurrence
+/// stream. When `OccurrenceLookup::for_slot` rescanned the target's WHOLE
+/// stream per slot, that was Theta(N^2) comparisons plus N temporary vectors.
+///
+/// `#[ignore]`d: this is the measuring instrument, not a gate. Checked in
+/// (rather than the numbers) so the measurement is reproducible -- run with
+/// `cargo test -p simlin-engine --release --lib -- --ignored --nocapture
+/// per_element_generation_scaling`. A timing assertion in the default suite
+/// would be flaky and would risk the 3-minute wall-clock cap; the structural
+/// guarantee is instead pinned by `slot_occurrence_index_groups_every_slot`.
+#[test]
+#[ignore]
+fn per_element_generation_scaling() {
+    use std::time::Instant;
+
+    fn generate_for_width(n: usize) -> std::time::Duration {
+        let elems: Vec<String> = (0..n).map(|i| format!("e{i}")).collect();
+        let elem_refs: Vec<&str> = elems.iter().map(String::as_str).collect();
+        // Each element equation reads its OWN element of the source plus a
+        // shared scalar, so every slot carries several occurrences.
+        let eqns: Vec<(String, String)> = elems
+            .iter()
+            .map(|e| (e.clone(), format!("pop[{e}] * rate * 0.01")))
+            .collect();
+        let eqn_refs: Vec<(&str, &str)> =
+            eqns.iter().map(|(e, q)| (e.as_str(), q.as_str())).collect();
+
+        let project = TestProject::new("wide_per_element")
+            .named_dimension("Wide", &elem_refs)
+            .aux("rate", "1", None)
+            .array_flow_with_ranges("growth[Wide]", eqn_refs)
+            .array_stock("pop[Wide]", "10", &["growth"], &[], None)
+            .build_datamodel();
+
+        let mut db = SimlinDb::default();
+        let (source_project, model) = {
+            let sync = sync_from_datamodel(&db, &project);
+            (sync.project, sync.models["main"].source)
+        };
+        use salsa::Setter;
+        source_project.set_ltm_enabled(&mut db).to(true);
+
+        // Sub-phase timings: which query actually scales quadratically.
+        let t0 = Instant::now();
+        let _sites = crate::db::ltm_ir::model_ltm_reference_sites(&db, model, source_project);
+        let t_sites = t0.elapsed();
+        let t0 = Instant::now();
+        let _edges = crate::db::model_element_causal_edges(&db, model, source_project);
+        let t_edges = t0.elapsed();
+        let t0 = Instant::now();
+        let _circuits = crate::db::model_loop_circuits_tiered(&db, model, source_project);
+        let t_circuits = t0.elapsed();
+
+        let start = Instant::now();
+        let ltm = crate::db::model_ltm_variables(&db, model, source_project);
+        let elapsed = start.elapsed();
+        let n_scores = ltm
+            .vars
+            .iter()
+            .filter(|v| v.name.contains("link_score"))
+            .count();
+        let n_arms: usize = ltm
+            .vars
+            .iter()
+            .map(|v| match &v.equation {
+                crate::db::LtmEquation::Arrayed { elements, .. } => elements.len(),
+                _ => 1,
+            })
+            .sum();
+        println!(
+            "  sub-phases: ref_sites {t_sites:?}, element_edges {t_edges:?}, \
+             tiered_circuits {t_circuits:?}; link_scores {n_scores}, total arms {n_arms}"
+        );
+        // Keep the work observable so nothing is optimized away, and confirm
+        // the fixture actually generated per-element scores.
+        assert!(
+            ltm.vars.iter().any(|v| v.name.contains("link_score")),
+            "fixture must generate link scores"
+        );
+        elapsed
+    }
+
+    for n in [50usize, 100, 200, 400] {
+        let d = generate_for_width(n);
+        println!("width {n:>4}: model_ltm_variables {d:?}");
+    }
+}
+
 /// Build a `StitchPetal<&str>` from `[agg, x1, ..., xm]`.
 fn petal<'a>(nodes: &[&'a str]) -> super::StitchPetal<&'a str> {
     super::StitchPetal {

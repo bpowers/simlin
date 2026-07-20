@@ -10,6 +10,7 @@
 use super::*;
 use crate::common::{CanonicalDimensionName, CanonicalElementName};
 use crate::db::LtmEquation;
+use crate::db::ltm_ir::OccurrenceRef;
 use crate::dimensions::{Dimension, NamedDimension};
 
 fn make_named_dimension(name: &str, elements: &[&str]) -> Dimension {
@@ -4756,7 +4757,8 @@ fn sgft(
 ) -> Result<String, PartialEquationError> {
     let occ_sites =
         build_wrap_test_occurrences(equation_text, from, deps, source_dim_elements, iter_ctx);
-    let occ = OccurrenceLookup::for_slot(&occ_sites, 0);
+    let slot_occurrences = SlotOccurrences::new(&occ_sites);
+    let occ = slot_occurrences.for_slot(0);
     shaped_guard_form_text(
         equation_text,
         deps,
@@ -4804,7 +4806,8 @@ fn wrap_missing_live_source_occurrence_is_loud_not_silent_freeze() {
             .into_iter()
             .filter(|o| !matches!(&o.reference, OccurrenceRef::Variable(v) if v == "pop"))
             .collect();
-    let occ = OccurrenceLookup::for_slot(&desynced, 0);
+    let slot_occurrences = SlotOccurrences::new(&desynced);
+    let occ = slot_occurrences.for_slot(0);
     assert!(
         !occ.is_empty(),
         "the guard scope requires a non-empty lookup -- helper must survive the drop"
@@ -5285,4 +5288,76 @@ fn gh526_natural_and_unthreadable_other_deps_keep_collapse() {
         partial.contains("PREVIOUS(arr)") && !partial.contains("PREVIOUS(arr["),
         "un-threadable dep dims keep the permissive legacy collapse; got: {partial}"
     );
+}
+
+/// [`SlotOccurrences`] groups a target's occurrence stream by slot FAITHFULLY:
+/// each slot's lookup holds exactly the occurrences whose `SiteId` starts with
+/// that slot, with the slot prefix stripped, and a slot with no occurrences is
+/// empty rather than a desync.
+///
+/// This is the structural pin for the F2 refactor (the per-slot rescan was
+/// quadratic in an `Ast::Arrayed` target's element count). Grouping must be
+/// equivalent to the old `filter(site_id.first() == slot)` scan -- if it were
+/// not, the wrap would look occurrences up in the wrong slot and freeze the
+/// wrong reference, which is a silent wrong score rather than a loud failure.
+/// The end-to-end equivalence is additionally pinned by the unchanged
+/// `arrayed_target_slot_scores` characterization golden.
+#[test]
+fn slot_occurrence_index_groups_every_slot() {
+    use crate::db::ltm_ir::{OccurrenceRouting, OccurrenceSite, SiteId};
+
+    let occ_at = |path: &[u16], name: &str| OccurrenceSite {
+        site_id: SiteId(path.to_vec().into_boxed_slice()),
+        reference: OccurrenceRef::Variable(name.to_string()),
+        shape: RefShape::Bare,
+        axes: Vec::new(),
+        target_element: None,
+        routing: OccurrenceRouting::Direct,
+        in_reducer: false,
+        reducer_keys: Vec::new(),
+        already_lagged: false,
+        index_nested: false,
+    };
+
+    // Slots 0 and 2 carry occurrences; slot 1 carries none.
+    let stream = vec![
+        occ_at(&[0, 1], "a"),
+        occ_at(&[0, 1, 0], "b"),
+        occ_at(&[2, 0], "c"),
+    ];
+    let index = SlotOccurrences::new(&stream);
+
+    let slot0 = index.for_slot(0);
+    assert!(!slot0.is_empty());
+    // Paths are slot-LOCAL: `[0, 1]` is looked up as `[1]`.
+    assert_eq!(
+        slot0.get(&[1]).map(|o| match &o.reference {
+            OccurrenceRef::Variable(v) => v.clone(),
+            _ => unreachable!(),
+        }),
+        Some("a".to_string())
+    );
+    assert_eq!(
+        slot0.get(&[1, 0]).map(|o| match &o.reference {
+            OccurrenceRef::Variable(v) => v.clone(),
+            _ => unreachable!(),
+        }),
+        Some("b".to_string())
+    );
+    // Slot 0 must NOT see slot 2's occurrence under any path.
+    assert!(slot0.get(&[0]).is_none());
+
+    let slot2 = index.for_slot(2);
+    assert_eq!(
+        slot2.get(&[0]).map(|o| match &o.reference {
+            OccurrenceRef::Variable(v) => v.clone(),
+            _ => unreachable!(),
+        }),
+        Some("c".to_string())
+    );
+
+    // A slot with no occurrences is legitimately EMPTY (the `missing_occurrence`
+    // desync guard keys on this, so it must not look like a populated slot).
+    assert!(index.for_slot(1).is_empty());
+    assert!(index.for_slot(99).is_empty());
 }
