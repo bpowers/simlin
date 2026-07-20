@@ -360,6 +360,18 @@ struct WalkAccum<'a> {
 }
 
 impl WalkAccum<'_> {
+    /// Record the per-EDGE view of a reference (name-keyed, feeds
+    /// `model_edge_shapes` and the element causal graph).
+    ///
+    /// ASYMMETRY WITH [`WalkAccum::push_occurrence`] -- do not collapse the two.
+    /// A missing entry means different things in the two views. Here, absence
+    /// does NOT mean "no reference": consumers that find no IR entry for an edge
+    /// fall back to a single `Bare` site, so skipping a `FixedIndex`/`DynamicIndex`
+    /// reference MISCLASSIFIES it and emits wrong element edges and link scores.
+    /// In the occurrence view, absence is safe and sometimes required -- a
+    /// SiteId-unaddressable child must record nothing, or the wrap's path lookup
+    /// aliases a sibling. That is why `suppress_occurrences` gates only
+    /// `push_occurrence`.
     fn push_ref_site(
         &mut self,
         from: &str,
@@ -378,6 +390,15 @@ impl WalkAccum<'_> {
             });
     }
 
+    /// Record the per-OCCURRENCE view of a reference (SiteId-keyed, consumed by
+    /// the ceteris-paribus wrap via `OccurrenceLookup`).
+    ///
+    /// ASYMMETRY WITH [`WalkAccum::push_ref_site`] -- see its docs. Absence here
+    /// is safe (the wrap treats a miss as "not a recorded causal reference", and
+    /// a live-source subscript miss additionally trips the loud
+    /// `missing_occurrence` guard), whereas absence in the per-edge view
+    /// silently misclassifies the edge as `Bare`. Suppression therefore applies
+    /// to this view only.
     #[allow(clippy::too_many_arguments)]
     fn push_occurrence(
         &mut self,

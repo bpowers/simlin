@@ -61,21 +61,132 @@ fn render_equation(eq: &crate::db::LtmEquation) -> String {
     }
 }
 
+/// What a characterization fixture expects from the LTM fragment-compile
+/// diagnostic pass (`model_ltm_fragment_diagnostics`).
+///
+/// Every fixture must state this explicitly -- it is a required argument of
+/// [`assert_char_fixture`], so a new fixture cannot forget to declare it and
+/// quietly contribute no runtime coverage.
+///
+/// Why the char goldens need it at all: a golden pins generated equation TEXT,
+/// so it is structurally blind to a generated equation that is *stably*
+/// unparseable. Such an equation compiles to no bytecode, the variable reads a
+/// constant 0, and the golden stays green forever. Two independent
+/// unquotable-generation bugs were found in one day (the `1stock` leading digit,
+/// and the bare-keyword class of GH #976), neither of which any text golden would
+/// have caught -- so the corpus asserts the runtime consequence too.
+enum FragmentExpectation {
+    /// No LTM synthetic fragment (or implicit helper) may fail to compile.
+    AllCompile,
+    /// This fixture deliberately exercises loud warned-skip degradation.
+    /// `vars` is the EXACT set of variables expected to fail -- an extra
+    /// failure fails the test, and so does a failure that disappears (which
+    /// means the annotation is now stale and should be tightened).
+    ExpectedFailures {
+        /// Why these specifically cannot compile. A carve-out without a reason
+        /// is indistinguishable from a bug that was annotated away.
+        why: &'static str,
+        vars: &'static [&'static str],
+    },
+}
+
+/// Build the fixture's db in the configuration the whole char suite uses:
+/// discovery mode ON (every fixture exercises the discovery emitters) and
+/// `ltm_enabled` ON so `model_ltm_fragment_diagnostics` actually runs.
+///
+/// `ltm_enabled` does not affect the dumped text -- `model_ltm_variables` is
+/// called directly and does not read the flag -- it only un-gates the diagnostic
+/// pass inside `model_all_diagnostics`.
+fn char_fixture_db(project: &datamodel::Project) -> (SimlinDb, SourceModel, SourceProject) {
+    use salsa::Setter;
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+    source_project.set_ltm_enabled(&mut db).to(true);
+    (db, model, source_project)
+}
+
+/// The LTM synthetic variables / implicit helpers whose fragments failed to
+/// compile, sorted. This is exactly the condition
+/// `model_ltm_fragment_diagnostics` reports: the variable keeps a layout slot
+/// but has no bytecode, so it evaluates to a constant 0 and every score derived
+/// from it is silently degraded.
+fn fragment_compile_failures(
+    db: &SimlinDb,
+    model: SourceModel,
+    project: SourceProject,
+) -> Vec<String> {
+    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
+    let mut failures: Vec<String> = collect_model_diagnostics(db, model, project)
+        .iter()
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(
+                    &d.error,
+                    DiagnosticError::Assembly(msg) if msg.contains("failed to compile")
+                )
+        })
+        .map(|d| d.variable.clone().unwrap_or_default())
+        .collect();
+    failures.sort();
+    failures
+}
+
+/// The characterization entry point: pin the generated equation text against
+/// `golden` AND assert the fixture's declared fragment-compile expectation.
+///
+/// Both halves matter and neither subsumes the other. The golden catches a
+/// change in generated text that still compiles; the expectation catches a
+/// generated equation that stops compiling (a silent per-variable zero) without
+/// changing any other fixture's text.
+#[track_caller]
+fn assert_char_fixture(
+    golden: &str,
+    project: datamodel::Project,
+    filter: &str,
+    expect: FragmentExpectation,
+) {
+    let (db, model, source_project) = char_fixture_db(&project);
+    let actual = render_synthetic_vars(&db, model, source_project, filter);
+    assert_golden(golden, &actual);
+
+    let failures = fragment_compile_failures(&db, model, source_project);
+    match expect {
+        FragmentExpectation::AllCompile => assert!(
+            failures.is_empty(),
+            "fixture `{golden}` declares AllCompile, but these LTM fragments failed to \
+             compile (each keeps a layout slot with no bytecode, so it reads a constant 0 \
+             and every score through it is silently degraded): {failures:?}"
+        ),
+        FragmentExpectation::ExpectedFailures { why, vars } => {
+            let mut expected: Vec<String> = vars.iter().map(|v| v.to_string()).collect();
+            expected.sort();
+            assert_eq!(
+                failures, expected,
+                "fixture `{golden}`'s fragment-compile failures do not match its \
+                 declared expectation.\n  declared reason: {why}\n  If a NEW failure \
+                 appeared, that is a silent-zero regression. If a declared failure \
+                 DISAPPEARED, the annotation is stale -- tighten it (ideally to \
+                 AllCompile)."
+            );
+        }
+    }
+}
+
 /// Deterministic dump of every synthetic variable whose name matches
 /// `filter`, sorted by name, one `name` line followed by its rendered
 /// equation. Used as the characterization surface: the whole string is
 /// pinned byte-for-byte.
-fn dump_synthetic_vars(project: datamodel::Project, discovery: bool, filter: &str) -> String {
-    use salsa::Setter;
-    let mut db = SimlinDb::default();
-    let (source_project, model) = {
-        let sync = sync_from_datamodel(&db, &project);
-        (sync.project, sync.models["main"].source)
-    };
-    if discovery {
-        source_project.set_ltm_discovery_mode(&mut db).to(true);
-    }
-    let ltm = model_ltm_variables(&db, model, source_project);
+fn render_synthetic_vars(
+    db: &SimlinDb,
+    model: SourceModel,
+    source_project: SourceProject,
+    filter: &str,
+) -> String {
+    let ltm = model_ltm_variables(db, model, source_project);
     let mut vars: Vec<&LtmSyntheticVar> = ltm
         .vars
         .iter()
@@ -144,8 +255,12 @@ fn per_element_model() -> datamodel::Project {
 
 #[test]
 fn char_per_element_link_scores() {
-    let actual = dump_synthetic_vars(per_element_model(), true, "link_score\u{205A}pop");
-    assert_golden("per_element_link_scores", &actual);
+    assert_char_fixture(
+        "per_element_link_scores",
+        per_element_model(),
+        "link_score\u{205A}pop",
+        FragmentExpectation::AllCompile,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -189,12 +304,12 @@ fn per_element_other_deps_model() -> datamodel::Project {
 
 #[test]
 fn char_per_element_other_deps() {
-    let actual = dump_synthetic_vars(
+    assert_char_fixture(
+        "per_element_other_deps",
         per_element_other_deps_model(),
-        true,
         "link_score\u{205A}pop",
+        FragmentExpectation::AllCompile,
     );
-    assert_golden("per_element_other_deps", &actual);
 }
 
 // ---------------------------------------------------------------------------
@@ -325,12 +440,12 @@ fn per_element_mixed_occurrences_model() -> datamodel::Project {
 
 #[test]
 fn char_per_element_mixed_occurrences() {
-    let actual = dump_synthetic_vars(
+    assert_char_fixture(
+        "per_element_mixed_occurrences",
         per_element_mixed_occurrences_model(),
-        true,
         "link_score\u{205A}pop",
+        FragmentExpectation::AllCompile,
     );
-    assert_golden("per_element_mixed_occurrences", &actual);
 }
 
 // ---------------------------------------------------------------------------
@@ -374,12 +489,12 @@ fn per_element_mapped_occurrence_model() -> datamodel::Project {
 
 #[test]
 fn char_per_element_mapped_occurrence() {
-    let actual = dump_synthetic_vars(
+    assert_char_fixture(
+        "per_element_mapped_occurrence",
         per_element_mapped_occurrence_model(),
-        true,
         "link_score\u{205A}pop",
+        FragmentExpectation::AllCompile,
     );
-    assert_golden("per_element_mapped_occurrence", &actual);
 }
 
 // Finding 1 materiality guard: the mapped analogue of
@@ -521,12 +636,12 @@ fn per_element_ambiguous_pin_model() -> datamodel::Project {
 
 #[test]
 fn char_per_element_ambiguous_pin() {
-    let actual = dump_synthetic_vars(
+    assert_char_fixture(
+        "per_element_ambiguous_pin",
         per_element_ambiguous_pin_model(),
-        true,
         "link_score\u{205A}pop",
+        FragmentExpectation::AllCompile,
     );
-    assert_golden("per_element_ambiguous_pin", &actual);
 }
 
 // Finding 1 materiality guard: a DYNAMIC feedback model whose per-element target
@@ -663,12 +778,12 @@ fn per_element_index_nested_model() -> datamodel::Project {
 
 #[test]
 fn char_per_element_index_nested_occurrence() {
-    let actual = dump_synthetic_vars(
+    assert_char_fixture(
+        "per_element_index_nested_occurrence",
         per_element_index_nested_model(),
-        true,
         "link_score\u{205A}pop",
+        FragmentExpectation::AllCompile,
     );
-    assert_golden("per_element_index_nested_occurrence", &actual);
 }
 
 // Finding 2 materiality guard: a DYNAMIC model whose per-element target reads
@@ -806,12 +921,12 @@ fn per_element_dynamic_index_model() -> datamodel::Project {
 
 #[test]
 fn char_per_element_dynamic_index() {
-    let actual = dump_synthetic_vars(
+    assert_char_fixture(
+        "per_element_dynamic_index",
         per_element_dynamic_index_model(),
-        true,
         "link_score\u{205A}pop",
+        FragmentExpectation::AllCompile,
     );
-    assert_golden("per_element_dynamic_index", &actual);
 }
 
 // Finding 1 materiality guard: the DYNAMIC-index sibling of the ambiguous-pin
@@ -934,8 +1049,12 @@ fn agg_to_scalar_model() -> datamodel::Project {
 
 #[test]
 fn char_agg_to_scalar_target() {
-    let actual = dump_synthetic_vars(agg_to_scalar_model(), true, "\u{205A}agg\u{205A}0\u{2192}");
-    assert_golden("agg_to_scalar_target", &actual);
+    assert_char_fixture(
+        "agg_to_scalar_target",
+        agg_to_scalar_model(),
+        "\u{205A}agg\u{205A}0\u{2192}",
+        FragmentExpectation::AllCompile,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -981,8 +1100,32 @@ fn agg_nested_reducer_model() -> datamodel::Project {
 
 #[test]
 fn char_agg_nested_reducer() {
-    let actual = dump_synthetic_vars(agg_nested_reducer_model(), true, "link_score");
-    assert_golden("agg_nested_reducer", &actual);
+    assert_char_fixture(
+        "agg_nested_reducer",
+        agg_nested_reducer_model(),
+        "link_score",
+        FragmentExpectation::ExpectedFailures {
+            // The GH #517 nested-live-reducer degradation this fixture exists to
+            // pin: the hoisted `SUM(pop[*])` held live sits inside a DECLINED
+            // outer reducer, so the `agg -> growth[e]` partial embeds `PREVIOUS`
+            // of a wildcard slice, which has no LoadPrev-of-array-view codegen
+            // path. It surfaces as an Assembly warning -- the LOUD warned-zero
+            // `b7898692` deliberately PRESERVES rather than fixes. Each of the
+            // two target elements contributes its score plus the two
+            // PREVIOUS-capture helpers its partial synthesizes.
+            why: "GH #517 live-agg-inside-a-declined-outer-reducer: the partial \
+                  freezes a wildcard slice, which cannot compile; preserved as a \
+                  loud warned zero, not fixed",
+            vars: &[
+                "$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}growth[boston]",
+                "$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}growth[nyc]",
+                "$\u{205A}$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}growth[boston]\u{205A}0\u{205A}arg0",
+                "$\u{205A}$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}growth[boston]\u{205A}1\u{205A}arg0",
+                "$\u{205A}$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}growth[nyc]\u{205A}0\u{205A}arg0",
+                "$\u{205A}$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}growth[nyc]\u{205A}1\u{205A}arg0",
+            ],
+        },
+    );
 }
 
 // Finding 2 materiality guard: unlike every other guard in this file (which
@@ -1069,8 +1212,12 @@ fn agg_to_arrayed_model() -> datamodel::Project {
 
 #[test]
 fn char_agg_to_arrayed_target() {
-    let actual = dump_synthetic_vars(agg_to_arrayed_model(), true, "\u{205A}agg\u{205A}0\u{2192}");
-    assert_golden("agg_to_arrayed_target", &actual);
+    assert_char_fixture(
+        "agg_to_arrayed_target",
+        agg_to_arrayed_model(),
+        "\u{205A}agg\u{205A}0\u{2192}",
+        FragmentExpectation::AllCompile,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1094,8 +1241,12 @@ fn arrayed_agg_model() -> datamodel::Project {
 
 #[test]
 fn char_arrayed_agg_to_target() {
-    let actual = dump_synthetic_vars(arrayed_agg_model(), true, "link_score");
-    assert_golden("arrayed_agg_to_target", &actual);
+    assert_char_fixture(
+        "arrayed_agg_to_target",
+        arrayed_agg_model(),
+        "link_score",
+        FragmentExpectation::AllCompile,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1126,8 +1277,12 @@ fn arrayed_target_model() -> datamodel::Project {
 
 #[test]
 fn char_arrayed_target_slot_scores() {
-    let actual = dump_synthetic_vars(arrayed_target_model(), true, "link_score\u{205A}pop");
-    assert_golden("arrayed_target_slot_scores", &actual);
+    assert_char_fixture(
+        "arrayed_target_slot_scores",
+        arrayed_target_model(),
+        "link_score\u{205A}pop",
+        FragmentExpectation::AllCompile,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,12 +1333,27 @@ fn reducer_index_nested_model() -> datamodel::Project {
 
 #[test]
 fn char_reducer_index_nested_freeze() {
-    let actual = dump_synthetic_vars(
+    assert_char_fixture(
+        "reducer_index_nested_freeze",
         reducer_index_nested_model(),
-        true,
         "link_score\u{205A}from\u{2192}to",
+        FragmentExpectation::ExpectedFailures {
+            // This fixture's OWN model does not compile: `to = SUM(w[from, *]) +
+            // from` uses a scalar variable as a subscript index, which the engine
+            // rejects with `ArrayReferenceNeedsExplicitSubscripts` (an
+            // Error-severity diagnostic on `to`). The fixture is deliberately
+            // that shape -- it pins the Fig. 2 Q4 index-nested SELECTION
+            // semantics at the text level -- so its `PREVIOUS`-capture helper
+            // inherits the un-compilable subscript. Zero failures is therefore
+            // not reachable here without changing what the fixture pins.
+            why: "the fixture model itself is rejected \
+                  (ArrayReferenceNeedsExplicitSubscripts: a scalar used as a \
+                  subscript index), so its PREVIOUS-capture helper cannot compile",
+            vars: &[
+                "$\u{205A}$\u{205A}ltm\u{205A}link_score\u{205A}from\u{2192}to\u{205A}0\u{205A}arg0",
+            ],
+        },
     );
-    assert_golden("reducer_index_nested_freeze", &actual);
 }
 
 // Finding 2 materiality guard for the index-nested reducer-freeze shape,
@@ -1280,12 +1450,12 @@ fn already_lagged_other_dep_model() -> datamodel::Project {
 
 #[test]
 fn char_already_lagged_other_dep() {
-    let actual = dump_synthetic_vars(
+    assert_char_fixture(
+        "already_lagged_other_dep",
         already_lagged_other_dep_model(),
-        true,
         "link_score\u{205A}from\u{2192}to",
+        FragmentExpectation::AllCompile,
     );
-    assert_golden("already_lagged_other_dep", &actual);
 }
 
 // ---------------------------------------------------------------------------
@@ -1328,12 +1498,12 @@ fn char_scalar_feeder_bare_in_hoisted_reducer() {
     // Every `scale -> X` score: the site-1 `scale -> total` Bare score (both
     // occurrences held live, changed-LAST) plus the `scale -> $⁚ltm⁚agg⁚0`
     // scalar-feeder score, so the whole feeder attribution is frozen.
-    let actual = dump_synthetic_vars(
+    assert_char_fixture(
+        "scalar_feeder_bare_in_hoisted_reducer",
         scalar_feeder_bare_in_hoisted_reducer_model(),
-        true,
         "link_score\u{205A}scale",
+        FragmentExpectation::AllCompile,
     );
-    assert_golden("scalar_feeder_bare_in_hoisted_reducer", &actual);
 }
 
 // ---------------------------------------------------------------------------
