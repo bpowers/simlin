@@ -9,6 +9,8 @@
 
 use super::*;
 use crate::common::{CanonicalDimensionName, CanonicalElementName};
+use crate::db::LtmEquation;
+use crate::db::ltm_ir::OccurrenceRef;
 use crate::dimensions::{Dimension, NamedDimension};
 
 fn make_named_dimension(name: &str, elements: &[&str]) -> Dimension {
@@ -2885,6 +2887,84 @@ fn partial_equation_does_not_rewrap_inside_previous() {
     );
 }
 
+/// GH #517 / Fig. 2 Q4 (Track A3 stage 2, review finding 2): an INDEX-NESTED
+/// occurrence of the live source must be EXCLUDED from the reducer-containment
+/// test, so a reducer whose only live-source occurrence is index-nested freezes
+/// WHOLE rather than recursing.
+///
+/// `to = SUM(w[from]) + from` with live source `from` (Bare): `from` occurs
+/// bare (outside the reducer -- the live occurrence) AND index-nested inside
+/// `w[from]`. The reducer-freeze check (`OccurrenceLookup::subtree_has_live_shape`)
+/// EXCLUDES `index_nested` occurrences, so the index-nested `from` never makes
+/// the reducer "hold the live reference": the whole reducer is frozen
+/// (`PREVIOUS(sum(w[from]))`) and only the bare `from` stays live. (The retired
+/// `expr0_contains_live_match` reproduced this by only inspecting subscript
+/// HEADS; the occurrence switch reproduces it via `occ.index_nested`.)
+///
+/// The scalar-element `SUM(w[from])` form (as opposed
+/// to the array-slice `SUM(w[from, *])` production golden) is the one that
+/// compiles under BOTH the correct and the mutated behavior -- so nothing but
+/// this exact-text pin catches a selector that mishandles `index_nested` here:
+/// recursing would emit `sum(PREVIOUS(w[from])) + from` (the index-nested
+/// `from` held live), a compiling but value-divergent partial.
+#[test]
+fn partial_freezes_whole_reducer_over_index_nested_live_source() {
+    let deps = deps_set(&["w", "from"]);
+    let live = Ident::<Canonical>::new("from");
+    let shape = RefShape::Bare;
+
+    let partial =
+        build_partial_equation_shaped("SUM(w[from]) + from", &deps, &live, &shape, &[], None, None)
+            .unwrap();
+
+    assert_eq!(
+        partial, "PREVIOUS(sum(w[from])) + from",
+        "an index-nested live-source occurrence must not make the reducer hold \
+         the live ref -- the whole reducer freezes and only the bare `from` \
+         stays live; got: {partial}"
+    );
+    // Belt-and-suspenders: the index-nested `from` must NOT be individually
+    // held live inside a recursed reducer.
+    assert!(
+        !partial.to_lowercase().contains("sum(previous(w"),
+        "the reducer must not recurse to hold the index-nested occurrence live; \
+         got: {partial}"
+    );
+}
+
+/// Fig. 2 Q3 (Track A3 stage 2, review finding 2): an already-lagged other-dep
+/// occurrence -- one that sits inside an ORIGINAL `PREVIOUS(...)` -- must be
+/// left untouched (its live selection is suppressed AND it is never re-wrapped),
+/// so the changed-first partial does not double-lag it to a t-2 read.
+///
+/// `to = from + PREVIOUS(g)` with live source `from` (Bare): `from` stays live;
+/// the already-lagged `PREVIOUS(g)` survives verbatim, NOT wrapped again as
+/// `PREVIOUS(PREVIOUS(g))`. This complements
+/// `partial_equation_does_not_rewrap_inside_previous` (which uses the
+/// two-argument SAMPLE-IF-TRUE `PREVIOUS(target, input)` shape) with the exact
+/// `to = from + PREVIOUS(g)` shape the stage-2 `occ.already_lagged` field must
+/// reproduce.
+#[test]
+fn partial_leaves_already_lagged_other_dep_untouched() {
+    let deps = deps_set(&["from", "g"]);
+    let live = Ident::<Canonical>::new("from");
+    let shape = RefShape::Bare;
+
+    let partial =
+        build_partial_equation_shaped("from + PREVIOUS(g)", &deps, &live, &shape, &[], None, None)
+            .unwrap();
+
+    assert_eq!(
+        partial, "from + previous(g)",
+        "the already-lagged `PREVIOUS(g)` must survive verbatim and `from` must \
+         stay live; got: {partial}"
+    );
+    assert!(
+        !partial.to_lowercase().contains("previous(previous(g"),
+        "an already-lagged occurrence must not be double-wrapped; got: {partial}"
+    );
+}
+
 // -- Arrayed-target link scores: per-element partial equations --
 //
 // For a per-element-equation (`Ast::Arrayed`) target, the link score
@@ -2963,16 +3043,17 @@ fn arrayed_var_from_text(
 /// Look up the slot equation for `element` in an `Equation::Arrayed`,
 /// failing the test loudly if the equation isn't `Arrayed` or the slot
 /// is missing.
-fn arrayed_slot<'a>(equation: &'a Equation, element: &str) -> &'a str {
+fn arrayed_slot<'a>(equation: &'a crate::db::LtmEquation, element: &str) -> &'a str {
+    use crate::db::LtmEquation;
     match equation {
-        Equation::Arrayed(_, elements, _, _) => elements
+        LtmEquation::Arrayed { elements, .. } => elements
             .iter()
-            .find(|(e, _, _, _)| e == element)
-            .map(|(_, eqn, _, _)| eqn.as_str())
+            .find(|(e, _)| e == element)
+            .map(|(_, arm)| arm.text.as_str())
             .unwrap_or_else(|| {
                 panic!("no slot for element {element:?} in arrayed equation: {equation:?}")
             }),
-        other => panic!("expected Equation::Arrayed, got: {other:?}"),
+        other => panic!("expected LtmEquation::Arrayed, got: {other:?}"),
     }
 }
 
@@ -3044,6 +3125,7 @@ fn generate_link_score_equation_for_link_empty_target_is_err() {
         &all_vars,
         None,
         None,
+        &[],
     );
     assert!(
         result.is_err(),
@@ -3077,10 +3159,11 @@ fn generate_link_score_equation_for_link_normal_target_is_ok() {
         &all_vars,
         None,
         None,
+        &[],
     )
     .expect("a normal scalar target must produce a valid link-score equation");
     let text = match &equation {
-        Equation::Scalar(t) => t.clone(),
+        LtmEquation::Scalar(arm) => arm.text.clone(),
         other => panic!("expected a scalar link score, got {other:?}"),
     };
     // The non-source dep is frozen; the source stays live -- the partial
@@ -3234,10 +3317,11 @@ fn link_score_for_with_lookup_scalar_target_wraps_partial_in_lookup() {
         &all_vars,
         None,
         None,
+        &[],
     )
     .expect("a with-lookup scalar target must produce a valid link-score equation");
     let text = match &equation {
-        Equation::Scalar(t) => t.clone(),
+        LtmEquation::Scalar(arm) => arm.text.clone(),
         other => panic!("expected a scalar link score, got {other:?}"),
     };
     assert!(
@@ -3275,12 +3359,13 @@ fn link_score_for_with_lookup_a2a_target_pins_shared_table() {
         &all_vars,
         None,
         None,
+        &[],
     )
     .expect("a with-lookup A2A target must produce a valid link-score equation");
     let text = match &equation {
-        Equation::ApplyToAll(dim_names, t) => {
+        LtmEquation::ApplyToAll(dim_names, arm) => {
             assert_eq!(dim_names, &["Region".to_string()]);
-            t.clone()
+            arm.text.clone()
         }
         other => panic!("expected an apply-to-all link score, got {other:?}"),
     };
@@ -3322,6 +3407,7 @@ fn link_score_for_with_lookup_arrayed_target_wraps_per_slot() {
         &all_vars,
         None,
         None,
+        &[],
     )
     .expect("a with-lookup arrayed target must produce a valid link-score equation");
 
@@ -3375,15 +3461,20 @@ fn test_arrayed_link_score_population_to_migration_pressure_fixed_nyc() {
         &to_var,
         None,
         None,
+        &test_occurrences_for_var(&to_var, &from, &source_dim_elements),
     )
     .unwrap();
 
     match &equation {
-        Equation::Arrayed(eq_dims, _, default, _) => {
+        LtmEquation::Arrayed {
+            dims: eq_dims,
+            default,
+            ..
+        } => {
             assert_eq!(eq_dims, &["Region".to_string()]);
             assert!(default.is_none(), "no EXCEPT default expected");
         }
-        other => panic!("expected Equation::Arrayed, got: {other:?}"),
+        other => panic!("expected LtmEquation::Arrayed, got: {other:?}"),
     }
 
     let nyc_slot = arrayed_slot(&equation, "nyc");
@@ -3453,6 +3544,7 @@ fn test_arrayed_link_score_population_to_migration_pressure_fixed_boston() {
         &to_var,
         None,
         None,
+        &test_occurrences_for_var(&to_var, &from, &source_dim_elements),
     )
     .unwrap();
 
@@ -3518,6 +3610,7 @@ fn test_arrayed_link_score_stock_to_flow_per_element_partials() {
         &births,
         None,
         None,
+        &test_occurrences_for_var(&births, &stock, &source_dim_elements),
     )
     .unwrap();
 
@@ -3569,10 +3662,11 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         &scalar_to,
         None,
         None,
+        &[],
     )
     .unwrap();
     assert!(
-        matches!(equation, Equation::Scalar(_)),
+        matches!(equation, LtmEquation::Scalar(_)),
         "scalar target must yield Equation::Scalar; got: {equation:?}"
     );
 
@@ -3615,10 +3709,11 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         &a2a_to,
         None,
         None,
+        &[],
     )
     .unwrap();
     match equation {
-        Equation::ApplyToAll(d, _) => assert_eq!(d, vec!["Region".to_string()]),
+        LtmEquation::ApplyToAll(d, _) => assert_eq!(d, vec!["Region".to_string()]),
         other => panic!("ApplyToAll target must yield Equation::ApplyToAll; got: {other:?}"),
     }
 }
@@ -3688,11 +3783,11 @@ fn test_flow_to_stock_arrayed_subscripts_references() {
 
     let equation = generate_flow_to_stock_equation("growth", "pop", &flow, &stock);
     let text = match &equation {
-        Equation::ApplyToAll(dims, text) => {
+        LtmEquation::ApplyToAll(dims, arm) => {
             assert_eq!(dims, &vec!["region".to_string()]);
-            text
+            &arm.text
         }
-        other => panic!("arrayed stock must yield Equation::ApplyToAll; got: {other:?}"),
+        other => panic!("arrayed stock must yield LtmEquation::ApplyToAll; got: {other:?}"),
     };
 
     // Every stock/flow occurrence carries the dimension subscript --
@@ -3729,7 +3824,7 @@ fn test_flow_to_stock_scalar_stays_bare() {
 
     let equation = generate_flow_to_stock_equation("births", "s", &flow, &stock);
     let text = match &equation {
-        Equation::Scalar(text) => text,
+        LtmEquation::Scalar(arm) => &arm.text,
         other => panic!("scalar stock must yield Equation::Scalar; got: {other:?}"),
     };
 
@@ -3765,7 +3860,7 @@ fn test_flow_to_stock_arrayed_outflow_sign() {
 
     let equation = generate_flow_to_stock_equation("deaths", "pop", &flow, &stock);
     let text = match &equation {
-        Equation::ApplyToAll(_, text) => text,
+        LtmEquation::ApplyToAll(_, arm) => &arm.text,
         other => panic!("arrayed stock must yield Equation::ApplyToAll; got: {other:?}"),
     };
 
@@ -3838,9 +3933,9 @@ fn loop_score_variables_scalar_loop_yields_scalar_equation() {
     let (name, equation) = &vars[0];
     assert_eq!(name, "$\u{205A}ltm\u{205A}loop_score\u{205A}r1");
     match equation {
-        Equation::Scalar(text) => {
+        LtmEquation::Scalar(arm) => {
             assert_eq!(
-                text,
+                &arm.text,
                 &format!(
                     "\"{}\" * \"{}\"",
                     ls_name("pop", "births"),
@@ -3849,7 +3944,7 @@ fn loop_score_variables_scalar_loop_yields_scalar_equation() {
                 "scalar loop score must be the plain product of Bare link-score refs"
             );
         }
-        other => panic!("scalar loop must yield Equation::Scalar; got: {other:?}"),
+        other => panic!("scalar loop must yield LtmEquation::Scalar; got: {other:?}"),
     }
 }
 
@@ -3917,10 +4012,10 @@ fn loop_score_variables_a2a_without_slot_links_yields_apply_to_all() {
     assert_eq!(vars.len(), 1);
     let (_, equation) = &vars[0];
     match equation {
-        Equation::ApplyToAll(eq_dims, text) => {
+        LtmEquation::ApplyToAll(eq_dims, arm) => {
             assert_eq!(eq_dims, &vec!["region".to_string()]);
             assert_eq!(
-                text,
+                &arm.text,
                 &format!(
                     "\"{}\" * \"{}\"",
                     ls_name("pop", "births"),
@@ -3929,7 +4024,7 @@ fn loop_score_variables_a2a_without_slot_links_yields_apply_to_all() {
                 "Bare-A2A loop score must keep the compact ApplyToAll product form"
             );
         }
-        other => panic!("Bare-A2A loop must yield Equation::ApplyToAll; got: {other:?}"),
+        other => panic!("Bare-A2A loop must yield LtmEquation::ApplyToAll; got: {other:?}"),
     }
 }
 
@@ -3991,7 +4086,12 @@ fn loop_score_variables_slot_links_yield_arrayed_per_slot_equations() {
     let (name, equation) = &vars[0];
     assert_eq!(name, "$\u{205A}ltm\u{205A}loop_score\u{205A}pin1");
     match equation {
-        Equation::Arrayed(eq_dims, elements, default, _) => {
+        LtmEquation::Arrayed {
+            dims: eq_dims,
+            elements,
+            default,
+            ..
+        } => {
             assert_eq!(eq_dims, &vec!["scenario".to_string()]);
             assert!(default.is_none());
             assert_eq!(
@@ -4005,7 +4105,7 @@ fn loop_score_variables_slot_links_yield_arrayed_per_slot_equations() {
             // The det slot references det's FixedIndex link scores
             // subscripted at det (they are arrayed vars), and must not
             // reference low's.
-            let det_eq = &elements[0].1;
+            let det_eq = &elements[0].1.text;
             assert!(
                 det_eq.contains(&format!("\"{}\"[det]", ls_name("heat[det]", "temp"))),
                 "det slot must reference heat[det]→temp subscripted at [det]; got: {det_eq}"
@@ -4014,13 +4114,13 @@ fn loop_score_variables_slot_links_yield_arrayed_per_slot_equations() {
                 !det_eq.contains("low"),
                 "det slot must not reference the low element's link scores; got: {det_eq}"
             );
-            let low_eq = &elements[1].1;
+            let low_eq = &elements[1].1.text;
             assert!(
                 low_eq.contains(&format!("\"{}\"[low]", ls_name("heat[low]", "temp"))),
                 "low slot must reference heat[low]→temp subscripted at [low]; got: {low_eq}"
             );
         }
-        other => panic!("slot_links loop must yield Equation::Arrayed; got: {other:?}"),
+        other => panic!("slot_links loop must yield LtmEquation::Arrayed; got: {other:?}"),
     }
 }
 
@@ -4060,11 +4160,11 @@ fn loop_score_variables_missing_slot_scores_zero() {
     );
     let (_, equation) = &vars[0];
     match equation {
-        Equation::Arrayed(_, elements, _, _) => {
+        LtmEquation::Arrayed { elements, .. } => {
             assert_eq!(elements.len(), 3, "every declared element gets a slot");
             let by_elem: std::collections::HashMap<&str, &str> = elements
                 .iter()
-                .map(|(e, eq, _, _)| (e.as_str(), eq.as_str()))
+                .map(|(e, arm)| (e.as_str(), arm.text.as_str()))
                 .collect();
             assert!(by_elem["det"].contains("link_score"));
             assert_eq!(
@@ -4073,7 +4173,7 @@ fn loop_score_variables_missing_slot_scores_zero() {
             );
             assert_eq!(by_elem["high"], "0");
         }
-        other => panic!("expected Equation::Arrayed; got: {other:?}"),
+        other => panic!("expected LtmEquation::Arrayed; got: {other:?}"),
     }
 }
 
@@ -4125,24 +4225,24 @@ fn loop_score_variables_multi_dim_slot_tuples() {
     );
     let (_, equation) = &vars[0];
     match equation {
-        Equation::Arrayed(_, elements, _, _) => {
+        LtmEquation::Arrayed { elements, .. } => {
             // Row-major over declared order: nyc,young / nyc,old /
             // boston,young / boston,old.
-            let keys: Vec<&str> = elements.iter().map(|(e, _, _, _)| e.as_str()).collect();
+            let keys: Vec<&str> = elements.iter().map(|(e, _)| e.as_str()).collect();
             assert_eq!(
                 keys,
                 vec!["nyc,young", "nyc,old", "boston,young", "boston,old"]
             );
             let by_elem: std::collections::HashMap<&str, &str> = elements
                 .iter()
-                .map(|(e, eq, _, _)| (e.as_str(), eq.as_str()))
+                .map(|(e, arm)| (e.as_str(), arm.text.as_str()))
                 .collect();
             assert!(by_elem["nyc,young"].contains("link_score"));
             assert_eq!(by_elem["nyc,old"], "0");
             assert_eq!(by_elem["boston,young"], "0");
             assert!(by_elem["boston,old"].contains("link_score"));
         }
-        other => panic!("expected Equation::Arrayed; got: {other:?}"),
+        other => panic!("expected LtmEquation::Arrayed; got: {other:?}"),
     }
 }
 
@@ -4193,10 +4293,10 @@ fn loop_score_variables_prefer_apply_to_all_when_all_links_bare() {
     );
     let (_, equation) = &vars[0];
     match equation {
-        Equation::ApplyToAll(eq_dims, text) => {
+        LtmEquation::ApplyToAll(eq_dims, arm) => {
             assert_eq!(eq_dims, &vec!["region".to_string()]);
             assert_eq!(
-                text,
+                &arm.text,
                 &format!(
                     "\"{}\" * \"{}\"",
                     ls_name("pop", "births"),
@@ -4638,6 +4738,116 @@ fn test_body_aware_rank_keeps_delta_ratio() {
     );
 }
 
+/// Test wrapper around `shaped_guard_form_text`: reconstructs the occurrence IR
+/// the production wrap consumes from the raw equation text (production callers
+/// get it from `model_ltm_reference_sites`; slot-0 body) and threads it in, so
+/// these focused text-in/text-out tests keep exercising the real chooser.
+#[allow(clippy::too_many_arguments)]
+fn sgft(
+    equation_text: &str,
+    deps: &HashSet<Ident<Canonical>>,
+    from: &Ident<Canonical>,
+    shape: &RefShape,
+    source_dim_elements: &[Vec<String>],
+    source_dim_names: &[String],
+    iter_ctx: Option<&IteratedDimCtx<'_>>,
+    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
+    target_ref: &str,
+    gf_table_ref: Option<&str>,
+) -> Result<String, PartialEquationError> {
+    let occ_sites =
+        build_wrap_test_occurrences(equation_text, from, deps, source_dim_elements, iter_ctx);
+    let slot_occurrences = SlotOccurrences::new(&occ_sites);
+    let occ = slot_occurrences.for_slot(0);
+    shaped_guard_form_text(
+        equation_text,
+        deps,
+        from,
+        shape,
+        source_dim_elements,
+        source_dim_names,
+        iter_ctx,
+        dims_ctx,
+        target_ref,
+        gf_table_ref,
+        &occ,
+    )
+}
+
+/// Finding 1 (loud-degradation, not silent-zero): a live-source subscript node
+/// with NO occurrence at its tracked structural path -- on a NON-empty
+/// occurrence stream -- is a walker desync (the reparsed-`Expr0` walk drifted
+/// from the IR's `Expr2` `SiteId` numbering). On a miss the shape lookup returns
+/// `None`, `node_shape == Some(live_shape)` fails, and the live reference would
+/// be silently FROZEN -- a clean-compiling `PREVIOUS(...)` that zeroes the
+/// score. That silent zero is exactly what the single-classifier flip must not
+/// regress, so the miss surfaces LOUDLY (the `missing_occurrence` outcome and an
+/// `Err` at the caller boundary, which the db-bearing emitters turn into a
+/// skip-and-warn).
+///
+/// `assert_occurrence_stream_aligns` proves the streams align corpus-wide, so a
+/// miss is only reachable on a NOVEL production shape the gate cannot cover --
+/// which is precisely why the guard exists. It is simulated here by dropping the
+/// live source's occurrence from an otherwise-aligned stream; its `helper`
+/// co-dep survives, so the lookup stays NON-empty (the guard's `is_empty()`
+/// scope, which excludes the legitimate source-free-slot miss, is satisfied).
+#[test]
+fn wrap_missing_live_source_occurrence_is_loud_not_silent_freeze() {
+    let equation = "pop[nyc] * helper";
+    let deps = deps_set(&["helper"]);
+    let live = Ident::<Canonical>::new("pop");
+    let shape = RefShape::FixedIndex(vec!["nyc".to_string()]);
+    let source_dims = vec![vec!["nyc".to_string(), "boston".to_string()]];
+
+    // A correctly-aligned stream, then drop pop's occurrence: the lookup stays
+    // non-empty (helper survives) but `pop[nyc]`'s node lookup now misses.
+    let desynced: Vec<OccurrenceSite> =
+        build_wrap_test_occurrences(equation, &live, &deps, &source_dims, None)
+            .into_iter()
+            .filter(|o| !matches!(&o.reference, OccurrenceRef::Variable(v) if v == "pop"))
+            .collect();
+    let slot_occurrences = SlotOccurrences::new(&desynced);
+    let occ = slot_occurrences.for_slot(0);
+    assert!(
+        !occ.is_empty(),
+        "the guard scope requires a non-empty lookup -- helper must survive the drop"
+    );
+
+    let (_ast, out) =
+        wrap_changed_first_ast(equation, &deps, &live, &shape, None, None, None, &occ)
+            .expect("the equation parses");
+    assert!(
+        out.missing_occurrence,
+        "a live-source subscript path-miss on a non-empty lookup must flag the desync"
+    );
+    assert!(
+        out.live_ref.is_none(),
+        "the missed live source was frozen -- there is no live reference to normalize by"
+    );
+
+    // The flag becomes a LOUD `Err` at the shaped-guard caller boundary (the
+    // db-bearing emitters convert it to a skip-and-warn), NOT an Ok silent-zero
+    // changed-first partial. Changed-last is not even attempted: it would read
+    // the SAME desynced stream.
+    let err = shaped_guard_form_text(
+        equation,
+        &deps,
+        &live,
+        &shape,
+        &source_dims,
+        &["region".to_string()],
+        None,
+        None,
+        "combined",
+        None,
+        &occ,
+    );
+    assert!(
+        err.is_err(),
+        "the missing-occurrence desync must surface as a loud Err, never Ok(silent-zero): {err:?}"
+    );
+}
+
 // -- shaped_guard_form_text: attribution-convention chooser (GH #743) --
 //
 // The chooser builds the standard changed-first guard form, but when the
@@ -4666,7 +4876,7 @@ fn shaped_guard_form_falls_back_to_changed_last_for_unfreezable_co_source() {
         dim_ctx: None,
         dep_dims: None,
     };
-    let text = shaped_guard_form_text(
+    let text = sgft(
         "SUM(matrix[D1, *] * frac[D1])",
         &deps,
         &live,
@@ -4698,7 +4908,7 @@ fn shaped_guard_form_keeps_changed_first_when_freezable() {
     // `population / SUM(population[*])`: the live ref is OUTSIDE the
     // reducer occurrence that matters, and the whole reducer is frozen as
     // `PREVIOUS(sum(population[*]))` -- PREVIOUS of a scalar, freezable.
-    let text = shaped_guard_form_text(
+    let text = sgft(
         "population / SUM(population[*])",
         &deps,
         &live,
@@ -4749,7 +4959,7 @@ fn shaped_guard_form_keeps_changed_first_when_freezable() {
 fn shaped_guard_form_rank_slice_arg_falls_back_to_changed_last() {
     let deps = deps_set(&["matrix", "frac"]);
     let live = Ident::<Canonical>::new("frac");
-    let text = shaped_guard_form_text(
+    let text = sgft(
         "frac * RANK(matrix[d1, *], 1)",
         &deps,
         &live,
@@ -4782,7 +4992,7 @@ fn shaped_guard_form_rank_slice_arg_falls_back_to_changed_last() {
 fn shaped_guard_form_errs_when_both_conventions_unfreezable() {
     let deps = deps_set(&["arr", "brr"]);
     let live = Ident::<Canonical>::new("arr");
-    let err = shaped_guard_form_text(
+    let err = sgft(
         "SUM(arr[*] * brr[d1, *])",
         &deps,
         &live,
@@ -4806,7 +5016,7 @@ fn shaped_guard_form_errs_when_both_conventions_unfreezable() {
 fn shaped_guard_form_errs_when_no_live_occurrence_to_freeze() {
     let deps = deps_set(&["matrix"]);
     let live = Ident::<Canonical>::new("frac");
-    let err = shaped_guard_form_text(
+    let err = sgft(
         // A naked (non-reducer-enclosed) wildcard slice; `frac` absent.
         // Not a compilable model equation, but exercises the guard.
         "matrix[d1, *] * 2",
@@ -4959,7 +5169,7 @@ fn shaped_guard_form_declines_bare_arrayed_feeder_of_unhoisted_reducer() {
         dim_ctx: None,
         dep_dims: None,
     };
-    let err = shaped_guard_form_text(
+    let err = sgft(
         "SUM(matrix[D1, *] * frac)",
         &deps,
         &live,
@@ -4995,7 +5205,7 @@ fn shaped_guard_form_scalar_feeder_inside_reducer_not_declined_by_gh779() {
     let deps = deps_set(&["matrix", "scale"]);
     let live = Ident::<Canonical>::new("scale");
     // `scale` SCALAR -> empty source dims, so the GH #779 gate is inert.
-    let result = shaped_guard_form_text(
+    let result = sgft(
         "SUM(matrix[D1, *] * scale)",
         &deps,
         &live,
@@ -5077,5 +5287,193 @@ fn gh526_natural_and_unthreadable_other_deps_keep_collapse() {
     assert!(
         partial.contains("PREVIOUS(arr)") && !partial.contains("PREVIOUS(arr["),
         "un-threadable dep dims keep the permissive legacy collapse; got: {partial}"
+    );
+}
+
+/// [`SlotOccurrences`] groups a target's occurrence stream by slot FAITHFULLY:
+/// each slot's lookup holds exactly the occurrences whose `SiteId` starts with
+/// that slot, with the slot prefix stripped, and a slot with no occurrences is
+/// empty rather than a desync.
+///
+/// This is the structural pin for the F2 refactor (the per-slot rescan was
+/// quadratic in an `Ast::Arrayed` target's element count). Grouping must be
+/// equivalent to the old `filter(site_id.first() == slot)` scan -- if it were
+/// not, the wrap would look occurrences up in the wrong slot and freeze the
+/// wrong reference, which is a silent wrong score rather than a loud failure.
+/// The end-to-end equivalence is additionally pinned by the unchanged
+/// `arrayed_target_slot_scores` characterization golden.
+#[test]
+fn slot_occurrence_index_groups_every_slot() {
+    use crate::db::ltm_ir::{OccurrenceRouting, OccurrenceSite, SiteId};
+
+    let occ_at = |path: &[u16], name: &str| OccurrenceSite {
+        site_id: SiteId(path.to_vec().into_boxed_slice()),
+        reference: OccurrenceRef::Variable(name.to_string()),
+        shape: RefShape::Bare,
+        axes: Vec::new(),
+        target_element: None,
+        routing: OccurrenceRouting::Direct,
+        in_reducer: false,
+        reducer_keys: Vec::new(),
+        already_lagged: false,
+        index_nested: false,
+    };
+
+    // Slots 0 and 2 carry occurrences; slot 1 carries none.
+    let stream = vec![
+        occ_at(&[0, 1], "a"),
+        occ_at(&[0, 1, 0], "b"),
+        occ_at(&[2, 0], "c"),
+    ];
+    let index = SlotOccurrences::new(&stream);
+
+    let slot0 = index.for_slot(0);
+    assert!(!slot0.is_empty());
+    // Paths are slot-LOCAL: `[0, 1]` is looked up as `[1]`.
+    assert_eq!(
+        slot0.get(&[1]).map(|o| match &o.reference {
+            OccurrenceRef::Variable(v) => v.clone(),
+            _ => unreachable!(),
+        }),
+        Some("a".to_string())
+    );
+    assert_eq!(
+        slot0.get(&[1, 0]).map(|o| match &o.reference {
+            OccurrenceRef::Variable(v) => v.clone(),
+            _ => unreachable!(),
+        }),
+        Some("b".to_string())
+    );
+    // Slot 0 must NOT see slot 2's occurrence under any path.
+    assert!(slot0.get(&[0]).is_none());
+
+    let slot2 = index.for_slot(2);
+    assert_eq!(
+        slot2.get(&[0]).map(|o| match &o.reference {
+            OccurrenceRef::Variable(v) => v.clone(),
+            _ => unreachable!(),
+        }),
+        Some("c".to_string())
+    );
+
+    // A slot with no occurrences is legitimately EMPTY (the `missing_occurrence`
+    // desync guard keys on this, so it must not look like a populated slot).
+    assert!(index.for_slot(1).is_empty());
+    assert!(index.for_slot(99).is_empty());
+}
+
+/// `child_path` must map an over-arity builtin child to the reserved
+/// unaddressable sentinel rather than letting `as u16` WRAP onto an earlier
+/// sibling's path.
+///
+/// This is the consumer half of the F3 fix, and it needs its own pin: the
+/// producer-side boundary tests (`db::ltm_ir_tests`) pass whether or not this
+/// conversion is checked, because they only exercise the pure index function.
+/// With a wrapping cast, child 65,536 produces child 0's path, so the lookup
+/// returns an UNRELATED occurrence, `missing_occurrence` never fires, and the
+/// wrap freezes the wrong reference -- a plausible, silent, wrong score.
+#[test]
+fn child_path_maps_over_arity_child_to_the_unaddressable_sentinel() {
+    use crate::db::ltm_ir::UNADDRESSABLE_CHILD;
+
+    // Ordinary children append their own index.
+    assert_eq!(child_path(&[3], 0), vec![3, 0]);
+    assert_eq!(child_path(&[3], 7), vec![3, 7]);
+    assert_eq!(child_path(&[], 65_534), vec![65_534]);
+
+    // Over-arity children get the sentinel, NOT a wrapped index. `65_536 as u16`
+    // is 0, which is precisely the collision this must avoid.
+    assert_eq!(child_path(&[3], 65_536), vec![3, UNADDRESSABLE_CHILD]);
+    assert_ne!(child_path(&[3], 65_536), child_path(&[3], 0));
+    assert_eq!(child_path(&[3], 131_072), vec![3, UNADDRESSABLE_CHILD]);
+    assert_ne!(child_path(&[3], 131_072), child_path(&[3], 0));
+
+    // `child_is_addressable` agrees with the producer's own predicate at the
+    // boundary, so the wrap flags exactly the children the IR omits.
+    assert!(child_is_addressable(0));
+    assert!(child_is_addressable(65_534));
+    assert!(!child_is_addressable(65_535));
+    assert!(!child_is_addressable(65_536));
+
+    // A path containing the sentinel can never be produced by the IR walker, so
+    // a lookup under it provably misses rather than aliasing.
+    assert_eq!(
+        crate::db::ltm_ir::site_child_index(65_536),
+        None,
+        "the producer must decline the same child the consumer sentinels"
+    );
+}
+
+/// The per-element row-pinning lowering must descend into a subscript RANGE's
+/// endpoints, not just its plain expression indices.
+///
+/// A source reference can hide in a range bound under another variable's
+/// subscript (`other[pop[region]:3]`). The IR walker records an occurrence there
+/// (`IndexExpr2::Range` pushes children 0 and 1) and the sibling lowering
+/// `substitute_reducers_in_expr0` descends both endpoints -- but
+/// `rewrite_per_element_source_refs` matched only `IndexExpr0::Expr` and passed
+/// a `Range` through untouched. The recorded occurrence was then left un-pinned:
+/// its dimension-name subscript survived into the scalar per-element equation,
+/// which either fails to compile (a `PREVIOUS`-of-dim-name capture helper) or
+/// reads the wrong element.
+#[test]
+fn per_element_pin_descends_into_range_endpoints() {
+    use crate::dimensions::DimensionsContext;
+    use crate::ltm_agg::AxisRead;
+
+    let region = make_named_dimension("region", &["nyc", "boston"]);
+    let from_dims = vec![region.clone()];
+    let source_dim_elements = vec![vec!["nyc".to_string(), "boston".to_string()]];
+    let source_dim_names = vec!["region".to_string()];
+    let target_iterated_dims = vec!["region".to_string()];
+    let dim_ctx = DimensionsContext::from(
+        [datamodel::Dimension::named(
+            "region".to_string(),
+            vec!["nyc".to_string(), "boston".to_string()],
+        )]
+        .as_slice(),
+    );
+    let iter_ctx = IteratedDimCtx {
+        source_dim_names: &source_dim_names,
+        target_iterated_dims: &target_iterated_dims,
+        dim_ctx: Some(&dim_ctx),
+        dep_dims: None,
+    };
+    let from = Ident::<Canonical>::new("pop");
+    let site_axes = vec![AxisRead::Iterated {
+        dim: "region".to_string(),
+        source_dim: "region".to_string(),
+    }];
+    let row_parts_bare = vec!["boston".to_string()];
+    let mut target_elem_by_dim = HashMap::new();
+    target_elem_by_dim.insert("region".to_string(), ("boston".to_string(), 1usize));
+
+    let ctx = super::post_transform::PerElementRefCtx {
+        from: &from,
+        site_axes: &site_axes,
+        row_parts_bare: &row_parts_bare,
+        source_dim_elements: &source_dim_elements,
+        from_dims: &from_dims,
+        target_elem_by_dim: &target_elem_by_dim,
+        iter_ctx: &iter_ctx,
+        dim_ctx: &dim_ctx,
+    };
+
+    // `pop[region]` sits in the LOWER bound of a range index of `other`.
+    let ast = Expr0::new("other[pop[region]:3]", LexerType::Equation)
+        .expect("fixture parses")
+        .expect("fixture is non-empty");
+    let lowered = super::post_transform::rewrite_per_element_source_refs(ast, &ctx, false);
+    let text = print_eqn(&lowered);
+
+    assert!(
+        !text.contains("pop[region]"),
+        "the source reference inside the range bound must be pinned, not left \
+         with its dimension-name subscript; got: {text}"
+    );
+    assert!(
+        text.contains("boston"),
+        "the range-bound occurrence must be pinned to this instantiation's row; \
+         got: {text}"
     );
 }

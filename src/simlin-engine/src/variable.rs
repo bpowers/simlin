@@ -533,7 +533,7 @@ mod is_lookup_only_tests {
     }
 }
 
-fn get_dimensions(
+pub(crate) fn get_dimensions(
     dimensions: &[datamodel::Dimension],
     names: &[DimensionName],
 ) -> Result<Vec<Dimension>, EquationError> {

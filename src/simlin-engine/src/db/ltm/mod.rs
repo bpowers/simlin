@@ -9,7 +9,8 @@
 //! emission for a model's synthetic LTM variables; the per-concern work
 //! lives in submodules:
 //!
-//! * `parse` -- parsing + `datamodel::Equation`-shaping helpers.
+//! * `parse` -- typed-equation lowering helpers (implicit-module
+//!   instantiation over the stored `LtmEquation` ASTs).
 //! * `compile` -- per-equation compilation to symbolic bytecodes, the
 //!   per-shape link-score equation-text query, and the compile-failure
 //!   diagnostic pass.
@@ -27,15 +28,18 @@ use crate::ltm::strip_subscript;
 
 use super::{
     Db, SourceModel, SourceProject, SourceVariable, SourceVariableKind, compute_layout,
-    model_causal_edges, model_implicit_var_info, project_datamodel_dims, project_units_context,
+    model_causal_edges, model_implicit_var_info, project_datamodel_dims,
     reconstruct_single_variable,
 };
 
 mod compile;
+mod equation;
 mod link_scores;
 mod loops;
 mod parse;
 mod pinned;
+
+pub use equation::{LtmArm, LtmEquation};
 
 // Re-export the LTM surface other `db` submodules (and the `db.rs` root's
 // `use ltm::*` / `pub use ltm::{...}` blocks) reach. The directory keeps the
@@ -514,7 +518,7 @@ fn max_abs_alias_selection(
                 let acc = acc_name(helpers.len());
                 helpers.push(super::LtmSyntheticVar {
                     name: acc.clone(),
-                    equation: datamodel::Equation::Scalar(selection),
+                    equation: LtmEquation::scalar(selection),
                     dimensions: vec![],
                     // Like the alias, these accumulator names parse as a
                     // `(from, to)` link score, so they must compile verbatim
@@ -526,7 +530,7 @@ fn max_abs_alias_selection(
             let final_acc = acc_name(helpers.len());
             helpers.push(super::LtmSyntheticVar {
                 name: final_acc.clone(),
-                equation: datamodel::Equation::Scalar(selection),
+                equation: LtmEquation::scalar(selection),
                 dimensions: vec![],
                 compile_directly: true,
             });
@@ -771,7 +775,7 @@ fn compute_module_link_overrides(
                 .entry(alias_name.clone())
                 .or_insert_with(|| super::LtmSyntheticVar {
                     name: alias_name.clone(),
-                    equation: datamodel::Equation::Scalar(alias_eqn),
+                    equation: LtmEquation::scalar(alias_eqn),
                     dimensions: vec![],
                     // Compile the prepared equation verbatim: the name parses as
                     // a `(from, to)` link score (`s→m⁚via⁚pos` => from="s",
@@ -843,7 +847,6 @@ pub fn model_ltm_implicit_var_info(
     let ltm_vars = model_ltm_variables(db, model, project);
 
     let dims = project_datamodel_dims(db, project);
-    let units_ctx = project_units_context(db, project);
     let module_idents = ltm_module_idents(db, model, project);
     let model_var_names = ltm_model_var_names(db, model, project);
 
@@ -854,7 +857,6 @@ pub fn model_ltm_implicit_var_info(
             &ltm_var.name,
             &ltm_var.equation,
             dims,
-            units_ctx,
             Some(module_idents),
             Some(model_var_names),
         );
@@ -1082,7 +1084,7 @@ pub fn model_ltm_mode(db: &dyn Db, model: SourceModel, project: SourceProject) -
 ///
 /// Pathway and composite scores are generated for models with input ports.
 /// Module-containing loops are no longer filtered out because
-/// `link_score_equation_text` now handles module links via composite refs.
+/// `module_link_score_equation` handles module links via composite refs.
 #[salsa::tracked(returns(ref))]
 pub fn model_ltm_variables(
     db: &dyn Db,
@@ -1301,9 +1303,9 @@ pub fn model_ltm_variables(
         // `matrix[D1,*]` is exactly "the `D1`-th row, all of axis 2", so this
         // evaluates correctly as the `Equation::ApplyToAll` body.
         let equation = if agg.result_dims.is_empty() {
-            datamodel::Equation::Scalar(agg.equation_text.clone())
+            LtmEquation::scalar(agg.equation_text.clone())
         } else {
-            datamodel::Equation::ApplyToAll(agg.result_dims.clone(), agg.equation_text.clone())
+            LtmEquation::apply_to_all(agg.result_dims.clone(), agg.equation_text.clone())
         };
         vars.push(LtmSyntheticVar {
             name: agg.name.clone(),
@@ -2033,7 +2035,7 @@ pub fn model_ltm_variables(
             pathway_names.push(path_var_name.clone());
             vars.push(LtmSyntheticVar {
                 name: path_var_name,
-                equation: datamodel::Equation::Scalar(equation),
+                equation: LtmEquation::scalar(equation),
                 dimensions: vec![],
                 compile_directly: false,
             });
@@ -2053,7 +2055,7 @@ pub fn model_ltm_variables(
         vars.extend(acc_helpers);
         vars.push(LtmSyntheticVar {
             name: composite_name,
-            equation: datamodel::Equation::Scalar(equation),
+            equation: LtmEquation::scalar(equation),
             dimensions: vec![],
             compile_directly: false,
         });

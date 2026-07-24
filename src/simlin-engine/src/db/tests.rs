@@ -2089,6 +2089,18 @@ fn two_loop_project() -> datamodel::Project {
     }
 }
 
+/// Per-link incrementality: editing loop A's variable must NOT force
+/// recompilation of loop B's link-score bytecode FRAGMENT.
+///
+/// The meaningful cache is the compiled fragment (`compile_ltm_var_fragment`),
+/// not the equation-text query. The per-shape equation-text query
+/// `link_score_equation_text_shaped(.., Bare)` (which `compile_ltm_var_fragment`
+/// now sources from) reads the whole-model occurrence IR
+/// (`model_ltm_reference_sites`) so the compiled fragment matches the emitted
+/// one -- so editing ANY variable re-runs it. But it produces an UNCHANGED value
+/// for an unaffected edge, so salsa backdates it and the expensive
+/// `compile_ltm_var_fragment` dependent is NOT re-executed: the fragment stays
+/// pointer-stable. That fragment-level reuse is what this test guards.
 #[test]
 fn test_ltm_per_link_caching() {
     use salsa::Setter;
@@ -2108,17 +2120,14 @@ fn test_ltm_per_link_caching() {
     // so that the immutable borrow on db is released before the mutation.
     let (link_b_ptr_before, link_a_ptr_before) = {
         let link_b_id = LtmLinkId::new(&db, "stock_b".to_string(), "births_b".to_string());
-        let link_b_before = link_score_equation_text(&db, link_b_id, source_model, source_project);
-        assert!(link_b_before.is_some(), "link B score should exist");
+        let link_b_before = compile_ltm_var_fragment(&db, link_b_id, source_model, source_project);
+        assert!(link_b_before.is_some(), "link B fragment should exist");
 
         let link_a_id = LtmLinkId::new(&db, "stock_a".to_string(), "births_a".to_string());
-        let link_a_before = link_score_equation_text(&db, link_a_id, source_model, source_project);
-        assert!(link_a_before.is_some(), "link A score should exist");
+        let link_a_before = compile_ltm_var_fragment(&db, link_a_id, source_model, source_project);
+        assert!(link_a_before.is_some(), "link A fragment should exist");
 
-        (
-            link_b_before as *const Option<LtmSyntheticVar>,
-            link_a_before as *const Option<LtmSyntheticVar>,
-        )
+        (link_b_before as *const _, link_a_before as *const _)
     };
 
     // Change births_a equation (affects loop A, should NOT affect loop B)
@@ -2132,20 +2141,22 @@ fn test_ltm_per_link_caching() {
     let link_b_id = LtmLinkId::new(&db, "stock_b".to_string(), "births_b".to_string());
     let link_a_id = LtmLinkId::new(&db, "stock_a".to_string(), "births_a".to_string());
 
-    // Link B should be pointer-equal (cached) since births_b is unaffected
-    let link_b_after = link_score_equation_text(&db, link_b_id, source_model, source_project);
-    let link_b_ptr_after = link_b_after as *const Option<LtmSyntheticVar>;
+    // Link B's FRAGMENT should be pointer-equal (backdate-cached): its
+    // equation-text query re-ran but produced an unchanged value, so the
+    // fragment compile was not re-executed.
+    let link_b_after = compile_ltm_var_fragment(&db, link_b_id, source_model, source_project);
+    let link_b_ptr_after = link_b_after as *const _;
     assert_eq!(
         link_b_ptr_before, link_b_ptr_after,
-        "link score for unaffected loop B should be cached (pointer-equal)"
+        "fragment for unaffected loop B should be cached (pointer-equal)"
     );
 
-    // Link A should be recomputed (equation changed for births_a)
-    let link_a_after = link_score_equation_text(&db, link_a_id, source_model, source_project);
-    let link_a_ptr_after = link_a_after as *const Option<LtmSyntheticVar>;
+    // Link A's fragment should be recomputed (equation changed for births_a)
+    let link_a_after = compile_ltm_var_fragment(&db, link_a_id, source_model, source_project);
+    let link_a_ptr_after = link_a_after as *const _;
     assert_ne!(
         link_a_ptr_before, link_a_ptr_after,
-        "link score for affected loop A should be recomputed"
+        "fragment for affected loop A should be recomputed"
     );
 }
 

@@ -5,7 +5,7 @@
 use super::{compile_ltm_equation_fragment, scalarize_ltm_equation};
 use crate::datamodel;
 use crate::db::{
-    LtmLinkId, RefShape, ShapedLinkScore, SimlinDb, compute_layout, link_score_equation_text,
+    LtmLinkId, RefShape, ShapedLinkScore, SimlinDb, compute_layout,
     link_score_equation_text_shaped, sync_from_datamodel,
 };
 use crate::test_common::TestProject;
@@ -86,7 +86,7 @@ fn test_ltm_previous_module_var_uses_helper_rewrite() {
     let fragment = compile_ltm_equation_fragment(
         &db,
         "$⁚ltm⁚test_prev_module",
-        &datamodel::Equation::Scalar("PREVIOUS(producer)".to_string()),
+        &crate::db::LtmEquation::scalar("PREVIOUS(producer)".to_string()),
         source_model,
         sync.project,
     )
@@ -134,7 +134,10 @@ fn test_a2a_ltm_equation_fragment_compiles() {
     let fragment = compile_ltm_equation_fragment(
         &db,
         "$\u{205A}ltm\u{205A}test_a2a_link_score",
-        &datamodel::Equation::ApplyToAll(dims.clone(), "PREVIOUS(population) * 0.5".to_string()),
+        &crate::db::LtmEquation::apply_to_all(
+            dims.clone(),
+            "PREVIOUS(population) * 0.5".to_string(),
+        ),
         source_model,
         sync.project,
     )
@@ -260,7 +263,10 @@ fn test_a2a_ltm_previous_per_element() {
     let fragment = compile_ltm_equation_fragment(
         &db,
         "$\u{205A}ltm\u{205A}test_prev_per_elem",
-        &datamodel::Equation::ApplyToAll(dims.clone(), "PREVIOUS(population) * 0.5".to_string()),
+        &crate::db::LtmEquation::apply_to_all(
+            dims.clone(),
+            "PREVIOUS(population) * 0.5".to_string(),
+        ),
         source_model,
         sync.project,
     )
@@ -344,13 +350,16 @@ fn test_stock_to_flow_link_score_handles_apply_to_all() {
     let sync = sync_from_datamodel(&db, &project);
     let source_model = sync.models["main"].source;
 
-    // The stock-to-flow direction: population -> births
+    // The stock-to-flow direction: population -> births. The scalar Bare score
+    // (what assembly's sub-case (a) compiles) comes from the shape-aware query;
+    // stock-to-flow ignores `RefShape`, so `Bare` yields the same generator
+    // output as the (deleted) legacy `(from, to)`-keyed query did.
     let link_id = LtmLinkId::new(&db, "population".to_string(), "births".to_string());
-    let lsv = link_score_equation_text(&db, link_id, source_model, sync.project);
-
-    let lsv = lsv
-        .as_ref()
-        .expect("stock-to-flow link score should be generated for arrayed model");
+    let ShapedLinkScore::Scored(lsv) =
+        link_score_equation_text_shaped(&db, link_id, RefShape::Bare, source_model, sync.project)
+    else {
+        panic!("stock-to-flow link score should be generated for arrayed model");
+    };
 
     // Before the fix, the equation would contain only "0" terms because
     // the flow_equation was "0" (ApplyToAll fell through the Scalar-only
@@ -465,8 +474,8 @@ fn test_stock_to_flow_link_score_handles_arrayed() {
 
     // Each `births[e]` references `population[e]` -- a FixedIndex(e) ref --
     // so the per-shape emission yields `population[e] -> births` link
-    // scores. The non-shaped `link_score_equation_text` would `scalarize`
-    // the result; use the shaped entry point so the arrayed equation
+    // scores. The scalar Bare score would `scalarize` the result; use the
+    // shaped entry point with the FixedIndex shape so the arrayed equation
     // survives intact.
     let link_id = LtmLinkId::new(&db, "population".to_string(), "births".to_string());
     let result = link_score_equation_text_shaped(
@@ -481,16 +490,17 @@ fn test_stock_to_flow_link_score_handles_arrayed() {
     };
 
     let elements = match &lsv.equation {
-        datamodel::Equation::Arrayed(_, elements, _, _) => elements,
+        crate::db::LtmEquation::Arrayed { elements, .. } => elements,
         other => {
-            panic!("stock-to-arrayed-flow link score must be Equation::Arrayed, got: {other:?}")
+            panic!("stock-to-arrayed-flow link score must be LtmEquation::Arrayed, got: {other:?}")
         }
     };
     assert!(
         !elements.is_empty(),
         "arrayed link score should have per-element slots"
     );
-    for (elem, slot_eqn, _, _) in elements {
+    for (elem, arm) in elements {
+        let slot_eqn = &arm.text;
         // The flow's actual equation contents (`population`) must show up
         // in every slot -- before the fix this was a constant `(0)`.
         assert!(
@@ -508,41 +518,309 @@ fn test_stock_to_flow_link_score_handles_arrayed() {
 
 #[test]
 fn test_scalarize_ltm_equation_arrayed_collapse() {
-    use datamodel::Equation::{ApplyToAll, Arrayed, Scalar};
+    use crate::db::LtmEquation;
 
+    // Uses parseable equation bodies (`LtmEquation` parses each arm eagerly, so
+    // a placeholder like "first slot" would trip the augmentation-bug guard);
+    // scalarize only ever selects an arm, so the exact expression is irrelevant.
+    //
     // Arrayed with multiple per-element slots collapses to the *first* slot's text.
-    let multi = Arrayed(
+    let multi = LtmEquation::arrayed(
         vec!["region".to_string()],
         vec![
-            ("nyc".to_string(), "first slot".to_string(), None, None),
-            ("boston".to_string(), "second slot".to_string(), None, None),
+            ("nyc".to_string(), "first_slot".to_string()),
+            ("boston".to_string(), "second_slot".to_string()),
         ],
         None,
         false,
     );
-    assert!(matches!(scalarize_ltm_equation(multi), Scalar(text) if text == "first slot"));
+    assert!(
+        matches!(scalarize_ltm_equation(multi), LtmEquation::Scalar(arm) if arm.text == "first_slot")
+    );
 
     // Arrayed with no slots but a Some(default) falls back to the default text.
-    let default_only = Arrayed(
+    let default_only = LtmEquation::arrayed(
         vec!["region".to_string()],
         vec![],
-        Some("default eqn".to_string()),
+        Some("default_eqn".to_string()),
         false,
     );
-    assert!(matches!(scalarize_ltm_equation(default_only), Scalar(text) if text == "default eqn"));
+    assert!(
+        matches!(scalarize_ltm_equation(default_only), LtmEquation::Scalar(arm) if arm.text == "default_eqn")
+    );
 
     // Arrayed with neither slots nor a default falls back to "0".
-    let empty = Arrayed(vec!["region".to_string()], vec![], None, false);
-    assert!(matches!(scalarize_ltm_equation(empty), Scalar(text) if text == "0"));
+    let empty = LtmEquation::arrayed(vec!["region".to_string()], vec![], None, false);
+    assert!(matches!(scalarize_ltm_equation(empty), LtmEquation::Scalar(arm) if arm.text == "0"));
 
     // ApplyToAll and Scalar inputs are preserved (text kept, dims dropped).
     assert!(matches!(
-        scalarize_ltm_equation(ApplyToAll(vec!["region".to_string()], "a2a eqn".to_string())),
-        Scalar(text) if text == "a2a eqn"
+        scalarize_ltm_equation(LtmEquation::apply_to_all(vec!["region".to_string()], "a2a_eqn".to_string())),
+        LtmEquation::Scalar(arm) if arm.text == "a2a_eqn"
     ));
     assert!(
-        matches!(scalarize_ltm_equation(Scalar("scalar eqn".to_string())), Scalar(text) if text == "scalar eqn")
+        matches!(scalarize_ltm_equation(LtmEquation::scalar("scalar_eqn".to_string())), LtmEquation::Scalar(arm) if arm.text == "scalar_eqn")
     );
+}
+
+/// A canonical name that cannot be spelled as a BARE identifier -- one whose
+/// first character is not `XID_Start` -- must be quoted in every generated LTM
+/// equation, so the equation parses.
+///
+/// XMILE lets a modeler quote any name, so `"1stock"` is a legal variable and
+/// canonicalizes to `1stock`. The equation lexer, though, only starts an
+/// identifier on `XID_Start`/`_`: bare `1stock` lexes as the number `1`
+/// followed by the identifier `stock`, which is a parse error. `quote_ident`
+/// used to test "every char is alphanumeric or `_`", which a leading digit
+/// satisfies, so the guard form was emitted with a bare `1stock` and the whole
+/// link score failed to parse -- the score silently degraded, and once
+/// `LtmEquation` began parsing each arm eagerly it also tripped an
+/// augmentation-bug `debug_assert` on a VALID model. `quote_ident` now also
+/// consults `ast::needs_quoting`, the leading-character rule the `print_eqn`
+/// path already uses, so the two spellings of one name in a single generated
+/// equation agree.
+///
+/// This asserts the real property -- the generated arm has a parsed AST -- not
+/// merely that the text contains a quote, so it fails for ANY unparseable
+/// generated equation rather than only this spelling.
+#[test]
+fn link_score_quotes_a_canonical_name_that_cannot_be_bare() {
+    let project = TestProject::new("digit_leading_ident")
+        .stock("1stock", "0", &["inflow"], &[], None)
+        .flow("inflow", "\"1stock\" * 0.1", None)
+        .build_datamodel();
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    // The `1stock -> inflow` edge: the guard form spells both endpoints.
+    let link_id = LtmLinkId::new(&db, "1stock".to_string(), "inflow".to_string());
+    let scored = link_score_equation_text_shaped(&db, link_id, RefShape::Bare, model, sync.project);
+    let ShapedLinkScore::Scored(lsv) = scored else {
+        panic!("the 1stock -> inflow link score should be scored, got: {scored:?}");
+    };
+
+    let crate::db::LtmEquation::Scalar(arm) = &lsv.equation else {
+        panic!(
+            "a scalar target's link score should be Scalar, got: {:?}",
+            lsv.name
+        );
+    };
+    assert!(
+        arm.text.contains("\"1stock\""),
+        "a name that cannot be bare must be quoted in the generated text, got: {}",
+        arm.text
+    );
+    assert!(
+        arm.expr.is_some(),
+        "the generated link-score equation must PARSE (an unparseable arm carries no \
+         AST, compiles to no bytecode, and silently zeroes the score); text was: {}",
+        arm.text
+    );
+}
+
+/// An unparseable generated arm degrades LOUDLY and WITHOUT PANICKING, for the
+/// scalar shape AND for an `Arrayed` equation whose OTHER arms parse fine.
+///
+/// This pins the fallback deliberately kept in place of the deleted
+/// `debug_assert!`. Two properties, and the arrayed one is the sharp edge:
+///
+/// - the arm retains its parse errors (so `expr` being `None` is
+///   distinguishable from a legitimately EMPTY arm, which must still drop
+///   silently);
+/// - `to_flow_ast` therefore yields NO ast and surfaces the errors, so
+///   `compile_ltm_equation_fragment` returns `None` -- the condition
+///   `model_ltm_fragment_diagnostics` turns into its "keeps a layout slot but
+///   no bytecode" Warning.
+///
+/// Before this, `LtmArm::new` collapsed a parse failure into a bare
+/// `expr: None` and the `Arrayed` slot map silently dropped it. With siblings
+/// that parsed, the fragment still had bytecode, so the compiler zero-filled
+/// the missing slot and NO diagnostic fired: a silent per-element zero, the
+/// exact defect class the typed-equation work exists to remove. The scalar case
+/// was loud only incidentally -- it had no surviving sibling to keep the
+/// fragment alive.
+///
+/// Constructing the degenerate value is legitimate through the public API:
+/// `LtmArm::new` takes an arbitrary `String`, so there is no "cannot be built"
+/// escape hatch here.
+#[test]
+fn unparseable_generated_arm_degrades_loudly_without_panicking() {
+    use crate::db::{LtmArm, LtmEquation};
+
+    // Unparseable for the same reason the `1stock` bug was: a bare leading
+    // digit lexes as a number followed by an identifier.
+    let bad = "1stock * 0.1";
+
+    // (a) The arm itself: no panic, no AST, errors RETAINED.
+    let arm = LtmArm::new(bad.to_string());
+    assert!(arm.expr.is_none(), "unparseable text must yield no AST");
+    assert!(
+        arm.parse_error.is_some(),
+        "the parse error must be retained -- discarding it is what made the \
+         arrayed case silent"
+    );
+    // An EMPTY arm is the legitimate `expr == None` and must NOT carry errors.
+    let empty = LtmArm::new(String::new());
+    assert!(empty.expr.is_none() && empty.parse_error.is_none());
+
+    let project = TestProject::new("bad_arm_degradation")
+        .named_dimension("Region", &["nyc", "boston"])
+        .array_aux("pop[Region]", "10")
+        .aux("other", "1", None)
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+    let dims = crate::db::project_datamodel_dims(&db, sync.project);
+
+    // (b) Scalar: no ast, errors surfaced, fragment rejected.
+    let scalar = LtmEquation::scalar(bad.to_string());
+    let (ast, errs) = scalar.to_flow_ast(dims);
+    assert!(
+        ast.is_none() && !errs.is_empty(),
+        "scalar must reject loudly"
+    );
+    assert!(
+        compile_ltm_equation_fragment(&db, "$⁚ltm⁚bad⁚scalar", &scalar, model, sync.project)
+            .is_none(),
+        "a rejected equation must not produce a fragment (the diagnostic pass \
+         reports the missing bytecode)"
+    );
+
+    // (c) Arrayed with ONE bad arm and one GOOD sibling -- the case that was
+    // silent. The whole equation must be rejected, not zero-filled.
+    let arrayed = LtmEquation::arrayed(
+        vec!["Region".to_string()],
+        vec![
+            ("nyc".to_string(), bad.to_string()),
+            ("boston".to_string(), "other * 2".to_string()),
+        ],
+        None,
+        false,
+    );
+    let (ast, errs) = arrayed.to_flow_ast(dims);
+    assert!(
+        ast.is_none() && !errs.is_empty(),
+        "one unparseable arm must reject the whole arrayed equation rather than \
+         drop the slot and let the surviving sibling keep the fragment alive"
+    );
+    assert!(
+        compile_ltm_equation_fragment(&db, "$⁚ltm⁚bad⁚arrayed", &arrayed, model, sync.project)
+            .is_none(),
+        "the arrayed fragment must be rejected -- otherwise the missing slot is \
+         zero-filled and no diagnostic fires"
+    );
+
+    // (d) An arrayed equation whose arms ALL parse is unaffected: an empty
+    // default still drops silently and the fragment compiles.
+    let good = LtmEquation::arrayed(
+        vec!["Region".to_string()],
+        vec![
+            ("nyc".to_string(), "other * 2".to_string()),
+            ("boston".to_string(), "other * 3".to_string()),
+        ],
+        Some(String::new()),
+        false,
+    );
+    let (ast, errs) = good.to_flow_ast(dims);
+    assert!(
+        ast.is_some() && errs.is_empty(),
+        "an all-parsing arrayed equation with an EMPTY default must still build"
+    );
+}
+
+/// Reproducible timing harness for per-element LTM generation over a WIDE
+/// dimension -- the shape whose occurrence lookup was quadratic.
+///
+/// `build_arrayed_link_score_equation` wraps each of an `Ast::Arrayed` target's
+/// N element equations separately, and each wrap needs that slot's occurrence
+/// stream. When `OccurrenceLookup::for_slot` rescanned the target's WHOLE
+/// stream per slot, that was Theta(N^2) comparisons plus N temporary vectors.
+///
+/// `#[ignore]`d: this is the measuring instrument, not a gate. Checked in
+/// (rather than the numbers) so the measurement is reproducible -- run with
+/// `cargo test -p simlin-engine --release --lib -- --ignored --nocapture
+/// per_element_generation_scaling`. A timing assertion in the default suite
+/// would be flaky and would risk the 3-minute wall-clock cap; the structural
+/// guarantee is instead pinned by `slot_occurrence_index_groups_every_slot`.
+#[test]
+#[ignore]
+fn per_element_generation_scaling() {
+    use std::time::Instant;
+
+    fn generate_for_width(n: usize) -> std::time::Duration {
+        let elems: Vec<String> = (0..n).map(|i| format!("e{i}")).collect();
+        let elem_refs: Vec<&str> = elems.iter().map(String::as_str).collect();
+        // Each element equation reads its OWN element of the source plus a
+        // shared scalar, so every slot carries several occurrences.
+        let eqns: Vec<(String, String)> = elems
+            .iter()
+            .map(|e| (e.clone(), format!("pop[{e}] * rate * 0.01")))
+            .collect();
+        let eqn_refs: Vec<(&str, &str)> =
+            eqns.iter().map(|(e, q)| (e.as_str(), q.as_str())).collect();
+
+        let project = TestProject::new("wide_per_element")
+            .named_dimension("Wide", &elem_refs)
+            .aux("rate", "1", None)
+            .array_flow_with_ranges("growth[Wide]", eqn_refs)
+            .array_stock("pop[Wide]", "10", &["growth"], &[], None)
+            .build_datamodel();
+
+        let mut db = SimlinDb::default();
+        let (source_project, model) = {
+            let sync = sync_from_datamodel(&db, &project);
+            (sync.project, sync.models["main"].source)
+        };
+        use salsa::Setter;
+        source_project.set_ltm_enabled(&mut db).to(true);
+
+        // Sub-phase timings: which query actually scales quadratically.
+        let t0 = Instant::now();
+        let _sites = crate::db::ltm_ir::model_ltm_reference_sites(&db, model, source_project);
+        let t_sites = t0.elapsed();
+        let t0 = Instant::now();
+        let _edges = crate::db::model_element_causal_edges(&db, model, source_project);
+        let t_edges = t0.elapsed();
+        let t0 = Instant::now();
+        let _circuits = crate::db::model_loop_circuits_tiered(&db, model, source_project);
+        let t_circuits = t0.elapsed();
+
+        let start = Instant::now();
+        let ltm = crate::db::model_ltm_variables(&db, model, source_project);
+        let elapsed = start.elapsed();
+        let n_scores = ltm
+            .vars
+            .iter()
+            .filter(|v| v.name.contains("link_score"))
+            .count();
+        let n_arms: usize = ltm
+            .vars
+            .iter()
+            .map(|v| match &v.equation {
+                crate::db::LtmEquation::Arrayed { elements, .. } => elements.len(),
+                _ => 1,
+            })
+            .sum();
+        println!(
+            "  sub-phases: ref_sites {t_sites:?}, element_edges {t_edges:?}, \
+             tiered_circuits {t_circuits:?}; link_scores {n_scores}, total arms {n_arms}"
+        );
+        // Keep the work observable so nothing is optimized away, and confirm
+        // the fixture actually generated per-element scores.
+        assert!(
+            ltm.vars.iter().any(|v| v.name.contains("link_score")),
+            "fixture must generate link scores"
+        );
+        elapsed
+    }
+
+    for n in [50usize, 100, 200, 400] {
+        let d = generate_for_width(n);
+        println!("width {n:>4}: model_ltm_variables {d:?}");
+    }
 }
 
 /// Build a `StitchPetal<&str>` from `[agg, x1, ..., xm]`.
@@ -748,3 +1026,13 @@ fn collect_agg_petals_groups_single_agg_circuits() {
         assert_eq!(p.nodes[0], agg, "petal rotated to start at the agg");
     }
 }
+
+// The Track A3 stage-2b regression `legacy_and_shaped_bare_score_agree_when_
+// source_bare_in_reducer` was removed here: it pinned that the deleted
+// `(from, to)`-keyed `link_score_equation_text` and `link_score_equation_text_
+// shaped(.., Bare)` derived byte-identical equations. With the legacy query
+// gone, assembly's sub-case (a) reads the shaped query directly, so the two
+// derivations are one -- the divergence the test guarded against is now
+// structurally impossible. The emitted (changed-LAST) text for that probe is
+// still pinned by the `scalar_feeder_bare_in_hoisted_reducer` characterization
+// golden (`db::ltm_char_tests`).

@@ -14,12 +14,12 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::common::{Canonical, Ident};
-use crate::datamodel;
 
 use crate::db::{
-    CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, LtmLinkId,
-    LtmSyntheticVar, RefShape, SourceModel, SourceProject, SourceVariable, SourceVariableKind,
-    project_dimensions_context, reconstruct_single_variable, variable_dimensions,
+    CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, LtmEquation,
+    LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject, SourceVariable,
+    SourceVariableKind, project_dimensions_context, reconstruct_single_variable,
+    variable_dimensions,
 };
 
 use super::compile::{ShapedLinkScore, link_score_equation_text_shaped};
@@ -29,6 +29,57 @@ use super::loops::{
 use super::parse::{
     ltm_equation_dimensions, reconstruct_ltm_var_lowered, retarget_ltm_equation_dims,
 };
+
+/// The occurrence-stream slot each target element maps to when the
+/// ceteris-paribus wrap walks one slot's expression at a time.
+///
+/// `build_arrayed_link_score_equation` wraps each `Ast::Arrayed` slot
+/// separately, so the per-element slots are numbered in canonical
+/// element-key-sorted order (the SiteId slot prefix
+/// [`crate::ltm_augment::OccurrenceLookup::for_slot`] strips) with the default
+/// equation the slot AFTER the last element; a scalar / `ApplyToAll` target is a
+/// single slot `0`. Shared by every per-element link-score emitter
+/// (`try_scalar_to_arrayed_link_scores`, `emit_per_element_link_scores`,
+/// `emit_agg_to_target_link_scores`) so the slot map and `OccurrenceLookup::for_slot`
+/// cannot disagree.
+struct ArrayedSlotMap {
+    /// `None` for a scalar / `ApplyToAll` target (one slot `0`); otherwise the
+    /// canonical-element-key -> slot map plus the default slot (`keys.len()`,
+    /// the slot after the last explicit element).
+    slots: Option<(HashMap<String, u16>, u16)>,
+}
+
+impl ArrayedSlotMap {
+    fn new<E>(ast: &crate::ast::Ast<E>) -> Self {
+        use crate::ast::Ast;
+        let slots = if let Ast::Arrayed(_, per_elem, _, _) = ast {
+            let mut keys: Vec<&crate::common::CanonicalElementName> = per_elem.keys().collect();
+            keys.sort();
+            let map = keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| (k.as_str().to_string(), i as u16))
+                .collect();
+            Some((map, keys.len() as u16))
+        } else {
+            None
+        };
+        ArrayedSlotMap { slots }
+    }
+
+    /// The slot for `element` (raw/unqualified -- the `per_elem` key form): its
+    /// own slot for an explicit `Ast::Arrayed` element, the default slot for an
+    /// unlisted one, or `0` for a scalar / `ApplyToAll` target.
+    fn slot_for(&self, element: &str) -> u16 {
+        match &self.slots {
+            None => 0,
+            Some((map, default_slot)) => {
+                let ce = crate::common::CanonicalElementName::from_raw(element);
+                map.get(ce.as_str()).copied().unwrap_or(*default_slot)
+            }
+        }
+    }
+}
 
 /// Determine the dimensions a link score should carry.
 ///
@@ -582,7 +633,7 @@ pub(super) fn try_cross_dimensional_link_scores(
             };
             cross_vars.push(LtmSyntheticVar {
                 name: var_name,
-                equation: datamodel::Equation::Scalar(equation),
+                equation: LtmEquation::scalar(equation),
                 dimensions: vec![], // scalar -- one variable per read row
                 // bracketed name -> routed direct by `assemble_module`.
                 compile_directly: false,
@@ -708,7 +759,7 @@ pub(super) fn try_cross_dimensional_link_scores(
             );
             cross_vars.push(LtmSyntheticVar {
                 name: var_name,
-                equation: datamodel::Equation::Scalar(equation),
+                equation: LtmEquation::scalar(equation),
                 dimensions: vec![], // scalar -- one variable per element
                 // bracketed name -> routed direct by `assemble_module`'s
                 // element-subscript check; the flag is irrelevant here.
@@ -783,7 +834,7 @@ pub(super) fn try_cross_dimensional_link_scores(
         );
         cross_vars.push(LtmSyntheticVar {
             name: var_name,
-            equation: datamodel::Equation::Scalar(equation),
+            equation: LtmEquation::scalar(equation),
             dimensions: vec![], // scalar -- one variable per (reduced-elem, result-elem)
             // bracketed name -> routed direct by `assemble_module`.
             compile_directly: false,
@@ -912,7 +963,7 @@ fn emit_broadcast_reduce_link_scores(
             );
             cross_vars.push(LtmSyntheticVar {
                 name: var_name,
-                equation: datamodel::Equation::Scalar(equation),
+                equation: LtmEquation::scalar(equation),
                 dimensions: vec![], // scalar -- one variable per (read-row, target-element)
                 // bracketed name -> routed direct by `assemble_module`.
                 compile_directly: false,
@@ -1089,7 +1140,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 };
                 return Some(vec![LtmSyntheticVar {
                     name,
-                    equation: datamodel::Equation::ApplyToAll(equation_dims.clone(), text),
+                    equation: LtmEquation::apply_to_all(equation_dims.clone(), text),
                     dimensions: equation_dims,
                     // The non-empty `dimensions` route this through the A2A
                     // arm of `compile_ltm_synthetic_fragment`, which compiles
@@ -1178,6 +1229,24 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     // GH #910: resolved once for the whole target -- see `WithLookupSlotRefs`.
     let slot_refs = crate::ltm_augment::WithLookupSlotRefs::new(&to_var, target_ast_dims);
 
+    // The target's per-occurrence access-shape IR the ceteris-paribus wrap
+    // consumes (the single classifier family). `from` is a scalar model
+    // `Variable` that can appear bare inside a reducer of `to`'s equation, so
+    // the wrap's GH #517 reducer-freeze arm must see the real stream to recurse
+    // (matching the shaped per-shape path) instead of freezing the reducer whole
+    // -- an empty stream silently zeroed such a score.
+    let ref_sites = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
+    let to_occurrences: &[crate::db::ltm_ir::OccurrenceSite] = ref_sites
+        .occurrences
+        .get(to)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let slot_map = ArrayedSlotMap::new(ast);
+    // Group the target's occurrences by slot ONCE (see `SlotOccurrences`):
+    // the per-element loops below index it per slot instead of rescanning
+    // the whole stream, which was quadratic in the element count.
+    let slot_occurrences = crate::ltm_augment::SlotOccurrences::new(to_occurrences);
+
     // Build one `LtmSyntheticVar` for `element` from its equation text and
     // that text's dependency set. The element name is the only part of the
     // generated equation/name that varies between elements.
@@ -1218,6 +1287,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             // as `apply_implicit_with_lookup` leaves its value unwrapped.
             let gf_table_ref =
                 slot_refs.for_element(&crate::common::CanonicalElementName::from_raw(element));
+            let occ = slot_occurrences.for_slot(slot_map.slot_for(element));
             match crate::ltm_augment::generate_scalar_to_element_equation(
                 from,
                 to,
@@ -1225,6 +1295,10 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 // LoadPrev, no helper auxes); the NAME below keeps the bare form.
                 &crate::ltm_augment::qualify_element_csv(element, &to_dims),
                 elem_text,
+                // A true scalar source has no hoisted reducers, so the wrap
+                // holds `from` live as an ident and the post-transform
+                // substitution is a no-op.
+                &std::collections::HashMap::new(),
                 elem_deps,
                 deps_to_sub,
                 // A true scalar source: the bare `quote_ident(from)`
@@ -1234,6 +1308,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 &[],
                 Some(project_dimensions_context(db, project)),
                 gf_table_ref.as_deref(),
+                &occ,
             ) {
                 Ok(eqn) => eqn,
                 Err(err) => {
@@ -1244,7 +1319,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         };
         Some(LtmSyntheticVar {
             name,
-            equation: datamodel::Equation::Scalar(equation),
+            equation: LtmEquation::scalar(equation),
             dimensions: vec![], // scalar -- one variable per target element
             // bracketed name -> routed direct by `assemble_module`.
             compile_directly: false,
@@ -2208,8 +2283,9 @@ pub(super) fn emit_per_shape_link_scores(
                 // behavior where such edges produced a scalar link score.
                 lsv.equation = retarget_ltm_equation_dims(lsv.equation, &target_dims);
                 // A non-`Bare` shape carries a partial that the (from, to)-
-                // keyed salsa compilation path (`link_score_equation_text`,
-                // always `RefShape::Bare`) cannot reproduce: a
+                // keyed salsa compilation path (`compile_ltm_var_fragment` ->
+                // `link_score_equation_text_shaped(.., Bare)`) cannot
+                // reproduce: a
                 // `Wildcard`/`DynamicIndex` reference into a scalar target
                 // would have its whole subscript wrapped in `PREVIOUS()` and
                 // the ceteris-paribus numerator zeroed. Force `assemble_module`
@@ -2319,6 +2395,20 @@ fn emit_per_element_link_scores(
     // GH #910: resolved once for the whole target -- see `WithLookupSlotRefs`.
     let slot_refs = crate::ltm_augment::WithLookupSlotRefs::new(&to_var, target_ast_dims);
     let dim_ctx = project_dimensions_context(db, project);
+
+    // The target's per-occurrence access-shape IR the ceteris-paribus wrap
+    // consumes (the single classifier family).
+    let ref_sites = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
+    let to_occurrences: &[crate::db::ltm_ir::OccurrenceSite] = ref_sites
+        .occurrences
+        .get(to)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let slot_map = ArrayedSlotMap::new(ast);
+    // Group the target's occurrences by slot ONCE (see `SlotOccurrences`):
+    // the per-element loops below index it per slot instead of rescanning
+    // the whole stream, which was quadratic in the element count.
+    let slot_occurrences = crate::ltm_augment::SlotOccurrences::new(to_occurrences);
 
     // Arrayed deps sharing a target dim get element-pinned in the scalar
     // per-element equation (mirroring `try_scalar_to_arrayed_link_scores`);
@@ -2454,6 +2544,7 @@ fn emit_per_element_link_scores(
             if !emitted.insert(name.clone()) {
                 continue;
             }
+            let occ = slot_occurrences.for_slot(slot_map.slot_for(element));
             match crate::ltm_augment::generate_per_element_link_equation(
                 from,
                 to,
@@ -2468,10 +2559,11 @@ fn emit_per_element_link_scores(
                 &target_iterated_dims,
                 dim_ctx,
                 gf_table_ref.as_deref(),
+                &occ,
             ) {
                 Ok(equation) => edge_vars.push(LtmSyntheticVar {
                     name,
-                    equation: datamodel::Equation::Scalar(equation),
+                    equation: LtmEquation::scalar(equation),
                     dimensions: vec![], // scalar -- one variable per (row, element)
                     // bracketed name -> routed direct by `assemble_module`.
                     compile_directly: false,
@@ -2610,7 +2702,7 @@ fn iterated_feeder_row_scores(
         ) {
             Ok(equation) => vars.push(LtmSyntheticVar {
                 name,
-                equation: datamodel::Equation::Scalar(equation),
+                equation: LtmEquation::scalar(equation),
                 dimensions: vec![], // scalar -- one variable per read row
                 // bracketed name -> routed direct by `assemble_module`.
                 compile_directly: false,
@@ -2698,14 +2790,14 @@ pub(super) fn emit_source_to_agg_link_scores(
         ) {
             Ok(text) => {
                 let equation = if agg.result_dims.is_empty() {
-                    datamodel::Equation::Scalar(text)
+                    LtmEquation::scalar(text)
                 } else {
                     // An arrayed agg's feeder score is per-slot: the agg's own
                     // equation text is already ApplyToAll-compatible over
                     // `result_dims` (it is the agg aux's own equation shape),
                     // and the bare agg/feeder references resolve same-element
                     // / broadcast respectively in A2A context.
-                    datamodel::Equation::ApplyToAll(agg.result_dims.clone(), text)
+                    LtmEquation::apply_to_all(agg.result_dims.clone(), text)
                 };
                 vars.push(LtmSyntheticVar {
                     name,
@@ -2765,9 +2857,9 @@ pub(super) fn emit_source_to_agg_link_scores(
     // would be emitted (silently zeroing the synthetic agg's loop score).
     // Mirrors the agg-aux emission above.
     let agg_eqn = if agg.result_dims.is_empty() {
-        datamodel::Equation::Scalar(agg.equation_text.clone())
+        LtmEquation::scalar(agg.equation_text.clone())
     } else {
-        datamodel::Equation::ApplyToAll(agg.result_dims.clone(), agg.equation_text.clone())
+        LtmEquation::apply_to_all(agg.result_dims.clone(), agg.equation_text.clone())
     };
     let Some(agg_var) = reconstruct_ltm_var_lowered(db, &agg.name, &agg_eqn, model, project) else {
         return;
@@ -2927,7 +3019,7 @@ pub(super) fn emit_source_to_agg_link_scores(
                 };
                 vars.push(LtmSyntheticVar {
                     name: var_name,
-                    equation: datamodel::Equation::Scalar(equation),
+                    equation: LtmEquation::scalar(equation),
                     dimensions: vec![],
                     compile_directly: false,
                 });
@@ -3009,7 +3101,7 @@ pub(super) fn emit_source_to_agg_link_scores(
         };
         vars.push(LtmSyntheticVar {
             name: var_name,
-            equation: datamodel::Equation::Scalar(equation),
+            equation: LtmEquation::scalar(equation),
             dimensions: vec![],
             // bracketed name (+ subscripted synthetic agg) -> routed direct.
             compile_directly: false,
@@ -3082,6 +3174,28 @@ pub(super) fn emit_agg_to_target_link_scores(
         Ast::Scalar(_) => &[],
         Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => dims,
     };
+    // The target slot's occurrence stream the ceteris-paribus wrap consumes --
+    // the SAME single classifier family every other emitter threads. The live
+    // source here is the synthetic agg (`$⁚ltm⁚agg⁚n`), which is never a recorded
+    // occurrence (it is held live by `reducer_subst` text-matching, and during
+    // the wrap the reducer that became it is still spelled `SUM(...)`), so the
+    // wrap's `subtree_has_live_shape`/`get` for the agg never hit and the stream
+    // is behavior-neutral for it -- exactly why the retired `OccurrenceLookup::empty()`
+    // was byte-equivalent here. Threading the real stream instead removes the
+    // empty-stream constructor (and the "my source is never in a reducer" footgun
+    // that mis-fired at the three scalar/module sites) rather than paying it with
+    // a parallel code path.
+    let ref_sites = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
+    let to_occurrences: &[crate::db::ltm_ir::OccurrenceSite] = ref_sites
+        .occurrences
+        .get(to)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let slot_map = ArrayedSlotMap::new(ast);
+    // Group the target's occurrences by slot ONCE (see `SlotOccurrences`):
+    // the per-element loops below index it per slot instead of rescanning
+    // the whole stream, which was quadratic in the element count.
+    let slot_occurrences = crate::ltm_augment::SlotOccurrences::new(to_occurrences);
     // GH #910: when `to` is an implicit WITH-LOOKUP variable, the per-element
     // partials below are full re-evaluations of its RAW element equation (with
     // the reducer substituted by the agg name), while the guard form ratios them
@@ -3316,19 +3430,12 @@ pub(super) fn emit_agg_to_target_link_scores(
             .collect()
     };
 
-    // Helper: substitute the reducers in a slot expr's canonical text, to
-    // build the agg→target link-score equation for one target element (or the
-    // scalar case when `element` is `None`). Propagates a `PartialEquationError`
-    // when the reducer substitution can't parse its input -- the caller skips
-    // the variable and warns rather than emitting a partial that keeps the
-    // inline reducer live instead of the hoisted agg node (GH #661).
-    let slot_text =
-        |expr: &crate::ast::Expr2| -> Result<String, crate::ltm_augment::PartialEquationError> {
-            crate::ltm_augment::substitute_reducers_in_equation(
-                &crate::patch::expr2_to_string(expr),
-                &reducer_subst,
-            )
-        };
+    // Track A stage 1: reducer -> agg-name substitution is now a POST-transform
+    // lowering INSIDE the generators (`generate_agg_to_scalar_target_equation` /
+    // `generate_scalar_to_element_equation`), which run the wrap on `to`'s OWN
+    // equation and then substitute. Each branch therefore threads the
+    // un-substituted slot text + `reducer_subst` rather than pre-substituting
+    // here (the old caller-side `slot_text` helper).
 
     match ast {
         Ast::Scalar(expr) => {
@@ -3340,28 +3447,29 @@ pub(super) fn emit_agg_to_target_link_scores(
                 "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
                 agg.name, to
             );
-            let substituted = match slot_text(expr) {
-                Ok(substituted) => substituted,
-                Err(err) => {
-                    if unscoreable_edges.insert((agg.name.clone(), to.to_string())) {
-                        emit_ltm_partial_equation_warning(db, model, &name, &err);
-                    }
-                    return;
-                }
-            };
+            // Track A stage 1: the generator now runs the wrap on `to`'s OWN
+            // equation and substitutes the reducers -> agg names AFTER the wrap,
+            // so we pass the un-substituted text + `reducer_subst` (the prior
+            // caller-side `slot_text`/`substitute_reducers_in_equation` step and
+            // its parse-failure handling move inside the generator's `Err`).
             match crate::ltm_augment::generate_agg_to_scalar_target_equation(
                 &agg.name,
                 to,
-                &substituted,
+                &crate::patch::expr2_to_string(expr),
+                &reducer_subst,
                 &all_deps,
                 Some(project_dimensions_context(db, project)),
                 // GH #910: a scalar with-lookup target's single table,
                 // referenced by bare ident.
                 crate::ltm_augment::with_lookup_table_ref(&to_var).as_deref(),
+                // Agg source: the live thing is the synthetic agg, never a
+                // recorded occurrence, so the real stream is behavior-neutral
+                // (the wrap's agg lookups all miss). A scalar target is slot 0.
+                &slot_occurrences.for_slot(0),
             ) {
                 Ok(equation) => vars.push(LtmSyntheticVar {
                     name,
-                    equation: datamodel::Equation::Scalar(equation),
+                    equation: LtmEquation::scalar(equation),
                     dimensions: vec![],
                     // synthetic agg on the `from` side -> routed direct already.
                     compile_directly: false,
@@ -3374,24 +3482,14 @@ pub(super) fn emit_agg_to_target_link_scores(
             }
         }
         Ast::ApplyToAll(_, expr) => {
-            // One shared body; emit one per-target-element scalar var. A
-            // substitution parse failure here fails the whole edge (the body
-            // is shared across every element), so warn once on the base
-            // `agg → to` name and skip rather than emit a partial that keeps
-            // the inline reducer live (GH #661).
-            let substituted = match slot_text(expr) {
-                Ok(substituted) => substituted,
-                Err(err) => {
-                    let name = format!(
-                        "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
-                        agg.name, to
-                    );
-                    if unscoreable_edges.insert((agg.name.clone(), to.to_string())) {
-                        emit_ltm_partial_equation_warning(db, model, &name, &err);
-                    }
-                    return;
-                }
-            };
+            // One shared body; emit one per-target-element scalar var. Track A
+            // stage 1: the generator runs the wrap on this OWN A2A body and
+            // substitutes reducers -> agg names AFTER the wrap, so we thread the
+            // un-substituted text + `reducer_subst`. An own-text parse failure
+            // (unreachable -- the text is a `print_eqn` of a compiled AST) then
+            // surfaces on the first element's generator `Err` and dooms the edge
+            // once, via the same GH #661 warning path the per-element loop uses.
+            let to_own_text = crate::patch::expr2_to_string(expr);
             if to_dims.is_empty() {
                 return;
             }
@@ -3401,8 +3499,9 @@ pub(super) fn emit_agg_to_target_link_scores(
                 .collect();
             let mut edge_vars: Vec<LtmSyntheticVar> = Vec::new();
             for element in &cartesian_subscripts(&dim_element_lists) {
-                // The partial is built around the *bare* agg names (which is
-                // what `substituted` holds); `source_pins_for_target` then
+                // The partial is built around the *bare* agg names (what the
+                // generator's post-transform `reducer_subst` lowering yields);
+                // `source_pins_for_target` then
                 // pins each arrayed agg -- the live one AND any frozen
                 // co-agg -- to its projected `agg[<slot>]`, matching
                 // `agg_name_for_target` for the live agg (the full element
@@ -3421,17 +3520,22 @@ pub(super) fn emit_agg_to_target_link_scores(
                     to,
                     // Qualified for equation text; the name keeps the bare form.
                     &crate::ltm_augment::qualify_element_csv(element, &to_dims),
-                    &substituted,
+                    &to_own_text,
+                    &reducer_subst,
                     &all_deps,
                     &deps_to_subscript,
                     Some(&agg_source_ref_for_target(element)),
                     &source_pins_for_target(element),
                     Some(project_dimensions_context(db, project)),
                     elem_gf_ref(element).as_deref(),
+                    // Agg source: the live thing is the synthetic agg, never a
+                    // recorded occurrence, so the real stream is behavior-neutral
+                    // (the wrap's agg lookups all miss). A2A body is slot 0.
+                    &slot_occurrences.for_slot(slot_map.slot_for(element)),
                 ) {
                     Ok(equation) => edge_vars.push(LtmSyntheticVar {
                         name,
-                        equation: datamodel::Equation::Scalar(equation),
+                        equation: LtmEquation::scalar(equation),
                         dimensions: vec![],
                         // synthetic agg on `from` + bracketed `to` -> routed direct.
                         compile_directly: false,
@@ -3466,16 +3570,20 @@ pub(super) fn emit_agg_to_target_link_scores(
                 // iff there is no slot expression.
                 let equation = match per_elem.get(&canonical_elem).or(default_expr.as_ref()) {
                     None => Ok("0".to_string()),
-                    // A substitution parse failure rides the same `Result` the
-                    // equation builder returns, so the `match equation` below
-                    // converts it into the per-element `Warning` + skip (GH
-                    // #661) -- no separate error handling needed here.
-                    Some(slot_expr) => slot_text(slot_expr).and_then(|substituted| {
+                    // Track A stage 1: the generator runs the wrap on this OWN
+                    // slot text and substitutes the reducers -> agg names AFTER
+                    // the wrap, so we thread the un-substituted slot text +
+                    // `reducer_subst`. An own-text parse failure rides the same
+                    // `Result` the equation builder returns, so the `match
+                    // equation` below converts it into the per-element `Warning`
+                    // + skip (GH #661) -- no separate error handling needed here.
+                    Some(slot_expr) => {
                         // Re-derive per-slot deps (the union over all slots
                         // would over-freeze refs absent from this slot),
                         // then extend with this agg's name and every other
-                        // agg referenced in the (substituted) slot text so
-                        // they are all PREVIOUS-wrapped (ceteris paribus).
+                        // agg name so they are all PREVIOUS-wrapped (ceteris
+                        // paribus); the reducer-source vars are already in the
+                        // own-slot deps.
                         let mut slot_deps = crate::variable::classify_dependencies(
                             &Ast::Scalar(slot_expr.clone()),
                             target_ast_dims,
@@ -3491,15 +3599,20 @@ pub(super) fn emit_agg_to_target_link_scores(
                             to,
                             // Qualified for equation text; the name keeps the bare form.
                             &crate::ltm_augment::qualify_element_csv(element, &to_dims),
-                            &substituted,
+                            &crate::patch::expr2_to_string(slot_expr),
+                            &reducer_subst,
                             &slot_deps,
                             &deps_to_subscript,
                             Some(&agg_source_ref_for_target(element)),
                             &source_pins_for_target(element),
                             Some(project_dimensions_context(db, project)),
                             elem_gf_ref(element).as_deref(),
+                            // Agg source: the live thing is the synthetic agg,
+                            // never a recorded occurrence, so the real stream is
+                            // behavior-neutral (the wrap's agg lookups all miss).
+                            &slot_occurrences.for_slot(slot_map.slot_for(element)),
                         )
-                    }),
+                    }
                 };
                 let name = format!(
                     "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
@@ -3510,7 +3623,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                 match equation {
                     Ok(equation) => edge_vars.push(LtmSyntheticVar {
                         name,
-                        equation: datamodel::Equation::Scalar(equation),
+                        equation: LtmEquation::scalar(equation),
                         dimensions: vec![],
                         // synthetic agg on `from` + bracketed `to` -> routed direct.
                         compile_directly: false,

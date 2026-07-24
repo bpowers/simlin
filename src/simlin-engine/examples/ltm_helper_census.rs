@@ -20,7 +20,8 @@ use std::collections::BTreeMap;
 
 use salsa::Setter;
 use simlin_engine::db::{
-    SimlinDb, model_ltm_implicit_var_info, model_ltm_variables, sync_from_datamodel_incremental,
+    LtmEquation, SimlinDb, model_ltm_implicit_var_info, model_ltm_variables,
+    sync_from_datamodel_incremental,
 };
 use simlin_engine::{canonicalize, open_vensim, open_xmile};
 
@@ -144,10 +145,10 @@ fn main() {
     let mut total_sites = 0usize;
     for v in &ltm_vars.vars {
         let texts: Vec<&str> = match &v.equation {
-            simlin_engine::datamodel::Equation::Scalar(t) => vec![t.as_str()],
-            simlin_engine::datamodel::Equation::ApplyToAll(_, t) => vec![t.as_str()],
-            simlin_engine::datamodel::Equation::Arrayed(_, elems, _, _) => {
-                elems.iter().map(|(_, t, _, _)| t.as_str()).collect()
+            LtmEquation::Scalar(arm) => vec![arm.text.as_str()],
+            LtmEquation::ApplyToAll(_, arm) => vec![arm.text.as_str()],
+            LtmEquation::Arrayed { elements, .. } => {
+                elements.iter().map(|(_, arm)| arm.text.as_str()).collect()
             }
         };
         for text in texts {
@@ -175,14 +176,11 @@ fn main() {
         let mut shown = 0;
         for v in &ltm_vars.vars {
             let (variant, texts): (&str, Vec<&str>) = match &v.equation {
-                simlin_engine::datamodel::Equation::Scalar(t) => ("Scalar", vec![t.as_str()]),
-                simlin_engine::datamodel::Equation::ApplyToAll(d, t) => {
-                    let _ = d;
-                    ("ApplyToAll", vec![t.as_str()])
-                }
-                simlin_engine::datamodel::Equation::Arrayed(_, elems, _, _) => (
+                LtmEquation::Scalar(arm) => ("Scalar", vec![arm.text.as_str()]),
+                LtmEquation::ApplyToAll(_, arm) => ("ApplyToAll", vec![arm.text.as_str()]),
+                LtmEquation::Arrayed { elements, .. } => (
                     "Arrayed",
-                    elems.iter().map(|(_, t, _, _)| t.as_str()).collect(),
+                    elements.iter().map(|(_, arm)| arm.text.as_str()).collect(),
                 ),
             };
             for text in &texts {

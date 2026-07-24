@@ -23,16 +23,15 @@ use crate::db::{
     Db, LtmLinkId, LtmSyntheticVar, ModelDepGraphResult, ModuleInputSet, RefShape, SourceModel,
     SourceProject, SourceVariableKind, VarFragmentResult, build_module_inputs, build_stub_variable,
     build_submodel_metadata, canonical_module_input_set, compute_layout,
-    extract_tables_from_source_var, link_score_equation_text, model_dependency_graph,
-    model_implicit_var_info, model_module_ident_context, model_module_map,
-    parse_source_variable_with_module_context, project_converted_dimensions,
-    project_datamodel_dims, project_dimensions_context, project_units_context,
-    reconstruct_single_variable, variable_dimensions, variable_size,
+    extract_tables_from_source_var, model_dependency_graph, model_implicit_var_info,
+    model_module_ident_context, model_module_map, parse_source_variable_with_module_context,
+    project_converted_dimensions, project_datamodel_dims, project_dimensions_context,
+    project_units_context, reconstruct_single_variable, variable_dimensions, variable_size,
 };
 
-use super::parse::{ltm_equation_dimensions, parse_ltm_equation};
+use super::parse::{ltm_equation_dimensions, parse_ltm_equation, scalarize_ltm_equation};
 use super::{
-    LtmImplicitVarMeta, ltm_module_idents, model_ltm_implicit_module_refs,
+    LtmEquation, LtmImplicitVarMeta, ltm_module_idents, model_ltm_implicit_module_refs,
     model_ltm_implicit_var_info, model_ltm_var_name_index, model_ltm_variables,
 };
 
@@ -53,6 +52,33 @@ use super::{
 /// Parsed LTM equations may synthesize helper auxes for PREVIOUS/INIT
 /// and may also expand stdlib module calls, so those implicit vars need
 /// to be handled the same way as in `compile_var_fragment`.
+///
+/// The equation is sourced from the per-shape query
+/// [`link_score_equation_text_shaped`] with the `Bare` shape -- the SAME query
+/// `model_ltm_variables` emits and reports the standard scalar Bare score from
+/// -- so the compiled fragment and the reported/serialized equation are
+/// single-sourced and cannot drift. (The former `(from, to)`-keyed
+/// `link_score_equation_text` query was a second derivation of the same score;
+/// it passed an empty dims context and `dim_ctx=None`, which the prior stage
+/// had to re-align occurrence-stream-by-occurrence-stream to keep byte-identical
+/// -- routing through the shaped twin retires that parallel derivation
+/// entirely.) This fragment stays keyed by `(from, to)` for per-link
+/// incrementality; the shaped query is keyed by `(from, to, Bare)`, so an edit
+/// to an unrelated edge backdates both and this fragment's bytecode is reused.
+///
+/// The shaped query returns the equation shaped to the TARGET (an `ApplyToAll`
+/// for a Bare read into an arrayed A2A target), but this `(from, to)`-keyed
+/// fragment is consumed ONLY by `compile_ltm_synthetic_fragment`'s sub-case (a)
+/// -- the dims-empty SCALAR Bare score, which the emission loop reports as
+/// `retarget_ltm_equation_dims(shaped_raw, [])` and lays out with one slot.
+/// `scalarize_ltm_equation` here is exactly that retarget for the empty-dims
+/// case (identical for `Scalar`/`ApplyToAll`/`Arrayed` inputs) and a no-op for a
+/// scalar target, so the compiled fragment stays byte-identical to the reported
+/// equation. Without it, a scalar feeder read bare beside a hoisted reducer in
+/// an arrayed target (`share[D1] = SUM(arr[*] * scale) + scale`) would compile
+/// the raw `ApplyToAll` -- writing element offsets past the 1-slot layout -- and
+/// abort the whole model with `NotSimulatable`, while the reported score stayed
+/// scalar (the compiled-vs-reported drift this single-sourcing exists to kill).
 #[salsa::tracked(returns(ref))]
 pub fn compile_ltm_var_fragment(
     db: &dyn Db,
@@ -60,9 +86,14 @@ pub fn compile_ltm_var_fragment(
     model: SourceModel,
     project: SourceProject,
 ) -> Option<VarFragmentResult> {
-    let lsv = link_score_equation_text(db, link_id, model, project).as_ref()?;
+    let ShapedLinkScore::Scored(lsv) =
+        link_score_equation_text_shaped(db, link_id, RefShape::Bare, model, project)
+    else {
+        return None;
+    };
 
-    compile_ltm_equation_fragment(db, &lsv.name, &lsv.equation, model, project)
+    let equation = scalarize_ltm_equation(lsv.equation.clone());
+    compile_ltm_equation_fragment(db, &lsv.name, &equation, model, project)
 }
 
 /// Outcome of [`link_score_equation_text_shaped`] for one
@@ -111,19 +142,24 @@ pub enum ShapedLinkScore {
 
 /// Compute the per-shape link score equation text for a single causal link.
 ///
-/// Sibling of [`crate::db::link_score_equation_text`]. Where the legacy
-/// function keys only on `(from, to)` and emits one variable per causal
-/// link, this shape-aware variant emits one variable per
-/// `(from, to, shape)` tuple. `model_ltm_variables` calls this once per
-/// unique shape in the target's AST so per-shape link scores can be
-/// ceteris-paribus scored against their actual reference site.
+/// This is the sole derivation of a link score's equation text. Keyed on
+/// `(from, to, shape)`, it emits one variable per unique shape in the
+/// target's AST so per-shape link scores can be ceteris-paribus scored
+/// against their actual reference site. `model_ltm_variables` calls it once
+/// per unique shape, and the standard scalar `Bare` score's fragment
+/// compiler ([`compile_ltm_var_fragment`]) reads the SAME `(from, to, Bare)`
+/// result -- so the compiled fragment and the reported/serialized equation
+/// are single-sourced and cannot drift. (A former `(from, to)`-keyed
+/// `link_score_equation_text` query was a second derivation of the same
+/// score; it was deleted in favour of routing every consumer through this
+/// query.)
 ///
 /// Returns a [`ShapedLinkScore`] (NOT a bare `Option`) so the emission loop
 /// can distinguish a `PartialEquationError`-driven unscoreable skip from a
 /// benign missing variable -- see that type's docs and GH #780.
 ///
-/// Module-involved links delegate to the same module formulas as the
-/// legacy function (composite reference / black-box delta-ratio). Their
+/// Module-involved links delegate to `module_link_score_equation` for the
+/// module formulas (composite reference / black-box delta-ratio). Their
 /// equations are independent of `shape`, but the variable name still
 /// carries the suffix so the emission loop can keep one entry per
 /// (from, to, shape) tuple in the `Vec<LtmSyntheticVar>`.
@@ -170,10 +206,10 @@ pub fn link_score_equation_text_shaped<'db>(
     // Module-involved links: shape doesn't change the equation (modules
     // are scalar nodes in the causal graph; the composite-reference /
     // ceteris-paribus / unit-transfer formulas don't reach into the AST).
-    // Delegate to the shared helper so this twin and the (from, to)-keyed
-    // `link_score_equation_text` stay byte-identical; key the synthetic
-    // variable by the shape-driven name so the emission loop's per-shape
-    // map works. A `None` here (a passthrough module with no composite or
+    // Delegate to the shared `module_link_score_equation` helper, and key
+    // the synthetic variable by the shape-driven name so the emission
+    // loop's per-shape map works. A `None` here (a passthrough module with
+    // no composite or
     // output port to score -- see `module_link_score_equation`) is a benign
     // structural skip, NOT an unscoreable edge.
     if from_is_module || to_is_module {
@@ -300,6 +336,17 @@ pub fn link_score_equation_text_shaped<'db>(
     // would compile cleanly, so `model_ltm_fragment_diagnostics` would not
     // catch it, and degrading dependent loops to warned constant-0 stubs
     // would look like legitimate values.
+    // The target's per-occurrence access-shape IR (the single classifier
+    // family the ceteris-paribus wrap consumes). Empty for a target with no
+    // recorded occurrences (a structural edge); the wrap then makes no
+    // shape-driven decision.
+    let ref_sites = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
+    let to_occurrences: &[crate::db::ltm_ir::OccurrenceSite] = ref_sites
+        .occurrences
+        .get(to_name)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
     let equation = match crate::ltm_augment::generate_link_score_equation_for_link(
         &from_ident,
         &to_ident,
@@ -309,6 +356,7 @@ pub fn link_score_equation_text_shaped<'db>(
         &all_vars,
         Some(dim_ctx),
         Some(&dep_dims),
+        to_occurrences,
     ) {
         Ok(eqn) => eqn,
         Err(err) => {
@@ -756,7 +804,7 @@ fn lower_ltm_variable(
 pub(crate) fn compile_ltm_equation_fragment(
     db: &dyn Db,
     var_name: &str,
-    equation: &datamodel::Equation,
+    equation: &LtmEquation,
     model: SourceModel,
     project: SourceProject,
 ) -> Option<VarFragmentResult> {
@@ -764,14 +812,13 @@ pub(crate) fn compile_ltm_equation_fragment(
         CompiledVarFragment, PerVarBytecodes, ReverseOffsetMap, VariableLayout,
     };
 
-    // Project-global dims (datamodel form needed by `parse_ltm_equation`) plus
-    // the canonicalized context + converted dims, all from the salsa-cached
-    // queries rather than rebuilt per LTM fragment.
+    // Project-global dims (datamodel form, used to resolve the equation's
+    // dimension names) plus the canonicalized context + converted dims, all
+    // from the salsa-cached queries rather than rebuilt per LTM fragment.
     let dims = project_datamodel_dims(db, project);
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
-    let units_ctx = project_units_context(db, project);
     let module_idents = ltm_module_idents(db, model, project);
     let model_var_names = super::ltm_model_var_names(db, model, project);
 
@@ -781,7 +828,6 @@ pub(crate) fn compile_ltm_equation_fragment(
         var_name,
         equation,
         dims,
-        units_ctx,
         Some(module_idents),
         Some(model_var_names),
     );
@@ -1628,8 +1674,9 @@ pub(crate) fn compile_ltm_equation_fragment(
 /// Most synthetic equations are compiled verbatim from `ltm_var.equation`
 /// (`compile_direct`); the one exception is the standard scalar Bare
 /// `from→to` link score, which routes through the salsa-cached
-/// `(from, to)`-keyed `compile_ltm_var_fragment` so an equation edit that
-/// does not change the dependency set reuses the cached fragment.
+/// `(from, to)`-keyed `compile_ltm_var_fragment` (itself sourced from the
+/// per-shape `link_score_equation_text_shaped(.., Bare)` query) so an equation
+/// edit that does not change the dependency set reuses the cached fragment.
 ///
 /// Returns `None` -- or a `VarFragmentResult` whose `flow_bytecodes` is
 /// `None` -- when the synthetic equation fails to parse or compile.
@@ -1663,8 +1710,8 @@ pub(crate) fn compile_ltm_synthetic_fragment(
     // Used for everything except the standard scalar Bare `from→to`
     // link score, which goes through the salsa-cached
     // `compile_ltm_var_fragment` path below: that path re-derives the
-    // equation from `link_score_equation_text` (always scalar, Bare;
-    // per-shape dimensions, element subscripts and reducer
+    // equation from `link_score_equation_text_shaped(.., Bare)` (always scalar,
+    // Bare; per-shape dimensions, element subscripts and reducer
     // substitutions are applied later in `model_ltm_variables`), so
     // for anything that carries those it would produce the wrong (or
     // a degenerate) fragment.

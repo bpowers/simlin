@@ -1,0 +1,4 @@
+$⁚ltm⁚link_score⁚$⁚ltm⁚agg⁚0→outflow[boston]
+scalar: if (TIME = INITIAL_TIME) then 0 else if ((outflow[region·boston] - PREVIOUS(outflow[region·boston])) = 0) OR (("$⁚ltm⁚agg⁚0" - PREVIOUS("$⁚ltm⁚agg⁚0")) = 0) then 0 else SAFEDIV((("$⁚ltm⁚agg⁚0" * previous(frac[region·boston])) - PREVIOUS(outflow[region·boston])), ABS((outflow[region·boston] - PREVIOUS(outflow[region·boston]))), 0) * SIGN(("$⁚ltm⁚agg⁚0" - PREVIOUS("$⁚ltm⁚agg⁚0")))
+$⁚ltm⁚link_score⁚$⁚ltm⁚agg⁚0→outflow[nyc]
+scalar: if (TIME = INITIAL_TIME) then 0 else if ((outflow[region·nyc] - PREVIOUS(outflow[region·nyc])) = 0) OR (("$⁚ltm⁚agg⁚0" - PREVIOUS("$⁚ltm⁚agg⁚0")) = 0) then 0 else SAFEDIV((("$⁚ltm⁚agg⁚0" * previous(frac[region·nyc])) - PREVIOUS(outflow[region·nyc])), ABS((outflow[region·nyc] - PREVIOUS(outflow[region·nyc]))), 0) * SIGN(("$⁚ltm⁚agg⁚0" - PREVIOUS("$⁚ltm⁚agg⁚0")))

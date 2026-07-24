@@ -1,0 +1,4 @@
+$⁚ltm⁚link_score⁚1pop[boston,young]→growth[boston]
+scalar: if (TIME = INITIAL_TIME) then 0 else if ((growth[region·boston] - PREVIOUS(growth[region·boston])) = 0) OR (("1pop"[region·boston,age·young] - PREVIOUS("1pop"[region·boston,age·young])) = 0) then 0 else SAFEDIV((("1pop"[boston, young] * 0.1) - PREVIOUS(growth[region·boston])), ABS((growth[region·boston] - PREVIOUS(growth[region·boston]))), 0) * SIGN(("1pop"[region·boston,age·young] - PREVIOUS("1pop"[region·boston,age·young])))
+$⁚ltm⁚link_score⁚1pop[nyc,young]→growth[nyc]
+scalar: if (TIME = INITIAL_TIME) then 0 else if ((growth[region·nyc] - PREVIOUS(growth[region·nyc])) = 0) OR (("1pop"[region·nyc,age·young] - PREVIOUS("1pop"[region·nyc,age·young])) = 0) then 0 else SAFEDIV((("1pop"[nyc, young] * 0.1) - PREVIOUS(growth[region·nyc])), ABS((growth[region·nyc] - PREVIOUS(growth[region·nyc]))), 0) * SIGN(("1pop"[region·nyc,age·young] - PREVIOUS("1pop"[region·nyc,age·young])))

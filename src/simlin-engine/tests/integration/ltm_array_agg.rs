@@ -64,8 +64,8 @@
 
 use simlin_engine::datamodel::{self, Dimension};
 use simlin_engine::db::{
-    DetectedLoopPolarity, DiagnosticError, DiagnosticSeverity, LtmSyntheticVar, SimlinDb,
-    collect_all_diagnostics, compile_project_incremental, model_detected_loops,
+    DetectedLoopPolarity, DiagnosticError, DiagnosticSeverity, LtmEquation, LtmSyntheticVar,
+    SimlinDb, collect_all_diagnostics, compile_project_incremental, model_detected_loops,
     model_element_causal_edges, model_ltm_variables, reclassify_loops_from_results,
     set_project_ltm_discovery_mode, set_project_ltm_enabled, sync_from_datamodel_incremental,
 };
@@ -5339,9 +5339,9 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
     // link-score names their loop-score equations reference.
     fn eqn_text(v: &LtmSyntheticVar) -> &str {
         match &v.equation {
-            datamodel::Equation::Scalar(t) => t,
-            datamodel::Equation::ApplyToAll(_, t) => t,
-            datamodel::Equation::Arrayed(..) => panic!("unexpected Arrayed loop score"),
+            LtmEquation::Scalar(arm) => &arm.text,
+            LtmEquation::ApplyToAll(_, arm) => &arm.text,
+            LtmEquation::Arrayed { .. } => panic!("unexpected Arrayed loop score"),
         }
     }
     let loop_scores: Vec<&LtmSyntheticVar> = ltm
@@ -5378,10 +5378,10 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
         .vars
         .iter()
         .find(|v| match &v.equation {
-            datamodel::Equation::ApplyToAll(dims, text) => {
-                dims.len() == 1 && dims[0] == "Region" && text == "rank(pop, 1)"
+            LtmEquation::ApplyToAll(dims, arm) => {
+                dims.len() == 1 && dims[0] == "Region" && arm.text == "rank(pop, 1)"
             }
-            datamodel::Equation::Scalar(_) | datamodel::Equation::Arrayed(..) => false,
+            LtmEquation::Scalar(_) | LtmEquation::Arrayed { .. } => false,
         })
         .expect("RANK(pop, 1) must be emitted as an arrayed aggregate helper")
         .name
@@ -5520,8 +5520,8 @@ fn gh525_two_reference_partially_iterated_row_sum_scores() {
     // per-(row, element) names, with real non-zero post-startup values.
     let eqn_text = |v: &LtmSyntheticVar| -> String {
         match &v.equation {
-            datamodel::Equation::Scalar(t) => t.clone(),
-            datamodel::Equation::ApplyToAll(_, t) => t.clone(),
+            LtmEquation::Scalar(arm) => arm.text.clone(),
+            LtmEquation::ApplyToAll(_, arm) => arm.text.clone(),
             other => format!("{other:?}"),
         }
     };
@@ -5587,12 +5587,16 @@ fn gh525_two_reference_partially_iterated_row_sum_scores() {
         .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
     {
         let text = match &lv.equation {
-            datamodel::Equation::Scalar(t) => t.clone(),
-            datamodel::Equation::ApplyToAll(_, t) => t.clone(),
-            datamodel::Equation::Arrayed(_, slots, default, _) => {
-                let mut t: String = slots.iter().map(|(_, eq, _, _)| eq.clone()).collect();
+            LtmEquation::Scalar(arm) => arm.text.clone(),
+            LtmEquation::ApplyToAll(_, arm) => arm.text.clone(),
+            LtmEquation::Arrayed {
+                elements: slots,
+                default,
+                ..
+            } => {
+                let mut t: String = slots.iter().map(|(_, arm)| arm.text.clone()).collect();
                 if let Some(d) = default {
-                    t.push_str(d);
+                    t.push_str(&d.text);
                 }
                 t
             }
@@ -5856,7 +5860,7 @@ fn mixed_bare_and_per_element_edge_resolver_precedence() {
     );
     let eqn_text = |v: &LtmSyntheticVar| -> String {
         match &v.equation {
-            datamodel::Equation::Scalar(t) => t.clone(),
+            LtmEquation::Scalar(arm) => arm.text.clone(),
             other => format!("{other:?}"),
         }
     };
@@ -5969,7 +5973,7 @@ fn per_element_hop_in_mixed_scalar_cycle_scores() {
     let mut saw_per_element_ref = 0usize;
     for lv in &loop_vars {
         let text = match &lv.equation {
-            datamodel::Equation::Scalar(t) => t.clone(),
+            LtmEquation::Scalar(arm) => arm.text.clone(),
             other => format!("{other:?}"),
         };
         assert!(
@@ -6372,7 +6376,7 @@ fn per_element_body_with_iterated_other_dep_scores() {
         // unresolvable bare dimension index.
         let var = ltm_var(&ltm.vars, &name);
         let eqn = match &var.equation {
-            datamodel::Equation::Scalar(t) => t.clone(),
+            LtmEquation::Scalar(arm) => arm.text.clone(),
             other => format!("{other:?}"),
         };
         assert!(
@@ -7817,8 +7821,8 @@ fn aligned_partial_reduce_emissions_stay_byte_identical() {
                   ABS((inflow[d1\u{B7}a] - PREVIOUS(inflow[d1\u{B7}a]))), 0) * \
                   SIGN((matrix[d1\u{B7}a,d2\u{B7}x] - PREVIOUS(matrix[d1\u{B7}a,d2\u{B7}x])))";
     match &emitted[0].equation {
-        datamodel::Equation::Scalar(text) => assert_eq!(
-            text, golden,
+        LtmEquation::Scalar(arm) => assert_eq!(
+            &arm.text, golden,
             "the aligned per-(row, slot) equation text must stay byte-identical"
         ),
         other => panic!("aligned per-(row, slot) score must be scalar; got {other:?}"),

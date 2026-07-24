@@ -1,0 +1,10 @@
+$⁚ltm⁚link_score⁚$⁚ltm⁚agg⁚0→growth[boston]
+scalar: if (TIME = INITIAL_TIME) then 0 else if ((growth[region·boston] - PREVIOUS(growth[region·boston])) = 0) OR (("$⁚ltm⁚agg⁚0" - PREVIOUS("$⁚ltm⁚agg⁚0")) = 0) then 0 else SAFEDIV(((sum(previous(matrix[region·boston, *]) * previous(other[region·nyc, *]) * "$⁚ltm⁚agg⁚0") * 0.001) - PREVIOUS(growth[region·boston])), ABS((growth[region·boston] - PREVIOUS(growth[region·boston]))), 0) * SIGN(("$⁚ltm⁚agg⁚0" - PREVIOUS("$⁚ltm⁚agg⁚0")))
+$⁚ltm⁚link_score⁚$⁚ltm⁚agg⁚0→growth[nyc]
+scalar: if (TIME = INITIAL_TIME) then 0 else if ((growth[region·nyc] - PREVIOUS(growth[region·nyc])) = 0) OR (("$⁚ltm⁚agg⁚0" - PREVIOUS("$⁚ltm⁚agg⁚0")) = 0) then 0 else SAFEDIV(((sum(previous(matrix[region·nyc, *]) * previous(other[region·nyc, *]) * "$⁚ltm⁚agg⁚0") * 0.001) - PREVIOUS(growth[region·nyc])), ABS((growth[region·nyc] - PREVIOUS(growth[region·nyc]))), 0) * SIGN(("$⁚ltm⁚agg⁚0" - PREVIOUS("$⁚ltm⁚agg⁚0")))
+$⁚ltm⁚link_score⁚growth→stock  dims=[Region]
+a2a[Region]: if (TIME = INITIAL_TIME) OR (PREVIOUS(TIME, INITIAL_TIME) = INITIAL_TIME) then 0 else ABS(SAFEDIV((time_step * (PREVIOUS(growth[Region]) - PREVIOUS(PREVIOUS(growth[Region])))), ((stock[Region] - PREVIOUS(stock[Region])) - (PREVIOUS(stock[Region]) - PREVIOUS(PREVIOUS(stock[Region])))), 0))
+$⁚ltm⁚link_score⁚pop[boston]→$⁚ltm⁚agg⁚0
+scalar: if (TIME = INITIAL_TIME) then 0 else if (("$⁚ltm⁚agg⁚0" - PREVIOUS("$⁚ltm⁚agg⁚0")) = 0) OR ((pop[region·boston] - PREVIOUS(pop[region·boston])) = 0) then 0 else SAFEDIV((PREVIOUS("$⁚ltm⁚agg⁚0") + (pop[region·boston] - PREVIOUS(pop[region·boston])) - PREVIOUS("$⁚ltm⁚agg⁚0")), ABS(("$⁚ltm⁚agg⁚0" - PREVIOUS("$⁚ltm⁚agg⁚0"))), 0) * SIGN((pop[region·boston] - PREVIOUS(pop[region·boston])))
+$⁚ltm⁚link_score⁚pop[nyc]→$⁚ltm⁚agg⁚0
+scalar: if (TIME = INITIAL_TIME) then 0 else if (("$⁚ltm⁚agg⁚0" - PREVIOUS("$⁚ltm⁚agg⁚0")) = 0) OR ((pop[region·nyc] - PREVIOUS(pop[region·nyc])) = 0) then 0 else SAFEDIV((PREVIOUS("$⁚ltm⁚agg⁚0") + (pop[region·nyc] - PREVIOUS(pop[region·nyc])) - PREVIOUS("$⁚ltm⁚agg⁚0")), ABS(("$⁚ltm⁚agg⁚0" - PREVIOUS("$⁚ltm⁚agg⁚0"))), 0) * SIGN((pop[region·nyc] - PREVIOUS(pop[region·nyc])))
