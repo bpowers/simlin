@@ -503,7 +503,7 @@ pub(super) fn try_cross_dimensional_link_scores(
     // (`SUM(pop[*] * (1 - weight[*]))` w.r.t. `weight` has the
     // sign-flipping coefficient `-pop[e]`).
     let (arrayed_dep_dims, model_deps) =
-        reducer_body_ctx_parts(db, source_vars, project, &classified.body_text);
+        reducer_body_ctx_parts(db, source_vars, project, &classified.body);
     let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
     // The live source's accepted slice, when `to` IS a variable-backed agg
     // reading `from`: lets the body partial resolve a mismatched-arity
@@ -522,7 +522,7 @@ pub(super) fn try_cross_dimensional_link_scores(
         .find(|a| !a.is_synthetic && a.name == to && a.reads_var(from))
         .map(|a| a.source_read_slice(from));
     let body_ctx = crate::ltm_augment::ReducerBodyCtx {
-        body_text: &classified.body_text,
+        body: &classified.body,
         live_source: from,
         arrayed_dep_dims: &arrayed_dep_dims,
         model_deps: &model_deps,
@@ -902,10 +902,10 @@ fn emit_broadcast_reduce_link_scores(
     // changed-first partial must account for. Mirrors
     // `try_cross_dimensional_link_scores`' setup.
     let (arrayed_dep_dims, model_deps) =
-        reducer_body_ctx_parts(db, source_vars, project, &classified.body_text);
+        reducer_body_ctx_parts(db, source_vars, project, &classified.body);
     let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
     let body_ctx = crate::ltm_augment::ReducerBodyCtx {
-        body_text: &classified.body_text,
+        body: &classified.body,
         live_source: from,
         arrayed_dep_dims: &arrayed_dep_dims,
         model_deps: &model_deps,
@@ -1247,16 +1247,16 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     // the whole stream, which was quadratic in the element count.
     let slot_occurrences = crate::ltm_augment::SlotOccurrences::new(to_occurrences);
 
-    // Build one `LtmSyntheticVar` for `element` from its equation text and
-    // that text's dependency set. The element name is the only part of the
+    // Build one `LtmSyntheticVar` for `element` from its equation AST and that
+    // equation's dependency set. The element name is the only part of the
     // generated equation/name that varies between elements.
     // Returns `None` (after surfacing a `Warning`) when the per-element
-    // ceteris-paribus partial fails to parse (GH #311) -- that element's link
+    // ceteris-paribus partial cannot be built (GH #311) -- that element's link
     // score is skipped rather than emitted with a silently non-ceteris-paribus
-    // equation. The `elem_text.is_empty()` zero is a legitimate no-slot value,
-    // not a parse failure.
+    // equation. A `None` `elem_eqn` is the legitimate no-slot case (a target
+    // hole), scored 0, and is distinct from a failure.
     let build_var = |element: &str,
-                     elem_text: &str,
+                     elem_eqn: Option<&crate::ast::Expr0>,
                      elem_deps: &HashSet<Ident<Canonical>>,
                      deps_to_sub: &HashSet<Ident<Canonical>>|
      -> Option<LtmSyntheticVar> {
@@ -1275,11 +1275,9 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             emit_ltm_partial_equation_warning(db, model, &name, &err);
             return None;
         }
-        let equation = if elem_text.is_empty() {
-            "0".to_string()
-        } else {
-            // GH #910: `elem_text` is the target's RAW element equation, but an
-            // implicit WITH-LOOKUP target's compiled value is `gf(elem_text)`.
+        let equation = if let Some(elem_eqn) = elem_eqn {
+            // GH #910: `elem_eqn` is the target's RAW element equation, but an
+            // implicit WITH-LOOKUP target's compiled value is `gf(elem_eqn)`.
             // Wrap the per-element partial in THIS element's own table (the
             // per-element-equation case) or the shared one, so the numerator
             // and the `Δto[e]` denominator live on the same scale. A gf-less
@@ -1294,7 +1292,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 // Equation text uses the qualified `dim·element` form (direct
                 // LoadPrev, no helper auxes); the NAME below keeps the bare form.
                 &crate::ltm_augment::qualify_element_csv(element, &to_dims),
-                elem_text,
+                elem_eqn,
                 // A true scalar source has no hoisted reducers, so the wrap
                 // holds `from` live as an ident and the post-transform
                 // substitution is a no-op.
@@ -1316,6 +1314,10 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                     return None;
                 }
             }
+        } else {
+            // A target hole: no per-element slot and no default. Zero is the
+            // right link-score value (no sensitivity).
+            "0".to_string()
         };
         Some(LtmSyntheticVar {
             name,
@@ -1327,7 +1329,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     };
 
     // GH #780: `build_var` returns `None` only on a true per-element
-    // `PartialEquationError` (the empty-slot case returns `Some("0")`). One
+    // `PartialEquationError` (the no-slot case returns `Some("0")`). One
     // doomed element dooms the whole edge -- a loop hop through it resolves
     // (`loop_link_score_ref`) to that element's name, which was never
     // emitted, so the loop would otherwise stub to a warned constant 0.
@@ -1342,11 +1344,11 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         // dependency set, and the subset to element-pin are all
         // element-invariant -- compute them once, outside the loop.
         Ast::ApplyToAll(_, expr) => {
-            let elem_text = crate::patch::expr2_to_string(expr);
+            let elem_eqn = crate::patch::expr2_to_expr0(expr);
             let elem_deps = crate::variable::identifier_set(ast, target_ast_dims, None);
             let deps_to_sub = deps_to_subscript(&elem_deps);
             for element in &elements {
-                match build_var(element, &elem_text, &elem_deps, &deps_to_sub) {
+                match build_var(element, Some(&elem_eqn), &elem_deps, &deps_to_sub) {
                     Some(v) => cross_vars.push(v),
                     None => {
                         unscoreable_edges.insert((from.to_string(), to.to_string()));
@@ -1362,24 +1364,25 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             for element in &elements {
                 let canonical_elem = crate::common::CanonicalElementName::from_raw(element);
                 let slot = per_elem.get(&canonical_elem).or(default_expr.as_ref());
-                let (elem_text, elem_deps): (String, HashSet<Ident<Canonical>>) = match slot {
-                    Some(expr) => (
-                        crate::patch::expr2_to_string(expr),
-                        crate::variable::identifier_set(
-                            &Ast::Scalar(expr.clone()),
-                            target_ast_dims,
-                            None,
+                let (elem_eqn, elem_deps): (Option<crate::ast::Expr0>, HashSet<Ident<Canonical>>) =
+                    match slot {
+                        Some(expr) => (
+                            Some(crate::patch::expr2_to_expr0(expr)),
+                            crate::variable::identifier_set(
+                                &Ast::Scalar(expr.clone()),
+                                target_ast_dims,
+                                None,
+                            ),
                         ),
-                    ),
-                    // No slot and no default: the target has a hole at
-                    // this element. A zero equation is the right
-                    // link-score value (no sensitivity), matching the
-                    // historical placeholder behaviour for un-derivable
-                    // partials.
-                    None => (String::new(), HashSet::new()),
-                };
+                        // No slot and no default: the target has a hole at
+                        // this element. A zero equation is the right
+                        // link-score value (no sensitivity), matching the
+                        // historical placeholder behaviour for un-derivable
+                        // partials.
+                        None => (None, HashSet::new()),
+                    };
                 let deps_to_sub = deps_to_subscript(&elem_deps);
-                match build_var(element, &elem_text, &elem_deps, &deps_to_sub) {
+                match build_var(element, elem_eqn.as_ref(), &elem_deps, &deps_to_sub) {
                     Some(v) => cross_vars.push(v),
                     None => {
                         unscoreable_edges.insert((from.to_string(), to.to_string()));
@@ -2357,7 +2360,11 @@ fn emit_per_element_link_scores(
 
     /// One target element's equation parts: (body text, full dep set, the
     /// arrayed deps to element-pin).
-    type ElemEqnParts = (String, HashSet<Ident<Canonical>>, HashSet<Ident<Canonical>>);
+    type ElemEqnParts = (
+        crate::ast::Expr0,
+        HashSet<Ident<Canonical>>,
+        HashSet<Ident<Canonical>>,
+    );
 
     let Some(from_sv) = source_vars.get(from) else {
         return false;
@@ -2443,10 +2450,10 @@ fn emit_per_element_link_scores(
     // Per target element: the body text + dep sets (shared for A2A,
     // per-slot for Arrayed -- mirroring `try_scalar_to_arrayed_link_scores`).
     let a2a_parts: Option<ElemEqnParts> = if let Ast::ApplyToAll(_, expr) = ast {
-        let text = crate::patch::expr2_to_string(expr);
+        let eqn = crate::patch::expr2_to_expr0(expr);
         let deps = crate::variable::identifier_set(ast, target_ast_dims, None);
         let to_sub = deps_to_subscript(&deps);
-        Some((text, deps, to_sub))
+        Some((eqn, deps, to_sub))
     } else {
         None
     };
@@ -2487,14 +2494,14 @@ fn emit_per_element_link_scores(
                 let slot = per_elem.get(&canonical_elem).or(default_expr.as_ref());
                 match slot {
                     Some(expr) => {
-                        let text = crate::patch::expr2_to_string(expr);
+                        let eqn = crate::patch::expr2_to_expr0(expr);
                         let deps = crate::variable::identifier_set(
                             &Ast::Scalar(expr.clone()),
                             target_ast_dims,
                             None,
                         );
                         let to_sub = deps_to_subscript(&deps);
-                        Some((text, deps, to_sub))
+                        Some((eqn, deps, to_sub))
                     }
                     // No slot, no default: a hole -- this element has no
                     // equation, so the site cannot occur in it; skip.
@@ -2503,7 +2510,7 @@ fn emit_per_element_link_scores(
             }
             _ => None,
         };
-        let Some((body_text, deps, to_sub)) = a2a_parts.as_ref().or(slot_parts.as_ref()) else {
+        let Some((body_eqn, deps, to_sub)) = a2a_parts.as_ref().or(slot_parts.as_ref()) else {
             continue;
         };
 
@@ -2532,7 +2539,9 @@ fn emit_per_element_link_scores(
                         db,
                         model,
                         &name,
-                        &crate::ltm_augment::PartialEquationError::new(body_text),
+                        &crate::ltm_augment::PartialEquationError::new(&crate::ast::print_eqn(
+                            body_eqn,
+                        )),
                     );
                 }
                 return true;
@@ -2551,7 +2560,7 @@ fn emit_per_element_link_scores(
                 axes,
                 &row_parts,
                 &qualified_element,
-                body_text,
+                body_eqn,
                 deps,
                 to_sub,
                 from_dims,
@@ -2594,11 +2603,11 @@ fn reducer_body_ctx_parts(
     db: &dyn Db,
     source_vars: &HashMap<String, SourceVariable>,
     project: SourceProject,
-    body_text: &str,
+    body: &crate::ast::Expr0,
 ) -> (HashMap<String, usize>, HashSet<String>) {
     let mut arrayed_dep_dims: HashMap<String, usize> = HashMap::new();
     let mut model_deps: HashSet<String> = HashSet::new();
-    for ident in crate::ltm_augment::expr_reference_idents(body_text) {
+    for ident in crate::ltm_augment::expr_reference_idents(body) {
         if let Some(sv) = source_vars.get(&ident) {
             model_deps.insert(ident.clone());
             let dims = variable_dimensions(db, *sv, project);
@@ -2878,10 +2887,10 @@ pub(super) fn emit_source_to_agg_link_scores(
     // Linear arm build the true changed-first row partial instead of
     // asserting ∂agg/∂from[e] = 1.
     let (arrayed_dep_dims, model_deps) =
-        reducer_body_ctx_parts(db, source_vars, project, &classified.body_text);
+        reducer_body_ctx_parts(db, source_vars, project, &classified.body);
     let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
     let body_ctx = crate::ltm_augment::ReducerBodyCtx {
-        body_text: &classified.body_text,
+        body: &classified.body,
         live_source: from,
         arrayed_dep_dims: &arrayed_dep_dims,
         model_deps: &model_deps,
@@ -3455,7 +3464,7 @@ pub(super) fn emit_agg_to_target_link_scores(
             match crate::ltm_augment::generate_agg_to_scalar_target_equation(
                 &agg.name,
                 to,
-                &crate::patch::expr2_to_string(expr),
+                &crate::patch::expr2_to_expr0(expr),
                 &reducer_subst,
                 &all_deps,
                 Some(project_dimensions_context(db, project)),
@@ -3485,11 +3494,12 @@ pub(super) fn emit_agg_to_target_link_scores(
             // One shared body; emit one per-target-element scalar var. Track A
             // stage 1: the generator runs the wrap on this OWN A2A body and
             // substitutes reducers -> agg names AFTER the wrap, so we thread the
-            // un-substituted text + `reducer_subst`. An own-text parse failure
-            // (unreachable -- the text is a `print_eqn` of a compiled AST) then
-            // surfaces on the first element's generator `Err` and dooms the edge
-            // once, via the same GH #661 warning path the per-element loop uses.
-            let to_own_text = crate::patch::expr2_to_string(expr);
+            // un-substituted AST + `reducer_subst`. The own-equation parse that
+            // used to be able to fail here is gone (the generation half lowers
+            // the `Expr2` straight to `Expr0`); a doomed wrap still surfaces on
+            // the first element's generator `Err` and dooms the edge once, via
+            // the same GH #661 warning path the per-element loop uses.
+            let to_own_eqn = crate::patch::expr2_to_expr0(expr);
             if to_dims.is_empty() {
                 return;
             }
@@ -3520,7 +3530,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                     to,
                     // Qualified for equation text; the name keeps the bare form.
                     &crate::ltm_augment::qualify_element_csv(element, &to_dims),
-                    &to_own_text,
+                    &to_own_eqn,
                     &reducer_subst,
                     &all_deps,
                     &deps_to_subscript,
@@ -3599,7 +3609,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                             to,
                             // Qualified for equation text; the name keeps the bare form.
                             &crate::ltm_augment::qualify_element_csv(element, &to_dims),
-                            &crate::patch::expr2_to_string(slot_expr),
+                            &crate::patch::expr2_to_expr0(slot_expr),
                             &reducer_subst,
                             &slot_deps,
                             &deps_to_subscript,

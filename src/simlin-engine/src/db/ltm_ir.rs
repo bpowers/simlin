@@ -399,15 +399,12 @@ impl WalkAccum<'_> {
     /// `missing_occurrence` guard), whereas absence in the per-edge view
     /// silently misclassifies the edge as `Bare`. Suppression therefore applies
     /// to this view only.
-    #[allow(clippy::too_many_arguments)]
     fn push_occurrence(
         &mut self,
         reference: OccurrenceRef,
         shape: RefShape,
         axes: Vec<OccurrenceAxis>,
-        target_element: Option<&str>,
         reducer_keys: &[String],
-        already_lagged: bool,
         index_nested: bool,
     ) {
         // Inside an unaddressable builtin child, record NO occurrence: its path
@@ -421,10 +418,7 @@ impl WalkAccum<'_> {
             reference,
             shape,
             axes,
-            target_element: target_element.map(|s| s.to_string()),
             in_reducer: !reducer_keys.is_empty(),
-            reducer_keys: reducer_keys.to_vec(),
-            already_lagged,
             index_nested,
         });
     }
@@ -484,7 +478,6 @@ fn collect_all_reference_sites_and_occurrences(
                     None,
                     &mut reducer_keys,
                     false,
-                    false,
                     &mut acc,
                 );
                 acc.path.pop();
@@ -506,7 +499,6 @@ fn collect_all_reference_sites_and_occurrences(
                         Some(k.as_str()),
                         &mut reducer_keys,
                         false,
-                        false,
                         &mut acc,
                     );
                     acc.path.pop();
@@ -521,7 +513,6 @@ fn collect_all_reference_sites_and_occurrences(
                         lookup_dims,
                         None,
                         &mut reducer_keys,
-                        false,
                         false,
                         &mut acc,
                     );
@@ -650,16 +641,6 @@ pub(crate) fn site_child_index(n: usize) -> Option<u16> {
     u16::try_from(n).ok().filter(|&i| i != UNADDRESSABLE_CHILD)
 }
 
-/// `true` iff `builtin` is `PREVIOUS(...)` / `INIT(...)`: everything inside is
-/// already lagged (read at t-1) or frozen (read at t=0). Used to set the
-/// `already_lagged` occurrence marker so the transform does not re-wrap it.
-fn builtin_is_previous_or_init<E>(builtin: &crate::builtins::BuiltinFn<E>) -> bool {
-    matches!(
-        builtin,
-        crate::builtins::BuiltinFn::Previous(_, _) | crate::builtins::BuiltinFn::Init(_)
-    )
-}
-
 /// Recursive helper for [`collect_all_reference_sites_and_occurrences`]:
 /// left-to-right DFS over an `Expr2` tree, pushing one [`ReferenceSite`] per
 /// model-variable reference (bucketed by source name) AND one
@@ -668,8 +649,7 @@ fn builtin_is_previous_or_init<E>(builtin: &crate::builtins::BuiltinFn<E>) -> bo
 /// `in_reducer` becomes `true` (via `reducer_keys` non-empty) once we descend
 /// into a builtin that can route through an aggregate node and stays sticky (a
 /// reducer nested in another reducer's arg is still inside *a* reducer); `SIZE`
-/// does not route through an agg, so it never sets the flag. `already_lagged`
-/// becomes sticky-true inside a `PREVIOUS`/`INIT` call; `index_nested`
+/// does not route through an agg, so it never sets the flag. `index_nested`
 /// becomes sticky-true once we descend into a subscript index expression.
 #[allow(clippy::too_many_arguments)]
 fn walk_all_in_expr(
@@ -678,7 +658,6 @@ fn walk_all_in_expr(
     lookup_dims: &mut impl FnMut(&str) -> Vec<crate::dimensions::Dimension>,
     target_element: Option<&str>,
     reducer_keys: &mut Vec<String>,
-    already_lagged: bool,
     index_nested: bool,
     acc: &mut WalkAccum,
 ) {
@@ -694,9 +673,7 @@ fn walk_all_in_expr(
                     OccurrenceRef::Variable(ident.as_str().to_string()),
                     RefShape::Bare,
                     Vec::new(),
-                    target_element,
                     reducer_keys,
-                    already_lagged,
                     index_nested,
                 );
             } else if let Some((module, port)) = module_output_parts(ident.as_str(), ctx) {
@@ -708,9 +685,7 @@ fn walk_all_in_expr(
                     },
                     RefShape::Bare,
                     Vec::new(),
-                    target_element,
                     reducer_keys,
-                    already_lagged,
                     index_nested,
                 );
             }
@@ -742,9 +717,7 @@ fn walk_all_in_expr(
                     OccurrenceRef::Variable(ident.as_str().to_string()),
                     shape,
                     axes,
-                    target_element,
                     reducer_keys,
-                    already_lagged,
                     index_nested,
                 );
             } else if let Some((module, port)) = module_output_parts(ident.as_str(), ctx) {
@@ -779,9 +752,7 @@ fn walk_all_in_expr(
                     },
                     RefShape::Bare,
                     axes,
-                    target_element,
                     reducer_keys,
-                    already_lagged,
                     index_nested,
                 );
             }
@@ -814,7 +785,6 @@ fn walk_all_in_expr(
                         lookup_dims,
                         target_element,
                         reducer_keys,
-                        already_lagged,
                         true,
                         acc,
                     ),
@@ -826,7 +796,6 @@ fn walk_all_in_expr(
                             lookup_dims,
                             target_element,
                             reducer_keys,
-                            already_lagged,
                             true,
                             acc,
                         );
@@ -838,7 +807,6 @@ fn walk_all_in_expr(
                             lookup_dims,
                             target_element,
                             reducer_keys,
-                            already_lagged,
                             true,
                             acc,
                         );
@@ -856,8 +824,6 @@ fn walk_all_in_expr(
             if pushed_reducer_key {
                 reducer_keys.push(crate::patch::expr2_to_string(expr));
             }
-            // Contents of a PREVIOUS/INIT call are already lagged/frozen.
-            let child_lagged = already_lagged || builtin_is_previous_or_init(builtin);
             // Builtin arity is the one child count not bounded by the AST shape
             // (`MEAN(a, b, ...)` is variadic), so it is the only place a `SiteId`
             // element can run out of range. `site_child_index` returns `None`
@@ -884,9 +850,7 @@ fn walk_all_in_expr(
                                 OccurrenceRef::Variable(id.to_string()),
                                 RefShape::Bare,
                                 Vec::new(),
-                                target_element,
                                 reducer_keys,
-                                child_lagged,
                                 index_nested,
                             );
                         } else if let Some((module, port)) = module_output_parts(id, ctx) {
@@ -898,9 +862,7 @@ fn walk_all_in_expr(
                                 },
                                 RefShape::Bare,
                                 Vec::new(),
-                                target_element,
                                 reducer_keys,
-                                child_lagged,
                                 index_nested,
                             );
                         }
@@ -911,7 +873,6 @@ fn walk_all_in_expr(
                         lookup_dims,
                         target_element,
                         reducer_keys,
-                        child_lagged,
                         index_nested,
                         acc,
                     ),
@@ -939,7 +900,6 @@ fn walk_all_in_expr(
                 lookup_dims,
                 target_element,
                 reducer_keys,
-                already_lagged,
                 index_nested,
                 acc,
             );
@@ -953,7 +913,6 @@ fn walk_all_in_expr(
                 lookup_dims,
                 target_element,
                 reducer_keys,
-                already_lagged,
                 index_nested,
                 acc,
             );
@@ -965,7 +924,6 @@ fn walk_all_in_expr(
                 lookup_dims,
                 target_element,
                 reducer_keys,
-                already_lagged,
                 index_nested,
                 acc,
             );
@@ -980,7 +938,6 @@ fn walk_all_in_expr(
                     lookup_dims,
                     target_element,
                     reducer_keys,
-                    already_lagged,
                     index_nested,
                     acc,
                 );
@@ -1269,41 +1226,27 @@ pub(crate) fn derive_other_dep_verdict(
     OtherDepVerdict::Collapse
 }
 
-/// How a per-occurrence reference routes, the occurrence-faithful counterpart
-/// of [`SiteRouting`]. Unlike `SiteRouting` (which the edge consumers split
-/// into one entry per routed agg), a single syntactic occurrence keeps ONE
-/// record carrying ALL the synthetic aggs it routes through (GH #793 nested
-/// reducers). The RAW walker shape is preserved on the occurrence (the
-/// not-hoisted in-reducer `Wildcard`->`DynamicIndex` reclassification the
-/// `ClassifiedSite` builder performs is a per-edge-consumer artifact that
-/// discards the reducer-enclosure bit; the occurrence keeps `Wildcard` +
-/// `in_reducer` instead).
-#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
-pub(crate) enum OccurrenceRouting {
-    /// Consumers use the occurrence's own `shape` / `axes`.
-    Direct,
-    /// The occurrence's read is carried by one or more synthetic aggregate
-    /// nodes (its enclosing hoisted reducer(s)).
-    ThroughAgg { aggs: Vec<AggRef> },
-}
-
 /// One classified reference occurrence over a target equation, the finer
 /// substrate both LTM consumers project from (edge emission is a per-edge
 /// dedup of these; the transform selects a live SET by shape and names the
-/// first non-index-nested occurrence as the normalizer). Every field maps to a
-/// spec §3 requirement, but they are not all consumed by the same code today:
-/// the ceteris-paribus wrap reads `site_id` (by path), `reference`, `shape`,
-/// `axes`, and `index_nested`; `db::module_link_score_equation` reads
-/// `reference` for the document-order module-output pick. `target_element`,
-/// `routing`, `in_reducer`, `reducer_keys`, and `already_lagged` are classified
-/// facts the wrap does not *need* to read -- it reaches the same decisions
-/// structurally (it never descends into a `PREVIOUS`/`INIT` call, so
-/// `already_lagged` content is untouched by construction; the reducer-freeze arm
-/// asks `subtree_has_live_shape` rather than reading `in_reducer`). They are
-/// carried because they are the same walk's output and the remaining GH #965
-/// generation-half work consumes them, and each is pinned at the IR level
-/// (`db::ltm_ir_tests`) so a walker regression is caught even with no production
-/// reader. Do not add a field with neither a production consumer nor an IR pin.
+/// first non-index-nested occurrence as the normalizer).
+///
+/// Every field has a reader. The ceteris-paribus wrap reads `site_id` (by path),
+/// `reference`, `shape`, `axes`, and `index_nested`;
+/// `db::module_link_score_equation` reads `reference` for the document-order
+/// module-output pick; the corpus gate reads `in_reducer` to scope its
+/// per-occurrence comparison. **Do not add a field without one.**
+///
+/// Four fields once rode along here -- `target_element`, `routing`,
+/// `reducer_keys`, `already_lagged` -- carried on the theory that the GH #965
+/// generation half would consume them. It consumed none, so they are gone.
+/// `routing` was the instructive case: it duplicated the GH #793
+/// enclosing-reducer narrowing the `ClassifiedSite` loop already performs, i.e. a
+/// second implementation of one rule inside the IR built to end second
+/// implementations. `target_element` and `already_lagged` duplicated facts their
+/// consumers already hold (the generators are handed the target element; the wrap
+/// sees a `PREVIOUS`/`INIT` node directly, and must in any case account for the
+/// freezes it inserts ITSELF, which no field of an occurrence can describe).
 #[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub(crate) struct OccurrenceSite {
     /// Stable, deterministic occurrence identity within `to`'s equation.
@@ -1315,26 +1258,22 @@ pub(crate) struct OccurrenceSite {
     /// `Wildcard`->`DynamicIndex` reclassification), so the two views agree.
     pub shape: RefShape,
     /// Per-index access (the extended `AxisRead` vocabulary). Empty for a bare
-    /// `Var` / module output.
+    /// `Var` / module output. Read by the wrap for the other-dep verdict, the
+    /// literal-element index guard, and the `PerElement` row pinning.
     pub axes: Vec<OccurrenceAxis>,
-    /// `Some(elem)` when the occurrence sits in an `Ast::Arrayed` per-element
-    /// slot (canonical element / comma-tuple), else `None`.
-    pub target_element: Option<String>,
-    /// How the occurrence routes (direct, or through its hoisted reducer aggs).
-    pub routing: OccurrenceRouting,
     /// `true` iff the occurrence sits syntactically inside an aggregate-routed
-    /// reducer (`SUM`/`MEAN`/`MIN`/`MAX`/`STDDEV`/`RANK`). Surfaced explicitly
-    /// -- the transform's whole-reducer freeze (#517) and bare-feeder decline
-    /// (#779) need "inside a scalar reducer" even when routing is `Direct`.
+    /// reducer (`SUM`/`MEAN`/`MIN`/`MAX`/`STDDEV`/`RANK`). Consumed by the corpus
+    /// gate, which scopes its per-occurrence shape comparison to non-reducer
+    /// references and asserts both streams agree on reducer context.
+    ///
+    /// NOT yet consumed by the transform's GH #779 bare-reducer-feeder decline,
+    /// which re-derives "inside a scalar reducer" with its own walk: the two
+    /// decisions use two different reducer SETS
+    /// (`ltm_agg::reducer_collapses_to_scalar` includes `SIZE` and excludes
+    /// `RANK`; `builtin_routes_through_agg`, which sets this bit, does the
+    /// opposite), so consuming it there would flip a bare source inside
+    /// `RANK(...)` from scored to loudly declined. Tracked as GH #982.
     pub in_reducer: bool,
-    /// Canonical printed text of every enclosing hoistable reducer, outermost
-    /// to innermost (empty when `!in_reducer`).
-    pub reducer_keys: Vec<String>,
-    /// `true` iff the occurrence sits inside a `PREVIOUS(...)` / `INIT(...)`
-    /// call -- already lagged/frozen. The transform must NOT re-wrap it (a
-    /// double lag reads t-2), though it stays live-selectable (Q3). The edge
-    /// emitter ignores this.
-    pub already_lagged: bool,
     /// `true` iff the occurrence is reachable ONLY through another reference's
     /// subscript index (`other_arr[from]`). Such an occurrence is excluded
     /// from live selection, from the normalizer, and from the changed-last
@@ -1343,18 +1282,15 @@ pub(crate) struct OccurrenceSite {
     pub index_nested: bool,
 }
 
-/// Walker output for one occurrence, before the (agg-dependent) routing is
-/// resolved -- the occurrence analogue of [`ReferenceSite`]. `model_ltm_reference_sites`
-/// finalizes it into an [`OccurrenceSite`] by attaching [`OccurrenceRouting`].
+/// Walker output for one occurrence -- the occurrence analogue of
+/// [`ReferenceSite`]. `model_ltm_reference_sites` moves it into an
+/// [`OccurrenceSite`] field for field.
 struct RawOccurrence {
     site_id: SiteId,
     reference: OccurrenceRef,
     shape: RefShape,
     axes: Vec<OccurrenceAxis>,
-    target_element: Option<String>,
     in_reducer: bool,
-    reducer_keys: Vec<String>,
-    already_lagged: bool,
     index_nested: bool,
 }
 
@@ -1483,56 +1419,21 @@ pub(crate) fn model_ltm_reference_sites(
             })
             .unwrap_or_default();
 
-        // The synthetic aggs a `from` reference routes through, narrowed to
-        // the aggs minted for one of the reference's *enclosing* reducers --
-        // the exact per-occurrence `ThroughAgg` decision the `ClassifiedSite`
-        // loop below makes per raw site (GH #793), reused for the occurrence
-        // stream's `OccurrenceRouting`.
-        let matching_aggs_for = |from_name: &str, reducer_keys: &[String]| -> Vec<AggRef> {
-            synthetic_aggs_in_to
-                .iter()
-                .copied()
-                .filter(|&i| agg_nodes.aggs[i].reads_var(from_name))
-                .filter(|&i| {
-                    reducer_keys
-                        .iter()
-                        .any(|k| k == &agg_nodes.aggs[i].equation_text)
-                })
-                .map(AggRef)
-                .collect()
-        };
-
-        // Finalize the per-occurrence view: attach routing (a single occurrence
-        // keeps ONE record carrying all its matching aggs, unlike the per-edge
-        // `ClassifiedSite` which duplicates one entry per agg). The RAW walker
-        // shape is preserved -- the not-hoisted in-reducer `Wildcard`->`DynamicIndex`
-        // reclassification below is a per-edge-consumer artifact.
-        let mut occ_sites: Vec<OccurrenceSite> = Vec::with_capacity(raw_occurrences.len());
-        for occ in raw_occurrences {
-            let routing = match &occ.reference {
-                OccurrenceRef::Variable(from) if occ.in_reducer => {
-                    let aggs = matching_aggs_for(from, &occ.reducer_keys);
-                    if aggs.is_empty() {
-                        OccurrenceRouting::Direct
-                    } else {
-                        OccurrenceRouting::ThroughAgg { aggs }
-                    }
-                }
-                _ => OccurrenceRouting::Direct,
-            };
-            occ_sites.push(OccurrenceSite {
+        // Finalize the per-occurrence view. The RAW walker shape is preserved --
+        // the not-hoisted in-reducer `Wildcard`->`DynamicIndex` reclassification
+        // below is a per-edge-consumer artifact, and the occurrence keeps
+        // `in_reducer` instead.
+        let occ_sites: Vec<OccurrenceSite> = raw_occurrences
+            .into_iter()
+            .map(|occ| OccurrenceSite {
                 site_id: occ.site_id,
                 reference: occ.reference,
                 shape: occ.shape,
                 axes: occ.axes,
-                target_element: occ.target_element,
-                routing,
                 in_reducer: occ.in_reducer,
-                reducer_keys: occ.reducer_keys,
-                already_lagged: occ.already_lagged,
                 index_nested: occ.index_nested,
-            });
-        }
+            })
+            .collect();
         if !occ_sites.is_empty() {
             occurrences.insert(to_name_str.to_string(), occ_sites);
         }

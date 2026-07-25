@@ -900,7 +900,7 @@ mod model_ltm_reference_sites_tests {
 mod occurrence_ir_tests {
     use super::*;
     use crate::datamodel;
-    use crate::db::ltm_ir::{OccurrenceAxis, OccurrenceRef, OccurrenceRouting, OccurrenceSite};
+    use crate::db::ltm_ir::{OccurrenceAxis, OccurrenceRef, OccurrenceSite};
     use crate::testutils::{x_aux, x_flow, x_model, x_module, x_stock};
 
     /// Sync `datamodel`, run `model_ltm_reference_sites`, and return the
@@ -976,12 +976,12 @@ mod occurrence_ir_tests {
     }
 
     #[test]
-    fn reducer_enclosure_surfaced_even_when_routing_is_direct() {
+    fn reducer_enclosure_surfaced_on_an_unhoisted_reducer() {
         // `z = SUM(pop[idx, *])` with `idx` a scalar: the reducer is NOT hoisted
-        // (dynamic index), so the occurrence routes `Direct` -- yet it must
-        // still surface `in_reducer` + `reducer_keys` (the #517/#779
-        // "inside a scalar reducer" fact the per-edge `ClassifiedSite` folds
-        // away by reclassifying Wildcard->DynamicIndex and dropping the bit).
+        // (dynamic index), yet the occurrence must still surface `in_reducer`
+        // (the #517/#779 "inside a scalar reducer" fact the per-edge
+        // `ClassifiedSite` folds away by reclassifying Wildcard->DynamicIndex and
+        // dropping the bit).
         let project = TestProject::new("main")
             .named_dimension("D1", &["a", "b"])
             .named_dimension("D2", &["x", "y"])
@@ -998,12 +998,6 @@ mod occurrence_ir_tests {
                 "the occurrence keeps the RAW walker shape, unlike ClassifiedSite"
             );
             assert!(o.in_reducer, "the SUM argument sits inside a reducer");
-            assert_eq!(o.reducer_keys.len(), 1, "one enclosing reducer");
-            assert_eq!(
-                o.routing,
-                OccurrenceRouting::Direct,
-                "the dynamic-index reducer is not hoisted"
-            );
             // The per-edge view folds the enclosure away: it reclassifies to
             // DynamicIndex, discarding the reducer-enclosure bit.
             let sites = ir.sites.get(&("pop".to_string(), "z".to_string())).unwrap();
@@ -1015,53 +1009,38 @@ mod occurrence_ir_tests {
     }
 
     #[test]
-    fn hoisted_reducer_occurrence_routes_through_agg() {
-        // `share[Region] = pop / SUM(pop[*])`: the bare numerator is Direct/Bare;
-        // the SUM's wildcard arg is hoisted, so its occurrence routes ThroughAgg
-        // while KEEPING the raw Wildcard shape.
+    fn hoisted_reducer_occurrence_keeps_the_raw_wildcard_shape() {
+        // `share[Region] = pop / SUM(pop[*])`: the bare numerator is Bare; the
+        // SUM's wildcard arg is hoisted, and its occurrence KEEPS the raw
+        // `Wildcard` shape where the per-edge view reclassifies. Routing lives
+        // exclusively on the per-EDGE `ClassifiedSite` now (the occurrence copy
+        // duplicated the same GH #793 narrowing), so `ThroughAgg` is asserted
+        // there.
         let project = TestProject::new("main")
             .named_dimension("Region", &["nyc", "boston"])
             .array_aux("pop[Region]", "100")
             .array_aux("share[Region]", "pop / SUM(pop[*])");
-        with_ir_and_occ(&project, "share", |_ir, occs| {
+        with_ir_and_occ(&project, "share", |ir, occs| {
             let pop = var_occs(occs, "pop");
             assert_eq!(pop.len(), 2, "occs: {occs:?}");
             let bare = pop.iter().find(|o| !o.in_reducer).expect("bare numerator");
-            assert_eq!(bare.routing, OccurrenceRouting::Direct);
             assert_eq!(bare.shape, RefShape::Bare);
             let reduced = pop.iter().find(|o| o.in_reducer).expect("SUM argument");
-            assert!(
-                matches!(reduced.routing, OccurrenceRouting::ThroughAgg { .. }),
-                "a hoisted reducer occurrence routes through its synthetic agg"
-            );
             assert_eq!(
                 reduced.shape,
                 RefShape::Wildcard,
                 "the raw walker shape is preserved on the occurrence"
             );
-        });
-    }
-
-    #[test]
-    fn already_lagged_marks_previous_and_init_contents() {
-        // `to = from + PREVIOUS(g) + INIT(h)`: `from` is live/unlagged; the
-        // occurrences inside PREVIOUS and INIT are `already_lagged` (so the
-        // transform will not re-wrap and double-lag them).
-        let project = TestProject::new("main")
-            .scalar_aux("from", "1")
-            .scalar_aux("g", "2")
-            .scalar_aux("h", "3")
-            .scalar_aux("to", "from + PREVIOUS(g) + INIT(h)");
-        with_ir_and_occ(&project, "to", |_ir, occs| {
-            let get = |name: &str| {
-                var_occs(occs, name)
-                    .first()
-                    .copied()
-                    .unwrap_or_else(|| panic!("no occurrence for {name}: {occs:?}"))
-            };
-            assert!(!get("from").already_lagged, "the bare `from` is not lagged");
-            assert!(get("g").already_lagged, "g sits inside PREVIOUS");
-            assert!(get("h").already_lagged, "h sits inside INIT");
+            let sites = ir
+                .sites
+                .get(&("pop".to_string(), "share".to_string()))
+                .expect("the pop -> share edge");
+            assert!(
+                sites
+                    .iter()
+                    .any(|s| matches!(s.routing, SiteRouting::ThroughAgg { .. })),
+                "the hoisted reducer read routes through its synthetic agg: {sites:?}"
+            );
         });
     }
 
@@ -1377,9 +1356,8 @@ mod occurrence_ir_tests {
             .iter()
             .find(|o| matches!(&o.reference, OccurrenceRef::ModuleOutput { .. }))
             .expect("the module-output occurrence");
-        assert_eq!(
-            module_occ.routing,
-            OccurrenceRouting::Direct,
+        assert!(
+            !module_occ.in_reducer,
             "the composite read is not inside a reducer"
         );
     }
@@ -1762,9 +1740,7 @@ fn suppressed_occurrences_still_record_edge_sites() {
             super::OccurrenceRef::Variable("pop".to_string()),
             RefShape::FixedIndex(vec!["nyc".to_string()]),
             Vec::new(),
-            None,
             &[],
-            false,
             false,
         );
     }

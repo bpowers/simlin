@@ -83,7 +83,7 @@ fn classify_expr0_rejects_out_of_range_integer_literal() {
         Loc::default(),
     ))];
 
-    let shape = classify_expr0_subscript_shape(&indices, &dims, None);
+    let shape = classify_expr0_subscript_shape(&indices, &dims, None, None);
     assert_eq!(
         shape,
         RefShape::DynamicIndex,
@@ -103,7 +103,7 @@ fn classify_expr0_rejects_out_of_range_integer_literal() {
         1.0,
         Loc::default(),
     ))];
-    let in_range_shape = classify_expr0_subscript_shape(&in_range, &dims, None);
+    let in_range_shape = classify_expr0_subscript_shape(&in_range, &dims, None, None);
     assert_eq!(
         in_range_shape,
         RefShape::FixedIndex(vec!["1".to_string()]),
@@ -139,7 +139,7 @@ fn classify_expr0_canonicalizes_integer_literal_subscript() {
         Loc::default(),
     ))];
 
-    let shape = classify_expr0_subscript_shape(&indices, &dims, None);
+    let shape = classify_expr0_subscript_shape(&indices, &dims, None, None);
     assert_eq!(
         shape,
         RefShape::FixedIndex(vec!["1".to_string()]),
@@ -1086,7 +1086,7 @@ fn test_generate_special_chars_quoted() {
 
 /// Owned backing storage for a [`ReducerBodyCtx`] in tests.
 struct BodyCtxFixture {
-    body_text: String,
+    body: Expr0,
     live_source: String,
     arrayed_dep_dims: std::collections::HashMap<String, usize>,
     model_deps: HashSet<String>,
@@ -1110,7 +1110,9 @@ impl BodyCtxFixture {
             .chain(scalars.iter().map(|s| s.to_string()))
             .collect();
         BodyCtxFixture {
-            body_text: body_text.to_string(),
+            body: Expr0::new(body_text, LexerType::Equation)
+                .expect("the fixture body parses")
+                .expect("the fixture body is non-empty"),
             live_source: live_source.to_string(),
             arrayed_dep_dims,
             model_deps,
@@ -1129,7 +1131,7 @@ impl BodyCtxFixture {
 
     fn ctx(&self) -> ReducerBodyCtx<'_> {
         ReducerBodyCtx {
-            body_text: &self.body_text,
+            body: &self.body,
             live_source: &self.live_source,
             arrayed_dep_dims: &self.arrayed_dep_dims,
             model_deps: &self.model_deps,
@@ -1453,7 +1455,7 @@ fn test_body_aware_nested_reducer_falls_back_to_delta_ratio() {
 
 /// `classify_reducer` must surface the reducer argument's canonical text.
 #[test]
-fn test_classify_reducer_returns_body_text() {
+fn test_classify_reducer_returns_body_ast() {
     let pop = subscript_wildcard("pop");
     let weight = subscript_wildcard("weight");
     let one = Expr2::Const("1".to_string(), 1.0, Loc::default());
@@ -1474,14 +1476,23 @@ fn test_classify_reducer_returns_body_text() {
     let expr = Expr2::App(BuiltinFn::Sum(Box::new(body)), None, Loc::default());
     let var = var_with_expr(expr);
     let result = classify_reducer(&var, "weight").expect("expected a classified reducer");
-    assert_eq!(result.body_text, "pop[*] * (1 - weight[*])");
+    // The classifier now hands back the body's AST rather than its printed
+    // text; printing it is how this test states the expectation, not how the
+    // consumers read it.
+    assert_eq!(print_eqn(&result.body), "pop[*] * (1 - weight[*])");
 }
 
 /// `expr_reference_idents` collects canonical heads (including inside
 /// subscript index expressions) but not function names.
 #[test]
 fn test_expr_reference_idents() {
-    let idents = expr_reference_idents("pop[*] * SAFEDIV(scale, other[idx + 1], 0)");
+    let body = Expr0::new(
+        "pop[*] * SAFEDIV(scale, other[idx + 1], 0)",
+        LexerType::Equation,
+    )
+    .expect("the fixture parses")
+    .expect("the fixture is non-empty");
+    let idents = expr_reference_idents(&body);
     assert!(idents.contains("pop"));
     assert!(idents.contains("scale"));
     assert!(idents.contains("other"));
@@ -1808,7 +1819,6 @@ fn test_partial_equation_iterated_dim_source_normalized_to_bare() {
     let iter_ctx = IteratedDimCtx {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated_dims,
-        dim_ctx: None,
         dep_dims: None,
     };
 
@@ -2942,7 +2952,7 @@ fn partial_freezes_whole_reducer_over_index_nested_live_source() {
 /// `PREVIOUS(PREVIOUS(g))`. This complements
 /// `partial_equation_does_not_rewrap_inside_previous` (which uses the
 /// two-argument SAMPLE-IF-TRUE `PREVIOUS(target, input)` shape) with the exact
-/// `to = from + PREVIOUS(g)` shape the stage-2 `occ.already_lagged` field must
+/// `to = from + PREVIOUS(g)` shape the wrap's structural PREVIOUS/INIT skip must
 /// reproduce.
 #[test]
 fn partial_leaves_already_lagged_other_dep_untouched() {
@@ -4755,12 +4765,19 @@ fn sgft(
     target_ref: &str,
     gf_table_ref: Option<&str>,
 ) -> Result<String, PartialEquationError> {
+    // A genuine text entry point: the tests spell the target equation as a
+    // string, so it is parsed here once. Production hands the transform an
+    // `Expr0` lowered straight from the target's `Expr2`.
+    let Ok(Some(ast)) = crate::ast::Expr0::new(equation_text, crate::lexer::LexerType::Equation)
+    else {
+        return Err(PartialEquationError::new(equation_text));
+    };
     let occ_sites =
-        build_wrap_test_occurrences(equation_text, from, deps, source_dim_elements, iter_ctx);
+        build_wrap_test_occurrences(&ast, from, deps, source_dim_elements, iter_ctx, dims_ctx);
     let slot_occurrences = SlotOccurrences::new(&occ_sites);
     let occ = slot_occurrences.for_slot(0);
     shaped_guard_form_text(
-        equation_text,
+        &ast,
         deps,
         from,
         shape,
@@ -4801,8 +4818,11 @@ fn wrap_missing_live_source_occurrence_is_loud_not_silent_freeze() {
 
     // A correctly-aligned stream, then drop pop's occurrence: the lookup stays
     // non-empty (helper survives) but `pop[nyc]`'s node lookup now misses.
+    let ast = crate::ast::Expr0::new(equation, crate::lexer::LexerType::Equation)
+        .expect("the equation parses")
+        .expect("the equation is non-empty");
     let desynced: Vec<OccurrenceSite> =
-        build_wrap_test_occurrences(equation, &live, &deps, &source_dims, None)
+        build_wrap_test_occurrences(&ast, &live, &deps, &source_dims, None, None)
             .into_iter()
             .filter(|o| !matches!(&o.reference, OccurrenceRef::Variable(v) if v == "pop"))
             .collect();
@@ -4813,9 +4833,8 @@ fn wrap_missing_live_source_occurrence_is_loud_not_silent_freeze() {
         "the guard scope requires a non-empty lookup -- helper must survive the drop"
     );
 
-    let (_ast, out) =
-        wrap_changed_first_ast(equation, &deps, &live, &shape, None, None, None, &occ)
-            .expect("the equation parses");
+    let (_wrapped, out) =
+        wrap_changed_first_ast(&ast, &deps, &live, &shape, None, None, None, &occ, None);
     assert!(
         out.missing_occurrence,
         "a live-source subscript path-miss on a non-empty lookup must flag the desync"
@@ -4830,7 +4849,7 @@ fn wrap_missing_live_source_occurrence_is_loud_not_silent_freeze() {
     // changed-first partial. Changed-last is not even attempted: it would read
     // the SAME desynced stream.
     let err = shaped_guard_form_text(
-        equation,
+        &ast,
         &deps,
         &live,
         &shape,
@@ -4873,7 +4892,6 @@ fn shaped_guard_form_falls_back_to_changed_last_for_unfreezable_co_source() {
     let iter_ctx = IteratedDimCtx {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated,
-        dim_ctx: None,
         dep_dims: None,
     };
     let text = sgft(
@@ -5060,7 +5078,6 @@ fn gh526_transposed_other_dep_with_threaded_dims_is_unfreezable() {
     let iter_ctx = IteratedDimCtx {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated_dims,
-        dim_ctx: None,
         dep_dims: Some(&dep_dims),
     };
     let result = build_partial_equation_shaped(
@@ -5166,7 +5183,6 @@ fn shaped_guard_form_declines_bare_arrayed_feeder_of_unhoisted_reducer() {
     let iter_ctx = IteratedDimCtx {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated,
-        dim_ctx: None,
         dep_dims: None,
     };
     let err = sgft(
@@ -5247,7 +5263,6 @@ fn gh526_natural_and_unthreadable_other_deps_keep_collapse() {
     let iter_ctx = IteratedDimCtx {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated_dims,
-        dim_ctx: None,
         dep_dims: Some(&dep_dims),
     };
     let partial = build_partial_equation_shaped(
@@ -5271,7 +5286,6 @@ fn gh526_natural_and_unthreadable_other_deps_keep_collapse() {
     let iter_ctx_unthreaded = IteratedDimCtx {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated_dims,
-        dim_ctx: None,
         dep_dims: Some(&empty_dep_dims),
     };
     let partial = build_partial_equation_shaped(
@@ -5304,18 +5318,14 @@ fn gh526_natural_and_unthreadable_other_deps_keep_collapse() {
 /// `arrayed_target_slot_scores` characterization golden.
 #[test]
 fn slot_occurrence_index_groups_every_slot() {
-    use crate::db::ltm_ir::{OccurrenceRouting, OccurrenceSite, SiteId};
+    use crate::db::ltm_ir::{OccurrenceSite, SiteId};
 
     let occ_at = |path: &[u16], name: &str| OccurrenceSite {
         site_id: SiteId(path.to_vec().into_boxed_slice()),
         reference: OccurrenceRef::Variable(name.to_string()),
         shape: RefShape::Bare,
         axes: Vec::new(),
-        target_element: None,
-        routing: OccurrenceRouting::Direct,
         in_reducer: false,
-        reducer_keys: Vec::new(),
-        already_lagged: false,
         index_nested: false,
     };
 
@@ -5404,76 +5414,6 @@ fn child_path_maps_over_arity_child_to_the_unaddressable_sentinel() {
     );
 }
 
-/// The per-element row-pinning lowering must descend into a subscript RANGE's
-/// endpoints, not just its plain expression indices.
-///
-/// A source reference can hide in a range bound under another variable's
-/// subscript (`other[pop[region]:3]`). The IR walker records an occurrence there
-/// (`IndexExpr2::Range` pushes children 0 and 1) and the sibling lowering
-/// `substitute_reducers_in_expr0` descends both endpoints -- but
-/// `rewrite_per_element_source_refs` matched only `IndexExpr0::Expr` and passed
-/// a `Range` through untouched. The recorded occurrence was then left un-pinned:
-/// its dimension-name subscript survived into the scalar per-element equation,
-/// which either fails to compile (a `PREVIOUS`-of-dim-name capture helper) or
-/// reads the wrong element.
-#[test]
-fn per_element_pin_descends_into_range_endpoints() {
-    use crate::dimensions::DimensionsContext;
-    use crate::ltm_agg::AxisRead;
-
-    let region = make_named_dimension("region", &["nyc", "boston"]);
-    let from_dims = vec![region.clone()];
-    let source_dim_elements = vec![vec!["nyc".to_string(), "boston".to_string()]];
-    let source_dim_names = vec!["region".to_string()];
-    let target_iterated_dims = vec!["region".to_string()];
-    let dim_ctx = DimensionsContext::from(
-        [datamodel::Dimension::named(
-            "region".to_string(),
-            vec!["nyc".to_string(), "boston".to_string()],
-        )]
-        .as_slice(),
-    );
-    let iter_ctx = IteratedDimCtx {
-        source_dim_names: &source_dim_names,
-        target_iterated_dims: &target_iterated_dims,
-        dim_ctx: Some(&dim_ctx),
-        dep_dims: None,
-    };
-    let from = Ident::<Canonical>::new("pop");
-    let site_axes = vec![AxisRead::Iterated {
-        dim: "region".to_string(),
-        source_dim: "region".to_string(),
-    }];
-    let row_parts_bare = vec!["boston".to_string()];
-    let mut target_elem_by_dim = HashMap::new();
-    target_elem_by_dim.insert("region".to_string(), ("boston".to_string(), 1usize));
-
-    let ctx = super::post_transform::PerElementRefCtx {
-        from: &from,
-        site_axes: &site_axes,
-        row_parts_bare: &row_parts_bare,
-        source_dim_elements: &source_dim_elements,
-        from_dims: &from_dims,
-        target_elem_by_dim: &target_elem_by_dim,
-        iter_ctx: &iter_ctx,
-        dim_ctx: &dim_ctx,
-    };
-
-    // `pop[region]` sits in the LOWER bound of a range index of `other`.
-    let ast = Expr0::new("other[pop[region]:3]", LexerType::Equation)
-        .expect("fixture parses")
-        .expect("fixture is non-empty");
-    let lowered = super::post_transform::rewrite_per_element_source_refs(ast, &ctx, false);
-    let text = print_eqn(&lowered);
-
-    assert!(
-        !text.contains("pop[region]"),
-        "the source reference inside the range bound must be pinned, not left \
-         with its dimension-name subscript; got: {text}"
-    );
-    assert!(
-        text.contains("boston"),
-        "the range-bound occurrence must be pinned to this instantiation's row; \
-         got: {text}"
-    );
-}
+#[cfg(test)]
+#[path = "ltm_augment_pin_tests.rs"]
+mod pin_tests;
