@@ -944,11 +944,11 @@ where
 ///
 /// This is the `ModelStage0`-construction twin of the salsa-layer gate
 /// (`compile_project_incremental` / `emit_duplicate_variable_diagnostics`,
-/// GH #885): the monolithic constructors and `Project::from_salsa` collapse
-/// variables into a canonical-keyed map last-wins, so callers seed the
-/// model's error list with this result instead of silently building a
-/// different model than the one declared. The message text is shared via
-/// [`duplicate_variable_message`], so every surface reports identically.
+/// GH #885): every `ModelStage0` constructor collapses variables into a
+/// canonical-keyed map last-wins, so callers seed the model's error list with
+/// this result instead of silently building a different model than the one
+/// declared. The message text is shared via [`duplicate_variable_message`], so
+/// every surface reports identically.
 pub(crate) fn duplicate_variable_errors_from_groups(
     model_name: &str,
     groups: &[(String, Vec<String>)],
@@ -972,10 +972,12 @@ pub(crate) fn duplicate_variable_errors_from_groups(
 
 /// [`duplicate_variable_errors_from_groups`] over a raw declared-ident list:
 /// groups the idents by canonical form first. Used by the datamodel-driven
-/// `ModelStage0` constructors -- which are themselves `#[cfg(test)]`, hence
-/// the gate here -- while the salsa-driven paths (`db::stages::model_stage0`
-/// and, until it reads that query, `Project::from_salsa`) feed the memoized
-/// `db::model_duplicate_variables` groups directly.
+/// `ModelStage0` constructor -- itself `#[cfg(test)]`, hence the gate here --
+/// while the salsa-driven path (`db::stages::model_stage0`, which every other
+/// consumer including `Project::from_salsa` now reads) feeds the memoized
+/// `db::model_duplicate_variables` groups directly. The two routes to the same
+/// error list are what `model::test_stage0_records_duplicate_variable_error`
+/// cross-checks.
 #[cfg(test)]
 pub(crate) fn duplicate_variable_errors<'a, I>(model_name: &str, idents: I) -> Option<Vec<Error>>
 where

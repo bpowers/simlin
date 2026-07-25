@@ -10,7 +10,7 @@ use crate::dimensions::DimensionsContext;
 use crate::model::ModelStage1;
 use std::sync::Arc;
 
-use {crate::model::ScopeStage0, crate::units::Context, std::collections::BTreeSet};
+use {crate::units::Context, std::collections::BTreeSet};
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
@@ -58,10 +58,24 @@ impl Project {
 
     /// Build a `Project` from a pre-synced salsa database.
     ///
-    /// All variable parsing comes from salsa-cached results (no
-    /// redundant parsing). The caller provides the salsa DB and
-    /// `SourceProject`; the `model_cb` runs per non-stdlib model
-    /// after dependency resolution (typically unit inference/checking).
+    /// The two pre-layout model stages come from the cached `db::stages`
+    /// queries -- the crate's single salsa-native construction of them -- so
+    /// this path and the unit pass share one set of memos. The caller provides
+    /// the salsa DB and `SourceProject`; the `model_cb` runs per non-stdlib
+    /// model after dependency resolution (typically unit inference/checking).
+    ///
+    /// **Reachability.** Nothing in production calls this. Inside the crate
+    /// every caller is a test (`test_common::TestProject::compile`/
+    /// `build_module`, the `units_infer` inference tests, `db::stages_tests`,
+    /// and the tests below); outside it, the `From<datamodel::Project>` impl is
+    /// public, but the only in-repo user is the engine's own
+    /// `tests/integration/simulate_ltm.rs`, which builds a `Project` solely to
+    /// feed the `ltm_finding::discover_loops` convenience wrapper. The shipped
+    /// analysis surface (libsimlin's `simlin_analyze_discover_loops` ->
+    /// `analysis::...` -> `ltm_finding::discover_loops_with_graph`) never
+    /// constructs one. So this is a "monolith as live oracle" path: it is worth
+    /// keeping honest because tests compare against it, not because users run
+    /// it.
     pub(crate) fn from_salsa<F>(
         project_datamodel: datamodel::Project,
         db: &dyn crate::db::Db,
@@ -73,10 +87,10 @@ impl Project {
     {
         use crate::common::{ErrorCode, ErrorKind, topo_sort};
         use crate::db::{
-            model_module_ident_context, parse_source_variable_with_module_context,
-            project_datamodel_dims, project_dimensions_context, project_units_context_result,
+            model_stage1, project_datamodel_dims, project_dimensions_context,
+            project_units_context_result,
         };
-        use crate::model::{ModelStage0, VariableStage0, enumerate_modules};
+        use crate::model::enumerate_modules;
 
         let units_result = project_units_context_result(db, source_project);
         let units_ctx = &units_result.ctx;
@@ -106,96 +120,26 @@ impl Project {
         // rather than rebuilding it here (it is canonicalized once per project).
         let dims_ctx = project_dimensions_context(db, source_project);
 
-        // Build ModelStage0 from salsa-parsed variables for all models.
-        let project_models = source_project.models(db);
-        let mut all_s0: Vec<ModelStage0> = Vec::new();
-        for (canonical_name, src_model) in project_models.iter() {
-            // Only treat a model as implicit/stdlib if it matches one
-            // of the known stdlib model names, not just any model whose
-            // name starts with the stdlib prefix.
-            let is_stdlib = canonical_name
-                .strip_prefix("stdlib\u{205A}")
-                .is_some_and(|suffix| crate::stdlib::MODEL_NAMES.contains(&suffix));
-            let model_name = src_model.name(db);
-            let src_vars = src_model.variables(db);
-            // For stdlib models, ALL variable names must be module idents so
-            // PREVIOUS(module_input) rewrites through a scalar helper aux
-            // instead of reading a transient module-input slot directly.
-            let extra_module_idents: Vec<String> = if is_stdlib {
-                src_vars.keys().cloned().collect()
-            } else {
-                vec![]
-            };
-            let module_ctx =
-                model_module_ident_context(db, *src_model, source_project, extra_module_idents);
-            let mut var_list: Vec<VariableStage0> = Vec::new();
-            let mut implicit_dm: Vec<datamodel::Variable> = Vec::new();
-            for (_vname, svar) in src_vars.iter() {
-                let parsed = parse_source_variable_with_module_context(
-                    db,
-                    *svar,
-                    source_project,
-                    module_ctx,
-                );
-                var_list.push(parsed.variable.clone());
-                implicit_dm.extend(parsed.implicit_vars.iter().cloned());
-            }
-            // Parse implicit vars (SMOOTH/DELAY expansion).
-            let mut nested_implicit: Vec<datamodel::Variable> = Vec::new();
-            var_list.extend(implicit_dm.into_iter().map(|dm_var| {
-                crate::variable::parse_var(
-                    dm_dims,
-                    &dm_var,
-                    &mut nested_implicit,
-                    units_ctx,
-                    |mi| Ok(Some(mi.clone())),
-                )
-            }));
-            debug_assert!(
-                nested_implicit.is_empty(),
-                "implicit vars should not produce further implicit vars"
-            );
-            let variables: HashMap<Ident<Canonical>, VariableStage0> = var_list
-                .into_iter()
-                .map(|v| (Ident::new(v.ident()), v))
-                .collect();
-            // Two declared variables whose names canonicalize identically
-            // already collapsed last-wins on the canonical-keyed sync maps
-            // this loop reads, so `variables` above cannot detect the twin.
-            // The production compile pipeline hard-errors upstream (GH #885);
-            // record the same DuplicateVariable model error here so this
-            // legacy path's consumers (TestProject::compile and other
-            // non-simulating surfaces) reject the model too instead of
-            // quietly building a different one (GH #891). The memoized salsa
-            // groups derive from the raw pre-dedup declared-ident list.
-            let errors = crate::common::duplicate_variable_errors_from_groups(
-                model_name,
-                crate::db::model_duplicate_variables(db, *src_model),
-            );
-            all_s0.push(ModelStage0 {
-                ident: Ident::new(model_name),
-                display_name: model_name.clone(),
-                variables,
-                errors,
-                implicit: is_stdlib,
-                is_macro: src_model.macro_spec(db).is_some(),
-                macro_params: crate::model::macro_param_idents(src_model.macro_spec(db).as_ref()),
-            });
-        }
-
-        // ModelStage0 -> ModelStage1
-        let models_s0: HashMap<Ident<Canonical>, &ModelStage0> =
-            all_s0.iter().map(|m| (m.ident.clone(), m)).collect();
-        let mut models_list: Vec<ModelStage1> = all_s0
-            .iter()
-            .map(|ms0| {
-                let scope = ScopeStage0 {
-                    models: &models_s0,
-                    dimensions: dims_ctx,
-                    model_name: ms0.ident.as_str(),
-                };
-                ModelStage1::new(&scope, ms0)
-            })
+        // Every model's lowered stage, read from the cached query instead of
+        // built here. This used to be ~90 lines that re-derived the stdlib
+        // `implicit` test, the stdlib module-ident set, the per-variable parse
+        // loop, the SMOOTH/DELAY implicit-variable parse, the duplicate-ident
+        // model errors, and the whole-project Stage0 -> Stage1 lowering -- a
+        // second salsa-native copy of `db::stages`, which had already silently
+        // drifted from the others on three fields (GH #966).
+        //
+        // The values are CLONED because everything below is destructive and the
+        // memo is shared with every other reader: `model_deps.take()` empties
+        // that field, `set_dependencies` fills `instantiations`, rewrites
+        // `errors`, and pushes equation errors onto the variables THEMSELVES,
+        // and `model_cb` takes `&mut ModelStage1`. A `ModelStage1` is one
+        // model's lowered equations, so this is the same allocation the deleted
+        // code paid for building them -- the saving is the parse and lowering
+        // work, not the copy.
+        let mut models_list: Vec<ModelStage1> = source_project
+            .models(db)
+            .values()
+            .map(|src_model| model_stage1(db, *src_model, source_project).clone())
             .collect();
 
         // Topo-sort by model dependencies.
@@ -208,7 +152,14 @@ impl Project {
                 })
                 .collect();
 
-            let model_runlist: Vec<&Ident<Canonical>> = model_deps.keys().collect();
+            // Sort before the topo sort. `topo_sort` breaks ties -- models with
+            // no ordering edge between them -- by visit order, so seeding it
+            // straight from a `HashMap`'s keys made the model order, and every
+            // `runlist_initials` derived from it, vary run to run. This is the
+            // `Project`-path twin of the GH #595 fix in
+            // `db::dep_graph::model_dependency_graph_impl`.
+            let mut model_runlist: Vec<&Ident<Canonical>> = model_deps.keys().collect();
+            model_runlist.sort_unstable();
             let model_runlist = topo_sort(model_runlist, &model_deps);
             model_runlist
                 .into_iter()
@@ -320,6 +271,105 @@ mod tests {
             "Diagnostic variable should include a conflicting unit name, got: {:?}",
             unit_errs,
         );
+    }
+
+    /// Building the same project repeatedly must produce the same model order
+    /// and the same Initials runlists.
+    ///
+    /// Two `HashMap`/`HashSet` iteration orders used to leak into `topo_sort`,
+    /// which breaks ties by visit order: the model runlist seeded from
+    /// `model_deps.keys()` here, and the Initials runlist set in
+    /// `ModelStage1::set_dependencies`. On two fresh `SimlinDb`s in ONE process
+    /// this produced `["sub_a","sub_b","main"]` on one construction and
+    /// `["sub_b","sub_a","main"]` on the next, with `runlist_initials` flipping
+    /// to match -- so an initial value depending on an unordered pair was
+    /// order-dependent. This is the `Project`-path twin of GH #595, fixed the
+    /// same way (sort before the topo sort).
+    ///
+    /// Repeated across several independent constructions because each fresh
+    /// `HashMap` gets its own `RandomState`: one agreeing pair proves nothing,
+    /// a run of them is what makes a surviving nondeterminism improbable.
+    #[test]
+    fn from_salsa_model_order_and_initials_runlists_are_deterministic() {
+        use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project};
+        use std::collections::BTreeMap;
+
+        // Two sibling sub-models with NO ordering edge between them: the tie
+        // `topo_sort` has to break, and the one an unsorted seed decided by
+        // hash order.
+        let sub_a = x_model(
+            "sub_a",
+            vec![x_aux("input", "0", None), x_aux("out", "input * 2", None)],
+        );
+        let sub_b = x_model(
+            "sub_b",
+            vec![x_aux("input", "0", None), x_aux("out", "input + 1", None)],
+        );
+        let main = x_model(
+            "main",
+            vec![
+                x_aux("driver", "5", None),
+                // Several mutually unordered auxes, so the Initials runlist has
+                // ties of its own to break.
+                x_aux("alpha", "1", None),
+                x_aux("beta", "2", None),
+                x_aux("gamma", "3", None),
+                x_module("sub_a", &[("driver", "sub_a.input")], None),
+                x_module("sub_b", &[("driver", "sub_b.input")], None),
+                x_aux("combined", "sub_a.out + sub_b.out", None),
+            ],
+        );
+        let dm = x_project(sim_specs_with_units("month"), &[main, sub_a, sub_b]);
+
+        let build_once = || {
+            let db = crate::db::SimlinDb::default();
+            let sync = crate::db::sync_from_datamodel(&db, &dm);
+            let mut cb_order: Vec<String> = Vec::new();
+            let project = Project::from_salsa(dm.clone(), &db, sync.project, |_, _, model| {
+                cb_order.push(model.name.to_string());
+            });
+            // Initials runlists for every model, keyed so the comparison does
+            // not depend on map order itself.
+            let runlists: BTreeMap<String, Vec<Vec<String>>> = project
+                .models
+                .iter()
+                .map(|(name, m)| {
+                    let mut per_instantiation: Vec<Vec<String>> = m
+                        .instantiations
+                        .as_ref()
+                        .expect("set_dependencies fills instantiations")
+                        .values()
+                        .map(|inst| {
+                            inst.runlist_initials
+                                .iter()
+                                .map(|i| i.to_string())
+                                .collect()
+                        })
+                        .collect();
+                    per_instantiation.sort();
+                    (name.to_string(), per_instantiation)
+                })
+                .collect();
+            (cb_order, runlists)
+        };
+
+        // Many attempts, not a handful: each fresh `HashMap` draws a new
+        // `RandomState`, but the tie `topo_sort` breaks has only a few possible
+        // outcomes, so a short run agrees by chance often enough to let a
+        // regression through. Measured against the unsorted code, 8 attempts
+        // missed it roughly one run in three; 64 has not missed it.
+        let first = build_once();
+        for attempt in 1..64 {
+            let next = build_once();
+            assert_eq!(
+                first.0, next.0,
+                "model_cb order must not vary run to run (attempt {attempt})"
+            );
+            assert_eq!(
+                first.1, next.1,
+                "Initials runlists must not vary run to run (attempt {attempt})"
+            );
+        }
     }
 
     /// A module referencing a model that does not exist must not panic the

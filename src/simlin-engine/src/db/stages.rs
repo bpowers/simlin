@@ -20,16 +20,42 @@
 //! the model count (GH #966). Caching them here as `returns(ref)` queries makes
 //! each model's stages one memoized value that consumers READ.
 //!
-//! This is where the two stages are built from salsa inputs. It is its own
-//! file, rather than more of `db/query.rs`, so that a second construction site
-//! has to arrive as a new file instead of hiding as a few more lines in a
-//! grab-bag module -- the drift this box exists to delete. One other copy
-//! survives for now: `Project::from_salsa` still builds its own stages inline,
-//! and migrating it to read these queries is the follow-on commit. Where the
-//! two bodies used to disagree (the stdlib `implicit` test, the stdlib
-//! module-ident set, and whether duplicate-canonical-ident model errors are
-//! recorded) this one takes `from_salsa`'s behaviour, so that migration is a
-//! deletion rather than a merge.
+//! This is the ONLY place in the crate the two stages are built from salsa
+//! inputs. It is its own file, rather than more of `db/query.rs`, so that a
+//! second construction site has to arrive as a new file instead of hiding as a
+//! few more lines in a grab-bag module -- the drift this exists to delete.
+//! `Project::from_salsa` used to carry a second copy (silently disagreeing on
+//! three fields: the stdlib `implicit` test, the stdlib module-ident set, and
+//! whether duplicate-canonical-ident model errors are recorded); this body took
+//! `from_salsa`'s behaviour in all three, so retiring that copy was a deletion
+//! rather than a merge, and `from_salsa` now clones these memos.
+//!
+//! Every other place in the crate that builds either stage, exhaustively --
+//! this file exists to be where that list is right, so keep it complete:
+//!
+//! PRODUCTION (three, none a whole-model salsa build, each deliberate):
+//!
+//!   - `db::var_fragment::lower_var_fragment` (`ModelStage0` literal) and
+//!     `db::ltm::compile` (ditto) build a per-variable MINI Stage0 holding only
+//!     that variable's dependencies, then call `lower_variable` directly rather
+//!     than `ModelStage1::new`. Pointing those at this query would add a
+//!     project-wide dependency edge to every fragment compile -- the opposite of
+//!     the goal.
+//!   - `db::units::check_conveyor_param_units` calls `ModelStage1::new` on a
+//!     CLONE of the cached Stage0 augmented with synthetic conveyor-parameter
+//!     auxes. The augmented stage is a throwaway on purpose; see that module's
+//!     header.
+//!
+//! `#[cfg(test)]` (the oracle surface, all database-free):
+//!
+//!   - `ModelStage0::new` / `new_in_project` build from a `datamodel::Model`
+//!     with no database at all, which these queries cannot do. They are the
+//!     independent oracle `db::stages_tests` checks this module against.
+//!   - Four `ModelStage1::new` call sites lower those oracle Stage0s:
+//!     `model.rs` (the dependency-resolution and `enumerate_modules` tests) and
+//!     `db::stages_tests::datamodel_driven_stage1s` (the whole-project lowering
+//!     oracle). They take a `ScopeStage0` the test builds by hand, so they are
+//!     construction sites for the stage TYPE but never for a cached value.
 //!
 //! **Memory.** `returns(ref)` means salsa RETAINS one `ModelStage0` and one
 //! `ModelStage1` per model for as long as their memos stay valid, where the old
@@ -168,11 +194,13 @@ pub(crate) fn source_model_is_stdlib(db: &dyn Db, model: SourceModel) -> bool {
 /// against a slot that does not exist.
 ///
 /// No shipped stdlib body calls `PREVIOUS`/`INIT`, so today this changes no
-/// parse result. It is kept because it is the rule `Project::from_salsa` has
-/// always used and the rule the datamodel-driven `ModelStage0::new` uses for an
-/// implicit model: one rule means the two paths hit the SAME
-/// `ModuleIdentContext` and share one `parse_source_variable_with_module_context`
-/// cache entry, instead of minting a second set of parses under a second key.
+/// parse result. It is kept because it is the rule the datamodel-driven
+/// `ModelStage0::new` uses for an implicit model, and the rule
+/// `Project::from_salsa` used while it still built its own stages: one rule
+/// means every path reaching a stdlib model's parse hits the SAME
+/// `ModuleIdentContext` and shares one
+/// `parse_source_variable_with_module_context` cache entry, instead of minting
+/// a second set of parses under a second key.
 ///
 /// `pub(super)` for the same reason as [`model_is_stdlib`]: the rule is inert
 /// in the stage VALUE today, so `db::stages_tests` pins it here.
@@ -321,6 +349,23 @@ pub(crate) fn model_stage0(db: &dyn Db, model: SourceModel, project: SourceProje
 /// results; narrowing it to the module-reachable closure is the follow-on to
 /// GH #966, deliberately left out of this commit so the caching change is
 /// behavior-preserving on its own.
+///
+/// Anyone doing that narrowing: three fixtures in `db::stages_tests` are what
+/// can see it going wrong, and they separate the mistakes it can make.
+///
+///   - `arrayed_module_project` -- `main` reduces over an ARRAYED output of its
+///     direct module target `sub_a`, so a scope holding only the model itself
+///     lowers that reference as a scalar. (Before it existed, emptying this map
+///     entirely left every test in the crate green.)
+///   - `chain_project` -- `main -> sub_a -> sub_c`, with `main` reducing over
+///     `sub_a.sub_c.out_by_region`. `sub_c` is reachable only THROUGH `sub_a`,
+///     so a scope of "self + direct module targets" is caught here and nowhere
+///     else. The closure must be TRANSITIVE.
+///   - `omitting_stdlib_models_from_the_lowering_scope_is_inert_today` -- a
+///     narrowing that drops the `stdlib⁚*` models is currently harmless, and
+///     that test asserts the precise reason (no stdlib template is arrayed or
+///     instantiates a module). It fails the moment that stops being true, which
+///     is the moment such a narrowing would start mis-lowering silently.
 #[salsa::tracked(returns(ref))]
 pub(crate) fn model_stage1(db: &dyn Db, model: SourceModel, project: SourceProject) -> ModelStage1 {
     #[cfg(test)]
