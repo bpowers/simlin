@@ -4,9 +4,10 @@
 
 //! Demand-driven read queries over the salsa inputs: per-variable parsing
 //! (`parse_source_variable_with_module_context` and its `_impl`), the
-//! project-global cached contexts (`project_units_context`,
-//! `project_datamodel_dims`, `project_dimensions_context`,
-//! `project_converted_dimensions`), the module-ident context
+//! project-global cached contexts (`project_units_context_result` and its
+//! `project_units_context` projection, `project_datamodel_dims`,
+//! `project_dimensions_context`, `project_converted_dimensions`), the
+//! module-ident context
 //! (`module_ident_context_for_model`/`model_module_ident_context`), the
 //! per-variable direct-dependency extraction
 //! (`variable_direct_dependencies` and its `_impl`, plus the
@@ -38,43 +39,79 @@ impl std::fmt::Debug for ParsedVariableResult {
     }
 }
 
+/// The project's units context together with the definition errors that
+/// building it produced.
+///
+/// The errors ride the RESULT rather than a salsa accumulator because a bad
+/// unit declaration is a PROJECT-level fact -- there is one `units` list per
+/// project, belonging to no model. Accumulating it from inside this query's
+/// body meant `collect_all_diagnostics` reported one copy per model (every
+/// model's diagnostic subtree reaches this query), and that after an unrelated
+/// salsa revision bump the accumulator DFS pruned the subtree and the errors
+/// vanished from the collection entirely. `collect_all_diagnostics` now reads
+/// this field and emits each error once. See `db::macro_registry` for the
+/// sibling case and `db/diagnostic_tests.rs` for the regression tests.
+#[derive(Clone, PartialEq, salsa::Update)]
+pub struct UnitsContextResult {
+    pub ctx: crate::units::Context,
+    /// One entry per unit declaration that failed to parse: its name and the
+    /// equation errors it produced.
+    pub definition_errors: Vec<(String, Vec<crate::common::EquationError>)>,
+}
+
 /// Cached units context -- computed once per project, reused across all variables.
 /// Subsumes the per-variable Context::new_with_builtins calls.
 ///
 /// Reads the datamodel `Vec<Unit>` and `SimSpecs` directly off the salsa input
 /// (the inputs now store the datamodel types, so no per-call conversion is
 /// needed).
-///
-/// Unit definition parsing errors are accumulated as diagnostics so they
-/// appear in `collect_all_diagnostics`.
 #[salsa::tracked(returns(ref))]
-pub fn project_units_context(db: &dyn Db, project: SourceProject) -> crate::units::Context {
-    use salsa::Accumulator;
+pub fn project_units_context_result(db: &dyn Db, project: SourceProject) -> UnitsContextResult {
     let dm_units = project.units(db);
     let dm_sim_specs = project.sim_specs(db);
     // Construction is partial: keep the context built from the valid unit
-    // declarations and surface each conflicting/duplicate declaration as a
-    // project-level diagnostic, rather than discarding every unit definition on
-    // the first conflict. An empty context would lose all alias normalization
-    // project-wide (yr/year, person/people, model-defined equivalences) and
-    // re-create a spurious unit-mismatch flood -- the context-layer parallel of
-    // the inference partial-results fix (GH #614).
-    let (ctx, unit_parse_errors) = crate::units::Context::new_with_builtins(dm_units, dm_sim_specs);
-    for (unit_name, eq_errors) in &unit_parse_errors {
-        for eq_err in eq_errors {
-            CompilationDiagnostic(Diagnostic {
-                model: String::new(),
-                variable: Some(unit_name.clone()),
-                error: DiagnosticError::Unit(crate::common::UnitError::DefinitionError(
-                    eq_err.clone(),
-                    None,
-                )),
-                severity: DiagnosticSeverity::Error,
-            })
-            .accumulate(db);
-        }
+    // declarations and report each conflicting/duplicate declaration, rather
+    // than discarding every unit definition on the first conflict. An empty
+    // context would lose all alias normalization project-wide (yr/year,
+    // person/people, model-defined equivalences) and re-create a spurious
+    // unit-mismatch flood -- the context-layer parallel of the inference
+    // partial-results fix (GH #614).
+    let (ctx, definition_errors) = crate::units::Context::new_with_builtins(dm_units, dm_sim_specs);
+    UnitsContextResult {
+        ctx,
+        definition_errors,
     }
-    ctx
+}
+
+/// The project's units context, for the many callers that want the context and
+/// not the definition errors that came with it.
+///
+/// This is a salsa PROJECTION over [`project_units_context_result`], not a plain
+/// accessor, and the distinction is load-bearing. A caller that reads a plain
+/// accessor takes a dependency on the whole `UnitsContextResult`, so it is
+/// invalidated whenever EITHER half changes -- and the two halves move
+/// independently: a unit whose equation fails to parse is left out of `ctx`
+/// entirely, so editing a malformed unit equation (every intermediate state of
+/// typing one) changes `definition_errors` while `ctx` stays byte-identical.
+/// Every variable parse in the project would rebuild on each keystroke.
+///
+/// As a tracked query it re-executes when the result changes but salsa BACKDATES
+/// it when the projected `Context` compares equal, so its readers keep exactly
+/// the dependency they had when the errors rode the salsa accumulator instead.
+/// Pinned by `db::dimension_invalidation_tests::
+/// unit_definition_error_only_change_does_not_invalidate_context_readers`.
+///
+/// **What the projection costs.** `Context::new_with_builtins` still runs
+/// exactly once, in the query above -- the cost is memory, not CPU. Salsa now
+/// RETAINS two `units::Context` copies per project: the one inside
+/// `UnitsContextResult` and the one in this query's memo. Each also costs a
+/// clone in every revision where the units input changes. A `Context` is the
+/// project's unit name/alias/equation maps, so this is small next to the model
+/// stages (see `db::stages`' memory note) and flat in the model count -- but it
+/// is per project and permanent, so a future field on `Context` is paid twice.
+#[salsa::tracked(returns(ref))]
+pub fn project_units_context(db: &dyn Db, project: SourceProject) -> crate::units::Context {
+    project_units_context_result(db, project).ctx.clone()
 }
 
 /// Cached datamodel dimensions -- computed once per project.

@@ -21,9 +21,10 @@ pub struct Project {
     pub models: HashMap<Ident<Canonical>, Arc<ModelStage1>>,
     #[allow(dead_code)]
     model_order: Vec<Ident<Canonical>>,
-    /// Project-level errors. With the `from_salsa` construction path,
-    /// unit definition errors are recovered from the salsa accumulator
-    /// in `project_units_context` so callers can still inspect them.
+    /// Project-level errors. With the `from_salsa` construction path, unit
+    /// definition errors are read off `UnitsContextResult::definition_errors`
+    /// -- the same memoized derivation `collect_all_diagnostics` reports from
+    /// -- so callers can inspect them here and get the same set.
     pub errors: Vec<Error>,
     /// Cached dimension context for subdimension lookups
     pub dimensions_ctx: DimensionsContext,
@@ -72,31 +73,34 @@ impl Project {
     {
         use crate::common::{ErrorCode, ErrorKind, topo_sort};
         use crate::db::{
-            CompilationDiagnostic, DiagnosticError, model_module_ident_context,
-            parse_source_variable_with_module_context, project_datamodel_dims,
-            project_dimensions_context, project_units_context,
+            model_module_ident_context, parse_source_variable_with_module_context,
+            project_datamodel_dims, project_dimensions_context, project_units_context_result,
         };
         use crate::model::{ModelStage0, VariableStage0, enumerate_modules};
 
-        let units_ctx = project_units_context(db, source_project);
+        let units_result = project_units_context_result(db, source_project);
+        let units_ctx = &units_result.ctx;
 
-        // Recover unit definition errors from the salsa accumulator so
-        // callers that inspect Project.errors (e.g. tests) still see them.
-        let project_errors: Vec<Error> =
-            project_units_context::accumulated::<CompilationDiagnostic>(db, source_project)
-                .into_iter()
-                .filter_map(|cd| match &cd.0.error {
-                    DiagnosticError::Unit(unit_err) => {
-                        let name = cd.0.variable.as_deref().unwrap_or("unknown");
-                        Some(Error {
-                            kind: ErrorKind::Model,
-                            code: ErrorCode::UnitDefinitionErrors,
-                            details: Some(format!("{name}: {unit_err}")),
-                        })
+        // Unit definition errors come off the memoized result, so callers that
+        // inspect `Project.errors` (e.g. tests) see the same set
+        // `collect_all_diagnostics` reports -- and see it deterministically.
+        // They used to be recovered by draining the salsa accumulator, which
+        // returned them once per reachable model and returned NOTHING at all
+        // once an unrelated revision bump let the DFS prune the subtree.
+        let project_errors: Vec<Error> = units_result
+            .definition_errors
+            .iter()
+            .flat_map(|(name, eq_errors)| {
+                eq_errors.iter().map(move |eq_err| {
+                    let unit_err = crate::common::UnitError::DefinitionError(eq_err.clone(), None);
+                    Error {
+                        kind: ErrorKind::Model,
+                        code: ErrorCode::UnitDefinitionErrors,
+                        details: Some(format!("{name}: {unit_err}")),
                     }
-                    _ => None,
                 })
-                .collect();
+            })
+            .collect();
         let dm_dims = project_datamodel_dims(db, source_project);
         // Read the project-global dimension context from the salsa-cached query
         // rather than rebuilding it here (it is canonicalized once per project).

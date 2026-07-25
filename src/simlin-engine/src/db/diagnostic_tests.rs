@@ -2677,3 +2677,252 @@ fn test_unknown_element_subscript_warns_on_conveyor_init_list() {
         "the message must name the unmatched subscript"
     );
 }
+
+// ---- project-level macro-registry build error ----
+//
+// An invalid macro set (a recursion cycle, a duplicate macro name, a
+// macro/model name collision) is a PROJECT-level failure: exactly one thing is
+// wrong with the project, regardless of how many models it holds. It used to be
+// accumulated from inside `project_macro_registry`'s body and discovered only by
+// whatever accumulator DFS happened to reach that memo, which made it both
+// over-reported (once per model, since every model's `model_all_diagnostics`
+// subtree reaches the registry through `model_module_ident_context`) and
+// FRAGILE (see the pruning hazard documented above `unit_warning_fixture`: after
+// an unrelated revision bump the whole subtree is pruned and the diagnostic
+// silently vanishes). It is now emitted once, directly, by
+// `collect_all_diagnostics` from the memoized `build_error`.
+
+/// A project with `n_extra` filler models plus two macros that share a name --
+/// an AC5.3 `DuplicateMacroName` registry-build failure.
+fn duplicate_macro_project(n_extra: usize) -> datamodel::Project {
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
+
+    let macro_model = |body: &str| {
+        let mut model = x_model("foo", vec![x_aux("foo", body, None), x_aux("a", "0", None)]);
+        model.macro_spec = Some(datamodel::MacroSpec {
+            parameters: vec!["a".to_string()],
+            primary_output: "foo".to_string(),
+            additional_outputs: vec![],
+        });
+        model
+    };
+
+    let mut models = vec![x_model("main", vec![x_aux("x", "1", None)])];
+    for i in 0..n_extra {
+        models.push(x_model(&format!("filler_{i}"), vec![x_aux("y", "2", None)]));
+    }
+    models.push(macro_model("a"));
+    models.push(macro_model("a + 1"));
+    x_project(sim_specs_with_units("months"), &models)
+}
+
+/// The registry-build diagnostics in a collected set.
+fn macro_build_diagnostics(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
+    diags
+        .iter()
+        .filter(|d| {
+            matches!(&d.error, DiagnosticError::Model(e)
+                if e.code == crate::common::ErrorCode::DuplicateMacroName)
+        })
+        .collect()
+}
+
+/// One project-level failure produces exactly ONE diagnostic, however many
+/// models the project holds.
+#[test]
+fn macro_registry_build_error_is_reported_exactly_once() {
+    let db = SimlinDb::default();
+    let project = duplicate_macro_project(4);
+    let sync = sync_from_datamodel(&db, &project);
+
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let found = macro_build_diagnostics(&diags);
+    assert_eq!(
+        found.len(),
+        1,
+        "a project-level macro-registry failure must be reported once, not once per model; \
+         got {} copies: {found:?}",
+        found.len()
+    );
+    let d = found[0];
+    assert_eq!(d.severity, DiagnosticSeverity::Error);
+    assert!(
+        d.model.is_empty() && d.variable.is_none(),
+        "the registry failure is project-level, so it names no model or variable: {d:?}"
+    );
+
+    // It reaches the collection as a memoized VALUE read, never through the
+    // accumulator: no model's per-model drain carries it. That is what makes it
+    // exactly-once AND immune to the accumulator-DFS pruning below.
+    for (name, source_model) in sync.project.models(&db) {
+        let per_model = collect_model_diagnostics(&db, *source_model, sync.project);
+        assert!(
+            macro_build_diagnostics(&per_model).is_empty(),
+            "the project-level registry error must not ride any model's accumulator \
+             (model '{name}'): {per_model:?}"
+        );
+    }
+}
+
+/// The registry-build diagnostic survives an unrelated salsa revision bump.
+///
+/// This is the failure the accumulator-based emission actually had: bumping
+/// `pinned_loops` (the same unrelated input
+/// `test_diagnostics_stable_across_unrelated_input_change` uses) let salsa
+/// validate `model_all_diagnostics` without re-executing it, the deep-verify
+/// path recomputed the DFS pruning flag as `Empty`, and the diagnostic
+/// disappeared from the next collection.
+#[test]
+fn macro_registry_build_error_survives_an_unrelated_input_change() {
+    use crate::db::PinnedLoopSpec;
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = duplicate_macro_project(2);
+    let sync = sync_from_datamodel(&db, &project);
+
+    let before = collect_all_diagnostics(&db, sync.project);
+    assert_eq!(
+        macro_build_diagnostics(&before).len(),
+        1,
+        "fixture must produce the registry error to begin with: {before:?}"
+    );
+
+    let source_model = sync.models["main"].source;
+    source_model
+        .set_pinned_loops(&mut db)
+        .to(vec![PinnedLoopSpec {
+            name: "dummy_loop".to_string(),
+            variables: vec![],
+            description: String::new(),
+        }]);
+
+    let after = collect_all_diagnostics(&db, sync.project);
+    assert_eq!(
+        macro_build_diagnostics(&after).len(),
+        1,
+        "the registry error must survive an unrelated input change: {after:?}"
+    );
+    assert_eq!(
+        before, after,
+        "the full diagnostic set must be identical across an unrelated input change"
+    );
+}
+
+// ---- project-level unit-definition errors ----
+//
+// The same defect, in the same shape, as the macro-registry build error above:
+// a project's `units` list belongs to no model, but the errors from parsing it
+// were accumulated inside `project_units_context`'s body, so the DFS found them
+// once per model and lost them completely after an unrelated revision bump.
+// They now ride `UnitsContextResult::definition_errors` and are emitted once by
+// `collect_all_diagnostics`.
+
+/// A project whose unit declarations conflict: two units claim the same alias
+/// `gadget` for different primary names. (Identical duplicate declarations are
+/// deliberately tolerated -- Vensim MDL footers repeat `22:` lines -- so a
+/// plain duplicate would not produce an error here.)
+fn conflicting_unit_alias_project() -> datamodel::Project {
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
+
+    let mut dm = x_project(
+        sim_specs_with_units("years"),
+        &[
+            x_model("main", vec![x_aux("x", "1", None)]),
+            x_model("other", vec![x_aux("y", "2", None)]),
+        ],
+    );
+    for name in ["widget", "doodad"] {
+        dm.units.push(datamodel::Unit {
+            name: name.to_string(),
+            equation: None,
+            disabled: false,
+            aliases: vec!["gadget".to_string()],
+        });
+    }
+    dm
+}
+
+/// The unit-definition errors in a collected set.
+fn unit_definition_diagnostics(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
+    diags
+        .iter()
+        .filter(|d| {
+            matches!(
+                &d.error,
+                DiagnosticError::Unit(crate::common::UnitError::DefinitionError(_, _))
+            )
+        })
+        .collect()
+}
+
+/// One bad unit declaration produces one diagnostic, however many models the
+/// project holds -- and it does not ride any model's accumulator.
+#[test]
+fn unit_definition_errors_are_reported_exactly_once() {
+    let db = SimlinDb::default();
+    let project = conflicting_unit_alias_project();
+    let sync = sync_from_datamodel(&db, &project);
+
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let found = unit_definition_diagnostics(&diags);
+    assert_eq!(
+        found.len(),
+        1,
+        "a conflicting unit alias must be reported once, not once per model; \
+         got {} copies: {found:?}",
+        found.len()
+    );
+    assert!(
+        found[0].model.is_empty(),
+        "a unit declaration belongs to the project, not a model: {:?}",
+        found[0]
+    );
+
+    for (name, source_model) in sync.project.models(&db) {
+        let per_model = collect_model_diagnostics(&db, *source_model, sync.project);
+        assert!(
+            unit_definition_diagnostics(&per_model).is_empty(),
+            "the project-level unit error must not ride model '{name}''s accumulator: \
+             {per_model:?}"
+        );
+    }
+}
+
+/// The unit-definition error survives an unrelated salsa revision bump.
+#[test]
+fn unit_definition_errors_survive_an_unrelated_input_change() {
+    use crate::db::PinnedLoopSpec;
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = conflicting_unit_alias_project();
+    let sync = sync_from_datamodel(&db, &project);
+
+    let before = collect_all_diagnostics(&db, sync.project);
+    assert_eq!(
+        unit_definition_diagnostics(&before).len(),
+        1,
+        "fixture must produce the unit definition error to begin with: {before:?}"
+    );
+
+    let source_model = sync.models["main"].source;
+    source_model
+        .set_pinned_loops(&mut db)
+        .to(vec![PinnedLoopSpec {
+            name: "dummy_loop".to_string(),
+            variables: vec![],
+            description: String::new(),
+        }]);
+
+    let after = collect_all_diagnostics(&db, sync.project);
+    assert_eq!(
+        unit_definition_diagnostics(&after).len(),
+        1,
+        "the unit definition error must survive an unrelated input change: {after:?}"
+    );
+    assert_eq!(
+        before, after,
+        "the full diagnostic set must be identical across an unrelated input change"
+    );
+}

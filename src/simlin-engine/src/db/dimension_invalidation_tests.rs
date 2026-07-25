@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Tests for dimension-granularity invalidation (AC8).
+//! Tests for input-granularity invalidation (AC8).
 //!
 //! Verifies that the per-variable dimension filtering in
 //! `parse_source_variable_impl` correctly narrows salsa's invalidation
@@ -10,6 +10,10 @@
 //! variables only depend on their own dimensions (plus transitive
 //! maps_to targets), and unrelated dimension changes do not trigger
 //! re-compilation.
+//!
+//! The same question for the project's UNITS input is at the bottom of the
+//! file: a reader of `project_units_context` must not be invalidated by a
+//! change that moves only the unit-definition ERROR list.
 
 use super::*;
 use crate::datamodel;
@@ -474,4 +478,93 @@ mod expand_maps_to_chains_tests {
             "reverse `maps_to` must also compare canonically; got {expanded:?}"
         );
     }
+}
+
+// ---- units-granularity invalidation ----
+
+/// A change that alters ONLY the unit-definition errors must not invalidate
+/// readers of `project_units_context`.
+///
+/// The two halves of `UnitsContextResult` move independently: a unit whose
+/// equation fails to parse is left out of the context entirely, so replacing one
+/// malformed equation with a different malformed one changes
+/// `definition_errors` while `ctx` stays byte-identical. That is not a contrived
+/// case -- it is every intermediate state of typing a unit equation in the
+/// editor.
+///
+/// `project_units_context` is therefore a salsa PROJECTION over the result, not
+/// a plain accessor: it re-executes but backdates on the equal `Context`, so its
+/// readers are left alone. With a plain accessor every reader takes a dependency
+/// on the whole result and rebuilds on each keystroke -- measured here as
+/// `model_stage0` rebuilds, since it reads the context and nothing else that
+/// this edit touches.
+#[test]
+fn unit_definition_error_only_change_does_not_invalidate_context_readers() {
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
+
+    let project_with_malformed_unit = |eqn: &str| {
+        let mut dm = x_project(
+            sim_specs_with_units("month"),
+            &[x_model("main", vec![x_aux("x", "1", None)])],
+        );
+        dm.units.push(datamodel::Unit {
+            name: "bad".to_string(),
+            equation: Some(eqn.to_string()),
+            disabled: false,
+            aliases: vec![],
+        });
+        dm
+    };
+
+    let mut db = SimlinDb::default();
+    let first = project_with_malformed_unit("widget/");
+    let state1 = sync_from_datamodel_incremental(&mut db, &first, None);
+    let sync1 = state1.to_sync_result();
+    let _ = model_stage0(&db, sync1.models["main"].source, sync1.project);
+
+    // Control: re-syncing the identical project rebuilds nothing, so a rebuild
+    // below is attributable to the edit and not to the re-sync itself.
+    reset_stage_executions();
+    let state2 = sync_from_datamodel_incremental(&mut db, &first, Some(&state1));
+    let sync2 = state2.to_sync_result();
+    let _ = model_stage0(&db, sync2.models["main"].source, sync2.project);
+    assert_eq!(
+        stage_executions().stage0,
+        0,
+        "re-syncing an unchanged project must not rebuild anything"
+    );
+
+    // Snapshot BEFORE the edit: incremental sync reuses the same `SourceProject`
+    // handle and mutates its fields, so `sync2.project` and `sync3.project` are
+    // the same salsa input -- reading through it after the edit yields the NEW
+    // value for both.
+    let ctx_before = project_units_context(&db, sync2.project).clone();
+    let errors_before = project_units_context_result(&db, sync2.project)
+        .definition_errors
+        .clone();
+
+    // A DIFFERENT malformed equation for the same unit: both are rejected.
+    let second = project_with_malformed_unit("widget * ");
+    reset_stage_executions();
+    let state3 = sync_from_datamodel_incremental(&mut db, &second, Some(&state2));
+    let sync3 = state3.to_sync_result();
+
+    assert_eq!(
+        *project_units_context(&db, sync3.project),
+        ctx_before,
+        "the fixture must leave the units context unchanged, or it proves nothing"
+    );
+    let errors_after = &project_units_context_result(&db, sync3.project).definition_errors;
+    assert_ne!(
+        errors_after, &errors_before,
+        "the fixture must change the definition errors, or it proves nothing"
+    );
+
+    let _ = model_stage0(&db, sync3.models["main"].source, sync3.project);
+    assert_eq!(
+        stage_executions().stage0,
+        0,
+        "a change to the unit-definition errors alone must not rebuild a reader \
+         of the units context; errors are now {errors_after:?}"
+    );
 }

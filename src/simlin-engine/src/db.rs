@@ -78,12 +78,12 @@ pub use input::{
 mod query;
 pub(crate) use query::canonical_module_input_set;
 pub use query::{
-    ImplicitVarMeta, ModuleReferenceGraph, ParsedVariableResult, VariableDeps,
+    ImplicitVarMeta, ModuleReferenceGraph, ParsedVariableResult, UnitsContextResult, VariableDeps,
     model_implicit_var_info, model_module_ident_context, model_module_map,
     parse_source_variable_with_module_context, project_converted_dimensions,
     project_datamodel_dims, project_dimensions_context, project_module_graph,
-    project_units_context, variable_dimensions, variable_direct_dependencies,
-    variable_relevant_dimensions, variable_size,
+    project_units_context, project_units_context_result, variable_dimensions,
+    variable_direct_dependencies, variable_relevant_dimensions, variable_size,
 };
 
 mod sync;
@@ -1172,8 +1172,9 @@ pub fn compile_project_incremental(
 ) -> crate::Result<crate::vm::CompiledSimulation> {
     // An invalid macro set (AC5.2 cycle / AC5.3 duplicate / collision) fails
     // the project-level compile before per-model processing, uniformly as
-    // `NotSimulatable` (the build error's own typed code rides the
-    // diagnostic `project_macro_registry` accumulated -- see that module).
+    // `NotSimulatable`. The build error's own typed code reaches the diagnostic
+    // surface separately: `collect_all_diagnostics` reads this same memoized
+    // `build_error` and emits one project-level `Diagnostic` from it.
     if let Some((_code, msg)) =
         &crate::db::macro_registry::project_macro_registry(db, project).build_error
     {

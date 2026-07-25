@@ -38,13 +38,8 @@
 
 use std::collections::HashMap;
 
-use salsa::Accumulator;
-
 use crate::datamodel;
-use crate::db::{
-    CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceProject,
-    SourceVariable, datamodel_variable_from_source,
-};
+use crate::db::{Db, SourceProject, SourceVariable, datamodel_variable_from_source};
 
 /// The result of building the per-project macro registry: the (possibly
 /// empty) resolution registry plus the build error, if any.
@@ -177,14 +172,26 @@ fn reconstruct_project_models(db: &dyn Db, project: SourceProject) -> Vec<datamo
 /// order, from the `macro_declarations` input plus the macro bodies) and runs
 /// the UNCHANGED `MacroRegistry::build` on it -- so its typed
 /// `(ErrorCode, message)` is byte-identical to building over the original
-/// datamodel `Vec<Model>`. When the build fails, the error is accumulated as
-/// a project-level `Diagnostic` carrying that exact `ErrorCode` (so it
-/// surfaces through `collect_all_diagnostics`, mirroring
-/// `project_units_context`) and returned in `build_error` (so the plain
-/// `compile_project_incremental` entry can fail with a clear message), and
-/// the resolution registry is returned empty so the offending macros' callers
-/// are not treated as macro calls -- the compile fails with the registry
-/// error, not a confusing cascade.
+/// datamodel `Vec<Model>`. When the build fails the error is returned in
+/// `build_error`, and the resolution registry is returned empty so the
+/// offending macros' callers are not treated as macro calls -- the compile
+/// fails with the registry error, not a confusing cascade.
+///
+/// This query does NOT accumulate a diagnostic. `build_error` is a plain
+/// memoized VALUE that its two consumers read directly:
+/// `compile_project_incremental` (to fail with a clear message) and
+/// `collect_all_diagnostics` (to emit the project-level `Diagnostic`, once).
+/// It used to accumulate here, which was wrong twice over. A registry failure
+/// is a PROJECT-level fact, but every model's `model_all_diagnostics` subtree
+/// reaches this query through `model_module_ident_context`, so the accumulator
+/// DFS found the one accumulated value once per model and `collect_all_diagnostics`
+/// reported N identical copies. Worse, a value accumulated inside a memo body is
+/// only discoverable while the `accumulated_inputs` flags along the whole path
+/// stay `Any`: after an unrelated salsa revision bump the deep-verify path
+/// recomputed them as `Empty`, the DFS pruned the subtree, and the diagnostic
+/// silently vanished from the next collection entirely (pinned by
+/// `db::diagnostic_tests::macro_registry_build_error_survives_an_unrelated_input_change`).
+/// Reading the memoized value sidesteps the accumulator, and with it both bugs.
 ///
 /// For a *valid* project every model name is unique, so rebuilding the
 /// resolution map from the (deduplicated) `SourceModel`s here is exact.
@@ -195,23 +202,8 @@ pub(crate) fn project_macro_registry(db: &dyn Db, project: SourceProject) -> Mac
     // AC5.2 cycle, `DuplicateMacroName` for an AC5.3 duplicate / collision),
     // carried through verbatim from `build`'s `Err` -- not re-derived from the
     // message prose -- so a future reword of the build error message cannot
-    // silently mis-tag this diagnostic.
+    // silently mis-tag the diagnostic `collect_all_diagnostics` builds from it.
     if let Some((code, message)) = build_error_from_inputs(db, project) {
-        // Surface through `collect_all_diagnostics` (project-level: no
-        // specific model/variable). Accumulate directly like
-        // `project_units_context` -- this query is in the call graph of
-        // `model_all_diagnostics` via `module_ident_context`.
-        CompilationDiagnostic(Diagnostic {
-            model: String::new(),
-            variable: None,
-            error: DiagnosticError::Model(crate::common::Error::new(
-                crate::common::ErrorKind::Model,
-                code,
-                Some(message.clone()),
-            )),
-            severity: DiagnosticSeverity::Error,
-        })
-        .accumulate(db);
         return MacroRegistryResult {
             registry: crate::module_functions::MacroRegistry::default(),
             build_error: Some((code, message)),
