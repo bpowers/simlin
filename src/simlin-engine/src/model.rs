@@ -800,14 +800,27 @@ where
                     inputs.iter().map(|input| input.dst.clone()).collect();
 
                 let key = mapper(model);
+                let first_sighting = !modules.contains_key(&key);
 
-                if !modules.contains_key(&key) {
+                // Record this instantiation BEFORE descending into the model.
+                // The `first_sighting` test is what stops the walk revisiting a
+                // model, so a model that is still being walked has to count as
+                // seen: otherwise two models that instantiate each other are
+                // each unrecorded when the other looks, and the recursion
+                // diverges into a stack overflow -- a process abort, not a
+                // catchable panic. (A cycle THROUGH the main model happened to
+                // terminate already, because `enumerate_modules` records main
+                // up front.) Recording early cannot lose an instantiation: this
+                // line runs at every module site regardless, and the values are
+                // a set of input sets, so the order they arrive in is not
+                // observable.
+                modules.entry(key).or_default().insert(inputs);
+
+                if first_sighting {
                     // first time we are seeing the model for this module.
                     // make sure all _its_ module instantiations are recorded
                     enumerate_modules_inner(models, model_name.as_str(), mapper, modules)?;
                 }
-
-                modules.entry(key).or_default().insert(inputs);
             } else {
                 return model_err!(BadModelName, model_name.as_str().to_string());
             }

@@ -739,6 +739,62 @@ mod tests {
         check_model_units(&db, sync.models["main"].source, sync.project);
     }
 
+    /// Unit-checking a model inside a module CYCLE (`a` instantiates `b`, `b`
+    /// instantiates `a`) must terminate. `units_infer::gen_all_constraints`
+    /// recurses through every module instantiation, so before the recursion
+    /// guard this overflowed the stack -- which, unlike a panic, is an
+    /// immediate abort of the host process (libsimlin builds with
+    /// `panic=abort`; the host is a WASM tab, an MCP server, or a Python
+    /// session). Today nothing in the shipped product reaches here with a
+    /// cyclic graph, because `collect_all_diagnostics` consults
+    /// `project_module_graph` first; this pins the engine primitive itself
+    /// rather than that one caller-side gate.
+    ///
+    /// It must also DEGRADE rather than fail: `a`'s own dimensional error is
+    /// still reported. This is driven through `check_model_units` directly --
+    /// the entry that diverged -- not through the gated whole-project path.
+    #[test]
+    fn module_cycle_unit_checks_without_diverging() {
+        use crate::common::ErrorCode;
+        use crate::testutils::x_module_named;
+
+        let sim_specs = sim_specs_with_units("parsec");
+        let model_a = x_model(
+            "a",
+            vec![
+                x_aux("x", "1", Some("widget")),
+                // A genuine dimensional error: widget + time.
+                x_aux("bad", "x + TIME", None),
+                x_module_named("to_b", "b", &[("x", "to_b.input")], None),
+            ],
+        );
+        let model_b = x_model(
+            "b",
+            vec![
+                x_aux("input", "0", None),
+                x_module_named("to_a", "a", &[("input", "to_a.x")], None),
+            ],
+        );
+        let project = x_project(sim_specs, &[model_a, model_b]);
+
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let diagnostics = check_model_units::accumulated::<CompilationDiagnostic>(
+            &db,
+            sync.models["a"].source,
+            sync.project,
+        );
+
+        assert!(
+            diagnostics.iter().any(|cd| matches!(
+                &cd.0.error,
+                DiagnosticError::Model(e) if e.code == ErrorCode::UnitMismatch
+            )),
+            "a model's own unit error must still be reported despite the cycle, got: {:?}",
+            diagnostics.iter().map(|cd| &cd.0).collect::<Vec<_>>()
+        );
+    }
+
     // ── Conveyor block parameter unit checks (docs/design/conveyors.md §9.8) ──
 
     /// Build a conveyor stock: an ordinary `datamodel::Stock` carrying a

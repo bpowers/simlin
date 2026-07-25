@@ -872,13 +872,54 @@ pub fn model_module_wiring_diagnostics(db: &dyn Db, model: SourceModel, project:
     }
 }
 
+/// The `CircularDependency` diagnostic for a model that can REACH a module
+/// cycle, or `None` when its reachable subgraph is acyclic.
+///
+/// Driving a reaching model's per-model passes would take `compile_var_fragment`
+/// into the recursive `model_module_map` query, which salsa turns into an
+/// unrecoverable dependency-graph cycle panic (GH #806). Both diagnostic
+/// collectors must therefore consult this FIRST and report the cycle instead of
+/// running the passes -- and both must scope it to REACHABILITY, so an
+/// unrelated draft cycle elsewhere in the project does not suppress a valid
+/// model's own diagnostics.
+///
+/// It is one function rather than the same six lines in each collector because
+/// the two disagreeing is precisely how this went wrong: the whole-project
+/// collector had the gate and the per-model one did not, so the identical
+/// project panicked or reported cleanly depending on which `pub` entry point
+/// the caller happened to pick.
+fn module_cycle_diagnostic(
+    db: &dyn Db,
+    project: SourceProject,
+    model_name: &str,
+) -> Option<Diagnostic> {
+    project_module_graph(db, project)
+        .cycle_error_from(model_name)
+        .map(|(code, message)| Diagnostic {
+            model: model_name.to_string(),
+            variable: None,
+            error: DiagnosticError::Model(Error::new(
+                crate::common::ErrorKind::Model,
+                code,
+                Some(message),
+            )),
+            severity: DiagnosticSeverity::Error,
+        })
+}
+
 /// Collect all `CompilationDiagnostic`s accumulated during
 /// `model_all_diagnostics` for a single model.
+///
+/// A model that reaches a module cycle reports that cycle and nothing else; see
+/// [`module_cycle_diagnostic`] for why the passes must not run at all.
 pub fn collect_model_diagnostics(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
 ) -> Vec<Diagnostic> {
+    if let Some(diagnostic) = module_cycle_diagnostic(db, project, model.name(db)) {
+        return vec![diagnostic];
+    }
     model_all_diagnostics::accumulated::<CompilationDiagnostic>(db, model, project)
         .into_iter()
         .map(|cd| cd.0.clone())
@@ -895,8 +936,6 @@ pub fn collect_model_diagnostics(
 /// subtree it lives in (see `db::macro_registry`, and the module-level note
 /// above `unit_warning_fixture` in `db/diagnostic_tests.rs`).
 pub fn collect_all_diagnostics(db: &SimlinDb, project: SourceProject) -> Vec<Diagnostic> {
-    let graph = project_module_graph(db, project);
-
     let mut all = Vec::new();
 
     // A unit declaration that failed to parse belongs to the project's `units`
@@ -933,26 +972,14 @@ pub fn collect_all_diagnostics(db: &SimlinDb, project: SourceProject) -> Vec<Dia
         });
     }
 
-    for (name, source_model) in project.models(db) {
-        // A model that can REACH a module cycle would drive its per-model passes
-        // (compile_var_fragment recursing through the submodel) into the salsa
-        // cycle panic. Report the cycle for that model and skip its passes. A
-        // model that reaches no cycle is processed normally, so a valid model's
-        // diagnostics are not hidden by an unrelated draft cycle elsewhere
-        // (GH #806).
-        if let Some((code, message)) = graph.cycle_error_from(name) {
-            all.push(Diagnostic {
-                model: name.clone(),
-                variable: None,
-                error: DiagnosticError::Model(Error::new(
-                    crate::common::ErrorKind::Model,
-                    code,
-                    Some(message),
-                )),
-                severity: DiagnosticSeverity::Error,
-            });
-            continue;
-        }
+    for source_model in project.models(db).values() {
+        // The module-cycle gate lives in `collect_model_diagnostics` (see
+        // `module_cycle_diagnostic`): a model that reaches a cycle reports the
+        // cycle instead of running its passes, and a model that reaches none is
+        // processed normally -- so an unrelated draft cycle elsewhere in the
+        // project does not hide a valid model's diagnostics (GH #806). This
+        // loop used to carry its own copy of that gate, which is how the
+        // per-model entry point came to be missing it.
         all.extend(collect_model_diagnostics(db, *source_model, project));
     }
     all

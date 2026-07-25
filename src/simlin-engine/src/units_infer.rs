@@ -111,6 +111,60 @@ struct UnitInferer<'a> {
     time: Variable,
 }
 
+/// The models whose bodies are being walked on the CURRENT instantiation path,
+/// as a cons list threaded down the recursion in `gen_all_constraints`.
+///
+/// A module graph is a graph, not a tree: it may contain cycles (`a`
+/// instantiates `b`, `b` instantiates `a`), which without a guard make the walk
+/// diverge and overflow the stack -- an immediate process abort under
+/// `panic=abort`, not a catchable panic. The guard must distinguish a back edge
+/// from a legal repeated visit, so it tracks the models on the current PATH
+/// rather than every model visited anywhere: in a diamond (`a` instantiates `b`
+/// and `c`, both of which instantiate `d`) `d` is genuinely instantiated twice,
+/// under two different prefixes, and both instantiations need their own
+/// constraints. A visited-anywhere set would silently drop one of them.
+///
+/// A cons list rather than a `Vec` push/pop pair because the entry's lifetime
+/// IS the stack frame's: there is no pop to forget and no way to leave a stale
+/// model on the path. Membership is linear in the path's LENGTH, which is at
+/// most one entry per model in the project.
+///
+/// That depth bound is not a bound on total work, and this is the wrong place
+/// to read one: the number of instantiation PREFIXES walked is not bounded by
+/// the model count. `k` models each instantiating the next twice reaches the
+/// last one `2^k` times, and every one of those walks is legal -- they are
+/// distinct instantiations that must each be constrained (see
+/// `diamond_module_graph_is_walked_on_every_path` for the k=2 case). The
+/// exponential is inherent to per-instantiation constraint generation, not
+/// introduced by this guard; the guard only makes the walk FINITE.
+struct InstantiationPath<'a> {
+    model: &'a Ident<Canonical>,
+    parent: Option<&'a InstantiationPath<'a>>,
+}
+
+impl InstantiationPath<'_> {
+    /// The path consisting of just `model` -- the root of a walk.
+    fn root(model: &Ident<Canonical>) -> InstantiationPath<'_> {
+        InstantiationPath {
+            model,
+            parent: None,
+        }
+    }
+
+    /// Is `model` already being walked further up this path? Such an edge
+    /// closes a cycle and must not be followed.
+    fn contains(&self, model: &Ident<Canonical>) -> bool {
+        let mut node = Some(self);
+        while let Some(entry) = node {
+            if entry.model == model {
+                return true;
+            }
+            node = entry.parent;
+        }
+        false
+    }
+}
+
 fn single_fv(units: &UnitMap) -> Option<&str> {
     let mut result = None;
     for (unit, exp) in units.map.iter() {
@@ -766,11 +820,18 @@ impl UnitInferer<'_> {
         }
     }
 
+    /// Generate every constraint for `model` at instantiation `prefix`,
+    /// recursing through its module instantiations.
+    ///
+    /// `active` is the set of models already being walked on the path that led
+    /// here; a module targeting one of them closes a cycle and is skipped. See
+    /// [`InstantiationPath`].
     fn gen_all_constraints(
         &self,
         model: &ModelStage1,
         prefix: &str,
         constraints: &mut Vec<LocatedConstraint>,
+        active: &InstantiationPath<'_>,
     ) {
         let time_units_name =
             canonicalize(self.ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
@@ -834,15 +895,41 @@ impl UnitInferer<'_> {
                 ..
             } = var
             {
-                // A module may reference a model that is not in the map: a
-                // freshly drawn module in the editor carries an empty
-                // model_name until its target model is assigned (and a dangling
-                // reference can outlive a deleted model). Skip the submodel
-                // constraints rather than panicking on the missing key -- the
-                // variable still falls through to its declared-units constraint
-                // below, and inference is partial-result so the rest of the
-                // model resolves.
-                if let Some(&submodel) = self.models.get(model_name) {
+                // Two reasons to decline a module's submodel constraints, both
+                // of which DEGRADE rather than fail -- the variable still falls
+                // through to its declared-units constraint below, and inference
+                // is partial-result, so the rest of the model resolves.
+                //
+                // 1. The target model is not in the map: a freshly drawn module
+                //    in the editor carries an empty model_name until its target
+                //    is assigned (and a dangling reference can outlive a deleted
+                //    model). Skip rather than panic on the missing key.
+                // 2. The target model is already being walked on this path, so
+                //    this edge closes a module cycle. Following it diverges;
+                //    see `InstantiationPath`. The cycle itself gets no unit
+                //    diagnostic: `project_module_graph` already reports it as a
+                //    `CircularDependency`, and a second, unit-flavoured message
+                //    for the same structural fact would be noise.
+                //
+                // The input constraints go with the body, and that has a KNOWN
+                // COST -- it is a conservative choice, not a free one. The
+                // callee-side metavariable `@{subprefix}{dst}` is NOT
+                // necessarily dead just because we skip the body: a parent
+                // equation reading `{ident}·{var}` emits that same
+                // metavariable (`gen_constraints`' `Expr2::Var` arm renders an
+                // ident verbatim under the active prefix), so the binding we
+                // decline to make can contradict one the parent already made.
+                // Keeping the constraint would therefore report a genuine
+                // cross-module dimensional conflict that we now stay silent
+                // about. We accept that: the project is already rejected as
+                // `CircularDependency`, so a unit conflict on a model that
+                // cannot compile is noise on top of the real error.
+                // `back_edge_declines_a_real_cross_module_conflict` builds
+                // exactly that shape and pins the silence, so this trade stays
+                // visible instead of looking like an accident.
+                if let Some(&submodel) = self.models.get(model_name)
+                    && !active.contains(model_name)
+                {
                     let subprefix = format!("{prefix}{ident}·");
                     for input in inputs {
                         let src_var = format!("{}{}", prefix, input.src);
@@ -857,7 +944,11 @@ impl UnitInferer<'_> {
                                 .with_source(&dst_var, None),
                         );
                     }
-                    self.gen_all_constraints(submodel, &subprefix, constraints);
+                    let subpath = InstantiationPath {
+                        model: model_name,
+                        parent: Some(active),
+                    };
+                    self.gen_all_constraints(submodel, &subprefix, constraints, &subpath);
                 }
             }
             // we only should be adding constraints based on the equation if
@@ -1043,7 +1134,14 @@ impl UnitInferer<'_> {
 
     fn infer(&self, model: &ModelStage1) -> InferenceResult {
         let mut constraints = vec![];
-        self.gen_all_constraints(model, "", &mut constraints);
+        // The root model is seeded onto the path, so a model that instantiates
+        // ITSELF is declined at the first edge rather than unrolled once.
+        self.gen_all_constraints(
+            model,
+            "",
+            &mut constraints,
+            &InstantiationPath::root(&model.name),
+        );
 
         let (resolved, leftover) = self.unify(constraints);
 
@@ -1725,6 +1823,339 @@ pub(crate) fn infer(
     };
 
     units.infer(model)
+}
+
+// ── Module-graph shape: cycles degrade, diamonds are fully walked ────────────
+//
+// `gen_all_constraints` recurses through every module instantiation, so the
+// shape of the module graph -- not just its contents -- decides whether it
+// terminates and whether it generates the constraints a legal model needs.
+// These tests drive `infer` the way `db::units::check_model_units` does, over
+// each project model's salsa-cached `ModelStage1`.
+
+/// Run inference over `model_name` with every project model's lowered stage in
+/// the map, mirroring `db::units::check_model_units`. Deliberately NOT routed
+/// through `Project::from_salsa`: that path enumerates module instantiations of
+/// its own, and these fixtures are about the shape of the module graph itself.
+#[cfg(test)]
+fn infer_project(
+    project_datamodel: &crate::datamodel::Project,
+    model_name: &str,
+) -> InferenceResult {
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, project_datamodel);
+    let models_s1: HashMap<Ident<Canonical>, &ModelStage1> = sync
+        .project
+        .models(&db)
+        .values()
+        .map(|src_model| {
+            let s1 = crate::db::model_stage1(&db, *src_model, sync.project);
+            (s1.name.clone(), s1)
+        })
+        .collect();
+    let target = models_s1[&Ident::<Canonical>::new(model_name)];
+    infer(
+        &models_s1,
+        crate::db::project_units_context(&db, sync.project),
+        target,
+    )
+}
+
+/// The metavariable a prefixed variable resolved to, if any. Metavariable keys
+/// carry the instantiation prefix (`b·d·out`), which is exactly what
+/// distinguishes one instantiation of a model from another.
+#[cfg(test)]
+fn resolved_units<'a>(result: &'a InferenceResult, prefixed_ident: &str) -> Option<&'a UnitMap> {
+    result
+        .resolved
+        .get(&Ident::<Canonical>::from_str_unchecked(prefixed_ident))
+}
+
+/// A DIAMOND module graph -- `main` instantiates `sub_b` and `sub_c`, each of
+/// which instantiates `leaf` -- must generate `leaf`'s constraints under BOTH
+/// instantiation prefixes.
+///
+/// This is the test that a careless cycle fix breaks. Guarding the recursion
+/// with a set of models visited ANYWHERE (rather than models on the current
+/// path) prunes `leaf`'s second visit, and a perfectly legal model silently
+/// loses every constraint from one of its two instantiations. `leaf·out` is a
+/// BODY variable of `leaf`, so its metavariable exists only if the body was
+/// walked -- a guard that keeps generating module-input constraints while
+/// skipping the body is caught here too.
+#[test]
+fn diamond_module_graph_is_walked_on_every_path() {
+    use crate::testutils::x_module_named;
+
+    let sim_specs = sim_specs_with_units("parsec");
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).0;
+
+    let main = x_model(
+        "main",
+        vec![
+            x_aux("driver", "1", Some("widget")),
+            x_module_named("b", "sub_b", &[("driver", "b.input")], None),
+            x_module_named("c", "sub_c", &[("driver", "c.input")], None),
+        ],
+    );
+    let sub_b = x_model(
+        "sub_b",
+        vec![
+            x_aux("input", "0", None),
+            x_module_named("d", "leaf", &[("input", "d.input")], None),
+        ],
+    );
+    let sub_c = x_model(
+        "sub_c",
+        vec![
+            x_aux("input", "0", None),
+            x_module_named("d", "leaf", &[("input", "d.input")], None),
+        ],
+    );
+    let leaf = x_model(
+        "leaf",
+        vec![x_aux("input", "0", None), x_aux("out", "input", None)],
+    );
+    let project = x_project(sim_specs.clone(), &[main, sub_b, sub_c, leaf]);
+
+    let result = infer_project(&project, "main");
+    assert!(
+        result.conflicts.is_empty(),
+        "a consistent diamond must not conflict, got: {:?}",
+        result.conflicts
+    );
+
+    let widget: UnitMap = crate::units::parse_units(&units_ctx, Some("widget"))
+        .unwrap()
+        .unwrap();
+    for path in ["b\u{b7}d\u{b7}out", "c\u{b7}d\u{b7}out"] {
+        assert_eq!(
+            resolved_units(&result, path),
+            Some(&widget),
+            "'{path}' must be inferred: a model reached twice on different paths \
+             is instantiated twice and must be constrained twice"
+        );
+    }
+}
+
+/// The user-visible half of the diamond: a unit conflict inside a model
+/// instantiated twice must be reported for BOTH instantiations. The two
+/// callers feed `leaf` incompatible units, so `leaf`'s `widget`-declared
+/// output contradicts each of them differently -- and each contradiction names
+/// its own instantiation path.
+#[test]
+fn diamond_module_graph_reports_a_conflict_on_each_path() {
+    use crate::testutils::x_module_named;
+
+    let sim_specs = sim_specs_with_units("parsec");
+
+    let main = x_model(
+        "main",
+        vec![
+            x_aux("driver_b", "1", Some("meter")),
+            x_aux("driver_c", "1", Some("gram")),
+            x_module_named("b", "sub_b", &[("driver_b", "b.input")], None),
+            x_module_named("c", "sub_c", &[("driver_c", "c.input")], None),
+        ],
+    );
+    let sub_b = x_model(
+        "sub_b",
+        vec![
+            x_aux("input", "0", None),
+            x_module_named("d", "leaf", &[("input", "d.input")], None),
+        ],
+    );
+    let sub_c = x_model(
+        "sub_c",
+        vec![
+            x_aux("input", "0", None),
+            x_module_named("d", "leaf", &[("input", "d.input")], None),
+        ],
+    );
+    let leaf = x_model(
+        "leaf",
+        vec![
+            x_aux("input", "0", None),
+            x_aux("out", "input", Some("widget")),
+        ],
+    );
+    let project = x_project(sim_specs, &[main, sub_b, sub_c, leaf]);
+
+    let result = infer_project(&project, "main");
+
+    let mentions = |prefix: &str| {
+        result.conflicts.iter().any(|conflict| match conflict {
+            UnitError::InferenceError { sources, .. } => {
+                sources.iter().any(|(var, _)| var.starts_with(prefix))
+            }
+            _ => false,
+        })
+    };
+    for prefix in ["b\u{b7}", "c\u{b7}"] {
+        assert!(
+            mentions(prefix),
+            "expected a conflict naming the '{prefix}' instantiation, got: {:?}",
+            result.conflicts
+        );
+    }
+}
+
+/// A module CYCLE (`main` instantiates `sub`, `sub` instantiates `main`) must
+/// degrade, not diverge. Before the recursion guard this overflowed the stack,
+/// which is an immediate process abort rather than a panic -- fatal for a
+/// `panic=abort` host like a WASM tab or an MCP server.
+///
+/// Degrading means declining to generate constraints across the BACK EDGE only:
+/// everything on the acyclic part of the walk is still inferred, and no new
+/// hard error appears (`project_module_graph` already reports the cycle
+/// structurally, so a second unit-flavoured message for it would be noise).
+#[test]
+fn module_cycle_degrades_instead_of_diverging() {
+    use crate::testutils::x_module_named;
+
+    let sim_specs = sim_specs_with_units("parsec");
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).0;
+
+    let main = x_model(
+        "main",
+        vec![
+            x_aux("x", "1", Some("widget")),
+            x_module_named("to_sub", "sub", &[("x", "to_sub.input")], None),
+        ],
+    );
+    let sub = x_model(
+        "sub",
+        vec![
+            x_aux("input", "0", None),
+            x_aux("echo", "input", None),
+            x_module_named("back", "main", &[("input", "back.x")], None),
+        ],
+    );
+    let project = x_project(sim_specs, &[main, sub]);
+
+    let result = infer_project(&project, "main");
+
+    let widget: UnitMap = crate::units::parse_units(&units_ctx, Some("widget"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resolved_units(&result, "to_sub\u{b7}echo"),
+        Some(&widget),
+        "the acyclic part of the walk must still be inferred"
+    );
+    assert!(
+        result.conflicts.is_empty(),
+        "a module cycle is a structural problem, not a dimensional one; \
+         unit inference must not invent a conflict for it, got: {:?}",
+        result.conflicts
+    );
+}
+
+/// THE KNOWN COST of declining a back edge, pinned so it stays visible.
+///
+/// Declining the back edge takes the module-INPUT constraint with it, and that
+/// constraint is not inert: the callee-side metavariable it would have bound
+/// can be constrained by the PARENT's own equations, because a parent equation
+/// reading `{module}·{var}` emits that very metavariable (`gen_constraints`'
+/// `Expr2::Var` arm renders an ident verbatim under the active prefix). Here
+/// `b`'s `peek = to_a.x ~ gram` pins `@to_b·to_a·x` to `gram` while `a` feeds
+/// its `widget`-declared `x` into the same slot -- a genuine cross-module
+/// dimensional contradiction that IS NOT REPORTED, because the edge carrying
+/// the `widget` half is the one we decline.
+///
+/// That is a deliberate conservative choice, not an oversight: the project is
+/// already rejected as `CircularDependency`, and resurrecting a unit conflict
+/// on a model that cannot compile is noise. This test exists so the cost is a
+/// documented degradation rather than a silent one -- if you re-enable the
+/// input constraint across a back edge, this test goes red and tells you what
+/// you are trading for.
+#[test]
+fn back_edge_declines_a_real_cross_module_conflict() {
+    use crate::testutils::x_module_named;
+
+    let sim_specs = sim_specs_with_units("parsec");
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).0;
+
+    let model_a = x_model(
+        "a",
+        vec![
+            x_aux("x", "1", Some("widget")),
+            x_module_named("to_b", "b", &[("x", "to_b.input")], None),
+        ],
+    );
+    let model_b = x_model(
+        "b",
+        vec![
+            x_aux("input", "0", None),
+            // Reads back across the cycle, and declares the units of what it
+            // reads -- this is what makes the declined metavariable live.
+            x_aux("peek", "to_a.x", Some("gram")),
+            x_module_named("to_a", "a", &[("input", "to_a.x")], None),
+        ],
+    );
+    let project = x_project(sim_specs, &[model_a, model_b]);
+
+    let result = infer_project(&project, "a");
+
+    // The metavariable the declined constraint would have bound is genuinely
+    // constrained elsewhere. This is the fact that makes the omission a real
+    // loss rather than a no-op.
+    let gram: UnitMap = crate::units::parse_units(&units_ctx, Some("gram"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resolved_units(&result, "to_b\u{b7}to_a\u{b7}x"),
+        Some(&gram),
+        "the parent's own equation constrains the back edge's callee-side \
+         metavariable, so declining the input constraint drops information"
+    );
+
+    // ...and the contradiction against `a`'s `widget` goes unreported.
+    assert!(
+        result.conflicts.is_empty(),
+        "declining the back edge is a deliberate conservative choice whose \
+         known cost is exactly this unreported conflict; got: {:?}",
+        result.conflicts
+    );
+}
+
+/// A model that instantiates ITSELF is the degenerate cycle. Its own body is
+/// walked once, at the root, and the self-edge is declined.
+#[test]
+fn self_instantiating_model_degrades_instead_of_diverging() {
+    use crate::testutils::x_module_named;
+
+    let sim_specs = sim_specs_with_units("parsec");
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).0;
+
+    let main = x_model(
+        "main",
+        vec![
+            x_aux("x", "1", Some("widget")),
+            x_aux("y", "x", None),
+            x_module_named("me", "main", &[("x", "me.x")], None),
+        ],
+    );
+    let project = x_project(sim_specs, &[main]);
+
+    let result = infer_project(&project, "main");
+
+    let widget: UnitMap = crate::units::parse_units(&units_ctx, Some("widget"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resolved_units(&result, "y"),
+        Some(&widget),
+        "the root model's own variables must still be inferred"
+    );
+    // The other half of the claim, and the one the `y` assertion does NOT
+    // make: the self-edge is declined at the FIRST edge rather than unrolled
+    // one level. Seeding the root path with anything that does not match the
+    // model's own ident still resolves `y`, but would also produce `me·y`.
+    assert_eq!(
+        resolved_units(&result, "me\u{b7}y"),
+        None,
+        "the self-edge must be declined immediately, not unrolled once"
+    );
 }
 
 /// PREVIOUS(x) desugars to PREVIOUS(x, 0). The inferred units should

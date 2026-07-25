@@ -402,6 +402,48 @@ mod tests {
         let _project = Project::from(dm);
     }
 
+    /// A module cycle that does NOT pass through the main model must not
+    /// diverge. `enumerate_modules_inner` guards its recursion on "have I
+    /// already recorded this model's instantiations", but it records a model
+    /// only AFTER walking it, so two models that instantiate each other are
+    /// each unrecorded when the other looks -- and the walk recurses forever,
+    /// overflowing the stack. `main` itself is recorded up front by
+    /// `enumerate_modules`, which is why a main-rooted cycle happened to
+    /// terminate and this one did not.
+    ///
+    /// Like the dangling-reference guard above, this path is a test-only
+    /// oracle, but `From<datamodel::Project>` is public and a stack overflow is
+    /// a process abort rather than a catchable panic.
+    #[test]
+    fn from_salsa_module_cycle_below_main_does_not_diverge() {
+        use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module_named, x_project};
+
+        let main = x_model(
+            "main",
+            vec![
+                x_aux("driver", "1", None),
+                x_module_named("mid", "middle", &[("driver", "mid.input")], None),
+            ],
+        );
+        let middle = x_model(
+            "middle",
+            vec![
+                x_aux("input", "0", None),
+                x_module_named("other", "leaf", &[("input", "other.input")], None),
+            ],
+        );
+        let leaf = x_model(
+            "leaf",
+            vec![
+                x_aux("input", "0", None),
+                x_module_named("back", "middle", &[("input", "back.input")], None),
+            ],
+        );
+        let dm = x_project(sim_specs_with_units("years"), &[main, middle, leaf]);
+
+        let _project = Project::from(dm);
+    }
+
     /// GH #891: the legacy `from_salsa` path builds each model's variable map
     /// from the canonical-keyed salsa sync maps, where two variables whose
     /// names canonicalize identically already collapsed last-wins. The
