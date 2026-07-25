@@ -24,7 +24,13 @@
 use super::*;
 use crate::common::{EquationError, Error, UnitError};
 
+/// `Debug` is derived rather than left off: every caller that drains this
+/// accumulator wants to print the result in an assertion message, and without
+/// it each one has to map through `.0.clone()` into the printable `Diagnostic`
+/// first. The inner `Diagnostic` is already `Debug`, so the derive costs
+/// nothing.
 #[salsa::accumulator]
+#[derive(Debug)]
 pub struct CompilationDiagnostic(pub Diagnostic);
 
 /// A single compilation diagnostic emitted by tracked functions.

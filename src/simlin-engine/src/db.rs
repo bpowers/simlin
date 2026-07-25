@@ -34,6 +34,7 @@ use std::collections::BTreeSet;
 // * `assemble`   -- module/simulation assembly + flattened-offset map.
 // * `dep_graph`  -- the dependency-graph cycle gate + its result types.
 // * `analysis`   -- causal-graph analysis tracked functions.
+// * `stages`     -- the two cached model-compilation stages (Stage0/Stage1).
 // * `ltm` / `ltm_ir` / `macro_registry` / `units` -- LTM (a `ltm/` directory:
 //   mod/parse/compile/loops/link_scores), the reference-site IR, the macro
 //   registry, and the unit-check pass.
@@ -48,6 +49,15 @@ pub(crate) use invariance::model_flows_invariant;
 // (`model_ltm_reference_sites`) it compares the Expr0 partial builder against.
 pub(crate) mod ltm_ir;
 mod macro_registry;
+mod stages;
+pub(crate) use stages::{
+    model_stage0, model_stage1, project_models_stage0, source_model_is_stdlib,
+};
+// Test-only: the stage-query execution counters, so `stages_tests` can prove
+// each model's stages are BUILT at most once per revision (GH #966) -- a claim
+// pointer equality of a `returns(ref)` memo cannot support.
+#[cfg(test)]
+pub(crate) use stages::{StageExecutions, reset_stage_executions, stage_executions};
 mod units;
 mod var_fragment;
 
@@ -1377,6 +1387,8 @@ mod module_cycle_tests;
 mod module_wiring_tests;
 #[cfg(test)]
 mod prev_init_tests;
+#[cfg(test)]
+mod stages_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

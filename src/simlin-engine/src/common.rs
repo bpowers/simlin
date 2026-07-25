@@ -973,8 +973,9 @@ pub(crate) fn duplicate_variable_errors_from_groups(
 /// [`duplicate_variable_errors_from_groups`] over a raw declared-ident list:
 /// groups the idents by canonical form first. Used by the datamodel-driven
 /// `ModelStage0` constructors -- which are themselves `#[cfg(test)]`, hence
-/// the gate here -- while the salsa-driven path (`Project::from_salsa`) feeds
-/// the memoized `db::model_duplicate_variables` groups directly.
+/// the gate here -- while the salsa-driven paths (`db::stages::model_stage0`
+/// and, until it reads that query, `Project::from_salsa`) feed the memoized
+/// `db::model_duplicate_variables` groups directly.
 #[cfg(test)]
 pub(crate) fn duplicate_variable_errors<'a, I>(model_name: &str, idents: I) -> Option<Vec<Error>>
 where

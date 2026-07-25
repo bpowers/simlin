@@ -4,12 +4,22 @@
 
 // pattern: Imperative Shell
 //
-// Salsa-tracked unit-checking orchestration: it reads salsa inputs, rebuilds
-// the temporary ModelStage0/ModelStage1 representations, runs the pure unit
+// Salsa-tracked unit-checking orchestration: it reads the cached
+// ModelStage0/ModelStage1 representations (`db::stages`), runs the pure unit
 // inference (`units_infer`) and consistency checking (`units_check`) cores,
 // and accumulates the resulting diagnostics. The dimensional-analysis logic
 // itself is the Functional Core in `units.rs`/`units_infer.rs`/`units_check.rs`;
 // this module only wires it into the salsa graph.
+//
+// It constructs no model stage of its own -- `db::stages` owns that -- with ONE
+// deliberate carve-out: `check_conveyor_param_units` clones the cached Stage0,
+// inserts its synthetic `<len>`/`<capacity>`/`<in_limit>`/leak-fraction auxes
+// into the clone, and calls `ModelStage1::new` on the result. That
+// `ModelStage1::new` call is NOT an unmigrated construction site and must not be
+// replaced with a read of `db::stages::model_stage1`: the whole point is that
+// the augmented stage is a throwaway. Those auxes exist only to be unit-checked,
+// and adding them to a cached stage would feed their constraints into every
+// other reader of that memo -- inference and the ordinary unit check included.
 
 //! Per-model unit inference and checking as a salsa-tracked query.
 //!
@@ -35,9 +45,9 @@ use crate::common::{Canonical, Ident};
 use crate::datamodel;
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel,
-    SourceProject, SourceVariable, model_module_ident_context,
-    parse_source_variable_with_module_context, project_datamodel_dims, project_dimensions_context,
-    project_units_context,
+    SourceProject, SourceVariable, model_stage0, model_stage1, project_datamodel_dims,
+    project_dimensions_context, project_models_stage0, project_units_context,
+    source_model_is_stdlib,
 };
 
 /// Collect the identifiers that must share units because they sit in the
@@ -153,23 +163,37 @@ fn init_value_equivalence_group(
 /// Per-model tracked function that performs unit inference and checking,
 /// accumulating unit warnings/errors through the salsa accumulator.
 ///
-/// Builds temporary ModelStage0/ModelStage1 representations from the
-/// salsa-cached parsed variables, then runs the same unit inference and
-/// checking pipeline as the old `run_default_model_checks` callback.
-/// Unit mismatches are accumulated as DiagnosticSeverity::Warning to
-/// match the old-path behavior where unit issues don't block simulation.
+/// Reads each project model's salsa-cached `ModelStage1` (`db::stages`), then
+/// runs the same unit inference and checking pipeline as the old
+/// `run_default_model_checks` callback. Unit mismatches are accumulated as
+/// DiagnosticSeverity::Warning to match the old-path behavior where unit issues
+/// don't block simulation.
+///
+/// This function used to BUILD both stages for every project model on every
+/// call, so collecting a project's diagnostics was quadratic in the model count
+/// (GH #966). Reading the cached queries keeps the same whole-project view --
+/// cross-module inference constraints resolve submodel variable types, and
+/// stdlib models stay in the map because user models reference them as modules
+/// -- while each model's stages are built once per revision.
 ///
 /// Stdlib (implicit) models are skipped because they are generic
 /// templates that only make sense when instantiated with specific inputs.
 #[salsa::tracked]
 pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject) {
     use crate::common::{ErrorCode, ErrorKind};
-    use crate::model::{ModelStage0, ModelStage1, ScopeStage0, VariableStage0};
+    use crate::model::ModelStage1;
 
     // Skip stdlib models -- they are generic and unit checking doesn't
-    // apply until instantiated with concrete inputs. Stdlib model names
-    // start with the "stdlib\u{205A}" prefix (two-dot punctuation separator).
-    if model.name(db).starts_with("stdlib\u{205A}") {
+    // apply until instantiated with concrete inputs.
+    //
+    // The test is `db::stages`', shared rather than re-spelled here (GH #988).
+    // This gate used to accept the bare `stdlib\u{205A}` prefix while the stage
+    // query additionally required the suffix to name a real stdlib model, so
+    // the two disagreed about an imported `stdlib\u{205A}<unknown>` model: it
+    // was skipped here but staged as a user model there. The strict rule is the
+    // right one for both -- such a model is a user model, and this gate exists
+    // to skip generic templates, which it is not -- so it is now unit-checked.
+    if source_model_is_stdlib(db, model) {
         return;
     }
 
@@ -184,73 +208,22 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
 
     let model_name = model.name(db).clone();
     let units_ctx = project_units_context(db, project);
-    let dm_dims = project_datamodel_dims(db, project);
-    let dim_context = project_dimensions_context(db, project);
 
-    // Helper: build a ModelStage0 from a SourceModel's parsed variables.
-    let build_model_s0 = |src_model: &SourceModel, is_stdlib: bool| -> ModelStage0 {
-        let src_vars = src_model.variables(db);
-        let module_ctx = model_module_ident_context(db, *src_model, project, vec![]);
-        let mut var_list: Vec<VariableStage0> = Vec::new();
-        let mut implicit_dm: Vec<datamodel::Variable> = Vec::new();
-        for (_name, svar) in src_vars.iter() {
-            let parsed = parse_source_variable_with_module_context(db, *svar, project, module_ctx);
-            var_list.push(parsed.variable.clone());
-            implicit_dm.extend(parsed.implicit_vars.iter().cloned());
-        }
-        // Parse implicit vars (SMOOTH/DELAY expansion).
-        let mut dummy: Vec<datamodel::Variable> = Vec::new();
-        var_list.extend(implicit_dm.into_iter().map(|dm_var| {
-            crate::variable::parse_var(dm_dims, &dm_var, &mut dummy, units_ctx, |mi| {
-                Ok(Some(mi.clone()))
-            })
-        }));
-        let variables: HashMap<Ident<Canonical>, VariableStage0> = var_list
-            .into_iter()
-            .map(|v| (Ident::new(v.ident()), v))
-            .collect();
-        ModelStage0 {
-            ident: Ident::new(src_model.name(db)),
-            display_name: src_model.name(db).clone(),
-            variables,
-            errors: None,
-            implicit: is_stdlib,
-            is_macro: src_model.macro_spec(db).is_some(),
-            macro_params: crate::model::macro_param_idents(src_model.macro_spec(db).as_ref()),
-        }
-    };
-
-    // Build ModelStage0 for all project models so that cross-module unit
+    // Read every project model's lowered stage so that cross-module unit
     // inference constraints (module inputs/outputs) can resolve submodel
     // variable types. Stdlib models are included in the map because user
     // models may reference them as modules.
-    let project_models = project.models(db);
-    let mut all_s0: Vec<ModelStage0> = Vec::new();
-    for (name, src_model) in project_models.iter() {
-        let is_stdlib = name.starts_with("stdlib\u{205A}");
-        all_s0.push(build_model_s0(src_model, is_stdlib));
-    }
-
-    let models_s0: HashMap<Ident<Canonical>, &ModelStage0> =
-        all_s0.iter().map(|m| (m.ident.clone(), m)).collect();
-
-    // Lower all ModelStage0 -> ModelStage1.
-    let all_s1: Vec<ModelStage1> = all_s0
-        .iter()
-        .map(|ms0| {
-            let scope = ScopeStage0 {
-                models: &models_s0,
-                dimensions: dim_context,
-                model_name: ms0.ident.as_str(),
-            };
-            ModelStage1::new(&scope, ms0)
+    let models_s1: HashMap<Ident<Canonical>, &ModelStage1> = project
+        .models(db)
+        .values()
+        .map(|src_model| {
+            let s1 = model_stage1(db, *src_model, project);
+            (s1.name.clone(), s1)
         })
         .collect();
 
-    let models_s1: HashMap<Ident<Canonical>, &ModelStage1> =
-        all_s1.iter().map(|m| (m.name.clone(), m)).collect();
-
-    // Find the target model in the lowered map.
+    // Find the target model in the lowered map. A `SourceModel` that is not the
+    // project's entry under its own canonical name has nothing to check here.
     let target_ident = Ident::<Canonical>::new(&model_name);
     let target_model = match models_s1.get(&target_ident) {
         Some(m) => *m,
@@ -452,20 +425,15 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
     // here with the datamodel + lowering machinery already in hand. Runs after
     // the ordinary unit check so a conveyor model's ordinary variables are still
     // checked exactly as before.
-    if let Some(target_ms0) = all_s0.iter().find(|m| m.ident == target_ident) {
-        check_conveyor_param_units(
-            db,
-            model,
-            &model_name,
-            target_model,
-            target_ms0,
-            &models_s0,
-            dim_context,
-            dm_dims,
-            units_ctx,
-            &inferred_units,
-        );
-    }
+    check_conveyor_param_units(
+        db,
+        model,
+        project,
+        &model_name,
+        target_model,
+        units_ctx,
+        &inferred_units,
+    );
 }
 
 /// Unit-check a model's conveyor block parameters (docs/design/conveyors.md
@@ -498,19 +466,17 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
 /// "unknown units are skipped" rule elsewhere in unit checking. Likewise a
 /// parameter whose expression reads a variable with unknown units is skipped
 /// (a `DoesNotExist` verdict), never reported as a mismatch.
-// The salsa keys, the two model stages, and the four project-wide contexts are all
-// already resolved by the single caller (`check_model_units`); re-deriving any of
-// them here would re-run a salsa query per conveyor stock.
-#[allow(clippy::too_many_arguments)]
+// The lowered target model, its model name and the inferred-units map are all
+// already resolved by the single caller (`check_model_units`), so they are
+// passed rather than re-derived. The Stage0 scope and the dimension queries are
+// read here instead, ONCE, and only past the early return below: a model with no
+// conveyor -- almost every model -- then pays nothing for them at all.
 fn check_conveyor_param_units(
     db: &dyn Db,
     model: SourceModel,
+    project: SourceProject,
     model_name: &str,
     target_model: &crate::model::ModelStage1,
-    target_ms0: &crate::model::ModelStage0,
-    models_s0: &HashMap<Ident<Canonical>, &crate::model::ModelStage0>,
-    dim_context: &crate::dimensions::DimensionsContext,
-    dm_dims: &[datamodel::Dimension],
     units_ctx: &crate::units::Context,
     inferred_units: &HashMap<Ident<Canonical>, crate::datamodel::UnitMap>,
 ) {
@@ -662,10 +628,13 @@ fn check_conveyor_param_units(
     }
 
     // Lower every synthesized parameter aux in the target model's context. We
-    // build a throwaway augmented ModelStage1 rather than perturbing the real
-    // `target_model` (which drives inference and the ordinary unit check): the
-    // synthetic auxes must not add constraints to the model under analysis.
-    let mut aug_ms0 = target_ms0.clone();
+    // build a throwaway augmented ModelStage1 from a CLONE of the cached Stage0
+    // rather than perturbing either the real `target_model` (which drives
+    // inference and the ordinary unit check) or the cached stage itself: the
+    // synthetic auxes must not add constraints to the model under analysis, and
+    // must never reach another reader of the memo.
+    let dm_dims = project_datamodel_dims(db, project);
+    let mut aug_ms0 = model_stage0(db, model, project).clone();
     for dm_var in &synth_dm_vars {
         let mut dummy: Vec<datamodel::Variable> = Vec::new();
         let vs0 = crate::variable::parse_var(dm_dims, dm_var, &mut dummy, units_ctx, |mi| {
@@ -673,9 +642,13 @@ fn check_conveyor_param_units(
         });
         aug_ms0.variables.insert(Ident::new(vs0.ident()), vs0);
     }
+    // The scope holds each model's UNAUGMENTED Stage0 -- including the target's,
+    // so the synthetic auxes stay invisible to dimension resolution exactly as
+    // they were before the stages were cached.
+    let models_s0 = project_models_stage0(db, project);
     let scope = crate::model::ScopeStage0 {
-        models: models_s0,
-        dimensions: dim_context,
+        models: &models_s0,
+        dimensions: project_dimensions_context(db, project),
         model_name: aug_ms0.ident.as_str(),
     };
     let aug_s1 = crate::model::ModelStage1::new(&scope, &aug_ms0);
