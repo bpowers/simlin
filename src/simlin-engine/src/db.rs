@@ -51,13 +51,14 @@ pub(crate) mod ltm_ir;
 mod macro_registry;
 mod stages;
 pub(crate) use stages::{
-    model_stage0, model_stage1, project_models_stage0, source_model_is_stdlib,
+    model_scope_models, model_scope_stage0, model_stage0, model_stage1, source_model_is_stdlib,
 };
-// Test-only: the stage-query execution counters, so `stages_tests` can prove
-// each model's stages are BUILT at most once per revision (GH #966) -- a claim
-// pointer equality of a `returns(ref)` memo cannot support.
+// Test-only: the execution counters for the two stage queries and the unit-check
+// pass, so `stages_tests` can prove each model's stages are BUILT at most once
+// per revision (GH #966), and that an unrelated model's edit re-executes none of
+// the three -- claims pointer equality of a `returns(ref)` memo cannot support.
 #[cfg(test)]
-pub(crate) use stages::{StageExecutions, reset_stage_executions, stage_executions};
+pub(crate) use stages::{QueryExecutions, query_executions, reset_query_executions};
 mod units;
 mod var_fragment;
 

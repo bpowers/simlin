@@ -524,12 +524,12 @@ fn unit_definition_error_only_change_does_not_invalidate_context_readers() {
 
     // Control: re-syncing the identical project rebuilds nothing, so a rebuild
     // below is attributable to the edit and not to the re-sync itself.
-    reset_stage_executions();
+    reset_query_executions();
     let state2 = sync_from_datamodel_incremental(&mut db, &first, Some(&state1));
     let sync2 = state2.to_sync_result();
     let _ = model_stage0(&db, sync2.models["main"].source, sync2.project);
     assert_eq!(
-        stage_executions().stage0,
+        query_executions().stage0,
         0,
         "re-syncing an unchanged project must not rebuild anything"
     );
@@ -545,7 +545,7 @@ fn unit_definition_error_only_change_does_not_invalidate_context_readers() {
 
     // A DIFFERENT malformed equation for the same unit: both are rejected.
     let second = project_with_malformed_unit("widget * ");
-    reset_stage_executions();
+    reset_query_executions();
     let state3 = sync_from_datamodel_incremental(&mut db, &second, Some(&state2));
     let sync3 = state3.to_sync_result();
 
@@ -562,7 +562,7 @@ fn unit_definition_error_only_change_does_not_invalidate_context_readers() {
 
     let _ = model_stage0(&db, sync3.models["main"].source, sync3.project);
     assert_eq!(
-        stage_executions().stage0,
+        query_executions().stage0,
         0,
         "a change to the unit-definition errors alone must not rebuild a reader \
          of the units context; errors are now {errors_after:?}"

@@ -430,15 +430,18 @@ fn cached_stage1_lowering_equals_datamodel_driven_lowering() {
     }
 }
 
-/// Omitting the stdlib models from `model_stage1`'s lowering scope changes no
+/// Omitting the stdlib models from `model_stage1`'s LOWERING scope changes no
 /// lowering TODAY -- and this is the property that makes that true, asserted
 /// directly so it becomes a tripwire rather than an assumption.
 ///
-/// Written for whoever does the scope narrowing (the follow-on to GH #966).
-/// Four plausible narrowings were probed against the full workspace; "whole
-/// project MINUS every `stdlib⁚` model" came back green, and the reason is not
-/// missing coverage. The scope map has exactly two consumers, and neither can
-/// observe a stdlib model:
+/// Written for whoever did the scope narrowing (the follow-on to GH #966). That
+/// narrowing has landed and did NOT take the wholesale route: `model_scope_models`
+/// keeps the stdlib models a lowering can actually reach, exactly as it keeps
+/// any other module target, so this test now guards a road not taken.
+///
+/// The reason "whole project MINUS every `stdlib⁚` model" is inert for LOWERING
+/// is not missing coverage. The lowering scope has exactly two consumers, and
+/// neither can observe a stdlib model:
 ///
 ///   - `ArrayContext::get_variable` follows a `module·output` reference into the
 ///     target model's Stage0 to read its DIMENSIONS. Every shipped stdlib
@@ -448,15 +451,22 @@ fn cached_stage1_lowering_equals_datamodel_driven_lowering() {
 ///     dotted reference. No stdlib model instantiates a module, so none can ever
 ///     be an intermediate hop.
 ///
-/// One route DOES reach a stdlib entry, and it is deliberately out of scope
-/// here: `resolve_relative`'s TERMINAL lookup. A module-input `src` spelled
-/// `stdlib⁚<template>·<var>` resolves against the stdlib model itself, so
-/// dropping those entries turns that input into a `BadModuleInputSrc`. That is
-/// a LOUD error rather than a silent mis-lowering -- the opposite of the failure
-/// class this tripwire guards -- and it needs an imported model whose input
-/// `src` literally names a stdlib template (ordinary model creation never
-/// produces the `⁚` separator). A narrowing that keeps the closure's stdlib
-/// targets, rather than skipping `stdlib⁚*` wholesale, avoids it entirely.
+/// Two routes DO reach a stdlib entry, and both are deliberately out of scope
+/// for this assertion:
+///
+///   - `resolve_relative`'s TERMINAL lookup. A module-input `src` spelled
+///     `stdlib⁚<template>·<var>` resolves against the stdlib model itself, so
+///     dropping those entries turns that input into a `BadModuleInputSrc`. That
+///     is a LOUD error rather than a silent mis-lowering -- the opposite of the
+///     failure class this tripwire guards -- and it needs an imported model whose
+///     input `src` literally names a stdlib template (ordinary model creation
+///     never produces the `⁚` separator).
+///   - The INFERENCE map, which is a different consumer of the same scope:
+///     `check_model_units`' stdlib-argument-group check looks a module's target
+///     up by name, and `units_infer` recurses into it. Since B3 gave both halves
+///     one scope, a `stdlib⁚*`-skipping closure is no longer even inert
+///     end-to-end -- it reds `unit_checking_test::test_smth1_unit_mismatch_initial`,
+///     measured. Keeping the closure's stdlib targets avoids both routes.
 ///
 /// If a future stdlib template gains an arrayed variable or a module instance,
 /// this test fails -- and at that moment a closure that skips `stdlib⁚*` becomes
@@ -844,22 +854,28 @@ fn stage0_records_duplicate_canonical_ident_errors() {
 // ── 3. the GH #966 cost claim ───────────────────────────────────────────
 
 /// Collecting whole-project diagnostics BUILDS each model's Stage0 and Stage1
-/// exactly once, not once per (checked model, project model) pair.
+/// at most once, and only for the models something actually reaches.
 ///
-/// What the execution counts prove: the two query BODIES ran `models.len()`
-/// times each across a whole-project diagnostic collection that runs the unit
-/// pass on three models. Before this change the same collection constructed
-/// `3 x models.len()` of each. The second half re-reads every model's stages
-/// once per model -- the exact pre-#966 access pattern -- and shows the build
-/// count does not move, so the linearity is a property of the cache and not of
-/// the order `collect_all_diagnostics` happens to walk in.
+/// What the execution counts prove: the two query BODIES ran once per USER model
+/// across a whole-project diagnostic collection that runs the unit pass on all
+/// of them. Before GH #966 the same collection constructed `n_models` of each
+/// PER checked model; after it, one per project model; and now one per model
+/// that is in some checked model's module-reachable scope. The stdlib templates
+/// are spliced into every project but this fixture instantiates none of them, so
+/// they are never staged at all -- the difference between `n_user` and
+/// `n_models` is the narrowing, measured.
 ///
-/// What they do NOT prove: anything about wall-clock time; anything about a
-/// LATER revision (no incrementality claim is made here); and nothing about the
-/// number of memo READS, which is still quadratic in the model count until the
-/// lowering scope is narrowed to the module-reachable closure.
+/// The second half re-reads every model's stages once per model -- the exact
+/// pre-#966 access pattern -- and shows that once the stdlib stages have been
+/// demanded once, nothing rebuilds: the linearity is a property of the cache and
+/// not of the order `collect_all_diagnostics` happens to walk in.
 ///
-/// What makes the measurement sound: `reset_stage_executions()` immediately
+/// What they do NOT prove: anything about wall-clock time, and anything about a
+/// LATER revision (the incrementality claims are
+/// [`an_unrelated_models_edit_invalidates_neither_stage_nor_unit_check`] and
+/// [`a_module_targets_edit_invalidates_its_instantiators_stage_and_unit_check`]).
+///
+/// What makes the measurement sound: `reset_query_executions()` immediately
 /// before the measured region. The counters are thread-local, which keeps a
 /// PARALLEL run's other tests off this thread, but that is not on its own
 /// enough -- under `--test-threads=1` libtest runs every test on this same
@@ -871,38 +887,59 @@ fn whole_project_diagnostics_build_each_models_stages_once() {
     let project = three_model_project();
     let sync = sync_from_datamodel(&db, &project);
     let n_models = sync.project.models(&db).len();
+    let n_user = project.models.len();
     // Three user models plus the spliced stdlib set: the pre-#966 cost was
-    // 3 x n_models of each stage, so n_models and 3 x n_models are far apart.
+    // 3 x n_models of each stage, so n_user and 3 x n_models are far apart.
     assert!(
-        n_models > 3,
-        "fixture should have several models: {n_models}"
+        n_models > n_user,
+        "fixture should have stdlib models beyond its {n_user} user models: {n_models}"
     );
 
-    reset_stage_executions();
+    reset_query_executions();
     let diagnostics = collect_all_diagnostics(&db, sync.project);
-    let after_collect = stage_executions();
+    let after_collect = query_executions();
     assert_eq!(
         after_collect,
-        StageExecutions {
-            stage0: n_models,
-            stage1: n_models,
+        QueryExecutions {
+            stage0: n_user,
+            stage1: n_user,
+            // The unit pass is entered for every model, stdlib included; the
+            // stdlib ones return at the skip gate before reading a stage.
+            unit_check: n_models,
         },
-        "each model's stages must be built exactly once per revision, got {after_collect:?} \
-         for {n_models} models (diagnostics: {diagnostics:?})"
+        "only the reachable models' stages may be built, once each, got {after_collect:?} \
+         for {n_user} user models of {n_models} (diagnostics: {diagnostics:?})"
     );
 
     // The pre-#966 access pattern, made explicit: every model's stages, once
-    // per model. n_models^2 reads, still n_models builds.
+    // per model. n_models^2 reads, and -- after the first pass has demanded the
+    // stdlib stages nothing had reached -- still n_models builds.
     let sources: Vec<SourceModel> = sync.project.models(&db).values().copied().collect();
-    for _target in &sources {
+    for (round, _target) in sources.iter().enumerate() {
         for m in &sources {
             let _ = model_stage1(&db, *m, sync.project);
             let _ = model_stage0(&db, *m, sync.project);
         }
+        if round == 0 {
+            assert_eq!(
+                query_executions(),
+                QueryExecutions {
+                    stage0: n_models,
+                    stage1: n_models,
+                    unit_check: n_models,
+                },
+                "demanding every model's stages must build only the ones the diagnostic \
+                 collection did not reach"
+            );
+        }
     }
     assert_eq!(
-        stage_executions(),
-        after_collect,
+        query_executions(),
+        QueryExecutions {
+            stage0: n_models,
+            stage1: n_models,
+            unit_check: n_models,
+        },
         "re-reading every model's stages must not rebuild any of them"
     );
 }
@@ -929,16 +966,17 @@ fn project_from_salsa_reads_the_cached_stages() {
     let project = three_model_project();
     let sync = sync_from_datamodel(&db, &project);
     let n_models = sync.project.models(&db).len();
-    let expected = StageExecutions {
+    let expected = QueryExecutions {
         stage0: n_models,
         stage1: n_models,
+        unit_check: 0,
     };
 
-    reset_stage_executions();
+    reset_query_executions();
     let built =
         crate::project::Project::from_salsa(project.clone(), &db, sync.project, |_, _, _| {});
     assert_eq!(
-        stage_executions(),
+        query_executions(),
         expected,
         "from_salsa must build each model's stages through the cached queries, once each"
     );
@@ -950,8 +988,11 @@ fn project_from_salsa_reads_the_cached_stages() {
 
     let diagnostics = collect_all_diagnostics(&db, sync.project);
     assert_eq!(
-        stage_executions(),
-        expected,
+        query_executions(),
+        QueryExecutions {
+            unit_check: n_models,
+            ..expected
+        },
         "the unit pass must reuse the stages from_salsa already demanded, not rebuild them \
          (diagnostics: {diagnostics:?})"
     );
@@ -1039,5 +1080,588 @@ fn a_stdlib_prefixed_model_with_an_unknown_suffix_is_unit_checked() {
     assert!(
         unit_pass_diagnostics(&db, real, sync.project).is_empty(),
         "a real stdlib model must still be skipped by the unit pass"
+    );
+}
+
+// ── 5. the scope narrowing ──────────────────────────────────────────────
+
+/// The canonical model names in `model`'s lowering/inference scope.
+fn scope_names(db: &SimlinDb, sync: &SyncResult, model: &str) -> Vec<String> {
+    model_scope_models(db, sync.models[model].source, sync.project)
+        .keys()
+        .map(|ident| ident.as_str().to_string())
+        .collect()
+}
+
+/// The scope is the TRANSITIVE module-reachable closure, and nothing else.
+///
+/// [`chain_project`] is `main -> sub_a -> sub_c`, so each model's scope shrinks
+/// as you descend, and `sub_c` -- reachable from `main` only THROUGH `sub_a` --
+/// proves the closure is transitive rather than one hop. The stdlib templates
+/// are spliced into every synced project and this fixture instantiates none of
+/// them, so their absence is what says the scope is a closure and not a filter
+/// on the project's model list.
+#[test]
+fn the_lowering_scope_is_the_transitive_module_reachable_closure() {
+    let db = SimlinDb::default();
+    let project = chain_project();
+    let sync = sync_from_datamodel(&db, &project);
+
+    assert_eq!(scope_names(&db, &sync, "main"), ["main", "sub_a", "sub_c"]);
+    assert_eq!(scope_names(&db, &sync, "sub_a"), ["sub_a", "sub_c"]);
+    assert_eq!(scope_names(&db, &sync, "sub_c"), ["sub_c"]);
+    assert!(
+        sync.project.models(&db).len() > 3,
+        "the fixture must carry models outside every scope (the spliced stdlib set)"
+    );
+}
+
+/// An IMPLICIT module -- one that builtin/macro expansion synthesized rather
+/// than the modeller declaring -- is a scope edge like any other.
+///
+/// This is the constraint that rules out deriving the scope from
+/// `db::project_module_graph`, which records only EXPLICIT `Variable::Module`
+/// edges. A `SMTH1` call reaches a stdlib template, which is harmless today; a
+/// MACRO call reaches an ordinary user model, which is not. Both are asserted
+/// here, together with the sibling stdlib templates the model does NOT
+/// instantiate, so "the scope holds every stdlib model" cannot pass this test.
+#[test]
+fn implicit_and_macro_modules_are_scope_edges() {
+    let db = SimlinDb::default();
+    let project = every_shape_project();
+    let sync = sync_from_datamodel(&db, &project);
+
+    assert_eq!(
+        scope_names(&db, &sync, "main"),
+        ["main", "scaled", "stdlib\u{205A}smth1", "sub"],
+        "the SMTH1 expansion's stdlib target and the macro call's model must both be edges"
+    );
+    // The macro model itself calls nothing, so its scope is just itself -- the
+    // macro-call edge above is real reachability, not a project-wide splice.
+    assert_eq!(scope_names(&db, &sync, "scaled"), ["scaled"]);
+}
+
+/// A project whose `main` reduces over the output of a MACRO call, where the
+/// macro's primary output is arrayed (`arrayed`) or scalar (the control).
+///
+/// A macro call expands into a synthetic module targeting the macro's own model
+/// plus a reference to `<synthetic module>·<primary_output>`
+/// (`builtins_visitor::expand_module_function`), so `SUM(scaled(driver))` is the
+/// macro-side twin of [`arrayed_module_project`]'s
+/// `SUM(sub_a.out_by_region[*])`: resolving its dimensions means following an
+/// IMPLICIT module edge into another model's Stage0.
+fn macro_output_project(arrayed: bool) -> datamodel::Project {
+    let out = if arrayed {
+        x_apply_to_all("out", "Region", "p1 * 2")
+    } else {
+        x_aux("out", "p1 * 2", None)
+    };
+    let scaled_macro = datamodel::Model {
+        name: "scaled".to_string(),
+        sim_specs: None,
+        variables: vec![out, x_aux("p1", "0", None)],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: Some(datamodel::MacroSpec {
+            parameters: vec!["p1".to_string()],
+            primary_output: "out".to_string(),
+            additional_outputs: vec![],
+        }),
+    };
+    let main = x_model(
+        "main",
+        vec![
+            x_aux("driver", "5", None),
+            x_aux("total", "SUM(scaled(driver))", None),
+        ],
+    );
+    let mut project = x_project(sim_specs_with_units("month"), &[main, scaled_macro]);
+    project.dimensions = vec![datamodel::Dimension::named(
+        "Region".to_string(),
+        vec!["north".to_string(), "south".to_string()],
+    )];
+    project
+}
+
+/// Lower `main` against its own scope with the named models REMOVED, as a
+/// closure that dropped those edges would.
+fn lower_main_without(
+    db: &SimlinDb,
+    sync: &SyncResult,
+    omit: &[&str],
+) -> crate::model::ModelStage1 {
+    let source = sync.models["main"].source;
+    let main_s0 = model_stage0(db, source, sync.project);
+    let models: HashMap<Ident<Canonical>, &ModelStage0> =
+        model_scope_models(db, source, sync.project)
+            .values()
+            .map(|m| {
+                let s0 = model_stage0(db, *m, sync.project);
+                (s0.ident.clone(), s0)
+            })
+            .filter(|(ident, _)| !omit.contains(&ident.as_str()))
+            .collect();
+    let scope = crate::model::ScopeStage0 {
+        models: &models,
+        dimensions: project_dimensions_context(db, sync.project),
+        model_name: main_s0.ident.as_str(),
+    };
+    ModelStage1::new(&scope, main_s0)
+}
+
+/// Dropping the macro model's scope edge changes the lowered VALUE, and the
+/// mechanism is dimension resolution.
+///
+/// [`implicit_and_macro_modules_are_scope_edges`] pins the macro edge
+/// STRUCTURALLY -- it asserts a name list -- which cannot show that losing the
+/// edge would mis-lower anything. This is the macro-side equivalent of what
+/// [`arrayed_module_project`] and [`chain_project`] do for user models: it
+/// demonstrates the CONSEQUENCE.
+///
+/// Two halves, and the second is what makes the first mean something:
+///
+///   - ARRAYED macro output: `main`'s `total` lowers differently with and
+///     without `scaled` in scope, and it is the ONLY variable that differs.
+///     Without the macro model, `ArrayContext::get_variable` cannot follow the
+///     synthetic module into `scaled`, `get_dimensions` returns `None`, and
+///     `SUM(...)` reduces over what it now believes is a scalar -- no error, a
+///     plausible wrong answer.
+///   - SCALAR macro output (the control): removing `scaled` changes NOTHING,
+///     because `get_dimensions` answers `None` either way. So the difference
+///     above is dimension resolution through the macro edge specifically, not
+///     some incidental sensitivity to the map's contents.
+///
+/// What a mis-lowering here actually corrupts is worth stating, because it is
+/// narrower than "the model simulates wrong": `model_stage1`'s consumers are
+/// unit checking and the test-only `Project::from_salsa`. Simulation compiles
+/// from the per-variable fragment path (its own mini Stage0s), so it does not
+/// read this stage at all.
+#[test]
+fn dropping_a_macro_models_scope_edge_changes_the_lowered_value() {
+    let total: Ident<Canonical> = Ident::new("total");
+
+    let db = SimlinDb::default();
+    let project = macro_output_project(true);
+    let sync = sync_from_datamodel(&db, &project);
+    let cached = model_stage1(&db, sync.models["main"].source, sync.project);
+
+    // The fixture must actually route through a macro-expansion module. This is
+    // read off the model's STAGE0, deliberately, not off its scope: a scope-name
+    // assertion would fire first under a narrowing that drops macro edges, and
+    // then this test would be red for the same structural reason
+    // `implicit_and_macro_modules_are_scope_edges` already covers, instead of on
+    // the lowered value it exists to protect.
+    assert!(
+        model_stage0(&db, sync.models["main"].source, sync.project)
+            .variables
+            .values()
+            .any(
+                |v| matches!(v, crate::variable::Variable::Module { model_name, .. }
+                if model_name.as_str() == "scaled")
+            ),
+        "the macro call must have expanded into a synthetic module targeting `scaled`"
+    );
+
+    let without_macro = lower_main_without(&db, &sync, &["scaled"]);
+    assert!(
+        cached.variables[&total] != without_macro.variables[&total],
+        "the arrayed macro output's dimensions must resolve through the macro \
+         scope edge, so dropping it must change how `total` lowers"
+    );
+    let differing: Vec<&str> = cached
+        .variables
+        .iter()
+        .filter(|(ident, var)| without_macro.variables.get(*ident) != Some(*var))
+        .map(|(ident, _)| ident.as_str())
+        .collect();
+    assert_eq!(
+        differing,
+        ["total"],
+        "only the reducing caller should be affected"
+    );
+
+    // Control: with a SCALAR macro output the same removal changes nothing.
+    let db = SimlinDb::default();
+    let scalar_project = macro_output_project(false);
+    let sync = sync_from_datamodel(&db, &scalar_project);
+    let cached = model_stage1(&db, sync.models["main"].source, sync.project);
+    let without_macro = lower_main_without(&db, &sync, &["scaled"]);
+    assert!(
+        cached.variables == without_macro.variables,
+        "a scalar macro output resolves to no dimensions either way, so the \
+         difference above is dimension resolution and not the map's contents"
+    );
+}
+
+/// `resolve_relative` keys a dotted module-input `src` on each component as a
+/// MODEL name, so a module's own IDENT is a scope edge too when it names one.
+///
+/// This is the narrowing's one non-obvious edge, and the fixture is the shape
+/// that needs it: `main` instantiates model `real_target` under the ident
+/// `helper`, while a model named `helper` also exists, and a second module's
+/// input reads `helper·something`. `resolve_relative` predates a module ident
+/// being allowed to differ from its target's name, so it resolves that `src`
+/// against MODEL `helper` -- which is reachable from `main` only through the
+/// ident. Dropping the ident edge turns a project that lowered cleanly into one
+/// reporting `BadModuleInputSrc`.
+///
+/// That resolution is itself questionable (the reference means "the module
+/// `helper`'s output", not "model `helper`'s variable"), and its TODO has been
+/// in `model.rs` for years. This test pins BEHAVIOUR PRESERVATION across the
+/// narrowing, not the rule: whoever fixes the underlying resolution should
+/// delete this along with the ident edge.
+#[test]
+fn a_module_ident_that_names_a_model_is_a_scope_edge() {
+    use crate::testutils::x_module_named;
+
+    let db = SimlinDb::default();
+    let project = x_project(
+        sim_specs_with_units("month"),
+        &[
+            x_model(
+                "main",
+                vec![
+                    x_aux("driver", "5", None),
+                    x_module_named("helper", "real_target", &[("driver", "helper.input")], None),
+                    x_module_named("m2", "consumer", &[("helper.something", "m2.input")], None),
+                ],
+            ),
+            x_model("real_target", vec![x_aux("input", "0", None)]),
+            x_model("helper", vec![x_aux("something", "1", None)]),
+            x_model("consumer", vec![x_aux("input", "0", None)]),
+        ],
+    );
+    let sync = sync_from_datamodel(&db, &project);
+
+    assert!(
+        scope_names(&db, &sync, "main").contains(&"helper".to_string()),
+        "the module ident `helper` names a model that `resolve_relative` reaches: {:?}",
+        scope_names(&db, &sync, "main")
+    );
+
+    let m2 = model_stage1(&db, sync.models["main"].source, sync.project)
+        .variables
+        .get(&Ident::<Canonical>::new("m2"))
+        .expect("the second module must be staged")
+        .equation_errors();
+    assert!(
+        m2.is_none(),
+        "the module input must still resolve, as it does under a whole-project scope: {m2:?}"
+    );
+}
+
+/// A module CYCLE yields a finite scope containing the whole cycle.
+///
+/// The walk is iterative over a visited set precisely because this project is
+/// one a user can draw: a recursive tracked query on this graph is salsa's
+/// unrecoverable dependency-graph panic, not a diagnostic (GH #806), and a
+/// recursive plain function is a stack overflow, which under `panic=abort` takes
+/// the host process with it. Both members' stages must also LOWER, since
+/// `check_model_units` reaches them on a cyclic project (the engine primitive is
+/// reachable even though `collect_all_diagnostics` gates on the cycle first).
+#[test]
+fn a_module_cycle_yields_a_finite_scope() {
+    use crate::testutils::x_module_named;
+
+    let db = SimlinDb::default();
+    let project = x_project(
+        sim_specs_with_units("month"),
+        &[
+            x_model(
+                "a",
+                vec![
+                    x_aux("x", "1", None),
+                    x_module_named("to_b", "b", &[("x", "to_b.input")], None),
+                ],
+            ),
+            x_model(
+                "b",
+                vec![
+                    x_aux("input", "0", None),
+                    x_module_named("to_a", "a", &[("input", "to_a.x")], None),
+                ],
+            ),
+        ],
+    );
+    let sync = sync_from_datamodel(&db, &project);
+
+    assert_eq!(scope_names(&db, &sync, "a"), ["a", "b"]);
+    assert_eq!(scope_names(&db, &sync, "b"), ["a", "b"]);
+    for name in ["a", "b"] {
+        assert!(
+            !model_stage1(&db, sync.models[name].source, sync.project)
+                .variables
+                .is_empty(),
+            "a cyclic project's models must still lower"
+        );
+    }
+}
+
+/// A cross-module unit mismatch that only closes through TWO module hops.
+///
+/// `main.x` is declared `widget` and feeds `sub_a.input`, which is undeclared
+/// and feeds `sub_c.input`, which is declared `gadget`. The contradiction exists
+/// only once `units_infer` has walked BOTH hops: hop one binds
+/// `@main·x = @sub_a·input`, hop two binds `@sub_a·input = @sub_c·input`, and
+/// only `sub_c`'s declaration closes it against `widget`. `sub_a` declares
+/// nothing, so no one-hop conflict can stand in for it.
+fn two_hop_unit_mismatch_project() -> datamodel::Project {
+    let sub_c = x_model("sub_c", vec![x_aux("input", "0", Some("gadget"))]);
+    let sub_a = x_model(
+        "sub_a",
+        vec![
+            x_aux("input", "0", None),
+            x_module("sub_c", &[("input", "sub_c.input")], None),
+        ],
+    );
+    let main = x_model(
+        "main",
+        vec![
+            x_aux("x", "1", Some("widget")),
+            x_module("sub_a", &[("x", "sub_a.input")], None),
+        ],
+    );
+    x_project(sim_specs_with_units("month"), &[main, sub_a, sub_c])
+}
+
+/// The unit guard for the TRANSITIVE row of the narrowing matrix.
+///
+/// The stdlib row has `unit_checking_test::test_smth1_unit_mismatch_initial` as
+/// its guard: narrow the closure past stdlib targets and a unit diagnostic
+/// disappears. The transitive row had no twin -- the direct-targets-only probe
+/// red-lit only LOWERING tests, so a closure that stopped at direct targets
+/// would have silently dropped every grandchild's unit constraints with nothing
+/// to say so. `units_infer` recurses through module instantiations, so a model
+/// missing from the inference map is declined exactly like a dangling
+/// `model_name`: partial results, no error, one fewer diagnostic.
+///
+/// This is a diagnostic-DISAPPEARS test, so it asserts the warning is present.
+/// Under a direct-targets-only closure `sub_c` is absent from `main`'s inference
+/// map and the mismatch goes unreported.
+#[test]
+fn a_two_hop_cross_module_unit_mismatch_is_still_reported() {
+    use crate::common::ErrorCode;
+
+    let db = SimlinDb::default();
+    let project = two_hop_unit_mismatch_project();
+    let sync = sync_from_datamodel(&db, &project);
+
+    // The fixture depends on `sub_c` being reachable only THROUGH `sub_a`, and
+    // that precondition is read off the models' STAGE0s rather than off `main`'s
+    // scope. A scope-name assertion here would fire first under the very
+    // narrowing this test exists to catch, and the test would then be red for a
+    // structural reason `the_lowering_scope_is_the_transitive_module_reachable_closure`
+    // already covers instead of on the diagnostic it is protecting.
+    let targets = |model: &str| -> Vec<String> {
+        model_stage0(&db, sync.models[model].source, sync.project)
+            .variables
+            .values()
+            .filter_map(|v| match v {
+                crate::variable::Variable::Module { model_name, .. } => {
+                    Some(model_name.as_str().to_string())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        targets("main"),
+        ["sub_a"],
+        "main must not reach sub_c directly"
+    );
+    assert_eq!(
+        targets("sub_a"),
+        ["sub_c"],
+        "sub_a must be the only route to sub_c"
+    );
+
+    let diagnostics = unit_pass_diagnostics(&db, sync.models["main"].source, sync.project);
+    assert!(
+        diagnostics.iter().any(|cd| matches!(
+            &cd.0.error,
+            DiagnosticError::Model(e) if e.code == ErrorCode::UnitMismatch
+        )),
+        "the two-hop widget/gadget contradiction must still be reported: {:?}",
+        diagnostics.iter().map(|cd| &cd.0).collect::<Vec<_>>()
+    );
+}
+
+/// Editing a model with NO module relationship to `main` re-executes neither
+/// `main`'s lowered stage nor its unit check.
+///
+/// This is the point of the narrowing, and it needs execution counts rather than
+/// memo pointer identity: salsa backdates a re-executed query whose value
+/// compares equal and can keep the memo's address, so a pointer-equal memo does
+/// not show that the body did not run. With the whole-project scope map both of
+/// `main`'s queries re-executed on this edit; `other`'s still must, or the test
+/// would pass against a database that simply answered nothing.
+///
+/// The sync trap this is written around: incremental sync REUSES the
+/// `SourceProject` handle, so `sync1.project` and `sync2.project` are the same
+/// salsa input and a value read through the older `SyncResult` after the edit is
+/// the POST-edit value. Every read here is therefore made against the sync that
+/// is current at that moment.
+#[test]
+fn an_unrelated_models_edit_invalidates_neither_stage_nor_unit_check() {
+    let unrelated_pair = |other_eqn: &str| {
+        x_project(
+            sim_specs_with_units("month"),
+            &[
+                x_model(
+                    "main",
+                    vec![
+                        x_aux("driver", "5", Some("widget")),
+                        x_aux("scaled", "driver * 2", Some("widget")),
+                    ],
+                ),
+                x_model("other", vec![x_aux("y", other_eqn, Some("gadget"))]),
+            ],
+        )
+    };
+
+    let mut db = SimlinDb::default();
+    let state1 = sync_from_datamodel_incremental(&mut db, &unrelated_pair("1"), None);
+    let sync1 = state1.to_sync_result();
+    for name in ["main", "other"] {
+        let source = sync1.models[name].source;
+        let _ = model_stage1(&db, source, sync1.project);
+        crate::db::units::check_model_units(&db, source, sync1.project);
+    }
+
+    // Control: re-syncing the identical project re-executes nothing, so a count
+    // below is attributable to the edit rather than to the re-sync.
+    reset_query_executions();
+    let state2 = sync_from_datamodel_incremental(&mut db, &unrelated_pair("1"), Some(&state1));
+    let sync2 = state2.to_sync_result();
+    for name in ["main", "other"] {
+        let source = sync2.models[name].source;
+        let _ = model_stage1(&db, source, sync2.project);
+        crate::db::units::check_model_units(&db, source, sync2.project);
+    }
+    assert_eq!(
+        query_executions(),
+        QueryExecutions::default(),
+        "re-syncing an unchanged project must re-execute nothing"
+    );
+
+    reset_query_executions();
+    let state3 = sync_from_datamodel_incremental(&mut db, &unrelated_pair("2"), Some(&state2));
+    let sync3 = state3.to_sync_result();
+    let main = sync3.models["main"].source;
+    let _ = model_stage1(&db, main, sync3.project);
+    crate::db::units::check_model_units(&db, main, sync3.project);
+    assert_eq!(
+        query_executions(),
+        QueryExecutions::default(),
+        "an unrelated model's edit must not invalidate main's stage or unit check"
+    );
+
+    // The edit really did land: the edited model's own queries re-execute.
+    let other = sync3.models["other"].source;
+    let _ = model_stage1(&db, other, sync3.project);
+    crate::db::units::check_model_units(&db, other, sync3.project);
+    assert_eq!(
+        query_executions(),
+        QueryExecutions {
+            stage0: 1,
+            stage1: 1,
+            unit_check: 1,
+        },
+        "the EDITED model's stage and unit check must re-execute, or the fixture proves nothing"
+    );
+}
+
+/// Editing a model that `main` instantiates DOES re-execute `main`'s lowered
+/// stage and unit check.
+///
+/// This is the direction a too-narrow scope breaks, and it breaks silently: the
+/// stale memo still answers, with the previous revision's lowering. A scope of
+/// "self only" leaves this test red, which is the property that makes the
+/// narrowing testable at all rather than merely plausible.
+///
+/// The two queries are demanded SEPARATELY, because a combined count cannot tell
+/// `main`'s stage1 re-executing from `sub`'s: the unit check demands `sub`'s
+/// stage1 itself. Demanding `model_stage1(main)` alone can only re-execute
+/// `main`'s -- that query reads Stage0s, never another model's Stage1 -- so the
+/// first count attributes the invalidation to `main`.
+#[test]
+fn a_module_targets_edit_invalidates_its_instantiators_stage_and_unit_check() {
+    let parent_child = |child_eqn: &str| {
+        x_project(
+            sim_specs_with_units("month"),
+            &[
+                x_model(
+                    "main",
+                    vec![
+                        x_aux("driver", "5", Some("widget")),
+                        x_module("sub", &[("driver", "sub.input")], None),
+                        x_aux("combined", "sub.out", Some("widget")),
+                    ],
+                ),
+                x_model(
+                    "sub",
+                    vec![
+                        x_aux("input", "0", Some("widget")),
+                        x_aux("out", child_eqn, Some("widget")),
+                    ],
+                ),
+            ],
+        )
+    };
+
+    let mut db = SimlinDb::default();
+    let state1 = sync_from_datamodel_incremental(&mut db, &parent_child("input * 2"), None);
+    let sync1 = state1.to_sync_result();
+    let _ = model_stage1(&db, sync1.models["main"].source, sync1.project);
+    crate::db::units::check_model_units(&db, sync1.models["main"].source, sync1.project);
+
+    // Control: re-syncing the IDENTICAL project re-executes nothing, so the
+    // counts below are attributable to the edit and not to the re-sync. Without
+    // it this test would still pass if a no-op re-sync had started re-executing
+    // everything -- it asserts re-execution, so a spurious cause satisfies it.
+    reset_query_executions();
+    let state2 =
+        sync_from_datamodel_incremental(&mut db, &parent_child("input * 2"), Some(&state1));
+    let sync2 = state2.to_sync_result();
+    let _ = model_stage1(&db, sync2.models["main"].source, sync2.project);
+    crate::db::units::check_model_units(&db, sync2.models["main"].source, sync2.project);
+    assert_eq!(
+        query_executions(),
+        QueryExecutions::default(),
+        "re-syncing an unchanged project must re-execute nothing"
+    );
+
+    reset_query_executions();
+    let state3 =
+        sync_from_datamodel_incremental(&mut db, &parent_child("input * 3"), Some(&state2));
+    let sync3 = state3.to_sync_result();
+    let main = sync3.models["main"].source;
+
+    let _ = model_stage1(&db, main, sync3.project);
+    assert_eq!(
+        query_executions(),
+        QueryExecutions {
+            // `sub`'s Stage0 rebuilt because its equation changed; `main`'s did
+            // not (its own variables are untouched), and `main`'s Stage1 rebuilt
+            // because that Stage0 is in its lowering scope.
+            stage0: 1,
+            stage1: 1,
+            unit_check: 0,
+        },
+        "a module target's edit must re-execute the INSTANTIATOR's lowered stage"
+    );
+
+    reset_query_executions();
+    crate::db::units::check_model_units(&db, main, sync3.project);
+    assert_eq!(
+        query_executions(),
+        QueryExecutions {
+            stage0: 0,
+            // the target's own Stage1, which only the unit check demanded
+            stage1: 1,
+            unit_check: 1,
+        },
+        "a module target's edit must re-execute the instantiator's unit check"
     );
 }

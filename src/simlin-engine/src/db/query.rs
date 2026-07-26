@@ -734,8 +734,28 @@ impl ModuleReferenceGraph {
 /// Build the project's explicit module-instance graph (see
 /// [`ModuleReferenceGraph`]). Reads each model's module variables and their
 /// target `model_name`s with flat salsa reads (no recursion). Implicit
-/// (SMOOTH/DELAY/TREND/stdlib) modules can only reference leaf stdlib models, so
-/// they can never close a user cycle and are intentionally omitted.
+/// (SMOOTH/DELAY/TREND/stdlib/MACRO-call) modules are omitted, which keeps this
+/// query structural: it reads variable KINDS and target names, never a parse
+/// result, so it is invalidated by a variable being added, removed or retargeted
+/// and not by an equation being typed. Every production entry point consults it,
+/// so widening it to parse-derived edges would put every variable's parse on
+/// every compile's dependency list.
+///
+/// **The omission is not free, and this doc used to claim it was.** It said
+/// implicit modules "can only reference leaf stdlib models, so they can never
+/// close a user cycle". That is false for a MACRO call: it expands into an
+/// implicit module targeting the macro's own model, which is an ordinary user
+/// model. A macro whose body instantiates a module targeting a model that CALLS
+/// that macro is a cycle this graph does not see -- and the recursive
+/// `model_module_map` follows implicit edges, so it reaches salsa's
+/// unrecoverable dependency-graph cycle panic with this gate reporting no cycle.
+/// `MacroRegistry`'s Pass 3 rejects macro->macro recursion and no stdlib model
+/// instantiates a module, so an explicit module inside a macro-marked model is
+/// the one remaining shape; it needs a fix of its own (three candidates, each
+/// with a different incrementality cost), not a widening here.
+///
+/// `db::stages::model_scope_models` walks the same edges plus the implicit ones
+/// and is iterative, so it is unaffected either way.
 #[salsa::tracked(returns(ref))]
 pub fn project_module_graph(db: &dyn Db, project: SourceProject) -> ModuleReferenceGraph {
     let models = project.models(db);

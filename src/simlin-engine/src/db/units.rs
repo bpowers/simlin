@@ -45,8 +45,8 @@ use crate::common::{Canonical, Ident};
 use crate::datamodel;
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel,
-    SourceProject, SourceVariable, model_stage0, model_stage1, project_datamodel_dims,
-    project_dimensions_context, project_models_stage0, project_units_context,
+    SourceProject, SourceVariable, model_scope_models, model_scope_stage0, model_stage0,
+    model_stage1, project_datamodel_dims, project_dimensions_context, project_units_context,
     source_model_is_stdlib,
 };
 
@@ -163,18 +163,22 @@ fn init_value_equivalence_group(
 /// Per-model tracked function that performs unit inference and checking,
 /// accumulating unit warnings/errors through the salsa accumulator.
 ///
-/// Reads each project model's salsa-cached `ModelStage1` (`db::stages`), then
-/// runs the same unit inference and checking pipeline as the old
-/// `run_default_model_checks` callback. Unit mismatches are accumulated as
-/// DiagnosticSeverity::Warning to match the old-path behavior where unit issues
-/// don't block simulation.
+/// Reads the salsa-cached `ModelStage1` (`db::stages`) of every model in this
+/// one's module-reachable scope, then runs the same unit inference and checking
+/// pipeline as the old `run_default_model_checks` callback. Unit mismatches are
+/// accumulated as DiagnosticSeverity::Warning to match the old-path behavior
+/// where unit issues don't block simulation.
 ///
 /// This function used to BUILD both stages for every project model on every
 /// call, so collecting a project's diagnostics was quadratic in the model count
-/// (GH #966). Reading the cached queries keeps the same whole-project view --
-/// cross-module inference constraints resolve submodel variable types, and
-/// stdlib models stay in the map because user models reference them as modules
-/// -- while each model's stages are built once per revision.
+/// (GH #966). It then read the cached queries for every project model, which
+/// fixed the builds but left the reads quadratic and, worse, made this check
+/// depend on every model in the project -- so any edit anywhere re-ran every
+/// model's unit check. It now reads `db::model_scope_models`: this model plus the
+/// models it can reach through module instantiation, which is exactly what
+/// `units_infer` can consult (`self.models.get(model_name)`, for module targets,
+/// recursing along the same edges) plus what the stdlib-argument check below
+/// looks up (this model's own direct module targets).
 ///
 /// Stdlib (implicit) models are skipped because they are generic
 /// templates that only make sense when instantiated with specific inputs.
@@ -182,6 +186,9 @@ fn init_value_equivalence_group(
 pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject) {
     use crate::common::{ErrorCode, ErrorKind};
     use crate::model::ModelStage1;
+
+    #[cfg(test)]
+    crate::db::stages::note_unit_check_execution();
 
     // Skip stdlib models -- they are generic and unit checking doesn't
     // apply until instantiated with concrete inputs.
@@ -209,12 +216,28 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
     let model_name = model.name(db).clone();
     let units_ctx = project_units_context(db, project);
 
-    // Read every project model's lowered stage so that cross-module unit
-    // inference constraints (module inputs/outputs) can resolve submodel
-    // variable types. Stdlib models are included in the map because user
-    // models may reference them as modules.
-    let models_s1: HashMap<Ident<Canonical>, &ModelStage1> = project
-        .models(db)
+    // Read the lowered stage of every model in this one's module-reachable
+    // scope, so that cross-module unit inference constraints (module
+    // inputs/outputs) can resolve submodel variable types. A stdlib model is in
+    // the map when this model instantiates one, on the same rule as any other
+    // module target.
+    //
+    // The map is built from `model_scope_models`' resolved handles WITHOUT the
+    // self-entry repair `model_scope_stage0` performs, because the lookup below
+    // depends on the difference. Be precise about what that difference is: what
+    // can be missing is the NAME, not this handle. `model_scope_models` seeds the
+    // scope with `project.models(db)`'s entry for the root's canonical name
+    // whenever the project holds that name, so
+    //
+    //   - the name is absent only when the project holds NO model under it (this
+    //     handle was renamed or deleted while a caller kept it), and the lookup
+    //     below then returns `None` -- the signal that there is nothing to check;
+    //   - if a DIFFERENT handle occupies the name, the map holds that other
+    //     model's Stage1 and `target_model` is that model, not this one.
+    //
+    // Both behaviours predate the scope narrowing -- the whole-project map was
+    // keyed the same way -- and neither is changed by it.
+    let models_s1: HashMap<Ident<Canonical>, &ModelStage1> = model_scope_models(db, model, project)
         .values()
         .map(|src_model| {
             let s1 = model_stage1(db, *src_model, project);
@@ -222,8 +245,8 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
         })
         .collect();
 
-    // Find the target model in the lowered map. A `SourceModel` that is not the
-    // project's entry under its own canonical name has nothing to check here.
+    // Find the target model in the lowered map. A `SourceModel` whose canonical
+    // name the project no longer holds has nothing to check here.
     let target_ident = Ident::<Canonical>::new(&model_name);
     let target_model = match models_s1.get(&target_ident) {
         Some(m) => *m,
@@ -642,10 +665,12 @@ fn check_conveyor_param_units(
         });
         aug_ms0.variables.insert(Ident::new(vs0.ident()), vs0);
     }
-    // The scope holds each model's UNAUGMENTED Stage0 -- including the target's,
-    // so the synthetic auxes stay invisible to dimension resolution exactly as
-    // they were before the stages were cached.
-    let models_s0 = project_models_stage0(db, project);
+    // The scope holds each reachable model's UNAUGMENTED Stage0 -- including the
+    // target's, so the synthetic auxes stay invisible to dimension resolution
+    // exactly as they were before the stages were cached. It is the same scope
+    // `model_stage1` lowers the real variables in, so a parameter expression
+    // resolves a `module·output` reference exactly as an ordinary equation does.
+    let models_s0 = model_scope_stage0(db, model, project);
     let scope = crate::model::ScopeStage0 {
         models: &models_s0,
         dimensions: project_dimensions_context(db, project),
