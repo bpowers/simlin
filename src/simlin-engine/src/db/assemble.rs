@@ -694,6 +694,33 @@ pub(crate) fn compute_flow_invariance_support(
 pub(crate) type PerVarOffsetMap =
     HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, (usize, usize)>>;
 
+/// Flatten a phase's temp-id -> size map into the `(temp_id, size)` vector
+/// `PerVarBytecodes::temp_sizes` carries, **ordered by temp id**.
+///
+/// The ordering is load-bearing, not cosmetic. `temp_sizes` rides on a
+/// `PerVarBytecodes`, which is a salsa-cached value with a *derived*
+/// `PartialEq`, and `Vec` equality is order-sensitive. Building it straight
+/// out of `HashMap::iter` therefore made two otherwise-identical compiles of
+/// the same fragment compare unequal whenever the per-process hash seed
+/// reordered the map: salsa's backdating stops firing (every downstream
+/// consumer re-executes), and the compiled artifact itself stops being
+/// reproducible run to run -- the nondeterminism class GH #595 tracks.
+///
+/// Nothing downstream ever *depended* on the order: the sole consumer,
+/// `FragmentMerger::absorb`, folds each entry into a resize-and-`max` over a
+/// dense `merged_temp_sizes` vector, which is order-independent, and the
+/// merged result is re-emitted densely by `into_per_var_bytecodes`. So this is
+/// a pure determinism fix with no bytecode consequence -- which is exactly why
+/// it survived undetected.
+pub(crate) fn temp_sizes_by_id(temp_sizes_map: &HashMap<u32, usize>) -> Vec<(u32, usize)> {
+    let mut temp_sizes: Vec<(u32, usize)> = temp_sizes_map
+        .iter()
+        .map(|(&id, &size)| (id, size))
+        .collect();
+    temp_sizes.sort_unstable_by_key(|(id, _)| *id);
+    temp_sizes
+}
+
 /// Compile one phase's lowered `Vec<Expr>` for a single variable through
 /// its own correct mini-context and symbolize the result into a
 /// layout-independent `PerVarBytecodes`.
@@ -797,8 +824,7 @@ pub(crate) fn compile_phase_to_per_var_bytecodes(
                 .collect::<Result<Vec<_>, _>>()
                 .ok()?;
 
-            let temp_sizes_vec: Vec<(u32, usize)> =
-                temp_sizes_map.iter().map(|(&k, &v)| (k, v)).collect();
+            let temp_sizes_vec = temp_sizes_by_id(&temp_sizes_map);
 
             let dim_lists: Vec<Vec<u16>> = ctx
                 .dim_lists

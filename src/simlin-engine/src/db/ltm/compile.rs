@@ -26,7 +26,8 @@ use crate::db::{
     extract_tables_from_source_var, model_dependency_graph, model_implicit_var_info,
     model_module_ident_context, model_module_map, parse_source_variable_with_module_context,
     project_converted_dimensions, project_datamodel_dims, project_dimensions_context,
-    project_units_context, reconstruct_single_variable, variable_dimensions, variable_size,
+    project_units_context, reconstruct_single_variable, temp_sizes_by_id, variable_dimensions,
+    variable_size,
 };
 
 use super::parse::{ltm_equation_dimensions, parse_ltm_equation, scalarize_ltm_equation};
@@ -444,7 +445,25 @@ struct LoweredLtmVariable {
     /// the dt AST). Identifier sets are lowering-scope-independent, so
     /// this is valid for the returned `variable` whether or not the
     /// scoped re-lower ran.
-    dep_idents: HashSet<Ident<Canonical>>,
+    ///
+    /// ORDERED, not a `HashSet`. Both consumers walk this set assigning
+    /// consecutive mini-layout offsets in iteration order, so with a
+    /// `HashSet` the offsets a dependency received were a function of the
+    /// per-process hash seed rather than of the query's inputs. Symbolization
+    /// inverts those offsets, so the emitted fragment was identical either
+    /// way and nothing observable changed -- this is the same
+    /// "intermediate state must be a function of the inputs" rule the
+    /// `temp_sizes` ordering restores, applied where it is not directly
+    /// testable. The non-LTM twins
+    /// (`db::var_fragment::collect_var_dependencies`,
+    /// `db::compile_implicit_var_phase_bytecodes`) already use a `BTreeSet`
+    /// here; these two hand-copied LTM walks were the outliers.
+    ///
+    /// This does NOT explain (or fix) the separately-reported
+    /// nondeterministic *invalidation* of `compile_ltm_var_fragment`: that
+    /// was measured before and after this change with no effect, and salsa
+    /// verifies a dependency SET, which an ordering cannot alter.
+    dep_idents: BTreeSet<Ident<Canonical>>,
     /// `classify_dependencies(..).referenced_tables` of the same AST.
     referenced_tables: BTreeSet<String>,
 }
@@ -669,8 +688,8 @@ fn lower_ltm_variable(
         .ast()
         .map(|ast| crate::variable::classify_dependencies(ast, &[], None));
     let (dep_idents, referenced_tables) = match classification {
-        Some(c) => (c.all, c.referenced_tables),
-        None => (HashSet::new(), BTreeSet::new()),
+        Some(c) => (c.all.into_iter().collect(), c.referenced_tables),
+        None => (BTreeSet::new(), BTreeSet::new()),
     };
 
     // Structural gate: without a Pass-1 temp-decomposition site in the
@@ -1627,8 +1646,7 @@ pub(crate) fn compile_ltm_equation_fragment(
                     .collect::<Result<Vec<_>, _>>()
                     .ok()?;
 
-                let temp_sizes_vec: Vec<(u32, usize)> =
-                    temp_sizes_map.iter().map(|(&k, &v)| (k, v)).collect();
+                let temp_sizes_vec = temp_sizes_by_id(&temp_sizes_map);
 
                 let dim_lists: Vec<Vec<u16>> = ctx
                     .dim_lists
@@ -2048,7 +2066,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
     // Dependency classification handed back by `lower_ltm_variable` for the
     // non-module path, reused by the dep-collection pass below (the module
     // path constructs its deps from the dm_module references instead).
-    let mut ltm_lowered_deps: Option<(HashSet<Ident<Canonical>>, BTreeSet<String>)> = None;
+    let mut ltm_lowered_deps: Option<(BTreeSet<Ident<Canonical>>, BTreeSet<String>)> = None;
 
     // Module-type implicit vars need direct Module construction
     let lowered = if meta.is_module {
@@ -2333,7 +2351,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         let (dep_idents, referenced_tables) = if lowered.ast().is_some() {
             ltm_lowered_deps.take().unwrap_or_default()
         } else {
-            (HashSet::new(), BTreeSet::new())
+            (BTreeSet::new(), BTreeSet::new())
         };
 
         let implicit_info = model_implicit_var_info(db, model, project);
@@ -2640,8 +2658,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
                     .collect::<Result<Vec<_>, _>>()
                     .ok()?;
 
-                let temp_sizes_vec: Vec<(u32, usize)> =
-                    temp_sizes_map.iter().map(|(&k, &v)| (k, v)).collect();
+                let temp_sizes_vec = temp_sizes_by_id(&temp_sizes_map);
 
                 let dim_lists: Vec<Vec<u16>> = ctx
                     .dim_lists

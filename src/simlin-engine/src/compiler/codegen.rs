@@ -53,14 +53,42 @@ pub(super) struct Compiler<'module> {
 
 impl<'module> Compiler<'module> {
     pub(super) fn new(module: &'module Module) -> Compiler<'module> {
-        // Pre-populate graphical_functions with all tables and record base IDs
+        // Pre-populate graphical_functions with all tables and record base IDs.
+        //
+        // Iterated in sorted ident order, NOT `HashMap` order, and that is
+        // load-bearing rather than cosmetic. This loop assigns both the layout
+        // of `graphical_functions` and every `base_gf` operand the emitted
+        // `Lookup`/`LookupArray` opcodes carry, so with `HashMap` order a model
+        // whose fragment holds two or more table-bearing variables compiled to
+        // a *different* (still self-consistent, still numerically correct)
+        // bytecode on every run. `PerVarBytecodes` is a salsa-cached value with
+        // a derived `PartialEq`, so that defeats backdating exactly as an
+        // unordered `temp_sizes` did (`db::assemble::temp_sizes_by_id`), and the
+        // assembled `CompiledModule` was not reproducible: measured differing on
+        // 18 of 23 fresh-database repeats. It reaches shipped models --
+        // `test/metasd/theil-statistics/Theil_2011.mdl` compiles a fragment
+        // holding `["dummy_data", "dummy_simulation"]`.
+        //
+        // Nothing downstream depends on WHICH order is chosen, only that a
+        // fragment's `base_gf` operands agree with its own
+        // `graphical_functions` vector and that distinct variables' blocks stay
+        // disjoint -- both of which sorting preserves. Checked: the VM reads
+        // `graphical_functions[base_gf + element_offset]` self-relatively;
+        // `symbolize_bytecode`/`resolve` pass `base_gf`/`table_count` through
+        // untouched (they are table indices, not layout offsets); and
+        // `symbolic::gf_blocks_of_fragment` derives its blocks from the
+        // fragment's own opcode runs (sorting them itself) while
+        // `FragmentMerger::absorb_gf` dedups on block CONTENT, so #582's
+        // cross-fragment GF dedup is order-insensitive by construction.
         let mut graphical_functions = Vec::new();
         let mut table_base_ids = HashMap::new();
 
-        for (ident, tables) in &module.tables {
+        let mut table_idents: Vec<&Ident<Canonical>> = module.tables.keys().collect();
+        table_idents.sort_unstable();
+        for ident in table_idents {
             let base_gf = graphical_functions.len() as GraphicalFunctionId;
             table_base_ids.insert(ident.clone(), base_gf);
-            for table in tables {
+            for table in &module.tables[ident] {
                 graphical_functions.push(table.data.clone());
             }
         }
