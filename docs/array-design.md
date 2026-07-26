@@ -105,7 +105,7 @@ Indexed dimensions (e.g., numeric dimensions like `Periods(5)`) can use position
 - All expression types: `StaticSubscript`, `TempArray`, `TempArrayElement`, `AssignTemp`
 
 #### Bytecode VM
-- View stack operations: `PushVarView`, `PushTempView`, `PushStaticView`
+- View stack operations: `PushStaticView`, `PushTempView`, `PushVarViewDirect`
 - View manipulation: `ViewSubscriptConst/Dynamic`, `ViewRange/Dynamic`, `ViewStarRange`, `ViewWildcard`, `ViewTranspose`
 - Iteration: `BeginIter`, `LoadIterElement`, `StoreIterElement`, `NextIterOrJump`, `EndIter`
 - Reductions: `ArraySum`, `ArrayMax`, `ArrayMin`, `ArrayMean`, `ArrayStddev`, `ArraySize`

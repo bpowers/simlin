@@ -815,9 +815,11 @@ enum SccVerdict {
 ///   and does NOT strip INIT-refs (an `INIT(x)` read during the
 ///   initial-value computation is a genuine init-phase ordering edge;
 ///   `init_referenced_vars` feeds the Initials runlist, not a strip).
-/// - `LoadVar`/`LoadSubscript`/`PushVarView`/`PushVarViewDirect` and a
-///   `Var`-based `PushStaticView`: current-value reads, kept unchanged --
-///   the reads `build_var_info` never strips.
+/// - `LoadVar`/`LoadSubscript`/`PushVarViewDirect` and a `Var`-based
+///   `PushStaticView`: current-value reads, kept unchanged -- the reads
+///   `build_var_info` never strips. (These are ALL the `SymVarRef`-carrying
+///   read opcodes the compiler can emit; codegen has no whole-array
+///   `PushVarView` form.)
 ///
 /// **Why this is the CORRECT relation, not a new over/under-approximation
 /// (the AC4 soundness argument).** A genuine current-(phase-)timestep
@@ -932,7 +934,6 @@ fn symbolic_phase_element_order(
                 // (`build_var_info` never strips a current-value dep).
                 SymbolicOpcode::LoadVar { var }
                 | SymbolicOpcode::LoadSubscript { var }
-                | SymbolicOpcode::PushVarView { var, .. }
                 | SymbolicOpcode::PushVarViewDirect { var, .. } => {
                     pending_reads.insert((var.name.clone(), var.element_offset));
                 }
@@ -987,8 +988,8 @@ fn symbolic_phase_element_order(
                         }
                     }
                 }
-                // Other write targets (a different member, or `AssignNext`
-                // / `BinOpAssignNext` -- a stock-update, not a per-element
+                // Other write targets (a different member, or
+                // `BinOpAssignNext` -- a stock-update, not a per-element
                 // current-value write of THIS member) do not terminate
                 // this member's element segment and carry no read; ignore.
                 _ => {}
@@ -1101,7 +1102,7 @@ fn symbolic_phase_element_order(
 /// recurrence has an init self-loop with **no corresponding dt cycle**.
 /// Here only the **init** induced element graph is relevant: the dt
 /// precondition the `Dt` branch applies would be *wrong* (a stock has no
-/// dt element graph -- its dt lowering is `AssignNext`, not the
+/// dt element graph -- its dt lowering is `BinOpAssignNext`, not the
 /// per-element `AssignCurr` the element graph reads -- so requiring dt
 /// element-acyclicity would spuriously reject every init-only
 /// recurrence). The init verdict therefore verifies `SccPhase::Initial`

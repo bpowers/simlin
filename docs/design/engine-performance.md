@@ -330,9 +330,12 @@ only conclusive for effects that exceed ~4%.
 
 ### R4. `RuntimeView` allocation + `flat_offset` (~20% of post-win run)
 
-`PushVarView`/`PushTempView` rebuild `SmallVec`s (dims, strides, dim_ids) on every
-execution; `flat_offset` (10.3%) recomputes row-major offsets per element. For
-arrayed models this is now the #2 run cost.
+`PushTempView`/`PushVarViewDirect` rebuild `SmallVec`s (dims, strides, dim_ids)
+on every execution; `flat_offset` (10.3%) recomputes row-major offsets per
+element. For arrayed models this is now the #2 run cost. (This item was written
+when a third opcode, `PushVarView`, shared the cost; it was deleted in GH #964's
+stage 2 as unemittable by codegen, which is part (a) of the proposal below
+already realized for the whole-array case.)
 
 Proposal: (a) push more views through the compile-time `PushStaticView` path
 (precomputed `StaticArrayView`) and store dynamic view descriptors in the

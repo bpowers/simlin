@@ -2517,7 +2517,7 @@ fn compile_simulation_reset_no_override_restores_defaults() {
 
 /// `set_value` on a non-constant offset returns the error code and does not
 /// write. A stock's offset (`level`) is not an overridable constant (its
-/// initial is a constant, but it is assigned via `AssignNext`, not an
+/// initial is a constant, but it is assigned via `BinOpAssignNext`, not an
 /// `AssignConstCurr` in flows), so `set_value` must reject it. After the
 /// rejected call the default run must be unchanged.
 #[test]

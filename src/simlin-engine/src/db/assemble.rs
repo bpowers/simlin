@@ -1097,11 +1097,10 @@ fn segment_member_by_element(
             {
                 Some(var.element_offset)
             }
-            // A write to a *different* member, or AssignNext/
-            // BinOpAssignNext (a stock-update, not a per-element
-            // current-value write of THIS member) does not terminate this
-            // member's element segment -- exactly the
-            // `symbolic_phase_element_order` rule.
+            // A write to a *different* member, or `BinOpAssignNext` (a
+            // stock-update, not a per-element current-value write of THIS
+            // member) does not terminate this member's element segment --
+            // exactly the `symbolic_phase_element_order` rule.
             _ => None,
         };
         if let Some(elem) = write_elem {

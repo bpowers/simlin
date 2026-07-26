@@ -613,9 +613,9 @@ pub(crate) enum Op2 {
 /// - Variable access (LoadVar, LoadGlobalVar, etc.)
 /// - Control flow (SetCond, If, Ret)
 /// - Module operations (EvalModule, LoadModuleInput)
-/// - Assignment (AssignCurr, AssignNext)
+/// - Assignment (AssignCurr, and the fused BinOpAssignNext for stock updates)
 /// - Builtins and lookups (Apply, Lookup)
-/// - Array view stack operations (PushVarView, ViewSubscript*, etc.)
+/// - Array view stack operations (PushStaticView, ViewSubscript*, etc.)
 /// - Array iteration (BeginIter, LoadIterElement, etc.)
 /// - Array reductions (ArraySum, ArrayMax, etc.)
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -677,9 +677,6 @@ pub(crate) enum Opcode {
     AssignCurr {
         off: VariableOffset,
     },
-    AssignNext {
-        off: VariableOffset,
-    },
 
     // === BUILTINS & LOOKUPS ===
     Apply {
@@ -714,8 +711,13 @@ pub(crate) enum Opcode {
         off: VariableOffset,
     },
 
-    /// Fused Op2 + AssignNext.
-    /// Pops two values, applies binary op, assigns result to next[module_off + off].
+    /// The next-value assignment: pops two values, applies the binary op, and
+    /// assigns the result to `next[module_off + off]`.
+    ///
+    /// There is no un-fused counterpart. Every write to `next[]` is a stock
+    /// update, and a stock update's operand walk always ends in an `Op2`
+    /// (`Context::build_stock_update_expr`), so codegen emits this form
+    /// directly via `ByteCodeBuilder::fuse_trailing_op2_into_assign_next`.
     BinOpAssignNext {
         op: Op2,
         off: VariableOffset,
@@ -1002,14 +1004,6 @@ pub(crate) enum Opcode {
     // =========================================================================
 
     // === VIEW STACK: Building views dynamically ===
-    /// Push a view for a variable's full array onto the view stack.
-    /// Looks up dimension info to compute strides.
-    /// The dim_list_id references a (n_dims, [DimId; 4]) entry in ByteCodeContext.dim_lists.
-    PushVarView {
-        base_off: VariableOffset,
-        dim_list_id: DimListId,
-    },
-
     /// Push a view for a temp array onto the view stack.
     /// The dim_list_id references a (n_dims, [DimId; 4]) entry in ByteCodeContext.dim_lists.
     PushTempView {
@@ -1319,7 +1313,7 @@ impl Opcode {
             Opcode::EvalModule { n_inputs, .. } => (*n_inputs, 0),
 
             // Assignment: pops 1 (the value to assign)
-            Opcode::AssignCurr { .. } | Opcode::AssignNext { .. } => (1, 0),
+            Opcode::AssignCurr { .. } => (1, 0),
 
             // Builtins always take 3 args (actual + padding), push 1 result
             Opcode::Apply { .. } => (3, 1),
@@ -1386,8 +1380,7 @@ impl Opcode {
             | Opcode::AssignStackConstNext { .. } => (1, 0),
 
             // View stack ops don't touch arithmetic stack
-            Opcode::PushVarView { .. }
-            | Opcode::PushTempView { .. }
+            Opcode::PushTempView { .. }
             | Opcode::PushStaticView { .. }
             | Opcode::PushVarViewDirect { .. }
             | Opcode::ViewSubscriptConst { .. }
@@ -1469,7 +1462,6 @@ impl Opcode {
             Opcode::LoadModuleInput { .. } => "LoadModuleInput",
             Opcode::EvalModule { .. } => "EvalModule",
             Opcode::AssignCurr { .. } => "AssignCurr",
-            Opcode::AssignNext { .. } => "AssignNext",
             Opcode::Apply { .. } => "Apply",
             Opcode::Lookup { .. } => "Lookup",
             Opcode::AssignConstCurr { .. } => "AssignConstCurr",
@@ -1515,7 +1507,6 @@ impl Opcode {
             Opcode::AssignStackVarNext { .. } => "AssignStackVarNext",
             Opcode::AssignStackConstCurr { .. } => "AssignStackConstCurr",
             Opcode::AssignStackConstNext { .. } => "AssignStackConstNext",
-            Opcode::PushVarView { .. } => "PushVarView",
             Opcode::PushTempView { .. } => "PushTempView",
             Opcode::PushStaticView { .. } => "PushStaticView",
             Opcode::PushVarViewDirect { .. } => "PushVarViewDirect",
@@ -1826,6 +1817,37 @@ impl ByteCodeBuilder {
         self.bytecode.code.push(op)
     }
 
+    /// Replace a just-emitted trailing `Op2` with the fused
+    /// `BinOpAssignNext { op, off }` that both computes it and stores the
+    /// result into `next[off]`. Returns `false` -- emitting nothing -- when the
+    /// stream does not end in an `Op2`.
+    ///
+    /// There is no un-fused `Opcode::AssignNext`: a stock update is the only
+    /// thing that ever writes `next[]`, and `Context::build_stock_update_expr`
+    /// always returns `Op2(Add, curr_value, net * dt)`, so the operand walk
+    /// always ends in an `Op2` and the fused form is always emittable. Codegen
+    /// therefore fuses here, at emit time, and reports a typed error if a stock
+    /// update ever arrives in a shape that would need the un-fused opcode --
+    /// most plausibly an eventual `non_negative` implementation (GH #545)
+    /// wrapping the update in a `MAX`. A comment could not fail; this can.
+    ///
+    /// Fusing at emit time is strictly inside `peephole_optimize`'s
+    /// jump-target safety envelope rather than an exception to it: the `Op2`
+    /// being replaced is the LAST opcode in the stream, so no jump emitted so
+    /// far can target it (every jump is a backward `NextIterOrJump` emitted
+    /// after its target), and the pair it replaces has no successor whose PC
+    /// could shift.
+    pub(crate) fn fuse_trailing_op2_into_assign_next(&mut self, off: VariableOffset) -> bool {
+        match self.bytecode.code.last() {
+            Some(&Opcode::Op2 { op }) => {
+                let last = self.bytecode.code.len() - 1;
+                self.bytecode.code[last] = Opcode::BinOpAssignNext { op, off };
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Returns the current number of opcodes in the bytecode
     pub(crate) fn len(&self) -> usize {
         self.bytecode.code.len()
@@ -1901,10 +1923,6 @@ impl ByteCode {
                     // Pattern: Op2 + AssignCurr -> BinOpAssignCurr
                     (Opcode::Op2 { op }, Opcode::AssignCurr { off }) => {
                         Some(Opcode::BinOpAssignCurr { op: *op, off: *off })
-                    }
-                    // Pattern: Op2 + AssignNext -> BinOpAssignNext
-                    (Opcode::Op2 { op }, Opcode::AssignNext { off }) => {
-                        Some(Opcode::BinOpAssignNext { op: *op, off: *off })
                     }
                     _ => None,
                 };
@@ -2289,7 +2307,6 @@ mod tests {
     #[test]
     fn test_stack_effect_assignments() {
         assert_eq!((Opcode::AssignCurr { off: 0 }).stack_effect(), (1, 0));
-        assert_eq!((Opcode::AssignNext { off: 0 }).stack_effect(), (1, 0));
     }
 
     #[test]
@@ -2369,7 +2386,7 @@ mod tests {
     #[test]
     fn test_stack_effect_view_ops_dont_affect_arithmetic_stack() {
         assert_eq!(
-            (Opcode::PushVarView {
+            (Opcode::PushVarViewDirect {
                 base_off: 0,
                 dim_list_id: 0,
             })
@@ -3566,20 +3583,20 @@ mod tests {
         }
     }
 
+    /// The next-value assign is fused at EMIT time (there is no un-fused
+    /// `AssignNext` opcode for the peephole to fuse), so this pins the
+    /// builder helper codegen uses.
     #[test]
-    fn test_peephole_op2_assign_next_fusion() {
-        let mut bc = ByteCode {
-            code: vec![
-                Opcode::LoadVar { off: 0 },
-                Opcode::LoadVar { off: 1 },
-                Opcode::Op2 { op: Op2::Mul },
-                Opcode::AssignNext { off: 3 },
-            ],
-            literals: vec![],
-        };
-        bc.peephole_optimize();
+    fn test_builder_fuses_trailing_op2_into_assign_next() {
+        let mut builder = ByteCodeBuilder::default();
+        builder.push_opcode(Opcode::LoadVar { off: 0 });
+        builder.push_opcode(Opcode::LoadVar { off: 1 });
+        builder.push_opcode(Opcode::Op2 { op: Op2::Mul });
+        assert!(builder.fuse_trailing_op2_into_assign_next(3));
+        builder.push_opcode(Opcode::Ret);
 
-        assert_eq!(bc.code.len(), 3);
+        let bc = builder.finish();
+        assert_eq!(bc.code.len(), 4);
         match &bc.code[2] {
             Opcode::BinOpAssignNext { op, off } => {
                 assert!(matches!(op, Op2::Mul));
@@ -3587,6 +3604,27 @@ mod tests {
             }
             _ => panic!("expected BinOpAssignNext"),
         }
+    }
+
+    /// The other half of the contract: when the operand walk did NOT end in
+    /// an `Op2` -- the shape an eventual `non_negative` implementation
+    /// (GH #545) would produce by wrapping the stock update in a builtin --
+    /// the helper refuses and emits nothing, so codegen can raise a typed
+    /// error instead of silently dropping the store.
+    #[test]
+    fn test_builder_refuses_assign_next_fusion_without_trailing_op2() {
+        let mut builder = ByteCodeBuilder::default();
+        builder.push_opcode(Opcode::LoadVar { off: 0 });
+        builder.push_opcode(Opcode::Apply {
+            func: BuiltinId::Max,
+        });
+        assert!(!builder.fuse_trailing_op2_into_assign_next(3));
+        assert_eq!(builder.len(), 2, "a refused fusion must emit nothing");
+
+        // ...and an empty stream is refused too, rather than panicking.
+        let mut empty = ByteCodeBuilder::default();
+        assert!(!empty.fuse_trailing_op2_into_assign_next(0));
+        assert_eq!(empty.len(), 0);
     }
 
     #[test]
@@ -3872,7 +3910,7 @@ mod tests {
 
     #[test]
     fn test_peephole_no_fusion_when_patterns_dont_match() {
-        // Op2 followed by something other than AssignCurr/AssignNext
+        // Op2 followed by something other than AssignCurr
         let mut bc = ByteCode {
             code: vec![Opcode::Op2 { op: Op2::Add }, Opcode::Not {}, Opcode::Ret],
             literals: vec![],
@@ -3928,7 +3966,7 @@ mod tests {
                 Opcode::LoadConstant { id: 1 },
                 Opcode::AssignCurr { off: 1 },
                 Opcode::Op2 { op: Op2::Div },
-                Opcode::AssignNext { off: 2 },
+                Opcode::AssignCurr { off: 2 },
             ],
             literals: vec![1.0, 2.0],
         };
@@ -3950,11 +3988,11 @@ mod tests {
             }
         ));
         match &bc.code[2] {
-            Opcode::BinOpAssignNext { op, off } => {
+            Opcode::BinOpAssignCurr { op, off } => {
                 assert!(matches!(op, Op2::Div));
                 assert_eq!(*off, 2);
             }
-            _ => panic!("expected BinOpAssignNext"),
+            _ => panic!("expected BinOpAssignCurr"),
         }
     }
 

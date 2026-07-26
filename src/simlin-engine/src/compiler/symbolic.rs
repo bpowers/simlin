@@ -99,9 +99,6 @@ pub(crate) enum SymbolicOpcode {
     AssignCurr {
         var: SymVarRef,
     },
-    AssignNext {
-        var: SymVarRef,
-    },
 
     // === BUILTINS & LOOKUPS (unchanged) ===
     Apply {
@@ -128,10 +125,6 @@ pub(crate) enum SymbolicOpcode {
     },
 
     // === ARRAY VIEW STACK ===
-    PushVarView {
-        var: SymVarRef,
-        dim_list_id: DimListId,
-    },
     PushTempView {
         temp_id: TempId,
         dim_list_id: DimListId,
@@ -575,9 +568,6 @@ pub(crate) fn symbolize_opcode(
         Opcode::AssignCurr { off } => Ok(SymbolicOpcode::AssignCurr {
             var: rmap.lookup(u32::from(*off))?,
         }),
-        Opcode::AssignNext { off } => Ok(SymbolicOpcode::AssignNext {
-            var: rmap.lookup(u32::from(*off))?,
-        }),
         Opcode::AssignConstCurr { off, literal_id } => Ok(SymbolicOpcode::AssignConstCurr {
             var: rmap.lookup(u32::from(*off))?,
             literal_id: *literal_id,
@@ -640,13 +630,6 @@ pub(crate) fn symbolize_opcode(
         | Opcode::AssignStackConstNext { .. } => {
             unreachable!("3-address fused opcode reached symbolize_opcode")
         }
-        Opcode::PushVarView {
-            base_off,
-            dim_list_id,
-        } => Ok(SymbolicOpcode::PushVarView {
-            var: rmap.lookup(u32::from(*base_off))?,
-            dim_list_id: *dim_list_id,
-        }),
         Opcode::PushVarViewDirect {
             base_off,
             dim_list_id,
@@ -921,11 +904,9 @@ fn sym_var_refs_in_bytecode(sbc: &SymbolicByteCode) -> impl Iterator<Item = &str
         | SymbolicOpcode::SymLoadInitial { var }
         | SymbolicOpcode::LoadSubscript { var }
         | SymbolicOpcode::AssignCurr { var }
-        | SymbolicOpcode::AssignNext { var }
         | SymbolicOpcode::AssignConstCurr { var, .. }
         | SymbolicOpcode::BinOpAssignCurr { var, .. }
         | SymbolicOpcode::BinOpAssignNext { var, .. }
-        | SymbolicOpcode::PushVarView { var, .. }
         | SymbolicOpcode::PushVarViewDirect { var, .. } => Some(var.name.as_str()),
         _ => None,
     })
@@ -1050,9 +1031,6 @@ pub(crate) fn resolve_opcode(
         SymbolicOpcode::AssignCurr { var } => Ok(Opcode::AssignCurr {
             off: resolve_var_ref(var, layout)?,
         }),
-        SymbolicOpcode::AssignNext { var } => Ok(Opcode::AssignNext {
-            off: resolve_var_ref(var, layout)?,
-        }),
         SymbolicOpcode::AssignConstCurr { var, literal_id } => Ok(Opcode::AssignConstCurr {
             off: resolve_var_ref(var, layout)?,
             literal_id: *literal_id,
@@ -1064,10 +1042,6 @@ pub(crate) fn resolve_opcode(
         SymbolicOpcode::BinOpAssignNext { op, var } => Ok(Opcode::BinOpAssignNext {
             op: *op,
             off: resolve_var_ref(var, layout)?,
-        }),
-        SymbolicOpcode::PushVarView { var, dim_list_id } => Ok(Opcode::PushVarView {
-            base_off: resolve_var_ref(var, layout)?,
-            dim_list_id: *dim_list_id,
         }),
         SymbolicOpcode::PushVarViewDirect { var, dim_list_id } => Ok(Opcode::PushVarViewDirect {
             base_off: resolve_var_ref(var, layout)?,
@@ -2195,10 +2169,6 @@ pub(crate) fn renumber_opcode(
             temp_id: checked_add_u8(*temp_id, temp_off_u8, "TempId")?,
             dim_list_id: *dim_list_id + dl_off,
         },
-        SymbolicOpcode::PushVarView { var, dim_list_id } => SymbolicOpcode::PushVarView {
-            var: var.clone(),
-            dim_list_id: *dim_list_id + dl_off,
-        },
         SymbolicOpcode::PushVarViewDirect { var, dim_list_id } => {
             SymbolicOpcode::PushVarViewDirect {
                 var: var.clone(),
@@ -3248,10 +3218,6 @@ mod tests {
         let rmap = ReverseOffsetMap::from_layout(&layout);
 
         let opcodes = vec![
-            Opcode::PushVarView {
-                base_off: 4,
-                dim_list_id: 0,
-            },
             Opcode::PushTempView {
                 temp_id: 1,
                 dim_list_id: 2,
@@ -3302,7 +3268,10 @@ mod tests {
             Opcode::LoadTempDynamic { temp_id: 2 },
             Opcode::PushSubscriptIndex { bounds: 4 },
             Opcode::LoadSubscript { off: 5 },
-            Opcode::AssignNext { off: 4 },
+            Opcode::BinOpAssignNext {
+                op: Op2::Add,
+                off: 4,
+            },
         ];
 
         for op in &opcodes {

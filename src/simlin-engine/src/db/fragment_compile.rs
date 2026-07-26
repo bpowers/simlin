@@ -216,6 +216,30 @@ pub fn compile_var_fragment<'db>(
     // Accumulate a diagnostic when per-variable compilation (Var::new)
     // fails. Without this, errors like DoesNotExist (unknown dependency)
     // are silently dropped and never appear in collect_all_diagnostics.
+    //
+    // KNOWN LOSS, deliberately not fixed here: `err.details` is dropped.
+    // `EquationError` is `{start, end, code}` with no message field, so every
+    // message a `Var::new` failure writes -- including the one naming the
+    // stock in `compiler::check_stock_updates_are_emittable` -- reaches the
+    // user only as its `ErrorCode`. The variable name still rides on the
+    // `Diagnostic`, so the report stays attributable; it is the *reason* that
+    // is lost, not the *location*.
+    //
+    // The obvious fix is wrong. Switching to `DiagnosticError::Model(err)`
+    // does carry `details`, but `errors.rs` treats the two variants
+    // differently on purpose: the `Equation` arm produces
+    // `FormattedErrorKind::Variable`, names the variable in the summary, and
+    // -- via `format_diagnostic_with_datamodel` -> `format_equation_error` --
+    // enriches the message with a source snippet from the equation text. The
+    // `Model` arm produces `FormattedErrorKind::Model`, drops the variable
+    // from the summary, and gets no snippet. Trading a per-variable
+    // diagnostic for a model-level one to gain a message is a net regression
+    // of the user-facing surface (pinned by
+    // `db::diagnostic_tests::test_compile_var_fragment_per_phase_var_new_failure`).
+    //
+    // The right fix is to give `EquationError` a details field, which is 48
+    // construction sites across 20 files and the type the FFI error surface
+    // is built on -- its own change, not a rider on this one.
     let accumulate_var_compile_error = |err: &crate::Error| {
         CompilationDiagnostic(Diagnostic {
             model: model.name(db).clone(),

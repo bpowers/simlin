@@ -15,7 +15,7 @@ pub(crate) mod symbolic;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use crate::ast::{ArrayView, Ast, Loc};
+use crate::ast::{ArrayView, Ast, BinaryOp, Loc};
 #[cfg(test)]
 use crate::bytecode::CompiledModule;
 use crate::common::{Canonical, CanonicalElementName, Ident, Result};
@@ -675,6 +675,62 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
     );
 }
 
+/// The stock-update shape guard, in both directions.
+///
+/// Codegen emits every next-value assignment as the fused `BinOpAssignNext`,
+/// so a stock update whose lowered form does not end in an `Op2` must be
+/// REJECTED at lowering (a structured, per-variable error) rather than dropped
+/// at emission (a stock that silently never integrates). This pins that
+/// contract directly, since the shape it guards is unreachable from today's
+/// `build_stock_update_expr` and so cannot be provoked through a model.
+#[test]
+fn stock_update_shape_guard_rejects_only_non_binary_updates() {
+    let var = Expr::Var(0, Loc::default());
+    let c = || Expr::Const(1.0, Loc::default());
+    let op2 = |op| Expr::Op2(op, Box::new(var.clone()), Box::new(c()), Loc::default());
+
+    // The real shape: `curr + net * dt`.
+    check_stock_updates_are_emittable(
+        &[Expr::AssignNext(0, Box::new(op2(BinaryOp::Add)))],
+        "level",
+    )
+    .expect("the `Op2(Add, ..)` `build_stock_update_expr` produces must be accepted");
+
+    // A non-`Op2` update -- the shape a `MAX(0, ..)` `non_negative` clamp
+    // (GH #545) would produce.
+    let err = check_stock_updates_are_emittable(
+        &[Expr::AssignNext(
+            0,
+            Box::new(Expr::App(
+                crate::builtins::BuiltinFn::Max(Box::new(c()), Some(Box::new(var.clone()))),
+                Loc::default(),
+            )),
+        )],
+        "level",
+    )
+    .expect_err("a builtin-wrapped stock update must be rejected, not silently dropped");
+    assert_eq!(err.code, ErrorCode::NotSimulatable);
+    assert!(
+        err.details.as_deref().unwrap_or("").contains("level"),
+        "the error must name the stock so the diagnostic is attributable, got {err:?}"
+    );
+
+    // `Neq` is the one binary operator codegen does not leave as a trailing
+    // `Op2` (it emits `Op2 Eq` then `Not`), so it is rejected too.
+    assert!(
+        check_stock_updates_are_emittable(
+            &[Expr::AssignNext(0, Box::new(op2(BinaryOp::Neq)))],
+            "level"
+        )
+        .is_err(),
+        "a `Neq` update does not end in an Op2 opcode and must be rejected"
+    );
+
+    // Nothing else in an expression list is inspected.
+    check_stock_updates_are_emittable(&[Expr::AssignCurr(0, Box::new(c()))], "aux")
+        .expect("a non-stock assignment is not a stock update");
+}
+
 impl Var {
     pub(crate) fn new(ctx: &Context, var: &Variable) -> Result<Self> {
         // if this variable is overriden by a module input, our expression is easy
@@ -840,12 +896,66 @@ impl Var {
         // single chokepoint every lowering path (monolithic Module::compile
         // and the salsa per-variable fragment path) funnels through -- so both
         // backends (VM and wasmgen) see the folded form.
-        let ast = ast.into_iter().map(fold::fold_constants).collect();
+        let ast: Vec<Expr> = ast.into_iter().map(fold::fold_constants).collect();
+        check_stock_updates_are_emittable(&ast, var.ident())?;
         Ok(Var {
             ident: Ident::new(var.ident()),
             ast,
         })
     }
+}
+
+/// Reject a stock update codegen could not emit, with a structured
+/// per-variable error rather than an unattributed batch failure.
+///
+/// `Expr::AssignNext` is the only thing that ever writes `next[]`, and it is
+/// synthesized here from `Context::build_stock_update_expr`, never by a user
+/// equation. Codegen has no un-fused next-assign opcode: it emits
+/// `BinOpAssignNext`, which requires the update expression's *last* emitted
+/// opcode to be an `Op2` (`ByteCodeBuilder::fuse_trailing_op2_into_assign_next`).
+/// Today that always holds -- `build_stock_update_expr` returns
+/// `Op2(Add, curr, net * dt)` and constant folding cannot collapse it, since
+/// its left operand is an `Expr::Var` -- so this check never fires.
+///
+/// It exists because the property is a *shape* invariant that a future change
+/// could quietly break: implementing `non_negative` (GH #545) by wrapping the
+/// update in `MAX(0, ..)` would end the walk in an `Apply`, which codegen
+/// cannot emit as a next-value assignment.
+///
+/// What the guard buys is ATTRIBUTION, not the difference between failing and
+/// not failing. Without it the build still fails, but late and vaguely:
+/// codegen's error is swallowed by `compile_phase_to_per_var_bytecodes`'s
+/// loud-safe `None`, the stock's phase goes missing, and `assemble_module`'s
+/// `missing_vars` check reports the whole batch as
+/// `failed to compile fragments for variables: <names>` with no reason and no
+/// per-variable diagnostic. Checked here, at the chokepoint every lowering
+/// path funnels through, the same failure instead surfaces as a typed
+/// `NotSimulatable` `Diagnostic` attributed to the stock (through
+/// `compile_var_fragment`'s `accumulate_var_compile_error`), which is what
+/// invariant 7 asks for. Note that the `details` string below does not reach
+/// the user today -- see the comment on `accumulate_var_compile_error` for why
+/// and what the real fix is.
+///
+/// `Neq` is excluded along with the non-`Op2` shapes: it is the one binary
+/// operator codegen does not emit as a trailing `Op2` (it emits `Op2 Eq` then
+/// `Not`).
+fn check_stock_updates_are_emittable(ast: &[Expr], ident: &str) -> Result<()> {
+    for expr in ast {
+        let Expr::AssignNext(_, rhs) = expr else {
+            continue;
+        };
+        let emittable = matches!(rhs.as_ref(), Expr::Op2(op, _, _, _) if *op != BinaryOp::Neq);
+        if !emittable {
+            return sim_err!(
+                NotSimulatable,
+                format!(
+                    "the dt update for stock '{ident}' is not a binary operation, \
+                     so it cannot be emitted as a next-value assignment"
+                )
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Implicit WITH LOOKUP application (GH #909): rewrite each per-element

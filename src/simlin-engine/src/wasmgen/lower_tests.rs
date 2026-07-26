@@ -531,7 +531,7 @@ fn lowers_nested_if() {
     assert_eq!(eval(1.0, 0.0, 9.0, 100.0, 200.0), 200.0);
 }
 
-// ── AssignCurr / AssignNext ───────────────────────────────────────────
+// ── AssignCurr / BinOpAssignNext ──────────────────────────────────────
 
 #[test]
 fn lowers_assign_curr_constant() {
@@ -675,8 +675,12 @@ fn lowers_assign_next_euler_update() {
         op2(Op2::Sub),                  // births - deaths
         Opcode::LoadConstant { id: 0 }, // dt
         op2(Op2::Mul),                  // (births - deaths) * dt
-        op2(Op2::Add),                  // pop + ...
-        Opcode::AssignNext { off: 4 },
+        // `pop + ...` and the store into next[] are one fused opcode: codegen
+        // emits `BinOpAssignNext` directly for every stock update.
+        Opcode::BinOpAssignNext {
+            op: Op2::Add,
+            off: 4,
+        },
     ];
     // pop=100, births=10, deaths=2.5 -> 100 + 7.5*0.5 = 103.75
     let seed = &[(32, 100.0), (40, 10.0), (48, 2.5)];
@@ -685,14 +689,18 @@ fn lowers_assign_next_euler_update() {
 
 #[test]
 fn assign_next_honors_module_off() {
-    // With module_off=2, AssignNext{off:0} writes next[2]; next_base=4096,
+    // With module_off=2, BinOpAssignNext{off:0} writes next[2]; next_base=4096,
     // so byte 4096 + 2*8 = 4112.
     let ctx = ctx_with_cond_depth(0);
     let program = bc(
-        vec![7.0],
+        vec![3.5],
         vec![
             Opcode::LoadConstant { id: 0 },
-            Opcode::AssignNext { off: 0 },
+            Opcode::LoadConstant { id: 0 },
+            Opcode::BinOpAssignNext {
+                op: Op2::Add,
+                off: 0,
+            },
         ],
     );
     let bytes = build_module(&program, &ctx, false, 0);
@@ -2199,7 +2207,8 @@ fn load_temp_dynamic_floors_fractional_index() {
 // `StaticArrayView::to_runtime_view`) folded per the matching VM reducer arm
 // (`vm.rs:2216-2309`). The view transform opcodes the production codegen does
 // not emit directly (it bakes constant subscripts into one `PushStaticView`)
-// are exercised here on a `PushVarView` base so each `apply_*` is reduced
+// are exercised here on a full-array `PushStaticView` base so each `apply_*`
+// is reduced
 // over and checked against the VM. Reuses `TEMP_BASE` / `ctx_with_arrays`
 // from the Task 1 section above.
 // ════════════════════════════════════════════════════════════════════════
@@ -2421,13 +2430,15 @@ fn static_temp_view_honors_temp_offset() {
 
 // ── Task 1: view transform opcodes (mirror RuntimeView::apply_*) ──────
 //
-// Build a full var view with PushVarView, apply one transform, reduce, and
-// compare to the VM's RuntimeView with the same transform applied. These are
-// the opcodes production codegen bakes into a single PushStaticView, so they
-// are exercised here directly to pin each `apply_*` against the VM.
+// Build a full var view, apply one transform, reduce, and compare to the VM's
+// RuntimeView with the same transform applied. Production codegen bakes these
+// transforms into a single `PushStaticView`, so the base view here is a
+// `PushStaticView` too -- carrying the same real `DimId`s the VM oracle's
+// `RuntimeView::for_var` is built with, which a `PushVarViewDirect` base
+// (dim_ids all zero) would not.
 
-/// A `ByteCodeContext` with a single dimension of `size` (DimId 0) and a
-/// dim-list `[DimId 0]` (DimListId 0) for a 1-D `PushVarView`.
+/// A `ByteCodeContext` with a single dimension of `size` (DimId 0), plus the
+/// dim-list `[DimId 0]` some transform opcodes resolve against.
 fn ctx_one_dim(size: u16) -> ByteCodeContext {
     let mut context = ByteCodeContext::default();
     let name_id = context.intern_name("D");
@@ -2436,19 +2447,39 @@ fn ctx_one_dim(size: u16) -> ByteCodeContext {
     context
 }
 
-/// Run `PushVarView(base 0, dims) ; <transforms> ; <reduce> ; PopView` and
-/// also build the VM `RuntimeView` the same way for the addressing oracle.
+/// A full contiguous view over `curr` slots `0..product(dims)` whose shape is
+/// `context`'s dim-list 0, resolved through `context.dimensions` -- i.e. the
+/// view `RuntimeView::for_var(0, dims, dim_ids)` describes. A context may
+/// declare dimensions the view does not span (a star-range's child dim), so
+/// the dim-list, not the dimension table, is what defines the view.
+fn full_var_view(context: &ByteCodeContext) -> StaticArrayView {
+    let (n_dims, dim_ids) = context.get_dim_list(0);
+    let dim_ids: Vec<u16> = dim_ids[..n_dims as usize].to_vec();
+    let dims: Vec<u16> = dim_ids
+        .iter()
+        .map(|&id| {
+            context
+                .get_dimension(id)
+                .expect("dim-list 0 must reference declared dimensions")
+                .size
+        })
+        .collect();
+    let mut view = dense_view(0, &dims);
+    view.dim_ids = dim_ids.into_iter().collect();
+    view
+}
+
+/// Run `PushStaticView(full var view) ; <transforms> ; <reduce> ; PopView`.
 fn run_var_view_reduce(
     context: &ByteCodeContext,
     transforms: &[Opcode],
     reduce: Opcode,
     data: &[f64],
 ) -> f64 {
-    let ctx = ctx_with_arrays(context);
-    let mut code = vec![Opcode::PushVarView {
-        base_off: 0,
-        dim_list_id: 0,
-    }];
+    let mut context = context.clone();
+    let view_id = context.add_static_view(full_var_view(&context));
+    let ctx = ctx_with_arrays(&context);
+    let mut code = vec![Opcode::PushStaticView { view_id }];
     code.extend_from_slice(transforms);
     code.push(reduce);
     code.push(Opcode::PopView {});
@@ -2590,12 +2621,11 @@ fn dup_view_then_reduce_matches_single() {
     // The duplicate must leave the stack balanced for the trailing PopView;
     // a second PopView would underflow, so add one more here to drain the
     // dup and confirm both pops succeed.
+    let mut context = context.clone();
+    let view_id = context.add_static_view(full_var_view(&context));
     let ctx = ctx_with_arrays(&context);
     let code = vec![
-        Opcode::PushVarView {
-            base_off: 0,
-            dim_list_id: 0,
-        },
+        Opcode::PushStaticView { view_id },
         Opcode::DupView {},
         Opcode::ArraySum {},
         Opcode::PopView {}, // pop dup

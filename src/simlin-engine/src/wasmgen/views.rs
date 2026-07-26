@@ -32,9 +32,9 @@ pub(crate) enum ViewBase {
     /// `base_off` verbatim (no `module_off` added), so the byte address is
     /// `curr_base + (base_off + flat) * 8` with no runtime addend.
     CurrAbsolute,
-    /// `curr[module_off + base_off + ..]`. `PushVarView` / `PushVarViewDirect`
-    /// fold the runtime `module_off` into the base (`vm.rs:1749` / `1784`), so a
-    /// read adds `module_off * 8` to the constant address. In the current
+    /// `curr[module_off + base_off + ..]`. `PushVarViewDirect` folds the
+    /// runtime `module_off` into the base (`vm.rs`'s `PushVarViewDirect` arm),
+    /// so a read adds `module_off * 8` to the constant address. In the current
     /// single-root scope `module_off == 0`, but the distinction is preserved so
     /// Phase 7 can thread a real `module_off` without changing addressing.
     CurrModuleRelative,
@@ -119,7 +119,7 @@ impl ViewDesc {
 
     /// Build a contiguous view over a full variable/temp array from a dim-list
     /// (the `(n_dims, sizes)` for `PushVarViewDirect`, or dim sizes resolved
-    /// from `ctx.dimensions` for `PushVarView`/`PushTempView`). Strides are
+    /// from `ctx.dimensions` for `PushTempView`). Strides are
     /// row-major, built right-to-left, exactly as `RuntimeView::for_var`.
     pub fn contiguous(base_off: u32, base: ViewBase, dims: Vec<u16>, dim_ids: Vec<u16>) -> Self {
         let mut strides = Vec::with_capacity(dims.len());
@@ -421,7 +421,7 @@ impl ViewDesc {
     ///   `module_relative = false`.
     /// - `CurrModuleRelative`: `const = curr_base + (base_off + flat) * 8`,
     ///   `module_relative = true` (the caller adds `module_off * 8`). The VM
-    ///   folds `module_off` into the base at `PushVarView` time (`vm.rs:1749`);
+    ///   folds `module_off` into the base at `PushVarViewDirect` time;
     ///   in the single-root scope `module_off == 0`, so the read is the same as
     ///   `CurrAbsolute` today, but the flag keeps Phase 7 correct.
     ///

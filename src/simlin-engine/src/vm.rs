@@ -649,7 +649,7 @@ fn collect_stock_offsets(
     let mut offsets = Vec::new();
     for op in module.compiled_stocks.code.iter() {
         match op {
-            Opcode::AssignNext { off } | Opcode::BinOpAssignNext { off, .. } => {
+            Opcode::BinOpAssignNext { off, .. } => {
                 offsets.push(base_off + *off as usize);
             }
             Opcode::EvalModule { id, .. } => {
@@ -2024,10 +2024,6 @@ impl Vm {
                     curr[module_off + *off as usize] = stack.pop();
                     debug_assert_eq!(0, stack.len());
                 }
-                Opcode::AssignNext { off } => {
-                    next[module_off + *off as usize] = stack.pop();
-                    debug_assert_eq!(0, stack.len());
-                }
                 // === SUPERINSTRUCTIONS ===
                 Opcode::AssignConstCurr { off, literal_id } => {
                     curr[module_off + *off as usize] = bytecode.literals[*literal_id as usize];
@@ -2315,24 +2311,6 @@ impl Vm {
                 // =========================================================
                 // VIEW STACK OPERATIONS
                 // =========================================================
-                Opcode::PushVarView {
-                    base_off,
-                    dim_list_id,
-                } => {
-                    let (n_dims, dim_ids) = context.get_dim_list(*dim_list_id);
-                    let n = n_dims as usize;
-                    let dims: SmallVec<[u16; 4]> = (0..n)
-                        .map(|i| context.dimensions[dim_ids[i] as usize].size)
-                        .collect();
-                    let dim_id_vec: SmallVec<[DimId; 4]> = dim_ids[..n].iter().copied().collect();
-                    let view = RuntimeView::for_var(
-                        (module_off + *base_off as usize) as u32,
-                        dims,
-                        dim_id_vec,
-                    );
-                    view_stack.push(view);
-                }
-
                 Opcode::PushTempView {
                     temp_id,
                     dim_list_id,
@@ -4729,7 +4707,7 @@ mod superinstruction_tests {
 
     #[test]
     fn test_fused_binop_next_sub() {
-        // stock with only outflow exercises Sub in AssignNext
+        // stock with only outflow exercises Sub inside the stock update
         let tp = TestProject::new("fused_next_sub")
             .with_sim_time(0.0, 3.0, 1.0)
             .flow("outflow", "5", None)

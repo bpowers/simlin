@@ -1338,11 +1338,29 @@ impl<'module> Compiler<'module> {
                 }
                 None
             }
+            // A stock update -- the only thing that writes `next[]`. It is
+            // emitted as the fused `BinOpAssignNext` directly, because
+            // `build_stock_update_expr` always produces `Op2(Add, curr, net*dt)`
+            // and so the operand walk always ends in an `Op2`. There is no
+            // un-fused `Opcode::AssignNext` to fall back to; a stock update
+            // arriving in any other shape is a compile error here rather than a
+            // silently different program (see
+            // `ByteCodeBuilder::fuse_trailing_op2_into_assign_next`).
             Expr::AssignNext(off, rhs) => {
                 self.walk_expr(rhs)?.unwrap();
-                self.push(Opcode::AssignNext {
-                    off: *off as VariableOffset,
-                });
+                if !self
+                    .curr_code
+                    .fuse_trailing_op2_into_assign_next(*off as VariableOffset)
+                {
+                    return sim_err!(
+                        NotSimulatable,
+                        format!(
+                            "stock update for slot {off} does not end in a binary \
+                             operation, so it cannot be emitted as a next-value \
+                             assignment"
+                        )
+                    );
+                }
                 None
             }
             Expr::AssignTemp(id, rhs, view) => {

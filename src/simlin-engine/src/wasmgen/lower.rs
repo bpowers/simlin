@@ -13,7 +13,7 @@
 //! values live in one flat f64 "slab" in linear memory, addressed by slot
 //! offset. A model runs over two chunks at a time -- `curr` (the values at the
 //! current timestep) and `next` (the values being computed for the following
-//! timestep). `LoadVar` reads from `curr`; `AssignCurr`/`AssignNext` store into
+//! timestep). `LoadVar` reads from `curr`; `AssignCurr`/`BinOpAssignNext` store into
 //! `curr`/`next`.
 //!
 //! Each `Opcode` lowers to a short, mostly 1:1 wasm instruction sequence over
@@ -138,7 +138,7 @@ pub(crate) struct EmitCtx<'a> {
     pub final_time: f64,
     /// wasm local index holding this instance's `module_off` (i32).
     pub module_off_local: u32,
-    /// wasm local index of a scratch f64, used by `AssignCurr`/`AssignNext` to
+    /// wasm local index of a scratch f64, used by `AssignCurr`/`BinOpAssign*` to
     /// hold the value while the store address is pushed under it.
     pub scratch_local: u32,
     /// wasm local indices reserved for the `SetCond`/`If` condition register.
@@ -1319,9 +1319,6 @@ fn emit_ops(
             Opcode::AssignCurr { off } => {
                 emit_assign(ctx.curr_base, *off, ctx, f);
             }
-            Opcode::AssignNext { off } => {
-                emit_assign(ctx.next_base, *off, ctx, f);
-            }
             // `AssignConstCurr` reaches a `CompiledSimulation` by two routes
             // (see the module docstring): `compiler::codegen` emits it directly
             // for any constant-RHS `AssignCurr` (`codegen.rs:1164`), and the
@@ -1415,21 +1412,6 @@ fn emit_ops(
                 })?;
                 state.view_stack.push(ViewDesc::from_static(view));
             }
-            // `PushVarView` builds a full contiguous view over a variable array;
-            // the VM folds `module_off` into the base (`vm.rs:1749`), so the base
-            // is module-relative.
-            Opcode::PushVarView {
-                base_off,
-                dim_list_id,
-            } => {
-                let (dims, dim_ids) = resolve_dim_list_dims(ctx, *dim_list_id)?;
-                state.view_stack.push(ViewDesc::contiguous(
-                    u32::from(*base_off),
-                    ViewBase::CurrModuleRelative,
-                    dims,
-                    dim_ids,
-                ));
-            }
             // `PushTempView` builds a full contiguous view over a temp array
             // (`vm.rs:1757`).
             Opcode::PushTempView {
@@ -1445,8 +1427,11 @@ fn emit_ops(
                 ));
             }
             // `PushVarViewDirect` builds a contiguous view from raw dim sizes
-            // (dim_ids all 0), the base for a dynamic subscript (`vm.rs:1776`).
-            // Module-relative, like `PushVarView`.
+            // (dim_ids all 0), the base for a dynamic subscript. It is the only
+            // `CurrModuleRelative` view opcode: the VM folds the runtime `module_off`
+            // into the base, where `PushStaticView` bakes an absolute slot in
+            // and `PushTempView` addresses `temp_storage` with no `module_off`
+            // at all.
             Opcode::PushVarViewDirect {
                 base_off,
                 dim_list_id,
@@ -2732,8 +2717,8 @@ fn view_top_mut(view_stack: &mut [ViewDesc]) -> Result<&mut ViewDesc, WasmGenErr
     })
 }
 
-/// Resolve a dim-list id to `(dim sizes, dim ids)` for `PushVarView`/
-/// `PushTempView`: each entry is a `DimId`, and the size comes from
+/// Resolve a dim-list id to `(dim sizes, dim ids)` for `PushTempView`:
+/// each entry is a `DimId`, and the size comes from
 /// `ctx.dimensions[DimId].size` (`vm.rs:1745`).
 fn resolve_dim_list_dims(
     ctx: &EmitCtx,

@@ -249,16 +249,16 @@ fn global_var_name(off: u16) -> &'static str {
 /// appear in a golden, so no reference-bearing opcode family can silently
 /// enter the goldens as unprintable noise.
 ///
-/// Eleven `SymbolicOpcode` variants carry a `SymVarRef` -- the operands the
-/// GH #964 round trip exists to recover -- and the fixtures reach nine of
-/// them. The two they do not appear to be unreachable from the compiler, not
-/// merely unexercised: `PushVarView` is never constructed by `compiler/codegen`
-/// at all (only `PushVarViewDirect` is), and a plain `AssignNext` is always
-/// consumed by `ByteCodeBuilder`'s `Op2 + AssignNext -> BinOpAssignNext`
-/// peephole, because a stock update's last operation is always the `Op2 Add`
-/// of `curr + net * dt`. Both are still handled by the VM, the symbolizer, the
-/// resolver and the wasm backend, so they are dead weight rather than a gap in
-/// this suite.
+/// Nine `SymbolicOpcode` variants carry a `SymVarRef` -- the operands the
+/// GH #964 round trip exists to recover -- and the fixtures reach all nine.
+/// There were eleven until C1b deleted the two that codegen could not emit:
+/// `PushVarView` (never constructed in `compiler/codegen` at all -- only
+/// `PushVarViewDirect` is) and a plain `AssignNext` (a stock update's last
+/// operation is always the `Op2 Add` of `curr + net * dt`, so codegen now
+/// emits the fused `BinOpAssignNext` directly and refuses any other shape).
+/// Exhaustive coverage here is therefore a property of the suite, not a
+/// coincidence: every reference-bearing opcode family the compiler can emit
+/// appears in a golden.
 fn render_opcode(op: &SymbolicOpcode, literals: &[f64]) -> String {
     let lit = |id: u16| match literals.get(id as usize) {
         Some(v) => format!("#{id} (={})", f(*v)),
@@ -286,7 +286,6 @@ fn render_opcode(op: &SymbolicOpcode, literals: &[f64]) -> String {
             format!("EvalModule module={id} n_inputs={n_inputs}")
         }
         SymbolicOpcode::AssignCurr { var } => format!("AssignCurr {}", render_var_ref(var)),
-        SymbolicOpcode::AssignNext { var } => format!("AssignNext {}", render_var_ref(var)),
         SymbolicOpcode::Apply { func } => format!("Apply {func:?}"),
         SymbolicOpcode::Lookup {
             base_gf,
@@ -303,9 +302,6 @@ fn render_opcode(op: &SymbolicOpcode, literals: &[f64]) -> String {
         }
         SymbolicOpcode::BinOpAssignNext { op, var } => {
             format!("BinOpAssignNext {op:?} {}", render_var_ref(var))
-        }
-        SymbolicOpcode::PushVarView { var, dim_list_id } => {
-            format!("PushVarView {} dim_list={dim_list_id}", render_var_ref(var))
         }
         SymbolicOpcode::PushTempView {
             temp_id,
