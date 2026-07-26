@@ -119,8 +119,8 @@ pub fn compile_var_fragment<'db>(
     let var_ident_canonical: Ident<Canonical> = Ident::new(&var_ident);
 
     // The interned input set stores the sorted canonical names; the plain
-    // lowering helpers (`lower_var_fragment`/`build_caller_module_refs`) still
-    // take `&[String]`, so read it back as a slice.
+    // lowering helper (`lower_var_fragment`) still takes `&[String]`, so read
+    // it back as a slice.
     let module_input_names = module_inputs.names(db);
 
     // Caller-owned, lowering-independent context (built only from
@@ -193,34 +193,21 @@ pub fn compile_var_fragment<'db>(
     let is_module = var.kind(db) == SourceVariableKind::Module;
     let is_module_input = inputs.contains(&var_ident_canonical);
 
-    let module_refs = crate::db::var_fragment::build_caller_module_refs(
-        db,
-        var,
-        model,
-        project,
-        module_input_names,
+    // The phase-invariant emission context, built once per variable and
+    // borrowed by every phase (up to three). All three fragment emitters --
+    // this one, the implicit-helper one, and both LTM ones -- go through the
+    // same `compile_phase_to_per_var_bytecodes`.
+    let base_ctx = fragment_emit_ctx(
+        &model_name_ident,
+        &inputs,
+        mini_offset,
+        &offsets,
+        &tables,
+        converted_dims,
+        dim_context,
     );
-
-    // Compile for each phase and symbolize. The closure now delegates to
-    // the factored `compile_phase_to_per_var_bytecodes` so the SCC
-    // element-graph builder reuses the EXACT production compile+symbolize
-    // path (no re-derivation); the per-variable production behavior is
-    // byte-identical to the former inline closure (same minimal `Module`,
-    // same temp extraction, same symbolization, same `None` arms).
     let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
-        compile_phase_to_per_var_bytecodes(
-            exprs,
-            &offsets,
-            &rmap,
-            &tables,
-            &module_refs,
-            mini_offset,
-            converted_dims,
-            dim_context,
-            &model_name_ident,
-            &var_ident_canonical,
-            &inputs,
-        )
+        compile_phase_to_per_var_bytecodes(&base_ctx, &rmap, exprs)
     };
 
     // Runlists use canonical names, so compare with the canonical form.
@@ -695,7 +682,6 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
     let implicit_info = model_implicit_var_info(db, model, project);
     let all_names: Vec<&String> = all_dep_names.iter().chain(extra_dep_names.iter()).collect();
     let mut dep_variables: Vec<(Ident<Canonical>, crate::variable::Variable, usize)> = Vec::new();
-    let mut extra_module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
     let mut extra_submodels: HashMap<String, SourceModel> = HashMap::new();
 
     for dep_name in &all_names {
@@ -744,15 +730,11 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
                         ident: module_ident.clone(),
                         model_name: Ident::new(mod_model_name),
                         units: None,
-                        inputs: module_inputs.clone(),
+                        inputs: module_inputs,
                         errors: vec![],
                         unit_errors: vec![],
                     };
-                    dep_variables.push((module_ident.clone(), mod_var, sub_size));
-
-                    let input_set: BTreeSet<Ident<Canonical>> =
-                        module_inputs.iter().map(|mi| mi.dst.clone()).collect();
-                    extra_module_refs.insert(module_ident, (Ident::new(mod_model_name), input_set));
+                    dep_variables.push((module_ident, mod_var, sub_size));
 
                     if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
                         extra_submodels.insert(mod_model_name.to_string(), *sub_model);
@@ -793,15 +775,11 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
                     ident: module_ident.clone(),
                     model_name: Ident::new(im_model_name),
                     units: None,
-                    inputs: module_inputs.clone(),
+                    inputs: module_inputs,
                     errors: vec![],
                     unit_errors: vec![],
                 };
-                dep_variables.push((module_ident.clone(), mod_var, sub_size));
-
-                let input_set: BTreeSet<Ident<Canonical>> =
-                    module_inputs.iter().map(|mi| mi.dst.clone()).collect();
-                extra_module_refs.insert(module_ident, (Ident::new(im_model_name), input_set));
+                dep_variables.push((module_ident, mod_var, sub_size));
 
                 if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
                     extra_submodels.insert(im_model_name.to_string(), *sub_model);
@@ -948,41 +926,21 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
     }
 
     let inputs = canonical_module_input_set(module_input_names);
-    let (module_models, mut module_refs) = if meta.is_module {
-        let mm = model_module_map(db, model, project).clone();
-
-        // Build module_refs from the implicit var's datamodel::Module references,
-        // stripping the module ident prefix from dst (matching compile_var_fragment
-        // and enumerate_module_instances_inner).
-        let mut refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
+    let module_models = if meta.is_module {
+        // A module-typed implicit helper compiles an `EvalModule`, so its
+        // sub-model's variables must be in the metadata map for the
+        // reference offsets to resolve.
         if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
-            let input_prefix = format!("{implicit_name}\u{00B7}");
-            let input_set: BTreeSet<Ident<Canonical>> = dm_module
-                .references
-                .iter()
-                .filter_map(|mr| {
-                    let dst_canonical = canonicalize(&mr.dst);
-                    let bare = dst_canonical.strip_prefix(&input_prefix)?;
-                    Some(Ident::new(bare))
-                })
-                .collect();
-            refs.insert(
-                var_ident_canonical.clone(),
-                (Ident::new(&dm_module.model_name), input_set),
-            );
-
-            // Populate sub-model metadata
             let sub_canonical = canonicalize(&dm_module.model_name);
             if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
                 build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
             }
         }
 
-        (mm, refs)
+        model_module_map(db, model, project).clone()
     } else {
-        (HashMap::new(), HashMap::new())
+        HashMap::new()
     };
-    module_refs.extend(extra_module_refs);
 
     let core = crate::compiler::ContextCore {
         dimensions: converted_dims,
@@ -999,12 +957,8 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
     )
     .ok()?;
 
-    // Offsets in the per-variable form `compile_phase_to_per_var_bytecodes`
-    // expects, built from the mini-layout `all_metadata` exactly as the
-    // former inline `compile_phase` closure built them (so the shared
-    // compile+symbolize tail is byte-identical to the prior per-implicit
-    // behavior -- this replaces the verbatim-duplicate closure with the
-    // single shared relation).
+    // Offsets in the per-variable form the emission context borrows, built
+    // from the mini-layout `all_metadata`.
     let offsets: PerVarOffsetMap = all_metadata
         .iter()
         .map(|(k, v)| {
@@ -1017,17 +971,14 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
         })
         .collect();
 
-    compile_phase_to_per_var_bytecodes(
-        &var.ast,
-        &offsets,
-        &rmap,
-        &tables,
-        &module_refs,
+    let base_ctx = fragment_emit_ctx(
+        &model_name_ident,
+        &inputs,
         mini_offset,
+        &offsets,
+        &tables,
         converted_dims,
         dim_context,
-        &model_name_ident,
-        &var_ident_canonical,
-        &inputs,
-    )
+    );
+    compile_phase_to_per_var_bytecodes(&base_ctx, &rmap, &var.ast)
 }

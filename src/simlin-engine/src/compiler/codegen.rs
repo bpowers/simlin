@@ -19,12 +19,67 @@ use crate::dimensions::Dimension;
 use crate::sim_err;
 use crate::vm::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, TIME_OFF};
 
-use super::Module;
 use super::dimensions::UnaryOp;
-use super::expr::{BuiltinFn, Expr, SubscriptIndex};
+use super::expr::{BuiltinFn, Expr, SubscriptIndex, Table};
+use super::{VarInitial, VariableOffsetMap};
+
+/// Everything `Compiler` reads, borrowed for the duration of one emission.
+///
+/// This is the compiler's *whole* input contract, and there is exactly one
+/// codegen behind it. Two very different callers build one:
+///
+/// * [`super::Module::compile`] -- the test-only monolithic whole-model path,
+///   which borrows every field straight off its owned `Module`;
+/// * `db::assemble::compile_phase_to_per_var_bytecodes` -- the production
+///   per-variable fragment compiler, which borrows the salsa-cached
+///   project-global dimension context and converted dimensions, the
+///   variable's own lowered expressions, and the mini-layout its lowering
+///   produced.
+///
+/// Borrowing rather than owning is the point (GH #964 / #655): the fragment
+/// compiler runs once per variable *per phase* -- tens of thousands of times
+/// on an LTM-heavy model -- and the stand-in one-variable `Module` it used to
+/// build by struct literal deep-cloned `dimensions_ctx`, `dimensions`,
+/// `tables`, `offsets` and the phase's whole lowered `Vec<Expr>` on every one
+/// of them. Nothing in codegen mutates any of it, so a reference is the
+/// honest type.
+///
+/// The field set is deliberately minimal: it is what codegen actually reads,
+/// not what a `Module` happens to carry. `runlist_initials` (codegen uses the
+/// per-variable `runlist_initials_by_var` instead), `runlist_order`, and
+/// `module_refs` are absent because no line of codegen ever looked at them --
+/// the fragment sites were cloning two maps per phase that nothing read.
+#[derive(Clone, Copy)]
+pub(crate) struct ModuleCtx<'a> {
+    pub(crate) ident: &'a Ident<Canonical>,
+    /// The module-instance input set, consulted only by `isModuleInput(x)`.
+    pub(crate) inputs: &'a std::collections::BTreeSet<Ident<Canonical>>,
+    pub(crate) n_slots: usize,
+    /// Per-temp element counts, indexed by `TempId`. Its length is the temp
+    /// count; there is no separate `n_temps`, which could only ever disagree.
+    pub(crate) temp_sizes: &'a [usize],
+    pub(crate) runlist_initials_by_var: &'a [VarInitial],
+    pub(crate) runlist_flows: &'a [Expr],
+    pub(crate) runlist_stocks: &'a [Expr],
+    /// `model -> variable -> (offset, size)`. Codegen reads only
+    /// `offsets[ident]`, and only in the *reverse* direction (offset -> owning
+    /// variable), for `full_source_len`, arrayed-lookup table resolution, and
+    /// `EvalModule`'s sub-model base offset.
+    pub(crate) offsets: &'a VariableOffsetMap,
+    pub(crate) tables: &'a HashMap<Ident<Canonical>, Vec<Table>>,
+    pub(crate) dimensions: &'a [Dimension],
+    pub(crate) dimensions_ctx: &'a crate::dimensions::DimensionsContext,
+}
+
+impl<'a> ModuleCtx<'a> {
+    /// Emit this unit's bytecode. The single entry point into codegen.
+    pub(crate) fn compile(self) -> Result<CompiledModule> {
+        Compiler::new(self).compile()
+    }
+}
 
 pub(super) struct Compiler<'module> {
-    module: &'module Module,
+    module: ModuleCtx<'module>,
     module_decls: Vec<ModuleDeclaration>,
     graphical_functions: Vec<Vec<(f64, f64)>>,
     /// Maps table variable names to their base index in graphical_functions.
@@ -52,7 +107,7 @@ pub(super) struct Compiler<'module> {
 }
 
 impl<'module> Compiler<'module> {
-    pub(super) fn new(module: &'module Module) -> Compiler<'module> {
+    pub(super) fn new(module: ModuleCtx<'module>) -> Compiler<'module> {
         // Pre-populate graphical_functions with all tables and record base IDs.
         //
         // Iterated in sorted ident order, NOT `HashMap` order, and that is
@@ -120,7 +175,7 @@ impl<'module> Compiler<'module> {
     /// Note: Subdimension relations are populated lazily via `get_or_add_subdim_relation`
     /// when ViewStarRange bytecode is emitted, rather than pre-computing all pairs.
     fn populate_dimension_metadata(&mut self) {
-        for dim in &self.module.dimensions {
+        for dim in self.module.dimensions {
             let dim_name = dim.name();
             let name_id = self.intern_name(dim_name);
 
@@ -272,7 +327,7 @@ impl<'module> Compiler<'module> {
         };
 
         if let Some(base_off) = base_off {
-            let model_offsets = &self.module.offsets[&self.module.ident];
+            let model_offsets = &self.module.offsets[self.module.ident];
             if let Some(size) = model_offsets
                 .values()
                 .find(|(off, _)| *off == base_off)
@@ -377,7 +432,7 @@ impl<'module> Compiler<'module> {
     /// `BadTable` (loud-safe: an un-reconstructable arrayed-GF dependency must
     /// never become a silent stub -- GH #580 / AC7.5).
     fn arrayed_lookup_table_info(&self, table_expr: &Expr) -> Result<(GraphicalFunctionId, u16)> {
-        let module_offsets = &self.module.offsets[&self.module.ident];
+        let module_offsets = &self.module.offsets[self.module.ident];
         let base_off = match table_expr {
             // Whole-array static subscript: the var's storage starts at `off`
             // and the view spans the full array (offset 0).
@@ -781,7 +836,7 @@ impl<'module> Compiler<'module> {
 
                 // lookups are special
                 if let BuiltinFn::Lookup(table_expr, index, _loc) = builtin {
-                    let module_offsets = &self.module.offsets[&self.module.ident];
+                    let module_offsets = &self.module.offsets[self.module.ident];
                     let (table_ident, element_offset_expr) =
                         extract_table_info(table_expr, module_offsets)?;
 
@@ -822,7 +877,7 @@ impl<'module> Compiler<'module> {
                     } else {
                         LookupMode::Backward
                     };
-                    let module_offsets = &self.module.offsets[&self.module.ident];
+                    let module_offsets = &self.module.offsets[self.module.ident];
                     let (table_ident, element_offset_expr) =
                         extract_table_info(table_expr, module_offsets)?;
 
@@ -1205,7 +1260,7 @@ impl<'module> Compiler<'module> {
                     // (consistent with every other operand walk in this fn).
                     self.walk_expr(arg)?.unwrap();
                 }
-                let module_offsets = &self.module.offsets[&self.module.ident];
+                let module_offsets = &self.module.offsets[self.module.ident];
                 self.module_decls.push(ModuleDeclaration {
                     model_name: model_name.clone(),
                     input_set: input_set.clone(),
@@ -1659,10 +1714,15 @@ impl<'module> Compiler<'module> {
     }
 
     pub(super) fn compile(mut self) -> Result<CompiledModule> {
+        // The runlists live for `'module`, independent of `&mut self`, so bind
+        // them out of the (Copy) context before the mutable walks.
+        let initials_by_var = self.module.runlist_initials_by_var;
+        let flows = self.module.runlist_flows;
+        let stocks = self.module.runlist_stocks;
+        let temp_sizes = self.module.temp_sizes;
+
         // Compile each variable's initials separately
-        let compiled_initials: Vec<CompiledInitial> = self
-            .module
-            .runlist_initials_by_var
+        let compiled_initials: Vec<CompiledInitial> = initials_by_var
             .iter()
             .map(|var_init| {
                 let bytecode = self.walk(&var_init.ast)?;
@@ -1675,13 +1735,13 @@ impl<'module> Compiler<'module> {
             .collect::<Result<Vec<_>>>()?;
         let compiled_initials = Arc::new(compiled_initials);
 
-        let compiled_flows = Arc::new(self.walk(&self.module.runlist_flows)?);
-        let compiled_stocks = Arc::new(self.walk(&self.module.runlist_stocks)?);
+        let compiled_flows = Arc::new(self.walk(flows)?);
+        let compiled_stocks = Arc::new(self.walk(stocks)?);
 
         // Build temp info from module
-        let mut temp_offsets = Vec::with_capacity(self.module.n_temps);
+        let mut temp_offsets = Vec::with_capacity(temp_sizes.len());
         let mut offset = 0usize;
-        for &size in &self.module.temp_sizes {
+        for &size in temp_sizes {
             temp_offsets.push(offset);
             offset += size;
         }
@@ -1723,27 +1783,43 @@ mod tests {
     use crate::ast::Loc;
     use std::collections::HashMap;
 
-    /// Build a minimal, dimension-free `Module` sufficient to drive `walk_expr`
-    /// on a hand-built `Expr`. The runlists are empty -- the test calls
-    /// `walk_expr` directly, so the only requirement is a well-formed `Module`
-    /// that `Compiler::new` can populate metadata from.
-    fn empty_module() -> Module {
-        Module {
-            ident: Ident::new("test"),
-            inputs: Default::default(),
-            n_slots: 1,
-            n_temps: 0,
-            temp_sizes: vec![],
-            runlist_initials: vec![],
-            runlist_initials_by_var: vec![],
-            runlist_flows: vec![],
-            runlist_stocks: vec![],
-            offsets: HashMap::new(),
-            runlist_order: vec![],
-            tables: HashMap::new(),
-            dimensions: vec![],
-            dimensions_ctx: Default::default(),
-            module_refs: HashMap::new(),
+    /// Owner for the borrows a minimal, dimension-free [`ModuleCtx`] needs.
+    /// The runlists are empty -- the tests call `walk_expr` directly, so the
+    /// only requirement is a well-formed context `Compiler::new` can populate
+    /// metadata from.
+    struct EmptyCtxOwner {
+        ident: Ident<Canonical>,
+        inputs: std::collections::BTreeSet<Ident<Canonical>>,
+        offsets: VariableOffsetMap,
+        tables: HashMap<Ident<Canonical>, Vec<Table>>,
+        dimensions_ctx: crate::dimensions::DimensionsContext,
+    }
+
+    impl EmptyCtxOwner {
+        fn new() -> Self {
+            EmptyCtxOwner {
+                ident: Ident::new("test"),
+                inputs: Default::default(),
+                offsets: HashMap::new(),
+                tables: HashMap::new(),
+                dimensions_ctx: Default::default(),
+            }
+        }
+
+        fn ctx(&self) -> ModuleCtx<'_> {
+            ModuleCtx {
+                ident: &self.ident,
+                inputs: &self.inputs,
+                n_slots: 1,
+                temp_sizes: &[],
+                runlist_initials_by_var: &[],
+                runlist_flows: &[],
+                runlist_stocks: &[],
+                offsets: &self.offsets,
+                tables: &self.tables,
+                dimensions: &[],
+                dimensions_ctx: &self.dimensions_ctx,
+            }
         }
     }
 
@@ -1757,8 +1833,8 @@ mod tests {
     /// (codegen.rs line 494 was a double-`unwrap` on this `Result`).
     #[test]
     fn previous_of_non_var_inside_subscript_index_is_err_not_panic() {
-        let module = empty_module();
-        let mut compiler = Compiler::new(&module);
+        let owner = EmptyCtxOwner::new();
+        let mut compiler = Compiler::new(owner.ctx());
 
         // arr[ PREVIOUS(1, 0) ] -- the index is a PREVIOUS of a constant, which
         // is not a bare variable reference, so the PREVIOUS arm returns
@@ -1799,8 +1875,8 @@ mod tests {
     /// the fix it propagates the typed `NotSimulatable` via `?`.
     #[test]
     fn previous_of_non_var_inside_view_subscript_index_is_err_not_panic() {
-        let module = empty_module();
-        let mut compiler = Compiler::new(&module);
+        let owner = EmptyCtxOwner::new();
+        let mut compiler = Compiler::new(owner.ctx());
 
         // arr[ PREVIOUS(1, 0) ] driven through the array-view path: the index
         // is a PREVIOUS of a constant (NotSimulatable). The `Subscript` arm of

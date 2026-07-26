@@ -117,28 +117,20 @@ pub(crate) enum LoweredVarFragment {
     },
 }
 
-/// Dependency-collection outputs for a single variable.
+/// Dependency-collection outputs for a single variable: the stub
+/// `dep_variables` / `implicit_module_vars` woven into the minimal metadata
+/// map, and the sub-model lists feeding sub-model metadata.
 ///
-/// The dependency walk produces both lowering-coupled values (the stub
-/// `dep_variables` / `implicit_module_vars` woven into the minimal
-/// metadata map, and the sub-model lists feeding sub-model metadata) and
-/// lowering-*independent* values (`extra_module_refs` /
-/// `implicit_module_refs`, which the caller's `compile_phase` needs).
-/// The walk logic is defined exactly once (`collect_var_dependencies`).
-/// It is invoked from two call sites per variable -- `lower_var_fragment`
-/// and the caller's module-ref reconstruction (`build_caller_module_refs`)
-/// -- but `collect_var_dependencies` is pure over salsa-tracked inputs,
-/// so the second invocation is a memoized cache hit with no
-/// recomputation. `unknown_dependency` is `Some` when the walk hit a
-/// reference that is neither a source nor an implicit variable (the fatal
-/// unknown-dependency site); the walk stops there (a fatal unknown
-/// dependency short-circuits the rest of the walk).
+/// The walk logic is defined exactly once (`collect_var_dependencies`) and
+/// invoked once per variable, from `lower_var_fragment`.
+/// `unknown_dependency` is `Some` when the walk hit a reference that is
+/// neither a source nor an implicit variable (the fatal unknown-dependency
+/// site); the walk stops there (a fatal unknown dependency short-circuits
+/// the rest of the walk).
 pub(crate) struct VarDepCollection {
     pub(crate) dep_variables: Vec<(Ident<Canonical>, crate::variable::Variable, usize)>,
-    pub(crate) extra_module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey>,
     pub(crate) extra_submodels: Vec<(String, SourceModel)>,
     pub(crate) implicit_module_vars: Vec<(Ident<Canonical>, crate::variable::Variable, usize)>,
-    pub(crate) implicit_module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey>,
     pub(crate) implicit_submodels: Vec<(String, SourceModel)>,
     pub(crate) unknown_dependency: Option<Diagnostic>,
 }
@@ -281,8 +273,7 @@ fn collect_var_dependencies(
         .chain(extra_dep_names.iter())
         .collect();
 
-    // Track module deps that need module_refs and sub-model metadata
-    let mut extra_module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
+    // Track module deps that need sub-model metadata
     let mut extra_submodels: Vec<(String, SourceModel)> = Vec::new();
     let implicit_var_info = model_implicit_var_info(db, model, project);
 
@@ -351,16 +342,11 @@ fn collect_var_dependencies(
                         ident: module_ident.clone(),
                         model_name: Ident::new(mod_model_name),
                         units: None,
-                        inputs: module_inputs.clone(),
+                        inputs: module_inputs,
                         errors: vec![],
                         unit_errors: vec![],
                     };
-                    dep_variables.push((module_ident.clone(), mod_var, sub_size));
-
-                    // Build module_refs entry
-                    let input_set: BTreeSet<Ident<Canonical>> =
-                        module_inputs.iter().map(|mi| mi.dst.clone()).collect();
-                    extra_module_refs.insert(module_ident, (Ident::new(mod_model_name), input_set));
+                    dep_variables.push((module_ident, mod_var, sub_size));
 
                     if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
                         extra_submodels.push((mod_model_name.to_string(), *sub_model));
@@ -444,10 +430,8 @@ fn collect_var_dependencies(
                 .unwrap_or_default();
             return VarDepCollection {
                 dep_variables,
-                extra_module_refs,
                 extra_submodels,
                 implicit_module_vars: Vec::new(),
-                implicit_module_refs: HashMap::new(),
                 implicit_submodels: Vec::new(),
                 unknown_dependency: Some(Diagnostic {
                     model: model.name(db).clone(),
@@ -469,7 +453,6 @@ fn collect_var_dependencies(
     // module in mini_metadata to resolve the sub-model offset.
     let mut implicit_module_vars: Vec<(Ident<Canonical>, crate::variable::Variable, usize)> =
         Vec::new();
-    let mut implicit_module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
     let mut implicit_submodels: Vec<(String, SourceModel)> = Vec::new();
 
     for implicit_dm_var in &parsed.implicit_vars {
@@ -494,21 +477,7 @@ fn collect_var_dependencies(
                 errors: vec![],
                 unit_errors: vec![],
             };
-            implicit_module_vars.push((im_ident.clone(), im_var, sub_size));
-
-            // Build module_refs entry for the implicit module, stripping
-            // the module ident prefix from dst (same as resolve_module_input)
-            let im_input_prefix = format!("{im_name}\u{00B7}");
-            let input_set: BTreeSet<Ident<Canonical>> = dm_module
-                .references
-                .iter()
-                .filter_map(|mr| {
-                    let dst_canonical = canonicalize(&mr.dst);
-                    let bare = dst_canonical.strip_prefix(&im_input_prefix)?;
-                    Some(Ident::new(bare))
-                })
-                .collect();
-            implicit_module_refs.insert(im_ident, (Ident::new(&dm_module.model_name), input_set));
+            implicit_module_vars.push((im_ident, im_var, sub_size));
 
             if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
                 implicit_submodels.push((dm_module.model_name.clone(), *sub_model));
@@ -518,62 +487,11 @@ fn collect_var_dependencies(
 
     VarDepCollection {
         dep_variables,
-        extra_module_refs,
         extra_submodels,
         implicit_module_vars,
-        implicit_module_refs,
         implicit_submodels,
         unknown_dependency: None,
     }
-}
-
-/// Reconstruct the `module_refs` map the caller's `compile_phase` needs.
-///
-/// `module_refs` is built only from project/variable data (the variable's
-/// own module references plus the module/implicit-module references found
-/// during the dependency walk) -- it does not depend on the lowered
-/// equation, the metadata arena, or the symbol-table context, so it is
-/// rebuilt on the caller side from the same single dependency walk
-/// (`collect_var_dependencies`) rather than threaded back across the
-/// lowering boundary. This is the exact `module_refs` assembly that
-/// previously followed the dependency loop inline.
-pub(crate) fn build_caller_module_refs(
-    db: &dyn Db,
-    var: SourceVariable,
-    model: SourceModel,
-    project: SourceProject,
-    module_input_names: &[String],
-) -> HashMap<Ident<Canonical>, crate::vm::ModuleKey> {
-    let var_ident = var.ident(db).clone();
-    let var_ident_canonical: Ident<Canonical> = Ident::new(&var_ident);
-    let is_module = var.kind(db) == SourceVariableKind::Module;
-
-    let deps = collect_var_dependencies(db, var, model, project, module_input_names);
-
-    // We need module_refs for module variables (explicit or implicit)
-    let mut module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = if is_module {
-        let ref_prefix = format!("{var_ident}\u{00B7}");
-        let input_set: BTreeSet<Ident<Canonical>> = var
-            .module_refs(db)
-            .iter()
-            .filter_map(|mr| {
-                let dst_canonical = canonicalize(&mr.dst);
-                let bare = dst_canonical.strip_prefix(&ref_prefix)?;
-                Some(Ident::new(bare))
-            })
-            .collect();
-        let mut refs = HashMap::new();
-        refs.insert(
-            var_ident_canonical.clone(),
-            (Ident::new(var.model_name(db)), input_set),
-        );
-        refs
-    } else {
-        HashMap::new()
-    };
-    module_refs.extend(deps.implicit_module_refs);
-    module_refs.extend(deps.extra_module_refs);
-    module_refs
 }
 
 /// Whether `flow_ident` names a flow that is DRIVEN by a special-stock

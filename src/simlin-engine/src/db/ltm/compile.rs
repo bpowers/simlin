@@ -13,21 +13,21 @@
 //! compile-failure diagnostic pass (`model_ltm_fragment_diagnostics`), and
 //! the implicit-variable fragment compiler (`compile_ltm_implicit_var_fragment`).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use crate::canonicalize;
 use crate::common::{Canonical, Ident};
 use crate::datamodel;
 
 use crate::db::{
-    Db, LtmLinkId, LtmSyntheticVar, ModelDepGraphResult, ModuleInputSet, RefShape, SourceModel,
-    SourceProject, SourceVariableKind, VarFragmentResult, build_module_inputs, build_stub_variable,
-    build_submodel_metadata, canonical_module_input_set, compute_layout,
-    extract_tables_from_source_var, model_dependency_graph, model_implicit_var_info,
-    model_module_ident_context, model_module_map, parse_source_variable_with_module_context,
-    project_converted_dimensions, project_datamodel_dims, project_dimensions_context,
-    project_units_context, reconstruct_single_variable, temp_sizes_by_id, variable_dimensions,
-    variable_size,
+    Db, LtmLinkId, LtmSyntheticVar, ModelDepGraphResult, ModuleInputSet, PerVarOffsetMap, RefShape,
+    SourceModel, SourceProject, SourceVariableKind, VarFragmentResult, build_module_inputs,
+    build_stub_variable, build_submodel_metadata, canonical_module_input_set,
+    compile_phase_to_per_var_bytecodes, compute_layout, extract_tables_from_source_var,
+    fragment_emit_ctx, model_dependency_graph, model_implicit_var_info, model_module_ident_context,
+    model_module_map, parse_source_variable_with_module_context, project_converted_dimensions,
+    project_datamodel_dims, project_dimensions_context, project_units_context,
+    reconstruct_single_variable, variable_dimensions, variable_size,
 };
 
 use super::parse::{ltm_equation_dimensions, parse_ltm_equation, scalarize_ltm_equation};
@@ -1575,102 +1575,33 @@ pub(crate) fn compile_ltm_equation_fragment(
         )
     };
 
+    // The LTM synthetic var's fragment goes through the SAME emission entry
+    // point the explicit and implicit paths use. This site used to carry a
+    // hand-copied duplicate of that function's body, differing only in which
+    // module-ref map it stuffed into the stand-in `Module` -- a field codegen
+    // never read.
+    let offsets: PerVarOffsetMap = all_metadata
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                v.iter()
+                    .map(|(vk, vm)| (vk.clone(), (vm.offset, vm.size)))
+                    .collect(),
+            )
+        })
+        .collect();
+    let base_ctx = fragment_emit_ctx(
+        &model_name_ident,
+        &inputs,
+        mini_offset,
+        &offsets,
+        &tables,
+        converted_dims,
+        dim_context,
+    );
     let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
-        if exprs.is_empty() {
-            return None;
-        }
-
-        let module_inputs_set: HashSet<Ident<Canonical>> = inputs.iter().cloned().collect();
-        let module = crate::compiler::Module {
-            ident: model_name_ident.clone(),
-            inputs: module_inputs_set,
-            n_slots: mini_offset,
-            n_temps: 0,
-            temp_sizes: vec![],
-            runlist_initials: vec![],
-            runlist_initials_by_var: vec![],
-            runlist_flows: exprs.to_vec(),
-            runlist_stocks: vec![],
-            offsets: all_metadata
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        v.iter()
-                            .map(|(vk, vm)| (vk.clone(), (vm.offset, vm.size)))
-                            .collect(),
-                    )
-                })
-                .collect(),
-            runlist_order: vec![var_ident_canonical.clone()],
-            tables: tables.clone(),
-            // Owned Module fields: the slice/context come from the cached
-            // queries by reference, so materialize owned copies here. The
-            // interned-backed `Dimension`s clone cheaply -- the expensive
-            // rebuild (re-canonicalizing every element) is what the cache
-            // removes; only the relationship-cache memo is rebuilt cold.
-            dimensions: converted_dims.to_vec(),
-            dimensions_ctx: (*dim_context).clone(),
-            module_refs: implicit_module_refs.clone(),
-        };
-
-        let mut temp_sizes_map: HashMap<u32, usize> = HashMap::new();
-        for expr in exprs {
-            crate::compiler::extract_temp_sizes_pub(expr, &mut temp_sizes_map);
-        }
-        let n_temps = temp_sizes_map.len();
-        let mut temp_sizes: Vec<usize> = vec![0; n_temps];
-        for (id, size) in &temp_sizes_map {
-            if (*id as usize) < temp_sizes.len() {
-                temp_sizes[*id as usize] = *size;
-            }
-        }
-
-        let module = crate::compiler::Module {
-            n_temps,
-            temp_sizes: temp_sizes.clone(),
-            ..module
-        };
-
-        match module.compile() {
-            Ok(compiled) => {
-                let sym_bc =
-                    crate::compiler::symbolic::symbolize_bytecode(&compiled.compiled_flows, &rmap)
-                        .ok()?;
-
-                let ctx = &*compiled.context;
-                let sym_views: Vec<_> = ctx
-                    .static_views
-                    .iter()
-                    .map(|sv| crate::compiler::symbolic::symbolize_static_view(sv, &rmap))
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-                let sym_mods: Vec<_> = ctx
-                    .modules
-                    .iter()
-                    .map(|md| crate::compiler::symbolic::symbolize_module_decl(md, &rmap))
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-
-                let temp_sizes_vec = temp_sizes_by_id(&temp_sizes_map);
-
-                let dim_lists: Vec<Vec<u16>> = ctx
-                    .dim_lists
-                    .iter()
-                    .map(|(n, arr)| arr[..(*n as usize)].to_vec())
-                    .collect();
-
-                Some(PerVarBytecodes {
-                    symbolic: sym_bc,
-                    graphical_functions: ctx.graphical_functions.clone(),
-                    module_decls: sym_mods,
-                    static_views: sym_views,
-                    temp_sizes: temp_sizes_vec,
-                    dim_lists,
-                })
-            }
-            Err(_) => None,
-        }
+        compile_phase_to_per_var_bytecodes(&base_ctx, &rmap, exprs)
     };
 
     // LTM vars are always flow-phase only (scalar auxes, not stocks)
@@ -2587,102 +2518,32 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         )
     };
 
+    // Same single emission entry point as every other fragment site. This was
+    // the second hand-copied duplicate of that body; it differed from the
+    // first only in the (unread) module-ref map, and it rebuilt the offsets
+    // projection once per phase rather than once per variable.
+    let offsets: PerVarOffsetMap = all_metadata
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                v.iter()
+                    .map(|(vk, vm)| (vk.clone(), (vm.offset, vm.size)))
+                    .collect(),
+            )
+        })
+        .collect();
+    let base_ctx = fragment_emit_ctx(
+        &model_name_ident,
+        &inputs,
+        mini_offset,
+        &offsets,
+        &tables,
+        converted_dims,
+        dim_context,
+    );
     let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
-        if exprs.is_empty() {
-            return None;
-        }
-
-        let module_inputs_set: HashSet<Ident<Canonical>> = inputs.iter().cloned().collect();
-        let module = crate::compiler::Module {
-            ident: model_name_ident.clone(),
-            inputs: module_inputs_set,
-            n_slots: mini_offset,
-            n_temps: 0,
-            temp_sizes: vec![],
-            runlist_initials: vec![],
-            runlist_initials_by_var: vec![],
-            runlist_flows: exprs.to_vec(),
-            runlist_stocks: vec![],
-            offsets: all_metadata
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        v.iter()
-                            .map(|(vk, vm)| (vk.clone(), (vm.offset, vm.size)))
-                            .collect(),
-                    )
-                })
-                .collect(),
-            runlist_order: vec![var_ident_canonical.clone()],
-            tables: tables.clone(),
-            // Owned Module fields: the slice/context come from the cached
-            // queries by reference, so materialize owned copies here. The
-            // interned-backed `Dimension`s clone cheaply -- the expensive
-            // rebuild (re-canonicalizing every element) is what the cache
-            // removes; only the relationship-cache memo is rebuilt cold.
-            dimensions: converted_dims.to_vec(),
-            dimensions_ctx: (*dim_context).clone(),
-            module_refs: module_refs.clone(),
-        };
-
-        let mut temp_sizes_map: HashMap<u32, usize> = HashMap::new();
-        for expr in exprs {
-            crate::compiler::extract_temp_sizes_pub(expr, &mut temp_sizes_map);
-        }
-        let n_temps = temp_sizes_map.len();
-        let mut temp_sizes: Vec<usize> = vec![0; n_temps];
-        for (id, size) in &temp_sizes_map {
-            if (*id as usize) < temp_sizes.len() {
-                temp_sizes[*id as usize] = *size;
-            }
-        }
-
-        let module = crate::compiler::Module {
-            n_temps,
-            temp_sizes: temp_sizes.clone(),
-            ..module
-        };
-
-        match module.compile() {
-            Ok(compiled) => {
-                let sym_bc =
-                    crate::compiler::symbolic::symbolize_bytecode(&compiled.compiled_flows, &rmap)
-                        .ok()?;
-
-                let ctx = &*compiled.context;
-                let sym_views: Vec<_> = ctx
-                    .static_views
-                    .iter()
-                    .map(|sv| crate::compiler::symbolic::symbolize_static_view(sv, &rmap))
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-                let sym_mods: Vec<_> = ctx
-                    .modules
-                    .iter()
-                    .map(|md| crate::compiler::symbolic::symbolize_module_decl(md, &rmap))
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-
-                let temp_sizes_vec = temp_sizes_by_id(&temp_sizes_map);
-
-                let dim_lists: Vec<Vec<u16>> = ctx
-                    .dim_lists
-                    .iter()
-                    .map(|(n, arr)| arr[..(*n as usize)].to_vec())
-                    .collect();
-
-                Some(PerVarBytecodes {
-                    symbolic: sym_bc,
-                    graphical_functions: ctx.graphical_functions.clone(),
-                    module_decls: sym_mods,
-                    static_views: sym_views,
-                    temp_sizes: temp_sizes_vec,
-                    dim_lists,
-                })
-            }
-            Err(_) => None,
-        }
+        compile_phase_to_per_var_bytecodes(&base_ctx, &rmap, exprs)
     };
 
     // LTM implicit vars participate in whichever phases their lowered

@@ -1275,12 +1275,11 @@ pub(crate) struct DtSccResolution {
 /// fragment injection (Task 6, `assemble_module` ->
 /// `var_phase_symbolic_fragment_prod`) deliberately consumes the *same*
 /// no-input wiring: the symbolic per-member fragments are lowered with
-/// `lower_var_fragment(.., &[], ..)` / `inputs = BTreeSet::new()` /
-/// `build_caller_module_refs(.., &[])`, matching this SCC identification's
-/// `build_var_info(.., &[])`, so the verdict's `element_order` and the
-/// combined fragment's per-element segmentation agree by construction. The
-/// real `module_input_names` are intentionally NOT plumbed into either
-/// side, because the with-inputs `compute_transitive` re-run is the
+/// `lower_var_fragment(.., &[], ..)` / `inputs = BTreeSet::new()`, matching
+/// this SCC identification's `build_var_info(.., &[])`, so the verdict's
+/// `element_order` and the combined fragment's per-element segmentation
+/// agree by construction. The real `module_input_names` are intentionally NOT
+/// plumbed into either side, because the with-inputs `compute_transitive` re-run is the
 /// soundness backstop for the multi-member (N>=2) SCCs Subcomponent B
 /// resolves *exactly as it is for the N=1 single-variable self-recurrence
 /// case*: that re-run's `.unwrap_or_else` clears `resolved_sccs` and sets

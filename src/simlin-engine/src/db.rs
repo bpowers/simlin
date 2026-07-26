@@ -116,7 +116,7 @@ mod assemble;
 pub(crate) use assemble::{
     PerVarOffsetMap, VarFragmentResult, build_module_inputs, build_stub_variable,
     build_submodel_metadata, compile_phase_to_per_var_bytecodes, extract_tables_from_source_var,
-    temp_sizes_by_id, var_phase_symbolic_fragment_prod,
+    fragment_emit_ctx, var_phase_symbolic_fragment_prod,
 };
 pub use assemble::{assemble_module, assemble_simulation};
 // `combine_scc_fragment` and `calc_flattened_offsets_incremental` are

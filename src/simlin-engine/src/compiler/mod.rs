@@ -12,15 +12,18 @@ pub mod pretty;
 pub mod subscript;
 pub(crate) mod symbolic;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use crate::ast::{ArrayView, Ast, Loc};
+#[cfg(test)]
 use crate::bytecode::CompiledModule;
 use crate::common::{Canonical, CanonicalElementName, Ident, Result};
 #[cfg(test)]
 use crate::common::{Error, ErrorCode, ErrorKind};
-use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
+#[cfg(test)]
+use crate::dimensions::DimensionsContext;
+use crate::dimensions::{Dimension, SubscriptIterator};
 #[cfg(test)]
 use crate::model::ModelStage1;
 #[cfg(test)]
@@ -29,16 +32,18 @@ use crate::sim_err;
 use crate::variable::Variable;
 #[cfg(test)]
 use crate::vm::IMPLICIT_VAR_COUNT;
-use crate::vm::ModuleKey;
 
 // Re-exports for crate-internal API
+pub(crate) use self::codegen::ModuleCtx;
 pub(crate) use self::context::{Context, ContextCore, VariableMetadata};
 pub(crate) use self::expr::{BuiltinFn, Expr, SubscriptIndex, Table};
 
-use self::codegen::Compiler;
-
-// Type alias to reduce complexity
-type VariableOffsetMap = HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, (usize, usize)>>;
+/// `model -> variable -> (offset, size)`: the symbol layout an emission
+/// resolves references against. The salsa fragment path builds one over its
+/// per-variable mini-layout (`db::assemble::PerVarOffsetMap` is this alias);
+/// the test-only monolithic path builds one over the whole model.
+pub(crate) type VariableOffsetMap =
+    HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, (usize, usize)>>;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(PartialEq, Clone)]
@@ -2572,7 +2577,14 @@ fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut Has
 }
 
 /// Per-variable initial expressions, kept alongside the flat runlist.
+///
+/// Only the test-only monolithic [`Module`] path produces these: a fragment
+/// is one variable's one phase, so the per-variable fragment compiler passes
+/// [`ModuleCtx::runlist_initials_by_var`] an empty slice and puts the initials
+/// phase in `runlist_flows`. The type stays un-gated because `ModuleCtx` --
+/// which is production code -- names it.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, PartialEq)]
 pub(crate) struct VarInitial {
     pub(crate) ident: Ident<Canonical>,
@@ -2581,12 +2593,27 @@ pub(crate) struct VarInitial {
     pub(crate) ast: Vec<Expr>,
 }
 
+/// A whole model, compiled as one unit.
+///
+/// **`#[cfg(test)]`, and that gate is a load-bearing assertion, not tidiness.**
+/// Production compilation is per-variable and incremental: every fragment
+/// emitter builds a [`ModuleCtx`] and calls codegen directly (GH #964). Until
+/// this change three production sites built a stand-in one-variable `Module`
+/// by struct literal and deep-cloned five fields into it per phase. Gating the
+/// type makes "no production `compiler::Module` literal remains" a compile
+/// error rather than a claim someone has to re-audit.
+///
+/// Every field here is one codegen reads; see [`ModuleCtx`], which is exactly
+/// the set of things `Compiler` looks at and which [`Module::compile`] hands
+/// it by reference. `runlist_initials` is the exception -- codegen compiles
+/// initials per variable out of `runlist_initials_by_var`, and the flat list
+/// exists only for the `get_initial_exprs` accessor.
+#[cfg(test)]
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 pub struct Module {
     pub(crate) ident: Ident<Canonical>,
-    pub(crate) inputs: HashSet<Ident<Canonical>>,
+    pub(crate) inputs: BTreeSet<Ident<Canonical>>,
     pub(crate) n_slots: usize,
-    pub(crate) n_temps: usize,
     pub(crate) temp_sizes: Vec<usize>,
     #[allow(dead_code)]
     pub(crate) runlist_initials: Vec<Expr>,
@@ -2594,13 +2621,9 @@ pub struct Module {
     pub(crate) runlist_flows: Vec<Expr>,
     pub(crate) runlist_stocks: Vec<Expr>,
     pub(crate) offsets: VariableOffsetMap,
-    #[allow(dead_code)]
-    pub(crate) runlist_order: Vec<Ident<Canonical>>,
     pub(crate) tables: HashMap<Ident<Canonical>, Vec<Table>>,
     pub(crate) dimensions: Vec<Dimension>,
     pub(crate) dimensions_ctx: DimensionsContext,
-    #[allow(dead_code)]
-    pub(crate) module_refs: HashMap<Ident<Canonical>, ModuleKey>,
 }
 
 #[cfg(test)]
@@ -2785,9 +2808,28 @@ fn calc_n_slots(
     metadata.values().map(|v| v.size).sum()
 }
 
+#[cfg(test)]
 impl Module {
+    /// Borrow this whole-model unit as the emission context codegen consumes.
+    /// Every field is a reference into `self`; nothing is copied.
+    pub(crate) fn as_ctx(&self) -> ModuleCtx<'_> {
+        ModuleCtx {
+            ident: &self.ident,
+            inputs: &self.inputs,
+            n_slots: self.n_slots,
+            temp_sizes: &self.temp_sizes,
+            runlist_initials_by_var: &self.runlist_initials_by_var,
+            runlist_flows: &self.runlist_flows,
+            runlist_stocks: &self.runlist_stocks,
+            offsets: &self.offsets,
+            tables: &self.tables,
+            dimensions: &self.dimensions,
+            dimensions_ctx: &self.dimensions_ctx,
+        }
+    }
+
     pub fn compile(&self) -> Result<CompiledModule> {
-        Compiler::new(self).compile()
+        self.as_ctx().compile()
     }
 }
 
@@ -2825,26 +2867,6 @@ impl Module {
             var_names
         };
         let module_models = calc_module_model_map(project, model_name);
-
-        // Build module_refs: map from module variable ident to (model_name, input_set)
-        let module_refs: HashMap<Ident<Canonical>, ModuleKey> = model
-            .variables
-            .iter()
-            .filter_map(|(ident, var)| {
-                if let Variable::Module {
-                    model_name: module_model_name,
-                    inputs,
-                    ..
-                } = var
-                {
-                    let input_set: BTreeSet<Ident<Canonical>> =
-                        inputs.iter().map(|mi| mi.dst.clone()).collect();
-                    Some((ident.clone(), (module_model_name.clone(), input_set)))
-                } else {
-                    None
-                }
-            })
-            .collect();
 
         let converted_dims: Vec<Dimension> = project
             .datamodel
@@ -2887,10 +2909,6 @@ impl Module {
             .map(|ident| build_var(ident, false))
             .collect::<Result<Vec<Var>>>()?;
 
-        let mut runlist_order = Vec::with_capacity(flow_vars.len() + stock_vars.len());
-        runlist_order.extend(flow_vars.iter().map(|v| v.ident.clone()));
-        runlist_order.extend(stock_vars.iter().map(|v| v.ident.clone()));
-
         // Build per-variable initials before flattening
         let runlist_initials_by_var: Vec<VarInitial> = initial_vars
             .iter()
@@ -2932,8 +2950,7 @@ impl Module {
         }
 
         // Build temp_sizes vector, ordered by temp ID
-        let n_temps = temp_sizes_map.len();
-        let mut temp_sizes: Vec<usize> = vec![0; n_temps];
+        let mut temp_sizes: Vec<usize> = vec![0; temp_sizes_map.len()];
         for (id, size) in temp_sizes_map {
             temp_sizes[id as usize] = size;
         }
@@ -2971,20 +2988,17 @@ impl Module {
 
         Ok(Module {
             ident: model_name.clone(),
-            inputs: inputs.iter().cloned().collect(),
+            inputs: inputs.clone(),
             n_slots,
-            n_temps,
             temp_sizes,
             runlist_initials,
             runlist_initials_by_var,
             runlist_flows,
             runlist_stocks,
             offsets,
-            runlist_order,
             tables,
             dimensions: converted_dims,
             dimensions_ctx: project.dimensions_ctx.clone(),
-            module_refs,
         })
     }
 }
