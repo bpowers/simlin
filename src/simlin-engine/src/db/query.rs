@@ -741,18 +741,66 @@ impl ModuleReferenceGraph {
 /// so widening it to parse-derived edges would put every variable's parse on
 /// every compile's dependency list.
 ///
-/// **The omission is not free, and this doc used to claim it was.** It said
-/// implicit modules "can only reference leaf stdlib models, so they can never
-/// close a user cycle". That is false for a MACRO call: it expands into an
-/// implicit module targeting the macro's own model, which is an ordinary user
-/// model. A macro whose body instantiates a module targeting a model that CALLS
-/// that macro is a cycle this graph does not see -- and the recursive
-/// `model_module_map` follows implicit edges, so it reaches salsa's
-/// unrecoverable dependency-graph cycle panic with this gate reporting no cycle.
-/// `MacroRegistry`'s Pass 3 rejects macro->macro recursion and no stdlib model
-/// instantiates a module, so an explicit module inside a macro-marked model is
-/// the one remaining shape; it needs a fix of its own (three candidates, each
-/// with a different incrementality cost), not a widening here.
+/// # Why omitting implicit edges is nonetheless SOUND
+///
+/// This doc once claimed the omission was free because implicit modules "can only
+/// reference leaf stdlib models, so they can never close a user cycle". That was
+/// false for a MACRO call, which expands into an implicit module targeting the
+/// macro's own model -- an ordinary user model. A macro whose body instantiated a
+/// module targeting a model that CALLED that macro closed a cycle this graph did
+/// not see, and `model_module_map` (which does follow implicit edges) then hit
+/// salsa's unrecoverable dependency-graph cycle panic with this gate reporting no
+/// cycle at all.
+///
+/// That shape no longer exists: `MacroRegistry::build`'s Pass 4 rejects a
+/// `Variable::Module` inside a macro-marked model (`MacroContainsModule`). With
+/// it gone, every implicit module edge terminates somewhere that cannot continue
+/// an invisible cycle:
+///
+///   - The edges are synthesized at ONE site,
+///     `builtins_visitor::expand_module_function`, from a
+///     `ModuleFunctionDescriptor`; that type has exactly two producers,
+///     `module_functions::stdlib_descriptor` (target `stdlib⁚{name}`) and
+///     `MacroRegistry::build`'s Pass 1 (target the macro's own model).
+///   - A stdlib model is a SINK -- it instantiates no module, explicit or
+///     implicit. Test-asserted over the SYNCED Stage0s by
+///     `db::stages_tests::omitting_stdlib_models_from_the_lowering_scope_is_inert_today`,
+///     which is the tripwire if a template ever gains one.
+///   - A macro model's three possible outgoing edges are all handled: an explicit
+///     module in its body (Pass 4 rejects it), an implicit macro-to-macro edge
+///     (Pass 3 rejects a cycle among those, and on ANY build failure the registry
+///     the pipeline receives is EMPTY, so no call resolves as a macro and the edge
+///     does not exist -- see `db::macro_registry::project_macro_registry`), or an
+///     implicit stdlib edge (to a sink).
+///
+/// So every remaining cycle lies entirely in explicit edges, which is exactly what
+/// this query records.
+///
+/// **RESIDUAL** (enumerated, not proved): the first bullet assumes builtin
+/// expansion and macro expansion are the ONLY synthesisers of implicit module
+/// vars. That came from reading the code paths -- the single
+/// `expand_module_function` synthesis site and the two descriptor producers --
+/// not from any exhaustiveness check.
+///
+/// Three things RECORD implicit module vars downstream of that one synthesis
+/// site, and only one of them can open a cycle path:
+///
+///   - `model_implicit_var_info` (`is_module` + `model_name`) -- read by BOTH
+///     recursive queries, which recurse on its module entries. This is the live
+///     path, and the one the argument above is about.
+///   - `db::ltm::model_ltm_implicit_var_info` (`LtmImplicitVarMeta`, same two
+///     fields) -- `compute_layout` reads it but takes `meta.size` verbatim
+///     rather than recursing (Section 3b), and `model_module_map` does not read
+///     it at all. Inert for cycle safety TODAY; listed because making it
+///     recursive is a one-line edit that would silently reopen this.
+///   - `db::stages::model_scope_models` -- walks Stage0 `variables`, but is an
+///     iterative worklist, not a recursive tracked query, so a cycle terminates.
+///
+/// A future implicit-var synthesizer that mints a `Variable::Module` with some
+/// other target would be invisible to this gate again, and NO test would go red:
+/// the two tripwires that exist cover the stdlib-sink premise and the
+/// empty-registry premise, not this one. Anyone adding an implicit-var
+/// synthesizer, or making the LTM recorder recursive, has to check it by hand.
 ///
 /// `db::stages::model_scope_models` walks the same edges plus the implicit ones
 /// and is iterative, so it is unaffected either way.

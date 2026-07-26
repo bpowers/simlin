@@ -579,6 +579,35 @@ pub enum ErrorCode {
     /// key and silently DROPS an unmatched one, so a one-character typo
     /// simulates plausibly-but-wrong with no signal. Warning-level (GH #905).
     UnknownElementSubscript,
+    /// A macro-marked model's body instantiates a module (`Variable::Module`).
+    /// A cycle-safety rule, not a taste rule. `db::project_module_graph` -- the
+    /// gate every compile, diagnostic, and analysis entry point consults so a
+    /// module cycle surfaces as [`ErrorCode::CircularDependency`] rather than as
+    /// salsa's dependency-graph cycle panic -- records only EXPLICIT module
+    /// edges, because it must stay parse-free. A macro CALL is an implicit edge
+    /// it cannot see, so a macro whose body holds an explicit module targeting a
+    /// model that calls that macro closes a cycle the gate reports as absent, and
+    /// the recursive queries abort on it (fatal under `panic = "abort"`).
+    /// Rejected at `MacroRegistry::build`, which restores the invariant that
+    /// every module cycle lies in explicit edges.
+    ///
+    /// The cost is real and accepted, not zero. The shape is reachable from an
+    /// ordinary XMILE file -- the `<macro>` content model is shared with
+    /// `<model>` and the reader passes a `<module>` through unfiltered -- our own
+    /// XMILE writer round-trips it, and a project containing an ACYCLIC one
+    /// compiles and simulates correctly today. It is rejected anyway because
+    /// narrowing to only-when-cyclic would need a second reachability analysis
+    /// whose back edge (the macro call) is only discoverable by parsing every
+    /// model's equations, and because a macro is a template that has no business
+    /// instantiating a sub-model. The MDL importer cannot produce it, though not
+    /// because "Vensim macros have no modules" -- its multi-output materializer
+    /// does mint modules; the scoped macro-body context just never runs it.
+    ///
+    /// Distinct from `CircularDependency` on purpose -- the rejection covers the
+    /// acyclic case too, which is not a cycle and must not claim to be one. A
+    /// module *targeting* a macro model is unaffected; only a module *inside* one
+    /// is rejected. See `MacroRegistry::build`'s Pass 4 for the full argument.
+    MacroContainsModule,
 }
 
 impl fmt::Display for ErrorCode {
@@ -665,6 +694,7 @@ impl fmt::Display for ErrorCode {
             StockBothConveyorAndQueue => "stock_both_conveyor_and_queue",
             ConveyorInitListUnsupported => "conveyor_init_list_unsupported",
             UnknownElementSubscript => "unknown_element_subscript",
+            MacroContainsModule => "macro_contains_module",
         };
 
         write!(f, "{name}")

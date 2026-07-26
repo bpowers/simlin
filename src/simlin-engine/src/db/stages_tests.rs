@@ -474,6 +474,24 @@ fn cached_stage1_lowering_equals_datamodel_driven_lowering() {
 /// [`arrayed_module_project`] and [`chain_project`] catch for user models. The
 /// assertion runs over the SYNCED Stage0s, which is what the scope map actually
 /// holds, rather than over the generated stdlib source.
+///
+/// # The module half is ALSO the tripwire for module-graph cycle safety
+///
+/// The `Variable::Module` assertion below now carries a second, unrelated claim.
+/// `MacroRegistry::build`'s Pass 4 (rejecting a module inside a macro,
+/// `ErrorCode::MacroContainsModule`) closes the hole where a cycle ran through an
+/// IMPLICIT module edge that `db::project_module_graph` cannot see. Its closure
+/// argument needs "a stdlib model is a SINK -- it instantiates no module", so that
+/// an implicit stdlib edge cannot be one hop of a longer invisible cycle. That
+/// property is TEST-asserted here, not structural: nothing stops a future
+/// `stdlib/*.stmx` template from instantiating another template.
+///
+/// So if this assertion ever fails, TWO things break at once, and the second is
+/// the abort-class one: the shape a stdlib template just gained is a module edge
+/// invisible to the gate, and `project_module_graph`'s "every remaining cycle is
+/// explicit" invariant no longer holds. Fixing it means teaching the gate about
+/// stdlib edges (they are static and known at build time, so this is cheap --
+/// unlike parse-derived macro edges), not just widening the lowering scope.
 #[test]
 fn omitting_stdlib_models_from_the_lowering_scope_is_inert_today() {
     let db = SimlinDb::default();
@@ -498,9 +516,12 @@ fn omitting_stdlib_models_from_the_lowering_scope_is_inert_today() {
             );
             assert!(
                 !matches!(var, crate::variable::Variable::Module { .. }),
-                "stdlib model {} instantiates a module ({ident}); it can now be an intermediate \
-                 hop in `resolve_relative`, so a lowering scope that omits stdlib models can \
-                 silently break a chained reference",
+                "stdlib model {} instantiates a module ({ident}). Two consequences: it can now \
+                 be an intermediate hop in `resolve_relative`, so a lowering scope that omits \
+                 stdlib models can silently break a chained reference; and -- the abort-class \
+                 one -- `db::project_module_graph` does not record implicit module edges, so \
+                 the stdlib-sink premise of `MacroRegistry::build`'s Pass 4 closure argument \
+                 no longer holds and a cycle through this edge is invisible to the cycle gate",
                 s0.ident
             );
         }
