@@ -187,8 +187,12 @@ pub fn compile_var_fragment<'db>(
         CompilationDiagnostic(diag).accumulate(db);
     }
 
-    // Determine which runlists this variable belongs to
-    let dep_graph = model_dependency_graph(db, model, project, module_inputs);
+    // Which runlists this variable belongs to, read through the three-bit
+    // projection rather than the whole `ModelDepGraphResult`: the projection
+    // backdates when this variable's membership is unchanged, so an unrelated
+    // variable being added, deleted or renamed no longer invalidates every
+    // fragment in the model (GH #964).
+    let membership = var_runlist_membership(db, var, model, project, module_inputs);
     let is_stock = var.kind(db) == SourceVariableKind::Stock;
     let is_module = var.kind(db) == SourceVariableKind::Module;
     let is_module_input = inputs.contains(&var_ident_canonical);
@@ -209,9 +213,6 @@ pub fn compile_var_fragment<'db>(
     let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
         compile_phase_to_per_var_bytecodes(&base_ctx, &rmap, exprs)
     };
-
-    // Runlists use canonical names, so compare with the canonical form.
-    let var_ident_str = var_ident_canonical.as_str().to_string();
 
     // Accumulate a diagnostic when per-variable compilation (Var::new)
     // fails. Without this, errors like DoesNotExist (unknown dependency)
@@ -255,7 +256,7 @@ pub fn compile_var_fragment<'db>(
     };
 
     // Initial phase: stocks and their deps get compiled with is_initial=true
-    let initial_bytecodes = if dep_graph.runlist_initials.contains(&var_ident_str) {
+    let initial_bytecodes = if membership.initials {
         match &per_phase_lowered.initial {
             Ok(var_result) => compile_phase(&var_result.ast),
             Err(err) => {
@@ -272,8 +273,7 @@ pub fn compile_var_fragment<'db>(
     // AssignCurr in the flows phase to propagate the parent-provided value
     // each timestep (matching the monolithic path's `instantiation.contains(id)
     // || !var.is_stock()` filter).
-    let in_flows_runlist =
-        (!is_stock || is_module_input) && dep_graph.runlist_flows.contains(&var_ident_str);
+    let in_flows_runlist = (!is_stock || is_module_input) && membership.flows;
     let flow_bytecodes = if in_flows_runlist {
         match &per_phase_lowered.noninitial {
             Ok(var_result) => compile_phase(&var_result.ast),
@@ -302,18 +302,17 @@ pub fn compile_var_fragment<'db>(
     };
 
     // Stock phase: stocks and modules get compiled with is_initial=false
-    let stock_bytecodes =
-        if (is_stock || is_module) && dep_graph.runlist_stocks.contains(&var_ident_str) {
-            match &per_phase_lowered.noninitial {
-                Ok(var_result) => compile_phase(&var_result.ast),
-                Err(err) => {
-                    accumulate_var_compile_error(err);
-                    None
-                }
+    let stock_bytecodes = if (is_stock || is_module) && membership.stocks {
+        match &per_phase_lowered.noninitial {
+            Ok(var_result) => compile_phase(&var_result.ast),
+            Err(err) => {
+                accumulate_var_compile_error(err);
+                None
             }
-        } else {
-            None
-        };
+        }
+    } else {
+        None
+    };
 
     Some(VarFragmentResult {
         fragment: CompiledVarFragment {

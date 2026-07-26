@@ -44,8 +44,8 @@ use crate::canonicalize;
 use crate::common::{Canonical, Ident};
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ModuleInputSet,
-    SourceModel, SourceProject, SourceVariableKind, VariableDeps, model_module_ident_context,
-    variable_direct_dependencies,
+    SourceModel, SourceProject, SourceVariable, SourceVariableKind, VariableDeps,
+    model_module_ident_context, variable_direct_dependencies,
 };
 
 /// Per-variable dependency facts used to build the model dependency
@@ -1679,6 +1679,45 @@ pub fn model_dependency_graph<'db>(
 ) -> ModelDepGraphResult {
     let module_input_names = module_inputs.names(db);
     model_dependency_graph_impl(db, model, project, module_input_names)
+}
+
+/// Which of the three phase runlists one variable appears in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, salsa::Update)]
+pub struct RunlistMembership {
+    pub initials: bool,
+    pub flows: bool,
+    pub stocks: bool,
+}
+
+/// Project `model_dependency_graph` down to the three runlist-membership bits
+/// a per-variable fragment compiler actually reads -- a salsa *firewall*.
+///
+/// `compile_var_fragment` needs only "is this variable in the initials /
+/// flows / stocks runlist"; reading the whole `ModelDepGraphResult` for that
+/// made every fragment in a model depend on every other variable's
+/// dependencies, so any dep-graph change re-executed all of them. This
+/// projection re-executes on the same changes but returns three booleans, so
+/// salsa backdates it whenever the variable's own membership is unchanged --
+/// which is the case for every variable a layout-only edit does not touch.
+///
+/// Keyed on the `SourceVariable` handle rather than a name so it is invalidated
+/// by a rename of *this* variable through the same field read every other
+/// per-variable query uses.
+#[salsa::tracked]
+pub fn var_runlist_membership<'db>(
+    db: &'db dyn Db,
+    var: SourceVariable,
+    model: SourceModel,
+    project: SourceProject,
+    module_inputs: ModuleInputSet<'db>,
+) -> RunlistMembership {
+    let dep_graph = model_dependency_graph(db, model, project, module_inputs);
+    let name = canonicalize(var.ident(db)).into_owned();
+    RunlistMembership {
+        initials: dep_graph.runlist_initials.contains(&name),
+        flows: dep_graph.runlist_flows.contains(&name),
+        stocks: dep_graph.runlist_stocks.contains(&name),
+    }
 }
 
 // ── Model dependency graph (the cycle gate) ────────────────────────────

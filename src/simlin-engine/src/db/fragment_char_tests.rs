@@ -1774,28 +1774,38 @@ fn char_ltm_fragments_discovery() {
 // Each test has a control step -- re-syncing the IDENTICAL project must
 // re-execute nothing -- so a count is attributable to the edit that follows it.
 //
-// WHAT THIS MEASURED: that acceptance criterion does NOT hold today. Adding,
-// deleting or renaming an unrelated variable re-executes EVERY per-variable
-// fragment compile in the edited model. Two coarse salsa edges cause it, and
-// both are inside the round trip GH #964 is deleting, so this is a baseline for
-// stage 3 rather than a regression it introduced:
+// The criterion held only as a VALUE property until C1b: the fragments were
+// identical across a layout edit, but every one of them was recompiled to
+// rediscover that. Two coarse salsa edges caused it, and both were inside the
+// round trip GH #964 is deleting:
 //
-//   1. `compile_var_fragment` reads the whole `ModelDepGraphResult`
-//      (`model_dependency_graph`) but uses only three runlist-membership bits
+//   1. `compile_var_fragment` read the whole `ModelDepGraphResult`
+//      (`model_dependency_graph`) but used only three runlist-membership bits
 //      of it. Any variable added to the model changes the runlists, so the
-//      value changes and every dependent re-executes.
+//      value changed and every dependent re-executed. Narrowed by the
+//      `var_runlist_membership` projection, which returns those three bits and
+//      backdates.
 //   2. `lower_var_fragment` / `collect_var_dependencies` read the whole
 //      `SourceModel::variables` map field to resolve dependency names, so any
-//      change to the model's variable SET invalidates every fragment through
-//      that edge too.
+//      change to the model's variable SET invalidated every fragment through
+//      that edge too. Narrowed by the `model_variable_by_name` firewall query,
+//      so a fragment depends on the dependencies it actually looks up.
 //
-// The fragments produced are identical, so salsa backdates them and nothing
-// downstream re-runs -- which is exactly why no pointer-based test ever caught
-// this, and why the expensive half (the compile itself) is the part that is
-// not being saved. Narrowing edge 1 is a small salsa projection; narrowing
-// edge 2 needs a per-name variable lookup query, which is a design change of
-// the size stages 2 and 3 are for. These tests pin today's numbers so that
-// change can be measured, and so stage 3 cannot make them worse unnoticed.
+// Fixing edge 1 alone was provably unmeasurable while edge 2 stood, which is
+// why they landed together. A THIRD edge (`model_implicit_var_info`, narrowed
+// by `model_implicit_var_by_name`) is exercised only by a variable that
+// synthesizes an implicit helper, so it has its own test below rather than a
+// row here.
+//
+// **These counts are the gate C1c is measured against, and they are TIGHT
+// WITHIN A BOUND that `implicit_helper_add_is_tight_but_module_helper_add_is_not`
+// states exactly.** Tight for a plain aux (this test) and for a
+// PREVIOUS/INIT-helper-bearing variable; still saturated for a variable that
+// instantiates a MODULE, for two reasons neither edge narrowing reaches. Read
+// that test before relying on "the counts are tight" as a blanket claim: a
+// stage-3 rewrite that reintroduces a model-wide dependency reds here on the
+// count, not merely on the value assertions below, but only for the shapes
+// these fixtures actually cover.
 // ---------------------------------------------------------------------------
 
 /// A flat model: `probe` (the fragment under test) reads `k`; every other
@@ -1887,12 +1897,16 @@ fn layout_only_edits_and_fragment_cache_reuse() {
     // at the end. This is the property the execution counts cannot express,
     // and the one that matters most for stage 3.
     //
-    // The counts are saturated -- every fragment already re-executes -- so a
-    // newly-introduced layout dependency would not move them by one. Value
-    // equality catches it: a fragment encoding anything about the model-global
-    // layout changes when an unrelated variable is added, deleted or renamed.
-    // It is also the stronger property, since it holds whether or not the
-    // compile re-ran.
+    // Both checks are kept, and the reason is NOT that one is weaker. Since
+    // C1b narrowed the two coarse edges the counts above are tight, and they
+    // are in fact the more sensitive of the two: a fragment cannot change
+    // value without its body re-running, so any layout dependency strong
+    // enough to move the value has already moved a count. What value equality
+    // adds is INDEPENDENCE from the counting apparatus -- it holds whatever
+    // C1c does to the query structure, the recorder's `FragmentExecKind`s, or
+    // which compiler owns which variable, and it holds whether or not the
+    // compile re-ran. A rewrite is free to change the counts for a legitimate
+    // reason; it is never free to change these values.
     //
     // Asserted after each edit INDIVIDUALLY and deliberately. Checking only
     // the end state is not enough: the base and the post-rename project happen
@@ -1928,29 +1942,32 @@ fn layout_only_edits_and_fragment_cache_reuse() {
     let (state3, add_execs) = resync_and_assemble(&mut db, &added, Some(&state2));
     assert_eq!(
         explicit_execs(&add_execs),
-        vec!["added", "k", "other", "probe"],
-        "adding an unrelated variable re-executes EVERY fragment in the model, \
-         `probe` included"
+        vec!["added"],
+        "adding an unrelated variable must compile ONLY the new variable: no \
+         existing fragment's inputs changed, so none may re-execute"
     );
     assert_probe_unchanged(&db, &state3, &probe_before, "an unrelated ADD");
 
-    // Edit 2: DELETE an unrelated variable (`other`).
+    // Edit 2: DELETE an unrelated variable (`other`). Nothing referenced it, so
+    // no surviving fragment has a changed input -- not even a re-execution that
+    // would backdate.
     let deleted = cache_probe_project(&[("added", "5")], false);
     let (state4, del_execs) = resync_and_assemble(&mut db, &deleted, Some(&state3));
     assert_eq!(
         explicit_execs(&del_execs),
-        vec!["added", "k", "probe"],
-        "deleting an unrelated variable re-executes every surviving fragment"
+        Vec::<&str>::new(),
+        "deleting an unrelated variable must re-execute no fragment at all"
     );
     assert_probe_unchanged(&db, &state4, &probe_before, "an unrelated DELETE");
 
-    // Edit 3: RENAME an unrelated variable (`added` -> `renamed`).
+    // Edit 3: RENAME an unrelated variable (`added` -> `renamed`). A rename is
+    // a delete plus an add, so exactly the new name compiles.
     let renamed = cache_probe_project(&[("renamed", "5")], false);
     let (state5, rename_execs) = resync_and_assemble(&mut db, &renamed, Some(&state4));
     assert_eq!(
         explicit_execs(&rename_execs),
-        vec!["k", "probe", "renamed"],
-        "renaming an unrelated variable re-executes every fragment"
+        vec!["renamed"],
+        "renaming an unrelated variable must compile only the renamed variable"
     );
     assert_probe_unchanged(&db, &state5, &probe_before, "an unrelated RENAME");
 }
@@ -2338,6 +2355,126 @@ fn implicit_and_ltm_fragment_cache_granularity() {
             .all(|edge| *edge == "level\u{2192}growth" || *edge == "growth\u{2192}level"),
         "only the circuit's own two edges have link scores in exhaustive mode, \
          so nothing outside them may recompile; got {recompiled:?}"
+    );
+}
+
+/// The THIRD coarse edge (`model_implicit_var_info`), pinned in BOTH
+/// directions: narrowed for a plain implicit helper, still saturated for one
+/// that instantiates a module.
+///
+/// `layout_only_edits_and_fragment_cache_reuse` above adds a plain aux, which
+/// synthesizes no implicit variable at all and so never touches this edge. A
+/// variable whose equation calls `PREVIOUS` or `INIT` DOES synthesize one, and
+/// before the `model_implicit_var_by_name` projection every fragment in the
+/// model re-executed for it -- `collect_var_dependencies` read the whole
+/// implicit-var map to answer a per-name question.
+///
+/// The `SMTH1` half is the honest limit, asserted as the CURRENT CONTRACT so
+/// it cannot be quietly over-claimed. Narrowing this edge does not make a
+/// module-instantiating helper tight, because two further whole-model
+/// dependencies survive on that path and neither is a projection away:
+///
+///  1. `project.models(db)` changes -- the implicit `stdlib⁚smth1` template is
+///     spliced into the project's model map, so the map every fragment reads
+///     is a different value.
+///  2. `model_module_ident_context` is an INTERNED handle keyed on the model's
+///     module-ident set. Adding a module instance grows that set, which mints
+///     a NEW interned id, which becomes a new cache key for every variable's
+///     `parse_source_variable_with_module_context`. A changed key cannot
+///     backdate -- there is no prior memo to compare against -- so this is a
+///     cache-key problem, not a value-equality problem, and no projection over
+///     the existing query can fix it.
+///
+/// If someone fixes (2), this test reds on the `SMTH1` assertion rather than
+/// leaving a stale sentence in a doc comment. That is the point of pinning a
+/// limitation instead of describing it.
+#[test]
+fn implicit_helper_add_is_tight_but_module_helper_add_is_not() {
+    // `probe` reads `k`; the added variable is independent of both, so this is
+    // a layout-only edit from `probe`'s point of view in every case.
+    let project_with = |extra: Option<(&str, &str)>| {
+        let mut tp = TestProject::new("frag_cache_implicit_edge")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .scalar_aux("k", "3")
+            .scalar_aux("probe", "k * 2");
+        if let Some((name, eqn)) = extra {
+            tp = tp.scalar_aux(name, eqn);
+        }
+        tp.build_datamodel()
+    };
+
+    // ── A PREVIOUS helper: narrowed by `model_implicit_var_by_name`.
+    let mut db = SimlinDb::default();
+    let base = project_with(None);
+    let state1 = sync_from_datamodel_incremental(&mut db, &base, None);
+    assemble_simulation(&db, state1.to_sync_result().project, "main".to_string())
+        .expect("priming assemble");
+
+    let (state2, control) = resync_and_assemble(&mut db, &base, Some(&state1));
+    assert_eq!(
+        control,
+        Vec::new(),
+        "control: re-syncing the identical project must re-execute nothing"
+    );
+
+    // The argument must be an EXPRESSION, not a bare variable. A direct scalar
+    // `PREVIOUS(k, 0)` compiles straight to the `LoadPrev` opcode and
+    // synthesizes NO implicit variable at all, so it never touches this edge --
+    // it passes whether or not the projection exists, which makes it a
+    // vacuous fixture. (A mutation probe reintroducing the whole-map read is
+    // how that was caught: it stayed green on the bare-variable form and reds
+    // on this one.) `PREVIOUS(k * 2, 0)` is rewritten through a synthesized
+    // scalar helper aux, which is the shape that changes
+    // `model_implicit_var_info` without instantiating any module.
+    let with_prev = project_with(Some(("lagged", "PREVIOUS(k * 2, 0)")));
+    let (_state3, prev_execs) = resync_and_assemble(&mut db, &with_prev, Some(&state2));
+    assert_eq!(
+        explicit_execs(&prev_execs),
+        vec!["lagged"],
+        "adding a PREVIOUS-helper-bearing variable must compile only the new \
+         variable: the implicit-var map changed, but no existing fragment asks \
+         it about a name whose answer moved"
+    );
+
+    // ── An SMTH1 helper: still saturated, for the two reasons above.
+    let mut db2 = SimlinDb::default();
+    let base2 = project_with(None);
+    let s1 = sync_from_datamodel_incremental(&mut db2, &base2, None);
+    assemble_simulation(&db2, s1.to_sync_result().project, "main".to_string())
+        .expect("priming assemble");
+
+    let (s2, control2) = resync_and_assemble(&mut db2, &base2, Some(&s1));
+    assert_eq!(
+        control2,
+        Vec::new(),
+        "control: re-syncing the identical project must re-execute nothing"
+    );
+
+    let with_smth = project_with(Some(("smoothed", "SMTH1(k, 2)")));
+    let (_s3, smth_execs) = resync_and_assemble(&mut db2, &with_smth, Some(&s2));
+    // `delay_time`/`flow`/`initial_value`/`input`/`output` are the spliced
+    // `stdlib⁚smth1` template's own variables, compiling for the first time --
+    // those are legitimately new work. `k` and `probe` are not: they are the
+    // saturation this test pins.
+    assert_eq!(
+        explicit_execs(&smth_execs),
+        vec![
+            "delay_time",
+            "flow",
+            "initial_value",
+            "input",
+            "k",
+            "output",
+            "probe",
+            "smoothed"
+        ],
+        "CURRENT CONTRACT, not an aspiration: adding a MODULE-instantiating \
+         helper still re-executes every PRE-EXISTING fragment (`k`, `probe`), \
+         because `project.models` gains the spliced `stdlib⁚smth1` template \
+         and the interned `ModuleIdentContext` key every parse is memoized \
+         under changes. If this assertion reds because `k` and `probe` \
+         dropped out, someone fixed one of those two and this pin should be \
+         tightened to match"
     );
 }
 

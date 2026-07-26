@@ -77,7 +77,6 @@ pub use input::{
 };
 
 mod query;
-pub(crate) use query::canonical_module_input_set;
 pub use query::{
     ImplicitVarMeta, ModuleReferenceGraph, ParsedVariableResult, UnitsContextResult, VariableDeps,
     model_implicit_var_info, model_module_ident_context, model_module_map,
@@ -85,6 +84,9 @@ pub use query::{
     project_datamodel_dims, project_dimensions_context, project_module_graph,
     project_units_context, project_units_context_result, variable_dimensions,
     variable_direct_dependencies, variable_relevant_dimensions, variable_size,
+};
+pub(crate) use query::{
+    canonical_module_input_set, model_implicit_var_by_name, model_variable_by_name,
 };
 
 mod sync;
@@ -127,7 +129,10 @@ pub use assemble::{assemble_module, assemble_simulation};
 #[cfg(test)]
 pub(crate) use assemble::{calc_flattened_offsets_incremental, combine_scc_fragment};
 
-pub use dep_graph::{ModelDepGraphResult, ResolvedScc, SccPhase, model_dependency_graph};
+pub use dep_graph::{
+    ModelDepGraphResult, ResolvedScc, RunlistMembership, SccPhase, model_dependency_graph,
+    var_runlist_membership,
+};
 
 mod ltm;
 use ltm::*;

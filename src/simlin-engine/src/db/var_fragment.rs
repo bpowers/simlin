@@ -63,8 +63,9 @@ use crate::db::{
     Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ModuleInputSet, SourceModel,
     SourceProject, SourceVariable, SourceVariableKind, build_module_inputs, build_stub_variable,
     build_submodel_metadata, compute_layout, extract_tables_from_source_var,
-    model_implicit_var_info, model_module_ident_context, parse_source_variable_with_module_context,
-    variable_dimensions, variable_direct_dependencies, variable_size,
+    model_implicit_var_by_name, model_module_ident_context, model_variable_by_name,
+    parse_source_variable_with_module_context, variable_dimensions, variable_direct_dependencies,
+    variable_size,
 };
 
 /// Per-model variable -> (offset, size) projection of the minimal
@@ -253,7 +254,6 @@ fn collect_var_dependencies(
 
     // For each dep, build a dimension-only Variable for context.
     // We need these to live long enough for the metadata references.
-    let source_vars = model.variables(db);
     let mut dep_variables: Vec<(Ident<Canonical>, crate::variable::Variable, usize)> = Vec::new();
 
     // Also add inflows/outflows for stocks (needed by stock update expressions)
@@ -275,7 +275,6 @@ fn collect_var_dependencies(
 
     // Track module deps that need sub-model metadata
     let mut extra_submodels: Vec<(String, SourceModel)> = Vec::new();
-    let implicit_var_info = model_implicit_var_info(db, model, project);
 
     for dep_name in &all_names {
         // Skip self and implicit vars
@@ -303,8 +302,12 @@ fn collect_var_dependencies(
                 continue;
             }
 
-            // Look up the module variable in source_vars or implicit vars
-            if let Some(mod_source_var) = source_vars.get(module_var_name) {
+            // Look up the module variable by name (one salsa firewall query
+            // per dependency, NOT a read of the whole variables map) or among
+            // the implicit vars.
+            if let Some(mod_source_var) =
+                model_variable_by_name(db, model, module_var_name.to_string())
+            {
                 if mod_source_var.kind(db) == SourceVariableKind::Module {
                     let mod_model_name = mod_source_var.model_name(db);
                     let sub_canonical = canonicalize(mod_model_name);
@@ -352,7 +355,8 @@ fn collect_var_dependencies(
                         extra_submodels.push((mod_model_name.to_string(), *sub_model));
                     }
                 }
-            } else if let Some(meta) = implicit_var_info.get(module_var_name)
+            } else if let Some(meta) =
+                model_implicit_var_by_name(db, model, project, module_var_name.to_string())
                 && meta.is_module
             {
                 // Implicit module already handled in the implicit_module_vars section below
@@ -365,14 +369,17 @@ fn collect_var_dependencies(
             continue;
         }
 
-        if let Some(dep_source_var) = source_vars.get(effective_name) {
-            let dep_dims = variable_dimensions(db, *dep_source_var, project);
-            let dep_size = variable_size(db, *dep_source_var, project);
+        if let Some(dep_source_var) = model_variable_by_name(db, model, effective_name.to_string())
+        {
+            let dep_dims = variable_dimensions(db, dep_source_var, project);
+            let dep_size = variable_size(db, dep_source_var, project);
 
-            let dep_var = build_stub_variable(db, dep_source_var, &dep_ident, dep_dims);
+            let dep_var = build_stub_variable(db, &dep_source_var, &dep_ident, dep_dims);
 
             dep_variables.push((dep_ident, dep_var, dep_size));
-        } else if let Some(meta) = implicit_var_info.get(effective_name) {
+        } else if let Some(meta) =
+            model_implicit_var_by_name(db, model, project, effective_name.to_string())
+        {
             if !meta.is_module {
                 // An *arrayed* implicit helper (GH #541's bare-arrayed-PREVIOUS
                 // case) needs its array shape in the stub so a consumer that
@@ -381,7 +388,7 @@ fn collect_var_dependencies(
                 // subscript rejected. Mirror `build_stub_variable`'s dummy
                 // `ApplyToAll(dims, 0)` AST. Scalar helpers (the common case)
                 // keep `ast: None`.
-                let dep_dims = implicit_dep_dimensions(db, project, meta);
+                let dep_dims = implicit_dep_dimensions(db, project, &meta);
                 let dummy_ast = if dep_dims.is_empty() {
                     None
                 } else {
@@ -514,8 +521,19 @@ fn collect_var_dependencies(
 /// marker: dropping the `<conveyor>`/`<queue>` block re-emits the flow's
 /// `EmptyEquation` diagnostic (pinned by
 /// `test_conveyor_marker_removal_reinstates_empty_equation`).
-fn flow_is_special_stock_driven(db: &dyn Db, model: SourceModel, flow_ident: &str) -> bool {
-    let flow_canon = canonicalize(flow_ident);
+///
+/// Salsa-tracked for the same firewall reason as `model_variable_by_name`:
+/// answering the question needs a scan of every stock, so an untracked helper
+/// would give its caller a dependency on the whole variables map. Tracked, the
+/// `bool` backdates and only a genuine change of the flow's driven-ness
+/// invalidates the fragment.
+#[salsa::tracked]
+pub(crate) fn flow_is_special_stock_driven(
+    db: &dyn Db,
+    model: SourceModel,
+    flow_ident: String,
+) -> bool {
+    let flow_canon = canonicalize(&flow_ident);
     model.variables(db).values().any(|sv| {
         sv.kind(db) == SourceVariableKind::Stock
             && sv
@@ -597,7 +615,7 @@ pub(crate) fn lower_var_fragment(
             && errors
                 .iter()
                 .any(|e| e.code == crate::common::ErrorCode::EmptyEquation)
-            && flow_is_special_stock_driven(db, model, &var_ident);
+            && flow_is_special_stock_driven(db, model, var_ident.clone());
         let mut fatal_diags: Vec<Diagnostic> = Vec::new();
         for err in &errors {
             if suppress_empty && err.code == crate::common::ErrorCode::EmptyEquation {
@@ -627,6 +645,22 @@ pub(crate) fn lower_var_fragment(
         ModuleInputSet::empty(db),
     );
 
+    // Per-call memo over `model_variable_by_name`. The salsa firewall query is
+    // the SOURCE of truth for the lookup (that is what gives the fragment a
+    // dependency on the named variable rather than on the whole variables map);
+    // this only stops the three name loops below from asking it the same
+    // question three times, which on a dependency-heavy model was the whole
+    // measurable cost of the narrowing.
+    let mut resolved: HashMap<String, Option<SourceVariable>> = HashMap::new();
+    let mut resolve_var = |name: &str| -> Option<SourceVariable> {
+        if let Some(hit) = resolved.get(name) {
+            return *hit;
+        }
+        let found = model_variable_by_name(db, model, name.to_string());
+        resolved.insert(name.to_string(), found);
+        found
+    };
+
     // A bare reference to a standalone lookup-only table -- the table used as a
     // value rather than called via `LOOKUP(table, x)` -- has no scalar value of
     // its own and is rejected (issue #606). After the table-reference /
@@ -635,7 +669,6 @@ pub(crate) fn lower_var_fragment(
     // reference (a real call lands in `referenced_tables`), so its presence in
     // the dependency sets is exactly this error.
     {
-        let source_vars = model.variables(db);
         let referenced: BTreeSet<&String> = deps
             .dt_deps
             .iter()
@@ -644,8 +677,8 @@ pub(crate) fn lower_var_fragment(
         let bare_table_diags: Vec<Diagnostic> = referenced
             .into_iter()
             .filter_map(|dep| {
-                let dep_sv = source_vars.get(dep.as_str())?;
-                crate::db::source_var_is_table_only(db, *dep_sv).then(|| Diagnostic {
+                let dep_sv = resolve_var(dep)?;
+                crate::db::source_var_is_table_only(db, dep_sv).then(|| Diagnostic {
                     model: model.name(db).clone(),
                     variable: Some(var.ident(db).clone()),
                     error: DiagnosticError::Model(crate::common::Error::new(
@@ -697,7 +730,6 @@ pub(crate) fn lower_var_fragment(
         // this, SUM(arr[*] + 1) fails because the Op2's ArrayBounds are
         // never computed (get_dimensions returns None for dependencies).
         let model_name_str = model.name(db);
-        let source_vars = model.variables(db);
         let mut stage0_vars: HashMap<Ident<Canonical>, crate::model::VariableStage0> =
             HashMap::new();
 
@@ -719,10 +751,10 @@ pub(crate) fn lower_var_fragment(
             if effective.contains('\u{00B7}') {
                 continue;
             }
-            if let Some(dep_sv) = source_vars.get(effective) {
+            if let Some(dep_sv) = resolve_var(effective) {
                 let dep_parsed = parse_source_variable_with_module_context(
                     db,
-                    *dep_sv,
+                    dep_sv,
                     project,
                     module_ident_context,
                 );
@@ -906,7 +938,6 @@ pub(crate) fn lower_var_fragment(
     // functions. When a variable uses LOOKUP(dep, x), the dep's table
     // data must be in the mini-Module's tables map so the bytecode
     // compiler can emit the correct Lookup opcodes.
-    let source_vars = model.variables(db);
     let all_dep_names: BTreeSet<&String> = deps
         .dt_deps
         .iter()
@@ -939,8 +970,8 @@ pub(crate) fn lower_var_fragment(
         if tables.contains_key(&dep_canonical) {
             continue;
         }
-        if let Some(dep_sv) = source_vars.get(effective) {
-            let dep_tables = extract_tables_from_source_var(db, dep_sv, project);
+        if let Some(dep_sv) = resolve_var(effective) {
+            let dep_tables = extract_tables_from_source_var(db, &dep_sv, project);
             if !dep_tables.is_empty() {
                 tables.insert(dep_canonical, dep_tables);
             }
