@@ -5487,4 +5487,36 @@ mod arrayed_vector_sort_order_per_slice_tests {
         }
         project.assert_vm_result_incremental("sorted", &[10.0, 20.0, 30.0, 1.0, 5.0, 15.0]);
     }
+
+    /// A VECTOR ELM MAP whose source is subscripted by a *variable* index
+    /// (`src[idx]`, resolved at runtime) must bound its reads by the source
+    /// VARIABLE's full extent, exactly as a literal subscript does.
+    ///
+    /// `codegen::full_source_len` recovered that extent for
+    /// `Expr::StaticSubscript` and `Expr::Var` but had no arm for the dynamic
+    /// `Expr::Subscript`, so it fell through to the 1-element default. Every
+    /// read outside `[0, 1)` then returned the documented out-of-range `:NA:`
+    /// (NaN) -- which is EVERY read whenever the base was not the source's
+    /// first element, and every non-zero offset regardless. Both directions are
+    /// covered below, and neither is expressible with a literal subscript, so
+    /// no existing test could see it.
+    ///
+    /// vals = [10, 20, 30, 40]; idx = 2 (1-based) selects flat base 1.
+    ///   picked[j] = vals_full[1 + offs[j]], offs = [0, 1, 2]
+    ///             = [vals[1], vals[2], vals[3]] = [20, 30, 40]
+    #[test]
+    fn elm_map_dynamic_source_subscript_uses_full_variable_extent_vm() {
+        let project = TestProject::new("elm_map_dynamic_source_extent")
+            .indexed_dimension("D", 4)
+            .indexed_dimension("E", 3)
+            .array_with_ranges(
+                "vals[D]",
+                vec![("1", "10"), ("2", "20"), ("3", "30"), ("4", "40")],
+            )
+            .array_with_ranges("offs[E]", vec![("1", "0"), ("2", "1"), ("3", "2")])
+            .scalar_aux("idx", "2")
+            .array_aux("picked[E]", "VECTOR ELM MAP(vals[idx], offs[E])");
+        project.assert_compiles_incremental();
+        project.assert_vm_result_incremental("picked", &[20.0, 30.0, 40.0]);
+    }
 }

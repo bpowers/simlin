@@ -220,6 +220,24 @@ impl<'module> Compiler<'module> {
             Expr::StaticSubscript(off, view, _) => {
                 (Some(*off), view.dims.iter().product::<usize>().max(1))
             }
+            // A *dynamic* subscript (`arr[i]`, `i` a variable) is the same
+            // shape as `StaticSubscript` for this purpose -- the source is
+            // still the whole `arr` variable, only the base element is chosen
+            // at runtime. Without this arm it fell to the `_` case and reported
+            // a full extent of 1, so `VECTOR ELM MAP(arr[i], offsets)` returned
+            // NaN for every element whenever `i` selected anything but `arr`'s
+            // first element, and for any non-zero offset at all.
+            //
+            // No wasm-backend parity test accompanies the VM regression test
+            // (`array_tests::…::elm_map_dynamic_source_subscript_uses_full_variable_extent_vm`)
+            // because the backends cannot diverge here: `wasmgen::vector`
+            // rejects a dynamically-subscripted ELM MAP source outright
+            // (`source_view.runtime_off_local.is_some()` =>
+            // `WasmGenError::Unsupported`), so this shape never reaches wasm
+            // lowering at all.
+            Expr::Subscript(off, _, bounds, _) => {
+                (Some(*off), bounds.iter().product::<usize>().max(1))
+            }
             Expr::Var(off, _) => (Some(*off), 1usize),
             Expr::TempArray(_, view, _) => (None, view.dims.iter().product::<usize>().max(1)),
             _ => (None, 1usize),
