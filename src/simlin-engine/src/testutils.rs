@@ -119,6 +119,25 @@ pub(crate) fn x_module(
     refs: &[(&str, &str)],
     units: Option<&str>,
 ) -> datamodel::Variable {
+    x_module_named(ident, ident, refs, units)
+}
+
+/// A module instantiation whose variable ident may differ from the name of the
+/// model it instantiates. `x_module` covers the common case where the two
+/// coincide; the cases that need them apart are the shapes of the module graph
+/// that are not a tree -- a cycle (`a` holds a module named `to_b` targeting
+/// `b`) and a diamond (one model instantiated from two different parents).
+///
+/// Each `refs` entry is a datamodel `(src, dst)` pair, where `dst` is written
+/// from the PARENT's perspective and so carries the module variable's own ident
+/// as a prefix (`"to_b.input"`); lowering strips that prefix.
+#[cfg(test)]
+pub(crate) fn x_module_named(
+    ident: &str,
+    model_name: &str,
+    refs: &[(&str, &str)],
+    units: Option<&str>,
+) -> datamodel::Variable {
     use datamodel::{Module, Variable};
     let references: Vec<ModuleReference> = refs
         .iter()
@@ -130,7 +149,7 @@ pub(crate) fn x_module(
 
     Variable::Module(Module {
         ident: ident.to_string(),
-        model_name: ident.to_string(),
+        model_name: model_name.to_string(),
         documentation: "".to_string(),
         units: units.map(|s| s.to_owned()),
         references,

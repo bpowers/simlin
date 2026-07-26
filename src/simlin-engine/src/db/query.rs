@@ -4,9 +4,10 @@
 
 //! Demand-driven read queries over the salsa inputs: per-variable parsing
 //! (`parse_source_variable_with_module_context` and its `_impl`), the
-//! project-global cached contexts (`project_units_context`,
-//! `project_datamodel_dims`, `project_dimensions_context`,
-//! `project_converted_dimensions`), the module-ident context
+//! project-global cached contexts (`project_units_context_result` and its
+//! `project_units_context` projection, `project_datamodel_dims`,
+//! `project_dimensions_context`, `project_converted_dimensions`), the
+//! module-ident context
 //! (`module_ident_context_for_model`/`model_module_ident_context`), the
 //! per-variable direct-dependency extraction
 //! (`variable_direct_dependencies` and its `_impl`, plus the
@@ -38,43 +39,79 @@ impl std::fmt::Debug for ParsedVariableResult {
     }
 }
 
+/// The project's units context together with the definition errors that
+/// building it produced.
+///
+/// The errors ride the RESULT rather than a salsa accumulator because a bad
+/// unit declaration is a PROJECT-level fact -- there is one `units` list per
+/// project, belonging to no model. Accumulating it from inside this query's
+/// body meant `collect_all_diagnostics` reported one copy per model (every
+/// model's diagnostic subtree reaches this query), and that after an unrelated
+/// salsa revision bump the accumulator DFS pruned the subtree and the errors
+/// vanished from the collection entirely. `collect_all_diagnostics` now reads
+/// this field and emits each error once. See `db::macro_registry` for the
+/// sibling case and `db/diagnostic_tests.rs` for the regression tests.
+#[derive(Clone, PartialEq, salsa::Update)]
+pub struct UnitsContextResult {
+    pub ctx: crate::units::Context,
+    /// One entry per unit declaration that failed to parse: its name and the
+    /// equation errors it produced.
+    pub definition_errors: Vec<(String, Vec<crate::common::EquationError>)>,
+}
+
 /// Cached units context -- computed once per project, reused across all variables.
 /// Subsumes the per-variable Context::new_with_builtins calls.
 ///
 /// Reads the datamodel `Vec<Unit>` and `SimSpecs` directly off the salsa input
 /// (the inputs now store the datamodel types, so no per-call conversion is
 /// needed).
-///
-/// Unit definition parsing errors are accumulated as diagnostics so they
-/// appear in `collect_all_diagnostics`.
 #[salsa::tracked(returns(ref))]
-pub fn project_units_context(db: &dyn Db, project: SourceProject) -> crate::units::Context {
-    use salsa::Accumulator;
+pub fn project_units_context_result(db: &dyn Db, project: SourceProject) -> UnitsContextResult {
     let dm_units = project.units(db);
     let dm_sim_specs = project.sim_specs(db);
     // Construction is partial: keep the context built from the valid unit
-    // declarations and surface each conflicting/duplicate declaration as a
-    // project-level diagnostic, rather than discarding every unit definition on
-    // the first conflict. An empty context would lose all alias normalization
-    // project-wide (yr/year, person/people, model-defined equivalences) and
-    // re-create a spurious unit-mismatch flood -- the context-layer parallel of
-    // the inference partial-results fix (GH #614).
-    let (ctx, unit_parse_errors) = crate::units::Context::new_with_builtins(dm_units, dm_sim_specs);
-    for (unit_name, eq_errors) in &unit_parse_errors {
-        for eq_err in eq_errors {
-            CompilationDiagnostic(Diagnostic {
-                model: String::new(),
-                variable: Some(unit_name.clone()),
-                error: DiagnosticError::Unit(crate::common::UnitError::DefinitionError(
-                    eq_err.clone(),
-                    None,
-                )),
-                severity: DiagnosticSeverity::Error,
-            })
-            .accumulate(db);
-        }
+    // declarations and report each conflicting/duplicate declaration, rather
+    // than discarding every unit definition on the first conflict. An empty
+    // context would lose all alias normalization project-wide (yr/year,
+    // person/people, model-defined equivalences) and re-create a spurious
+    // unit-mismatch flood -- the context-layer parallel of the inference
+    // partial-results fix (GH #614).
+    let (ctx, definition_errors) = crate::units::Context::new_with_builtins(dm_units, dm_sim_specs);
+    UnitsContextResult {
+        ctx,
+        definition_errors,
     }
-    ctx
+}
+
+/// The project's units context, for the many callers that want the context and
+/// not the definition errors that came with it.
+///
+/// This is a salsa PROJECTION over [`project_units_context_result`], not a plain
+/// accessor, and the distinction is load-bearing. A caller that reads a plain
+/// accessor takes a dependency on the whole `UnitsContextResult`, so it is
+/// invalidated whenever EITHER half changes -- and the two halves move
+/// independently: a unit whose equation fails to parse is left out of `ctx`
+/// entirely, so editing a malformed unit equation (every intermediate state of
+/// typing one) changes `definition_errors` while `ctx` stays byte-identical.
+/// Every variable parse in the project would rebuild on each keystroke.
+///
+/// As a tracked query it re-executes when the result changes but salsa BACKDATES
+/// it when the projected `Context` compares equal, so its readers keep exactly
+/// the dependency they had when the errors rode the salsa accumulator instead.
+/// Pinned by `db::dimension_invalidation_tests::
+/// unit_definition_error_only_change_does_not_invalidate_context_readers`.
+///
+/// **What the projection costs.** `Context::new_with_builtins` still runs
+/// exactly once, in the query above -- the cost is memory, not CPU. Salsa now
+/// RETAINS two `units::Context` copies per project: the one inside
+/// `UnitsContextResult` and the one in this query's memo. Each also costs a
+/// clone in every revision where the units input changes. A `Context` is the
+/// project's unit name/alias/equation maps, so this is small next to the model
+/// stages (see `db::stages`' memory note) and flat in the model count -- but it
+/// is per project and permanent, so a future field on `Context` is paid twice.
+#[salsa::tracked(returns(ref))]
+pub fn project_units_context(db: &dyn Db, project: SourceProject) -> crate::units::Context {
+    project_units_context_result(db, project).ctx.clone()
 }
 
 /// Cached datamodel dimensions -- computed once per project.
@@ -697,8 +734,76 @@ impl ModuleReferenceGraph {
 /// Build the project's explicit module-instance graph (see
 /// [`ModuleReferenceGraph`]). Reads each model's module variables and their
 /// target `model_name`s with flat salsa reads (no recursion). Implicit
-/// (SMOOTH/DELAY/TREND/stdlib) modules can only reference leaf stdlib models, so
-/// they can never close a user cycle and are intentionally omitted.
+/// (SMOOTH/DELAY/TREND/stdlib/MACRO-call) modules are omitted, which keeps this
+/// query structural: it reads variable KINDS and target names, never a parse
+/// result, so it is invalidated by a variable being added, removed or retargeted
+/// and not by an equation being typed. Every production entry point consults it,
+/// so widening it to parse-derived edges would put every variable's parse on
+/// every compile's dependency list.
+///
+/// # Why omitting implicit edges is nonetheless SOUND
+///
+/// This doc once claimed the omission was free because implicit modules "can only
+/// reference leaf stdlib models, so they can never close a user cycle". That was
+/// false for a MACRO call, which expands into an implicit module targeting the
+/// macro's own model -- an ordinary user model. A macro whose body instantiated a
+/// module targeting a model that CALLED that macro closed a cycle this graph did
+/// not see, and `model_module_map` (which does follow implicit edges) then hit
+/// salsa's unrecoverable dependency-graph cycle panic with this gate reporting no
+/// cycle at all.
+///
+/// That shape no longer exists: `MacroRegistry::build`'s Pass 4 rejects a
+/// `Variable::Module` inside a macro-marked model (`MacroContainsModule`). With
+/// it gone, every implicit module edge terminates somewhere that cannot continue
+/// an invisible cycle:
+///
+///   - The edges are synthesized at ONE site,
+///     `builtins_visitor::expand_module_function`, from a
+///     `ModuleFunctionDescriptor`; that type has exactly two producers,
+///     `module_functions::stdlib_descriptor` (target `stdlib⁚{name}`) and
+///     `MacroRegistry::build`'s Pass 1 (target the macro's own model).
+///   - A stdlib model is a SINK -- it instantiates no module, explicit or
+///     implicit. Test-asserted over the SYNCED Stage0s by
+///     `db::stages_tests::omitting_stdlib_models_from_the_lowering_scope_is_inert_today`,
+///     which is the tripwire if a template ever gains one.
+///   - A macro model's three possible outgoing edges are all handled: an explicit
+///     module in its body (Pass 4 rejects it), an implicit macro-to-macro edge
+///     (Pass 3 rejects a cycle among those, and on ANY build failure the registry
+///     the pipeline receives is EMPTY, so no call resolves as a macro and the edge
+///     does not exist -- see `db::macro_registry::project_macro_registry`), or an
+///     implicit stdlib edge (to a sink).
+///
+/// So every remaining cycle lies entirely in explicit edges, which is exactly what
+/// this query records.
+///
+/// **RESIDUAL** (enumerated, not proved): the first bullet assumes builtin
+/// expansion and macro expansion are the ONLY synthesisers of implicit module
+/// vars. That came from reading the code paths -- the single
+/// `expand_module_function` synthesis site and the two descriptor producers --
+/// not from any exhaustiveness check.
+///
+/// Three things RECORD implicit module vars downstream of that one synthesis
+/// site, and only one of them can open a cycle path:
+///
+///   - `model_implicit_var_info` (`is_module` + `model_name`) -- read by BOTH
+///     recursive queries, which recurse on its module entries. This is the live
+///     path, and the one the argument above is about.
+///   - `db::ltm::model_ltm_implicit_var_info` (`LtmImplicitVarMeta`, same two
+///     fields) -- `compute_layout` reads it but takes `meta.size` verbatim
+///     rather than recursing (Section 3b), and `model_module_map` does not read
+///     it at all. Inert for cycle safety TODAY; listed because making it
+///     recursive is a one-line edit that would silently reopen this.
+///   - `db::stages::model_scope_models` -- walks Stage0 `variables`, but is an
+///     iterative worklist, not a recursive tracked query, so a cycle terminates.
+///
+/// A future implicit-var synthesizer that mints a `Variable::Module` with some
+/// other target would be invisible to this gate again, and NO test would go red:
+/// the two tripwires that exist cover the stdlib-sink premise and the
+/// empty-registry premise, not this one. Anyone adding an implicit-var
+/// synthesizer, or making the LTM recorder recursive, has to check it by hand.
+///
+/// `db::stages::model_scope_models` walks the same edges plus the implicit ones
+/// and is iterative, so it is unaffected either way.
 #[salsa::tracked(returns(ref))]
 pub fn project_module_graph(db: &dyn Db, project: SourceProject) -> ModuleReferenceGraph {
     let models = project.models(db);

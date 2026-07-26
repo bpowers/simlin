@@ -34,6 +34,7 @@ use std::collections::BTreeSet;
 // * `assemble`   -- module/simulation assembly + flattened-offset map.
 // * `dep_graph`  -- the dependency-graph cycle gate + its result types.
 // * `analysis`   -- causal-graph analysis tracked functions.
+// * `stages`     -- the two cached model-compilation stages (Stage0/Stage1).
 // * `ltm` / `ltm_ir` / `macro_registry` / `units` -- LTM (a `ltm/` directory:
 //   mod/parse/compile/loops/link_scores), the reference-site IR, the macro
 //   registry, and the unit-check pass.
@@ -48,6 +49,16 @@ pub(crate) use invariance::model_flows_invariant;
 // (`model_ltm_reference_sites`) it compares the Expr0 partial builder against.
 pub(crate) mod ltm_ir;
 mod macro_registry;
+mod stages;
+pub(crate) use stages::{
+    model_scope_models, model_scope_stage0, model_stage0, model_stage1, source_model_is_stdlib,
+};
+// Test-only: the execution counters for the two stage queries and the unit-check
+// pass, so `stages_tests` can prove each model's stages are BUILT at most once
+// per revision (GH #966), and that an unrelated model's edit re-executes none of
+// the three -- claims pointer equality of a `returns(ref)` memo cannot support.
+#[cfg(test)]
+pub(crate) use stages::{QueryExecutions, query_executions, reset_query_executions};
 mod units;
 mod var_fragment;
 
@@ -68,12 +79,12 @@ pub use input::{
 mod query;
 pub(crate) use query::canonical_module_input_set;
 pub use query::{
-    ImplicitVarMeta, ModuleReferenceGraph, ParsedVariableResult, VariableDeps,
+    ImplicitVarMeta, ModuleReferenceGraph, ParsedVariableResult, UnitsContextResult, VariableDeps,
     model_implicit_var_info, model_module_ident_context, model_module_map,
     parse_source_variable_with_module_context, project_converted_dimensions,
     project_datamodel_dims, project_dimensions_context, project_module_graph,
-    project_units_context, variable_dimensions, variable_direct_dependencies,
-    variable_relevant_dimensions, variable_size,
+    project_units_context, project_units_context_result, variable_dimensions,
+    variable_direct_dependencies, variable_relevant_dimensions, variable_size,
 };
 
 mod sync;
@@ -1162,8 +1173,9 @@ pub fn compile_project_incremental(
 ) -> crate::Result<crate::vm::CompiledSimulation> {
     // An invalid macro set (AC5.2 cycle / AC5.3 duplicate / collision) fails
     // the project-level compile before per-model processing, uniformly as
-    // `NotSimulatable` (the build error's own typed code rides the
-    // diagnostic `project_macro_registry` accumulated -- see that module).
+    // `NotSimulatable`. The build error's own typed code reaches the diagnostic
+    // surface separately: `collect_all_diagnostics` reads this same memoized
+    // `build_error` and emits one project-level `Diagnostic` from it.
     if let Some((_code, msg)) =
         &crate::db::macro_registry::project_macro_registry(db, project).build_error
     {
@@ -1377,6 +1389,8 @@ mod module_cycle_tests;
 mod module_wiring_tests;
 #[cfg(test)]
 mod prev_init_tests;
+#[cfg(test)]
+mod stages_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

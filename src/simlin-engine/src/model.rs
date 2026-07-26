@@ -21,7 +21,7 @@ use {
 
 #[cfg(test)]
 use {
-    crate::db::{self, SourceModel, SourceProject},
+    crate::db,
     crate::units::Context,
     crate::variable::{parse_var, parse_var_with_module_context},
 };
@@ -800,14 +800,27 @@ where
                     inputs.iter().map(|input| input.dst.clone()).collect();
 
                 let key = mapper(model);
+                let first_sighting = !modules.contains_key(&key);
 
-                if !modules.contains_key(&key) {
+                // Record this instantiation BEFORE descending into the model.
+                // The `first_sighting` test is what stops the walk revisiting a
+                // model, so a model that is still being walked has to count as
+                // seen: otherwise two models that instantiate each other are
+                // each unrecorded when the other looks, and the recursion
+                // diverges into a stack overflow -- a process abort, not a
+                // catchable panic. (A cycle THROUGH the main model happened to
+                // terminate already, because `enumerate_modules` records main
+                // up front.) Recording early cannot lose an instantiation: this
+                // line runs at every module site regardless, and the values are
+                // a set of input sets, so the order they arrive in is not
+                // observable.
+                modules.entry(key).or_default().insert(inputs);
+
+                if first_sighting {
                     // first time we are seeing the model for this module.
                     // make sure all _its_ module instantiations are recorded
                     enumerate_modules_inner(models, model_name.as_str(), mapper, modules)?;
                 }
-
-                modules.entry(key).or_default().insert(inputs);
             } else {
                 return model_err!(BadModelName, model_name.as_str().to_string());
             }
@@ -870,7 +883,7 @@ pub(crate) fn collect_module_idents(
 ///
 /// This intentionally re-parses the equation text rather than reusing the
 /// already-parsed AST. It runs during `collect_module_idents` (called from
-/// `ModelStage0::new`/`new_cached` and the salsa `module_ident_context`
+/// `ModelStage0::new_in_project` and the salsa `module_ident_context`
 /// query), before the full per-variable parse in `parse_var`. The re-parse
 /// is cheap (single equation, top-level only) and avoids threading the
 /// parsed AST through an intermediate data structure just for this early
@@ -914,9 +927,46 @@ pub(crate) fn equation_is_module_call(
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
 impl ModelStage0 {
+    /// Stage a model that stands alone, resolving module-function calls against
+    /// its OWN macro definitions only.
+    ///
+    /// Correct for the many single-model test fixtures, and for a macro body
+    /// staged in isolation (its own `macro_spec` is in the registry, so a
+    /// self-call resolves). NOT correct for a model that CALLS a macro defined
+    /// in a sibling model -- use [`ModelStage0::new_in_project`] there.
     pub fn new(
+        x_model: &datamodel::Model,
+        dimensions: &[Dimension],
+        units_ctx: &Context,
+        implicit: bool,
+    ) -> Self {
+        Self::new_in_project(
+            std::slice::from_ref(x_model),
+            x_model,
+            dimensions,
+            units_ctx,
+            implicit,
+        )
+    }
+
+    /// The datamodel-driven Stage0 constructor: no salsa database, everything
+    /// derived from `x_model` plus the project's macro definitions.
+    ///
+    /// This is the independent twin of the salsa-native
+    /// `db::stages::model_stage0` -- the two share `parse_var_with_module_context`
+    /// but derive the module-ident set, the macro registry and the
+    /// duplicate-ident errors along completely different routes -- which is what
+    /// makes it a real oracle for that query rather than a restatement of it.
+    ///
+    /// `project_models` is the whole project's model list, only so that the
+    /// `MacroRegistry` matches the project-wide one `db::macro_registry`'s query
+    /// builds. Passing just `x_model` (what the [`ModelStage0::new`] wrapper
+    /// does) leaves a caller of a sibling-defined macro unclassified and its
+    /// call unexpanded, which silently makes the oracle disagree with the query
+    /// for reasons that have nothing to do with the code under test.
+    pub fn new_in_project(
+        project_models: &[datamodel::Model],
         x_model: &datamodel::Model,
         dimensions: &[Dimension],
         units_ctx: &Context,
@@ -938,12 +988,9 @@ impl ModelStage0 {
         // persistent slot in prev_values. PREVIOUS(module_input) must first
         // capture the current scalar into a temp helper so LoadPrev reads
         // that helper's slot on the next step.
-        // Test helper: a single model in isolation, so its own macro_spec
-        // (if any) is the registry. A build error here is a test-fixture
-        // bug -- surface it loudly.
-        let macro_registry =
-            crate::module_functions::MacroRegistry::build(std::slice::from_ref(x_model))
-                .expect("test fixture macro set must be valid");
+        // A build error here is a test-fixture bug -- surface it loudly.
+        let macro_registry = crate::module_functions::MacroRegistry::build(project_models)
+            .expect("test fixture macro set must be valid");
         let module_idents: HashSet<Ident<Canonical>> = if implicit {
             x_model
                 .variables
@@ -1007,115 +1054,6 @@ impl ModelStage0 {
             // idents are scanned (mirroring the salsa gate's
             // `declared_variable_idents`, GH #885) -- synthesized implicit
             // vars are unique by construction.
-            errors: crate::common::duplicate_variable_errors(
-                &x_model.name,
-                x_model.variables.iter().map(|v| v.get_ident()),
-            ),
-            implicit,
-            is_macro: x_model.macro_spec.is_some(),
-            macro_params: macro_param_idents(x_model.macro_spec.as_ref()),
-        }
-    }
-
-    /// Construct a ModelStage0 using salsa-cached per-variable parsing.
-    /// Each variable's parse result is individually memoized — editing one
-    /// variable's equation only re-parses that variable.
-    pub fn new_cached(
-        salsa_db: &dyn db::Db,
-        source_model: SourceModel,
-        source_project: SourceProject,
-        x_model: &datamodel::Model,
-        dimensions: &[Dimension],
-        units_ctx: &Context,
-        implicit: bool,
-    ) -> Self {
-        // For implicit (stdlib) models, bypass the salsa cache and use
-        // the direct path with module_idents awareness. This ensures
-        // PREVIOUS calls inside submodules rewrite through scalar helper
-        // auxes instead of compiling LoadPrev/LoadModuleInput directly
-        // against transient module-input slots. The performance impact is
-        // negligible since stdlib models have very few variables.
-        if implicit {
-            return Self::new(x_model, dimensions, units_ctx, implicit);
-        }
-
-        let source_vars = source_model.variables(salsa_db);
-
-        let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-        let mut variable_list: Vec<VariableStage0> = Vec::new();
-
-        // Collect module identifiers for the PREVIOUS/INIT helper rewrite.
-        // For user models, only explicit Module variables and module-call
-        // (stdlib or macro) Aux/Flow variables are multi-slot/module-backed.
-        let macro_registry =
-            crate::module_functions::MacroRegistry::build(std::slice::from_ref(x_model))
-                .expect("test fixture macro set must be valid");
-        let module_idents: HashSet<Ident<Canonical>> =
-            collect_module_idents(&x_model.variables, &macro_registry);
-        let mut module_ident_list: Vec<String> = module_idents
-            .iter()
-            .map(|ident| ident.as_str().to_owned())
-            .collect();
-        module_ident_list.sort();
-        let module_ident_context = db::ModuleIdentContext::new(salsa_db, module_ident_list);
-
-        // #554: macro-body fallback (non-salsa-synced vars) also resolves a
-        // renamed same-named `init`/`previous` to the intrinsic.
-        let enclosing_model: Option<&str> =
-            x_model.macro_spec.as_ref().map(|_| x_model.name.as_str());
-        for dm_var in &x_model.variables {
-            let canonical_name = canonicalize(dm_var.get_ident());
-            if let Some(source_var) = source_vars.get(canonical_name.as_ref()) {
-                let result = db::parse_source_variable_with_module_context(
-                    salsa_db,
-                    *source_var,
-                    source_project,
-                    module_ident_context,
-                );
-                variable_list.push(result.variable.clone());
-                implicit_vars.extend(result.implicit_vars.iter().cloned());
-            } else {
-                variable_list.push(parse_var_with_module_context(
-                    dimensions,
-                    dm_var,
-                    &mut implicit_vars,
-                    units_ctx,
-                    |mi| Ok(Some(mi.clone())),
-                    Some(&module_idents),
-                    None,
-                    Some(&macro_registry),
-                    enclosing_model,
-                ));
-            }
-        }
-
-        // Implicit vars (from builtin module expansion) are always parsed
-        // directly since they don't have SourceVariable entries.
-        {
-            let mut dummy_implicit_vars: Vec<datamodel::Variable> = Vec::new();
-            variable_list.extend(implicit_vars.into_iter().map(|x_var| {
-                parse_var(
-                    dimensions,
-                    &x_var,
-                    &mut dummy_implicit_vars,
-                    units_ctx,
-                    |mi| Ok(Some(mi.clone())),
-                )
-            }));
-            assert_eq!(0, dummy_implicit_vars.len());
-        }
-
-        let variables: HashMap<Ident<Canonical>, _> = variable_list
-            .into_iter()
-            .map(|v| (Ident::new(v.ident()), v))
-            .collect();
-
-        Self {
-            ident: Ident::new(&x_model.name),
-            display_name: x_model.name.clone(),
-            variables,
-            // Same duplicate-canonical-ident guard as `new` (GH #891), so the
-            // direct and cached constructors stay behaviorally identical.
             errors: crate::common::duplicate_variable_errors(
                 &x_model.name,
                 x_model.variables.iter().map(|v| v.get_ident()),
@@ -1250,7 +1188,17 @@ impl ModelStage1 {
                             let mut runlist: HashSet<&Ident<Canonical>> =
                                 needed.iter().flat_map(|id| &deps[*id]).collect();
                             runlist.extend(needed);
-                            let runlist = runlist.into_iter().collect();
+                            // Sort before the topo sort: the set above is a
+                            // `HashSet`, and `topo_sort` breaks ties by visit
+                            // order, so feeding it the raw iteration order made
+                            // the Initials runlist -- and therefore any initial
+                            // value depending on an unordered pair -- vary run
+                            // to run. Same fix, same reason, as GH #595 in
+                            // `db::dep_graph::model_dependency_graph_impl`; the
+                            // Flows/Stocks arms are already deterministic
+                            // because they filter the pre-sorted `var_names`.
+                            let mut runlist: Vec<&Ident<Canonical>> = runlist.into_iter().collect();
+                            runlist.sort_unstable();
                             topo_sort(runlist, deps)
                         }
                         StepPart::Flows => topo_sort(runlist, deps),
@@ -1657,8 +1605,22 @@ fn test_errors() {
     );
 }
 
+/// `PREVIOUS(module_var)` must rewrite through a synthesized scalar helper aux
+/// on the salsa-cached parse path exactly as it does on the direct one.
+///
+/// A module occupies several flattened slots, so a `LoadPrev` at its base
+/// offset would read the wrong sub-variable; the parser therefore captures the
+/// current value into a helper first. That rewrite is driven by the
+/// module-ident set, which the two paths derive along different routes
+/// (`collect_module_idents` over the `datamodel::Model` here, an interned
+/// `ModuleIdentContext` off the salsa inputs there) -- so the agreement is a
+/// real cross-check.
+///
+/// Previously written against the test-only `ModelStage0::new_cached` twin;
+/// now against `db::stages::model_stage0`, which IS the crate's salsa-cached
+/// Stage0 constructor.
 #[test]
-fn test_new_cached_preserves_previous_helper_rewrite() {
+fn test_cached_stage0_preserves_previous_helper_rewrite() {
     let units_ctx = Context::new(&[], &Default::default()).0;
     let main_model = x_model(
         "main",
@@ -1686,16 +1648,7 @@ fn test_new_cached_preserves_previous_helper_rewrite() {
 
     let db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-    let source_model = sync.models["main"].source;
-    let cached = ModelStage0::new_cached(
-        &db,
-        source_model,
-        sync.project,
-        &main_model,
-        &[],
-        &units_ctx,
-        false,
-    );
+    let cached = db::model_stage0(&db, sync.models["main"].source, sync.project);
 
     let has_previous_helper = |model: &ModelStage0| {
         model
@@ -1710,18 +1663,25 @@ fn test_new_cached_preserves_previous_helper_rewrite() {
     );
     assert_eq!(
         has_previous_helper(&direct),
-        has_previous_helper(&cached),
+        has_previous_helper(cached),
         "cached parse should preserve PREVIOUS(module_var) helper rewriting"
     );
 }
 
-/// GH #891: the monolithic `ModelStage0` constructors collapse variables into
-/// a canonical-keyed map (last-in-declaration-order wins), so two variables
-/// whose names canonicalize identically would silently produce a DIFFERENT
-/// model than the one written. Both constructors must record a
-/// `DuplicateVariable` model-level error naming the colliding spellings, and
-/// that error must survive `set_dependencies` (which recomputes model-level
-/// errors).
+/// GH #891: every `ModelStage0` constructor collapses variables into a
+/// canonical-keyed map (last-in-declaration-order wins), so two variables whose
+/// names canonicalize identically would silently produce a DIFFERENT model than
+/// the one written. Both the datamodel-driven constructor and the cached query
+/// must record a `DuplicateVariable` model-level error naming the colliding
+/// spellings, and that error must survive `set_dependencies` (which recomputes
+/// model-level errors).
+///
+/// The two derive the error from genuinely different inputs -- the raw
+/// `datamodel::Variable` list here, the memoized `db::model_duplicate_variables`
+/// groups off `SourceModel::declared_variable_idents` there -- so comparing them
+/// is a cross-check, not a restatement. (Before this commit the salsa side of
+/// this test was `ModelStage0::new_cached`, which computed the errors with the
+/// SAME raw-list helper as the direct constructor and so compared nothing.)
 #[test]
 fn test_stage0_records_duplicate_variable_error() {
     let units_ctx = Context::new(&[], &Default::default()).0;
@@ -1743,7 +1703,7 @@ fn test_stage0_records_duplicate_variable_error() {
         "message should name both colliding spellings, got: {msg}"
     );
 
-    // The salsa-cached constructor must agree with the direct one.
+    // The salsa-cached query must agree with the direct constructor.
     let project_datamodel = datamodel::Project {
         name: "dup".to_string(),
         sim_specs: datamodel::SimSpecs::default(),
@@ -1755,15 +1715,7 @@ fn test_stage0_records_duplicate_variable_error() {
     };
     let db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-    let cached = ModelStage0::new_cached(
-        &db,
-        sync.models["main"].source,
-        sync.project,
-        &main_model,
-        &[],
-        &units_ctx,
-        false,
-    );
+    let cached = db::model_stage0(&db, sync.models["main"].source, sync.project);
     assert_eq!(direct.errors, cached.errors);
 
     // `set_dependencies` rebuilds the model-level error list; the Stage0

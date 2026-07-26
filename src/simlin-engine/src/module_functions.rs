@@ -374,7 +374,15 @@ impl MacroRegistry {
     ///   model's canonical name (`DuplicateMacroName`, message names the
     ///   collision);
     /// - **macros.AC5.2** a directly- or mutually-recursive macro
-    ///   (`CircularDependency`, message names the cycle path).
+    ///   (`CircularDependency`, message names the cycle path);
+    /// - **macros.AC5.7** a macro body that instantiates a module
+    ///   (`MacroContainsModule`, message names the macro and its module
+    ///   variables). See Pass 4 for why this is a CYCLE-SAFETY rule.
+    ///
+    /// **On failure the returned registry is EMPTY, and that is load-bearing for
+    /// cycle safety** -- see the note on the `Err` return path in
+    /// `db::macro_registry::project_macro_registry`, which is where the empty
+    /// registry is actually materialized for the pipeline.
     pub(crate) fn build(models: &[datamodel::Model]) -> Result<MacroRegistry, Error> {
         let mut macros: HashMap<String, ModuleFunctionDescriptor> = HashMap::new();
 
@@ -433,6 +441,166 @@ impl MacroRegistry {
         // invokes) and run cycle detection over it.
         let registry = MacroRegistry { macros };
         registry.check_for_recursion(models)?;
+
+        // Pass 4: reject a macro body that instantiates a module. This is a
+        // CYCLE-SAFETY rule, not a taste rule, and it is NOT redundant with
+        // Pass 3.
+        //
+        // `db::project_module_graph` is the gate every production compile /
+        // diagnostic / analysis entry point consults so that a module cycle
+        // surfaces as a clean `CircularDependency` instead of driving the
+        // recursive `model_module_map` / `compute_layout` queries into salsa's
+        // dependency-graph cycle panic (an abort under `panic = "abort"`). That
+        // graph records only EXPLICIT `Variable::Module` edges, because it reads
+        // variable KINDS off the salsa inputs and must never depend on a parse
+        // result. A macro CALL is an implicit module edge, so the cycle
+        //
+        //     mac ->(explicit module in its body)-> u ->(macro call)-> mac
+        //
+        // has one edge the graph cannot see. `cycle_error_from` reports no cycle
+        // and every entry point then aborts.
+        //
+        // Pass 3 cannot catch it: the macro set here is VALID, and has to be for
+        // the bug to fire at all. `check_for_recursion` collects macro-to-macro
+        // edges only; this cycle runs through `u`, a NON-macro model, so Pass 3's
+        // graph cannot express the edge.
+        //
+        // Rejecting the shape (rather than widening the graph to parse-derived
+        // edges, which would put every variable's parse on every compile's
+        // dependency list) CLOSES the hole rather than narrowing it:
+        //
+        //   - The invisible edges are exactly the implicit module edges. They are
+        //     synthesized at one site -- `builtins_visitor::expand_module_function`
+        //     -- from a `ModuleFunctionDescriptor`, which has exactly two
+        //     producers: `stdlib_descriptor` (target `stdlib⁚{name}`) and Pass 1
+        //     above (target the macro's own model).
+        //   - A stdlib model is a SINK: it holds no module variable, explicit or
+        //     implicit. Asserted over synced Stage0s by
+        //     `db::stages_tests::omitting_stdlib_models_from_the_lowering_scope_is_inert_today`.
+        //   - So a macro model's outgoing edges are three, and all three are
+        //     handled: an explicit module in its body (this pass), an implicit
+        //     macro-to-macro edge (Pass 3 rejects a cycle among them, and on ANY
+        //     build failure the registry the pipeline gets is empty, so no call
+        //     is classified module-backed and the edge does not exist), or an
+        //     implicit stdlib edge (to a sink).
+        //   - Therefore every remaining cycle lies entirely in explicit edges,
+        //     which is exactly what `project_module_graph` records.
+        //
+        // RESIDUAL: that first step -- builtin expansion and macro expansion
+        // being the only synthesisers of implicit module vars -- was ENUMERATED
+        // from the code paths above, not proved exhaustively. Nothing
+        // structurally prevents a future implicit-var synthesizer from minting a
+        // `Variable::Module` with a different target, and such a target would be
+        // invisible to the gate again. There are THREE recorders of implicit
+        // module vars today, all fed by the same `expand_module_function`:
+        // `db::query::model_implicit_var_info` and
+        // `db::ltm::model_ltm_implicit_var_info` (both carrying `is_module` +
+        // `model_name`), plus `db::stages::model_scope_models`, which walks the
+        // Stage0 `variables`. Only the first opens a cycle path: `compute_layout`
+        // recurses on `model_implicit_var_info`'s module entries (Section 2) but
+        // takes `meta.size` verbatim for the LTM ones (Section 3b), and
+        // `model_module_map` does not read the LTM map at all. So the LTM
+        // recorder is inert for cycle safety -- but it is a place a future edit
+        // could make recursive, which is why it is named here rather than left
+        // out of the enumeration.
+        //
+        // The rejection is deliberately BROADER than the cycle, and the cost is
+        // REAL, not zero. Measured against the pre-pass code, an explicit module
+        // inside a macro targeting a model that does not call back is acyclic and
+        // works end to end: it compiles, analyses, diagnoses cleanly, and
+        // SIMULATES correctly. This pass rejects it anyway. Two things make that
+        // shape reachable rather than hypothetical:
+        //
+        //   - The XMILE reader PASSES IT THROUGH (it does not synthesize it):
+        //     `xmile::Macro.variables` reuses the `<model>` content model, and
+        //     `macro_to_datamodel` filters only `Var::Unhandled`, so a `<module>`
+        //     written inside a `<macro>` becomes a `Variable::Module` in a
+        //     macro-marked model. Protobuf/JSON round-trip it the same way, so a
+        //     project already stored with this shape is affected too.
+        //   - Simlin's OWN XMILE writer round-trips it.
+        //
+        // The MDL importer cannot produce it, but not for the reason one might
+        // assume: `mdl/convert/multi_output.rs` DOES mint a `Variable::Module`
+        // (for a multi-output `:`-list invocation). It is unreachable from a macro
+        // body only because the scoped body sub-context hard-codes an empty
+        // materialization -- see `mdl/convert/macros.rs`'s `build_model(...,
+        // &Default::default())`.
+        //
+        // We reject it regardless, for two reasons on record. (1) Narrowing to
+        // only-when-cyclic needs a second reachability analysis here that must
+        // agree with `project_module_graph`'s, and the back edge it would have to
+        // see is the macro CALL -- discoverable only by parsing every model's
+        // equations, which is exactly the dependency-list cost that widening the
+        // graph was rejected for, wearing a different hat. Two reachability
+        // implementations disagreeing is the failure mode commit 61d467d2
+        // documents for the two diagnostic collectors. (2) A macro is a TEMPLATE;
+        // instantiating a sub-model inside one is dubious on its own terms, so
+        // this reads as a language rule with a cycle-safety motivation rather than
+        // as a workaround. A loud rejection naming the remedy beats an abort.
+        //
+        // How many real models this affects is JUDGEMENT, not measurement: XMILE
+        // §4.8 makes `<module>` syntactically legal inside `<macro>` because the
+        // content model is shared, but Stella emits no `<macro>` at all and xmutil
+        // emits them only from Vensim `:MACRO:` blocks, which cannot contain
+        // modules. So: hand-written XMILE or a third-party writer. Small, but not
+        // empty -- and nobody should lean on that estimate the way they can lean
+        // on the MDL argument above.
+        //
+        // NOT affected, and the first thing a reader worries this breaks: a module
+        // TARGETING a macro model. That is how a multi-output macro invocation
+        // works at all -- the `Variable::Module` lives in the CALLING model. This
+        // pass tests `macro_spec.is_some()` on the model that HOLDS the variable,
+        // so those are untouched (`ac5_7_module_in_a_non_macro_model_is_not_rejected`).
+        //
+        // TWO CONSEQUENCES OF REJECTING, both intended, both surprising in
+        // isolation:
+        //
+        //   - The reported macro name is CANONICAL (`my_macro` for a macro the
+        //     file spells `My Macro`), because the salsa reconstruction path
+        //     (`db::macro_registry::reconstruct_project_models`) has only the
+        //     canonical name available. A modeller grepping their source for the
+        //     reported name will not find it verbatim.
+        //   - A rejected macro ALSO produces one `UnknownBuiltin` per call site,
+        //     naming a real, correctly-declared macro as an unknown builtin. That
+        //     is the pre-existing behaviour for ANY invalid macro set (a failed
+        //     build yields an empty registry, so no call resolves as a macro), and
+        //     it must NOT be suppressed: it is the load-bearing observable that no
+        //     implicit module edge was synthesized, which is what keeps the two
+        //     entry points that run their passes anyway from walking the cycle.
+        //     Pinned by `db::module_cycle_tests::
+        //     rejecting_a_macro_empties_the_registry_so_no_implicit_edge_is_synthesized`.
+        for model in models {
+            if model.macro_spec.is_none() {
+                continue;
+            }
+            // Canonicalized and sorted so the message cannot depend on
+            // body-variable iteration order: the salsa reconstruction path
+            // (`db::macro_registry::reconstruct_project_models`) walks a
+            // `HashMap<String, SourceVariable>`.
+            let mut module_idents: Vec<String> = model
+                .variables
+                .iter()
+                .filter_map(|var| match var {
+                    datamodel::Variable::Module(m) => Some(canonicalize(&m.ident).into_owned()),
+                    _ => None,
+                })
+                .collect();
+            if module_idents.is_empty() {
+                continue;
+            }
+            module_idents.sort_unstable();
+            return model_err!(
+                MacroContainsModule,
+                format!(
+                    "macro '{}' instantiates a module ({}); a macro body cannot \
+                     contain a module -- move the sub-model instantiation to a \
+                     caller of the macro",
+                    canonicalize(&model.name),
+                    module_idents.join(", ")
+                )
+            );
+        }
+
         Ok(registry)
     }
 
@@ -920,6 +1088,121 @@ mod tests {
             details.contains("main"),
             "the collision error must name the collision: {:?}",
             details
+        );
+    }
+
+    // --- macros.AC5.7: a macro body may not instantiate a module -----------
+
+    /// A `Variable::Module` body variable, for the AC5.7 fixtures.
+    fn module_var(ident: &str, target_model: &str) -> Variable {
+        Variable::Module(datamodel::Module {
+            ident: ident.to_string(),
+            model_name: target_model.to_string(),
+            documentation: String::new(),
+            units: None,
+            references: vec![],
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        })
+    }
+
+    /// A macro-marked model whose body holds a module is rejected, naming both
+    /// the macro and the offending module variable.
+    #[test]
+    fn ac5_7_macro_holding_a_module_is_a_build_error_naming_both() {
+        let mut mac = macro_model("mac", &["p1"], "p1 * 2");
+        mac.variables.push(module_var("u_hop", "u"));
+        let models = vec![plain_model("u"), mac];
+
+        let err = MacroRegistry::build(&models)
+            .expect_err("a macro holding a module must fail registry build");
+        assert_eq!(err.code, crate::common::ErrorCode::MacroContainsModule);
+        let details = err.get_details().unwrap_or_default();
+        assert!(
+            details.contains("mac") && details.contains("u_hop"),
+            "the rejection must name the macro and its module variable: {details:?}",
+        );
+    }
+
+    /// A module in an ORDINARY model is untouched -- the rule is scoped to
+    /// macro-marked models. Without this the pass could quietly become a
+    /// project-wide ban on sub-models.
+    #[test]
+    fn ac5_7_module_in_a_non_macro_model_is_not_rejected() {
+        let mut host = plain_model("host");
+        host.variables.push(module_var("sub", "u"));
+        let models = vec![
+            host,
+            plain_model("u"),
+            macro_model("mac", &["p1"], "p1 * 2"),
+        ];
+        MacroRegistry::build(&models)
+            .expect("a module in a non-macro model must not trip the macro rule");
+    }
+
+    /// The message is independent of body-variable iteration order. The salsa
+    /// reconstruction path (`db::macro_registry::reconstruct_project_models`)
+    /// walks a `HashMap<String, SourceVariable>`, so a macro with two module
+    /// variables would otherwise report them in an arbitrary order and the
+    /// message would differ run to run -- the same hazard `find_cycle`'s sorted
+    /// roots / `BTreeSet` successors exist for.
+    #[test]
+    fn ac5_7_two_modules_in_one_macro_report_deterministically() {
+        let build_message = |idents: [&str; 2]| {
+            let mut mac = macro_model("mac", &["p1"], "p1 * 2");
+            for ident in idents {
+                mac.variables.push(module_var(ident, "u"));
+            }
+            MacroRegistry::build(&[plain_model("u"), mac])
+                .expect_err("a macro holding modules must fail")
+                .get_details()
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            build_message(["zeta_hop", "alpha_hop"]),
+            build_message(["alpha_hop", "zeta_hop"]),
+            "the rejection message must not depend on body-variable order",
+        );
+        assert!(
+            build_message(["zeta_hop", "alpha_hop"]).contains("alpha_hop, zeta_hop"),
+            "both offending modules must be listed, sorted",
+        );
+    }
+
+    /// Pass 4 runs LAST -- after ALL THREE pre-existing passes -- so adding it
+    /// shifts no existing error message or ordering, and every fixture that
+    /// asserted an AC5.2/AC5.3 code keeps getting it. Cycle safety does not
+    /// depend on which pass fires (any failure empties the registry); the
+    /// ordering is purely about not perturbing the pre-existing surface.
+    ///
+    /// Both halves are needed. A fixture that is merely duplicated pins the
+    /// ordering against Passes 1-2 only: moving Pass 4 to sit between Pass 2 and
+    /// Pass 3 would leave it green, which is how a first version of this test
+    /// gave a mutation probe a false pass.
+    #[test]
+    fn ac5_7_pass_runs_after_the_pre_existing_passes() {
+        // vs Passes 1-2 (duplicate macro name).
+        let mut dup = macro_model("mac", &["p1"], "p1 * 2");
+        dup.variables.push(module_var("u_hop", "u"));
+        let err = MacroRegistry::build(&[plain_model("u"), dup.clone(), dup])
+            .expect_err("a duplicate macro must fail");
+        assert_eq!(
+            err.code,
+            crate::common::ErrorCode::DuplicateMacroName,
+            "the pre-existing duplicate-name pass must still win",
+        );
+
+        // vs Pass 3 (macro recursion). `mac` both self-recurses and holds a
+        // module, so only the pass ORDER decides which code is reported.
+        let mut recursive = macro_model("mac", &["p1"], "mac(p1) + 1");
+        recursive.variables.push(module_var("u_hop", "u"));
+        let err = MacroRegistry::build(&[plain_model("u"), recursive])
+            .expect_err("a self-recursive macro must fail");
+        assert_eq!(
+            err.code,
+            crate::common::ErrorCode::CircularDependency,
+            "the pre-existing recursion pass must still win",
         );
     }
 

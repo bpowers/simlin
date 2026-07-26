@@ -101,7 +101,7 @@ Ignore suggestions that:
 - Would add unnecessary complexity
 - The reviewer convinced itself weren't actually problems
 
-**Deferred feedback**: Only defer feedback that is genuinely unrelated to this PR's changes -- pre-existing issues in untouched code, future feature requests, or theoretical concerns about code paths this PR does not introduce or modify. For each deferred item, spawn the `track-issue` agent (via the Task tool with `subagent_type: "track-issue"`) with a detailed description.
+**Deferred feedback**: The default is to FIX what a review surfaces, including things the review found by accident -- see "Discovered Issues" in the root `CLAUDE.md`. Defer only feedback that is genuinely unrelated to this PR's changes AND too large to fold into it: pre-existing issues in untouched code, future feature requests, or theoretical concerns about code paths this PR does not introduce or modify. Deferring is an explicit call, not a default: say what you are deferring and why. For each deferred item, spawn the `track-issue` agent (via the Task tool with `subagent_type: "track-issue"`) with a detailed description.
 
 **CRITICAL**: P0/P1/P2 feedback about code introduced or modified by THIS PR must NEVER be deferred. If a reviewer flags a correctness, data-loss, or behavioral bug in code that this branch touches, fix it in this review cycle. Deferring P1 feedback on your own changes is not acceptable -- it means shipping a known bug. When in doubt about whether feedback is "in scope", err on the side of fixing it.
 

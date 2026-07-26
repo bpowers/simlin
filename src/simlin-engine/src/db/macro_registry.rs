@@ -18,18 +18,19 @@
 //! plus a build-error message).
 //!
 //! Registry-build *validation* (macros.AC5.2 recursion cycle, macros.AC5.3
-//! duplicate macro name / macro-model name collision) cannot be re-derived
-//! from `SourceProject.models`: that map is keyed by canonical model name,
-//! so two same-named macros -- or a macro colliding with a model -- collapse
-//! into one entry and become indistinguishable post-sync. The query instead
-//! derives the build error on demand from two salsa inputs: the ordered,
-//! pre-dedup `SourceProject::macro_declarations` list (canonical name +
-//! `macro_spec`, one entry per project model in declaration order) supplies
-//! the duplicate/collision data Passes 1-2 need, and the macro-marked
-//! models' body equations -- read from `models` -- drive Pass 3's recursion
-//! check. It surfaces the result as a project-level diagnostic carrying
-//! `MacroRegistry::build`'s own `ErrorCode`, and returns it so
-//! `compile_project_incremental` can fail with a clear message.
+//! duplicate macro name / macro-model name collision, macros.AC5.7 a module
+//! inside a macro body) cannot be re-derived from `SourceProject.models`: that
+//! map is keyed by canonical model name, so two same-named macros -- or a macro
+//! colliding with a model -- collapse into one entry and become
+//! indistinguishable post-sync. The query instead derives the build error on
+//! demand from two salsa inputs: the ordered, pre-dedup
+//! `SourceProject::macro_declarations` list (canonical name + `macro_spec`, one
+//! entry per project model in declaration order) supplies the duplicate/collision
+//! data Passes 1-2 need, and the macro-marked models' bodies -- read from
+//! `models` -- drive Pass 3's recursion check (equations) and Pass 4's
+//! module-in-a-macro check (variable kinds). It surfaces the result as a
+//! project-level diagnostic carrying `MacroRegistry::build`'s own `ErrorCode`,
+//! and returns it so `compile_project_incremental` can fail with a clear message.
 //!
 //! This is a submodule of `db` (a child of `db.rs`, like `ltm_ir`) kept in
 //! its own file purely to keep `db.rs` under the per-file line cap
@@ -38,13 +39,8 @@
 
 use std::collections::HashMap;
 
-use salsa::Accumulator;
-
 use crate::datamodel;
-use crate::db::{
-    CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceProject,
-    SourceVariable, datamodel_variable_from_source,
-};
+use crate::db::{Db, SourceProject, SourceVariable, datamodel_variable_from_source};
 
 /// The result of building the per-project macro registry: the (possibly
 /// empty) resolution registry plus the build error, if any.
@@ -61,10 +57,12 @@ use crate::db::{
 pub(crate) struct MacroRegistryResult {
     pub registry: crate::module_functions::MacroRegistry,
     /// `Some((code, message))` when `MacroRegistry::build` rejected the macro
-    /// set (duplicate name, macro/model collision, recursion cycle). `code`
-    /// is `MacroRegistry::build`'s own typed `ErrorCode` -- carried through
-    /// rather than re-derived from the message prose -- so the diagnostic is
-    /// tagged with the authoritative code. The registry is then empty.
+    /// set (duplicate name, macro/model collision, recursion cycle, a module
+    /// inside a macro body). `code` is `MacroRegistry::build`'s own typed
+    /// `ErrorCode` -- carried through rather than re-derived from the message
+    /// prose -- so the diagnostic is tagged with the authoritative code. The
+    /// registry is then empty, which is REQUIRED, not merely tidy: see the
+    /// cycle-safety note on [`project_macro_registry`]'s failure return.
     pub build_error: Option<(crate::common::ErrorCode, String)>,
 }
 
@@ -96,9 +94,14 @@ pub(crate) struct MacroRegistryResult {
 ///   `find_cycle` sorts roots and uses `BTreeSet` successors, so the reported
 ///   cycle path is independent of model iteration order; declaration order
 ///   here only matters for Passes 1-2.
+/// - **Pass 4** (macros.AC5.7: a module inside a macro body) reads the
+///   macro-marked models' body variable KINDS + a module's `ident`, both of
+///   which the reconstruction carries. It sorts the offending idents, so its
+///   message is likewise independent of the `HashMap<String, SourceVariable>`
+///   iteration order the reconstruction below walks.
 ///
 /// Non-macro models get an empty body: Passes 1-2 never read non-macro bodies
-/// and Pass 3 skips non-macro models, so their absence cannot change the
+/// and Passes 3-4 skip non-macro models, so their absence cannot change the
 /// result. Returns `None` for a valid macro set, including every macro-free
 /// project (the build short-circuits when no model carries a `macro_spec`).
 fn build_error_from_inputs(
@@ -172,19 +175,58 @@ fn reconstruct_project_models(db: &dyn Db, project: SourceProject) -> Vec<datamo
 /// so editing a non-macro variable's equation does not invalidate it.
 ///
 /// Validation (macros.AC5.2 recursion cycle, macros.AC5.3 duplicate name /
-/// macro-model collision) is derived on demand by `build_error_from_inputs`,
-/// which reconstructs the project's `datamodel::Model` list (in declaration
-/// order, from the `macro_declarations` input plus the macro bodies) and runs
-/// the UNCHANGED `MacroRegistry::build` on it -- so its typed
-/// `(ErrorCode, message)` is byte-identical to building over the original
-/// datamodel `Vec<Model>`. When the build fails, the error is accumulated as
-/// a project-level `Diagnostic` carrying that exact `ErrorCode` (so it
-/// surfaces through `collect_all_diagnostics`, mirroring
-/// `project_units_context`) and returned in `build_error` (so the plain
-/// `compile_project_incremental` entry can fail with a clear message), and
-/// the resolution registry is returned empty so the offending macros' callers
-/// are not treated as macro calls -- the compile fails with the registry
-/// error, not a confusing cascade.
+/// macro-model collision, macros.AC5.7 module inside a macro body) is derived on
+/// demand by `build_error_from_inputs`, which reconstructs the project's
+/// `datamodel::Model` list (in declaration order, from the `macro_declarations`
+/// input plus the macro bodies) and runs the UNCHANGED `MacroRegistry::build` on
+/// it -- so its typed `(ErrorCode, message)` is byte-identical to building over
+/// the original datamodel `Vec<Model>`. When the build fails the error is
+/// returned in `build_error`, and the resolution registry is returned empty.
+///
+/// # The empty registry on failure is load-bearing for CYCLE SAFETY
+///
+/// It reads as an error-quality choice -- the offending macros' callers are not
+/// treated as macro calls, so the compile fails with the registry error rather
+/// than a confusing cascade. It is more than that, and a refactor that "keeps a
+/// partial registry alongside the error" would reopen an abort-class hole.
+///
+/// `db::project_module_graph` -- the gate that turns a module cycle into a clean
+/// `CircularDependency` instead of salsa's dependency-graph cycle panic -- records
+/// only EXPLICIT module edges. A macro CALL is an implicit edge it cannot see.
+/// `MacroRegistry::build`'s Pass 4 deletes the one shape that can close a cycle
+/// through such an edge (an explicit module inside a macro body,
+/// `ErrorCode::MacroContainsModule`), and Pass 3 rejects macro-to-macro recursion.
+/// Both are REJECTIONS, and two of the three production entry points do not stop
+/// at a rejection: `collect_all_diagnostics` emits `build_error` and then runs
+/// every model's passes anyway, and `analysis::analyze_model` does not read
+/// `build_error` at all. Only `compile_project_incremental` returns early.
+///
+/// What keeps those two from walking the very cycle the build just rejected is
+/// this empty registry: with no macro registered, no call resolves as a macro,
+/// `builtins_visitor::expand_module_function` synthesizes no implicit module, and
+/// the edge does not exist. A registry that retained the rejected macro would
+/// restore the edge and abort the host process -- on a project whose macros no
+/// longer contain any module at all, since the rejected macro would still be
+/// resolvable. Pinned by
+/// `db::module_cycle_tests::rejecting_a_macro_empties_the_registry_so_no_implicit_edge_is_synthesized`,
+/// which asserts the resulting `UnknownBuiltin` at the call site as the visible
+/// proof that no implicit edge was synthesized.
+///
+/// This query does NOT accumulate a diagnostic. `build_error` is a plain
+/// memoized VALUE that its two consumers read directly:
+/// `compile_project_incremental` (to fail with a clear message) and
+/// `collect_all_diagnostics` (to emit the project-level `Diagnostic`, once).
+/// It used to accumulate here, which was wrong twice over. A registry failure
+/// is a PROJECT-level fact, but every model's `model_all_diagnostics` subtree
+/// reaches this query through `model_module_ident_context`, so the accumulator
+/// DFS found the one accumulated value once per model and `collect_all_diagnostics`
+/// reported N identical copies. Worse, a value accumulated inside a memo body is
+/// only discoverable while the `accumulated_inputs` flags along the whole path
+/// stay `Any`: after an unrelated salsa revision bump the deep-verify path
+/// recomputed them as `Empty`, the DFS pruned the subtree, and the diagnostic
+/// silently vanished from the next collection entirely (pinned by
+/// `db::diagnostic_tests::macro_registry_build_error_survives_an_unrelated_input_change`).
+/// Reading the memoized value sidesteps the accumulator, and with it both bugs.
 ///
 /// For a *valid* project every model name is unique, so rebuilding the
 /// resolution map from the (deduplicated) `SourceModel`s here is exact.
@@ -195,23 +237,16 @@ pub(crate) fn project_macro_registry(db: &dyn Db, project: SourceProject) -> Mac
     // AC5.2 cycle, `DuplicateMacroName` for an AC5.3 duplicate / collision),
     // carried through verbatim from `build`'s `Err` -- not re-derived from the
     // message prose -- so a future reword of the build error message cannot
-    // silently mis-tag this diagnostic.
+    // silently mis-tag the diagnostic `collect_all_diagnostics` builds from it.
     if let Some((code, message)) = build_error_from_inputs(db, project) {
-        // Surface through `collect_all_diagnostics` (project-level: no
-        // specific model/variable). Accumulate directly like
-        // `project_units_context` -- this query is in the call graph of
-        // `model_all_diagnostics` via `module_ident_context`.
-        CompilationDiagnostic(Diagnostic {
-            model: String::new(),
-            variable: None,
-            error: DiagnosticError::Model(crate::common::Error::new(
-                crate::common::ErrorKind::Model,
-                code,
-                Some(message.clone()),
-            )),
-            severity: DiagnosticSeverity::Error,
-        })
-        .accumulate(db);
+        // The EMPTY registry here is required for cycle safety, not just for
+        // error quality: it is what makes a rejected macro's call sites stop
+        // resolving as macro calls, so no implicit module edge is synthesized and
+        // the module cycle the gate cannot see does not exist. Two of the three
+        // entry points run the per-model passes anyway after a build failure, so
+        // "keep a partial registry alongside the error" reopens a process abort.
+        // The full argument is on this function's rustdoc; do not weaken this
+        // without reading it.
         return MacroRegistryResult {
             registry: crate::module_functions::MacroRegistry::default(),
             build_error: Some((code, message)),
@@ -469,6 +504,42 @@ mod tests {
         assert_propagates_build_code(&models);
         let surfaced = build_error_via_query(&x_project(Default::default(), &models)).unwrap();
         assert_eq!(surfaced.0, ErrorCode::DuplicateMacroName);
+    }
+
+    /// macros.AC5.7: the Pass 4 rejection must survive the salsa reconstruction.
+    ///
+    /// Pass 4 reads something the earlier passes do not: a body variable's KIND
+    /// and a module's `ident`. `reconstruct_project_models` rebuilds macro bodies
+    /// from `SourceVariable`s, so this is the only fixture that proves a
+    /// `Variable::Module` body variable actually round-trips through the salsa
+    /// inputs -- reconstruct it as an `Aux` (or drop it) and the query would
+    /// surface no error at all while `MacroRegistry::build` over the original
+    /// models does, which is exactly what `assert_propagates_build_code`'s
+    /// comparison catches.
+    #[test]
+    fn ac5_7_macro_holding_a_module_propagates_through_the_reconstruction() {
+        let mut mac = macro_model("mac", &["p1"], "p1 * 2");
+        mac.variables
+            .push(Variable::Module(crate::datamodel::Module {
+                ident: "u_hop".to_string(),
+                model_name: "u".to_string(),
+                documentation: String::new(),
+                units: None,
+                references: vec![],
+                compat: crate::datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }));
+        let models = vec![plain_model("u"), mac];
+
+        assert_propagates_build_code(&models);
+        let surfaced = build_error_via_query(&x_project(Default::default(), &models)).unwrap();
+        assert_eq!(surfaced.0, ErrorCode::MacroContainsModule);
+        assert!(
+            surfaced.1.contains("mac") && surfaced.1.contains("u_hop"),
+            "the rejection must name the macro and its module variable: {:?}",
+            surfaced.1,
+        );
     }
 
     /// Non-canonical-name byte-identity proof. Every other oracle fixture uses

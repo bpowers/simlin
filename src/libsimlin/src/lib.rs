@@ -308,6 +308,9 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             // wire Generic code; the specific engine code and the message
             // carry the detail (GH #905).
             engine::ErrorCode::UnknownElementSubscript => SimlinErrorCode::Generic,
+            // A macro body instantiating a module likewise collapses to the wire
+            // Generic code; the engine code and the message carry the detail.
+            engine::ErrorCode::MacroContainsModule => SimlinErrorCode::Generic,
         }
     }
 }

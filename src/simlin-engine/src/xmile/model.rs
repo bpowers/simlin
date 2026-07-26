@@ -769,8 +769,13 @@ pub(crate) fn access_from(visibility: Visibility, can_be_module_input: bool) -> 
 impl ToXml<XmlWriter> for Module {
     fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         let mut attrs = vec![("name", self.name.as_str())];
-        if self.model_name.is_some() {
-            attrs.push(("simlin:model_name", self.name.as_str()));
+        // `name` is the module INSTANCE's ident; `simlin:model_name` is the
+        // model it instantiates. The two coincide for most modules, which is
+        // exactly why writing `self.name` here went unnoticed -- it silently
+        // retargeted every module whose ident differs from its target, and the
+        // re-import then pointed at a model that need not exist.
+        if let Some(model_name) = self.model_name.as_ref() {
+            attrs.push(("simlin:model_name", model_name.as_str()));
         }
         if let Some(access) = self.access.as_ref() {
             attrs.push(("access", access.as_str()));
@@ -982,5 +987,128 @@ fn test_semantic_group_roundtrip() {
     assert_eq!(
         original_model.groups[1].run_enabled,
         roundtripped.groups[1].run_enabled
+    );
+}
+
+/// A module whose instance IDENT differs from the model it instantiates must
+/// survive a full XMILE round-trip with its target intact.
+///
+/// The `simlin:model_name` attribute is the only place the target is recorded --
+/// the standard `name` attribute carries the INSTANCE ident -- so writing the
+/// wrong string there silently retargets the module. Re-importing then points at
+/// a model that may not exist, and the failure surfaces far from the export as a
+/// dangling module reference.
+///
+/// This is invisible whenever ident == model_name, which is the common case and
+/// what every other module fixture in the crate uses (`x_module` sets them
+/// equal). Only a renamed instance -- `u_hop` instantiating `u` -- can detect it,
+/// which is why the bug survived: the writer pushed `self.name` under a
+/// `self.model_name.is_some()` guard, so it wrote a plausible value that happened
+/// to be correct for every fixture that could not tell the difference.
+#[test]
+fn module_target_survives_an_xmile_roundtrip_when_ident_differs() {
+    use crate::xmile::{project_from_reader, project_to_xmile};
+
+    let project = datamodel::Project {
+        name: "test".to_owned(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 1.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_owned(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "driver".to_owned(),
+                        equation: datamodel::Equation::Scalar("5".to_owned()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "u_hop".to_owned(),
+                        model_name: "u".to_owned(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![datamodel::ModuleReference {
+                            src: "driver".to_owned(),
+                            dst: "u_hop.input".to_owned(),
+                        }],
+                        compat: datamodel::Compat::default(),
+                        ai_state: None,
+                        uid: None,
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: None,
+            },
+            datamodel::Model {
+                name: "u".to_owned(),
+                sim_specs: None,
+                variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "input".to_owned(),
+                    equation: datamodel::Equation::Scalar("0".to_owned()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                })],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: None,
+            },
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let xml = project_to_xmile(&project).expect("project must serialize to XMILE");
+    // Pin the serialized attribute directly: the round-trip assertion below
+    // would also pass if BOTH the writer and the reader were wrong in matching
+    // ways, and the emitted file is what other tools consume.
+    assert!(
+        xml.contains(r#"simlin:model_name="u""#),
+        "the exported module must record its TARGET model, not its own ident: {xml}",
+    );
+
+    let reimported = project_from_reader(&mut xml.as_bytes()).expect("XMILE must re-import");
+    let main = reimported
+        .models
+        .iter()
+        .find(|m| m.name == "main")
+        .expect("main model survives the round-trip");
+    let module = main
+        .variables
+        .iter()
+        .find_map(|v| match v {
+            datamodel::Variable::Module(m) => Some(m),
+            _ => None,
+        })
+        .expect("the module variable survives the round-trip");
+
+    assert_eq!(
+        module.ident, "u_hop",
+        "the instance ident must be preserved"
+    );
+    assert_eq!(
+        module.model_name, "u",
+        "the module must still target model `u`; a retargeted module points at a \
+         model that need not exist",
     );
 }

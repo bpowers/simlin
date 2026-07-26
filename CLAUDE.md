@@ -121,11 +121,18 @@ IMPORTANT: If feedback seems non-actionable, it means you need comments explaini
 ### libsimlin API Design
 Keep the FFI surface small and orthogonal. Prefer composable primitives over bulk endpoints. Do NOT add bulk/batch variants to paper over caller-side concurrency issues.
 
-## Tracking Discovered Issues
+## Discovered Issues
 
-When you discover something wrong or concerning during your work -- tech debt, design limitations, broken tooling, missing CI checks, unintended consequences of a committed design, deferred review feedback -- it must be explicitly tracked. Never silently drop these observations.
+When you discover something wrong or concerning during your work -- tech debt, a latent bug, design limitations, broken tooling, missing CI checks, unintended consequences of a committed design, deferred review feedback -- **fix it as part of the work**. Never silently drop these observations, and never file an issue as a substitute for fixing one.
 
-Spawn the `track-issue` agent (via the Task tool with `subagent_type: "track-issue"`) with a description of the problem. The agent checks for duplicates in GitHub issues and [docs/tech-debt.md](/docs/tech-debt.md), then files the item if it's not already tracked. Using a sub-agent preserves your context on the main task.
+Filing defers the cost without reducing it, and the context needed to fix a problem is at its cheapest the moment you find it. Name what you fixed in the commit message or PR body (`Fixes #<n>` when an issue already exists).
+
+Two things are NOT covered by "fix it", and both are explicit conversations rather than silent decisions:
+
+- **The fix is too large to fold in** -- it would swamp the branch's review surface, or it belongs to a different subsystem. Say so, with a cost estimate, and sequence it: its own commit, its own PR, or (if that is what the user wants) tracked for later. Do not make that call quietly.
+- **The fix is not yours to make** -- it needs a product decision, or access you do not have. Surface it.
+
+When something genuinely does need tracking, spawn the `track-issue` agent (via the Task tool with `subagent_type: "track-issue"`) with a description of the problem. It checks for duplicates in GitHub issues and [docs/tech-debt.md](/docs/tech-debt.md) and files the item, keeping your context on the main task.
 
 ## Generated/Noise Paths
 

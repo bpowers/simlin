@@ -4,16 +4,44 @@
 
 //! Compilation diagnostics: the salsa `CompilationDiagnostic` accumulator,
 //! the typed `Diagnostic` value (severity + per-model/per-variable context),
-//! the per-model triggering query `model_all_diagnostics`, and the
-//! accumulator-drain helpers `collect_model_diagnostics` /
-//! `collect_all_diagnostics`.
+//! the per-model triggering query `model_all_diagnostics`, and the drain
+//! helpers `collect_model_diagnostics` / `collect_all_diagnostics`.
 //!
 //! `model_all_diagnostics` is the single per-model query that drives every
-//! diagnostic source: it triggers `compile_var_fragment` per variable (the
-//! emission half lives in `db.rs`), the unit-check pass, and -- when LTM is
-//! enabled -- the LTM fragment-diagnostic pass. The two `collect_*` helpers
+//! PER-MODEL diagnostic source: it triggers `compile_var_fragment` per variable
+//! (the emission half lives in `db.rs`), the unit-check pass, and -- when LTM
+//! is enabled -- the LTM fragment-diagnostic pass. The two `collect_*` helpers
 //! drain the accumulated `CompilationDiagnostic`s for one model or the whole
 //! synced project.
+//!
+//! Three diagnostics do NOT come from the accumulator. `collect_all_diagnostics`
+//! emits each directly from a memoized derivation, and they differ in how many
+//! rows each produces -- do not collapse them into one rule:
+//!
+//!   - the **macro-registry build error** (`project_macro_registry`): at most
+//!     ONE row per project, naming no model and no variable. A project has one
+//!     macro set, and it is either valid or not.
+//!   - the **unit-definition errors** (`project_units_context_result`): one row
+//!     per declaration that failed to parse, so several are normal. They name no
+//!     model -- a project has one `units` list, belonging to none of them -- but
+//!     they carry the offending unit's name as `variable`.
+//!   - the **module-reference cycle** (`project_module_graph`): one row per
+//!     MODEL that can reach a cycle, carrying that model's name, and that model's
+//!     per-model passes are skipped. This one is deliberately per-model and must
+//!     stay that way: a model reaching no cycle is still processed normally, so
+//!     an unrelated draft cycle elsewhere in the project cannot hide a valid
+//!     model's diagnostics (GH #806). Reporting it once project-wide would
+//!     revert that.
+//!
+//! What the first two have in common is not their row count but their ORIGIN:
+//! each is derived once per project, and each used to be accumulated from inside
+//! its deriving query's body. That was wrong twice over. Every model's
+//! diagnostic subtree reaches those queries, so the DFS found the single
+//! accumulated value once per model and reported N copies; and a value
+//! accumulated inside a memo body is only discoverable while the pruning flags
+//! along the whole path stay `Any`, so after an unrelated revision bump the
+//! deep-verify path recomputed them as `Empty` and the diagnostic vanished from
+//! the collection entirely. Reading the memoized value sidesteps both.
 //!
 //! `model_all_diagnostics` performs an untracked read so it always
 //! re-executes: see the in-body comment for why that is load-bearing for
@@ -24,7 +52,13 @@
 use super::*;
 use crate::common::{EquationError, Error, UnitError};
 
+/// `Debug` is derived rather than left off: every caller that drains this
+/// accumulator wants to print the result in an assertion message, and without
+/// it each one has to map through `.0.clone()` into the printable `Diagnostic`
+/// first. The inner `Diagnostic` is already `Debug`, so the derive costs
+/// nothing.
 #[salsa::accumulator]
+#[derive(Debug)]
 pub struct CompilationDiagnostic(pub Diagnostic);
 
 /// A single compilation diagnostic emitted by tracked functions.
@@ -838,13 +872,54 @@ pub fn model_module_wiring_diagnostics(db: &dyn Db, model: SourceModel, project:
     }
 }
 
+/// The `CircularDependency` diagnostic for a model that can REACH a module
+/// cycle, or `None` when its reachable subgraph is acyclic.
+///
+/// Driving a reaching model's per-model passes would take `compile_var_fragment`
+/// into the recursive `model_module_map` query, which salsa turns into an
+/// unrecoverable dependency-graph cycle panic (GH #806). Both diagnostic
+/// collectors must therefore consult this FIRST and report the cycle instead of
+/// running the passes -- and both must scope it to REACHABILITY, so an
+/// unrelated draft cycle elsewhere in the project does not suppress a valid
+/// model's own diagnostics.
+///
+/// It is one function rather than the same six lines in each collector because
+/// the two disagreeing is precisely how this went wrong: the whole-project
+/// collector had the gate and the per-model one did not, so the identical
+/// project panicked or reported cleanly depending on which `pub` entry point
+/// the caller happened to pick.
+fn module_cycle_diagnostic(
+    db: &dyn Db,
+    project: SourceProject,
+    model_name: &str,
+) -> Option<Diagnostic> {
+    project_module_graph(db, project)
+        .cycle_error_from(model_name)
+        .map(|(code, message)| Diagnostic {
+            model: model_name.to_string(),
+            variable: None,
+            error: DiagnosticError::Model(Error::new(
+                crate::common::ErrorKind::Model,
+                code,
+                Some(message),
+            )),
+            severity: DiagnosticSeverity::Error,
+        })
+}
+
 /// Collect all `CompilationDiagnostic`s accumulated during
 /// `model_all_diagnostics` for a single model.
+///
+/// A model that reaches a module cycle reports that cycle and nothing else; see
+/// [`module_cycle_diagnostic`] for why the passes must not run at all.
 pub fn collect_model_diagnostics(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
 ) -> Vec<Diagnostic> {
+    if let Some(diagnostic) = module_cycle_diagnostic(db, project, model.name(db)) {
+        return vec![diagnostic];
+    }
     model_all_diagnostics::accumulated::<CompilationDiagnostic>(db, model, project)
         .into_iter()
         .map(|cd| cd.0.clone())
@@ -852,30 +927,59 @@ pub fn collect_model_diagnostics(
 }
 
 /// Collect all diagnostics for every model in a synced project.
+///
+/// Project-level failures are emitted here, directly from their memoized
+/// derivation, rather than accumulated by whichever tracked query happens to
+/// derive them. There is exactly one of each per project, so a per-model
+/// accumulator drain would report N copies -- and a value accumulated inside a
+/// memo body silently disappears once salsa's accumulator DFS prunes the
+/// subtree it lives in (see `db::macro_registry`, and the module-level note
+/// above `unit_warning_fixture` in `db/diagnostic_tests.rs`).
 pub fn collect_all_diagnostics(db: &SimlinDb, project: SourceProject) -> Vec<Diagnostic> {
-    let graph = project_module_graph(db, project);
-
     let mut all = Vec::new();
-    for (name, source_model) in project.models(db) {
-        // A model that can REACH a module cycle would drive its per-model passes
-        // (compile_var_fragment recursing through the submodel) into the salsa
-        // cycle panic. Report the cycle for that model and skip its passes. A
-        // model that reaches no cycle is processed normally, so a valid model's
-        // diagnostics are not hidden by an unrelated draft cycle elsewhere
-        // (GH #806).
-        if let Some((code, message)) = graph.cycle_error_from(name) {
+
+    // A unit declaration that failed to parse belongs to the project's `units`
+    // list, not to any model. Read from the memoized derivation rather than
+    // drained from the accumulator, for the reasons on `UnitsContextResult`.
+    for (unit_name, eq_errors) in &project_units_context_result(db, project).definition_errors {
+        for eq_err in eq_errors {
             all.push(Diagnostic {
-                model: name.clone(),
-                variable: None,
-                error: DiagnosticError::Model(Error::new(
-                    crate::common::ErrorKind::Model,
-                    code,
-                    Some(message),
-                )),
+                model: String::new(),
+                variable: Some(unit_name.clone()),
+                error: DiagnosticError::Unit(UnitError::DefinitionError(eq_err.clone(), None)),
                 severity: DiagnosticSeverity::Error,
             });
-            continue;
         }
+    }
+
+    // An invalid macro set (recursion cycle / duplicate macro name / macro-model
+    // collision) is a single project-level fact, carried as a memoized value on
+    // `project_macro_registry` and read here rather than accumulated there.
+    // Emitted before the per-model passes so the ordering is deterministic.
+    if let Some((code, message)) = crate::db::macro_registry::project_macro_registry(db, project)
+        .build_error
+        .as_ref()
+    {
+        all.push(Diagnostic {
+            model: String::new(),
+            variable: None,
+            error: DiagnosticError::Model(Error::new(
+                crate::common::ErrorKind::Model,
+                *code,
+                Some(message.clone()),
+            )),
+            severity: DiagnosticSeverity::Error,
+        });
+    }
+
+    for source_model in project.models(db).values() {
+        // The module-cycle gate lives in `collect_model_diagnostics` (see
+        // `module_cycle_diagnostic`): a model that reaches a cycle reports the
+        // cycle instead of running its passes, and a model that reaches none is
+        // processed normally -- so an unrelated draft cycle elsewhere in the
+        // project does not hide a valid model's diagnostics (GH #806). This
+        // loop used to carry its own copy of that gate, which is how the
+        // per-model entry point came to be missing it.
         all.extend(collect_model_diagnostics(db, *source_model, project));
     }
     all

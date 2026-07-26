@@ -404,6 +404,15 @@ pub(crate) fn gather_error_details_with_db(
     all_errors
 }
 
+/// The code reported for a rejected patch: the first Error-severity diagnostic,
+/// else the VM validation error.
+///
+/// "First" is now deterministic. `collect_all_diagnostics` emits the
+/// project-level failures (bad unit declarations, an invalid macro set) ahead of
+/// the per-model passes, where they used to surface in whatever order the salsa
+/// accumulator DFS happened to walk. Accept/reject is unchanged -- the set of
+/// Error-severity diagnostics is the same -- but a project carrying both a
+/// project-level and a per-model error now reports the project-level code.
 fn first_error_code(
     diagnostics: &[engine::db::Diagnostic],
     sim_error: Option<&engine::Error>,
