@@ -22,6 +22,85 @@ use salsa::Accumulator;
 use super::*;
 use crate::common::{Canonical, Ident};
 
+// Test-only per-thread record of which fragment-compiler bodies ran.
+//
+// Pointer equality of a memo does NOT prove a query body did not run: salsa
+// backdates a re-executed query whose value compares equal and keeps the memo
+// address (the trap `db::stages` documents at length). For the fragment
+// compilers that matters even more than it did there, because a fragment is
+// *designed* to be layout-independent -- so a layout-only edit produces an
+// EQUAL fragment whether or not the expensive compile re-ran, and every
+// pointer-based test passes either way. Recording each body entry, with the
+// name it ran for, is the only evidence that separates "reused the memo" from
+// "recompiled it and found it equal".
+//
+// Names, not just counts: the acceptance criterion under test is per-variable
+// ("an *unchanged* fragment is reused"), so an aggregate count cannot say
+// whether the one re-execution was the edited variable or an unrelated one.
+//
+// Thread-local rather than a global atomic, for the same reasons as
+// `db::stages`: no lock, and a parallel test run cannot charge one test's
+// work to another. The same caveat applies -- the record happens INSIDE the
+// body, on whatever thread salsa ran it, so anyone introducing query
+// parallelism here must move this to a shared atomic in the same change.
+// `reset_fragment_executions()` at the start of a measured region is what
+// isolates a test under `--test-threads=1`, where every test shares a thread.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum FragmentExecKind {
+    /// `compile_var_fragment` -- salsa-tracked, one cache entry per
+    /// `(variable, model, project, module inputs)`.
+    Explicit,
+    /// `compile_implicit_var_fragment` -- NOT salsa-tracked. It is a plain
+    /// function called from the tracked `assemble_module`, so its results are
+    /// cached only at whole-module granularity.
+    Implicit,
+    /// `compile_ltm_var_fragment` -- salsa-tracked, keyed by `(from, to)` link.
+    Ltm,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// `None` = not recording. Recording is armed by `reset_fragment_executions`
+    /// and disarmed by `fragment_executions`, so that the ~5k tests that never
+    /// measure anything pay nothing and cannot accumulate an unbounded log on a
+    /// libtest worker thread they happen to share with a measuring test.
+    static FRAGMENT_EXECUTIONS: std::cell::RefCell<Option<Vec<(FragmentExecKind, String)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Start (or restart) recording on this thread, discarding anything already
+/// recorded (test-only). Call it after the fixture is built and primed, so
+/// setup work is not charged to the measured region.
+#[cfg(test)]
+pub(crate) fn reset_fragment_executions() {
+    FRAGMENT_EXECUTIONS.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+/// Stop recording and return every body entry since the last reset, sorted so
+/// the result is comparable regardless of the order assembly happened to walk
+/// its maps in (test-only). Panics if recording was never armed, since an empty
+/// answer from an unarmed recorder would read as "nothing recompiled".
+#[cfg(test)]
+pub(crate) fn fragment_executions() -> Vec<(FragmentExecKind, String)> {
+    let mut execs = FRAGMENT_EXECUTIONS
+        .with(|c| c.borrow_mut().take())
+        .expect("fragment_executions() without a preceding reset_fragment_executions()");
+    execs.sort();
+    execs
+}
+
+/// Record one fragment-compiler body entry, if this thread is recording
+/// (test-only).
+#[cfg(test)]
+pub(crate) fn note_fragment_execution(kind: FragmentExecKind, name: &str) {
+    FRAGMENT_EXECUTIONS.with(|c| {
+        if let Some(log) = c.borrow_mut().as_mut() {
+            log.push((kind, name.to_string()));
+        }
+    });
+}
+
 #[salsa::tracked(returns(ref))]
 pub fn compile_var_fragment<'db>(
     db: &'db dyn Db,
@@ -32,6 +111,9 @@ pub fn compile_var_fragment<'db>(
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
     use crate::db::var_fragment::{LoweredVarFragment, lower_var_fragment};
+
+    #[cfg(test)]
+    note_fragment_execution(FragmentExecKind::Explicit, var.ident(db));
 
     let var_ident = var.ident(db).clone();
     let var_ident_canonical: Ident<Canonical> = Ident::new(&var_ident);
@@ -375,6 +457,21 @@ pub(crate) fn compile_implicit_var_fragment(
     module_input_names: &[String],
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::CompiledVarFragment;
+
+    // Recorded at body entry (before the name is even resolved), keyed by the
+    // parent variable and the implicit index -- the identity this compiler is
+    // called with. Recording after `lower_implicit_var` would silently omit
+    // every entry that failed to lower, which is exactly the work a caching
+    // claim needs to account for.
+    #[cfg(test)]
+    note_fragment_execution(
+        FragmentExecKind::Implicit,
+        &format!(
+            "{}#{}",
+            meta.parent_source_var.ident(db),
+            meta.index_in_parent
+        ),
+    );
 
     // The implicit var's canonical name (the runlist-gate key). Resolve it
     // through the shared prefix so this and the per-phase compile agree on

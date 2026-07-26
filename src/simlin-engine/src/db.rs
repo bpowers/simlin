@@ -102,6 +102,15 @@ pub use fragment_compile::compile_var_fragment;
 pub(crate) use fragment_compile::{
     compile_implicit_var_fragment, compile_implicit_var_phase_bytecodes,
 };
+// Test-only: the per-thread record of which fragment-compiler bodies ran, so
+// `fragment_char_tests` can prove a layout-only edit did or did not recompile
+// a fragment. Pointer equality of a memo cannot prove that -- salsa backdates
+// a re-executed query whose value compares equal -- and a fragment is designed
+// to compare equal across a layout edit, so the record is the only evidence.
+#[cfg(test)]
+pub(crate) use fragment_compile::{
+    FragmentExecKind, fragment_executions, note_fragment_execution, reset_fragment_executions,
+};
 
 mod assemble;
 pub(crate) use assemble::{
@@ -1375,6 +1384,8 @@ mod dimension_context_cache_tests;
 mod dimension_invalidation_tests;
 #[cfg(test)]
 mod fragment_cache_tests;
+#[cfg(test)]
+mod fragment_char_tests;
 #[cfg(test)]
 mod fragment_determinism_tests;
 #[cfg(test)]

@@ -1,0 +1,185 @@
+########## model main (module inputs: []) ##########
+== layout ==
+  n_slots: 16
+  acc: [0, 3)
+  arr: [3, 6)
+  grow: [6, 9)
+  idx: [9, 10)
+  mapped: [10, 13)
+  off1: [13, 16)
+== main::acc [explicit] : initial+stock ==
+  initial:
+    literals: [0.0, 0.0, 0.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr acc@0 #0 (=0.0)
+      0001  AssignConstCurr acc@1 #1 (=0.0)
+      0002  AssignConstCurr acc@2 #2 (=0.0)
+      0003  Ret
+  flow: <no fragment>
+  stock:
+    literals: [0.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar acc@0
+      0001  LoadVar grow@0
+      0002  LoadConstant #0 (=0.0)
+      0003  Op2 Sub
+      0004  LoadGlobalVar off=1 (dt)
+      0005  Op2 Mul
+      0006  BinOpAssignNext Add acc@0
+      0007  LoadVar acc@1
+      0008  LoadVar grow@1
+      0009  LoadConstant #0 (=0.0)
+      0010  Op2 Sub
+      0011  LoadGlobalVar off=1 (dt)
+      0012  Op2 Mul
+      0013  BinOpAssignNext Add acc@1
+      0014  LoadVar acc@2
+      0015  LoadVar grow@2
+      0016  LoadConstant #0 (=0.0)
+      0017  Op2 Sub
+      0018  LoadGlobalVar off=1 (dt)
+      0019  Op2 Mul
+      0020  BinOpAssignNext Add acc@2
+      0021  Ret
+== main::arr [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [1.0, 2.0, 3.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr arr@0 #0 (=1.0)
+      0001  AssignConstCurr arr@1 #1 (=2.0)
+      0002  AssignConstCurr arr@2 #2 (=3.0)
+      0003  Ret
+  stock: <no fragment>
+== main::grow [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar arr@0
+      0001  AssignCurr grow@0
+      0002  LoadVar arr@1
+      0003  AssignCurr grow@1
+      0004  LoadVar arr@2
+      0005  AssignCurr grow@2
+      0006  Ret
+  stock: <no fragment>
+== main::idx [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [1.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadConstant #0 (=1.0)
+      0001  LoadGlobalVar off=0 (time)
+      0002  BinOpAssignCurr Add idx@0
+      0003  Ret
+  stock: <no fragment>
+== main::mapped [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: []
+    temp_sizes: [temp0:3]
+    dim_lists: [[3]]
+    graphical_functions: []
+    module_decls: []
+    static_views:
+      view[0]: base=off1@0 dims=[3] strides=[1] offset=0 dim_ids=[0] sparse=[]
+    code:
+      0000  PushVarViewDirect arr@0 dim_list=0
+      0001  LoadVar idx@0
+      0002  ViewSubscriptDynamic dim=0
+      0003  PushStaticView view=0
+      0004  VectorElmMap write_temp=0 full_source_len=3
+      0005  PopView
+      0006  PopView
+      0007  LoadTempConst temp=0 index=0
+      0008  AssignCurr mapped@0
+      0009  LoadTempConst temp=0 index=1
+      0010  AssignCurr mapped@1
+      0011  LoadTempConst temp=0 index=2
+      0012  AssignCurr mapped@2
+      0013  Ret
+  stock: <no fragment>
+== main::off1 [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [0.0, 0.0, 0.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr off1@0 #0 (=0.0)
+      0001  AssignConstCurr off1@1 #1 (=0.0)
+      0002  AssignConstCurr off1@2 #2 (=0.0)
+      0003  Ret
+  stock: <no fragment>
+########## runtime ##########
+  step 0:
+    acc[east] = 0.0
+    acc[north] = 0.0
+    acc[west] = 0.0
+    arr[east] = 1.0
+    arr[north] = 3.0
+    arr[west] = 2.0
+    dt = 1.0
+    final_time = 1.0
+    grow[east] = 1.0
+    grow[north] = 3.0
+    grow[west] = 2.0
+    idx = 1.0
+    initial_time = 0.0
+    mapped[east] = 1.0
+    mapped[north] = 1.0
+    mapped[west] = 1.0
+    off1[east] = 0.0
+    off1[north] = 0.0
+    off1[west] = 0.0
+    time = 0.0
+  step 1:
+    acc[east] = 1.0
+    acc[north] = 3.0
+    acc[west] = 2.0
+    arr[east] = 1.0
+    arr[north] = 3.0
+    arr[west] = 2.0
+    dt = 1.0
+    final_time = 1.0
+    grow[east] = 1.0
+    grow[north] = 3.0
+    grow[west] = 2.0
+    idx = 2.0
+    initial_time = 0.0
+    mapped[east] = 2.0
+    mapped[north] = 2.0
+    mapped[west] = 2.0
+    off1[east] = 0.0
+    off1[north] = 0.0
+    off1[west] = 0.0
+    time = 1.0

@@ -87,6 +87,12 @@ pub fn compile_ltm_var_fragment(
     model: SourceModel,
     project: SourceProject,
 ) -> Option<VarFragmentResult> {
+    #[cfg(test)]
+    crate::db::note_fragment_execution(
+        crate::db::FragmentExecKind::Ltm,
+        &format!("{}\u{2192}{}", link_id.link_from(db), link_id.link_to(db)),
+    );
+
     let ShapedLinkScore::Scored(lsv) =
         link_score_equation_text_shaped(db, link_id, RefShape::Bare, model, project)
     else {

@@ -1,0 +1,90 @@
+########## model main (module inputs: []) ##########
+== layout ==
+  n_slots: 6
+  arr: [0, 3)
+  dynamic: [3, 4)
+  idx: [4, 5)
+  stat: [5, 6)
+== main::arr [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [1.0, 2.0, 3.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr arr@0 #0 (=1.0)
+      0001  AssignConstCurr arr@1 #1 (=2.0)
+      0002  AssignConstCurr arr@2 #2 (=3.0)
+      0003  Ret
+  stock: <no fragment>
+== main::dynamic [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar idx@0
+      0001  PushSubscriptIndex bounds=3
+      0002  LoadSubscript arr@0
+      0003  AssignCurr dynamic@0
+      0004  Ret
+  stock: <no fragment>
+== main::idx [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [1.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadConstant #0 (=1.0)
+      0001  LoadGlobalVar off=0 (time)
+      0002  BinOpAssignCurr Add idx@0
+      0003  Ret
+  stock: <no fragment>
+== main::stat [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar arr@1
+      0001  AssignCurr stat@0
+      0002  Ret
+  stock: <no fragment>
+########## runtime ##########
+  step 0:
+    arr[east] = 1.0
+    arr[north] = 3.0
+    arr[west] = 2.0
+    dt = 1.0
+    dynamic = 1.0
+    final_time = 1.0
+    idx = 1.0
+    initial_time = 0.0
+    stat = 2.0
+    time = 0.0
+  step 1:
+    arr[east] = 1.0
+    arr[north] = 3.0
+    arr[west] = 2.0
+    dt = 1.0
+    dynamic = 2.0
+    final_time = 1.0
+    idx = 2.0
+    initial_time = 0.0
+    stat = 2.0
+    time = 1.0

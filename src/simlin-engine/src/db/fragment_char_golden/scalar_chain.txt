@@ -1,0 +1,125 @@
+########## model main (module inputs: []) ##########
+== layout ==
+  n_slots: 5
+  derived: [0, 1)
+  inflow: [1, 2)
+  k: [2, 3)
+  level: [3, 4)
+  outflow: [4, 5)
+== main::derived [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [1.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar inflow@0
+      0001  LoadConstant #0 (=1.0)
+      0002  BinOpAssignCurr Add derived@0
+      0003  Ret
+  stock: <no fragment>
+== main::inflow [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [3.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar k@0
+      0001  LoadConstant #0 (=3.0)
+      0002  BinOpAssignCurr Mul inflow@0
+      0003  Ret
+  stock: <no fragment>
+== main::k [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [2.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr k@0 #0 (=2.0)
+      0001  Ret
+  stock: <no fragment>
+== main::level [explicit] : initial+stock ==
+  initial:
+    literals: [10.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr level@0 #0 (=10.0)
+      0001  Ret
+  flow: <no fragment>
+  stock:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar level@0
+      0001  LoadVar inflow@0
+      0002  LoadVar outflow@0
+      0003  Op2 Sub
+      0004  LoadGlobalVar off=1 (dt)
+      0005  Op2 Mul
+      0006  BinOpAssignNext Add level@0
+      0007  Ret
+== main::outflow [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [0.1]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar level@0
+      0001  LoadConstant #0 (=0.1)
+      0002  BinOpAssignCurr Mul outflow@0
+      0003  Ret
+  stock: <no fragment>
+########## runtime ##########
+  step 0:
+    derived = 7.0
+    dt = 1.0
+    final_time = 2.0
+    inflow = 6.0
+    initial_time = 0.0
+    k = 2.0
+    level = 10.0
+    outflow = 1.0
+    time = 0.0
+  step 1:
+    derived = 7.0
+    dt = 1.0
+    final_time = 2.0
+    inflow = 6.0
+    initial_time = 0.0
+    k = 2.0
+    level = 15.0
+    outflow = 1.5
+    time = 1.0
+  step 2:
+    derived = 7.0
+    dt = 1.0
+    final_time = 2.0
+    inflow = 6.0
+    initial_time = 0.0
+    k = 2.0
+    level = 19.5
+    outflow = 1.9500000000000002
+    time = 2.0
