@@ -999,7 +999,18 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
 /// - a duplicate write for the same element (ambiguous segmentation);
 /// - opcodes present but no per-element write at all (not element-
 ///   sourceable in the simple per-element shape, mirroring
-///   `symbolic_phase_element_order`'s `saw_write` guard).
+///   `symbolic_phase_element_order`'s `saw_write` guard);
+/// - a backward jump whose target lies in an EARLIER segment. Segments are
+///   emitted in `element_order`, not in their original order, and a jump
+///   offset is relative, so a jump that escaped its own segment would land on
+///   whatever opcode happened to sit that far back after the interleave -- a
+///   silent miscompile with no bad id and no bad reference to notice. Codegen
+///   cannot currently produce one (a `BeginIter` loop writes a TEMP through
+///   `StoreIterElement`, and a member's per-element `AssignCurr` is emitted
+///   after `EndIter`, so a loop is always wholly inside one segment), which is
+///   exactly why it is worth checking rather than asserting in prose: this is
+///   an assumption about a DIFFERENT file's emission shape, and nothing else
+///   would notice it changing.
 ///
 /// Consumed by `combine_scc_fragment`, which `assemble_module` invokes
 /// for every resolved recurrence SCC (the Subcomponent B Task 6
@@ -1019,13 +1030,12 @@ fn segment_member_by_element(
     };
     let body = &code[..end];
 
-    let mut segments: HashMap<usize, Vec<SymbolicOpcode>> = HashMap::new();
-    let mut current: Vec<SymbolicOpcode> = Vec::new();
-    let mut last_written_elem: Option<usize> = None;
-
-    for op in body {
-        current.push(op.clone());
-        let write_elem = match op {
+    // The opcode that terminates one of THIS member's per-element segments. A
+    // write to a *different* member, or a `BinOpAssignNext` (a stock update,
+    // not a per-element current-value write of this member), does not --
+    // exactly the `symbolic_phase_element_order` rule.
+    let write_element = |op: &SymbolicOpcode| -> Option<usize> {
+        match op {
             SymbolicOpcode::AssignCurr { var }
             | SymbolicOpcode::AssignConstCurr { var, .. }
             | SymbolicOpcode::BinOpAssignCurr { var, .. }
@@ -1033,13 +1043,61 @@ fn segment_member_by_element(
             {
                 Some(var.element_offset)
             }
-            // A write to a *different* member, or `BinOpAssignNext` (a
-            // stock-update, not a per-element current-value write of THIS
-            // member) does not terminate this member's element segment --
-            // exactly the `symbolic_phase_element_order` rule.
             _ => None,
+        }
+    };
+
+    // Jump containment. `lower_bound[pc]` is the first index of the segment
+    // `pc` ends up in: segments start just after the previous per-element
+    // write, except that opcodes trailing the FINAL write are appended to the
+    // last segment rather than starting a new one (see below), so their bound
+    // is that segment's start.
+    let mut lower_bound: Vec<usize> = Vec::with_capacity(body.len());
+    let mut start = 0usize;
+    for (pc, op) in body.iter().enumerate() {
+        lower_bound.push(start);
+        if write_element(op).is_some() {
+            start = pc + 1;
+        }
+    }
+    if let Some(last_write) = body.iter().rposition(|op| write_element(op).is_some())
+        && last_write + 1 < body.len()
+    {
+        let last_segment_start = lower_bound[last_write];
+        for bound in &mut lower_bound[last_write + 1..] {
+            *bound = last_segment_start;
+        }
+    }
+    for (pc, op) in body.iter().enumerate() {
+        let Some(offset) = op.jump_offset() else {
+            continue;
         };
-        if let Some(elem) = write_elem {
+        let target = pc as isize + offset as isize;
+        // Backward-or-self and not before the segment's own start. The second
+        // half is what segment reordering needs; the first is what makes the
+        // lower bound sufficient, and it holds for every jump the instruction
+        // set can express (`jump_offset` reports only backward jumps). A
+        // future forward jump would need its own upper-bound reasoning, and
+        // should trip this rather than silently inherit an argument that does
+        // not cover it.
+        if target < lower_bound[pc] as isize || target > pc as isize {
+            return Err(format!(
+                "SCC member `{member}` has a jump at opcode {pc} targeting \
+                 {target}, outside the per-element segment starting at {}; \
+                 the segments are reordered by element_order, so a jump that \
+                 leaves its own segment cannot be relocated safely",
+                lower_bound[pc]
+            ));
+        }
+    }
+
+    let mut segments: HashMap<usize, Vec<SymbolicOpcode>> = HashMap::new();
+    let mut current: Vec<SymbolicOpcode> = Vec::new();
+    let mut last_written_elem: Option<usize> = None;
+
+    for op in body {
+        current.push(op.clone());
+        if let Some(elem) = write_element(op) {
             if segments.contains_key(&elem) {
                 return Err(format!(
                     "SCC member `{member}` has a duplicate per-element \

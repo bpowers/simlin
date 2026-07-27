@@ -528,10 +528,13 @@ impl VariableLayout {
 impl SymbolicOpcode {
     /// The jump offset, if this opcode is a backward jump.
     ///
-    /// Centralized here for the same reason as its concrete twin: a new jump
-    /// opcode that forgot to report itself would be silently mis-relocated by
-    /// the peephole optimizer.
-    fn jump_offset(&self) -> Option<PcOffset> {
+    /// Centralized here because two passes must agree on which opcodes carry a
+    /// PC, and a new jump opcode that failed to report itself would be
+    /// silently mishandled by both: the peephole optimizer would mis-relocate
+    /// it, and `db::assemble::segment_member_by_element` -- which REORDERS the
+    /// segments a jump lives between -- would not notice it escaping its
+    /// segment.
+    pub(crate) fn jump_offset(&self) -> Option<PcOffset> {
         match self {
             SymbolicOpcode::NextIterOrJump { jump_back }
             | SymbolicOpcode::NextBroadcastOrJump { jump_back } => Some(*jump_back),

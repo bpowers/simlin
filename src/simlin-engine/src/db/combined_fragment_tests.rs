@@ -518,6 +518,127 @@ fn combined_fragment_trailing_non_write_opcodes_join_last_segment() {
     );
 }
 
+// ── Jump containment ────────────────────────────────────────────────────
+//
+// `combine_scc_fragment` REORDERS a member's per-element segments into
+// `element_order`, and a jump offset is relative. A jump that left its own
+// segment would, after the interleave, land on whatever opcode happened to sit
+// that far back -- a silent miscompile with no bad id and no bad reference for
+// anything downstream to notice. `segment_member_by_element` rejects it.
+//
+// Codegen cannot emit that shape today: `BeginIter`/`NextIterOrJump`/`EndIter`
+// come from one place (the `Expr::AssignTemp` arm, whose loop writes a TEMP
+// through `StoreIterElement`), and a member's per-element `AssignCurr` is
+// emitted by the statement-level arm after `EndIter` -- so a loop is always
+// wholly inside one segment. That is precisely why it is checked rather than
+// asserted in prose: the assumption lives in a different file, and nothing else
+// would notice it changing.
+//
+// The same statement-boundary argument is what keeps the view stack and the
+// value stack balanced across a segment cut, so a future emitter that broke
+// this would want re-examining on all three counts, not just the jump.
+
+/// Splice a self-contained iteration loop into `ce`'s element-0 segment: the
+/// `BeginIter` and the backward jump that targets inside it both precede the
+/// element-0 write, so the whole loop moves as one unit.
+fn ce_with_contained_loop() -> HashMap<Ident<Canonical>, PerVarBytecodes> {
+    let mut frags = two_member_fragments();
+    let ce = frags.get_mut(&id("ce")).unwrap();
+    ce.symbolic.code = vec![
+        SymbolicOpcode::BeginIter {
+            write_temp_id: 0,
+            has_write_temp: true,
+        },
+        SymbolicOpcode::LoadIterViewAt { offset: 0 },
+        SymbolicOpcode::StoreIterElement {},
+        SymbolicOpcode::NextIterOrJump { jump_back: -2 },
+        SymbolicOpcode::EndIter {},
+        SymbolicOpcode::AssignConstCurr {
+            var: vref("ce", 0),
+            literal_id: 0,
+        },
+        SymbolicOpcode::LoadVar {
+            var: vref("ecc", 0),
+        },
+        SymbolicOpcode::AssignCurr { var: vref("ce", 1) },
+        SymbolicOpcode::Ret,
+    ];
+    frags
+}
+
+#[test]
+fn a_jump_inside_its_own_segment_survives_the_interleave() {
+    let combined = combine_scc_fragment(&scc(interleaved_order()), &ce_with_contained_loop())
+        .expect("a self-contained loop must not block the interleave");
+    let jumps = combined
+        .symbolic
+        .code
+        .iter()
+        .filter(|op| matches!(op, SymbolicOpcode::NextIterOrJump { .. }))
+        .count();
+    assert_eq!(jumps, 1, "the loop must survive the interleave");
+    assert_eq!(
+        write_refs(&combined),
+        vec![vref("ce", 0), vref("ecc", 0), vref("ce", 1), vref("ecc", 1)],
+        "and the writes must still follow element_order"
+    );
+}
+
+#[test]
+fn a_jump_escaping_its_segment_is_a_loud_safe_err() {
+    let mut frags = two_member_fragments();
+    // `ce`'s element-1 segment jumps back across the element-0 write.
+    let ce = frags.get_mut(&id("ce")).unwrap();
+    ce.symbolic.code = vec![
+        SymbolicOpcode::LoadVar {
+            var: vref("ecc", 0),
+        },
+        SymbolicOpcode::AssignCurr { var: vref("ce", 0) },
+        SymbolicOpcode::LoadVar {
+            var: vref("ecc", 0),
+        },
+        // Targets opcode 0, which is in element 0's segment.
+        SymbolicOpcode::NextIterOrJump { jump_back: -3 },
+        SymbolicOpcode::AssignCurr { var: vref("ce", 1) },
+        SymbolicOpcode::Ret,
+    ];
+
+    let err = combine_scc_fragment(&scc(interleaved_order()), &frags)
+        .expect_err("a jump crossing a segment boundary must be rejected");
+    assert!(
+        err.contains("outside the per-element segment"),
+        "expected a loud jump-containment error, got: {err}"
+    );
+}
+
+#[test]
+fn a_jump_in_the_trailing_tail_targets_its_own_merged_segment() {
+    // Opcodes after the FINAL per-element write join the last segment rather
+    // than starting one of their own, so a jump among them is contained when it
+    // targets inside that segment. The guard's lower bound has to account for
+    // the tail merging backwards; a naive "segment starts after the last write"
+    // bound rejects this.
+    let mut frags = two_member_fragments();
+    let ce = frags.get_mut(&id("ce")).unwrap();
+    ce.symbolic.code = vec![
+        SymbolicOpcode::AssignConstCurr {
+            var: vref("ce", 0),
+            literal_id: 0,
+        },
+        SymbolicOpcode::LoadVar {
+            var: vref("ecc", 0),
+        },
+        SymbolicOpcode::AssignCurr { var: vref("ce", 1) },
+        // Tail: joins element 1's segment, and targets opcode 1, inside it.
+        SymbolicOpcode::PopView {},
+        SymbolicOpcode::NextIterOrJump { jump_back: -3 },
+        SymbolicOpcode::Ret,
+    ];
+
+    combine_scc_fragment(&scc(interleaved_order()), &frags)
+        .expect("a tail jump into the segment the tail joins is contained");
+}
+
 // ── AC2.3: combined-fragment injection is layout-transparent ────────────
 //
 // End-to-end through `assemble_module` (the Task 6 production consumer).
