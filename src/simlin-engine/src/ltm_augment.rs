@@ -1417,12 +1417,24 @@ fn contains_unfreezable_previous(expr: &Expr0) -> bool {
 /// must not be touched. References already inside a `PREVIOUS(...)`/`INIT(...)`
 /// call are skipped (already lagged/frozen, not a live read this partial
 /// must account for). The reducer set comes from
-/// `reducer_collapses_to_scalar`, so it also includes SIZE -- harmless: an
-/// equation whose only reducer is SIZE keeps the changed-first convention
-/// (the whole reducer is freezable as `PREVIOUS(size(...))`), so it does
-/// not reach this gate. RANK is excluded by that predicate: it is
+/// [`crate::ltm_agg::reducer_collapses_to_scalar`], so it also includes SIZE
+/// -- harmless: an equation whose only reducer is SIZE keeps the changed-first
+/// convention (the whole reducer is freezable as `PREVIOUS(size(...))`,
+/// because [`expr_is_array_slice_valued`] reads the SAME predicate), so it
+/// does not reach this gate. RANK is excluded by that predicate: it is
 /// array-valued and uses its own agg-routing path (GH #771/#776), so its
 /// bare arg is not this scalar-reducer feeder shape.
+///
+/// This is deliberately NOT `db::ltm_ir::OccurrenceSite::in_reducer`, which
+/// looks like the same "is this reference inside a reducer?" question but is
+/// the LTM ROUTING one ("did an aggregate node get minted for this call?") and
+/// therefore inverts on exactly SIZE and RANK. Consuming the IR bit here would
+/// flip a bare arrayed source inside `RANK(...)` from scored (via the GH #742
+/// arrayed-capture path) to loudly declined -- a user-visible score change
+/// with no argument behind it. Assessed in GH #982 and left as two predicates;
+/// `ltm_agg::reducer_collapses_to_scalar`'s doc carries the comparison and
+/// `ltm_agg::REDUCER_DECISION_TABLE` pins both of them row by row, so neither
+/// can drift.
 fn references_bare_source_inside_reducer(
     expr: &Expr0,
     source: &Ident<Canonical>,
@@ -4381,28 +4393,7 @@ fn classify_reducer_in_expr(
 
     match expr {
         Expr2::App(builtin, _, _) => {
-            // Check if this builtin is a reducer whose argument references
-            // the source variable.
-            if let Some((kind, name, body)) =
-                classify_builtin_if_references_source(builtin, source_ident)
-            {
-                return Some(ClassifiedReducer {
-                    kind,
-                    name,
-                    is_bare: is_top_level,
-                    body,
-                });
-            }
-            // Even if this particular App node isn't the reducer we want,
-            // recurse into its arguments to find nested reducers.
-            // Any reducer found inside a non-reducer App is nested.
-            let mut result = None;
-            builtin.for_each_expr_ref(|sub_expr| {
-                if result.is_none() {
-                    result = classify_reducer_in_expr(sub_expr, source_ident, false);
-                }
-            });
-            result
+            classify_reducer_in_builtin(builtin, source_ident, is_top_level)
         }
         Expr2::Op1(_, inner, _, _) => classify_reducer_in_expr(inner, source_ident, false),
         Expr2::Op2(_, lhs, rhs, _, _) => classify_reducer_in_expr(lhs, source_ident, false)
@@ -4414,6 +4405,42 @@ fn classify_reducer_in_expr(
         }
         Expr2::Var(..) | Expr2::Const(..) | Expr2::Subscript(..) => None,
     }
+}
+
+/// [`classify_reducer_in_expr`]'s `App` arm, reachable directly from a
+/// `BuiltinFn` the caller already holds.
+///
+/// This is how the link-score emitters read the reducer kind, name and body
+/// off [`crate::ltm_agg::AggNode::reducer`] (GH #983): an aggregate node's
+/// equation IS one reducer call, so `is_top_level = true` reproduces exactly
+/// what walking a reconstructed `Ast::Scalar(App(..))` used to produce --
+/// including the nested-reducer fallback below, which fires when the outer
+/// reducer's array argument does not itself reference `source_ident`.
+pub(crate) fn classify_reducer_in_builtin(
+    builtin: &crate::builtins::BuiltinFn<crate::ast::Expr2>,
+    source_ident: &str,
+    is_top_level: bool,
+) -> Option<ClassifiedReducer> {
+    // Check if this builtin is a reducer whose argument references the
+    // source variable.
+    if let Some((kind, name, body)) = classify_builtin_if_references_source(builtin, source_ident) {
+        return Some(ClassifiedReducer {
+            kind,
+            name,
+            is_bare: is_top_level,
+            body,
+        });
+    }
+    // Even if this particular App node isn't the reducer we want, recurse
+    // into its arguments to find nested reducers. Any reducer found inside a
+    // non-reducer App is nested.
+    let mut result = None;
+    builtin.for_each_expr_ref(|sub_expr| {
+        if result.is_none() {
+            result = classify_reducer_in_expr(sub_expr, source_ident, false);
+        }
+    });
+    result
 }
 
 /// If `builtin` is a recognized array reducer (per

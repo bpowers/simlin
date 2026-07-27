@@ -5923,12 +5923,15 @@ fn test_source_to_agg_polarity_discriminates_body_sign() {
             loc,
         )
     };
-    let sum = |arg: Expr2| Expr2::App(crate::builtins::BuiltinFn::Sum(Box::new(arg)), None, loc);
+    // The analyzed unit is the reducer CALL, exactly as it rides on
+    // `ltm_agg::AggNode::reducer` (GH #983) -- an aggregate node's equation is
+    // one reducer application, so there is no enclosing `Ast` to supply.
+    let sum = |arg: Expr2| crate::builtins::BuiltinFn::Sum(Box::new(arg));
     let empty_vars = HashMap::new();
 
     // SUM(pop[*] * scale): the co-factor is a bare arrayed reference,
     // positive by the SD labeling convention -> Positive.
-    let headline = Ast::Scalar(sum(op2(BinaryOp::Mul, pop_wild(), var("scale"))));
+    let headline = sum(op2(BinaryOp::Mul, pop_wild(), var("scale")));
     assert_eq!(
         analyze_source_to_agg_polarity(&headline, &scale, &empty_vars),
         LinkPolarity::Positive,
@@ -5938,11 +5941,11 @@ fn test_source_to_agg_polarity_discriminates_body_sign() {
     // SUM(pop[*] * (1 - scale)): the feeder enters through a negation ->
     // Negative (the review's demonstrated counterexample to the blanket
     // monotone-Positive label).
-    let negating = Ast::Scalar(sum(op2(
+    let negating = sum(op2(
         BinaryOp::Mul,
         pop_wild(),
         op2(BinaryOp::Sub, cnst(1.0), var("scale")),
-    )));
+    ));
     assert_eq!(
         analyze_source_to_agg_polarity(&negating, &scale, &empty_vars),
         LinkPolarity::Negative,
@@ -5953,11 +5956,11 @@ fn test_source_to_agg_polarity_discriminates_body_sign() {
     // its value sign is derived, not a convention -- so the hop polarity is
     // indeterminate and must fall back to Unknown (never a confident wrong
     // label).
-    let compound = Ast::Scalar(sum(op2(
+    let compound = sum(op2(
         BinaryOp::Mul,
         op2(BinaryOp::Sub, var("k"), pop_wild()),
         var("scale"),
-    )));
+    ));
     assert_eq!(
         analyze_source_to_agg_polarity(&compound, &scale, &empty_vars),
         LinkPolarity::Unknown,
@@ -5966,11 +5969,8 @@ fn test_source_to_agg_polarity_discriminates_body_sign() {
 
     // STDDEV(pop[*] * scale): a non-monotone reducer stays Unknown even
     // with a convention-positive body.
-    let stddev = Ast::Scalar(Expr2::App(
-        crate::builtins::BuiltinFn::Stddev(Box::new(op2(BinaryOp::Mul, pop_wild(), var("scale")))),
-        None,
-        loc,
-    ));
+    let stddev =
+        crate::builtins::BuiltinFn::Stddev(Box::new(op2(BinaryOp::Mul, pop_wild(), var("scale"))));
     assert_eq!(
         analyze_source_to_agg_polarity(&stddev, &scale, &empty_vars),
         LinkPolarity::Unknown,
@@ -5981,7 +5981,11 @@ fn test_source_to_agg_polarity_discriminates_body_sign() {
     // headline body is Unknown there -- the convention applies ONLY to the
     // feeder-hop analysis, never to general link polarity.
     assert_eq!(
-        analyze_link_polarity(&headline, &scale, &empty_vars),
+        analyze_link_polarity(
+            &Ast::Scalar(Expr2::App(headline, None, loc)),
+            &scale,
+            &empty_vars
+        ),
         LinkPolarity::Unknown,
         "the general analyzer must NOT adopt the convention Mul rule"
     );

@@ -26,9 +26,7 @@ use super::compile::{ShapedLinkScore, link_score_equation_text_shaped};
 use super::loops::{
     ReadSliceRow, ReadSliceRowParts, cartesian_subscripts, read_slice_row_parts, read_slice_rows,
 };
-use super::parse::{
-    ltm_equation_dimensions, reconstruct_ltm_var_lowered, retarget_ltm_equation_dims,
-};
+use super::parse::{ltm_equation_dimensions, retarget_ltm_equation_dims};
 
 /// The occurrence-stream slot each target element maps to when the
 /// ceteris-paribus wrap walks one slot's expression at a time.
@@ -2862,24 +2860,22 @@ pub(super) fn emit_source_to_agg_link_scores(
         vars.extend(feeder_vars);
         return;
     }
-    // Reconstruct a transient (parsed + lowered) `Variable` from the
-    // agg's equation text so `classify_reducer` can read the reducer
-    // kind/name. An arrayed agg (`result_dims` non-empty -- a sliced
-    // reducer like `SUM(matrix[D1,*])` over an A2A-`D1` body) must be
-    // reconstructed as an `ApplyToAll` over `result_dims`; treating
-    // `matrix[d1,*]` as a scalar equation is a type error, so the lowered
-    // reconstruction would fail and no per-read-row source link scores
-    // would be emitted (silently zeroing the synthetic agg's loop score).
-    // Mirrors the agg-aux emission above.
-    let agg_eqn = if agg.result_dims.is_empty() {
-        LtmEquation::scalar(agg.equation_text.clone())
-    } else {
-        LtmEquation::apply_to_all(agg.result_dims.clone(), agg.equation_text.clone())
-    };
-    let Some(agg_var) = reconstruct_ltm_var_lowered(db, &agg.name, &agg_eqn, model, project) else {
-        return;
-    };
-    let Some(classified) = crate::ltm_augment::classify_reducer(&agg_var, from) else {
+    // The reducer kind / name / body come straight off the aggregate node
+    // (GH #983). This used to print `agg.equation_text`, re-parse it, re-lower
+    // it against a freshly built scope and re-classify the result -- a closed
+    // round trip through our own printer and parser, run once per
+    // (agg, source) pair, whose two fallible steps both returned early and
+    // silently zeroed the agg's loop score. It also forced the emitter to
+    // rebuild the equation SHAPE by hand: an arrayed agg had to be
+    // reconstructed as an `ApplyToAll` over `result_dims`, because treating
+    // `matrix[d1,*]` as a scalar equation is a type error whose lowering
+    // failure emitted no scores at all. Reading the classified builtin
+    // removes both hazards -- there is no shape to rebuild.
+    let Some(classified) = crate::ltm_augment::classify_reducer_in_builtin(
+        &agg.reducer,
+        from,
+        /* is_top_level = */ true,
+    ) else {
         return;
     };
     if classified.kind == crate::ltm_augment::ReducerKind::Constant {

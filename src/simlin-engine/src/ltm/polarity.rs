@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{Ast, BinaryOp, Expr2, IndexExpr2};
+use crate::builtins::BuiltinFn;
 use crate::common::{Canonical, Ident};
 use crate::variable::Variable;
 
@@ -54,12 +55,25 @@ pub(super) fn analyze_link_polarity(
 /// An agg's body is the one context where a blanket monotone-Positive
 /// label was previously applied unconditionally, so a convention-scoped
 /// analysis is strictly more accurate there.
+///
+/// `reducer` is the reducer call itself (`ltm_agg::AggNode::reducer`), not a
+/// whole equation: an aggregate node's equation IS one reducer application,
+/// so the `Ast` wrapper the caller used to reconstruct carried no
+/// information -- [`analyze_ast_polarity`] treats `Ast::Scalar` and
+/// `Ast::ApplyToAll` through the same arm, and an agg is never
+/// `Ast::Arrayed`.
 pub(super) fn analyze_source_to_agg_polarity(
-    agg_ast: &Ast<Expr2>,
+    reducer: &BuiltinFn<Expr2>,
     source: &Ident<Canonical>,
     variables: &HashMap<Ident<Canonical>, Variable>,
 ) -> LinkPolarity {
-    analyze_ast_polarity(agg_ast, source, variables, /* mul_convention = */ true)
+    analyze_builtin_polarity(
+        reducer,
+        source,
+        LinkPolarity::Positive,
+        Some(variables),
+        /* mul_convention = */ true,
+    )
 }
 
 /// Shared AST-level dispatch for [`analyze_link_polarity`] /
@@ -267,6 +281,154 @@ pub(super) fn analyze_expr_polarity_with_context(
     )
 }
 
+/// The `Expr2::App` half of [`analyze_expr_polarity_impl`], reachable from a
+/// `BuiltinFn` on its own so that a hoisted reducer's polarity
+/// ([`analyze_source_to_agg_polarity`]) can be analysed without wrapping the
+/// builtin back up in an `Expr2::App` it was taken out of.
+///
+/// The `App` node's own `ArrayBounds` and `Loc` are not read by any arm, so
+/// nothing is lost by dropping the wrapper.
+fn analyze_builtin_polarity(
+    builtin: &BuiltinFn<Expr2>,
+    from_var: &Ident<Canonical>,
+    current_polarity: LinkPolarity,
+    variables: Option<&HashMap<Ident<Canonical>, Variable>>,
+    mul_convention: bool,
+) -> LinkPolarity {
+    match builtin {
+        // All three lookup variants share the `(table_expr, index_expr, loc)`
+        // shape and the same polarity story: the result is non-decreasing in
+        // the index when the table is, so the link polarity is the argument's
+        // monotonicity composed with the table's.
+        BuiltinFn::Lookup(table_expr, index_expr, _)
+        | BuiltinFn::LookupForward(table_expr, index_expr, _)
+        | BuiltinFn::LookupBackward(table_expr, index_expr, _) => {
+            let arg_polarity = analyze_expr_polarity_impl(
+                index_expr,
+                from_var,
+                LinkPolarity::Positive,
+                variables,
+                mul_convention,
+            );
+
+            if arg_polarity == LinkPolarity::Unknown {
+                return LinkPolarity::Unknown;
+            }
+
+            // Composing argument monotonicity with table monotonicity is plain
+            // sign multiplication; an Unknown on either side absorbs.
+            arg_polarity.compose(lookup_table_polarity(table_expr, variables))
+        }
+        // Non-decreasing single-arg builtins: propagate inner polarity.
+        // Int (floor) is a step function with discontinuities, but is still
+        // non-decreasing, which is sufficient for polarity propagation.
+        BuiltinFn::Exp(inner)
+        | BuiltinFn::Ln(inner)
+        | BuiltinFn::Log10(inner)
+        | BuiltinFn::Sqrt(inner)
+        | BuiltinFn::Arctan(inner)
+        | BuiltinFn::Int(inner) => {
+            analyze_expr_polarity_impl(inner, from_var, current_polarity, variables, mul_convention)
+        }
+        // Max/Min (scalar two-arg form): non-decreasing in each argument
+        BuiltinFn::Max(a, Some(b)) | BuiltinFn::Min(a, Some(b)) => {
+            let pol_a = analyze_expr_polarity_impl(
+                a,
+                from_var,
+                current_polarity,
+                variables,
+                mul_convention,
+            );
+            let pol_b = analyze_expr_polarity_impl(
+                b,
+                from_var,
+                current_polarity,
+                variables,
+                mul_convention,
+            );
+            match (pol_a, pol_b) {
+                // When one side returns Unknown, we must check whether it actually
+                // references from_var. Unknown from an independent expression (e.g.
+                // a constant or unrelated variable) means we can use the other side's
+                // polarity. Unknown from a dependent expression (e.g. ABS(x)) means
+                // the result is truly non-monotonic.
+                (LinkPolarity::Unknown, known) => {
+                    if expr_references_var(a, from_var) {
+                        LinkPolarity::Unknown
+                    } else {
+                        known
+                    }
+                }
+                (known, LinkPolarity::Unknown) => {
+                    if expr_references_var(b, from_var) {
+                        LinkPolarity::Unknown
+                    } else {
+                        known
+                    }
+                }
+                // Both agree: propagate
+                (a_pol, b_pol) if a_pol == b_pol => a_pol,
+                // Disagree: unknown
+                _ => LinkPolarity::Unknown,
+            }
+        }
+        // Array reducers SUM and MEAN: monotone in every input element, so
+        // polarity is the polarity of the (single) array argument.
+        // MEAN's variant carries Vec<Expr> to also represent the variadic scalar
+        // form MEAN(a, b, c); for polarity that form is still monotone in each
+        // argument, so we combine arg polarities the same way Add does (any
+        // disagreement collapses to Unknown).
+        BuiltinFn::Sum(arg) => {
+            analyze_expr_polarity_impl(arg, from_var, current_polarity, variables, mul_convention)
+        }
+        BuiltinFn::Mean(args) => {
+            let mut combined = LinkPolarity::Unknown;
+            for arg in args {
+                let arg_pol = analyze_expr_polarity_impl(
+                    arg,
+                    from_var,
+                    current_polarity,
+                    variables,
+                    mul_convention,
+                );
+                // Hoist the self-reference + Unknown short circuit ahead of the
+                // per-arg combiner so that any non-monotone dependence on
+                // from_var (e.g. ABS(x)) collapses the whole mean to Unknown,
+                // regardless of arg order. This mirrors the Add path: an
+                // Unknown that references from_var poisons the result; an
+                // Unknown that's independent of from_var (e.g. an unrelated
+                // variable or constant) is just skipped. Without this hoist a
+                // first-iteration ABS(x) would seed `combined` with Unknown and
+                // then be silently overwritten by a later known-polarity arg.
+                if arg_pol == LinkPolarity::Unknown && expr_references_var(arg, from_var) {
+                    return LinkPolarity::Unknown;
+                }
+                match (combined, arg_pol) {
+                    // Independent Unknown (constant, unrelated var): skip.
+                    (_, LinkPolarity::Unknown) => {}
+                    // First known polarity wins.
+                    (LinkPolarity::Unknown, pol) => combined = pol,
+                    // Same polarity across args: stable.
+                    (a_pol, b_pol) if a_pol == b_pol => {}
+                    // Disagreement among known polarities collapses to Unknown.
+                    _ => return LinkPolarity::Unknown,
+                }
+            }
+            combined
+        }
+        // Array reducers MAX/MIN (single-arg form): max/min of a monotone family
+        // is monotone, so propagate the inner polarity.
+        BuiltinFn::Max(a, None) | BuiltinFn::Min(a, None) => {
+            analyze_expr_polarity_impl(a, from_var, current_polarity, variables, mul_convention)
+        }
+        // STDDEV is non-monotone (variance has no fixed sign w.r.t. inputs).
+        // RANK depends on the rest of the array, so its sign w.r.t. one element
+        // is not determined. Both must explicitly return Unknown.
+        BuiltinFn::Stddev(_) | BuiltinFn::Rank(_, _) => LinkPolarity::Unknown,
+        _ => LinkPolarity::Unknown,
+    }
+}
+
 /// The recursive polarity walk. `mul_convention` enables the
 /// positive-by-convention Mul one-side rule (feeder-hop analysis ONLY; see
 /// [`analyze_source_to_agg_polarity`]); `false` reproduces the general
@@ -330,143 +492,13 @@ fn analyze_expr_polarity_impl(
                 LinkPolarity::Unknown
             }
         }
-        // All three lookup variants share the `(table_expr, index_expr, loc)`
-        // shape and the same polarity story: the result is non-decreasing in
-        // the index when the table is, so the link polarity is the argument's
-        // monotonicity composed with the table's.
-        Expr2::App(
-            crate::builtins::BuiltinFn::Lookup(table_expr, index_expr, _)
-            | crate::builtins::BuiltinFn::LookupForward(table_expr, index_expr, _)
-            | crate::builtins::BuiltinFn::LookupBackward(table_expr, index_expr, _),
-            _,
-            _,
-        ) => {
-            let arg_polarity = analyze_expr_polarity_impl(
-                index_expr,
-                from_var,
-                LinkPolarity::Positive,
-                variables,
-                mul_convention,
-            );
-
-            if arg_polarity == LinkPolarity::Unknown {
-                return LinkPolarity::Unknown;
-            }
-
-            // Composing argument monotonicity with table monotonicity is plain
-            // sign multiplication; an Unknown on either side absorbs.
-            arg_polarity.compose(lookup_table_polarity(table_expr, variables))
-        }
-        // Non-decreasing single-arg builtins: propagate inner polarity.
-        // Int (floor) is a step function with discontinuities, but is still
-        // non-decreasing, which is sufficient for polarity propagation.
-        Expr2::App(crate::builtins::BuiltinFn::Exp(inner), _, _)
-        | Expr2::App(crate::builtins::BuiltinFn::Ln(inner), _, _)
-        | Expr2::App(crate::builtins::BuiltinFn::Log10(inner), _, _)
-        | Expr2::App(crate::builtins::BuiltinFn::Sqrt(inner), _, _)
-        | Expr2::App(crate::builtins::BuiltinFn::Arctan(inner), _, _)
-        | Expr2::App(crate::builtins::BuiltinFn::Int(inner), _, _) => {
-            analyze_expr_polarity_impl(inner, from_var, current_polarity, variables, mul_convention)
-        }
-        // Max/Min (scalar two-arg form): non-decreasing in each argument
-        Expr2::App(crate::builtins::BuiltinFn::Max(a, Some(b)), _, _)
-        | Expr2::App(crate::builtins::BuiltinFn::Min(a, Some(b)), _, _) => {
-            let pol_a = analyze_expr_polarity_impl(
-                a,
-                from_var,
-                current_polarity,
-                variables,
-                mul_convention,
-            );
-            let pol_b = analyze_expr_polarity_impl(
-                b,
-                from_var,
-                current_polarity,
-                variables,
-                mul_convention,
-            );
-            match (pol_a, pol_b) {
-                // When one side returns Unknown, we must check whether it actually
-                // references from_var. Unknown from an independent expression (e.g.
-                // a constant or unrelated variable) means we can use the other side's
-                // polarity. Unknown from a dependent expression (e.g. ABS(x)) means
-                // the result is truly non-monotonic.
-                (LinkPolarity::Unknown, known) => {
-                    if expr_references_var(a, from_var) {
-                        LinkPolarity::Unknown
-                    } else {
-                        known
-                    }
-                }
-                (known, LinkPolarity::Unknown) => {
-                    if expr_references_var(b, from_var) {
-                        LinkPolarity::Unknown
-                    } else {
-                        known
-                    }
-                }
-                // Both agree: propagate
-                (a_pol, b_pol) if a_pol == b_pol => a_pol,
-                // Disagree: unknown
-                _ => LinkPolarity::Unknown,
-            }
-        }
-        // Array reducers SUM and MEAN: monotone in every input element, so
-        // polarity is the polarity of the (single) array argument.
-        // MEAN's variant carries Vec<Expr> to also represent the variadic scalar
-        // form MEAN(a, b, c); for polarity that form is still monotone in each
-        // argument, so we combine arg polarities the same way Add does (any
-        // disagreement collapses to Unknown).
-        Expr2::App(crate::builtins::BuiltinFn::Sum(arg), _, _) => {
-            analyze_expr_polarity_impl(arg, from_var, current_polarity, variables, mul_convention)
-        }
-        Expr2::App(crate::builtins::BuiltinFn::Mean(args), _, _) => {
-            let mut combined = LinkPolarity::Unknown;
-            for arg in args {
-                let arg_pol = analyze_expr_polarity_impl(
-                    arg,
-                    from_var,
-                    current_polarity,
-                    variables,
-                    mul_convention,
-                );
-                // Hoist the self-reference + Unknown short circuit ahead of the
-                // per-arg combiner so that any non-monotone dependence on
-                // from_var (e.g. ABS(x)) collapses the whole mean to Unknown,
-                // regardless of arg order. This mirrors the Add path: an
-                // Unknown that references from_var poisons the result; an
-                // Unknown that's independent of from_var (e.g. an unrelated
-                // variable or constant) is just skipped. Without this hoist a
-                // first-iteration ABS(x) would seed `combined` with Unknown and
-                // then be silently overwritten by a later known-polarity arg.
-                if arg_pol == LinkPolarity::Unknown && expr_references_var(arg, from_var) {
-                    return LinkPolarity::Unknown;
-                }
-                match (combined, arg_pol) {
-                    // Independent Unknown (constant, unrelated var): skip.
-                    (_, LinkPolarity::Unknown) => {}
-                    // First known polarity wins.
-                    (LinkPolarity::Unknown, pol) => combined = pol,
-                    // Same polarity across args: stable.
-                    (a_pol, b_pol) if a_pol == b_pol => {}
-                    // Disagreement among known polarities collapses to Unknown.
-                    _ => return LinkPolarity::Unknown,
-                }
-            }
-            combined
-        }
-        // Array reducers MAX/MIN (single-arg form): max/min of a monotone family
-        // is monotone, so propagate the inner polarity.
-        Expr2::App(crate::builtins::BuiltinFn::Max(a, None), _, _)
-        | Expr2::App(crate::builtins::BuiltinFn::Min(a, None), _, _) => {
-            analyze_expr_polarity_impl(a, from_var, current_polarity, variables, mul_convention)
-        }
-        // STDDEV is non-monotone (variance has no fixed sign w.r.t. inputs).
-        // RANK depends on the rest of the array, so its sign w.r.t. one element
-        // is not determined. Both must explicitly return Unknown.
-        Expr2::App(crate::builtins::BuiltinFn::Stddev(_), _, _)
-        | Expr2::App(crate::builtins::BuiltinFn::Rank(_, _), _, _) => LinkPolarity::Unknown,
-        Expr2::App(_, _, _) => LinkPolarity::Unknown,
+        Expr2::App(builtin, _, _) => analyze_builtin_polarity(
+            builtin,
+            from_var,
+            current_polarity,
+            variables,
+            mul_convention,
+        ),
         Expr2::Op2(op, left, right, _, _) => {
             let left_pol = analyze_expr_polarity_impl(
                 left,

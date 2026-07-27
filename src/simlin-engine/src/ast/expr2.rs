@@ -108,6 +108,20 @@ impl IndexExpr2 {
         }
     }
 
+    /// The [`Expr2::strip_loc_and_bounds`] twin for one subscript index.
+    pub(crate) fn strip_loc_and_bounds(self) -> Self {
+        let loc = Loc::default();
+        match self {
+            IndexExpr2::Wildcard(_) => IndexExpr2::Wildcard(loc),
+            IndexExpr2::StarRange(dim, _) => IndexExpr2::StarRange(dim, loc),
+            IndexExpr2::Range(l, r, _) => {
+                IndexExpr2::Range(l.strip_loc_and_bounds(), r.strip_loc_and_bounds(), loc)
+            }
+            IndexExpr2::DimPosition(n, _) => IndexExpr2::DimPosition(n, loc),
+            IndexExpr2::Expr(e) => IndexExpr2::Expr(e.strip_loc_and_bounds()),
+        }
+    }
+
     #[allow(dead_code)]
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
@@ -194,6 +208,63 @@ pub trait Expr2Context {
 }
 
 impl Expr2 {
+    /// The expression with every `Loc` zeroed and every [`ArrayBounds`]
+    /// annotation dropped -- its position- and lowering-independent form.
+    ///
+    /// Both stripped fields are artifacts of *where* an expression was
+    /// written rather than *what* it means: a `Loc` is a byte range into one
+    /// variable's equation text, and a `Temp` bound carries a temp id the
+    /// lowering context handed out in equation order. Two occurrences of the
+    /// same subexpression in different equations therefore differ in both
+    /// while denoting the same thing, so a cache that stores an expression
+    /// keyed on its canonical printed form (`ltm_agg::AggNode`) must store
+    /// this form or its value stops being a function of its key.
+    ///
+    /// Necessary, not sufficient: `Expr2::Const` holds an `f64`, whose `==` is
+    /// not reflexive on NaN, so a NaN-bearing expression compares unequal to
+    /// itself however it is normalized. See `ltm_agg::AggNode::reducer` for
+    /// that residual and the root fix it waits on.
+    pub(crate) fn strip_loc_and_bounds(self) -> Self {
+        let loc = Loc::default();
+        match self {
+            Expr2::Const(text, value, _) => Expr2::Const(text, value, loc),
+            Expr2::Var(ident, _, _) => Expr2::Var(ident, None, loc),
+            Expr2::App(builtin, _, _) => Expr2::App(
+                builtin
+                    .map(|arg| arg.strip_loc_and_bounds())
+                    .strip_own_locs(),
+                None,
+                loc,
+            ),
+            Expr2::Subscript(ident, indices, _, _) => Expr2::Subscript(
+                ident,
+                indices
+                    .into_iter()
+                    .map(IndexExpr2::strip_loc_and_bounds)
+                    .collect(),
+                None,
+                loc,
+            ),
+            Expr2::Op1(op, rhs, _, _) => {
+                Expr2::Op1(op, Box::new(rhs.strip_loc_and_bounds()), None, loc)
+            }
+            Expr2::Op2(op, lhs, rhs, _, _) => Expr2::Op2(
+                op,
+                Box::new(lhs.strip_loc_and_bounds()),
+                Box::new(rhs.strip_loc_and_bounds()),
+                None,
+                loc,
+            ),
+            Expr2::If(cond, then_e, else_e, _, _) => Expr2::If(
+                Box::new(cond.strip_loc_and_bounds()),
+                Box::new(then_e.strip_loc_and_bounds()),
+                Box::new(else_e.strip_loc_and_bounds()),
+                None,
+                loc,
+            ),
+        }
+    }
+
     /// Extract the array bounds from an expression, if it has one
     pub(crate) fn get_array_bounds(&self) -> Option<&ArrayBounds> {
         match self {

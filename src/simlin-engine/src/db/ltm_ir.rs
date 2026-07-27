@@ -1486,13 +1486,20 @@ pub(crate) struct OccurrenceSite {
     /// gate, which scopes its per-occurrence shape comparison to non-reducer
     /// references and asserts both streams agree on reducer context.
     ///
-    /// NOT yet consumed by the transform's GH #779 bare-reducer-feeder decline,
-    /// which re-derives "inside a scalar reducer" with its own walk: the two
-    /// decisions use two different reducer SETS
-    /// (`ltm_agg::reducer_collapses_to_scalar` includes `SIZE` and excludes
-    /// `RANK`; `builtin_routes_through_agg`, which sets this bit, does the
-    /// opposite), so consuming it there would flip a bare source inside
-    /// `RANK(...)` from scored to loudly declined. Tracked as GH #982.
+    /// Deliberately NOT consumed by the transform's GH #779
+    /// bare-reducer-feeder decline, which asks a DIFFERENT question with its
+    /// own walk: "does this subtree collapse to a scalar?"
+    /// (`ltm_agg::reducer_collapses_to_scalar`) rather than "did an aggregate
+    /// node get minted for it?" (`builtin_routes_through_agg`, which sets this
+    /// bit). The two answers are inverted on exactly `SIZE` and `RANK`, and
+    /// that inversion IS the difference between the questions -- `SIZE` is a
+    /// scalar count that is never hoisted, `RANK` is array-valued but gets an
+    /// array-valued agg. Consuming this bit there would flip a bare source
+    /// inside `RANK(...)` from scored to loudly declined, a user-visible score
+    /// change with no argument behind it. Assessed and resolved that way in
+    /// GH #982; `ltm_agg::reducer_collapses_to_scalar`'s doc carries the full
+    /// comparison and `ltm_agg::REDUCER_DECISION_TABLE` pins both predicates,
+    /// row by row, so neither can move silently.
     pub in_reducer: bool,
     /// `true` iff the occurrence is reachable ONLY through another reference's
     /// subscript index (`other_arr[from]`). Such an occurrence is excluded

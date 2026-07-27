@@ -5214,6 +5214,23 @@ fn references_bare_source_inside_reducer_detects_only_the_dangerous_shape() {
         &frac,
         false
     ));
+    // SIZE completes the reducer set (`reducer_kind_from_name` recognizes
+    // seven functions; the loop above covers five and RANK is the sixth).
+    // It IS in this predicate's set, because the question here is "does the
+    // subtree collapse to a scalar" and a count does -- see
+    // `ltm_agg::reducer_collapses_to_scalar`, whose OTHER consumer
+    // (`expr_is_array_slice_valued`, the GH #743 freezability test) reads the
+    // same predicate and is what makes this cell INERT: an equation whose only
+    // reducer is SIZE is freezable as `PREVIOUS(size(...))`, so its
+    // changed-first partial succeeds and the changed-last chooser never
+    // reaches this gate. The membership is pinned anyway, because the
+    // inertness is a property of the two call sites AGREEING, and nothing else
+    // would notice one of them moving (GH #982).
+    assert!(references_bare_source_inside_reducer(
+        &parse("SIZE(frac)"),
+        &frac,
+        false
+    ));
     // A different variable inside the reducer is irrelevant.
     assert!(!references_bare_source_inside_reducer(
         &parse("SUM(matrix[D1, *] * other)"),

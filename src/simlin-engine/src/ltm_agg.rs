@@ -208,6 +208,29 @@ pub(crate) fn reducer_kind_from_name(name: &str, arity: usize) -> Option<Reducer
 /// through synthetic aggs, but those aggs are marked array-valued and their
 /// source→agg half uses the RANK-specific all-read-rows-to-all-output-slots
 /// treatment rather than the scalar reducer row→slot treatment (GH #776).
+///
+/// # Not the same question as [`builtin_routes_through_agg`]
+///
+/// The two predicates answer questions that LOOK alike -- "is this reference
+/// inside a reducer?" -- and their answers are inverted on exactly `SIZE` and
+/// `RANK`. That inversion is the DEFINITION of the difference, not a
+/// disagreement (GH #982): they read the one [`reducer_kind_from_name`] table
+/// along two orthogonal axes.
+///
+/// * This predicate is about the reducer's RESULT TYPE: does the subtree
+///   collapse to a scalar? `SIZE` does (it is a count), `RANK` does not (it is
+///   array-valued). Its consumers -- the two freeze/capture gates named above,
+///   plus the GH #779 bare-reducer-feeder decline in
+///   `ltm_augment::references_bare_source_inside_reducer` -- are all deciding
+///   whether an expression can live in a SCALAR slot.
+/// * [`builtin_routes_through_agg`] is about LTM ROUTING: did
+///   [`enumerate_agg_nodes`] mint an aggregate node for this call? `SIZE` did
+///   not (`ReducerKind::Constant` is never hoisted -- its link score is
+///   identically 0), `RANK` did (an array-valued agg, GH #776).
+///
+/// Both cells of the inversion are pinned in both directions by
+/// `reducer_kind_classifies_every_array_reducer`, so an edit that moves either
+/// predicate's membership is a test failure rather than a silent drift.
 pub(crate) fn reducer_collapses_to_scalar(name: &str, arity: usize) -> bool {
     reducer_kind_from_name(name, arity).is_some() && name != "rank"
 }
@@ -220,6 +243,93 @@ pub(crate) fn reducer_collapses_to_scalar(name: &str, arity: usize) -> bool {
 /// future `BuiltinFn<Expr0>` caller share one implementation.
 pub(crate) fn reducer_kind<E>(builtin: &BuiltinFn<E>) -> Option<ReducerKind> {
     reducer_kind_from_name(builtin.name(), builtin_reducer_arity(builtin))
+}
+
+/// The reducer decision table as DATA, for the tests that pin it.
+///
+/// One row per `(name, arity)` pair needed to reach every arm of
+/// [`reducer_kind_from_name`]: its six `Some` arms name seven functions
+/// (`min | max` share an arm), two of those arms carry an `arity == 1` guard
+/// so `mean`/`min`/`max` each need a failing-arity row as well, and the
+/// catch-all needs one row -- 7 + 3 + 1 = 11 rows. Each row carries the kind
+/// and all three derived predicates, so the `SIZE`/`RANK` inversion between
+/// [`reducer_collapses_to_scalar`] and [`builtin_routes_through_agg`]
+/// (GH #982) is pinned in BOTH directions rather than asserted from one side.
+///
+/// Shared with `ltm_augment::classifier_agreement_tests`, whose name-based
+/// twin of `builtin_routes_through_agg` must agree row for row.
+#[cfg(test)]
+pub(crate) const REDUCER_DECISION_TABLE: &[ReducerDecisionRow] = &[
+    ReducerDecisionRow::new("sum", 1, Some(ReducerKind::Linear), true, true, true),
+    ReducerDecisionRow::new("mean", 1, Some(ReducerKind::Linear), true, true, true),
+    ReducerDecisionRow::new("mean", 2, None, false, false, false),
+    ReducerDecisionRow::new("min", 1, Some(ReducerKind::Nonlinear), true, true, true),
+    ReducerDecisionRow::new("min", 2, None, false, false, false),
+    ReducerDecisionRow::new("max", 1, Some(ReducerKind::Nonlinear), true, true, true),
+    ReducerDecisionRow::new("max", 2, None, false, false, false),
+    ReducerDecisionRow::new("stddev", 1, Some(ReducerKind::Nonlinear), true, true, true),
+    // The two inverted cells: array-valued but agg-routed ...
+    ReducerDecisionRow::new("rank", 1, Some(ReducerKind::Nonlinear), false, false, true),
+    // ... and scalar-valued but never routed.
+    ReducerDecisionRow::new("size", 1, Some(ReducerKind::Constant), true, false, false),
+    ReducerDecisionRow::new("abs", 1, None, false, false, false),
+];
+
+/// One row of [`REDUCER_DECISION_TABLE`].
+#[cfg(test)]
+pub(crate) struct ReducerDecisionRow {
+    pub name: &'static str,
+    pub arity: usize,
+    pub kind: Option<ReducerKind>,
+    /// [`reducer_collapses_to_scalar`]: does the subtree evaluate to a scalar?
+    pub collapses_to_scalar: bool,
+    /// [`reducer_is_hoistable`]: does a scalar-reducer agg get minted?
+    pub is_hoistable: bool,
+    /// [`builtin_routes_through_agg`]: do references inside it route to an agg?
+    pub routes_through_agg: bool,
+}
+
+#[cfg(test)]
+impl ReducerDecisionRow {
+    const fn new(
+        name: &'static str,
+        arity: usize,
+        kind: Option<ReducerKind>,
+        collapses_to_scalar: bool,
+        is_hoistable: bool,
+        routes_through_agg: bool,
+    ) -> Self {
+        ReducerDecisionRow {
+            name,
+            arity,
+            kind,
+            collapses_to_scalar,
+            is_hoistable,
+            routes_through_agg,
+        }
+    }
+
+    /// The `BuiltinFn` this row's `(name, arity)` names, so the builtin-keyed
+    /// predicates can be checked against the same row as the name-keyed ones.
+    /// Panics on an unknown row, which keeps the table and this constructor in
+    /// step.
+    pub(crate) fn builtin(&self) -> BuiltinFn<i32> {
+        match (self.name, self.arity) {
+            ("sum", 1) => BuiltinFn::Sum(Box::new(0)),
+            ("mean", n) => BuiltinFn::Mean((0..n as i32).collect()),
+            ("min", 1) => BuiltinFn::Min(Box::new(0), None),
+            ("min", 2) => BuiltinFn::Min(Box::new(0), Some(Box::new(1))),
+            ("max", 1) => BuiltinFn::Max(Box::new(0), None),
+            ("max", 2) => BuiltinFn::Max(Box::new(0), Some(Box::new(1))),
+            ("stddev", 1) => BuiltinFn::Stddev(Box::new(0)),
+            // `RANK(arr, dir)` reports arity 1: `builtin_reducer_arity` counts
+            // only the reduced argument, and the deciders ignore arity here.
+            ("rank", 1) => BuiltinFn::Rank(Box::new(0), Box::new(1)),
+            ("size", 1) => BuiltinFn::Size(Box::new(0)),
+            ("abs", 1) => BuiltinFn::Abs(Box::new(0)),
+            other => unreachable!("no BuiltinFn for decision-table row {other:?}"),
+        }
+    }
 }
 
 /// The arity [`reducer_kind_from_name`] / [`reducer_collapses_to_scalar`]
@@ -254,10 +364,20 @@ pub(crate) fn reducer_is_hoistable<E>(builtin: &BuiltinFn<E>) -> bool {
 }
 
 /// `true` when references inside `builtin` may route through an aggregate
-/// node. Scalar reducers use [`reducer_is_hoistable`]; array-valued `RANK`
-/// uses a synthetic arrayed agg whose source half has RANK-specific routing.
+/// node -- the LTM ROUTING question, and the sole setter of
+/// `db::ltm_ir::OccurrenceSite::in_reducer`.
+///
+/// It is the disjunction of [`agg_candidate_for_builtin`]'s two minting
+/// branches, read from the branches themselves rather than restated:
+/// [`reducer_is_hoistable`] is the scalar-reducer branch and
+/// [`array_valued_rank_arg`] is the array-valued one. Stating it that way is
+/// what keeps "can this call mint an agg" and "do references in it route to
+/// one" from drifting apart.
+///
+/// See [`reducer_collapses_to_scalar`] for why the two "is this inside a
+/// reducer?" predicates deliberately disagree on `SIZE` and `RANK` (GH #982).
 pub(crate) fn builtin_routes_through_agg<E>(builtin: &BuiltinFn<E>) -> bool {
-    reducer_is_hoistable(builtin) || matches!(builtin, BuiltinFn::Rank(_, _))
+    reducer_is_hoistable(builtin) || array_valued_rank_arg(builtin).is_some()
 }
 
 /// How one *source axis* of a hoisted reducer is consumed.
@@ -410,7 +530,8 @@ pub struct AggSource {
 }
 
 /// One aggregate node: the stand-in for a maximal reducer subexpression.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub struct AggNode {
     /// The aggregate node's name. For a synthetic agg this is
     /// `$⁚ltm⁚agg⁚{n}`; for a variable-backed agg this is the owning
@@ -449,6 +570,66 @@ pub struct AggNode {
     /// output element in the same iterated context, so the source→agg half
     /// fans each read row out across all non-pinned result-axis slots.
     pub array_valued_rank: bool,
+    /// The reducer call itself: the very `BuiltinFn<Expr2>` this enumerator
+    /// classified when it decided the hoist, of which `equation_text` is the
+    /// printed rendering.
+    ///
+    /// It is here so that no downstream consumer has to recover the reducer's
+    /// kind, name, or body by parsing and re-lowering `equation_text` (GH
+    /// #983): [`crate::ltm_augment::classify_reducer_in_builtin`] reads the
+    /// first two and hands back the third, and
+    /// `db::ltm::loops::source_to_agg_hop_polarity` analyses it directly.
+    ///
+    /// **Read only for SYNTHETIC aggs.** Both readers filter to those
+    /// (`recover_agg_hop_polarities` on `is_synthetic`; every
+    /// `emit_source_to_agg_link_scores` call site on `is_synthetic_agg_name` or
+    /// the IR's synthetic-only `routed_aggs`), so the copy `register_agg`
+    /// stores on the variable-backed arm is unread today. It is stored anyway
+    /// so `AggNode` has ONE shape -- an `Option` here would add a branch to
+    /// every reader to encode a fact about who happens to call them -- but
+    /// nothing pins it: corrupting it to a wrong kind, name and body leaves the
+    /// whole suite green, while the same corruption on the synthetic arm reds a
+    /// dozen-plus tests across the char goldens and the cross-agg recovery
+    /// suite.
+    ///
+    /// # What the stored form does and does not normalize
+    ///
+    /// Stored in [`Expr2::strip_loc_and_bounds`] form, which removes TWO of the
+    /// three ways this field can make the salsa-cached `AggNodesResult`
+    /// compare unequal to an identical rebuild. It does not remove the third.
+    ///
+    /// * `Loc` -- removed, and load-bearing. Two AST-identical occurrences in
+    ///   different equations carry different `Loc`s, so storing them raw would
+    ///   make *which occurrence won the dedup* observable and would stop
+    ///   `enumerate_agg_nodes` backdating across an edit that only moves an
+    ///   equation's byte offsets. Neither reader looks at a `Loc`
+    ///   ([`crate::patch::expr2_to_expr0`] carries them along unread; the
+    ///   polarity analyzer matches on none), so removing them changes no answer.
+    ///   Pinned by `the_carried_reducer_is_normalized_so_offset_only_edits_backdate`.
+    /// * `ArrayBounds` -- removed as a GUARD, not a live requirement: the ASTs
+    ///   this enumerator walks come from
+    ///   `db::analysis::reconstruct_model_variables`, which lowers against an
+    ///   EMPTY model scope, so `Expr2Context::get_dimensions` resolves nothing
+    ///   and every bound is already `None`. Were that to change, a bound would
+    ///   carry the temp id the lowering context happened to hand out in
+    ///   equation order, and the cached value would become sensitive to
+    ///   unrelated edits elsewhere in the owning equation. Neither reader looks
+    ///   at one either -- `expr2_to_expr0` drops them outright.
+    /// * The `f64` on `Expr2::Const` -- **NOT removed, and not removable.** A
+    ///   derived `PartialEq` over an `f64` is not reflexive on NaN, so a model
+    ///   whose hoisted reducer contains a `nan` literal
+    ///   (`out = 1 + SUM(pop[*] * nan)`) yields two enumerations that are
+    ///   structurally identical and compare UNEQUAL -- permanently defeating
+    ///   this query's backdating, so every revision bump re-executes
+    ///   `model_element_causal_edges` / `model_ltm_reference_sites` /
+    ///   `model_ltm_variables`. No normalization can fix it here: dropping a
+    ///   NaN literal would change what the equation means. It is the GH
+    ///   #987/#981 class (the same mechanism that forces `db::stages_tests`'
+    ///   stdlib oracle onto `npv`), and it is fixed at the ROOT by making AST
+    ///   float literals compare by bit pattern. Today's broken behaviour is
+    ///   pinned by `a_nan_literal_in_a_reducer_defeats_agg_backdating`, which
+    ///   that fix must invert.
+    pub reducer: BuiltinFn<Expr2>,
 }
 
 impl AggNode {
@@ -550,7 +731,8 @@ impl AggNode {
 /// reuses a variable-backed agg of the same text (which would otherwise be
 /// filtered out by the `is_synthetic` checks downstream, leaving the inline
 /// reducer on the conservative direct-scoring path -- a name-ordering bug).
-#[derive(Clone, Debug, PartialEq, Eq, Default, salsa::Update)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Default, salsa::Update)]
 pub struct AggNodesResult {
     /// Aggregate nodes in first-encounter (deterministic) order.
     pub aggs: Vec<AggNode>,
@@ -770,6 +952,7 @@ fn walk_var_equation(
         // (`rowsum[D1] = SUM(matrix[D1, *])`) keeps `[D1]` as its result dims.
         let key = crate::patch::expr2_to_string(expr);
         let result_dims = candidate.result_dims;
+        let reducer = candidate.reducer;
         // DECLINE the degenerate square-source shape (repeated result dim,
         // GH #778/#785): the per-axis emission paths pin subscript indices by
         // dim name and disagree across the duplicated occurrence. Declining
@@ -787,6 +970,7 @@ fn walk_var_equation(
                     var_name: var_name.to_string(),
                     result_dims,
                     array_valued_rank: false,
+                    reducer,
                 },
                 sources,
             );
@@ -1000,6 +1184,7 @@ fn walk_subexpr_for_aggs(
                     AggKind::Synthetic {
                         result_dims: candidate.result_dims,
                         array_valued_rank: candidate.array_valued_rank,
+                        reducer: candidate.reducer,
                     },
                     sources,
                 );
@@ -1048,12 +1233,23 @@ struct AggCandidate {
     slices: CombinedReadSlices,
     result_dims: Vec<String>,
     array_valued_rank: bool,
+    /// The classified reducer call, normalized for storage on the node
+    /// (see [`AggNode::reducer`]).
+    reducer: BuiltinFn<Expr2>,
 }
 
 fn agg_candidate_for_builtin(
     builtin: &BuiltinFn<Expr2>,
     ctx: &AggWalkCtx<'_>,
 ) -> Option<AggCandidate> {
+    // Cloned only once the builtin has been accepted as a candidate, so the
+    // non-reducer majority of App nodes pays nothing.
+    let normalized = || {
+        builtin
+            .clone()
+            .map(Expr2::strip_loc_and_bounds)
+            .strip_own_locs()
+    };
     if let Some(rank_arg) = array_valued_rank_arg(builtin) {
         let source_vars = rank_source_vars(rank_arg, ctx.variables)?;
         let slices = rank_combined_read_slice(rank_arg, ctx)?;
@@ -1066,6 +1262,7 @@ fn agg_candidate_for_builtin(
             slices,
             result_dims,
             array_valued_rank: true,
+            reducer: normalized(),
         });
     }
 
@@ -1077,10 +1274,20 @@ fn agg_candidate_for_builtin(
         slices,
         result_dims,
         array_valued_rank: false,
+        reducer: normalized(),
     })
 }
 
-fn array_valued_rank_arg(builtin: &BuiltinFn<Expr2>) -> Option<&Expr2> {
+/// The ranked argument of an ARRAY-VALUED reducer, or `None` for every other
+/// builtin -- the array-valued half of [`agg_candidate_for_builtin`]'s
+/// two-branch minting decision (the other half being
+/// [`reducer_is_hoistable`]).
+///
+/// Generic over the contained expression type because it inspects only the
+/// builtin's identity: [`builtin_routes_through_agg`] reads it so that "which
+/// builtins can mint an array-valued agg" is stated once, here, rather than
+/// restated as a second `matches!` beside the routing predicate.
+fn array_valued_rank_arg<E>(builtin: &BuiltinFn<E>) -> Option<&E> {
     match builtin {
         BuiltinFn::Rank(arg, _) => Some(arg),
         _ => None,
@@ -1209,12 +1416,14 @@ enum AggKind {
     Synthetic {
         result_dims: Vec<String>,
         array_valued_rank: bool,
+        reducer: BuiltinFn<Expr2>,
     },
     /// The owning variable already is the aggregate node.
     VariableBacked {
         var_name: String,
         result_dims: Vec<String>,
         array_valued_rank: bool,
+        reducer: BuiltinFn<Expr2>,
     },
 }
 
@@ -1291,6 +1500,7 @@ fn register_agg(
         AggKind::Synthetic {
             result_dims,
             array_valued_rank,
+            reducer,
         } => {
             if let Some(&existing) = result.synthetic_by_key.get(key) {
                 existing
@@ -1304,6 +1514,7 @@ fn register_agg(
                     sources,
                     is_synthetic: true,
                     array_valued_rank,
+                    reducer,
                 });
                 let idx = result.aggs.len() - 1;
                 result.synthetic_by_key.insert(key.to_string(), idx);
@@ -1314,6 +1525,7 @@ fn register_agg(
             var_name,
             result_dims,
             array_valued_rank,
+            reducer,
         } => {
             // Each whole-RHS-reducer variable is its own aggregate node;
             // never deduped, and not entered in `synthetic_by_key`.
@@ -1324,6 +1536,7 @@ fn register_agg(
                 sources,
                 is_synthetic: false,
                 array_valued_rank,
+                reducer,
             });
             result.aggs.len() - 1
         }
@@ -4296,69 +4509,62 @@ mod tests {
         assert!(synthetic[0].result_dims.is_empty());
     }
 
-    /// AC1.2: the consolidated `reducer_kind` table classifies every array
-    /// reducer the LTM machinery cares about, and `reducer_is_hoistable`
-    /// derives the right hoisted subset. `reducer_kind` is
-    /// generic over the contained expression type, so `BuiltinFn::<i32>`
-    /// literals suffice -- it only inspects structure and arity.
+    /// AC1.2 + GH #982: the consolidated reducer table classifies every array
+    /// reducer the LTM machinery cares about, and all THREE derived predicates
+    /// agree with the table row for row.
+    ///
+    /// The rows come from [`REDUCER_DECISION_TABLE`], whose 11 entries are
+    /// derived from `reducer_kind_from_name`'s own arms (see its doc): every
+    /// arm, every arity guard in both directions, and the catch-all. Each row
+    /// asserts the name-keyed decider, the builtin-keyed decider, the arity
+    /// the builtin form reports, and the three consumers -- so the `SIZE` /
+    /// `RANK` inversion between `reducer_collapses_to_scalar` ("does this
+    /// collapse to a scalar?") and `builtin_routes_through_agg` ("did an agg
+    /// get minted for it?") is pinned in both directions on both rows, and an
+    /// edit to either predicate reds here rather than drifting silently
+    /// (GH #982).
     #[test]
     fn reducer_kind_classifies_every_array_reducer() {
-        use crate::builtins::BuiltinFn;
+        for row in REDUCER_DECISION_TABLE {
+            let name = row.name;
+            let arity = row.arity;
+            let builtin = row.builtin();
+            assert_eq!(
+                builtin_reducer_arity(&builtin),
+                arity,
+                "{name}/{arity}: the builtin form must report the row's arity"
+            );
+            assert_eq!(
+                reducer_kind_from_name(name, arity),
+                row.kind,
+                "{name}/{arity}: reducer_kind_from_name"
+            );
+            assert_eq!(
+                reducer_kind(&builtin),
+                row.kind,
+                "{name}/{arity}: reducer_kind"
+            );
+            assert_eq!(
+                reducer_collapses_to_scalar(name, arity),
+                row.collapses_to_scalar,
+                "{name}/{arity}: reducer_collapses_to_scalar"
+            );
+            assert_eq!(
+                reducer_is_hoistable(&builtin),
+                row.is_hoistable,
+                "{name}/{arity}: reducer_is_hoistable"
+            );
+            assert_eq!(
+                builtin_routes_through_agg(&builtin),
+                row.routes_through_agg,
+                "{name}/{arity}: builtin_routes_through_agg"
+            );
+        }
 
-        let sum = BuiltinFn::Sum(Box::new(0i32));
-        let mean_1 = BuiltinFn::Mean(vec![0i32]);
-        let mean_2 = BuiltinFn::Mean(vec![0i32, 1i32]);
-        let min_1 = BuiltinFn::Min(Box::new(0i32), None);
-        let min_2 = BuiltinFn::Min(Box::new(0i32), Some(Box::new(1i32)));
-        let max_1 = BuiltinFn::Max(Box::new(0i32), None);
-        let max_2 = BuiltinFn::Max(Box::new(0i32), Some(Box::new(1i32)));
-        let stddev = BuiltinFn::Stddev(Box::new(0i32));
-        let rank = BuiltinFn::Rank(Box::new(0i32), Box::new(1i32));
-        let size = BuiltinFn::Size(Box::new(0i32));
-        let abs = BuiltinFn::Abs(Box::new(0i32));
-
-        assert_eq!(reducer_kind(&sum), Some(ReducerKind::Linear));
-        assert_eq!(reducer_kind(&mean_1), Some(ReducerKind::Linear));
-        // Multi-argument MEAN is a scalar mean-of-arguments, not a reducer.
-        assert_eq!(reducer_kind(&mean_2), None);
-        assert_eq!(reducer_kind(&min_1), Some(ReducerKind::Nonlinear));
-        // 2-arg MIN/MAX are scalar binary builtins, not reducers.
-        assert_eq!(reducer_kind(&min_2), None);
-        assert_eq!(reducer_kind(&max_1), Some(ReducerKind::Nonlinear));
-        assert_eq!(reducer_kind(&max_2), None);
-        assert_eq!(reducer_kind(&stddev), Some(ReducerKind::Nonlinear));
-        assert_eq!(reducer_kind(&rank), Some(ReducerKind::Nonlinear));
-        assert_eq!(reducer_kind(&size), Some(ReducerKind::Constant));
-        assert_eq!(reducer_kind(&abs), None);
-
-        // Scalar-hoistable: recognized AND not Constant AND scalar-valued (I5) --
-        // SUM / 1-arg MEAN / 1-arg MIN / 1-arg MAX / STDDEV. SIZE is
-        // recognized but never hoisted (its link score is always 0); RANK is
-        // not scalar-hoistable (array-valued -- it uses its own agg path,
-        // GH #771/#776); 2-arg MIN/MAX are not recognized at all.
-        assert!(reducer_is_hoistable(&sum));
-        assert!(reducer_is_hoistable(&mean_1));
-        assert!(reducer_is_hoistable(&min_1));
-        assert!(reducer_is_hoistable(&max_1));
-        assert!(reducer_is_hoistable(&stddev));
-        assert!(!reducer_is_hoistable(&rank));
-        assert!(!reducer_is_hoistable(&size));
-        assert!(!reducer_is_hoistable(&mean_2));
-        assert!(!reducer_is_hoistable(&min_2));
-        assert!(!reducer_is_hoistable(&max_2));
-        assert!(!reducer_is_hoistable(&abs));
-
-        // `reducer_kind_from_name` is the raw lowercase + arity decider that
-        // `is_array_reducer_name` reads: SIZE included; mean/min/max only at
-        // arity 1; sum/stddev/rank/size at any arity.
-        assert_eq!(reducer_kind_from_name("sum", 1), Some(ReducerKind::Linear));
-        assert_eq!(reducer_kind_from_name("mean", 1), Some(ReducerKind::Linear));
-        assert_eq!(reducer_kind_from_name("mean", 2), None);
-        assert_eq!(
-            reducer_kind_from_name("min", 1),
-            Some(ReducerKind::Nonlinear)
-        );
-        assert_eq!(reducer_kind_from_name("min", 2), None);
+        // The table keys `stddev`/`rank`/`size`/`sum` at one arity each, but
+        // `reducer_kind_from_name` ignores arity for them -- only
+        // `mean`/`min`/`max` carry an `arity == 1` guard. Spot-check one, so a
+        // stray arity guard added to an arity-insensitive arm is caught.
         assert_eq!(
             reducer_kind_from_name("stddev", 7),
             Some(ReducerKind::Nonlinear)
@@ -4367,11 +4573,6 @@ mod tests {
             reducer_kind_from_name("rank", 2),
             Some(ReducerKind::Nonlinear)
         );
-        assert_eq!(
-            reducer_kind_from_name("size", 1),
-            Some(ReducerKind::Constant)
-        );
-        assert_eq!(reducer_kind_from_name("abs", 1), None);
     }
 
     /// GH #776: a RANK subexpression mints an ARRAY-valued synthetic agg,
@@ -5411,6 +5612,269 @@ mod tests {
                     read_slice: vec![],
                 },
             ]
+        );
+    }
+
+    /// GH #983: every recognized reducer's classification is CARRIED on the
+    /// SYNTHETIC node it decided, so no emitter has to recover it by
+    /// re-parsing [`AggNode::equation_text`].
+    ///
+    /// Scope, stated because "every recognized reducer" is only one of the two
+    /// axes here: this covers all seven reducers on the SYNTHETIC producer arm,
+    /// which is the arm both readers actually reach. `register_agg`'s
+    /// variable-backed arm stores a `reducer` too and no test covers it, because
+    /// no reader consumes it -- see [`AggNode::reducer`]'s doc.
+    ///
+    /// The rows are the reducer set itself, not a sample. `reducer_kind` is
+    /// the only admission test, and [`crate::ltm_augment`]'s
+    /// `classify_builtin_if_references_source` -- the function that reads the
+    /// kind, name and body back off `AggNode::reducer` -- destructures exactly
+    /// SEVEN `BuiltinFn` variants (`Sum`, `Mean`, `Min`, `Max`, `Stddev`,
+    /// `Rank`, `Size`) and calls `unreachable!()` on the rest, so those seven
+    /// are the whole space and this table has seven rows. Each row states the
+    /// three facts the emitters read: whether a node is minted at all, and (if
+    /// so) the `ReducerKind` and uppercase name the carried builtin classifies
+    /// to.
+    ///
+    /// `SIZE` is the one row that mints nothing (`ReducerKind::Constant` is
+    /// never hoisted -- its link score is always 0), and `RANK` is the one
+    /// row that mints an ARRAY-valued node; both are properties of the
+    /// enumerator this table would notice changing.
+    #[test]
+    fn every_reducer_carries_its_classification_on_the_agg_node() {
+        use crate::ltm_augment::{ReducerKind, classify_reducer_in_builtin};
+
+        // (equation for `out`, out's dims, expected (kind, name, array_valued_rank))
+        struct Row {
+            equation: &'static str,
+            out_dims: &'static [&'static str],
+            expected: Option<(ReducerKind, &'static str, bool)>,
+        }
+        let rows = [
+            Row {
+                equation: "1 + SUM(pop[*])",
+                out_dims: &[],
+                expected: Some((ReducerKind::Linear, "SUM", false)),
+            },
+            Row {
+                equation: "1 + MEAN(pop[*])",
+                out_dims: &[],
+                expected: Some((ReducerKind::Linear, "MEAN", false)),
+            },
+            Row {
+                equation: "1 + MIN(pop[*])",
+                out_dims: &[],
+                expected: Some((ReducerKind::Nonlinear, "MIN", false)),
+            },
+            Row {
+                equation: "1 + MAX(pop[*])",
+                out_dims: &[],
+                expected: Some((ReducerKind::Nonlinear, "MAX", false)),
+            },
+            Row {
+                equation: "1 + STDDEV(pop[*])",
+                out_dims: &[],
+                expected: Some((ReducerKind::Nonlinear, "STDDEV", false)),
+            },
+            Row {
+                // Array-valued: the node is arrayed over the ranked axis, so
+                // its consumer must be arrayed too.
+                equation: "1 + RANK(pop[*], 1)",
+                out_dims: &["Region"],
+                expected: Some((ReducerKind::Nonlinear, "RANK", true)),
+            },
+            Row {
+                // `ReducerKind::Constant`: recognized, never hoisted.
+                equation: "1 + SIZE(pop[*])",
+                out_dims: &[],
+                expected: None,
+            },
+        ];
+
+        for Row {
+            equation,
+            out_dims,
+            expected,
+        } in rows
+        {
+            let mut project = TestProject::new("carried")
+                .named_dimension("Region", &["nyc", "boston"])
+                .array_aux("pop[Region]", "1");
+            project = if out_dims.is_empty() {
+                project.scalar_aux("out", equation)
+            } else {
+                project.array_aux_direct(
+                    "out",
+                    out_dims.iter().map(|d| (*d).to_string()).collect(),
+                    equation,
+                    None,
+                )
+            };
+            let aggs = agg_nodes(&project);
+            let synthetic: Vec<&AggNode> = aggs.aggs.iter().filter(|a| a.is_synthetic).collect();
+
+            let Some((kind, name, array_valued_rank)) = expected else {
+                assert!(
+                    synthetic.is_empty(),
+                    "{equation}: a Constant reducer must mint no aggregate node"
+                );
+                continue;
+            };
+            assert_eq!(
+                synthetic.len(),
+                1,
+                "{equation}: expected exactly one synthetic aggregate node"
+            );
+            let agg = synthetic[0];
+            assert_eq!(
+                agg.array_valued_rank, array_valued_rank,
+                "{equation}: array_valued_rank"
+            );
+
+            let classified = classify_reducer_in_builtin(&agg.reducer, "pop", true)
+                .unwrap_or_else(|| panic!("{equation}: the carried builtin must classify"));
+            assert_eq!(classified.kind, kind, "{equation}: kind");
+            assert_eq!(classified.name, name, "{equation}: name");
+            assert!(
+                classified.is_bare,
+                "{equation}: an aggregate node's equation IS the reducer call"
+            );
+            // The body is the reducer's array argument, taken from the AST the
+            // enumerator walked rather than re-parsed from `equation_text`.
+            assert_eq!(
+                crate::ast::print_eqn(&classified.body),
+                "pop[*]",
+                "{equation}: body"
+            );
+        }
+    }
+
+    /// GH #983: the carried reducer is stored in
+    /// [`crate::ast::Expr2::strip_loc_and_bounds`] form, so a `Loc`-only edit
+    /// leaves the salsa-cached `AggNodesResult` equal.
+    ///
+    /// **This is one of the two ways the backdating claim can fail, and it
+    /// measures only this one.** The other is `f64` non-reflexivity on a NaN
+    /// literal, which normalization cannot touch;
+    /// [`a_nan_literal_in_a_reducer_defeats_agg_backdating`] pins that arm
+    /// (today: broken) and names the root fix.
+    ///
+    /// The two spellings differ ONLY in a leading term that mints no
+    /// aggregate node of its own -- a `SIZE` call, which is recognized as a
+    /// reducer but never hoisted -- so `SUM(pop[*])` moves to a different byte
+    /// offset and nothing else about the enumeration changes. The whole
+    /// `AggNodesResult` must therefore compare EQUAL, which is exactly
+    /// salsa's backdating criterion and so is the invalidation claim: an edit
+    /// that changes neither the reducer nor its sources must not invalidate
+    /// this query's consumers, as it did not before the node carried an AST
+    /// at all.
+    ///
+    /// It is the `Loc` half of the normalization that this measures. The
+    /// `ArrayBounds` half is inert TODAY and cannot be measured, because
+    /// `db::analysis::reconstruct_model_variables` -- the source of the ASTs
+    /// this query walks -- lowers against an EMPTY model scope, so
+    /// `Expr2Context::get_dimensions` resolves nothing and no bound is ever
+    /// allocated. The leading `SIZE(other[*])` is chosen over a bare constant
+    /// so that this test starts measuring the bounds half the moment that
+    /// stops being true: its arrayed argument would take the first temp id
+    /// and push `pop[*]` to the second.
+    ///
+    /// The second assertion is a weaker independent check on the same
+    /// property (re-normalizing the stored builtin is a no-op); it catches
+    /// normalization being dropped entirely but, being idempotence, cannot
+    /// by itself catch the normalization being made too weak. That is what
+    /// the equality assertion above is for.
+    #[test]
+    fn the_carried_reducer_is_normalized_so_offset_only_edits_backdate() {
+        let build = |leading: &str| {
+            TestProject::new("normalized")
+                .named_dimension("Region", &["nyc", "boston"])
+                .array_aux("pop[Region]", "1")
+                .array_aux("other[Region]", "2")
+                .scalar_aux("out", &format!("{leading} + SUM(pop[*])"))
+        };
+        let before = agg_nodes(&build("1"));
+        let after = agg_nodes(&build("SIZE(other[*])"));
+
+        let sum_agg = |r: &AggNodesResult| {
+            r.aggs
+                .iter()
+                .find(|a| a.equation_text == "sum(pop[*])")
+                .cloned()
+                .expect("the SUM subexpression must be hoisted")
+        };
+        assert_eq!(
+            before, after,
+            "an edit that only moves the reducer's byte offsets must leave the \
+             enumerated aggregate nodes equal, so salsa backdates"
+        );
+        let agg = sum_agg(&before);
+        assert_eq!(
+            agg.reducer
+                .clone()
+                .map(crate::ast::Expr2::strip_loc_and_bounds)
+                .strip_own_locs(),
+            agg.reducer,
+            "the stored reducer must already be normalized"
+        );
+    }
+
+    // CHARACTERIZATION, NOT A CONTRACT: this asserts today's BROKEN behaviour
+    // so the fix has something to turn red.
+    //
+    // `AggNode::reducer` (GH #983) puts an `Expr2` inside the salsa-cached,
+    // `PartialEq`-compared `AggNodesResult`, and `Expr2::Const` holds a bare
+    // `f64`. A derived `PartialEq` over an `f64` is not reflexive on NaN, so a
+    // model whose hoisted reducer contains a `nan` literal enumerates to a
+    // value that is structurally identical to an independent rebuild and
+    // compares UNEQUAL to it. Salsa's backdating criterion is exactly that
+    // equality, so such a model can never backdate `enumerate_agg_nodes`:
+    // every revision bump, from any unrelated edit anywhere in the project,
+    // re-executes `model_element_causal_edges`, `model_ltm_reference_sites`
+    // and `model_ltm_variables` -- the whole LTM compile.
+    //
+    // `strip_loc_and_bounds` closes the `Loc` and `ArrayBounds` channels (see
+    // `the_carried_reducer_is_normalized_so_offset_only_edits_backdate`); it
+    // cannot close this one, because there is no normalization that removes a
+    // NaN literal without changing what the equation means. This is the GH
+    // #987/#981 class -- the same mechanism that forces `db::stages_tests`'
+    // stdlib value oracle onto `npv` rather than `smth1` -- and the root fix is
+    // to make AST float literals compare by BIT PATTERN.
+    //
+    // When that lands, this test MUST be inverted, not deleted: switch to
+    // `assert_eq`, rename the test (it asserts the opposite of
+    // `defeats_agg_backdating` afterwards) along with the
+    // `nan_backdating_is_broken` project name, and update the three rustdocs
+    // that cite it by name -- `AggNode::reducer`,
+    // `the_carried_reducer_is_normalized_so_offset_only_edits_backdate`, and
+    // the `ltm_agg.rs` bullet in `simlin-engine/CLAUDE.md`. Its failure is the
+    // signal that the root fix reached this query.
+    #[test]
+    fn a_nan_literal_in_a_reducer_defeats_agg_backdating() {
+        let build = || {
+            TestProject::new("nan_backdating_is_broken")
+                .named_dimension("Region", &["nyc", "boston"])
+                .array_aux("pop[Region]", "1")
+                .scalar_aux("out", "1 + SUM(pop[*] * nan)")
+        };
+
+        // Guard against a vacuous pass: the reducer really is hoisted, so the
+        // NaN really does ride on a stored `AggNode::reducer`.
+        let enumerated = agg_nodes(&build());
+        let synthetic: Vec<&AggNode> = enumerated.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "the NaN-bearing reducer must still be hoisted for this to measure anything"
+        );
+
+        assert_ne!(
+            agg_nodes(&build()),
+            agg_nodes(&build()),
+            "TODAY'S BEHAVIOUR, not the desired one: two enumerations of an \
+             identical NaN-bearing model compare unequal, so `enumerate_agg_nodes` \
+             can never backdate for this model. Making AST float literals compare \
+             by bit pattern (GH #987/#981) must flip this to `assert_eq!`."
         );
     }
 }
