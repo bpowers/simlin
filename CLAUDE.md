@@ -94,6 +94,20 @@ IMPORTANT: Simple, general, testable, maintainable code is better than preservin
 
 IMPORTANT: If feedback seems non-actionable, it means you need comments explaining why the code looks that way.
 
+**CRITICAL**: A test that pins one arm of an N-way decision reads exactly like a test that pins the decision. Derive the rows from the enumeration -- the variant list, the call-site list, the axis list -- and cover every arm, or state in the test which arms it does not cover and where they are covered instead. "It passes" and "it constrains the code" are different claims.
+
+## Claims About Other Tools
+
+Vensim, Stella, and the XMILE specification are external systems. What one of them does is a **fact to be checked, not a premise to reason from** -- and the sources are cheap:
+
+- **XMILE spec**: `docs/reference/xmile-v1.0.html`, in-repo and greppable (strip tags and search the prose; the footnotes carry the resolution rules).
+- **Vensim function reference**: one page per function at vensim.com/documentation, named fn_ plus the lowercased function name with underscores.
+- **Ground truth output**: real Vensim DSS runs checked into `test/` (e.g. `test/test-models/tests/vector_order/output.tab`, which is how VECTOR SORT ORDER's semantics were settled).
+
+When code encodes a claim about another tool, cite the source next to it. When you cannot check one, write that the claim is unverified rather than asserting it -- and never let an unverified claim carry a design decision.
+
+This is the most expensive class of error in this repo, because review does not catch it: reviewers check the code against the stated claim, not the claim against the world. A wrong premise about an external tool therefore survives every round of review that its own code passes, and the work built on top of it is wasted rather than merely wrong.
+
 ## Comment and Rustdoc Standards
 
 - Preserve useful comments/docstrings when refactoring. Do not delete comments unless they are stale, wrong, or redundant with clearer replacement code.
@@ -131,6 +145,8 @@ Two things are NOT covered by "fix it", and both are explicit conversations rath
 
 - **The fix is too large to fold in** -- it would swamp the branch's review surface, or it belongs to a different subsystem. Say so, with a cost estimate, and sequence it: its own commit, its own PR, or (if that is what the user wants) tracked for later. Do not make that call quietly.
 - **The fix is not yours to make** -- it needs a product decision, or access you do not have. Surface it.
+
+**A fix that introduces a regression is a scope signal, not a bug to try harder at.** Once the second attempt at the same discovered issue produces a new defect, stop and re-scope: the problem is larger than the branch it was found in, and each further attempt is being designed against an understanding that has already failed twice. Split it out with what was learned, rather than continuing. Discovering something mid-task tells you it exists; it does not tell you it belongs in the change you are making.
 
 When something genuinely does need tracking, spawn the `track-issue` agent (via the Task tool with `subagent_type: "track-issue"`) with a description of the problem. It checks for duplicates in GitHub issues and [docs/tech-debt.md](/docs/tech-debt.md) and files the item, keeping your context on the main task.
 
