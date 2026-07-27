@@ -2153,6 +2153,251 @@ fn assert_fragment_value_survives_layout_edits(
     );
 }
 
+/// `main` reads `sub·output` across a module boundary. `producer_extra` adds a
+/// variable to the SUB-model that sorts before `output` (so `output`'s offset
+/// inside `producer` moves); `unrelated_extra` adds one to a model nothing
+/// instantiates.
+fn submodel_layout_project(producer_extra: bool, unrelated_extra: bool) -> datamodel::Project {
+    let aux = |ident: &str, equation: &str, can_be_module_input: bool| {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: datamodel::Equation::Scalar(equation.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat {
+                can_be_module_input,
+                ..datamodel::Compat::default()
+            },
+        })
+    };
+
+    let mut producer_vars = vec![aux("input", "0", true), aux("output", "input * 10", false)];
+    if producer_extra {
+        // Sorts before both, so `compute_layout`'s alphabetical body layout
+        // pushes `output` from slot 1 to slot 2.
+        producer_vars.insert(0, aux("aaa", "1", false));
+    }
+
+    let mut unrelated_vars = vec![aux("u1", "1", false)];
+    if unrelated_extra {
+        unrelated_vars.push(aux("u2", "2", false));
+    }
+
+    datamodel::Project {
+        name: "frag_submodel_layout".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 1.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    aux("src", "3", false),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "sub".to_string(),
+                        model_name: "producer".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![datamodel::ModuleReference {
+                            src: "src".to_string(),
+                            dst: "sub.input".to_string(),
+                        }],
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    aux("usesub", "sub.output * 2", false),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: None,
+            },
+            datamodel::Model {
+                name: "producer".to_string(),
+                sim_specs: None,
+                variables: producer_vars,
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: None,
+            },
+            datamodel::Model {
+                name: "unrelated".to_string(),
+                sim_specs: None,
+                variables: unrelated_vars,
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: None,
+            },
+        ],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// Every `element_offset` a fragment's opcodes carry for references to
+/// `module_var`, across all three phases, in opcode order.
+fn cross_module_element_offsets(
+    fragment: &crate::compiler::symbolic::CompiledVarFragment,
+    module_var: &str,
+) -> Vec<usize> {
+    let phases = [
+        fragment.initial_bytecodes.as_ref(),
+        fragment.flow_bytecodes.as_ref(),
+        fragment.stock_bytecodes.as_ref(),
+    ];
+    let mut offsets = Vec::new();
+    for bc in phases.into_iter().flatten() {
+        for op in &bc.symbolic.code {
+            let var = match op {
+                SymbolicOpcode::LoadVar { var }
+                | SymbolicOpcode::SymLoadPrev { var }
+                | SymbolicOpcode::SymLoadInitial { var }
+                | SymbolicOpcode::LoadSubscript { var }
+                | SymbolicOpcode::AssignCurr { var }
+                | SymbolicOpcode::AssignConstCurr { var, .. }
+                | SymbolicOpcode::BinOpAssignCurr { var, .. }
+                | SymbolicOpcode::BinOpAssignNext { var, .. }
+                | SymbolicOpcode::PushVarViewDirect { var, .. } => var,
+                _ => continue,
+            };
+            if var.name.as_str() == module_var {
+                offsets.push(var.element_offset);
+            }
+        }
+    }
+    offsets
+}
+
+/// The ONE layout channel that still reaches into a fragment -- and the only
+/// place the value-equality assertions above still have teeth of their own.
+///
+/// Since GH #964 a fragment carries no offset of its own model at all, and
+/// consulting one is a compile error (`VariableMetadata::offset` is `None` for
+/// the model being compiled), so the TYPE now subsumes most of what those
+/// assertions were watching for. One channel survives, in the other direction:
+/// a cross-module reference `sub·output` lowers to
+/// `VarRef { name: sub, element_offset: <output's offset INSIDE producer> }`,
+/// because the parent's layout has a single entry spanning the whole instance
+/// and none for `sub·output`. `Context::submodel_offset_within` reads that
+/// offset out of `compute_layout(producer)`, which is already fixed before any
+/// parent fragment compiles.
+///
+/// So the parent's cached fragment is a function of the SUB-model's layout,
+/// and both directions are load-bearing:
+///
+/// * growing `producer` ahead of `output` MUST change the parent's fragment,
+///   and MUST re-execute it. A cache hit here would serve a stale
+///   `element_offset` and the parent would read the wrong slot of the instance
+///   -- a silent wrong number, not a failure to compile.
+/// * growing a model nothing instantiates must NOT change it.
+///
+/// Neither direction was pinned before. The behavior is pre-existing and
+/// unchanged by GH #964; what changed is that it is now the only layout input
+/// a fragment has, which is what makes it worth its own test.
+#[test]
+fn parent_fragment_tracks_the_sub_models_layout_and_nothing_else() {
+    let base = submodel_layout_project(false, false);
+    let grown_submodel = submodel_layout_project(true, false);
+    let grown_unrelated = submodel_layout_project(false, true);
+
+    let mut db = SimlinDb::default();
+    let state1 = sync_from_datamodel_incremental(&mut db, &base, None);
+    assemble_simulation(&db, state1.to_sync_result().project, "main".to_string())
+        .expect("the sub-model layout fixture must assemble");
+    let before = probe_fragment(&db, &state1, "main", "usesub");
+
+    // Precondition: the fixture really does carry a cross-module reference, so
+    // a shape change that stopped emitting one fails here rather than making
+    // the assertions below vacuously true.
+    assert_eq!(
+        cross_module_element_offsets(&before, "sub"),
+        vec![1],
+        "`usesub` must read `sub` at `output`'s offset inside `producer` \
+         (input@0, output@1)"
+    );
+
+    // Direction 1: the sub-model's layout shifts under the parent.
+    let (state2, execs) = resync_and_assemble(&mut db, &grown_submodel, Some(&state1));
+    let after_submodel = probe_fragment(&db, &state2, "main", "usesub");
+    assert_eq!(
+        cross_module_element_offsets(&after_submodel, "sub"),
+        vec![2],
+        "adding `aaa` to `producer` moves `output` to slot 2, so the parent's \
+         cross-module reference must follow it"
+    );
+    assert_ne!(
+        before, after_submodel,
+        "the parent's fragment must change when the sub-model's layout shifts \
+         beneath it"
+    );
+    // Exactly three fragments re-execute, and the set is the point: `usesub`
+    // MUST be in it (a cache hit would serve the stale element offset), `sub`
+    // must be too (its `SymbolicModuleDecl` and `EvalModule` describe an
+    // instance whose size changed), and `src` -- an ordinary aux in `main` --
+    // must not, or the sub-model edit has become a whole-project invalidation.
+    // `aaa` is the new sub-model variable itself.
+    assert_eq!(
+        explicit_execs(&execs),
+        vec!["aaa", "sub", "usesub"],
+        "growing the sub-model must re-execute the new variable, the module \
+         variable, and the parent's cross-module reader -- and nothing else"
+    );
+
+    // ...and back: shrinking the sub-model again restores the identical
+    // fragment, so the dependence is on the layout rather than on the edit.
+    let state3 = sync_from_datamodel_incremental(&mut db, &base, Some(&state2));
+    assert_eq!(
+        before,
+        probe_fragment(&db, &state3, "main", "usesub"),
+        "removing the sub-model variable must restore the identical parent \
+         fragment"
+    );
+
+    // Direction 2: a model nothing instantiates grows. `main` and `producer`
+    // are untouched, so the parent's fragment must be bit-identical AND must
+    // not recompile.
+    //
+    // The execution set is measured, not assumed: exactly `["sub"]`, stable
+    // across repeated runs. `sub` re-executes because growing the project's
+    // model set re-keys the interned module-ident context, which is the
+    // saturation `implicit_helper_add_is_tight_but_module_helper_add_is_not`
+    // pins with both causes named -- so this test does not re-litigate it. What
+    // it does pin is that `usesub`, the cross-module READER this test is about,
+    // is not in the set: its fragment is a function of `producer`'s layout, and
+    // `producer` did not move.
+    //
+    // Value equality alone could not make that claim. It cannot distinguish
+    // "correctly cached" from "recompiled and happened to agree", which is
+    // precisely the distinction direction 1 turns on.
+    let (state4, unrelated_execs) = resync_and_assemble(&mut db, &grown_unrelated, Some(&state3));
+    assert_eq!(
+        explicit_execs(&unrelated_execs),
+        vec!["sub"],
+        "growing a model nothing instantiates must not recompile the parent's \
+         cross-module reader"
+    );
+    assert_eq!(
+        before,
+        probe_fragment(&db, &state4, "main", "usesub"),
+        "adding a variable to a model nothing instantiates must not change the \
+         parent's fragment"
+    );
+}
+
 #[test]
 fn equation_only_edit_recompiles_only_the_edited_fragment() {
     // The contrast case for `layout_only_edits_and_fragment_cache_reuse`: an
