@@ -1561,11 +1561,20 @@ pub(crate) fn compile_ltm_equation_fragment(
             &merged_module_models
         };
 
+    // The LTM synthetic var's fragment goes through the SAME emission entry
+    // point the explicit and implicit paths use. This site used to carry a
+    // hand-copied duplicate of that function's body, differing only in which
+    // module-ref map it stuffed into the stand-in `Module` -- a field codegen
+    // never read.
+    let var_sizes: PerVarSizes =
+        crate::compiler::whole_variable_extents(&all_metadata, &model_name_ident);
+
     let core = crate::compiler::ContextCore {
         dimensions: converted_dims,
         dimensions_ctx: dim_context,
         model_name: &model_name_ident,
         metadata: &all_metadata,
+        var_sizes: &var_sizes,
         module_models,
         inputs: &inputs,
     };
@@ -1577,15 +1586,6 @@ pub(crate) fn compile_ltm_equation_fragment(
         )
     };
 
-    // The LTM synthetic var's fragment goes through the SAME emission entry
-    // point the explicit and implicit paths use. This site used to carry a
-    // hand-copied duplicate of that function's body, differing only in which
-    // module-ref map it stuffed into the stand-in `Module` -- a field codegen
-    // never read.
-    let var_sizes: PerVarSizes = all_metadata[&model_name_ident]
-        .iter()
-        .map(|(k, vm)| (k.clone(), vm.size))
-        .collect();
     let base_ctx = fragment_emit_ctx(
         &model_name_ident,
         &inputs,
@@ -2485,11 +2485,19 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
             &merged_module_models
         };
 
+    // Same single emission entry point as every other fragment site. This was
+    // the second hand-copied duplicate of that body; it differed from the
+    // first only in the (unread) module-ref map, and it rebuilt the offsets
+    // projection once per phase rather than once per variable.
+    let var_sizes: PerVarSizes =
+        crate::compiler::whole_variable_extents(&all_metadata, &model_name_ident);
+
     let core = crate::compiler::ContextCore {
         dimensions: converted_dims,
         dimensions_ctx: dim_context,
         model_name: &model_name_ident,
         metadata: &all_metadata,
+        var_sizes: &var_sizes,
         module_models,
         inputs: &inputs,
     };
@@ -2501,14 +2509,6 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         )
     };
 
-    // Same single emission entry point as every other fragment site. This was
-    // the second hand-copied duplicate of that body; it differed from the
-    // first only in the (unread) module-ref map, and it rebuilt the offsets
-    // projection once per phase rather than once per variable.
-    let var_sizes: PerVarSizes = all_metadata[&model_name_ident]
-        .iter()
-        .map(|(k, vm)| (k.clone(), vm.size))
-        .collect();
     let base_ctx = fragment_emit_ctx(
         &model_name_ident,
         &inputs,

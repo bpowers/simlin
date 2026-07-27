@@ -64,8 +64,9 @@ pub(crate) struct ModuleCtx<'a> {
     pub(crate) runlist_initials_by_var: &'a [Var],
     pub(crate) runlist_flows: &'a [Expr],
     pub(crate) runlist_stocks: &'a [Expr],
-    /// Canonical variable name -> total slot count, for this model. The sole
-    /// reader is [`Compiler::full_source_len`].
+    /// Reference -> the extent of the variable it addresses in whole. The sole
+    /// reader is [`Compiler::full_source_len`]; the sole producer is
+    /// `context::whole_variable_extents`, shared with lowering.
     pub(crate) var_sizes: &'a VarSizes,
     pub(crate) tables: &'a HashMap<Ident<Canonical>, Vec<Table>>,
     pub(crate) dimensions: &'a [Dimension],
@@ -295,15 +296,17 @@ impl<'module> Compiler<'module> {
     /// returned for an offset that would map outside the source variable's
     /// full storage).
     ///
-    /// The reference carries the owning variable's name, so this is a direct
-    /// `var_sizes` lookup. It applies only to a reference that addresses the
-    /// variable *in whole*: a reference starting mid-variable names one element
-    /// of a bigger array, or one slot inside a module instance, and the full
-    /// extent of the thing it names is not knowable from the enclosing model's
-    /// symbol table. Those fall back to the lowered view's element count, which
-    /// is the correct full extent for the non-sliced shapes -- exactly what the
-    /// previous "does any variable's storage begin at this offset?" scan did,
-    /// since a variable's slot range contains no other variable's base.
+    /// This is a direct [`VarSizes`] lookup keyed by the reference itself,
+    /// because the reference does not always name the variable being asked
+    /// about: a cross-module `m·x` names the module INSTANCE `m` with `x`'s slot
+    /// inside it. `VarSizes` holds one entry per variable a reference can
+    /// address in whole -- a sub-model's variables among them, at their slots
+    /// within the instance -- so both shapes are one lookup.
+    ///
+    /// A reference the table does not hold starts mid-variable: it names one
+    /// element of a bigger array, and the array's extent is not that element's.
+    /// Those fall back to the lowered view's element count, which is the correct
+    /// full extent for the non-sliced shapes.
     fn full_source_len(&self, source: &Expr) -> u32 {
         let (base, view_len) = match source {
             Expr::StaticSubscript(base, view, _) => {
@@ -333,8 +336,7 @@ impl<'module> Compiler<'module> {
         };
 
         if let Some(base) = base
-            && base.is_whole_var()
-            && let Some(size) = self.module.var_sizes.get(&base.name)
+            && let Some(size) = self.module.var_sizes.get(base)
         {
             return *size as u32;
         }
@@ -1807,8 +1809,18 @@ mod tests {
             }
         }
 
+        /// The extent of a whole reference to `name`, as
+        /// `context::whole_variable_extents` records an ordinary variable.
         fn with_var_size(mut self, name: &str, size: usize) -> Self {
-            self.var_sizes.insert(Ident::new(name), size);
+            self.var_sizes.insert(VarRef::base(Ident::new(name)), size);
+            self
+        }
+
+        /// The extent of a SUB-MODEL variable living at slot `slot` of module
+        /// instance `instance`, as `whole_variable_extents` records one.
+        fn with_submodel_var_size(mut self, instance: &str, slot: usize, size: usize) -> Self {
+            self.var_sizes
+                .insert(VarRef::new(Ident::new(instance), slot), size);
             self
         }
 
@@ -1910,19 +1922,14 @@ mod tests {
     }
 
     /// `full_source_len` reports a VECTOR ELM MAP source's extent from the
-    /// variable's own size, and only when the reference addresses that
-    /// variable in whole.
+    /// [`VarSizes`] entry the reference itself keys, and falls back to the view
+    /// when the reference addresses no variable in whole.
     ///
-    /// The whole-variable rule is the exact translation of the offset scan this
-    /// replaced ("does any variable's storage BEGIN at this offset?"), and it is
-    /// what makes the two shapes below differ. A collapsed element source inside
-    /// an array-producing builtin keeps the variable's base and carries the
-    /// element in `view.offset` (that is why `Context::lower_from_expr3` returns
-    /// a `StaticSubscript` rather than a `Var` there -- GH #578), so it takes
-    /// the first arm and recovers the FULL extent. A reference that genuinely
-    /// starts mid-variable -- a cross-module `m·x`, whose owner in this model is
-    /// the module variable `m` -- names something whose extent this model's
-    /// symbol table does not know, so it falls back to the view.
+    /// A collapsed element source inside an array-producing builtin keeps the
+    /// variable's base and carries the element in `view.offset` (that is why
+    /// `Context::lower_from_expr3` returns a `StaticSubscript` rather than a
+    /// `Var` there -- GH #578), so it recovers the FULL extent. A reference that
+    /// starts mid-array names one element of a bigger array and falls back.
     #[test]
     fn full_source_len_uses_the_whole_variable_only_at_its_base() {
         let owner = EmptyCtxOwner::new().with_var_size("d", 6);
@@ -1944,9 +1951,9 @@ mod tests {
             6
         );
 
-        // The same view, but the reference starts 4 slots into its owner (the
-        // shape a cross-module reference produces). The owner is not `d` as a
-        // whole, so the view's extent is all this can honestly report.
+        // The same view, but the reference starts 4 slots into `d`. It names one
+        // element of a bigger array, whose extent is not the array's, so the
+        // view's extent is all this can honestly report.
         assert_eq!(
             compiler.full_source_len(&Expr::StaticSubscript(
                 VarRef::new(Ident::new("d"), 4),
@@ -1954,6 +1961,71 @@ mod tests {
                 crate::ast::Loc::default(),
             )),
             1
+        );
+    }
+
+    /// A CROSS-MODULE source reports the SUB-MODEL variable's extent, not the
+    /// module instance's slot count.
+    ///
+    /// `m·x` lowers to `VarRef { name: m, element_offset: x's slot inside the
+    /// instance }`, so a name-keyed lookup answered with the size of the whole
+    /// instance -- and when `x` happened to sit at slot 0 of its sub-model the
+    /// reference also passed a `element_offset == 0` whole-variable test, so the
+    /// wrong answer was returned rather than declined. Reads past `x`'s end then
+    /// landed on the NEXT sub-model variable instead of yielding `:NA:`. The
+    /// end-to-end shape is
+    /// `array_tests::…::elm_map_cross_module_source_uses_the_submodel_variable_extent`;
+    /// this is the unit-level statement of the same rule.
+    #[test]
+    fn full_source_len_of_a_cross_module_source_is_the_submodel_variables_extent() {
+        // Instance `m` spans 8 slots: `avals[4]` at 0, another 4-slot variable
+        // at 4. Both are recorded; the instance itself is not.
+        let owner = EmptyCtxOwner::new()
+            .with_submodel_var_size("m", 0, 4)
+            .with_submodel_var_size("m", 4, 4);
+        let compiler = Compiler::new(owner.ctx());
+
+        // A COLLAPSED element source: the view carries no dimensions, so the
+        // table is the only thing that can report an extent and the answer is
+        // not confounded by a fallback that happens to coincide with it.
+        let collapsed = |slot: usize| {
+            let mut view = ArrayView::contiguous(vec![]);
+            view.offset = 1;
+            compiler.full_source_len(&Expr::StaticSubscript(
+                VarRef::new(Ident::new("m"), slot),
+                view,
+                Loc::default(),
+            ))
+        };
+
+        assert_eq!(
+            collapsed(0),
+            4,
+            "the sub-model variable at the instance's base -- its extent, not m's 8 slots"
+        );
+        assert_eq!(
+            collapsed(4),
+            4,
+            "the second sub-model variable: a reference below the instance's \
+             base still addresses a variable in whole"
+        );
+        assert_eq!(
+            collapsed(2),
+            1,
+            "mid-array: no whole-variable entry, so the collapsed view stands"
+        );
+
+        // The dynamic-subscript shape resolves through the same table; its
+        // lowered bounds agree with it for an in-model source, and only the
+        // table is right for a cross-module one.
+        assert_eq!(
+            compiler.full_source_len(&Expr::Subscript(
+                VarRef::new(Ident::new("m"), 4),
+                vec![SubscriptIndex::Single(Expr::Const(0.0, Loc::default()))],
+                vec![4],
+                Loc::default(),
+            )),
+            4
         );
     }
 }

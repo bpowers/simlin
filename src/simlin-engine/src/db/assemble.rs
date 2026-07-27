@@ -648,10 +648,12 @@ pub(crate) fn compute_flow_invariance_support(
     })
 }
 
-/// `var_name -> slot count`: the per-fragment size table `lower_var_fragment`
-/// produces and the per-phase emission context (`compiler::ModuleCtx`) borrows.
-/// This IS `compiler::VarSizes` -- the fragment-side name for the same type,
-/// kept so the db-side signatures read in fragment terms.
+/// `reference -> extent of the variable it addresses in whole`: the per-fragment
+/// size table `lower_var_fragment` produces, and which BOTH halves of the
+/// compile borrow -- the lowering context (`compiler::ContextCore`) and the
+/// per-phase emission context (`compiler::ModuleCtx`). This IS
+/// `compiler::VarSizes` -- the fragment-side name for the same type, kept so the
+/// db-side signatures read in fragment terms.
 ///
 /// Its predecessor carried `(offset, size)` per variable over a private
 /// per-fragment layout that existed only so symbolization could undo it. There

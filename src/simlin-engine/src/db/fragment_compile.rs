@@ -939,11 +939,17 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
         HashMap::new()
     };
 
+    // Reference extents in the per-variable form BOTH halves borrow: lowering's
+    // ELM MAP fold below, and the emission context further down.
+    let var_sizes: PerVarSizes =
+        crate::compiler::whole_variable_extents(&all_metadata, &model_name_ident);
+
     let core = crate::compiler::ContextCore {
         dimensions: converted_dims,
         dimensions_ctx: dim_context,
         model_name: &model_name_ident,
         metadata: &all_metadata,
+        var_sizes: &var_sizes,
         module_models: &module_models,
         inputs: &inputs,
     };
@@ -953,12 +959,6 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
         &lowered,
     )
     .ok()?;
-
-    // Sizes in the per-variable form the emission context borrows.
-    let var_sizes: PerVarSizes = all_metadata[&model_name_ident]
-        .iter()
-        .map(|(k, vm)| (k.clone(), vm.size))
-        .collect();
 
     let base_ctx = fragment_emit_ctx(
         &model_name_ident,

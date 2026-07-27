@@ -56,7 +56,8 @@
 //! The metadata map borrows the lowered variable (its self-entry is
 //! `&lowered`) and the sub-model stub arena, so it must not outlive them;
 //! the caller never sees it -- it consumes only the owned `var_sizes`
-//! projection (variable -> slot count).
+//! projection (reference -> the extent of the variable it addresses in
+//! whole).
 //!
 //! This is a submodule of `db` (a child of `db.rs`, like `dep_graph` /
 //! `ltm_ir` / `macro_registry`) kept in its own file purely to keep `db.rs`
@@ -978,12 +979,22 @@ pub(crate) fn lower_var_fragment(
         }
     }
 
+    // Project the owned extent view out of this model's metadata. The map
+    // borrows `lowered` and the arena and must stay internal; this projection
+    // reads only owned data (a reference and a size), never the borrowed
+    // variable, so it crosses back to the caller freely. It is built BEFORE the
+    // lowering context because both halves of the compile read it: lowering's
+    // GH #578 ELM MAP fold through `Context`, and emission through `ModuleCtx`.
+    let var_sizes: crate::db::assemble::PerVarSizes =
+        crate::compiler::whole_variable_extents(&all_metadata, model_name_ident);
+
     // Build Var for each phase this variable participates in
     let core = crate::compiler::ContextCore {
         dimensions: converted_dims,
         dimensions_ctx: dim_context,
         model_name: model_name_ident,
         metadata: &all_metadata,
+        var_sizes: &var_sizes,
         module_models,
         inputs,
     };
@@ -1000,17 +1011,6 @@ pub(crate) fn lower_var_fragment(
     // but `Var::new` is deterministic so one call reused is identical.
     let initial = build_var(true);
     let noninitial = build_var(false);
-
-    // Project the owned size view out of this model's metadata. The map
-    // borrows `lowered` and the arena and must stay internal; this projection
-    // reads only the owned size, never the borrowed variable, so it crosses
-    // back to the caller freely. Sub-model entries are deliberately excluded:
-    // the only consumer is `codegen::full_source_len`, which asks about a
-    // variable of the model being compiled.
-    let var_sizes: crate::db::assemble::PerVarSizes = all_metadata[model_name_ident]
-        .iter()
-        .map(|(k, vm)| (k.clone(), vm.size))
-        .collect();
 
     LoweredVarFragment::Lowered {
         unit_diags,

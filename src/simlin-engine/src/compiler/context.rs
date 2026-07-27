@@ -44,6 +44,103 @@ pub(crate) struct VariableMetadata<'a> {
     pub(crate) var: &'a Variable,
 }
 
+/// The symbol table lowering builds: `model -> variable -> metadata`. It holds
+/// the model being compiled plus every sub-model reachable from it, which is
+/// what makes a cross-module name resolvable.
+pub(crate) type MetadataByModel<'a> =
+    HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata<'a>>>;
+
+/// Project [`super::VarSizes`] out of the symbol table: the extent of every
+/// variable a reference in `model` can address **in whole**.
+///
+/// This is the single statement of "which reference addresses which variable's
+/// full storage", and both consumers of that question read it -- lowering's
+/// GH #578 scalar-source ELM MAP fold (`Context::full_var_len_for_base`) and
+/// emission's `codegen::full_source_len`. They used to answer it separately,
+/// each from its own view of the symbol table, and both got a cross-module
+/// source wrong in a different direction.
+///
+/// An ordinary variable contributes one entry, at its base. A MODULE INSTANCE
+/// contributes none of its own -- its slot count is the whole sub-model block,
+/// which is the extent of nothing a reference can name -- and instead
+/// contributes one entry per sub-model variable at that variable's slot within
+/// the instance, recursively through nested instances so every entry names a
+/// leaf variable. A reference landing mid-array is absent from the result,
+/// which is the same answer it has always had: the extent of one element of a
+/// bigger array is not the array's extent, so the caller falls back to what the
+/// lowered view says.
+///
+/// A sub-model that is not in `metadata` contributes nothing. That is the
+/// loud-safe direction: the reference falls back to its view's extent, exactly
+/// as an unresolvable one always did, rather than borrowing a neighbour's size.
+pub(crate) fn whole_variable_extents(
+    metadata: &MetadataByModel<'_>,
+    model: &Ident<Canonical>,
+) -> super::VarSizes {
+    let mut extents = super::VarSizes::new();
+    let Some(vars) = metadata.get(model) else {
+        return extents;
+    };
+    for (name, md) in vars {
+        if let Variable::Module {
+            model_name: sub_model,
+            ..
+        } = md.var
+        {
+            let mut path = vec![model.clone()];
+            collect_instance_extents(metadata, sub_model, name, 0, &mut path, &mut extents);
+        } else {
+            extents.insert(VarRef::base(name.clone()), md.size);
+        }
+    }
+    extents
+}
+
+/// One module instance's contribution to [`whole_variable_extents`].
+///
+/// `base` is the slot the instance's copy of `sub_model` starts at, measured
+/// from the instance's own base, so a nested instance's variables are reached
+/// by accumulating the offsets on the way down -- the same arithmetic
+/// `Context::submodel_offset_within` performs when it lowers `m·n·x`.
+///
+/// `path` is the chain of models being walked, and a model already on it is
+/// declined rather than descended into. `db::project_module_graph` rejects a
+/// cyclic project before any of this runs, so the guard exists to bound the
+/// walk, not to gate the project.
+fn collect_instance_extents(
+    metadata: &MetadataByModel<'_>,
+    sub_model: &Ident<Canonical>,
+    instance: &Ident<Canonical>,
+    base: usize,
+    path: &mut Vec<Ident<Canonical>>,
+    extents: &mut super::VarSizes,
+) {
+    if path.iter().any(|seen| seen == sub_model) {
+        return;
+    }
+    let Some(vars) = metadata.get(sub_model) else {
+        return;
+    };
+    path.push(sub_model.clone());
+    for md in vars.values() {
+        // A sub-model's layout is always already assigned (`db::compute_layout`
+        // runs before any fragment of the parent compiles); an entry without one
+        // is the model being compiled, which cannot also be its own sub-model.
+        let Some(offset) = md.offset else {
+            continue;
+        };
+        if let Variable::Module {
+            model_name: nested, ..
+        } = md.var
+        {
+            collect_instance_extents(metadata, nested, instance, base + offset, path, extents);
+        } else {
+            extents.insert(VarRef::new(instance.clone(), base + offset), md.size);
+        }
+    }
+    path.pop();
+}
+
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub(crate) struct Context<'a> {
@@ -70,8 +167,12 @@ pub(crate) struct ContextCore<'a> {
     #[allow(dead_code)]
     pub(crate) dimensions_ctx: &'a DimensionsContext,
     pub(crate) model_name: &'a Ident<Canonical>,
-    pub(crate) metadata:
-        &'a HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata<'a>>>,
+    pub(crate) metadata: &'a MetadataByModel<'a>,
+    /// The extents [`whole_variable_extents`] projects out of `metadata`, so
+    /// lowering and codegen answer "how big is the variable this reference
+    /// addresses?" from one table rather than from two readings of the symbol
+    /// table. Derived, never authored: build it with `whole_variable_extents`.
+    pub(crate) var_sizes: &'a super::VarSizes,
     pub(crate) module_models:
         &'a HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>>,
     pub(crate) inputs: &'a BTreeSet<Ident<Canonical>>,
@@ -1007,15 +1108,22 @@ impl Context<'_> {
         }
     }
 
-    /// Metadata for a reference that addresses a variable's *whole* storage.
+    /// Metadata for a reference that addresses a variable's *whole* storage, in
+    /// the model being compiled.
     ///
     /// `None` for a reference into the middle of a variable, which is the exact
     /// answer the previous offset-scan gave ("no variable's storage begins at
     /// this offset"): a mid-variable reference names an element, not the array,
-    /// so neither the array's dimensions nor its extent apply to it. A slot
-    /// inside a module instance is likewise mid-variable unless it happens to be
-    /// the instance's first slot, and there the metadata really is the module
-    /// variable's -- same as before.
+    /// so neither the array's dimensions nor its extent apply to it.
+    ///
+    /// The sole reader is [`Self::apply_dimension_reordering`], which wants a
+    /// bare array reference's declared DIMENSIONS. Note that a CROSS-MODULE
+    /// reference gets the module instance's entry here (a `Variable::Module`,
+    /// which declares no dimensions), so the reorder falls through to its
+    /// generic path rather than specializing -- correct, if unspecialized. Do
+    /// not reach for this to answer a question about a reference's EXTENT:
+    /// [`super::VarSizes`] is where that lives, precisely because it resolves
+    /// the cross-module case.
     fn whole_var_metadata(&self, var: &VarRef) -> Option<&VariableMetadata<'_>> {
         if !var.is_whole_var() {
             return None;
@@ -1023,19 +1131,19 @@ impl Context<'_> {
         self.metadata.get(self.model_name)?.get(&var.name)
     }
 
-    /// Full element count of the variable `var` addresses in whole (the product
-    /// of its declared dimensions; 1 for a scalar). `None` for a reference that
-    /// does not start at a variable's base. This is the compile-time twin of
-    /// `codegen::full_source_len`, used by the GH #578 scalar-source VECTOR ELM
-    /// MAP fold to bound the per-element static read.
+    /// Full element count of the variable `base` addresses in whole. `None` for
+    /// a reference that does not start at a variable's base. Used by the GH #578
+    /// scalar-source VECTOR ELM MAP fold to bound the per-element static read.
+    ///
+    /// This reads the SAME table `codegen::full_source_len` reads, which is the
+    /// point: the fold and the opcode must agree about where a source's storage
+    /// ends, and they are on opposite sides of lowering. Answering from the
+    /// variable's own declared dimensions -- what this did before -- silently
+    /// reported 1 for a cross-module source, whose metadata entry here is the
+    /// dimensionless module instance rather than the sub-model variable the
+    /// reference actually names.
     pub(super) fn full_var_len_for_base(&self, base: &VarRef) -> Option<usize> {
-        let md = self.whole_var_metadata(base)?;
-        Some(
-            md.var
-                .get_dimensions()
-                .map(|dims| dims.iter().map(|d| d.len()).product::<usize>().max(1))
-                .unwrap_or(1),
-        )
+        self.var_sizes.get(base).copied()
     }
 
     pub(super) fn build_stock_update_expr(&self, stock: &VarRef, var: &Variable) -> Result<Expr> {
@@ -1079,9 +1187,39 @@ impl Context<'_> {
 
 // Implement Expr3LowerContext for Context to enable Expr2 -> Expr3 conversion
 impl Expr3LowerContext for Context<'_> {
+    /// Resolved through [`Self::get_metadata`], so a CROSS-MODULE name
+    /// (`m·arr`) reports the sub-model variable's dimensions rather than
+    /// nothing. A direct `metadata[model][ident]` lookup -- what this did
+    /// before -- has no entry for the dotted name, and the `None` it returned
+    /// made `Expr3::from_expr2` treat every cross-module array as a scalar, so
+    /// a WILDCARD subscript on one (`SUM(m.arr[*])`) was rejected as
+    /// `CantSubscriptScalar`. `ast::ArrayContext::get_dimensions`, the
+    /// Expr2-stage twin of this trait method, has always followed the module
+    /// variable into the sub-model; this is the same rule, one stage later.
+    ///
+    /// The wildcard rejection was the whole of the user-visible consequence.
+    /// A BARE cross-module array reference was unaffected: it skipped the
+    /// implicit-subscript expansion here, but `lower_from_expr3`'s `Var` arm
+    /// resolves it one layer down through `var_ref` ->
+    /// `submodel_offset_within(.., ignore_arrays: false)`, which reads the
+    /// sub-model's own metadata and gets the dimensions this method did not.
+    /// Bare references, whole-array copies and transposes all produced correct
+    /// results before the fix.
     fn get_dimensions(&self, ident: &str) -> Option<Vec<Dimension>> {
-        let metadata = self.metadata.get(self.model_name)?;
-        let var_metadata = metadata.get(&*canonicalize(ident))?;
+        let canonical = canonicalize(ident);
+        let vars = self.metadata.get(self.model_name)?;
+        // A plain name is its own key, so the direct lookup answers it without
+        // interning an `Ident`; only a name the model does not hold -- every
+        // dotted cross-module one among them -- pays for the module-following
+        // resolution. The two agree on a plain name by construction:
+        // `get_submodel_metadata` reduces to this same lookup when there is no
+        // module separator to follow.
+        let var_metadata = match vars.get(&*canonical) {
+            Some(md) => md,
+            None => self
+                .get_metadata(&Ident::from_unchecked(canonical.into_owned()))
+                .ok()?,
+        };
         var_metadata.var.get_dimensions().map(|dims| dims.to_vec())
     }
 
@@ -2779,12 +2917,14 @@ fn test_lower() {
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
+    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
     let context = Context::new(
         ContextCore {
             dimensions: &[],
             dimensions_ctx: &dims_ctx,
             model_name: &main_ident,
             metadata: &metadata2,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs,
         },
@@ -2884,12 +3024,14 @@ fn test_lower() {
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
+    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
     let context = Context::new(
         ContextCore {
             dimensions: &[],
             dimensions_ctx: &dims_ctx,
             model_name: &main_ident,
             metadata: &metadata2,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs,
         },
@@ -2938,12 +3080,14 @@ fn test_with_active_subscripts_reuses_dimension_storage() {
         HashMap::new();
     let inputs = BTreeSet::new();
 
+    let var_sizes = whole_variable_extents(&metadata, &model_name);
     let base = Context::new(
         ContextCore {
             dimensions: &dims,
             dimensions_ctx: &dims_ctx,
             model_name: &model_name,
             metadata: &metadata,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs: &inputs,
         },
@@ -2993,12 +3137,14 @@ fn test_get_implicit_subscript_off_translates_through_mapping_parent() {
     let model_name = Ident::new("main");
     let ident = Ident::new("test_var");
 
+    let var_sizes = whole_variable_extents(&metadata, &model_name);
     let base = Context::new(
         ContextCore {
             dimensions: &all_dims,
             dimensions_ctx: &dims_ctx,
             model_name: &model_name,
             metadata: &metadata,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs: &inputs,
         },
@@ -3076,12 +3222,14 @@ fn test_positional_fallback_ignores_unrelated_mapping() {
         HashMap::new();
     let inputs = BTreeSet::new();
     let ident = Ident::new("test_var");
+    let var_sizes = whole_variable_extents(&metadata, &model_name);
     let base = Context::new(
         ContextCore {
             dimensions: &all_dims,
             dimensions_ctx: &dims_ctx,
             model_name: &model_name,
             metadata: &metadata,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs: &inputs,
         },

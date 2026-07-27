@@ -83,12 +83,16 @@ impl VarRef {
     /// Whether this reference is to the variable's *whole* storage, i.e. its
     /// first slot.
     ///
-    /// Several codegen/lowering lookups are only meaningful for a whole-variable
-    /// reference (the source extent of a VECTOR ELM MAP, the dimensions of a
-    /// transposed bare array, the identity of a lookup table). Those used to ask
-    /// "does any variable's storage *begin* at this offset?"; asking whether the
-    /// reference sits at its owner's base is the same question, and answers it
-    /// without a reverse scan.
+    /// Two codegen/lowering lookups are only meaningful for a whole-variable
+    /// reference: the dimensions of a transposed bare array, and the identity of
+    /// an arrayed lookup table. Both used to ask "does any variable's storage
+    /// *begin* at this offset?"; asking whether the reference sits at its
+    /// owner's base is the same question, and answers it without a reverse scan.
+    ///
+    /// A VECTOR ELM MAP source's extent is deliberately NOT one of them. That
+    /// question is keyed on the whole reference (`super::VarSizes`), because a
+    /// cross-module reference sits at its module INSTANCE's base while naming a
+    /// sub-model variable, and this predicate cannot tell those apart.
     pub(crate) fn is_whole_var(&self) -> bool {
         self.element_offset == 0
     }

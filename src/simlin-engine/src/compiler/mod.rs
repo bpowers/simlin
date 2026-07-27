@@ -35,11 +35,11 @@ use crate::vm::IMPLICIT_VAR_COUNT;
 
 // Re-exports for crate-internal API
 pub(crate) use self::codegen::ModuleCtx;
-pub(crate) use self::context::{Context, ContextCore, VariableMetadata};
+pub(crate) use self::context::{Context, ContextCore, VariableMetadata, whole_variable_extents};
 pub(crate) use self::expr::{BuiltinFn, Expr, SubscriptIndex, Table, VarRef};
 
-/// Canonical variable name -> the variable's total slot count, for the model
-/// being emitted.
+/// The total slot count of the variable a reference addresses **in whole**,
+/// keyed by that reference.
 ///
 /// This is all codegen needs from the symbol table now that references carry
 /// names: the *extent* of a VECTOR ELM MAP's source variable
@@ -47,7 +47,25 @@ pub(crate) use self::expr::{BuiltinFn, Expr, SubscriptIndex, Table, VarRef};
 /// through a `name -> (offset, size)` map -- the identity of a lookup table,
 /// the base slot of a module instance -- reads the name off the reference
 /// directly. Offsets are assigned once, at assembly, and never appear here.
-pub(crate) type VarSizes = HashMap<Ident<Canonical>, usize>;
+///
+/// Keyed by the whole `VarRef` rather than by name, because a reference does
+/// not always name the variable whose extent it asks about. A CROSS-MODULE
+/// reference `m·x` lowers to `VarRef { name: m, element_offset: x's slot
+/// inside the instance }`, and `m`'s own slot count -- the whole sub-model
+/// block -- is the extent of nothing a reference can name. Each instance
+/// therefore contributes one entry per sub-model variable, at that variable's
+/// slot; a reference sitting at a sub-model variable's base reports THAT
+/// variable's extent, and one landing mid-array is simply absent. Absence is
+/// the same answer an in-model mid-array reference gets, so the caller's
+/// fallback ("all the view can honestly report") is unchanged.
+///
+/// Built once per emission unit by [`context::whole_variable_extents`]. That is
+/// the only place the rule is DERIVED -- every production site calls it, so
+/// lowering and emission cannot disagree about what a reference addresses.
+/// (`codegen`'s unit tests hand-build a table instead, in order to state the
+/// lookup's contract against inputs of their own choosing; they exercise the
+/// reader, not the rule.)
+pub(crate) type VarSizes = HashMap<VarRef, usize>;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(PartialEq, Clone)]
@@ -112,12 +130,14 @@ fn test_fold_flows() {
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
+    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
     let ctx = Context::new(
         ContextCore {
             dimensions: &[],
             dimensions_ctx: &dims_ctx,
             model_name: &main_ident,
             metadata: &metadata2,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs,
         },
@@ -195,12 +215,14 @@ fn test_module_var_new_missing_input_source_returns_error() {
     metadata2.insert(main_ident.clone(), metadata);
 
     let dims_ctx = DimensionsContext::default();
+    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
     let ctx = Context::new(
         ContextCore {
             dimensions: &[],
             dimensions_ctx: &dims_ctx,
             model_name: &main_ident,
             metadata: &metadata2,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs,
         },
@@ -266,12 +288,14 @@ fn test_build_stock_update_expr_inflows_only() {
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
+    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
     let ctx = Context::new(
         ContextCore {
             dimensions: &[],
             dimensions_ctx: &dims_ctx,
             model_name: &main_ident,
             metadata: &metadata2,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs,
         },
@@ -363,12 +387,14 @@ fn test_build_stock_update_expr_outflows_only() {
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
+    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
     let ctx = Context::new(
         ContextCore {
             dimensions: &[],
             dimensions_ctx: &dims_ctx,
             model_name: &main_ident,
             metadata: &metadata2,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs,
         },
@@ -451,12 +477,14 @@ fn test_build_stock_update_expr_no_flows() {
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
+    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
     let ctx = Context::new(
         ContextCore {
             dimensions: &[],
             dimensions_ctx: &dims_ctx,
             model_name: &main_ident,
             metadata: &metadata2,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs,
         },
@@ -542,12 +570,14 @@ fn test_build_stock_update_expr_multiple_flows() {
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
+    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
     let ctx = Context::new(
         ContextCore {
             dimensions: &[],
             dimensions_ctx: &dims_ctx,
             model_name: &main_ident,
             metadata: &metadata2,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs,
         },
@@ -670,12 +700,14 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
         HashMap::new();
     let dims_ctx = DimensionsContext::from(std::slice::from_ref(&datamodel_dim));
     let ident = Ident::new("test");
+    let var_sizes = whole_variable_extents(&metadata, &model_name);
     let ctx = Context::new(
         ContextCore {
             dimensions: &dims,
             dimensions_ctx: &dims_ctx,
             model_name: &model_name,
             metadata: &metadata,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs: &inputs,
         },
@@ -3041,6 +3073,11 @@ impl Module {
             .map(Dimension::from)
             .collect();
 
+        // Built once and shared by lowering (below) and emission (`compile`,
+        // through `as_ctx`), so the two agree about where a VECTOR ELM MAP
+        // source's storage ends.
+        let var_sizes: VarSizes = whole_variable_extents(&metadata, model_name);
+
         let build_var = |ident: &Ident<Canonical>, is_initial| {
             Var::new(
                 &Context::new(
@@ -3049,6 +3086,7 @@ impl Module {
                         dimensions_ctx: &project.dimensions_ctx,
                         model_name,
                         metadata: &metadata,
+                        var_sizes: &var_sizes,
                         module_models: &module_models,
                         inputs,
                     },
@@ -3123,10 +3161,6 @@ impl Module {
         let tables = tables?;
 
         let model_metadata = &metadata[model_name];
-        let var_sizes: VarSizes = model_metadata
-            .iter()
-            .map(|(k, v)| (k.clone(), v.size))
-            .collect();
         let layout = crate::compiler::symbolic::VariableLayout::from_offset_map(
             &model_metadata
                 .iter()
