@@ -4,11 +4,15 @@
 
 //! Characterization pins for the **per-variable fragment compiler** -- the
 //! salsa-cached unit of production compilation (`db::compile_var_fragment` and
-//! its implicit/LTM siblings), whose emission half currently reaches its
-//! layout-independent result through a mini-layout / stand-in
-//! `compiler::Module` / `symbolize_*` round trip (GH #964).
+//! its implicit/LTM siblings).
 //!
-//! This suite is the gate the round-trip deletion is measured against. The
+//! These were written while that compiler still reached its layout-independent
+//! result the long way round -- private per-fragment offsets, a stand-in
+//! one-variable `compiler::Module`, and a `symbolize_*` pass to undo both --
+//! and they are the gate GH #964's deletion of that round trip was measured
+//! against. **All 12 goldens came through it byte-identical, with no
+//! regeneration**, which is the strongest available evidence that the shorter
+//! route produces the same value rather than a plausible one. The
 //! integration corpus (`tests/integration/simulate.rs`) pins *numeric* results
 //! of whole models, which is necessary but far too coarse here: it cannot see a
 //! fragment change shape, a fragment stop being emitted (an `Option::None`
@@ -17,7 +21,9 @@
 //! Three independent assertions per fixture, none of which subsumes another:
 //!
 //! 1. **A golden** of every fragment's rendered symbolic form -- opcode stream
-//!    with `SymVarRef { name, element_offset }` operands, literal pool,
+//!    with `SymVarRef { name, element_offset }` operands (since GH #964 that is
+//!    `compiler::VarRef`, the type lowering itself emits, not the output of a
+//!    conversion pass), literal pool,
 //!    graphical functions, module declarations, static views, temp sizes and
 //!    dim lists -- plus the model's `compute_layout` body layout and the VM's
 //!    result table. Regenerate with `UPDATE_FRAGMENT_GOLDEN=1`, but only after
@@ -45,16 +51,22 @@
 //! see: which fragment-compiler bodies actually re-execute after an edit, using
 //! the `#[cfg(test)]` execution records in `db::fragment_compile` rather than
 //! memo pointer equality. Read `layout_only_edits_and_fragment_cache_reuse`'s
-//! header comment for what that measurement found -- GH #964's "layout-only
-//! project edits continue to reuse unchanged salsa-cached fragments" criterion
-//! does not hold today, and these tests pin the baseline so the stage that
-//! deletes the round trip can be measured against it.
+//! header comment for what that measurement found and for the two documented
+//! reasons a module-instantiating add is still saturated.
 //!
-//! One property this suite establishes as a side effect is worth naming,
-//! because stage 3 depends on it: the goldens are byte-identical under a
-//! reordering of the mini-layout's dependency walk. That is direct evidence
-//! that a fragment really is independent of the private offsets the round trip
-//! hands out -- the premise the whole deletion rests on.
+//! **That half is now the load-bearing one.** The value-equality assertions were
+//! written when a fragment COULD have absorbed a layout dependency and still
+//! looked right; after GH #964 a fragment cannot carry an offset of its own
+//! model at all, and consulting one is a compile error, so the type subsumes
+//! most of what those assertions were watching for. The execution counts are
+//! what can still catch a regression -- a fragment newly depending on something
+//! model-wide moves them and nothing else does. Do not loosen them.
+//!
+//! One property this suite established before that change is worth keeping on
+//! the record, because the deletion rested on it: the goldens were byte-
+//! identical under a reordering of the (now deleted) private dependency walk,
+//! which was direct evidence that a fragment really was independent of the
+//! offsets it was being handed.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

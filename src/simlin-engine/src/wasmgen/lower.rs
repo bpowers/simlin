@@ -21,22 +21,30 @@
 //! (`vm.rs:1257+`).
 //!
 //! Three compound assignment opcodes beyond the bare scalar set reach a
-//! `CompiledSimulation` consumer, and they all lower here:
+//! `CompiledSimulation` consumer, and they all lower here. All three are
+//! produced in the SYMBOLIC domain and carried through `resolve_bytecode`
+//! unchanged (it is strictly 1:1), so they arrive here exactly as codegen
+//! emitted them:
 //! - `AssignConstCurr` arrives by *two* routes: `compiler::codegen` emits it
-//!   directly for any constant-RHS `AssignCurr` (`codegen.rs:1164`), and the
-//!   **peephole** pass also fuses a `LoadConstant; AssignCurr` pair into it
-//!   (`bytecode.rs:1830`). Either way it rides through the symbolic layer into
-//!   `CompiledSimulation`; every model with a constant initial/aux carries it.
-//! - `BinOpAssignCurr` / `BinOpAssignNext` are *only* peephole output
-//!   (`bytecode.rs:1837`/`1841`, fusing `Op2; Assign{Curr,Next}`). The peephole
-//!   pass (`ByteCode::peephole_optimize`, run inside
-//!   `Module::compile`/`ByteCodeBuilder::finish`) runs per-variable-fragment in
-//!   the incremental pipeline *before* symbolization, so these ride through
-//!   too. Every scalar Euler stock integration (`stock + delta`) is one, so
-//!   they are part of the scalar core.
+//!   directly for any constant-RHS `AssignCurr`, and the **peephole** pass also
+//!   fuses a `LoadConstant; AssignCurr` pair into it. Every model with a
+//!   constant initial/aux carries one.
+//! - `BinOpAssignCurr` is *only* peephole output (fusing `Op2; AssignCurr`);
+//!   `BinOpAssignNext` is emitted at once by
+//!   `SymbolicByteCodeBuilder::fuse_trailing_op2_into_assign_next`, since there
+//!   is no un-fused next-assign opcode to fall back to. Every scalar Euler
+//!   stock integration (`stock + delta`) is one, so they are part of the scalar
+//!   core.
+//!
+//! The peephole runs per variable fragment, inside
+//! `compiler::symbolic::SymbolicByteCodeBuilder::finish` -- i.e. before
+//! assembly rather than, as it once did, on concrete per-fragment bytecode that
+//! was then symbolized. The observable result is the same opcode stream; what
+//! changed (GH #964) is that there is now no concrete-bytecode stage before
+//! assembly for it to run on.
 //!
 //! The late **3-address** pass (`ByteCode::fuse_three_address`) instead runs
-//! only on the VM's private execution copy (`vm.rs:395-398`), so its
+//! only on the VM's private execution copy (`vm.rs`, in `Vm::new`), so its
 //! `BinVarVar` / `AssignAddVarVarCurr` / ... family never reaches a consumer.
 //!
 //! Anything outside the supported scalar core -- an array/module/lookup opcode

@@ -3,16 +3,14 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use smallvec::SmallVec;
 
 use crate::ast::{ArrayView, BinaryOp};
 use crate::bytecode::{
-    BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledInitial, CompiledModule, DimId,
-    DimListId, DimensionInfo, GraphicalFunctionId, LookupMode, ModuleDeclaration, ModuleId,
-    ModuleInputOffset, NameId, Op2, Opcode, RuntimeSparseMapping, StaticArrayView,
-    SubdimensionRelation, TempId, VariableOffset, ViewId,
+    BuiltinId, DimId, DimListId, DimensionInfo, GraphicalFunctionId, LookupMode, ModuleId,
+    ModuleInputOffset, NameId, Op2, RuntimeSparseMapping, SubdimensionRelation, TempId,
+    VariableOffset, ViewId,
 };
 use crate::common::{Canonical, ErrorCode, ErrorKind, Ident, Result, canonicalize};
 use crate::dimensions::Dimension;
@@ -20,8 +18,12 @@ use crate::sim_err;
 use crate::vm::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, TIME_OFF};
 
 use super::dimensions::UnaryOp;
-use super::expr::{BuiltinFn, Expr, SubscriptIndex, Table};
-use super::{VarInitial, VariableOffsetMap};
+use super::expr::{BuiltinFn, Expr, SubscriptIndex, Table, VarRef};
+use super::symbolic::{
+    SymStaticViewBase, SymbolicByteCode, SymbolicByteCodeBuilder, SymbolicCompiledInitial,
+    SymbolicCompiledModule, SymbolicModuleDecl, SymbolicOpcode, SymbolicStaticView,
+};
+use super::{Var, VarSizes};
 
 /// Everything `Compiler` reads, borrowed for the duration of one emission.
 ///
@@ -29,12 +31,13 @@ use super::{VarInitial, VariableOffsetMap};
 /// codegen behind it. Two very different callers build one:
 ///
 /// * [`super::Module::compile`] -- the test-only monolithic whole-model path,
-///   which borrows every field straight off its owned `Module`;
+///   which borrows every field straight off its owned `Module` and then
+///   resolves the emitted symbolic module against its own layout;
 /// * `db::assemble::compile_phase_to_per_var_bytecodes` -- the production
 ///   per-variable fragment compiler, which borrows the salsa-cached
-///   project-global dimension context and converted dimensions, the
-///   variable's own lowered expressions, and the mini-layout its lowering
-///   produced.
+///   project-global dimension context and converted dimensions plus the
+///   variable's own lowered expressions, and keeps the emitted fragment
+///   symbolic until assembly.
 ///
 /// Borrowing rather than owning is the point (GH #964 / #655): the fragment
 /// compiler runs once per variable *per phase* -- tens of thousands of times
@@ -44,28 +47,26 @@ use super::{VarInitial, VariableOffsetMap};
 /// of them. Nothing in codegen mutates any of it, so a reference is the
 /// honest type.
 ///
-/// The field set is deliberately minimal: it is what codegen actually reads,
-/// not what a `Module` happens to carry. `runlist_initials` (codegen uses the
-/// per-variable `runlist_initials_by_var` instead), `runlist_order`, and
-/// `module_refs` are absent because no line of codegen ever looked at them --
-/// the fragment sites were cloning two maps per phase that nothing read.
+/// The field set is deliberately minimal: it is what codegen actually reads.
+/// In particular there is no offset map and no slot count. Codegen emits
+/// `VarRef`s straight through from the lowered expressions, so the only thing
+/// it still needs from the symbol table is `var_sizes` -- the *extent* of a
+/// VECTOR ELM MAP source variable, which is a property of the variable and not
+/// of where it lives.
 #[derive(Clone, Copy)]
 pub(crate) struct ModuleCtx<'a> {
     pub(crate) ident: &'a Ident<Canonical>,
     /// The module-instance input set, consulted only by `isModuleInput(x)`.
     pub(crate) inputs: &'a std::collections::BTreeSet<Ident<Canonical>>,
-    pub(crate) n_slots: usize,
     /// Per-temp element counts, indexed by `TempId`. Its length is the temp
     /// count; there is no separate `n_temps`, which could only ever disagree.
     pub(crate) temp_sizes: &'a [usize],
-    pub(crate) runlist_initials_by_var: &'a [VarInitial],
+    pub(crate) runlist_initials_by_var: &'a [Var],
     pub(crate) runlist_flows: &'a [Expr],
     pub(crate) runlist_stocks: &'a [Expr],
-    /// `model -> variable -> (offset, size)`. Codegen reads only
-    /// `offsets[ident]`, and only in the *reverse* direction (offset -> owning
-    /// variable), for `full_source_len`, arrayed-lookup table resolution, and
-    /// `EvalModule`'s sub-model base offset.
-    pub(crate) offsets: &'a VariableOffsetMap,
+    /// Canonical variable name -> total slot count, for this model. The sole
+    /// reader is [`Compiler::full_source_len`].
+    pub(crate) var_sizes: &'a VarSizes,
     pub(crate) tables: &'a HashMap<Ident<Canonical>, Vec<Table>>,
     pub(crate) dimensions: &'a [Dimension],
     pub(crate) dimensions_ctx: &'a crate::dimensions::DimensionsContext,
@@ -73,19 +74,19 @@ pub(crate) struct ModuleCtx<'a> {
 
 impl<'a> ModuleCtx<'a> {
     /// Emit this unit's bytecode. The single entry point into codegen.
-    pub(crate) fn compile(self) -> Result<CompiledModule> {
+    pub(crate) fn compile(self) -> Result<SymbolicCompiledModule> {
         Compiler::new(self).compile()
     }
 }
 
 pub(super) struct Compiler<'module> {
     module: ModuleCtx<'module>,
-    module_decls: Vec<ModuleDeclaration>,
+    module_decls: Vec<SymbolicModuleDecl>,
     graphical_functions: Vec<Vec<(f64, f64)>>,
     /// Maps table variable names to their base index in graphical_functions.
     /// For subscripted lookups, the actual table is at base_id + element_offset.
     table_base_ids: HashMap<Ident<Canonical>, GraphicalFunctionId>,
-    curr_code: ByteCodeBuilder,
+    curr_code: SymbolicByteCodeBuilder,
     // Array support fields
     pub(super) dimensions: Vec<DimensionInfo>,
     pub(super) subdim_relations: Vec<SubdimensionRelation>,
@@ -96,14 +97,14 @@ pub(super) struct Compiler<'module> {
     /// element name up front -- with a linear-scan intern that was O(D^2)
     /// string comparisons per fragment (GH #655).
     name_ids: HashMap<String, NameId>,
-    static_views: Vec<StaticArrayView>,
+    static_views: Vec<SymbolicStaticView>,
     dim_lists: Vec<(u8, [u16; 4])>,
     // Iteration context - set when compiling inside AssignTemp
     in_iteration: bool,
     /// When in optimized iteration mode, maps pre-pushed views to their stack offset.
-    /// Each entry is (StaticArrayView, stack_offset) where stack_offset is 1-based from top.
+    /// Each entry is (SymbolicStaticView, stack_offset) where stack_offset is 1-based from top.
     /// The output view is always at offset (n_source_views + 1).
-    iter_source_views: Option<Vec<(StaticArrayView, u8)>>,
+    iter_source_views: Option<Vec<(SymbolicStaticView, u8)>>,
 }
 
 impl<'module> Compiler<'module> {
@@ -129,8 +130,8 @@ impl<'module> Compiler<'module> {
         // `graphical_functions` vector and that distinct variables' blocks stay
         // disjoint -- both of which sorting preserves. Checked: the VM reads
         // `graphical_functions[base_gf + element_offset]` self-relatively;
-        // `symbolize_bytecode`/`resolve` pass `base_gf`/`table_count` through
-        // untouched (they are table indices, not layout offsets); and
+        // `resolve` passes `base_gf`/`table_count` through untouched (they
+        // are table indices, not layout offsets); and
         // `symbolic::gf_blocks_of_fragment` derives its blocks from the
         // fragment's own opcode runs (sorting them itself) while
         // `FragmentMerger::absorb_gf` dedups on block CONTENT, so #582's
@@ -153,7 +154,7 @@ impl<'module> Compiler<'module> {
             module_decls: vec![],
             graphical_functions,
             table_base_ids,
-            curr_code: ByteCodeBuilder::default(),
+            curr_code: SymbolicByteCodeBuilder::default(),
             dimensions: vec![],
             subdim_relations: vec![],
             names: vec![],
@@ -283,7 +284,7 @@ impl<'module> Compiler<'module> {
     }
 
     /// Add a static view and return its ViewId
-    fn add_static_view(&mut self, view: StaticArrayView) -> ViewId {
+    fn add_static_view(&mut self, view: SymbolicStaticView) -> ViewId {
         self.static_views.push(view);
         (self.static_views.len() - 1) as ViewId
     }
@@ -292,16 +293,21 @@ impl<'module> Compiler<'module> {
     /// expression, i.e. the product of its full declared dimensions. This is
     /// the genuine-Vensim VECTOR ELM MAP out-of-range bound (`:NA:` is
     /// returned for an offset that would map outside the source variable's
-    /// full storage). Each model variable owns a unique `[offset, offset+size)`
-    /// slot range (offsets are assigned by `i += size`), so the base offset
-    /// uniquely identifies the variable and its full `size`. Falls back to
-    /// the lowered view's element count when the source is not a plain
-    /// variable/subscript reference (e.g. a scalar `Var`), which is the
-    /// correct full extent for those non-sliced shapes.
+    /// full storage).
+    ///
+    /// The reference carries the owning variable's name, so this is a direct
+    /// `var_sizes` lookup. It applies only to a reference that addresses the
+    /// variable *in whole*: a reference starting mid-variable names one element
+    /// of a bigger array, or one slot inside a module instance, and the full
+    /// extent of the thing it names is not knowable from the enclosing model's
+    /// symbol table. Those fall back to the lowered view's element count, which
+    /// is the correct full extent for the non-sliced shapes -- exactly what the
+    /// previous "does any variable's storage begin at this offset?" scan did,
+    /// since a variable's slot range contains no other variable's base.
     fn full_source_len(&self, source: &Expr) -> u32 {
-        let (base_off, view_len) = match source {
-            Expr::StaticSubscript(off, view, _) => {
-                (Some(*off), view.dims.iter().product::<usize>().max(1))
+        let (base, view_len) = match source {
+            Expr::StaticSubscript(base, view, _) => {
+                (Some(base), view.dims.iter().product::<usize>().max(1))
             }
             // A *dynamic* subscript (`arr[i]`, `i` a variable) is the same
             // shape as `StaticSubscript` for this purpose -- the source is
@@ -318,29 +324,25 @@ impl<'module> Compiler<'module> {
             // (`source_view.runtime_off_local.is_some()` =>
             // `WasmGenError::Unsupported`), so this shape never reaches wasm
             // lowering at all.
-            Expr::Subscript(off, _, bounds, _) => {
-                (Some(*off), bounds.iter().product::<usize>().max(1))
+            Expr::Subscript(base, _, bounds, _) => {
+                (Some(base), bounds.iter().product::<usize>().max(1))
             }
-            Expr::Var(off, _) => (Some(*off), 1usize),
+            Expr::Var(base, _) => (Some(base), 1usize),
             Expr::TempArray(_, view, _) => (None, view.dims.iter().product::<usize>().max(1)),
             _ => (None, 1usize),
         };
 
-        if let Some(base_off) = base_off {
-            let model_offsets = &self.module.offsets[self.module.ident];
-            if let Some(size) = model_offsets
-                .values()
-                .find(|(off, _)| *off == base_off)
-                .map(|(_, size)| *size)
-            {
-                return size as u32;
-            }
+        if let Some(base) = base
+            && base.is_whole_var()
+            && let Some(size) = self.module.var_sizes.get(&base.name)
+        {
+            return *size as u32;
         }
         view_len as u32
     }
 
-    /// Convert an ArrayView to a StaticArrayView for a variable
-    fn array_view_to_static(&mut self, base_off: usize, view: &ArrayView) -> StaticArrayView {
+    /// Convert an ArrayView to a SymbolicStaticView for a variable
+    fn array_view_to_static(&mut self, base: &VarRef, view: &ArrayView) -> SymbolicStaticView {
         // Convert sparse info
         let sparse: SmallVec<[RuntimeSparseMapping; 2]> = view
             .sparse
@@ -366,9 +368,8 @@ impl<'module> Compiler<'module> {
             })
             .collect();
 
-        StaticArrayView {
-            base_off: base_off as u32,
-            is_temp: false,
+        SymbolicStaticView {
+            base: SymStaticViewBase::Var(base.clone()),
             dims: view.dims.iter().map(|&d| d as u16).collect(),
             strides: view.strides.iter().map(|&s| s as i32).collect(),
             offset: view.offset as u32,
@@ -377,8 +378,8 @@ impl<'module> Compiler<'module> {
         }
     }
 
-    /// Convert an ArrayView to a StaticArrayView for a temp array
-    fn array_view_to_static_temp(&mut self, temp_id: u32, view: &ArrayView) -> StaticArrayView {
+    /// Convert an ArrayView to a SymbolicStaticView for a temp array
+    fn array_view_to_static_temp(&mut self, temp_id: u32, view: &ArrayView) -> SymbolicStaticView {
         // Look up or create DimIds for each dimension using the dim_names
         let dim_ids: SmallVec<[DimId; 4]> = view
             .dim_names
@@ -407,9 +408,8 @@ impl<'module> Compiler<'module> {
             stride *= view.dims[i] as i32;
         }
 
-        StaticArrayView {
-            base_off: temp_id,
-            is_temp: true,
+        SymbolicStaticView {
+            base: SymStaticViewBase::Temp(temp_id),
             dims: view.dims.iter().map(|&d| d as u16).collect(),
             strides,
             offset: 0,
@@ -432,12 +432,10 @@ impl<'module> Compiler<'module> {
     /// `BadTable` (loud-safe: an un-reconstructable arrayed-GF dependency must
     /// never become a silent stub -- GH #580 / AC7.5).
     fn arrayed_lookup_table_info(&self, table_expr: &Expr) -> Result<(GraphicalFunctionId, u16)> {
-        let module_offsets = &self.module.offsets[self.module.ident];
-        let base_off = match table_expr {
-            // Whole-array static subscript: the var's storage starts at `off`
-            // and the view spans the full array (offset 0).
-            Expr::StaticSubscript(off, _, _) => *off,
-            Expr::Var(off, _) => *off,
+        let base = match table_expr {
+            // Whole-array reference: the view spans the full array, so the
+            // reference sits at the variable's base.
+            Expr::StaticSubscript(base, _, _) | Expr::Var(base, _) => base,
             other => {
                 return sim_err!(
                     BadTable,
@@ -449,17 +447,18 @@ impl<'module> Compiler<'module> {
                 );
             }
         };
-        let table_ident = module_offsets
-            .iter()
-            .find(|(_, (base, _))| *base == base_off)
-            .map(|(k, _)| k.clone())
-            .ok_or_else(|| {
-                crate::Error::new(
-                    ErrorKind::Simulation,
-                    ErrorCode::BadTable,
-                    Some("could not find arrayed lookup table variable".to_string()),
-                )
-            })?;
+        // A reference into the middle of a variable is not a whole-array base,
+        // and never was: the previous exact-base offset scan rejected it too,
+        // because a variable's slot range contains no other variable's base.
+        if !base.is_whole_var() {
+            return sim_err!(
+                BadTable,
+                "arrayed graphical-function apply expected a whole-array base, got an \
+                 element reference"
+                    .to_string()
+            );
+        }
+        let table_ident = base.name.clone();
         let base_gf = *self.table_base_ids.get(&table_ident).ok_or_else(|| {
             crate::Error::new(
                 ErrorKind::Simulation,
@@ -482,30 +481,30 @@ impl<'module> Compiler<'module> {
     /// This is used for array operations that need to iterate over arrays.
     fn walk_expr_as_view(&mut self, expr: &Expr) -> Result<()> {
         match expr {
-            Expr::StaticSubscript(off, view, _) => {
+            Expr::StaticSubscript(base, view, _) => {
                 // Create a static view and push it
-                let static_view = self.array_view_to_static(*off, view);
+                let static_view = self.array_view_to_static(base, view);
                 let view_id = self.add_static_view(static_view);
-                self.push(Opcode::PushStaticView { view_id });
+                self.push(SymbolicOpcode::PushStaticView { view_id });
                 Ok(())
             }
             Expr::TempArray(id, view, _) => {
                 // Create a static view for the temp array and push it
                 let static_view = self.array_view_to_static_temp(*id, view);
                 let view_id = self.add_static_view(static_view);
-                self.push(Opcode::PushStaticView { view_id });
+                self.push(SymbolicOpcode::PushStaticView { view_id });
                 Ok(())
             }
-            Expr::Var(off, _) => {
+            Expr::Var(base, _) => {
                 // A bare variable reference used as an array - create a scalar view
                 // This shouldn't normally happen for array operations, but handle it
                 let view = ArrayView::contiguous(vec![1]);
-                let static_view = self.array_view_to_static(*off, &view);
+                let static_view = self.array_view_to_static(base, &view);
                 let view_id = self.add_static_view(static_view);
-                self.push(Opcode::PushStaticView { view_id });
+                self.push(SymbolicOpcode::PushStaticView { view_id });
                 Ok(())
             }
-            Expr::Subscript(off, indices, bounds, _) => {
+            Expr::Subscript(base, indices, bounds, _) => {
                 // Dynamic subscript with potential range indices
                 // First, push a full view for the base array using explicit bounds
                 let n_dims = bounds.len().min(4) as u8;
@@ -515,8 +514,8 @@ impl<'module> Compiler<'module> {
                 }
                 let dim_list_id = self.dim_lists.len() as DimListId;
                 self.dim_lists.push((n_dims, dims));
-                self.push(Opcode::PushVarViewDirect {
-                    base_off: *off as u16,
+                self.push(SymbolicOpcode::PushVarViewDirect {
+                    var: base.clone(),
                     dim_list_id,
                 });
 
@@ -546,7 +545,7 @@ impl<'module> Compiler<'module> {
                             // is a genuine compiler invariant violation, never
                             // reachable from a real subscript index.
                             self.walk_expr(expr)?.unwrap();
-                            self.push(Opcode::ViewSubscriptDynamic {
+                            self.push(SymbolicOpcode::ViewSubscriptDynamic {
                                 dim_idx: effective_dim,
                             });
                             singles_processed += 1; // Track collapse for subsequent indices
@@ -556,7 +555,7 @@ impl<'module> Compiler<'module> {
                             // a range bound can carry a recoverable lowering Err.
                             self.walk_expr(start)?.unwrap();
                             self.walk_expr(end)?.unwrap();
-                            self.push(Opcode::ViewRangeDynamic {
+                            self.push(SymbolicOpcode::ViewRangeDynamic {
                                 dim_idx: effective_dim,
                             });
                         }
@@ -578,18 +577,18 @@ impl<'module> Compiler<'module> {
 
     /// Emit the array-reduce pattern: push view, emit reduction opcode, pop view.
     /// Used by SUM, SIZE, STDDEV, MIN (1-arg), MAX (1-arg), and MEAN (1-arg).
-    fn emit_array_reduce(&mut self, arg: &Expr, opcode: Opcode) -> Result<Option<()>> {
+    fn emit_array_reduce(&mut self, arg: &Expr, opcode: SymbolicOpcode) -> Result<Option<()>> {
         self.walk_expr_as_view(arg)?;
         self.push(opcode);
-        self.push(Opcode::PopView {});
+        self.push(SymbolicOpcode::PopView {});
         Ok(Some(()))
     }
 
-    fn walk(&mut self, exprs: &[Expr]) -> Result<ByteCode> {
+    fn walk(&mut self, exprs: &[Expr]) -> Result<SymbolicByteCode> {
         for expr in exprs.iter() {
             self.walk_expr(expr)?;
         }
-        self.push(Opcode::Ret);
+        self.push(SymbolicOpcode::Ret);
 
         let curr = std::mem::take(&mut self.curr_code);
 
@@ -600,16 +599,14 @@ impl<'module> Compiler<'module> {
         let result = match expr {
             Expr::Const(value, _) => {
                 let id = self.curr_code.intern_literal(*value);
-                self.push(Opcode::LoadConstant { id });
+                self.push(SymbolicOpcode::LoadConstant { id });
                 Some(())
             }
-            Expr::Var(off, _) => {
-                self.push(Opcode::LoadVar {
-                    off: *off as VariableOffset,
-                });
+            Expr::Var(var, _) => {
+                self.push(SymbolicOpcode::LoadVar { var: var.clone() });
                 Some(())
             }
-            Expr::Subscript(off, indices, bounds, _) => {
+            Expr::Subscript(base, indices, bounds, _) => {
                 // For scalar access (old-style Subscript), all indices must be Single
                 for (i, idx) in indices.iter().enumerate() {
                     match idx {
@@ -624,7 +621,7 @@ impl<'module> Compiler<'module> {
                             // LTM synthetic fragment), never escalate to a panic (#363).
                             self.walk_expr(expr)?.unwrap();
                             let bounds = bounds[i] as VariableOffset;
-                            self.push(Opcode::PushSubscriptIndex { bounds });
+                            self.push(SymbolicOpcode::PushSubscriptIndex { bounds });
                         }
                         SubscriptIndex::Range(_, _) => {
                             // Range subscripts should be handled via walk_expr_as_view
@@ -638,15 +635,13 @@ impl<'module> Compiler<'module> {
                     }
                 }
                 assert!(indices.len() == bounds.len());
-                self.push(Opcode::LoadSubscript {
-                    off: *off as VariableOffset,
-                });
+                self.push(SymbolicOpcode::LoadSubscript { var: base.clone() });
                 Some(())
             }
-            Expr::StaticSubscript(off, view, _) => {
+            Expr::StaticSubscript(base, view, _) => {
                 if self.in_iteration {
                     // In iteration context with optimized view hoisting
-                    let static_view = self.array_view_to_static(*off, view);
+                    let static_view = self.array_view_to_static(base, view);
 
                     let offset = self.find_iter_view_offset(&static_view).unwrap_or_else(|| {
                         unreachable!(
@@ -654,12 +649,14 @@ impl<'module> Compiler<'module> {
                              collect_iter_source_views_impl and walk_expr should visit same nodes"
                         )
                     });
-                    self.push(Opcode::LoadIterViewAt { offset });
+                    self.push(SymbolicOpcode::LoadIterViewAt { offset });
                     Some(())
                 } else if view.dims.iter().product::<usize>() == 1 {
-                    // Scalar result - compute final offset and load
-                    let final_off = (*off + view.offset) as VariableOffset;
-                    self.push(Opcode::LoadVar { off: final_off });
+                    // Scalar result - the view has collapsed to one element, so
+                    // read it directly.
+                    self.push(SymbolicOpcode::LoadVar {
+                        var: base.offset_by(view.offset),
+                    });
                     Some(())
                 } else {
                     // Non-scalar array outside iteration context - this shouldn't happen
@@ -681,57 +678,54 @@ impl<'module> Compiler<'module> {
                              collect_iter_source_views_impl and walk_expr should visit same nodes"
                         )
                     });
-                    self.push(Opcode::LoadIterViewAt { offset });
+                    self.push(SymbolicOpcode::LoadIterViewAt { offset });
                     Some(())
                 } else {
                     // Outside iteration - push temp view for subsequent operations (like SUM)
                     let static_view = self.array_view_to_static_temp(*id, view);
                     let view_id = self.add_static_view(static_view);
-                    self.push(Opcode::PushStaticView { view_id });
+                    self.push(SymbolicOpcode::PushStaticView { view_id });
                     // Note: caller (like array builtin) will use and pop this view
                     None
                 }
             }
             Expr::TempArrayElement(id, _view, idx, _) => {
                 // Load a specific element from a temp array
-                self.push(Opcode::LoadTempConst {
+                self.push(SymbolicOpcode::LoadTempConst {
                     temp_id: *id as TempId,
                     index: *idx as u16,
                 });
                 Some(())
             }
             Expr::Dt(_) => {
-                self.push(Opcode::LoadGlobalVar {
+                self.push(SymbolicOpcode::LoadGlobalVar {
                     off: DT_OFF as VariableOffset,
                 });
                 Some(())
             }
             Expr::App(builtin, _) => {
-                // Helper to extract table info from table expression
-                fn extract_table_info(
-                    table_expr: &Expr,
-                    module_offsets: &HashMap<Ident<Canonical>, (usize, usize)>,
-                ) -> Result<(Ident<Canonical>, Expr)> {
+                // Helper to extract table info from table expression.
+                //
+                // The table's identity and the element within it both come
+                // straight off the reference: `name` is the variable that owns
+                // the slot and `element_offset` is the element within it --
+                // which is what the offset-range scan this used to do
+                // reconstructed. A reference whose base is not the variable's
+                // own (a cross-module `m·x`, whose owner in this model is the
+                // module variable) can only fail the `table_base_ids` lookup
+                // below, exactly as the scan's exact-base match used to fail.
+                fn extract_table_info(table_expr: &Expr) -> Result<(Ident<Canonical>, Expr)> {
                     match table_expr {
-                        Expr::Var(off, loc) => {
-                            // Could be a simple scalar table or an element of an arrayed table
-                            // (when subscript was static and compiled to a direct Var reference).
-                            // Find the variable whose range contains this offset.
-                            let (table_ident, base_off) = module_offsets
-                                .iter()
-                                .find(|(_, (base, size))| *off >= *base && *off < *base + *size)
-                                .map(|(k, (base, _))| (k.clone(), *base))
-                                .ok_or_else(|| {
-                                    crate::Error::new(
-                                        ErrorKind::Simulation,
-                                        ErrorCode::BadTable,
-                                        Some("could not find table variable".to_string()),
-                                    )
-                                })?;
-                            let elem_off = *off - base_off;
-                            Ok((table_ident, Expr::Const(elem_off as f64, *loc)))
+                        Expr::Var(var, loc) => {
+                            // Either a scalar table or an element of an arrayed
+                            // table (a static subscript that compiled down to a
+                            // direct element reference).
+                            Ok((
+                                var.name.clone(),
+                                Expr::Const(var.element_offset as f64, *loc),
+                            ))
                         }
-                        Expr::StaticSubscript(off, view, loc) => {
+                        Expr::StaticSubscript(base, view, loc) => {
                             // Static subscript - element offset is precomputed in the ArrayView
                             // Reject ranges/wildcards - only single element selection is valid
                             if view.size() > 1 {
@@ -740,20 +734,12 @@ impl<'module> Compiler<'module> {
                                     "range subscripts not supported in lookup tables".to_string()
                                 );
                             }
-                            let table_ident = module_offsets
-                                .iter()
-                                .find(|(_, (base, _))| *off == *base)
-                                .map(|(k, _)| k.clone())
-                                .ok_or_else(|| {
-                                    crate::Error::new(
-                                        ErrorKind::Simulation,
-                                        ErrorCode::BadTable,
-                                        Some("could not find table variable".to_string()),
-                                    )
-                                })?;
-                            Ok((table_ident, Expr::Const(view.offset as f64, *loc)))
+                            Ok((
+                                base.name.clone(),
+                                Expr::Const((base.element_offset + view.offset) as f64, *loc),
+                            ))
                         }
-                        Expr::Subscript(off, subscript_indices, dim_sizes, _loc) => {
+                        Expr::Subscript(base, subscript_indices, dim_sizes, _loc) => {
                             // Subscripted table reference - compute element_offset
                             // For a multi-dimensional subscript, compute linear offset
                             // offset = sum(index_i * stride_i) where stride_i = product of sizes[i+1..]
@@ -811,18 +797,24 @@ impl<'module> Compiler<'module> {
                                 stride *= dim_sizes.get(i).copied().unwrap_or(1);
                             }
 
-                            let table_ident = module_offsets
-                                .iter()
-                                .find(|(_, (base, _))| *off == *base)
-                                .map(|(k, _)| k.clone())
-                                .ok_or_else(|| {
-                                    crate::Error::new(
-                                        ErrorKind::Simulation,
-                                        ErrorCode::BadTable,
-                                        Some("could not find table variable".to_string()),
-                                    )
-                                })?;
-                            Ok((table_ident, offset_expr.unwrap_or(Expr::Const(0.0, *_loc))))
+                            // A dynamically-subscripted table reference is always
+                            // to the whole table variable: the index expression
+                            // selects the element. `base.element_offset` is
+                            // therefore 0, and a non-zero one (a cross-module
+                            // `m·x`) has no representable table identity here --
+                            // the previous exact-base offset scan rejected it too.
+                            if !base.is_whole_var() {
+                                return sim_err!(
+                                    BadTable,
+                                    "subscripted lookup table reference must name a \
+                                     variable of this model"
+                                        .to_string()
+                                );
+                            }
+                            Ok((
+                                base.name.clone(),
+                                offset_expr.unwrap_or(Expr::Const(0.0, *_loc)),
+                            ))
                         }
                         _ => {
                             sim_err!(
@@ -836,9 +828,7 @@ impl<'module> Compiler<'module> {
 
                 // lookups are special
                 if let BuiltinFn::Lookup(table_expr, index, _loc) = builtin {
-                    let module_offsets = &self.module.offsets[self.module.ident];
-                    let (table_ident, element_offset_expr) =
-                        extract_table_info(table_expr, module_offsets)?;
+                    let (table_ident, element_offset_expr) = extract_table_info(table_expr)?;
 
                     // Look up the base_gf for this table variable
                     let base_gf = *self.table_base_ids.get(&table_ident).ok_or_else(|| {
@@ -860,7 +850,7 @@ impl<'module> Compiler<'module> {
                     // Emit: push element_offset, push lookup_index, Lookup { base_gf, table_count, mode }
                     self.walk_expr(&element_offset_expr)?.unwrap();
                     self.walk_expr(index)?.unwrap();
-                    self.push(Opcode::Lookup {
+                    self.push(SymbolicOpcode::Lookup {
                         base_gf,
                         table_count,
                         mode: LookupMode::Interpolate,
@@ -877,9 +867,7 @@ impl<'module> Compiler<'module> {
                     } else {
                         LookupMode::Backward
                     };
-                    let module_offsets = &self.module.offsets[self.module.ident];
-                    let (table_ident, element_offset_expr) =
-                        extract_table_info(table_expr, module_offsets)?;
+                    let (table_ident, element_offset_expr) = extract_table_info(table_expr)?;
 
                     let base_gf = *self.table_base_ids.get(&table_ident).ok_or_else(|| {
                         crate::Error::new(
@@ -898,7 +886,7 @@ impl<'module> Compiler<'module> {
 
                     self.walk_expr(&element_offset_expr)?.unwrap();
                     self.walk_expr(index)?.unwrap();
-                    self.push(Opcode::Lookup {
+                    self.push(SymbolicOpcode::Lookup {
                         base_gf,
                         table_count,
                         mode,
@@ -913,7 +901,7 @@ impl<'module> Compiler<'module> {
                     } else {
                         self.curr_code.intern_literal(0.0)
                     };
-                    self.push(Opcode::LoadConstant { id });
+                    self.push(SymbolicOpcode::LoadConstant { id });
                     return Ok(Some(()));
                 };
 
@@ -932,11 +920,11 @@ impl<'module> Compiler<'module> {
                 // compile-time constant. Anything else (dynamic indices,
                 // expressions) was rewritten through a helper aux at parse
                 // time, so reaching here with one is a compiler bug.
-                let static_slot_offset = |arg: &Expr| -> Option<VariableOffset> {
+                let static_slot = |arg: &Expr| -> Option<VarRef> {
                     match arg {
-                        Expr::Var(off, _) => Some(*off as VariableOffset),
-                        Expr::StaticSubscript(off, view, _) if view.dims.is_empty() => {
-                            Some((*off + view.offset) as VariableOffset)
+                        Expr::Var(var, _) => Some(var.clone()),
+                        Expr::StaticSubscript(base, view, _) if view.dims.is_empty() => {
+                            Some(base.offset_by(view.offset))
                         }
                         _ => None,
                     }
@@ -944,9 +932,9 @@ impl<'module> Compiler<'module> {
                 match builtin {
                     BuiltinFn::Previous(arg, fallback) => {
                         self.walk_expr(fallback)?.unwrap();
-                        match static_slot_offset(arg.as_ref()) {
-                            Some(off) => {
-                                self.push(Opcode::LoadPrev { off });
+                        match static_slot(arg.as_ref()) {
+                            Some(var) => {
+                                self.push(SymbolicOpcode::SymLoadPrev { var });
                             }
                             None => {
                                 return sim_err!(
@@ -959,8 +947,8 @@ impl<'module> Compiler<'module> {
                         return Ok(Some(()));
                     }
                     BuiltinFn::Init(arg) => {
-                        let off = match static_slot_offset(arg.as_ref()) {
-                            Some(off) => off,
+                        let var = match static_slot(arg.as_ref()) {
+                            Some(var) => var,
                             None => {
                                 return sim_err!(
                                     NotSimulatable,
@@ -968,7 +956,7 @@ impl<'module> Compiler<'module> {
                                 );
                             }
                         };
-                        self.push(Opcode::LoadInitial { off });
+                        self.push(SymbolicOpcode::SymLoadInitial { var });
                         return Ok(Some(()));
                     }
                     _ => {}
@@ -986,7 +974,7 @@ impl<'module> Compiler<'module> {
                             BuiltinFn::FinalTime => FINAL_TIME_OFF,
                             _ => unreachable!(),
                         } as u16;
-                        self.push(Opcode::LoadGlobalVar { off });
+                        self.push(SymbolicOpcode::LoadGlobalVar { off });
                         return Ok(Some(()));
                     }
                     BuiltinFn::Lookup(_, _, _)
@@ -1000,7 +988,7 @@ impl<'module> Compiler<'module> {
                             _ => unreachable!(),
                         };
                         let id = self.curr_code.intern_literal(lit);
-                        self.push(Opcode::LoadConstant { id });
+                        self.push(SymbolicOpcode::LoadConstant { id });
                         return Ok(Some(()));
                     }
                     BuiltinFn::Abs(a)
@@ -1018,23 +1006,23 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::Tan(a) => {
                         self.walk_expr(a)?.unwrap();
                         let id = self.curr_code.intern_literal(0.0);
-                        self.push(Opcode::LoadConstant { id });
-                        self.push(Opcode::LoadConstant { id });
+                        self.push(SymbolicOpcode::LoadConstant { id });
+                        self.push(SymbolicOpcode::LoadConstant { id });
                     }
                     BuiltinFn::Step(a, b) => {
                         self.walk_expr(a)?.unwrap();
                         self.walk_expr(b)?.unwrap();
                         let id = self.curr_code.intern_literal(0.0);
-                        self.push(Opcode::LoadConstant { id });
+                        self.push(SymbolicOpcode::LoadConstant { id });
                     }
                     BuiltinFn::Max(a, b) => {
                         if let Some(b) = b {
                             self.walk_expr(a)?.unwrap();
                             self.walk_expr(b)?.unwrap();
                             let id = self.curr_code.intern_literal(0.0);
-                            self.push(Opcode::LoadConstant { id });
+                            self.push(SymbolicOpcode::LoadConstant { id });
                         } else {
-                            return self.emit_array_reduce(a, Opcode::ArrayMax {});
+                            return self.emit_array_reduce(a, SymbolicOpcode::ArrayMax {});
                         }
                     }
                     BuiltinFn::Min(a, b) => {
@@ -1042,16 +1030,16 @@ impl<'module> Compiler<'module> {
                             self.walk_expr(a)?.unwrap();
                             self.walk_expr(b)?.unwrap();
                             let id = self.curr_code.intern_literal(0.0);
-                            self.push(Opcode::LoadConstant { id });
+                            self.push(SymbolicOpcode::LoadConstant { id });
                         } else {
-                            return self.emit_array_reduce(a, Opcode::ArrayMin {});
+                            return self.emit_array_reduce(a, SymbolicOpcode::ArrayMin {});
                         }
                     }
                     BuiltinFn::Quantum(a, b) => {
                         self.walk_expr(a)?.unwrap();
                         self.walk_expr(b)?.unwrap();
                         let id = self.curr_code.intern_literal(0.0);
-                        self.push(Opcode::LoadConstant { id });
+                        self.push(SymbolicOpcode::LoadConstant { id });
                     }
                     BuiltinFn::Pulse(a, b, c) => {
                         self.walk_expr(a)?.unwrap();
@@ -1060,7 +1048,7 @@ impl<'module> Compiler<'module> {
                             self.walk_expr(c.as_ref().unwrap())?.unwrap()
                         } else {
                             let id = self.curr_code.intern_literal(0.0);
-                            self.push(Opcode::LoadConstant { id });
+                            self.push(SymbolicOpcode::LoadConstant { id });
                         };
                     }
                     BuiltinFn::Ramp(a, b, c) => {
@@ -1079,7 +1067,7 @@ impl<'module> Compiler<'module> {
                             // root model (where slot 3 IS final_time); inside a
                             // submodule it reads an unrelated body slot (or drops
                             // the fragment when that slot has no symbolic mapping).
-                            self.push(Opcode::LoadGlobalVar {
+                            self.push(SymbolicOpcode::LoadGlobalVar {
                                 off: FINAL_TIME_OFF as u16,
                             });
                         };
@@ -1101,7 +1089,7 @@ impl<'module> Compiler<'module> {
                         };
                         if c.is_none() {
                             let id = self.curr_code.intern_literal(0.0);
-                            self.push(Opcode::LoadConstant { id });
+                            self.push(SymbolicOpcode::LoadConstant { id });
                         }
                     }
                     BuiltinFn::Sshape(a, b, c) => {
@@ -1120,7 +1108,8 @@ impl<'module> Compiler<'module> {
                                 | Expr::TempArray(..)
                                 | Expr::Var(..)
                                 | Expr::Subscript(..) => {
-                                    return self.emit_array_reduce(&args[0], Opcode::ArrayMean {});
+                                    return self
+                                        .emit_array_reduce(&args[0], SymbolicOpcode::ArrayMean {});
                                 }
                                 _ => {
                                     self.walk_expr(&args[0])?.unwrap();
@@ -1131,16 +1120,16 @@ impl<'module> Compiler<'module> {
 
                         // Multi-argument scalar mean: (arg1 + arg2 + ... + argN) / N
                         let id = self.curr_code.intern_literal(0.0);
-                        self.push(Opcode::LoadConstant { id });
+                        self.push(SymbolicOpcode::LoadConstant { id });
 
                         for arg in args.iter() {
                             self.walk_expr(arg)?.unwrap();
-                            self.push(Opcode::Op2 { op: Op2::Add });
+                            self.push(SymbolicOpcode::Op2 { op: Op2::Add });
                         }
 
                         let id = self.curr_code.intern_literal(args.len() as f64);
-                        self.push(Opcode::LoadConstant { id });
-                        self.push(Opcode::Op2 { op: Op2::Div });
+                        self.push(SymbolicOpcode::LoadConstant { id });
+                        self.push(SymbolicOpcode::Op2 { op: Op2::Div });
                         return Ok(Some(()));
                     }
                     BuiltinFn::Rank(_, _) => {
@@ -1150,22 +1139,22 @@ impl<'module> Compiler<'module> {
                         );
                     }
                     BuiltinFn::Size(arg) => {
-                        return self.emit_array_reduce(arg, Opcode::ArraySize {});
+                        return self.emit_array_reduce(arg, SymbolicOpcode::ArraySize {});
                     }
                     BuiltinFn::Stddev(arg) => {
-                        return self.emit_array_reduce(arg, Opcode::ArrayStddev {});
+                        return self.emit_array_reduce(arg, SymbolicOpcode::ArrayStddev {});
                     }
                     BuiltinFn::Sum(arg) => {
-                        return self.emit_array_reduce(arg, Opcode::ArraySum {});
+                        return self.emit_array_reduce(arg, SymbolicOpcode::ArraySum {});
                     }
                     BuiltinFn::VectorSelect(sel, expr, max_val, action, _err) => {
                         self.walk_expr_as_view(sel)?;
                         self.walk_expr_as_view(expr)?;
                         self.walk_expr(max_val)?.unwrap();
                         self.walk_expr(action)?.unwrap();
-                        self.push(Opcode::VectorSelect {});
-                        self.push(Opcode::PopView {});
-                        self.push(Opcode::PopView {});
+                        self.push(SymbolicOpcode::VectorSelect {});
+                        self.push(SymbolicOpcode::PopView {});
+                        self.push(SymbolicOpcode::PopView {});
                         return Ok(Some(()));
                     }
                     BuiltinFn::Previous(_, _) | BuiltinFn::Init(_) => {
@@ -1250,7 +1239,7 @@ impl<'module> Compiler<'module> {
                     }
                 };
 
-                self.push(Opcode::Apply { func });
+                self.push(SymbolicOpcode::Apply { func });
                 Some(())
             }
             Expr::EvalModule(ident, model_name, input_set, args) => {
@@ -1260,22 +1249,24 @@ impl<'module> Compiler<'module> {
                     // (consistent with every other operand walk in this fn).
                     self.walk_expr(arg)?.unwrap();
                 }
-                let module_offsets = &self.module.offsets[self.module.ident];
-                self.module_decls.push(ModuleDeclaration {
+                // The instance's base slot is the module variable's own first
+                // slot; naming it is all the declaration needs, and assembly
+                // resolves it against the final layout like any other reference.
+                self.module_decls.push(SymbolicModuleDecl {
                     model_name: model_name.clone(),
                     input_set: input_set.clone(),
-                    off: module_offsets[ident].0,
+                    var: VarRef::base(ident.clone()),
                 });
                 let id = (self.module_decls.len() - 1) as ModuleId;
 
-                self.push(Opcode::EvalModule {
+                self.push(SymbolicOpcode::EvalModule {
                     id,
                     n_inputs: args.len() as u8,
                 });
                 None
             }
             Expr::ModuleInput(off, _) => {
-                self.push(Opcode::LoadModuleInput {
+                self.push(SymbolicOpcode::LoadModuleInput {
                     input: *off as ModuleInputOffset,
                 });
                 Some(())
@@ -1284,23 +1275,23 @@ impl<'module> Compiler<'module> {
                 self.walk_expr(lhs)?.unwrap();
                 self.walk_expr(rhs)?.unwrap();
                 let opcode = match op {
-                    BinaryOp::Add => Opcode::Op2 { op: Op2::Add },
-                    BinaryOp::Sub => Opcode::Op2 { op: Op2::Sub },
-                    BinaryOp::Exp => Opcode::Op2 { op: Op2::Exp },
-                    BinaryOp::Mul => Opcode::Op2 { op: Op2::Mul },
-                    BinaryOp::Div => Opcode::Op2 { op: Op2::Div },
-                    BinaryOp::Mod => Opcode::Op2 { op: Op2::Mod },
-                    BinaryOp::Gt => Opcode::Op2 { op: Op2::Gt },
-                    BinaryOp::Gte => Opcode::Op2 { op: Op2::Gte },
-                    BinaryOp::Lt => Opcode::Op2 { op: Op2::Lt },
-                    BinaryOp::Lte => Opcode::Op2 { op: Op2::Lte },
-                    BinaryOp::Eq => Opcode::Op2 { op: Op2::Eq },
+                    BinaryOp::Add => SymbolicOpcode::Op2 { op: Op2::Add },
+                    BinaryOp::Sub => SymbolicOpcode::Op2 { op: Op2::Sub },
+                    BinaryOp::Exp => SymbolicOpcode::Op2 { op: Op2::Exp },
+                    BinaryOp::Mul => SymbolicOpcode::Op2 { op: Op2::Mul },
+                    BinaryOp::Div => SymbolicOpcode::Op2 { op: Op2::Div },
+                    BinaryOp::Mod => SymbolicOpcode::Op2 { op: Op2::Mod },
+                    BinaryOp::Gt => SymbolicOpcode::Op2 { op: Op2::Gt },
+                    BinaryOp::Gte => SymbolicOpcode::Op2 { op: Op2::Gte },
+                    BinaryOp::Lt => SymbolicOpcode::Op2 { op: Op2::Lt },
+                    BinaryOp::Lte => SymbolicOpcode::Op2 { op: Op2::Lte },
+                    BinaryOp::Eq => SymbolicOpcode::Op2 { op: Op2::Eq },
                     BinaryOp::Neq => {
-                        self.push(Opcode::Op2 { op: Op2::Eq });
-                        Opcode::Not {}
+                        self.push(SymbolicOpcode::Op2 { op: Op2::Eq });
+                        SymbolicOpcode::Not {}
                     }
-                    BinaryOp::And => Opcode::Op2 { op: Op2::And },
-                    BinaryOp::Or => Opcode::Op2 { op: Op2::Or },
+                    BinaryOp::And => SymbolicOpcode::Op2 { op: Op2::And },
+                    BinaryOp::Or => SymbolicOpcode::Op2 { op: Op2::Or },
                 };
                 self.push(opcode);
                 Some(())
@@ -1308,7 +1299,7 @@ impl<'module> Compiler<'module> {
             Expr::Op1(op, rhs, _) => {
                 self.walk_expr(rhs)?.unwrap();
                 match op {
-                    UnaryOp::Not => self.push(Opcode::Not {}),
+                    UnaryOp::Not => self.push(SymbolicOpcode::Not {}),
                     UnaryOp::Transpose => {
                         unreachable!("Transpose should be handled at compile time in lower()");
                     }
@@ -1319,22 +1310,20 @@ impl<'module> Compiler<'module> {
                 self.walk_expr(t)?.unwrap();
                 self.walk_expr(f)?.unwrap();
                 self.walk_expr(cond)?.unwrap();
-                self.push(Opcode::SetCond {});
-                self.push(Opcode::If {});
+                self.push(SymbolicOpcode::SetCond {});
+                self.push(SymbolicOpcode::If {});
                 Some(())
             }
-            Expr::AssignCurr(off, rhs) => {
+            Expr::AssignCurr(dst, rhs) => {
                 if let Expr::Const(value, _) = rhs.as_ref() {
                     let id = self.curr_code.push_named_literal(*value);
-                    self.push(Opcode::AssignConstCurr {
-                        off: *off as VariableOffset,
+                    self.push(SymbolicOpcode::AssignConstCurr {
+                        var: dst.clone(),
                         literal_id: id,
                     });
                 } else {
                     self.walk_expr(rhs)?.unwrap();
-                    self.push(Opcode::AssignCurr {
-                        off: *off as VariableOffset,
-                    });
+                    self.push(SymbolicOpcode::AssignCurr { var: dst.clone() });
                 }
                 None
             }
@@ -1345,19 +1334,17 @@ impl<'module> Compiler<'module> {
             // un-fused `Opcode::AssignNext` to fall back to; a stock update
             // arriving in any other shape is a compile error here rather than a
             // silently different program (see
-            // `ByteCodeBuilder::fuse_trailing_op2_into_assign_next`).
-            Expr::AssignNext(off, rhs) => {
+            // `SymbolicByteCodeBuilder::fuse_trailing_op2_into_assign_next`).
+            Expr::AssignNext(dst, rhs) => {
                 self.walk_expr(rhs)?.unwrap();
-                if !self
-                    .curr_code
-                    .fuse_trailing_op2_into_assign_next(*off as VariableOffset)
-                {
+                if !self.curr_code.fuse_trailing_op2_into_assign_next(dst) {
                     return sim_err!(
                         NotSimulatable,
                         format!(
-                            "stock update for slot {off} does not end in a binary \
+                            "stock update for '{}' does not end in a binary \
                              operation, so it cannot be emitted as a next-value \
-                             assignment"
+                             assignment",
+                            dst.name
                         )
                     );
                 }
@@ -1377,30 +1364,30 @@ impl<'module> Compiler<'module> {
                             let full_source_len = self.full_source_len(source);
                             self.walk_expr_as_view(source)?;
                             self.walk_expr_as_view(offset)?;
-                            self.push(Opcode::VectorElmMap {
+                            self.push(SymbolicOpcode::VectorElmMap {
                                 write_temp_id: *id as TempId,
                                 full_source_len,
                             });
-                            self.push(Opcode::PopView {});
-                            self.push(Opcode::PopView {});
+                            self.push(SymbolicOpcode::PopView {});
+                            self.push(SymbolicOpcode::PopView {});
                             return Ok(None);
                         }
                         BuiltinFn::VectorSortOrder(array, direction) => {
                             self.walk_expr_as_view(array)?;
                             self.walk_expr(direction)?.unwrap();
-                            self.push(Opcode::VectorSortOrder {
+                            self.push(SymbolicOpcode::VectorSortOrder {
                                 write_temp_id: *id as TempId,
                             });
-                            self.push(Opcode::PopView {});
+                            self.push(SymbolicOpcode::PopView {});
                             return Ok(None);
                         }
                         BuiltinFn::Rank(array, direction) => {
                             self.walk_expr_as_view(array)?;
                             self.walk_expr(direction)?.unwrap();
-                            self.push(Opcode::Rank {
+                            self.push(SymbolicOpcode::Rank {
                                 write_temp_id: *id as TempId,
                             });
-                            self.push(Opcode::PopView {});
+                            self.push(SymbolicOpcode::PopView {});
                             return Ok(None);
                         }
                         // Per-element arrayed-GF lookup (GH #580 Bug B):
@@ -1425,24 +1412,24 @@ impl<'module> Compiler<'module> {
                                 self.arrayed_lookup_table_info(table_expr)?;
                             self.walk_expr_as_view(table_expr)?;
                             self.walk_expr(index)?.unwrap();
-                            self.push(Opcode::LookupArray {
+                            self.push(SymbolicOpcode::LookupArray {
                                 base_gf,
                                 table_count,
                                 mode,
                                 write_temp_id: *id as TempId,
                             });
-                            self.push(Opcode::PopView {});
+                            self.push(SymbolicOpcode::PopView {});
                             return Ok(None);
                         }
                         BuiltinFn::AllocateAvailable(requests, profile, avail) => {
                             self.walk_expr_as_view(requests)?;
                             self.walk_expr_as_view(profile)?;
                             self.walk_expr(avail)?.unwrap();
-                            self.push(Opcode::AllocateAvailable {
+                            self.push(SymbolicOpcode::AllocateAvailable {
                                 write_temp_id: *id as TempId,
                             });
-                            self.push(Opcode::PopView {});
-                            self.push(Opcode::PopView {});
+                            self.push(SymbolicOpcode::PopView {});
+                            self.push(SymbolicOpcode::PopView {});
                             return Ok(None);
                         }
                         BuiltinFn::AllocateByPriority(requests, priority, _size, width, supply) => {
@@ -1453,11 +1440,11 @@ impl<'module> Compiler<'module> {
                             self.walk_expr_as_view(priority)?;
                             self.walk_expr(width)?.unwrap();
                             self.walk_expr(supply)?.unwrap();
-                            self.push(Opcode::AllocateByPriority {
+                            self.push(SymbolicOpcode::AllocateByPriority {
                                 write_temp_id: *id as TempId,
                             });
-                            self.push(Opcode::PopView {});
-                            self.push(Opcode::PopView {});
+                            self.push(SymbolicOpcode::PopView {});
+                            self.push(SymbolicOpcode::PopView {});
                             return Ok(None);
                         }
                         _ => {} // fall through to existing BeginIter logic
@@ -1502,13 +1489,13 @@ impl<'module> Compiler<'module> {
                 // 2. Push the OUTPUT temp's view for iteration size
                 let output_static_view = self.array_view_to_static_temp(*id, view);
                 let output_view_id = self.add_static_view(output_static_view);
-                self.push(Opcode::PushStaticView {
+                self.push(SymbolicOpcode::PushStaticView {
                     view_id: output_view_id,
                 });
 
                 // 3. Begin iteration - MUST be before source views are pushed
                 // BeginIter captures view_stack.last() as the iteration view
-                self.push(Opcode::BeginIter {
+                self.push(SymbolicOpcode::BeginIter {
                     write_temp_id: *id as TempId,
                     has_write_temp: true,
                 });
@@ -1516,12 +1503,12 @@ impl<'module> Compiler<'module> {
                 // 4. Push all source views AFTER BeginIter and record their stack offsets
                 // After this, view_stack looks like: [output_view, src1, src2, ...]
                 // So src1 is at offset n_source_views, src2 at n_source_views-1, etc.
-                let mut iter_views_with_offsets: Vec<(StaticArrayView, u8)> =
+                let mut iter_views_with_offsets: Vec<(SymbolicStaticView, u8)> =
                     Vec::with_capacity(n_source_views);
 
                 for (i, src_view) in source_views.into_iter().enumerate() {
                     let view_id = self.add_static_view(src_view.clone());
-                    self.push(Opcode::PushStaticView { view_id });
+                    self.push(SymbolicOpcode::PushStaticView { view_id });
                     // Offset is counted from top: last pushed is at offset 1
                     // First pushed source view will be at offset n_source_views after all are pushed
                     let offset = (n_source_views - i) as u8;
@@ -1539,22 +1526,22 @@ impl<'module> Compiler<'module> {
                 self.in_iteration = false;
 
                 // Store the result to temp
-                self.push(Opcode::StoreIterElement {});
+                self.push(SymbolicOpcode::StoreIterElement {});
 
                 // Calculate jump offset (negative, back to loop start)
                 let next_iter_pos = self.curr_code.len();
                 let jump_back = (loop_start as isize - next_iter_pos as isize) as i16;
 
-                self.push(Opcode::NextIterOrJump { jump_back });
-                self.push(Opcode::EndIter {});
+                self.push(SymbolicOpcode::NextIterOrJump { jump_back });
+                self.push(SymbolicOpcode::EndIter {});
 
                 // 6. Pop all source views (in reverse order of push)
                 for _ in 0..n_source_views {
-                    self.push(Opcode::PopView {});
+                    self.push(SymbolicOpcode::PopView {});
                 }
 
                 // 7. Pop output view
-                self.push(Opcode::PopView {});
+                self.push(SymbolicOpcode::PopView {});
 
                 // AssignTemp doesn't produce a value on the stack
                 None
@@ -1563,14 +1550,14 @@ impl<'module> Compiler<'module> {
         Ok(result)
     }
 
-    fn push(&mut self, op: Opcode) {
+    fn push(&mut self, op: SymbolicOpcode) {
         self.curr_code.push_opcode(op)
     }
 
     /// Collect all source views referenced in an expression.
     /// This traverses the expression and collects StaticArrayView data for each
     /// StaticSubscript and TempArray node, deduplicating identical views.
-    fn collect_iter_source_views(&mut self, expr: &Expr) -> Vec<StaticArrayView> {
+    fn collect_iter_source_views(&mut self, expr: &Expr) -> Vec<SymbolicStaticView> {
         let mut views = Vec::new();
         let mut seen = std::collections::HashSet::new();
         self.collect_iter_source_views_impl(expr, &mut views, &mut seen);
@@ -1580,12 +1567,12 @@ impl<'module> Compiler<'module> {
     fn collect_iter_source_views_impl(
         &mut self,
         expr: &Expr,
-        views: &mut Vec<StaticArrayView>,
-        seen: &mut std::collections::HashSet<StaticArrayView>,
+        views: &mut Vec<SymbolicStaticView>,
+        seen: &mut std::collections::HashSet<SymbolicStaticView>,
     ) {
         match expr {
-            Expr::StaticSubscript(off, view, _) => {
-                let static_view = self.array_view_to_static(*off, view);
+            Expr::StaticSubscript(base, view, _) => {
+                let static_view = self.array_view_to_static(base, view);
                 // O(1) deduplication using HashSet
                 if seen.insert(static_view.clone()) {
                     views.push(static_view);
@@ -1632,8 +1619,8 @@ impl<'module> Compiler<'module> {
     fn collect_builtin_views(
         &mut self,
         builtin: &BuiltinFn,
-        views: &mut Vec<StaticArrayView>,
-        seen: &mut std::collections::HashSet<StaticArrayView>,
+        views: &mut Vec<SymbolicStaticView>,
+        seen: &mut std::collections::HashSet<SymbolicStaticView>,
     ) {
         use crate::builtins::BuiltinFn::*;
         match builtin {
@@ -1722,7 +1709,7 @@ impl<'module> Compiler<'module> {
 
     /// Find the stack offset for a view that was pre-pushed.
     /// Returns Some(offset) if found, where offset is 1-based from stack top.
-    fn find_iter_view_offset(&self, view: &StaticArrayView) -> Option<u8> {
+    fn find_iter_view_offset(&self, view: &SymbolicStaticView) -> Option<u8> {
         self.iter_source_views.as_ref().and_then(|views| {
             views
                 .iter()
@@ -1731,7 +1718,7 @@ impl<'module> Compiler<'module> {
         })
     }
 
-    pub(super) fn compile(mut self) -> Result<CompiledModule> {
+    pub(super) fn compile(mut self) -> Result<SymbolicCompiledModule> {
         // The runlists live for `'module`, independent of `&mut self`, so bind
         // them out of the (Copy) context before the mutable walks.
         let initials_by_var = self.module.runlist_initials_by_var;
@@ -1740,21 +1727,19 @@ impl<'module> Compiler<'module> {
         let temp_sizes = self.module.temp_sizes;
 
         // Compile each variable's initials separately
-        let compiled_initials: Vec<CompiledInitial> = initials_by_var
+        let compiled_initials: Vec<SymbolicCompiledInitial> = initials_by_var
             .iter()
             .map(|var_init| {
                 let bytecode = self.walk(&var_init.ast)?;
-                Ok(CompiledInitial {
+                Ok(SymbolicCompiledInitial {
                     ident: var_init.ident.clone(),
-                    offsets: var_init.offsets.clone(),
                     bytecode,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let compiled_initials = Arc::new(compiled_initials);
 
-        let compiled_flows = Arc::new(self.walk(flows)?);
-        let compiled_stocks = Arc::new(self.walk(stocks)?);
+        let compiled_flows = self.walk(flows)?;
+        let compiled_stocks = self.walk(stocks)?;
 
         // Build temp info from module
         let mut temp_offsets = Vec::with_capacity(temp_sizes.len());
@@ -1765,31 +1750,29 @@ impl<'module> Compiler<'module> {
         }
         let temp_total_size = offset;
 
-        Ok(CompiledModule {
+        Ok(SymbolicCompiledModule {
             ident: self.module.ident.clone(),
-            n_slots: self.module.n_slots,
-            context: Arc::new(ByteCodeContext {
-                graphical_functions: self.graphical_functions,
-                modules: self.module_decls,
-                arrays: vec![],
-                dimensions: self.dimensions,
-                subdim_relations: self.subdim_relations,
-                names: self.names,
-                static_views: self.static_views,
-                temp_offsets,
-                temp_total_size,
-                dim_lists: self.dim_lists,
-            }),
             compiled_initials,
             compiled_flows,
             compiled_stocks,
+            graphical_functions: self.graphical_functions,
+            module_decls: self.module_decls,
+            static_views: self.static_views,
+            arrays: vec![],
+            dimensions: self.dimensions,
+            subdim_relations: self.subdim_relations,
+            names: self.names,
+            temp_offsets,
+            temp_total_size,
+            dim_lists: self.dim_lists,
             // The flow-runlist invariant/dynamic partition is decided at module
             // assembly (the salsa `assemble_module` path, where the whole
             // root-model runlist is available), NOT here: `Compiler::compile`
             // runs both per single-variable fragment (split is trivially 0) and
             // on the test-only monolithic whole-model `Module`. So this is
-            // always 0; the production split is installed by `resolve_module`
-            // from the assembled `SymbolicCompiledModule` (GH #712).
+            // always 0; the production split is installed by `assemble_module`
+            // on the `SymbolicCompiledModule` it builds from the fragments
+            // (GH #712).
             flows_invariant_opcode_len: 0,
         })
     }
@@ -1808,7 +1791,7 @@ mod tests {
     struct EmptyCtxOwner {
         ident: Ident<Canonical>,
         inputs: std::collections::BTreeSet<Ident<Canonical>>,
-        offsets: VariableOffsetMap,
+        var_sizes: VarSizes,
         tables: HashMap<Ident<Canonical>, Vec<Table>>,
         dimensions_ctx: crate::dimensions::DimensionsContext,
     }
@@ -1818,22 +1801,26 @@ mod tests {
             EmptyCtxOwner {
                 ident: Ident::new("test"),
                 inputs: Default::default(),
-                offsets: HashMap::new(),
+                var_sizes: HashMap::new(),
                 tables: HashMap::new(),
                 dimensions_ctx: Default::default(),
             }
+        }
+
+        fn with_var_size(mut self, name: &str, size: usize) -> Self {
+            self.var_sizes.insert(Ident::new(name), size);
+            self
         }
 
         fn ctx(&self) -> ModuleCtx<'_> {
             ModuleCtx {
                 ident: &self.ident,
                 inputs: &self.inputs,
-                n_slots: 1,
                 temp_sizes: &[],
                 runlist_initials_by_var: &[],
                 runlist_flows: &[],
                 runlist_stocks: &[],
-                offsets: &self.offsets,
+                var_sizes: &self.var_sizes,
                 tables: &self.tables,
                 dimensions: &[],
                 dimensions_ctx: &self.dimensions_ctx,
@@ -1859,7 +1846,7 @@ mod tests {
         // NotSimulatable. Before the fix the enclosing Subscript arm panicked
         // by unwrapping that Err; after the fix it propagates via `?`.
         let expr = Expr::Subscript(
-            0,
+            VarRef::base(Ident::new("arr")),
             vec![SubscriptIndex::Single(Expr::App(
                 BuiltinFn::Previous(
                     Box::new(Expr::Const(1.0, Loc::default())),
@@ -1900,7 +1887,7 @@ mod tests {
         // is a PREVIOUS of a constant (NotSimulatable). The `Subscript` arm of
         // `walk_expr_as_view` must return that typed Err, not panic.
         let expr = Expr::Subscript(
-            0,
+            VarRef::base(Ident::new("arr")),
             vec![SubscriptIndex::Single(Expr::App(
                 BuiltinFn::Previous(
                     Box::new(Expr::Const(1.0, Loc::default())),
@@ -1919,6 +1906,54 @@ mod tests {
             err.code,
             ErrorCode::NotSimulatable,
             "expected NotSimulatable, got {err:?}"
+        );
+    }
+
+    /// `full_source_len` reports a VECTOR ELM MAP source's extent from the
+    /// variable's own size, and only when the reference addresses that
+    /// variable in whole.
+    ///
+    /// The whole-variable rule is the exact translation of the offset scan this
+    /// replaced ("does any variable's storage BEGIN at this offset?"), and it is
+    /// what makes the two shapes below differ. A collapsed element source inside
+    /// an array-producing builtin keeps the variable's base and carries the
+    /// element in `view.offset` (that is why `Context::lower_from_expr3` returns
+    /// a `StaticSubscript` rather than a `Var` there -- GH #578), so it takes
+    /// the first arm and recovers the FULL extent. A reference that genuinely
+    /// starts mid-variable -- a cross-module `m·x`, whose owner in this model is
+    /// the module variable `m` -- names something whose extent this model's
+    /// symbol table does not know, so it falls back to the view.
+    #[test]
+    fn full_source_len_uses_the_whole_variable_only_at_its_base() {
+        let owner = EmptyCtxOwner::new().with_var_size("d", 6);
+        let compiler = Compiler::new(owner.ctx());
+
+        // `d[DimA, DimB]` collapsed to one element: base is `d`, the element
+        // rides in the view. The genuine-Vensim bound is d's FULL 6 elements.
+        let scalar_view = {
+            let mut v = ArrayView::contiguous(vec![]);
+            v.offset = 4;
+            v
+        };
+        assert_eq!(
+            compiler.full_source_len(&Expr::StaticSubscript(
+                VarRef::base(Ident::new("d")),
+                scalar_view.clone(),
+                crate::ast::Loc::default(),
+            )),
+            6
+        );
+
+        // The same view, but the reference starts 4 slots into its owner (the
+        // shape a cross-module reference produces). The owner is not `d` as a
+        // whole, so the view's extent is all this can honestly report.
+        assert_eq!(
+            compiler.full_source_len(&Expr::StaticSubscript(
+                VarRef::new(Ident::new("d"), 4),
+                scalar_view,
+                crate::ast::Loc::default(),
+            )),
+            1
         );
     }
 }

@@ -116,7 +116,7 @@ pub(crate) use fragment_compile::{
 
 mod assemble;
 pub(crate) use assemble::{
-    PerVarOffsetMap, VarFragmentResult, build_module_inputs, build_stub_variable,
+    PerVarSizes, VarFragmentResult, build_module_inputs, build_stub_variable,
     build_submodel_metadata, compile_phase_to_per_var_bytecodes, extract_tables_from_source_var,
     fragment_emit_ctx, var_phase_symbolic_fragment_prod,
 };

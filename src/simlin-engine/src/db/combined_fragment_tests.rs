@@ -33,7 +33,7 @@ fn id(s: &str) -> Ident<Canonical> {
 
 fn vref(name: &str, element_offset: usize) -> SymVarRef {
     SymVarRef {
-        name: name.to_string(),
+        name: crate::common::Ident::new(name),
         element_offset,
     }
 }

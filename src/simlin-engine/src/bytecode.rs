@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use smallvec::SmallVec;
@@ -44,10 +44,16 @@ pub type DimListId = u16; // Index into dim_lists table (for [DimId; 4] or [u16;
 /// The stack resets to 0 after every assignment opcode, so depth depends only on
 /// expression complexity, not on model size.
 ///
-/// `ByteCodeBuilder::finish()` validates at compile time that no bytecode
-/// sequence exceeds this capacity, making the VM's unsafe unchecked stack
-/// access provably safe. The `#![deny(unsafe_code)]` crate attribute ensures
-/// no other unsafe code can be added without explicit opt-in.
+/// [`crate::compiler::symbolic::resolve_bytecode`] validates at compile time
+/// that no bytecode sequence exceeds this capacity, making the VM's unsafe
+/// unchecked stack access provably safe. That is the single place concrete
+/// bytecode is produced, so the check cannot be bypassed; it answers with a
+/// compile `Err` rather than an assertion, so an over-deep or underflowing
+/// program is rejected instead of executed. (It lived in the per-fragment
+/// `ByteCodeBuilder::finish()` until GH #964 moved emission into the symbolic
+/// domain, taking the builder with it.) The `#![deny(unsafe_code)]` crate
+/// attribute ensures no other unsafe code can be added without explicit
+/// opt-in.
 pub(crate) const STACK_CAPACITY: usize = 64;
 
 /// Lookup interpolation mode for graphical function tables.
@@ -717,7 +723,9 @@ pub(crate) enum Opcode {
     /// There is no un-fused counterpart. Every write to `next[]` is a stock
     /// update, and a stock update's operand walk always ends in an `Op2`
     /// (`Context::build_stock_update_expr`), so codegen emits this form
-    /// directly via `ByteCodeBuilder::fuse_trailing_op2_into_assign_next`.
+    /// directly via
+    /// `compiler::symbolic::SymbolicByteCodeBuilder::fuse_trailing_op2_into_assign_next`
+    /// and `resolve_bytecode` carries it through unchanged.
     BinOpAssignNext {
         op: Op2,
         off: VariableOffset,
@@ -1764,201 +1772,34 @@ impl ByteCode {
     /// SD expressions are straight-line (no conditional jumps that could create
     /// divergent stack depths -- backward jumps from iteration opcodes always
     /// return to the same stack depth), a single linear pass is sufficient.
-    pub(crate) fn max_stack_depth(&self) -> usize {
+    ///
+    /// `Err` on an underflow, which means an opcode's [`Opcode::stack_effect`]
+    /// metadata is wrong -- a compiler bug, not a modelling error. It is
+    /// reported rather than asserted because the sole production caller,
+    /// [`crate::compiler::symbolic::resolve_bytecode`], is the one place
+    /// concrete bytecode is born and already answers with a `Result`: an abort
+    /// there would take down a `libsimlin` host (release builds are
+    /// `panic = abort`) for a defect the host can neither cause nor fix, and it
+    /// would leave that function with one failure mode it reports and one it
+    /// does not. `checked_sub` rather than `saturating_sub` is the load-bearing
+    /// part either way -- a silent clamp would invalidate the VM's stack-safety
+    /// proof without saying so.
+    pub(crate) fn max_stack_depth(&self) -> Result<usize, String> {
         let mut depth: usize = 0;
         let mut max_depth: usize = 0;
         for (pc, op) in self.code.iter().enumerate() {
             let (pops, pushes) = op.stack_effect();
-            // Use checked_sub rather than saturating_sub: an underflow here
-            // means stack_effect() metadata is wrong for some opcode, which
-            // would silently invalidate our safety proof. Panicking surfaces
-            // the bug immediately in tests.
-            depth = depth.checked_sub(pops as usize).unwrap_or_else(|| {
-                panic!("stack_effect underflow at pc {pc}: {pops} pops but depth is {depth}")
-            });
+            depth = depth.checked_sub(pops as usize).ok_or_else(|| {
+                format!("stack_effect underflow at pc {pc}: {pops} pops but depth is {depth}")
+            })?;
             depth += pushes as usize;
             max_depth = max_depth.max(depth);
         }
-        max_depth
-    }
-}
-
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default)]
-pub struct ByteCodeBuilder {
-    bytecode: ByteCode,
-    // keyed on the literal's bit pattern: interning only needs Eq + Hash, and
-    // bit-exact deduplication is the right semantic for codegen (it never
-    // conflates distinct values; at worst -0.0 and 0.0 get separate slots)
-    interned_literals: HashMap<u64, LiteralId>,
-}
-
-impl ByteCodeBuilder {
-    pub(crate) fn intern_literal(&mut self, lit: f64) -> LiteralId {
-        let key = lit.to_bits();
-        if self.interned_literals.contains_key(&key) {
-            return self.interned_literals[&key];
-        }
-        self.bytecode.literals.push(lit);
-        let literal_id = (self.bytecode.literals.len() - 1) as u16;
-        self.interned_literals.insert(key, literal_id);
-        literal_id
-    }
-
-    /// Allocate a new literal slot without deduplication.
-    /// Used for named constants so each variable gets its own slot,
-    /// preventing shared-literal corruption when overriding via set_value.
-    pub(crate) fn push_named_literal(&mut self, lit: f64) -> LiteralId {
-        self.bytecode.literals.push(lit);
-        (self.bytecode.literals.len() - 1) as u16
-    }
-
-    pub(crate) fn push_opcode(&mut self, op: Opcode) {
-        self.bytecode.code.push(op)
-    }
-
-    /// Replace a just-emitted trailing `Op2` with the fused
-    /// `BinOpAssignNext { op, off }` that both computes it and stores the
-    /// result into `next[off]`. Returns `false` -- emitting nothing -- when the
-    /// stream does not end in an `Op2`.
-    ///
-    /// There is no un-fused `Opcode::AssignNext`: a stock update is the only
-    /// thing that ever writes `next[]`, and `Context::build_stock_update_expr`
-    /// always returns `Op2(Add, curr_value, net * dt)`, so the operand walk
-    /// always ends in an `Op2` and the fused form is always emittable. Codegen
-    /// therefore fuses here, at emit time, and reports a typed error if a stock
-    /// update ever arrives in a shape that would need the un-fused opcode --
-    /// most plausibly an eventual `non_negative` implementation (GH #545)
-    /// wrapping the update in a `MAX`. A comment could not fail; this can.
-    ///
-    /// Fusing at emit time is strictly inside `peephole_optimize`'s
-    /// jump-target safety envelope rather than an exception to it: the `Op2`
-    /// being replaced is the LAST opcode in the stream, so no jump emitted so
-    /// far can target it (every jump is a backward `NextIterOrJump` emitted
-    /// after its target), and the pair it replaces has no successor whose PC
-    /// could shift.
-    pub(crate) fn fuse_trailing_op2_into_assign_next(&mut self, off: VariableOffset) -> bool {
-        match self.bytecode.code.last() {
-            Some(&Opcode::Op2 { op }) => {
-                let last = self.bytecode.code.len() - 1;
-                self.bytecode.code[last] = Opcode::BinOpAssignNext { op, off };
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Returns the current number of opcodes in the bytecode
-    pub(crate) fn len(&self) -> usize {
-        self.bytecode.code.len()
-    }
-
-    pub(crate) fn finish(self) -> ByteCode {
-        let mut bc = self.bytecode;
-        bc.peephole_optimize();
-
-        // Validate that the compiled bytecode cannot overflow the VM's
-        // fixed-size stack. This makes the unsafe unchecked stack access
-        // in the VM provably safe for this bytecode.
-        let depth = bc.max_stack_depth();
-        assert!(
-            depth < STACK_CAPACITY,
-            "compiled bytecode requires stack depth {depth}, exceeding VM capacity {STACK_CAPACITY}"
-        );
-
-        bc
+        Ok(max_depth)
     }
 }
 
 impl ByteCode {
-    /// Peephole optimization pass: fuse common opcode sequences into
-    /// superinstructions to reduce dispatch overhead.
-    ///
-    /// Only fuses adjacent instructions when neither is a jump target.
-    /// Jump offsets are recalculated after fusion using an old->new PC map.
-    fn peephole_optimize(&mut self) {
-        if self.code.is_empty() {
-            return;
-        }
-
-        // 1. Build set of PCs that are jump targets
-        let mut jump_targets = vec![false; self.code.len()];
-        for (pc, op) in self.code.iter().enumerate() {
-            if let Some(offset) = op.jump_offset() {
-                let target = (pc as isize + offset as isize) as usize;
-                assert!(
-                    target < jump_targets.len(),
-                    "jump at pc {pc} targets {target}, which is out of bounds (code length: {})",
-                    self.code.len()
-                );
-                jump_targets[target] = true;
-            }
-        }
-
-        // 2. Build old_pc -> new_pc mapping and fused output.
-        // pc_map has one entry per original instruction so that jump fixup
-        // can index by the original PC directly.
-        let mut optimized: Vec<Opcode> = Vec::with_capacity(self.code.len());
-        let mut pc_map: Vec<usize> = Vec::with_capacity(self.code.len() + 1);
-        let mut i = 0;
-        while i < self.code.len() {
-            let new_pc = optimized.len();
-            pc_map.push(new_pc);
-
-            // Only try fusion if the next instruction is not a jump target.
-            // We intentionally don't check whether instruction i itself is a
-            // jump target: the fused instruction replaces both i and i+1 at the
-            // same PC, so jumps to i still land on the correct (fused) opcode.
-            let can_fuse = i + 1 < self.code.len() && !jump_targets[i + 1];
-
-            if can_fuse {
-                let fused = match (&self.code[i], &self.code[i + 1]) {
-                    // Pattern: LoadConstant + AssignCurr -> AssignConstCurr
-                    (Opcode::LoadConstant { id }, Opcode::AssignCurr { off }) => {
-                        Some(Opcode::AssignConstCurr {
-                            off: *off,
-                            literal_id: *id,
-                        })
-                    }
-                    // Pattern: Op2 + AssignCurr -> BinOpAssignCurr
-                    (Opcode::Op2 { op }, Opcode::AssignCurr { off }) => {
-                        Some(Opcode::BinOpAssignCurr { op: *op, off: *off })
-                    }
-                    _ => None,
-                };
-
-                if let Some(op) = fused {
-                    optimized.push(op);
-                    // Both old PCs map to the same new PC
-                    pc_map.push(new_pc);
-                    i += 2;
-                    continue;
-                }
-            }
-
-            // No pattern matched - copy opcode as-is
-            optimized.push(self.code[i]);
-            i += 1;
-        }
-        // Sentinel for instructions past the end
-        pc_map.push(optimized.len());
-
-        // 3. Fix up jump offsets.  Iterate original code to find jumps,
-        // then use pc_map (indexed by old_pc) for O(1) translation.
-        for (old_pc, op) in self.code.iter().enumerate() {
-            let Some(jump_back) = op.jump_offset() else {
-                continue;
-            };
-            let new_pc = pc_map[old_pc];
-            let old_target = (old_pc as isize + jump_back as isize) as usize;
-            let new_target = pc_map[old_target];
-            let new_jump_back = (new_target as isize - new_pc as isize) as PcOffset;
-            *optimized[new_pc].jump_offset_mut().unwrap() = new_jump_back;
-        }
-
-        self.code = optimized;
-    }
-
     /// Late 3-address fusion pass (R2): fold the leaf operand load(s) of a
     /// binary op into the op itself.
     ///
@@ -2243,42 +2084,6 @@ mod tests {
     use super::*;
 
     // =========================================================================
-    // ByteCode Builder Tests
-    // =========================================================================
-
-    #[test]
-    fn test_memoizing_interning() {
-        let mut bytecode = ByteCodeBuilder::default();
-        let a1 = bytecode.intern_literal(1.0);
-        let b1 = bytecode.intern_literal(1.01);
-        let b2 = bytecode.intern_literal(1.01);
-        let b3 = bytecode.intern_literal(1.01);
-        let a2 = bytecode.intern_literal(1.0);
-        let b4 = bytecode.intern_literal(1.01);
-
-        assert_eq!(a1, a2);
-        assert_eq!(b1, b2);
-        assert_eq!(b1, b3);
-        assert_eq!(b1, b4);
-        assert_ne!(a1, b1);
-
-        let bytecode = bytecode.finish();
-        assert_eq!(2, bytecode.literals.len());
-    }
-
-    #[test]
-    fn test_push_named_literal_no_dedup() {
-        let mut builder = ByteCodeBuilder::default();
-        let a = builder.push_named_literal(0.1);
-        let b = builder.push_named_literal(0.1);
-        let c = builder.push_named_literal(0.1);
-
-        assert_ne!(a, b);
-        assert_ne!(b, c);
-        assert_ne!(a, c);
-    }
-
-    // =========================================================================
     // Stack Effect Tests
     // =========================================================================
 
@@ -2476,7 +2281,29 @@ mod tests {
     #[test]
     fn test_max_stack_depth_empty() {
         let bc = ByteCode::default();
-        assert_eq!(bc.max_stack_depth(), 0);
+        assert_eq!(bc.max_stack_depth().unwrap(), 0);
+    }
+
+    /// A pop with nothing on the stack means some opcode's `stack_effect`
+    /// metadata is wrong, which would silently invalidate the VM's stack-safety
+    /// proof. It must be REPORTED, not clamped -- and the message must name the
+    /// pc so the wrong arm is findable.
+    ///
+    /// This was a `#[should_panic]` test until the underflow became a structured
+    /// error (it is reached from `symbolic::resolve_bytecode`, which answers
+    /// with a `Result` and must not abort a host process). It is the only
+    /// negative test this function has; the rest assert depths on well-formed
+    /// streams and would all still pass against a `saturating_sub`.
+    #[test]
+    fn test_max_stack_depth_reports_underflow() {
+        let bc = ByteCode {
+            literals: vec![],
+            code: vec![Opcode::Op2 { op: Op2::Add }],
+        };
+        let err = bc
+            .max_stack_depth()
+            .expect_err("an Op2 with an empty stack must be reported, not clamped");
+        assert!(err.contains("stack_effect underflow at pc 0"), "got: {err}");
     }
 
     #[test]
@@ -2489,7 +2316,7 @@ mod tests {
                 Opcode::AssignCurr { off: 0 },
             ],
         };
-        assert_eq!(bc.max_stack_depth(), 1);
+        assert_eq!(bc.max_stack_depth().unwrap(), 1);
     }
 
     #[test]
@@ -2504,7 +2331,7 @@ mod tests {
                 Opcode::AssignCurr { off: 2 },
             ],
         };
-        assert_eq!(bc.max_stack_depth(), 2);
+        assert_eq!(bc.max_stack_depth().unwrap(), 2);
     }
 
     #[test]
@@ -2525,7 +2352,7 @@ mod tests {
                 Opcode::AssignCurr { off: 4 }, // depth: 0
             ],
         };
-        assert_eq!(bc.max_stack_depth(), 3);
+        assert_eq!(bc.max_stack_depth().unwrap(), 3);
     }
 
     #[test]
@@ -2543,7 +2370,7 @@ mod tests {
                 Opcode::AssignCurr { off: 1 },
             ],
         };
-        assert_eq!(bc.max_stack_depth(), 3);
+        assert_eq!(bc.max_stack_depth().unwrap(), 3);
     }
 
     #[test]
@@ -2560,7 +2387,7 @@ mod tests {
                 Opcode::AssignCurr { off: 3 }, // depth: 0
             ],
         };
-        assert_eq!(bc.max_stack_depth(), 2);
+        assert_eq!(bc.max_stack_depth().unwrap(), 2);
     }
 
     #[test]
@@ -2573,7 +2400,7 @@ mod tests {
                 literal_id: 0,
             }],
         };
-        assert_eq!(bc.max_stack_depth(), 0);
+        assert_eq!(bc.max_stack_depth().unwrap(), 0);
     }
 
     #[test]
@@ -2591,7 +2418,7 @@ mod tests {
                 Opcode::AssignCurr { off: 4 },
             ],
         };
-        assert_eq!(bc.max_stack_depth(), 2);
+        assert_eq!(bc.max_stack_depth().unwrap(), 2);
     }
 
     #[test]
@@ -2611,7 +2438,7 @@ mod tests {
                 Opcode::EndIter {},
             ],
         };
-        assert_eq!(bc.max_stack_depth(), 1);
+        assert_eq!(bc.max_stack_depth().unwrap(), 1);
     }
 
     #[test]
@@ -2631,40 +2458,7 @@ mod tests {
                 Opcode::AssignCurr { off: 20 },           // depth: 0
             ],
         };
-        assert_eq!(bc.max_stack_depth(), 1);
-    }
-
-    #[test]
-    fn test_finish_validates_stack_depth() {
-        // Build bytecode that fits within STACK_CAPACITY -- should succeed
-        let mut builder = ByteCodeBuilder::default();
-        let id = builder.intern_literal(1.0);
-        builder.push_opcode(Opcode::LoadConstant { id });
-        builder.push_opcode(Opcode::AssignCurr { off: 0 });
-        let _bc = builder.finish(); // should not panic
-    }
-
-    #[test]
-    #[should_panic(expected = "stack_effect underflow at pc 0")]
-    fn test_max_stack_depth_catches_underflow() {
-        // An Op2 at the start with nothing on the stack should panic,
-        // catching bugs in stack_effect metadata
-        let bc = ByteCode {
-            literals: vec![],
-            code: vec![Opcode::Op2 { op: Op2::Add }],
-        };
-        bc.max_stack_depth();
-    }
-
-    #[test]
-    #[should_panic(expected = "jump at pc 0 targets")]
-    fn test_peephole_panics_on_out_of_bounds_jump_target() {
-        // A jump that targets beyond the code length indicates a compiler bug
-        let mut bc = ByteCode {
-            literals: vec![],
-            code: vec![Opcode::NextIterOrJump { jump_back: 10 }],
-        };
-        bc.peephole_optimize();
+        assert_eq!(bc.max_stack_depth().unwrap(), 1);
     }
 
     // =========================================================================
@@ -3492,525 +3286,6 @@ mod tests {
         assert_eq!(view.offset_for_iter_index(0), 5);
     }
 
-    // =========================================================================
-    // Peephole Optimizer Tests
-    // =========================================================================
-
-    #[test]
-    fn test_peephole_empty_bytecode() {
-        let mut bc = ByteCode {
-            code: vec![],
-            literals: vec![],
-        };
-        bc.peephole_optimize();
-        assert!(bc.code.is_empty());
-    }
-
-    #[test]
-    fn test_peephole_single_instruction() {
-        let mut bc = ByteCode {
-            code: vec![Opcode::Ret],
-            literals: vec![],
-        };
-        bc.peephole_optimize();
-        assert_eq!(bc.code.len(), 1);
-        assert!(matches!(bc.code[0], Opcode::Ret));
-    }
-
-    #[test]
-    fn test_peephole_no_fusible_patterns() {
-        let mut bc = ByteCode {
-            code: vec![
-                Opcode::LoadVar { off: 0 },
-                Opcode::LoadVar { off: 1 },
-                Opcode::Not {},
-                Opcode::Ret,
-            ],
-            literals: vec![],
-        };
-        bc.peephole_optimize();
-        assert_eq!(bc.code.len(), 4);
-        assert!(matches!(bc.code[0], Opcode::LoadVar { off: 0 }));
-        assert!(matches!(bc.code[1], Opcode::LoadVar { off: 1 }));
-        assert!(matches!(bc.code[2], Opcode::Not {}));
-        assert!(matches!(bc.code[3], Opcode::Ret));
-    }
-
-    #[test]
-    fn test_peephole_load_constant_assign_curr_fusion() {
-        let mut bc = ByteCode {
-            code: vec![
-                Opcode::LoadConstant { id: 0 },
-                Opcode::AssignCurr { off: 5 },
-            ],
-            literals: vec![42.0],
-        };
-        bc.peephole_optimize();
-
-        assert_eq!(bc.code.len(), 1);
-        match &bc.code[0] {
-            Opcode::AssignConstCurr { off, literal_id } => {
-                assert_eq!(*off, 5);
-                assert_eq!(*literal_id, 0);
-            }
-            _ => panic!("expected AssignConstCurr"),
-        }
-    }
-
-    #[test]
-    fn test_peephole_op2_assign_curr_fusion() {
-        let mut bc = ByteCode {
-            code: vec![
-                Opcode::LoadVar { off: 0 },
-                Opcode::LoadVar { off: 1 },
-                Opcode::Op2 { op: Op2::Add },
-                Opcode::AssignCurr { off: 2 },
-            ],
-            literals: vec![],
-        };
-        bc.peephole_optimize();
-
-        // LoadVar, LoadVar stay; Op2+AssignCurr fuse into BinOpAssignCurr
-        assert_eq!(bc.code.len(), 3);
-        assert!(matches!(bc.code[0], Opcode::LoadVar { off: 0 }));
-        assert!(matches!(bc.code[1], Opcode::LoadVar { off: 1 }));
-        match &bc.code[2] {
-            Opcode::BinOpAssignCurr { op, off } => {
-                assert!(matches!(op, Op2::Add));
-                assert_eq!(*off, 2);
-            }
-            _ => panic!("expected BinOpAssignCurr"),
-        }
-    }
-
-    /// The next-value assign is fused at EMIT time (there is no un-fused
-    /// `AssignNext` opcode for the peephole to fuse), so this pins the
-    /// builder helper codegen uses.
-    #[test]
-    fn test_builder_fuses_trailing_op2_into_assign_next() {
-        let mut builder = ByteCodeBuilder::default();
-        builder.push_opcode(Opcode::LoadVar { off: 0 });
-        builder.push_opcode(Opcode::LoadVar { off: 1 });
-        builder.push_opcode(Opcode::Op2 { op: Op2::Mul });
-        assert!(builder.fuse_trailing_op2_into_assign_next(3));
-        builder.push_opcode(Opcode::Ret);
-
-        let bc = builder.finish();
-        assert_eq!(bc.code.len(), 4);
-        match &bc.code[2] {
-            Opcode::BinOpAssignNext { op, off } => {
-                assert!(matches!(op, Op2::Mul));
-                assert_eq!(*off, 3);
-            }
-            _ => panic!("expected BinOpAssignNext"),
-        }
-    }
-
-    /// The other half of the contract: when the operand walk did NOT end in
-    /// an `Op2` -- the shape an eventual `non_negative` implementation
-    /// (GH #545) would produce by wrapping the stock update in a builtin --
-    /// the helper refuses and emits nothing, so codegen can raise a typed
-    /// error instead of silently dropping the store.
-    #[test]
-    fn test_builder_refuses_assign_next_fusion_without_trailing_op2() {
-        let mut builder = ByteCodeBuilder::default();
-        builder.push_opcode(Opcode::LoadVar { off: 0 });
-        builder.push_opcode(Opcode::Apply {
-            func: BuiltinId::Max,
-        });
-        assert!(!builder.fuse_trailing_op2_into_assign_next(3));
-        assert_eq!(builder.len(), 2, "a refused fusion must emit nothing");
-
-        // ...and an empty stream is refused too, rather than panicking.
-        let mut empty = ByteCodeBuilder::default();
-        assert!(!empty.fuse_trailing_op2_into_assign_next(0));
-        assert_eq!(empty.len(), 0);
-    }
-
-    #[test]
-    fn test_peephole_all_op2_variants_fuse() {
-        // Verify every Op2 variant can be fused with AssignCurr
-        let ops = [
-            Op2::Add,
-            Op2::Sub,
-            Op2::Mul,
-            Op2::Div,
-            Op2::Exp,
-            Op2::Mod,
-            Op2::Gt,
-            Op2::Gte,
-            Op2::Lt,
-            Op2::Lte,
-            Op2::Eq,
-            Op2::And,
-            Op2::Or,
-        ];
-        for op in ops {
-            let mut bc = ByteCode {
-                code: vec![Opcode::Op2 { op }, Opcode::AssignCurr { off: 10 }],
-                literals: vec![],
-            };
-            bc.peephole_optimize();
-            assert_eq!(bc.code.len(), 1, "failed for op variant");
-            assert!(matches!(bc.code[0], Opcode::BinOpAssignCurr { .. }));
-        }
-    }
-
-    #[test]
-    fn test_peephole_multiple_fusions() {
-        // Two independent fusion opportunities in sequence
-        let mut bc = ByteCode {
-            code: vec![
-                Opcode::LoadConstant { id: 0 },
-                Opcode::AssignCurr { off: 0 },
-                Opcode::LoadVar { off: 1 },
-                Opcode::LoadVar { off: 2 },
-                Opcode::Op2 { op: Op2::Sub },
-                Opcode::AssignCurr { off: 3 },
-            ],
-            literals: vec![1.0],
-        };
-        bc.peephole_optimize();
-
-        // LoadConstant+AssignCurr -> AssignConstCurr
-        // LoadVar, LoadVar stay
-        // Op2+AssignCurr -> BinOpAssignCurr
-        assert_eq!(bc.code.len(), 4);
-        assert!(matches!(bc.code[0], Opcode::AssignConstCurr { .. }));
-        assert!(matches!(bc.code[1], Opcode::LoadVar { off: 1 }));
-        assert!(matches!(bc.code[2], Opcode::LoadVar { off: 2 }));
-        assert!(matches!(bc.code[3], Opcode::BinOpAssignCurr { .. }));
-    }
-
-    #[test]
-    fn test_peephole_mixed_fusible_and_nonfusible() {
-        let mut bc = ByteCode {
-            code: vec![
-                Opcode::LoadVar { off: 0 },
-                Opcode::Not {},
-                Opcode::LoadConstant { id: 0 },
-                Opcode::AssignCurr { off: 1 },
-                Opcode::LoadVar { off: 2 },
-                Opcode::Ret,
-            ],
-            literals: vec![0.0],
-        };
-        bc.peephole_optimize();
-
-        // LoadVar, Not stay; LoadConstant+AssignCurr fuse; LoadVar, Ret stay
-        assert_eq!(bc.code.len(), 5);
-        assert!(matches!(bc.code[0], Opcode::LoadVar { off: 0 }));
-        assert!(matches!(bc.code[1], Opcode::Not {}));
-        assert!(matches!(bc.code[2], Opcode::AssignConstCurr { .. }));
-        assert!(matches!(bc.code[3], Opcode::LoadVar { off: 2 }));
-        assert!(matches!(bc.code[4], Opcode::Ret));
-    }
-
-    #[test]
-    fn test_peephole_jump_target_prevents_fusion() {
-        // If instruction i+1 is a jump target, don't fuse i with i+1.
-        // Layout (before optimization):
-        //   0: LoadConstant { id: 0 }       <- loop body start (jump target)
-        //   1: AssignCurr { off: 0 }
-        //   2: NextIterOrJump { jump_back: -2 }  (target = 2 + (-2) = 0)
-        //   3: Ret
-        //
-        // Instruction 0 is a jump target, so even though 0 is LoadConstant
-        // and 1 is AssignCurr, we should NOT fuse them because instruction 0
-        // is a jump target. Wait -- actually the check is whether i+1 is a
-        // jump target. Here instruction 0 IS a jump target. The optimizer checks
-        // `!jump_targets[i + 1]` to decide whether to fuse i with i+1.
-        //
-        // For i=0: jump_targets[1] is false, so fusion IS allowed.
-        // The jump target protection matters when the SECOND instruction of a
-        // potential pair is a jump target. Let's build that scenario:
-        //
-        //   0: Ret                            <- something before the loop
-        //   1: LoadVar { off: 5 }             <- jump target (loop body start)
-        //   2: NextIterOrJump { jump_back: -1 }  (target = 2 + (-1) = 1)
-        //   3: Ret
-        //
-        // For i=0 (Ret): can_fuse checks jump_targets[1] = true -> no fusion.
-        // This prevents fusing Ret with LoadVar, which is correct.
-        //
-        // A more realistic scenario: Op2 followed by AssignCurr where the
-        // AssignCurr is a jump target.
-        let mut bc = ByteCode {
-            code: vec![
-                Opcode::Op2 { op: Op2::Add },             // 0
-                Opcode::AssignCurr { off: 0 },            // 1 -- jump target
-                Opcode::NextIterOrJump { jump_back: -1 }, // 2 -> target = 2-1 = 1
-                Opcode::Ret,                              // 3
-            ],
-            literals: vec![],
-        };
-        bc.peephole_optimize();
-
-        // Fusion of 0+1 should be prevented because instruction 1 is a jump target
-        assert_eq!(bc.code.len(), 4);
-        assert!(matches!(bc.code[0], Opcode::Op2 { op: Op2::Add }));
-        assert!(matches!(bc.code[1], Opcode::AssignCurr { off: 0 }));
-        assert!(matches!(bc.code[2], Opcode::NextIterOrJump { .. }));
-        assert!(matches!(bc.code[3], Opcode::Ret));
-    }
-
-    #[test]
-    fn test_peephole_jump_target_only_blocks_specific_pair() {
-        // Verify that a jump target only blocks fusion of the pair where
-        // the second instruction is the target, not other pairs.
-        //
-        //   0: LoadConstant { id: 0 }
-        //   1: AssignCurr { off: 0 }         <- NOT a jump target, so 0+1 CAN fuse
-        //   2: LoadVar { off: 5 }            <- jump target
-        //   3: NextIterOrJump { jump_back: -1 }  (target = 3-1 = 2)
-        //   4: Ret
-        let mut bc = ByteCode {
-            code: vec![
-                Opcode::LoadConstant { id: 0 },
-                Opcode::AssignCurr { off: 0 },
-                Opcode::LoadVar { off: 5 },
-                Opcode::NextIterOrJump { jump_back: -1 },
-                Opcode::Ret,
-            ],
-            literals: vec![1.0],
-        };
-        bc.peephole_optimize();
-
-        // 0+1 should fuse (neither target), 2 stays (it's a jump target, but
-        // the previous instruction was AssignCurr which doesn't match any pattern
-        // anyway), 3 stays, 4 stays
-        assert_eq!(bc.code.len(), 4);
-        assert!(matches!(
-            bc.code[0],
-            Opcode::AssignConstCurr {
-                off: 0,
-                literal_id: 0
-            }
-        ));
-        assert!(matches!(bc.code[1], Opcode::LoadVar { off: 5 }));
-        assert!(matches!(bc.code[2], Opcode::NextIterOrJump { .. }));
-        assert!(matches!(bc.code[3], Opcode::Ret));
-    }
-
-    #[test]
-    fn test_peephole_jump_offset_recalculation_next_iter() {
-        // When fusion shrinks the code, jump offsets must be recalculated.
-        // This test places a fusion BEFORE the loop (outside the jump target
-        // to jump instruction range) so the fixup works correctly.
-        //
-        // Before optimization:
-        //   0: LoadConstant { id: 0 }    \
-        //   1: AssignCurr { off: 0 }     / -> fuse
-        //   2: LoadVar { off: 1 }        <- jump target
-        //   3: AssignCurr { off: 2 }
-        //   4: NextIterOrJump { jump_back: -2 }  target = 4+(-2) = 2
-        //   5: Ret
-        //
-        // After optimization:
-        //   0: AssignConstCurr            (fused 0+1)
-        //   1: LoadVar { off: 1 }         (jump target)
-        //   2: AssignCurr { off: 2 }
-        //   3: NextIterOrJump { jump_back: -2 }  (loop body unchanged)
-        //   4: Ret
-        let mut bc = ByteCode {
-            code: vec![
-                Opcode::LoadConstant { id: 0 },           // 0
-                Opcode::AssignCurr { off: 0 },            // 1
-                Opcode::LoadVar { off: 1 },               // 2 (jump target)
-                Opcode::AssignCurr { off: 2 },            // 3
-                Opcode::NextIterOrJump { jump_back: -2 }, // 4, target=2
-                Opcode::Ret,                              // 5
-            ],
-            literals: vec![1.0],
-        };
-        bc.peephole_optimize();
-
-        assert_eq!(bc.code.len(), 5);
-        assert!(matches!(bc.code[0], Opcode::AssignConstCurr { .. }));
-        assert!(matches!(bc.code[1], Opcode::LoadVar { off: 1 }));
-        assert!(matches!(bc.code[2], Opcode::AssignCurr { off: 2 }));
-        match &bc.code[3] {
-            Opcode::NextIterOrJump { jump_back } => {
-                assert_eq!(*jump_back, -2, "jump_back should remain -2");
-            }
-            _ => panic!("expected NextIterOrJump"),
-        }
-        assert!(matches!(bc.code[4], Opcode::Ret));
-    }
-
-    #[test]
-    fn test_peephole_fusion_inside_loop_body() {
-        let mut bc = ByteCode {
-            code: vec![
-                Opcode::LoadVar { off: 0 },               // 0 (jump target)
-                Opcode::Op2 { op: Op2::Add },             // 1 \
-                Opcode::AssignCurr { off: 1 },            // 2 / fuse
-                Opcode::NextIterOrJump { jump_back: -3 }, // 3, target=0
-                Opcode::Ret,                              // 4
-            ],
-            literals: vec![],
-        };
-        bc.peephole_optimize();
-
-        // 1+2 fuse -> BinOpAssignCurr
-        // Result: [LoadVar, BinOpAssignCurr, NextIterOrJump, Ret]
-        assert_eq!(bc.code.len(), 4);
-        assert!(matches!(bc.code[0], Opcode::LoadVar { off: 0 }));
-        assert!(matches!(
-            bc.code[1],
-            Opcode::BinOpAssignCurr {
-                op: Op2::Add,
-                off: 1
-            }
-        ));
-        match &bc.code[2] {
-            Opcode::NextIterOrJump { jump_back } => {
-                // new PC 2, target should be new PC 0 -> jump_back = -2
-                assert_eq!(*jump_back, -2);
-            }
-            other => panic!(
-                "expected NextIterOrJump, got {:?}",
-                std::mem::discriminant(other)
-            ),
-        }
-        assert!(matches!(bc.code[3], Opcode::Ret));
-    }
-
-    #[test]
-    fn test_peephole_jump_offset_recalculation_next_broadcast() {
-        // Same as above but with NextBroadcastOrJump
-        let mut bc = ByteCode {
-            code: vec![
-                Opcode::LoadConstant { id: 0 },                // 0
-                Opcode::AssignCurr { off: 0 },                 // 1
-                Opcode::LoadVar { off: 1 },                    // 2 (jump target)
-                Opcode::NextBroadcastOrJump { jump_back: -1 }, // 3, target=2
-                Opcode::Ret,                                   // 4
-            ],
-            literals: vec![1.0],
-        };
-        bc.peephole_optimize();
-
-        // 0+1 fuse -> AssignConstCurr at new PC 0
-        // 2 -> new PC 1 (jump target)
-        // 3 -> new PC 2
-        // 4 -> new PC 3
-        assert_eq!(bc.code.len(), 4);
-        assert!(matches!(bc.code[0], Opcode::AssignConstCurr { .. }));
-        assert!(matches!(bc.code[1], Opcode::LoadVar { off: 1 }));
-        match &bc.code[2] {
-            Opcode::NextBroadcastOrJump { jump_back } => {
-                // new PC 2, target should be new PC 1
-                assert_eq!(*jump_back, -1, "jump_back should be -1");
-            }
-            _ => panic!("expected NextBroadcastOrJump"),
-        }
-        assert!(matches!(bc.code[3], Opcode::Ret));
-    }
-
-    #[test]
-    fn test_peephole_no_fusion_when_patterns_dont_match() {
-        // Op2 followed by something other than AssignCurr
-        let mut bc = ByteCode {
-            code: vec![Opcode::Op2 { op: Op2::Add }, Opcode::Not {}, Opcode::Ret],
-            literals: vec![],
-        };
-        bc.peephole_optimize();
-
-        assert_eq!(bc.code.len(), 3);
-        assert!(matches!(bc.code[0], Opcode::Op2 { op: Op2::Add }));
-        assert!(matches!(bc.code[1], Opcode::Not {}));
-    }
-
-    #[test]
-    fn test_peephole_load_constant_not_followed_by_assign_curr() {
-        // LoadConstant not followed by AssignCurr should not fuse
-        let mut bc = ByteCode {
-            code: vec![Opcode::LoadConstant { id: 0 }, Opcode::Not {}, Opcode::Ret],
-            literals: vec![1.0],
-        };
-        bc.peephole_optimize();
-
-        assert_eq!(bc.code.len(), 3);
-        assert!(matches!(bc.code[0], Opcode::LoadConstant { id: 0 }));
-    }
-
-    #[test]
-    fn test_peephole_via_builder() {
-        // Verify that ByteCodeBuilder::finish() runs peephole_optimize
-        let mut builder = ByteCodeBuilder::default();
-        let lit_id = builder.intern_literal(3.125);
-        builder.push_opcode(Opcode::LoadConstant { id: lit_id });
-        builder.push_opcode(Opcode::AssignCurr { off: 7 });
-        builder.push_opcode(Opcode::Ret);
-
-        let bc = builder.finish();
-        assert_eq!(bc.code.len(), 2);
-        match &bc.code[0] {
-            Opcode::AssignConstCurr { off, literal_id } => {
-                assert_eq!(*off, 7);
-                assert_eq!(*literal_id, lit_id);
-            }
-            _ => panic!("expected AssignConstCurr after builder finish"),
-        }
-        assert!(matches!(bc.code[1], Opcode::Ret));
-    }
-
-    #[test]
-    fn test_peephole_consecutive_fusions_chain() {
-        // Three consecutive fusible pairs
-        let mut bc = ByteCode {
-            code: vec![
-                Opcode::LoadConstant { id: 0 },
-                Opcode::AssignCurr { off: 0 },
-                Opcode::LoadConstant { id: 1 },
-                Opcode::AssignCurr { off: 1 },
-                Opcode::Op2 { op: Op2::Div },
-                Opcode::AssignCurr { off: 2 },
-            ],
-            literals: vec![1.0, 2.0],
-        };
-        bc.peephole_optimize();
-
-        assert_eq!(bc.code.len(), 3);
-        assert!(matches!(
-            bc.code[0],
-            Opcode::AssignConstCurr {
-                off: 0,
-                literal_id: 0
-            }
-        ));
-        assert!(matches!(
-            bc.code[1],
-            Opcode::AssignConstCurr {
-                off: 1,
-                literal_id: 1
-            }
-        ));
-        match &bc.code[2] {
-            Opcode::BinOpAssignCurr { op, off } => {
-                assert!(matches!(op, Op2::Div));
-                assert_eq!(*off, 2);
-            }
-            _ => panic!("expected BinOpAssignCurr"),
-        }
-    }
-
-    #[test]
-    fn test_peephole_last_instruction_not_fused_alone() {
-        // If the fusible first instruction is the very last one, no fusion happens
-        let mut bc = ByteCode {
-            code: vec![Opcode::Ret, Opcode::LoadConstant { id: 0 }],
-            literals: vec![1.0],
-        };
-        bc.peephole_optimize();
-
-        assert_eq!(bc.code.len(), 2);
-        assert!(matches!(bc.code[0], Opcode::Ret));
-        assert!(matches!(bc.code[1], Opcode::LoadConstant { id: 0 }));
-    }
-
-    // =========================================================================
     // DimList Side Table Tests
     // =========================================================================
 
@@ -4436,13 +3711,13 @@ mod tests {
                 },
             ],
         };
-        let before = bc.max_stack_depth();
+        let before = bc.max_stack_depth().unwrap();
         bc.fuse_three_address();
         // Fusion folds loads into ops, so depth can only stay equal or shrink.
-        assert!(bc.max_stack_depth() <= before);
+        assert!(bc.max_stack_depth().unwrap() <= before);
         // And the leaf-assign collapsed to a (0,0) op, the stack-leaf assign to
         // (1,0): the whole stream's peak is now 1 (the BinVarVar push).
-        assert_eq!(bc.max_stack_depth(), 1);
+        assert_eq!(bc.max_stack_depth().unwrap(), 1);
     }
 
     #[test]
@@ -4503,9 +3778,9 @@ mod tests {
                 Opcode::AssignCurr { off: 4 },
             ],
         };
-        let before = bc.max_stack_depth();
+        let before = bc.max_stack_depth().unwrap();
         bc.fuse_three_address();
-        assert!(bc.max_stack_depth() <= before);
+        assert!(bc.max_stack_depth().unwrap() <= before);
     }
 
     #[test]
@@ -4819,9 +4094,9 @@ mod tests {
                 Opcode::AssignCurr { off: 5 },
             ],
         };
-        let before = bc.max_stack_depth();
+        let before = bc.max_stack_depth().unwrap();
         bc.fuse_three_address();
-        assert!(bc.max_stack_depth() <= before);
+        assert!(bc.max_stack_depth().unwrap() <= before);
     }
 }
 

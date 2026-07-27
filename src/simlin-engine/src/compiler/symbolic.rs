@@ -2,15 +2,26 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Symbolic bytecode layer for layout-independent compilation.
+//! Symbolic bytecode: the layout-independent form the compiler emits, and the
+//! single late pass that turns it concrete.
 //!
-//! The existing compiler produces bytecodes with integer offsets that depend on
-//! the model's variable layout. This module introduces a symbolic representation
-//! where opcodes reference variables by name instead of offset. This decouples
-//! per-variable compilation from the global layout, enabling salsa to cache
-//! compiled fragments that remain valid even when variables are added or removed.
+//! Codegen emits `SymbolicOpcode`s whose variable operands are
+//! [`crate::compiler::VarRef`]s -- a canonical variable name plus an element
+//! offset -- so a compiled fragment says nothing about where its variables live.
+//! That is what lets salsa cache one `PerVarBytecodes` per variable and reuse it
+//! across variable additions, removals and renames, and what lets one cache
+//! entry serve both the diagnostic pass and assembly.
 //!
-//! The pipeline is: concrete bytecodes -> symbolize -> SymbolicByteCode -> resolve -> concrete bytecodes.
+//! The pipeline is: lowered `Expr` (names) -> codegen -> `SymbolicByteCode` ->
+//! `resolve` -> concrete bytecode. Addresses travel in exactly one direction and
+//! are assigned exactly once, at assembly, against the model's final
+//! `VariableLayout`.
+//!
+//! The peephole optimizer and the literal pool live on this side too
+//! ([`SymbolicByteCodeBuilder`]): they are address-independent, and running them
+//! before resolution keeps `resolve_bytecode` a strict 1:1 mapping, which is
+//! what several downstream invariants rely on (the run-invariant prefix
+//! boundary, the SCC segment boundaries).
 
 // These types and functions are used by the incremental compilation pipeline.
 
@@ -22,30 +33,28 @@ use smallvec::SmallVec;
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, CompiledInitial, CompiledModule, DimId, DimListId,
     GraphicalFunctionId, LiteralId, LookupMode, ModuleDeclaration, ModuleId, ModuleInputOffset,
-    Op2, Opcode, PcOffset, RuntimeSparseMapping, StaticArrayView, TempId, VariableOffset, ViewId,
+    Op2, Opcode, PcOffset, RuntimeSparseMapping, STACK_CAPACITY, StaticArrayView, TempId,
+    VariableOffset, ViewId,
 };
 use crate::common::{Canonical, Ident};
+
+pub(crate) use super::expr::VarRef as SymVarRef;
 
 // ============================================================================
 // Types
 // ============================================================================
-
-/// Symbolic reference to a variable location within a model.
-/// Replaces raw integer offsets with a variable name and element offset,
-/// making the reference independent of the model's variable layout.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct SymVarRef {
-    /// Canonical variable name
-    pub name: String,
-    /// Offset within the variable (0 for scalars, 0..size for array elements)
-    pub element_offset: usize,
-}
 
 /// Symbolic version of `Opcode`. Identical structure except opcodes that
 /// reference model variable offsets use `SymVarRef` instead of `VariableOffset`.
 ///
 /// Opcodes that reference global implicit variables (time, dt, etc.) keep their
 /// fixed offsets since those never change.
+///
+/// The 3-address fused opcodes (`BinVarVar`, `AssignAddVarVarCurr`, ...) have no
+/// counterpart here, and that absence is structural rather than an oversight:
+/// `ByteCode::fuse_three_address` runs at `Vm::new`, on the VM's private copy of
+/// already-resolved bytecode, so a fused opcode can never exist in the symbolic
+/// domain.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum SymbolicOpcode {
     // === ARITHMETIC & LOGIC (unchanged) ===
@@ -125,6 +134,33 @@ pub(crate) enum SymbolicOpcode {
     },
 
     // === ARRAY VIEW STACK ===
+    // ── Opcodes codegen does not emit ────────────────────────────────────
+    //
+    // The sixteen variants carrying `#[allow(dead_code)]` in this enum are ones
+    // `Compiler` never constructs, which -- now that codegen emits symbolic
+    // opcodes directly -- the dead-code lint proves rather than merely
+    // suggests: `Compiler` is the ONLY producer of a `SymbolicOpcode`, and
+    // `resolve_opcode` is the only producer of an `Opcode`, so a symbolic
+    // variant nothing constructs is a program the compiler cannot express.
+    // They are the superseded halves of two schemes: incremental view-stack
+    // construction (`ViewSubscriptConst`/`ViewRange`/`ViewStarRange`/
+    // `ViewWildcard`/`ViewTranspose`/`DupView`/`PushTempView`/
+    // `LoadTempDynamic`/`LoadIter{Element,TempElement,ViewTop}`), which
+    // precomputed `PushStaticView` views replaced, and broadcast iteration
+    // (`*BroadcastIter*`/`*BroadcastElement`/`NextBroadcastOrJump`), which
+    // `BeginIter` replaced.
+    //
+    // They are NOT deleted here, deliberately. Each also has an `Opcode`
+    // twin with a VM execution arm and a wasm-backend lowering arm (~149
+    // sites plus their tests), so removing them is a change to the VM
+    // instruction set and the wasm parity harness -- a different subsystem,
+    // with a different risk profile, that would swamp this change's review
+    // surface. The broadcast family in particular reads as a half-landed
+    // feature, so retiring it is a product call rather than a cleanup.
+    // Sequenced as its own change; the evidence it needs is exactly this
+    // lint, so it does not need the empirical probe GH #964's earlier
+    // opcode deletions did.
+    #[allow(dead_code)]
     PushTempView {
         temp_id: TempId,
         dim_list_id: DimListId,
@@ -136,6 +172,7 @@ pub(crate) enum SymbolicOpcode {
         var: SymVarRef,
         dim_list_id: DimListId,
     },
+    #[allow(dead_code)]
     ViewSubscriptConst {
         dim_idx: u8,
         index: u16,
@@ -143,6 +180,7 @@ pub(crate) enum SymbolicOpcode {
     ViewSubscriptDynamic {
         dim_idx: u8,
     },
+    #[allow(dead_code)]
     ViewRange {
         dim_idx: u8,
         start: u16,
@@ -151,15 +189,19 @@ pub(crate) enum SymbolicOpcode {
     ViewRangeDynamic {
         dim_idx: u8,
     },
+    #[allow(dead_code)]
     ViewStarRange {
         dim_idx: u8,
         subdim_relation_id: u16,
     },
+    #[allow(dead_code)]
     ViewWildcard {
         dim_idx: u8,
     },
+    #[allow(dead_code)]
     ViewTranspose {},
     PopView {},
+    #[allow(dead_code)]
     DupView {},
 
     // === TEMP ARRAY ACCESS (unchanged) ===
@@ -167,6 +209,7 @@ pub(crate) enum SymbolicOpcode {
         temp_id: TempId,
         index: u16,
     },
+    #[allow(dead_code)]
     LoadTempDynamic {
         temp_id: TempId,
     },
@@ -176,10 +219,13 @@ pub(crate) enum SymbolicOpcode {
         write_temp_id: TempId,
         has_write_temp: bool,
     },
+    #[allow(dead_code)]
     LoadIterElement {},
+    #[allow(dead_code)]
     LoadIterTempElement {
         temp_id: TempId,
     },
+    #[allow(dead_code)]
     LoadIterViewTop {},
     LoadIterViewAt {
         offset: u8,
@@ -227,23 +273,28 @@ pub(crate) enum SymbolicOpcode {
     },
 
     // === BROADCASTING ITERATION (unchanged) ===
+    #[allow(dead_code)]
     BeginBroadcastIter {
         n_sources: u8,
         dest_temp_id: TempId,
     },
+    #[allow(dead_code)]
     LoadBroadcastElement {
         source_idx: u8,
     },
+    #[allow(dead_code)]
     StoreBroadcastElement {},
+    #[allow(dead_code)]
     NextBroadcastOrJump {
         jump_back: PcOffset,
     },
+    #[allow(dead_code)]
     EndBroadcastIter {},
 }
 
 /// Symbolic version of `ByteCode`. Contains the literal pool (unchanged)
 /// and symbolic opcodes.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SymbolicByteCode {
     pub literals: Vec<f64>,
     pub code: Vec<SymbolicOpcode>,
@@ -251,7 +302,7 @@ pub(crate) struct SymbolicByteCode {
 
 /// Symbolic version of `StaticArrayView`. When the view refers to a model
 /// variable (not a temp), `base_off` is replaced with a `SymVarRef`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct SymbolicStaticView {
     pub base: SymStaticViewBase,
     pub dims: SmallVec<[u16; 4]>,
@@ -261,7 +312,7 @@ pub(crate) struct SymbolicStaticView {
     pub dim_ids: SmallVec<[DimId; 4]>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum SymStaticViewBase {
     /// Model variable reference (replaces base_off when is_temp=false)
     Var(SymVarRef),
@@ -286,10 +337,13 @@ pub(crate) struct SymbolicCompiledInitial {
 }
 
 /// Full symbolic representation of a `CompiledModule`.
+///
+/// There is deliberately no `n_slots`: a slot count is a property of a layout,
+/// and this value has none. `resolve_module` takes the slot count from the
+/// layout it resolves against, which is the only place the number is meaningful.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SymbolicCompiledModule {
     pub ident: Ident<Canonical>,
-    pub n_slots: usize,
     pub compiled_initials: Vec<SymbolicCompiledInitial>,
     pub compiled_flows: SymbolicByteCode,
     pub compiled_stocks: SymbolicByteCode,
@@ -369,8 +423,13 @@ impl VariableLayout {
         VariableLayout { entries, n_slots }
     }
 
-    /// Build from a Module's offset map for a specific model.
-    #[allow(dead_code)]
+    /// Build from a model's `name -> (offset, size)` map.
+    ///
+    /// `#[cfg(test)]` because its only caller is: the test-only monolithic
+    /// `compiler::Module` builds its whole-model layout this way and resolves
+    /// its emitted symbolic module against it. Production gets the same shape
+    /// from the salsa `compute_layout` query instead.
+    #[cfg(test)]
     pub fn from_offset_map(
         offsets: &HashMap<crate::common::Ident<crate::common::Canonical>, (usize, usize)>,
         n_slots: usize,
@@ -463,433 +522,217 @@ impl VariableLayout {
 }
 
 // ============================================================================
-// Reverse Offset Map (for symbolization)
+// Emission: the symbolic bytecode builder
 // ============================================================================
 
-/// Maps absolute variable offsets back to (variable_name, element_within_variable).
-/// Used during symbolization to convert integer offsets to symbolic references.
-pub(crate) struct ReverseOffsetMap {
-    /// Indexed by offset. `entries[off] = Some((name, element_offset))`.
-    entries: Vec<Option<(String, usize)>>,
+impl SymbolicOpcode {
+    /// The jump offset, if this opcode is a backward jump.
+    ///
+    /// Centralized here for the same reason as its concrete twin: a new jump
+    /// opcode that forgot to report itself would be silently mis-relocated by
+    /// the peephole optimizer.
+    fn jump_offset(&self) -> Option<PcOffset> {
+        match self {
+            SymbolicOpcode::NextIterOrJump { jump_back }
+            | SymbolicOpcode::NextBroadcastOrJump { jump_back } => Some(*jump_back),
+            _ => None,
+        }
+    }
+
+    /// Mutably borrow the jump offset, if this opcode is a backward jump.
+    fn jump_offset_mut(&mut self) -> Option<&mut PcOffset> {
+        match self {
+            SymbolicOpcode::NextIterOrJump { jump_back }
+            | SymbolicOpcode::NextBroadcastOrJump { jump_back } => Some(jump_back),
+            _ => None,
+        }
+    }
 }
 
-impl ReverseOffsetMap {
-    /// Build from a VariableLayout.
-    pub(crate) fn from_layout(layout: &VariableLayout) -> Self {
-        let mut entries: Vec<Option<(String, usize)>> = vec![None; layout.n_slots];
-        for (name, entry) in &layout.entries {
-            for elem in 0..entry.size {
-                let off = entry.offset + elem;
-                if off < entries.len() {
-                    entries[off] = Some((name.clone(), elem));
-                }
+/// Accumulates one emission unit's symbolic opcodes and its literal pool.
+///
+/// This is the compiler's only bytecode builder. It runs entirely in the
+/// layout-independent domain: the peephole fusions it performs
+/// (`LoadConstant; AssignCurr` -> `AssignConstCurr`, `Op2; AssignCurr` ->
+/// `BinOpAssignCurr`, and the emit-time `Op2` -> `BinOpAssignNext`) key on
+/// opcode shape, never on an address, so fusing before resolution rather than
+/// after is not an approximation -- it is the same decision made one step
+/// earlier. Keeping it here is what makes `resolve_bytecode` a strict 1:1
+/// mapping, which the run-invariant flow prefix
+/// (`SymbolicCompiledModule::flows_invariant_opcode_len`) and the SCC
+/// per-element segmentation both depend on.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Default)]
+pub(crate) struct SymbolicByteCodeBuilder {
+    bytecode: SymbolicByteCode,
+    // keyed on the literal's bit pattern: interning only needs Eq + Hash, and
+    // bit-exact deduplication is the right semantic for codegen (it never
+    // conflates distinct values; at worst -0.0 and 0.0 get separate slots)
+    interned_literals: HashMap<u64, LiteralId>,
+}
+
+impl SymbolicByteCodeBuilder {
+    pub(crate) fn intern_literal(&mut self, lit: f64) -> LiteralId {
+        let key = lit.to_bits();
+        if self.interned_literals.contains_key(&key) {
+            return self.interned_literals[&key];
+        }
+        self.bytecode.literals.push(lit);
+        let literal_id = (self.bytecode.literals.len() - 1) as u16;
+        self.interned_literals.insert(key, literal_id);
+        literal_id
+    }
+
+    /// Allocate a new literal slot without deduplication.
+    /// Used for named constants so each variable gets its own slot,
+    /// preventing shared-literal corruption when overriding via set_value.
+    pub(crate) fn push_named_literal(&mut self, lit: f64) -> LiteralId {
+        self.bytecode.literals.push(lit);
+        (self.bytecode.literals.len() - 1) as u16
+    }
+
+    pub(crate) fn push_opcode(&mut self, op: SymbolicOpcode) {
+        self.bytecode.code.push(op)
+    }
+
+    /// Replace a just-emitted trailing `Op2` with the fused
+    /// `BinOpAssignNext { op, var }` that both computes it and stores the
+    /// result into `next[var]`. Returns `false` -- emitting nothing -- when the
+    /// stream does not end in an `Op2`.
+    ///
+    /// There is no un-fused `SymbolicOpcode::AssignNext`: a stock update is the
+    /// only thing that ever writes `next[]`, and `Context::build_stock_update_expr`
+    /// always returns `Op2(Add, curr_value, net * dt)`, so the operand walk
+    /// always ends in an `Op2` and the fused form is always emittable. Codegen
+    /// therefore fuses here, at emit time, and reports a typed error if a stock
+    /// update ever arrives in a shape that would need the un-fused opcode --
+    /// most plausibly an eventual `non_negative` implementation (GH #545)
+    /// wrapping the update in a `MAX`. A comment could not fail; this can.
+    ///
+    /// Fusing at emit time is strictly inside `peephole_optimize`'s
+    /// jump-target safety envelope rather than an exception to it: the `Op2`
+    /// being replaced is the LAST opcode in the stream, so no jump emitted so
+    /// far can target it (every jump is a backward `NextIterOrJump` emitted
+    /// after its target), and the pair it replaces has no successor whose PC
+    /// could shift.
+    pub(crate) fn fuse_trailing_op2_into_assign_next(&mut self, var: &SymVarRef) -> bool {
+        match self.bytecode.code.last() {
+            Some(SymbolicOpcode::Op2 { op }) => {
+                let op = *op;
+                let last = self.bytecode.code.len() - 1;
+                self.bytecode.code[last] = SymbolicOpcode::BinOpAssignNext {
+                    op,
+                    var: var.clone(),
+                };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Returns the current number of opcodes in the bytecode
+    pub(crate) fn len(&self) -> usize {
+        self.bytecode.code.len()
+    }
+
+    pub(crate) fn finish(self) -> SymbolicByteCode {
+        let mut bc = self.bytecode;
+        bc.peephole_optimize();
+        bc
+    }
+}
+
+impl SymbolicByteCode {
+    /// Peephole optimization pass: fuse common opcode sequences into
+    /// superinstructions to reduce dispatch overhead.
+    ///
+    /// Only fuses adjacent instructions when neither is a jump target.
+    /// Jump offsets are recalculated after fusion using an old->new PC map.
+    fn peephole_optimize(&mut self) {
+        if self.code.is_empty() {
+            return;
+        }
+
+        // 1. Build set of PCs that are jump targets
+        let mut jump_targets = vec![false; self.code.len()];
+        for (pc, op) in self.code.iter().enumerate() {
+            if let Some(offset) = op.jump_offset() {
+                let target = (pc as isize + offset as isize) as usize;
+                assert!(
+                    target < jump_targets.len(),
+                    "jump at pc {pc} targets {target}, which is out of bounds (code length: {})",
+                    self.code.len()
+                );
+                jump_targets[target] = true;
             }
         }
-        ReverseOffsetMap { entries }
+
+        // 2. Build old_pc -> new_pc mapping and fused output.
+        // pc_map has one entry per original instruction so that jump fixup
+        // can index by the original PC directly.
+        let mut optimized: Vec<SymbolicOpcode> = Vec::with_capacity(self.code.len());
+        let mut pc_map: Vec<usize> = Vec::with_capacity(self.code.len() + 1);
+        let mut i = 0;
+        while i < self.code.len() {
+            let new_pc = optimized.len();
+            pc_map.push(new_pc);
+
+            // Only try fusion if the next instruction is not a jump target.
+            // We intentionally don't check whether instruction i itself is a
+            // jump target: the fused instruction replaces both i and i+1 at the
+            // same PC, so jumps to i still land on the correct (fused) opcode.
+            let can_fuse = i + 1 < self.code.len() && !jump_targets[i + 1];
+
+            if can_fuse {
+                let fused = match (&self.code[i], &self.code[i + 1]) {
+                    // Pattern: LoadConstant + AssignCurr -> AssignConstCurr
+                    (SymbolicOpcode::LoadConstant { id }, SymbolicOpcode::AssignCurr { var }) => {
+                        Some(SymbolicOpcode::AssignConstCurr {
+                            var: var.clone(),
+                            literal_id: *id,
+                        })
+                    }
+                    // Pattern: Op2 + AssignCurr -> BinOpAssignCurr
+                    (SymbolicOpcode::Op2 { op }, SymbolicOpcode::AssignCurr { var }) => {
+                        Some(SymbolicOpcode::BinOpAssignCurr {
+                            op: *op,
+                            var: var.clone(),
+                        })
+                    }
+                    _ => None,
+                };
+
+                if let Some(op) = fused {
+                    optimized.push(op);
+                    // Both old PCs map to the same new PC
+                    pc_map.push(new_pc);
+                    i += 2;
+                    continue;
+                }
+            }
+
+            // No pattern matched - copy opcode as-is
+            optimized.push(self.code[i].clone());
+            i += 1;
+        }
+        // Sentinel for instructions past the end
+        pc_map.push(optimized.len());
+
+        // 3. Fix up jump offsets.  Iterate original code to find jumps,
+        // then use pc_map (indexed by old_pc) for O(1) translation.
+        for (old_pc, op) in self.code.iter().enumerate() {
+            let Some(jump_back) = op.jump_offset() else {
+                continue;
+            };
+            let new_pc = pc_map[old_pc];
+            let old_target = (old_pc as isize + jump_back as isize) as usize;
+            let new_target = pc_map[old_target];
+            let new_jump_back = (new_target as isize - new_pc as isize) as PcOffset;
+            *optimized[new_pc].jump_offset_mut().unwrap() = new_jump_back;
+        }
+
+        self.code = optimized;
     }
-
-    /// Look up a variable offset.
-    fn lookup(&self, off: u32) -> Result<SymVarRef, String> {
-        let idx = off as usize;
-        if idx >= self.entries.len() {
-            return Err(format!(
-                "offset {} out of range (max {})",
-                off,
-                self.entries.len()
-            ));
-        }
-        match &self.entries[idx] {
-            Some((name, elem)) => Ok(SymVarRef {
-                name: name.clone(),
-                element_offset: *elem,
-            }),
-            None => Err(format!("no variable mapped at offset {}", off)),
-        }
-    }
-}
-
-// ============================================================================
-// Layout Construction
-// ============================================================================
-
-/// Build a `VariableLayout` from the metadata produced by `build_metadata()`.
-///
-/// The metadata map is `model_name -> (variable_name -> VariableMetadata)`.
-/// This extracts the layout for a single model.
-pub(crate) fn layout_from_metadata(
-    metadata: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, super::VariableMetadata<'_>>>,
-    model_name: &Ident<Canonical>,
-) -> Result<VariableLayout, String> {
-    let model_metadata = metadata.get(model_name).ok_or_else(|| {
-        format!(
-            "model '{}' not found in metadata during layout construction",
-            model_name.as_str()
-        )
-    })?;
-    let mut entries = HashMap::with_capacity(model_metadata.len());
-    let mut n_slots = 0;
-
-    for (name, meta) in model_metadata {
-        entries.insert(
-            name.to_string(),
-            LayoutEntry {
-                offset: meta.offset,
-                size: meta.size,
-            },
-        );
-        n_slots = n_slots.max(meta.offset + meta.size);
-    }
-
-    Ok(VariableLayout::new(entries, n_slots))
-}
-
-// ============================================================================
-// Symbolize: Concrete -> Symbolic
-// ============================================================================
-
-pub(crate) fn symbolize_opcode(
-    op: &Opcode,
-    rmap: &ReverseOffsetMap,
-) -> Result<SymbolicOpcode, String> {
-    match op {
-        // Opcodes with variable offsets that need symbolization
-        Opcode::LoadVar { off } => Ok(SymbolicOpcode::LoadVar {
-            var: rmap.lookup(u32::from(*off))?,
-        }),
-        Opcode::LoadPrev { off } => Ok(SymbolicOpcode::SymLoadPrev {
-            var: rmap.lookup(u32::from(*off))?,
-        }),
-        Opcode::LoadInitial { off } => Ok(SymbolicOpcode::SymLoadInitial {
-            var: rmap.lookup(u32::from(*off))?,
-        }),
-        Opcode::LoadSubscript { off } => Ok(SymbolicOpcode::LoadSubscript {
-            var: rmap.lookup(u32::from(*off))?,
-        }),
-        Opcode::AssignCurr { off } => Ok(SymbolicOpcode::AssignCurr {
-            var: rmap.lookup(u32::from(*off))?,
-        }),
-        Opcode::AssignConstCurr { off, literal_id } => Ok(SymbolicOpcode::AssignConstCurr {
-            var: rmap.lookup(u32::from(*off))?,
-            literal_id: *literal_id,
-        }),
-        Opcode::BinOpAssignCurr { op, off } => Ok(SymbolicOpcode::BinOpAssignCurr {
-            op: *op,
-            var: rmap.lookup(u32::from(*off))?,
-        }),
-        Opcode::BinOpAssignNext { op, off } => Ok(SymbolicOpcode::BinOpAssignNext {
-            op: *op,
-            var: rmap.lookup(u32::from(*off))?,
-        }),
-        // The 3-address fused binops AND the fused leaf assignments are created
-        // by `ByteCode::fuse_three_address`, which runs only on FINAL concrete
-        // bytecode (after `resolve`), strictly after symbolization, and only on
-        // the Vm's private execution copy (never the salsa-cached
-        // CompiledSimulation). They therefore never reach this function; seeing
-        // one means the fusion ran before symbolize, which is a compiler bug.
-        // The exhaustive match here is the guarantee no fused opcode can silently
-        // leak into the symbolic/incremental layer.
-        Opcode::BinVarVar { .. }
-        | Opcode::BinVarConst { .. }
-        | Opcode::BinConstVar { .. }
-        | Opcode::BinStackVar { .. }
-        | Opcode::BinStackConst { .. }
-        | Opcode::BinGlobalVar { .. }
-        | Opcode::BinVarGlobal { .. }
-        | Opcode::BinGlobalConst { .. }
-        | Opcode::BinConstGlobal { .. }
-        | Opcode::BinGlobalGlobal { .. }
-        | Opcode::BinStackGlobal { .. }
-        | Opcode::BinConstConst { .. }
-        | Opcode::AssignAddVarVarCurr { .. }
-        | Opcode::AssignSubVarVarCurr { .. }
-        | Opcode::AssignMulVarVarCurr { .. }
-        | Opcode::AssignDivVarVarCurr { .. }
-        | Opcode::AssignAddVarVarNext { .. }
-        | Opcode::AssignSubVarVarNext { .. }
-        | Opcode::AssignMulVarVarNext { .. }
-        | Opcode::AssignDivVarVarNext { .. }
-        | Opcode::AssignAddVarConstCurr { .. }
-        | Opcode::AssignSubVarConstCurr { .. }
-        | Opcode::AssignMulVarConstCurr { .. }
-        | Opcode::AssignDivVarConstCurr { .. }
-        | Opcode::AssignAddVarConstNext { .. }
-        | Opcode::AssignSubVarConstNext { .. }
-        | Opcode::AssignMulVarConstNext { .. }
-        | Opcode::AssignDivVarConstNext { .. }
-        | Opcode::AssignAddConstVarCurr { .. }
-        | Opcode::AssignSubConstVarCurr { .. }
-        | Opcode::AssignMulConstVarCurr { .. }
-        | Opcode::AssignDivConstVarCurr { .. }
-        | Opcode::AssignAddConstVarNext { .. }
-        | Opcode::AssignSubConstVarNext { .. }
-        | Opcode::AssignMulConstVarNext { .. }
-        | Opcode::AssignDivConstVarNext { .. }
-        | Opcode::AssignStackVarCurr { .. }
-        | Opcode::AssignStackVarNext { .. }
-        | Opcode::AssignStackConstCurr { .. }
-        | Opcode::AssignStackConstNext { .. } => {
-            unreachable!("3-address fused opcode reached symbolize_opcode")
-        }
-        Opcode::PushVarViewDirect {
-            base_off,
-            dim_list_id,
-        } => Ok(SymbolicOpcode::PushVarViewDirect {
-            var: rmap.lookup(u32::from(*base_off))?,
-            dim_list_id: *dim_list_id,
-        }),
-
-        // Opcodes that are identical in symbolic form
-        Opcode::Op2 { op } => Ok(SymbolicOpcode::Op2 { op: *op }),
-        Opcode::Not {} => Ok(SymbolicOpcode::Not {}),
-        Opcode::LoadConstant { id } => Ok(SymbolicOpcode::LoadConstant { id: *id }),
-        Opcode::LoadGlobalVar { off } => Ok(SymbolicOpcode::LoadGlobalVar { off: *off }),
-        Opcode::PushSubscriptIndex { bounds } => {
-            Ok(SymbolicOpcode::PushSubscriptIndex { bounds: *bounds })
-        }
-        Opcode::SetCond {} => Ok(SymbolicOpcode::SetCond {}),
-        Opcode::If {} => Ok(SymbolicOpcode::If {}),
-        Opcode::Ret => Ok(SymbolicOpcode::Ret),
-        Opcode::LoadModuleInput { input } => Ok(SymbolicOpcode::LoadModuleInput { input: *input }),
-        Opcode::EvalModule { id, n_inputs } => Ok(SymbolicOpcode::EvalModule {
-            id: *id,
-            n_inputs: *n_inputs,
-        }),
-        Opcode::Apply { func } => Ok(SymbolicOpcode::Apply { func: *func }),
-        Opcode::Lookup {
-            base_gf,
-            table_count,
-            mode,
-        } => Ok(SymbolicOpcode::Lookup {
-            base_gf: *base_gf,
-            table_count: *table_count,
-            mode: *mode,
-        }),
-        Opcode::PushTempView {
-            temp_id,
-            dim_list_id,
-        } => Ok(SymbolicOpcode::PushTempView {
-            temp_id: *temp_id,
-            dim_list_id: *dim_list_id,
-        }),
-        Opcode::PushStaticView { view_id } => {
-            Ok(SymbolicOpcode::PushStaticView { view_id: *view_id })
-        }
-        Opcode::ViewSubscriptConst { dim_idx, index } => Ok(SymbolicOpcode::ViewSubscriptConst {
-            dim_idx: *dim_idx,
-            index: *index,
-        }),
-        Opcode::ViewSubscriptDynamic { dim_idx } => {
-            Ok(SymbolicOpcode::ViewSubscriptDynamic { dim_idx: *dim_idx })
-        }
-        Opcode::ViewRange {
-            dim_idx,
-            start,
-            end,
-        } => Ok(SymbolicOpcode::ViewRange {
-            dim_idx: *dim_idx,
-            start: *start,
-            end: *end,
-        }),
-        Opcode::ViewRangeDynamic { dim_idx } => {
-            Ok(SymbolicOpcode::ViewRangeDynamic { dim_idx: *dim_idx })
-        }
-        Opcode::ViewStarRange {
-            dim_idx,
-            subdim_relation_id,
-        } => Ok(SymbolicOpcode::ViewStarRange {
-            dim_idx: *dim_idx,
-            subdim_relation_id: *subdim_relation_id,
-        }),
-        Opcode::ViewWildcard { dim_idx } => Ok(SymbolicOpcode::ViewWildcard { dim_idx: *dim_idx }),
-        Opcode::ViewTranspose {} => Ok(SymbolicOpcode::ViewTranspose {}),
-        Opcode::PopView {} => Ok(SymbolicOpcode::PopView {}),
-        Opcode::DupView {} => Ok(SymbolicOpcode::DupView {}),
-        Opcode::LoadTempConst { temp_id, index } => Ok(SymbolicOpcode::LoadTempConst {
-            temp_id: *temp_id,
-            index: *index,
-        }),
-        Opcode::LoadTempDynamic { temp_id } => {
-            Ok(SymbolicOpcode::LoadTempDynamic { temp_id: *temp_id })
-        }
-        Opcode::BeginIter {
-            write_temp_id,
-            has_write_temp,
-        } => Ok(SymbolicOpcode::BeginIter {
-            write_temp_id: *write_temp_id,
-            has_write_temp: *has_write_temp,
-        }),
-        Opcode::LoadIterElement {} => Ok(SymbolicOpcode::LoadIterElement {}),
-        Opcode::LoadIterTempElement { temp_id } => {
-            Ok(SymbolicOpcode::LoadIterTempElement { temp_id: *temp_id })
-        }
-        Opcode::LoadIterViewTop {} => Ok(SymbolicOpcode::LoadIterViewTop {}),
-        Opcode::LoadIterViewAt { offset } => Ok(SymbolicOpcode::LoadIterViewAt { offset: *offset }),
-        Opcode::StoreIterElement {} => Ok(SymbolicOpcode::StoreIterElement {}),
-        Opcode::NextIterOrJump { jump_back } => Ok(SymbolicOpcode::NextIterOrJump {
-            jump_back: *jump_back,
-        }),
-        Opcode::EndIter {} => Ok(SymbolicOpcode::EndIter {}),
-        Opcode::ArraySum {} => Ok(SymbolicOpcode::ArraySum {}),
-        Opcode::ArrayMax {} => Ok(SymbolicOpcode::ArrayMax {}),
-        Opcode::ArrayMin {} => Ok(SymbolicOpcode::ArrayMin {}),
-        Opcode::ArrayMean {} => Ok(SymbolicOpcode::ArrayMean {}),
-        Opcode::ArrayStddev {} => Ok(SymbolicOpcode::ArrayStddev {}),
-        Opcode::ArraySize {} => Ok(SymbolicOpcode::ArraySize {}),
-        Opcode::VectorSelect {} => Ok(SymbolicOpcode::VectorSelect {}),
-        Opcode::VectorElmMap {
-            write_temp_id,
-            full_source_len,
-        } => Ok(SymbolicOpcode::VectorElmMap {
-            write_temp_id: *write_temp_id,
-            full_source_len: *full_source_len,
-        }),
-        Opcode::VectorSortOrder { write_temp_id } => Ok(SymbolicOpcode::VectorSortOrder {
-            write_temp_id: *write_temp_id,
-        }),
-        Opcode::Rank { write_temp_id } => Ok(SymbolicOpcode::Rank {
-            write_temp_id: *write_temp_id,
-        }),
-        Opcode::LookupArray {
-            base_gf,
-            table_count,
-            mode,
-            write_temp_id,
-        } => Ok(SymbolicOpcode::LookupArray {
-            base_gf: *base_gf,
-            table_count: *table_count,
-            mode: *mode,
-            write_temp_id: *write_temp_id,
-        }),
-        Opcode::AllocateAvailable { write_temp_id } => Ok(SymbolicOpcode::AllocateAvailable {
-            write_temp_id: *write_temp_id,
-        }),
-        Opcode::AllocateByPriority { write_temp_id } => Ok(SymbolicOpcode::AllocateByPriority {
-            write_temp_id: *write_temp_id,
-        }),
-        Opcode::BeginBroadcastIter {
-            n_sources,
-            dest_temp_id,
-        } => Ok(SymbolicOpcode::BeginBroadcastIter {
-            n_sources: *n_sources,
-            dest_temp_id: *dest_temp_id,
-        }),
-        Opcode::LoadBroadcastElement { source_idx } => Ok(SymbolicOpcode::LoadBroadcastElement {
-            source_idx: *source_idx,
-        }),
-        Opcode::StoreBroadcastElement {} => Ok(SymbolicOpcode::StoreBroadcastElement {}),
-        Opcode::NextBroadcastOrJump { jump_back } => Ok(SymbolicOpcode::NextBroadcastOrJump {
-            jump_back: *jump_back,
-        }),
-        Opcode::EndBroadcastIter {} => Ok(SymbolicOpcode::EndBroadcastIter {}),
-    }
-}
-
-pub(crate) fn symbolize_static_view(
-    view: &StaticArrayView,
-    rmap: &ReverseOffsetMap,
-) -> Result<SymbolicStaticView, String> {
-    let base = if view.is_temp {
-        SymStaticViewBase::Temp(view.base_off)
-    } else {
-        SymStaticViewBase::Var(rmap.lookup(view.base_off)?)
-    };
-
-    Ok(SymbolicStaticView {
-        base,
-        dims: view.dims.clone(),
-        strides: view.strides.clone(),
-        offset: view.offset,
-        sparse: view.sparse.clone(),
-        dim_ids: view.dim_ids.clone(),
-    })
-}
-
-pub(crate) fn symbolize_module_decl(
-    decl: &ModuleDeclaration,
-    rmap: &ReverseOffsetMap,
-) -> Result<SymbolicModuleDecl, String> {
-    let off = u32::try_from(decl.off)
-        .map_err(|_| format!("module declaration offset {} does not fit in u32", decl.off))?;
-    Ok(SymbolicModuleDecl {
-        model_name: decl.model_name.clone(),
-        input_set: decl.input_set.clone(),
-        var: rmap.lookup(off)?,
-    })
-}
-
-pub(crate) fn symbolize_bytecode(
-    bc: &ByteCode,
-    rmap: &ReverseOffsetMap,
-) -> Result<SymbolicByteCode, String> {
-    let code = bc
-        .code
-        .iter()
-        .map(|op| symbolize_opcode(op, rmap))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(SymbolicByteCode {
-        literals: bc.literals.clone(),
-        code,
-    })
-}
-
-/// Convert a `CompiledModule` to its symbolic representation.
-/// All variable offsets are replaced with symbolic references using the layout.
-#[allow(dead_code)]
-pub(crate) fn symbolize_module(
-    module: &CompiledModule,
-    layout: &VariableLayout,
-) -> Result<SymbolicCompiledModule, String> {
-    let rmap = ReverseOffsetMap::from_layout(layout);
-
-    let compiled_initials = module
-        .compiled_initials
-        .iter()
-        .map(|ci| {
-            Ok(SymbolicCompiledInitial {
-                ident: ci.ident.clone(),
-                bytecode: symbolize_bytecode(&ci.bytecode, &rmap)?,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-
-    let compiled_flows = symbolize_bytecode(&module.compiled_flows, &rmap)?;
-    let compiled_stocks = symbolize_bytecode(&module.compiled_stocks, &rmap)?;
-
-    let ctx = &*module.context;
-
-    let static_views = ctx
-        .static_views
-        .iter()
-        .map(|sv| symbolize_static_view(sv, &rmap))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let module_decls = ctx
-        .modules
-        .iter()
-        .map(|md| symbolize_module_decl(md, &rmap))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(SymbolicCompiledModule {
-        ident: module.ident.clone(),
-        n_slots: module.n_slots,
-        compiled_initials,
-        compiled_flows,
-        compiled_stocks,
-        graphical_functions: ctx.graphical_functions.clone(),
-        module_decls,
-        static_views,
-        arrays: ctx.arrays.clone(),
-        dimensions: ctx.dimensions.clone(),
-        subdim_relations: ctx.subdim_relations.clone(),
-        names: ctx.names.clone(),
-        temp_offsets: ctx.temp_offsets.clone(),
-        temp_total_size: ctx.temp_total_size,
-        dim_lists: ctx.dim_lists.clone(),
-        // The symbolize<->resolve roundtrip is opcode-count-preserving, so the
-        // invariant-prefix boundary index is identical in both forms (GH #712).
-        flows_invariant_opcode_len: module.flows_invariant_opcode_len,
-    })
 }
 
 // ============================================================================
@@ -943,7 +786,10 @@ pub(crate) fn fragment_vars_in_layout(
     ];
     for maybe_decls in &phase_decls {
         let Some(decls) = maybe_decls else { continue };
-        if decls.iter().any(|d| layout.get(&d.var.name).is_none()) {
+        if decls
+            .iter()
+            .any(|d| layout.get(d.var.name.as_str()).is_none())
+        {
             return false;
         }
     }
@@ -982,7 +828,7 @@ pub(crate) fn resolve_var_ref(
     var: &SymVarRef,
     layout: &VariableLayout,
 ) -> Result<VariableOffset, String> {
-    let entry = layout.get(&var.name).ok_or_else(|| {
+    let entry = layout.get(var.name.as_str()).ok_or_else(|| {
         format!(
             "variable '{}' not found in layout during resolution",
             var.name
@@ -1176,7 +1022,7 @@ pub(crate) fn resolve_opcode(
             // constant in both sites). The structural symbolic round-trip --
             // `test_renumber_vector_builtin_temp_ids` (isolated `renumber_opcode`)
             // and `test_vector_elm_map_full_source_len_survives_fragment_roundtrip`
-            // (the full `symbolize` -> `concatenate_fragments` -> `resolve_bytecode`
+            // (the full `concatenate_fragments` -> `resolve_bytecode`
             // merge path) -- complements them by pinning that this field is
             // invariant under renumbering (it is NOT a renumber-able resource id
             // like temp/lit/gf/view/dim_list/module).
@@ -1223,6 +1069,26 @@ pub(crate) fn resolve_opcode(
     }
 }
 
+/// Resolve a symbolic bytecode stream against `layout`, producing the concrete
+/// bytecode the VM executes.
+///
+/// **This is the only place concrete bytecode is born**, and therefore the place
+/// the VM's stack-safety proof is discharged: the emitted program must not be
+/// able to overflow the VM's fixed-size arithmetic stack, which is what makes
+/// `vm::Stack`'s unchecked accesses sound.
+///
+/// The check used to live in the per-fragment `ByteCodeBuilder::finish()`. Moving
+/// it here made it strictly STRONGER, not merely equivalent: a fragment starts
+/// and ends at depth 0 today, so per-fragment maxima and the concatenation's
+/// maximum agree -- but `concatenate_fragments` strips each fragment's trailing
+/// `Ret` and appends, so a fragment that did NOT balance would accumulate depth
+/// across fragment boundaries in a way the per-fragment check could not see.
+/// It also runs once per assembled phase instead of once per fragment.
+///
+/// Both failure modes are reported, not asserted: an over-deep program and an
+/// `Opcode::stack_effect` underflow (a compiler-metadata bug) both come back as
+/// `Err`, so neither can abort a `libsimlin` host process from inside a
+/// `Result`-returning function.
 pub(crate) fn resolve_bytecode(
     sbc: &SymbolicByteCode,
     layout: &VariableLayout,
@@ -1233,10 +1099,20 @@ pub(crate) fn resolve_bytecode(
         .map(|op| resolve_opcode(op, layout))
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(ByteCode {
+    let bc = ByteCode {
         literals: sbc.literals.clone(),
         code,
-    })
+    };
+
+    let depth = bc.max_stack_depth()?;
+    if depth >= STACK_CAPACITY {
+        return Err(format!(
+            "compiled bytecode requires stack depth {depth}, exceeding VM capacity \
+             {STACK_CAPACITY}"
+        ));
+    }
+
+    Ok(bc)
 }
 
 pub(crate) fn resolve_static_view(
@@ -1245,7 +1121,7 @@ pub(crate) fn resolve_static_view(
 ) -> Result<StaticArrayView, String> {
     let (base_off, is_temp) = match &sv.base {
         SymStaticViewBase::Var(var_ref) => {
-            let entry = layout.get(&var_ref.name).ok_or_else(|| {
+            let entry = layout.get(var_ref.name.as_str()).ok_or_else(|| {
                 format!(
                     "variable '{}' not found in layout during static view resolution",
                     var_ref.name
@@ -1271,7 +1147,7 @@ pub(crate) fn resolve_module_decl(
     sd: &SymbolicModuleDecl,
     layout: &VariableLayout,
 ) -> Result<ModuleDeclaration, String> {
-    let entry = layout.get(&sd.var.name).ok_or_else(|| {
+    let entry = layout.get(sd.var.name.as_str()).ok_or_else(|| {
         format!(
             "module variable '{}' not found in layout during resolution",
             sd.var.name
@@ -1306,10 +1182,10 @@ pub(crate) fn resolve_module(
         })
         .collect::<Result<Vec<_>, String>>()?;
 
-    // `resolve_module` is a pure symbolic<->concrete primitive (the roundtrip
-    // tests symbolize its output again), so the 3-address fusion (R2) is NOT
-    // applied here -- the production assembler `assemble_module` applies it to
-    // this function's output instead, where the result is never re-symbolized.
+    // `resolve_module` is the single symbolic -> concrete primitive, so the
+    // 3-address fusion (R2) is NOT applied here -- `Vm::new` applies it to its
+    // own private copy of the bytecode, after the salsa-cached artifact has
+    // been produced.
     let compiled_flows = resolve_bytecode(&sym.compiled_flows, layout)?;
     let compiled_stocks = resolve_bytecode(&sym.compiled_stocks, layout)?;
 
@@ -2242,6 +2118,10 @@ pub(crate) fn renumber_opcode(
     })
 }
 
+#[cfg(test)]
+#[path = "symbolic_builder_tests.rs"]
+mod builder_tests;
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -2250,6 +2130,11 @@ pub(crate) fn renumber_opcode(
 mod tests {
     use super::*;
     use crate::bytecode::Op2;
+
+    /// A symbolic reference to `name`'s element `elem`.
+    fn sref(name: &str, elem: usize) -> SymVarRef {
+        SymVarRef::new(Ident::new(name), elem)
+    }
 
     fn simple_layout() -> VariableLayout {
         let mut entries = HashMap::new();
@@ -2266,109 +2151,46 @@ mod tests {
         VariableLayout::new(entries, 6)
     }
 
+    /// The two reference-bearing opcode families every model uses.
     #[test]
-    fn test_reverse_offset_map_basic() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let var = rmap.lookup(4).unwrap();
-        assert_eq!(var.name, "births");
-        assert_eq!(var.element_offset, 0);
-
-        let var = rmap.lookup(5).unwrap();
-        assert_eq!(var.name, "population");
-        assert_eq!(var.element_offset, 0);
-    }
-
-    #[test]
-    fn test_reverse_offset_map_array() {
-        let mut entries = HashMap::new();
-        entries.insert("arr".to_string(), LayoutEntry { offset: 4, size: 3 });
-        let layout = VariableLayout::new(entries, 7);
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        assert_eq!(rmap.lookup(4).unwrap().element_offset, 0);
-        assert_eq!(rmap.lookup(5).unwrap().element_offset, 1);
-        assert_eq!(rmap.lookup(6).unwrap().element_offset, 2);
-        assert_eq!(rmap.lookup(4).unwrap().name, "arr");
-    }
-
-    #[test]
-    fn test_reverse_offset_map_out_of_range() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-        assert!(rmap.lookup(99).is_err());
-    }
-
-    #[test]
-    fn test_symbolize_load_var() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let op = Opcode::LoadVar { off: 5 };
-        let sym = symbolize_opcode(&op, &rmap).unwrap();
-        assert_eq!(
-            sym,
+    fn test_resolve_load_var_and_assign_curr() {
+        assert_resolves(
             SymbolicOpcode::LoadVar {
-                var: SymVarRef {
-                    name: "population".to_string(),
-                    element_offset: 0
-                }
-            }
+                var: sref("population", 0),
+            },
+            Opcode::LoadVar { off: 5 },
         );
-    }
-
-    #[test]
-    fn test_symbolize_assign_curr() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let op = Opcode::AssignCurr { off: 4 };
-        let sym = symbolize_opcode(&op, &rmap).unwrap();
-        assert_eq!(
-            sym,
+        assert_resolves(
             SymbolicOpcode::AssignCurr {
-                var: SymVarRef {
-                    name: "births".to_string(),
-                    element_offset: 0
-                }
-            }
+                var: sref("births", 0),
+            },
+            Opcode::AssignCurr { off: 4 },
         );
     }
 
+    /// Opcodes that carry no variable reference pass through resolution with
+    /// their operands untouched.
     #[test]
-    fn test_symbolize_passthrough_opcodes() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        // These opcodes should pass through unchanged
-        let op = Opcode::LoadGlobalVar { off: 1 };
-        let sym = symbolize_opcode(&op, &rmap).unwrap();
-        assert_eq!(sym, SymbolicOpcode::LoadGlobalVar { off: 1 });
-
-        let op = Opcode::Op2 { op: Op2::Add };
-        let sym = symbolize_opcode(&op, &rmap).unwrap();
-        assert_eq!(sym, SymbolicOpcode::Op2 { op: Op2::Add });
-
-        let op = Opcode::Ret;
-        let sym = symbolize_opcode(&op, &rmap).unwrap();
-        assert_eq!(sym, SymbolicOpcode::Ret);
+    fn test_resolve_passthrough_opcodes() {
+        assert_resolves(
+            SymbolicOpcode::LoadGlobalVar { off: 1 },
+            Opcode::LoadGlobalVar { off: 1 },
+        );
+        assert_resolves(
+            SymbolicOpcode::Op2 { op: Op2::Add },
+            Opcode::Op2 { op: Op2::Add },
+        );
+        assert_resolves(SymbolicOpcode::Ret, Opcode::Ret);
     }
 
     #[test]
     fn test_resolve_var_ref() {
         let layout = simple_layout();
 
-        let var = SymVarRef {
-            name: "population".to_string(),
-            element_offset: 0,
-        };
+        let var = sref("population", 0);
         assert_eq!(resolve_var_ref(&var, &layout).unwrap(), 5);
 
-        let var = SymVarRef {
-            name: "births".to_string(),
-            element_offset: 0,
-        };
+        let var = sref("births", 0);
         assert_eq!(resolve_var_ref(&var, &layout).unwrap(), 4);
     }
 
@@ -2384,10 +2206,7 @@ mod tests {
         );
         let layout = VariableLayout::new(entries, 13);
 
-        let var = SymVarRef {
-            name: "arr".to_string(),
-            element_offset: 2,
-        };
+        let var = sref("arr", 2);
         assert_eq!(resolve_var_ref(&var, &layout).unwrap(), 12);
     }
 
@@ -2398,37 +2217,25 @@ mod tests {
         let layout = VariableLayout::new(entries, 7);
 
         // element_offset == size (out of bounds)
-        let var = SymVarRef {
-            name: "arr".to_string(),
-            element_offset: 3,
-        };
+        let var = sref("arr", 3);
         assert!(
             resolve_var_ref(&var, &layout).is_err(),
             "element_offset >= size should fail"
         );
 
         // element_offset well beyond size
-        let var = SymVarRef {
-            name: "arr".to_string(),
-            element_offset: 100,
-        };
+        let var = sref("arr", 100);
         assert!(resolve_var_ref(&var, &layout).is_err());
 
         // element_offset at max valid index should succeed
-        let var = SymVarRef {
-            name: "arr".to_string(),
-            element_offset: 2,
-        };
+        let var = sref("arr", 2);
         assert_eq!(resolve_var_ref(&var, &layout).unwrap(), 6);
     }
 
     #[test]
     fn test_resolve_missing_variable() {
         let layout = simple_layout();
-        let var = SymVarRef {
-            name: "nonexistent".to_string(),
-            element_offset: 0,
-        };
+        let var = sref("nonexistent", 0);
         assert!(resolve_var_ref(&var, &layout).is_err());
     }
 
@@ -2449,10 +2256,7 @@ mod tests {
         );
         let layout = VariableLayout::new(entries, (VariableOffset::MAX as usize) + 2);
 
-        let var = SymVarRef {
-            name: "huge".to_string(),
-            element_offset: 0,
-        };
+        let var = sref("huge", 0);
         let err = resolve_var_ref(&var, &layout).expect_err("offset beyond u16 must error");
         assert!(
             err.contains("huge") && err.contains("65535"),
@@ -2470,10 +2274,7 @@ mod tests {
             },
         );
         let layout = VariableLayout::new(entries, (VariableOffset::MAX as usize) + 4);
-        let var = SymVarRef {
-            name: "arr".to_string(),
-            element_offset: 3,
-        };
+        let var = sref("arr", 3);
         assert!(
             resolve_var_ref(&var, &layout).is_err(),
             "element offset crossing the u16 limit must error"
@@ -2492,10 +2293,7 @@ mod tests {
             },
         );
         let layout = VariableLayout::new(entries, (VariableOffset::MAX as usize) + 1);
-        let var = SymVarRef {
-            name: "edge".to_string(),
-            element_offset: 0,
-        };
+        let var = sref("edge", 0);
         assert_eq!(resolve_var_ref(&var, &layout).unwrap(), VariableOffset::MAX);
     }
 
@@ -2523,112 +2321,158 @@ mod tests {
         assert!(check_layout_addressable(171_597, "main").is_err());
     }
 
+    /// A whole bytecode stream resolves opcode-for-opcode, literals intact.
     #[test]
-    fn test_bytecode_roundtrip() {
+    fn test_bytecode_resolution() {
         let layout = simple_layout();
 
-        let bc = ByteCode {
+        let sym = SymbolicByteCode {
             literals: vec![1.0, 0.5],
             code: vec![
-                Opcode::LoadVar { off: 5 },     // population
-                Opcode::LoadConstant { id: 1 }, // 0.5
-                Opcode::Op2 { op: Op2::Mul },
-                Opcode::AssignCurr { off: 4 }, // births
-                Opcode::Ret,
+                SymbolicOpcode::LoadVar {
+                    var: sref("population", 0),
+                },
+                SymbolicOpcode::LoadConstant { id: 1 },
+                SymbolicOpcode::Op2 { op: Op2::Mul },
+                SymbolicOpcode::AssignCurr {
+                    var: sref("births", 0),
+                },
+                SymbolicOpcode::Ret,
             ],
         };
 
-        let sym = symbolize_bytecode(&bc, &ReverseOffsetMap::from_layout(&layout)).unwrap();
         let resolved = resolve_bytecode(&sym, &layout).unwrap();
-
-        assert_eq!(bc.literals, resolved.literals);
-        assert_eq!(bc.code.len(), resolved.code.len());
-        for (i, (orig, res)) in bc.code.iter().zip(resolved.code.iter()).enumerate() {
-            assert!(
-                opcode_eq(orig, res),
-                "opcode mismatch at index {}: {:?} vs {:?}",
-                i,
-                orig,
-                res
-            );
-        }
+        assert_eq!(resolved.literals, vec![1.0, 0.5]);
+        assert_eq!(
+            resolved.code,
+            vec![
+                Opcode::LoadVar { off: 5 },
+                Opcode::LoadConstant { id: 1 },
+                Opcode::Op2 { op: Op2::Mul },
+                Opcode::AssignCurr { off: 4 },
+                Opcode::Ret,
+            ]
+        );
     }
 
+    /// The three superinstructions the peephole and the emit-time stock fusion
+    /// produce all carry a reference and all resolve.
     #[test]
-    fn test_bytecode_roundtrip_superinstructions() {
+    fn test_bytecode_resolution_superinstructions() {
         let layout = simple_layout();
 
-        let bc = ByteCode {
+        // The two `BinOpAssign*` forms pop their operands, so the stream has
+        // to be stack-balanced: `resolve_bytecode` validates depth (that is
+        // where the VM's unchecked stack access is proven sound).
+        let sym = SymbolicByteCode {
             literals: vec![100.0, 0.0],
             code: vec![
+                SymbolicOpcode::AssignConstCurr {
+                    var: sref("population", 0),
+                    literal_id: 0,
+                },
+                SymbolicOpcode::LoadConstant { id: 0 },
+                SymbolicOpcode::LoadConstant { id: 1 },
+                SymbolicOpcode::BinOpAssignCurr {
+                    op: Op2::Add,
+                    var: sref("births", 0),
+                },
+                SymbolicOpcode::LoadConstant { id: 0 },
+                SymbolicOpcode::LoadConstant { id: 1 },
+                SymbolicOpcode::BinOpAssignNext {
+                    op: Op2::Mul,
+                    var: sref("population", 0),
+                },
+                SymbolicOpcode::Ret,
+            ],
+        };
+
+        let resolved = resolve_bytecode(&sym, &layout).unwrap();
+        assert_eq!(
+            resolved.code,
+            vec![
                 Opcode::AssignConstCurr {
                     off: 5,
                     literal_id: 0,
                 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadConstant { id: 1 },
                 Opcode::BinOpAssignCurr {
                     op: Op2::Add,
                     off: 4,
                 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadConstant { id: 1 },
                 Opcode::BinOpAssignNext {
                     op: Op2::Mul,
                     off: 5,
                 },
                 Opcode::Ret,
+            ]
+        );
+    }
+
+    /// The implicit globals keep their fixed absolute slots: they are read by
+    /// `LoadGlobalVar`, which never goes through a layout at all.
+    #[test]
+    fn test_bytecode_resolution_global_vars() {
+        let layout = simple_layout();
+
+        let sym = SymbolicByteCode {
+            literals: vec![],
+            code: vec![
+                SymbolicOpcode::LoadGlobalVar { off: 0 },
+                SymbolicOpcode::LoadGlobalVar { off: 1 },
+                SymbolicOpcode::Op2 { op: Op2::Add },
+                SymbolicOpcode::AssignCurr {
+                    var: sref("births", 0),
+                },
+                SymbolicOpcode::Ret,
             ],
         };
 
-        let sym = symbolize_bytecode(&bc, &ReverseOffsetMap::from_layout(&layout)).unwrap();
         let resolved = resolve_bytecode(&sym, &layout).unwrap();
-
-        assert_eq!(bc.code.len(), resolved.code.len());
-        for (i, (orig, res)) in bc.code.iter().zip(resolved.code.iter()).enumerate() {
-            assert!(
-                opcode_eq(orig, res),
-                "opcode mismatch at index {}: {:?} vs {:?}",
-                i,
-                orig,
-                res
-            );
-        }
-    }
-
-    #[test]
-    fn test_bytecode_roundtrip_global_vars() {
-        let layout = simple_layout();
-
-        let bc = ByteCode {
-            literals: vec![],
-            code: vec![
-                Opcode::LoadGlobalVar { off: 0 }, // time
-                Opcode::LoadGlobalVar { off: 1 }, // dt
+        assert_eq!(
+            resolved.code,
+            vec![
+                Opcode::LoadGlobalVar { off: 0 },
+                Opcode::LoadGlobalVar { off: 1 },
                 Opcode::Op2 { op: Op2::Add },
                 Opcode::AssignCurr { off: 4 },
                 Opcode::Ret,
-            ],
+            ]
+        );
+    }
+
+    /// A bytecode stream deeper than the VM's fixed arithmetic stack is a
+    /// compile error, not an abort: `resolve_bytecode` is the single place
+    /// concrete bytecode is born, so it is where the VM's unchecked stack
+    /// access is proven sound.
+    #[test]
+    fn test_resolution_rejects_stack_overflow() {
+        let layout = simple_layout();
+
+        let mut code: Vec<SymbolicOpcode> =
+            vec![SymbolicOpcode::LoadConstant { id: 0 }; STACK_CAPACITY];
+        code.push(SymbolicOpcode::Ret);
+        let sym = SymbolicByteCode {
+            literals: vec![1.0],
+            code,
         };
 
-        let sym = symbolize_bytecode(&bc, &ReverseOffsetMap::from_layout(&layout)).unwrap();
-        let resolved = resolve_bytecode(&sym, &layout).unwrap();
-
-        for (i, (orig, res)) in bc.code.iter().zip(resolved.code.iter()).enumerate() {
-            assert!(
-                opcode_eq(orig, res),
-                "opcode mismatch at index {}: {:?} vs {:?}",
-                i,
-                orig,
-                res
-            );
-        }
+        let err = resolve_bytecode(&sym, &layout).unwrap_err();
+        assert!(
+            err.contains("exceeding VM capacity"),
+            "expected a stack-capacity error, got: {err}"
+        );
     }
 
     #[test]
-    fn test_static_view_roundtrip_var() {
+    fn test_static_view_resolution_var() {
         let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
 
-        let view = StaticArrayView {
-            base_off: 5,
-            is_temp: false,
+        let sym = SymbolicStaticView {
+            base: SymStaticViewBase::Var(sref("population", 0)),
             dims: SmallVec::from_slice(&[3]),
             strides: SmallVec::from_slice(&[1]),
             offset: 0,
@@ -2636,24 +2480,19 @@ mod tests {
             dim_ids: SmallVec::from_slice(&[0]),
         };
 
-        let sym = symbolize_static_view(&view, &rmap).unwrap();
-        assert!(matches!(sym.base, SymStaticViewBase::Var(_)));
-
         let resolved = resolve_static_view(&sym, &layout).unwrap();
-        assert_eq!(view.base_off, resolved.base_off);
-        assert_eq!(view.is_temp, resolved.is_temp);
-        assert_eq!(view.dims, resolved.dims);
-        assert_eq!(view.offset, resolved.offset);
+        assert_eq!(resolved.base_off, 5);
+        assert!(!resolved.is_temp);
+        assert_eq!(resolved.dims, sym.dims);
+        assert_eq!(resolved.offset, 0);
     }
 
     #[test]
-    fn test_static_view_roundtrip_temp() {
+    fn test_static_view_resolution_temp() {
         let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
 
-        let view = StaticArrayView {
-            base_off: 7,
-            is_temp: true,
+        let sym = SymbolicStaticView {
+            base: SymStaticViewBase::Temp(7),
             dims: SmallVec::from_slice(&[2, 3]),
             strides: SmallVec::from_slice(&[3, 1]),
             offset: 0,
@@ -2661,67 +2500,53 @@ mod tests {
             dim_ids: SmallVec::from_slice(&[0, 1]),
         };
 
-        let sym = symbolize_static_view(&view, &rmap).unwrap();
-        assert!(matches!(sym.base, SymStaticViewBase::Temp(7)));
-
         let resolved = resolve_static_view(&sym, &layout).unwrap();
-        assert_eq!(view.base_off, resolved.base_off);
-        assert_eq!(view.is_temp, resolved.is_temp);
+        assert_eq!(resolved.base_off, 7);
+        assert!(resolved.is_temp);
     }
 
     #[test]
-    fn test_module_decl_roundtrip() {
+    fn test_module_decl_resolution() {
         let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
 
-        let decl = ModuleDeclaration {
+        let sym = SymbolicModuleDecl {
             model_name: Ident::new("sub_model"),
             input_set: BTreeSet::new(),
-            off: 4,
+            var: sref("births", 0),
         };
 
-        let sym = symbolize_module_decl(&decl, &rmap).unwrap();
-        assert_eq!(sym.var.name, "births");
-
         let resolved = resolve_module_decl(&sym, &layout).unwrap();
-        assert_eq!(decl.off, resolved.off);
-        assert_eq!(decl.model_name, resolved.model_name);
+        assert_eq!(resolved.off, 4);
+        assert_eq!(resolved.model_name, Ident::new("sub_model"));
     }
 
+    /// The property the whole symbolic layer exists for: one fragment, two
+    /// layouts. Adding a variable ahead of `population` moves its slot, and the
+    /// SAME symbolic bytecode resolves to the new slot with no recompilation.
     #[test]
     fn test_layout_independence() {
-        // Symbolize with one layout, resolve with a different layout.
-        // The symbolic bytecodes should produce correct concrete offsets
-        // for the new layout.
-
-        let layout1 = simple_layout(); // births=4, population=5
-
-        let bc = ByteCode {
+        let sym = SymbolicByteCode {
             literals: vec![0.1],
             code: vec![
-                Opcode::LoadVar { off: 5 }, // population in layout1
-                Opcode::LoadConstant { id: 0 },
-                Opcode::Op2 { op: Op2::Mul },
-                Opcode::AssignCurr { off: 4 }, // births in layout1
-                Opcode::Ret,
+                SymbolicOpcode::LoadVar {
+                    var: sref("population", 0),
+                },
+                SymbolicOpcode::LoadConstant { id: 0 },
+                SymbolicOpcode::Op2 { op: Op2::Mul },
+                SymbolicOpcode::AssignCurr {
+                    var: sref("births", 0),
+                },
+                SymbolicOpcode::Ret,
             ],
         };
 
-        // Symbolize using layout1
-        let sym = symbolize_bytecode(&bc, &ReverseOffsetMap::from_layout(&layout1)).unwrap();
+        // layout1: births=4, population=5
+        let resolved1 = resolve_bytecode(&sym, &simple_layout()).unwrap();
+        assert_eq!(resolved1.code[0], Opcode::LoadVar { off: 5 });
+        assert_eq!(resolved1.code[3], Opcode::AssignCurr { off: 4 });
 
-        // Verify symbolic opcodes reference variable names, not offsets
-        assert_eq!(
-            sym.code[0],
-            SymbolicOpcode::LoadVar {
-                var: SymVarRef {
-                    name: "population".to_string(),
-                    element_offset: 0
-                }
-            }
-        );
-
-        // Create layout2 with different offsets (swapped positions + new variable)
+        // layout2 inserts `growth_rate` alphabetically between births and
+        // population, so population moves to 6 and births stays at 4.
         let mut entries2 = HashMap::new();
         entries2.insert("time".to_string(), LayoutEntry { offset: 0, size: 1 });
         entries2.insert("dt".to_string(), LayoutEntry { offset: 1, size: 1 });
@@ -2730,7 +2555,6 @@ mod tests {
             LayoutEntry { offset: 2, size: 1 },
         );
         entries2.insert("final_time".to_string(), LayoutEntry { offset: 3, size: 1 });
-        // New variable inserted alphabetically between births and population
         entries2.insert("births".to_string(), LayoutEntry { offset: 4, size: 1 });
         entries2.insert(
             "growth_rate".to_string(),
@@ -2739,13 +2563,9 @@ mod tests {
         entries2.insert("population".to_string(), LayoutEntry { offset: 6, size: 1 });
         let layout2 = VariableLayout::new(entries2, 7);
 
-        // Resolve using layout2
-        let resolved = resolve_bytecode(&sym, &layout2).unwrap();
-
-        // population is now at offset 6 (was 5)
-        assert!(opcode_eq(&resolved.code[0], &Opcode::LoadVar { off: 6 }));
-        // births is still at offset 4
-        assert!(opcode_eq(&resolved.code[3], &Opcode::AssignCurr { off: 4 }));
+        let resolved2 = resolve_bytecode(&sym, &layout2).unwrap();
+        assert_eq!(resolved2.code[0], Opcode::LoadVar { off: 6 });
+        assert_eq!(resolved2.code[3], Opcode::AssignCurr { off: 4 });
     }
 
     #[test]
@@ -2769,39 +2589,20 @@ mod tests {
         assert_eq!(offsets, vec![5, 6, 7]);
     }
 
-    // Helper: compare opcodes for equality.
-    // Opcode doesn't derive PartialEq, so we compare via Debug representation.
-    #[cfg(feature = "debug-derive")]
-    fn opcode_eq(a: &Opcode, b: &Opcode) -> bool {
-        format!("{:?}", a) == format!("{:?}", b)
-    }
-
-    // When debug-derive is not enabled, compare by encoding a known
-    // discriminant + payload check for the opcodes we use in tests.
-    #[cfg(not(feature = "debug-derive"))]
-    fn opcode_eq(a: &Opcode, b: &Opcode) -> bool {
-        // Use the symbolize/resolve roundtrip property: if both opcodes
-        // symbolize to the same SymbolicOpcode, they are equal.
-        // We need a layout that covers all offsets used in tests.
-        let mut entries = HashMap::new();
-        for off in 0..20 {
-            entries.insert(
-                format!("__test_var_{}", off),
-                LayoutEntry {
-                    offset: off,
-                    size: 1,
-                },
-            );
-        }
-        let layout = VariableLayout::new(entries, 20);
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let sym_a = symbolize_opcode(a, &rmap);
-        let sym_b = symbolize_opcode(b, &rmap);
-        match (sym_a, sym_b) {
-            (Ok(sa), Ok(sb)) => sa == sb,
-            _ => false,
-        }
+    /// Assert that `sym` resolves against `simple_layout()` to `expected`.
+    ///
+    /// This is the shape every opcode-family test takes now that resolution is
+    /// the only direction of travel: build the symbolic opcode the compiler
+    /// emits, resolve it, and pin the concrete opcode the VM will execute.
+    #[track_caller]
+    fn assert_resolves(sym: SymbolicOpcode, expected: Opcode) {
+        let layout = simple_layout();
+        let resolved = resolve_opcode(&sym, &layout)
+            .unwrap_or_else(|e| panic!("resolve failed for {sym:?}: {e}"));
+        assert!(
+            resolved == expected,
+            "resolve produced the wrong opcode for {sym:?}"
+        );
     }
 
     // ====================================================================
@@ -2821,7 +2622,18 @@ mod tests {
         }
     }
 
-    fn compile_and_roundtrip(dm_project: &crate::datamodel::Project, model_name: &str) {
+    /// Compile a real model through the production incremental path and check
+    /// that every address in the result is one the model's layout actually
+    /// assigns.
+    ///
+    /// This replaced a `symbolize(compiled) -> resolve -> compare` roundtrip,
+    /// which tested that two functions inverted each other; one of them no
+    /// longer exists, because production never travels concrete-to-symbolic.
+    /// What is worth asserting now is the forward direction end to end: the
+    /// resolved module is addressed against the same layout the assembler
+    /// used, each `CompiledInitial` carries exactly the write targets its own
+    /// bytecode has, and each module declaration points at a variable's base.
+    fn compile_and_check_resolution(dm_project: &crate::datamodel::Project, model_name: &str) {
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, dm_project, None);
         let sim = crate::db::compile_project_incremental(&db, sync.project, model_name)
@@ -2831,148 +2643,73 @@ mod tests {
 
         let source_model = sync.models[model_name].source_model;
         // The root module is assembled against the root-shifted layout
-        // (implicit globals at fixed slots 0..3, body at +IMPLICIT_VAR_COUNT),
-        // so the symbolize/resolve roundtrip must use that same layout.
+        // (implicit globals at fixed slots 0..3, body at +IMPLICIT_VAR_COUNT).
         let layout = crate::db::compute_layout(&db, source_model, sync.project).root_shifted();
 
-        let sym = symbolize_module(compiled, &layout)
-            .unwrap_or_else(|e| panic!("symbolize_module failed: {e}"));
+        assert_eq!(compiled.n_slots, layout.n_slots);
 
-        let resolved =
-            resolve_module(&sym, &layout).unwrap_or_else(|e| panic!("resolve_module failed: {e}"));
+        // Every slot a layout entry owns, so an emitted offset can be checked
+        // for being a real address rather than a stray integer.
+        let mut owned: Vec<bool> = vec![false; layout.n_slots];
+        for entry in layout.entries.values() {
+            owned[entry.offset..entry.offset + entry.size].fill(true);
+        }
+        let check = |bc: &ByteCode, what: &str| {
+            for op in &bc.code {
+                if let Some(off) = referenced_offset(op) {
+                    assert!(
+                        (off as usize) < layout.n_slots && owned[off as usize],
+                        "{what}: opcode references slot {off}, which no layout entry owns"
+                    );
+                }
+            }
+        };
 
-        // Verify structural equivalence
-        assert_eq!(compiled.ident, resolved.ident);
-        assert_eq!(compiled.n_slots, resolved.n_slots);
-        assert_eq!(
-            compiled.compiled_initials.len(),
-            resolved.compiled_initials.len()
-        );
-
-        // Compare initials
-        for (orig, res) in compiled
-            .compiled_initials
-            .iter()
-            .zip(resolved.compiled_initials.iter())
-        {
-            assert_eq!(orig.ident, res.ident);
+        for init in compiled.compiled_initials.iter() {
+            check(&init.bytecode, "initials");
             assert_eq!(
-                orig.offsets, res.offsets,
-                "initial offsets mismatch for {}",
-                orig.ident
+                init.offsets,
+                extract_assign_curr_offsets(&init.bytecode),
+                "initial `{}` carries offsets its bytecode does not write",
+                init.ident
             );
-            assert_eq!(orig.bytecode.literals, res.bytecode.literals);
-            assert_eq!(
-                orig.bytecode.code.len(),
-                res.bytecode.code.len(),
-                "initial code length mismatch for {}",
-                orig.ident
+        }
+        check(&compiled.compiled_flows, "flows");
+        check(&compiled.compiled_stocks, "stocks");
+
+        for md in compiled.context.modules.iter() {
+            assert!(
+                md.off < layout.n_slots && owned[md.off],
+                "module declaration for '{}' points at slot {}, which no layout entry owns",
+                md.model_name,
+                md.off
             );
-            for (i, (o, r)) in orig
-                .bytecode
-                .code
-                .iter()
-                .zip(res.bytecode.code.iter())
-                .enumerate()
-            {
+        }
+        for sv in compiled.context.static_views.iter() {
+            if !sv.is_temp {
                 assert!(
-                    opcode_eq(o, r),
-                    "initial opcode mismatch at index {} for {}: {:?} vs {:?}",
-                    i,
-                    orig.ident,
-                    o,
-                    r
+                    (sv.base_off as usize) < layout.n_slots && owned[sv.base_off as usize],
+                    "static view base {} is not an owned slot",
+                    sv.base_off
                 );
             }
         }
+    }
 
-        // Compare flows bytecode
-        assert_eq!(
-            compiled.compiled_flows.literals,
-            resolved.compiled_flows.literals
-        );
-        assert_eq!(
-            compiled.compiled_flows.code.len(),
-            resolved.compiled_flows.code.len(),
-            "flows code length mismatch"
-        );
-        for (i, (o, r)) in compiled
-            .compiled_flows
-            .code
-            .iter()
-            .zip(resolved.compiled_flows.code.iter())
-            .enumerate()
-        {
-            assert!(
-                opcode_eq(o, r),
-                "flows opcode mismatch at index {}: {:?} vs {:?}",
-                i,
-                o,
-                r
-            );
-        }
-
-        // Compare stocks bytecode
-        assert_eq!(
-            compiled.compiled_stocks.literals,
-            resolved.compiled_stocks.literals
-        );
-        assert_eq!(
-            compiled.compiled_stocks.code.len(),
-            resolved.compiled_stocks.code.len(),
-            "stocks code length mismatch"
-        );
-        for (i, (o, r)) in compiled
-            .compiled_stocks
-            .code
-            .iter()
-            .zip(resolved.compiled_stocks.code.iter())
-            .enumerate()
-        {
-            assert!(
-                opcode_eq(o, r),
-                "stocks opcode mismatch at index {}: {:?} vs {:?}",
-                i,
-                o,
-                r
-            );
-        }
-
-        // Compare context fields
-        assert_eq!(
-            compiled.context.graphical_functions,
-            resolved.context.graphical_functions
-        );
-        assert_eq!(
-            compiled.context.modules.len(),
-            resolved.context.modules.len()
-        );
-        for (orig_md, res_md) in compiled
-            .context
-            .modules
-            .iter()
-            .zip(resolved.context.modules.iter())
-        {
-            assert_eq!(orig_md.model_name, res_md.model_name);
-            assert_eq!(orig_md.off, res_md.off);
-            assert_eq!(orig_md.input_set, res_md.input_set);
-        }
-
-        assert_eq!(
-            compiled.context.static_views.len(),
-            resolved.context.static_views.len()
-        );
-        for (orig_sv, res_sv) in compiled
-            .context
-            .static_views
-            .iter()
-            .zip(resolved.context.static_views.iter())
-        {
-            assert_eq!(orig_sv.base_off, res_sv.base_off);
-            assert_eq!(orig_sv.is_temp, res_sv.is_temp);
-            assert_eq!(orig_sv.dims, res_sv.dims);
-            assert_eq!(orig_sv.strides, res_sv.strides);
-            assert_eq!(orig_sv.offset, res_sv.offset);
+    /// The model slot an opcode reads or writes, if it has one. Mirrors the
+    /// nine `SymVarRef`-carrying symbolic opcode families.
+    fn referenced_offset(op: &Opcode) -> Option<VariableOffset> {
+        match op {
+            Opcode::LoadVar { off }
+            | Opcode::LoadPrev { off }
+            | Opcode::LoadInitial { off }
+            | Opcode::LoadSubscript { off }
+            | Opcode::AssignCurr { off }
+            | Opcode::AssignConstCurr { off, .. }
+            | Opcode::BinOpAssignCurr { off, .. }
+            | Opcode::BinOpAssignNext { off, .. } => Some(*off),
+            Opcode::PushVarViewDirect { base_off, .. } => Some(*base_off),
+            _ => None,
         }
     }
 
@@ -2991,7 +2728,7 @@ mod tests {
                 ],
             )],
         );
-        compile_and_roundtrip(&dm_project, "main");
+        compile_and_check_resolution(&dm_project, "main");
     }
 
     #[test]
@@ -3007,7 +2744,7 @@ mod tests {
                 ],
             )],
         );
-        compile_and_roundtrip(&dm_project, "main");
+        compile_and_check_resolution(&dm_project, "main");
     }
 
     #[test]
@@ -3023,32 +2760,52 @@ mod tests {
                 ],
             )],
         );
-        compile_and_roundtrip(&dm_project, "main");
+        compile_and_check_resolution(&dm_project, "main");
     }
 
+    /// The resolved module's slot count comes from the layout, never from the
+    /// symbolic value. `SymbolicCompiledModule` carries no slot count at all
+    /// now, so this pins the remaining half: a bigger layout produces a bigger
+    /// module from the same fragments.
     #[test]
-    fn test_resolve_uses_layout_n_slots_not_symbolic() {
-        let dm_project = x_project(
-            default_sim_specs(),
-            &[x_model(
-                "main",
-                vec![x_aux("a", "1", None), x_aux("b", "a + 1", None)],
-            )],
+    fn test_resolve_uses_layout_n_slots() {
+        let layout = simple_layout();
+        let sym = SymbolicCompiledModule {
+            ident: Ident::new("main"),
+            compiled_initials: vec![],
+            compiled_flows: SymbolicByteCode {
+                literals: vec![],
+                code: vec![
+                    SymbolicOpcode::LoadVar {
+                        var: sref("population", 0),
+                    },
+                    SymbolicOpcode::AssignCurr {
+                        var: sref("births", 0),
+                    },
+                    SymbolicOpcode::Ret,
+                ],
+            },
+            compiled_stocks: SymbolicByteCode::default(),
+            graphical_functions: vec![],
+            module_decls: vec![],
+            static_views: vec![],
+            arrays: vec![],
+            dimensions: vec![],
+            subdim_relations: vec![],
+            names: vec![],
+            temp_offsets: vec![],
+            temp_total_size: 0,
+            dim_lists: vec![],
+            flows_invariant_opcode_len: 0,
+        };
+
+        assert_eq!(
+            resolve_module(&sym, &layout).unwrap().n_slots,
+            layout.n_slots
         );
-        let mut db = crate::db::SimlinDb::default();
-        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &dm_project, None);
-        let sim = crate::db::compile_project_incremental(&db, sync.project, "main")
-            .expect("incremental compile should succeed");
 
-        let compiled = &sim.modules[&sim.root];
-
-        let source_model = sync.models["main"].source_model;
-        // The root module was assembled against the root-shifted layout, so
-        // symbolize it back with that same layout.
-        let layout = crate::db::compute_layout(&db, source_model, sync.project).root_shifted();
-        let sym = symbolize_module(compiled, &layout).unwrap();
-
-        // Create a layout with more slots (simulating a variable addition)
+        // A variable added past the end grows the layout; the same fragments
+        // resolve into the bigger module.
         let mut bigger_entries = layout.entries.clone();
         bigger_entries.insert(
             "new_var".to_string(),
@@ -3058,15 +2815,9 @@ mod tests {
             },
         );
         let bigger_layout = VariableLayout::new(bigger_entries, layout.n_slots + 1);
-
-        let resolved = resolve_module(&sym, &bigger_layout).unwrap();
         assert_eq!(
-            resolved.n_slots, bigger_layout.n_slots,
-            "resolved module should use layout's n_slots, not the stale symbolic value"
-        );
-        assert_ne!(
-            resolved.n_slots, sym.n_slots,
-            "resolved n_slots should differ from symbolic n_slots when layout changed"
+            resolve_module(&sym, &bigger_layout).unwrap().n_slots,
+            bigger_layout.n_slots
         );
     }
 
@@ -3074,6 +2825,9 @@ mod tests {
     // u16 truncation boundary tests (issue #291)
     // ====================================================================
 
+    /// A model bigger than u16 can address is rejected before assembly, but the
+    /// resolution primitives must handle large *usize* offsets correctly up to
+    /// that point rather than truncating.
     #[test]
     fn test_large_offset_static_view() {
         let large_off: usize = 70_000;
@@ -3086,26 +2840,15 @@ mod tests {
             },
         );
         let layout = VariableLayout::new(entries, large_off + 3);
-        let rmap = ReverseOffsetMap::from_layout(&layout);
 
-        let view = StaticArrayView {
-            base_off: large_off as u32,
-            is_temp: false,
+        let sym = SymbolicStaticView {
+            base: SymStaticViewBase::Var(sref("big_var", 0)),
             dims: SmallVec::from_slice(&[3]),
             strides: SmallVec::from_slice(&[1]),
             offset: 0,
             sparse: SmallVec::new(),
             dim_ids: SmallVec::from_slice(&[0]),
         };
-
-        let sym = symbolize_static_view(&view, &rmap).unwrap();
-        match &sym.base {
-            SymStaticViewBase::Var(var_ref) => {
-                assert_eq!(var_ref.name, "big_var");
-                assert_eq!(var_ref.element_offset, 0);
-            }
-            SymStaticViewBase::Temp(_) => panic!("expected Var, got Temp"),
-        }
 
         let resolved = resolve_static_view(&sym, &layout).unwrap();
         assert_eq!(resolved.base_off, large_off as u32);
@@ -3124,220 +2867,251 @@ mod tests {
             },
         );
         let layout = VariableLayout::new(entries, large_off + 5);
-        let rmap = ReverseOffsetMap::from_layout(&layout);
 
-        let decl = ModuleDeclaration {
+        let sym = SymbolicModuleDecl {
             model_name: Ident::new("sub"),
             input_set: BTreeSet::new(),
-            off: large_off,
+            var: sref("big_module", 0),
         };
-
-        let sym = symbolize_module_decl(&decl, &rmap).unwrap();
-        assert_eq!(sym.var.name, "big_module");
 
         let resolved = resolve_module_decl(&sym, &layout).unwrap();
         assert_eq!(resolved.off, large_off);
     }
 
-    #[test]
-    #[cfg(target_pointer_width = "64")]
-    fn test_module_decl_offset_overflow_is_rejected() {
-        let mut entries = HashMap::new();
-        entries.insert("wrapped".to_string(), LayoutEntry { offset: 4, size: 1 });
-        let layout = VariableLayout::new(entries, 5);
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let overflowing_off = (u32::MAX as usize) + 5;
-        let decl = ModuleDeclaration {
-            model_name: Ident::new("sub"),
-            input_set: BTreeSet::new(),
-            off: overflowing_off,
-        };
-
-        let err = symbolize_module_decl(&decl, &rmap).unwrap_err();
-        assert!(
-            err.contains("does not fit in u32"),
-            "expected explicit overflow error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn test_unmapped_offset() {
-        let mut entries = HashMap::new();
-        entries.insert("a".to_string(), LayoutEntry { offset: 0, size: 1 });
-        // Offset 1 is allocated but not mapped to any variable
-        let layout = VariableLayout::new(entries, 3);
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        assert!(rmap.lookup(0).is_ok());
-        let err = rmap.lookup(1).unwrap_err();
-        assert!(err.contains("no variable mapped at offset"));
-    }
-
     // ====================================================================
-    // Opcode roundtrip coverage: passthrough opcodes
+    // Resolution coverage: one case per opcode family
     // ====================================================================
+    //
+    // `resolve_opcode` is an exhaustive match over `SymbolicOpcode`, so a new
+    // variant is a compile error there; these pin that each existing arm maps
+    // to the right concrete opcode with its operands intact.
 
     #[test]
-    fn test_roundtrip_control_flow_and_builtin_opcodes() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let opcodes = vec![
-            Opcode::Not {},
-            Opcode::SetCond {},
-            Opcode::If {},
-            Opcode::LoadModuleInput { input: 3 },
-            Opcode::EvalModule { id: 0, n_inputs: 2 },
-            Opcode::Apply {
-                func: BuiltinId::Abs,
-            },
-            Opcode::Lookup {
-                base_gf: 0,
-                table_count: 4,
-                mode: LookupMode::Interpolate,
-            },
-            Opcode::Lookup {
-                base_gf: 1,
-                table_count: 1,
-                mode: LookupMode::Forward,
-            },
-            Opcode::Ret,
-        ];
-
-        for op in &opcodes {
-            let sym = symbolize_opcode(op, &rmap).unwrap();
-            let resolved = resolve_opcode(&sym, &layout).unwrap();
-            assert!(opcode_eq(op, &resolved), "roundtrip failed for {:?}", sym);
+    fn test_resolve_control_flow_and_builtin_opcodes() {
+        for (sym, concrete) in [
+            (SymbolicOpcode::Not {}, Opcode::Not {}),
+            (SymbolicOpcode::SetCond {}, Opcode::SetCond {}),
+            (SymbolicOpcode::If {}, Opcode::If {}),
+            (
+                SymbolicOpcode::LoadModuleInput { input: 3 },
+                Opcode::LoadModuleInput { input: 3 },
+            ),
+            (
+                SymbolicOpcode::EvalModule { id: 0, n_inputs: 2 },
+                Opcode::EvalModule { id: 0, n_inputs: 2 },
+            ),
+            (
+                SymbolicOpcode::Apply {
+                    func: BuiltinId::Abs,
+                },
+                Opcode::Apply {
+                    func: BuiltinId::Abs,
+                },
+            ),
+            (
+                SymbolicOpcode::Lookup {
+                    base_gf: 0,
+                    table_count: 4,
+                    mode: LookupMode::Interpolate,
+                },
+                Opcode::Lookup {
+                    base_gf: 0,
+                    table_count: 4,
+                    mode: LookupMode::Interpolate,
+                },
+            ),
+            (
+                SymbolicOpcode::Lookup {
+                    base_gf: 1,
+                    table_count: 1,
+                    mode: LookupMode::Forward,
+                },
+                Opcode::Lookup {
+                    base_gf: 1,
+                    table_count: 1,
+                    mode: LookupMode::Forward,
+                },
+            ),
+            (SymbolicOpcode::Ret, Opcode::Ret),
+        ] {
+            assert_resolves(sym, concrete);
         }
     }
 
     #[test]
-    fn test_roundtrip_view_stack_opcodes() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let opcodes = vec![
-            Opcode::PushTempView {
-                temp_id: 1,
-                dim_list_id: 2,
-            },
-            Opcode::PushStaticView { view_id: 3 },
-            Opcode::PushVarViewDirect {
-                base_off: 5,
-                dim_list_id: 1,
-            },
-            Opcode::ViewSubscriptConst {
-                dim_idx: 0,
-                index: 2,
-            },
-            Opcode::ViewSubscriptDynamic { dim_idx: 1 },
-            Opcode::ViewRange {
-                dim_idx: 0,
-                start: 1,
-                end: 5,
-            },
-            Opcode::ViewRangeDynamic { dim_idx: 2 },
-            Opcode::ViewStarRange {
-                dim_idx: 0,
-                subdim_relation_id: 7,
-            },
-            Opcode::ViewWildcard { dim_idx: 1 },
-            Opcode::ViewTranspose {},
-            Opcode::PopView {},
-            Opcode::DupView {},
-        ];
-
-        for op in &opcodes {
-            let sym = symbolize_opcode(op, &rmap).unwrap();
-            let resolved = resolve_opcode(&sym, &layout).unwrap();
-            assert!(opcode_eq(op, &resolved), "roundtrip failed for {:?}", sym);
+    fn test_resolve_view_stack_opcodes() {
+        for (sym, concrete) in [
+            (
+                SymbolicOpcode::PushStaticView { view_id: 3 },
+                Opcode::PushStaticView { view_id: 3 },
+            ),
+            (
+                SymbolicOpcode::PushVarViewDirect {
+                    var: sref("population", 0),
+                    dim_list_id: 1,
+                },
+                Opcode::PushVarViewDirect {
+                    base_off: 5,
+                    dim_list_id: 1,
+                },
+            ),
+            (
+                SymbolicOpcode::ViewSubscriptDynamic { dim_idx: 1 },
+                Opcode::ViewSubscriptDynamic { dim_idx: 1 },
+            ),
+            (
+                SymbolicOpcode::ViewRangeDynamic { dim_idx: 2 },
+                Opcode::ViewRangeDynamic { dim_idx: 2 },
+            ),
+            (SymbolicOpcode::PopView {}, Opcode::PopView {}),
+        ] {
+            assert_resolves(sym, concrete);
         }
     }
 
     #[test]
-    fn test_roundtrip_temp_and_subscript_opcodes() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let opcodes = vec![
-            Opcode::LoadTempConst {
-                temp_id: 0,
-                index: 3,
-            },
-            Opcode::LoadTempDynamic { temp_id: 2 },
-            Opcode::PushSubscriptIndex { bounds: 4 },
-            Opcode::LoadSubscript { off: 5 },
-            Opcode::BinOpAssignNext {
-                op: Op2::Add,
-                off: 4,
-            },
-        ];
-
-        for op in &opcodes {
-            let sym = symbolize_opcode(op, &rmap).unwrap();
-            let resolved = resolve_opcode(&sym, &layout).unwrap();
-            assert!(opcode_eq(op, &resolved), "roundtrip failed for {:?}", sym);
+    fn test_resolve_temp_and_subscript_opcodes() {
+        for (sym, concrete) in [
+            (
+                SymbolicOpcode::LoadTempConst {
+                    temp_id: 0,
+                    index: 3,
+                },
+                Opcode::LoadTempConst {
+                    temp_id: 0,
+                    index: 3,
+                },
+            ),
+            (
+                SymbolicOpcode::PushSubscriptIndex { bounds: 4 },
+                Opcode::PushSubscriptIndex { bounds: 4 },
+            ),
+            (
+                SymbolicOpcode::LoadSubscript {
+                    var: sref("population", 0),
+                },
+                Opcode::LoadSubscript { off: 5 },
+            ),
+            (
+                SymbolicOpcode::BinOpAssignNext {
+                    op: Op2::Add,
+                    var: sref("births", 0),
+                },
+                Opcode::BinOpAssignNext {
+                    op: Op2::Add,
+                    off: 4,
+                },
+            ),
+            (
+                SymbolicOpcode::SymLoadPrev {
+                    var: sref("population", 0),
+                },
+                Opcode::LoadPrev { off: 5 },
+            ),
+            (
+                SymbolicOpcode::SymLoadInitial {
+                    var: sref("births", 0),
+                },
+                Opcode::LoadInitial { off: 4 },
+            ),
+        ] {
+            assert_resolves(sym, concrete);
         }
     }
 
     #[test]
-    fn test_roundtrip_iteration_opcodes() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let opcodes = vec![
-            Opcode::BeginIter {
-                write_temp_id: 0,
-                has_write_temp: true,
-            },
-            Opcode::BeginIter {
-                write_temp_id: 0,
-                has_write_temp: false,
-            },
-            Opcode::LoadIterElement {},
-            Opcode::LoadIterTempElement { temp_id: 1 },
-            Opcode::LoadIterViewTop {},
-            Opcode::LoadIterViewAt { offset: 2 },
-            Opcode::StoreIterElement {},
-            Opcode::NextIterOrJump { jump_back: -5 },
-            Opcode::EndIter {},
-        ];
-
-        for op in &opcodes {
-            let sym = symbolize_opcode(op, &rmap).unwrap();
-            let resolved = resolve_opcode(&sym, &layout).unwrap();
-            assert!(opcode_eq(op, &resolved), "roundtrip failed for {:?}", sym);
+    fn test_resolve_iteration_opcodes() {
+        for (sym, concrete) in [
+            (
+                SymbolicOpcode::BeginIter {
+                    write_temp_id: 0,
+                    has_write_temp: true,
+                },
+                Opcode::BeginIter {
+                    write_temp_id: 0,
+                    has_write_temp: true,
+                },
+            ),
+            (
+                SymbolicOpcode::BeginIter {
+                    write_temp_id: 0,
+                    has_write_temp: false,
+                },
+                Opcode::BeginIter {
+                    write_temp_id: 0,
+                    has_write_temp: false,
+                },
+            ),
+            (
+                SymbolicOpcode::LoadIterViewAt { offset: 2 },
+                Opcode::LoadIterViewAt { offset: 2 },
+            ),
+            (
+                SymbolicOpcode::StoreIterElement {},
+                Opcode::StoreIterElement {},
+            ),
+            (
+                SymbolicOpcode::NextIterOrJump { jump_back: -5 },
+                Opcode::NextIterOrJump { jump_back: -5 },
+            ),
+            (SymbolicOpcode::EndIter {}, Opcode::EndIter {}),
+        ] {
+            assert_resolves(sym, concrete);
         }
     }
 
     #[test]
-    fn test_roundtrip_broadcast_and_reduction_opcodes() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let opcodes = vec![
-            Opcode::ArraySum {},
-            Opcode::ArrayMax {},
-            Opcode::ArrayMin {},
-            Opcode::ArrayMean {},
-            Opcode::ArrayStddev {},
-            Opcode::ArraySize {},
-            Opcode::BeginBroadcastIter {
-                n_sources: 2,
-                dest_temp_id: 0,
-            },
-            Opcode::LoadBroadcastElement { source_idx: 0 },
-            Opcode::LoadBroadcastElement { source_idx: 1 },
-            Opcode::StoreBroadcastElement {},
-            Opcode::NextBroadcastOrJump { jump_back: -4 },
-            Opcode::EndBroadcastIter {},
-        ];
-
-        for op in &opcodes {
-            let sym = symbolize_opcode(op, &rmap).unwrap();
-            let resolved = resolve_opcode(&sym, &layout).unwrap();
-            assert!(opcode_eq(op, &resolved), "roundtrip failed for {:?}", sym);
+    fn test_resolve_reduction_and_vector_opcodes() {
+        for (sym, concrete) in [
+            (SymbolicOpcode::ArraySum {}, Opcode::ArraySum {}),
+            (SymbolicOpcode::ArrayMax {}, Opcode::ArrayMax {}),
+            (SymbolicOpcode::ArrayMin {}, Opcode::ArrayMin {}),
+            (SymbolicOpcode::ArrayMean {}, Opcode::ArrayMean {}),
+            (SymbolicOpcode::ArrayStddev {}, Opcode::ArrayStddev {}),
+            (SymbolicOpcode::ArraySize {}, Opcode::ArraySize {}),
+            (SymbolicOpcode::VectorSelect {}, Opcode::VectorSelect {}),
+            (
+                SymbolicOpcode::VectorElmMap {
+                    write_temp_id: 1,
+                    full_source_len: 12,
+                },
+                Opcode::VectorElmMap {
+                    write_temp_id: 1,
+                    full_source_len: 12,
+                },
+            ),
+            (
+                SymbolicOpcode::VectorSortOrder { write_temp_id: 2 },
+                Opcode::VectorSortOrder { write_temp_id: 2 },
+            ),
+            (
+                SymbolicOpcode::Rank { write_temp_id: 3 },
+                Opcode::Rank { write_temp_id: 3 },
+            ),
+            (
+                SymbolicOpcode::LookupArray {
+                    base_gf: 2,
+                    table_count: 3,
+                    mode: LookupMode::Backward,
+                    write_temp_id: 4,
+                },
+                Opcode::LookupArray {
+                    base_gf: 2,
+                    table_count: 3,
+                    mode: LookupMode::Backward,
+                    write_temp_id: 4,
+                },
+            ),
+            (
+                SymbolicOpcode::AllocateAvailable { write_temp_id: 5 },
+                Opcode::AllocateAvailable { write_temp_id: 5 },
+            ),
+            (
+                SymbolicOpcode::AllocateByPriority { write_temp_id: 6 },
+                Opcode::AllocateByPriority { write_temp_id: 6 },
+            ),
+        ] {
+            assert_resolves(sym, concrete);
         }
     }
 
@@ -3346,25 +3120,23 @@ mod tests {
     // ====================================================================
 
     #[test]
-    fn test_symbolize_opcode_out_of_range_offset() {
-        let mut entries = HashMap::new();
-        entries.insert("a".to_string(), LayoutEntry { offset: 0, size: 1 });
-        let layout = VariableLayout::new(entries, 1);
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let op = Opcode::LoadVar { off: 50 };
-        let err = symbolize_opcode(&op, &rmap).unwrap_err();
-        assert!(err.contains("out of range"));
+    fn test_resolve_opcode_unknown_variable() {
+        let layout = simple_layout();
+        let err = resolve_opcode(
+            &SymbolicOpcode::LoadVar {
+                var: sref("nonexistent", 0),
+            },
+            &layout,
+        )
+        .unwrap_err();
+        assert!(err.contains("not found in layout"), "got: {err}");
     }
 
     #[test]
     fn test_resolve_static_view_missing_variable() {
         let layout = simple_layout();
         let sym_view = SymbolicStaticView {
-            base: SymStaticViewBase::Var(SymVarRef {
-                name: "nonexistent".to_string(),
-                element_offset: 0,
-            }),
+            base: SymStaticViewBase::Var(sref("nonexistent", 0)),
             dims: SmallVec::from_slice(&[3]),
             strides: SmallVec::from_slice(&[1]),
             offset: 0,
@@ -3382,10 +3154,7 @@ mod tests {
         let sym_decl = SymbolicModuleDecl {
             model_name: Ident::new("sub"),
             input_set: BTreeSet::new(),
-            var: SymVarRef {
-                name: "nonexistent".to_string(),
-                element_offset: 0,
-            },
+            var: sref("nonexistent", 0),
         };
 
         let err = resolve_module_decl(&sym_decl, &layout).unwrap_err();
@@ -3414,7 +3183,7 @@ mod tests {
                 ),
             ],
         );
-        compile_and_roundtrip(&dm_project, "main");
+        compile_and_check_resolution(&dm_project, "main");
     }
 
     // ====================================================================
@@ -3774,29 +3543,23 @@ mod tests {
         // End-to-end belt-and-suspenders for the Phase 5 `full_source_len`
         // opcode field. `test_renumber_vector_builtin_temp_ids` covers the
         // isolated `renumber_opcode` call; this exercises the *real merge
-        // path* a compiled model takes -- `symbolize_opcode` ->
+        // path* a compiled model takes -- codegen's symbolic opcode ->
         // `concatenate_fragments` (absorb + `renumber_fragment_code`) ->
         // `resolve_bytecode` -- with the VECTOR ELM MAP opcode merged AFTER a
         // temp-contributing fragment so its `write_temp_id` gets a *non-zero*
         // renumber offset. The invariant under test: `full_source_len` is an
         // absolute element count, NOT a renumber-able resource id, so it must
-        // come out of symbolize -> concatenate/renumber -> resolve
-        // byte-identical even though `write_temp_id` is offset. If
-        // `full_source_len` were ever (mistakenly) treated like a temp id, it
-        // would be shifted by `frag_a`'s temp count here and this test would
-        // fail; the existing renumber unit test would not catch that
-        // regression because it never drives the fragment merger.
+        // come out of concatenate/renumber -> resolve byte-identical even
+        // though `write_temp_id` is offset. If `full_source_len` were ever
+        // (mistakenly) treated like a temp id, it would be shifted by
+        // `frag_a`'s temp count here and this test would fail; the existing
+        // renumber unit test would not catch that regression because it never
+        // drives the fragment merger.
         const GENUINE_FULL_SOURCE_LEN: u32 = 6; // e.g. d[DimA,DimB] = 3 x 2
-        let original = Opcode::VectorElmMap {
+        let symbolic_elm_map = SymbolicOpcode::VectorElmMap {
             write_temp_id: 0,
             full_source_len: GENUINE_FULL_SOURCE_LEN,
         };
-
-        // The VectorElmMap opcode carries no variable offset, so an empty
-        // layout (=> empty ReverseOffsetMap) is sufficient for symbolization.
-        let empty_layout = VariableLayout::new(HashMap::new(), 0);
-        let rmap = ReverseOffsetMap::from_layout(&empty_layout);
-        let symbolic_elm_map = symbolize_opcode(&original, &rmap).unwrap();
 
         // frag_a is a temp-bearing fragment; frag_b carries the VectorElmMap.
         // #583: the plain-phase concat RECYCLES temps into one identity pool,
@@ -3836,8 +3599,9 @@ mod tests {
         };
         let merged = concatenate_fragments(&[&frag_a, &frag_b], &based).unwrap();
 
-        // Resolve back to concrete bytecode (same empty layout: the
-        // VectorElmMap opcode carries no SymVarRef).
+        // Resolve to concrete bytecode against an empty layout: the
+        // VectorElmMap opcode carries no variable reference.
+        let empty_layout = VariableLayout::new(HashMap::new(), 0);
         let resolved = resolve_bytecode(&merged.bytecode, &empty_layout).unwrap();
 
         let elm_map = resolved
@@ -3862,12 +3626,12 @@ mod tests {
              the fragment merger renumbered this opcode"
         );
         // The invariant: full_source_len is absolute, not renumbered. It must
-        // survive symbolize -> concatenate/renumber -> resolve unchanged even
+        // survive concatenate/renumber -> resolve unchanged even
         // though write_temp_id was offset.
         assert_eq!(
             elm_map.1, GENUINE_FULL_SOURCE_LEN,
-            "full_source_len must survive the symbolize -> fragment-merge -> \
-             resolve round-trip byte-identical (it is an absolute element \
+            "full_source_len must survive the fragment-merge -> resolve path \
+             byte-identical (it is an absolute element \
              count, not a renumber-able resource id); a corrupted value would \
              feed the VM a wrong full-source extent and break genuine VECTOR \
              ELM MAP results"

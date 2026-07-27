@@ -159,8 +159,15 @@ mod tests {
         Expr::Op2(op, Box::new(l), Box::new(r), Loc::default())
     }
 
-    fn var(off: usize) -> Expr {
-        Expr::Var(off, Loc::default())
+    fn var(n: usize) -> Expr {
+        Expr::Var(vref(n), Loc::default())
+    }
+
+    /// A distinct variable reference per test slot: the folder never inspects
+    /// a reference beyond copying it, so the tests only need distinguishable
+    /// operands.
+    fn vref(n: usize) -> crate::compiler::VarRef {
+        crate::compiler::VarRef::base(crate::common::Ident::new(&format!("v{n}")))
     }
 
     fn assert_folds_to(expr: Expr, expected: f64) {
@@ -246,7 +253,7 @@ mod tests {
                 assert!(matches!(*r, Expr::Const(v, _) if v == 3.0));
                 match *l {
                     Expr::Op2(BinaryOp::Mul, ll, lr, _) => {
-                        assert!(matches!(*ll, Expr::Var(0, _)));
+                        assert!(*ll == var(0));
                         assert!(matches!(*lr, Expr::Const(v, _) if v == 2.0));
                     }
                     _ => panic!("inner Mul must be preserved"),
@@ -263,7 +270,7 @@ mod tests {
         match fold_constants(expr) {
             Expr::Op2(BinaryOp::Mul, l, r, _) => {
                 assert!(matches!(*l, Expr::Const(v, _) if v == 6.0));
-                assert!(matches!(*r, Expr::Var(0, _)));
+                assert!(*r == var(0));
             }
             _ => panic!("expected Mul(Const(6), Var)"),
         }
@@ -285,7 +292,7 @@ mod tests {
             Box::new(var(2)),
             Loc::default(),
         );
-        assert!(matches!(fold_constants(expr), Expr::Var(1, _)));
+        assert_eq!(fold_constants(expr), var(1));
 
         let expr = Expr::If(
             Box::new(c(0.0)),
@@ -306,9 +313,9 @@ mod tests {
         );
         match fold_constants(expr) {
             Expr::If(cond, t, f, _) => {
-                assert!(matches!(*cond, Expr::Var(0, _)));
+                assert!(*cond == var(0));
                 assert!(matches!(*t, Expr::Const(v, _) if v == 2.0));
-                assert!(matches!(*f, Expr::Var(2, _)));
+                assert!(*f == var(2));
             }
             _ => panic!("If with dynamic condition must be preserved"),
         }
@@ -328,7 +335,7 @@ mod tests {
         match fold_constants(expr) {
             Expr::App(BuiltinFn::Step(a, b), _) => {
                 assert!(matches!(*a, Expr::Const(v, _) if v == 3.0));
-                assert!(matches!(*b, Expr::Var(0, _)));
+                assert!(*b == var(0));
             }
             _ => panic!("Step must be preserved with folded args"),
         }
@@ -336,17 +343,17 @@ mod tests {
 
     #[test]
     fn folds_inside_assignments_and_module_args() {
-        let expr = Expr::AssignCurr(7, Box::new(op2(BinaryOp::Mul, c(2.0), c(3.0))));
+        let expr = Expr::AssignCurr(vref(7), Box::new(op2(BinaryOp::Mul, c(2.0), c(3.0))));
         match fold_constants(expr) {
-            Expr::AssignCurr(7, rhs) => {
+            Expr::AssignCurr(dst, rhs) if dst == vref(7) => {
                 assert!(matches!(*rhs, Expr::Const(v, _) if v == 6.0));
             }
             _ => panic!("AssignCurr must be preserved"),
         }
 
-        let expr = Expr::AssignNext(3, Box::new(op2(BinaryOp::Add, c(1.0), c(1.0))));
+        let expr = Expr::AssignNext(vref(3), Box::new(op2(BinaryOp::Add, c(1.0), c(1.0))));
         match fold_constants(expr) {
-            Expr::AssignNext(3, rhs) => {
+            Expr::AssignNext(dst, rhs) if dst == vref(3) => {
                 assert!(matches!(*rhs, Expr::Const(v, _) if v == 2.0));
             }
             _ => panic!("AssignNext must be preserved"),
@@ -361,7 +368,7 @@ mod tests {
         match fold_constants(expr) {
             Expr::EvalModule(_, _, _, args) => {
                 assert!(matches!(args[0], Expr::Const(v, _) if v == 2.0));
-                assert!(matches!(args[1], Expr::Var(0, _)));
+                assert_eq!(args[1], var(0));
             }
             _ => panic!("EvalModule must be preserved"),
         }
@@ -370,7 +377,7 @@ mod tests {
     #[test]
     fn folds_subscript_indices() {
         let expr = Expr::Subscript(
-            0,
+            vref(0),
             vec![
                 SubscriptIndex::Single(op2(BinaryOp::Add, c(1.0), c(1.0))),
                 SubscriptIndex::Range(c(1.0), op2(BinaryOp::Add, c(1.0), c(2.0))),
@@ -379,7 +386,7 @@ mod tests {
             Loc::default(),
         );
         match fold_constants(expr) {
-            Expr::Subscript(0, indices, _, _) => {
+            Expr::Subscript(base, indices, _, _) if base == vref(0) => {
                 assert!(
                     matches!(&indices[0], SubscriptIndex::Single(Expr::Const(v, _)) if *v == 2.0)
                 );

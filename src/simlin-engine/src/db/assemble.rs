@@ -8,8 +8,8 @@
 //! Holds the table/metadata extraction helpers
 //! (`extract_tables_from_source_var`, `build_module_inputs`,
 //! `build_stub_variable`, `build_submodel_metadata`), the per-variable
-//! compile+symbolize tail (`compile_phase_to_per_var_bytecodes` and the
-//! `VarFragmentResult`/`PerVarOffsetMap` values), the production
+//! emission tail (`compile_phase_to_per_var_bytecodes` and the
+//! `VarFragmentResult`/`PerVarSizes` values), the production
 //! element-graph source `var_phase_symbolic_fragment_prod`, the resolved
 //! recurrence-SCC interleaver (`segment_member_by_element` /
 //! `combine_scc_fragment`), the salsa-tracked `assemble_module` /
@@ -229,7 +229,7 @@ pub(crate) fn build_submodel_metadata<'arena>(
         sub_metadata.insert(
             var_ident.clone(),
             crate::compiler::VariableMetadata {
-                offset,
+                offset: Some(offset),
                 size,
                 var: stub,
             },
@@ -306,7 +306,7 @@ pub(crate) fn build_submodel_metadata<'arena>(
             sub_metadata.insert(
                 var_ident,
                 crate::compiler::VariableMetadata {
-                    offset: entry.offset,
+                    offset: Some(entry.offset),
                     size: entry.size,
                     var: stub,
                 },
@@ -360,7 +360,7 @@ pub(crate) fn build_submodel_metadata<'arena>(
             sub_metadata.insert(
                 var_ident,
                 crate::compiler::VariableMetadata {
-                    offset: entry.offset,
+                    offset: Some(entry.offset),
                     size: entry.size,
                     var: stub,
                 },
@@ -404,30 +404,30 @@ pub(crate) struct VarFragmentResult {
     pub flow_invariance: Option<FlowInvarianceSupport>,
 }
 
-/// Walk `exprs` and push every base slot offset referenced by a `Var`,
+/// Walk `exprs` and push the NAME of every variable referenced by a `Var`,
 /// `Subscript`, or `StaticSubscript` node into `out`.
 ///
-/// This is NOT the same as calling `exprs_are_invariant`: it collects offsets
+/// This is NOT the same as calling `exprs_are_invariant`: it collects names
 /// without returning a verdict. It is used by `compute_flow_invariance_support`
-/// to determine which mini-layout entries are actually referenced in the *flow*
-/// expression (as opposed to the init expression, which also contributes to
-/// the mini-layout but must not pollute the dep_names set).
+/// to determine which variables are actually referenced in the *flow*
+/// expression (as opposed to the init expression, which must not pollute the
+/// dep_names set).
 ///
 /// The walk is exhaustive over every `Expr`/`BuiltinFn` variant.
-fn collect_expr_offsets(exprs: &[crate::compiler::Expr], out: &mut HashSet<usize>) {
+fn collect_expr_refs(exprs: &[crate::compiler::Expr], out: &mut HashSet<Ident<Canonical>>) {
     use crate::builtins::BuiltinFn;
     use crate::compiler::Expr;
     use crate::compiler::expr::SubscriptIndex;
 
-    fn walk(expr: &Expr, out: &mut HashSet<usize>) {
+    fn walk(expr: &Expr, out: &mut HashSet<Ident<Canonical>>) {
         match expr {
-            // Leaf: referenced slot.
-            Expr::Var(off, _)
-            | Expr::Subscript(off, _, _, _)
-            | Expr::StaticSubscript(off, _, _) => {
-                out.insert(*off);
+            // Leaf: referenced variable.
+            Expr::Var(var, _)
+            | Expr::Subscript(var, _, _, _)
+            | Expr::StaticSubscript(var, _, _) => {
+                out.insert(var.name.clone());
                 // For Subscript, also walk the index expressions (they may
-                // reference other slots).
+                // reference other variables).
                 if let Expr::Subscript(_, indices, _, _) = expr {
                     for idx in indices {
                         match idx {
@@ -592,24 +592,21 @@ fn collect_expr_offsets(exprs: &[crate::compiler::Expr], out: &mut HashSet<usize
 /// expression can make it `false`).
 ///
 /// `dep_names` is determined by walking the *flow* expression (`flow_var.ast`)
-/// to collect every slot offset actually referenced there, then reverse-mapping
-/// each offset through the mini-layout to the owning variable name. This is
-/// precise: it considers only flow-expression references, not init-only deps
-/// that happen to share the same mini-layout but are never read at dt time.
-/// Using all mini-layout keys would over-approximate: a variable `v` with `y =
-/// INIT(k)` in its init equation would include `k` in dep_names even though `k`
-/// does not appear in `v`'s flow expression, causing `k` being variant to
-/// incorrectly classify `v` as variant too.
+/// and reading the owning variable's name off every reference. This is precise:
+/// it considers only flow-expression references, not init-only deps that were
+/// never read at dt time. Using the fragment's whole dependency set would
+/// over-approximate: a variable `v` with `y = INIT(k)` in its init equation
+/// would include `k` in dep_names even though `k` does not appear in `v`'s flow
+/// expression, causing `k` being variant to incorrectly classify `v` as variant
+/// too.
 ///
 /// Returns `None` if `flow_var` is an `Err` (noninitial lowering failed) or
 /// the expression list is empty.
 pub(crate) fn compute_flow_invariance_support(
     flow_var: &Result<crate::compiler::Var, crate::common::Error>,
-    offsets: &PerVarOffsetMap,
-    model_name_ident: &Ident<Canonical>,
     var_ident_canonical: &Ident<Canonical>,
 ) -> Option<FlowInvarianceSupport> {
-    use crate::compiler::invariance::{OffsetClass, exprs_are_invariant};
+    use crate::compiler::invariance::{RefClass, exprs_are_invariant};
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
@@ -623,59 +620,27 @@ pub(crate) fn compute_flow_invariance_support(
 
     // Structural purity check: does the expression contain any variant
     // builtins (TIME, PULSE, RAMP, STEP, PREVIOUS, EvalModule, ModuleInput)?
-    // All offset lookups return Invariant so only the builtin arms matter.
-    let locally_pure = exprs_are_invariant(&flow_var.ast, &|_off| OffsetClass::Invariant);
+    // All reference lookups return Invariant so only the builtin arms matter.
+    let locally_pure = exprs_are_invariant(&flow_var.ast, &|_var| RefClass::Invariant);
 
-    // Build the reverse-lookup: offset -> variable name from the mini-layout.
-    // An offset belongs to the variable whose range [base, base+size) contains it.
-    let model_offsets = offsets.get(model_name_ident);
+    // Walk the flow expression to collect only the variables actually
+    // referenced there (not init-only deps).
+    //
+    // This used to reverse-map each referenced slot offset through the
+    // fragment's private offset layout, with a `debug_assert!` guarding the case
+    // where an offset resolved to no owner -- a silently dropped dependency
+    // would be INVISIBLE to the invariance fixpoint, the over-classification
+    // direction. Reading the name off the reference removes the failure mode
+    // rather than guarding it: there is no lookup left to fail.
+    let mut referenced: HashSet<Ident<Canonical>> = HashSet::new();
+    collect_expr_refs(&flow_var.ast, &mut referenced);
 
-    // Walk the flow expression to collect only the offsets actually referenced
-    // there (not init-only deps that also appear in the mini-layout).
-    let mut referenced_offsets: HashSet<usize> = HashSet::new();
-    collect_expr_offsets(&flow_var.ast, &mut referenced_offsets);
-
-    // Resolve each referenced offset to its owning variable name, excluding the
-    // variable itself (its own slot is offset 0 in the mini-layout, never a dep).
-    let var_name_str = var_ident_canonical.as_str();
-    let dep_names: BTreeSet<String> = match model_offsets {
-        None => BTreeSet::new(),
-        Some(mo) => {
-            // Build an (offset, name) list from the mini-layout for range lookup.
-            let ranges: Vec<(&Ident<Canonical>, usize, usize)> = mo
-                .iter()
-                .map(|(name, &(base, size))| (name, base, size))
-                .collect();
-
-            referenced_offsets
-                .iter()
-                .filter_map(|&off| {
-                    // Find the mini-layout entry whose [base, base+size) contains
-                    // this offset.
-                    let owner = ranges
-                        .iter()
-                        .find(|(_, base, size)| off >= *base && off < *base + *size)
-                        .map(|(name, _, _)| name.as_str());
-                    // The mini-layout is contiguous over [0, total) and the time
-                    // globals lower via LoadGlobalVar/Dt/App (never Expr::Var),
-                    // so every flow-referenced offset must resolve to an owner.
-                    // A silently dropped offset would make that dependency
-                    // INVISIBLE to the invariance fixpoint -- the
-                    // over-classification direction (stale values once B2 skips
-                    // re-evaluating the invariant prefix) -- so be loud in debug
-                    // builds; the end-to-end bit-constancy oracle is the
-                    // release-build backstop.
-                    debug_assert!(
-                        owner.is_some(),
-                        "flow-referenced offset {off} of '{var_name_str}' resolves to no mini-layout owner"
-                    );
-                    owner
-                        .filter(|name| *name != var_name_str)
-                        .map(|name| name.to_string())
-                })
-                .collect()
-        }
-    };
+    // The variable's own references are self-references, never dependencies.
+    let dep_names: BTreeSet<String> = referenced
+        .iter()
+        .filter(|name| *name != var_ident_canonical)
+        .map(|name| name.as_str().to_string())
+        .collect();
 
     Some(FlowInvarianceSupport {
         locally_pure,
@@ -683,12 +648,16 @@ pub(crate) fn compute_flow_invariance_support(
     })
 }
 
-/// `model_name -> (var_name -> (offset, size))`: the per-variable mini-
-/// layout offset map `lower_var_fragment` produces and the per-phase
-/// emission context (`compiler::ModuleCtx`) borrows. This IS
-/// `compiler::VariableOffsetMap` -- the fragment-side name for the same
-/// type, kept so the db-side signatures read in fragment terms.
-pub(crate) type PerVarOffsetMap = crate::compiler::VariableOffsetMap;
+/// `var_name -> slot count`: the per-fragment size table `lower_var_fragment`
+/// produces and the per-phase emission context (`compiler::ModuleCtx`) borrows.
+/// This IS `compiler::VarSizes` -- the fragment-side name for the same type,
+/// kept so the db-side signatures read in fragment terms.
+///
+/// Its predecessor carried `(offset, size)` per variable over a private
+/// per-fragment layout that existed only so symbolization could undo it. There
+/// are no fragment-local offsets any more: emission reads names, and the only
+/// surviving question is how big a variable is.
+pub(crate) type PerVarSizes = crate::compiler::VarSizes;
 
 /// Flatten a phase's temp-id -> size map into the `(temp_id, size)` vector
 /// `PerVarBytecodes::temp_sizes` carries, **ordered by temp id**.
@@ -722,10 +691,10 @@ pub(crate) fn temp_sizes_by_id(temp_sizes_map: &HashMap<u32, usize>) -> Vec<(u32
 /// the phase's own lowered expressions (and the temp sizes derived from
 /// them, which that function fills in).
 ///
-/// Every field is a borrow with the caller's lifetime -- the mini-layout,
-/// the fragment's tables, and the salsa-cached project-global dimension
-/// context and converted dimensions are read in place, never copied into a
-/// per-fragment container.
+/// Every field is a borrow with the caller's lifetime -- the fragment's size
+/// table and tables, and the salsa-cached project-global dimension context and
+/// converted dimensions, are read in place, never copied into a per-fragment
+/// container.
 ///
 /// The empty `runlist_flows`/`temp_sizes` placeholders exist in exactly one
 /// place, here, so no emission site can forget which runlist a fragment's
@@ -733,8 +702,7 @@ pub(crate) fn temp_sizes_by_id(temp_sizes_map: &HashMap<u32, usize>) -> Vec<(u32
 pub(crate) fn fragment_emit_ctx<'a>(
     model_name: &'a Ident<Canonical>,
     inputs: &'a BTreeSet<Ident<Canonical>>,
-    n_slots: usize,
-    offsets: &'a PerVarOffsetMap,
+    var_sizes: &'a PerVarSizes,
     tables: &'a HashMap<Ident<Canonical>, Vec<crate::compiler::Table>>,
     dimensions: &'a [crate::dimensions::Dimension],
     dimensions_ctx: &'a crate::dimensions::DimensionsContext,
@@ -742,20 +710,18 @@ pub(crate) fn fragment_emit_ctx<'a>(
     crate::compiler::ModuleCtx {
         ident: model_name,
         inputs,
-        n_slots,
         temp_sizes: &[],
         runlist_initials_by_var: &[],
         runlist_flows: &[],
         runlist_stocks: &[],
-        offsets,
+        var_sizes,
         tables,
         dimensions,
         dimensions_ctx,
     }
 }
 
-/// Compile one phase's lowered `Vec<Expr>` for a single variable through
-/// its own correct mini-context and symbolize the result into a
+/// Compile one phase's lowered `Vec<Expr>` for a single variable into a
 /// layout-independent `PerVarBytecodes`.
 ///
 /// **This is the single fragment emission entry point** (GH #964's "explicit,
@@ -773,17 +739,17 @@ pub(crate) fn fragment_emit_ctx<'a>(
 /// `base` is the phase-INVARIANT half of the emission context, built once
 /// per variable by the caller: its `runlist_flows`/`temp_sizes` are ignored
 /// (this function fills both in per phase), and everything else -- the
-/// mini-layout `offsets`, the fragment's `tables`, `n_slots`, the
-/// project-global `dimensions`/`dimensions_ctx`, and the module-input set --
-/// is borrowed for the call and never cloned. `rmap` inverts the same
-/// mini-layout `base.offsets` describes, so every concrete offset the
-/// emission produces maps back to a `SymVarRef`.
+/// fragment's `var_sizes` and `tables`, the project-global
+/// `dimensions`/`dimensions_ctx`, and the module-input set -- is borrowed for
+/// the call and never cloned.
 ///
-/// Returns `None` (loud-safe, never panics) when `exprs` is empty, codegen
-/// fails, or any symbolization step fails.
+/// What comes back is codegen's output verbatim: it is already symbolic, so
+/// there is nothing between emission and the salsa-cached fragment.
+///
+/// Returns `None` (loud-safe, never panics) when `exprs` is empty or codegen
+/// fails.
 pub(crate) fn compile_phase_to_per_var_bytecodes(
     base: &crate::compiler::ModuleCtx<'_>,
-    rmap: &crate::compiler::symbolic::ReverseOffsetMap,
     exprs: &[crate::compiler::Expr],
 ) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
     use crate::compiler::symbolic::PerVarBytecodes;
@@ -813,50 +779,24 @@ pub(crate) fn compile_phase_to_per_var_bytecodes(
         ..*base
     };
 
-    match emit_ctx.compile() {
-        Ok(compiled) => {
-            // Symbolize the flows bytecode (we put everything in flows)
-            let sym_bc =
-                crate::compiler::symbolic::symbolize_bytecode(&compiled.compiled_flows, rmap)
-                    .ok()?;
+    let compiled = emit_ctx.compile().ok()?;
 
-            let ctx = &*compiled.context;
-            let sym_views: Vec<_> = ctx
-                .static_views
-                .iter()
-                .map(|sv| crate::compiler::symbolic::symbolize_static_view(sv, rmap))
-                .collect::<Result<Vec<_>, _>>()
-                .ok()?;
-            let sym_mods: Vec<_> = ctx
-                .modules
-                .iter()
-                .map(|md| crate::compiler::symbolic::symbolize_module_decl(md, rmap))
-                .collect::<Result<Vec<_>, _>>()
-                .ok()?;
-
-            let temp_sizes_vec = temp_sizes_by_id(&temp_sizes_map);
-
-            let dim_lists: Vec<Vec<u16>> = ctx
-                .dim_lists
-                .iter()
-                .map(|(n, arr)| arr[..(*n as usize)].to_vec())
-                .collect();
-
-            Some(PerVarBytecodes {
-                symbolic: sym_bc,
-                graphical_functions: ctx.graphical_functions.clone(),
-                module_decls: sym_mods,
-                static_views: sym_views,
-                temp_sizes: temp_sizes_vec,
-                dim_lists,
-            })
-        }
-        Err(_) => None,
-    }
+    Some(PerVarBytecodes {
+        symbolic: compiled.compiled_flows,
+        graphical_functions: compiled.graphical_functions,
+        module_decls: compiled.module_decls,
+        static_views: compiled.static_views,
+        temp_sizes: temp_sizes_by_id(&temp_sizes_map),
+        dim_lists: compiled
+            .dim_lists
+            .iter()
+            .map(|(n, arr)| arr[..(*n as usize)].to_vec())
+            .collect(),
+    })
 }
 
 /// A variable's *symbolic* `PerVarBytecodes` for a phase, sourced through
-/// the exact production compile+symbolize path (`lower_var_fragment` +
+/// the exact production lowering + emission path (`lower_var_fragment` +
 /// `compile_phase_to_per_var_bytecodes`), never a re-derivation.
 ///
 /// This is the cross-member-comparable substrate the element-cycle SCC
@@ -893,7 +833,7 @@ pub(crate) fn compile_phase_to_per_var_bytecodes(
 /// A synthetic helper (`$\u{205A}` prefix, absent from `model.variables`)
 /// that lands in a recurrence SCC is **parent-sourced**: its symbolic
 /// `PerVarBytecodes` is the parent variable's `implicit_vars[index]`
-/// compiled+symbolized through the shared per-phase relation
+/// compiled through the shared per-phase relation
 /// `compile_implicit_var_phase_bytecodes` (the same chain
 /// `compile_implicit_var_fragment` runs), so the element-graph builder
 /// consumes it exactly like a real member (element-cycle Phase 3 Task 2 /
@@ -910,8 +850,7 @@ pub(crate) fn compile_phase_to_per_var_bytecodes(
 ///   explicit `return None`;
 /// - the requested phase's `Var::new` errored (`phase_var.ok()?`);
 /// - any `compile_phase_to_per_var_bytecodes` failure (empty exprs, the
-///   minimal `Module::compile()`, or any `symbolize_*` step) -- that
-///   function is itself total-and-`None`-on-failure.
+///   codegen) -- that function is itself total-and-`None`-on-failure.
 ///
 /// `None` propagates loud-safe and all-or-nothing: any in-SCC node that
 /// cannot be element-sourced makes `symbolic_phase_element_order` return
@@ -957,11 +896,11 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
     // (element-cycle Phase 3 Task 2 / AC3.1). A synthetic helper that
     // lands in a recurrence SCC has no `SourceVariable` but DOES resolve
     // in `model_implicit_var_info`; its symbolic `PerVarBytecodes` is the
-    // parent variable's `implicit_vars[index]` compiled+symbolized through
+    // parent variable's `implicit_vars[index]` compiled through
     // the SAME shared per-phase relation the production per-variable
     // assembly uses (`compile_implicit_var_phase_bytecodes` -- the exact
     // `parent → parsed.implicit_vars[i] → parse_var → lower_variable →
-    // compile → symbolize` chain `compile_implicit_var_fragment` runs), so
+    // compile` chain `compile_implicit_var_fragment` runs), so
     // the element-graph builder consumes it exactly like a real member
     // (same layout-independent `SymVarRef` form). The element-cycle SCC
     // identification uses the default no-module-input wiring, so source the
@@ -1003,15 +942,13 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
         &inputs,
     );
 
-    let (per_phase_lowered, tables, offsets, rmap, mini_offset) = match lowered {
+    let (per_phase_lowered, tables, var_sizes) = match lowered {
         LoweredVarFragment::Lowered {
             per_phase_lowered,
             tables,
-            offsets,
-            rmap,
-            mini_offset,
+            var_sizes,
             ..
-        } => (per_phase_lowered, tables, offsets, rmap, mini_offset),
+        } => (per_phase_lowered, tables, var_sizes),
         // The variable did not lower at all => `None` (loud-safe).
         LoweredVarFragment::Fatal { .. } => return None,
     };
@@ -1030,13 +967,12 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
     let base_ctx = fragment_emit_ctx(
         &model_name_ident,
         &inputs,
-        mini_offset,
-        &offsets,
+        &var_sizes,
         &tables,
         converted_dims,
         dim_context,
     );
-    compile_phase_to_per_var_bytecodes(&base_ctx, &rmap, &var.ast)
+    compile_phase_to_per_var_bytecodes(&base_ctx, &var.ast)
 }
 
 /// Segment one member's symbolic opcode stream into per-element slices,
@@ -1093,7 +1029,7 @@ fn segment_member_by_element(
             SymbolicOpcode::AssignCurr { var }
             | SymbolicOpcode::AssignConstCurr { var, .. }
             | SymbolicOpcode::BinOpAssignCurr { var, .. }
-                if var.name == member =>
+                if var.name.as_str() == member =>
             {
                 Some(var.element_offset)
             }
@@ -1147,7 +1083,7 @@ fn segment_member_by_element(
 /// `member_fragments` maps each SCC member's canonical name to its
 /// *symbolic* `PerVarBytecodes` for the SCC's phase (obtained by the
 /// caller via `var_phase_symbolic_fragment_prod(.., scc.phase)` -- the
-/// exact production compile+symbolize path, never a re-derivation). The
+/// exact production emission path, never a re-derivation). The
 /// result is a single fragment whose per-element writes appear in
 /// `scc.element_order`, with each write keeping its **original**
 /// `SymVarRef { name, element_offset }` (only segment ordering changes).
@@ -1463,7 +1399,7 @@ pub fn assemble_module<'db>(
     // one-contiguous-block-per-variable fragments -- the latter cannot
     // express the required cross-member per-element interleaving. Each
     // member's symbolic fragment is sourced via the EXACT production
-    // compile+symbolize path (`var_phase_symbolic_fragment_prod`, the
+    // emission path (`var_phase_symbolic_fragment_prod`, the
     // Task 4 accessor -- never a re-derivation), so every write keeps its
     // original `SymVarRef { name, element_offset }`; `resolve_module`
     // therefore maps each write to the same model slot the acyclic layout
@@ -1890,7 +1826,6 @@ pub fn assemble_module<'db>(
     // Build the symbolic compiled module
     let sym_module = SymbolicCompiledModule {
         ident: Ident::new(&model_name),
-        n_slots: layout.n_slots,
         compiled_initials,
         compiled_flows: flows_concat.bytecode,
         compiled_stocks: stocks_concat.bytecode,
@@ -1908,8 +1843,7 @@ pub fn assemble_module<'db>(
     };
 
     // Resolve symbolic -> concrete offsets. The CompiledModule stays a pure,
-    // symbolizable artifact (the symbolic roundtrip tests symbolize it again,
-    // and salsa caches it); the 3-address fusion (R2) is applied later, at
+    // salsa-cached artifact; the 3-address fusion (R2) is applied later, at
     // Vm::new, to the execution copy of the bytecode. The success payload is
     // wrapped in an `Arc` so this tracked fn's return type is `salsa::Update`
     // and salsa's clone-out is a refcount bump (the inner bytecode is large).

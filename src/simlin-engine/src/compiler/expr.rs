@@ -10,6 +10,90 @@ use crate::sim_err;
 
 use super::dimensions::UnaryOp;
 
+/// A reference to one slot of a model variable, **by name**.
+///
+/// This is the compiler's only variable-address representation. Lowering
+/// produces it, codegen emits it into `symbolic::SymbolicOpcode` /
+/// `SymbolicStaticView` / `SymbolicModuleDecl` operands unchanged, and
+/// `symbolic::resolve_module` turns it into a concrete slot exactly once, at
+/// assembly, against the model's final `VariableLayout`. Nothing in between
+/// needs to know where the variable lives, which is what lets one salsa cache
+/// entry per variable serve both the diagnostic pass and assembly and survive
+/// unrelated variables being added, removed, or renamed.
+///
+/// `name` is the canonical name of the variable that owns the slot **in the
+/// model being compiled**. A cross-module reference (`m·x`) resolves to the
+/// *module* variable `m` with `element_offset` indexing into that module
+/// instance's slot block, because the enclosing model's layout has one entry
+/// for `m` spanning the whole sub-model and none for `m·x`. That is the one
+/// place a sub-model's own (already fixed) layout is consulted during
+/// lowering; see `Context::submodel_offset_within`.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct VarRef {
+    /// Canonical name of the variable that owns the referenced slot.
+    pub name: Ident<Canonical>,
+    /// Offset of the slot within that variable's storage: 0 for a scalar,
+    /// `0..size` for an array element or a slot inside a module instance.
+    pub element_offset: usize,
+}
+
+// A `VarRef` rides on `PerVarBytecodes`, whose `Debug` is unconditional (the
+// fragment characterization goldens and the salsa artifacts print it), so this
+// cannot hang off the optional `debug-derive` feature the way `Expr` does.
+#[cfg(not(feature = "debug-derive"))]
+impl std::fmt::Debug for VarRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self}")
+    }
+}
+
+/// `name@element` -- the spelling the fragment characterization goldens and the
+/// compiler's diagnostics both use for a reference.
+impl std::fmt::Display for VarRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}", self.name, self.element_offset)
+    }
+}
+
+impl VarRef {
+    /// A reference to the variable's first slot.
+    pub(crate) fn base(name: Ident<Canonical>) -> Self {
+        VarRef {
+            name,
+            element_offset: 0,
+        }
+    }
+
+    pub(crate) fn new(name: Ident<Canonical>, element_offset: usize) -> Self {
+        VarRef {
+            name,
+            element_offset,
+        }
+    }
+
+    /// The reference `delta` slots further into the same variable.
+    pub(crate) fn offset_by(&self, delta: usize) -> Self {
+        VarRef {
+            name: self.name.clone(),
+            element_offset: self.element_offset + delta,
+        }
+    }
+
+    /// Whether this reference is to the variable's *whole* storage, i.e. its
+    /// first slot.
+    ///
+    /// Several codegen/lowering lookups are only meaningful for a whole-variable
+    /// reference (the source extent of a VECTOR ELM MAP, the dimensions of a
+    /// transposed bare array, the identity of a lookup table). Those used to ask
+    /// "does any variable's storage *begin* at this offset?"; asking whether the
+    /// reference sits at its owner's base is the same question, and answers it
+    /// without a reverse scan.
+    pub(crate) fn is_whole_var(&self) -> bool {
+        self.element_offset == 0
+    }
+}
+
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
 pub struct Table {
@@ -61,12 +145,12 @@ impl SubscriptIndex {
 #[allow(dead_code)]
 pub enum Expr {
     Const(f64, Loc),
-    Var(usize, Loc), // offset
+    Var(VarRef, Loc),
     /// Dynamic subscript with possible range indices
-    /// (offset, subscript indices, dimension sizes, location)
-    Subscript(usize, Vec<SubscriptIndex>, Vec<usize>, Loc),
-    StaticSubscript(usize, ArrayView, Loc), // offset, precomputed view, location
-    TempArray(u32, ArrayView, Loc),         // temp id, view into temp array, location
+    /// (base reference, subscript indices, dimension sizes, location)
+    Subscript(VarRef, Vec<SubscriptIndex>, Vec<usize>, Loc),
+    StaticSubscript(VarRef, ArrayView, Loc), // base reference, precomputed view, location
+    TempArray(u32, ArrayView, Loc),          // temp id, view into temp array, location
     TempArrayElement(u32, ArrayView, usize, Loc), // temp id, view, element index, location
     Dt(Loc),
     App(BuiltinFn, Loc),
@@ -82,8 +166,8 @@ pub enum Expr {
     Op2(BinaryOp, Box<Expr>, Box<Expr>, Loc),
     Op1(UnaryOp, Box<Expr>, Loc),
     If(Box<Expr>, Box<Expr>, Box<Expr>, Loc),
-    AssignCurr(usize, Box<Expr>),
-    AssignNext(usize, Box<Expr>),
+    AssignCurr(VarRef, Box<Expr>),
+    AssignNext(VarRef, Box<Expr>),
     AssignTemp(u32, Box<Expr>, ArrayView), // temp id, expression to evaluate, view info
 }
 

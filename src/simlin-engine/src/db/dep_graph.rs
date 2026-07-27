@@ -777,17 +777,16 @@ enum SccVerdict {
 /// by the old `members.len() != 1` short-circuit). This builder instead
 /// consumes each member's *symbolic* `PerVarBytecodes`
 /// (`var_phase_symbolic_fragment_prod`, the exact production
-/// compile+symbolize path -- never a re-derivation), where every variable
+/// emission path -- never a re-derivation), where every variable
 /// reference is a layout-independent `SymVarRef { name, element_offset }`.
-/// `SymVarRef.name` is the canonical variable name (the mini-layout keys
-/// are `Ident<Canonical>` -- see `layout_from_metadata`), so it is
-/// directly comparable to an SCC member's `Ident<Canonical>`. The N=1 and
+/// `SymVarRef.name` IS an `Ident<Canonical>` -- codegen copies it straight
+/// out of the lowered expression -- so it is directly comparable to an SCC
+/// member's `Ident<Canonical>`. The N=1 and
 /// N>=2 cases are the same builder; N=1 is byte-identical to before (a
-/// single member's `AssignCurr(member_base+e, rhs)` symbolizes to one
-/// write op with `element_offset == e`, and the reads the prior
-/// `collect_read_slots` mapped to `(member, e')` via the mini-`rmap`
-/// become exactly the symbolic reads with `name == member,
-/// element_offset == e'`; same `element_node_key`, same
+/// single member's per-element write emits one write op with
+/// `element_offset == e`, and the reads the prior `collect_read_slots`
+/// mapped to `(member, e')` are exactly the symbolic reads with
+/// `name == member, element_offset == e'`; same `element_node_key`, same
 /// `scc_components`, same sorted Kahn => same `element_order`).
 ///
 /// The edges are the literal current-value data-flow reads of each
@@ -859,8 +858,7 @@ fn symbolic_phase_element_order(
 
     // The set of member canonical names, for the "is this read an in-SCC
     // member?" test. `SymVarRef.name` is the canonical variable name
-    // (mini-layout keys are `Ident<Canonical>`), so a member's
-    // `as_str()` compares directly.
+    // (an `Ident<Canonical>`), so a member's `as_str()` compares directly.
     let member_names: BTreeSet<&str> = members.iter().map(|m| m.as_str()).collect();
 
     // Build the induced element graph by segmenting each member's
@@ -886,7 +884,7 @@ fn symbolic_phase_element_order(
         // Reads accumulated since the previous per-element write of THIS
         // member, as (read-name, read-element) pairs. A read is an
         // in-SCC edge source only if its name is an SCC member.
-        let mut pending_reads: BTreeSet<(String, usize)> = BTreeSet::new();
+        let mut pending_reads: BTreeSet<(Ident<Canonical>, usize)> = BTreeSet::new();
         // True once at least one per-element write of this member has
         // been seen: a malformed fragment with no write for the member
         // means it is not element-sourceable in the simple per-element
@@ -902,7 +900,7 @@ fn symbolic_phase_element_order(
                 SymbolicOpcode::AssignCurr { var }
                 | SymbolicOpcode::AssignConstCurr { var, .. }
                 | SymbolicOpcode::BinOpAssignCurr { var, .. }
-                    if var.name == member_name =>
+                    if var.name.as_str() == member_name =>
                 {
                     saw_write = true;
                     let node = element_node_key(member_name, var.element_offset);
@@ -912,7 +910,7 @@ fn symbolic_phase_element_order(
                     let mut preds: BTreeSet<Ident<Canonical>> = BTreeSet::new();
                     for (rname, relem) in &pending_reads {
                         if member_names.contains(rname.as_str()) {
-                            preds.insert(element_node_key(rname, *relem));
+                            preds.insert(element_node_key(rname.as_str(), *relem));
                         }
                     }
                     for pred in preds {

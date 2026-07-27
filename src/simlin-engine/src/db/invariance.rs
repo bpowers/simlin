@@ -16,17 +16,20 @@
 //!    run with an all-`Invariant` offset callback, so it flags only variant
 //!    *builtins* (TIME / PULSE / RAMP / STEP / PREVIOUS / EvalModule /
 //!    ModuleInput);
-//!  * `dep_names` -- the variables whose slots the FLOW exprs actually read
-//!    (`collect_expr_offsets` reverse-mapped through the mini-layout; `INIT()`
-//!    arguments are skipped because the init buffer is frozen).
+//!  * `dep_names` -- the variables the FLOW exprs actually read
+//!    (`collect_expr_refs`, reading the owning variable's name straight off
+//!    each reference; `INIT()` arguments are skipped because the init buffer
+//!    is frozen).
 //!
 //! This query is then just the fixpoint over the dependency graph:
 //! `invariant(v) iff locally_pure(v) && dep_names(v) ⊆ invariant-set`, so the
 //! whole burden of catching variant *dependencies* (stocks, dynamic auxes,
-//! module outputs) rides on `dep_names` -- which is why
-//! `compute_flow_invariance_support` is loud about unresolvable offsets and the
-//! end-to-end bit-constancy oracle (`tests/integration/simulate.rs` `oracle_*`)
-//! pins the production mechanism.
+//! module outputs) rides on `dep_names`. That set used to be recovered by
+//! reverse-mapping slot offsets through a private per-fragment layout, with a
+//! `debug_assert!` guarding the silent-drop case; references now carry the name
+//! and there is no lookup left to fail. The end-to-end bit-constancy oracle
+//! (`tests/integration/simulate.rs` `oracle_*`) still pins the production
+//! mechanism.
 //!
 //! The flow runlist (`ModelDepGraphResult.runlist_flows`) is a topological
 //! order: every non-stock/non-module dt dependency precedes its reader. So a
@@ -163,7 +166,7 @@ pub(crate) fn model_flows_invariant<'db>(
 mod tests {
     use super::*;
     use crate::compiler::Expr;
-    use crate::compiler::invariance::{OffsetClass, exprs_are_invariant};
+    use crate::compiler::invariance::{RefClass, exprs_are_invariant};
     use crate::datamodel;
     use crate::db::{ModuleInputSet, SimlinDb, sync_from_datamodel};
     use crate::test_common::TestProject;
@@ -182,22 +185,23 @@ mod tests {
 
     /// Compute the monolithic-path run-invariant flow var-name set by running
     /// the SAME shared classifier over the test-only `Module`'s model-global
-    /// lowered exprs. The offset callback resolves a model-global offset to its
-    /// owning variable via the `Module`'s metadata, then classifies the owner by
-    /// kind (stock/module -> variant) and by the accumulated invariant set,
-    /// mirroring the salsa callback. Restricted to scalar variables (no array
-    /// temps) so `Module::get_flow_exprs` captures each variable's full flow
-    /// statement list.
+    /// lowered exprs. The callback reads the owning variable's name straight off
+    /// the reference, then classifies it by kind (stock/module -> variant) and
+    /// by the accumulated invariant set, mirroring the salsa callback.
+    /// Restricted to scalar variables (no array temps) so
+    /// `Module::get_flow_exprs` captures each variable's full flow statement
+    /// list.
+    ///
+    /// Before references carried names this callback had to reverse-map a
+    /// model-global offset through the `Module`'s own offset map -- a second,
+    /// hand-written copy of the resolution the salsa side did differently. The
+    /// two callbacks are now the same lookup, which is why this differential
+    /// test is cheaper AND stronger than it was.
     fn monolithic_invariant_set(tp: &TestProject, runlist_order: &[String]) -> BTreeSet<String> {
         use crate::common::{Canonical, Ident};
 
         let module = tp.build_module().expect("build monolithic module");
         let model_ident = module.ident.clone();
-        let model_offsets = module
-            .offsets
-            .get(&model_ident)
-            .expect("model offsets")
-            .clone();
 
         // Stocks and modules in this model (by canonical name): a referenced
         // owner of these kinds is variant. We derive stock/module membership
@@ -235,28 +239,22 @@ mod tests {
                 continue;
             }
 
-            let classify_offset = |off: usize| -> OffsetClass {
-                let owner = model_offsets
-                    .iter()
-                    .find(|(_, (base, size))| off >= *base && off < *base + *size)
-                    .map(|(name, _)| name.as_str().to_string());
-                let Some(owner) = owner else {
-                    return OffsetClass::Variant;
-                };
-                if owner == *var_name {
-                    return OffsetClass::Invariant;
+            let classify_ref = |var: &crate::compiler::VarRef| -> RefClass {
+                let owner = var.name.as_str();
+                if owner == var_name.as_str() {
+                    return RefClass::Invariant;
                 }
-                if stock_or_module.contains(&owner) {
-                    return OffsetClass::Variant;
+                if stock_or_module.contains(owner) {
+                    return RefClass::Variant;
                 }
-                if invariant.contains(&owner) {
-                    OffsetClass::Invariant
+                if invariant.contains(owner) {
+                    RefClass::Invariant
                 } else {
-                    OffsetClass::Variant
+                    RefClass::Variant
                 }
             };
 
-            if exprs_are_invariant(&exprs, &classify_offset) {
+            if exprs_are_invariant(&exprs, &classify_ref) {
                 invariant.insert(var_name.clone());
             }
         }

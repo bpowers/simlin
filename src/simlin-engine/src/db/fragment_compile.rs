@@ -5,13 +5,13 @@
 //! Per-variable bytecode emission: the *emission half* of per-variable
 //! compilation. The *lowering half* (parse + lower to `Vec<Expr>`) lives in
 //! the sibling `db/var_fragment.rs` (`lower_var_fragment`); this module
-//! consumes that and emits + symbolizes the per-phase bytecode.
+//! consumes that and emits the per-phase symbolic bytecode.
 //!
 //! `compile_var_fragment` is the salsa-tracked per-variable fragment
 //! compiler for explicit variables. `compile_implicit_var_fragment` /
 //! `compile_implicit_var_phase_bytecodes` do the same for the implicit
 //! (SMOOTH/DELAY/TREND) helpers, sharing the `lower_implicit_var`
-//! parent->implicit->parse->lower prefix. The compile+symbolize tail and the
+//! parent->implicit->parse->lower prefix. The emission tail and the
 //! production element-graph source (`compile_phase_to_per_var_bytecodes`,
 //! `var_phase_symbolic_fragment_prod`) live in the sibling `db/assemble.rs`.
 
@@ -149,7 +149,7 @@ pub fn compile_var_fragment<'db>(
         &inputs,
     );
 
-    let (unit_diags, per_phase_lowered, tables, offsets, rmap, mini_offset) = match lowered {
+    let (unit_diags, per_phase_lowered, tables, var_sizes) = match lowered {
         LoweredVarFragment::Fatal {
             unit_diags,
             fatal_diags,
@@ -169,17 +169,8 @@ pub fn compile_var_fragment<'db>(
             unit_diags,
             per_phase_lowered,
             tables,
-            offsets,
-            rmap,
-            mini_offset,
-        } => (
-            unit_diags,
-            per_phase_lowered,
-            tables,
-            offsets,
-            rmap,
-            mini_offset,
-        ),
+            var_sizes,
+        } => (unit_diags, per_phase_lowered, tables, var_sizes),
     };
 
     // Malformed-unit diagnostics are non-fatal: record them and continue.
@@ -204,14 +195,13 @@ pub fn compile_var_fragment<'db>(
     let base_ctx = fragment_emit_ctx(
         &model_name_ident,
         &inputs,
-        mini_offset,
-        &offsets,
+        &var_sizes,
         &tables,
         converted_dims,
         dim_context,
     );
     let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
-        compile_phase_to_per_var_bytecodes(&base_ctx, &rmap, exprs)
+        compile_phase_to_per_var_bytecodes(&base_ctx, exprs)
     };
 
     // Accumulate a diagnostic when per-variable compilation (Var::new)
@@ -293,8 +283,6 @@ pub fn compile_var_fragment<'db>(
     let flow_invariance = if in_flows_runlist {
         crate::db::assemble::compute_flow_invariance_support(
             &per_phase_lowered.noninitial,
-            &offsets,
-            &model_name_ident,
             &var_ident_canonical,
         )
     } else {
@@ -546,7 +534,7 @@ pub(crate) fn compile_implicit_var_fragment(
     })
 }
 
-/// Build the mini-layout context for one implicit variable and compile a
+/// Build the minimal symbol table for one implicit variable and compile a
 /// single phase (`is_initial`) to symbolic `PerVarBytecodes`. NOT a tracked
 /// function -- the parent variable's parse result already provides salsa
 /// caching.
@@ -560,18 +548,17 @@ pub(crate) fn compile_implicit_var_fragment(
 /// the element-graph accessor's bytecode is byte-identical to the
 /// production fragment by construction (DRY -- "single shared relation,
 /// never re-derive"). The shared `parent → implicit → parse → lower`
-/// prefix is `lower_implicit_var`; the shared compile+symbolize tail is
+/// prefix is `lower_implicit_var`; the shared emission tail is
 /// `compile_phase_to_per_var_bytecodes` (the exact function the real-var
 /// arm of `var_phase_symbolic_fragment_prod` and `compile_var_fragment`
-/// use). The mini-layout/metadata/dep-collection glue between them is
-/// intrinsic to the implicit-var shape (the `meta.is_module` branch, the
-/// body-relative mini-layout, the dep-stub/sub-model collection) and is not
-/// separately extractable without restructuring this function.
+/// use). The metadata/dep-collection glue between them is intrinsic to the
+/// implicit-var shape (the `meta.is_module` branch, the dep-stub/sub-model
+/// collection) and is not separately extractable without restructuring this
+/// function.
 ///
 /// Loud-safe `None` (never panics): the shared prefix failed (absent
 /// implicit index / equation errors), a graphical-function table failed to
-/// build, the phase's `Var::new` errored, or `Module::compile()` /
-/// symbolization failed -- exactly the original closure's `None` arms.
+/// build, the phase's `Var::new` errored, or codegen failed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_implicit_var_phase_bytecodes(
     db: &dyn Db,
@@ -581,8 +568,6 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
     module_input_names: &[String],
     is_initial: bool,
 ) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
-    use crate::compiler::symbolic::{ReverseOffsetMap, VariableLayout};
-
     let module_ident_context =
         model_module_ident_context(db, model, project, module_input_names.to_vec());
 
@@ -617,15 +602,11 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
     // Arena for sub-model stub variables allocated by build_submodel_metadata
     let arena = bumpalo::Bump::new();
 
-    // The mini-layout is always body-relative (offset 0). The implicit
-    // globals (time/dt/initial_time/final_time) are NOT inserted: they
-    // lower to `LoadGlobalVar` at fixed absolute slots, never through this
-    // metadata/rmap, so the symbolic fragment is role-independent. The root
-    // +IMPLICIT_VAR_COUNT shift is applied later in `assemble_module` via
-    // `VariableLayout::root_shifted`.
+    // The minimal symbol table for this helper: itself plus its dependencies,
+    // carrying no offsets. See `lower_var_fragment` for why a fragment must not
+    // know where its own model's variables live.
     let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
         HashMap::new();
-    let mut mini_offset = 0;
 
     let project_models = project.models(db);
     let self_size = if meta.is_module {
@@ -642,19 +623,18 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
         // An *arrayed* implicit helper (the GH #541 bare-arrayed-PREVIOUS case)
         // occupies one slot per element; `meta.size` is its element count (1
         // for the scalar helpers that are every other implicit var). The
-        // mini-layout self-size MUST match the `compute_layout` allocation, or
-        // the helper's per-element writes spill into the next variable's slots.
+        // recorded size MUST match the `compute_layout` allocation, or the
+        // helper's per-element writes spill into the next variable's slots.
         meta.size
     };
     mini_metadata.insert(
         var_ident_canonical.clone(),
         crate::compiler::VariableMetadata {
-            offset: mini_offset,
+            offset: None,
             size: self_size,
             var: &lowered,
         },
     );
-    mini_offset += self_size;
 
     // Implicit vars' deps are always explicit vars in the same model (or other implicit vars)
     // Keep dependency context conservative for implicit vars as well: both
@@ -886,12 +866,11 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
             mini_metadata.insert(
                 dep_ident.clone(),
                 crate::compiler::VariableMetadata {
-                    offset: mini_offset,
+                    offset: None,
                     size: *dep_size,
                     var: dep_var,
                 },
             );
-            mini_offset += dep_size;
         }
     }
 
@@ -904,11 +883,6 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
     for sub_model in extra_submodels.values() {
         build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
     }
-
-    let mini_layout =
-        crate::compiler::symbolic::layout_from_metadata(&all_metadata, &model_name_ident)
-            .unwrap_or_else(|_| VariableLayout::new(HashMap::new(), 0));
-    let rmap = ReverseOffsetMap::from_layout(&mini_layout);
 
     let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
     {
@@ -980,28 +954,19 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
     )
     .ok()?;
 
-    // Offsets in the per-variable form the emission context borrows, built
-    // from the mini-layout `all_metadata`.
-    let offsets: PerVarOffsetMap = all_metadata
+    // Sizes in the per-variable form the emission context borrows.
+    let var_sizes: PerVarSizes = all_metadata[&model_name_ident]
         .iter()
-        .map(|(k, v)| {
-            (
-                k.clone(),
-                v.iter()
-                    .map(|(vk, vm)| (vk.clone(), (vm.offset, vm.size)))
-                    .collect(),
-            )
-        })
+        .map(|(k, vm)| (k.clone(), vm.size))
         .collect();
 
     let base_ctx = fragment_emit_ctx(
         &model_name_ident,
         &inputs,
-        mini_offset,
-        &offsets,
+        &var_sizes,
         &tables,
         converted_dims,
         dim_context,
     );
-    compile_phase_to_per_var_bytecodes(&base_ctx, &rmap, &var.ast)
+    compile_phase_to_per_var_bytecodes(&base_ctx, &var.ast)
 }

@@ -17,7 +17,7 @@ use crate::variable::Variable;
 use crate::{Error, sim_err};
 
 use super::dimensions::{UnaryOp, find_dimension_reordering, match_dimensions_with_mapping};
-use super::expr::{BuiltinFn, Expr, SubscriptIndex};
+use super::expr::{BuiltinFn, Expr, SubscriptIndex, VarRef};
 use super::subscript::{
     IndexOp, Subscript3Config, ViewBuildConfig, ViewBuildResult, build_view_from_ops,
     normalize_subscripts3,
@@ -26,7 +26,20 @@ use super::subscript::{
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy)]
 pub(crate) struct VariableMetadata<'a> {
-    pub(crate) offset: usize,
+    /// The variable's slot offset within **its own model's** layout.
+    ///
+    /// `None` means that layout has not been assigned yet, which is the normal
+    /// case for the model being compiled: the per-variable fragment path defers
+    /// its model's layout to assembly, so a fragment cannot know (and must not
+    /// depend on) where its own variables land.
+    ///
+    /// The only reader is `Context::submodel_offset_within`, and it only ever
+    /// walks *sub*-model entries: a cross-module reference `m·x` lowers to
+    /// `VarRef { name: m, element_offset: <x's offset inside the sub-model> }`,
+    /// and the sub-model's layout IS already fixed (`db::compute_layout`) --
+    /// the parent relocates the whole block via `m`'s own name. A `None` there
+    /// is a loud `DoesNotExist`, never a silent slot 0.
+    pub(crate) offset: Option<usize>,
     pub(crate) size: usize,
     pub(crate) var: &'a Variable,
 }
@@ -121,13 +134,18 @@ impl Context<'_> {
         )
     }
 
-    pub(super) fn get_offset(&self, ident: &Ident<Canonical>) -> Result<usize> {
-        self.get_submodel_offset(self.model_name, ident, false)
+    /// The reference `ident` denotes in the model being compiled, resolving an
+    /// arrayed variable's *implicit* subscripts (the active A2A element) to an
+    /// element offset.
+    pub(super) fn get_ref(&self, ident: &Ident<Canonical>) -> Result<VarRef> {
+        self.var_ref(ident, false)
     }
 
-    /// get_base_offset ignores arrays and should only be used from Var::new and Expr::Subscript
-    pub(super) fn get_base_offset(&self, ident: &Ident<Canonical>) -> Result<usize> {
-        self.get_submodel_offset(self.model_name, ident, true)
+    /// `get_base_ref` ignores arrays -- it yields the variable's first slot --
+    /// and should only be used from `Var::new` and `Expr::Subscript`, where the
+    /// element is selected by an explicit view or index expression instead.
+    pub(super) fn get_base_ref(&self, ident: &Ident<Canonical>) -> Result<VarRef> {
+        self.var_ref(ident, true)
     }
 
     pub(super) fn get_metadata(&self, ident: &Ident<Canonical>) -> Result<&VariableMetadata<'_>> {
@@ -402,7 +420,83 @@ impl Context<'_> {
         }
     }
 
-    fn get_submodel_offset(
+    /// Resolve `ident` to a layout-independent [`VarRef`] in the model being
+    /// compiled.
+    ///
+    /// A plain name resolves to itself, so the reference is just
+    /// `(ident, implicit element offset)` -- the model's own layout is never
+    /// consulted. A cross-module name `m·x` resolves to the *module* variable
+    /// `m`, because the enclosing model's layout has one entry spanning the
+    /// whole sub-model instance and none for `m·x`; the element offset is `x`'s
+    /// position inside that block, which the sub-model's already-fixed layout
+    /// supplies (see [`Self::submodel_offset_within`]).
+    fn var_ref(&self, ident: &Ident<Canonical>, ignore_arrays: bool) -> Result<VarRef> {
+        let metadata = self
+            .metadata
+            .get(self.model_name)
+            .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
+        let ident_str = ident.as_str();
+        if let Some(pos) = ident_str.find('\u{00B7}') {
+            let submodel_module_name = &ident_str[..pos];
+            let module_key = Ident::<Canonical>::from_str_unchecked(submodel_module_name);
+            // The module variable may have been deleted while dependent
+            // equations still reference it (e.g. `module.output`).
+            let model_modules = self
+                .module_models
+                .get(self.model_name)
+                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
+            let submodel_name = model_modules
+                .get(&module_key)
+                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
+            // The module variable must still be in scope; the sub-model's
+            // internal offset is what indexes into its block.
+            if !metadata.contains_key(&module_key) {
+                return Err(Error::new(
+                    ErrorKind::Simulation,
+                    ErrorCode::DoesNotExist,
+                    None,
+                ));
+            }
+            let submodel_var = &ident_str[pos + '\u{00B7}'.len_utf8()..];
+            let element_offset = self.submodel_offset_within(
+                submodel_name,
+                &Ident::<Canonical>::from_str_unchecked(submodel_var),
+                ignore_arrays,
+            )?;
+            Ok(VarRef::new(module_key, element_offset))
+        } else {
+            // The lookup is load-bearing even when `ignore_arrays` discards the
+            // metadata: a reference to a variable that is not in scope must be
+            // `DoesNotExist`, and naming it is no longer enough to prove it
+            // exists.
+            let var_meta = metadata
+                .get(ident)
+                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
+            if ignore_arrays {
+                return Ok(VarRef::base(ident.clone()));
+            }
+            match var_meta.var.get_dimensions() {
+                Some(dims) => {
+                    let off = self.get_implicit_subscript_off(dims, ident.as_str())?;
+                    Ok(VarRef::new(ident.clone(), off))
+                }
+                None => Ok(VarRef::base(ident.clone())),
+            }
+        }
+    }
+
+    /// The absolute slot offset of `ident` within the *sub*-model `model`'s own
+    /// layout.
+    ///
+    /// This is the one place a concrete offset is still computed during
+    /// lowering, and it is sound because a sub-model's layout is already fixed
+    /// (`db::compute_layout`) before any fragment of the parent is compiled: the
+    /// parent relocates the whole block through the module variable's name. A
+    /// metadata entry with no offset (the model being compiled, whose layout is
+    /// assigned at assembly) is a loud `DoesNotExist` rather than a silent 0 --
+    /// reaching one here would mean a model instantiated itself, which the
+    /// module-graph cycle gate rejects first.
+    fn submodel_offset_within(
         &self,
         model: &Ident<Canonical>,
         ident: &Ident<Canonical>,
@@ -416,8 +510,6 @@ impl Context<'_> {
         if let Some(pos) = ident_str.find('\u{00B7}') {
             let submodel_module_name = &ident_str[..pos];
             let module_key = Ident::<Canonical>::from_str_unchecked(submodel_module_name);
-            // The module variable may have been deleted while dependent
-            // equations still reference it (e.g. `module.output`).
             let model_modules = self
                 .module_models
                 .get(model)
@@ -428,29 +520,31 @@ impl Context<'_> {
             let submodel_var = &ident_str[pos + '\u{00B7}'.len_utf8()..];
             let submodel_off = metadata
                 .get(&module_key)
-                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?
-                .offset;
+                .and_then(|m| m.offset)
+                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
             Ok(submodel_off
-                + self.get_submodel_offset(
+                + self.submodel_offset_within(
                     submodel_name,
                     &Ident::<Canonical>::from_str_unchecked(submodel_var),
                     ignore_arrays,
                 )?)
-        } else if !ignore_arrays {
+        } else {
             let var_meta = metadata
                 .get(ident)
                 .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
-            if let Some(dims) = var_meta.var.get_dimensions() {
-                let off = self.get_implicit_subscript_off(dims, ident.as_str())?;
-                Ok(var_meta.offset + off)
-            } else {
-                Ok(var_meta.offset)
+            let base = var_meta
+                .offset
+                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
+            if ignore_arrays {
+                return Ok(base);
             }
-        } else {
-            metadata
-                .get(ident)
-                .map(|m| m.offset)
-                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))
+            match var_meta.var.get_dimensions() {
+                Some(dims) => {
+                    let off = self.get_implicit_subscript_off(dims, ident.as_str())?;
+                    Ok(base + off)
+                }
+                None => Ok(base),
+            }
         }
     }
 
@@ -848,10 +942,7 @@ impl Context<'_> {
 
         let loads: Result<Vec<Expr>> = flows
             .iter()
-            .map(|flow| {
-                self.get_offset(flow)
-                    .map(|off| Expr::Var(off, Loc::default()))
-            })
+            .map(|flow| self.get_ref(flow).map(|var| Expr::Var(var, Loc::default())))
             .collect();
         let mut loads = loads?.into_iter();
 
@@ -874,10 +965,10 @@ impl Context<'_> {
 
         // Check if this is a simple variable or static subscript that we can reorder directly
         match &expr {
-            Expr::Var(off, _) => {
+            Expr::Var(var, _) => {
                 // This is a bare array variable - create a StaticSubscript with reordered view
                 // First, get the variable metadata to get dimensions
-                if let Ok(metadata) = self.get_variable_metadata_by_offset(*off)
+                if let Some(metadata) = self.whole_var_metadata(var)
                     && let Some(dims) = metadata.var.get_dimensions()
                 {
                     let orig_dims: Vec<usize> = dims.iter().map(|d| d.len()).collect();
@@ -887,16 +978,16 @@ impl Context<'_> {
                     // Create a contiguous view with names and apply reordering
                     let view = ArrayView::contiguous_with_names(orig_dims, orig_dim_names);
                     return Ok(Expr::StaticSubscript(
-                        *off,
+                        var.clone(),
                         view.reorder_dimensions(&reordering),
                         loc,
                     ));
                 }
             }
-            Expr::StaticSubscript(off, view, _) => {
+            Expr::StaticSubscript(var, view, _) => {
                 // Apply reordering to existing view
                 return Ok(Expr::StaticSubscript(
-                    *off,
+                    var.clone(),
                     view.reorder_dimensions(&reordering),
                     loc,
                 ));
@@ -916,34 +1007,29 @@ impl Context<'_> {
         }
     }
 
-    /// Helper to get variable metadata by offset
-    fn get_variable_metadata_by_offset(&self, offset: usize) -> Result<&VariableMetadata<'_>> {
-        let metadata = self.metadata.get(self.model_name).ok_or_else(|| {
-            use crate::common::{Error, ErrorCode, ErrorKind};
-            Error {
-                kind: ErrorKind::Simulation,
-                code: ErrorCode::BadModelName,
-                details: Some("Model not found".to_string()),
-            }
-        })?;
-
-        // Find the variable with the matching offset
-        for (_, var_metadata) in metadata.iter() {
-            if var_metadata.offset == offset {
-                return Ok(var_metadata);
-            }
+    /// Metadata for a reference that addresses a variable's *whole* storage.
+    ///
+    /// `None` for a reference into the middle of a variable, which is the exact
+    /// answer the previous offset-scan gave ("no variable's storage begins at
+    /// this offset"): a mid-variable reference names an element, not the array,
+    /// so neither the array's dimensions nor its extent apply to it. A slot
+    /// inside a module instance is likewise mid-variable unless it happens to be
+    /// the instance's first slot, and there the metadata really is the module
+    /// variable's -- same as before.
+    fn whole_var_metadata(&self, var: &VarRef) -> Option<&VariableMetadata<'_>> {
+        if !var.is_whole_var() {
+            return None;
         }
-
-        sim_err!(DoesNotExist, "Variable not found by offset".to_string())
+        self.metadata.get(self.model_name)?.get(&var.name)
     }
 
-    /// Full element count of the variable whose storage *begins* at `base_off`
-    /// (the product of its declared dimensions; 1 for a scalar). Returns `None`
-    /// if no variable owns that exact base offset. This is the compile-time
-    /// twin of `codegen::full_source_len`, used by the GH #578 scalar-source
-    /// VECTOR ELM MAP fold to bound the per-element static read.
-    pub(super) fn full_var_len_for_base(&self, base_off: usize) -> Option<usize> {
-        let md = self.get_variable_metadata_by_offset(base_off).ok()?;
+    /// Full element count of the variable `var` addresses in whole (the product
+    /// of its declared dimensions; 1 for a scalar). `None` for a reference that
+    /// does not start at a variable's base. This is the compile-time twin of
+    /// `codegen::full_source_len`, used by the GH #578 scalar-source VECTOR ELM
+    /// MAP fold to bound the per-element static read.
+    pub(super) fn full_var_len_for_base(&self, base: &VarRef) -> Option<usize> {
+        let md = self.whole_var_metadata(base)?;
         Some(
             md.var
                 .get_dimensions()
@@ -952,7 +1038,7 @@ impl Context<'_> {
         )
     }
 
-    pub(super) fn build_stock_update_expr(&self, stock_off: usize, var: &Variable) -> Result<Expr> {
+    pub(super) fn build_stock_update_expr(&self, stock: &VarRef, var: &Variable) -> Result<Expr> {
         if let Variable::Stock {
             inflows, outflows, ..
         } = var
@@ -978,7 +1064,7 @@ impl Context<'_> {
 
             Ok(Expr::Op2(
                 BinaryOp::Add,
-                Box::new(Expr::Var(stock_off, Loc::default())),
+                Box::new(Expr::Var(stock.clone(), Loc::default())),
                 Box::new(dt_update),
                 Loc::default(),
             ))
@@ -1076,8 +1162,8 @@ impl Context<'_> {
         match expr {
             // Handle Expr3-specific variants directly
             Expr3::StaticSubscript(id, view, _, loc) => {
-                let off = self.get_base_offset(id)?;
-                Ok(Expr::StaticSubscript(off, view.clone(), *loc))
+                let base = self.get_base_ref(id)?;
+                Ok(Expr::StaticSubscript(base, view.clone(), *loc))
             }
 
             Expr3::TempArray(id, view, loc) => Ok(Expr::TempArray(*id, view.clone(), *loc)),
@@ -1180,8 +1266,8 @@ impl Context<'_> {
                 }
 
                 // Check if it's a regular variable
-                match self.get_offset(id) {
-                    Ok(off) => Ok(Expr::Var(off, *loc)),
+                match self.get_ref(id) {
+                    Ok(var) => Ok(Expr::Var(var, *loc)),
                     Err(err) => {
                         // If get_offset fails because it's an array without implicit subscripts,
                         // try to create a full array view
@@ -1190,7 +1276,7 @@ impl Context<'_> {
                             && let Some(source_dims) = metadata.var.get_dimensions()
                         {
                             // This is an array variable - check if we need dimension reordering
-                            let off = self.get_base_offset(id)?;
+                            let base = self.get_base_ref(id)?;
 
                             // Check if we're in an A2A context and need to reorder dimensions
                             if let Some(target_dims) = &self.active_dimension {
@@ -1246,7 +1332,7 @@ impl Context<'_> {
                                             dim_names: target_dim_names.clone(),
                                         };
 
-                                        return Ok(Expr::StaticSubscript(off, view, *loc));
+                                        return Ok(Expr::StaticSubscript(base, view, *loc));
                                     }
                                 }
                             }
@@ -1257,7 +1343,7 @@ impl Context<'_> {
                             let dim_names: Vec<String> =
                                 source_dims.iter().map(|d| d.name().to_string()).collect();
                             let view = ArrayView::contiguous_with_names(orig_dims, dim_names);
-                            return Ok(Expr::StaticSubscript(off, view, *loc));
+                            return Ok(Expr::StaticSubscript(base, view, *loc));
                         }
                         Err(err)
                     }
@@ -1266,7 +1352,7 @@ impl Context<'_> {
 
             Expr3::Subscript(id, indices, _bounds, loc) => {
                 // Handle subscript directly without converting to Expr2
-                let off = self.get_base_offset(id)?;
+                let base = self.get_base_ref(id)?;
                 let metadata = self.get_metadata(id)?;
                 let dims = metadata.var.get_dimensions().ok_or_else(|| {
                     Error::new(
@@ -1399,7 +1485,7 @@ impl Context<'_> {
                                 &orig_strides,
                                 &view_config,
                             )?;
-                            return Ok(Expr::StaticSubscript(off, preserved_result.view, *loc));
+                            return Ok(Expr::StaticSubscript(base, preserved_result.view, *loc));
                         } else {
                             if view.dims.is_empty() {
                                 // Inside an array-producing builtin a fully-
@@ -1420,9 +1506,9 @@ impl Context<'_> {
                                 if self.promote_active_dim_ref
                                     && operations.iter().any(|op| matches!(op, IndexOp::Single(_)))
                                 {
-                                    return Ok(Expr::StaticSubscript(off, view, *loc));
+                                    return Ok(Expr::StaticSubscript(base, view, *loc));
                                 }
-                                return Ok(Expr::Var(off + view.offset, *loc));
+                                return Ok(Expr::Var(base.offset_by(view.offset), *loc));
                             }
 
                             // For broadcasting: source array may have fewer dimensions than output.
@@ -1805,16 +1891,16 @@ impl Context<'_> {
                                 result_index += rel_offset * (*stride as usize);
                             }
 
-                            return Ok(Expr::Var(off + view.offset + result_index, *loc));
+                            return Ok(Expr::Var(base.offset_by(view.offset + result_index), *loc));
                         }
 
                         if !has_dim_positions {
-                            return Ok(Expr::StaticSubscript(off, view, *loc));
+                            return Ok(Expr::StaticSubscript(base, view, *loc));
                         }
                         // has_dim_positions is true - fall through to dynamic handling
                     } else {
                         // Not in A2A context - return StaticSubscript for the full view
-                        return Ok(Expr::StaticSubscript(off, view, *loc));
+                        return Ok(Expr::StaticSubscript(base, view, *loc));
                     }
                 }
 
@@ -1889,7 +1975,7 @@ impl Context<'_> {
 
                         // Load the element via dynamic single subscript
                         let load_elem = Expr::Subscript(
-                            off,
+                            base.clone(),
                             vec![SubscriptIndex::Single(computed_index)],
                             vec![dims[0].len()],
                             *loc,
@@ -1911,7 +1997,7 @@ impl Context<'_> {
                     .enumerate()
                     .map(|(i, arg)| self.lower_index_expr3(arg, id, i, dims, &orig_dims, *loc))
                     .collect();
-                Ok(Expr::Subscript(off, args?, orig_dims, *loc))
+                Ok(Expr::Subscript(base, args?, orig_dims, *loc))
             }
 
             Expr3::App(builtin, _bounds, loc) => {
@@ -1939,7 +2025,7 @@ impl Context<'_> {
                                 } else {
                                     // Not in A2A context - create a wildcard subscript to get the full array
                                     // then apply transpose
-                                    let off = self.get_base_offset(id)?;
+                                    let base = self.get_base_ref(id)?;
                                     let orig_dims: Vec<usize> =
                                         dims.iter().map(|d| d.len()).collect();
                                     let orig_dim_names: Vec<String> =
@@ -1957,7 +2043,7 @@ impl Context<'_> {
                                     };
 
                                     return Ok(Expr::StaticSubscript(
-                                        off,
+                                        base,
                                         view.transpose(),
                                         *var_loc,
                                     ));
@@ -1974,8 +2060,8 @@ impl Context<'_> {
                             let lowered = self.lower_from_expr3(inner)?;
                             // Transpose reverses the dimensions of an array
                             match lowered {
-                                Expr::StaticSubscript(off, view, expr_loc) => {
-                                    Ok(Expr::StaticSubscript(off, view.transpose(), expr_loc))
+                                Expr::StaticSubscript(base, view, expr_loc) => {
+                                    Ok(Expr::StaticSubscript(base, view.transpose(), expr_loc))
                                 }
                                 _ => {
                                     // For other expressions, wrap in a transpose operation
@@ -2337,7 +2423,7 @@ impl Context<'_> {
         // simultaneous allocation.  Any explicit subscripts that restricted
         // dimensions are intentionally overridden: the allocator requires
         // the full array regardless of the calling element's context.
-        let base = self.get_base_offset(var_ident)?;
+        let base = self.get_base_ref(var_ident)?;
         let dim_sizes: Vec<usize> = full_dims.iter().map(|d| d.len()).collect();
         let dim_names: Vec<String> = full_dims.iter().map(|d| d.name().to_string()).collect();
         let view = ArrayView::contiguous_with_names(dim_sizes, dim_names);
@@ -2675,7 +2761,7 @@ fn test_lower() {
     metadata.insert(
         Ident::new("true_input"),
         VariableMetadata {
-            offset: 7,
+            offset: Some(7),
             size: 1,
             var: &true_var,
         },
@@ -2683,7 +2769,7 @@ fn test_lower() {
     metadata.insert(
         Ident::new("false_input"),
         VariableMetadata {
-            offset: 8,
+            offset: Some(8),
             size: 1,
             var: &false_var,
         },
@@ -2708,8 +2794,14 @@ fn test_lower() {
     let expected = Expr::If(
         Box::new(Expr::Op2(
             BinaryOp::And,
-            Box::new(Expr::Var(7, Loc::default())),
-            Box::new(Expr::Var(8, Loc::default())),
+            Box::new(Expr::Var(
+                VarRef::base(Ident::new("true_input")),
+                Loc::default(),
+            )),
+            Box::new(Expr::Var(
+                VarRef::base(Ident::new("false_input")),
+                Loc::default(),
+            )),
             Loc::default(),
         )),
         Box::new(Expr::Const(1.0, Loc::default())),
@@ -2774,7 +2866,7 @@ fn test_lower() {
     metadata.insert(
         Ident::new("true_input"),
         VariableMetadata {
-            offset: 7,
+            offset: Some(7),
             size: 1,
             var: &true_var,
         },
@@ -2782,7 +2874,7 @@ fn test_lower() {
     metadata.insert(
         Ident::new("false_input"),
         VariableMetadata {
-            offset: 8,
+            offset: Some(8),
             size: 1,
             var: &false_var,
         },
@@ -2807,8 +2899,14 @@ fn test_lower() {
     let expected = Expr::If(
         Box::new(Expr::Op2(
             BinaryOp::Or,
-            Box::new(Expr::Var(7, Loc::default())),
-            Box::new(Expr::Var(8, Loc::default())),
+            Box::new(Expr::Var(
+                VarRef::base(Ident::new("true_input")),
+                Loc::default(),
+            )),
+            Box::new(Expr::Var(
+                VarRef::base(Ident::new("false_input")),
+                Loc::default(),
+            )),
             Loc::default(),
         )),
         Box::new(Expr::Const(1.0, Loc::default())),
@@ -2963,7 +3061,7 @@ fn test_positional_fallback_ignores_unrelated_mapping() {
     model_metadata.insert(
         Ident::new("source_var"),
         VariableMetadata {
-            offset: 10,
+            offset: Some(10),
             size: 2,
             var: &source_var,
         },
@@ -3008,7 +3106,7 @@ fn test_positional_fallback_ignores_unrelated_mapping() {
         .expect("positional fallback should resolve source[*] in target context");
     assert_eq!(
         lowered,
-        Expr::Var(11, Loc::default()),
+        Expr::Var(VarRef::new(Ident::new("source_var"), 1), Loc::default()),
         "target element t2 should select the second source element"
     );
 }

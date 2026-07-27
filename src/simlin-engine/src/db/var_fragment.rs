@@ -16,12 +16,21 @@
 //! `crate::db::compile_var_fragment` (in `db/fragment_compile.rs`), which
 //! consumes the owned, lowering-independent values this returns.
 //!
-//! The split exists for two reasons. First, the lowered `Vec<Expr>` is
-//! the natural reuse surface for read-only structural probes that need
-//! the engine's *own* per-variable production lowering without re-running
-//! it with a reconstructed context. Second, `Vec<Expr>` does not
-//! implement `salsa::Update`, so the lowering step must be a plain
-//! function while the caller remains the salsa-tracked query.
+//! The split exists because the lowered `Vec<Expr>` is the natural reuse
+//! surface for read-only structural probes that need the engine's *own*
+//! per-variable production lowering without re-running it with a
+//! reconstructed context.
+//!
+//! It used to have a second reason -- `Vec<Expr>` does not implement
+//! `salsa::Update`, so lowering had to be a plain function while the caller
+//! stayed the tracked query. That reason was really the *prohibition* on
+//! `Expr` deriving `Update` (an `Expr` was keyed to one model-global slot
+//! layout), and it is gone: since GH #964 an `Expr` references variables by
+//! name and carries no offsets, so it is as layout-independent as the
+//! symbolic bytecode it becomes. Nothing derives `Update` for it yet, but
+//! making this step a tracked query of its own is now a free choice rather
+//! than an unsound one. See the rustdoc on
+//! `model.rs::stage_types_and_error_implement_salsa_update`.
 //!
 //! Because a plain function cannot accumulate salsa diagnostics, the
 //! diagnostics this step would emit are returned **as data**
@@ -43,11 +52,11 @@
 //! The coupled cluster `{lowered, all_metadata, arena, ContextCore,
 //! Context, Var::new}` is internal to `lower_var_fragment` and drops
 //! together at return; only owned, lifetime-free values
-//! (`per_phase_lowered`, `tables`, `offsets`, `rmap`, `mini_offset`)
-//! cross back to the caller. The metadata map borrows the lowered
-//! variable (its self-entry is `&lowered`) and the sub-model stub arena,
-//! so it must not outlive them; the caller never sees it -- it consumes
-//! only the owned `offsets` projection (variable -> (offset, size)).
+//! (`per_phase_lowered`, `tables`, `var_sizes`) cross back to the caller.
+//! The metadata map borrows the lowered variable (its self-entry is
+//! `&lowered`) and the sub-model stub arena, so it must not outlive them;
+//! the caller never sees it -- it consumes only the owned `var_sizes`
+//! projection (variable -> slot count).
 //!
 //! This is a submodule of `db` (a child of `db.rs`, like `dep_graph` /
 //! `ltm_ir` / `macro_registry`) kept in its own file purely to keep `db.rs`
@@ -67,13 +76,6 @@ use crate::db::{
     parse_source_variable_with_module_context, variable_dimensions, variable_direct_dependencies,
     variable_size,
 };
-
-/// Per-model variable -> (offset, size) projection of the minimal
-/// metadata map. This is the owned, borrow-free view of the symbol
-/// layout the caller's `compile_phase` consumes (it never reads the
-/// borrowed variable, only the offset/size pair), mirroring the
-/// `VariableOffsetMap` shape used inside the compiler.
-type VarOffsets = HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, (usize, usize)>>;
 
 /// Result of `crate::compiler::Var::new` for each compilation phase.
 ///
@@ -112,9 +114,7 @@ pub(crate) enum LoweredVarFragment {
         unit_diags: Vec<Diagnostic>,
         per_phase_lowered: PerPhaseLowered,
         tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>>,
-        offsets: VarOffsets,
-        rmap: crate::compiler::symbolic::ReverseOffsetMap,
-        mini_offset: usize,
+        var_sizes: crate::db::assemble::PerVarSizes,
     },
 }
 
@@ -569,8 +569,6 @@ pub(crate) fn lower_var_fragment(
     module_models: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>>,
     inputs: &BTreeSet<Ident<Canonical>>,
 ) -> LoweredVarFragment {
-    use crate::compiler::symbolic::{ReverseOffsetMap, VariableLayout};
-
     let var_ident = var.ident(db).clone();
     let module_ident_context =
         model_module_ident_context(db, model, project, module_input_names.to_vec());
@@ -813,30 +811,28 @@ pub(crate) fn lower_var_fragment(
     // Arena for sub-model stub variables allocated by build_submodel_metadata
     let arena = bumpalo::Bump::new();
 
-    // Assign sequential offsets for the minimal context. The mini-layout is
-    // always body-relative (offset 0): the implicit globals
-    // (time/dt/initial_time/final_time) are NOT inserted because they lower
-    // to `LoadGlobalVar` at fixed absolute slots, never through this
-    // metadata/rmap. Symbolization round-trips each offset back to its
-    // `SymVarRef { name, element_offset }`, so the produced symbolic
-    // fragment is independent of where the body starts -- the root
-    // +IMPLICIT_VAR_COUNT shift is applied later, at assembly, via
-    // `VariableLayout::root_shifted`. This is what makes the diagnostic pass
-    // and assembly share one salsa cache entry per variable.
+    // The minimal symbol table for this variable: itself plus its
+    // dependencies, carrying no offsets at all. The variables of the model
+    // being compiled have no layout yet -- assembly assigns one -- and lowering
+    // does not need one, because every reference it emits names its variable.
+    // That is what makes a fragment position-independent, and hence what lets
+    // ONE salsa cache entry per variable serve both the diagnostic pass and
+    // assembly and survive unrelated variables coming and going. (The four
+    // implicit globals are absent for a separate reason: they lower to
+    // `LoadGlobalVar` at fixed absolute slots and never go through a symbol
+    // table at all.)
     let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
         HashMap::new();
-    let mut mini_offset = 0;
 
     // Add self
     mini_metadata.insert(
         var_ident_canonical.clone(),
         crate::compiler::VariableMetadata {
-            offset: mini_offset,
+            offset: None,
             size: var_size,
             var: &lowered,
         },
     );
-    mini_offset += var_size;
 
     // Walk dependencies + implicit modules (single shared walk). An
     // unknown dependency is fatal here, exactly as before.
@@ -862,12 +858,11 @@ pub(crate) fn lower_var_fragment(
             mini_metadata.insert(
                 dep_ident.clone(),
                 crate::compiler::VariableMetadata {
-                    offset: mini_offset,
+                    offset: None,
                     size: *dep_size,
                     var: dep_var,
                 },
             );
-            mini_offset += dep_size;
         }
     }
 
@@ -876,12 +871,11 @@ pub(crate) fn lower_var_fragment(
             mini_metadata.insert(
                 im_ident.clone(),
                 crate::compiler::VariableMetadata {
-                    offset: mini_offset,
+                    offset: None,
                     size: *im_size,
                     var: im_var,
                 },
             );
-            mini_offset += im_size;
         }
     }
 
@@ -896,12 +890,6 @@ pub(crate) fn lower_var_fragment(
     for (_sub_name, sub_model) in implicit_submodels.iter().chain(extra_submodels.iter()) {
         build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
     }
-
-    // Build the mini VariableLayout for symbolization
-    let mini_layout =
-        crate::compiler::symbolic::layout_from_metadata(&all_metadata, model_name_ident)
-            .unwrap_or_else(|_| VariableLayout::new(HashMap::new(), 0));
-    let rmap = ReverseOffsetMap::from_layout(&mini_layout);
 
     // Build tables for compilation -- propagate errors rather than
     // silently dropping them, which would shift table indices and cause
@@ -1013,20 +1001,15 @@ pub(crate) fn lower_var_fragment(
     let initial = build_var(true);
     let noninitial = build_var(false);
 
-    // Project the owned (offset, size) view out of the metadata map. The
-    // map borrows `lowered` and the arena and must stay internal; this
-    // projection reads only the owned offset/size pair, never the
-    // borrowed variable, so it crosses back to the caller freely.
-    let offsets: VarOffsets = all_metadata
+    // Project the owned size view out of this model's metadata. The map
+    // borrows `lowered` and the arena and must stay internal; this projection
+    // reads only the owned size, never the borrowed variable, so it crosses
+    // back to the caller freely. Sub-model entries are deliberately excluded:
+    // the only consumer is `codegen::full_source_len`, which asks about a
+    // variable of the model being compiled.
+    let var_sizes: crate::db::assemble::PerVarSizes = all_metadata[model_name_ident]
         .iter()
-        .map(|(k, v)| {
-            (
-                k.clone(),
-                v.iter()
-                    .map(|(vk, vm)| (vk.clone(), (vm.offset, vm.size)))
-                    .collect(),
-            )
-        })
+        .map(|(k, vm)| (k.clone(), vm.size))
         .collect();
 
     LoweredVarFragment::Lowered {
@@ -1036,8 +1019,6 @@ pub(crate) fn lower_var_fragment(
             noninitial,
         },
         tables,
-        offsets,
-        rmap,
-        mini_offset,
+        var_sizes,
     }
 }

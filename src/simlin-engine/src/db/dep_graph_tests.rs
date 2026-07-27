@@ -2333,7 +2333,7 @@ fn synthetic_helper_symbolic_fragment_is_parent_sourced() {
             SymbolicOpcode::AssignCurr { var }
                 | SymbolicOpcode::AssignConstCurr { var, .. }
                 | SymbolicOpcode::BinOpAssignCurr { var, .. }
-                if var.name == helper.as_str()
+                if var.name.as_str() == helper.as_str()
         )),
         "the parent-sourced helper fragment must write the helper's own \
          per-element value (so symbolic_phase_element_order can define its \

@@ -421,10 +421,16 @@ impl Stack {
     #[inline(always)]
     fn push(&mut self, value: f64) {
         debug_assert!(self.top < STACK_CAPACITY, "stack overflow");
-        // SAFETY: ByteCodeBuilder::finish() statically validates that the max
-        // stack depth of all compiled bytecode is < STACK_CAPACITY, so this
-        // bound cannot be exceeded at runtime. The debug_assert serves as a
-        // belt-and-suspenders check during development.
+        // SAFETY: compiler::symbolic::resolve_bytecode() statically validates
+        // that the max stack depth of all compiled bytecode is < STACK_CAPACITY,
+        // so this bound cannot be exceeded at runtime. That function is the ONLY
+        // place concrete bytecode is produced, so nothing can reach the VM
+        // without passing the check; it reports over-depth as a compile Err
+        // rather than aborting, so an unchecked program is not executed, it is
+        // rejected. (The check lived in the per-fragment `ByteCodeBuilder` until
+        // GH #964 made codegen emit symbolic bytecode; it did not go away with
+        // the builder.) The debug_assert serves as a belt-and-suspenders check
+        // during development.
         unsafe {
             *self.data.get_unchecked_mut(self.top) = value;
         }
@@ -434,10 +440,13 @@ impl Stack {
     fn pop(&mut self) -> f64 {
         debug_assert!(self.top > 0, "stack underflow");
         self.top -= 1;
-        // SAFETY: ByteCodeBuilder::finish() validates via checked_sub that no
-        // opcode sequence pops more values than have been pushed (i.e. the stack
-        // depth never goes negative). This guarantees top > 0 before every pop
-        // at runtime. The debug_assert is a belt-and-suspenders check.
+        // SAFETY: compiler::symbolic::resolve_bytecode() validates via
+        // ByteCode::max_stack_depth's checked_sub that no opcode sequence pops
+        // more values than have been pushed (i.e. the stack depth never goes
+        // negative). Producing concrete bytecode is the only way to reach the
+        // VM, so this guarantees top > 0 before every pop at runtime; an
+        // underflow is reported as a compile Err and the program never runs.
+        // The debug_assert is a belt-and-suspenders check.
         unsafe { *self.data.get_unchecked(self.top) }
     }
     #[inline(always)]

@@ -2238,14 +2238,24 @@ fn test_all_deps() {
 /// return). Keeping the derives is cheap and forward-compatible; the point of the
 /// test is that nothing else forces them to stay.
 ///
-/// The offset-keyed lowered-expression layer (`compiler::Expr` and everything
-/// downstream of variable layout) must NEVER derive `salsa::Update`, even
-/// though it mechanically could: those values are only meaningful relative to
-/// ONE model-global slot layout, so caching one and reusing it after a layout
-/// change would silently return a value keyed to a stale layout. `ModelStage0`
-/// and `ModelStage1` are keyed by canonical name and built before layout, and
-/// `Error` is layout-independent diagnostic data, so the derive is
-/// semantically sound only for these three.
+/// This used to carry a prohibition: `compiler::Expr` and "everything
+/// downstream of variable layout" must never derive `salsa::Update`, because
+/// those values were keyed to ONE model-global slot layout and caching one
+/// across a layout change would silently return a stale address. **That premise
+/// no longer holds.** Since GH #964's symbolic emission, a lowered `Expr`
+/// references variables by NAME (`compiler::VarRef`) and carries no offsets at
+/// all; addresses are assigned exactly once, at assembly, by
+/// `symbolic::resolve_module`. `Expr` is now as layout-independent as the two
+/// stages above it, and caching one across a layout change is sound -- which is
+/// the whole reason a per-variable fragment survives its neighbours moving.
+///
+/// The derive is still absent from `Expr`, and this test still does not assert
+/// it, because nothing needs it yet: making the *lowering* itself a tracked
+/// query is a separate change. The point is that the obstacle is gone, so
+/// whoever wants it does not have to relitigate a soundness argument.
+/// `ModelStage0` and `ModelStage1` are keyed by canonical name and built before
+/// layout, and `Error` is layout-independent diagnostic data, so the derive is
+/// sound for all three.
 #[test]
 fn stage_types_and_error_implement_salsa_update() {
     fn assert_update<T: salsa::Update>() {}
