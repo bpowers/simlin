@@ -271,9 +271,11 @@ pub(crate) fn build_var_info(
         // A `submodel·subvar` dependency whose `subvar` is a Stock is read
         // from the PRIOR timestep in the dt phase (a stock breaks the
         // dependency chain), so it must NOT impose a same-step ordering edge.
-        // This mirrors the legacy `model.rs::module_output_deps` gate
+        // It used to mirror the same rule in `model.rs::module_output_deps`
         // (`if ctx.is_initial || !output_var.is_stock()` -- the dt-phase case
-        // omits the module dependency for a stock output). It applies to EVERY
+        // omitted the module dependency for a stock output); that second
+        // dependency walk is gone (GH #568) and this is the only statement of
+        // the rule left. It applies to EVERY
         // reader, not just module variables: a NON-module variable that reads
         // a stock submodel output (e.g. `v = SMOOTH(...)·output`, the SMOOTH
         // output being an INTEG stock) must likewise drop the dt edge.

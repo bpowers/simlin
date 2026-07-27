@@ -137,11 +137,15 @@ def main() -> int:
 
     # All CLAUDE.md files
     for claude_md in repo_root.rglob("CLAUDE.md"):
-        # Skip generated/noise directories
+        # Skip generated/noise directories. `.claude-scratch` is git-excluded
+        # agent scratch space INSIDE the repo, so a working copy of a CLAUDE.md
+        # routinely lands there mid-task; walking it reports every relative path
+        # in that copy as broken (~150 errors) and fails the pre-commit hook on
+        # a tree that is actually fine.
         rel = claude_md.relative_to(repo_root)
         parts = rel.parts
         if any(p in ("node_modules", "target", "build", "lib", "lib.browser", "lib.module",
-                     "third_party")
+                     "third_party", ".claude-scratch")
                for p in parts):
             continue
         files_to_check.append(claude_md)

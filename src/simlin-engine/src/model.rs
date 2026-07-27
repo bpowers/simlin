@@ -14,24 +14,18 @@ use crate::dimensions::DimensionsContext;
 use crate::variable::{ModuleInput, Variable, identifier_set};
 use crate::{datamodel, eqn_err, model_err};
 
-use {
-    crate::common::topo_sort, crate::datamodel::Dimension, crate::var_eqn_err, crate::vm::StepPart,
-    std::result::Result as StdResult,
-};
-
 #[cfg(test)]
 use {
+    crate::datamodel::Dimension,
     crate::db,
     crate::units::Context,
     crate::variable::{parse_var, parse_var_with_module_context},
 };
 
 #[cfg(test)]
-use crate::testutils::{aux, flow, stock, x_aux, x_flow, x_model, x_module, x_stock};
+use crate::testutils::{x_aux, x_flow, x_model, x_module, x_stock};
 
 pub type ModuleInputSet = BTreeSet<Ident<Canonical>>;
-pub type DependencySet = BTreeSet<Ident<Canonical>>;
-pub type DependencyMap = HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>;
 
 pub type VariableStage0 = Variable<datamodel::ModuleReference, Expr0>;
 
@@ -106,6 +100,14 @@ pub struct ModelStage1 {
     pub macro_params: Vec<Ident<Canonical>>,
 }
 
+/// One module instantiation's evaluation order, as the monolithic
+/// `compiler::Module` consumes it.
+///
+/// The three runlists are copied verbatim out of the production dependency
+/// graph (`db::dep_graph::model_dependency_graph`); this type carries no
+/// dependency analysis of its own. It used to also carry that graph's
+/// `dt_dependencies` / `initial_dependencies` maps, whose only readers were the
+/// second, now-deleted dependency walk that produced them.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq)]
 pub struct ModuleStage2 {
@@ -113,414 +115,9 @@ pub struct ModuleStage2 {
     /// inputs is the set of variables overridden (provided as input) in this
     /// module instantiation.
     pub inputs: ModuleInputSet,
-    /// initial_dependencies contains variables dependencies needed to calculate the initial values of stocks
-    pub initial_dependencies: HashMap<Ident<Canonical>, DependencySet>,
-    /// dt_dependencies contains the variable dependencies used during normal "dt" iterations/calculations.
-    pub dt_dependencies: HashMap<Ident<Canonical>, DependencySet>,
     pub runlist_initials: Vec<Ident<Canonical>>,
     pub runlist_flows: Vec<Ident<Canonical>>,
     pub runlist_stocks: Vec<Ident<Canonical>>,
-}
-
-impl ModelStage1 {
-    pub(crate) fn dt_deps(
-        &self,
-        inputs: &ModuleInputSet,
-    ) -> Option<&HashMap<Ident<Canonical>, DependencySet>> {
-        self.instantiations
-            .as_ref()
-            .and_then(|instances| instances.get(inputs).map(|module| &module.dt_dependencies))
-    }
-
-    pub(crate) fn initial_deps(
-        &self,
-        inputs: &ModuleInputSet,
-    ) -> Option<&HashMap<Ident<Canonical>, DependencySet>> {
-        self.instantiations.as_ref().and_then(|instances| {
-            instances
-                .get(inputs)
-                .map(|module| &module.initial_dependencies)
-        })
-    }
-
-    /// Collect the set of variables referenced by INIT() calls across all
-    /// equations in this model. These variables must be included in the
-    /// Initials runlist so that INIT(x) can read x's initial value even
-    /// when x is not a stock or module.
-    ///
-    /// Parallel logic exists in db.rs variable_direct_dependencies_impl for
-    /// the salsa incremental path.
-    fn init_referenced_vars(&self) -> HashSet<Ident<Canonical>> {
-        self.variables
-            .values()
-            .filter_map(|v| v.ast())
-            .flat_map(|ast| crate::variable::classify_dependencies(ast, &[], None).init_referenced)
-            .map(|s| Ident::new(&s))
-            .collect()
-    }
-}
-
-fn module_deps(
-    ctx: &DepContext,
-    var: &Variable,
-    is_stock: &dyn Fn(&Ident<Canonical>) -> bool,
-) -> Vec<Ident<Canonical>> {
-    if let Variable::Module {
-        inputs, model_name, ..
-    } = var
-    {
-        if ctx.is_initial {
-            // A module may reference a model that is not present (an empty or
-            // dangling `model_name`: a freshly-drawn module or a reference to a
-            // deleted model). Skip its submodel deps gracefully rather than
-            // indexing `ctx.models` and panicking -- mirroring the guarded twin
-            // in `module_output_deps` (GH #806).
-            let Some(model) = ctx.models.get(model_name).copied() else {
-                return vec![];
-            };
-            // FIXME: do this higher up
-            let module_inputs = &inputs.iter().map(|mi| mi.dst.clone()).collect();
-            if let Some(initial_deps) = model.initial_deps(module_inputs) {
-                let mut stock_deps = HashSet::<Ident<Canonical>>::new();
-
-                for var in model.variables.values() {
-                    if let Variable::Stock { .. } = var
-                        && let Some(deps) = initial_deps.get(var.ident())
-                    {
-                        stock_deps.extend(deps.iter().cloned());
-                    }
-                }
-
-                // During initialization, modules need their stock
-                // inputs initialized first (e.g. SMOOTH3 needs its
-                // input stock's initial value).  Unlike the DT phase
-                // where stocks use their previous-timestep value, the
-                // initial phase must respect stock dependencies.
-                inputs
-                    .iter()
-                    .flat_map(|input| {
-                        let src = &input.src;
-                        if stock_deps.contains(&input.dst) {
-                            let direct_dep = match src.as_str().find('.') {
-                                Some(pos) => &src.as_str()[..pos],
-                                None => src.as_str(),
-                            };
-
-                            Some(Ident::new(direct_dep))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            } else {
-                panic!("internal compiler error: invariant broken");
-            }
-        } else {
-            inputs
-                .iter()
-                .flat_map(|r| {
-                    let src = &r.src;
-                    let direct_dep = match src.as_str().find('.') {
-                        Some(pos) => &src.as_str()[..pos],
-                        None => src.as_str(),
-                    };
-
-                    if is_stock(src) {
-                        None
-                    } else {
-                        Some(Ident::new(direct_dep))
-                    }
-                })
-                .collect()
-        }
-    } else {
-        unreachable!();
-    }
-}
-
-fn module_output_deps<'a>(
-    ctx: &DepContext,
-    model_name: &Ident<Canonical>,
-    output_ident: &str,
-    inputs: &'a [ModuleInput],
-    module_ident: &'a str,
-) -> Result<BTreeSet<&'a str>> {
-    if !ctx.models.contains_key(model_name) {
-        return model_err!(BadModelName, model_name.to_string());
-    }
-    let model = ctx.models[model_name];
-
-    let module_inputs = &inputs.iter().map(|mi| mi.dst.clone()).collect();
-    let deps = if ctx.is_initial {
-        model.initial_deps(module_inputs)
-    } else {
-        model.dt_deps(module_inputs)
-    };
-
-    if deps.is_none() {
-        return model_err!(Generic, output_ident.to_owned());
-    }
-    let deps = deps.unwrap();
-    if !deps.contains_key(output_ident) {
-        return model_err!(UnknownDependency, output_ident.to_owned());
-    }
-
-    let output_var = &model.variables[output_ident];
-    let output_deps = &deps[output_ident];
-
-    let mut final_deps: BTreeSet<&str> = BTreeSet::new();
-
-    if ctx.is_initial || !output_var.is_stock() {
-        final_deps.insert(module_ident);
-    }
-
-    for dep in output_deps.iter() {
-        for module_input in inputs.iter() {
-            if &module_input.dst == dep {
-                final_deps.insert(module_input.src.as_str());
-            }
-        }
-    }
-
-    Ok(final_deps)
-}
-
-fn direct_deps(ctx: &DepContext, var: &Variable) -> Vec<Ident<Canonical>> {
-    let is_stock = |ident: &Ident<Canonical>| -> bool {
-        matches!(
-            resolve_relative2(ctx, ident.as_str()),
-            Some(Variable::Stock { .. })
-        )
-    };
-    if var.is_module() {
-        module_deps(ctx, var, &is_stock)
-    } else {
-        let ast = if ctx.is_initial {
-            var.init_ast()
-        } else {
-            var.ast()
-        };
-        match ast {
-            Some(ast) => {
-                let converted_dims: Vec<crate::dimensions::Dimension> = ctx
-                    .dimensions
-                    .iter()
-                    .map(crate::dimensions::Dimension::from)
-                    .collect();
-                let classification =
-                    crate::variable::classify_dependencies(ast, &converted_dims, ctx.module_inputs);
-                let mut deps = classification.all;
-                if !ctx.is_initial {
-                    deps.retain(|dep| !classification.init_only.contains(dep.as_str()));
-                }
-                deps.retain(|dep| !classification.previous_only.contains(dep.as_str()));
-                deps
-            }
-            .into_iter()
-            .collect(),
-            None => vec![],
-        }
-    }
-}
-
-struct DepContext<'a> {
-    is_initial: bool,
-    model_name: &'a str, // this needs to be a str, not an Ident<Canonical> for lifetime reasons when recursing
-    models: &'a HashMap<Ident<Canonical>, &'a ModelStage1>,
-    sibling_vars: &'a HashMap<Ident<Canonical>, Variable>,
-    module_inputs: Option<&'a ModuleInputSet>,
-    dimensions: &'a [Dimension],
-}
-
-// to ensure we sort the list of variables in O(n*log(n)) time, we
-// need to iterate over the set of variables we have and compute
-// their recursive dependencies.  (assuming this function runs
-// in <= O(n*log(n)))
-fn all_deps<'a, Iter>(
-    ctx: &DepContext,
-    vars: Iter,
-) -> StdResult<DependencyMap, (Ident<Canonical>, EquationError)>
-where
-    Iter: Iterator<Item = &'a Variable>,
-{
-    // we need to use vars multiple times, so collect it into a Vec once
-    let vars = vars.collect::<Vec<_>>();
-    let mut processing: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-    let mut all_vars: HashMap<&'a str, &'a Variable> =
-        vars.iter().map(|v| (v.ident(), *v)).collect();
-    let mut all_var_deps: HashMap<Ident<Canonical>, Option<BTreeSet<Ident<Canonical>>>> = vars
-        .iter()
-        .map(|v| (Ident::from_str_unchecked(v.ident()), None))
-        .collect();
-
-    fn all_deps_inner<'a>(
-        ctx: &DepContext,
-        id: &str,
-        processing: &mut BTreeSet<Ident<Canonical>>,
-        all_vars: &mut HashMap<&'a str, &'a Variable>,
-        all_var_deps: &mut HashMap<Ident<Canonical>, Option<BTreeSet<Ident<Canonical>>>>,
-    ) -> StdResult<(), (Ident<Canonical>, EquationError)> {
-        let var = all_vars[id];
-
-        // short circuit if we've already figured this out
-        let canonical_id = Ident::from_str_unchecked(id);
-        if all_var_deps[&canonical_id].is_some() {
-            return Ok(());
-        }
-
-        // dependency chains break at stocks, as we use their value from the
-        // last dt timestep.  BUT if we are calculating dependencies in the
-        // initial dt, then we need to treat stocks as ordinary variables.
-        if var.is_stock() && !ctx.is_initial {
-            all_var_deps.insert(canonical_id.clone(), Some(BTreeSet::new()));
-            return Ok(());
-        }
-
-        processing.insert(canonical_id.clone());
-
-        // all deps start out as the direct deps
-        let mut all_deps: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-
-        for dep in direct_deps(ctx, var).into_iter() {
-            // TODO: we could potentially handle this by passing around some context
-            //   variable, but its just terrible.
-            if dep.as_str().starts_with("\\·") {
-                let loc = var
-                    .ast()
-                    .unwrap()
-                    .get_var_loc(dep.as_str())
-                    .unwrap_or_default();
-                return var_eqn_err!(
-                    Ident::from_str_unchecked(var.ident()),
-                    NoAbsoluteReferences,
-                    loc.start,
-                    loc.end
-                );
-            }
-
-            // in the case of a dependency on a module output, this one dep may
-            // turn into several: we'll need to depend on the inputs to that module
-            let filtered_deps: Vec<Ident<Canonical>> = if dep.as_str().contains('·') {
-                // if the dependency was e.g. "submodel.output", do a dataflow analysis to
-                // figure out which of the set of (inputs + module) we depend on
-                let parts = dep.as_str().splitn(2, '·').collect::<Vec<_>>();
-                let module_ident = parts[0];
-                let output_ident = parts[1];
-
-                if !all_vars.contains_key(module_ident) {
-                    let loc = var
-                        .ast()
-                        .unwrap()
-                        .get_var_loc(dep.as_str())
-                        .unwrap_or_default();
-                    return var_eqn_err!(
-                        Ident::from_str_unchecked(var.ident()),
-                        UnknownDependency,
-                        loc.start,
-                        loc.end
-                    );
-                }
-
-                if let Variable::Module {
-                    model_name, inputs, ..
-                } = all_vars[module_ident]
-                {
-                    // XXX: I don't remember why we do this differently here
-                    //      and then special case modules below (end of this
-                    //      for loop)
-                    match module_output_deps(ctx, model_name, output_ident, inputs, module_ident) {
-                        Ok(deps) => deps.into_iter().map(Ident::from_str_unchecked).collect(),
-                        Err(err) => {
-                            return Err((Ident::from_str_unchecked(var.ident()), err.into()));
-                        }
-                    }
-                } else {
-                    let loc = var
-                        .ast()
-                        .unwrap()
-                        .get_var_loc(dep.as_str())
-                        .unwrap_or_default();
-                    return var_eqn_err!(
-                        Ident::from_str_unchecked(var.ident()),
-                        ExpectedModule,
-                        loc.start,
-                        loc.end
-                    );
-                }
-            } else {
-                vec![dep]
-            };
-
-            for dep in filtered_deps {
-                if !all_vars.contains_key(dep.as_str()) {
-                    let loc = var
-                        .ast()
-                        .unwrap()
-                        .get_var_loc(dep.as_str())
-                        .unwrap_or_default();
-                    return var_eqn_err!(
-                        Ident::from_str_unchecked(var.ident()),
-                        UnknownDependency,
-                        loc.start,
-                        loc.end
-                    );
-                }
-
-                if ctx.is_initial || !all_vars[dep.as_str()].is_stock() {
-                    all_deps.insert(dep.clone());
-
-                    // ensure we don't blow the stack
-                    if processing.contains(&dep) {
-                        let loc = match var.ast() {
-                            Some(ast) => ast.get_var_loc(dep.as_str()).unwrap_or_default(),
-                            None => Default::default(),
-                        };
-                        return var_eqn_err!(
-                            Ident::from_str_unchecked(var.ident()),
-                            CircularDependency,
-                            loc.start,
-                            loc.end
-                        );
-                    }
-
-                    if all_var_deps[&dep].is_none() {
-                        all_deps_inner(ctx, dep.as_str(), processing, all_vars, all_var_deps)?;
-                    }
-
-                    // we actually don't want the module's dependencies here;
-                    // we handled that above in module_output_deps()
-                    if !all_vars[dep.as_str()].is_module() {
-                        let dep_deps = all_var_deps[&dep].as_ref().unwrap();
-                        all_deps.extend(dep_deps.iter().cloned());
-                    }
-                }
-            }
-        }
-
-        processing.remove(&canonical_id);
-
-        all_var_deps.insert(canonical_id, Some(all_deps));
-
-        Ok(())
-    }
-
-    for var in vars {
-        all_deps_inner(
-            ctx,
-            var.ident(),
-            &mut processing,
-            &mut all_vars,
-            &mut all_var_deps,
-        )?;
-    }
-
-    // this unwrap is safe, because of the full iteration over vars directly above
-    let var_deps: HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>> = all_var_deps
-        .into_iter()
-        .map(|(k, v)| (k, v.unwrap()))
-        .collect();
-
-    Ok(var_deps)
 }
 
 fn resolve_relative<'a>(
@@ -547,41 +144,6 @@ fn resolve_relative<'a>(
         resolve_relative(models, submodel_name, submodel_var)
     } else {
         Some(model.variables.get(ident)?)
-    }
-}
-
-// the ident arg must be from a CanonicalIdent, but is a &str here for lifetime reasons around recursion.
-fn resolve_relative2<'a>(ctx: &DepContext<'a>, ident: &'a str) -> Option<&'a Variable> {
-    let model_name = ctx.model_name;
-    let ident = if model_name == "main" && ident.starts_with('·') {
-        &ident['·'.len_utf8()..]
-    } else {
-        ident
-    };
-
-    let input_prefix = format!("{model_name}·");
-    // TODO: this is weird to do here and not before we call into this fn
-    let ident = ident.strip_prefix(&input_prefix).unwrap_or(ident);
-
-    // if the identifier is still dotted, its a further submodel reference
-    // TODO: this will have to change when we break `module ident == model name`
-    if let Some(pos) = ident.find('·') {
-        let submodel_name = &ident[..pos];
-        let submodel_var = &ident[pos + '·'.len_utf8()..];
-        let ctx = DepContext {
-            is_initial: ctx.is_initial,
-            model_name: submodel_name,
-            models: ctx.models,
-            sibling_vars: &ctx
-                .models
-                .get(&Ident::<Canonical>::from_str_unchecked(submodel_name))?
-                .variables,
-            module_inputs: None,
-            dimensions: ctx.dimensions,
-        };
-        resolve_relative2(&ctx, submodel_var)
-    } else {
-        Some(ctx.sibling_vars.get(ident)?)
     }
 }
 
@@ -1111,159 +673,124 @@ impl ModelStage1 {
         }
     }
 
+    /// Fill `instantiations` -- the per-module-instance evaluation order the
+    /// monolithic `compiler::Module` consumes -- from the production
+    /// dependency-graph query.
+    ///
+    /// This used to be a second, independent dependency analysis: its own
+    /// transitive-closure walk (`all_deps`), its own cross-model output
+    /// resolution, its own `CircularDependency` gate and its own topological
+    /// runlists. That is the divergence GH #568 tracked. The two gates did not
+    /// merely *risk* disagreeing -- they DID: an element-acyclic recurrence SCC
+    /// (`ecc[t2] = ecc[t1] + 1`) that `db::dep_graph::resolve_recurrence_sccs`
+    /// resolves was still a whole-variable `CircularDependency` here, so this
+    /// path rejected models production compiles and simulates. There is now one
+    /// gate, and it is the one production uses.
+    ///
+    /// The runlists are therefore the production runlists, including everything
+    /// the second walk did not have: the resolved-SCC contiguous blocks, the
+    /// dt stock-submodel-output chain break, and the `INITIAL()`-backed
+    /// initials seeding (GH #584).
+    ///
+    /// # Two model classes are refused, for two different reasons
+    ///
+    /// A rejected graph (`has_cycle`) records a model-level
+    /// `CircularDependency`. Note it does NOT get empty runlists, despite the
+    /// dependency MAP being emptied: `topo_sort_str` over an empty map still
+    /// emits every allowed name, in sorted order, so the runlists come out
+    /// populated and mutually incoherent (a stock's init can read a variable
+    /// that is absent from the initials runlist). `ModelStage1::errors` is what
+    /// stops `compiler::Module::new` from compiling them; the gate is not
+    /// redundant with an empty-runlist check, because there is no such thing.
+    ///
+    /// A RESOLVED recurrence SCC (`resolved_sccs` non-empty) is refused too,
+    /// with `NotSimulatable`. Unifying the gate did not unify the emitter:
+    /// production compiles such an SCC by interleaving its members' per-element
+    /// segments (`db::assemble::combine_scc_fragment`, reached only from
+    /// `assemble_module`), and `compiler::Module` has no equivalent -- it would
+    /// emit the members whole, in runlist order, so a member reads a co-member's
+    /// element before it is assigned. That is a silent wrong answer, not a
+    /// failure. Before the unification the second gate happened to refuse these
+    /// models by calling them circular; refusing them deliberately keeps the
+    /// monolith honest as an oracle, which is the only reason it still exists.
+    /// The distinct code matters: `CircularDependency` here would contradict
+    /// `project::tests::the_circular_dependency_gate_is_the_production_one`,
+    /// which asserts the two gates agree that this model class is NOT circular.
     pub(crate) fn set_dependencies(
         &mut self,
-        models: &HashMap<Ident<Canonical>, &ModelStage1>,
-        dimensions: &[Dimension],
+        db: &dyn crate::db::Db,
+        source_model: crate::db::SourceModel,
+        project: crate::db::SourceProject,
         instantiations: &BTreeSet<ModuleInputSet>,
     ) {
-        // used when building runlists - give us a stable order to start with
-        let mut var_names: Vec<&Ident<Canonical>> = self.variables.keys().collect();
-        var_names.sort_unstable();
-
-        // use a Set to deduplicate problems we see in dt_deps and initial_deps
-        let mut var_errors: HashMap<Ident<Canonical>, HashSet<EquationError>> = HashMap::new();
         // Model errors: seed with any pre-existing model-level errors recorded
         // at Stage0 construction (e.g. DuplicateVariable, GH #891) so this
         // recompute extends rather than clobbers them. `set_dependencies` runs
         // once per model (Project::from_salsa), so taking the list cannot
         // double-report.
         let mut errors: Vec<Error> = self.errors.take().unwrap_or_default();
+        let mut has_cycle = false;
+        let mut has_resolved_scc = false;
 
-        let instantiations = instantiations
+        let to_idents = |names: &[String]| -> Vec<Ident<Canonical>> {
+            // The graph's runlists are canonical names by construction, so
+            // interning them needs no re-canonicalization scan.
+            names.iter().map(|n| Ident::from_str_unchecked(n)).collect()
+        };
+
+        let instantiations: HashMap<ModuleInputSet, ModuleStage2> = instantiations
             .iter()
-            .map(|instantiation| {
-                let mut ctx = DepContext {
-                    is_initial: false,
-                    model_name: self.name.as_str(),
-                    sibling_vars: &self.variables,
-                    models,
-                    module_inputs: Some(instantiation),
-                    dimensions,
-                };
-
-                let dt_deps = match all_deps(&ctx, self.variables.values()) {
-                    Ok(deps) => Some(deps),
-                    Err((ident, err)) => {
-                        var_errors.entry(ident).or_default().insert(err);
-                        None
-                    }
-                };
-
-                ctx.is_initial = true;
-
-                let initial_deps = match all_deps(&ctx, self.variables.values()) {
-                    Ok(deps) => Some(deps),
-                    Err((ident, err)) => {
-                        var_errors.entry(ident).or_default().insert(err);
-                        None
-                    }
-                };
-
-                let init_referenced = self.init_referenced_vars();
-
-                let build_runlist = |deps: &HashMap<
-                    Ident<Canonical>,
-                    BTreeSet<Ident<Canonical>>,
-                >,
-                                     part: StepPart,
-                                     predicate: &dyn Fn(&Ident<Canonical>) -> bool|
-                 -> Vec<Ident<Canonical>> {
-                    let canonical_var_names: Vec<Ident<Canonical>> = var_names
-                        .iter()
-                        .filter(|id| predicate(id))
-                        .map(|id| (*id).clone())
-                        .collect();
-                    let runlist: Vec<&Ident<Canonical>> = canonical_var_names.iter().collect();
-                    let runlist = match part {
-                        StepPart::Initials => {
-                            let needed: HashSet<&Ident<Canonical>> = runlist
-                                .iter()
-                                .cloned()
-                                .filter(|id| {
-                                    let v = &self.variables[*id];
-                                    v.is_stock() || v.is_module() || init_referenced.contains(*id)
-                                })
-                                .collect();
-                            let mut runlist: HashSet<&Ident<Canonical>> =
-                                needed.iter().flat_map(|id| &deps[*id]).collect();
-                            runlist.extend(needed);
-                            // Sort before the topo sort: the set above is a
-                            // `HashSet`, and `topo_sort` breaks ties by visit
-                            // order, so feeding it the raw iteration order made
-                            // the Initials runlist -- and therefore any initial
-                            // value depending on an unordered pair -- vary run
-                            // to run. Same fix, same reason, as GH #595 in
-                            // `db::dep_graph::model_dependency_graph_impl`; the
-                            // Flows/Stocks arms are already deterministic
-                            // because they filter the pre-sorted `var_names`.
-                            let mut runlist: Vec<&Ident<Canonical>> = runlist.into_iter().collect();
-                            runlist.sort_unstable();
-                            topo_sort(runlist, deps)
-                        }
-                        StepPart::Flows => topo_sort(runlist, deps),
-                        StepPart::Stocks => runlist,
-                    };
-
-                    let runlist: Vec<Ident<Canonical>> = runlist.into_iter().cloned().collect();
-
-                    runlist
-                };
-
-                let runlist_initials = if let Some(deps) = initial_deps.as_ref() {
-                    build_runlist(deps, StepPart::Initials, &|_| true)
-                } else {
-                    vec![]
-                };
-
-                let runlist_flows = if let Some(deps) = dt_deps.as_ref() {
-                    build_runlist(deps, StepPart::Flows, &|id| {
-                        instantiation.contains(id) || !self.variables[id].is_stock()
-                    })
-                } else {
-                    vec![]
-                };
-
-                let runlist_stocks = if let Some(deps) = dt_deps.as_ref() {
-                    build_runlist(deps, StepPart::Stocks, &|id| {
-                        let v = &self.variables[id];
-                        // modules need to be called _both_ during Flows and Stocks, as
-                        // they may contain _both_ flows and Stocks
-                        !instantiation.contains(id) && (v.is_stock() || v.is_module())
-                    })
-                } else {
-                    vec![]
-                };
-
+            .map(|inputs| {
+                let interned = crate::db::ModuleInputSet::from_canonical_set(db, inputs);
+                let graph = crate::db::model_dependency_graph(db, source_model, project, interned);
+                has_cycle |= graph.has_cycle;
+                has_resolved_scc |= !graph.resolved_sccs.is_empty();
                 (
-                    instantiation.clone(),
+                    inputs.clone(),
                     ModuleStage2 {
                         model_ident: self.name.clone(),
-                        inputs: instantiation.clone(),
-                        dt_dependencies: dt_deps.unwrap_or_default(),
-                        initial_dependencies: initial_deps.unwrap_or_default(),
-                        runlist_initials,
-                        runlist_flows,
-                        runlist_stocks,
+                        inputs: inputs.clone(),
+                        runlist_initials: to_idents(&graph.runlist_initials),
+                        runlist_flows: to_idents(&graph.runlist_flows),
+                        runlist_stocks: to_idents(&graph.runlist_stocks),
                     },
                 )
             })
-            .collect::<HashMap<_, _>>();
+            .collect();
 
         self.instantiations = Some(instantiations);
 
-        let mut variables_have_errors = false;
-        for (ident, var) in self.variables.iter_mut() {
-            if var_errors.contains_key(ident) {
-                let errors = std::mem::take(var_errors.get_mut(ident).unwrap());
-                for error in errors.into_iter() {
-                    var.push_error(error);
-                }
-                variables_have_errors = true;
-            }
+        if has_cycle {
+            errors.push(Error::new(
+                ErrorKind::Model,
+                ErrorCode::CircularDependency,
+                None,
+            ));
         }
 
-        if variables_have_errors {
+        // The gate is unified; the EMITTER is not. See the rustdoc above: the
+        // monolith cannot lower an interleaved per-element SCC, so refuse rather
+        // than emit members whole and read a co-member's element early.
+        if has_resolved_scc {
+            errors.push(Error::new(
+                ErrorKind::Model,
+                ErrorCode::NotSimulatable,
+                Some(format!(
+                    "model '{}' contains a resolved recurrence SCC, which only \
+                     the per-element interleaving fragment compiler can lower",
+                    self.name
+                )),
+            ));
+        }
+
+        // Equation errors already ride on the variables themselves, recorded by
+        // parsing and by `lower_variable`. Roll them up to the model level so
+        // the `Module::new` gate still refuses a model with a broken variable.
+        if self
+            .variables
+            .values()
+            .any(|var| var.equation_errors().is_some())
+        {
             errors.push(Error::new(
                 ErrorKind::Model,
                 ErrorCode::VariablesHaveErrors,
@@ -1271,12 +798,11 @@ impl ModelStage1 {
             ));
         }
 
-        let maybe_errors = match errors.len() {
-            0 => None,
-            _ => Some(errors),
+        self.errors = if errors.is_empty() {
+            None
+        } else {
+            Some(errors)
         };
-
-        self.errors = maybe_errors;
     }
 
     /// Returns unit errors from variables in this model. The salsa incremental
@@ -1550,58 +1076,86 @@ fn test_module_parse() {
     assert_eq!(expected, actual);
 }
 
+/// A variable carrying an equation error rolls up to a model-level
+/// `VariablesHaveErrors`, which is what stops `compiler::Module::new` from
+/// compiling a model with a broken variable.
+///
+/// The errors rolled up are the ones parsing and `lower_variable` recorded on
+/// the variables themselves (`Variable::errors`). `set_dependencies` used to
+/// contribute a second source -- its own dependency walk's
+/// `UnknownDependency` / `CircularDependency` / `ExpectedModule` -- which was
+/// the GH #568 divergence; that walk is gone and its diagnostics come from the
+/// production gate instead (see
+/// `unknown_dependency_reaches_the_one_remaining_gate`).
 #[test]
-fn test_errors() {
+fn variable_equation_errors_roll_up_to_the_model() {
     let units_ctx = Context::new(&[], &Default::default()).0;
-    let main_model = x_model(
-        "main",
-        vec![x_aux("aux_3", "unknown_variable * 3.14", None)],
-    );
-    let owned_models: HashMap<Ident<Canonical>, ModelStage0> =
-        vec![("main".to_string(), &main_model)]
-            .into_iter()
-            .map(|(name, m)| {
-                (
-                    Ident::new(&name),
-                    ModelStage0::new(m, &[], &units_ctx, false),
-                )
-            })
-            .collect();
+    let main_model = x_model("main", vec![x_aux("aux_3", "1 +", None)]);
+    let direct = ModelStage0::new(&main_model, &[], &units_ctx, false);
     let models: HashMap<Ident<Canonical>, &ModelStage0> =
-        owned_models.iter().map(|(k, v)| (k.clone(), v)).collect();
+        std::iter::once((Ident::new("main"), &direct)).collect();
 
-    let model = {
-        let no_module_inputs: ModuleInputSet = BTreeSet::new();
-        let default_instantiation = [no_module_inputs].iter().cloned().collect();
-        let scope = ScopeStage0 {
-            models: &models,
-            dimensions: &Default::default(),
-            model_name: "main",
-        };
-        let mut model = ModelStage1::new(&scope, models[&*canonicalize("main")]);
-        model.set_dependencies(&HashMap::new(), &[], &default_instantiation);
-        model
+    let db = db::SimlinDb::default();
+    let project_datamodel = datamodel::Project {
+        name: "errors".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![main_model.clone()],
+        source: None,
+        ai_information: None,
     };
+    let sync = db::sync_from_datamodel(&db, &project_datamodel);
 
-    assert!(model.errors.is_some());
+    let scope = ScopeStage0 {
+        models: &models,
+        dimensions: &Default::default(),
+        model_name: "main",
+    };
+    let mut model = ModelStage1::new(&scope, &direct);
+    let no_module_inputs: ModuleInputSet = BTreeSet::new();
+    let default_instantiation = [no_module_inputs].iter().cloned().collect();
+    model.set_dependencies(
+        &db,
+        sync.models["main"].source,
+        sync.project,
+        &default_instantiation,
+    );
+
     assert_eq!(
-        &Error::new(ErrorKind::Model, ErrorCode::VariablesHaveErrors, None),
-        &model.errors.as_ref().unwrap()[0]
+        Some(&Error::new(
+            ErrorKind::Model,
+            ErrorCode::VariablesHaveErrors,
+            None
+        )),
+        model.errors.as_ref().and_then(|errs| errs.first()),
     );
 
     let var_errors = model.get_variable_errors();
-    assert_eq!(1, var_errors.len());
     let aux_3_key = Ident::new("aux_3");
-    assert!(var_errors.contains_key(&aux_3_key));
-    assert_eq!(1, var_errors[&aux_3_key].len());
-    let err = &var_errors[&aux_3_key][0];
     assert_eq!(
-        &EquationError {
-            start: 0,
-            end: 16,
-            code: ErrorCode::UnknownDependency
-        },
-        err
+        1,
+        var_errors.len(),
+        "exactly the broken variable carries errors, got: {var_errors:?}"
+    );
+    assert!(var_errors.contains_key(&aux_3_key));
+}
+
+/// The `UnknownDependency` the deleted second dependency walk used to raise is
+/// still raised -- by the production gate, which is now the only one.
+#[test]
+fn unknown_dependency_reaches_the_one_remaining_gate() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("main").aux("aux_3", "unknown_variable * 3.14", None);
+    let errs = match tp.compile() {
+        Ok(_) => panic!("a model referencing an undefined variable must not compile"),
+        Err(errs) => errs,
+    };
+    assert!(
+        errs.iter()
+            .any(|(loc, code)| loc == "main.aux_3" && *code == ErrorCode::UnknownDependency),
+        "expected a main.aux_3 UnknownDependency, got: {errs:?}"
     );
 }
 
@@ -1730,7 +1284,12 @@ fn test_stage0_records_duplicate_variable_error() {
     let mut model = ModelStage1::new(&scope, &direct);
     let no_module_inputs: ModuleInputSet = BTreeSet::new();
     let default_instantiation = [no_module_inputs].iter().cloned().collect();
-    model.set_dependencies(&HashMap::new(), &[], &default_instantiation);
+    model.set_dependencies(
+        &db,
+        sync.models["main"].source,
+        sync.project,
+        &default_instantiation,
+    );
     assert!(
         model
             .errors
@@ -1976,241 +1535,6 @@ fn test_collect_module_idents_skips_apply_to_all_previous() {
         !ids.contains(&Ident::new("prev_x_init")),
         "ApplyToAll equations that invoke PREVIOUS should stay intrinsic",
     );
-}
-
-#[test]
-fn test_all_deps() {
-    use rand::rng;
-    use rand::seq::SliceRandom;
-
-    fn verify_all_deps(
-        expected_deps_list: &[(&Variable, &[&str])],
-        is_initial: bool,
-        models: &HashMap<Ident<Canonical>, &ModelStage1>,
-        module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
-    ) {
-        let default_inputs = BTreeSet::<Ident<Canonical>>::new();
-        let expected_deps: HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>> =
-            expected_deps_list
-                .iter()
-                .map(|(v, deps)| {
-                    (
-                        Ident::new(v.ident()),
-                        deps.iter().map(|s| Ident::new(s)).collect(),
-                    )
-                })
-                .collect();
-
-        let mut all_vars: Vec<Variable> = expected_deps_list
-            .iter()
-            .map(|(v, _)| (*v).clone())
-            .collect();
-        let ctx = DepContext {
-            is_initial,
-            model_name: "test",
-            models,
-            sibling_vars: &HashMap::new(),
-            module_inputs: Some(module_inputs.unwrap_or(&default_inputs)),
-            dimensions: &[],
-        };
-        let deps = all_deps(&ctx, all_vars.iter()).unwrap();
-
-        if expected_deps != deps {
-            let failed_dep_order: Vec<_> = all_vars.iter().map(|v| v.ident()).collect();
-            eprintln!("failed order: {failed_dep_order:?}");
-            for (v, expected) in expected_deps_list.iter() {
-                eprintln!("{}", v.ident());
-                let mut expected: Vec<_> = expected.to_vec();
-                expected.sort();
-                eprintln!("  expected: {expected:?}");
-                let mut actual: Vec<_> = deps[&*canonicalize(v.ident())].iter().collect();
-                actual.sort();
-                eprintln!("  actual  : {actual:?}");
-            }
-        };
-        assert_eq!(expected_deps, deps);
-
-        let mut rng = rng();
-        // no matter the order of variables in the list, we should get the same all_deps
-        // (even though the order of recursion might change)
-        for _ in 0..16 {
-            all_vars.shuffle(&mut rng);
-            let ctx = DepContext {
-                is_initial,
-                model_name: "test",
-                models,
-                sibling_vars: &HashMap::new(),
-                module_inputs: Some(module_inputs.unwrap_or(&default_inputs)),
-                dimensions: &[],
-            };
-            let deps = all_deps(&ctx, all_vars.iter()).unwrap();
-            assert_eq!(expected_deps, deps);
-        }
-    }
-
-    let mod_1_model = x_model(
-        "mod_1",
-        vec![
-            x_aux("input", "{expects to be set with module input}", None),
-            x_aux("output", "3 * TIME", None),
-            x_aux("flow", "2 * input", None),
-            x_stock("output_2", "input", &["flow"], &[], None),
-        ],
-    );
-
-    let main_model = x_model(
-        "main",
-        vec![
-            x_module("mod_1", &[("aux_3", "mod_1.input")], None),
-            x_aux("aux_3", "6", None),
-            x_flow("inflow", "mod_1.flow", None),
-            x_aux("aux_4", "mod_1.output", None),
-        ],
-    );
-    let units_ctx = Context::new(&[], &Default::default()).0;
-    let owned_x_models: HashMap<Ident<Canonical>, ModelStage0> = vec![
-        ("mod_1".to_owned(), &mod_1_model),
-        ("main".to_owned(), &main_model),
-    ]
-    .into_iter()
-    .map(|(name, m)| {
-        (
-            Ident::new(&name),
-            ModelStage0::new(m, &[], &units_ctx, false),
-        )
-    })
-    .collect();
-    let x_models: HashMap<Ident<Canonical>, &ModelStage0> =
-        owned_x_models.iter().map(|(k, v)| (k.clone(), v)).collect();
-
-    let mut model_list = vec!["mod_1", "main"]
-        .into_iter()
-        .map(|name| {
-            let model_s0 = x_models[&*canonicalize(name)];
-            let scope = ScopeStage0 {
-                models: &x_models,
-                dimensions: &Default::default(),
-                model_name: name,
-            };
-            ModelStage1::new(&scope, model_s0)
-        })
-        .collect::<Vec<_>>();
-
-    let module_instantiations = {
-        let models = model_list.iter().map(|m| (m.name.as_str(), m)).collect();
-        // FIXME: ignoring the result here because if we have errors, it doesn't really matter
-        enumerate_modules(&models, "main", |model| model.name.clone()).unwrap()
-    };
-
-    let models = {
-        let no_instantiations = BTreeSet::new();
-        let mut models: HashMap<Ident<Canonical>, &ModelStage1> = HashMap::new();
-        for model in model_list.iter_mut() {
-            let instantiations = module_instantiations
-                .get(&model.name)
-                .unwrap_or(&no_instantiations);
-            model.set_dependencies(&models, &[], instantiations);
-            models.insert(model.name.clone(), model);
-        }
-        models
-    };
-
-    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let mod_1_orig = &main_model.variables[0];
-    assert_eq!("mod_1", mod_1_orig.get_ident());
-    let mod_1 = parse_var(&[], mod_1_orig, &mut implicit_vars, &unit_ctx, |mi| {
-        Ok(Some(mi.clone()))
-    });
-    let scope = ScopeStage0 {
-        models: &x_models,
-        dimensions: &Default::default(),
-        model_name: "main",
-    };
-    let mod_1 = lower_variable(&scope, &mod_1);
-    assert!(implicit_vars.is_empty());
-    let aux_3 = aux("aux_3", "6");
-    let aux_4 = aux("aux_4", "mod_1.output");
-    let inflow = flow("inflow", "mod_1.flow");
-    let expected_deps_list: Vec<(&Variable, &[&str])> = vec![
-        (&inflow, &["mod_1", "aux_3"]),
-        (&mod_1, &["aux_3"]),
-        (&aux_3, &[]),
-        (&aux_4, &["mod_1"]),
-    ];
-
-    verify_all_deps(&expected_deps_list, false, &models, None);
-
-    let aux_used_in_initial = aux("aux_used_in_initial", "7");
-    let aux_2 = aux("aux_2", "aux_used_in_initial");
-    let aux_3 = aux("aux_3", "aux_2");
-    let aux_4 = aux("aux_4", "aux_2");
-    let inflow = flow("inflow", "aux_3 + aux_4");
-    let outflow = flow("outflow", "stock_1");
-    let stock_1 = stock("stock_1", "aux_used_in_initial", &["inflow"], &["outflow"]);
-    let expected_deps_list: Vec<(&Variable, &[&str])> = vec![
-        (&aux_used_in_initial, &[]),
-        (&aux_2, &["aux_used_in_initial"]),
-        (&aux_3, &["aux_used_in_initial", "aux_2"]),
-        (&aux_4, &["aux_used_in_initial", "aux_2"]),
-        (&inflow, &["aux_used_in_initial", "aux_2", "aux_3", "aux_4"]),
-        (&outflow, &[]),
-        (&stock_1, &[]),
-    ];
-
-    verify_all_deps(&expected_deps_list, false, &models, None);
-
-    // test circular references return an error and don't do something like infinitely
-    // recurse
-    let aux_a = aux("aux_a", "aux_b");
-    let aux_b = aux("aux_b", "aux_a");
-    let all_vars = [aux_a, aux_b];
-    let ctx = DepContext {
-        is_initial: false,
-        model_name: "test",
-        models: &models,
-        sibling_vars: &HashMap::new(),
-        module_inputs: None,
-        dimensions: &[],
-    };
-    let deps_result = all_deps(&ctx, all_vars.iter());
-    assert!(deps_result.is_err());
-
-    // also self-references should return an error and not blow stock
-    let aux_a = aux("aux_a", "aux_a");
-    let all_vars = [aux_a];
-    let deps_result = all_deps(&ctx, all_vars.iter());
-    assert!(deps_result.is_err());
-
-    // test initials
-    let expected_deps_list: Vec<(&Variable, &[&str])> = vec![
-        (&aux_used_in_initial, &[]),
-        (&aux_2, &["aux_used_in_initial"]),
-        (&aux_3, &["aux_used_in_initial", "aux_2"]),
-        (&aux_4, &["aux_used_in_initial", "aux_2"]),
-        (&inflow, &["aux_used_in_initial", "aux_2", "aux_3", "aux_4"]),
-        (&outflow, &["stock_1", "aux_used_in_initial"]),
-        (&stock_1, &["aux_used_in_initial"]),
-    ];
-
-    verify_all_deps(&expected_deps_list, true, &models, None);
-
-    let aux_if = aux(
-        "aux_if",
-        "if isModuleInput(aux_true) THEN aux_true ELSE aux_false",
-    );
-    let aux_true = aux("aux_true", "TIME * 3");
-    let aux_false = aux("aux_false", "TIME * 4");
-    let expected_deps_list: Vec<(&Variable, &[&str])> = vec![
-        (&aux_if, &["aux_true"]),
-        (&aux_true, &[]),
-        (&aux_false, &[]),
-    ];
-
-    let module_inputs = [Ident::new("aux_true")].iter().cloned().collect();
-    verify_all_deps(&expected_deps_list, true, &models, Some(&module_inputs));
-
-    // test non-existant variables
 }
 
 /// Compile-time proof that the two name-keyed, pre-layout model-compilation

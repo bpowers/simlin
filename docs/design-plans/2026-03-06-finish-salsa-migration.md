@@ -62,6 +62,20 @@ only re-parse variables that actually reference the affected dimensions.
 - **finish-salsa-migration.AC3.2 Success:** `PREVIOUS(x)` where `x = SMTH1(input, 1)` compiles to module expansion (not `LoadPrev`) through the salsa incremental path.
 - **finish-salsa-migration.AC3.3 Success:** Editing an unrelated variable does not trigger re-parse of variables in the same model (salsa cache stability preserved).
 
+> **Annotation (2026-07-26, GH #568).** This document is a record of what was
+> decided in March, not a live contract; it is annotated rather than rewritten.
+> AC4.3, AC4.5 and AC5.2 have been *partly* overtaken and must not be actioned
+> as written. `all_deps` (and `direct_deps`/`module_deps`/`module_output_deps`)
+> is gone, but `set_dependencies` deliberately REMAINS as a thin adapter that
+> reads `db::dep_graph::model_dependency_graph` -- it is the monolithic
+> `compiler::Module`'s only source of runlists, and that monolith is the live
+> differential oracle for the run-invariance classifier
+> (`db::invariance::salsa_and_monolithic_paths_agree`). Deleting it per AC4.3
+> costs that oracle. AC4.5 is answered in `docs/tech-debt.md` item 17: the
+> `Variable::errors`/`unit_errors` fields are a LIVE error channel the salsa
+> path reads, not legacy residue, and removing them without first replacing the
+> channel silently drops diagnostics.
+
 ### finish-salsa-migration.AC4: Monolithic compilation path removed
 - **finish-salsa-migration.AC4.1 Success:** `compile_project` (free function in interpreter.rs) does not exist.
 - **finish-salsa-migration.AC4.2 Success:** `Simulation::compile()` does not exist.

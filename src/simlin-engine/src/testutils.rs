@@ -3,8 +3,6 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use crate::datamodel::{self, ModuleReference};
-use crate::model::{ScopeStage0, lower_variable};
-use crate::variable::{Variable, parse_var};
 
 #[cfg(test)]
 fn optional_vec(slice: &[&str]) -> Vec<String> {
@@ -27,24 +25,6 @@ pub(crate) fn x_aux(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::V
 }
 
 #[cfg(test)]
-pub(crate) fn aux(ident: &str, eqn: &str) -> Variable {
-    let var = x_aux(ident, eqn, None);
-    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
-        Ok(Some(mi.clone()))
-    });
-    assert!(var.equation_errors().is_none());
-    assert!(implicit_vars.is_empty());
-    let scope = ScopeStage0 {
-        models: &Default::default(),
-        dimensions: &Default::default(),
-        model_name: "main",
-    };
-    lower_variable(&scope, &var)
-}
-
-#[cfg(test)]
 pub(crate) fn x_stock(
     ident: &str,
     eqn: &str,
@@ -64,24 +44,6 @@ pub(crate) fn x_stock(
         uid: None,
         compat: datamodel::Compat::default(),
     })
-}
-
-#[cfg(test)]
-pub(crate) fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variable {
-    let var = x_stock(ident, eqn, inflows, outflows, None);
-    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
-        Ok(Some(mi.clone()))
-    });
-    assert!(var.equation_errors().is_none());
-    assert!(implicit_vars.is_empty());
-    let scope = ScopeStage0 {
-        models: &Default::default(),
-        dimensions: &Default::default(),
-        model_name: "main",
-    };
-    lower_variable(&scope, &var)
 }
 
 #[cfg(test)]
@@ -172,24 +134,6 @@ pub(crate) fn x_flow(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::
         uid: None,
         compat: datamodel::Compat::default(),
     })
-}
-
-#[cfg(test)]
-pub(crate) fn flow(ident: &str, eqn: &str) -> Variable {
-    let var = x_flow(ident, eqn, None);
-    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
-        Ok(Some(mi.clone()))
-    });
-    assert!(var.equation_errors().is_none());
-    assert!(implicit_vars.is_empty());
-    let scope = ScopeStage0 {
-        models: &Default::default(),
-        dimensions: &Default::default(),
-        model_name: "main",
-    };
-    lower_variable(&scope, &var)
 }
 
 #[cfg(test)]
