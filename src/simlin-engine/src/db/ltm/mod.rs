@@ -1156,6 +1156,54 @@ pub fn model_ltm_variables(
         };
     }
 
+    // The LTM front door (GH #978/#979). Occurrence identity is a `SiteId`: a
+    // path of `u16` child indices. An equation needing more children at one
+    // level than a `u16` can tell apart -- an `Ast::Arrayed` target with more
+    // slots, a variadic `MEAN` with more arguments, or a subscript with more
+    // indices -- would give two distinct references the SAME identity, and the
+    // ceteris-paribus wrap would then hold or freeze the wrong one and emit a
+    // plausible, wrong link score. `model_ltm_reference_sites` therefore records
+    // no occurrence for such an equation, which leaves the stream unable to name
+    // every reference; scoring the model from it would silently mis-attribute,
+    // and the per-edge fallbacks would read a MISSING entry as a real
+    // classification. So refuse the model outright, loudly.
+    //
+    // This is a whole-model refusal rather than a per-edge skip because the
+    // trigger is a property of a TARGET EQUATION, not of an edge: every edge
+    // into that target is affected, and there is no per-site decline that a
+    // consumer could tell apart from "no reference here". Loop DETECTION is
+    // untouched -- `model_element_causal_edges` / `model_detected_loops` read
+    // the name-keyed, path-free `sites` view, which stays complete -- so what is
+    // lost is the scores, not the structure.
+    let ref_sites = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
+    if let Some(rejection) = &ref_sites.site_width_rejection {
+        let msg = format!(
+            "LTM analysis was skipped for this model: variable \"{}\" needs {} {} \
+             at one level of its equation, more than the {} distinct children one \
+             link-score occurrence path can address -- two references would share \
+             an identity and be scored as one. No link, loop, or pathway scores \
+             were generated for this model.",
+            rejection.variable,
+            rejection.count,
+            rejection.axis.describe(),
+            rejection.limit,
+        );
+        CompilationDiagnostic(Diagnostic {
+            model: model.name(db).clone(),
+            variable: Some(rejection.variable.clone()),
+            error: DiagnosticError::Assembly(msg),
+            severity: DiagnosticSeverity::Warning,
+        })
+        .accumulate(db);
+        return LtmVariablesResult {
+            vars: vec![],
+            loop_partitions: indexmap::IndexMap::new(),
+            agg_recovery_truncated: false,
+            pathways_truncated: false,
+            mode: model_ltm_mode(db, model, project),
+        };
+    }
+
     // GH #486's non-Euler rejection is NOT emitted here. The integration
     // method that the VM actually honors is a single, main-model-governed
     // property of the assembled simulation (`assemble_simulation`'s `Specs`

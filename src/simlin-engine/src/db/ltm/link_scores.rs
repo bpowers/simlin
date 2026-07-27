@@ -42,6 +42,12 @@ use super::parse::{
 /// (`try_scalar_to_arrayed_link_scores`, `emit_per_element_link_scores`,
 /// `emit_agg_to_target_link_scores`) so the slot map and `OccurrenceLookup::for_slot`
 /// cannot disagree.
+///
+/// The `as u16` slot conversions below are in range by the LTM front door
+/// (`db::ltm_ir::ast_site_width_rejection`), which refuses a target needing more
+/// slots than `MAX_SITE_CHILDREN` can tell apart -- counting the trailing
+/// default slot this type computes unconditionally, whether or not the target
+/// declares a default equation.
 struct ArrayedSlotMap {
     /// `None` for a scalar / `ApplyToAll` target (one slot `0`); otherwise the
     /// canonical-element-key -> slot map plus the default slot (`keys.len()`,

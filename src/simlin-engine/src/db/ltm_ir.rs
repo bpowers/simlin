@@ -334,6 +334,252 @@ pub(crate) fn collect_all_reference_sites(
     collect_all_reference_sites_and_occurrences(target_var, variables, dim_ctx, lookup_dims).0
 }
 
+// ── The LTM front door: `SiteId` addressability ────────────────────────────
+
+/// The number of children one [`SiteId`] path component can tell apart.
+///
+/// A component is a `u16`, so an equation needing more than this many distinct
+/// child positions at one level cannot be addressed: two occurrences would share
+/// a path, and the ceteris-paribus wrap would then hold or freeze the WRONG
+/// reference and emit a plausible, wrong link score -- silent corruption, the
+/// failure class this IR exists to eliminate.
+///
+/// Rather than making that case safe by threading a reserved sentinel through
+/// the IR and the wrap, LTM refuses such a model at the front door: the walk
+/// records no occurrence for the offending equation ([`WalkAccum::record_occurrences`])
+/// and `model_ltm_variables` emits no LTM variable for the model at all, with a
+/// `Warning` naming the variable. Every `SiteId` component the walk pushes is
+/// therefore in range by construction -- which is what lets the pushes be plain
+/// conversions and the consumer's `ltm_augment::child_path` be total.
+///
+/// Widening the component to `u32` was the alternative. It is rejected: the
+/// occurrence IR is salsa-cached per model and every occurrence carries a boxed
+/// path, so widening doubles that footprint on every model to serve a width no
+/// real model reaches -- and it would not remove the case, only move it.
+pub(crate) const MAX_SITE_CHILDREN: usize = u16::MAX as usize + 1;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of [`site_children_limit`], installed by
+    /// [`SiteChildrenLimitGuard`]. Lets a test trip the front door with a tiny
+    /// fixture instead of building an equation wide enough to trip the
+    /// production constant (per docs/dev/rust.md#test-time-budgets).
+    static SITE_CHILDREN_LIMIT_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The `SiteId` child-count limit in force. [`MAX_SITE_CHILDREN`] in production
+/// builds; in `#[cfg(test)]` builds an active [`SiteChildrenLimitGuard`]
+/// override takes precedence.
+pub(crate) fn site_children_limit() -> usize {
+    #[cfg(test)]
+    {
+        if let Some(limit) = SITE_CHILDREN_LIMIT_OVERRIDE.with(|c| c.get()) {
+            return limit;
+        }
+    }
+    MAX_SITE_CHILDREN
+}
+
+/// RAII guard (test-only) that lowers [`site_children_limit`] for the current
+/// thread for the guard's lifetime, restoring the previous value on drop -- so a
+/// panicking test does not leak the override to the next test reusing the
+/// thread.
+///
+/// `model_ltm_reference_sites` and `model_ltm_variables` are salsa-memoized, so
+/// the guard must outlive every call in the test whose limit it controls (a
+/// later call on the same `db` would otherwise return the memoized
+/// tiny-limit result regardless of the override state).
+#[cfg(test)]
+pub(crate) struct SiteChildrenLimitGuard {
+    prev: Option<usize>,
+}
+
+#[cfg(test)]
+impl SiteChildrenLimitGuard {
+    pub(crate) fn new(limit: usize) -> Self {
+        let prev = SITE_CHILDREN_LIMIT_OVERRIDE.with(|c| c.replace(Some(limit)));
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for SiteChildrenLimitGuard {
+    fn drop(&mut self) {
+        SITE_CHILDREN_LIMIT_OVERRIDE.with(|c| c.set(self.prev));
+    }
+}
+
+/// Which child axis of a [`SiteId`] path an equation overran.
+///
+/// The rows are exactly the walk's own variable-width `push` sites. Every OTHER
+/// push is a literal bounded by the node's shape -- an `Ast::Scalar` /
+/// `Ast::ApplyToAll` target's single slot `0`, `Op1`'s one operand, `Op2`'s two,
+/// `Expr2::If`'s three, and an `IndexExpr2::Range`'s two halves -- so those axes
+/// need no check and have no arm here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::Update)]
+pub(crate) enum SiteWidthAxis {
+    /// An `Ast::Arrayed` target's equation slots: one per `<element>` equation,
+    /// plus the trailing default slot.
+    ArrayedSlots,
+    /// One builtin call's ordered contents. `BuiltinFn::Mean` is the only
+    /// variadic variant (every other holds at most five fixed children), so
+    /// `MEAN(a, b, ...)` is the only equation shape that can reach this.
+    BuiltinContents,
+    /// One `Expr2::Subscript`'s index list. The parser accepts any number of
+    /// comma-separated indices and `Expr2::from` does NOT narrow it to the
+    /// subscripted variable's declared arity (it simply ignores indices past
+    /// `dims.len()`), so this axis is bounded by the AST alone.
+    SubscriptIndices,
+}
+
+impl SiteWidthAxis {
+    /// Human-readable plural for the diagnostic message.
+    pub(crate) fn describe(self) -> &'static str {
+        match self {
+            SiteWidthAxis::ArrayedSlots => "equation slots (per-element equations plus a default)",
+            SiteWidthAxis::BuiltinContents => "arguments to one builtin call",
+            SiteWidthAxis::SubscriptIndices => "indices in one subscript",
+        }
+    }
+}
+
+/// Why a model's equations cannot be addressed by a [`SiteId`], as reported by
+/// the LTM front door.
+///
+/// Carries the first offending variable in the walk's own deterministic order
+/// (variables canonical-sorted, then left-to-right DFS), so the emitted
+/// diagnostic is reproducible across processes.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
+pub(crate) struct SiteWidthRejection {
+    /// Canonical name of the target variable whose equation is too wide.
+    pub variable: String,
+    /// Which axis overran.
+    pub axis: SiteWidthAxis,
+    /// How many children that axis needed.
+    pub count: usize,
+    /// The limit in force when the rejection was recorded.
+    pub limit: usize,
+}
+
+/// The first place `ast` needs more `SiteId` child positions at one level than
+/// `limit` can tell apart, in the walk's own left-to-right order.
+///
+/// Path-free by construction: it counts children and never builds a path. That
+/// is what makes it a FRONT door -- a truncated path the walk had already
+/// recorded would be the aliasing bug itself, not a check against it.
+///
+/// Its descent is a strict SUPERSET of [`walk_all_in_expr`]'s, and that is the
+/// reason this is a separate pre-pass rather than a counter carried on the walk
+/// itself: the CONSUMER's path cursor (`ltm_augment::child_path`) descends
+/// through nodes the producer never enters, so a check that saw only what the
+/// producer sees could not bound the consumer's paths. Two places:
+///
+/// - a `LOOKUP` **table argument**. The walk pushes a path component for it and
+///   then records nothing (`BuiltinContents::LookupTable(_) => {}`) without
+///   recursing -- static table data is not a causal edge. The wrap DOES recurse:
+///   `ltm_augment::wrap_non_matching_in_previous`'s LOOKUP arm hands the table
+///   argument to `post_transform::pin_only_source_refs` at `child_path(path, i)`,
+///   and that function's own `App` arm then descends into every argument at
+///   `child_path(path, i)` again. So a builtin nested under a table argument is
+///   reachable by consumer path indices and by no producer path at all.
+/// - every **subscript index**. The walk skips an index that resolves to a
+///   literal element of the subscripted variable's axis; the wrap's skip is a
+///   different predicate (the occurrence's `Pinned` axes, or what
+///   `pin_source_subscript_indices` leaves unresolved), so the two sets are not
+///   the same and only the union bounds both.
+///
+/// Descending in both is therefore load-bearing, not conservatism. It is also
+/// sound in the other direction: descending where NEITHER side goes could only
+/// over-reject a node no path names, never miss one.
+fn ast_site_width_rejection(
+    ast: &crate::ast::Ast<crate::ast::Expr2>,
+    limit: usize,
+) -> Option<(SiteWidthAxis, usize)> {
+    use crate::ast::Ast;
+
+    match ast {
+        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => expr_site_width_rejection(expr, limit),
+        Ast::Arrayed(_, per_elem, default_expr, _) => {
+            // Slots are numbered in canonical element-key-sorted order with the
+            // default equation the slot AFTER the last element. Reserve that
+            // trailing slot unconditionally: `db::ltm::link_scores`'
+            // `ArrayedSlotMap` computes it as `keys.len()` whether or not a
+            // default equation exists, and routes an unlisted element there.
+            let slots = per_elem.len() + 1;
+            if slots > limit {
+                return Some((SiteWidthAxis::ArrayedSlots, slots));
+            }
+            // Visit slots in the walk's own order so the reported rejection is
+            // deterministic (a `HashMap` iteration order is not).
+            let mut elem_keys: Vec<_> = per_elem.keys().collect();
+            elem_keys.sort();
+            for k in elem_keys {
+                if let Some(rejection) = expr_site_width_rejection(&per_elem[k], limit) {
+                    return Some(rejection);
+                }
+            }
+            default_expr
+                .as_ref()
+                .and_then(|expr| expr_site_width_rejection(expr, limit))
+        }
+    }
+}
+
+/// [`ast_site_width_rejection`]'s recursive half over one expression tree.
+///
+/// The `match` is exhaustive with no catch-all arm, so a new `Expr2` variant is
+/// a compile error here rather than a silently unchecked axis.
+fn expr_site_width_rejection(
+    expr: &crate::ast::Expr2,
+    limit: usize,
+) -> Option<(SiteWidthAxis, usize)> {
+    use crate::ast::{Expr2, IndexExpr2};
+    use crate::builtins::{BuiltinContents, walk_builtin_expr};
+
+    match expr {
+        Expr2::Const(..) | Expr2::Var(..) => None,
+        Expr2::Subscript(_, indices, _, _) => {
+            if indices.len() > limit {
+                return Some((SiteWidthAxis::SubscriptIndices, indices.len()));
+            }
+            indices.iter().find_map(|idx| match idx {
+                IndexExpr2::Expr(e) => expr_site_width_rejection(e, limit),
+                IndexExpr2::Range(l, r, _) => expr_site_width_rejection(l, limit)
+                    .or_else(|| expr_site_width_rejection(r, limit)),
+                IndexExpr2::Wildcard(_)
+                | IndexExpr2::StarRange(_, _)
+                | IndexExpr2::DimPosition(_, _) => None,
+            })
+        }
+        Expr2::App(builtin, _, _) => {
+            // Count with the walker's OWN enumerator, so the front door and the
+            // walk cannot disagree about how many children a builtin has.
+            let mut children: Vec<&Expr2> = Vec::new();
+            let mut n: usize = 0;
+            walk_builtin_expr(builtin, |contents| {
+                n += 1;
+                match contents {
+                    BuiltinContents::Expr(e) | BuiltinContents::LookupTable(e) => children.push(e),
+                    BuiltinContents::Ident(_, _) => {}
+                }
+            });
+            if n > limit {
+                return Some((SiteWidthAxis::BuiltinContents, n));
+            }
+            children
+                .into_iter()
+                .find_map(|e| expr_site_width_rejection(e, limit))
+        }
+        Expr2::Op1(_, operand, _, _) => expr_site_width_rejection(operand, limit),
+        Expr2::Op2(_, left, right, _, _) => expr_site_width_rejection(left, limit)
+            .or_else(|| expr_site_width_rejection(right, limit)),
+        Expr2::If(cond, then_e, else_e, _, _) => expr_site_width_rejection(cond, limit)
+            .or_else(|| expr_site_width_rejection(then_e, limit))
+            .or_else(|| expr_site_width_rejection(else_e, limit)),
+    }
+}
+
 /// The bundled accumulators the single walk feeds: the per-source
 /// [`ReferenceSite`] buckets (the existing per-edge view) and the flat,
 /// document-ordered [`RawOccurrence`] stream (the per-occurrence view). The
@@ -344,19 +590,21 @@ struct WalkAccum<'a> {
     sites: &'a mut HashMap<String, Vec<ReferenceSite>>,
     occurrences: &'a mut Vec<RawOccurrence>,
     path: Vec<u16>,
-    /// `> 0` while the walk is inside a builtin child whose index a [`SiteId`]
-    /// element cannot address (see [`site_child_index`]).
+    /// `false` when the LTM front door rejected this target's equation as too
+    /// wide for a [`SiteId`] to address (see [`ast_site_width_rejection`]).
     ///
-    /// Only the OCCURRENCE view is suppressed there; `push_ref_site` keeps
-    /// running, so the per-edge view -- and therefore `model_edge_shapes` and
-    /// the element causal graph -- still sees every reference with its real
-    /// shape. Suppressing the ref site too would leave the IR with no entry for
-    /// the edge, and consumers default a missing entry to a single `Bare` site,
-    /// which would MISCLASSIFY a `FixedIndex`/`DynamicIndex` reference and emit
-    /// wrong element edges. It is a depth COUNTER rather than a flag because the
-    /// suppression must cover the unaddressable child's whole subtree: emitting
-    /// a nested occurrence at a truncated path would alias a sibling's `SiteId`.
-    suppress_occurrences: usize,
+    /// Only the OCCURRENCE view is dropped; `push_ref_site` keeps running, so
+    /// the per-edge view -- and therefore `model_edge_shapes` and the element
+    /// causal graph -- still sees every reference with its real shape. That view
+    /// is name-keyed and carries no path, so it is unaffected by the width;
+    /// dropping it too would leave the IR with no entry for the edge, and
+    /// consumers default a missing entry to a single `Bare` site, which would
+    /// MISCLASSIFY a `FixedIndex`/`DynamicIndex` reference and emit wrong
+    /// element edges. The occurrence view instead records NOTHING, so no two
+    /// occurrences of a rejected equation can share a `SiteId` -- and
+    /// `model_ltm_variables` refuses the whole model, so no consumer ever reads
+    /// an occurrence stream that is missing entries.
+    record_occurrences: bool,
 }
 
 impl WalkAccum<'_> {
@@ -368,9 +616,9 @@ impl WalkAccum<'_> {
     /// does NOT mean "no reference": consumers that find no IR entry for an edge
     /// fall back to a single `Bare` site, so skipping a `FixedIndex`/`DynamicIndex`
     /// reference MISCLASSIFIES it and emits wrong element edges and link scores.
-    /// In the occurrence view, absence is safe and sometimes required -- a
-    /// SiteId-unaddressable child must record nothing, or the wrap's path lookup
-    /// aliases a sibling. That is why `suppress_occurrences` gates only
+    /// In the occurrence view, absence is safe -- the wrap treats a miss as "not
+    /// a recorded causal reference" and a front-door-rejected equation records
+    /// none at all. That is why `record_occurrences` gates only
     /// `push_occurrence`.
     fn push_ref_site(
         &mut self,
@@ -407,10 +655,11 @@ impl WalkAccum<'_> {
         reducer_keys: &[String],
         index_nested: bool,
     ) {
-        // Inside an unaddressable builtin child, record NO occurrence: its path
-        // could not be reproduced by a consumer, and emitting it at a truncated
-        // path would alias a sibling. See `suppress_occurrences`.
-        if self.suppress_occurrences > 0 {
+        // A front-door-rejected equation records NO occurrence: its paths could
+        // not tell every child apart, and two occurrences sharing a `SiteId` is
+        // exactly the aliasing the identity exists to prevent. See
+        // `record_occurrences`.
+        if !self.record_occurrences {
             return;
         }
         self.occurrences.push(RawOccurrence {
@@ -424,6 +673,17 @@ impl WalkAccum<'_> {
     }
 }
 
+/// The three views one target-equation walk produces: the per-EDGE
+/// [`ReferenceSite`] buckets (name-keyed, path-free), the flat document-ordered
+/// [`RawOccurrence`] stream (`SiteId`-keyed), and the LTM front door's verdict on
+/// that equation (`Some((axis, count))` when it needs more children at one level
+/// than a `SiteId` component can tell apart).
+type WalkedTarget = (
+    HashMap<String, Vec<ReferenceSite>>,
+    Vec<RawOccurrence>,
+    Option<(SiteWidthAxis, usize)>,
+);
+
 /// Walk a target's AST once, producing BOTH the per-source [`ReferenceSite`]
 /// map (the per-edge view current consumers read) AND the flat, document-order
 /// [`RawOccurrence`] stream (the per-occurrence view the ceteris-paribus
@@ -433,17 +693,25 @@ impl WalkAccum<'_> {
 /// composites (which are not model-variable keys) -- and it OMITS an index
 /// token that is a literal element selector (the A2a bug fix; see the
 /// `Subscript` arm of [`walk_all_in_expr`]).
+///
+/// The third return is the LTM front door's verdict on THIS equation
+/// ([`ast_site_width_rejection`], run before the walk starts). When it is
+/// `Some`, the occurrence stream is empty by construction -- no `SiteId` is
+/// minted for an equation whose paths could not tell every child apart -- while
+/// the per-edge map is complete as always.
 fn collect_all_reference_sites_and_occurrences(
     target_var: &crate::variable::Variable,
     variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
     dim_ctx: &crate::dimensions::DimensionsContext,
     lookup_dims: &mut impl FnMut(&str) -> Vec<crate::dimensions::Dimension>,
-) -> (HashMap<String, Vec<ReferenceSite>>, Vec<RawOccurrence>) {
+) -> WalkedTarget {
     let mut sites: HashMap<String, Vec<ReferenceSite>> = HashMap::new();
     let mut occurrences: Vec<RawOccurrence> = Vec::new();
     let Some(ast) = target_var.ast() else {
-        return (sites, occurrences);
+        return (sites, occurrences, None);
     };
+    // The front door, before a single path component is pushed.
+    let width_rejection = ast_site_width_rejection(ast, site_children_limit());
     // The target equation's iterated dimensions drive the #511 iterated-
     // subscript recognition; `Ast::Scalar` has none.
     let target_iterated_dims: Vec<String> = match ast {
@@ -464,7 +732,7 @@ fn collect_all_reference_sites_and_occurrences(
             sites: &mut sites,
             occurrences: &mut occurrences,
             path: Vec::new(),
-            suppress_occurrences: 0,
+            record_occurrences: width_rejection.is_none(),
         };
         match ast {
             crate::ast::Ast::Scalar(expr) | crate::ast::Ast::ApplyToAll(_, expr) => {
@@ -486,7 +754,9 @@ fn collect_all_reference_sites_and_occurrences(
                 // Per-element expressions: visit slots in canonical element-key
                 // order so the per-source site Vecs (and the occurrence stream /
                 // its `SiteId`s) are deterministic. The slot index is the first
-                // `SiteId` path element.
+                // `SiteId` path element; the front door above refused this
+                // equation if it needs more slots than `MAX_SITE_CHILDREN` can
+                // tell apart, so both conversions are in range by construction.
                 let mut elem_keys: Vec<_> = subscript_map.keys().collect();
                 elem_keys.sort();
                 for (slot, k) in elem_keys.iter().enumerate() {
@@ -521,7 +791,7 @@ fn collect_all_reference_sites_and_occurrences(
             }
         }
     }
-    (sites, occurrences)
+    (sites, occurrences, width_rejection)
 }
 
 /// If `ident` is a module-qualified output composite (`module·port`, e.g.
@@ -595,50 +865,6 @@ fn classify_occurrence_axes(
             None => mismatched_or_dynamic(idx),
         })
         .collect()
-}
-
-/// The reserved [`SiteId`] path component meaning "this child is not
-/// addressable". [`site_child_index`] NEVER returns it, so a path containing it
-/// cannot equal any recorded occurrence's `SiteId` -- which is exactly what lets
-/// the ceteris-paribus wrap append it for an over-arity child and be *certain*
-/// the lookup misses instead of aliasing an unrelated sibling
-/// (`ltm_augment::child_path`).
-pub(crate) const UNADDRESSABLE_CHILD: u16 = u16::MAX;
-
-/// The [`SiteId`] child index for a builtin's `n`-th content, or `None` when the
-/// arity exceeds what one path element can address.
-///
-/// A `SiteId` element is a `u16`, which every AST-shaped child count fits by
-/// construction (`Op1`/`Op2`/`If`/`Subscript` arity is bounded by the node).
-/// Builtin arity is NOT: `MEAN`/`SUM` and friends are variadic, so a call with
-/// 65,536+ arguments is representable in the AST.
-///
-/// Returning `None` -- rather than wrapping -- is the whole point. A wrapped
-/// index would RE-USE an earlier child's `SiteId`, so the wrap's path lookup
-/// would silently return a DIFFERENT occurrence: if the two children carry
-/// different subscript shapes, the wrap holds or freezes the wrong reference and
-/// emits a plausible, wrong link score. That is silent corruption, the failure
-/// class this IR exists to eliminate.
-///
-/// The caller records NO occurrence for an unaddressable child. That is the loud
-/// outcome, because it routes into machinery that already exists: a live-source
-/// subscript with no occurrence at its tracked path (on a non-empty stream) sets
-/// `WrapOutcome::missing_occurrence`, so the partial is abandoned and the
-/// db-bearing emitter warns and skips. The per-EDGE `ReferenceSite` view is
-/// unaffected (the caller still pushes those), so the causal graph keeps every
-/// edge -- only the SiteId-addressable occurrence view declines to name a child
-/// it cannot address.
-///
-/// Widening the path element to `u32` was the alternative. It is rejected: the
-/// occurrence IR is salsa-cached per model and every occurrence carries a boxed
-/// path, so widening doubles that footprint on every model to serve an arity no
-/// real model reaches -- and it would not remove the case, only move it.
-///
-/// [`UNADDRESSABLE_CHILD`] is excluded from the addressable range so it remains a
-/// value no recorded `SiteId` can contain; that reserves one child index out of
-/// 65,536 and buys the consumer a provably-unmatchable path to descend under.
-pub(crate) fn site_child_index(n: usize) -> Option<u16> {
-    u16::try_from(n).ok().filter(|&i| i != UNADDRESSABLE_CHILD)
 }
 
 /// Recursive helper for [`collect_all_reference_sites_and_occurrences`]:
@@ -773,6 +999,11 @@ fn walk_all_in_expr(
             // Everything else is genuine index content: recurse with
             // `index_nested = true`, so a model-variable dynamic index
             // (`arr[from]`) is marked reachable only through a subscript index.
+            //
+            // An index list is NOT narrowed to the subscripted variable's
+            // declared arity by `Expr2::from` (it ignores indices past
+            // `dims.len()`), so this is a third variable-width axis -- covered
+            // by the same front door, which makes the conversion in range.
             for (i, idx) in indices.iter().enumerate() {
                 if resolve_literal_index(idx, &from_dims).is_some() {
                     continue;
@@ -824,23 +1055,15 @@ fn walk_all_in_expr(
             if pushed_reducer_key {
                 reducer_keys.push(crate::patch::expr2_to_string(expr));
             }
-            // Builtin arity is the one child count not bounded by the AST shape
-            // (`MEAN(a, b, ...)` is variadic), so it is the only place a `SiteId`
-            // element can run out of range. `site_child_index` returns `None`
-            // past the addressable range and we then record NO occurrence for
-            // that child -- see its rustdoc for why that is the loud outcome.
+            // Builtin arity is one of the three child counts not bounded by the
+            // AST node's own shape (`BuiltinFn::Mean` is the only variadic
+            // variant). The LTM front door -- `ast_site_width_rejection`, run
+            // before this walk -- refuses an equation whose arity exceeds
+            // `MAX_SITE_CHILDREN`, so the conversion below is in range by
+            // construction and no two children can share a path component.
             let mut child_n: usize = 0;
             walk_builtin_expr(builtin, |contents| {
-                // An unaddressable child still gets its REFERENCE SITES walked
-                // (edges and their shapes must stay complete); only the
-                // SiteId-keyed occurrence view is suppressed, for it and its
-                // whole subtree.
-                let addressable = site_child_index(child_n);
-                let suppressed = addressable.is_none();
-                if suppressed {
-                    acc.suppress_occurrences += 1;
-                }
-                acc.path.push(addressable.unwrap_or(UNADDRESSABLE_CHILD));
+                acc.path.push(child_n as u16);
                 match contents {
                     BuiltinContents::Ident(id, _) => {
                         let canonical = Ident::<Canonical>::new(id);
@@ -883,9 +1106,6 @@ fn walk_all_in_expr(
                     BuiltinContents::LookupTable(_) => {}
                 }
                 acc.path.pop();
-                if suppressed {
-                    acc.suppress_occurrences -= 1;
-                }
                 child_n += 1;
             });
             if pushed_reducer_key {
@@ -1318,10 +1538,20 @@ struct RawOccurrence {
 /// consumer reads it (A2b is the first). Like `sites`, the HashMap *key*
 /// order is irrelevant (consumers sort keys themselves); only each value
 /// `Vec`'s order is load-bearing for salsa determinism.
+///
+/// `site_width_rejection` is the LTM front door's verdict for the whole model
+/// (GH #978/#979). When it is `Some`, at least one target equation needs more
+/// children at one path level than a `SiteId` component can tell apart, and that
+/// equation contributed NO occurrences -- so `occurrences` is incomplete and
+/// `model_ltm_variables` refuses the model outright rather than scoring it from
+/// a stream that cannot name every reference. `sites` is unaffected either way:
+/// the per-edge view is name-keyed, carries no path, and feeds the element
+/// causal graph and `model_detected_loops`, which stay correct.
 #[derive(Debug, Clone, Default, PartialEq, Eq, salsa::Update)]
 pub(crate) struct LtmReferenceSitesResult {
     pub sites: HashMap<(String, String), Vec<ClassifiedSite>>,
     pub occurrences: HashMap<String, Vec<OccurrenceSite>>,
+    pub site_width_rejection: Option<SiteWidthRejection>,
 }
 
 /// Classify every causal-edge reference site in `model` exactly once.
@@ -1339,6 +1569,13 @@ pub(crate) struct LtmReferenceSitesResult {
 /// text matches one of the site's enclosing reducer keys. That site-precise
 /// key check prevents a hoisted sibling reducer from claiming a declined
 /// sibling read on the same `(from, to)` edge (GH #793).
+///
+/// This is also the LTM front door (GH #978/#979): each target equation is
+/// checked for `SiteId` addressability BEFORE its walk pushes a single path
+/// component, and the first failure is reported on
+/// [`LtmReferenceSitesResult::site_width_rejection`]. A rejected equation
+/// contributes no occurrence at all, so no recorded `SiteId` can be a path two
+/// children share, and `model_ltm_variables` refuses to score the model.
 #[salsa::tracked(returns(ref))]
 pub(crate) fn model_ltm_reference_sites(
     db: &dyn Db,
@@ -1385,6 +1622,10 @@ pub(crate) fn model_ltm_reference_sites(
 
     let mut sites: HashMap<(String, String), Vec<ClassifiedSite>> = HashMap::new();
     let mut occurrences: HashMap<String, Vec<OccurrenceSite>> = HashMap::new();
+    // The LTM front door's model-level verdict: the FIRST target equation (in
+    // the canonical-sorted visit order above) too wide for a `SiteId` to
+    // address. `model_ltm_variables` reads it and refuses the model.
+    let mut site_width_rejection: Option<SiteWidthRejection> = None;
 
     for to_name in to_names {
         let to_var = &variables[to_name];
@@ -1393,12 +1634,28 @@ pub(crate) fn model_ltm_reference_sites(
         // One walk feeds BOTH views: the per-source `ReferenceSite` buckets
         // (per-edge, existing consumers) and the flat, document-ordered
         // `RawOccurrence` stream (per-occurrence, the A2b transform).
-        let (raw_by_source, raw_occurrences) = collect_all_reference_sites_and_occurrences(
-            to_var,
-            &variables,
-            dim_ctx,
-            &mut lookup_dims,
-        );
+        let (raw_by_source, raw_occurrences, width_rejection) =
+            collect_all_reference_sites_and_occurrences(
+                to_var,
+                &variables,
+                dim_ctx,
+                &mut lookup_dims,
+            );
+        // Record the rejection BEFORE the reference-free skip below: an
+        // over-wide equation need not reference any model variable at all
+        // (`MEAN` of 65,536 constants), and losing its verdict there would let
+        // the model be scored from an occurrence stream that silently dropped
+        // the whole equation.
+        if site_width_rejection.is_none()
+            && let Some((axis, count)) = width_rejection
+        {
+            site_width_rejection = Some(SiteWidthRejection {
+                variable: to_name_str.to_string(),
+                axis,
+                count,
+                limit: site_children_limit(),
+            });
+        }
         // A target that references ONLY module-qualified outputs has no
         // `ReferenceSite` (module·port is not a model-variable key) but does
         // carry occurrences, so gate the skip on both being empty.
@@ -1540,7 +1797,11 @@ pub(crate) fn model_ltm_reference_sites(
         }
     }
 
-    LtmReferenceSitesResult { sites, occurrences }
+    LtmReferenceSitesResult {
+        sites,
+        occurrences,
+        site_width_rejection,
+    }
 }
 
 #[cfg(test)]

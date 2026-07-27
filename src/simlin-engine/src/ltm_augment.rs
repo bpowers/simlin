@@ -252,29 +252,32 @@ struct WrapCtx<'a> {
 /// `classifier_agreement_tests::assert_occurrence_stream_aligns` proves
 /// corpus-wide. Cloning per descent is cheap: LTM equations are short.
 ///
-/// `i` is a `usize` and the conversion is CHECKED, mapping an over-arity child
-/// (a variadic builtin with 65,536+ arguments) to
-/// [`db::ltm_ir::UNADDRESSABLE_CHILD`] rather than letting `as u16` wrap. That
-/// matters because wrapping produced an EARLIER sibling's path: the lookup would
-/// return an unrelated occurrence, `missing_occurrence` would never fire, and
-/// the wrap would freeze the wrong reference and emit a plausible wrong score.
-/// The sentinel is a value `site_child_index` never emits, so every lookup at or
-/// below such a child provably MISSES -- which turns the case into the existing
-/// loud skip-and-warn. Callers additionally flag it directly (see the `App` arms)
-/// rather than relying only on the downstream miss.
+/// `i` fits a `u16` by the LTM front door, not by luck: `model_ltm_reference_sites`
+/// refuses a target equation needing more than
+/// [`MAX_SITE_CHILDREN`](crate::db::ltm_ir::MAX_SITE_CHILDREN) children at one
+/// level, and `model_ltm_variables` then emits no LTM variable for that model at
+/// all -- so the wrap never runs on an equation whose child indices could
+/// overflow. **The front door is the whole of the soundness argument here.**
+///
+/// The conversion saturates rather than wrapping, which is strictly better --
+/// wrapping maps child 65,536 onto child 0, so it can alias an ARBITRARY earlier
+/// sibling. But saturating is not a safety net: this change deleted the reserved
+/// unaddressable-child sentinel that used to hold `u16::MAX` back, so `u16::MAX`
+/// is now an ordinary, addressable child index (pinned by `db::ltm_ir::ltm_ir_tests`'
+/// `the_production_limit_is_the_whole_u16_range`). A violated precondition would
+/// therefore land on sibling 65,535's real recorded `SiteId` -- exactly the alias
+/// the sentinel used to make impossible. Do not read the saturation as
+/// protection; read it as "the failure mode is one specific collision instead of
+/// an arbitrary one, and the front door is what keeps it unreachable".
+///
+/// It is not a `panic`/`expect` because release builds use `panic = abort`:
+/// aborting the host process is a worse answer than an unreachable collision on
+/// a model for which no link score is generated at all.
 fn child_path(path: &[u16], i: usize) -> Vec<u16> {
     let mut v = Vec::with_capacity(path.len() + 1);
     v.extend_from_slice(path);
-    v.push(u16::try_from(i).unwrap_or(crate::db::ltm_ir::UNADDRESSABLE_CHILD));
+    v.push(u16::try_from(i).unwrap_or(u16::MAX));
     v
-}
-
-/// Whether builtin child index `i` can be addressed by a `SiteId` element. The
-/// wrap's `App` arms set [`WrapOutcome::missing_occurrence`] when this is false,
-/// so the partial is abandoned LOUDLY at the overflow point instead of depending
-/// on a lookup miss further down.
-fn child_is_addressable(i: usize) -> bool {
-    crate::db::ltm_ir::site_child_index(i).is_some()
 }
 
 /// The `Collapse` / `Mismatch` / `NotIterated` verdict for an iterated-dimension
@@ -726,9 +729,6 @@ fn wrap_non_matching_in_previous(
                                 None => a,
                             }
                         } else {
-                            if !child_is_addressable(i) {
-                                out.missing_occurrence = true;
-                            }
                             wrap_non_matching_in_previous(a, ctx, out, &child_path(path, i), frozen)
                         }
                     })
@@ -791,12 +791,6 @@ fn wrap_non_matching_in_previous(
                 .into_iter()
                 .enumerate()
                 .map(|(i, a)| {
-                    // An over-arity child cannot be addressed by a `SiteId`, so
-                    // every occurrence decision inside it is unavailable: abandon
-                    // the partial loudly rather than wrap on a guessed path.
-                    if !child_is_addressable(i) {
-                        out.missing_occurrence = true;
-                    }
                     wrap_non_matching_in_previous(a, ctx, out, &child_path(path, i), frozen)
                 })
                 .collect();
@@ -3377,7 +3371,10 @@ fn build_arrayed_link_score_equation(
     // `slot` is the per-element occurrence-stream slot: `walk_all_in_expr`
     // numbers `Ast::Arrayed` slots in canonical element-key-sorted order (then
     // the default after the last element), so the wrap for element `slot`
-    // consumes exactly that slot's occurrences.
+    // consumes exactly that slot's occurrences. Both `slot as u16` conversions
+    // below are in range by the LTM front door, which refuses a target needing
+    // more slots than `db::ltm_ir::MAX_SITE_CHILDREN` can tell apart -- so this
+    // model would have emitted no link score to reach here.
     let slot_equation = |expr: &crate::ast::Expr2,
                          gf_table_ref: Option<&str>,
                          slot: u16|

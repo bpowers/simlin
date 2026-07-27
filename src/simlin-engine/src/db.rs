@@ -715,21 +715,27 @@ fn module_composite_ports(
 /// left-to-right order, so taking the first that names `module` is a
 /// reproducible choice over the SAME set the old scan considered.
 ///
-/// One case this CANNOT distinguish, deliberately: a composite read from a
-/// builtin child index no `SiteId` element can address (a variadic call with
-/// 65,536+ arguments) has its occurrence suppressed by `walk_all_in_expr`, so it
-/// looks identical here to "`to` reads no output of `module`". Both yield `None`
-/// and [`module_link_score_equation`] falls through to the signed magnitude-1
-/// `black_box_unit_transfer_equation` instead of a real ceteris-paribus partial.
+/// `None` no longer conflates a WIDTH-suppressed reference with a genuine
+/// absence. The occurrence stream is complete in that respect for every model
+/// that reaches here, because the LTM front door
+/// (`db::ltm_ir::model_ltm_reference_sites`' `site_width_rejection`, GH
+/// #978/#979) refuses a model holding an equation whose `SiteId` paths could not
+/// name every child, and `model_ltm_variables` then emits no link score for it
+/// at all. Until that check existed, an over-arity builtin child had its
+/// occurrence suppressed and looked identical here to "reads no output", so the
+/// caller silently approximated the first with the signed magnitude-1
+/// `black_box_unit_transfer_equation`.
 ///
-/// That is accepted rather than fixed. The outcome is the SAME documented
-/// fallback an unlocatable reference has always taken -- an approximation, not a
-/// plausible-looking wrong number -- and distinguishing the two would mean
-/// threading an "unaddressable" marker through the IR and this query to serve an
-/// arity no real model reaches (a 65,536-argument builtin; note the arity is also
-/// far past where LTM generation is tractable at all, see GH #977). If a future
-/// change makes such a marker cheap, the honest behavior is to skip the edge
-/// LOUDLY here rather than silently approximate it.
+/// One PRE-EXISTING source of `None` survives, deliberately and unrelated to
+/// width: the walker skips a `LOOKUP` table argument as static data without
+/// recursing (`ltm_ir.rs`, `BuiltinContents::LookupTable(_) => {}`), and
+/// `OccurrenceRef::ModuleOutput` is minted only in the arms it reaches by
+/// recursion -- so a composite read as a table argument records no occurrence
+/// and lands here as `None` too. That shape is not known to be reachable from a
+/// compiling model (a table argument names a graphical function, not a value),
+/// and the outcome is the same explicit approximation an unlocatable reference
+/// has always taken; it is noted so the next reader does not take `None` for an
+/// absolute.
 fn module_output_ref_in_document_order(
     db: &dyn Db,
     model: SourceModel,

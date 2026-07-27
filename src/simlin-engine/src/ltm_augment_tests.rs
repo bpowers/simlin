@@ -5428,46 +5428,37 @@ fn slot_occurrence_index_groups_every_slot() {
     assert!(index.for_slot(99).is_empty());
 }
 
-/// `child_path` must map an over-arity builtin child to the reserved
-/// unaddressable sentinel rather than letting `as u16` WRAP onto an earlier
-/// sibling's path.
+/// `child_path` must append each child's own index over the WHOLE range a
+/// `SiteId` component addresses, and must never WRAP onto an earlier sibling's
+/// path past it.
 ///
-/// This is the consumer half of the F3 fix, and it needs its own pin: the
-/// producer-side boundary tests (`db::ltm_ir_tests`) pass whether or not this
-/// conversion is checked, because they only exercise the pure index function.
-/// With a wrapping cast, child 65,536 produces child 0's path, so the lookup
-/// returns an UNRELATED occurrence, `missing_occurrence` never fires, and the
-/// wrap freezes the wrong reference -- a plausible, silent, wrong score.
+/// The consumer half of the front-door contract (GH #978/#979). Every index the
+/// LTM front door admits (`0 ..= MAX_SITE_CHILDREN - 1`) must round-trip
+/// verbatim, because the wrap looks occurrences up by exactly this path; and the
+/// out-of-range conversion must saturate rather than wrap, since `65_536 as u16`
+/// is 0 -- child 0's path -- which would make the lookup return an UNRELATED
+/// occurrence, never fire `missing_occurrence`, and freeze the wrong reference.
+/// (Out of range is unreachable in production: the front door refuses such a
+/// model and no link score is generated for it.)
 #[test]
-fn child_path_maps_over_arity_child_to_the_unaddressable_sentinel() {
-    use crate::db::ltm_ir::UNADDRESSABLE_CHILD;
+fn child_path_appends_every_addressable_index_and_never_wraps() {
+    use crate::db::ltm_ir::MAX_SITE_CHILDREN;
 
     // Ordinary children append their own index.
     assert_eq!(child_path(&[3], 0), vec![3, 0]);
     assert_eq!(child_path(&[3], 7), vec![3, 7]);
+    // The whole addressable range round-trips, boundary included. `u16::MAX` is
+    // an ordinary child index now that no value is reserved as a sentinel.
     assert_eq!(child_path(&[], 65_534), vec![65_534]);
-
-    // Over-arity children get the sentinel, NOT a wrapped index. `65_536 as u16`
-    // is 0, which is precisely the collision this must avoid.
-    assert_eq!(child_path(&[3], 65_536), vec![3, UNADDRESSABLE_CHILD]);
-    assert_ne!(child_path(&[3], 65_536), child_path(&[3], 0));
-    assert_eq!(child_path(&[3], 131_072), vec![3, UNADDRESSABLE_CHILD]);
-    assert_ne!(child_path(&[3], 131_072), child_path(&[3], 0));
-
-    // `child_is_addressable` agrees with the producer's own predicate at the
-    // boundary, so the wrap flags exactly the children the IR omits.
-    assert!(child_is_addressable(0));
-    assert!(child_is_addressable(65_534));
-    assert!(!child_is_addressable(65_535));
-    assert!(!child_is_addressable(65_536));
-
-    // A path containing the sentinel can never be produced by the IR walker, so
-    // a lookup under it provably misses rather than aliasing.
     assert_eq!(
-        crate::db::ltm_ir::site_child_index(65_536),
-        None,
-        "the producer must decline the same child the consumer sentinels"
+        child_path(&[3], MAX_SITE_CHILDREN - 1),
+        vec![3, u16::MAX],
+        "the last child the front door admits must address itself"
     );
+
+    // Past the range: saturate, never wrap onto an earlier sibling.
+    assert_ne!(child_path(&[3], MAX_SITE_CHILDREN), child_path(&[3], 0));
+    assert_ne!(child_path(&[3], 131_072), child_path(&[3], 0));
 }
 
 #[cfg(test)]
