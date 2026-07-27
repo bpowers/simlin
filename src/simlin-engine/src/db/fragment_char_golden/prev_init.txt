@@ -1,0 +1,192 @@
+########## model main (module inputs: []) ##########
+== layout ==
+  n_slots: 7
+  $⁚init_expr⁚0⁚arg0: [5, 6)
+  $⁚prev_expr⁚0⁚arg0: [6, 7)
+  init_direct: [0, 1)
+  init_expr: [1, 2)
+  prev_direct: [2, 3)
+  prev_expr: [3, 4)
+  x: [4, 5)
+== main::$⁚init_expr⁚0⁚arg0 [implicit-helper] : initial+flow ==
+  initial:
+    literals: [1.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar x@0
+      0001  LoadConstant #0 (=1.0)
+      0002  BinOpAssignCurr Add $⁚init_expr⁚0⁚arg0@0
+      0003  Ret
+  flow:
+    literals: [1.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar x@0
+      0001  LoadConstant #0 (=1.0)
+      0002  BinOpAssignCurr Add $⁚init_expr⁚0⁚arg0@0
+      0003  Ret
+  stock: <no fragment>
+== main::$⁚prev_expr⁚0⁚arg0 [implicit-helper] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [1.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar x@0
+      0001  LoadConstant #0 (=1.0)
+      0002  BinOpAssignCurr Add $⁚prev_expr⁚0⁚arg0@0
+      0003  Ret
+  stock: <no fragment>
+== main::init_direct [explicit] : initial+flow ==
+  initial:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadInitial x@0
+      0001  AssignCurr init_direct@0
+      0002  Ret
+  flow:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadInitial x@0
+      0001  AssignCurr init_direct@0
+      0002  Ret
+  stock: <no fragment>
+== main::init_expr [explicit] : initial+flow ==
+  initial:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadInitial $⁚init_expr⁚0⁚arg0@0
+      0001  AssignCurr init_expr@0
+      0002  Ret
+  flow:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadInitial $⁚init_expr⁚0⁚arg0@0
+      0001  AssignCurr init_expr@0
+      0002  Ret
+  stock: <no fragment>
+== main::prev_direct [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [0.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadConstant #0 (=0.0)
+      0001  LoadPrev x@0
+      0002  AssignCurr prev_direct@0
+      0003  Ret
+  stock: <no fragment>
+== main::prev_expr [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [0.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadConstant #0 (=0.0)
+      0001  LoadPrev $⁚prev_expr⁚0⁚arg0@0
+      0002  AssignCurr prev_expr@0
+      0003  Ret
+  stock: <no fragment>
+== main::x [explicit] : initial+flow ==
+  initial:
+    literals: [2.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadGlobalVar off=0 (time)
+      0001  LoadConstant #0 (=2.0)
+      0002  BinOpAssignCurr Mul x@0
+      0003  Ret
+  flow:
+    literals: [2.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadGlobalVar off=0 (time)
+      0001  LoadConstant #0 (=2.0)
+      0002  BinOpAssignCurr Mul x@0
+      0003  Ret
+  stock: <no fragment>
+########## runtime ##########
+  step 0:
+    $⁚init_expr⁚0⁚arg0 = 1.0
+    $⁚prev_expr⁚0⁚arg0 = 1.0
+    dt = 1.0
+    final_time = 2.0
+    init_direct = 0.0
+    init_expr = 1.0
+    initial_time = 0.0
+    prev_direct = 0.0
+    prev_expr = 0.0
+    time = 0.0
+    x = 0.0
+  step 1:
+    $⁚init_expr⁚0⁚arg0 = 3.0
+    $⁚prev_expr⁚0⁚arg0 = 3.0
+    dt = 1.0
+    final_time = 2.0
+    init_direct = 0.0
+    init_expr = 1.0
+    initial_time = 0.0
+    prev_direct = 0.0
+    prev_expr = 1.0
+    time = 1.0
+    x = 2.0
+  step 2:
+    $⁚init_expr⁚0⁚arg0 = 5.0
+    $⁚prev_expr⁚0⁚arg0 = 5.0
+    dt = 1.0
+    final_time = 2.0
+    init_direct = 0.0
+    init_expr = 1.0
+    initial_time = 0.0
+    prev_direct = 2.0
+    prev_expr = 3.0
+    time = 2.0
+    x = 4.0

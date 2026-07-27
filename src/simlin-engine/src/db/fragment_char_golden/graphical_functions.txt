@@ -1,0 +1,132 @@
+########## model main (module inputs: []) ##########
+== layout ==
+  n_slots: 7
+  curve: [0, 1)
+  drive: [1, 2)
+  g: [2, 4)
+  gtotal: [4, 5)
+  out: [5, 7)
+== main::curve [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [0.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions:
+      gf[0]: (0.0, 5.0) (1.0, 15.0)
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadConstant #0 (=0.0)
+      0001  LoadVar drive@0
+      0002  Lookup base_gf=0 table_count=1 mode=Interpolate
+      0003  AssignCurr curve@0
+      0004  Ret
+  stock: <no fragment>
+== main::drive [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadGlobalVar off=0 (time)
+      0001  AssignCurr drive@0
+      0002  Ret
+  stock: <no fragment>
+== main::g [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [0.0, 1.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions:
+      gf[0]: (0.0, 1.0) (1.0, 2.0)
+      gf[1]: (0.0, 2.0) (1.0, 4.0)
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadConstant #0 (=0.0)
+      0001  LoadGlobalVar off=0 (time)
+      0002  Lookup base_gf=0 table_count=2 mode=Interpolate
+      0003  AssignCurr g@0
+      0004  LoadConstant #1 (=1.0)
+      0005  LoadGlobalVar off=0 (time)
+      0006  Lookup base_gf=0 table_count=2 mode=Interpolate
+      0007  AssignCurr g@1
+      0008  Ret
+  stock: <no fragment>
+== main::gtotal [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: []
+    temp_sizes: [temp0:2]
+    dim_lists: []
+    graphical_functions:
+      gf[0]: (0.0, 1.0) (1.0, 2.0)
+      gf[1]: (0.0, 2.0) (1.0, 4.0)
+    module_decls: []
+    static_views:
+      view[0]: base=g@0 dims=[2] strides=[1] offset=0 dim_ids=[0] sparse=[]
+      view[1]: base=temp0 dims=[2] strides=[1] offset=0 dim_ids=[0] sparse=[]
+    code:
+      0000  PushStaticView view=0
+      0001  LoadGlobalVar off=0 (time)
+      0002  LookupArray base_gf=0 table_count=2 mode=Interpolate write_temp=0
+      0003  PopView
+      0004  PushStaticView view=1
+      0005  ArraySum
+      0006  PopView
+      0007  AssignCurr gtotal@0
+      0008  Ret
+  stock: <no fragment>
+== main::out [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [0.0, 1.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions:
+      gf[0]: (0.0, 1.0) (1.0, 2.0)
+      gf[1]: (0.0, 2.0) (1.0, 4.0)
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadConstant #0 (=0.0)
+      0001  LoadGlobalVar off=0 (time)
+      0002  Lookup base_gf=0 table_count=2 mode=Interpolate
+      0003  AssignCurr out@0
+      0004  LoadConstant #1 (=1.0)
+      0005  LoadGlobalVar off=0 (time)
+      0006  Lookup base_gf=0 table_count=2 mode=Interpolate
+      0007  AssignCurr out@1
+      0008  Ret
+  stock: <no fragment>
+########## runtime ##########
+  step 0:
+    curve = 5.0
+    drive = 0.0
+    dt = 1.0
+    final_time = 1.0
+    g[east] = 1.0
+    g[west] = 2.0
+    gtotal = 3.0
+    initial_time = 0.0
+    out[east] = 1.0
+    out[west] = 2.0
+    time = 0.0
+  step 1:
+    curve = 15.0
+    drive = 1.0
+    dt = 1.0
+    final_time = 1.0
+    g[east] = 2.0
+    g[west] = 4.0
+    gtotal = 6.0
+    initial_time = 0.0
+    out[east] = 2.0
+    out[west] = 4.0
+    time = 1.0

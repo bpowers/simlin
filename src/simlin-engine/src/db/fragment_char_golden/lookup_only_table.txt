@@ -1,0 +1,59 @@
+########## model main (module inputs: []) ##########
+== layout ==
+  n_slots: 3
+  at_half: [0, 1)
+  at_time: [1, 2)
+  table: [2, 3)
+== main::at_half [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [0.0, 0.5]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions:
+      gf[0]: (0.0, 3.0) (1.0, 7.0)
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadConstant #0 (=0.0)
+      0001  LoadConstant #1 (=0.5)
+      0002  Lookup base_gf=0 table_count=1 mode=Interpolate
+      0003  AssignCurr at_half@0
+      0004  Ret
+  stock: <no fragment>
+== main::at_time [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [0.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions:
+      gf[0]: (0.0, 3.0) (1.0, 7.0)
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadConstant #0 (=0.0)
+      0001  LoadGlobalVar off=0 (time)
+      0002  Lookup base_gf=0 table_count=1 mode=Interpolate
+      0003  AssignCurr at_time@0
+      0004  Ret
+  stock: <no fragment>
+== main::table [explicit] : none ==
+  initial: <no fragment>
+  flow: <no fragment>
+  stock: <no fragment>
+########## runtime ##########
+  step 0:
+    at_half = 5.0
+    at_time = 3.0
+    dt = 1.0
+    final_time = 1.0
+    initial_time = 0.0
+    time = 0.0
+  step 1:
+    at_half = 5.0
+    at_time = 7.0
+    dt = 1.0
+    final_time = 1.0
+    initial_time = 0.0
+    time = 1.0

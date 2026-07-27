@@ -1,0 +1,86 @@
+########## model main (module inputs: []) ##########
+== layout ==
+  n_slots: 6
+  ce: [0, 3)
+  ecc: [3, 6)
+== main::ce [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [1.0, 1.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr ce@0 #0 (=1.0)
+      0001  LoadVar ecc@0
+      0002  LoadConstant #1 (=1.0)
+      0003  BinOpAssignCurr Add ce@1
+      0004  LoadVar ecc@1
+      0005  LoadConstant #1 (=1.0)
+      0006  BinOpAssignCurr Add ce@2
+      0007  Ret
+  stock: <no fragment>
+== main::ecc [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [1.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar ce@0
+      0001  LoadConstant #0 (=1.0)
+      0002  BinOpAssignCurr Add ecc@0
+      0003  LoadVar ce@1
+      0004  LoadConstant #0 (=1.0)
+      0005  BinOpAssignCurr Add ecc@1
+      0006  LoadVar ce@2
+      0007  LoadConstant #0 (=1.0)
+      0008  BinOpAssignCurr Add ecc@2
+      0009  Ret
+  stock: <no fragment>
+########## resolved recurrence SCC ##########
+  phase: Dt
+  members: [ce, ecc]
+  element_order: [ce@0, ecc@0, ce@1, ecc@1, ce@2, ecc@2]
+  combined fragment:
+    literals: [1.0, 1.0, 1.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr ce@0 #0 (=1.0)
+      0001  LoadVar ce@0
+      0002  LoadConstant #2 (=1.0)
+      0003  BinOpAssignCurr Add ecc@0
+      0004  LoadVar ecc@0
+      0005  LoadConstant #1 (=1.0)
+      0006  BinOpAssignCurr Add ce@1
+      0007  LoadVar ce@1
+      0008  LoadConstant #2 (=1.0)
+      0009  BinOpAssignCurr Add ecc@1
+      0010  LoadVar ecc@1
+      0011  LoadConstant #1 (=1.0)
+      0012  BinOpAssignCurr Add ce@2
+      0013  LoadVar ce@2
+      0014  LoadConstant #2 (=1.0)
+      0015  BinOpAssignCurr Add ecc@2
+      0016  Ret
+########## runtime ##########
+  step 0:
+    ce[t1] = 1.0
+    ce[t2] = 3.0
+    ce[t3] = 5.0
+    dt = 1.0
+    ecc[t1] = 2.0
+    ecc[t2] = 4.0
+    ecc[t3] = 6.0
+    final_time = 1.0
+    initial_time = 0.0
+    time = 0.0

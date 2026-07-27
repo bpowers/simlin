@@ -1,0 +1,165 @@
+########## model main (module inputs: []) ##########
+== layout ==
+  n_slots: 16
+  arr: [0, 3)
+  combo: [3, 6)
+  order: [6, 9)
+  ranked: [9, 12)
+  sorted: [12, 15)
+  total: [15, 16)
+== main::arr [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [30.0, 10.0, 20.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr arr@0 #0 (=30.0)
+      0001  AssignConstCurr arr@1 #1 (=10.0)
+      0002  AssignConstCurr arr@2 #2 (=20.0)
+      0003  Ret
+  stock: <no fragment>
+== main::combo [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [1.0]
+    temp_sizes: [temp0:3, temp1:3]
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views:
+      view[0]: base=arr@0 dims=[3] strides=[1] offset=0 dim_ids=[0] sparse=[]
+      view[1]: base=arr@0 dims=[3] strides=[1] offset=0 dim_ids=[0] sparse=[]
+    code:
+      0000  PushStaticView view=0
+      0001  LoadConstant #0 (=1.0)
+      0002  VectorSortOrder write_temp=0
+      0003  PopView
+      0004  PushStaticView view=1
+      0005  LoadConstant #0 (=1.0)
+      0006  Rank write_temp=1
+      0007  PopView
+      0008  LoadTempConst temp=0 index=0
+      0009  LoadTempConst temp=1 index=0
+      0010  BinOpAssignCurr Add combo@0
+      0011  LoadTempConst temp=0 index=1
+      0012  LoadTempConst temp=1 index=1
+      0013  BinOpAssignCurr Add combo@1
+      0014  LoadTempConst temp=0 index=2
+      0015  LoadTempConst temp=1 index=2
+      0016  BinOpAssignCurr Add combo@2
+      0017  Ret
+  stock: <no fragment>
+== main::order [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [1.0]
+    temp_sizes: [temp0:3]
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views:
+      view[0]: base=arr@0 dims=[3] strides=[1] offset=0 dim_ids=[0] sparse=[]
+    code:
+      0000  PushStaticView view=0
+      0001  LoadConstant #0 (=1.0)
+      0002  VectorSortOrder write_temp=0
+      0003  PopView
+      0004  LoadTempConst temp=0 index=0
+      0005  AssignCurr order@0
+      0006  LoadTempConst temp=0 index=1
+      0007  AssignCurr order@1
+      0008  LoadTempConst temp=0 index=2
+      0009  AssignCurr order@2
+      0010  Ret
+  stock: <no fragment>
+== main::ranked [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [1.0]
+    temp_sizes: [temp0:3]
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views:
+      view[0]: base=arr@0 dims=[3] strides=[1] offset=0 dim_ids=[0] sparse=[]
+    code:
+      0000  PushStaticView view=0
+      0001  LoadConstant #0 (=1.0)
+      0002  Rank write_temp=0
+      0003  PopView
+      0004  LoadTempConst temp=0 index=0
+      0005  AssignCurr ranked@0
+      0006  LoadTempConst temp=0 index=1
+      0007  AssignCurr ranked@1
+      0008  LoadTempConst temp=0 index=2
+      0009  AssignCurr ranked@2
+      0010  Ret
+  stock: <no fragment>
+== main::sorted [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: []
+    temp_sizes: [temp0:3]
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views:
+      view[0]: base=arr@0 dims=[] strides=[] offset=0 dim_ids=[] sparse=[]
+      view[1]: base=order@0 dims=[3] strides=[1] offset=0 dim_ids=[0] sparse=[]
+    code:
+      0000  PushStaticView view=0
+      0001  PushStaticView view=1
+      0002  VectorElmMap write_temp=0 full_source_len=3
+      0003  PopView
+      0004  PopView
+      0005  LoadTempConst temp=0 index=0
+      0006  AssignCurr sorted@0
+      0007  LoadTempConst temp=0 index=1
+      0008  AssignCurr sorted@1
+      0009  LoadTempConst temp=0 index=2
+      0010  AssignCurr sorted@2
+      0011  Ret
+  stock: <no fragment>
+== main::total [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views:
+      view[0]: base=arr@0 dims=[3] strides=[1] offset=0 dim_ids=[0] sparse=[]
+    code:
+      0000  PushStaticView view=0
+      0001  ArraySum
+      0002  PopView
+      0003  AssignCurr total@0
+      0004  Ret
+  stock: <no fragment>
+########## runtime ##########
+  step 0:
+    arr[east] = 30.0
+    arr[north] = 20.0
+    arr[west] = 10.0
+    combo[east] = 4.0
+    combo[north] = 2.0
+    combo[west] = 3.0
+    dt = 1.0
+    final_time = 1.0
+    initial_time = 0.0
+    order[east] = 1.0
+    order[north] = 0.0
+    order[west] = 2.0
+    ranked[east] = 3.0
+    ranked[north] = 2.0
+    ranked[west] = 1.0
+    sorted[east] = 10.0
+    sorted[north] = 30.0
+    sorted[west] = 20.0
+    time = 0.0
+    total = 60.0

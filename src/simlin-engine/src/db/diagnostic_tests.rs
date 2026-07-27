@@ -2926,3 +2926,112 @@ fn unit_definition_errors_survive_an_unrelated_input_change() {
         "the full diagnostic set must be identical across an unrelated input change"
     );
 }
+
+/// `Variable::errors` and `Variable::unit_errors` are the CHANNEL by which
+/// parsing and lowering report a failure to the salsa path, not residue from
+/// the monolithic compiler.
+///
+/// `docs/tech-debt.md` item 17 claimed all four embedded error fields were
+/// "dead weight carried through the monolithic compilation path", redundant
+/// with the salsa pipeline. For these two that is backwards: the salsa
+/// pipeline's diagnostics are DOWNSTREAM of them --
+/// `db::var_fragment::lower_var_fragment` reads
+/// `parsed.variable.unit_errors()`, `parsed.variable.equation_errors()` and
+/// `lowered.equation_errors()` and turns each entry into a `Diagnostic`. Acting
+/// on the claim would silently drop those diagnostics, so it is pinned here
+/// rather than left as prose: each half asserts BOTH that the stage's value
+/// carries the error in the field AND that the matching diagnostic comes out of
+/// `collect_all_diagnostics`.
+///
+/// Emptying the `unit_errors()` read or the `lowered.equation_errors()` read
+/// reds THIS test. Emptying the `parsed.variable.equation_errors()` read does
+/// NOT -- `lower_variable` clones parse errors forward in all three arms, so the
+/// lowered read catches the same error and this test stays green. What that read
+/// uniquely carries is the conveyor/queue driven-flow `EmptyEquation`
+/// suppression, and dropping it reds
+/// `test_conveyor_driven_flow_empty_equation_suppressed`,
+/// `test_conveyor_marker_removal_reinstates_empty_equation` and
+/// `test_queue_driven_outflow_empty_equation_suppressed` instead. Measured, not
+/// assumed.
+#[test]
+fn variable_error_fields_are_the_lowering_channel() {
+    use crate::test_common::TestProject;
+
+    // ── parse-time: a malformed `<units>` string, and a syntax error ──
+    let dm = TestProject::new("parse_channel")
+        .aux("bad_unit_var", "1", Some("bad units here!!!"))
+        .aux("bad_eqn_var", "1 +", None)
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &dm);
+    let stage0 = crate::db::model_stage0(&db, sync.models["main"].source, sync.project);
+
+    assert!(
+        stage0.variables[&crate::common::Ident::new("bad_unit_var")]
+            .unit_errors()
+            .is_some(),
+        "parsing must record the malformed unit string on the variable"
+    );
+    assert!(
+        stage0.variables[&crate::common::Ident::new("bad_eqn_var")]
+            .equation_errors()
+            .is_some(),
+        "parsing must record the equation syntax error on the variable"
+    );
+
+    let diags = collect_all_diagnostics(&db, sync.project);
+    assert!(
+        diags.iter().any(|d| {
+            d.variable.as_deref() == Some("bad_unit_var")
+                && matches!(&d.error, DiagnosticError::Unit(_))
+        }),
+        "the recorded unit error must reach collect_all_diagnostics; got: {diags:?}"
+    );
+    assert!(
+        diags.iter().any(|d| {
+            d.variable.as_deref() == Some("bad_eqn_var")
+                && matches!(&d.error, DiagnosticError::Equation(_))
+        }),
+        "the recorded equation error must reach collect_all_diagnostics; got: {diags:?}"
+    );
+
+    // ── lowering-time: an error `lower_ast` raises, which the parsed
+    // variable cannot carry because it does not exist yet ──
+    let dm = TestProject::new("lower_channel")
+        .named_dimension("Cities", &["Boston", "Seattle"])
+        .named_dimension("Products", &["Widgets", "Gadgets"])
+        .array_aux("sales[Cities]", "1")
+        .array_aux("prices[Products]", "1")
+        .array_aux("bad[Cities]", "sales + prices")
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &dm);
+    let bad = crate::common::Ident::new("bad");
+
+    assert!(
+        crate::db::model_stage0(&db, sync.models["main"].source, sync.project).variables[&bad]
+            .equation_errors()
+            .is_none(),
+        "the fixture must isolate a LOWERING error: parsing sees nothing wrong"
+    );
+    let lowered_errors = crate::db::model_stage1(&db, sync.models["main"].source, sync.project)
+        .variables[&bad]
+        .equation_errors()
+        .expect("lowering must record the dimension mismatch on the variable");
+    assert!(
+        lowered_errors
+            .iter()
+            .any(|e| e.code == crate::common::ErrorCode::MismatchedDimensions),
+        "expected MismatchedDimensions, got: {lowered_errors:?}"
+    );
+
+    let diags = collect_all_diagnostics(&db, sync.project);
+    assert!(
+        diags.iter().any(|d| {
+            d.variable.as_deref() == Some("bad")
+                && matches!(&d.error, DiagnosticError::Equation(e)
+                    if e.code == crate::common::ErrorCode::MismatchedDimensions)
+        }),
+        "the recorded lowering error must reach collect_all_diagnostics; got: {diags:?}"
+    );
+}

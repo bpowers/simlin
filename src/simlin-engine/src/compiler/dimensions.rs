@@ -685,7 +685,7 @@ mod tests {
         .expect("Module creation should succeed");
 
         // Create a Compiler directly to test lazy subdim_relation population
-        let mut compiler = super::super::codegen::Compiler::new(&module);
+        let mut compiler = super::super::codegen::Compiler::new(module.as_ctx());
 
         // Initially, subdim_relations should be empty (lazy population)
         assert!(

@@ -1,0 +1,64 @@
+########## model main (module inputs: []) ##########
+== layout ==
+  n_slots: 6
+  base: [0, 2)
+  exceptdef: [2, 4)
+  perelem: [4, 6)
+== main::base [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [10.0, 10.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr base@0 #0 (=10.0)
+      0001  AssignConstCurr base@1 #1 (=10.0)
+      0002  Ret
+  stock: <no fragment>
+== main::exceptdef [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [7.0, 1.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr exceptdef@0 #0 (=7.0)
+      0001  AssignConstCurr exceptdef@1 #1 (=1.0)
+      0002  Ret
+  stock: <no fragment>
+== main::perelem [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [2.0, 5.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar base@0
+      0001  LoadConstant #0 (=2.0)
+      0002  BinOpAssignCurr Mul perelem@0
+      0003  LoadVar base@1
+      0004  LoadConstant #1 (=5.0)
+      0005  BinOpAssignCurr Add perelem@1
+      0006  Ret
+  stock: <no fragment>
+########## runtime ##########
+  step 0:
+    base[east] = 10.0
+    base[west] = 10.0
+    dt = 1.0
+    exceptdef[east] = 7.0
+    exceptdef[west] = 1.0
+    final_time = 1.0
+    initial_time = 0.0
+    perelem[east] = 20.0
+    perelem[west] = 15.0
+    time = 0.0

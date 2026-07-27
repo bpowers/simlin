@@ -1,0 +1,16 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+#
+# Provenance: captured during the C2 mutation experiments on `FragmentMerger`
+# (GH #964 row C), not from a production bug. Both seeds fail under both
+# interleaving mutations: `combine_scc_fragment` switched to
+# `TempStrategy::Recycle`, and a static view's `Temp` base shifted by
+# `ctx_base.temps` instead of the per-fragment `temp_offset` -- the second of
+# which passed lib 5365/0 and `file_io` 637/0 until `temp_uses` learned to
+# resolve views. They guard the two-channel temp scan, not a historical defect.
+cc d743fe134fbb25c2d91d28ea13339a6da094f1aefb2f09452f18af6ee8341503 # shrinks to specs = [MemberSpec { index: 0, n_elements: 1, n_literals: 0, n_temps: 1, n_modules: 0, n_views: 0, n_gf_tables: 0, with_loop: false }, MemberSpec { index: 1, n_elements: 1, n_literals: 0, n_temps: 1, n_modules: 0, n_views: 1, n_gf_tables: 0, with_loop: false }]
+cc 1f353451224703f806aa7db528b9846f6232b4e4c18019cb8f562d0242ff63ed # shrinks to specs = [MemberSpec { index: 0, n_elements: 1, n_literals: 1, n_temps: 1, n_modules: 0, n_views: 1, n_gf_tables: 0, with_loop: false }, MemberSpec { index: 1, n_elements: 1, n_literals: 1, n_temps: 1, n_modules: 0, n_views: 1, n_gf_tables: 0, with_loop: false }]

@@ -5,13 +5,13 @@
 //! Per-variable bytecode emission: the *emission half* of per-variable
 //! compilation. The *lowering half* (parse + lower to `Vec<Expr>`) lives in
 //! the sibling `db/var_fragment.rs` (`lower_var_fragment`); this module
-//! consumes that and emits + symbolizes the per-phase bytecode.
+//! consumes that and emits the per-phase symbolic bytecode.
 //!
 //! `compile_var_fragment` is the salsa-tracked per-variable fragment
 //! compiler for explicit variables. `compile_implicit_var_fragment` /
 //! `compile_implicit_var_phase_bytecodes` do the same for the implicit
 //! (SMOOTH/DELAY/TREND) helpers, sharing the `lower_implicit_var`
-//! parent->implicit->parse->lower prefix. The compile+symbolize tail and the
+//! parent->implicit->parse->lower prefix. The emission tail and the
 //! production element-graph source (`compile_phase_to_per_var_bytecodes`,
 //! `var_phase_symbolic_fragment_prod`) live in the sibling `db/assemble.rs`.
 
@@ -21,6 +21,85 @@ use salsa::Accumulator;
 
 use super::*;
 use crate::common::{Canonical, Ident};
+
+// Test-only per-thread record of which fragment-compiler bodies ran.
+//
+// Pointer equality of a memo does NOT prove a query body did not run: salsa
+// backdates a re-executed query whose value compares equal and keeps the memo
+// address (the trap `db::stages` documents at length). For the fragment
+// compilers that matters even more than it did there, because a fragment is
+// *designed* to be layout-independent -- so a layout-only edit produces an
+// EQUAL fragment whether or not the expensive compile re-ran, and every
+// pointer-based test passes either way. Recording each body entry, with the
+// name it ran for, is the only evidence that separates "reused the memo" from
+// "recompiled it and found it equal".
+//
+// Names, not just counts: the acceptance criterion under test is per-variable
+// ("an *unchanged* fragment is reused"), so an aggregate count cannot say
+// whether the one re-execution was the edited variable or an unrelated one.
+//
+// Thread-local rather than a global atomic, for the same reasons as
+// `db::stages`: no lock, and a parallel test run cannot charge one test's
+// work to another. The same caveat applies -- the record happens INSIDE the
+// body, on whatever thread salsa ran it, so anyone introducing query
+// parallelism here must move this to a shared atomic in the same change.
+// `reset_fragment_executions()` at the start of a measured region is what
+// isolates a test under `--test-threads=1`, where every test shares a thread.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum FragmentExecKind {
+    /// `compile_var_fragment` -- salsa-tracked, one cache entry per
+    /// `(variable, model, project, module inputs)`.
+    Explicit,
+    /// `compile_implicit_var_fragment` -- NOT salsa-tracked. It is a plain
+    /// function called from the tracked `assemble_module`, so its results are
+    /// cached only at whole-module granularity.
+    Implicit,
+    /// `compile_ltm_var_fragment` -- salsa-tracked, keyed by `(from, to)` link.
+    Ltm,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// `None` = not recording. Recording is armed by `reset_fragment_executions`
+    /// and disarmed by `fragment_executions`, so that the ~5k tests that never
+    /// measure anything pay nothing and cannot accumulate an unbounded log on a
+    /// libtest worker thread they happen to share with a measuring test.
+    static FRAGMENT_EXECUTIONS: std::cell::RefCell<Option<Vec<(FragmentExecKind, String)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Start (or restart) recording on this thread, discarding anything already
+/// recorded (test-only). Call it after the fixture is built and primed, so
+/// setup work is not charged to the measured region.
+#[cfg(test)]
+pub(crate) fn reset_fragment_executions() {
+    FRAGMENT_EXECUTIONS.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+/// Stop recording and return every body entry since the last reset, sorted so
+/// the result is comparable regardless of the order assembly happened to walk
+/// its maps in (test-only). Panics if recording was never armed, since an empty
+/// answer from an unarmed recorder would read as "nothing recompiled".
+#[cfg(test)]
+pub(crate) fn fragment_executions() -> Vec<(FragmentExecKind, String)> {
+    let mut execs = FRAGMENT_EXECUTIONS
+        .with(|c| c.borrow_mut().take())
+        .expect("fragment_executions() without a preceding reset_fragment_executions()");
+    execs.sort();
+    execs
+}
+
+/// Record one fragment-compiler body entry, if this thread is recording
+/// (test-only).
+#[cfg(test)]
+pub(crate) fn note_fragment_execution(kind: FragmentExecKind, name: &str) {
+    FRAGMENT_EXECUTIONS.with(|c| {
+        if let Some(log) = c.borrow_mut().as_mut() {
+            log.push((kind, name.to_string()));
+        }
+    });
+}
 
 #[salsa::tracked(returns(ref))]
 pub fn compile_var_fragment<'db>(
@@ -33,12 +112,15 @@ pub fn compile_var_fragment<'db>(
     use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
     use crate::db::var_fragment::{LoweredVarFragment, lower_var_fragment};
 
+    #[cfg(test)]
+    note_fragment_execution(FragmentExecKind::Explicit, var.ident(db));
+
     let var_ident = var.ident(db).clone();
     let var_ident_canonical: Ident<Canonical> = Ident::new(&var_ident);
 
     // The interned input set stores the sorted canonical names; the plain
-    // lowering helpers (`lower_var_fragment`/`build_caller_module_refs`) still
-    // take `&[String]`, so read it back as a slice.
+    // lowering helper (`lower_var_fragment`) still takes `&[String]`, so read
+    // it back as a slice.
     let module_input_names = module_inputs.names(db);
 
     // Caller-owned, lowering-independent context (built only from
@@ -67,7 +149,7 @@ pub fn compile_var_fragment<'db>(
         &inputs,
     );
 
-    let (unit_diags, per_phase_lowered, tables, offsets, rmap, mini_offset) = match lowered {
+    let (unit_diags, per_phase_lowered, tables, var_sizes) = match lowered {
         LoweredVarFragment::Fatal {
             unit_diags,
             fatal_diags,
@@ -87,17 +169,8 @@ pub fn compile_var_fragment<'db>(
             unit_diags,
             per_phase_lowered,
             tables,
-            offsets,
-            rmap,
-            mini_offset,
-        } => (
-            unit_diags,
-            per_phase_lowered,
-            tables,
-            offsets,
-            rmap,
-            mini_offset,
-        ),
+            var_sizes,
+        } => (unit_diags, per_phase_lowered, tables, var_sizes),
     };
 
     // Malformed-unit diagnostics are non-fatal: record them and continue.
@@ -105,48 +178,59 @@ pub fn compile_var_fragment<'db>(
         CompilationDiagnostic(diag).accumulate(db);
     }
 
-    // Determine which runlists this variable belongs to
-    let dep_graph = model_dependency_graph(db, model, project, module_inputs);
+    // Which runlists this variable belongs to, read through the three-bit
+    // projection rather than the whole `ModelDepGraphResult`: the projection
+    // backdates when this variable's membership is unchanged, so an unrelated
+    // variable being added, deleted or renamed no longer invalidates every
+    // fragment in the model (GH #964).
+    let membership = var_runlist_membership(db, var, model, project, module_inputs);
     let is_stock = var.kind(db) == SourceVariableKind::Stock;
     let is_module = var.kind(db) == SourceVariableKind::Module;
     let is_module_input = inputs.contains(&var_ident_canonical);
 
-    let module_refs = crate::db::var_fragment::build_caller_module_refs(
-        db,
-        var,
-        model,
-        project,
-        module_input_names,
+    // The phase-invariant emission context, built once per variable and
+    // borrowed by every phase (up to three). All three fragment emitters --
+    // this one, the implicit-helper one, and both LTM ones -- go through the
+    // same `compile_phase_to_per_var_bytecodes`.
+    let base_ctx = fragment_emit_ctx(
+        &model_name_ident,
+        &inputs,
+        &var_sizes,
+        &tables,
+        converted_dims,
+        dim_context,
     );
-
-    // Compile for each phase and symbolize. The closure now delegates to
-    // the factored `compile_phase_to_per_var_bytecodes` so the SCC
-    // element-graph builder reuses the EXACT production compile+symbolize
-    // path (no re-derivation); the per-variable production behavior is
-    // byte-identical to the former inline closure (same minimal `Module`,
-    // same temp extraction, same symbolization, same `None` arms).
     let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
-        compile_phase_to_per_var_bytecodes(
-            exprs,
-            &offsets,
-            &rmap,
-            &tables,
-            &module_refs,
-            mini_offset,
-            converted_dims,
-            dim_context,
-            &model_name_ident,
-            &var_ident_canonical,
-            &inputs,
-        )
+        compile_phase_to_per_var_bytecodes(&base_ctx, exprs)
     };
-
-    // Runlists use canonical names, so compare with the canonical form.
-    let var_ident_str = var_ident_canonical.as_str().to_string();
 
     // Accumulate a diagnostic when per-variable compilation (Var::new)
     // fails. Without this, errors like DoesNotExist (unknown dependency)
     // are silently dropped and never appear in collect_all_diagnostics.
+    //
+    // KNOWN LOSS, deliberately not fixed here: `err.details` is dropped.
+    // `EquationError` is `{start, end, code}` with no message field, so every
+    // message a `Var::new` failure writes -- including the one naming the
+    // stock in `compiler::check_stock_updates_are_emittable` -- reaches the
+    // user only as its `ErrorCode`. The variable name still rides on the
+    // `Diagnostic`, so the report stays attributable; it is the *reason* that
+    // is lost, not the *location*.
+    //
+    // The obvious fix is wrong. Switching to `DiagnosticError::Model(err)`
+    // does carry `details`, but `errors.rs` treats the two variants
+    // differently on purpose: the `Equation` arm produces
+    // `FormattedErrorKind::Variable`, names the variable in the summary, and
+    // -- via `format_diagnostic_with_datamodel` -> `format_equation_error` --
+    // enriches the message with a source snippet from the equation text. The
+    // `Model` arm produces `FormattedErrorKind::Model`, drops the variable
+    // from the summary, and gets no snippet. Trading a per-variable
+    // diagnostic for a model-level one to gain a message is a net regression
+    // of the user-facing surface (pinned by
+    // `db::diagnostic_tests::test_compile_var_fragment_per_phase_var_new_failure`).
+    //
+    // The right fix is to give `EquationError` a details field, which is 48
+    // construction sites across 20 files and the type the FFI error surface
+    // is built on -- its own change, not a rider on this one.
     let accumulate_var_compile_error = |err: &crate::Error| {
         CompilationDiagnostic(Diagnostic {
             model: model.name(db).clone(),
@@ -162,7 +246,7 @@ pub fn compile_var_fragment<'db>(
     };
 
     // Initial phase: stocks and their deps get compiled with is_initial=true
-    let initial_bytecodes = if dep_graph.runlist_initials.contains(&var_ident_str) {
+    let initial_bytecodes = if membership.initials {
         match &per_phase_lowered.initial {
             Ok(var_result) => compile_phase(&var_result.ast),
             Err(err) => {
@@ -179,8 +263,7 @@ pub fn compile_var_fragment<'db>(
     // AssignCurr in the flows phase to propagate the parent-provided value
     // each timestep (matching the monolithic path's `instantiation.contains(id)
     // || !var.is_stock()` filter).
-    let in_flows_runlist =
-        (!is_stock || is_module_input) && dep_graph.runlist_flows.contains(&var_ident_str);
+    let in_flows_runlist = (!is_stock || is_module_input) && membership.flows;
     let flow_bytecodes = if in_flows_runlist {
         match &per_phase_lowered.noninitial {
             Ok(var_result) => compile_phase(&var_result.ast),
@@ -200,8 +283,6 @@ pub fn compile_var_fragment<'db>(
     let flow_invariance = if in_flows_runlist {
         crate::db::assemble::compute_flow_invariance_support(
             &per_phase_lowered.noninitial,
-            &offsets,
-            &model_name_ident,
             &var_ident_canonical,
         )
     } else {
@@ -209,18 +290,17 @@ pub fn compile_var_fragment<'db>(
     };
 
     // Stock phase: stocks and modules get compiled with is_initial=false
-    let stock_bytecodes =
-        if (is_stock || is_module) && dep_graph.runlist_stocks.contains(&var_ident_str) {
-            match &per_phase_lowered.noninitial {
-                Ok(var_result) => compile_phase(&var_result.ast),
-                Err(err) => {
-                    accumulate_var_compile_error(err);
-                    None
-                }
+    let stock_bytecodes = if (is_stock || is_module) && membership.stocks {
+        match &per_phase_lowered.noninitial {
+            Ok(var_result) => compile_phase(&var_result.ast),
+            Err(err) => {
+                accumulate_var_compile_error(err);
+                None
             }
-        } else {
-            None
-        };
+        }
+    } else {
+        None
+    };
 
     Some(VarFragmentResult {
         fragment: CompiledVarFragment {
@@ -376,6 +456,21 @@ pub(crate) fn compile_implicit_var_fragment(
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::CompiledVarFragment;
 
+    // Recorded at body entry (before the name is even resolved), keyed by the
+    // parent variable and the implicit index -- the identity this compiler is
+    // called with. Recording after `lower_implicit_var` would silently omit
+    // every entry that failed to lower, which is exactly the work a caching
+    // claim needs to account for.
+    #[cfg(test)]
+    note_fragment_execution(
+        FragmentExecKind::Implicit,
+        &format!(
+            "{}#{}",
+            meta.parent_source_var.ident(db),
+            meta.index_in_parent
+        ),
+    );
+
     // The implicit var's canonical name (the runlist-gate key). Resolve it
     // through the shared prefix so this and the per-phase compile agree on
     // the name by construction. `None` here is the same loud-safe signal
@@ -439,7 +534,7 @@ pub(crate) fn compile_implicit_var_fragment(
     })
 }
 
-/// Build the mini-layout context for one implicit variable and compile a
+/// Build the minimal symbol table for one implicit variable and compile a
 /// single phase (`is_initial`) to symbolic `PerVarBytecodes`. NOT a tracked
 /// function -- the parent variable's parse result already provides salsa
 /// caching.
@@ -453,18 +548,17 @@ pub(crate) fn compile_implicit_var_fragment(
 /// the element-graph accessor's bytecode is byte-identical to the
 /// production fragment by construction (DRY -- "single shared relation,
 /// never re-derive"). The shared `parent → implicit → parse → lower`
-/// prefix is `lower_implicit_var`; the shared compile+symbolize tail is
+/// prefix is `lower_implicit_var`; the shared emission tail is
 /// `compile_phase_to_per_var_bytecodes` (the exact function the real-var
 /// arm of `var_phase_symbolic_fragment_prod` and `compile_var_fragment`
-/// use). The mini-layout/metadata/dep-collection glue between them is
-/// intrinsic to the implicit-var shape (the `meta.is_module` branch, the
-/// body-relative mini-layout, the dep-stub/sub-model collection) and is not
-/// separately extractable without restructuring this function.
+/// use). The metadata/dep-collection glue between them is intrinsic to the
+/// implicit-var shape (the `meta.is_module` branch, the dep-stub/sub-model
+/// collection) and is not separately extractable without restructuring this
+/// function.
 ///
 /// Loud-safe `None` (never panics): the shared prefix failed (absent
 /// implicit index / equation errors), a graphical-function table failed to
-/// build, the phase's `Var::new` errored, or `Module::compile()` /
-/// symbolization failed -- exactly the original closure's `None` arms.
+/// build, the phase's `Var::new` errored, or codegen failed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_implicit_var_phase_bytecodes(
     db: &dyn Db,
@@ -474,8 +568,6 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
     module_input_names: &[String],
     is_initial: bool,
 ) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
-    use crate::compiler::symbolic::{ReverseOffsetMap, VariableLayout};
-
     let module_ident_context =
         model_module_ident_context(db, model, project, module_input_names.to_vec());
 
@@ -510,15 +602,11 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
     // Arena for sub-model stub variables allocated by build_submodel_metadata
     let arena = bumpalo::Bump::new();
 
-    // The mini-layout is always body-relative (offset 0). The implicit
-    // globals (time/dt/initial_time/final_time) are NOT inserted: they
-    // lower to `LoadGlobalVar` at fixed absolute slots, never through this
-    // metadata/rmap, so the symbolic fragment is role-independent. The root
-    // +IMPLICIT_VAR_COUNT shift is applied later in `assemble_module` via
-    // `VariableLayout::root_shifted`.
+    // The minimal symbol table for this helper: itself plus its dependencies,
+    // carrying no offsets. See `lower_var_fragment` for why a fragment must not
+    // know where its own model's variables live.
     let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
         HashMap::new();
-    let mut mini_offset = 0;
 
     let project_models = project.models(db);
     let self_size = if meta.is_module {
@@ -535,19 +623,18 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
         // An *arrayed* implicit helper (the GH #541 bare-arrayed-PREVIOUS case)
         // occupies one slot per element; `meta.size` is its element count (1
         // for the scalar helpers that are every other implicit var). The
-        // mini-layout self-size MUST match the `compute_layout` allocation, or
-        // the helper's per-element writes spill into the next variable's slots.
+        // recorded size MUST match the `compute_layout` allocation, or the
+        // helper's per-element writes spill into the next variable's slots.
         meta.size
     };
     mini_metadata.insert(
         var_ident_canonical.clone(),
         crate::compiler::VariableMetadata {
-            offset: mini_offset,
+            offset: None,
             size: self_size,
             var: &lowered,
         },
     );
-    mini_offset += self_size;
 
     // Implicit vars' deps are always explicit vars in the same model (or other implicit vars)
     // Keep dependency context conservative for implicit vars as well: both
@@ -598,7 +685,6 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
     let implicit_info = model_implicit_var_info(db, model, project);
     let all_names: Vec<&String> = all_dep_names.iter().chain(extra_dep_names.iter()).collect();
     let mut dep_variables: Vec<(Ident<Canonical>, crate::variable::Variable, usize)> = Vec::new();
-    let mut extra_module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
     let mut extra_submodels: HashMap<String, SourceModel> = HashMap::new();
 
     for dep_name in &all_names {
@@ -647,15 +733,11 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
                         ident: module_ident.clone(),
                         model_name: Ident::new(mod_model_name),
                         units: None,
-                        inputs: module_inputs.clone(),
+                        inputs: module_inputs,
                         errors: vec![],
                         unit_errors: vec![],
                     };
-                    dep_variables.push((module_ident.clone(), mod_var, sub_size));
-
-                    let input_set: BTreeSet<Ident<Canonical>> =
-                        module_inputs.iter().map(|mi| mi.dst.clone()).collect();
-                    extra_module_refs.insert(module_ident, (Ident::new(mod_model_name), input_set));
+                    dep_variables.push((module_ident, mod_var, sub_size));
 
                     if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
                         extra_submodels.insert(mod_model_name.to_string(), *sub_model);
@@ -696,15 +778,11 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
                     ident: module_ident.clone(),
                     model_name: Ident::new(im_model_name),
                     units: None,
-                    inputs: module_inputs.clone(),
+                    inputs: module_inputs,
                     errors: vec![],
                     unit_errors: vec![],
                 };
-                dep_variables.push((module_ident.clone(), mod_var, sub_size));
-
-                let input_set: BTreeSet<Ident<Canonical>> =
-                    module_inputs.iter().map(|mi| mi.dst.clone()).collect();
-                extra_module_refs.insert(module_ident, (Ident::new(im_model_name), input_set));
+                dep_variables.push((module_ident, mod_var, sub_size));
 
                 if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
                     extra_submodels.insert(im_model_name.to_string(), *sub_model);
@@ -788,12 +866,11 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
             mini_metadata.insert(
                 dep_ident.clone(),
                 crate::compiler::VariableMetadata {
-                    offset: mini_offset,
+                    offset: None,
                     size: *dep_size,
                     var: dep_var,
                 },
             );
-            mini_offset += dep_size;
         }
     }
 
@@ -806,11 +883,6 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
     for sub_model in extra_submodels.values() {
         build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
     }
-
-    let mini_layout =
-        crate::compiler::symbolic::layout_from_metadata(&all_metadata, &model_name_ident)
-            .unwrap_or_else(|_| VariableLayout::new(HashMap::new(), 0));
-    let rmap = ReverseOffsetMap::from_layout(&mini_layout);
 
     let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
     {
@@ -851,47 +923,33 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
     }
 
     let inputs = canonical_module_input_set(module_input_names);
-    let (module_models, mut module_refs) = if meta.is_module {
-        let mm = model_module_map(db, model, project).clone();
-
-        // Build module_refs from the implicit var's datamodel::Module references,
-        // stripping the module ident prefix from dst (matching compile_var_fragment
-        // and enumerate_module_instances_inner).
-        let mut refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
+    let module_models = if meta.is_module {
+        // A module-typed implicit helper compiles an `EvalModule`, so its
+        // sub-model's variables must be in the metadata map for the
+        // reference offsets to resolve.
         if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
-            let input_prefix = format!("{implicit_name}\u{00B7}");
-            let input_set: BTreeSet<Ident<Canonical>> = dm_module
-                .references
-                .iter()
-                .filter_map(|mr| {
-                    let dst_canonical = canonicalize(&mr.dst);
-                    let bare = dst_canonical.strip_prefix(&input_prefix)?;
-                    Some(Ident::new(bare))
-                })
-                .collect();
-            refs.insert(
-                var_ident_canonical.clone(),
-                (Ident::new(&dm_module.model_name), input_set),
-            );
-
-            // Populate sub-model metadata
             let sub_canonical = canonicalize(&dm_module.model_name);
             if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
                 build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
             }
         }
 
-        (mm, refs)
+        model_module_map(db, model, project).clone()
     } else {
-        (HashMap::new(), HashMap::new())
+        HashMap::new()
     };
-    module_refs.extend(extra_module_refs);
+
+    // Reference extents in the per-variable form BOTH halves borrow: lowering's
+    // ELM MAP fold below, and the emission context further down.
+    let var_sizes: PerVarSizes =
+        crate::compiler::whole_variable_extents(&all_metadata, &model_name_ident);
 
     let core = crate::compiler::ContextCore {
         dimensions: converted_dims,
         dimensions_ctx: dim_context,
         model_name: &model_name_ident,
         metadata: &all_metadata,
+        var_sizes: &var_sizes,
         module_models: &module_models,
         inputs: &inputs,
     };
@@ -902,35 +960,13 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
     )
     .ok()?;
 
-    // Offsets in the per-variable form `compile_phase_to_per_var_bytecodes`
-    // expects, built from the mini-layout `all_metadata` exactly as the
-    // former inline `compile_phase` closure built them (so the shared
-    // compile+symbolize tail is byte-identical to the prior per-implicit
-    // behavior -- this replaces the verbatim-duplicate closure with the
-    // single shared relation).
-    let offsets: PerVarOffsetMap = all_metadata
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.clone(),
-                v.iter()
-                    .map(|(vk, vm)| (vk.clone(), (vm.offset, vm.size)))
-                    .collect(),
-            )
-        })
-        .collect();
-
-    compile_phase_to_per_var_bytecodes(
-        &var.ast,
-        &offsets,
-        &rmap,
+    let base_ctx = fragment_emit_ctx(
+        &model_name_ident,
+        &inputs,
+        &var_sizes,
         &tables,
-        &module_refs,
-        mini_offset,
         converted_dims,
         dim_context,
-        &model_name_ident,
-        &var_ident_canonical,
-        &inputs,
-    )
+    );
+    compile_phase_to_per_var_bytecodes(&base_ctx, &var.ast)
 }

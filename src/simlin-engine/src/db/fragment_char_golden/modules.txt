@@ -1,0 +1,269 @@
+########## model main (module inputs: []) ##########
+== layout ==
+  n_slots: 11
+  $⁚smoothed⁚0⁚arg1: [5, 6)
+  $⁚smoothed⁚0⁚smth1: [6, 11)
+  smoothed: [0, 1)
+  src: [1, 2)
+  sub: [2, 4)
+  usesub: [4, 5)
+== main::$⁚smoothed⁚0⁚arg1 [implicit-helper] : initial+flow ==
+  initial:
+    literals: [2.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr $⁚smoothed⁚0⁚arg1@0 #0 (=2.0)
+      0001  Ret
+  flow:
+    literals: [2.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr $⁚smoothed⁚0⁚arg1@0 #0 (=2.0)
+      0001  Ret
+  stock: <no fragment>
+== main::$⁚smoothed⁚0⁚smth1 [implicit-helper] : initial+flow+stock ==
+  initial:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls:
+      decl[0]: model=stdlib⁚smth1 inputs=[delay_time, input] var=$⁚smoothed⁚0⁚smth1@0
+    static_views: []
+    code:
+      0000  LoadVar $⁚smoothed⁚0⁚arg1@0
+      0001  LoadVar src@0
+      0002  EvalModule module=0 n_inputs=2
+      0003  Ret
+  flow:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls:
+      decl[0]: model=stdlib⁚smth1 inputs=[delay_time, input] var=$⁚smoothed⁚0⁚smth1@0
+    static_views: []
+    code:
+      0000  LoadVar $⁚smoothed⁚0⁚arg1@0
+      0001  LoadVar src@0
+      0002  EvalModule module=0 n_inputs=2
+      0003  Ret
+  stock:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls:
+      decl[0]: model=stdlib⁚smth1 inputs=[delay_time, input] var=$⁚smoothed⁚0⁚smth1@0
+    static_views: []
+    code:
+      0000  LoadVar $⁚smoothed⁚0⁚arg1@0
+      0001  LoadVar src@0
+      0002  EvalModule module=0 n_inputs=2
+      0003  Ret
+== main::smoothed [explicit] : initial+flow ==
+  initial:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar $⁚smoothed⁚0⁚smth1@4
+      0001  AssignCurr smoothed@0
+      0002  Ret
+  flow:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar $⁚smoothed⁚0⁚smth1@4
+      0001  AssignCurr smoothed@0
+      0002  Ret
+  stock: <no fragment>
+== main::src [explicit] : initial+flow ==
+  initial:
+    literals: [3.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr src@0 #0 (=3.0)
+      0001  Ret
+  flow:
+    literals: [3.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr src@0 #0 (=3.0)
+      0001  Ret
+  stock: <no fragment>
+== main::sub [explicit] : initial+flow+stock ==
+  initial:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls:
+      decl[0]: model=producer inputs=[input] var=sub@0
+    static_views: []
+    code:
+      0000  LoadVar src@0
+      0001  EvalModule module=0 n_inputs=1
+      0002  Ret
+  flow:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls:
+      decl[0]: model=producer inputs=[input] var=sub@0
+    static_views: []
+    code:
+      0000  LoadVar src@0
+      0001  EvalModule module=0 n_inputs=1
+      0002  Ret
+  stock:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls:
+      decl[0]: model=producer inputs=[input] var=sub@0
+    static_views: []
+    code:
+      0000  LoadVar src@0
+      0001  EvalModule module=0 n_inputs=1
+      0002  Ret
+== main::usesub [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [2.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar sub@1
+      0001  LoadConstant #0 (=2.0)
+      0002  BinOpAssignCurr Mul usesub@0
+      0003  Ret
+  stock: <no fragment>
+########## model producer (module inputs: []) ##########
+== layout ==
+  n_slots: 2
+  input: [0, 1)
+  output: [1, 2)
+== producer::input [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [0.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr input@0 #0 (=0.0)
+      0001  Ret
+  stock: <no fragment>
+== producer::output [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [10.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar input@0
+      0001  LoadConstant #0 (=10.0)
+      0002  BinOpAssignCurr Mul output@0
+      0003  Ret
+  stock: <no fragment>
+########## model producer (module inputs: [input]) ##########
+== layout ==
+  n_slots: 2
+  input: [0, 1)
+  output: [1, 2)
+== producer::input [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadModuleInput input=0
+      0001  AssignCurr input@0
+      0002  Ret
+  stock: <no fragment>
+== producer::output [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [10.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadModuleInput input=0
+      0001  LoadConstant #0 (=10.0)
+      0002  BinOpAssignCurr Mul output@0
+      0003  Ret
+  stock: <no fragment>
+########## runtime ##########
+  step 0:
+    $⁚smoothed⁚0⁚arg1 = 2.0
+    $⁚smoothed⁚0⁚smth1·delay_time = 2.0
+    $⁚smoothed⁚0⁚smth1·flow = 0.0
+    $⁚smoothed⁚0⁚smth1·initial_value = NaN
+    $⁚smoothed⁚0⁚smth1·input = 3.0
+    $⁚smoothed⁚0⁚smth1·output = 3.0
+    dt = 1.0
+    final_time = 1.0
+    initial_time = 0.0
+    smoothed = 3.0
+    src = 3.0
+    sub·input = 3.0
+    sub·output = 30.0
+    time = 0.0
+    usesub = 60.0
+  step 1:
+    $⁚smoothed⁚0⁚arg1 = 2.0
+    $⁚smoothed⁚0⁚smth1·delay_time = 2.0
+    $⁚smoothed⁚0⁚smth1·flow = 0.0
+    $⁚smoothed⁚0⁚smth1·initial_value = NaN
+    $⁚smoothed⁚0⁚smth1·input = 3.0
+    $⁚smoothed⁚0⁚smth1·output = 3.0
+    dt = 1.0
+    final_time = 1.0
+    initial_time = 0.0
+    smoothed = 3.0
+    src = 3.0
+    sub·input = 3.0
+    sub·output = 30.0
+    time = 1.0
+    usesub = 60.0

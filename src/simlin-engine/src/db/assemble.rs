@@ -8,8 +8,8 @@
 //! Holds the table/metadata extraction helpers
 //! (`extract_tables_from_source_var`, `build_module_inputs`,
 //! `build_stub_variable`, `build_submodel_metadata`), the per-variable
-//! compile+symbolize tail (`compile_phase_to_per_var_bytecodes` and the
-//! `VarFragmentResult`/`PerVarOffsetMap` values), the production
+//! emission tail (`compile_phase_to_per_var_bytecodes` and the
+//! `VarFragmentResult`/`PerVarSizes` values), the production
 //! element-graph source `var_phase_symbolic_fragment_prod`, the resolved
 //! recurrence-SCC interleaver (`segment_member_by_element` /
 //! `combine_scc_fragment`), the salsa-tracked `assemble_module` /
@@ -229,7 +229,7 @@ pub(crate) fn build_submodel_metadata<'arena>(
         sub_metadata.insert(
             var_ident.clone(),
             crate::compiler::VariableMetadata {
-                offset,
+                offset: Some(offset),
                 size,
                 var: stub,
             },
@@ -306,7 +306,7 @@ pub(crate) fn build_submodel_metadata<'arena>(
             sub_metadata.insert(
                 var_ident,
                 crate::compiler::VariableMetadata {
-                    offset: entry.offset,
+                    offset: Some(entry.offset),
                     size: entry.size,
                     var: stub,
                 },
@@ -360,7 +360,7 @@ pub(crate) fn build_submodel_metadata<'arena>(
             sub_metadata.insert(
                 var_ident,
                 crate::compiler::VariableMetadata {
-                    offset: entry.offset,
+                    offset: Some(entry.offset),
                     size: entry.size,
                     var: stub,
                 },
@@ -404,30 +404,30 @@ pub(crate) struct VarFragmentResult {
     pub flow_invariance: Option<FlowInvarianceSupport>,
 }
 
-/// Walk `exprs` and push every base slot offset referenced by a `Var`,
+/// Walk `exprs` and push the NAME of every variable referenced by a `Var`,
 /// `Subscript`, or `StaticSubscript` node into `out`.
 ///
-/// This is NOT the same as calling `exprs_are_invariant`: it collects offsets
+/// This is NOT the same as calling `exprs_are_invariant`: it collects names
 /// without returning a verdict. It is used by `compute_flow_invariance_support`
-/// to determine which mini-layout entries are actually referenced in the *flow*
-/// expression (as opposed to the init expression, which also contributes to
-/// the mini-layout but must not pollute the dep_names set).
+/// to determine which variables are actually referenced in the *flow*
+/// expression (as opposed to the init expression, which must not pollute the
+/// dep_names set).
 ///
 /// The walk is exhaustive over every `Expr`/`BuiltinFn` variant.
-fn collect_expr_offsets(exprs: &[crate::compiler::Expr], out: &mut HashSet<usize>) {
+fn collect_expr_refs(exprs: &[crate::compiler::Expr], out: &mut HashSet<Ident<Canonical>>) {
     use crate::builtins::BuiltinFn;
     use crate::compiler::Expr;
     use crate::compiler::expr::SubscriptIndex;
 
-    fn walk(expr: &Expr, out: &mut HashSet<usize>) {
+    fn walk(expr: &Expr, out: &mut HashSet<Ident<Canonical>>) {
         match expr {
-            // Leaf: referenced slot.
-            Expr::Var(off, _)
-            | Expr::Subscript(off, _, _, _)
-            | Expr::StaticSubscript(off, _, _) => {
-                out.insert(*off);
+            // Leaf: referenced variable.
+            Expr::Var(var, _)
+            | Expr::Subscript(var, _, _, _)
+            | Expr::StaticSubscript(var, _, _) => {
+                out.insert(var.name.clone());
                 // For Subscript, also walk the index expressions (they may
-                // reference other slots).
+                // reference other variables).
                 if let Expr::Subscript(_, indices, _, _) = expr {
                     for idx in indices {
                         match idx {
@@ -592,24 +592,21 @@ fn collect_expr_offsets(exprs: &[crate::compiler::Expr], out: &mut HashSet<usize
 /// expression can make it `false`).
 ///
 /// `dep_names` is determined by walking the *flow* expression (`flow_var.ast`)
-/// to collect every slot offset actually referenced there, then reverse-mapping
-/// each offset through the mini-layout to the owning variable name. This is
-/// precise: it considers only flow-expression references, not init-only deps
-/// that happen to share the same mini-layout but are never read at dt time.
-/// Using all mini-layout keys would over-approximate: a variable `v` with `y =
-/// INIT(k)` in its init equation would include `k` in dep_names even though `k`
-/// does not appear in `v`'s flow expression, causing `k` being variant to
-/// incorrectly classify `v` as variant too.
+/// and reading the owning variable's name off every reference. This is precise:
+/// it considers only flow-expression references, not init-only deps that were
+/// never read at dt time. Using the fragment's whole dependency set would
+/// over-approximate: a variable `v` with `y = INIT(k)` in its init equation
+/// would include `k` in dep_names even though `k` does not appear in `v`'s flow
+/// expression, causing `k` being variant to incorrectly classify `v` as variant
+/// too.
 ///
 /// Returns `None` if `flow_var` is an `Err` (noninitial lowering failed) or
 /// the expression list is empty.
 pub(crate) fn compute_flow_invariance_support(
     flow_var: &Result<crate::compiler::Var, crate::common::Error>,
-    offsets: &PerVarOffsetMap,
-    model_name_ident: &Ident<Canonical>,
     var_ident_canonical: &Ident<Canonical>,
 ) -> Option<FlowInvarianceSupport> {
-    use crate::compiler::invariance::{OffsetClass, exprs_are_invariant};
+    use crate::compiler::invariance::{RefClass, exprs_are_invariant};
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
@@ -623,59 +620,27 @@ pub(crate) fn compute_flow_invariance_support(
 
     // Structural purity check: does the expression contain any variant
     // builtins (TIME, PULSE, RAMP, STEP, PREVIOUS, EvalModule, ModuleInput)?
-    // All offset lookups return Invariant so only the builtin arms matter.
-    let locally_pure = exprs_are_invariant(&flow_var.ast, &|_off| OffsetClass::Invariant);
+    // All reference lookups return Invariant so only the builtin arms matter.
+    let locally_pure = exprs_are_invariant(&flow_var.ast, &|_var| RefClass::Invariant);
 
-    // Build the reverse-lookup: offset -> variable name from the mini-layout.
-    // An offset belongs to the variable whose range [base, base+size) contains it.
-    let model_offsets = offsets.get(model_name_ident);
+    // Walk the flow expression to collect only the variables actually
+    // referenced there (not init-only deps).
+    //
+    // This used to reverse-map each referenced slot offset through the
+    // fragment's private offset layout, with a `debug_assert!` guarding the case
+    // where an offset resolved to no owner -- a silently dropped dependency
+    // would be INVISIBLE to the invariance fixpoint, the over-classification
+    // direction. Reading the name off the reference removes the failure mode
+    // rather than guarding it: there is no lookup left to fail.
+    let mut referenced: HashSet<Ident<Canonical>> = HashSet::new();
+    collect_expr_refs(&flow_var.ast, &mut referenced);
 
-    // Walk the flow expression to collect only the offsets actually referenced
-    // there (not init-only deps that also appear in the mini-layout).
-    let mut referenced_offsets: HashSet<usize> = HashSet::new();
-    collect_expr_offsets(&flow_var.ast, &mut referenced_offsets);
-
-    // Resolve each referenced offset to its owning variable name, excluding the
-    // variable itself (its own slot is offset 0 in the mini-layout, never a dep).
-    let var_name_str = var_ident_canonical.as_str();
-    let dep_names: BTreeSet<String> = match model_offsets {
-        None => BTreeSet::new(),
-        Some(mo) => {
-            // Build an (offset, name) list from the mini-layout for range lookup.
-            let ranges: Vec<(&Ident<Canonical>, usize, usize)> = mo
-                .iter()
-                .map(|(name, &(base, size))| (name, base, size))
-                .collect();
-
-            referenced_offsets
-                .iter()
-                .filter_map(|&off| {
-                    // Find the mini-layout entry whose [base, base+size) contains
-                    // this offset.
-                    let owner = ranges
-                        .iter()
-                        .find(|(_, base, size)| off >= *base && off < *base + *size)
-                        .map(|(name, _, _)| name.as_str());
-                    // The mini-layout is contiguous over [0, total) and the time
-                    // globals lower via LoadGlobalVar/Dt/App (never Expr::Var),
-                    // so every flow-referenced offset must resolve to an owner.
-                    // A silently dropped offset would make that dependency
-                    // INVISIBLE to the invariance fixpoint -- the
-                    // over-classification direction (stale values once B2 skips
-                    // re-evaluating the invariant prefix) -- so be loud in debug
-                    // builds; the end-to-end bit-constancy oracle is the
-                    // release-build backstop.
-                    debug_assert!(
-                        owner.is_some(),
-                        "flow-referenced offset {off} of '{var_name_str}' resolves to no mini-layout owner"
-                    );
-                    owner
-                        .filter(|name| *name != var_name_str)
-                        .map(|name| name.to_string())
-                })
-                .collect()
-        }
-    };
+    // The variable's own references are self-references, never dependencies.
+    let dep_names: BTreeSet<String> = referenced
+        .iter()
+        .filter(|name| *name != var_ident_canonical)
+        .map(|name| name.as_str().to_string())
+        .collect();
 
     Some(FlowInvarianceSupport {
         locally_pure,
@@ -683,51 +648,111 @@ pub(crate) fn compute_flow_invariance_support(
     })
 }
 
-/// `model_name -> (var_name -> (offset, size))`: the per-variable mini-
-/// layout offset map `lower_var_fragment` produces and the minimal
-/// per-phase `crate::compiler::Module` consumes. Structurally identical to
-/// `compiler::VariableOffsetMap` / `var_fragment::VarOffsets` (both
-/// private aliases in their modules); named here so the factored
-/// `compile_phase_to_per_var_bytecodes` signature is self-documenting
-/// rather than an inline nested-`HashMap` (which clippy flags as a very
-/// complex type).
-pub(crate) type PerVarOffsetMap =
-    HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, (usize, usize)>>;
+/// `reference -> extent of the variable it addresses in whole`: the per-fragment
+/// size table `lower_var_fragment` produces, and which BOTH halves of the
+/// compile borrow -- the lowering context (`compiler::ContextCore`) and the
+/// per-phase emission context (`compiler::ModuleCtx`). This IS
+/// `compiler::VarSizes` -- the fragment-side name for the same type, kept so the
+/// db-side signatures read in fragment terms.
+///
+/// Its predecessor carried `(offset, size)` per variable over a private
+/// per-fragment layout that existed only so symbolization could undo it. There
+/// are no fragment-local offsets any more: emission reads names, and the only
+/// surviving question is how big a variable is.
+pub(crate) type PerVarSizes = crate::compiler::VarSizes;
 
-/// Compile one phase's lowered `Vec<Expr>` for a single variable through
-/// its own correct mini-context and symbolize the result into a
+/// Flatten a phase's temp-id -> size map into the `(temp_id, size)` vector
+/// `PerVarBytecodes::temp_sizes` carries, **ordered by temp id**.
+///
+/// The ordering is load-bearing, not cosmetic. `temp_sizes` rides on a
+/// `PerVarBytecodes`, which is a salsa-cached value with a *derived*
+/// `PartialEq`, and `Vec` equality is order-sensitive. Building it straight
+/// out of `HashMap::iter` therefore made two otherwise-identical compiles of
+/// the same fragment compare unequal whenever the per-process hash seed
+/// reordered the map: salsa's backdating stops firing (every downstream
+/// consumer re-executes), and the compiled artifact itself stops being
+/// reproducible run to run -- the nondeterminism class GH #595 tracks.
+///
+/// Nothing downstream ever *depended* on the order: the sole consumer,
+/// `FragmentMerger::absorb`, folds each entry into a resize-and-`max` over a
+/// dense `merged_temp_sizes` vector, which is order-independent, and the
+/// merged result is re-emitted densely by `into_per_var_bytecodes`. So this is
+/// a pure determinism fix with no bytecode consequence -- which is exactly why
+/// it survived undetected.
+pub(crate) fn temp_sizes_by_id(temp_sizes_map: &HashMap<u32, usize>) -> Vec<(u32, usize)> {
+    let mut temp_sizes: Vec<(u32, usize)> = temp_sizes_map
+        .iter()
+        .map(|(&id, &size)| (id, size))
+        .collect();
+    temp_sizes.sort_unstable_by_key(|(id, _)| *id);
+    temp_sizes
+}
+
+/// Assemble the phase-INVARIANT emission context for one variable's
+/// fragment: everything `compile_phase_to_per_var_bytecodes` needs except
+/// the phase's own lowered expressions (and the temp sizes derived from
+/// them, which that function fills in).
+///
+/// Every field is a borrow with the caller's lifetime -- the fragment's size
+/// table and tables, and the salsa-cached project-global dimension context and
+/// converted dimensions, are read in place, never copied into a per-fragment
+/// container.
+///
+/// The empty `runlist_flows`/`temp_sizes` placeholders exist in exactly one
+/// place, here, so no emission site can forget which runlist a fragment's
+/// expressions belong in.
+pub(crate) fn fragment_emit_ctx<'a>(
+    model_name: &'a Ident<Canonical>,
+    inputs: &'a BTreeSet<Ident<Canonical>>,
+    var_sizes: &'a PerVarSizes,
+    tables: &'a HashMap<Ident<Canonical>, Vec<crate::compiler::Table>>,
+    dimensions: &'a [crate::dimensions::Dimension],
+    dimensions_ctx: &'a crate::dimensions::DimensionsContext,
+) -> crate::compiler::ModuleCtx<'a> {
+    crate::compiler::ModuleCtx {
+        ident: model_name,
+        inputs,
+        temp_sizes: &[],
+        runlist_initials_by_var: &[],
+        runlist_flows: &[],
+        runlist_stocks: &[],
+        var_sizes,
+        tables,
+        dimensions,
+        dimensions_ctx,
+    }
+}
+
+/// Compile one phase's lowered `Vec<Expr>` for a single variable into a
 /// layout-independent `PerVarBytecodes`.
 ///
-/// This is the exact body of `compile_var_fragment`'s former
-/// `compile_phase` closure, factored out so the element-cycle SCC graph
-/// builder (`crate::db::dep_graph` via `var_phase_symbolic_fragment_prod`)
-/// reuses the *exact* production compile+symbolize path rather than a
-/// re-derivation. `compile_var_fragment` calls this for each phase; the
-/// SCC accessor `var_phase_symbolic_fragment_prod` builds the caller-owned
-/// context byte-identically to `compile_var_fragment` and calls this with
-/// the phase's production-lowered exprs.
+/// **This is the single fragment emission entry point** (GH #964's "explicit,
+/// implicit, and LTM variables share one fragment emission implementation").
+/// Five call sites reach it: `compile_var_fragment` (explicit variables),
+/// `compile_implicit_var_phase_bytecodes` (SMOOTH/DELAY/TREND helpers, and
+/// through it `var_phase_symbolic_fragment_prod`'s parent-sourced arm),
+/// `var_phase_symbolic_fragment_prod` itself (the element-cycle SCC graph
+/// builder, which must reuse the *exact* production path rather than a
+/// re-derivation), and both LTM emitters in `db/ltm/compile.rs`. The two LTM
+/// sites used to carry hand-copied 97-line duplicates of this body, which is
+/// how the same `temp_sizes` ordering defect came to need fixing in three
+/// places at once.
 ///
-/// The caller owns and supplies the lowering-independent context
-/// (`offsets`, `rmap`, `tables`, `module_refs`, `mini_offset`,
-/// `converted_dims`, `dim_context`, `model_name_ident`, `inputs`) exactly
-/// as `compile_var_fragment` constructs it. `var_ident_canonical` is the
-/// single-variable runlist-order entry the minimal `Module` is built
-/// around. Returns `None` (loud-safe, never panics) when `exprs` is
-/// empty, the minimal `Module::compile()` fails, or any symbolization
-/// step fails -- exactly the closure's original `None` arms.
-#[allow(clippy::too_many_arguments)]
+/// `base` is the phase-INVARIANT half of the emission context, built once
+/// per variable by the caller: its `runlist_flows`/`temp_sizes` are ignored
+/// (this function fills both in per phase), and everything else -- the
+/// fragment's `var_sizes` and `tables`, the project-global
+/// `dimensions`/`dimensions_ctx`, and the module-input set -- is borrowed for
+/// the call and never cloned.
+///
+/// What comes back is codegen's output verbatim: it is already symbolic, so
+/// there is nothing between emission and the salsa-cached fragment.
+///
+/// Returns `None` (loud-safe, never panics) when `exprs` is empty or codegen
+/// fails.
 pub(crate) fn compile_phase_to_per_var_bytecodes(
+    base: &crate::compiler::ModuleCtx<'_>,
     exprs: &[crate::compiler::Expr],
-    offsets: &PerVarOffsetMap,
-    rmap: &crate::compiler::symbolic::ReverseOffsetMap,
-    tables: &HashMap<Ident<Canonical>, Vec<crate::compiler::Table>>,
-    module_refs: &HashMap<Ident<Canonical>, crate::vm::ModuleKey>,
-    mini_offset: usize,
-    converted_dims: &[crate::dimensions::Dimension],
-    dim_context: &crate::dimensions::DimensionsContext,
-    model_name_ident: &Ident<Canonical>,
-    var_ident_canonical: &Ident<Canonical>,
-    inputs: &BTreeSet<Ident<Canonical>>,
 ) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
     use crate::compiler::symbolic::PerVarBytecodes;
 
@@ -735,92 +760,45 @@ pub(crate) fn compile_phase_to_per_var_bytecodes(
         return None;
     }
 
-    // Build a minimal Module for this phase
-    let runlist_initials_by_var = vec![];
-    let module_inputs: HashSet<Ident<Canonical>> = inputs.iter().cloned().collect();
-    let module = crate::compiler::Module {
-        ident: model_name_ident.clone(),
-        inputs: module_inputs,
-        n_slots: mini_offset,
-        n_temps: 0,
-        temp_sizes: vec![],
-        runlist_initials: vec![],
-        runlist_initials_by_var,
-        runlist_flows: exprs.to_vec(),
-        runlist_stocks: vec![],
-        offsets: offsets.clone(),
-        runlist_order: vec![var_ident_canonical.clone()],
-        tables: tables.clone(),
-        dimensions: converted_dims.to_vec(),
-        dimensions_ctx: dim_context.clone(),
-        module_refs: module_refs.clone(),
-    };
-
     // Extract temp sizes from expressions
     let mut temp_sizes_map: HashMap<u32, usize> = HashMap::new();
     for expr in exprs {
         crate::compiler::extract_temp_sizes_pub(expr, &mut temp_sizes_map);
     }
-    let n_temps = temp_sizes_map.len();
-    let mut temp_sizes: Vec<usize> = vec![0; n_temps];
+    let mut temp_sizes: Vec<usize> = vec![0; temp_sizes_map.len()];
     for (id, size) in &temp_sizes_map {
         if (*id as usize) < temp_sizes.len() {
             temp_sizes[*id as usize] = *size;
         }
     }
 
-    // Update Module with temp info
-    let module = crate::compiler::Module {
-        n_temps,
-        temp_sizes: temp_sizes.clone(),
-        ..module
+    // A fragment is one variable's one phase, so the whole phase goes in the
+    // flows runlist; the initials/stocks runlists stay empty and the phase
+    // distinction is the caller's (which lowered `Vec<Expr>` it passes).
+    let emit_ctx = crate::compiler::ModuleCtx {
+        runlist_flows: exprs,
+        temp_sizes: &temp_sizes,
+        ..*base
     };
 
-    match module.compile() {
-        Ok(compiled) => {
-            // Symbolize the flows bytecode (we put everything in flows)
-            let sym_bc =
-                crate::compiler::symbolic::symbolize_bytecode(&compiled.compiled_flows, rmap)
-                    .ok()?;
+    let compiled = emit_ctx.compile().ok()?;
 
-            let ctx = &*compiled.context;
-            let sym_views: Vec<_> = ctx
-                .static_views
-                .iter()
-                .map(|sv| crate::compiler::symbolic::symbolize_static_view(sv, rmap))
-                .collect::<Result<Vec<_>, _>>()
-                .ok()?;
-            let sym_mods: Vec<_> = ctx
-                .modules
-                .iter()
-                .map(|md| crate::compiler::symbolic::symbolize_module_decl(md, rmap))
-                .collect::<Result<Vec<_>, _>>()
-                .ok()?;
-
-            let temp_sizes_vec: Vec<(u32, usize)> =
-                temp_sizes_map.iter().map(|(&k, &v)| (k, v)).collect();
-
-            let dim_lists: Vec<Vec<u16>> = ctx
-                .dim_lists
-                .iter()
-                .map(|(n, arr)| arr[..(*n as usize)].to_vec())
-                .collect();
-
-            Some(PerVarBytecodes {
-                symbolic: sym_bc,
-                graphical_functions: ctx.graphical_functions.clone(),
-                module_decls: sym_mods,
-                static_views: sym_views,
-                temp_sizes: temp_sizes_vec,
-                dim_lists,
-            })
-        }
-        Err(_) => None,
-    }
+    Some(PerVarBytecodes {
+        symbolic: compiled.compiled_flows,
+        graphical_functions: compiled.graphical_functions,
+        module_decls: compiled.module_decls,
+        static_views: compiled.static_views,
+        temp_sizes: temp_sizes_by_id(&temp_sizes_map),
+        dim_lists: compiled
+            .dim_lists
+            .iter()
+            .map(|(n, arr)| arr[..(*n as usize)].to_vec())
+            .collect(),
+    })
 }
 
 /// A variable's *symbolic* `PerVarBytecodes` for a phase, sourced through
-/// the exact production compile+symbolize path (`lower_var_fragment` +
+/// the exact production lowering + emission path (`lower_var_fragment` +
 /// `compile_phase_to_per_var_bytecodes`), never a re-derivation.
 ///
 /// This is the cross-member-comparable substrate the element-cycle SCC
@@ -857,7 +835,7 @@ pub(crate) fn compile_phase_to_per_var_bytecodes(
 /// A synthetic helper (`$\u{205A}` prefix, absent from `model.variables`)
 /// that lands in a recurrence SCC is **parent-sourced**: its symbolic
 /// `PerVarBytecodes` is the parent variable's `implicit_vars[index]`
-/// compiled+symbolized through the shared per-phase relation
+/// compiled through the shared per-phase relation
 /// `compile_implicit_var_phase_bytecodes` (the same chain
 /// `compile_implicit_var_fragment` runs), so the element-graph builder
 /// consumes it exactly like a real member (element-cycle Phase 3 Task 2 /
@@ -874,8 +852,7 @@ pub(crate) fn compile_phase_to_per_var_bytecodes(
 ///   explicit `return None`;
 /// - the requested phase's `Var::new` errored (`phase_var.ok()?`);
 /// - any `compile_phase_to_per_var_bytecodes` failure (empty exprs, the
-///   minimal `Module::compile()`, or any `symbolize_*` step) -- that
-///   function is itself total-and-`None`-on-failure.
+///   codegen) -- that function is itself total-and-`None`-on-failure.
 ///
 /// `None` propagates loud-safe and all-or-nothing: any in-SCC node that
 /// cannot be element-sourced makes `symbolic_phase_element_order` return
@@ -921,11 +898,11 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
     // (element-cycle Phase 3 Task 2 / AC3.1). A synthetic helper that
     // lands in a recurrence SCC has no `SourceVariable` but DOES resolve
     // in `model_implicit_var_info`; its symbolic `PerVarBytecodes` is the
-    // parent variable's `implicit_vars[index]` compiled+symbolized through
+    // parent variable's `implicit_vars[index]` compiled through
     // the SAME shared per-phase relation the production per-variable
     // assembly uses (`compile_implicit_var_phase_bytecodes` -- the exact
     // `parent → parsed.implicit_vars[i] → parse_var → lower_variable →
-    // compile → symbolize` chain `compile_implicit_var_fragment` runs), so
+    // compile` chain `compile_implicit_var_fragment` runs), so
     // the element-graph builder consumes it exactly like a real member
     // (same layout-independent `SymVarRef` form). The element-cycle SCC
     // identification uses the default no-module-input wiring, so source the
@@ -944,7 +921,6 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
         let is_initial = matches!(phase, SccPhase::Initial);
         return compile_implicit_var_phase_bytecodes(db, meta, model, project, &[], is_initial);
     };
-    let var_ident_canonical: Ident<Canonical> = Ident::new(var_name);
 
     // Caller-owned, lowering-independent context, read EXACTLY as
     // `compile_var_fragment` reads it (mirror byte-for-byte): the
@@ -968,26 +944,16 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
         &inputs,
     );
 
-    let (per_phase_lowered, tables, offsets, rmap, mini_offset) = match lowered {
+    let (per_phase_lowered, tables, var_sizes) = match lowered {
         LoweredVarFragment::Lowered {
             per_phase_lowered,
             tables,
-            offsets,
-            rmap,
-            mini_offset,
+            var_sizes,
             ..
-        } => (per_phase_lowered, tables, offsets, rmap, mini_offset),
+        } => (per_phase_lowered, tables, var_sizes),
         // The variable did not lower at all => `None` (loud-safe).
         LoweredVarFragment::Fatal { .. } => return None,
     };
-
-    // The element-cycle SCC identification uses the default no-module-
-    // input wiring, so the module-ref reconstruction must match that
-    // wiring too (mirrors `compile_var_fragment`'s
-    // `build_caller_module_refs(.., &module_input_names)` with empty
-    // inputs).
-    let module_refs =
-        crate::db::var_fragment::build_caller_module_refs(db, *sv, model, project, &[]);
 
     // `SccPhase::Dt` selects the non-initial (dt/flow) lowering;
     // `SccPhase::Initial` selects the initial lowering -- the same
@@ -1000,19 +966,15 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
     // lowered exprs => `None` (loud-safe).
     let var = phase_var.ok()?;
 
-    compile_phase_to_per_var_bytecodes(
-        &var.ast,
-        &offsets,
-        &rmap,
+    let base_ctx = fragment_emit_ctx(
+        &model_name_ident,
+        &inputs,
+        &var_sizes,
         &tables,
-        &module_refs,
-        mini_offset,
         converted_dims,
         dim_context,
-        &model_name_ident,
-        &var_ident_canonical,
-        &inputs,
-    )
+    );
+    compile_phase_to_per_var_bytecodes(&base_ctx, &var.ast)
 }
 
 /// Segment one member's symbolic opcode stream into per-element slices,
@@ -1039,7 +1001,18 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
 /// - a duplicate write for the same element (ambiguous segmentation);
 /// - opcodes present but no per-element write at all (not element-
 ///   sourceable in the simple per-element shape, mirroring
-///   `symbolic_phase_element_order`'s `saw_write` guard).
+///   `symbolic_phase_element_order`'s `saw_write` guard);
+/// - a backward jump whose target lies in an EARLIER segment. Segments are
+///   emitted in `element_order`, not in their original order, and a jump
+///   offset is relative, so a jump that escaped its own segment would land on
+///   whatever opcode happened to sit that far back after the interleave -- a
+///   silent miscompile with no bad id and no bad reference to notice. Codegen
+///   cannot currently produce one (a `BeginIter` loop writes a TEMP through
+///   `StoreIterElement`, and a member's per-element `AssignCurr` is emitted
+///   after `EndIter`, so a loop is always wholly inside one segment), which is
+///   exactly why it is worth checking rather than asserting in prose: this is
+///   an assumption about a DIFFERENT file's emission shape, and nothing else
+///   would notice it changing.
 ///
 /// Consumed by `combine_scc_fragment`, which `assemble_module` invokes
 /// for every resolved recurrence SCC (the Subcomponent B Task 6
@@ -1059,28 +1032,74 @@ fn segment_member_by_element(
     };
     let body = &code[..end];
 
+    // The opcode that terminates one of THIS member's per-element segments. A
+    // write to a *different* member, or a `BinOpAssignNext` (a stock update,
+    // not a per-element current-value write of this member), does not --
+    // exactly the `symbolic_phase_element_order` rule.
+    let write_element = |op: &SymbolicOpcode| -> Option<usize> {
+        match op {
+            SymbolicOpcode::AssignCurr { var }
+            | SymbolicOpcode::AssignConstCurr { var, .. }
+            | SymbolicOpcode::BinOpAssignCurr { var, .. }
+                if var.name.as_str() == member =>
+            {
+                Some(var.element_offset)
+            }
+            _ => None,
+        }
+    };
+
+    // Jump containment. `lower_bound[pc]` is the first index of the segment
+    // `pc` ends up in: segments start just after the previous per-element
+    // write, except that opcodes trailing the FINAL write are appended to the
+    // last segment rather than starting a new one (see below), so their bound
+    // is that segment's start.
+    let mut lower_bound: Vec<usize> = Vec::with_capacity(body.len());
+    let mut start = 0usize;
+    for (pc, op) in body.iter().enumerate() {
+        lower_bound.push(start);
+        if write_element(op).is_some() {
+            start = pc + 1;
+        }
+    }
+    if let Some(last_write) = body.iter().rposition(|op| write_element(op).is_some())
+        && last_write + 1 < body.len()
+    {
+        let last_segment_start = lower_bound[last_write];
+        for bound in &mut lower_bound[last_write + 1..] {
+            *bound = last_segment_start;
+        }
+    }
+    for (pc, op) in body.iter().enumerate() {
+        let Some(offset) = op.jump_offset() else {
+            continue;
+        };
+        let target = pc as isize + offset as isize;
+        // Backward-or-self and not before the segment's own start. The second
+        // half is what segment reordering needs; the first is what makes the
+        // lower bound sufficient, and it holds for every jump the instruction
+        // set can express (`jump_offset` reports only backward jumps). A
+        // future forward jump would need its own upper-bound reasoning, and
+        // should trip this rather than silently inherit an argument that does
+        // not cover it.
+        if target < lower_bound[pc] as isize || target > pc as isize {
+            return Err(format!(
+                "SCC member `{member}` has a jump at opcode {pc} targeting \
+                 {target}, outside the per-element segment starting at {}; \
+                 the segments are reordered by element_order, so a jump that \
+                 leaves its own segment cannot be relocated safely",
+                lower_bound[pc]
+            ));
+        }
+    }
+
     let mut segments: HashMap<usize, Vec<SymbolicOpcode>> = HashMap::new();
     let mut current: Vec<SymbolicOpcode> = Vec::new();
     let mut last_written_elem: Option<usize> = None;
 
     for op in body {
         current.push(op.clone());
-        let write_elem = match op {
-            SymbolicOpcode::AssignCurr { var }
-            | SymbolicOpcode::AssignConstCurr { var, .. }
-            | SymbolicOpcode::BinOpAssignCurr { var, .. }
-                if var.name == member =>
-            {
-                Some(var.element_offset)
-            }
-            // A write to a *different* member, or AssignNext/
-            // BinOpAssignNext (a stock-update, not a per-element
-            // current-value write of THIS member) does not terminate this
-            // member's element segment -- exactly the
-            // `symbolic_phase_element_order` rule.
-            _ => None,
-        };
-        if let Some(elem) = write_elem {
+        if let Some(elem) = write_element(op) {
             if segments.contains_key(&elem) {
                 return Err(format!(
                     "SCC member `{member}` has a duplicate per-element \
@@ -1124,7 +1143,7 @@ fn segment_member_by_element(
 /// `member_fragments` maps each SCC member's canonical name to its
 /// *symbolic* `PerVarBytecodes` for the SCC's phase (obtained by the
 /// caller via `var_phase_symbolic_fragment_prod(.., scc.phase)` -- the
-/// exact production compile+symbolize path, never a re-derivation). The
+/// exact production emission path, never a re-derivation). The
 /// result is a single fragment whose per-element writes appear in
 /// `scc.element_order`, with each write keeping its **original**
 /// `SymVarRef { name, element_offset }` (only segment ordering changes).
@@ -1248,6 +1267,73 @@ pub(crate) fn combine_scc_fragment(
     Ok(merger.into_per_var_bytecodes(combined_code))
 }
 
+/// Renumber the INITIALS phase into one `SymbolicCompiledInitial` per fragment.
+///
+/// The other two phases go through `concatenate_fragments_with_gf`, which
+/// merges their fragments into a single stream. Initials cannot: `eval_initials`
+/// runs them one at a time, so each keeps its own bytecode -- and therefore its
+/// own literal pool, which is why every initial is renumbered at literal offset
+/// 0 rather than at a running one.
+///
+/// Everything else must still land where the all-phases merge put it (M8): the
+/// module / view / dim-list offsets are the running counts over the preceding
+/// initials, exactly the bases `FragmentMerger::absorb_non_gf` would hand out,
+/// and the GF base comes from the shared dedup (initial `i` is `all_frags[i]`,
+/// since initials come first). Temps are NOT advanced (#583) -- they recycle
+/// into the one identity pool every phase shares.
+///
+/// This is a third hand-rolled copy of the merger's flat accounting, kept
+/// because of the literal-pool difference above. It is a free function rather
+/// than an inline loop specifically so the M8 property can drive it: as an
+/// inline loop, freezing `init_view_off` or `init_dl_off` left the entire
+/// repository green.
+///
+/// `Err` on M3, for the same reason `absorb_non_gf` checks its own bases: these
+/// offsets index the all-phases tables the module reports, so a silently
+/// truncated one produces a well-formed initial that names a different module,
+/// view or dimension list. The bound itself is not restated here -- the running
+/// offsets are `usize` and each is narrowed by `symbolic::resource_base`, the
+/// one place that knows both a base and the length of the fragment about to use
+/// it, so an initial that carries none of a resource is exempt exactly as a
+/// merged fragment is.
+pub(crate) fn renumber_initials_phase(
+    initial_frags: &[(String, &crate::compiler::symbolic::PerVarBytecodes)],
+    gf_dedup: &crate::compiler::symbolic::GfDedup,
+) -> Result<Vec<crate::compiler::symbolic::SymbolicCompiledInitial>, String> {
+    use crate::compiler::symbolic::{
+        SymbolicByteCode, SymbolicCompiledInitial, renumber_opcode, resource_base,
+    };
+
+    let mut compiled_initials: Vec<SymbolicCompiledInitial> = Vec::new();
+    let mut mod_off: usize = 0;
+    let mut view_off: usize = 0;
+    let temp_off: u32 = 0;
+    let mut dl_off: usize = 0;
+    for (i, (name, bc)) in initial_frags.iter().enumerate() {
+        let gf_remap = gf_dedup.remap(i);
+        let mod_base = resource_base(0, mod_off, bc.module_decls.len(), "module declaration")?;
+        let view_base = resource_base(0, view_off, bc.static_views.len(), "static view")?;
+        let dl_base = resource_base(0, dl_off, bc.dim_lists.len(), "dimension list")?;
+        let renumbered_code = bc
+            .symbolic
+            .code
+            .iter()
+            .map(|op| renumber_opcode(op, 0, gf_remap, mod_base, view_base, temp_off, dl_base))
+            .collect::<Result<Vec<_>, _>>()?;
+        compiled_initials.push(SymbolicCompiledInitial {
+            ident: Ident::new(name),
+            bytecode: SymbolicByteCode {
+                literals: bc.symbolic.literals.clone(),
+                code: renumbered_code,
+            },
+        });
+        mod_off += bc.module_decls.len();
+        view_off += bc.static_views.len();
+        dl_off += bc.dim_lists.len();
+    }
+    Ok(compiled_initials)
+}
+
 /// Assemble a complete CompiledModule from per-variable fragments.
 ///
 /// Salsa-tracked: the per-module assembly (fragment concatenation, SCC
@@ -1272,8 +1358,8 @@ pub fn assemble_module<'db>(
     module_inputs: ModuleInputSet<'db>,
 ) -> Result<std::sync::Arc<crate::bytecode::CompiledModule>, String> {
     use crate::compiler::symbolic::{
-        ContextResourceCounts, SymbolicCompiledInitial, SymbolicCompiledModule,
-        concatenate_fragments_with_gf, resolve_module,
+        ContextResourceCounts, SymbolicCompiledModule, concatenate_fragments_with_gf,
+        merge_context_side_channels, resolve_module,
     };
 
     // The interned set stores the sorted canonical names; the plain lowering
@@ -1440,7 +1526,7 @@ pub fn assemble_module<'db>(
     // one-contiguous-block-per-variable fragments -- the latter cannot
     // express the required cross-member per-element interleaving. Each
     // member's symbolic fragment is sourced via the EXACT production
-    // compile+symbolize path (`var_phase_symbolic_fragment_prod`, the
+    // emission path (`var_phase_symbolic_fragment_prod`, the
     // Task 4 accessor -- never a re-derivation), so every write keeps its
     // original `SymVarRef { name, element_offset }`; `resolve_module`
     // therefore maps each write to the same model slot the acyclic layout
@@ -1737,6 +1823,13 @@ pub fn assemble_module<'db>(
         temps: 0,
         ..initial_counts.clone()
     };
+    // Summed in `usize` and left there. M3 -- every ASSIGNED id is
+    // representable -- is discharged by `symbolic::resource_base` when a stock
+    // fragment actually consumes one of these bases, which is the only point
+    // where "the table is full" and "this fragment wants an id past the end"
+    // can be told apart. Bounding the sum here instead would reject a model
+    // whose initials and flows fill the table exactly and whose stocks phase
+    // then names nothing -- a program in which every id is valid.
     let stock_base = ContextResourceCounts {
         modules: initial_counts.modules + flow_counts.modules,
         views: initial_counts.views + flow_counts.views,
@@ -1771,57 +1864,19 @@ pub fn assemble_module<'db>(
     let stocks_concat =
         concatenate_fragments_with_gf(&stock_frags, &stock_base, &gf_dedup, n_init + n_flow)?;
 
-    // Build SymbolicCompiledInitial for each initial variable, renumbered
-    // so context resource IDs (GFs, modules, views, temps, dim_lists) match
-    // the all-phases merge. Literal IDs are local to each initial's bytecode
-    // so they get no base offset. The GF base comes from the shared dedup
-    // (initial `i` is `all_frags[i]`); the other resources stay flat.
-    let mut compiled_initials: Vec<SymbolicCompiledInitial> = Vec::new();
-    let mut init_mod_off: u16 = 0;
-    let mut init_view_off: u16 = 0;
-    // #583: temps recycle into the shared identity pool (the same pool the
-    // `merged` table below builds), so each initial's temp ids stay
-    // fragment-local (offset 0) -- they are NOT advanced per initial.
-    let init_temp_off: u32 = 0;
-    let mut init_dl_off: u16 = 0;
-    for (i, (name, bc)) in initial_frags.iter().enumerate() {
-        let gf_remap = gf_dedup.remap(i);
-        let renumbered_code: Vec<crate::compiler::symbolic::SymbolicOpcode> = bc
-            .symbolic
-            .code
-            .iter()
-            .map(|op| {
-                crate::compiler::symbolic::renumber_opcode(
-                    op,
-                    0, // literals are local to each initial's bytecode
-                    gf_remap,
-                    init_mod_off,
-                    init_view_off,
-                    init_temp_off,
-                    init_dl_off,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        compiled_initials.push(SymbolicCompiledInitial {
-            ident: Ident::new(name),
-            bytecode: crate::compiler::symbolic::SymbolicByteCode {
-                literals: bc.symbolic.literals.clone(),
-                code: renumbered_code,
-            },
-        });
-        init_mod_off += bc.module_decls.len() as u16;
-        init_view_off += bc.static_views.len() as u16;
-        // `init_temp_off` is NOT advanced (#583): temps recycle into the
-        // shared identity pool, so every initial's temp ids stay
-        // fragment-local and index the same `merged.temp_offsets` table.
-        init_dl_off += bc.dim_lists.len() as u16;
-    }
+    let compiled_initials = renumber_initials_phase(&initial_frags, &gf_dedup)?;
 
-    // The all-phases merge for the shared context side-channels (modules,
-    // views, temps, dim_lists); its `graphical_functions` is the dedup's
-    // single table (set by `concatenate_fragments_with_gf`), shared by all
-    // three phases.
-    let merged = concatenate_fragments_with_gf(&all_frags, &no_base, &gf_dedup, 0)?;
+    // The all-phases aggregation of the shared context side-channels (modules,
+    // views, temps, dim_lists); its `graphical_functions` is the dedup's single
+    // table, shared by all three phases.
+    //
+    // This is `merge_context_side_channels` and not a full merge because the
+    // three phases above already keep every stream this module retains. A full
+    // merge additionally built an opcode stream and a literal pool spanning the
+    // whole model, both dropped on the floor here -- and bounded the model's
+    // AGGREGATE literal count against the `u16` id capacity in the process,
+    // failing assembly for models whose every retained pool was fine.
+    let merged = merge_context_side_channels(&all_frags, &no_base, &gf_dedup)?;
 
     // Build dimension metadata from project dimensions (mirrors
     // Compiler::populate_dimension_metadata). Read the project-global converted
@@ -1867,7 +1922,6 @@ pub fn assemble_module<'db>(
     // Build the symbolic compiled module
     let sym_module = SymbolicCompiledModule {
         ident: Ident::new(&model_name),
-        n_slots: layout.n_slots,
         compiled_initials,
         compiled_flows: flows_concat.bytecode,
         compiled_stocks: stocks_concat.bytecode,
@@ -1885,8 +1939,7 @@ pub fn assemble_module<'db>(
     };
 
     // Resolve symbolic -> concrete offsets. The CompiledModule stays a pure,
-    // symbolizable artifact (the symbolic roundtrip tests symbolize it again,
-    // and salsa caches it); the 3-address fusion (R2) is applied later, at
+    // salsa-cached artifact; the 3-address fusion (R2) is applied later, at
     // Vm::new, to the execution copy of the bytecode. The success payload is
     // wrapped in an `Arc` so this tracked fn's return type is `salsa::Update`
     // and salsa's clone-out is a refcount bump (the inner bytecode is large).

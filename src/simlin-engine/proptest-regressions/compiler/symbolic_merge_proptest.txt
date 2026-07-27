@@ -1,0 +1,31 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+#
+# Provenance: every seed below was captured during the C2 mutation experiments
+# on `FragmentMerger` (GH #964 row C), not from a production bug. Between them
+# they fail under: a resource base that ignores the running merged length
+# (M1/M2), a phase `ctx_base` dropped from that base (M8), the sequential concat
+# switched to `TempStrategy::Sum` (M5), and an initials-phase accumulator frozen
+# in `renumber_initials_phase` (M8).
+#
+# The two GF seeds cover DIFFERENT halves of M4's gap totality, and the
+# distinction is the whole reason they are both here:
+#
+#   * seed 1 (unreferenced block FIRST, referenced second) is the LEADING /
+#     interior gap -- `gf_blocks_of_fragment`'s `if start > cursor` arm. Nothing
+#     else in the repository pins it: dropping that arm alone leaves all 12
+#     fragment characterization goldens, the entire `file_io` corpus, and both
+#     `combined_fragment_tests` gap tests green, and the property needs a
+#     fresh draw to find it. With this seed it fails at case 0.
+#   * seed 2 (a single unreferenced block) is the TRAILING gap -- the
+#     `if cursor < gf_len` arm. Two pre-existing `combined_fragment_tests`
+#     already catch that one; it is kept because it is the cheaper witness and
+#     it costs nothing to replay.
+cc d8964ed6418b3ef65bfe305ad90c5cd67f3b42afab94ae8e24b28c48a298dce0 # shrinks to specs = [FragSpec { tag: 1, n_literals: 0, gf_blocks: [GfBlockSpec { content: 2, len: 1, referenced: false }, GfBlockSpec { content: 0, len: 1, referenced: true }], n_modules: 0, n_views: 0, views_on_temps: false, temp_sizes: [], dim_lists: [], with_loop: false, n_elements: 2 }]
+cc 7f1b73ed71c899310dd23ab3b2781ea05decc05060eb94f87c59ad45e0a5a066 # shrinks to specs = [FragSpec { tag: 1, n_literals: 0, gf_blocks: [GfBlockSpec { content: 0, len: 1, referenced: false }], n_modules: 0, n_views: 0, views_on_temps: false, temp_sizes: [], dim_lists: [], with_loop: false, n_elements: 1 }]
+cc d241e3281e0a81a70a1029c59eb2d463285ad3efd1baae6bba9c85a56eca79a9 # shrinks to specs = [FragSpec { tag: 1, n_literals: 0, gf_blocks: [], n_modules: 0, n_views: 0, views_on_temps: false, temp_sizes: [], dim_lists: [], with_loop: false, n_elements: 1 }, FragSpec { tag: 2, n_literals: 0, gf_blocks: [], n_modules: 0, n_views: 0, views_on_temps: false, temp_sizes: [], dim_lists: [], with_loop: false, n_elements: 1 }, FragSpec { tag: 3, n_literals: 0, gf_blocks: [], n_modules: 1, n_views: 0, views_on_temps: false, temp_sizes: [], dim_lists: [], with_loop: false, n_elements: 1 }, FragSpec { tag: 4, n_literals: 0, gf_blocks: [], n_modules: 1, n_views: 0, views_on_temps: false, temp_sizes: [], dim_lists: [], with_loop: false, n_elements: 1 }]
+cc de8a8fbdc2ba067cfe1a52718ccba734ade5be82ca95222b0665456edb945f0a # shrinks to specs = [FragSpec { tag: 1, n_literals: 0, gf_blocks: [GfBlockSpec { content: 2, len: 1, referenced: false }, GfBlockSpec { content: 0, len: 1, referenced: true }], n_modules: 0, n_views: 0, views_on_temps: false, temp_sizes: [], dim_lists: [], with_loop: false, n_elements: 2 }]

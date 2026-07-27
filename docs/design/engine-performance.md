@@ -202,12 +202,14 @@ Op2`, 2→1). A leaf *assignment* `dst = a op b` keeps the existing
 (`BinOpAssignCurr` ≪ `Op2`).
 
 **Where it runs.** A late `ByteCode::fuse_three_address` pass applied to the Vm's
-flow/stock execution bytecode at `Vm::new`, reusing `peephole_optimize`'s
+flow/stock execution bytecode at `Vm::new`, reusing the symbolic peephole's
 jump-target guard + old→new PC remap and preserving `max_stack_depth`. It runs at
-`Vm::new` rather than compile time deliberately: the `CompiledSimulation` stays a
-pure, *symbolizable*, salsa-cached artifact (the symbolic roundtrip tests
-symbolize it; the fused opcodes have no symbolic form), and the `Vm`'s execution
-copy is where the optimization lives. Per-`Vm` fusion is a linear scan, negligible
+`Vm::new` rather than compile time deliberately: the fused opcodes have no
+symbolic form (`SymbolicOpcode` deliberately has no 3-address variants), so
+running the pass earlier would produce bytecode the salsa-cached artifact cannot
+represent -- and the `CompiledSimulation` must stay the pure resolution of the
+cached symbolic fragments. The `Vm`'s private execution copy is where the
+optimization lives. Per-`Vm` fusion is a linear scan, negligible
 vs a run. Initials are left unfused (run once; `extract_assign_curr_offsets` reads
 their `AssignCurr` targets).
 
@@ -330,9 +332,12 @@ only conclusive for effects that exceed ~4%.
 
 ### R4. `RuntimeView` allocation + `flat_offset` (~20% of post-win run)
 
-`PushVarView`/`PushTempView` rebuild `SmallVec`s (dims, strides, dim_ids) on every
-execution; `flat_offset` (10.3%) recomputes row-major offsets per element. For
-arrayed models this is now the #2 run cost.
+`PushTempView`/`PushVarViewDirect` rebuild `SmallVec`s (dims, strides, dim_ids)
+on every execution; `flat_offset` (10.3%) recomputes row-major offsets per
+element. For arrayed models this is now the #2 run cost. (This item was written
+when a third opcode, `PushVarView`, shared the cost; it was deleted in GH #964's
+stage 2 as unemittable by codegen, which is part (a) of the proposal below
+already realized for the whole-array case.)
 
 Proposal: (a) push more views through the compile-time `PushStaticView` path
 (precomputed `StaticArrayView`) and store dynamic view descriptors in the
@@ -400,8 +405,9 @@ re-derivation. (b) is broader but touches many call sites.
 2. ~~**R1 (bounds-check elimination)**~~ — INVESTIGATED, dropped: measured
    sub-noise (~0) ceiling; bounds checks are effectively free at opt-level=3.
 3. ~~**R2 (3-address binop fusion)**~~ — DONE. Flow opcodes −23.5%, run −6.8% on
-   C-LEARN; a late `fuse_three_address` pass at Vm::new (the `CompiledSimulation`
-   stays symbolizable). A full register VM would cut more but is a large rewrite.
+   C-LEARN; a late `fuse_three_address` pass at Vm::new (the fused opcodes have no
+   symbolic form, so they must not exist before assembly). A full register VM would
+   cut more but is a large rewrite.
 4. ~~**R4 (RuntimeView)**~~ — largely DONE via round 2's `dense_linear_start`
    fast paths (`flat_offset` 8.2% -> ~4% of a smaller run); the residual is
    the strict-slice `vector_elm_map` base and `offset_for_iter_index`'s

@@ -71,12 +71,12 @@ fn pretty_subscript_index(idx: &SubscriptIndex) -> String {
 pub fn pretty(expr: &Expr) -> String {
     match expr {
         Expr::Const(n, _) => format!("{n}"),
-        Expr::Var(off, _) => format!("curr[{off}]"),
-        Expr::StaticSubscript(off, view, _) => {
+        Expr::Var(var, _) => format!("curr[{var}]"),
+        Expr::StaticSubscript(base, view, _) => {
             let dims: Vec<_> = view.dims.iter().map(|d| format!("{d}")).collect();
             let strides: Vec<_> = view.strides.iter().map(|s| format!("{s}")).collect();
             format!(
-                "curr[{off} + view(dims: [{}], strides: [{}], offset: {})]",
+                "curr[{base} + view(dims: [{}], strides: [{}], offset: {})]",
                 dims.join(", "),
                 strides.join(", "),
                 view.offset
@@ -96,12 +96,12 @@ pub fn pretty(expr: &Expr) -> String {
             let dims: Vec<_> = view.dims.iter().map(|d| format!("{d}")).collect();
             format!("temp[{id}][{idx}] (dims: [{}])", dims.join(", "))
         }
-        Expr::Subscript(off, args, bounds, _) => {
+        Expr::Subscript(base, args, bounds, _) => {
             let args: Vec<_> = args.iter().map(pretty_subscript_index).collect();
             let string_args = args.join(", ");
             let bounds: Vec<_> = bounds.iter().map(|bounds| format!("{bounds}")).collect();
             let string_bounds = bounds.join(", ");
-            format!("curr[{off} + (({string_args}) - 1); bounds: {string_bounds}]")
+            format!("curr[{base} + (({string_args}) - 1); bounds: {string_bounds}]")
         }
         Expr::Dt(_) => "dt".to_string(),
         Expr::App(builtin, _) => match builtin {
@@ -266,8 +266,8 @@ pub fn pretty(expr: &Expr) -> String {
         Expr::If(cond, l, r, _) => {
             format!("if {} then {} else {}", pretty(cond), pretty(l), pretty(r))
         }
-        Expr::AssignCurr(off, rhs) => format!("curr[{}] := {}", off, pretty(rhs)),
-        Expr::AssignNext(off, rhs) => format!("next[{}] := {}", off, pretty(rhs)),
+        Expr::AssignCurr(dst, rhs) => format!("curr[{}] := {}", dst, pretty(rhs)),
+        Expr::AssignNext(dst, rhs) => format!("next[{}] := {}", dst, pretty(rhs)),
         Expr::AssignTemp(id, expr, view) => {
             let dims: Vec<_> = view.dims.iter().map(|d| format!("{d}")).collect();
             format!("temp[{id}][{}] <- {}", dims.join(", "), pretty(expr))

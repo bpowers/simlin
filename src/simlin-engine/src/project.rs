@@ -86,10 +86,7 @@ impl Project {
         F: FnMut(&HashMap<Ident<Canonical>, &ModelStage1>, &Context, &mut ModelStage1),
     {
         use crate::common::{ErrorCode, ErrorKind, topo_sort};
-        use crate::db::{
-            model_stage1, project_datamodel_dims, project_dimensions_context,
-            project_units_context_result,
-        };
+        use crate::db::{model_stage1, project_dimensions_context, project_units_context_result};
         use crate::model::enumerate_modules;
 
         let units_result = project_units_context_result(db, source_project);
@@ -115,7 +112,6 @@ impl Project {
                 })
             })
             .collect();
-        let dm_dims = project_datamodel_dims(db, source_project);
         // Read the project-global dimension context from the salsa-cached query
         // rather than rebuilding it here (it is canonicalized once per project).
         let dims_ctx = project_dimensions_context(db, source_project);
@@ -130,23 +126,31 @@ impl Project {
         //
         // The values are CLONED because everything below is destructive and the
         // memo is shared with every other reader: `model_deps.take()` empties
-        // that field, `set_dependencies` fills `instantiations`, rewrites
-        // `errors`, and pushes equation errors onto the variables THEMSELVES,
-        // and `model_cb` takes `&mut ModelStage1`. A `ModelStage1` is one
-        // model's lowered equations, so this is the same allocation the deleted
-        // code paid for building them -- the saving is the parse and lowering
-        // work, not the copy.
-        let mut models_list: Vec<ModelStage1> = source_project
+        // that field, `set_dependencies` fills `instantiations` and rewrites
+        // `errors`, and `model_cb` takes `&mut ModelStage1`. A `ModelStage1` is
+        // one model's lowered equations, so this is the same allocation the
+        // deleted code paid for building them -- the saving is the parse and
+        // lowering work, not the copy.
+        //
+        // Each stage is kept paired with the `SourceModel` handle it came from:
+        // `set_dependencies` reads the production dependency graph, which is
+        // keyed on that handle rather than on the model's name.
+        let mut models_list: Vec<(crate::db::SourceModel, ModelStage1)> = source_project
             .models(db)
             .values()
-            .map(|src_model| model_stage1(db, *src_model, source_project).clone())
+            .map(|src_model| {
+                (
+                    *src_model,
+                    model_stage1(db, *src_model, source_project).clone(),
+                )
+            })
             .collect();
 
         // Topo-sort by model dependencies.
         let model_order = {
             let model_deps: HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>> = models_list
                 .iter_mut()
-                .map(|model| {
+                .map(|(_, model)| {
                     let deps = model.model_deps.take().unwrap();
                     (model.name.clone(), deps)
                 })
@@ -167,22 +171,56 @@ impl Project {
                 .map(|(i, n)| (n.clone(), i))
                 .collect::<HashMap<Ident<Canonical>, usize>>()
         };
-        models_list.sort_unstable_by(|a, b| model_order[&a.name].cmp(&model_order[&b.name]));
+        models_list
+            .sort_unstable_by(|(_, a), (_, b)| model_order[&a.name].cmp(&model_order[&b.name]));
 
         let module_instantiations = {
-            let models = models_list.iter().map(|m| (m.name.as_str(), m)).collect();
+            let models = models_list
+                .iter()
+                .map(|(_, m)| (m.name.as_str(), m))
+                .collect();
             enumerate_modules(&models, "main", |model| model.name.clone()).unwrap_or_default()
         };
 
         // Dependency resolution + model callbacks (unit inference etc.).
+        //
+        // A model that can REACH a module cycle is gated out first, exactly as
+        // the production entry points gate it (`db::diagnostic`'s
+        // `module_cycle_diagnostic`, GH #806): resolving its dependencies takes
+        // the recurrence-SCC refinement into the recursive `model_module_map`
+        // query, which salsa turns into an unrecoverable dependency-graph panic
+        // -- a process abort under `panic = abort`, on a project a user can
+        // draw. It records the cycle as this model's error and gives it no
+        // instantiations at all, which is what a `NotSimulatable` model looks
+        // like here. Scoped to REACHABILITY, so an unrelated draft cycle
+        // elsewhere in the project does not gate a valid model out.
+        //
+        // The `continue` also skips `model_cb`, so a cycle-reaching model gets
+        // no unit inference on this path. Nothing is lost today -- the only
+        // non-trivial callback is the `units_infer` test harness, and the
+        // production unit pass (`db::units::check_model_units`) is gated the
+        // same way one level down -- but it is a consequence of the gate, not
+        // an oversight, and a callback that needs to see every model would have
+        // to run before it.
         {
+            let module_graph = crate::db::project_module_graph(db, source_project);
             let no_instantiations = BTreeSet::new();
             let mut models: HashMap<Ident<Canonical>, &ModelStage1> = HashMap::new();
-            for model in models_list.iter_mut() {
+            for (src_model, model) in models_list.iter_mut() {
+                if let Some((code, message)) = module_graph.cycle_error_from(model.name.as_str()) {
+                    model.errors.get_or_insert_with(Vec::new).push(Error::new(
+                        ErrorKind::Model,
+                        code,
+                        Some(message),
+                    ));
+                    model.instantiations = Some(HashMap::new());
+                    models.insert(model.name.clone(), model);
+                    continue;
+                }
                 let instantiations = module_instantiations
                     .get(&model.name)
                     .unwrap_or(&no_instantiations);
-                model.set_dependencies(&models, dm_dims.as_slice(), instantiations);
+                model.set_dependencies(db, *src_model, source_project, instantiations);
                 if !model.implicit {
                     model_cb(&models, units_ctx, model);
                 }
@@ -192,12 +230,12 @@ impl Project {
 
         let ordered_models = models_list
             .iter()
-            .map(|m| m.name.clone())
+            .map(|(_, m)| m.name.clone())
             .collect::<Vec<_>>();
 
         let models = models_list
             .into_iter()
-            .map(|m| (m.name.clone(), Arc::new(m)))
+            .map(|(_, m)| (m.name.clone(), Arc::new(m)))
             .collect();
 
         Project {
@@ -276,15 +314,20 @@ mod tests {
     /// Building the same project repeatedly must produce the same model order
     /// and the same Initials runlists.
     ///
-    /// Two `HashMap`/`HashSet` iteration orders used to leak into `topo_sort`,
+    /// Two `HashMap`/`HashSet` iteration orders used to leak into a `topo_sort`,
     /// which breaks ties by visit order: the model runlist seeded from
-    /// `model_deps.keys()` here, and the Initials runlist set in
-    /// `ModelStage1::set_dependencies`. On two fresh `SimlinDb`s in ONE process
-    /// this produced `["sub_a","sub_b","main"]` on one construction and
-    /// `["sub_b","sub_a","main"]` on the next, with `runlist_initials` flipping
-    /// to match -- so an initial value depending on an unordered pair was
-    /// order-dependent. This is the `Project`-path twin of GH #595, fixed the
-    /// same way (sort before the topo sort).
+    /// `model_deps.keys()` here, and the Initials runlist set in the second
+    /// dependency walk `set_dependencies` used to run. On two fresh `SimlinDb`s
+    /// in ONE process this produced `["sub_a","sub_b","main"]` on one
+    /// construction and `["sub_b","sub_a","main"]` on the next, with
+    /// `runlist_initials` flipping to match -- so an initial value depending on
+    /// an unordered pair was order-dependent. This is the `Project`-path twin
+    /// of GH #595, fixed the same way (sort before the topo sort).
+    ///
+    /// The runlist half now rides on the production dependency graph's own
+    /// determinism (GH #568 unified the two gates), so this covers the model
+    /// order directly and the runlists as a consequence -- which is why it
+    /// still asserts on them rather than on the model order alone.
     ///
     /// Repeated across several independent constructions because each fresh
     /// `HashMap` gets its own `RandomState`: one agreeing pair proves nothing,
@@ -396,9 +439,10 @@ mod tests {
         let model = x_model("main", vec![x_aux("x", "1", None), module]);
         let dm = x_project(sim_specs_with_units("years"), &[model]);
 
-        // Drives Project::from_datamodel -> from_salsa -> set_dependencies ->
-        // module_deps / topo_sort. Before the guards these panicked on the
-        // dangling model_name; now construction returns without crashing.
+        // Drives Project::from_datamodel -> from_salsa -> enumerate_modules /
+        // topo_sort. Before the guards a dangling `model_name` panicked here
+        // (and in the second dependency walk, since deleted); construction now
+        // returns without crashing.
         let _project = Project::from(dm);
     }
 
@@ -444,6 +488,211 @@ mod tests {
         let _project = Project::from(dm);
     }
 
+    /// GH #568: there is one circular-dependency gate, and it is production's.
+    ///
+    /// This path used to run its own dependency walk with its own
+    /// `CircularDependency`, which had no element-acyclicity refinement. A
+    /// staged subscript-shift recurrence (`ecc[t2] = ecc[t1] + 1`) is exactly
+    /// the class where the two verdicts parted: `db::dep_graph` resolves the
+    /// SCC per element and compiles the model, while the second walk saw a
+    /// whole-variable self-edge and rejected it. So this path refused models
+    /// production simulates.
+    ///
+    /// Written as *agreement* rather than as "it compiles", in both directions:
+    /// if the production gate's verdict on either shape changes, the assertion
+    /// tracks it instead of going stale, and a re-introduced second gate reds it.
+    #[test]
+    fn the_circular_dependency_gate_is_the_production_one() {
+        use crate::common::ErrorCode;
+        use crate::db::{ModuleInputSet, SimlinDb, model_dependency_graph, sync_from_datamodel};
+        use crate::test_common::TestProject;
+
+        // (fixture, description) -- one shape the production gate resolves, one
+        // it rejects.
+        let element_acyclic = TestProject::new("main")
+            .named_dimension("t", &["t1", "t2", "t3"])
+            .array_with_ranges(
+                "ecc[t]",
+                vec![("t1", "1"), ("t2", "ecc[t1] + 1"), ("t3", "ecc[t2] + 1")],
+            );
+        let genuine_cycle = TestProject::new("main")
+            .aux("a", "b + 1", None)
+            .aux("b", "a + 1", None);
+
+        for (tp, label) in [
+            (element_acyclic, "element-acyclic recurrence"),
+            (genuine_cycle, "genuine two-variable cycle"),
+        ] {
+            let db = SimlinDb::default();
+            let dm = tp.build_datamodel();
+            let sync = sync_from_datamodel(&db, &dm);
+            let graph = model_dependency_graph(
+                &db,
+                sync.models["main"].source,
+                sync.project,
+                ModuleInputSet::empty(&db),
+            );
+
+            let monolithic = Project::from(dm);
+            let monolithic_rejects = monolithic.models[&Ident::new("main")]
+                .errors
+                .as_ref()
+                .is_some_and(|errs| errs.iter().any(|e| e.code == ErrorCode::CircularDependency));
+
+            assert_eq!(
+                graph.has_cycle, monolithic_rejects,
+                "the two paths must agree on whether the {label} is circular \
+                 (production gate: {}, monolithic path: {monolithic_rejects})",
+                graph.has_cycle
+            );
+        }
+    }
+
+    /// Unifying the cycle GATE did not unify the EMITTER, so the monolith must
+    /// refuse a resolved recurrence SCC rather than mis-compile it.
+    ///
+    /// Production lowers such an SCC by cutting each member's bytecode into
+    /// per-element segments and interleaving them along the SCC's verified
+    /// element order (`db::assemble::combine_scc_fragment`, reached only from
+    /// `assemble_module`). `compiler::Module` has no equivalent: it emits each
+    /// member whole, in runlist order, so `ce`'s second element reads `ecc[0]`
+    /// before `ecc` has run at all. That produces `ce = [1,1,1] / ecc = [2,2,2]`
+    /// where the model means `[1,3,5] / [2,4,6]` -- a silent wrong answer.
+    ///
+    /// Before GH #568 the second dependency walk refused these models by calling
+    /// them circular, so the hazard was covered by accident. It is now refused
+    /// on purpose, because an oracle that answers wrongly is worse than one that
+    /// declines -- and this is precisely the model class the element-acyclicity
+    /// refinement exists for, so it is exactly where a wrong oracle would hide a
+    /// real regression.
+    ///
+    /// The negative half is the load-bearing one: an ordinary model must still
+    /// build, or "refuses everything" would pass this test.
+    #[test]
+    fn build_module_refuses_a_resolved_recurrence_scc() {
+        use crate::test_common::TestProject;
+
+        let resolved_scc = TestProject::new("main")
+            .named_dimension("t", &["t1", "t2", "t3"])
+            .array_with_ranges(
+                "ce[t]",
+                vec![("t1", "1"), ("t2", "ecc[t1] + 1"), ("t3", "ecc[t2] + 1")],
+            )
+            .array_with_ranges(
+                "ecc[t]",
+                vec![
+                    ("t1", "ce[t1] + 1"),
+                    ("t2", "ce[t2] + 1"),
+                    ("t3", "ce[t3] + 1"),
+                ],
+            );
+
+        // The production gate accepts it -- this is NOT a circular model, which
+        // is what makes the monolith's inability to lower it a silent hazard
+        // rather than a shared refusal.
+        {
+            use crate::db::{
+                ModuleInputSet, SimlinDb, model_dependency_graph, sync_from_datamodel,
+            };
+            let db = SimlinDb::default();
+            let dm = resolved_scc.build_datamodel();
+            let sync = sync_from_datamodel(&db, &dm);
+            let graph = model_dependency_graph(
+                &db,
+                sync.models["main"].source,
+                sync.project,
+                ModuleInputSet::empty(&db),
+            );
+            assert!(!graph.has_cycle, "fixture must not be circular");
+            assert!(
+                !graph.resolved_sccs.is_empty(),
+                "fixture must actually produce a resolved SCC, or this test \
+                 pins nothing"
+            );
+        }
+
+        let err = match resolved_scc.build_module() {
+            Ok(_) => panic!(
+                "the monolithic path must refuse a resolved recurrence SCC: it \
+                 cannot lower the per-element interleave and would emit a \
+                 program that reads a co-member's element before assigning it"
+            ),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("NotSimulatable"),
+            "expected a NotSimulatable refusal, got: {err}"
+        );
+
+        // Control: an ordinary model still builds, so the refusal above is
+        // attributable to the SCC rather than to a blanket rejection.
+        let ordinary = TestProject::new("main")
+            .aux("k", "10", None)
+            .aux("derived", "k * 3", None);
+        assert!(
+            ordinary.build_module().is_ok(),
+            "a model with no resolved SCC must still build a monolithic module"
+        );
+    }
+
+    /// A module cycle whose members ALSO contain a variable-level cycle must
+    /// not abort the process.
+    ///
+    /// Since GH #568 this path resolves dependencies through the production
+    /// dependency graph, and that query's recurrence-SCC refinement descends
+    /// into the recursive `model_module_map` -- which salsa turns into an
+    /// unrecoverable dependency-graph cycle panic on a cyclic module graph
+    /// (GH #806), i.e. a process abort under `panic = abort`, from a public
+    /// `From<datamodel::Project>` on a project a user can draw. The production
+    /// entry points have always gated reaching models out first; this path now
+    /// does too, and reports the module cycle as the model's error.
+    ///
+    /// The variable cycle in `middle` is load-bearing: without it the dep-graph
+    /// query never reaches the refinement and the shape does not panic, which is
+    /// why the plain module-cycle test above did not catch this.
+    #[test]
+    fn from_salsa_module_cycle_with_variable_cycle_does_not_abort() {
+        use crate::common::ErrorCode;
+        use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module_named, x_project};
+
+        let main = x_model(
+            "main",
+            vec![
+                x_aux("driver", "1", None),
+                x_module_named("mid", "middle", &[("driver", "mid.input")], None),
+            ],
+        );
+        let middle = x_model(
+            "middle",
+            vec![
+                x_aux("input", "0", None),
+                x_aux("a", "b + 1", None),
+                x_aux("b", "a + 1", None),
+                x_module_named("other", "leaf", &[("input", "other.input")], None),
+            ],
+        );
+        let leaf = x_model(
+            "leaf",
+            vec![
+                x_aux("input", "0", None),
+                x_module_named("back", "middle", &[("input", "back.input")], None),
+            ],
+        );
+        let dm = x_project(sim_specs_with_units("years"), &[main, middle, leaf]);
+        let project = Project::from(dm);
+
+        for name in ["main", "middle", "leaf"] {
+            let model = &project.models[&Ident::new(name)];
+            assert!(
+                model.errors.as_ref().is_some_and(|errs| errs
+                    .iter()
+                    .any(|e| e.code == ErrorCode::CircularDependency)),
+                "every model reaching the module cycle must record it, {name} did not: {:?}",
+                model.errors
+            );
+        }
+    }
+
     /// GH #891: the legacy `from_salsa` path builds each model's variable map
     /// from the canonical-keyed salsa sync maps, where two variables whose
     /// names canonicalize identically already collapsed last-wins. The
@@ -480,7 +729,9 @@ mod tests {
 
         // The TestProject::compile surface (the main test-helper consumer of
         // this path) must report the failure rather than compiling a silently
-        // different model.
+        // different model. It reports the SALSA diagnostic, which attributes
+        // the collision to the surviving variable rather than to the model as a
+        // whole -- so the location is `main.net_flow`, not `main`.
         let result = crate::test_common::TestProject::new("dup")
             .aux("net flow", "1", None)
             .aux("net_flow", "2", None)
@@ -491,8 +742,8 @@ mod tests {
         };
         assert!(
             errs.iter()
-                .any(|(loc, code)| loc == "main" && *code == ErrorCode::DuplicateVariable),
-            "expected a main-model DuplicateVariable, got: {errs:?}"
+                .any(|(loc, code)| loc == "main.net_flow" && *code == ErrorCode::DuplicateVariable),
+            "expected a main.net_flow DuplicateVariable, got: {errs:?}"
         );
     }
 }

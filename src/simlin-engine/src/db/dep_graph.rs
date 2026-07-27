@@ -44,8 +44,8 @@ use crate::canonicalize;
 use crate::common::{Canonical, Ident};
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ModuleInputSet,
-    SourceModel, SourceProject, SourceVariableKind, VariableDeps, model_module_ident_context,
-    variable_direct_dependencies,
+    SourceModel, SourceProject, SourceVariable, SourceVariableKind, VariableDeps,
+    model_module_ident_context, variable_direct_dependencies,
 };
 
 /// Per-variable dependency facts used to build the model dependency
@@ -271,9 +271,11 @@ pub(crate) fn build_var_info(
         // A `submodel·subvar` dependency whose `subvar` is a Stock is read
         // from the PRIOR timestep in the dt phase (a stock breaks the
         // dependency chain), so it must NOT impose a same-step ordering edge.
-        // This mirrors the legacy `model.rs::module_output_deps` gate
+        // It used to mirror the same rule in `model.rs::module_output_deps`
         // (`if ctx.is_initial || !output_var.is_stock()` -- the dt-phase case
-        // omits the module dependency for a stock output). It applies to EVERY
+        // omitted the module dependency for a stock output); that second
+        // dependency walk is gone (GH #568) and this is the only statement of
+        // the rule left. It applies to EVERY
         // reader, not just module variables: a NON-module variable that reads
         // a stock submodel output (e.g. `v = SMOOTH(...)·output`, the SMOOTH
         // output being an INTEG stock) must likewise drop the dt edge.
@@ -777,17 +779,16 @@ enum SccVerdict {
 /// by the old `members.len() != 1` short-circuit). This builder instead
 /// consumes each member's *symbolic* `PerVarBytecodes`
 /// (`var_phase_symbolic_fragment_prod`, the exact production
-/// compile+symbolize path -- never a re-derivation), where every variable
+/// emission path -- never a re-derivation), where every variable
 /// reference is a layout-independent `SymVarRef { name, element_offset }`.
-/// `SymVarRef.name` is the canonical variable name (the mini-layout keys
-/// are `Ident<Canonical>` -- see `layout_from_metadata`), so it is
-/// directly comparable to an SCC member's `Ident<Canonical>`. The N=1 and
+/// `SymVarRef.name` IS an `Ident<Canonical>` -- codegen copies it straight
+/// out of the lowered expression -- so it is directly comparable to an SCC
+/// member's `Ident<Canonical>`. The N=1 and
 /// N>=2 cases are the same builder; N=1 is byte-identical to before (a
-/// single member's `AssignCurr(member_base+e, rhs)` symbolizes to one
-/// write op with `element_offset == e`, and the reads the prior
-/// `collect_read_slots` mapped to `(member, e')` via the mini-`rmap`
-/// become exactly the symbolic reads with `name == member,
-/// element_offset == e'`; same `element_node_key`, same
+/// single member's per-element write emits one write op with
+/// `element_offset == e`, and the reads the prior `collect_read_slots`
+/// mapped to `(member, e')` are exactly the symbolic reads with
+/// `name == member, element_offset == e'`; same `element_node_key`, same
 /// `scc_components`, same sorted Kahn => same `element_order`).
 ///
 /// The edges are the literal current-value data-flow reads of each
@@ -815,9 +816,11 @@ enum SccVerdict {
 ///   and does NOT strip INIT-refs (an `INIT(x)` read during the
 ///   initial-value computation is a genuine init-phase ordering edge;
 ///   `init_referenced_vars` feeds the Initials runlist, not a strip).
-/// - `LoadVar`/`LoadSubscript`/`PushVarView`/`PushVarViewDirect` and a
-///   `Var`-based `PushStaticView`: current-value reads, kept unchanged --
-///   the reads `build_var_info` never strips.
+/// - `LoadVar`/`LoadSubscript`/`PushVarViewDirect` and a `Var`-based
+///   `PushStaticView`: current-value reads, kept unchanged -- the reads
+///   `build_var_info` never strips. (These are ALL the `SymVarRef`-carrying
+///   read opcodes the compiler can emit; codegen has no whole-array
+///   `PushVarView` form.)
 ///
 /// **Why this is the CORRECT relation, not a new over/under-approximation
 /// (the AC4 soundness argument).** A genuine current-(phase-)timestep
@@ -857,8 +860,7 @@ fn symbolic_phase_element_order(
 
     // The set of member canonical names, for the "is this read an in-SCC
     // member?" test. `SymVarRef.name` is the canonical variable name
-    // (mini-layout keys are `Ident<Canonical>`), so a member's
-    // `as_str()` compares directly.
+    // (an `Ident<Canonical>`), so a member's `as_str()` compares directly.
     let member_names: BTreeSet<&str> = members.iter().map(|m| m.as_str()).collect();
 
     // Build the induced element graph by segmenting each member's
@@ -884,7 +886,7 @@ fn symbolic_phase_element_order(
         // Reads accumulated since the previous per-element write of THIS
         // member, as (read-name, read-element) pairs. A read is an
         // in-SCC edge source only if its name is an SCC member.
-        let mut pending_reads: BTreeSet<(String, usize)> = BTreeSet::new();
+        let mut pending_reads: BTreeSet<(Ident<Canonical>, usize)> = BTreeSet::new();
         // True once at least one per-element write of this member has
         // been seen: a malformed fragment with no write for the member
         // means it is not element-sourceable in the simple per-element
@@ -900,7 +902,7 @@ fn symbolic_phase_element_order(
                 SymbolicOpcode::AssignCurr { var }
                 | SymbolicOpcode::AssignConstCurr { var, .. }
                 | SymbolicOpcode::BinOpAssignCurr { var, .. }
-                    if var.name == member_name =>
+                    if var.name.as_str() == member_name =>
                 {
                     saw_write = true;
                     let node = element_node_key(member_name, var.element_offset);
@@ -910,7 +912,7 @@ fn symbolic_phase_element_order(
                     let mut preds: BTreeSet<Ident<Canonical>> = BTreeSet::new();
                     for (rname, relem) in &pending_reads {
                         if member_names.contains(rname.as_str()) {
-                            preds.insert(element_node_key(rname, *relem));
+                            preds.insert(element_node_key(rname.as_str(), *relem));
                         }
                     }
                     for pred in preds {
@@ -932,7 +934,6 @@ fn symbolic_phase_element_order(
                 // (`build_var_info` never strips a current-value dep).
                 SymbolicOpcode::LoadVar { var }
                 | SymbolicOpcode::LoadSubscript { var }
-                | SymbolicOpcode::PushVarView { var, .. }
                 | SymbolicOpcode::PushVarViewDirect { var, .. } => {
                     pending_reads.insert((var.name.clone(), var.element_offset));
                 }
@@ -987,8 +988,8 @@ fn symbolic_phase_element_order(
                         }
                     }
                 }
-                // Other write targets (a different member, or `AssignNext`
-                // / `BinOpAssignNext` -- a stock-update, not a per-element
+                // Other write targets (a different member, or
+                // `BinOpAssignNext` -- a stock-update, not a per-element
                 // current-value write of THIS member) do not terminate
                 // this member's element segment and carry no read; ignore.
                 _ => {}
@@ -1101,7 +1102,7 @@ fn symbolic_phase_element_order(
 /// recurrence has an init self-loop with **no corresponding dt cycle**.
 /// Here only the **init** induced element graph is relevant: the dt
 /// precondition the `Dt` branch applies would be *wrong* (a stock has no
-/// dt element graph -- its dt lowering is `AssignNext`, not the
+/// dt element graph -- its dt lowering is `BinOpAssignNext`, not the
 /// per-element `AssignCurr` the element graph reads -- so requiring dt
 /// element-acyclicity would spuriously reject every init-only
 /// recurrence). The init verdict therefore verifies `SccPhase::Initial`
@@ -1275,12 +1276,11 @@ pub(crate) struct DtSccResolution {
 /// fragment injection (Task 6, `assemble_module` ->
 /// `var_phase_symbolic_fragment_prod`) deliberately consumes the *same*
 /// no-input wiring: the symbolic per-member fragments are lowered with
-/// `lower_var_fragment(.., &[], ..)` / `inputs = BTreeSet::new()` /
-/// `build_caller_module_refs(.., &[])`, matching this SCC identification's
-/// `build_var_info(.., &[])`, so the verdict's `element_order` and the
-/// combined fragment's per-element segmentation agree by construction. The
-/// real `module_input_names` are intentionally NOT plumbed into either
-/// side, because the with-inputs `compute_transitive` re-run is the
+/// `lower_var_fragment(.., &[], ..)` / `inputs = BTreeSet::new()`, matching
+/// this SCC identification's `build_var_info(.., &[])`, so the verdict's
+/// `element_order` and the combined fragment's per-element segmentation
+/// agree by construction. The real `module_input_names` are intentionally NOT
+/// plumbed into either side, because the with-inputs `compute_transitive` re-run is the
 /// soundness backstop for the multi-member (N>=2) SCCs Subcomponent B
 /// resolves *exactly as it is for the N=1 single-variable self-recurrence
 /// case*: that re-run's `.unwrap_or_else` clears `resolved_sccs` and sets
@@ -1679,6 +1679,45 @@ pub fn model_dependency_graph<'db>(
 ) -> ModelDepGraphResult {
     let module_input_names = module_inputs.names(db);
     model_dependency_graph_impl(db, model, project, module_input_names)
+}
+
+/// Which of the three phase runlists one variable appears in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, salsa::Update)]
+pub struct RunlistMembership {
+    pub initials: bool,
+    pub flows: bool,
+    pub stocks: bool,
+}
+
+/// Project `model_dependency_graph` down to the three runlist-membership bits
+/// a per-variable fragment compiler actually reads -- a salsa *firewall*.
+///
+/// `compile_var_fragment` needs only "is this variable in the initials /
+/// flows / stocks runlist"; reading the whole `ModelDepGraphResult` for that
+/// made every fragment in a model depend on every other variable's
+/// dependencies, so any dep-graph change re-executed all of them. This
+/// projection re-executes on the same changes but returns three booleans, so
+/// salsa backdates it whenever the variable's own membership is unchanged --
+/// which is the case for every variable a layout-only edit does not touch.
+///
+/// Keyed on the `SourceVariable` handle rather than a name so it is invalidated
+/// by a rename of *this* variable through the same field read every other
+/// per-variable query uses.
+#[salsa::tracked]
+pub fn var_runlist_membership<'db>(
+    db: &'db dyn Db,
+    var: SourceVariable,
+    model: SourceModel,
+    project: SourceProject,
+    module_inputs: ModuleInputSet<'db>,
+) -> RunlistMembership {
+    let dep_graph = model_dependency_graph(db, model, project, module_inputs);
+    let name = canonicalize(var.ident(db)).into_owned();
+    RunlistMembership {
+        initials: dep_graph.runlist_initials.contains(&name),
+        flows: dep_graph.runlist_flows.contains(&name),
+        stocks: dep_graph.runlist_stocks.contains(&name),
+    }
 }
 
 // ── Model dependency graph (the cycle gate) ────────────────────────────

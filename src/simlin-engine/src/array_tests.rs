@@ -5487,4 +5487,351 @@ mod arrayed_vector_sort_order_per_slice_tests {
         }
         project.assert_vm_result_incremental("sorted", &[10.0, 20.0, 30.0, 1.0, 5.0, 15.0]);
     }
+
+    /// A VECTOR ELM MAP whose source is subscripted by a *variable* index
+    /// (`src[idx]`, resolved at runtime) must bound its reads by the source
+    /// VARIABLE's full extent, exactly as a literal subscript does.
+    ///
+    /// `codegen::full_source_len` recovered that extent for
+    /// `Expr::StaticSubscript` and `Expr::Var` but had no arm for the dynamic
+    /// `Expr::Subscript`, so it fell through to the 1-element default. Every
+    /// read outside `[0, 1)` then returned the documented out-of-range `:NA:`
+    /// (NaN) -- which is EVERY read whenever the base was not the source's
+    /// first element, and every non-zero offset regardless. Both directions are
+    /// covered below, and neither is expressible with a literal subscript, so
+    /// no existing test could see it.
+    ///
+    /// vals = [10, 20, 30, 40]; idx = 2 (1-based) selects flat base 1.
+    ///   picked[j] = vals_full[1 + offs[j]], offs = [0, 1, 2]
+    ///             = [vals[1], vals[2], vals[3]] = [20, 30, 40]
+    #[test]
+    fn elm_map_dynamic_source_subscript_uses_full_variable_extent_vm() {
+        let project = TestProject::new("elm_map_dynamic_source_extent")
+            .indexed_dimension("D", 4)
+            .indexed_dimension("E", 3)
+            .array_with_ranges(
+                "vals[D]",
+                vec![("1", "10"), ("2", "20"), ("3", "30"), ("4", "40")],
+            )
+            .array_with_ranges("offs[E]", vec![("1", "0"), ("2", "1"), ("3", "2")])
+            .scalar_aux("idx", "2")
+            .array_aux("picked[E]", "VECTOR ELM MAP(vals[idx], offs[E])");
+        project.assert_compiles_incremental();
+        project.assert_vm_result_incremental("picked", &[20.0, 30.0, 40.0]);
+    }
+}
+
+#[cfg(test)]
+mod cross_module_array_reference_tests {
+    //! A reference into a sub-model (`m.x`) does not name `x`. Lowering
+    //! collapses it to `VarRef { name: m, element_offset: x's slot inside the
+    //! instance }`, because the parent model's layout has one entry spanning the
+    //! whole sub-model and none for the dotted name. Every question the compiler
+    //! asks about "the variable this reference names" therefore has to resolve
+    //! through the sub-model's own layout, and three of them did not:
+    //!
+    //!  * `codegen::full_source_len` looked the extent up by NAME, so a VECTOR
+    //!    ELM MAP over a cross-module source was bounded by the module
+    //!    instance's whole slot count -- reads past the source's end landed on
+    //!    the NEXT sub-model variable instead of yielding `:NA:`;
+    //!  * `Context::full_var_len_for_base`, the lowering-side twin that folds a
+    //!    constant-offset ELM MAP, asked the module variable for its dimensions
+    //!    and got none, so it bounded the same source at ONE element and folded
+    //!    every read to NaN;
+    //!  * `Expr3LowerContext::get_dimensions` did a direct, non-dotted metadata
+    //!    lookup, so a cross-module array looked like a scalar to the Expr2 ->
+    //!    Expr3 lowering and a wildcard subscript on one was rejected as
+    //!    `CantSubscriptScalar`.
+    //!
+    //! Every assertion below is the value the identical IN-MODEL shape produces,
+    //! which is what makes them a specification rather than a transcript: the
+    //! local twins are `elm_map_dynamic_source_subscript_uses_full_variable_extent_vm`
+    //! and the rest of this file. All three defects predate GH #964's symbolic
+    //! emission -- the offset-scan it replaced resolved a cross-module base to
+    //! the module variable for exactly the same reason.
+
+    use crate::datamodel;
+    use crate::test_common::TestProject;
+    use crate::testutils::{x_aux, x_model, x_module, x_module_named, x_project};
+
+    fn arrayed(ident: &str, dim: &str, elems: &[(&str, &str)]) -> datamodel::Variable {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: datamodel::Equation::Arrayed(
+                vec![dim.to_string()],
+                elems
+                    .iter()
+                    .map(|(e, eq)| (e.to_string(), eq.to_string(), None, None))
+                    .collect(),
+                None,
+                false,
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })
+    }
+
+    fn a2a(ident: &str, dim: &str, eqn: &str) -> datamodel::Variable {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: datamodel::Equation::ApplyToAll(vec![dim.to_string()], eqn.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })
+    }
+
+    /// The two arrayed sources every fixture below reads through:
+    ///
+    ///   avals = [10, 20, 30, 40]   at slots 0..4
+    ///   bvals = [100, 200, 300, 400] at slots 4..8
+    ///
+    /// The layout is alphabetical, so `avals` really is at its model's base --
+    /// the case where a wrong extent lookup and a right one are hardest to tell
+    /// apart, since a reference to it satisfies "element offset is 0" either way.
+    fn source_vars() -> Vec<datamodel::Variable> {
+        vec![
+            arrayed(
+                "avals",
+                "D",
+                &[("1", "10"), ("2", "20"), ("3", "30"), ("4", "40")],
+            ),
+            arrayed(
+                "bvals",
+                "D",
+                &[("1", "100"), ("2", "200"), ("3", "300"), ("4", "400")],
+            ),
+        ]
+    }
+
+    /// `main`, holding whatever sub-models a fixture supplies plus the variable
+    /// under test.
+    ///
+    /// `picked[E]` is the arrayed subject; `probe` is its scalar twin, so one
+    /// builder serves both an arrayed and a scalar equation.
+    ///
+    ///   offs = [0, 1, 2]   idx = 4
+    fn project_with(
+        module: datamodel::Variable,
+        sub_models: Vec<datamodel::Model>,
+        picked_eqn: &str,
+        probe_eqn: &str,
+    ) -> TestProject {
+        let main = x_model(
+            "main",
+            vec![
+                module,
+                x_aux("idx", "4", None),
+                arrayed("offs", "E", &[("1", "0"), ("2", "1"), ("3", "2")]),
+                a2a("picked", "E", picked_eqn),
+                x_aux("probe", probe_eqn, None),
+            ],
+        );
+        let mut models = vec![main];
+        models.extend(sub_models);
+        let mut project = x_project(
+            datamodel::SimSpecs {
+                start: 0.0,
+                stop: 1.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: Some(datamodel::Dt::Dt(1.0)),
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: Some("Month".to_string()),
+            },
+            &models,
+        );
+        project.dimensions = vec![
+            datamodel::Dimension::indexed("D".to_string(), 4),
+            datamodel::Dimension::indexed("E".to_string(), 3),
+        ];
+        TestProject::from_datamodel(project)
+    }
+
+    /// One hop: `main` -> instance `sub` of a model holding the two sources.
+    fn xmod_project(picked_eqn: &str, probe_eqn: &str) -> TestProject {
+        project_with(
+            x_module("sub", &[], None),
+            vec![x_model("sub", source_vars())],
+            picked_eqn,
+            probe_eqn,
+        )
+    }
+
+    /// TWO hops: `main` -> instance `m` of `mid` -> instance `inr` of `inner`.
+    ///
+    /// `mid` holds a scalar `aa` at slot 0 and `inr` at slot 1, so `inner`'s
+    /// block does NOT start at `m`'s base and the sources sit at `m`-relative
+    /// slots 1 (`avals`) and 5 (`bvals`). Reaching them needs the offsets
+    /// ACCUMULATED down the chain -- `aa`'s slot plus the source's own -- which
+    /// is the arithmetic a one-hop fixture cannot distinguish from ignoring the
+    /// intermediate offset entirely, because at one hop that offset is 0.
+    fn nested_xmod_project(picked_eqn: &str, probe_eqn: &str) -> TestProject {
+        // `compute_layout` orders a model's variables alphabetically, so `aa`
+        // takes slot 0 and `inr`'s 8-slot block starts at 1.
+        let mid = x_model(
+            "mid",
+            vec![
+                x_aux("aa", "1", None),
+                x_module_named("inr", "inner", &[], None),
+            ],
+        );
+        project_with(
+            x_module_named("m", "mid", &[], None),
+            vec![mid, x_model("inner", source_vars())],
+            picked_eqn,
+            probe_eqn,
+        )
+    }
+
+    /// A VECTOR ELM MAP whose source is a DYNAMICALLY subscripted cross-module
+    /// array must be bounded by that sub-model variable's own extent.
+    ///
+    /// `idx = 4` puts the base at `avals`'s last element, so offsets 1 and 2 map
+    /// outside `avals` and are `:NA:`. Bounded by the module instance's 8 slots
+    /// instead, they read `bvals[0]` and `bvals[1]` -- 100 and 200, a silent
+    /// wrong answer with no diagnostic anywhere.
+    ///
+    /// No wasm-backend twin: `wasmgen::vector` rejects a dynamically-subscripted
+    /// ELM MAP source outright, so this shape never reaches wasm lowering. The
+    /// static shapes below share the operand with wasm by construction -- it is
+    /// baked into the resolved bytecode both backends read -- so they cannot
+    /// diverge either.
+    #[test]
+    fn elm_map_cross_module_dynamic_source_uses_the_submodel_variable_extent() {
+        let project = xmod_project("VECTOR ELM MAP(sub.avals[idx], offs[E])", "0");
+        project.assert_compiles_incremental();
+        let got = project.vm_result_incremental("picked");
+        assert_eq!(got[0], 40.0, "in range: avals[3]");
+        assert!(
+            got[1].is_nan() && got[2].is_nan(),
+            "past avals's end must be :NA:, not bvals[0]/bvals[1]; got {got:?}"
+        );
+    }
+
+    /// The same rule for a source that is NOT at the instance's base: `bvals`
+    /// starts at slot 4, so the reference is `VarRef { sub, 4 }` with the element
+    /// in the view.
+    ///
+    /// The source is a COLLAPSED static element here, not a dynamic subscript,
+    /// which is what makes this case load-bearing rather than a restatement of
+    /// the one above: a collapsed view carries no bounds to fall back on, so the
+    /// extent must come from the table or not at all. `sub.bvals[2]` is flat
+    /// base 1 within `bvals`, and offsets 0..2 read `bvals[1..4]`. A reference
+    /// below the instance's base failed the old whole-variable test outright,
+    /// the extent fell back to the view's single element, and the ELM MAP then
+    /// treated the source as a full one-element array -- base 0, everything past
+    /// it `:NA:` -- so it returned `[200, NaN, NaN]`.
+    #[test]
+    fn elm_map_cross_module_source_below_the_instance_base_uses_its_own_extent() {
+        let project = xmod_project("VECTOR ELM MAP(sub.bvals[2], offs[E])", "0");
+        project.assert_compiles_incremental();
+        project.assert_vm_result_incremental("picked", &[200.0, 300.0, 400.0]);
+    }
+
+    /// The lowering-side twin: a collapsed literal element source with a
+    /// per-element CONSTANT offset is folded to a direct slot read at compile
+    /// time (GH #578), and that fold reads the extent through
+    /// `Context::full_var_len_for_base`.
+    ///
+    /// `sub.avals[4]` is flat base 3 and `E - 1` is 0, 1, 2, so only the first
+    /// read is in range. The assertion catches BOTH ways the extent can be
+    /// wrong, which is why the base sits at the end of the source rather than
+    /// in the middle: bounded at one element -- what asking the dimensionless
+    /// module variable for its dimensions returned -- the fold emits a constant
+    /// NaN for every element; bounded at the instance's 8 slots, it folds the
+    /// out-of-range reads to `bvals[0]` and `bvals[1]`.
+    #[test]
+    fn elm_map_cross_module_constant_offset_fold_uses_the_submodel_variable_extent() {
+        let project = xmod_project("VECTOR ELM MAP(sub.avals[4], E - 1)", "0");
+        project.assert_compiles_incremental();
+        let got = project.vm_result_incremental("picked");
+        assert_eq!(got[0], 40.0, "in range: avals[3]");
+        assert!(
+            got[1].is_nan() && got[2].is_nan(),
+            "past avals's end must fold to :NA:, not to bvals[0]/bvals[1]; got {got:?}"
+        );
+    }
+
+    /// A wildcard subscript on a cross-module array must compile: the reference
+    /// is an array, and the Expr2 -> Expr3 lowering has to see its dimensions to
+    /// resolve the wildcard.
+    ///
+    /// It did not, so `SUM(m.arr[*])` -- the ordinary way to reduce over a
+    /// sub-model's arrayed output, and the shape `db::stages_tests`'
+    /// `arrayed_module_project` fixture is built from -- was rejected as
+    /// `CantSubscriptScalar` and the whole variable failed to compile. That
+    /// fixture never noticed because it stops at Stage1 lowering, which uses
+    /// `ast::ArrayContext`, whose own `get_dimensions` always followed the
+    /// module variable.
+    #[test]
+    fn a_wildcard_subscript_on_a_cross_module_array_compiles_and_reduces() {
+        let project = xmod_project("0", "SUM(sub.avals[*])");
+        project.assert_compiles_incremental();
+        project.assert_vm_result_incremental("probe", &[100.0, 100.0]);
+    }
+
+    /// ...and the wildcard also works as a whole-array ELM MAP source, where the
+    /// extent lookup and the dimension lookup both run on the same reference.
+    #[test]
+    fn elm_map_over_a_whole_cross_module_array_matches_the_in_model_shape() {
+        let project = xmod_project("VECTOR ELM MAP(sub.avals[*], offs[E])", "0");
+        project.assert_compiles_incremental();
+        project.assert_vm_result_incremental("picked", &[10.0, 20.0, 30.0]);
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // TWO hops. A one-hop fixture cannot see the offset ACCUMULATION down a
+    // module chain, because the only offset it has to accumulate is 0: change
+    // the recursion's `base + offset` to `base` and every one-hop assertion
+    // above still holds. `nested_xmod_project` interposes a scalar at slot 0 of
+    // the middle model so the inner block starts at 1, and the two tests below
+    // are the only thing in the repository that distinguishes the two.
+    // ────────────────────────────────────────────────────────────────────
+
+    /// A source reached through TWO module hops resolves at the accumulated
+    /// slot: `avals` is at `inner`-relative 0, `inner` at `mid`-relative 1, so
+    /// the reference is `VarRef { m, 1 }` and its extent is `avals`'s 4.
+    ///
+    /// Base at `avals`'s last element, so offsets 1 and 2 map outside it.
+    #[test]
+    fn elm_map_through_two_module_hops_uses_the_leaf_variables_extent() {
+        let project = nested_xmod_project("VECTOR ELM MAP(m.inr.avals[4], offs[E])", "0");
+        project.assert_compiles_incremental();
+        let got = project.vm_result_incremental("picked");
+        assert_eq!(got[0], 40.0, "in range: avals[3]");
+        assert!(
+            got[1].is_nan() && got[2].is_nan(),
+            "past avals's end must be :NA:, not bvals[0]/bvals[1]; got {got:?}"
+        );
+    }
+
+    /// The same chain to the SECOND leaf variable, at `inner`-relative 4 and so
+    /// `m`-relative 5 -- the accumulation has to carry both hops' offsets, not
+    /// just the last one.
+    #[test]
+    fn elm_map_through_two_module_hops_below_the_inner_base_uses_its_own_extent() {
+        let project = nested_xmod_project("VECTOR ELM MAP(m.inr.bvals[2], offs[E])", "0");
+        project.assert_compiles_incremental();
+        project.assert_vm_result_incremental("picked", &[200.0, 300.0, 400.0]);
+    }
+
+    /// The whole-array form through two hops. This one is a COMPILES-AT-ALL
+    /// check and nothing more: its lowered view carries the source's full
+    /// dimensions, so the view fallback coincides with the extent the table
+    /// reports and the assertion holds whether or not the chain resolved. It is
+    /// here because the shape should not regress into a compile error, not
+    /// because it can detect a wrong offset -- the two tests above do that.
+    #[test]
+    fn a_whole_array_source_two_module_hops_away_still_compiles() {
+        let project = nested_xmod_project("VECTOR ELM MAP(m.inr.avals[*], offs[E])", "0");
+        project.assert_compiles_incremental();
+        project.assert_vm_result_incremental("picked", &[10.0, 20.0, 30.0]);
+    }
 }

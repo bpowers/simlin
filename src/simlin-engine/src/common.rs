@@ -360,6 +360,14 @@ pub enum ErrorCode {
     NotSimulatable,
     BadTable,
     BadSimSpecs,
+    /// No producer since GH #568 deleted `model.rs`'s second dependency walk,
+    /// which was the only site that raised it (on a `\·`-prefixed dependency).
+    /// The salsa dependency extraction never had an equivalent check, so this
+    /// was already unreachable from every production compile; deleting the walk
+    /// made it unreachable from every path. Kept because `ErrorCode` is mapped
+    /// to a numbered FFI enum (`src/core/errors.ts`, `src/engine/src/errors.ts`)
+    /// and removing a discriminant renumbers its successors. Reinstating the
+    /// check belongs in `db::var_fragment`'s dependency walk, not here.
     NoAbsoluteReferences,
     CircularDependency,
     ArraysNotImplemented,
@@ -382,6 +390,9 @@ pub enum ErrorCode {
     ExpectedInteger,
     ExpectedIntegerOne,
     DuplicateUnit,
+    /// No producer, for the same reason and with the same caveat as
+    /// [`ErrorCode::NoAbsoluteReferences`]: the deleted walk raised it when a
+    /// dotted `submodel·output` dependency named a non-module variable.
     ExpectedModule,
     ExpectedIdent,
     UnitMismatch,

@@ -12,15 +12,18 @@ pub mod pretty;
 pub mod subscript;
 pub(crate) mod symbolic;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use crate::ast::{ArrayView, Ast, Loc};
+use crate::ast::{ArrayView, Ast, BinaryOp, Loc};
+#[cfg(test)]
 use crate::bytecode::CompiledModule;
 use crate::common::{Canonical, CanonicalElementName, Ident, Result};
 #[cfg(test)]
 use crate::common::{Error, ErrorCode, ErrorKind};
-use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
+#[cfg(test)]
+use crate::dimensions::DimensionsContext;
+use crate::dimensions::{Dimension, SubscriptIterator};
 #[cfg(test)]
 use crate::model::ModelStage1;
 #[cfg(test)]
@@ -29,16 +32,40 @@ use crate::sim_err;
 use crate::variable::Variable;
 #[cfg(test)]
 use crate::vm::IMPLICIT_VAR_COUNT;
-use crate::vm::ModuleKey;
 
 // Re-exports for crate-internal API
-pub(crate) use self::context::{Context, ContextCore, VariableMetadata};
-pub(crate) use self::expr::{BuiltinFn, Expr, SubscriptIndex, Table};
+pub(crate) use self::codegen::ModuleCtx;
+pub(crate) use self::context::{Context, ContextCore, VariableMetadata, whole_variable_extents};
+pub(crate) use self::expr::{BuiltinFn, Expr, SubscriptIndex, Table, VarRef};
 
-use self::codegen::Compiler;
-
-// Type alias to reduce complexity
-type VariableOffsetMap = HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, (usize, usize)>>;
+/// The total slot count of the variable a reference addresses **in whole**,
+/// keyed by that reference.
+///
+/// This is all codegen needs from the symbol table now that references carry
+/// names: the *extent* of a VECTOR ELM MAP's source variable
+/// (`codegen::full_source_len`). Every other lookup that used to run backwards
+/// through a `name -> (offset, size)` map -- the identity of a lookup table,
+/// the base slot of a module instance -- reads the name off the reference
+/// directly. Offsets are assigned once, at assembly, and never appear here.
+///
+/// Keyed by the whole `VarRef` rather than by name, because a reference does
+/// not always name the variable whose extent it asks about. A CROSS-MODULE
+/// reference `m·x` lowers to `VarRef { name: m, element_offset: x's slot
+/// inside the instance }`, and `m`'s own slot count -- the whole sub-model
+/// block -- is the extent of nothing a reference can name. Each instance
+/// therefore contributes one entry per sub-model variable, at that variable's
+/// slot; a reference sitting at a sub-model variable's base reports THAT
+/// variable's extent, and one landing mid-array is simply absent. Absence is
+/// the same answer an in-model mid-array reference gets, so the caller's
+/// fallback ("all the view can honestly report") is unchanged.
+///
+/// Built once per emission unit by [`context::whole_variable_extents`]. That is
+/// the only place the rule is DERIVED -- every production site calls it, so
+/// lowering and emission cannot disagree about what a reference addresses.
+/// (`codegen`'s unit tests hand-build a table instead, in order to state the
+/// lookup's contract against inputs of their own choosing; they exercise the
+/// reader, not the rule.)
+pub(crate) type VarSizes = HashMap<VarRef, usize>;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(PartialEq, Clone)]
@@ -69,7 +96,7 @@ fn test_fold_flows() {
     metadata.insert(
         Ident::new("a"),
         VariableMetadata {
-            offset: 1,
+            offset: Some(1),
             size: 1,
             var: &dummy_var,
         },
@@ -77,7 +104,7 @@ fn test_fold_flows() {
     metadata.insert(
         Ident::new("b"),
         VariableMetadata {
-            offset: 2,
+            offset: Some(2),
             size: 1,
             var: &dummy_var,
         },
@@ -85,7 +112,7 @@ fn test_fold_flows() {
     metadata.insert(
         Ident::new("c"),
         VariableMetadata {
-            offset: 3,
+            offset: Some(3),
             size: 1,
             var: &dummy_var,
         },
@@ -93,7 +120,7 @@ fn test_fold_flows() {
     metadata.insert(
         Ident::new("d"),
         VariableMetadata {
-            offset: 4,
+            offset: Some(4),
             size: 1,
             var: &dummy_var,
         },
@@ -103,12 +130,14 @@ fn test_fold_flows() {
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
+    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
     let ctx = Context::new(
         ContextCore {
             dimensions: &[],
             dimensions_ctx: &dims_ctx,
             model_name: &main_ident,
             metadata: &metadata2,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs,
         },
@@ -118,14 +147,17 @@ fn test_fold_flows() {
 
     assert_eq!(Ok(None), ctx.fold_flows(&[]));
     assert_eq!(
-        Ok(Some(Expr::Var(1, Loc::default()))),
+        Ok(Some(Expr::Var(
+            VarRef::base(Ident::new("a")),
+            Loc::default()
+        ))),
         ctx.fold_flows(&[Ident::new("a")])
     );
     assert_eq!(
         Ok(Some(Expr::Op2(
             crate::ast::BinaryOp::Add,
-            Box::new(Expr::Var(1, Loc::default())),
-            Box::new(Expr::Var(4, Loc::default())),
+            Box::new(Expr::Var(VarRef::base(Ident::new("a")), Loc::default())),
+            Box::new(Expr::Var(VarRef::base(Ident::new("d")), Loc::default())),
             Loc::default(),
         ))),
         ctx.fold_flows(&[Ident::new("a"), Ident::new("d")])
@@ -174,7 +206,7 @@ fn test_module_var_new_missing_input_source_returns_error() {
     metadata.insert(
         module_ident.clone(),
         VariableMetadata {
-            offset: IMPLICIT_VAR_COUNT,
+            offset: Some(IMPLICIT_VAR_COUNT),
             size: 1,
             var: &module_var,
         },
@@ -183,12 +215,14 @@ fn test_module_var_new_missing_input_source_returns_error() {
     metadata2.insert(main_ident.clone(), metadata);
 
     let dims_ctx = DimensionsContext::default();
+    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
     let ctx = Context::new(
         ContextCore {
             dimensions: &[],
             dimensions_ctx: &dims_ctx,
             model_name: &main_ident,
             metadata: &metadata2,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs,
         },
@@ -236,7 +270,7 @@ fn test_build_stock_update_expr_inflows_only() {
     metadata.insert(
         Ident::new("stock"),
         VariableMetadata {
-            offset: 0,
+            offset: Some(0),
             size: 1,
             var: &dummy_var,
         },
@@ -244,7 +278,7 @@ fn test_build_stock_update_expr_inflows_only() {
     metadata.insert(
         Ident::new("inflow"),
         VariableMetadata {
-            offset: 1,
+            offset: Some(1),
             size: 1,
             var: &dummy_var,
         },
@@ -254,12 +288,14 @@ fn test_build_stock_update_expr_inflows_only() {
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
+    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
     let ctx = Context::new(
         ContextCore {
             dimensions: &[],
             dimensions_ctx: &dims_ctx,
             model_name: &main_ident,
             metadata: &metadata2,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs,
         },
@@ -267,16 +303,24 @@ fn test_build_stock_update_expr_inflows_only() {
         false,
     );
 
-    let result = ctx.build_stock_update_expr(0, &stock_var).unwrap();
+    let result = ctx
+        .build_stock_update_expr(&VarRef::base(Ident::new("stock")), &stock_var)
+        .unwrap();
 
     // stock + (inflow - 0.0) * dt
     // outflows should be Const(0.0) since there are none
     if let Expr::Op2(crate::ast::BinaryOp::Add, stock_box, dt_update_box, _) = &result {
-        assert!(matches!(stock_box.as_ref(), Expr::Var(0, _)));
+        assert_eq!(
+            stock_box.as_ref(),
+            &Expr::Var(VarRef::base(Ident::new("stock")), Loc::default())
+        );
         if let Expr::Op2(crate::ast::BinaryOp::Mul, sub_box, dt_box, _) = dt_update_box.as_ref() {
             assert!(matches!(dt_box.as_ref(), Expr::Dt(_)));
             if let Expr::Op2(crate::ast::BinaryOp::Sub, in_box, out_box, _) = sub_box.as_ref() {
-                assert!(matches!(in_box.as_ref(), Expr::Var(1, _)));
+                assert_eq!(
+                    in_box.as_ref(),
+                    &Expr::Var(VarRef::base(Ident::new("inflow")), Loc::default())
+                );
                 assert!(
                     matches!(out_box.as_ref(), Expr::Const(v, _) if *v == 0.0),
                     "outflows should be Const(0.0) when empty"
@@ -325,7 +369,7 @@ fn test_build_stock_update_expr_outflows_only() {
     metadata.insert(
         Ident::new("stock"),
         VariableMetadata {
-            offset: 0,
+            offset: Some(0),
             size: 1,
             var: &dummy_var,
         },
@@ -333,7 +377,7 @@ fn test_build_stock_update_expr_outflows_only() {
     metadata.insert(
         Ident::new("outflow"),
         VariableMetadata {
-            offset: 1,
+            offset: Some(1),
             size: 1,
             var: &dummy_var,
         },
@@ -343,12 +387,14 @@ fn test_build_stock_update_expr_outflows_only() {
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
+    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
     let ctx = Context::new(
         ContextCore {
             dimensions: &[],
             dimensions_ctx: &dims_ctx,
             model_name: &main_ident,
             metadata: &metadata2,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs,
         },
@@ -356,19 +402,27 @@ fn test_build_stock_update_expr_outflows_only() {
         false,
     );
 
-    let result = ctx.build_stock_update_expr(0, &stock_var).unwrap();
+    let result = ctx
+        .build_stock_update_expr(&VarRef::base(Ident::new("stock")), &stock_var)
+        .unwrap();
 
     // stock + (0.0 - outflow) * dt
     // inflows should be Const(0.0) since there are none
     if let Expr::Op2(crate::ast::BinaryOp::Add, stock_box, dt_update_box, _) = &result {
-        assert!(matches!(stock_box.as_ref(), Expr::Var(0, _)));
+        assert_eq!(
+            stock_box.as_ref(),
+            &Expr::Var(VarRef::base(Ident::new("stock")), Loc::default())
+        );
         if let Expr::Op2(crate::ast::BinaryOp::Mul, sub_box, _, _) = dt_update_box.as_ref() {
             if let Expr::Op2(crate::ast::BinaryOp::Sub, in_box, out_box, _) = sub_box.as_ref() {
                 assert!(
                     matches!(in_box.as_ref(), Expr::Const(v, _) if *v == 0.0),
                     "inflows should be Const(0.0) when empty"
                 );
-                assert!(matches!(out_box.as_ref(), Expr::Var(1, _)));
+                assert_eq!(
+                    out_box.as_ref(),
+                    &Expr::Var(VarRef::base(Ident::new("outflow")), Loc::default())
+                );
             } else {
                 panic!("Expected Sub expression in stock update");
             }
@@ -413,7 +467,7 @@ fn test_build_stock_update_expr_no_flows() {
     metadata.insert(
         Ident::new("stock"),
         VariableMetadata {
-            offset: 0,
+            offset: Some(0),
             size: 1,
             var: &dummy_var,
         },
@@ -423,12 +477,14 @@ fn test_build_stock_update_expr_no_flows() {
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
+    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
     let ctx = Context::new(
         ContextCore {
             dimensions: &[],
             dimensions_ctx: &dims_ctx,
             model_name: &main_ident,
             metadata: &metadata2,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs,
         },
@@ -436,7 +492,9 @@ fn test_build_stock_update_expr_no_flows() {
         false,
     );
 
-    let result = ctx.build_stock_update_expr(0, &stock_var).unwrap();
+    let result = ctx
+        .build_stock_update_expr(&VarRef::base(Ident::new("stock")), &stock_var)
+        .unwrap();
 
     // stock + (0.0 - 0.0) * dt
     if let Expr::Op2(crate::ast::BinaryOp::Add, _, dt_update_box, _) = &result {
@@ -501,7 +559,7 @@ fn test_build_stock_update_expr_multiple_flows() {
         metadata.insert(
             Ident::new(name),
             VariableMetadata {
-                offset: off,
+                offset: Some(off),
                 size: 1,
                 var: &dummy_var,
             },
@@ -512,12 +570,14 @@ fn test_build_stock_update_expr_multiple_flows() {
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
     let dims_ctx = DimensionsContext::default();
+    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
     let ctx = Context::new(
         ContextCore {
             dimensions: &[],
             dimensions_ctx: &dims_ctx,
             model_name: &main_ident,
             metadata: &metadata2,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs,
         },
@@ -525,11 +585,16 @@ fn test_build_stock_update_expr_multiple_flows() {
         false,
     );
 
-    let result = ctx.build_stock_update_expr(0, &stock_var).unwrap();
+    let result = ctx
+        .build_stock_update_expr(&VarRef::base(Ident::new("stock")), &stock_var)
+        .unwrap();
 
     // stock + ((in1 + in2) - (out1 + out2)) * dt
     if let Expr::Op2(crate::ast::BinaryOp::Add, stock_box, dt_update_box, _) = &result {
-        assert!(matches!(stock_box.as_ref(), Expr::Var(0, _)));
+        assert_eq!(
+            stock_box.as_ref(),
+            &Expr::Var(VarRef::base(Ident::new("stock")), Loc::default())
+        );
         if let Expr::Op2(crate::ast::BinaryOp::Mul, sub_box, dt_box, _) = dt_update_box.as_ref() {
             assert!(matches!(dt_box.as_ref(), Expr::Dt(_)));
             if let Expr::Op2(crate::ast::BinaryOp::Sub, in_sum, out_sum, _) = sub_box.as_ref() {
@@ -621,7 +686,7 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
     model_metadata.insert(
         Ident::new("x"),
         VariableMetadata {
-            offset: 0,
+            offset: Some(0),
             size: 3,
             var: &var,
         },
@@ -635,12 +700,14 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
         HashMap::new();
     let dims_ctx = DimensionsContext::from(std::slice::from_ref(&datamodel_dim));
     let ident = Ident::new("test");
+    let var_sizes = whole_variable_extents(&metadata, &model_name);
     let ctx = Context::new(
         ContextCore {
             dimensions: &dims,
             dimensions_ctx: &dims_ctx,
             model_name: &model_name,
             metadata: &metadata,
+            var_sizes: &var_sizes,
             module_models: &module_models,
             inputs: &inputs,
         },
@@ -652,9 +719,9 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
 
     let mut assigned: HashMap<usize, f64> = HashMap::new();
     for expr in lowered.ast {
-        if let Expr::AssignCurr(off, rhs) = expr {
+        if let Expr::AssignCurr(dst, rhs) = expr {
             if let Expr::Const(value, _) = *rhs {
-                assigned.insert(off, value);
+                assigned.insert(dst.element_offset, value);
             } else {
                 panic!("expected AssignCurr to use scalar constants in this test");
             }
@@ -670,18 +737,81 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
     );
 }
 
+/// The stock-update shape guard, in both directions.
+///
+/// Codegen emits every next-value assignment as the fused `BinOpAssignNext`,
+/// so a stock update whose lowered form does not end in an `Op2` must be
+/// REJECTED at lowering (a structured, per-variable error) rather than dropped
+/// at emission (a stock that silently never integrates). This pins that
+/// contract directly, since the shape it guards is unreachable from today's
+/// `build_stock_update_expr` and so cannot be provoked through a model.
+#[test]
+fn stock_update_shape_guard_rejects_only_non_binary_updates() {
+    let level = VarRef::base(Ident::new("level"));
+    let var = Expr::Var(level.clone(), Loc::default());
+    let c = || Expr::Const(1.0, Loc::default());
+    let op2 = |op| Expr::Op2(op, Box::new(var.clone()), Box::new(c()), Loc::default());
+
+    // The real shape: `curr + net * dt`.
+    check_stock_updates_are_emittable(
+        &[Expr::AssignNext(
+            level.clone(),
+            Box::new(op2(BinaryOp::Add)),
+        )],
+        "level",
+    )
+    .expect("the `Op2(Add, ..)` `build_stock_update_expr` produces must be accepted");
+
+    // A non-`Op2` update -- the shape a `MAX(0, ..)` `non_negative` clamp
+    // (GH #545) would produce.
+    let err = check_stock_updates_are_emittable(
+        &[Expr::AssignNext(
+            level.clone(),
+            Box::new(Expr::App(
+                crate::builtins::BuiltinFn::Max(Box::new(c()), Some(Box::new(var.clone()))),
+                Loc::default(),
+            )),
+        )],
+        "level",
+    )
+    .expect_err("a builtin-wrapped stock update must be rejected, not silently dropped");
+    assert_eq!(err.code, ErrorCode::NotSimulatable);
+    assert!(
+        err.details.as_deref().unwrap_or("").contains("level"),
+        "the error must name the stock so the diagnostic is attributable, got {err:?}"
+    );
+
+    // `Neq` is the one binary operator codegen does not leave as a trailing
+    // `Op2` (it emits `Op2 Eq` then `Not`), so it is rejected too.
+    assert!(
+        check_stock_updates_are_emittable(
+            &[Expr::AssignNext(
+                level.clone(),
+                Box::new(op2(BinaryOp::Neq))
+            )],
+            "level"
+        )
+        .is_err(),
+        "a `Neq` update does not end in an Op2 opcode and must be rejected"
+    );
+
+    // Nothing else in an expression list is inspected.
+    check_stock_updates_are_emittable(&[Expr::AssignCurr(level, Box::new(c()))], "aux")
+        .expect("a non-stock assignment is not a stock update");
+}
+
 impl Var {
     pub(crate) fn new(ctx: &Context, var: &Variable) -> Result<Self> {
         // if this variable is overriden by a module input, our expression is easy
-        let ast: Vec<Expr> = if let Some((off, _ident)) = ctx
+        let ast: Vec<Expr> = if let Some((input_idx, _ident)) = ctx
             .inputs
             .iter()
             .enumerate()
             .find(|(_i, n)| n.as_str() == var.ident())
         {
             vec![Expr::AssignCurr(
-                ctx.get_offset(&Ident::new(var.ident()))?,
-                Box::new(Expr::ModuleInput(off, Loc::default())),
+                ctx.get_ref(&Ident::new(var.ident()))?,
+                Box::new(Expr::ModuleInput(input_idx, Loc::default())),
             )]
         } else {
             match var {
@@ -698,7 +828,7 @@ impl Var {
                         inputs.iter().map(|mi| mi.dst.clone()).collect();
                     let inputs: Vec<Expr> = inputs
                         .into_iter()
-                        .map(|mi| Ok(Expr::Var(ctx.get_offset(&mi.src)?, Loc::default())))
+                        .map(|mi| Ok(Expr::Var(ctx.get_ref(&mi.src)?, Loc::default())))
                         .collect::<Result<Vec<_>>>()?;
                     vec![Expr::EvalModule(
                         ident.clone(),
@@ -708,7 +838,7 @@ impl Var {
                     )]
                 }
                 Variable::Stock { init_ast: ast, .. } => {
-                    let off = ctx.get_base_offset(&Ident::new(var.ident()))?;
+                    let base = ctx.get_base_ref(&Ident::new(var.ident()))?;
                     if ctx.is_initial {
                         if ast.is_none() {
                             return sim_err!(EmptyEquation, var.ident().to_string());
@@ -719,11 +849,11 @@ impl Var {
                                 let main_expr = exprs.pop().unwrap();
                                 let main_expr =
                                     hoist_nested_array_builtins_in_scalar(main_expr, &mut exprs);
-                                exprs.push(Expr::AssignCurr(off, Box::new(main_expr)));
+                                exprs.push(Expr::AssignCurr(base, Box::new(main_expr)));
                                 exprs
                             }
                             Ast::ApplyToAll(dims, ast) => {
-                                expand_a2a_with_hoisting(ctx, dims, ast, off)?
+                                expand_a2a_with_hoisting(ctx, dims, ast, &base)?
                             }
                             Ast::Arrayed(
                                 dims,
@@ -736,7 +866,7 @@ impl Var {
                                 elements,
                                 default_ast.as_ref(),
                                 *apply_default_for_missing,
-                                off,
+                                &base,
                             )?,
                         }
                     } else {
@@ -745,8 +875,8 @@ impl Var {
                         };
                         match ast {
                             Ast::Scalar(_) => vec![Expr::AssignNext(
-                                off,
-                                Box::new(ctx.build_stock_update_expr(off, var)?),
+                                base.clone(),
+                                Box::new(ctx.build_stock_update_expr(&base, var)?),
                             )],
                             Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => {
                                 let active_dims = Arc::<[Dimension]>::from(dims.clone());
@@ -758,10 +888,13 @@ impl Var {
                                             &subscripts,
                                         );
                                         let update_expr = ctx.build_stock_update_expr(
-                                            ctx.get_offset(&Ident::new(var.ident()))?,
+                                            &ctx.get_ref(&Ident::new(var.ident()))?,
                                             var,
                                         )?;
-                                        Ok(Expr::AssignNext(off + i, Box::new(update_expr)))
+                                        Ok(Expr::AssignNext(
+                                            base.offset_by(i),
+                                            Box::new(update_expr),
+                                        ))
                                     })
                                     .collect();
                                 exprs?
@@ -787,7 +920,7 @@ impl Var {
                             ast: vec![],
                         });
                     }
-                    let off = ctx.get_base_offset(&Ident::new(var.ident()))?;
+                    let base = ctx.get_base_ref(&Ident::new(var.ident()))?;
                     let ast = if ctx.is_initial {
                         var.init_ast()
                     } else {
@@ -802,11 +935,11 @@ impl Var {
                             let main_expr = exprs.pop().unwrap();
                             let main_expr =
                                 hoist_nested_array_builtins_in_scalar(main_expr, &mut exprs);
-                            exprs.push(Expr::AssignCurr(off, Box::new(main_expr)));
+                            exprs.push(Expr::AssignCurr(base.clone(), Box::new(main_expr)));
                             exprs
                         }
                         Ast::ApplyToAll(dims, ast) => {
-                            expand_a2a_with_hoisting(ctx, dims, ast, off)?
+                            expand_a2a_with_hoisting(ctx, dims, ast, &base)?
                         }
                         Ast::Arrayed(dims, elements, default_ast, apply_default_for_missing) => {
                             expand_arrayed_with_hoisting(
@@ -815,7 +948,7 @@ impl Var {
                                 elements,
                                 default_ast.as_ref(),
                                 *apply_default_for_missing,
-                                off,
+                                &base,
                             )?
                         }
                     };
@@ -825,7 +958,7 @@ impl Var {
                     // shapes (GH #909). (A standalone lookup-only table has no
                     // input and is handled above; ordinary auxes have no
                     // tables.)
-                    apply_implicit_with_lookup(exprs, off, tables)
+                    apply_implicit_with_lookup(exprs, &base, tables)
                 }
             }
         };
@@ -835,12 +968,67 @@ impl Var {
         // single chokepoint every lowering path (monolithic Module::compile
         // and the salsa per-variable fragment path) funnels through -- so both
         // backends (VM and wasmgen) see the folded form.
-        let ast = ast.into_iter().map(fold::fold_constants).collect();
+        let ast: Vec<Expr> = ast.into_iter().map(fold::fold_constants).collect();
+        check_stock_updates_are_emittable(&ast, var.ident())?;
         Ok(Var {
             ident: Ident::new(var.ident()),
             ast,
         })
     }
+}
+
+/// Reject a stock update codegen could not emit, with a structured
+/// per-variable error rather than an unattributed batch failure.
+///
+/// `Expr::AssignNext` is the only thing that ever writes `next[]`, and it is
+/// synthesized here from `Context::build_stock_update_expr`, never by a user
+/// equation. Codegen has no un-fused next-assign opcode: it emits
+/// `BinOpAssignNext`, which requires the update expression's *last* emitted
+/// opcode to be an `Op2`
+/// (`symbolic::SymbolicByteCodeBuilder::fuse_trailing_op2_into_assign_next`).
+/// Today that always holds -- `build_stock_update_expr` returns
+/// `Op2(Add, curr, net * dt)` and constant folding cannot collapse it, since
+/// its left operand is an `Expr::Var` -- so this check never fires.
+///
+/// It exists because the property is a *shape* invariant that a future change
+/// could quietly break: implementing `non_negative` (GH #545) by wrapping the
+/// update in `MAX(0, ..)` would end the walk in an `Apply`, which codegen
+/// cannot emit as a next-value assignment.
+///
+/// What the guard buys is ATTRIBUTION, not the difference between failing and
+/// not failing. Without it the build still fails, but late and vaguely:
+/// codegen's error is swallowed by `compile_phase_to_per_var_bytecodes`'s
+/// loud-safe `None`, the stock's phase goes missing, and `assemble_module`'s
+/// `missing_vars` check reports the whole batch as
+/// `failed to compile fragments for variables: <names>` with no reason and no
+/// per-variable diagnostic. Checked here, at the chokepoint every lowering
+/// path funnels through, the same failure instead surfaces as a typed
+/// `NotSimulatable` `Diagnostic` attributed to the stock (through
+/// `compile_var_fragment`'s `accumulate_var_compile_error`), which is what
+/// invariant 7 asks for. Note that the `details` string below does not reach
+/// the user today -- see the comment on `accumulate_var_compile_error` for why
+/// and what the real fix is.
+///
+/// `Neq` is excluded along with the non-`Op2` shapes: it is the one binary
+/// operator codegen does not emit as a trailing `Op2` (it emits `Op2 Eq` then
+/// `Not`).
+fn check_stock_updates_are_emittable(ast: &[Expr], ident: &str) -> Result<()> {
+    for expr in ast {
+        let Expr::AssignNext(_, rhs) = expr else {
+            continue;
+        };
+        let emittable = matches!(rhs.as_ref(), Expr::Op2(op, _, _, _) if *op != BinaryOp::Neq);
+        if !emittable {
+            return sim_err!(
+                NotSimulatable,
+                format!(
+                    "the dt update for stock '{ident}' is not a binary operation, \
+                     so it cannot be emitted as a next-value assignment"
+                )
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Implicit WITH LOOKUP application (GH #909): rewrite each per-element
@@ -874,15 +1062,15 @@ impl Var {
 ///
 /// Only the per-element `AssignCurr` nodes the expansion paths emit are
 /// rewritten; hoisted pre-computations (`AssignTemp`) feed those assignments
-/// and stay untouched. The table reference is `Expr::Var(base + table_idx)`:
-/// codegen's `extract_table_info` resolves it by offset-range containment to
-/// `(table_ident, element_offset)` -- exactly the resolution an explicit
-/// `LOOKUP(var[elem], x)` call site gets -- and emits the same scalar `Lookup`
-/// opcode (`graphical_functions[base_gf + element_offset]`), so both the VM
-/// and the wasm backend evaluate it with no new lowering.
+/// and stay untouched. The table reference is
+/// `Expr::Var(base.offset_by(table_idx))`: codegen's `extract_table_info` reads
+/// the owning variable's name straight off the reference -- exactly the
+/// resolution an explicit `LOOKUP(var[elem], x)` call site gets -- and emits the
+/// same scalar `Lookup` opcode (`graphical_functions[base_gf + element_offset]`),
+/// so both the VM and the wasm backend evaluate it with no new lowering.
 fn apply_implicit_with_lookup(
     exprs: Vec<Expr>,
-    base_off: usize,
+    base: &VarRef,
     tables: &[crate::variable::Table],
 ) -> Vec<Expr> {
     if tables.is_empty() {
@@ -892,12 +1080,15 @@ fn apply_implicit_with_lookup(
         .into_iter()
         .map(|expr| match expr {
             // The guard filters nothing in practice: every `AssignCurr` a
-            // Var fragment emits targets the variable's own offset range
+            // Var fragment emits targets this variable at or after its base
             // (pre-computations are `AssignTemp`). It exists purely as
-            // defense so a hypothetical foreign-offset assignment could
-            // never wrap against a nonsense element index.
-            Expr::AssignCurr(off, value) if off >= base_off => {
-                let elem = off - base_off;
+            // defense so a hypothetical assignment to a *different* variable,
+            // or one before the base, could never wrap against a nonsense
+            // element index.
+            Expr::AssignCurr(dst, value)
+                if dst.name == base.name && dst.element_offset >= base.element_offset =>
+            {
+                let elem = dst.element_offset - base.element_offset;
                 let table_idx = if tables.len() == 1 { 0 } else { elem };
                 // `false` for an out-of-range index (defensive: `tables` is
                 // either 1 or the element count) and for an empty placeholder.
@@ -908,10 +1099,10 @@ fn apply_implicit_with_lookup(
                 if has_table {
                     let loc = value.get_loc();
                     Expr::AssignCurr(
-                        off,
+                        dst,
                         Box::new(Expr::App(
                             BuiltinFn::Lookup(
-                                Box::new(Expr::Var(base_off + table_idx, loc)),
+                                Box::new(Expr::Var(base.offset_by(table_idx), loc)),
                                 value,
                                 loc,
                             ),
@@ -919,7 +1110,7 @@ fn apply_implicit_with_lookup(
                         )),
                     )
                 } else {
-                    Expr::AssignCurr(off, value)
+                    Expr::AssignCurr(dst, value)
                 }
             }
             other => other,
@@ -1205,6 +1396,10 @@ pub(crate) fn exprs_contain_array_producing_builtin(exprs: &[Expr]) -> bool {
 mod exprs_contain_array_producing_builtin_tests {
     use super::*;
 
+    fn vr(name: &str) -> VarRef {
+        VarRef::base(Ident::new(name))
+    }
+
     fn vem() -> Expr {
         // A minimal array-producing builtin call (args are irrelevant to
         // the predicate; only the `BuiltinFn` discriminant matters).
@@ -1222,7 +1417,7 @@ mod exprs_contain_array_producing_builtin_tests {
         // The scalar-lowering shape `AssignCurr(off, VECTOR ELM MAP(...))`
         // -- the top-level case the scalar path does NOT hoist:
         // `contains_ ⊇ is_` catches the top-level `App`.
-        let exprs = vec![Expr::AssignCurr(0, Box::new(vem()))];
+        let exprs = vec![Expr::AssignCurr(vr("dst"), Box::new(vem()))];
         assert!(exprs_contain_array_producing_builtin(&exprs));
     }
 
@@ -1234,7 +1429,7 @@ mod exprs_contain_array_producing_builtin_tests {
         // `AssignTemp` recursion must still flag it.
         let exprs = vec![
             Expr::AssignCurr(
-                0,
+                vr("dst"),
                 Box::new(Expr::TempArray(
                     0,
                     ArrayView::contiguous(vec![1]),
@@ -1249,8 +1444,8 @@ mod exprs_contain_array_producing_builtin_tests {
     #[test]
     fn does_not_flag_plain_exprs() {
         let exprs = vec![
-            Expr::AssignCurr(0, Box::new(Expr::Const(1.0, Loc::default()))),
-            Expr::AssignCurr(1, Box::new(Expr::Var(0, Loc::default()))),
+            Expr::AssignCurr(vr("a"), Box::new(Expr::Const(1.0, Loc::default()))),
+            Expr::AssignCurr(vr("b"), Box::new(Expr::Var(vr("a"), Loc::default()))),
         ];
         assert!(!exprs_contain_array_producing_builtin(&exprs));
     }
@@ -1713,7 +1908,7 @@ fn expand_arrayed_with_hoisting(
     elements: &HashMap<CanonicalElementName, crate::ast::Expr2>,
     default_ast: Option<&crate::ast::Expr2>,
     apply_default_for_missing: bool,
-    off: usize,
+    base: &VarRef,
 ) -> Result<Vec<Expr>> {
     let active_dims = Arc::<[Dimension]>::from(dims.to_vec());
 
@@ -1748,7 +1943,7 @@ fn expand_arrayed_with_hoisting(
             elements,
             default_ast,
             apply_default_for_missing,
-            off,
+            base,
             &active_dims,
             hoisting_ast,
         )
@@ -1766,12 +1961,13 @@ fn expand_arrayed_with_hoisting(
                             let ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
                             return ctx.lower(default_ast).map(|mut exprs| {
                                 let main_expr = exprs.pop().unwrap();
-                                exprs.push(Expr::AssignCurr(off + i, Box::new(main_expr)));
+                                exprs
+                                    .push(Expr::AssignCurr(base.offset_by(i), Box::new(main_expr)));
                                 exprs
                             });
                         }
                         return Ok(vec![Expr::AssignCurr(
-                            off + i,
+                            base.offset_by(i),
                             Box::new(Expr::Const(0.0, Loc::default())),
                         )]);
                     }
@@ -1779,7 +1975,7 @@ fn expand_arrayed_with_hoisting(
                 let ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
                 ctx.lower(ast).map(|mut exprs| {
                     let main_expr = exprs.pop().unwrap();
-                    exprs.push(Expr::AssignCurr(off + i, Box::new(main_expr)));
+                    exprs.push(Expr::AssignCurr(base.offset_by(i), Box::new(main_expr)));
                     exprs
                 })
             })
@@ -1798,7 +1994,7 @@ fn expand_a2a_with_hoisting(
     ctx: &Context,
     dims: &[Dimension],
     ast: &crate::ast::Expr2,
-    off: usize,
+    base: &VarRef,
 ) -> Result<Vec<Expr>> {
     let active_dims = Arc::<[Dimension]>::from(dims.to_vec());
 
@@ -1819,12 +2015,12 @@ fn expand_a2a_with_hoisting(
         // array arguments to scalars.
         let mut first_exprs = first_ctx.lower_preserving_dimensions(ast)?;
         let main_expr = first_exprs.pop().unwrap();
-        return expand_a2a_hoisted(ctx, dims, ast, off, &active_dims, first_exprs, main_expr);
+        return expand_a2a_hoisted(ctx, dims, ast, base, &active_dims, first_exprs, main_expr);
     }
 
     // Not an array-producing builtin: fall back to the standard per-element loop.
     // We already lowered element 0, so start from there.
-    first_exprs.push(Expr::AssignCurr(off, Box::new(main_expr)));
+    first_exprs.push(Expr::AssignCurr(base.clone(), Box::new(main_expr)));
     let rest: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
         .enumerate()
         .skip(1)
@@ -1832,7 +2028,7 @@ fn expand_a2a_with_hoisting(
             let ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
             ctx.lower(ast).map(|mut exprs| {
                 let main_expr = exprs.pop().unwrap();
-                exprs.push(Expr::AssignCurr(off + i, Box::new(main_expr)));
+                exprs.push(Expr::AssignCurr(base.offset_by(i), Box::new(main_expr)));
                 exprs
             })
         })
@@ -1874,7 +2070,7 @@ fn expand_a2a_hoisted(
     ctx: &Context,
     dims: &[Dimension],
     ast: &crate::ast::Expr2,
-    off: usize,
+    base: &VarRef,
     active_dims: &Arc<[Dimension]>,
     first_exprs: Vec<Expr>,
     main_expr: Expr,
@@ -1888,7 +2084,7 @@ fn expand_a2a_hoisted(
                 ctx,
                 dims,
                 ast,
-                off,
+                base,
                 active_dims,
                 first_exprs,
                 main_expr,
@@ -1910,7 +2106,7 @@ fn expand_a2a_hoisted(
         for i in 0..total_elements {
             let temp_idx = project_var_index_to_temp(i, &var_view, &builtin_view);
             result.push(Expr::AssignCurr(
-                off + i,
+                base.offset_by(i),
                 Box::new(Expr::TempArrayElement(
                     temp_id,
                     builtin_view.clone(),
@@ -1975,7 +2171,10 @@ fn expand_a2a_hoisted(
                     NestedBuiltinArgMode::ScalarElement,
                 );
                 result.extend(hoisted);
-                result.push(Expr::AssignCurr(off + i, Box::new(elem_rewritten)));
+                result.push(Expr::AssignCurr(
+                    base.offset_by(i),
+                    Box::new(elem_rewritten),
+                ));
             }
         } else {
             // Scalar args are constant: hoist once from element 0, then
@@ -1992,7 +2191,7 @@ fn expand_a2a_hoisted(
                 NestedBuiltinArgMode::ScalarElement,
             );
             result.extend(hoisted);
-            result.push(Expr::AssignCurr(off, Box::new(rewritten)));
+            result.push(Expr::AssignCurr(base.clone(), Box::new(rewritten)));
 
             for (i, subscripts) in SubscriptIterator::new(dims).enumerate().skip(1) {
                 let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
@@ -2010,7 +2209,10 @@ fn expand_a2a_hoisted(
                     false,
                     NestedBuiltinArgMode::ScalarElement,
                 );
-                result.push(Expr::AssignCurr(off + i, Box::new(elem_rewritten)));
+                result.push(Expr::AssignCurr(
+                    base.offset_by(i),
+                    Box::new(elem_rewritten),
+                ));
             }
         }
         Ok(result)
@@ -2043,8 +2245,8 @@ fn try_fold_scalar_source_elm_map(ctx: &Context, main_expr: &Expr) -> Option<Exp
     // Source must be a fully-collapsed (scalar) element reference carrying its
     // base: a StaticSubscript with no remaining dimensions, whose `off` is the
     // variable base and `view.offset` the element's flat index within it.
-    let (base_off, elem_flat) = match source.as_ref() {
-        Expr::StaticSubscript(off, view, _) if view.dims.is_empty() => (*off, view.offset),
+    let (base, elem_flat) = match source.as_ref() {
+        Expr::StaticSubscript(base, view, _) if view.dims.is_empty() => (base, view.offset),
         _ => return None,
     };
     // The per-element offset must be a compile-time constant (it is not a view,
@@ -2052,13 +2254,13 @@ fn try_fold_scalar_source_elm_map(ctx: &Context, main_expr: &Expr) -> Option<Exp
     let Expr::Const(offset_val, _) = fold::fold_constants((**offset).clone()) else {
         return None;
     };
-    let full_len = ctx.full_var_len_for_base(base_off)?;
+    let full_len = ctx.full_var_len_for_base(base)?;
     // round() matches the VM's `vm_vector_elm_map` per-element offset rounding.
     let flat = elem_flat as i64 + offset_val.round() as i64;
     if flat < 0 || flat >= full_len as i64 {
         Some(Expr::Const(f64::NAN, *loc))
     } else {
-        Some(Expr::Var(base_off + flat as usize, *loc))
+        Some(Expr::Var(base.offset_by(flat as usize), *loc))
     }
 }
 
@@ -2102,7 +2304,7 @@ fn expand_a2a_per_element_hoisted(
     ctx: &Context,
     dims: &[Dimension],
     ast: &crate::ast::Expr2,
-    off: usize,
+    base: &VarRef,
     active_dims: &Arc<[Dimension]>,
     first_exprs: Vec<Expr>,
     first_main_expr: Expr,
@@ -2153,7 +2355,7 @@ fn expand_a2a_per_element_hoisted(
         let main_expr = fold_scalar_source_elm_maps(ctx, main_expr);
         if !is_array_producing_builtin(&main_expr) && !contains_array_producing_builtin(&main_expr)
         {
-            result.push(Expr::AssignCurr(off + i, Box::new(main_expr)));
+            result.push(Expr::AssignCurr(base.offset_by(i), Box::new(main_expr)));
             continue;
         }
 
@@ -2169,7 +2371,7 @@ fn expand_a2a_per_element_hoisted(
             builtin_view.clone(),
         ));
         result.push(Expr::AssignCurr(
-            off + i,
+            base.offset_by(i),
             Box::new(Expr::TempArrayElement(temp_id, builtin_view, temp_idx, loc)),
         ));
     }
@@ -2188,7 +2390,7 @@ fn expand_arrayed_hoisted(
     elements: &HashMap<CanonicalElementName, crate::ast::Expr2>,
     default_ast: Option<&crate::ast::Expr2>,
     apply_default_for_missing: bool,
-    off: usize,
+    base: &VarRef,
     active_dims: &Arc<[Dimension]>,
     hoisting_ast: &crate::ast::Expr2,
 ) -> Result<Vec<Expr>> {
@@ -2308,7 +2510,10 @@ fn expand_arrayed_hoisted(
                         NestedBuiltinArgMode::ScalarElement,
                     );
                     result.extend(hoisted);
-                    result.push(Expr::AssignCurr(off + i, Box::new(elem_rewritten)));
+                    result.push(Expr::AssignCurr(
+                        base.offset_by(i),
+                        Box::new(elem_rewritten),
+                    ));
                     continue;
                 }
 
@@ -2370,7 +2575,10 @@ fn expand_arrayed_hoisted(
                     false,
                     NestedBuiltinArgMode::ScalarElement,
                 );
-                result.push(Expr::AssignCurr(off + i, Box::new(elem_rewritten)));
+                result.push(Expr::AssignCurr(
+                    base.offset_by(i),
+                    Box::new(elem_rewritten),
+                ));
             } else if let Some(ast) = elem_ast {
                 let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
                 let mut elem_exprs = elem_ctx.lower(ast)?;
@@ -2393,10 +2601,10 @@ fn expand_arrayed_hoisted(
                     temp_id = temp_id.max(max + 1);
                 }
                 result.extend(elem_exprs);
-                result.push(Expr::AssignCurr(off + i, Box::new(elem_main)));
+                result.push(Expr::AssignCurr(base.offset_by(i), Box::new(elem_main)));
             } else {
                 result.push(Expr::AssignCurr(
-                    off + i,
+                    base.offset_by(i),
                     Box::new(Expr::Const(0.0, Loc::default())),
                 ));
             }
@@ -2572,35 +2780,41 @@ fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut Has
 }
 
 /// Per-variable initial expressions, kept alongside the flat runlist.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
-pub(crate) struct VarInitial {
-    pub(crate) ident: Ident<Canonical>,
-    /// Sorted, deduplicated offsets extracted from AssignCurr nodes.
-    pub(crate) offsets: Vec<usize>,
-    pub(crate) ast: Vec<Expr>,
-}
-
+///
+/// A whole model, compiled as one unit.
+///
+/// **`#[cfg(test)]`, and that gate is a load-bearing assertion, not tidiness.**
+/// Production compilation is per-variable and incremental: every fragment
+/// emitter builds a [`ModuleCtx`] and calls codegen directly (GH #964). Until
+/// this change three production sites built a stand-in one-variable `Module`
+/// by struct literal and deep-cloned five fields into it per phase. Gating the
+/// type makes "no production `compiler::Module` literal remains" a compile
+/// error rather than a claim someone has to re-audit.
+///
+/// Every field here is one codegen reads; see [`ModuleCtx`], which is exactly
+/// the set of things `Compiler` looks at and which [`Module::compile`] hands
+/// it by reference. `runlist_initials` is the exception -- codegen compiles
+/// initials per variable out of `runlist_initials_by_var`, and the flat list
+/// exists only for the `get_initial_exprs` accessor.
+#[cfg(test)]
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 pub struct Module {
     pub(crate) ident: Ident<Canonical>,
-    pub(crate) inputs: HashSet<Ident<Canonical>>,
-    pub(crate) n_slots: usize,
-    pub(crate) n_temps: usize,
+    pub(crate) inputs: BTreeSet<Ident<Canonical>>,
     pub(crate) temp_sizes: Vec<usize>,
     #[allow(dead_code)]
     pub(crate) runlist_initials: Vec<Expr>,
-    pub(crate) runlist_initials_by_var: Vec<VarInitial>,
+    pub(crate) runlist_initials_by_var: Vec<Var>,
     pub(crate) runlist_flows: Vec<Expr>,
     pub(crate) runlist_stocks: Vec<Expr>,
-    pub(crate) offsets: VariableOffsetMap,
-    #[allow(dead_code)]
-    pub(crate) runlist_order: Vec<Ident<Canonical>>,
+    /// The whole-model layout the emitted symbolic module is resolved against.
+    /// This is the monolithic path's analogue of the salsa `compute_layout`
+    /// query, and it is consulted exactly once, at the end of `compile()`.
+    pub(crate) layout: crate::compiler::symbolic::VariableLayout,
+    pub(crate) var_sizes: VarSizes,
     pub(crate) tables: HashMap<Ident<Canonical>, Vec<Table>>,
     pub(crate) dimensions: Vec<Dimension>,
     pub(crate) dimensions_ctx: DimensionsContext,
-    #[allow(dead_code)]
-    pub(crate) module_refs: HashMap<Ident<Canonical>, ModuleKey>,
 }
 
 #[cfg(test)]
@@ -2715,7 +2929,7 @@ pub(crate) fn build_metadata<'p>(
         offsets.insert(
             Ident::new("time"),
             VariableMetadata {
-                offset: 0,
+                offset: Some(0),
                 size: 1,
                 var: &IMPLICIT_TIME,
             },
@@ -2723,7 +2937,7 @@ pub(crate) fn build_metadata<'p>(
         offsets.insert(
             Ident::new("dt"),
             VariableMetadata {
-                offset: 1,
+                offset: Some(1),
                 size: 1,
                 var: &IMPLICIT_DT,
             },
@@ -2731,7 +2945,7 @@ pub(crate) fn build_metadata<'p>(
         offsets.insert(
             Ident::new("initial_time"),
             VariableMetadata {
-                offset: 2,
+                offset: Some(2),
                 size: 1,
                 var: &IMPLICIT_INITIAL_TIME,
             },
@@ -2739,7 +2953,7 @@ pub(crate) fn build_metadata<'p>(
         offsets.insert(
             Ident::new("final_time"),
             VariableMetadata {
-                offset: 3,
+                offset: Some(3),
                 size: 1,
                 var: &IMPLICIT_FINAL_TIME,
             },
@@ -2764,7 +2978,7 @@ pub(crate) fn build_metadata<'p>(
         offsets.insert(
             canonical_ident.clone(),
             VariableMetadata {
-                offset: i,
+                offset: Some(i),
                 size,
                 var: &model.variables[canonical_ident],
             },
@@ -2785,9 +2999,35 @@ fn calc_n_slots(
     metadata.values().map(|v| v.size).sum()
 }
 
+#[cfg(test)]
 impl Module {
+    /// Borrow this whole-model unit as the emission context codegen consumes.
+    /// Every field is a reference into `self`; nothing is copied.
+    pub(crate) fn as_ctx(&self) -> ModuleCtx<'_> {
+        ModuleCtx {
+            ident: &self.ident,
+            inputs: &self.inputs,
+            temp_sizes: &self.temp_sizes,
+            runlist_initials_by_var: &self.runlist_initials_by_var,
+            runlist_flows: &self.runlist_flows,
+            runlist_stocks: &self.runlist_stocks,
+            var_sizes: &self.var_sizes,
+            tables: &self.tables,
+            dimensions: &self.dimensions,
+            dimensions_ctx: &self.dimensions_ctx,
+        }
+    }
+
+    /// Emit this whole model and resolve it against its own layout.
+    ///
+    /// Codegen is address-neutral, so the monolithic path reaches concrete
+    /// bytecode the same way production assembly does: through
+    /// `resolve_module`. That is the whole reason one emitter can serve both --
+    /// there is no second, offset-emitting codegen to keep in step.
     pub fn compile(&self) -> Result<CompiledModule> {
-        Compiler::new(self).compile()
+        let sym = self.as_ctx().compile()?;
+        crate::compiler::symbolic::resolve_module(&sym, &self.layout)
+            .map_err(|msg| Error::new(ErrorKind::Simulation, ErrorCode::NotSimulatable, Some(msg)))
     }
 }
 
@@ -2826,32 +3066,17 @@ impl Module {
         };
         let module_models = calc_module_model_map(project, model_name);
 
-        // Build module_refs: map from module variable ident to (model_name, input_set)
-        let module_refs: HashMap<Ident<Canonical>, ModuleKey> = model
-            .variables
-            .iter()
-            .filter_map(|(ident, var)| {
-                if let Variable::Module {
-                    model_name: module_model_name,
-                    inputs,
-                    ..
-                } = var
-                {
-                    let input_set: BTreeSet<Ident<Canonical>> =
-                        inputs.iter().map(|mi| mi.dst.clone()).collect();
-                    Some((ident.clone(), (module_model_name.clone(), input_set)))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
         let converted_dims: Vec<Dimension> = project
             .datamodel
             .dimensions
             .iter()
             .map(Dimension::from)
             .collect();
+
+        // Built once and shared by lowering (below) and emission (`compile`,
+        // through `as_ctx`), so the two agree about where a VECTOR ELM MAP
+        // source's storage ends.
+        let var_sizes: VarSizes = whole_variable_extents(&metadata, model_name);
 
         let build_var = |ident: &Ident<Canonical>, is_initial| {
             Var::new(
@@ -2861,6 +3086,7 @@ impl Module {
                         dimensions_ctx: &project.dimensions_ctx,
                         model_name,
                         metadata: &metadata,
+                        var_sizes: &var_sizes,
                         module_models: &module_models,
                         inputs,
                     },
@@ -2887,34 +3113,12 @@ impl Module {
             .map(|ident| build_var(ident, false))
             .collect::<Result<Vec<Var>>>()?;
 
-        let mut runlist_order = Vec::with_capacity(flow_vars.len() + stock_vars.len());
-        runlist_order.extend(flow_vars.iter().map(|v| v.ident.clone()));
-        runlist_order.extend(stock_vars.iter().map(|v| v.ident.clone()));
-
-        // Build per-variable initials before flattening
-        let runlist_initials_by_var: Vec<VarInitial> = initial_vars
-            .iter()
-            .map(|v| {
-                let mut offsets: Vec<usize> = v
-                    .ast
-                    .iter()
-                    .filter_map(|expr| {
-                        if let &Expr::AssignCurr(off, _) = expr {
-                            Some(off)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                offsets.sort_unstable();
-                offsets.dedup();
-                VarInitial {
-                    ident: v.ident.clone(),
-                    offsets,
-                    ast: v.ast.clone(),
-                }
-            })
-            .collect();
+        // Per-variable initials, kept alongside the flattened runlist. The
+        // `CompiledInitial::offsets` these used to carry are re-derived from
+        // the resolved bytecode's `AssignCurr` operands by `resolve_module`,
+        // which is the same set (every `Expr::AssignCurr` emits exactly one
+        // current-value write opcode for its target).
+        let runlist_initials_by_var: Vec<Var> = initial_vars.to_vec();
 
         // Flatten out the variables so that we're just dealing with lists of expressions
         let runlist_initials: Vec<Expr> = initial_vars.into_iter().flat_map(|v| v.ast).collect();
@@ -2932,8 +3136,7 @@ impl Module {
         }
 
         // Build temp_sizes vector, ordered by temp ID
-        let n_temps = temp_sizes_map.len();
-        let mut temp_sizes: Vec<usize> = vec![0; n_temps];
+        let mut temp_sizes: Vec<usize> = vec![0; temp_sizes_map.len()];
         for (id, size) in temp_sizes_map {
             temp_sizes[id as usize] = size;
         }
@@ -2957,34 +3160,28 @@ impl Module {
             .collect();
         let tables = tables?;
 
-        let offsets = metadata
-            .into_iter()
-            .map(|(k, v)| {
-                (
-                    k,
-                    v.iter()
-                        .map(|(k, v)| (k.clone(), (v.offset, v.size)))
-                        .collect(),
-                )
-            })
-            .collect();
+        let model_metadata = &metadata[model_name];
+        let layout = crate::compiler::symbolic::VariableLayout::from_offset_map(
+            &model_metadata
+                .iter()
+                .filter_map(|(k, v)| v.offset.map(|off| (k.clone(), (off, v.size))))
+                .collect(),
+            n_slots,
+        );
 
         Ok(Module {
             ident: model_name.clone(),
-            inputs: inputs.iter().cloned().collect(),
-            n_slots,
-            n_temps,
+            inputs: inputs.clone(),
             temp_sizes,
             runlist_initials,
             runlist_initials_by_var,
             runlist_flows,
             runlist_stocks,
-            offsets,
-            runlist_order,
+            layout,
+            var_sizes,
             tables,
             dimensions: converted_dims,
             dimensions_ctx: project.dimensions_ctx.clone(),
-            module_refs,
         })
     }
 }
@@ -2995,26 +3192,9 @@ impl Module {
     /// Returns all AssignCurr expressions that target offsets within this variable's range.
     pub fn get_flow_exprs(&self, var_name: &str) -> Vec<&Expr> {
         let canonical_name = Ident::new(var_name);
-
-        // Look up the variable's offset range
-        let Some(model_offsets) = self.offsets.get(&self.ident) else {
-            return vec![];
-        };
-        let Some(&(base_offset, size)) = model_offsets.get(&canonical_name) else {
-            return vec![];
-        };
-        let offset_range = base_offset..base_offset + size;
-
-        // Find all AssignCurr expressions that target offsets in this range
         self.runlist_flows
             .iter()
-            .filter(|expr| {
-                if let Expr::AssignCurr(off, _) = expr {
-                    offset_range.contains(off)
-                } else {
-                    false
-                }
-            })
+            .filter(|expr| matches!(expr, Expr::AssignCurr(dst, _) if dst.name == canonical_name))
             .collect()
     }
 
@@ -3022,26 +3202,9 @@ impl Module {
     /// Returns all AssignCurr expressions in the initials runlist for this variable.
     pub fn get_initial_exprs(&self, var_name: &str) -> Vec<&Expr> {
         let canonical_name = Ident::new(var_name);
-
-        // Look up the variable's offset range
-        let Some(model_offsets) = self.offsets.get(&self.ident) else {
-            return vec![];
-        };
-        let Some(&(base_offset, size)) = model_offsets.get(&canonical_name) else {
-            return vec![];
-        };
-        let offset_range = base_offset..base_offset + size;
-
-        // Find all AssignCurr expressions that target offsets in this range
         self.runlist_initials
             .iter()
-            .filter(|expr| {
-                if let Expr::AssignCurr(off, _) = expr {
-                    offset_range.contains(off)
-                } else {
-                    false
-                }
-            })
+            .filter(|expr| matches!(expr, Expr::AssignCurr(dst, _) if dst.name == canonical_name))
             .collect()
     }
 }

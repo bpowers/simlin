@@ -77,7 +77,6 @@ pub use input::{
 };
 
 mod query;
-pub(crate) use query::canonical_module_input_set;
 pub use query::{
     ImplicitVarMeta, ModuleReferenceGraph, ParsedVariableResult, UnitsContextResult, VariableDeps,
     model_implicit_var_info, model_module_ident_context, model_module_map,
@@ -85,6 +84,9 @@ pub use query::{
     project_datamodel_dims, project_dimensions_context, project_module_graph,
     project_units_context, project_units_context_result, variable_dimensions,
     variable_direct_dependencies, variable_relevant_dimensions, variable_size,
+};
+pub(crate) use query::{
+    canonical_module_input_set, model_implicit_var_by_name, model_variable_by_name,
 };
 
 mod sync;
@@ -102,12 +104,21 @@ pub use fragment_compile::compile_var_fragment;
 pub(crate) use fragment_compile::{
     compile_implicit_var_fragment, compile_implicit_var_phase_bytecodes,
 };
+// Test-only: the per-thread record of which fragment-compiler bodies ran, so
+// `fragment_char_tests` can prove a layout-only edit did or did not recompile
+// a fragment. Pointer equality of a memo cannot prove that -- salsa backdates
+// a re-executed query whose value compares equal -- and a fragment is designed
+// to compare equal across a layout edit, so the record is the only evidence.
+#[cfg(test)]
+pub(crate) use fragment_compile::{
+    FragmentExecKind, fragment_executions, note_fragment_execution, reset_fragment_executions,
+};
 
 mod assemble;
 pub(crate) use assemble::{
-    PerVarOffsetMap, VarFragmentResult, build_module_inputs, build_stub_variable,
+    PerVarSizes, VarFragmentResult, build_module_inputs, build_stub_variable,
     build_submodel_metadata, compile_phase_to_per_var_bytecodes, extract_tables_from_source_var,
-    var_phase_symbolic_fragment_prod,
+    fragment_emit_ctx, var_phase_symbolic_fragment_prod,
 };
 pub use assemble::{assemble_module, assemble_simulation};
 // `combine_scc_fragment` and `calc_flattened_offsets_incremental` are
@@ -117,8 +128,19 @@ pub use assemble::{assemble_module, assemble_simulation};
 // `crate::db::...` / `super::...`.
 #[cfg(test)]
 pub(crate) use assemble::{calc_flattened_offsets_incremental, combine_scc_fragment};
+// `renumber_initials_phase` is the initials half of assembly's phase renumber.
+// The root re-export exists so the merger's M8 property
+// (`compiler::symbolic_merge_proptest`) can drive the REAL function rather than
+// re-deriving it: as an inline loop inside `assemble_module` it was unreachable
+// from a test, and freezing two of its three accumulators left the whole
+// repository green.
+#[cfg(test)]
+pub(crate) use assemble::renumber_initials_phase;
 
-pub use dep_graph::{ModelDepGraphResult, ResolvedScc, SccPhase, model_dependency_graph};
+pub use dep_graph::{
+    ModelDepGraphResult, ResolvedScc, RunlistMembership, SccPhase, model_dependency_graph,
+    var_runlist_membership,
+};
 
 mod ltm;
 use ltm::*;
@@ -1364,6 +1386,8 @@ pub fn compile_project_incremental(
 }
 
 #[cfg(test)]
+mod combined_fragment_proptest;
+#[cfg(test)]
 mod combined_fragment_tests;
 #[cfg(test)]
 mod diagnostic_tests;
@@ -1375,6 +1399,10 @@ mod dimension_context_cache_tests;
 mod dimension_invalidation_tests;
 #[cfg(test)]
 mod fragment_cache_tests;
+#[cfg(test)]
+mod fragment_char_tests;
+#[cfg(test)]
+mod fragment_determinism_tests;
 #[cfg(test)]
 mod incremental_compile_tests;
 #[cfg(test)]

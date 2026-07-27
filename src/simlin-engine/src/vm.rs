@@ -421,10 +421,16 @@ impl Stack {
     #[inline(always)]
     fn push(&mut self, value: f64) {
         debug_assert!(self.top < STACK_CAPACITY, "stack overflow");
-        // SAFETY: ByteCodeBuilder::finish() statically validates that the max
-        // stack depth of all compiled bytecode is < STACK_CAPACITY, so this
-        // bound cannot be exceeded at runtime. The debug_assert serves as a
-        // belt-and-suspenders check during development.
+        // SAFETY: compiler::symbolic::resolve_bytecode() statically validates
+        // that the max stack depth of all compiled bytecode is < STACK_CAPACITY,
+        // so this bound cannot be exceeded at runtime. That function is the ONLY
+        // place concrete bytecode is produced, so nothing can reach the VM
+        // without passing the check; it reports over-depth as a compile Err
+        // rather than aborting, so an unchecked program is not executed, it is
+        // rejected. (The check lived in the per-fragment `ByteCodeBuilder` until
+        // GH #964 made codegen emit symbolic bytecode; it did not go away with
+        // the builder.) The debug_assert serves as a belt-and-suspenders check
+        // during development.
         unsafe {
             *self.data.get_unchecked_mut(self.top) = value;
         }
@@ -434,10 +440,13 @@ impl Stack {
     fn pop(&mut self) -> f64 {
         debug_assert!(self.top > 0, "stack underflow");
         self.top -= 1;
-        // SAFETY: ByteCodeBuilder::finish() validates via checked_sub that no
-        // opcode sequence pops more values than have been pushed (i.e. the stack
-        // depth never goes negative). This guarantees top > 0 before every pop
-        // at runtime. The debug_assert is a belt-and-suspenders check.
+        // SAFETY: compiler::symbolic::resolve_bytecode() validates via
+        // ByteCode::max_stack_depth's checked_sub that no opcode sequence pops
+        // more values than have been pushed (i.e. the stack depth never goes
+        // negative). Producing concrete bytecode is the only way to reach the
+        // VM, so this guarantees top > 0 before every pop at runtime; an
+        // underflow is reported as a compile Err and the program never runs.
+        // The debug_assert is a belt-and-suspenders check.
         unsafe { *self.data.get_unchecked(self.top) }
     }
     #[inline(always)]
@@ -649,7 +658,7 @@ fn collect_stock_offsets(
     let mut offsets = Vec::new();
     for op in module.compiled_stocks.code.iter() {
         match op {
-            Opcode::AssignNext { off } | Opcode::BinOpAssignNext { off, .. } => {
+            Opcode::BinOpAssignNext { off, .. } => {
                 offsets.push(base_off + *off as usize);
             }
             Opcode::EvalModule { id, .. } => {
@@ -2024,10 +2033,6 @@ impl Vm {
                     curr[module_off + *off as usize] = stack.pop();
                     debug_assert_eq!(0, stack.len());
                 }
-                Opcode::AssignNext { off } => {
-                    next[module_off + *off as usize] = stack.pop();
-                    debug_assert_eq!(0, stack.len());
-                }
                 // === SUPERINSTRUCTIONS ===
                 Opcode::AssignConstCurr { off, literal_id } => {
                     curr[module_off + *off as usize] = bytecode.literals[*literal_id as usize];
@@ -2315,24 +2320,6 @@ impl Vm {
                 // =========================================================
                 // VIEW STACK OPERATIONS
                 // =========================================================
-                Opcode::PushVarView {
-                    base_off,
-                    dim_list_id,
-                } => {
-                    let (n_dims, dim_ids) = context.get_dim_list(*dim_list_id);
-                    let n = n_dims as usize;
-                    let dims: SmallVec<[u16; 4]> = (0..n)
-                        .map(|i| context.dimensions[dim_ids[i] as usize].size)
-                        .collect();
-                    let dim_id_vec: SmallVec<[DimId; 4]> = dim_ids[..n].iter().copied().collect();
-                    let view = RuntimeView::for_var(
-                        (module_off + *base_off as usize) as u32,
-                        dims,
-                        dim_id_vec,
-                    );
-                    view_stack.push(view);
-                }
-
                 Opcode::PushTempView {
                     temp_id,
                     dim_list_id,
@@ -4729,7 +4716,7 @@ mod superinstruction_tests {
 
     #[test]
     fn test_fused_binop_next_sub() {
-        // stock with only outflow exercises Sub in AssignNext
+        // stock with only outflow exercises Sub inside the stock update
         let tp = TestProject::new("fused_next_sub")
             .with_sim_time(0.0, 3.0, 1.0)
             .flow("outflow", "5", None)

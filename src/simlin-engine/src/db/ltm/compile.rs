@@ -13,20 +13,21 @@
 //! compile-failure diagnostic pass (`model_ltm_fragment_diagnostics`), and
 //! the implicit-variable fragment compiler (`compile_ltm_implicit_var_fragment`).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use crate::canonicalize;
 use crate::common::{Canonical, Ident};
 use crate::datamodel;
 
 use crate::db::{
-    Db, LtmLinkId, LtmSyntheticVar, ModelDepGraphResult, ModuleInputSet, RefShape, SourceModel,
-    SourceProject, SourceVariableKind, VarFragmentResult, build_module_inputs, build_stub_variable,
-    build_submodel_metadata, canonical_module_input_set, compute_layout,
-    extract_tables_from_source_var, model_dependency_graph, model_implicit_var_info,
-    model_module_ident_context, model_module_map, parse_source_variable_with_module_context,
-    project_converted_dimensions, project_datamodel_dims, project_dimensions_context,
-    project_units_context, reconstruct_single_variable, variable_dimensions, variable_size,
+    Db, LtmLinkId, LtmSyntheticVar, ModelDepGraphResult, ModuleInputSet, PerVarSizes, RefShape,
+    SourceModel, SourceProject, SourceVariableKind, VarFragmentResult, build_module_inputs,
+    build_stub_variable, build_submodel_metadata, canonical_module_input_set,
+    compile_phase_to_per_var_bytecodes, compute_layout, extract_tables_from_source_var,
+    fragment_emit_ctx, model_dependency_graph, model_implicit_var_info, model_module_ident_context,
+    model_module_map, parse_source_variable_with_module_context, project_converted_dimensions,
+    project_datamodel_dims, project_dimensions_context, project_units_context,
+    reconstruct_single_variable, variable_dimensions, variable_size,
 };
 
 use super::parse::{ltm_equation_dimensions, parse_ltm_equation, scalarize_ltm_equation};
@@ -86,6 +87,12 @@ pub fn compile_ltm_var_fragment(
     model: SourceModel,
     project: SourceProject,
 ) -> Option<VarFragmentResult> {
+    #[cfg(test)]
+    crate::db::note_fragment_execution(
+        crate::db::FragmentExecKind::Ltm,
+        &format!("{}\u{2192}{}", link_id.link_from(db), link_id.link_to(db)),
+    );
+
     let ShapedLinkScore::Scored(lsv) =
         link_score_equation_text_shaped(db, link_id, RefShape::Bare, model, project)
     else {
@@ -444,7 +451,40 @@ struct LoweredLtmVariable {
     /// the dt AST). Identifier sets are lowering-scope-independent, so
     /// this is valid for the returned `variable` whether or not the
     /// scoped re-lower ran.
-    dep_idents: HashSet<Ident<Canonical>>,
+    ///
+    /// ORDERED, not a `HashSet` -- **deliberately, even though no consumer is
+    /// order-sensitive today.** Keep it that way; the reasoning is not
+    /// "something breaks if you don't", so a reader who checks only that will
+    /// wrongly conclude it is free to change.
+    ///
+    /// Both consumers walk this set to build per-dependency stub variables,
+    /// which land in a `HashMap`-keyed symbol table and a `HashMap` of tables.
+    /// Iteration order therefore does not reach the emitted fragment: the
+    /// stubs are keyed by ident, the insertion loops are first-inserted-wins
+    /// over distinct idents, and `Compiler::new` sorts the table idents it
+    /// lays graphical functions out from. The walk USED to assign consecutive
+    /// private per-fragment offsets in iteration order -- so a `HashSet` made
+    /// them a function of the per-process hash seed -- and symbolization then
+    /// inverted those offsets, which is why even then nothing observable
+    /// changed. GH #964 deleted both the offsets and the symbolization, so the
+    /// ordering is now inert rather than invisible.
+    ///
+    /// The rule it upholds is unchanged and is the reason to keep it: a
+    /// query's intermediate state must be a function of its inputs, not of the
+    /// hash seed. That is the same rule `db::assemble::temp_sizes_by_id`
+    /// restores, and the class of defect it prevents (GH #595) does not
+    /// announce itself -- it surfaces as salsa backdating quietly failing or a
+    /// compiled artifact that is not reproducible run to run, neither of which
+    /// a test would attribute back to here. It costs nothing, and the non-LTM
+    /// twins (`db::var_fragment::collect_var_dependencies`,
+    /// `db::compile_implicit_var_phase_bytecodes`) use a `BTreeSet` here too;
+    /// these two hand-copied LTM walks were the outliers.
+    ///
+    /// This does NOT explain (or fix) the separately-reported
+    /// nondeterministic *invalidation* of `compile_ltm_var_fragment`: that
+    /// was measured before and after this change with no effect, and salsa
+    /// verifies a dependency SET, which an ordering cannot alter.
+    dep_idents: BTreeSet<Ident<Canonical>>,
     /// `classify_dependencies(..).referenced_tables` of the same AST.
     referenced_tables: BTreeSet<String>,
 }
@@ -669,8 +709,8 @@ fn lower_ltm_variable(
         .ast()
         .map(|ast| crate::variable::classify_dependencies(ast, &[], None));
     let (dep_idents, referenced_tables) = match classification {
-        Some(c) => (c.all, c.referenced_tables),
-        None => (HashSet::new(), BTreeSet::new()),
+        Some(c) => (c.all.into_iter().collect(), c.referenced_tables),
+        None => (BTreeSet::new(), BTreeSet::new()),
     };
 
     // Structural gate: without a Pass-1 temp-decomposition site in the
@@ -808,9 +848,7 @@ pub(crate) fn compile_ltm_equation_fragment(
     model: SourceModel,
     project: SourceProject,
 ) -> Option<VarFragmentResult> {
-    use crate::compiler::symbolic::{
-        CompiledVarFragment, PerVarBytecodes, ReverseOffsetMap, VariableLayout,
-    };
+    use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
 
     // Project-global dims (datamodel form, used to resolve the equation's
     // dimension names) plus the canonicalized context + converted dims, all
@@ -863,9 +901,6 @@ pub(crate) fn compile_ltm_equation_fragment(
 
     let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
         HashMap::new();
-
-    // Mini-layout starts after the 4 implicit time vars (time, dt, initial_time, final_time)
-    let mut mini_offset = crate::vm::IMPLICIT_VAR_COUNT;
 
     // Add implicit time/dt/initial_time/final_time variables
     {
@@ -929,7 +964,7 @@ pub(crate) fn compile_ltm_equation_fragment(
         mini_metadata.insert(
             Ident::new("time"),
             crate::compiler::VariableMetadata {
-                offset: 0,
+                offset: None,
                 size: 1,
                 var: &IMPLICIT_TIME,
             },
@@ -937,7 +972,7 @@ pub(crate) fn compile_ltm_equation_fragment(
         mini_metadata.insert(
             Ident::new("dt"),
             crate::compiler::VariableMetadata {
-                offset: 1,
+                offset: None,
                 size: 1,
                 var: &IMPLICIT_DT,
             },
@@ -945,7 +980,7 @@ pub(crate) fn compile_ltm_equation_fragment(
         mini_metadata.insert(
             Ident::new("initial_time"),
             crate::compiler::VariableMetadata {
-                offset: 2,
+                offset: None,
                 size: 1,
                 var: &IMPLICIT_INITIAL_TIME,
             },
@@ -953,7 +988,7 @@ pub(crate) fn compile_ltm_equation_fragment(
         mini_metadata.insert(
             Ident::new("final_time"),
             crate::compiler::VariableMetadata {
-                offset: 3,
+                offset: None,
                 size: 1,
                 var: &IMPLICIT_FINAL_TIME,
             },
@@ -978,12 +1013,11 @@ pub(crate) fn compile_ltm_equation_fragment(
     mini_metadata.insert(
         var_ident_canonical.clone(),
         crate::compiler::VariableMetadata {
-            offset: mini_offset,
+            offset: None,
             size: var_size,
             var: &lowered,
         },
     );
-    mini_offset += var_size;
 
     // `dep_idents`/`referenced_tables` came back from `lower_ltm_variable`
     // (classified once during lowering). Lookup-table references are not
@@ -1469,12 +1503,11 @@ pub(crate) fn compile_ltm_equation_fragment(
             mini_metadata.insert(
                 dep_ident.clone(),
                 crate::compiler::VariableMetadata {
-                    offset: mini_offset,
+                    offset: None,
                     size: *dep_size,
                     var: dep_var,
                 },
             );
-            mini_offset += dep_size;
         }
     }
 
@@ -1484,12 +1517,11 @@ pub(crate) fn compile_ltm_equation_fragment(
             mini_metadata.insert(
                 im_ident.clone(),
                 crate::compiler::VariableMetadata {
-                    offset: mini_offset,
+                    offset: None,
                     size: *im_size,
                     var: im_var,
                 },
             );
-            mini_offset += im_size;
         }
     }
 
@@ -1504,11 +1536,6 @@ pub(crate) fn compile_ltm_equation_fragment(
     for (_sub_name, sub_model) in &implicit_submodels {
         build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
     }
-
-    let mini_layout =
-        crate::compiler::symbolic::layout_from_metadata(&all_metadata, &model_name_ident)
-            .unwrap_or_else(|_| VariableLayout::new(HashMap::new(), 0));
-    let rmap = ReverseOffsetMap::from_layout(&mini_layout);
 
     let inputs = BTreeSet::new();
 
@@ -1534,11 +1561,20 @@ pub(crate) fn compile_ltm_equation_fragment(
             &merged_module_models
         };
 
+    // The LTM synthetic var's fragment goes through the SAME emission entry
+    // point the explicit and implicit paths use. This site used to carry a
+    // hand-copied duplicate of that function's body, differing only in which
+    // module-ref map it stuffed into the stand-in `Module` -- a field codegen
+    // never read.
+    let var_sizes: PerVarSizes =
+        crate::compiler::whole_variable_extents(&all_metadata, &model_name_ident);
+
     let core = crate::compiler::ContextCore {
         dimensions: converted_dims,
         dimensions_ctx: dim_context,
         model_name: &model_name_ident,
         metadata: &all_metadata,
+        var_sizes: &var_sizes,
         module_models,
         inputs: &inputs,
     };
@@ -1550,103 +1586,16 @@ pub(crate) fn compile_ltm_equation_fragment(
         )
     };
 
+    let base_ctx = fragment_emit_ctx(
+        &model_name_ident,
+        &inputs,
+        &var_sizes,
+        &tables,
+        converted_dims,
+        dim_context,
+    );
     let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
-        if exprs.is_empty() {
-            return None;
-        }
-
-        let module_inputs_set: HashSet<Ident<Canonical>> = inputs.iter().cloned().collect();
-        let module = crate::compiler::Module {
-            ident: model_name_ident.clone(),
-            inputs: module_inputs_set,
-            n_slots: mini_offset,
-            n_temps: 0,
-            temp_sizes: vec![],
-            runlist_initials: vec![],
-            runlist_initials_by_var: vec![],
-            runlist_flows: exprs.to_vec(),
-            runlist_stocks: vec![],
-            offsets: all_metadata
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        v.iter()
-                            .map(|(vk, vm)| (vk.clone(), (vm.offset, vm.size)))
-                            .collect(),
-                    )
-                })
-                .collect(),
-            runlist_order: vec![var_ident_canonical.clone()],
-            tables: tables.clone(),
-            // Owned Module fields: the slice/context come from the cached
-            // queries by reference, so materialize owned copies here. The
-            // interned-backed `Dimension`s clone cheaply -- the expensive
-            // rebuild (re-canonicalizing every element) is what the cache
-            // removes; only the relationship-cache memo is rebuilt cold.
-            dimensions: converted_dims.to_vec(),
-            dimensions_ctx: (*dim_context).clone(),
-            module_refs: implicit_module_refs.clone(),
-        };
-
-        let mut temp_sizes_map: HashMap<u32, usize> = HashMap::new();
-        for expr in exprs {
-            crate::compiler::extract_temp_sizes_pub(expr, &mut temp_sizes_map);
-        }
-        let n_temps = temp_sizes_map.len();
-        let mut temp_sizes: Vec<usize> = vec![0; n_temps];
-        for (id, size) in &temp_sizes_map {
-            if (*id as usize) < temp_sizes.len() {
-                temp_sizes[*id as usize] = *size;
-            }
-        }
-
-        let module = crate::compiler::Module {
-            n_temps,
-            temp_sizes: temp_sizes.clone(),
-            ..module
-        };
-
-        match module.compile() {
-            Ok(compiled) => {
-                let sym_bc =
-                    crate::compiler::symbolic::symbolize_bytecode(&compiled.compiled_flows, &rmap)
-                        .ok()?;
-
-                let ctx = &*compiled.context;
-                let sym_views: Vec<_> = ctx
-                    .static_views
-                    .iter()
-                    .map(|sv| crate::compiler::symbolic::symbolize_static_view(sv, &rmap))
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-                let sym_mods: Vec<_> = ctx
-                    .modules
-                    .iter()
-                    .map(|md| crate::compiler::symbolic::symbolize_module_decl(md, &rmap))
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-
-                let temp_sizes_vec: Vec<(u32, usize)> =
-                    temp_sizes_map.iter().map(|(&k, &v)| (k, v)).collect();
-
-                let dim_lists: Vec<Vec<u16>> = ctx
-                    .dim_lists
-                    .iter()
-                    .map(|(n, arr)| arr[..(*n as usize)].to_vec())
-                    .collect();
-
-                Some(PerVarBytecodes {
-                    symbolic: sym_bc,
-                    graphical_functions: ctx.graphical_functions.clone(),
-                    module_decls: sym_mods,
-                    static_views: sym_views,
-                    temp_sizes: temp_sizes_vec,
-                    dim_lists,
-                })
-            }
-            Err(_) => None,
-        }
+        compile_phase_to_per_var_bytecodes(&base_ctx, exprs)
     };
 
     // LTM vars are always flow-phase only (scalar auxes, not stocks)
@@ -1993,9 +1942,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
     _dep_graph: &ModelDepGraphResult,
     module_input_names: &[String],
 ) -> Option<VarFragmentResult> {
-    use crate::compiler::symbolic::{
-        CompiledVarFragment, PerVarBytecodes, ReverseOffsetMap, VariableLayout,
-    };
+    use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
 
     // The implicit variable rides on the meta (captured at LTM-equation parse
     // time by `model_ltm_implicit_var_info`), so no parent re-parse is needed.
@@ -2048,7 +1995,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
     // Dependency classification handed back by `lower_ltm_variable` for the
     // non-module path, reused by the dep-collection pass below (the module
     // path constructs its deps from the dm_module references instead).
-    let mut ltm_lowered_deps: Option<(HashSet<Ident<Canonical>>, BTreeSet<String>)> = None;
+    let mut ltm_lowered_deps: Option<(BTreeSet<Ident<Canonical>>, BTreeSet<String>)> = None;
 
     // Module-type implicit vars need direct Module construction
     let lowered = if meta.is_module {
@@ -2104,8 +2051,6 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
 
     let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
         HashMap::new();
-    // LTM implicit vars are in the root model context
-    let mut mini_offset = crate::vm::IMPLICIT_VAR_COUNT;
 
     // Add implicit time/dt/initial_time/final_time
     {
@@ -2169,7 +2114,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         mini_metadata.insert(
             Ident::new("time"),
             crate::compiler::VariableMetadata {
-                offset: 0,
+                offset: None,
                 size: 1,
                 var: &IMPLICIT_TIME,
             },
@@ -2177,7 +2122,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         mini_metadata.insert(
             Ident::new("dt"),
             crate::compiler::VariableMetadata {
-                offset: 1,
+                offset: None,
                 size: 1,
                 var: &IMPLICIT_DT,
             },
@@ -2185,7 +2130,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         mini_metadata.insert(
             Ident::new("initial_time"),
             crate::compiler::VariableMetadata {
-                offset: 2,
+                offset: None,
                 size: 1,
                 var: &IMPLICIT_INITIAL_TIME,
             },
@@ -2193,7 +2138,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         mini_metadata.insert(
             Ident::new("final_time"),
             crate::compiler::VariableMetadata {
-                offset: 3,
+                offset: None,
                 size: 1,
                 var: &IMPLICIT_FINAL_TIME,
             },
@@ -2206,12 +2151,11 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
     mini_metadata.insert(
         var_ident_canonical.clone(),
         crate::compiler::VariableMetadata {
-            offset: mini_offset,
+            offset: None,
             size: self_size,
             var: &lowered,
         },
     );
-    mini_offset += self_size;
 
     // Collect dependencies from the implicit var itself
     let source_vars = model.variables(db);
@@ -2333,7 +2277,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         let (dep_idents, referenced_tables) = if lowered.ast().is_some() {
             ltm_lowered_deps.take().unwrap_or_default()
         } else {
-            (HashSet::new(), BTreeSet::new())
+            (BTreeSet::new(), BTreeSet::new())
         };
 
         let implicit_info = model_implicit_var_info(db, model, project);
@@ -2474,12 +2418,11 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
             mini_metadata.insert(
                 dep_ident.clone(),
                 crate::compiler::VariableMetadata {
-                    offset: mini_offset,
+                    offset: None,
                     size: *dep_size,
                     var: dep_var,
                 },
             );
-            mini_offset += dep_size;
         }
     }
 
@@ -2507,11 +2450,6 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
             build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
         }
     }
-
-    let mini_layout =
-        crate::compiler::symbolic::layout_from_metadata(&all_metadata, &model_name_ident)
-            .unwrap_or_else(|_| VariableLayout::new(HashMap::new(), 0));
-    let rmap = ReverseOffsetMap::from_layout(&mini_layout);
 
     let tables = fragment_tables;
     let inputs = canonical_module_input_set(module_input_names);
@@ -2547,11 +2485,19 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
             &merged_module_models
         };
 
+    // Same single emission entry point as every other fragment site. This was
+    // the second hand-copied duplicate of that body; it differed from the
+    // first only in the (unread) module-ref map, and it rebuilt the offsets
+    // projection once per phase rather than once per variable.
+    let var_sizes: PerVarSizes =
+        crate::compiler::whole_variable_extents(&all_metadata, &model_name_ident);
+
     let core = crate::compiler::ContextCore {
         dimensions: converted_dims,
         dimensions_ctx: dim_context,
         model_name: &model_name_ident,
         metadata: &all_metadata,
+        var_sizes: &var_sizes,
         module_models,
         inputs: &inputs,
     };
@@ -2563,103 +2509,16 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         )
     };
 
+    let base_ctx = fragment_emit_ctx(
+        &model_name_ident,
+        &inputs,
+        &var_sizes,
+        &tables,
+        converted_dims,
+        dim_context,
+    );
     let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
-        if exprs.is_empty() {
-            return None;
-        }
-
-        let module_inputs_set: HashSet<Ident<Canonical>> = inputs.iter().cloned().collect();
-        let module = crate::compiler::Module {
-            ident: model_name_ident.clone(),
-            inputs: module_inputs_set,
-            n_slots: mini_offset,
-            n_temps: 0,
-            temp_sizes: vec![],
-            runlist_initials: vec![],
-            runlist_initials_by_var: vec![],
-            runlist_flows: exprs.to_vec(),
-            runlist_stocks: vec![],
-            offsets: all_metadata
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        v.iter()
-                            .map(|(vk, vm)| (vk.clone(), (vm.offset, vm.size)))
-                            .collect(),
-                    )
-                })
-                .collect(),
-            runlist_order: vec![var_ident_canonical.clone()],
-            tables: tables.clone(),
-            // Owned Module fields: the slice/context come from the cached
-            // queries by reference, so materialize owned copies here. The
-            // interned-backed `Dimension`s clone cheaply -- the expensive
-            // rebuild (re-canonicalizing every element) is what the cache
-            // removes; only the relationship-cache memo is rebuilt cold.
-            dimensions: converted_dims.to_vec(),
-            dimensions_ctx: (*dim_context).clone(),
-            module_refs: module_refs.clone(),
-        };
-
-        let mut temp_sizes_map: HashMap<u32, usize> = HashMap::new();
-        for expr in exprs {
-            crate::compiler::extract_temp_sizes_pub(expr, &mut temp_sizes_map);
-        }
-        let n_temps = temp_sizes_map.len();
-        let mut temp_sizes: Vec<usize> = vec![0; n_temps];
-        for (id, size) in &temp_sizes_map {
-            if (*id as usize) < temp_sizes.len() {
-                temp_sizes[*id as usize] = *size;
-            }
-        }
-
-        let module = crate::compiler::Module {
-            n_temps,
-            temp_sizes: temp_sizes.clone(),
-            ..module
-        };
-
-        match module.compile() {
-            Ok(compiled) => {
-                let sym_bc =
-                    crate::compiler::symbolic::symbolize_bytecode(&compiled.compiled_flows, &rmap)
-                        .ok()?;
-
-                let ctx = &*compiled.context;
-                let sym_views: Vec<_> = ctx
-                    .static_views
-                    .iter()
-                    .map(|sv| crate::compiler::symbolic::symbolize_static_view(sv, &rmap))
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-                let sym_mods: Vec<_> = ctx
-                    .modules
-                    .iter()
-                    .map(|md| crate::compiler::symbolic::symbolize_module_decl(md, &rmap))
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-
-                let temp_sizes_vec: Vec<(u32, usize)> =
-                    temp_sizes_map.iter().map(|(&k, &v)| (k, v)).collect();
-
-                let dim_lists: Vec<Vec<u16>> = ctx
-                    .dim_lists
-                    .iter()
-                    .map(|(n, arr)| arr[..(*n as usize)].to_vec())
-                    .collect();
-
-                Some(PerVarBytecodes {
-                    symbolic: sym_bc,
-                    graphical_functions: ctx.graphical_functions.clone(),
-                    module_decls: sym_mods,
-                    static_views: sym_views,
-                    temp_sizes: temp_sizes_vec,
-                    dim_lists,
-                })
-            }
-            Err(_) => None,
-        }
+        compile_phase_to_per_var_bytecodes(&base_ctx, exprs)
     };
 
     // LTM implicit vars participate in whichever phases their lowered

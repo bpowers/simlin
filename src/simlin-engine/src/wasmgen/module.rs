@@ -1405,8 +1405,8 @@ fn new_opcode_fn(
 /// Collect absolute offsets of all stock variables across the whole simulation,
 /// recursing into child modules via `EvalModule` so submodule (SMOOTH/DELAY)
 /// stocks are included. Mirrors the VM's `collect_stock_offsets`
-/// (`vm.rs:512-543`) exactly: a stock writes via `AssignNext` or its
-/// peephole-fused `BinOpAssignNext` (most integrations are `stock + delta`), and
+/// (`vm.rs:512-543`) exactly: a stock writes via `BinOpAssignNext` (codegen's
+/// fused form of `stock + delta`, the only shape a stock update takes), and
 /// an `EvalModule` recurses with `base_off + decl.off` (each instance addresses
 /// its slot at `base_off + off`). After each step these slots are copied `next ->
 /// curr`; the RK loops index `rk_scratch[saved/accum]` by their sorted position.
@@ -1422,7 +1422,7 @@ fn collect_all_stock_offsets(
     let mut offsets: Vec<usize> = Vec::new();
     for op in module.compiled_stocks.code.iter() {
         match op {
-            Opcode::AssignNext { off } | Opcode::BinOpAssignNext { off, .. } => {
+            Opcode::BinOpAssignNext { off, .. } => {
                 offsets.push(base_off + *off as usize);
             }
             Opcode::EvalModule { id, .. } => {

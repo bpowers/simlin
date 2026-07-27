@@ -166,7 +166,7 @@ fn test_a2a_ltm_equation_fragment_compiles() {
         .iter()
         .filter_map(|op| match op {
             SymbolicOpcode::BinOpAssignCurr { var, .. }
-                if var.name.contains("test_a2a_link_score") =>
+                if var.name.as_str().contains("test_a2a_link_score") =>
             {
                 Some(var.element_offset)
             }
@@ -288,7 +288,7 @@ fn test_a2a_ltm_previous_per_element() {
         .code
         .iter()
         .filter_map(|op| match op {
-            SymbolicOpcode::SymLoadPrev { var } if var.name == "population" => {
+            SymbolicOpcode::SymLoadPrev { var } if var.name.as_str() == "population" => {
                 Some(var.element_offset)
             }
             _ => None,
@@ -314,7 +314,7 @@ fn test_a2a_ltm_previous_per_element() {
         .iter()
         .filter_map(|op| match op {
             SymbolicOpcode::BinOpAssignCurr { var, .. }
-                if var.name.contains("test_prev_per_elem") =>
+                if var.name.as_str().contains("test_prev_per_elem") =>
             {
                 Some(var.element_offset)
             }

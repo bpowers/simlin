@@ -9,6 +9,8 @@
 
 use crate::common::{Canonical, ErrorCode, Ident, UnitError};
 use crate::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
+#[cfg(test)]
+use crate::db::sync_from_datamodel;
 use crate::db::{
     DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
     compile_project_incremental, sync_from_datamodel_incremental,
@@ -541,78 +543,80 @@ impl TestProject {
 /// expressions via `Module::get_flow_exprs`).
 #[cfg(test)]
 impl TestProject {
-    /// Build and compile the project via `Project::from`.
-    pub fn compile(&self) -> Result<crate::project::Project, Vec<(String, ErrorCode)>> {
-        use std::sync::Arc;
-
+    /// Build the monolithic `Project`, or the `Error`-severity salsa
+    /// diagnostics that stop it, as `(location, code)` pairs.
+    ///
+    /// The error set comes from `collect_all_diagnostics` rather than from the
+    /// monolithic path's own embedded error fields. Those fields are a strict
+    /// subset -- they never carried the unknown-dependency, bare-lookup-table
+    /// or assembly diagnostics, and their cycle gate was a second
+    /// implementation that disagreed with production's (GH #568) -- so this
+    /// helper used to report a model as broken that production compiles, and
+    /// as fine when production rejects it.
+    ///
+    /// `location` is `model.variable` for a variable-attributed diagnostic, the
+    /// model name for a model-level one, and `"project"` for the project-level
+    /// ones (the macro-registry build error and the unit definition errors,
+    /// which name no model). The `Project` is built against the SAME database
+    /// the diagnostics came from, so the datamodel is synced once.
+    fn compile_checked(&self) -> Result<crate::project::Project, Vec<(String, ErrorCode)>> {
         let datamodel = self.build_datamodel();
-        let compiled = Arc::new(crate::project::Project::from(datamodel));
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
 
-        let mut errors = Vec::new();
-
-        if !compiled.errors.is_empty() {
-            for err in &compiled.errors {
-                errors.push(("project".to_string(), err.code));
-            }
-        }
-
-        for (model_name, model) in &compiled.models {
-            if let Some(model_errors) = &model.errors {
-                for err in model_errors {
-                    errors.push((model_name.to_string(), err.code));
-                }
-            }
-
-            for (var_name, var_errors) in model.get_variable_errors() {
-                for err in var_errors {
-                    errors.push((format!("{model_name}.{var_name}"), err.code));
-                }
-            }
-
-            for (var_name, unit_errors) in model.get_unit_errors() {
-                for err in unit_errors {
-                    let code = match err {
+        let errors: Vec<(String, ErrorCode)> = collect_all_diagnostics(&db, sync.project)
+            .iter()
+            .filter(|d| d.severity == DiagnosticSeverity::Error)
+            .map(|d| {
+                let location = match (d.model.as_str(), d.variable.as_deref()) {
+                    ("", _) => "project".to_string(),
+                    (model, Some(var)) => format!("{model}.{var}"),
+                    (model, None) => model.to_string(),
+                };
+                let code = match &d.error {
+                    DiagnosticError::Equation(eq_err) => eq_err.code,
+                    DiagnosticError::Model(err) => err.code,
+                    DiagnosticError::Unit(unit_err) => match unit_err {
                         UnitError::DefinitionError(eq_err, _) => eq_err.code,
-                        UnitError::ConsistencyError(code, _, _) => code,
-                        UnitError::InferenceError { code, .. } => code,
-                    };
-                    errors.push((format!("{model_name}.{var_name}"), code));
-                }
-            }
+                        UnitError::ConsistencyError(code, _, _) => *code,
+                        UnitError::InferenceError { code, .. } => *code,
+                    },
+                    DiagnosticError::Assembly(_) => ErrorCode::NotSimulatable,
+                };
+                (location, code)
+            })
+            .collect();
+        if !errors.is_empty() {
+            return Err(errors);
         }
 
-        if errors.is_empty() {
-            Ok(Arc::try_unwrap(compiled).unwrap_or_else(|arc| (*arc).clone()))
-        } else {
-            Err(errors)
-        }
+        Ok(crate::project::Project::from_salsa(
+            datamodel,
+            &db,
+            sync.project,
+            |_models, _units_ctx, _model| {},
+        ))
+    }
+
+    /// Build and compile the project, reporting the diagnostics production
+    /// would report; see [`TestProject::compile_checked`].
+    pub fn compile(&self) -> Result<crate::project::Project, Vec<(String, ErrorCode)>> {
+        self.compile_checked()
     }
 
     /// Build a Module for testing lowered expressions.
     pub fn build_module(&self) -> Result<crate::compiler::Module, String> {
         use crate::common::Canonical;
         use std::collections::BTreeSet;
-        use std::sync::Arc;
 
-        let datamodel = self.build_datamodel();
-        let compiled = Arc::new(crate::project::Project::from(datamodel));
-
-        if !compiled.errors.is_empty() {
-            return Err(format!(
-                "Project has compilation errors: {:?}",
-                compiled.errors
-            ));
-        }
-
+        let compiled = self
+            .compile_checked()
+            .map_err(|errors| format!("Project has compilation errors: {errors:?}"))?;
         let main_ident = Ident::<Canonical>::from_str_unchecked("main");
         let model = compiled
             .models
             .get(&main_ident)
             .ok_or_else(|| "Model 'main' not found in compiled project".to_string())?;
-
-        if model.errors.is_some() {
-            return Err(format!("Model has errors: {:?}", model.errors));
-        }
 
         let inputs: BTreeSet<Ident<Canonical>> = BTreeSet::new();
         crate::compiler::Module::new(&compiled, model.clone(), &inputs, true)

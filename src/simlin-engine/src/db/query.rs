@@ -538,6 +538,66 @@ pub fn model_implicit_var_info(
     result
 }
 
+/// Resolve one *implicit* (SMOOTH/DELAY/TREND/PREVIOUS/INIT) helper of `model`
+/// by its canonical name -- the firewall over `model_implicit_var_info`, the
+/// third coarse edge on the per-variable fragment path.
+///
+/// `model_implicit_var_info` is derived from every variable's parse, so adding
+/// a variable that synthesizes ANY implicit helper changes the whole map and
+/// re-executes every fragment that reads it. `collect_var_dependencies` only
+/// ever asks it "is this one name an implicit helper, and what shape is it",
+/// so this projection returns that and backdates on it.
+///
+/// **This narrowing is partial, and the limitation is pinned, not merely
+/// noted.** It makes an added `PREVIOUS`/`INIT` helper tight. It does NOT make
+/// an added *module-instantiating* helper (`SMTH1`, `DELAY`, a user sub-model)
+/// tight, because two further whole-model dependencies survive on that path
+/// and neither is a projection away: `project.models(db)` changes when the
+/// implicit `stdlib⁚smth1` model is spliced into the project, and
+/// `model_module_ident_context` is an INTERNED handle whose value changes when
+/// the module-ident set grows -- which gives every variable's parse a new
+/// cache key, and a new key cannot backdate at all. Both outcomes are asserted
+/// by `implicit_helper_add_is_tight_but_module_helper_add_is_not`, so the day
+/// someone fixes the module-ident cache key that test reds rather than
+/// silently over-delivering.
+#[salsa::tracked]
+pub(crate) fn model_implicit_var_by_name(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    name: String,
+) -> Option<ImplicitVarMeta> {
+    model_implicit_var_info(db, model, project)
+        .get(&name)
+        .cloned()
+}
+
+/// Resolve one variable of `model` by its canonical name -- a salsa
+/// *firewall* over the `SourceModel::variables` map field.
+///
+/// Reading `model.variables(db)` directly makes the reader depend on the whole
+/// map, so adding, deleting or renaming ANY variable invalidates it. That is
+/// what made every per-variable fragment in a model recompile whenever the
+/// model's variable SET changed, even though the fragments were bit-identical
+/// (GH #964's "layout-only project edits continue to reuse unchanged
+/// salsa-cached fragments" criterion). This query still reads the whole map,
+/// so it re-executes on any such edit -- but its VALUE is one handle, so salsa
+/// backdates it whenever that one variable is untouched and no reader re-runs.
+/// A fragment therefore depends on exactly the dependencies it looks up.
+///
+/// The handle is stable across unrelated edits because `sync` threads the
+/// prior `SourceVariable` inputs through `PersistentSyncState`; a genuinely
+/// re-created variable (delete + re-add, or a rename) gets a new handle, and
+/// its readers -- only those that name it -- re-execute.
+#[salsa::tracked]
+pub(crate) fn model_variable_by_name(
+    db: &dyn Db,
+    model: SourceModel,
+    name: String,
+) -> Option<SourceVariable> {
+    model.variables(db).get(&name).copied()
+}
+
 #[salsa::tracked(returns(ref))]
 pub fn model_module_map(
     db: &dyn Db,

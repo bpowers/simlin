@@ -6,8 +6,8 @@
 // for unchecked array access in the hot dispatch loop. Rust's forbid() cannot
 // be overridden by inner #[allow] attributes (even in submodules), so deny()
 // is the strongest level that still permits a single opt-in. The unsafe stack
-// access is proven safe by ByteCodeBuilder::finish(), which statically validates
-// that compiled bytecode cannot exceed STACK_CAPACITY.
+// access is proven safe by compiler::symbolic::resolve_bytecode(), which
+// statically validates that compiled bytecode cannot exceed STACK_CAPACITY.
 #![deny(unsafe_code)]
 
 pub use prost;

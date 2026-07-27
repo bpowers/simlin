@@ -2,15 +2,26 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Symbolic bytecode layer for layout-independent compilation.
+//! Symbolic bytecode: the layout-independent form the compiler emits, and the
+//! single late pass that turns it concrete.
 //!
-//! The existing compiler produces bytecodes with integer offsets that depend on
-//! the model's variable layout. This module introduces a symbolic representation
-//! where opcodes reference variables by name instead of offset. This decouples
-//! per-variable compilation from the global layout, enabling salsa to cache
-//! compiled fragments that remain valid even when variables are added or removed.
+//! Codegen emits `SymbolicOpcode`s whose variable operands are
+//! [`crate::compiler::VarRef`]s -- a canonical variable name plus an element
+//! offset -- so a compiled fragment says nothing about where its variables live.
+//! That is what lets salsa cache one `PerVarBytecodes` per variable and reuse it
+//! across variable additions, removals and renames, and what lets one cache
+//! entry serve both the diagnostic pass and assembly.
 //!
-//! The pipeline is: concrete bytecodes -> symbolize -> SymbolicByteCode -> resolve -> concrete bytecodes.
+//! The pipeline is: lowered `Expr` (names) -> codegen -> `SymbolicByteCode` ->
+//! `resolve` -> concrete bytecode. Addresses travel in exactly one direction and
+//! are assigned exactly once, at assembly, against the model's final
+//! `VariableLayout`.
+//!
+//! The peephole optimizer and the literal pool live on this side too
+//! ([`SymbolicByteCodeBuilder`]): they are address-independent, and running them
+//! before resolution keeps `resolve_bytecode` a strict 1:1 mapping, which is
+//! what several downstream invariants rely on (the run-invariant prefix
+//! boundary, the SCC segment boundaries).
 
 // These types and functions are used by the incremental compilation pipeline.
 
@@ -22,30 +33,28 @@ use smallvec::SmallVec;
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, CompiledInitial, CompiledModule, DimId, DimListId,
     GraphicalFunctionId, LiteralId, LookupMode, ModuleDeclaration, ModuleId, ModuleInputOffset,
-    Op2, Opcode, PcOffset, RuntimeSparseMapping, StaticArrayView, TempId, VariableOffset, ViewId,
+    Op2, Opcode, PcOffset, RuntimeSparseMapping, STACK_CAPACITY, StaticArrayView, TempId,
+    VariableOffset, ViewId,
 };
 use crate::common::{Canonical, Ident};
+
+pub(crate) use super::expr::VarRef as SymVarRef;
 
 // ============================================================================
 // Types
 // ============================================================================
-
-/// Symbolic reference to a variable location within a model.
-/// Replaces raw integer offsets with a variable name and element offset,
-/// making the reference independent of the model's variable layout.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct SymVarRef {
-    /// Canonical variable name
-    pub name: String,
-    /// Offset within the variable (0 for scalars, 0..size for array elements)
-    pub element_offset: usize,
-}
 
 /// Symbolic version of `Opcode`. Identical structure except opcodes that
 /// reference model variable offsets use `SymVarRef` instead of `VariableOffset`.
 ///
 /// Opcodes that reference global implicit variables (time, dt, etc.) keep their
 /// fixed offsets since those never change.
+///
+/// The 3-address fused opcodes (`BinVarVar`, `AssignAddVarVarCurr`, ...) have no
+/// counterpart here, and that absence is structural rather than an oversight:
+/// `ByteCode::fuse_three_address` runs at `Vm::new`, on the VM's private copy of
+/// already-resolved bytecode, so a fused opcode can never exist in the symbolic
+/// domain.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum SymbolicOpcode {
     // === ARITHMETIC & LOGIC (unchanged) ===
@@ -99,9 +108,6 @@ pub(crate) enum SymbolicOpcode {
     AssignCurr {
         var: SymVarRef,
     },
-    AssignNext {
-        var: SymVarRef,
-    },
 
     // === BUILTINS & LOOKUPS (unchanged) ===
     Apply {
@@ -128,10 +134,33 @@ pub(crate) enum SymbolicOpcode {
     },
 
     // === ARRAY VIEW STACK ===
-    PushVarView {
-        var: SymVarRef,
-        dim_list_id: DimListId,
-    },
+    // ── Opcodes codegen does not emit ────────────────────────────────────
+    //
+    // The sixteen variants carrying `#[allow(dead_code)]` in this enum are ones
+    // `Compiler` never constructs, which -- now that codegen emits symbolic
+    // opcodes directly -- the dead-code lint proves rather than merely
+    // suggests: `Compiler` is the ONLY producer of a `SymbolicOpcode`, and
+    // `resolve_opcode` is the only producer of an `Opcode`, so a symbolic
+    // variant nothing constructs is a program the compiler cannot express.
+    // They are the superseded halves of two schemes: incremental view-stack
+    // construction (`ViewSubscriptConst`/`ViewRange`/`ViewStarRange`/
+    // `ViewWildcard`/`ViewTranspose`/`DupView`/`PushTempView`/
+    // `LoadTempDynamic`/`LoadIter{Element,TempElement,ViewTop}`), which
+    // precomputed `PushStaticView` views replaced, and broadcast iteration
+    // (`*BroadcastIter*`/`*BroadcastElement`/`NextBroadcastOrJump`), which
+    // `BeginIter` replaced.
+    //
+    // They are NOT deleted here, deliberately. Each also has an `Opcode`
+    // twin with a VM execution arm and a wasm-backend lowering arm (~149
+    // sites plus their tests), so removing them is a change to the VM
+    // instruction set and the wasm parity harness -- a different subsystem,
+    // with a different risk profile, that would swamp this change's review
+    // surface. The broadcast family in particular reads as a half-landed
+    // feature, so retiring it is a product call rather than a cleanup.
+    // Sequenced as its own change; the evidence it needs is exactly this
+    // lint, so it does not need the empirical probe GH #964's earlier
+    // opcode deletions did.
+    #[allow(dead_code)]
     PushTempView {
         temp_id: TempId,
         dim_list_id: DimListId,
@@ -143,6 +172,7 @@ pub(crate) enum SymbolicOpcode {
         var: SymVarRef,
         dim_list_id: DimListId,
     },
+    #[allow(dead_code)]
     ViewSubscriptConst {
         dim_idx: u8,
         index: u16,
@@ -150,6 +180,7 @@ pub(crate) enum SymbolicOpcode {
     ViewSubscriptDynamic {
         dim_idx: u8,
     },
+    #[allow(dead_code)]
     ViewRange {
         dim_idx: u8,
         start: u16,
@@ -158,15 +189,19 @@ pub(crate) enum SymbolicOpcode {
     ViewRangeDynamic {
         dim_idx: u8,
     },
+    #[allow(dead_code)]
     ViewStarRange {
         dim_idx: u8,
         subdim_relation_id: u16,
     },
+    #[allow(dead_code)]
     ViewWildcard {
         dim_idx: u8,
     },
+    #[allow(dead_code)]
     ViewTranspose {},
     PopView {},
+    #[allow(dead_code)]
     DupView {},
 
     // === TEMP ARRAY ACCESS (unchanged) ===
@@ -174,6 +209,7 @@ pub(crate) enum SymbolicOpcode {
         temp_id: TempId,
         index: u16,
     },
+    #[allow(dead_code)]
     LoadTempDynamic {
         temp_id: TempId,
     },
@@ -183,10 +219,13 @@ pub(crate) enum SymbolicOpcode {
         write_temp_id: TempId,
         has_write_temp: bool,
     },
+    #[allow(dead_code)]
     LoadIterElement {},
+    #[allow(dead_code)]
     LoadIterTempElement {
         temp_id: TempId,
     },
+    #[allow(dead_code)]
     LoadIterViewTop {},
     LoadIterViewAt {
         offset: u8,
@@ -234,23 +273,28 @@ pub(crate) enum SymbolicOpcode {
     },
 
     // === BROADCASTING ITERATION (unchanged) ===
+    #[allow(dead_code)]
     BeginBroadcastIter {
         n_sources: u8,
         dest_temp_id: TempId,
     },
+    #[allow(dead_code)]
     LoadBroadcastElement {
         source_idx: u8,
     },
+    #[allow(dead_code)]
     StoreBroadcastElement {},
+    #[allow(dead_code)]
     NextBroadcastOrJump {
         jump_back: PcOffset,
     },
+    #[allow(dead_code)]
     EndBroadcastIter {},
 }
 
 /// Symbolic version of `ByteCode`. Contains the literal pool (unchanged)
 /// and symbolic opcodes.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SymbolicByteCode {
     pub literals: Vec<f64>,
     pub code: Vec<SymbolicOpcode>,
@@ -258,7 +302,7 @@ pub(crate) struct SymbolicByteCode {
 
 /// Symbolic version of `StaticArrayView`. When the view refers to a model
 /// variable (not a temp), `base_off` is replaced with a `SymVarRef`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct SymbolicStaticView {
     pub base: SymStaticViewBase,
     pub dims: SmallVec<[u16; 4]>,
@@ -268,7 +312,7 @@ pub(crate) struct SymbolicStaticView {
     pub dim_ids: SmallVec<[DimId; 4]>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum SymStaticViewBase {
     /// Model variable reference (replaces base_off when is_temp=false)
     Var(SymVarRef),
@@ -293,10 +337,13 @@ pub(crate) struct SymbolicCompiledInitial {
 }
 
 /// Full symbolic representation of a `CompiledModule`.
+///
+/// There is deliberately no `n_slots`: a slot count is a property of a layout,
+/// and this value has none. `resolve_module` takes the slot count from the
+/// layout it resolves against, which is the only place the number is meaningful.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SymbolicCompiledModule {
     pub ident: Ident<Canonical>,
-    pub n_slots: usize,
     pub compiled_initials: Vec<SymbolicCompiledInitial>,
     pub compiled_flows: SymbolicByteCode,
     pub compiled_stocks: SymbolicByteCode,
@@ -376,8 +423,13 @@ impl VariableLayout {
         VariableLayout { entries, n_slots }
     }
 
-    /// Build from a Module's offset map for a specific model.
-    #[allow(dead_code)]
+    /// Build from a model's `name -> (offset, size)` map.
+    ///
+    /// `#[cfg(test)]` because its only caller is: the test-only monolithic
+    /// `compiler::Module` builds its whole-model layout this way and resolves
+    /// its emitted symbolic module against it. Production gets the same shape
+    /// from the salsa `compute_layout` query instead.
+    #[cfg(test)]
     pub fn from_offset_map(
         offsets: &HashMap<crate::common::Ident<crate::common::Canonical>, (usize, usize)>,
         n_slots: usize,
@@ -470,443 +522,220 @@ impl VariableLayout {
 }
 
 // ============================================================================
-// Reverse Offset Map (for symbolization)
+// Emission: the symbolic bytecode builder
 // ============================================================================
 
-/// Maps absolute variable offsets back to (variable_name, element_within_variable).
-/// Used during symbolization to convert integer offsets to symbolic references.
-pub(crate) struct ReverseOffsetMap {
-    /// Indexed by offset. `entries[off] = Some((name, element_offset))`.
-    entries: Vec<Option<(String, usize)>>,
+impl SymbolicOpcode {
+    /// The jump offset, if this opcode is a backward jump.
+    ///
+    /// Centralized here because two passes must agree on which opcodes carry a
+    /// PC, and a new jump opcode that failed to report itself would be
+    /// silently mishandled by both: the peephole optimizer would mis-relocate
+    /// it, and `db::assemble::segment_member_by_element` -- which REORDERS the
+    /// segments a jump lives between -- would not notice it escaping its
+    /// segment.
+    pub(crate) fn jump_offset(&self) -> Option<PcOffset> {
+        match self {
+            SymbolicOpcode::NextIterOrJump { jump_back }
+            | SymbolicOpcode::NextBroadcastOrJump { jump_back } => Some(*jump_back),
+            _ => None,
+        }
+    }
+
+    /// Mutably borrow the jump offset, if this opcode is a backward jump.
+    fn jump_offset_mut(&mut self) -> Option<&mut PcOffset> {
+        match self {
+            SymbolicOpcode::NextIterOrJump { jump_back }
+            | SymbolicOpcode::NextBroadcastOrJump { jump_back } => Some(jump_back),
+            _ => None,
+        }
+    }
 }
 
-impl ReverseOffsetMap {
-    /// Build from a VariableLayout.
-    pub(crate) fn from_layout(layout: &VariableLayout) -> Self {
-        let mut entries: Vec<Option<(String, usize)>> = vec![None; layout.n_slots];
-        for (name, entry) in &layout.entries {
-            for elem in 0..entry.size {
-                let off = entry.offset + elem;
-                if off < entries.len() {
-                    entries[off] = Some((name.clone(), elem));
-                }
+/// Accumulates one emission unit's symbolic opcodes and its literal pool.
+///
+/// This is the compiler's only bytecode builder. It runs entirely in the
+/// layout-independent domain: the peephole fusions it performs
+/// (`LoadConstant; AssignCurr` -> `AssignConstCurr`, `Op2; AssignCurr` ->
+/// `BinOpAssignCurr`, and the emit-time `Op2` -> `BinOpAssignNext`) key on
+/// opcode shape, never on an address, so fusing before resolution rather than
+/// after is not an approximation -- it is the same decision made one step
+/// earlier. Keeping it here is what makes `resolve_bytecode` a strict 1:1
+/// mapping, which the run-invariant flow prefix
+/// (`SymbolicCompiledModule::flows_invariant_opcode_len`) and the SCC
+/// per-element segmentation both depend on.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Default)]
+pub(crate) struct SymbolicByteCodeBuilder {
+    bytecode: SymbolicByteCode,
+    // keyed on the literal's bit pattern: interning only needs Eq + Hash, and
+    // bit-exact deduplication is the right semantic for codegen (it never
+    // conflates distinct values; at worst -0.0 and 0.0 get separate slots)
+    interned_literals: HashMap<u64, LiteralId>,
+}
+
+impl SymbolicByteCodeBuilder {
+    pub(crate) fn intern_literal(&mut self, lit: f64) -> LiteralId {
+        let key = lit.to_bits();
+        if self.interned_literals.contains_key(&key) {
+            return self.interned_literals[&key];
+        }
+        self.bytecode.literals.push(lit);
+        let literal_id = (self.bytecode.literals.len() - 1) as u16;
+        self.interned_literals.insert(key, literal_id);
+        literal_id
+    }
+
+    /// Allocate a new literal slot without deduplication.
+    /// Used for named constants so each variable gets its own slot,
+    /// preventing shared-literal corruption when overriding via set_value.
+    pub(crate) fn push_named_literal(&mut self, lit: f64) -> LiteralId {
+        self.bytecode.literals.push(lit);
+        (self.bytecode.literals.len() - 1) as u16
+    }
+
+    pub(crate) fn push_opcode(&mut self, op: SymbolicOpcode) {
+        self.bytecode.code.push(op)
+    }
+
+    /// Replace a just-emitted trailing `Op2` with the fused
+    /// `BinOpAssignNext { op, var }` that both computes it and stores the
+    /// result into `next[var]`. Returns `false` -- emitting nothing -- when the
+    /// stream does not end in an `Op2`.
+    ///
+    /// There is no un-fused `SymbolicOpcode::AssignNext`: a stock update is the
+    /// only thing that ever writes `next[]`, and `Context::build_stock_update_expr`
+    /// always returns `Op2(Add, curr_value, net * dt)`, so the operand walk
+    /// always ends in an `Op2` and the fused form is always emittable. Codegen
+    /// therefore fuses here, at emit time, and reports a typed error if a stock
+    /// update ever arrives in a shape that would need the un-fused opcode --
+    /// most plausibly an eventual `non_negative` implementation (GH #545)
+    /// wrapping the update in a `MAX`. A comment could not fail; this can.
+    ///
+    /// Fusing at emit time is strictly inside `peephole_optimize`'s
+    /// jump-target safety envelope rather than an exception to it: the `Op2`
+    /// being replaced is the LAST opcode in the stream, so no jump emitted so
+    /// far can target it (every jump is a backward `NextIterOrJump` emitted
+    /// after its target), and the pair it replaces has no successor whose PC
+    /// could shift.
+    pub(crate) fn fuse_trailing_op2_into_assign_next(&mut self, var: &SymVarRef) -> bool {
+        match self.bytecode.code.last() {
+            Some(SymbolicOpcode::Op2 { op }) => {
+                let op = *op;
+                let last = self.bytecode.code.len() - 1;
+                self.bytecode.code[last] = SymbolicOpcode::BinOpAssignNext {
+                    op,
+                    var: var.clone(),
+                };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Returns the current number of opcodes in the bytecode
+    pub(crate) fn len(&self) -> usize {
+        self.bytecode.code.len()
+    }
+
+    pub(crate) fn finish(self) -> SymbolicByteCode {
+        let mut bc = self.bytecode;
+        bc.peephole_optimize();
+        bc
+    }
+}
+
+impl SymbolicByteCode {
+    /// Peephole optimization pass: fuse common opcode sequences into
+    /// superinstructions to reduce dispatch overhead.
+    ///
+    /// Only fuses adjacent instructions when neither is a jump target.
+    /// Jump offsets are recalculated after fusion using an old->new PC map.
+    fn peephole_optimize(&mut self) {
+        if self.code.is_empty() {
+            return;
+        }
+
+        // 1. Build set of PCs that are jump targets
+        let mut jump_targets = vec![false; self.code.len()];
+        for (pc, op) in self.code.iter().enumerate() {
+            if let Some(offset) = op.jump_offset() {
+                let target = (pc as isize + offset as isize) as usize;
+                assert!(
+                    target < jump_targets.len(),
+                    "jump at pc {pc} targets {target}, which is out of bounds (code length: {})",
+                    self.code.len()
+                );
+                jump_targets[target] = true;
             }
         }
-        ReverseOffsetMap { entries }
+
+        // 2. Build old_pc -> new_pc mapping and fused output.
+        // pc_map has one entry per original instruction so that jump fixup
+        // can index by the original PC directly.
+        let mut optimized: Vec<SymbolicOpcode> = Vec::with_capacity(self.code.len());
+        let mut pc_map: Vec<usize> = Vec::with_capacity(self.code.len() + 1);
+        let mut i = 0;
+        while i < self.code.len() {
+            let new_pc = optimized.len();
+            pc_map.push(new_pc);
+
+            // Only try fusion if the next instruction is not a jump target.
+            // We intentionally don't check whether instruction i itself is a
+            // jump target: the fused instruction replaces both i and i+1 at the
+            // same PC, so jumps to i still land on the correct (fused) opcode.
+            let can_fuse = i + 1 < self.code.len() && !jump_targets[i + 1];
+
+            if can_fuse {
+                let fused = match (&self.code[i], &self.code[i + 1]) {
+                    // Pattern: LoadConstant + AssignCurr -> AssignConstCurr
+                    (SymbolicOpcode::LoadConstant { id }, SymbolicOpcode::AssignCurr { var }) => {
+                        Some(SymbolicOpcode::AssignConstCurr {
+                            var: var.clone(),
+                            literal_id: *id,
+                        })
+                    }
+                    // Pattern: Op2 + AssignCurr -> BinOpAssignCurr
+                    (SymbolicOpcode::Op2 { op }, SymbolicOpcode::AssignCurr { var }) => {
+                        Some(SymbolicOpcode::BinOpAssignCurr {
+                            op: *op,
+                            var: var.clone(),
+                        })
+                    }
+                    _ => None,
+                };
+
+                if let Some(op) = fused {
+                    optimized.push(op);
+                    // Both old PCs map to the same new PC
+                    pc_map.push(new_pc);
+                    i += 2;
+                    continue;
+                }
+            }
+
+            // No pattern matched - copy opcode as-is
+            optimized.push(self.code[i].clone());
+            i += 1;
+        }
+        // Sentinel for instructions past the end
+        pc_map.push(optimized.len());
+
+        // 3. Fix up jump offsets.  Iterate original code to find jumps,
+        // then use pc_map (indexed by old_pc) for O(1) translation.
+        for (old_pc, op) in self.code.iter().enumerate() {
+            let Some(jump_back) = op.jump_offset() else {
+                continue;
+            };
+            let new_pc = pc_map[old_pc];
+            let old_target = (old_pc as isize + jump_back as isize) as usize;
+            let new_target = pc_map[old_target];
+            let new_jump_back = (new_target as isize - new_pc as isize) as PcOffset;
+            *optimized[new_pc].jump_offset_mut().unwrap() = new_jump_back;
+        }
+
+        self.code = optimized;
     }
-
-    /// Look up a variable offset.
-    fn lookup(&self, off: u32) -> Result<SymVarRef, String> {
-        let idx = off as usize;
-        if idx >= self.entries.len() {
-            return Err(format!(
-                "offset {} out of range (max {})",
-                off,
-                self.entries.len()
-            ));
-        }
-        match &self.entries[idx] {
-            Some((name, elem)) => Ok(SymVarRef {
-                name: name.clone(),
-                element_offset: *elem,
-            }),
-            None => Err(format!("no variable mapped at offset {}", off)),
-        }
-    }
-}
-
-// ============================================================================
-// Layout Construction
-// ============================================================================
-
-/// Build a `VariableLayout` from the metadata produced by `build_metadata()`.
-///
-/// The metadata map is `model_name -> (variable_name -> VariableMetadata)`.
-/// This extracts the layout for a single model.
-pub(crate) fn layout_from_metadata(
-    metadata: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, super::VariableMetadata<'_>>>,
-    model_name: &Ident<Canonical>,
-) -> Result<VariableLayout, String> {
-    let model_metadata = metadata.get(model_name).ok_or_else(|| {
-        format!(
-            "model '{}' not found in metadata during layout construction",
-            model_name.as_str()
-        )
-    })?;
-    let mut entries = HashMap::with_capacity(model_metadata.len());
-    let mut n_slots = 0;
-
-    for (name, meta) in model_metadata {
-        entries.insert(
-            name.to_string(),
-            LayoutEntry {
-                offset: meta.offset,
-                size: meta.size,
-            },
-        );
-        n_slots = n_slots.max(meta.offset + meta.size);
-    }
-
-    Ok(VariableLayout::new(entries, n_slots))
-}
-
-// ============================================================================
-// Symbolize: Concrete -> Symbolic
-// ============================================================================
-
-pub(crate) fn symbolize_opcode(
-    op: &Opcode,
-    rmap: &ReverseOffsetMap,
-) -> Result<SymbolicOpcode, String> {
-    match op {
-        // Opcodes with variable offsets that need symbolization
-        Opcode::LoadVar { off } => Ok(SymbolicOpcode::LoadVar {
-            var: rmap.lookup(u32::from(*off))?,
-        }),
-        Opcode::LoadPrev { off } => Ok(SymbolicOpcode::SymLoadPrev {
-            var: rmap.lookup(u32::from(*off))?,
-        }),
-        Opcode::LoadInitial { off } => Ok(SymbolicOpcode::SymLoadInitial {
-            var: rmap.lookup(u32::from(*off))?,
-        }),
-        Opcode::LoadSubscript { off } => Ok(SymbolicOpcode::LoadSubscript {
-            var: rmap.lookup(u32::from(*off))?,
-        }),
-        Opcode::AssignCurr { off } => Ok(SymbolicOpcode::AssignCurr {
-            var: rmap.lookup(u32::from(*off))?,
-        }),
-        Opcode::AssignNext { off } => Ok(SymbolicOpcode::AssignNext {
-            var: rmap.lookup(u32::from(*off))?,
-        }),
-        Opcode::AssignConstCurr { off, literal_id } => Ok(SymbolicOpcode::AssignConstCurr {
-            var: rmap.lookup(u32::from(*off))?,
-            literal_id: *literal_id,
-        }),
-        Opcode::BinOpAssignCurr { op, off } => Ok(SymbolicOpcode::BinOpAssignCurr {
-            op: *op,
-            var: rmap.lookup(u32::from(*off))?,
-        }),
-        Opcode::BinOpAssignNext { op, off } => Ok(SymbolicOpcode::BinOpAssignNext {
-            op: *op,
-            var: rmap.lookup(u32::from(*off))?,
-        }),
-        // The 3-address fused binops AND the fused leaf assignments are created
-        // by `ByteCode::fuse_three_address`, which runs only on FINAL concrete
-        // bytecode (after `resolve`), strictly after symbolization, and only on
-        // the Vm's private execution copy (never the salsa-cached
-        // CompiledSimulation). They therefore never reach this function; seeing
-        // one means the fusion ran before symbolize, which is a compiler bug.
-        // The exhaustive match here is the guarantee no fused opcode can silently
-        // leak into the symbolic/incremental layer.
-        Opcode::BinVarVar { .. }
-        | Opcode::BinVarConst { .. }
-        | Opcode::BinConstVar { .. }
-        | Opcode::BinStackVar { .. }
-        | Opcode::BinStackConst { .. }
-        | Opcode::BinGlobalVar { .. }
-        | Opcode::BinVarGlobal { .. }
-        | Opcode::BinGlobalConst { .. }
-        | Opcode::BinConstGlobal { .. }
-        | Opcode::BinGlobalGlobal { .. }
-        | Opcode::BinStackGlobal { .. }
-        | Opcode::BinConstConst { .. }
-        | Opcode::AssignAddVarVarCurr { .. }
-        | Opcode::AssignSubVarVarCurr { .. }
-        | Opcode::AssignMulVarVarCurr { .. }
-        | Opcode::AssignDivVarVarCurr { .. }
-        | Opcode::AssignAddVarVarNext { .. }
-        | Opcode::AssignSubVarVarNext { .. }
-        | Opcode::AssignMulVarVarNext { .. }
-        | Opcode::AssignDivVarVarNext { .. }
-        | Opcode::AssignAddVarConstCurr { .. }
-        | Opcode::AssignSubVarConstCurr { .. }
-        | Opcode::AssignMulVarConstCurr { .. }
-        | Opcode::AssignDivVarConstCurr { .. }
-        | Opcode::AssignAddVarConstNext { .. }
-        | Opcode::AssignSubVarConstNext { .. }
-        | Opcode::AssignMulVarConstNext { .. }
-        | Opcode::AssignDivVarConstNext { .. }
-        | Opcode::AssignAddConstVarCurr { .. }
-        | Opcode::AssignSubConstVarCurr { .. }
-        | Opcode::AssignMulConstVarCurr { .. }
-        | Opcode::AssignDivConstVarCurr { .. }
-        | Opcode::AssignAddConstVarNext { .. }
-        | Opcode::AssignSubConstVarNext { .. }
-        | Opcode::AssignMulConstVarNext { .. }
-        | Opcode::AssignDivConstVarNext { .. }
-        | Opcode::AssignStackVarCurr { .. }
-        | Opcode::AssignStackVarNext { .. }
-        | Opcode::AssignStackConstCurr { .. }
-        | Opcode::AssignStackConstNext { .. } => {
-            unreachable!("3-address fused opcode reached symbolize_opcode")
-        }
-        Opcode::PushVarView {
-            base_off,
-            dim_list_id,
-        } => Ok(SymbolicOpcode::PushVarView {
-            var: rmap.lookup(u32::from(*base_off))?,
-            dim_list_id: *dim_list_id,
-        }),
-        Opcode::PushVarViewDirect {
-            base_off,
-            dim_list_id,
-        } => Ok(SymbolicOpcode::PushVarViewDirect {
-            var: rmap.lookup(u32::from(*base_off))?,
-            dim_list_id: *dim_list_id,
-        }),
-
-        // Opcodes that are identical in symbolic form
-        Opcode::Op2 { op } => Ok(SymbolicOpcode::Op2 { op: *op }),
-        Opcode::Not {} => Ok(SymbolicOpcode::Not {}),
-        Opcode::LoadConstant { id } => Ok(SymbolicOpcode::LoadConstant { id: *id }),
-        Opcode::LoadGlobalVar { off } => Ok(SymbolicOpcode::LoadGlobalVar { off: *off }),
-        Opcode::PushSubscriptIndex { bounds } => {
-            Ok(SymbolicOpcode::PushSubscriptIndex { bounds: *bounds })
-        }
-        Opcode::SetCond {} => Ok(SymbolicOpcode::SetCond {}),
-        Opcode::If {} => Ok(SymbolicOpcode::If {}),
-        Opcode::Ret => Ok(SymbolicOpcode::Ret),
-        Opcode::LoadModuleInput { input } => Ok(SymbolicOpcode::LoadModuleInput { input: *input }),
-        Opcode::EvalModule { id, n_inputs } => Ok(SymbolicOpcode::EvalModule {
-            id: *id,
-            n_inputs: *n_inputs,
-        }),
-        Opcode::Apply { func } => Ok(SymbolicOpcode::Apply { func: *func }),
-        Opcode::Lookup {
-            base_gf,
-            table_count,
-            mode,
-        } => Ok(SymbolicOpcode::Lookup {
-            base_gf: *base_gf,
-            table_count: *table_count,
-            mode: *mode,
-        }),
-        Opcode::PushTempView {
-            temp_id,
-            dim_list_id,
-        } => Ok(SymbolicOpcode::PushTempView {
-            temp_id: *temp_id,
-            dim_list_id: *dim_list_id,
-        }),
-        Opcode::PushStaticView { view_id } => {
-            Ok(SymbolicOpcode::PushStaticView { view_id: *view_id })
-        }
-        Opcode::ViewSubscriptConst { dim_idx, index } => Ok(SymbolicOpcode::ViewSubscriptConst {
-            dim_idx: *dim_idx,
-            index: *index,
-        }),
-        Opcode::ViewSubscriptDynamic { dim_idx } => {
-            Ok(SymbolicOpcode::ViewSubscriptDynamic { dim_idx: *dim_idx })
-        }
-        Opcode::ViewRange {
-            dim_idx,
-            start,
-            end,
-        } => Ok(SymbolicOpcode::ViewRange {
-            dim_idx: *dim_idx,
-            start: *start,
-            end: *end,
-        }),
-        Opcode::ViewRangeDynamic { dim_idx } => {
-            Ok(SymbolicOpcode::ViewRangeDynamic { dim_idx: *dim_idx })
-        }
-        Opcode::ViewStarRange {
-            dim_idx,
-            subdim_relation_id,
-        } => Ok(SymbolicOpcode::ViewStarRange {
-            dim_idx: *dim_idx,
-            subdim_relation_id: *subdim_relation_id,
-        }),
-        Opcode::ViewWildcard { dim_idx } => Ok(SymbolicOpcode::ViewWildcard { dim_idx: *dim_idx }),
-        Opcode::ViewTranspose {} => Ok(SymbolicOpcode::ViewTranspose {}),
-        Opcode::PopView {} => Ok(SymbolicOpcode::PopView {}),
-        Opcode::DupView {} => Ok(SymbolicOpcode::DupView {}),
-        Opcode::LoadTempConst { temp_id, index } => Ok(SymbolicOpcode::LoadTempConst {
-            temp_id: *temp_id,
-            index: *index,
-        }),
-        Opcode::LoadTempDynamic { temp_id } => {
-            Ok(SymbolicOpcode::LoadTempDynamic { temp_id: *temp_id })
-        }
-        Opcode::BeginIter {
-            write_temp_id,
-            has_write_temp,
-        } => Ok(SymbolicOpcode::BeginIter {
-            write_temp_id: *write_temp_id,
-            has_write_temp: *has_write_temp,
-        }),
-        Opcode::LoadIterElement {} => Ok(SymbolicOpcode::LoadIterElement {}),
-        Opcode::LoadIterTempElement { temp_id } => {
-            Ok(SymbolicOpcode::LoadIterTempElement { temp_id: *temp_id })
-        }
-        Opcode::LoadIterViewTop {} => Ok(SymbolicOpcode::LoadIterViewTop {}),
-        Opcode::LoadIterViewAt { offset } => Ok(SymbolicOpcode::LoadIterViewAt { offset: *offset }),
-        Opcode::StoreIterElement {} => Ok(SymbolicOpcode::StoreIterElement {}),
-        Opcode::NextIterOrJump { jump_back } => Ok(SymbolicOpcode::NextIterOrJump {
-            jump_back: *jump_back,
-        }),
-        Opcode::EndIter {} => Ok(SymbolicOpcode::EndIter {}),
-        Opcode::ArraySum {} => Ok(SymbolicOpcode::ArraySum {}),
-        Opcode::ArrayMax {} => Ok(SymbolicOpcode::ArrayMax {}),
-        Opcode::ArrayMin {} => Ok(SymbolicOpcode::ArrayMin {}),
-        Opcode::ArrayMean {} => Ok(SymbolicOpcode::ArrayMean {}),
-        Opcode::ArrayStddev {} => Ok(SymbolicOpcode::ArrayStddev {}),
-        Opcode::ArraySize {} => Ok(SymbolicOpcode::ArraySize {}),
-        Opcode::VectorSelect {} => Ok(SymbolicOpcode::VectorSelect {}),
-        Opcode::VectorElmMap {
-            write_temp_id,
-            full_source_len,
-        } => Ok(SymbolicOpcode::VectorElmMap {
-            write_temp_id: *write_temp_id,
-            full_source_len: *full_source_len,
-        }),
-        Opcode::VectorSortOrder { write_temp_id } => Ok(SymbolicOpcode::VectorSortOrder {
-            write_temp_id: *write_temp_id,
-        }),
-        Opcode::Rank { write_temp_id } => Ok(SymbolicOpcode::Rank {
-            write_temp_id: *write_temp_id,
-        }),
-        Opcode::LookupArray {
-            base_gf,
-            table_count,
-            mode,
-            write_temp_id,
-        } => Ok(SymbolicOpcode::LookupArray {
-            base_gf: *base_gf,
-            table_count: *table_count,
-            mode: *mode,
-            write_temp_id: *write_temp_id,
-        }),
-        Opcode::AllocateAvailable { write_temp_id } => Ok(SymbolicOpcode::AllocateAvailable {
-            write_temp_id: *write_temp_id,
-        }),
-        Opcode::AllocateByPriority { write_temp_id } => Ok(SymbolicOpcode::AllocateByPriority {
-            write_temp_id: *write_temp_id,
-        }),
-        Opcode::BeginBroadcastIter {
-            n_sources,
-            dest_temp_id,
-        } => Ok(SymbolicOpcode::BeginBroadcastIter {
-            n_sources: *n_sources,
-            dest_temp_id: *dest_temp_id,
-        }),
-        Opcode::LoadBroadcastElement { source_idx } => Ok(SymbolicOpcode::LoadBroadcastElement {
-            source_idx: *source_idx,
-        }),
-        Opcode::StoreBroadcastElement {} => Ok(SymbolicOpcode::StoreBroadcastElement {}),
-        Opcode::NextBroadcastOrJump { jump_back } => Ok(SymbolicOpcode::NextBroadcastOrJump {
-            jump_back: *jump_back,
-        }),
-        Opcode::EndBroadcastIter {} => Ok(SymbolicOpcode::EndBroadcastIter {}),
-    }
-}
-
-pub(crate) fn symbolize_static_view(
-    view: &StaticArrayView,
-    rmap: &ReverseOffsetMap,
-) -> Result<SymbolicStaticView, String> {
-    let base = if view.is_temp {
-        SymStaticViewBase::Temp(view.base_off)
-    } else {
-        SymStaticViewBase::Var(rmap.lookup(view.base_off)?)
-    };
-
-    Ok(SymbolicStaticView {
-        base,
-        dims: view.dims.clone(),
-        strides: view.strides.clone(),
-        offset: view.offset,
-        sparse: view.sparse.clone(),
-        dim_ids: view.dim_ids.clone(),
-    })
-}
-
-pub(crate) fn symbolize_module_decl(
-    decl: &ModuleDeclaration,
-    rmap: &ReverseOffsetMap,
-) -> Result<SymbolicModuleDecl, String> {
-    let off = u32::try_from(decl.off)
-        .map_err(|_| format!("module declaration offset {} does not fit in u32", decl.off))?;
-    Ok(SymbolicModuleDecl {
-        model_name: decl.model_name.clone(),
-        input_set: decl.input_set.clone(),
-        var: rmap.lookup(off)?,
-    })
-}
-
-pub(crate) fn symbolize_bytecode(
-    bc: &ByteCode,
-    rmap: &ReverseOffsetMap,
-) -> Result<SymbolicByteCode, String> {
-    let code = bc
-        .code
-        .iter()
-        .map(|op| symbolize_opcode(op, rmap))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(SymbolicByteCode {
-        literals: bc.literals.clone(),
-        code,
-    })
-}
-
-/// Convert a `CompiledModule` to its symbolic representation.
-/// All variable offsets are replaced with symbolic references using the layout.
-#[allow(dead_code)]
-pub(crate) fn symbolize_module(
-    module: &CompiledModule,
-    layout: &VariableLayout,
-) -> Result<SymbolicCompiledModule, String> {
-    let rmap = ReverseOffsetMap::from_layout(layout);
-
-    let compiled_initials = module
-        .compiled_initials
-        .iter()
-        .map(|ci| {
-            Ok(SymbolicCompiledInitial {
-                ident: ci.ident.clone(),
-                bytecode: symbolize_bytecode(&ci.bytecode, &rmap)?,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-
-    let compiled_flows = symbolize_bytecode(&module.compiled_flows, &rmap)?;
-    let compiled_stocks = symbolize_bytecode(&module.compiled_stocks, &rmap)?;
-
-    let ctx = &*module.context;
-
-    let static_views = ctx
-        .static_views
-        .iter()
-        .map(|sv| symbolize_static_view(sv, &rmap))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let module_decls = ctx
-        .modules
-        .iter()
-        .map(|md| symbolize_module_decl(md, &rmap))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(SymbolicCompiledModule {
-        ident: module.ident.clone(),
-        n_slots: module.n_slots,
-        compiled_initials,
-        compiled_flows,
-        compiled_stocks,
-        graphical_functions: ctx.graphical_functions.clone(),
-        module_decls,
-        static_views,
-        arrays: ctx.arrays.clone(),
-        dimensions: ctx.dimensions.clone(),
-        subdim_relations: ctx.subdim_relations.clone(),
-        names: ctx.names.clone(),
-        temp_offsets: ctx.temp_offsets.clone(),
-        temp_total_size: ctx.temp_total_size,
-        dim_lists: ctx.dim_lists.clone(),
-        // The symbolize<->resolve roundtrip is opcode-count-preserving, so the
-        // invariant-prefix boundary index is identical in both forms (GH #712).
-        flows_invariant_opcode_len: module.flows_invariant_opcode_len,
-    })
 }
 
 // ============================================================================
@@ -921,11 +750,9 @@ fn sym_var_refs_in_bytecode(sbc: &SymbolicByteCode) -> impl Iterator<Item = &str
         | SymbolicOpcode::SymLoadInitial { var }
         | SymbolicOpcode::LoadSubscript { var }
         | SymbolicOpcode::AssignCurr { var }
-        | SymbolicOpcode::AssignNext { var }
         | SymbolicOpcode::AssignConstCurr { var, .. }
         | SymbolicOpcode::BinOpAssignCurr { var, .. }
         | SymbolicOpcode::BinOpAssignNext { var, .. }
-        | SymbolicOpcode::PushVarView { var, .. }
         | SymbolicOpcode::PushVarViewDirect { var, .. } => Some(var.name.as_str()),
         _ => None,
     })
@@ -962,7 +789,10 @@ pub(crate) fn fragment_vars_in_layout(
     ];
     for maybe_decls in &phase_decls {
         let Some(decls) = maybe_decls else { continue };
-        if decls.iter().any(|d| layout.get(&d.var.name).is_none()) {
+        if decls
+            .iter()
+            .any(|d| layout.get(d.var.name.as_str()).is_none())
+        {
             return false;
         }
     }
@@ -1001,7 +831,7 @@ pub(crate) fn resolve_var_ref(
     var: &SymVarRef,
     layout: &VariableLayout,
 ) -> Result<VariableOffset, String> {
-    let entry = layout.get(&var.name).ok_or_else(|| {
+    let entry = layout.get(var.name.as_str()).ok_or_else(|| {
         format!(
             "variable '{}' not found in layout during resolution",
             var.name
@@ -1050,9 +880,6 @@ pub(crate) fn resolve_opcode(
         SymbolicOpcode::AssignCurr { var } => Ok(Opcode::AssignCurr {
             off: resolve_var_ref(var, layout)?,
         }),
-        SymbolicOpcode::AssignNext { var } => Ok(Opcode::AssignNext {
-            off: resolve_var_ref(var, layout)?,
-        }),
         SymbolicOpcode::AssignConstCurr { var, literal_id } => Ok(Opcode::AssignConstCurr {
             off: resolve_var_ref(var, layout)?,
             literal_id: *literal_id,
@@ -1064,10 +891,6 @@ pub(crate) fn resolve_opcode(
         SymbolicOpcode::BinOpAssignNext { op, var } => Ok(Opcode::BinOpAssignNext {
             op: *op,
             off: resolve_var_ref(var, layout)?,
-        }),
-        SymbolicOpcode::PushVarView { var, dim_list_id } => Ok(Opcode::PushVarView {
-            base_off: resolve_var_ref(var, layout)?,
-            dim_list_id: *dim_list_id,
         }),
         SymbolicOpcode::PushVarViewDirect { var, dim_list_id } => Ok(Opcode::PushVarViewDirect {
             base_off: resolve_var_ref(var, layout)?,
@@ -1202,7 +1025,7 @@ pub(crate) fn resolve_opcode(
             // constant in both sites). The structural symbolic round-trip --
             // `test_renumber_vector_builtin_temp_ids` (isolated `renumber_opcode`)
             // and `test_vector_elm_map_full_source_len_survives_fragment_roundtrip`
-            // (the full `symbolize` -> `concatenate_fragments` -> `resolve_bytecode`
+            // (the full `concatenate_fragments` -> `resolve_bytecode`
             // merge path) -- complements them by pinning that this field is
             // invariant under renumbering (it is NOT a renumber-able resource id
             // like temp/lit/gf/view/dim_list/module).
@@ -1249,6 +1072,26 @@ pub(crate) fn resolve_opcode(
     }
 }
 
+/// Resolve a symbolic bytecode stream against `layout`, producing the concrete
+/// bytecode the VM executes.
+///
+/// **This is the only place concrete bytecode is born**, and therefore the place
+/// the VM's stack-safety proof is discharged: the emitted program must not be
+/// able to overflow the VM's fixed-size arithmetic stack, which is what makes
+/// `vm::Stack`'s unchecked accesses sound.
+///
+/// The check used to live in the per-fragment `ByteCodeBuilder::finish()`. Moving
+/// it here made it strictly STRONGER, not merely equivalent: a fragment starts
+/// and ends at depth 0 today, so per-fragment maxima and the concatenation's
+/// maximum agree -- but `concatenate_fragments` strips each fragment's trailing
+/// `Ret` and appends, so a fragment that did NOT balance would accumulate depth
+/// across fragment boundaries in a way the per-fragment check could not see.
+/// It also runs once per assembled phase instead of once per fragment.
+///
+/// Both failure modes are reported, not asserted: an over-deep program and an
+/// `Opcode::stack_effect` underflow (a compiler-metadata bug) both come back as
+/// `Err`, so neither can abort a `libsimlin` host process from inside a
+/// `Result`-returning function.
 pub(crate) fn resolve_bytecode(
     sbc: &SymbolicByteCode,
     layout: &VariableLayout,
@@ -1259,10 +1102,20 @@ pub(crate) fn resolve_bytecode(
         .map(|op| resolve_opcode(op, layout))
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(ByteCode {
+    let bc = ByteCode {
         literals: sbc.literals.clone(),
         code,
-    })
+    };
+
+    let depth = bc.max_stack_depth()?;
+    if depth >= STACK_CAPACITY {
+        return Err(format!(
+            "compiled bytecode requires stack depth {depth}, exceeding VM capacity \
+             {STACK_CAPACITY}"
+        ));
+    }
+
+    Ok(bc)
 }
 
 pub(crate) fn resolve_static_view(
@@ -1271,7 +1124,7 @@ pub(crate) fn resolve_static_view(
 ) -> Result<StaticArrayView, String> {
     let (base_off, is_temp) = match &sv.base {
         SymStaticViewBase::Var(var_ref) => {
-            let entry = layout.get(&var_ref.name).ok_or_else(|| {
+            let entry = layout.get(var_ref.name.as_str()).ok_or_else(|| {
                 format!(
                     "variable '{}' not found in layout during static view resolution",
                     var_ref.name
@@ -1297,7 +1150,7 @@ pub(crate) fn resolve_module_decl(
     sd: &SymbolicModuleDecl,
     layout: &VariableLayout,
 ) -> Result<ModuleDeclaration, String> {
-    let entry = layout.get(&sd.var.name).ok_or_else(|| {
+    let entry = layout.get(sd.var.name.as_str()).ok_or_else(|| {
         format!(
             "module variable '{}' not found in layout during resolution",
             sd.var.name
@@ -1332,10 +1185,10 @@ pub(crate) fn resolve_module(
         })
         .collect::<Result<Vec<_>, String>>()?;
 
-    // `resolve_module` is a pure symbolic<->concrete primitive (the roundtrip
-    // tests symbolize its output again), so the 3-address fusion (R2) is NOT
-    // applied here -- the production assembler `assemble_module` applies it to
-    // this function's output instead, where the result is never re-symbolized.
+    // `resolve_module` is the single symbolic -> concrete primitive, so the
+    // 3-address fusion (R2) is NOT applied here -- `Vm::new` applies it to its
+    // own private copy of the bytecode, after the salsa-cached artifact has
+    // been produced.
     let compiled_flows = resolve_bytecode(&sym.compiled_flows, layout)?;
     let compiled_stocks = resolve_bytecode(&sym.compiled_stocks, layout)?;
 
@@ -1414,12 +1267,20 @@ pub(crate) struct ConcatenatedBytecodes {
 /// pool. Graphical functions are excluded because they are content-de-
 /// duplicated (#582) rather than flat-counted -- their per-fragment base
 /// comes from a shared `GfDedup` remap, not a running sum.
+///
+/// The three `u16`-addressed counts are held as `usize` on purpose. They are
+/// COUNTS, not ids: a count of exactly `U16_ID_CAPACITY` describes a full table
+/// whose every id (`0..=u16::MAX`) is representable, and a phase that follows it
+/// with none of that resource assigns no id at all. Narrowing them here would
+/// reject that program even though M3 -- *every assigned id is representable* --
+/// holds for it; the one place that can tell is [`resource_base`], which sees
+/// the following fragment's length and is where the bound therefore lives.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ContextResourceCounts {
-    pub modules: u16,
-    pub views: u16,
+    pub modules: usize,
+    pub views: usize,
     pub temps: u32,
-    pub dim_lists: u16,
+    pub dim_lists: usize,
 }
 
 impl ContextResourceCounts {
@@ -1434,11 +1295,19 @@ impl ContextResourceCounts {
     /// rather than this per-phase sum. The field is summed here for the
     /// benefit of any caller that genuinely wants the disjoint per-phase temp
     /// count (e.g. the `Sum` strategy / `combine_scc_fragment` accounting).
+    ///
+    /// Infallible: summing counts cannot violate M3 by itself, because a base
+    /// only has to be representable once a fragment uses it to name something.
+    /// The check lives in [`resource_base`], which is handed both the base and
+    /// the length of the fragment about to consume it.
     pub fn from_fragments(fragments: &[&PerVarBytecodes]) -> Self {
-        let mut counts = ContextResourceCounts::default();
+        let mut modules: usize = 0;
+        let mut views: usize = 0;
+        let mut temps: u32 = 0;
+        let mut dim_lists: usize = 0;
         for frag in fragments {
-            counts.modules += frag.module_decls.len() as u16;
-            counts.views += frag.static_views.len() as u16;
+            modules += frag.module_decls.len();
+            views += frag.static_views.len();
             // Each fragment's temps start at 0, so the disjoint-layout total
             // is the sum of each fragment's (max_id + 1), not the global max.
             let frag_temp_count = frag
@@ -1447,11 +1316,128 @@ impl ContextResourceCounts {
                 .map(|(id, _)| *id + 1)
                 .max()
                 .unwrap_or(0);
-            counts.temps += frag_temp_count;
-            counts.dim_lists += frag.dim_lists.len() as u16;
+            temps += frag_temp_count;
+            dim_lists += frag.dim_lists.len();
         }
-        counts
+        ContextResourceCounts {
+            modules,
+            views,
+            temps,
+            dim_lists,
+        }
     }
+}
+
+/// How many entries a `u16`-addressed merged resource table can hold: ids run
+/// `0..=u16::MAX`.
+const U16_ID_CAPACITY: usize = u16::MAX as usize + 1;
+
+#[cfg(test)]
+thread_local! {
+    static ID_CAPACITY_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The capacity [`resource_base`] bounds against: `U16_ID_CAPACITY`, except
+/// under an [`IdCapacityGuard`] in a test.
+///
+/// The override exists so a test can reach the bound with a tiny fixture
+/// instead of one large enough to genuinely fill a 16-bit id space -- a
+/// 65,537-entry model would blow the per-test time budget many times over
+/// (`docs/dev/rust.md#test-time-budgets`). It does not add a second statement
+/// of the bound: the comparison still happens once, in `resource_base`; only
+/// the constant it compares against moves.
+#[inline]
+fn id_capacity() -> usize {
+    #[cfg(test)]
+    if let Some(cap) = ID_CAPACITY_OVERRIDE.with(|c| c.get()) {
+        return cap;
+    }
+    U16_ID_CAPACITY
+}
+
+/// Shrink the resource-id capacity for the current thread, restoring it on
+/// drop. Thread-local because tests run in parallel.
+#[cfg(test)]
+pub(crate) struct IdCapacityGuard;
+
+#[cfg(test)]
+impl IdCapacityGuard {
+    pub(crate) fn new(capacity: usize) -> Self {
+        ID_CAPACITY_OVERRIDE.with(|c| c.set(Some(capacity)));
+        IdCapacityGuard
+    }
+}
+
+#[cfg(test)]
+impl Drop for IdCapacityGuard {
+    fn drop(&mut self) {
+        ID_CAPACITY_OVERRIDE.with(|c| c.set(None));
+    }
+}
+
+/// The base id for a fragment's `frag_len` entries appended to a merged table
+/// that already holds `merged_len`, itself offset by `ctx_base` (M2 + M3).
+///
+/// **This is the only place the `u16` capacity bound is stated.** Every base a
+/// `u16`-addressed resource is renumbered against comes from here -- the
+/// merger's four, and the running offsets `db::assemble::renumber_initials_phase`
+/// tracks by hand -- so the boundary cannot be one value in one place and a
+/// different one in another. Everything upstream counts in `usize`.
+///
+/// The ids this fragment will use are `base .. base + frag_len`, so the check
+/// is that the LAST of them is still representable: `base + frag_len` must not
+/// exceed the table capacity. Computed in `usize` and narrowed once, so neither
+/// the base nor the end can wrap on the way to the comparison.
+///
+/// **`end > U16_ID_CAPACITY` is the load-bearing line, and the `>` is exact.**
+/// `end` is one past the last id, so `end == U16_ID_CAPACITY` means the last id
+/// is `u16::MAX` -- addressable. Tightening it to `>=` rejects a table that
+/// fills the id space exactly, which is a legal program; a reader "simplifying"
+/// it that way is the live risk, and `literal_pool_past_u16_capacity_fails_loud`
+/// / `a_full_ctx_base_bounds_only_the_phases_that_use_it` /
+/// `the_initials_phase_shares_the_mergers_capacity_bound` all red if they do.
+///
+/// A fragment carrying NONE of this resource is exempt: it names no id, so
+/// there is nothing to represent, and the base it is handed is never used. Note
+/// what that exemption does and does not buy. It does NOT move the boundary --
+/// deleting it leaves every test green, because the check above already admits
+/// a full table. What it buys is that `base as u16` cannot WRAP when `base` is
+/// exactly `U16_ID_CAPACITY`: the value is dead (no caller reads a base for a
+/// fragment with no entries), but returning a saturated 65,535 rather than a
+/// wrapped 0 keeps the dead value from ever being mistaken for a live one.
+pub(crate) fn resource_base(
+    ctx_base: usize,
+    merged_len: usize,
+    frag_len: usize,
+    label: &str,
+) -> Result<u16, String> {
+    let base = ctx_base + merged_len;
+    let end = base + frag_len;
+    if frag_len == 0 {
+        // No id to assign; hand back a base the caller will not use, saturated
+        // so the narrowing itself cannot wrap.
+        return Ok(base.min(u16::MAX as usize) as u16);
+    }
+    let capacity = id_capacity();
+    if end > capacity {
+        return Err(format!(
+            "merged {label} count {end} exceeds the bytecode id capacity of \
+             {capacity} (ids are 16-bit)"
+        ));
+    }
+    Ok(base as u16)
+}
+
+/// Add a fragment-local resource id to its fragment's base, reporting M3
+/// rather than wrapping. The `u16` twin of `checked_add_u8`.
+pub(crate) fn checked_add_u16(base: u16, off: u16, label: &str) -> Result<u16, String> {
+    base.checked_add(off).ok_or_else(|| {
+        format!(
+            "{label} overflow: {base} + {off} exceeds u16::MAX ({})",
+            u16::MAX
+        )
+    })
 }
 
 /// The five flat resource-ID base offsets a single fragment's non-GF
@@ -1467,6 +1453,34 @@ pub(crate) struct FragmentResourceOffsets {
     pub view_offset: u16,
     pub temp_offset: u32,
     pub dl_offset: u16,
+}
+
+/// The four bases for the SHARED CONTEXT resources alone -- what
+/// [`FragmentMerger::absorb_context`] can honestly report.
+///
+/// Separate from [`FragmentResourceOffsets`] so that "this absorb assigned no
+/// literal id" is a property of the type rather than a placeholder value. The
+/// all-phases aggregation keeps no literal pool, and a `lit_offset: 0` sitting
+/// in its result would be indistinguishable from a real base of zero.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ContextResourceOffsets {
+    pub mod_offset: u16,
+    pub view_offset: u16,
+    pub temp_offset: u32,
+    pub dl_offset: u16,
+}
+
+impl ContextResourceOffsets {
+    /// Pair these context bases with the literal base of the same absorb.
+    fn with_literals(self, lit_offset: u16) -> FragmentResourceOffsets {
+        FragmentResourceOffsets {
+            lit_offset,
+            mod_offset: self.mod_offset,
+            view_offset: self.view_offset,
+            temp_offset: self.temp_offset,
+            dl_offset: self.dl_offset,
+        }
+    }
 }
 
 /// Per-fragment local-GF-slot -> global-(deduped)-GF-slot map. Index `i`
@@ -1485,71 +1499,196 @@ pub(crate) type GfRemap = SmallVec<[GraphicalFunctionId; 8]>;
 /// producing builtins like `VectorSortOrder`/`VectorElmMap`): a fragment is
 /// one variable's bytecode, its temps are 0-based, and they are written and
 /// read entirely within that variable's expression evaluation -- dead once
-/// the variable's runlist segment completes. The two consumers differ in
-/// whether their fragments' temp live ranges can overlap:
+/// the variable's runlist segment completes.
 ///
-/// - `Recycle` (plain-phase `concatenate_fragments`): fragments are emitted
-///   as sequential, non-overlapping runlist segments, so two fragments'
-///   temps are never simultaneously live. They are max-merged into ONE
-///   shared identity pool keyed by temp id -- variable A's temp 0 and
-///   variable B's temp 0 collapse to global slot 0, the slot's size the max
-///   of the two. This exactly matches the monolithic `Module::compile` keyed
-///   max-merge (`compiler/mod.rs`), so the incremental temp count equals the
-///   monolithic `n_temps` instead of summing to a count that overflows the
-///   `TempId` (= `u8`) namespace.
+/// Temps are therefore the ONE merged resource that may legitimately be
+/// shared between fragments, and obligation M5 is what bounds the sharing:
+/// **in the merged opcode stream, the uses of one merged temp slot must not
+/// interleave between two fragments.** Two fragments may share a slot only if
+/// the emitter lays their opcodes out as disjoint contiguous runs; if it
+/// interleaves them, a shared slot means one fragment reads storage the other
+/// has already overwritten. The strategy is how the caller declares which
+/// emission shape it is about to produce:
 ///
-/// - `Sum` (`combine_scc_fragment`): the combined SCC fragment INTERLEAVES
-///   its members' per-element segments per `element_order`, so members' temp
-///   live ranges OVERLAP. Each member's temps must get a DISJOINT id range
-///   (advancing per member) -- recycling them onto a shared slot would make
-///   two simultaneously-live temps alias and silently miscompile the SCC.
+/// - `Recycle` -- the caller emits each fragment's opcodes as one contiguous
+///   run, in fragment order (`concatenate_fragments_with_gf`; the fragments
+///   are sequential, non-overlapping runlist segments). Temps collapse by
+///   IDENTITY into one shared pool: fragment A's temp 0 and fragment B's
+///   temp 0 both become slot `base + 0`, and that slot's size is the MAX over
+///   its users, so it is large enough for each of them in turn. Sharing is
+///   safe because no two users are live at the same time, and it is necessary
+///   because summing 0-based per-fragment temp counts across a whole model
+///   overflows the `TempId` (= `u8`) namespace -- the GH #583 failure on
+///   C-LEARN, whose flows phase legitimately needs 347 summed slots but far
+///   fewer recycled ones. The `u8` width is why recycling is the fix rather
+///   than an optimization; widening the id type was the rejected alternative
+///   (see #583).
+///
+/// - `Sum` -- the caller INTERLEAVES fragments' opcodes (`combine_scc_fragment`
+///   emits a resolved recurrence SCC's members' per-element segments in
+///   `element_order`, so `ce[0], ecc[0], ce[1], ecc[1]`). Members' temp live
+///   ranges overlap, so identity recycling would alias two simultaneously-live
+///   temps and silently miscompile the SCC. Each fragment gets a DISJOINT id
+///   range instead, which trivially satisfies M5 because no slot has two users
+///   at all. An SCC is a handful of members, so the summed count stays far
+///   inside `u8`.
+///
+/// Both arms are pinned as the live-range property itself rather than as a
+/// layout comparison: see `merged_temp_slot_uses_never_interleave` and
+/// `recycle_shares_by_identity_and_sizes_by_max` in
+/// `symbolic_merge_proptest.rs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TempStrategy {
-    /// Max-merge fragment temps into one identity-keyed pool (plain-phase
-    /// concat; matches monolithic recycling).
+    /// Collapse fragment temps by identity into one shared pool, each slot
+    /// sized to the max of its users. For an emitter that lays fragments out
+    /// as disjoint contiguous runs.
     Recycle,
-    /// Advance a disjoint temp id range per fragment (combined SCC fragment;
-    /// interleaved segments need non-overlapping live ranges).
+    /// Give each fragment a disjoint temp id range. For an emitter that
+    /// interleaves fragments' opcodes.
     Sum,
 }
 
 /// Running merge state for combining `PerVarBytecodes` into a single
 /// resource namespace.
 ///
-/// This is the shared core of `concatenate_fragments` and the
+/// This is the shared core of `concatenate_fragments_with_gf` and the
 /// per-element-granular `combine_scc_fragment` (a multi-member recurrence
-/// SCC's combined fragment). The accounting that must hold across both --
-/// every fragment's literals/GFs/modules/views/dim-lists land in a
-/// disjoint, non-colliding ID range -- is implemented exactly once here so
-/// the two consumers cannot drift. Temps are the one resource whose layout
-/// differs: see `TempStrategy`. `concatenate_fragments` absorbs each
-/// fragment and immediately renumbers its whole (Ret-stripped) code;
-/// `combine_scc_fragment` absorbs each *member* once and renumbers that
-/// member's per-element segments with the member's offsets, emitting the
-/// segments in the SCC's interleaved `element_order`.
+/// SCC's combined fragment). Both consumers absorb fragments through this one
+/// implementation so they cannot drift: `concatenate_fragments_with_gf`
+/// absorbs each fragment and immediately renumbers its whole (Ret-stripped)
+/// code, while `combine_scc_fragment` absorbs each *member* once and
+/// renumbers that member's per-element segments with the member's offsets,
+/// emitting the segments in the SCC's interleaved `element_order`.
 ///
-/// `ctx_base` provides context resource ID offsets inherited from
-/// preceding phases. Literal IDs are always phase-local (each phase's
-/// bytecode has its own literal pool) so they are not affected by
-/// `ctx_base`. Temps recycle into ONE global identity pool, so their
-/// `ctx_base.temps` is 0 for every phase (the pool is not partitioned by
-/// phase). When assembling a single phase in isolation, pass
+/// # What the merged fragment owes
+///
+/// A fragment is one variable's one phase, compiled against nothing but its
+/// own resources: its opcodes carry ids into its OWN `literals`,
+/// `graphical_functions`, `module_decls`, `static_views`, temp slots and
+/// `dim_lists`. Merging relocates those private id spaces into one shared
+/// space. These are the obligations that makes sound, stated as properties of
+/// the merged fragment -- not as a comparison with any other compiler. Each
+/// names the test that pins it. Unqualified test names are in the sibling
+/// `symbolic_merge_proptest.rs`; the interleaving consumer's half lives in
+/// `db/combined_fragment_proptest.rs`.
+///
+/// **M1 -- referential integrity.** For every absorbed fragment `F` and every
+/// opcode of `F`, the renumbered opcode names the same resource VALUE in the
+/// merged tables that the original named in `F`'s own tables:
+/// `merged.literals[id + lit_off] == F.literals[id]`, and likewise for module
+/// decls, static views (up to M5's temp-base shift), dim lists (up to the
+/// 4-element truncation), and every table of a GF run. This is the whole
+/// point of the merge; M2-M4 are the means. Pinned by
+/// `merged_ids_dereference_to_their_own_fragments_resources`, with
+/// `forced_rich_fragments_exercise_every_resource_kind` as its non-vacuity
+/// guard.
+///
+/// **M2 -- flat resources are disjoint.** Literals, module decls, static views
+/// and dim lists are APPENDED: fragment `i`'s entries occupy
+/// `[base_i, base_i + |R_i|)`, those ranges are pairwise disjoint, and
+/// together they tile the merged table in fragment order. No fragment can
+/// reach another's entry, so M1 is never satisfied by accidental sharing.
+/// Pinned by `flat_resource_ranges_are_disjoint_and_tile_the_merged_table`.
+///
+/// **M3 -- ids fit their bytecode id type.** Every ASSIGNED id is
+/// representable in the type the opcode field carries (`LiteralId`/`ModuleId`/
+/// `ViewId`/`DimListId` are `u16`, `TempId` and `GraphicalFunctionId` are
+/// `u8`). A merged table that outgrows its id type is a loud `Err`, never a
+/// wrapped id silently naming a different resource. Note what the obligation
+/// does NOT say: a table of exactly `U16_ID_CAPACITY` entries satisfies it, and
+/// so does any number of later phases that add nothing to one -- so the counts
+/// that become a later phase's base are carried in `usize` and the bound is
+/// discharged in exactly one function, [`resource_base`], which is the only
+/// point that sees both a base and the length of the fragment about to consume
+/// it. "Assigned" also means assigned to something the module KEEPS: a merge
+/// whose pool is discarded names no id, so bounding it rejects programs that
+/// are entirely valid. That is not hypothetical either -- it is why the
+/// all-phases aggregation is [`merge_context_side_channels`] and not a full
+/// merge. Pinned by `literal_pool_past_u16_capacity_fails_loud` (within a
+/// phase), `a_full_ctx_base_bounds_only_the_phases_that_use_it` (across
+/// phases), `the_initials_phase_shares_the_mergers_capacity_bound` (the
+/// initials phase's own running offsets),
+/// `the_all_phases_aggregation_does_not_bound_the_literal_pool` and
+/// `assembly_bounds_the_retained_pools_and_not_the_aggregate` (retained vs
+/// discarded), `renumber_opcode_u16_addition_overflow_is_loud`,
+/// `test_renumber_opcode_u8_addition_overflow` and
+/// `test_concatenate_genuinely_distinct_gf_over_capacity_fails_loud`.
+///
+/// **M4 -- graphical functions share by content, and only by content.** GFs
+/// are the one resource that deliberately does NOT get a disjoint range: N
+/// consumers of one dependency's arrayed GF each re-extract the same tables,
+/// and appending all N is how the `u8` `GraphicalFunctionId` overflowed
+/// (#582). Two local slots may map to one merged id only when their content
+/// is bit-identical; a `Lookup`/`LookupArray` run `[b, b + table_count)` stays
+/// contiguous and in order; and the remap is TOTAL over `[0, gf_len)`, so even
+/// a slot no opcode reads keeps its own content. Pinned by
+/// `gf_dedup_preserves_runs_and_never_merges_distinct_content`.
+///
+/// **M5 -- temps never alias between simultaneously-live fragments.** The one
+/// shareable resource; see [`TempStrategy`] for the live-range argument and
+/// which strategy a given emission shape needs. `temp_offsets` is the prefix
+/// sum of the merged sizes, so distinct slots' storage never overlaps either.
+/// Pinned by `merged_temp_slot_uses_never_interleave` and
+/// `recycle_shares_by_identity_and_sizes_by_max` for the sequential emitter,
+/// and by `db::combined_fragment_proptest`'s
+/// `interleaved_members_never_share_a_temp_slot` for the interleaving one.
+///
+/// **M6 -- absorption is 1:1 on opcodes.** The merged code is each fragment's
+/// Ret-stripped opcodes, contiguous and in fragment order, plus one terminal
+/// `Ret`. Two downstream boundaries are COUNTS into this stream and would move
+/// silently if it were not 1:1: `flows_invariant_opcode_len` (the
+/// run-invariant flow prefix, GH #712, computed in `db::assemble` as a sum of
+/// Ret-stripped fragment lengths) and the SCC per-element segmentation.
+/// Pinned by `merge_is_one_to_one_on_opcodes_and_prefix_lengths_are_boundaries`
+/// -- which asserts the stronger form the boundary actually needs, that a
+/// fragment's renumbering never depends on what FOLLOWS it -- and, for the
+/// interleaving emitter, by `db::combined_fragment_proptest`'s
+/// `interleave_conserves_opcodes_and_follows_element_order`.
+///
+/// **M7 -- variable references are not the merger's business.** Renumbering
+/// touches resource ids only: every `SymVarRef` comes through byte-identical
+/// and every opcode keeps its variant. Addresses are assigned exactly once,
+/// later, by `resolve_module`. Pinned by the `skeleton` half of
+/// `merged_ids_dereference_to_their_own_fragments_resources`: the comparison
+/// blanks only the resource ids, so every `SymVarRef` and every jump offset
+/// must survive byte-identical.
+///
+/// **M8 -- the phase split agrees with the whole-model merge.** `assemble_module`
+/// renumbers initials, flows and stocks SEPARATELY, but takes the module's
+/// `module_decls` / `static_views` / `temp_offsets` / `dim_lists` tables from a
+/// single all-phases merge. So merging one phase with `ctx_base` set to the
+/// summed counts of the preceding phases must assign each fragment exactly the
+/// ids the all-phases merge assigns it -- otherwise a flows opcode indexes the
+/// module's table with an id computed against a different table. Literals are
+/// the deliberate exception: each phase's bytecode carries its own pool and
+/// the all-phases pool is discarded, so `ctx_base` does not apply to them.
+/// Pinned by `phase_split_assigns_the_same_ids_as_the_all_phases_merge`, with
+/// `forced_rich_phase_split_uses_non_zero_bases` as its non-vacuity guard --
+/// with an all-zero `ctx_base` the split IS the all-phases merge, so the
+/// property would pass without testing anything.
+///
+/// `ctx_base` provides the context resource id offsets inherited from
+/// preceding phases (M8). Temps recycle into ONE pool shared by every phase,
+/// so `ctx_base.temps` is 0 for every phase -- the pool is not partitioned by
+/// phase. When merging a single phase in isolation, pass
 /// `ContextResourceCounts::default()`.
 pub(crate) struct FragmentMerger {
     ctx_base: ContextResourceCounts,
     temp_strategy: TempStrategy,
     merged_literals: Vec<f64>,
     merged_gf: Vec<Vec<(f64, f64)>>,
-    /// Cross-fragment graphical-function de-duplication index (#582). Maps a
-    /// GF *block* -- a maximal contiguous run of one or more lookup tables,
-    /// the granularity the monolithic `Compiler::new` lays out one-per-
-    /// variable -- keyed by its bit-exact content, to the global `merged_gf`
-    /// offset its first occurrence was appended at. A dependency arrayed GF
-    /// referenced by N consumer fragments produces N fragments each carrying
-    /// the *same* block (every consumer re-extracts the dependency's
-    /// `Vec<Table>` -- see `db/var_fragment.rs`); de-duplicating the block
-    /// appends it once and remaps every consumer's `base_gf` by the single
-    /// shared offset, matching the monolithic layout.
+    /// Cross-fragment graphical-function de-duplication index (#582, M4).
+    /// Maps a GF *block* -- a maximal contiguous run of one or more lookup
+    /// tables, the granularity `Compiler::new` lays a fragment's tables out in
+    /// (one run per table-bearing variable, `codegen.rs`) -- keyed by its
+    /// bit-exact content, to the global `merged_gf` offset its first
+    /// occurrence was appended at. A dependency arrayed GF referenced by N
+    /// consumer fragments produces N fragments each carrying the *same* block
+    /// (every consumer re-extracts the dependency's `Vec<Table>` -- see
+    /// `db/var_fragment.rs`); de-duplicating the block appends it once and
+    /// remaps every consumer's `base_gf` by the single shared offset, which is
+    /// what keeps the merged count proportional to the DISTINCT tables a model
+    /// has rather than to how many fragments mention them.
     ///
     /// A fragment's blocks are the *maximal* contiguous intervals its
     /// `Lookup`/`LookupArray` opcodes reference (overlapping/nested ranges
@@ -1603,24 +1742,28 @@ fn gf_block_key(tables: &[Vec<(f64, f64)>]) -> GfBlockKey {
 /// `(start, len)` blocks covering `[0, gf_len)` exactly, sorted by `start`
 /// (#582).
 ///
-/// Each `Lookup`/`LookupArray` `base_gf` addresses a run of `table_count`
-/// tables starting at `base_gf`, and `base_gf` is always an originating
-/// variable's block start (the monolithic `Compiler::new` only ever emits a
-/// `base_gf` from its one-per-variable `table_base_ids` map). Within a
-/// fragment one such run can be *nested* inside another: a per-element
-/// arrayed GF `g` is read both as the whole array (`LookupArray { base, |D|
-/// }`) and at one element (`Lookup { base + e, 1 }` -- fully inside the
-/// array's range). The whole-array run is the real block; the nested
-/// element run is a sub-reference, NOT a separate block (splitting the
+/// This is a property of the FRAGMENT, read off its own opcodes, and it needs
+/// exactly two things from the emitter that produced it (`Compiler::new` --
+/// the one codegen both the fragment path and the test-only whole-model path
+/// share): each `base_gf` an opcode carries is the start of some table-bearing
+/// variable's run, and distinct variables' runs are disjoint. Both hold
+/// because `Compiler::new` assigns every `base_gf` out of one
+/// `table_base_ids` map built by laying each variable's tables down
+/// contiguously from a monotonically advancing cursor.
+///
+/// Given that, a `Lookup`/`LookupArray` run `[base_gf, base_gf + table_count)`
+/// can be *nested* inside another run but never partially overlap it: a
+/// per-element arrayed GF `g` is read both as the whole array
+/// (`LookupArray { base, |D| }`) and at one element (`Lookup { base + e, 1 }`,
+/// fully inside the array's range). The whole-array run is the real block; the
+/// nested element run is a sub-reference, NOT a separate block (splitting the
 /// block at the element boundary could scatter the array across the deduped
-/// table and miscompile the `[base .. base + table_count]` array lookup).
-/// Distinct variables' blocks are laid out *disjointly* by `Compiler::new`,
-/// so opcode runs are only ever disjoint or nested -- never partially
-/// overlapping. The blocks are therefore the *maximal-by-inclusion* opcode
-/// runs (nested runs dropped), plus one block per maximal *un-referenced*
-/// gap (over-collected dependency tables `db/var_fragment.rs` gathered but
-/// no opcode reads -- never read, so an imperfect gap boundary cannot
-/// miscompile, only mildly affect the deduped count).
+/// table and miscompile the `[base .. base + table_count]` array lookup). The
+/// blocks are therefore the *maximal-by-inclusion* opcode runs (nested runs
+/// dropped), plus one block per maximal *un-referenced* gap (over-collected
+/// dependency tables `db/var_fragment.rs` gathered but no opcode reads --
+/// never read, so an imperfect gap boundary cannot miscompile, only mildly
+/// affect the deduped count).
 ///
 /// `Err` only if a run extends past `gf_len` or two runs partially overlap
 /// (a corrupt fragment the engine never produces); loud-safe.
@@ -1708,9 +1851,10 @@ impl FragmentMerger {
         Self::new_with_temp_strategy(ctx_base, TempStrategy::Sum)
     }
 
-    /// New merger with an explicit temp strategy. `concatenate_fragments`
-    /// (plain-phase, sequential segments) uses `TempStrategy::Recycle` to
-    /// match the monolithic keyed max-merge; the SCC path uses `Sum`.
+    /// New merger with an explicit temp strategy (M5). A caller that emits
+    /// each fragment's opcodes as one contiguous run passes
+    /// `TempStrategy::Recycle`; one that interleaves them passes `Sum`. See
+    /// [`TempStrategy`].
     pub(crate) fn new_with_temp_strategy(
         ctx_base: &ContextResourceCounts,
         temp_strategy: TempStrategy,
@@ -1739,58 +1883,112 @@ impl FragmentMerger {
         &mut self,
         frag: &PerVarBytecodes,
     ) -> Result<(FragmentResourceOffsets, GfRemap), String> {
-        let off = self.absorb_non_gf(frag);
+        let off = self.absorb_non_gf(frag)?;
         let gf_remap = self.absorb_gf(frag)?;
         Ok((off, gf_remap))
     }
 
     /// Absorb one fragment's flat (non-GF) side-channels -- literals,
     /// modules, views, temp sizes, dim lists -- into the running merge
-    /// state and return the five flat resource base offsets. The literal /
-    /// module / view / dim-list offsets are computed from the *pre-merge*
-    /// lengths (each is a distinct resource, laid out disjointly), then those
-    /// side-channels are appended (`Temp`-based static views shifted by this
-    /// fragment's `temp_offset`, dim-lists truncated to 4). The *temp* offset
-    /// instead follows `temp_strategy` (#583): `Sum` advances per fragment
-    /// (disjoint ranges, for `combine_scc_fragment`'s interleaved segments);
-    /// `Recycle` uses the fixed `ctx_base.temps` so every fragment's temps
-    /// max-merge into one identity pool (plain-phase concat, matching the
-    /// monolithic keyed max-merge). Graphical functions are handled
-    /// separately by `absorb_gf` (content-de-duplicated, #582).
-    pub(crate) fn absorb_non_gf(&mut self, frag: &PerVarBytecodes) -> FragmentResourceOffsets {
-        // Literals are phase-local; no ctx_base offset needed. Modules,
-        // views, and dim-lists are appended unshifted, so their offset is
-        // `ctx_base + cumulative_appended` (no double-count: the appended
-        // entries do NOT carry the ctx_base, so `merged_X.len()` excludes
-        // it). Temps are different: see below.
-        let lit_offset = self.merged_literals.len() as u16;
-        let mod_offset = self.merged_modules.len() as u16 + self.ctx_base.modules;
-        let view_offset = self.merged_views.len() as u16 + self.ctx_base.views;
+    /// state and return the five flat resource base offsets.
+    ///
+    /// M2: the literal / module / view / dim-list offsets are the *pre-merge*
+    /// lengths, and the fragment's entries are then appended, so this
+    /// fragment's entries occupy exactly `[base, base + len)` and no earlier
+    /// fragment's range can overlap it. Two things are rewritten on the way
+    /// in, and both are M1 (a merged entry must still denote what the
+    /// fragment's entry denoted): a `Temp`-based static view is shifted by
+    /// this fragment's `temp_offset` so it still points at the same temp, and
+    /// a dim-list is truncated to the 4 elements the `(u8, [u16; 4])` merged
+    /// representation holds.
+    ///
+    /// The *temp* offset instead follows `temp_strategy` (#583, M5): `Sum`
+    /// advances per fragment so each gets a disjoint range;  `Recycle` uses
+    /// the fixed `ctx_base.temps` so every fragment's temp `t` lands on the
+    /// same slot `t + base`, max-merged below. See [`TempStrategy`] for which
+    /// emission shape needs which. Graphical functions are handled separately
+    /// by `absorb_gf` (content-de-duplicated, #582, M4).
+    ///
+    /// `Err` on M3: a merged table that outgrows its `u16` id type. The base
+    /// offsets are checked here rather than only at `renumber_opcode` because
+    /// a fragment may carry entries no opcode reads (over-collected dependency
+    /// resources), and those still consume ids for the fragments after it.
+    pub(crate) fn absorb_non_gf(
+        &mut self,
+        frag: &PerVarBytecodes,
+    ) -> Result<FragmentResourceOffsets, String> {
+        // Literals are phase-local; no ctx_base offset needed (M8). They are
+        // also the ONE resource an aggregation may legitimately not want, which
+        // is why they are the half that lives here rather than in
+        // `absorb_context` -- see that method's rustdoc.
+        let lit_offset = resource_base(
+            0,
+            self.merged_literals.len(),
+            frag.symbolic.literals.len(),
+            "literal",
+        )?;
+        let ctx = self.absorb_context(frag)?;
+        self.merged_literals
+            .extend_from_slice(&frag.symbolic.literals);
+        Ok(ctx.with_literals(lit_offset))
+    }
+
+    /// Absorb one fragment's SHARED CONTEXT side-channels -- module decls,
+    /// static views, temp sizes, dim lists -- and return their base offsets.
+    /// The literal pool is deliberately not touched.
+    ///
+    /// This is the whole of `absorb_non_gf` except the literal pool, and it is
+    /// separate because the two have different lifetimes in the assembled
+    /// module. The context tables are shared by every phase and reported ONCE,
+    /// by the all-phases aggregation ([`merge_context_side_channels`]); the
+    /// literal pools are per-phase and each is retained by the phase that built
+    /// it. An aggregation that wants the former must not be bounded by the
+    /// latter, because it assigns no merged literal id to anything.
+    fn absorb_context(&mut self, frag: &PerVarBytecodes) -> Result<ContextResourceOffsets, String> {
+        // Modules, views, and dim-lists are appended unshifted, so their offset
+        // is `ctx_base + cumulative_appended` (no double-count: the appended
+        // entries do NOT carry the ctx_base, so `merged_X.len()` excludes it).
+        // Temps are different: see below.
+        let mod_offset = resource_base(
+            self.ctx_base.modules,
+            self.merged_modules.len(),
+            frag.module_decls.len(),
+            "module declaration",
+        )?;
+        let view_offset = resource_base(
+            self.ctx_base.views,
+            self.merged_views.len(),
+            frag.static_views.len(),
+            "static view",
+        )?;
         // #583: temps recycle (plain-phase) or sum (interleaved SCC).
         //
         // `Recycle`: a FIXED base (`ctx_base.temps`, which is 0 for every
         //   plain phase since temps share ONE global identity pool). The
         //   per-fragment max-merge below places fragment temp id `t` at slot
-        //   `t + base`, so every fragment's id 0 collapses to the same slot
-        //   -- the monolithic keyed max-merge.
+        //   `t + base`, so every fragment's id 0 collapses to the same slot.
         // `Sum`: advance by the running pool length so each fragment gets a
-        //   disjoint range (interleaved SCC segments need non-overlapping
-        //   live ranges). NOTE the previous unconditional
+        //   disjoint range (interleaved segments need non-overlapping live
+        //   ranges). NOTE the previous unconditional
         //   `merged_temp_sizes.len() + ctx_base.temps` double-counted
         //   `ctx_base.temps`: temps are stored at `id + temp_offset` (which
         //   already includes the base), so `merged_temp_sizes.len()` absorbs
         //   the base -- adding it again diverged `flows_concat` from the
-        //   all-phases `merged` table. The recycle path's fixed base removes
-        //   that divergence; the Sum path runs only with `ctx_base.temps == 0`
-        //   (`combine_scc_fragment` passes a default ctx_base).
+        //   all-phases `merged` table (an M8 violation). The recycle path's
+        //   fixed base removes that divergence; the Sum path runs only with
+        //   `ctx_base.temps == 0` (`combine_scc_fragment` passes a default
+        //   ctx_base).
         let temp_offset = match self.temp_strategy {
             TempStrategy::Recycle => self.ctx_base.temps,
             TempStrategy::Sum => self.merged_temp_sizes.len() as u32 + self.ctx_base.temps,
         };
-        let dl_offset = self.merged_dim_lists.len() as u16 + self.ctx_base.dim_lists;
+        let dl_offset = resource_base(
+            self.ctx_base.dim_lists,
+            self.merged_dim_lists.len(),
+            frag.dim_lists.len(),
+            "dimension list",
+        )?;
 
-        self.merged_literals
-            .extend_from_slice(&frag.symbolic.literals);
         self.merged_modules.extend_from_slice(&frag.module_decls);
         self.merged_views.extend(frag.static_views.iter().map(|sv| {
             let base = match &sv.base {
@@ -1818,13 +2016,12 @@ impl FragmentMerger {
                 self.merged_temp_sizes[new_id as usize].max(*size);
         }
 
-        FragmentResourceOffsets {
-            lit_offset,
+        Ok(ContextResourceOffsets {
             mod_offset,
             view_offset,
             temp_offset,
             dl_offset,
-        }
+        })
     }
 
     /// Content-de-duplicate one fragment's graphical-function *blocks* into
@@ -1890,11 +2087,28 @@ impl FragmentMerger {
     /// `code` is the already-renumbered, Ret-stripped opcode stream;
     /// a single trailing `Ret` is appended iff `code` is non-empty
     /// (preserving the original `concatenate_fragments` behavior).
-    fn into_concatenated(self, mut code: Vec<SymbolicOpcode>) -> ConcatenatedBytecodes {
+    fn into_concatenated(mut self, mut code: Vec<SymbolicOpcode>) -> ConcatenatedBytecodes {
         if !code.is_empty() {
             code.push(SymbolicOpcode::Ret);
         }
+        let literals = std::mem::take(&mut self.merged_literals);
+        let side = self.into_side_channels();
+        ConcatenatedBytecodes {
+            bytecode: SymbolicByteCode { literals, code },
+            graphical_functions: side.graphical_functions,
+            module_decls: side.module_decls,
+            static_views: side.static_views,
+            temp_offsets: side.temp_offsets,
+            temp_total_size: side.temp_total_size,
+            dim_lists: side.dim_lists,
+        }
+    }
 
+    /// Consume the merger and finalize just the SHARED CONTEXT side-channels,
+    /// discarding any literal pool. `temp_offsets` is the prefix sum of the
+    /// merged temp sizes, computed here and nowhere else so the two finishers
+    /// cannot disagree about the temp layout.
+    fn into_side_channels(self) -> ContextSideChannels {
         let mut temp_offsets = Vec::with_capacity(self.merged_temp_sizes.len());
         let mut offset = 0usize;
         for &size in &self.merged_temp_sizes {
@@ -1902,11 +2116,7 @@ impl FragmentMerger {
             offset += size;
         }
 
-        ConcatenatedBytecodes {
-            bytecode: SymbolicByteCode {
-                literals: self.merged_literals,
-                code,
-            },
+        ContextSideChannels {
             graphical_functions: self.merged_gf,
             module_decls: self.merged_modules,
             static_views: self.merged_views,
@@ -1989,6 +2199,59 @@ pub(crate) fn renumber_fragment_code(
     Ok(())
 }
 
+/// The context resources every phase of an assembled module SHARES, reported
+/// once. These are the only things the all-phases aggregation exists to
+/// produce; the bytecode and literal pool a full merge would also build are
+/// per-phase and are retained by the phases that build them.
+pub(crate) struct ContextSideChannels {
+    pub graphical_functions: Vec<Vec<(f64, f64)>>,
+    pub module_decls: Vec<SymbolicModuleDecl>,
+    pub static_views: Vec<SymbolicStaticView>,
+    pub temp_offsets: Vec<usize>,
+    pub temp_total_size: usize,
+    pub dim_lists: Vec<(u8, [u16; 4])>,
+}
+
+/// Aggregate the SHARED CONTEXT resources of every fragment in a module, in the
+/// all-phases order (initials, flows, stocks), so the module reports one
+/// module-decl / static-view / temp / dim-list table that each phase's
+/// separately-renumbered ids index.
+///
+/// This is deliberately NOT a merge. The phases that keep bytecode
+/// (`concatenate_fragments_with_gf` for flows and stocks,
+/// `db::assemble::renumber_initials_phase` for initials) each keep their own
+/// literal pool, so an aggregate pool over all three corresponds to no id the
+/// module retains. Building one was not merely wasted work: it put the whole
+/// model's literal count under `resource_base`'s `u16` bound, so a model whose
+/// every RETAINED pool was comfortably addressable failed to assemble once the
+/// three phases' pools summed past 65,536 -- roughly 33k scalar stocks, which
+/// is inside the size class this compiler targets. Assembly used to survive it
+/// by wrapping the offsets of a stream nobody read; the capacity check turned
+/// that into a hard error.
+///
+/// M8 is unaffected: it obliges the per-phase renumber and the all-phases
+/// aggregation to assign the same *context* ids, and literals were never part
+/// of it (`absorb_non_gf` bases them at 0 in every phase precisely because they
+/// are phase-local). Graphical functions come from the shared `dedup`, exactly
+/// as they do for a phase merge.
+pub(crate) fn merge_context_side_channels(
+    fragments: &[&PerVarBytecodes],
+    ctx_base: &ContextResourceCounts,
+    dedup: &GfDedup,
+) -> Result<ContextSideChannels, String> {
+    // `Recycle` to match the phase merges: temp slots collapse by identity into
+    // the one pool every phase shares, and this aggregation is what sizes it.
+    let mut merger = FragmentMerger::new_with_temp_strategy(ctx_base, TempStrategy::Recycle);
+    for frag in fragments {
+        merger.absorb_context(frag)?;
+    }
+    let mut side = merger.into_side_channels();
+    // The merger never touched GF (`absorb_context`), so install the shared
+    // deduped table; every phase reports the same `graphical_functions`.
+    side.graphical_functions = dedup.tables.clone();
+    Ok(side)
+}
+
 /// Merge a single phase's `PerVarBytecodes` into one stream, renumbering
 /// `LiteralId`, `GraphicalFunctionId`, `ModuleId`, `ViewId`, `TempId`, and
 /// `DimListId` to avoid collisions across fragments, with the graphical
@@ -2024,10 +2287,10 @@ pub(crate) struct GfDedup {
 }
 
 impl GfDedup {
-    /// De-duplicate the GF table lists of `fragments` (in order) by
-    /// bit-exact content, matching the monolithic `Compiler::new`'s
-    /// one-list-per-variable layout. Value-exact: genuinely-different lists
-    /// never share an offset. `Err` if the *distinct* GF count exceeds
+    /// De-duplicate the GF blocks of `fragments` (in order) by bit-exact
+    /// content (M4). Value-exact: two blocks share an offset only when their
+    /// content is identical, so a `Lookup` can never be redirected to a
+    /// different table. `Err` if the *distinct* GF count exceeds
     /// `GraphicalFunctionId` capacity (the genuine-capacity case the dedup
     /// cannot help -- escalate, do not widen the ID width here).
     pub fn build(fragments: &[&PerVarBytecodes]) -> Result<Self, String> {
@@ -2058,28 +2321,29 @@ impl GfDedup {
 /// over (0 when `dedup` covers exactly `fragments`; the running phase
 /// offset when one `GfDedup` spans initials + flows + stocks).
 ///
-/// The non-GF resource accounting is byte-for-byte the original
-/// `concatenate_fragments` loop -- only the GF base now comes from the
-/// shared deduped remap instead of a flat `gf_off`, so the output is
-/// identical to before for any model whose GF table lists were already
-/// distinct.
+/// This is the sequential-emission consumer of `FragmentMerger`: each
+/// fragment's Ret-stripped opcodes are appended as ONE contiguous run, in
+/// fragment order (M6), which is what makes `TempStrategy::Recycle` sound
+/// here (M5) and what makes a prefix of the fragment list correspond to a
+/// prefix of the merged opcode stream -- the boundary `assemble_module`
+/// counts for the run-invariant flow prefix.
 pub(crate) fn concatenate_fragments_with_gf(
     fragments: &[&PerVarBytecodes],
     ctx_base: &ContextResourceCounts,
     dedup: &GfDedup,
     gf_index_base: usize,
 ) -> Result<ConcatenatedBytecodes, String> {
-    // Plain-phase concat: temps RECYCLE into one identity pool (matching the
-    // monolithic keyed max-merge), since fragments are sequential, non-
-    // overlapping runlist segments. `combine_scc_fragment` (interleaved
-    // segments) uses the disjoint `Sum` path instead.
+    // Fragments are appended whole and in order below, so no two fragments'
+    // temp uses interleave and they may share slots by identity (M5).
+    // `combine_scc_fragment`, which interleaves per-element segments, uses the
+    // disjoint `Sum` path instead.
     let mut merger = FragmentMerger::new_with_temp_strategy(ctx_base, TempStrategy::Recycle);
     let mut merged_code: Vec<SymbolicOpcode> = Vec::new();
 
     for (i, frag) in fragments.iter().enumerate() {
         // Only the flat resources are merged here; GF numbering comes from
         // the shared `dedup` so it is coherent across phases.
-        let off = merger.absorb_non_gf(frag);
+        let off = merger.absorb_non_gf(frag)?;
         renumber_fragment_code(
             &frag.symbolic.code,
             &off,
@@ -2134,8 +2398,10 @@ fn remap_gf(
 /// is translated through `gf_remap` (the fragment's per-slot local->global
 /// map from `FragmentMerger::absorb_gf`) rather than a flat add.
 ///
-/// Returns `Err` if a per-opcode temp id would overflow `TempId` (= `u8`)
-/// after offsetting (the `checked_add_u8` below) or if a `base_gf` is out of
+/// Every offsetting add is checked (M3): a wrapped id is a well-formed
+/// program that names a different resource, so the failure mode of getting
+/// this wrong is wrong numbers with no diagnostic. `Err` on a temp id past
+/// `TempId` (= `u8`), on any `u16` id past its type, or on a `base_gf` out of
 /// range for `gf_remap` (a corrupt fragment).
 ///
 /// There is no separate `temp_off > u8::MAX` precheck (#583): the plain-
@@ -2146,6 +2412,12 @@ fn remap_gf(
 /// an SCC summing past 255 -- is still caught loud by `checked_add_u8`,
 /// which adds the actual `temp_id` to the offset (the precheck only saw the
 /// offset, so it could not have been the real bound anyway).
+///
+/// The `u16` adds are belt-and-braces alongside `absorb_non_gf`'s capacity
+/// check: that one bounds the merged TABLE, this one bounds the id an
+/// individual opcode carries, and a caller can reach this function with a base
+/// the merger did not compute (`assemble_module`'s per-initial renumber loop
+/// tracks its own running offsets).
 pub(crate) fn renumber_opcode(
     op: &SymbolicOpcode,
     lit_off: u16,
@@ -2167,10 +2439,12 @@ pub(crate) fn renumber_opcode(
         )
     })?;
     Ok(match op {
-        SymbolicOpcode::LoadConstant { id } => SymbolicOpcode::LoadConstant { id: *id + lit_off },
+        SymbolicOpcode::LoadConstant { id } => SymbolicOpcode::LoadConstant {
+            id: checked_add_u16(*id, lit_off, "LiteralId")?,
+        },
         SymbolicOpcode::AssignConstCurr { var, literal_id } => SymbolicOpcode::AssignConstCurr {
             var: var.clone(),
-            literal_id: *literal_id + lit_off,
+            literal_id: checked_add_u16(*literal_id, lit_off, "LiteralId")?,
         },
         SymbolicOpcode::Lookup {
             base_gf,
@@ -2182,27 +2456,23 @@ pub(crate) fn renumber_opcode(
             mode: *mode,
         },
         SymbolicOpcode::EvalModule { id, n_inputs } => SymbolicOpcode::EvalModule {
-            id: *id + mod_off,
+            id: checked_add_u16(*id, mod_off, "ModuleId")?,
             n_inputs: *n_inputs,
         },
         SymbolicOpcode::PushStaticView { view_id } => SymbolicOpcode::PushStaticView {
-            view_id: *view_id + view_off,
+            view_id: checked_add_u16(*view_id, view_off, "ViewId")?,
         },
         SymbolicOpcode::PushTempView {
             temp_id,
             dim_list_id,
         } => SymbolicOpcode::PushTempView {
             temp_id: checked_add_u8(*temp_id, temp_off_u8, "TempId")?,
-            dim_list_id: *dim_list_id + dl_off,
-        },
-        SymbolicOpcode::PushVarView { var, dim_list_id } => SymbolicOpcode::PushVarView {
-            var: var.clone(),
-            dim_list_id: *dim_list_id + dl_off,
+            dim_list_id: checked_add_u16(*dim_list_id, dl_off, "DimListId")?,
         },
         SymbolicOpcode::PushVarViewDirect { var, dim_list_id } => {
             SymbolicOpcode::PushVarViewDirect {
                 var: var.clone(),
-                dim_list_id: *dim_list_id + dl_off,
+                dim_list_id: checked_add_u16(*dim_list_id, dl_off, "DimListId")?,
             }
         }
         SymbolicOpcode::LoadTempConst { temp_id, index } => SymbolicOpcode::LoadTempConst {
@@ -2272,6 +2542,14 @@ pub(crate) fn renumber_opcode(
     })
 }
 
+#[cfg(test)]
+#[path = "symbolic_builder_tests.rs"]
+mod builder_tests;
+
+#[cfg(test)]
+#[path = "symbolic_merge_proptest.rs"]
+mod merge_proptest;
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -2280,6 +2558,11 @@ pub(crate) fn renumber_opcode(
 mod tests {
     use super::*;
     use crate::bytecode::Op2;
+
+    /// A symbolic reference to `name`'s element `elem`.
+    fn sref(name: &str, elem: usize) -> SymVarRef {
+        SymVarRef::new(Ident::new(name), elem)
+    }
 
     fn simple_layout() -> VariableLayout {
         let mut entries = HashMap::new();
@@ -2296,109 +2579,46 @@ mod tests {
         VariableLayout::new(entries, 6)
     }
 
+    /// The two reference-bearing opcode families every model uses.
     #[test]
-    fn test_reverse_offset_map_basic() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let var = rmap.lookup(4).unwrap();
-        assert_eq!(var.name, "births");
-        assert_eq!(var.element_offset, 0);
-
-        let var = rmap.lookup(5).unwrap();
-        assert_eq!(var.name, "population");
-        assert_eq!(var.element_offset, 0);
-    }
-
-    #[test]
-    fn test_reverse_offset_map_array() {
-        let mut entries = HashMap::new();
-        entries.insert("arr".to_string(), LayoutEntry { offset: 4, size: 3 });
-        let layout = VariableLayout::new(entries, 7);
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        assert_eq!(rmap.lookup(4).unwrap().element_offset, 0);
-        assert_eq!(rmap.lookup(5).unwrap().element_offset, 1);
-        assert_eq!(rmap.lookup(6).unwrap().element_offset, 2);
-        assert_eq!(rmap.lookup(4).unwrap().name, "arr");
-    }
-
-    #[test]
-    fn test_reverse_offset_map_out_of_range() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-        assert!(rmap.lookup(99).is_err());
-    }
-
-    #[test]
-    fn test_symbolize_load_var() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let op = Opcode::LoadVar { off: 5 };
-        let sym = symbolize_opcode(&op, &rmap).unwrap();
-        assert_eq!(
-            sym,
+    fn test_resolve_load_var_and_assign_curr() {
+        assert_resolves(
             SymbolicOpcode::LoadVar {
-                var: SymVarRef {
-                    name: "population".to_string(),
-                    element_offset: 0
-                }
-            }
+                var: sref("population", 0),
+            },
+            Opcode::LoadVar { off: 5 },
         );
-    }
-
-    #[test]
-    fn test_symbolize_assign_curr() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let op = Opcode::AssignCurr { off: 4 };
-        let sym = symbolize_opcode(&op, &rmap).unwrap();
-        assert_eq!(
-            sym,
+        assert_resolves(
             SymbolicOpcode::AssignCurr {
-                var: SymVarRef {
-                    name: "births".to_string(),
-                    element_offset: 0
-                }
-            }
+                var: sref("births", 0),
+            },
+            Opcode::AssignCurr { off: 4 },
         );
     }
 
+    /// Opcodes that carry no variable reference pass through resolution with
+    /// their operands untouched.
     #[test]
-    fn test_symbolize_passthrough_opcodes() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        // These opcodes should pass through unchanged
-        let op = Opcode::LoadGlobalVar { off: 1 };
-        let sym = symbolize_opcode(&op, &rmap).unwrap();
-        assert_eq!(sym, SymbolicOpcode::LoadGlobalVar { off: 1 });
-
-        let op = Opcode::Op2 { op: Op2::Add };
-        let sym = symbolize_opcode(&op, &rmap).unwrap();
-        assert_eq!(sym, SymbolicOpcode::Op2 { op: Op2::Add });
-
-        let op = Opcode::Ret;
-        let sym = symbolize_opcode(&op, &rmap).unwrap();
-        assert_eq!(sym, SymbolicOpcode::Ret);
+    fn test_resolve_passthrough_opcodes() {
+        assert_resolves(
+            SymbolicOpcode::LoadGlobalVar { off: 1 },
+            Opcode::LoadGlobalVar { off: 1 },
+        );
+        assert_resolves(
+            SymbolicOpcode::Op2 { op: Op2::Add },
+            Opcode::Op2 { op: Op2::Add },
+        );
+        assert_resolves(SymbolicOpcode::Ret, Opcode::Ret);
     }
 
     #[test]
     fn test_resolve_var_ref() {
         let layout = simple_layout();
 
-        let var = SymVarRef {
-            name: "population".to_string(),
-            element_offset: 0,
-        };
+        let var = sref("population", 0);
         assert_eq!(resolve_var_ref(&var, &layout).unwrap(), 5);
 
-        let var = SymVarRef {
-            name: "births".to_string(),
-            element_offset: 0,
-        };
+        let var = sref("births", 0);
         assert_eq!(resolve_var_ref(&var, &layout).unwrap(), 4);
     }
 
@@ -2414,10 +2634,7 @@ mod tests {
         );
         let layout = VariableLayout::new(entries, 13);
 
-        let var = SymVarRef {
-            name: "arr".to_string(),
-            element_offset: 2,
-        };
+        let var = sref("arr", 2);
         assert_eq!(resolve_var_ref(&var, &layout).unwrap(), 12);
     }
 
@@ -2428,37 +2645,25 @@ mod tests {
         let layout = VariableLayout::new(entries, 7);
 
         // element_offset == size (out of bounds)
-        let var = SymVarRef {
-            name: "arr".to_string(),
-            element_offset: 3,
-        };
+        let var = sref("arr", 3);
         assert!(
             resolve_var_ref(&var, &layout).is_err(),
             "element_offset >= size should fail"
         );
 
         // element_offset well beyond size
-        let var = SymVarRef {
-            name: "arr".to_string(),
-            element_offset: 100,
-        };
+        let var = sref("arr", 100);
         assert!(resolve_var_ref(&var, &layout).is_err());
 
         // element_offset at max valid index should succeed
-        let var = SymVarRef {
-            name: "arr".to_string(),
-            element_offset: 2,
-        };
+        let var = sref("arr", 2);
         assert_eq!(resolve_var_ref(&var, &layout).unwrap(), 6);
     }
 
     #[test]
     fn test_resolve_missing_variable() {
         let layout = simple_layout();
-        let var = SymVarRef {
-            name: "nonexistent".to_string(),
-            element_offset: 0,
-        };
+        let var = sref("nonexistent", 0);
         assert!(resolve_var_ref(&var, &layout).is_err());
     }
 
@@ -2479,10 +2684,7 @@ mod tests {
         );
         let layout = VariableLayout::new(entries, (VariableOffset::MAX as usize) + 2);
 
-        let var = SymVarRef {
-            name: "huge".to_string(),
-            element_offset: 0,
-        };
+        let var = sref("huge", 0);
         let err = resolve_var_ref(&var, &layout).expect_err("offset beyond u16 must error");
         assert!(
             err.contains("huge") && err.contains("65535"),
@@ -2500,10 +2702,7 @@ mod tests {
             },
         );
         let layout = VariableLayout::new(entries, (VariableOffset::MAX as usize) + 4);
-        let var = SymVarRef {
-            name: "arr".to_string(),
-            element_offset: 3,
-        };
+        let var = sref("arr", 3);
         assert!(
             resolve_var_ref(&var, &layout).is_err(),
             "element offset crossing the u16 limit must error"
@@ -2522,10 +2721,7 @@ mod tests {
             },
         );
         let layout = VariableLayout::new(entries, (VariableOffset::MAX as usize) + 1);
-        let var = SymVarRef {
-            name: "edge".to_string(),
-            element_offset: 0,
-        };
+        let var = sref("edge", 0);
         assert_eq!(resolve_var_ref(&var, &layout).unwrap(), VariableOffset::MAX);
     }
 
@@ -2553,112 +2749,158 @@ mod tests {
         assert!(check_layout_addressable(171_597, "main").is_err());
     }
 
+    /// A whole bytecode stream resolves opcode-for-opcode, literals intact.
     #[test]
-    fn test_bytecode_roundtrip() {
+    fn test_bytecode_resolution() {
         let layout = simple_layout();
 
-        let bc = ByteCode {
+        let sym = SymbolicByteCode {
             literals: vec![1.0, 0.5],
             code: vec![
-                Opcode::LoadVar { off: 5 },     // population
-                Opcode::LoadConstant { id: 1 }, // 0.5
-                Opcode::Op2 { op: Op2::Mul },
-                Opcode::AssignCurr { off: 4 }, // births
-                Opcode::Ret,
+                SymbolicOpcode::LoadVar {
+                    var: sref("population", 0),
+                },
+                SymbolicOpcode::LoadConstant { id: 1 },
+                SymbolicOpcode::Op2 { op: Op2::Mul },
+                SymbolicOpcode::AssignCurr {
+                    var: sref("births", 0),
+                },
+                SymbolicOpcode::Ret,
             ],
         };
 
-        let sym = symbolize_bytecode(&bc, &ReverseOffsetMap::from_layout(&layout)).unwrap();
         let resolved = resolve_bytecode(&sym, &layout).unwrap();
-
-        assert_eq!(bc.literals, resolved.literals);
-        assert_eq!(bc.code.len(), resolved.code.len());
-        for (i, (orig, res)) in bc.code.iter().zip(resolved.code.iter()).enumerate() {
-            assert!(
-                opcode_eq(orig, res),
-                "opcode mismatch at index {}: {:?} vs {:?}",
-                i,
-                orig,
-                res
-            );
-        }
+        assert_eq!(resolved.literals, vec![1.0, 0.5]);
+        assert_eq!(
+            resolved.code,
+            vec![
+                Opcode::LoadVar { off: 5 },
+                Opcode::LoadConstant { id: 1 },
+                Opcode::Op2 { op: Op2::Mul },
+                Opcode::AssignCurr { off: 4 },
+                Opcode::Ret,
+            ]
+        );
     }
 
+    /// The three superinstructions the peephole and the emit-time stock fusion
+    /// produce all carry a reference and all resolve.
     #[test]
-    fn test_bytecode_roundtrip_superinstructions() {
+    fn test_bytecode_resolution_superinstructions() {
         let layout = simple_layout();
 
-        let bc = ByteCode {
+        // The two `BinOpAssign*` forms pop their operands, so the stream has
+        // to be stack-balanced: `resolve_bytecode` validates depth (that is
+        // where the VM's unchecked stack access is proven sound).
+        let sym = SymbolicByteCode {
             literals: vec![100.0, 0.0],
             code: vec![
+                SymbolicOpcode::AssignConstCurr {
+                    var: sref("population", 0),
+                    literal_id: 0,
+                },
+                SymbolicOpcode::LoadConstant { id: 0 },
+                SymbolicOpcode::LoadConstant { id: 1 },
+                SymbolicOpcode::BinOpAssignCurr {
+                    op: Op2::Add,
+                    var: sref("births", 0),
+                },
+                SymbolicOpcode::LoadConstant { id: 0 },
+                SymbolicOpcode::LoadConstant { id: 1 },
+                SymbolicOpcode::BinOpAssignNext {
+                    op: Op2::Mul,
+                    var: sref("population", 0),
+                },
+                SymbolicOpcode::Ret,
+            ],
+        };
+
+        let resolved = resolve_bytecode(&sym, &layout).unwrap();
+        assert_eq!(
+            resolved.code,
+            vec![
                 Opcode::AssignConstCurr {
                     off: 5,
                     literal_id: 0,
                 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadConstant { id: 1 },
                 Opcode::BinOpAssignCurr {
                     op: Op2::Add,
                     off: 4,
                 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadConstant { id: 1 },
                 Opcode::BinOpAssignNext {
                     op: Op2::Mul,
                     off: 5,
                 },
                 Opcode::Ret,
+            ]
+        );
+    }
+
+    /// The implicit globals keep their fixed absolute slots: they are read by
+    /// `LoadGlobalVar`, which never goes through a layout at all.
+    #[test]
+    fn test_bytecode_resolution_global_vars() {
+        let layout = simple_layout();
+
+        let sym = SymbolicByteCode {
+            literals: vec![],
+            code: vec![
+                SymbolicOpcode::LoadGlobalVar { off: 0 },
+                SymbolicOpcode::LoadGlobalVar { off: 1 },
+                SymbolicOpcode::Op2 { op: Op2::Add },
+                SymbolicOpcode::AssignCurr {
+                    var: sref("births", 0),
+                },
+                SymbolicOpcode::Ret,
             ],
         };
 
-        let sym = symbolize_bytecode(&bc, &ReverseOffsetMap::from_layout(&layout)).unwrap();
         let resolved = resolve_bytecode(&sym, &layout).unwrap();
-
-        assert_eq!(bc.code.len(), resolved.code.len());
-        for (i, (orig, res)) in bc.code.iter().zip(resolved.code.iter()).enumerate() {
-            assert!(
-                opcode_eq(orig, res),
-                "opcode mismatch at index {}: {:?} vs {:?}",
-                i,
-                orig,
-                res
-            );
-        }
-    }
-
-    #[test]
-    fn test_bytecode_roundtrip_global_vars() {
-        let layout = simple_layout();
-
-        let bc = ByteCode {
-            literals: vec![],
-            code: vec![
-                Opcode::LoadGlobalVar { off: 0 }, // time
-                Opcode::LoadGlobalVar { off: 1 }, // dt
+        assert_eq!(
+            resolved.code,
+            vec![
+                Opcode::LoadGlobalVar { off: 0 },
+                Opcode::LoadGlobalVar { off: 1 },
                 Opcode::Op2 { op: Op2::Add },
                 Opcode::AssignCurr { off: 4 },
                 Opcode::Ret,
-            ],
+            ]
+        );
+    }
+
+    /// A bytecode stream deeper than the VM's fixed arithmetic stack is a
+    /// compile error, not an abort: `resolve_bytecode` is the single place
+    /// concrete bytecode is born, so it is where the VM's unchecked stack
+    /// access is proven sound.
+    #[test]
+    fn test_resolution_rejects_stack_overflow() {
+        let layout = simple_layout();
+
+        let mut code: Vec<SymbolicOpcode> =
+            vec![SymbolicOpcode::LoadConstant { id: 0 }; STACK_CAPACITY];
+        code.push(SymbolicOpcode::Ret);
+        let sym = SymbolicByteCode {
+            literals: vec![1.0],
+            code,
         };
 
-        let sym = symbolize_bytecode(&bc, &ReverseOffsetMap::from_layout(&layout)).unwrap();
-        let resolved = resolve_bytecode(&sym, &layout).unwrap();
-
-        for (i, (orig, res)) in bc.code.iter().zip(resolved.code.iter()).enumerate() {
-            assert!(
-                opcode_eq(orig, res),
-                "opcode mismatch at index {}: {:?} vs {:?}",
-                i,
-                orig,
-                res
-            );
-        }
+        let err = resolve_bytecode(&sym, &layout).unwrap_err();
+        assert!(
+            err.contains("exceeding VM capacity"),
+            "expected a stack-capacity error, got: {err}"
+        );
     }
 
     #[test]
-    fn test_static_view_roundtrip_var() {
+    fn test_static_view_resolution_var() {
         let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
 
-        let view = StaticArrayView {
-            base_off: 5,
-            is_temp: false,
+        let sym = SymbolicStaticView {
+            base: SymStaticViewBase::Var(sref("population", 0)),
             dims: SmallVec::from_slice(&[3]),
             strides: SmallVec::from_slice(&[1]),
             offset: 0,
@@ -2666,24 +2908,19 @@ mod tests {
             dim_ids: SmallVec::from_slice(&[0]),
         };
 
-        let sym = symbolize_static_view(&view, &rmap).unwrap();
-        assert!(matches!(sym.base, SymStaticViewBase::Var(_)));
-
         let resolved = resolve_static_view(&sym, &layout).unwrap();
-        assert_eq!(view.base_off, resolved.base_off);
-        assert_eq!(view.is_temp, resolved.is_temp);
-        assert_eq!(view.dims, resolved.dims);
-        assert_eq!(view.offset, resolved.offset);
+        assert_eq!(resolved.base_off, 5);
+        assert!(!resolved.is_temp);
+        assert_eq!(resolved.dims, sym.dims);
+        assert_eq!(resolved.offset, 0);
     }
 
     #[test]
-    fn test_static_view_roundtrip_temp() {
+    fn test_static_view_resolution_temp() {
         let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
 
-        let view = StaticArrayView {
-            base_off: 7,
-            is_temp: true,
+        let sym = SymbolicStaticView {
+            base: SymStaticViewBase::Temp(7),
             dims: SmallVec::from_slice(&[2, 3]),
             strides: SmallVec::from_slice(&[3, 1]),
             offset: 0,
@@ -2691,67 +2928,53 @@ mod tests {
             dim_ids: SmallVec::from_slice(&[0, 1]),
         };
 
-        let sym = symbolize_static_view(&view, &rmap).unwrap();
-        assert!(matches!(sym.base, SymStaticViewBase::Temp(7)));
-
         let resolved = resolve_static_view(&sym, &layout).unwrap();
-        assert_eq!(view.base_off, resolved.base_off);
-        assert_eq!(view.is_temp, resolved.is_temp);
+        assert_eq!(resolved.base_off, 7);
+        assert!(resolved.is_temp);
     }
 
     #[test]
-    fn test_module_decl_roundtrip() {
+    fn test_module_decl_resolution() {
         let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
 
-        let decl = ModuleDeclaration {
+        let sym = SymbolicModuleDecl {
             model_name: Ident::new("sub_model"),
             input_set: BTreeSet::new(),
-            off: 4,
+            var: sref("births", 0),
         };
 
-        let sym = symbolize_module_decl(&decl, &rmap).unwrap();
-        assert_eq!(sym.var.name, "births");
-
         let resolved = resolve_module_decl(&sym, &layout).unwrap();
-        assert_eq!(decl.off, resolved.off);
-        assert_eq!(decl.model_name, resolved.model_name);
+        assert_eq!(resolved.off, 4);
+        assert_eq!(resolved.model_name, Ident::new("sub_model"));
     }
 
+    /// The property the whole symbolic layer exists for: one fragment, two
+    /// layouts. Adding a variable ahead of `population` moves its slot, and the
+    /// SAME symbolic bytecode resolves to the new slot with no recompilation.
     #[test]
     fn test_layout_independence() {
-        // Symbolize with one layout, resolve with a different layout.
-        // The symbolic bytecodes should produce correct concrete offsets
-        // for the new layout.
-
-        let layout1 = simple_layout(); // births=4, population=5
-
-        let bc = ByteCode {
+        let sym = SymbolicByteCode {
             literals: vec![0.1],
             code: vec![
-                Opcode::LoadVar { off: 5 }, // population in layout1
-                Opcode::LoadConstant { id: 0 },
-                Opcode::Op2 { op: Op2::Mul },
-                Opcode::AssignCurr { off: 4 }, // births in layout1
-                Opcode::Ret,
+                SymbolicOpcode::LoadVar {
+                    var: sref("population", 0),
+                },
+                SymbolicOpcode::LoadConstant { id: 0 },
+                SymbolicOpcode::Op2 { op: Op2::Mul },
+                SymbolicOpcode::AssignCurr {
+                    var: sref("births", 0),
+                },
+                SymbolicOpcode::Ret,
             ],
         };
 
-        // Symbolize using layout1
-        let sym = symbolize_bytecode(&bc, &ReverseOffsetMap::from_layout(&layout1)).unwrap();
+        // layout1: births=4, population=5
+        let resolved1 = resolve_bytecode(&sym, &simple_layout()).unwrap();
+        assert_eq!(resolved1.code[0], Opcode::LoadVar { off: 5 });
+        assert_eq!(resolved1.code[3], Opcode::AssignCurr { off: 4 });
 
-        // Verify symbolic opcodes reference variable names, not offsets
-        assert_eq!(
-            sym.code[0],
-            SymbolicOpcode::LoadVar {
-                var: SymVarRef {
-                    name: "population".to_string(),
-                    element_offset: 0
-                }
-            }
-        );
-
-        // Create layout2 with different offsets (swapped positions + new variable)
+        // layout2 inserts `growth_rate` alphabetically between births and
+        // population, so population moves to 6 and births stays at 4.
         let mut entries2 = HashMap::new();
         entries2.insert("time".to_string(), LayoutEntry { offset: 0, size: 1 });
         entries2.insert("dt".to_string(), LayoutEntry { offset: 1, size: 1 });
@@ -2760,7 +2983,6 @@ mod tests {
             LayoutEntry { offset: 2, size: 1 },
         );
         entries2.insert("final_time".to_string(), LayoutEntry { offset: 3, size: 1 });
-        // New variable inserted alphabetically between births and population
         entries2.insert("births".to_string(), LayoutEntry { offset: 4, size: 1 });
         entries2.insert(
             "growth_rate".to_string(),
@@ -2769,13 +2991,9 @@ mod tests {
         entries2.insert("population".to_string(), LayoutEntry { offset: 6, size: 1 });
         let layout2 = VariableLayout::new(entries2, 7);
 
-        // Resolve using layout2
-        let resolved = resolve_bytecode(&sym, &layout2).unwrap();
-
-        // population is now at offset 6 (was 5)
-        assert!(opcode_eq(&resolved.code[0], &Opcode::LoadVar { off: 6 }));
-        // births is still at offset 4
-        assert!(opcode_eq(&resolved.code[3], &Opcode::AssignCurr { off: 4 }));
+        let resolved2 = resolve_bytecode(&sym, &layout2).unwrap();
+        assert_eq!(resolved2.code[0], Opcode::LoadVar { off: 6 });
+        assert_eq!(resolved2.code[3], Opcode::AssignCurr { off: 4 });
     }
 
     #[test]
@@ -2799,39 +3017,20 @@ mod tests {
         assert_eq!(offsets, vec![5, 6, 7]);
     }
 
-    // Helper: compare opcodes for equality.
-    // Opcode doesn't derive PartialEq, so we compare via Debug representation.
-    #[cfg(feature = "debug-derive")]
-    fn opcode_eq(a: &Opcode, b: &Opcode) -> bool {
-        format!("{:?}", a) == format!("{:?}", b)
-    }
-
-    // When debug-derive is not enabled, compare by encoding a known
-    // discriminant + payload check for the opcodes we use in tests.
-    #[cfg(not(feature = "debug-derive"))]
-    fn opcode_eq(a: &Opcode, b: &Opcode) -> bool {
-        // Use the symbolize/resolve roundtrip property: if both opcodes
-        // symbolize to the same SymbolicOpcode, they are equal.
-        // We need a layout that covers all offsets used in tests.
-        let mut entries = HashMap::new();
-        for off in 0..20 {
-            entries.insert(
-                format!("__test_var_{}", off),
-                LayoutEntry {
-                    offset: off,
-                    size: 1,
-                },
-            );
-        }
-        let layout = VariableLayout::new(entries, 20);
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let sym_a = symbolize_opcode(a, &rmap);
-        let sym_b = symbolize_opcode(b, &rmap);
-        match (sym_a, sym_b) {
-            (Ok(sa), Ok(sb)) => sa == sb,
-            _ => false,
-        }
+    /// Assert that `sym` resolves against `simple_layout()` to `expected`.
+    ///
+    /// This is the shape every opcode-family test takes now that resolution is
+    /// the only direction of travel: build the symbolic opcode the compiler
+    /// emits, resolve it, and pin the concrete opcode the VM will execute.
+    #[track_caller]
+    fn assert_resolves(sym: SymbolicOpcode, expected: Opcode) {
+        let layout = simple_layout();
+        let resolved = resolve_opcode(&sym, &layout)
+            .unwrap_or_else(|e| panic!("resolve failed for {sym:?}: {e}"));
+        assert!(
+            resolved == expected,
+            "resolve produced the wrong opcode for {sym:?}"
+        );
     }
 
     // ====================================================================
@@ -2851,7 +3050,18 @@ mod tests {
         }
     }
 
-    fn compile_and_roundtrip(dm_project: &crate::datamodel::Project, model_name: &str) {
+    /// Compile a real model through the production incremental path and check
+    /// that every address in the result is one the model's layout actually
+    /// assigns.
+    ///
+    /// This replaced a `symbolize(compiled) -> resolve -> compare` roundtrip,
+    /// which tested that two functions inverted each other; one of them no
+    /// longer exists, because production never travels concrete-to-symbolic.
+    /// What is worth asserting now is the forward direction end to end: the
+    /// resolved module is addressed against the same layout the assembler
+    /// used, each `CompiledInitial` carries exactly the write targets its own
+    /// bytecode has, and each module declaration points at a variable's base.
+    fn compile_and_check_resolution(dm_project: &crate::datamodel::Project, model_name: &str) {
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, dm_project, None);
         let sim = crate::db::compile_project_incremental(&db, sync.project, model_name)
@@ -2861,148 +3071,73 @@ mod tests {
 
         let source_model = sync.models[model_name].source_model;
         // The root module is assembled against the root-shifted layout
-        // (implicit globals at fixed slots 0..3, body at +IMPLICIT_VAR_COUNT),
-        // so the symbolize/resolve roundtrip must use that same layout.
+        // (implicit globals at fixed slots 0..3, body at +IMPLICIT_VAR_COUNT).
         let layout = crate::db::compute_layout(&db, source_model, sync.project).root_shifted();
 
-        let sym = symbolize_module(compiled, &layout)
-            .unwrap_or_else(|e| panic!("symbolize_module failed: {e}"));
+        assert_eq!(compiled.n_slots, layout.n_slots);
 
-        let resolved =
-            resolve_module(&sym, &layout).unwrap_or_else(|e| panic!("resolve_module failed: {e}"));
+        // Every slot a layout entry owns, so an emitted offset can be checked
+        // for being a real address rather than a stray integer.
+        let mut owned: Vec<bool> = vec![false; layout.n_slots];
+        for entry in layout.entries.values() {
+            owned[entry.offset..entry.offset + entry.size].fill(true);
+        }
+        let check = |bc: &ByteCode, what: &str| {
+            for op in &bc.code {
+                if let Some(off) = referenced_offset(op) {
+                    assert!(
+                        (off as usize) < layout.n_slots && owned[off as usize],
+                        "{what}: opcode references slot {off}, which no layout entry owns"
+                    );
+                }
+            }
+        };
 
-        // Verify structural equivalence
-        assert_eq!(compiled.ident, resolved.ident);
-        assert_eq!(compiled.n_slots, resolved.n_slots);
-        assert_eq!(
-            compiled.compiled_initials.len(),
-            resolved.compiled_initials.len()
-        );
-
-        // Compare initials
-        for (orig, res) in compiled
-            .compiled_initials
-            .iter()
-            .zip(resolved.compiled_initials.iter())
-        {
-            assert_eq!(orig.ident, res.ident);
+        for init in compiled.compiled_initials.iter() {
+            check(&init.bytecode, "initials");
             assert_eq!(
-                orig.offsets, res.offsets,
-                "initial offsets mismatch for {}",
-                orig.ident
+                init.offsets,
+                extract_assign_curr_offsets(&init.bytecode),
+                "initial `{}` carries offsets its bytecode does not write",
+                init.ident
             );
-            assert_eq!(orig.bytecode.literals, res.bytecode.literals);
-            assert_eq!(
-                orig.bytecode.code.len(),
-                res.bytecode.code.len(),
-                "initial code length mismatch for {}",
-                orig.ident
+        }
+        check(&compiled.compiled_flows, "flows");
+        check(&compiled.compiled_stocks, "stocks");
+
+        for md in compiled.context.modules.iter() {
+            assert!(
+                md.off < layout.n_slots && owned[md.off],
+                "module declaration for '{}' points at slot {}, which no layout entry owns",
+                md.model_name,
+                md.off
             );
-            for (i, (o, r)) in orig
-                .bytecode
-                .code
-                .iter()
-                .zip(res.bytecode.code.iter())
-                .enumerate()
-            {
+        }
+        for sv in compiled.context.static_views.iter() {
+            if !sv.is_temp {
                 assert!(
-                    opcode_eq(o, r),
-                    "initial opcode mismatch at index {} for {}: {:?} vs {:?}",
-                    i,
-                    orig.ident,
-                    o,
-                    r
+                    (sv.base_off as usize) < layout.n_slots && owned[sv.base_off as usize],
+                    "static view base {} is not an owned slot",
+                    sv.base_off
                 );
             }
         }
+    }
 
-        // Compare flows bytecode
-        assert_eq!(
-            compiled.compiled_flows.literals,
-            resolved.compiled_flows.literals
-        );
-        assert_eq!(
-            compiled.compiled_flows.code.len(),
-            resolved.compiled_flows.code.len(),
-            "flows code length mismatch"
-        );
-        for (i, (o, r)) in compiled
-            .compiled_flows
-            .code
-            .iter()
-            .zip(resolved.compiled_flows.code.iter())
-            .enumerate()
-        {
-            assert!(
-                opcode_eq(o, r),
-                "flows opcode mismatch at index {}: {:?} vs {:?}",
-                i,
-                o,
-                r
-            );
-        }
-
-        // Compare stocks bytecode
-        assert_eq!(
-            compiled.compiled_stocks.literals,
-            resolved.compiled_stocks.literals
-        );
-        assert_eq!(
-            compiled.compiled_stocks.code.len(),
-            resolved.compiled_stocks.code.len(),
-            "stocks code length mismatch"
-        );
-        for (i, (o, r)) in compiled
-            .compiled_stocks
-            .code
-            .iter()
-            .zip(resolved.compiled_stocks.code.iter())
-            .enumerate()
-        {
-            assert!(
-                opcode_eq(o, r),
-                "stocks opcode mismatch at index {}: {:?} vs {:?}",
-                i,
-                o,
-                r
-            );
-        }
-
-        // Compare context fields
-        assert_eq!(
-            compiled.context.graphical_functions,
-            resolved.context.graphical_functions
-        );
-        assert_eq!(
-            compiled.context.modules.len(),
-            resolved.context.modules.len()
-        );
-        for (orig_md, res_md) in compiled
-            .context
-            .modules
-            .iter()
-            .zip(resolved.context.modules.iter())
-        {
-            assert_eq!(orig_md.model_name, res_md.model_name);
-            assert_eq!(orig_md.off, res_md.off);
-            assert_eq!(orig_md.input_set, res_md.input_set);
-        }
-
-        assert_eq!(
-            compiled.context.static_views.len(),
-            resolved.context.static_views.len()
-        );
-        for (orig_sv, res_sv) in compiled
-            .context
-            .static_views
-            .iter()
-            .zip(resolved.context.static_views.iter())
-        {
-            assert_eq!(orig_sv.base_off, res_sv.base_off);
-            assert_eq!(orig_sv.is_temp, res_sv.is_temp);
-            assert_eq!(orig_sv.dims, res_sv.dims);
-            assert_eq!(orig_sv.strides, res_sv.strides);
-            assert_eq!(orig_sv.offset, res_sv.offset);
+    /// The model slot an opcode reads or writes, if it has one. Mirrors the
+    /// nine `SymVarRef`-carrying symbolic opcode families.
+    fn referenced_offset(op: &Opcode) -> Option<VariableOffset> {
+        match op {
+            Opcode::LoadVar { off }
+            | Opcode::LoadPrev { off }
+            | Opcode::LoadInitial { off }
+            | Opcode::LoadSubscript { off }
+            | Opcode::AssignCurr { off }
+            | Opcode::AssignConstCurr { off, .. }
+            | Opcode::BinOpAssignCurr { off, .. }
+            | Opcode::BinOpAssignNext { off, .. } => Some(*off),
+            Opcode::PushVarViewDirect { base_off, .. } => Some(*base_off),
+            _ => None,
         }
     }
 
@@ -3021,7 +3156,7 @@ mod tests {
                 ],
             )],
         );
-        compile_and_roundtrip(&dm_project, "main");
+        compile_and_check_resolution(&dm_project, "main");
     }
 
     #[test]
@@ -3037,7 +3172,7 @@ mod tests {
                 ],
             )],
         );
-        compile_and_roundtrip(&dm_project, "main");
+        compile_and_check_resolution(&dm_project, "main");
     }
 
     #[test]
@@ -3053,32 +3188,52 @@ mod tests {
                 ],
             )],
         );
-        compile_and_roundtrip(&dm_project, "main");
+        compile_and_check_resolution(&dm_project, "main");
     }
 
+    /// The resolved module's slot count comes from the layout, never from the
+    /// symbolic value. `SymbolicCompiledModule` carries no slot count at all
+    /// now, so this pins the remaining half: a bigger layout produces a bigger
+    /// module from the same fragments.
     #[test]
-    fn test_resolve_uses_layout_n_slots_not_symbolic() {
-        let dm_project = x_project(
-            default_sim_specs(),
-            &[x_model(
-                "main",
-                vec![x_aux("a", "1", None), x_aux("b", "a + 1", None)],
-            )],
+    fn test_resolve_uses_layout_n_slots() {
+        let layout = simple_layout();
+        let sym = SymbolicCompiledModule {
+            ident: Ident::new("main"),
+            compiled_initials: vec![],
+            compiled_flows: SymbolicByteCode {
+                literals: vec![],
+                code: vec![
+                    SymbolicOpcode::LoadVar {
+                        var: sref("population", 0),
+                    },
+                    SymbolicOpcode::AssignCurr {
+                        var: sref("births", 0),
+                    },
+                    SymbolicOpcode::Ret,
+                ],
+            },
+            compiled_stocks: SymbolicByteCode::default(),
+            graphical_functions: vec![],
+            module_decls: vec![],
+            static_views: vec![],
+            arrays: vec![],
+            dimensions: vec![],
+            subdim_relations: vec![],
+            names: vec![],
+            temp_offsets: vec![],
+            temp_total_size: 0,
+            dim_lists: vec![],
+            flows_invariant_opcode_len: 0,
+        };
+
+        assert_eq!(
+            resolve_module(&sym, &layout).unwrap().n_slots,
+            layout.n_slots
         );
-        let mut db = crate::db::SimlinDb::default();
-        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &dm_project, None);
-        let sim = crate::db::compile_project_incremental(&db, sync.project, "main")
-            .expect("incremental compile should succeed");
 
-        let compiled = &sim.modules[&sim.root];
-
-        let source_model = sync.models["main"].source_model;
-        // The root module was assembled against the root-shifted layout, so
-        // symbolize it back with that same layout.
-        let layout = crate::db::compute_layout(&db, source_model, sync.project).root_shifted();
-        let sym = symbolize_module(compiled, &layout).unwrap();
-
-        // Create a layout with more slots (simulating a variable addition)
+        // A variable added past the end grows the layout; the same fragments
+        // resolve into the bigger module.
         let mut bigger_entries = layout.entries.clone();
         bigger_entries.insert(
             "new_var".to_string(),
@@ -3088,15 +3243,9 @@ mod tests {
             },
         );
         let bigger_layout = VariableLayout::new(bigger_entries, layout.n_slots + 1);
-
-        let resolved = resolve_module(&sym, &bigger_layout).unwrap();
         assert_eq!(
-            resolved.n_slots, bigger_layout.n_slots,
-            "resolved module should use layout's n_slots, not the stale symbolic value"
-        );
-        assert_ne!(
-            resolved.n_slots, sym.n_slots,
-            "resolved n_slots should differ from symbolic n_slots when layout changed"
+            resolve_module(&sym, &bigger_layout).unwrap().n_slots,
+            bigger_layout.n_slots
         );
     }
 
@@ -3104,6 +3253,9 @@ mod tests {
     // u16 truncation boundary tests (issue #291)
     // ====================================================================
 
+    /// A model bigger than u16 can address is rejected before assembly, but the
+    /// resolution primitives must handle large *usize* offsets correctly up to
+    /// that point rather than truncating.
     #[test]
     fn test_large_offset_static_view() {
         let large_off: usize = 70_000;
@@ -3116,26 +3268,15 @@ mod tests {
             },
         );
         let layout = VariableLayout::new(entries, large_off + 3);
-        let rmap = ReverseOffsetMap::from_layout(&layout);
 
-        let view = StaticArrayView {
-            base_off: large_off as u32,
-            is_temp: false,
+        let sym = SymbolicStaticView {
+            base: SymStaticViewBase::Var(sref("big_var", 0)),
             dims: SmallVec::from_slice(&[3]),
             strides: SmallVec::from_slice(&[1]),
             offset: 0,
             sparse: SmallVec::new(),
             dim_ids: SmallVec::from_slice(&[0]),
         };
-
-        let sym = symbolize_static_view(&view, &rmap).unwrap();
-        match &sym.base {
-            SymStaticViewBase::Var(var_ref) => {
-                assert_eq!(var_ref.name, "big_var");
-                assert_eq!(var_ref.element_offset, 0);
-            }
-            SymStaticViewBase::Temp(_) => panic!("expected Var, got Temp"),
-        }
 
         let resolved = resolve_static_view(&sym, &layout).unwrap();
         assert_eq!(resolved.base_off, large_off as u32);
@@ -3154,221 +3295,251 @@ mod tests {
             },
         );
         let layout = VariableLayout::new(entries, large_off + 5);
-        let rmap = ReverseOffsetMap::from_layout(&layout);
 
-        let decl = ModuleDeclaration {
+        let sym = SymbolicModuleDecl {
             model_name: Ident::new("sub"),
             input_set: BTreeSet::new(),
-            off: large_off,
+            var: sref("big_module", 0),
         };
-
-        let sym = symbolize_module_decl(&decl, &rmap).unwrap();
-        assert_eq!(sym.var.name, "big_module");
 
         let resolved = resolve_module_decl(&sym, &layout).unwrap();
         assert_eq!(resolved.off, large_off);
     }
 
-    #[test]
-    #[cfg(target_pointer_width = "64")]
-    fn test_module_decl_offset_overflow_is_rejected() {
-        let mut entries = HashMap::new();
-        entries.insert("wrapped".to_string(), LayoutEntry { offset: 4, size: 1 });
-        let layout = VariableLayout::new(entries, 5);
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let overflowing_off = (u32::MAX as usize) + 5;
-        let decl = ModuleDeclaration {
-            model_name: Ident::new("sub"),
-            input_set: BTreeSet::new(),
-            off: overflowing_off,
-        };
-
-        let err = symbolize_module_decl(&decl, &rmap).unwrap_err();
-        assert!(
-            err.contains("does not fit in u32"),
-            "expected explicit overflow error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn test_unmapped_offset() {
-        let mut entries = HashMap::new();
-        entries.insert("a".to_string(), LayoutEntry { offset: 0, size: 1 });
-        // Offset 1 is allocated but not mapped to any variable
-        let layout = VariableLayout::new(entries, 3);
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        assert!(rmap.lookup(0).is_ok());
-        let err = rmap.lookup(1).unwrap_err();
-        assert!(err.contains("no variable mapped at offset"));
-    }
-
     // ====================================================================
-    // Opcode roundtrip coverage: passthrough opcodes
+    // Resolution coverage: one case per opcode family
     // ====================================================================
+    //
+    // `resolve_opcode` is an exhaustive match over `SymbolicOpcode`, so a new
+    // variant is a compile error there; these pin that each existing arm maps
+    // to the right concrete opcode with its operands intact.
 
     #[test]
-    fn test_roundtrip_control_flow_and_builtin_opcodes() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let opcodes = vec![
-            Opcode::Not {},
-            Opcode::SetCond {},
-            Opcode::If {},
-            Opcode::LoadModuleInput { input: 3 },
-            Opcode::EvalModule { id: 0, n_inputs: 2 },
-            Opcode::Apply {
-                func: BuiltinId::Abs,
-            },
-            Opcode::Lookup {
-                base_gf: 0,
-                table_count: 4,
-                mode: LookupMode::Interpolate,
-            },
-            Opcode::Lookup {
-                base_gf: 1,
-                table_count: 1,
-                mode: LookupMode::Forward,
-            },
-            Opcode::Ret,
-        ];
-
-        for op in &opcodes {
-            let sym = symbolize_opcode(op, &rmap).unwrap();
-            let resolved = resolve_opcode(&sym, &layout).unwrap();
-            assert!(opcode_eq(op, &resolved), "roundtrip failed for {:?}", sym);
+    fn test_resolve_control_flow_and_builtin_opcodes() {
+        for (sym, concrete) in [
+            (SymbolicOpcode::Not {}, Opcode::Not {}),
+            (SymbolicOpcode::SetCond {}, Opcode::SetCond {}),
+            (SymbolicOpcode::If {}, Opcode::If {}),
+            (
+                SymbolicOpcode::LoadModuleInput { input: 3 },
+                Opcode::LoadModuleInput { input: 3 },
+            ),
+            (
+                SymbolicOpcode::EvalModule { id: 0, n_inputs: 2 },
+                Opcode::EvalModule { id: 0, n_inputs: 2 },
+            ),
+            (
+                SymbolicOpcode::Apply {
+                    func: BuiltinId::Abs,
+                },
+                Opcode::Apply {
+                    func: BuiltinId::Abs,
+                },
+            ),
+            (
+                SymbolicOpcode::Lookup {
+                    base_gf: 0,
+                    table_count: 4,
+                    mode: LookupMode::Interpolate,
+                },
+                Opcode::Lookup {
+                    base_gf: 0,
+                    table_count: 4,
+                    mode: LookupMode::Interpolate,
+                },
+            ),
+            (
+                SymbolicOpcode::Lookup {
+                    base_gf: 1,
+                    table_count: 1,
+                    mode: LookupMode::Forward,
+                },
+                Opcode::Lookup {
+                    base_gf: 1,
+                    table_count: 1,
+                    mode: LookupMode::Forward,
+                },
+            ),
+            (SymbolicOpcode::Ret, Opcode::Ret),
+        ] {
+            assert_resolves(sym, concrete);
         }
     }
 
     #[test]
-    fn test_roundtrip_view_stack_opcodes() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let opcodes = vec![
-            Opcode::PushVarView {
-                base_off: 4,
-                dim_list_id: 0,
-            },
-            Opcode::PushTempView {
-                temp_id: 1,
-                dim_list_id: 2,
-            },
-            Opcode::PushStaticView { view_id: 3 },
-            Opcode::PushVarViewDirect {
-                base_off: 5,
-                dim_list_id: 1,
-            },
-            Opcode::ViewSubscriptConst {
-                dim_idx: 0,
-                index: 2,
-            },
-            Opcode::ViewSubscriptDynamic { dim_idx: 1 },
-            Opcode::ViewRange {
-                dim_idx: 0,
-                start: 1,
-                end: 5,
-            },
-            Opcode::ViewRangeDynamic { dim_idx: 2 },
-            Opcode::ViewStarRange {
-                dim_idx: 0,
-                subdim_relation_id: 7,
-            },
-            Opcode::ViewWildcard { dim_idx: 1 },
-            Opcode::ViewTranspose {},
-            Opcode::PopView {},
-            Opcode::DupView {},
-        ];
-
-        for op in &opcodes {
-            let sym = symbolize_opcode(op, &rmap).unwrap();
-            let resolved = resolve_opcode(&sym, &layout).unwrap();
-            assert!(opcode_eq(op, &resolved), "roundtrip failed for {:?}", sym);
+    fn test_resolve_view_stack_opcodes() {
+        for (sym, concrete) in [
+            (
+                SymbolicOpcode::PushStaticView { view_id: 3 },
+                Opcode::PushStaticView { view_id: 3 },
+            ),
+            (
+                SymbolicOpcode::PushVarViewDirect {
+                    var: sref("population", 0),
+                    dim_list_id: 1,
+                },
+                Opcode::PushVarViewDirect {
+                    base_off: 5,
+                    dim_list_id: 1,
+                },
+            ),
+            (
+                SymbolicOpcode::ViewSubscriptDynamic { dim_idx: 1 },
+                Opcode::ViewSubscriptDynamic { dim_idx: 1 },
+            ),
+            (
+                SymbolicOpcode::ViewRangeDynamic { dim_idx: 2 },
+                Opcode::ViewRangeDynamic { dim_idx: 2 },
+            ),
+            (SymbolicOpcode::PopView {}, Opcode::PopView {}),
+        ] {
+            assert_resolves(sym, concrete);
         }
     }
 
     #[test]
-    fn test_roundtrip_temp_and_subscript_opcodes() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let opcodes = vec![
-            Opcode::LoadTempConst {
-                temp_id: 0,
-                index: 3,
-            },
-            Opcode::LoadTempDynamic { temp_id: 2 },
-            Opcode::PushSubscriptIndex { bounds: 4 },
-            Opcode::LoadSubscript { off: 5 },
-            Opcode::AssignNext { off: 4 },
-        ];
-
-        for op in &opcodes {
-            let sym = symbolize_opcode(op, &rmap).unwrap();
-            let resolved = resolve_opcode(&sym, &layout).unwrap();
-            assert!(opcode_eq(op, &resolved), "roundtrip failed for {:?}", sym);
+    fn test_resolve_temp_and_subscript_opcodes() {
+        for (sym, concrete) in [
+            (
+                SymbolicOpcode::LoadTempConst {
+                    temp_id: 0,
+                    index: 3,
+                },
+                Opcode::LoadTempConst {
+                    temp_id: 0,
+                    index: 3,
+                },
+            ),
+            (
+                SymbolicOpcode::PushSubscriptIndex { bounds: 4 },
+                Opcode::PushSubscriptIndex { bounds: 4 },
+            ),
+            (
+                SymbolicOpcode::LoadSubscript {
+                    var: sref("population", 0),
+                },
+                Opcode::LoadSubscript { off: 5 },
+            ),
+            (
+                SymbolicOpcode::BinOpAssignNext {
+                    op: Op2::Add,
+                    var: sref("births", 0),
+                },
+                Opcode::BinOpAssignNext {
+                    op: Op2::Add,
+                    off: 4,
+                },
+            ),
+            (
+                SymbolicOpcode::SymLoadPrev {
+                    var: sref("population", 0),
+                },
+                Opcode::LoadPrev { off: 5 },
+            ),
+            (
+                SymbolicOpcode::SymLoadInitial {
+                    var: sref("births", 0),
+                },
+                Opcode::LoadInitial { off: 4 },
+            ),
+        ] {
+            assert_resolves(sym, concrete);
         }
     }
 
     #[test]
-    fn test_roundtrip_iteration_opcodes() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let opcodes = vec![
-            Opcode::BeginIter {
-                write_temp_id: 0,
-                has_write_temp: true,
-            },
-            Opcode::BeginIter {
-                write_temp_id: 0,
-                has_write_temp: false,
-            },
-            Opcode::LoadIterElement {},
-            Opcode::LoadIterTempElement { temp_id: 1 },
-            Opcode::LoadIterViewTop {},
-            Opcode::LoadIterViewAt { offset: 2 },
-            Opcode::StoreIterElement {},
-            Opcode::NextIterOrJump { jump_back: -5 },
-            Opcode::EndIter {},
-        ];
-
-        for op in &opcodes {
-            let sym = symbolize_opcode(op, &rmap).unwrap();
-            let resolved = resolve_opcode(&sym, &layout).unwrap();
-            assert!(opcode_eq(op, &resolved), "roundtrip failed for {:?}", sym);
+    fn test_resolve_iteration_opcodes() {
+        for (sym, concrete) in [
+            (
+                SymbolicOpcode::BeginIter {
+                    write_temp_id: 0,
+                    has_write_temp: true,
+                },
+                Opcode::BeginIter {
+                    write_temp_id: 0,
+                    has_write_temp: true,
+                },
+            ),
+            (
+                SymbolicOpcode::BeginIter {
+                    write_temp_id: 0,
+                    has_write_temp: false,
+                },
+                Opcode::BeginIter {
+                    write_temp_id: 0,
+                    has_write_temp: false,
+                },
+            ),
+            (
+                SymbolicOpcode::LoadIterViewAt { offset: 2 },
+                Opcode::LoadIterViewAt { offset: 2 },
+            ),
+            (
+                SymbolicOpcode::StoreIterElement {},
+                Opcode::StoreIterElement {},
+            ),
+            (
+                SymbolicOpcode::NextIterOrJump { jump_back: -5 },
+                Opcode::NextIterOrJump { jump_back: -5 },
+            ),
+            (SymbolicOpcode::EndIter {}, Opcode::EndIter {}),
+        ] {
+            assert_resolves(sym, concrete);
         }
     }
 
     #[test]
-    fn test_roundtrip_broadcast_and_reduction_opcodes() {
-        let layout = simple_layout();
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let opcodes = vec![
-            Opcode::ArraySum {},
-            Opcode::ArrayMax {},
-            Opcode::ArrayMin {},
-            Opcode::ArrayMean {},
-            Opcode::ArrayStddev {},
-            Opcode::ArraySize {},
-            Opcode::BeginBroadcastIter {
-                n_sources: 2,
-                dest_temp_id: 0,
-            },
-            Opcode::LoadBroadcastElement { source_idx: 0 },
-            Opcode::LoadBroadcastElement { source_idx: 1 },
-            Opcode::StoreBroadcastElement {},
-            Opcode::NextBroadcastOrJump { jump_back: -4 },
-            Opcode::EndBroadcastIter {},
-        ];
-
-        for op in &opcodes {
-            let sym = symbolize_opcode(op, &rmap).unwrap();
-            let resolved = resolve_opcode(&sym, &layout).unwrap();
-            assert!(opcode_eq(op, &resolved), "roundtrip failed for {:?}", sym);
+    fn test_resolve_reduction_and_vector_opcodes() {
+        for (sym, concrete) in [
+            (SymbolicOpcode::ArraySum {}, Opcode::ArraySum {}),
+            (SymbolicOpcode::ArrayMax {}, Opcode::ArrayMax {}),
+            (SymbolicOpcode::ArrayMin {}, Opcode::ArrayMin {}),
+            (SymbolicOpcode::ArrayMean {}, Opcode::ArrayMean {}),
+            (SymbolicOpcode::ArrayStddev {}, Opcode::ArrayStddev {}),
+            (SymbolicOpcode::ArraySize {}, Opcode::ArraySize {}),
+            (SymbolicOpcode::VectorSelect {}, Opcode::VectorSelect {}),
+            (
+                SymbolicOpcode::VectorElmMap {
+                    write_temp_id: 1,
+                    full_source_len: 12,
+                },
+                Opcode::VectorElmMap {
+                    write_temp_id: 1,
+                    full_source_len: 12,
+                },
+            ),
+            (
+                SymbolicOpcode::VectorSortOrder { write_temp_id: 2 },
+                Opcode::VectorSortOrder { write_temp_id: 2 },
+            ),
+            (
+                SymbolicOpcode::Rank { write_temp_id: 3 },
+                Opcode::Rank { write_temp_id: 3 },
+            ),
+            (
+                SymbolicOpcode::LookupArray {
+                    base_gf: 2,
+                    table_count: 3,
+                    mode: LookupMode::Backward,
+                    write_temp_id: 4,
+                },
+                Opcode::LookupArray {
+                    base_gf: 2,
+                    table_count: 3,
+                    mode: LookupMode::Backward,
+                    write_temp_id: 4,
+                },
+            ),
+            (
+                SymbolicOpcode::AllocateAvailable { write_temp_id: 5 },
+                Opcode::AllocateAvailable { write_temp_id: 5 },
+            ),
+            (
+                SymbolicOpcode::AllocateByPriority { write_temp_id: 6 },
+                Opcode::AllocateByPriority { write_temp_id: 6 },
+            ),
+        ] {
+            assert_resolves(sym, concrete);
         }
     }
 
@@ -3377,25 +3548,23 @@ mod tests {
     // ====================================================================
 
     #[test]
-    fn test_symbolize_opcode_out_of_range_offset() {
-        let mut entries = HashMap::new();
-        entries.insert("a".to_string(), LayoutEntry { offset: 0, size: 1 });
-        let layout = VariableLayout::new(entries, 1);
-        let rmap = ReverseOffsetMap::from_layout(&layout);
-
-        let op = Opcode::LoadVar { off: 50 };
-        let err = symbolize_opcode(&op, &rmap).unwrap_err();
-        assert!(err.contains("out of range"));
+    fn test_resolve_opcode_unknown_variable() {
+        let layout = simple_layout();
+        let err = resolve_opcode(
+            &SymbolicOpcode::LoadVar {
+                var: sref("nonexistent", 0),
+            },
+            &layout,
+        )
+        .unwrap_err();
+        assert!(err.contains("not found in layout"), "got: {err}");
     }
 
     #[test]
     fn test_resolve_static_view_missing_variable() {
         let layout = simple_layout();
         let sym_view = SymbolicStaticView {
-            base: SymStaticViewBase::Var(SymVarRef {
-                name: "nonexistent".to_string(),
-                element_offset: 0,
-            }),
+            base: SymStaticViewBase::Var(sref("nonexistent", 0)),
             dims: SmallVec::from_slice(&[3]),
             strides: SmallVec::from_slice(&[1]),
             offset: 0,
@@ -3413,10 +3582,7 @@ mod tests {
         let sym_decl = SymbolicModuleDecl {
             model_name: Ident::new("sub"),
             input_set: BTreeSet::new(),
-            var: SymVarRef {
-                name: "nonexistent".to_string(),
-                element_offset: 0,
-            },
+            var: sref("nonexistent", 0),
         };
 
         let err = resolve_module_decl(&sym_decl, &layout).unwrap_err();
@@ -3445,7 +3611,7 @@ mod tests {
                 ),
             ],
         );
-        compile_and_roundtrip(&dm_project, "main");
+        compile_and_check_resolution(&dm_project, "main");
     }
 
     // ====================================================================
@@ -3805,29 +3971,23 @@ mod tests {
         // End-to-end belt-and-suspenders for the Phase 5 `full_source_len`
         // opcode field. `test_renumber_vector_builtin_temp_ids` covers the
         // isolated `renumber_opcode` call; this exercises the *real merge
-        // path* a compiled model takes -- `symbolize_opcode` ->
+        // path* a compiled model takes -- codegen's symbolic opcode ->
         // `concatenate_fragments` (absorb + `renumber_fragment_code`) ->
         // `resolve_bytecode` -- with the VECTOR ELM MAP opcode merged AFTER a
         // temp-contributing fragment so its `write_temp_id` gets a *non-zero*
         // renumber offset. The invariant under test: `full_source_len` is an
         // absolute element count, NOT a renumber-able resource id, so it must
-        // come out of symbolize -> concatenate/renumber -> resolve
-        // byte-identical even though `write_temp_id` is offset. If
-        // `full_source_len` were ever (mistakenly) treated like a temp id, it
-        // would be shifted by `frag_a`'s temp count here and this test would
-        // fail; the existing renumber unit test would not catch that
-        // regression because it never drives the fragment merger.
+        // come out of concatenate/renumber -> resolve byte-identical even
+        // though `write_temp_id` is offset. If `full_source_len` were ever
+        // (mistakenly) treated like a temp id, it would be shifted by
+        // `frag_a`'s temp count here and this test would fail; the existing
+        // renumber unit test would not catch that regression because it never
+        // drives the fragment merger.
         const GENUINE_FULL_SOURCE_LEN: u32 = 6; // e.g. d[DimA,DimB] = 3 x 2
-        let original = Opcode::VectorElmMap {
+        let symbolic_elm_map = SymbolicOpcode::VectorElmMap {
             write_temp_id: 0,
             full_source_len: GENUINE_FULL_SOURCE_LEN,
         };
-
-        // The VectorElmMap opcode carries no variable offset, so an empty
-        // layout (=> empty ReverseOffsetMap) is sufficient for symbolization.
-        let empty_layout = VariableLayout::new(HashMap::new(), 0);
-        let rmap = ReverseOffsetMap::from_layout(&empty_layout);
-        let symbolic_elm_map = symbolize_opcode(&original, &rmap).unwrap();
 
         // frag_a is a temp-bearing fragment; frag_b carries the VectorElmMap.
         // #583: the plain-phase concat RECYCLES temps into one identity pool,
@@ -3867,8 +4027,9 @@ mod tests {
         };
         let merged = concatenate_fragments(&[&frag_a, &frag_b], &based).unwrap();
 
-        // Resolve back to concrete bytecode (same empty layout: the
-        // VectorElmMap opcode carries no SymVarRef).
+        // Resolve to concrete bytecode against an empty layout: the
+        // VectorElmMap opcode carries no variable reference.
+        let empty_layout = VariableLayout::new(HashMap::new(), 0);
         let resolved = resolve_bytecode(&merged.bytecode, &empty_layout).unwrap();
 
         let elm_map = resolved
@@ -3893,16 +4054,340 @@ mod tests {
              the fragment merger renumbered this opcode"
         );
         // The invariant: full_source_len is absolute, not renumbered. It must
-        // survive symbolize -> concatenate/renumber -> resolve unchanged even
+        // survive concatenate/renumber -> resolve unchanged even
         // though write_temp_id was offset.
         assert_eq!(
             elm_map.1, GENUINE_FULL_SOURCE_LEN,
-            "full_source_len must survive the symbolize -> fragment-merge -> \
-             resolve round-trip byte-identical (it is an absolute element \
+            "full_source_len must survive the fragment-merge -> resolve path \
+             byte-identical (it is an absolute element \
              count, not a renumber-able resource id); a corrupted value would \
              feed the VM a wrong full-source extent and break genuine VECTOR \
              ELM MAP results"
         );
+    }
+
+    // ====================================================================
+    // M3: a resource id past its bytecode type is reported, never wrapped.
+    //
+    // `GraphicalFunctionId` (#582) and `TempId` (#583) both overflowed on
+    // C-LEARN and both fail loud. The four `u16` resources -- literals, module
+    // decls, static views, dim lists -- were the unguarded members of the same
+    // family: `absorb_non_gf` narrowed their bases with `as u16` and
+    // `renumber_opcode` added them unchecked, so a merged table past 65,536
+    // entries produced a wrapped id that names a real, in-range resource. The
+    // program runs and returns different numbers, with no diagnostic anywhere.
+    //
+    // The bound is EXACT in both directions -- a table of 65,536 entries is
+    // addressable, 65,537 is not -- and the tests below say so at each of the
+    // three places a base is computed, because the first fix stated it once per
+    // place and the three disagreed: the cross-phase and initials-phase
+    // narrowings rejected a count of exactly 65,536 that the merger accepts.
+    // ====================================================================
+
+    /// A fragment carrying `n` literals and nothing else.
+    fn literal_pool_frag(n: usize) -> PerVarBytecodes {
+        PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![1.0; n],
+                code: vec![SymbolicOpcode::LoadConstant { id: 0 }, SymbolicOpcode::Ret],
+            },
+            graphical_functions: vec![],
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![],
+            dim_lists: vec![],
+        }
+    }
+
+    /// M3 for the literal pool, the cheapest `u16` resource to overflow and the
+    /// one whose failure is worst: a wrapped `LiteralId` names a real, in-range
+    /// literal, so the program runs and returns different numbers.
+    #[test]
+    fn literal_pool_past_u16_capacity_fails_loud() {
+        let cap = u16::MAX as usize + 1;
+        let a = literal_pool_frag(cap - 1);
+        let b = literal_pool_frag(4);
+        let err = concatenate_fragments(&[&a, &b], &ContextResourceCounts::default())
+            .expect_err("a literal pool past u16 capacity must be reported, not wrapped");
+        assert!(
+            err.contains("literal") && err.contains("16-bit"),
+            "expected a loud literal-capacity error, got: {err}"
+        );
+
+        // ...and one entry less is still fine, so the bound is exact rather than
+        // conservative.
+        let c = literal_pool_frag(1);
+        concatenate_fragments(&[&a, &c], &ContextResourceCounts::default())
+            .expect("a pool of exactly u16::MAX + 1 literals is addressable");
+
+        // A fragment carrying NONE of the resource is exempt even at a full
+        // table: it names no id, so there is nothing that has to be
+        // representable. Without the exemption the base -- which this fragment
+        // never uses -- would be rejected for being one past `u16::MAX`.
+        let empty = PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![],
+                code: vec![SymbolicOpcode::Ret],
+            },
+            graphical_functions: vec![],
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![],
+            dim_lists: vec![],
+        };
+        concatenate_fragments(&[&a, &c, &empty], &ContextResourceCounts::default())
+            .expect("a fragment with no literals must not be bounded by a full pool");
+    }
+
+    /// A fragment carrying `n` dim lists and nothing else.
+    fn dim_list_frag(n: usize) -> PerVarBytecodes {
+        PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![],
+                code: vec![
+                    SymbolicOpcode::PushVarViewDirect {
+                        var: SymVarRef::base(Ident::new("x")),
+                        dim_list_id: 0,
+                    },
+                    SymbolicOpcode::Ret,
+                ],
+            },
+            graphical_functions: vec![],
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![],
+            dim_lists: vec![vec![1u16]; n],
+        }
+    }
+
+    /// The same bound, one level up: across PHASES, where the base is a
+    /// preceding phase's count rather than a running merged length.
+    ///
+    /// The literal pool cannot reach this path -- literals are phase-local, so
+    /// their `ctx_base` is always 0 -- which is why the exactness the test above
+    /// pins did not extend to the three resources that DO carry a `ctx_base`.
+    /// Those went through a separate narrowing (`ContextResourceCounts` held
+    /// `u16` fields and `assemble_module` summed them with a checked add), and
+    /// that narrowing rejected a count of exactly `U16_ID_CAPACITY` outright --
+    /// disagreeing with `resource_base`, which accepts a table of exactly that
+    /// size because every id in it is `<= u16::MAX`. A model whose initials
+    /// filled the table and whose flows and stocks then named no dim list at all
+    /// was rejected with every one of its ids valid.
+    #[test]
+    fn a_full_ctx_base_bounds_only_the_phases_that_use_it() {
+        let cap = U16_ID_CAPACITY;
+        let full = dim_list_frag(cap);
+        let one = dim_list_frag(1);
+        let none = dim_list_frag(0);
+
+        // A phase count is just a count: filling the table exactly is legal, and
+        // saying so is not the same as handing out an id past the end.
+        let at_capacity = ContextResourceCounts::from_fragments(&[&full]);
+        assert_eq!(at_capacity.dim_lists, cap);
+
+        // A following phase that names no dim list assigns no id, so it merges.
+        concatenate_fragments(&[&none], &at_capacity)
+            .expect("a phase carrying no dim lists is not bounded by a full table");
+
+        // One that names even a single dim list would need id 65,536.
+        let err = concatenate_fragments(&[&one], &at_capacity)
+            .expect_err("a dim list id past u16 capacity must be reported, not wrapped");
+        assert!(
+            err.contains("dimension list") && err.contains("16-bit"),
+            "expected a loud dim-list-capacity error, got: {err}"
+        );
+
+        // ...and the bound is exact from below: one entry short of capacity, the
+        // following phase's single entry is id 65,535 and merges.
+        let nearly = ContextResourceCounts::from_fragments(&[&dim_list_frag(cap - 1)]);
+        concatenate_fragments(&[&one], &nearly)
+            .expect("the last addressable dim list id (u16::MAX) must merge");
+
+        // The same exactness within one phase's merged table, so the two halves
+        // of the bound are stated against the same resource.
+        concatenate_fragments(
+            &[&dim_list_frag(cap - 1), &one],
+            &ContextResourceCounts::default(),
+        )
+        .expect("a merged table of exactly u16::MAX + 1 dim lists is addressable");
+        concatenate_fragments(&[&full, &one], &ContextResourceCounts::default())
+            .expect_err("one dim list past a full merged table must be reported");
+        concatenate_fragments(&[&full, &none], &ContextResourceCounts::default())
+            .expect("a fragment with no dim lists must not be bounded by a full table");
+    }
+
+    /// The initials phase tracks its own running offsets rather than going
+    /// through the merger (each initial keeps its own bytecode, so each is
+    /// renumbered at literal offset 0), and it has to agree with the merger
+    /// about where the table ends.
+    ///
+    /// It did not: it narrowed each initial's count and its running total to
+    /// `u16` eagerly, so an initials list that filled the table exactly was
+    /// rejected the moment the LAST initial's count was folded in -- with
+    /// nothing left to assign an id to.
+    #[test]
+    fn the_initials_phase_shares_the_mergers_capacity_bound() {
+        let cap = U16_ID_CAPACITY;
+        let full = dim_list_frag(cap);
+        let one = dim_list_frag(1);
+        let none = dim_list_frag(0);
+
+        let run = |frags: &[&PerVarBytecodes]| -> Result<(), String> {
+            let dedup = GfDedup::build(frags)?;
+            let named: Vec<(String, &PerVarBytecodes)> = frags
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (format!("init{i}"), *f))
+                .collect();
+            crate::db::renumber_initials_phase(&named, &dedup).map(|_| ())
+        };
+
+        run(&[&full]).expect("initials that fill the dim-list table exactly are addressable");
+        run(&[&full, &none]).expect("an initial naming no dim list is not bounded by a full table");
+        let err = run(&[&full, &one])
+            .expect_err("an initial needing dim list id 65,536 must be reported");
+        assert!(
+            err.contains("dimension list") && err.contains("16-bit"),
+            "expected a loud dim-list-capacity error, got: {err}"
+        );
+    }
+
+    /// The all-phases aggregation of the shared context tables must NOT bound
+    /// the model's literal count, because it retains no literal pool.
+    ///
+    /// Each compiled initial keeps its own pool and the flows and stocks phases
+    /// keep one each; the aggregation exists only for the module-decl /
+    /// static-view / temp / dim-list tables those three phases' ids index. A
+    /// full merge over every fragment additionally built a literal pool spanning
+    /// the whole model and threw it away -- but not before `resource_base`
+    /// bounded it, so a model whose every RETAINED pool was comfortably
+    /// addressable stopped assembling once the three summed past capacity.
+    #[test]
+    fn the_all_phases_aggregation_does_not_bound_the_literal_pool() {
+        let cap = U16_ID_CAPACITY;
+        // Two fragments that together overrun the literal id space.
+        let full = literal_pool_frag(cap);
+        let one = literal_pool_frag(1);
+        let frags = [&full, &one];
+        let dedup = GfDedup::build(&frags).expect("no GFs to dedup");
+
+        // Merging them into ONE stream assigns literal id 65,536 and is an
+        // error -- that pool would be retained, so the bound is right.
+        let err =
+            concatenate_fragments_with_gf(&frags, &ContextResourceCounts::default(), &dedup, 0)
+                .expect_err("a retained pool past capacity must be reported");
+        assert!(
+            err.contains("literal") && err.contains("16-bit"),
+            "expected a loud literal-capacity error, got: {err}"
+        );
+
+        // Aggregating their context side-channels assigns no literal id at all,
+        // so the same fragments are fine.
+        let side = merge_context_side_channels(&frags, &ContextResourceCounts::default(), &dedup)
+            .expect("the side-channel aggregation must not be bounded by a literal pool");
+        assert!(
+            side.module_decls.is_empty() && side.static_views.is_empty(),
+            "these fragments carry no context resources; only literals"
+        );
+    }
+
+    /// The same property end-to-end, through `assemble_module` on a real model,
+    /// so a future refactor that points the all-phases aggregation back at a
+    /// full merge fails here rather than only at the unit level.
+    ///
+    /// Reaching the bound honestly would need a model with 65,537 literals,
+    /// which is orders of magnitude outside the per-test time budget, so the
+    /// capacity is shrunk instead (`docs/dev/rust.md#test-time-budgets`, the
+    /// repo's stated preference over building a fixture large enough to trip a
+    /// production threshold). Five scalar stocks give one literal per initial
+    /// (five pools of one), five in the flows pool and five in the stocks pool
+    /// -- fifteen in aggregate. At a capacity of 8 every RETAINED pool fits and
+    /// only the discarded aggregate does not.
+    ///
+    /// The second half is what stops this from being a test that merely proves
+    /// a check was deleted: at a capacity of 4 the flows pool genuinely does not
+    /// fit, and assembly must still fail.
+    #[test]
+    fn assembly_bounds_the_retained_pools_and_not_the_aggregate() {
+        use crate::test_common::TestProject;
+
+        let model = || {
+            let mut p = TestProject::new("literal_capacity");
+            for i in 0..5 {
+                p = p
+                    .stock(
+                        &format!("s{i}"),
+                        &format!("{}", i + 1),
+                        &[&format!("f{i}")],
+                        &[],
+                        None,
+                    )
+                    .flow(&format!("f{i}"), &format!("{}", 10 + i), None);
+            }
+            p
+        };
+
+        {
+            let _cap = IdCapacityGuard::new(8);
+            model()
+                .compile_incremental()
+                .expect("every retained literal pool fits; only the discarded aggregate does not");
+        }
+
+        {
+            let _cap = IdCapacityGuard::new(4);
+            let err = model()
+                .compile_incremental()
+                .expect_err("the flows phase's own five-literal pool does not fit in four ids");
+            assert!(
+                format!("{err:?}").contains("literal"),
+                "expected the failure to name the literal pool, got: {err:?}"
+            );
+        }
+    }
+
+    /// M3 for the per-opcode add. `renumber_opcode` can be reached with a base the
+    /// merger did not compute -- `assemble_module`'s per-initial loop tracks its
+    /// own running module / view / dim-list offsets -- so the add is checked there
+    /// too rather than relying on the merger's table bound alone.
+    #[test]
+    fn renumber_opcode_u16_addition_overflow_is_loud() {
+        let cases: Vec<(SymbolicOpcode, &str, [u16; 4])> = vec![
+            (
+                SymbolicOpcode::LoadConstant { id: u16::MAX },
+                "LiteralId",
+                [1, 0, 0, 0],
+            ),
+            (
+                SymbolicOpcode::EvalModule {
+                    id: u16::MAX,
+                    n_inputs: 0,
+                },
+                "ModuleId",
+                [0, 1, 0, 0],
+            ),
+            (
+                SymbolicOpcode::PushStaticView { view_id: u16::MAX },
+                "ViewId",
+                [0, 0, 1, 0],
+            ),
+            (
+                SymbolicOpcode::PushVarViewDirect {
+                    var: SymVarRef::base(Ident::new("x")),
+                    dim_list_id: u16::MAX,
+                },
+                "DimListId",
+                [0, 0, 0, 1],
+            ),
+        ];
+        for (op, label, [lit, md, vw, dl]) in cases {
+            let err = renumber_opcode(&op, lit, &[], md, vw, 0, dl)
+                .expect_err("an id at u16::MAX plus a non-zero base must be reported");
+            assert!(
+                err.contains(label) && err.contains("overflow"),
+                "expected a loud {label} overflow, got: {err}"
+            );
+        }
     }
 
     #[test]
@@ -3918,17 +4403,18 @@ mod tests {
     }
 
     // ====================================================================
-    // #582: cross-fragment graphical-function de-duplication.
+    // #582, M4: cross-fragment graphical-function de-duplication.
     //
     // `concatenate_fragments` previously appended every fragment's
     // `graphical_functions` with no de-duplication (the flat running
     // `gf_offset = merged_gf.len()`), so a dependency arrayed GF referenced
     // by N consumer fragments duplicated N times and `renumber_opcode`'s
     // `gf_off > u8::MAX` guard tripped once the duplicated count crossed
-    // 255 -- even though the *distinct* count is small. The monolithic
-    // `Compiler::new` (codegen.rs) carries each variable's GF list exactly
-    // once (its `module.tables` map is keyed by ident), so the incremental
-    // path was incorrect-by-omission, not merely capacity-limited.
+    // 255 -- even though the *distinct* count is small. Codegen lays each
+    // table-bearing variable's tables down exactly once per fragment (its
+    // `tables` map is keyed by ident); the duplication was entirely ACROSS
+    // fragments, which is why de-duplicating on block content is a complete
+    // fix rather than a capacity workaround.
     // ====================================================================
 
     /// Build a single-`Lookup` fragment carrying one scalar GF table whose
@@ -4190,20 +4676,26 @@ mod tests {
     }
 
     // ====================================================================
-    // #583: match the monolithic temp recycling in the plain-phase concat.
+    // #583, M5: the sequential concat shares temp slots by IDENTITY.
     //
-    // The monolithic `Module::compile` flattens every variable's exprs into
-    // one runlist and max-merges their temps via a `HashMap<temp_id, size>`
-    // (`compiler/mod.rs`): since each variable's temps are 0-based scratch
-    // that die at that variable's runlist-segment end, variable A's temp 0
-    // and variable B's temp 0 collapse to ONE global slot 0. The plain-phase
-    // incremental concat must produce the SAME identity-recycled pool (one
-    // shared pool across initials/flows/stocks), not a per-fragment SUM --
-    // summing both wastes slots AND, with a non-zero phase ctx_base, drives
-    // the renumbered `temp_id` past `u8::MAX` (the C-LEARN
-    // `temp offset ... exceeds TempId capacity` failure). `combine_scc_fragment`
-    // stays on the disjoint (sum) path because its per-element segments
-    // interleave (overlapping live ranges) -- see `db/combined_fragment_tests`.
+    // A fragment's temps are 0-based scratch that dies at the end of that
+    // fragment's runlist segment, and `concatenate_fragments_with_gf` emits
+    // each fragment as one contiguous run, so no two fragments' temp uses
+    // interleave and fragment A's temp 0 may occupy the same slot as fragment
+    // B's temp 0 -- sized to the MAX of its users, since each of them holds it
+    // alone for the length of its own segment. That sharing is not an
+    // optimization: `TempId` is `u8`, and summing 0-based per-fragment counts
+    // across a model overflows it (the C-LEARN
+    // `temp offset ... exceeds TempId capacity` failure, #583).
+    // `combine_scc_fragment` interleaves per-element segments, so its members'
+    // live ranges DO overlap and it stays on the disjoint `Sum` path -- see
+    // `db/combined_fragment_tests`.
+    //
+    // These fixtures pin the rule on hand-built shapes; the general statement
+    // (over arbitrary fragment sets, including the non-interleaving property
+    // that is the actual justification) is
+    // `symbolic_merge_proptest::recycle_shares_by_identity_and_sizes_by_max`
+    // and `merged_temp_slot_uses_never_interleave`.
     // ====================================================================
 
     /// Build a single-variable-shaped fragment carrying a `VectorSortOrder`
@@ -4229,51 +4721,30 @@ mod tests {
         }
     }
 
-    /// The monolithic `Module::compile` temp count: the keyed max-merge of
-    /// every fragment's `(temp_id, size)` pairs (`compiler/mod.rs` flattens
-    /// every variable's exprs and merges into one `HashMap<temp_id, size>`).
-    /// `n_temps` is the number of distinct ids (== `max_id + 1` for the
-    /// dense 0-based ids real per-variable fragments produce).
-    fn monolithic_n_temps(frags: &[&PerVarBytecodes]) -> usize {
-        let mut map: HashMap<u32, usize> = HashMap::new();
-        for frag in frags {
-            for (id, size) in &frag.temp_sizes {
-                let e = map.entry(*id).or_insert(0);
-                *e = (*e).max(*size);
-            }
-        }
-        map.len()
-    }
-
     #[test]
-    fn test_concatenate_recycles_temps_to_match_monolithic() {
+    fn test_concatenate_recycles_three_id_zero_temps_onto_one_slot() {
         // Three per-variable fragments, each with its own 0-based temp 0.
-        // Monolithic recycles them to ONE slot (n_temps == 1). The plain-
-        // phase concat must do the same: a single shared identity pool, not
-        // three summed slots.
+        // They are emitted as three disjoint contiguous runs, so all three may
+        // hold ONE slot in turn: the pool is one slot wide, sized to the
+        // largest of them.
         let frag_a = sort_order_temp_frag(0, 4);
         let frag_b = sort_order_temp_frag(0, 8);
         let frag_c = sort_order_temp_frag(0, 2);
         let refs: Vec<&PerVarBytecodes> = vec![&frag_a, &frag_b, &frag_c];
 
-        let expected = monolithic_n_temps(&refs);
-        assert_eq!(expected, 1, "monolithic recycles three id-0 temps to one");
-
         let no_base = ContextResourceCounts::default();
         let merged = concatenate_fragments(&refs, &no_base).unwrap();
 
-        // The recycled pool has exactly `expected` slots, and the surviving
-        // slot's size is the MAX over the fragments that used it (8), since
-        // they share the storage (the monolithic keyed max-merge).
         assert_eq!(
             merged.temp_offsets.len(),
-            expected,
-            "incremental plain-phase temp count must EQUAL the monolithic \
-             Module::compile n_temps (recycle, not sum)"
+            1,
+            "three fragments' id-0 temps must recycle onto one shared slot, \
+             not sum to three"
         );
         assert_eq!(
             merged.temp_total_size, 8,
-            "the recycled slot's size is the max over the fragments using it"
+            "a shared slot must be sized to the LARGEST of its users, or the \
+             fragment needing 8 elements would write past its storage"
         );
 
         // Every renumbered temp opcode must resolve in-range (index < pool).
@@ -4291,9 +4762,9 @@ mod tests {
 
     #[test]
     fn test_concatenate_temp_recycle_distinct_ids_max_merge() {
-        // A fragment using temp ids {0, 1} and another using {0}. Monolithic
-        // merges to ids {0, 1} (2 slots, sizes max-merged per id). The
-        // plain-phase concat must match: 2 slots, not 3 summed.
+        // A fragment using temp ids {0, 1} and another using {0}: the pool is
+        // the UNION of the ids (2 slots), each sized to the max of the
+        // fragments using that id -- not 3 summed slots.
         let frag_a = PerVarBytecodes {
             symbolic: SymbolicByteCode {
                 literals: vec![],
@@ -4315,11 +4786,12 @@ mod tests {
         let frag_b = sort_order_temp_frag(0, 8);
         let refs: Vec<&PerVarBytecodes> = vec![&frag_a, &frag_b];
 
-        let expected = monolithic_n_temps(&refs);
-        assert_eq!(expected, 2, "ids {{0,1}} merged with {{0}} -> 2 distinct");
-
         let merged = concatenate_fragments(&refs, &ContextResourceCounts::default()).unwrap();
-        assert_eq!(merged.temp_offsets.len(), expected);
+        assert_eq!(
+            merged.temp_offsets.len(),
+            2,
+            "ids {{0,1}} unioned with {{0}} -> 2 slots"
+        );
         // Slot 0 size = max(4, 8) = 8; slot 1 size = 6.
         assert_eq!(merged.temp_total_size, 8 + 6);
 
