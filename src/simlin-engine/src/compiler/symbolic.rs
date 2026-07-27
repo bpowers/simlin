@@ -1267,12 +1267,20 @@ pub(crate) struct ConcatenatedBytecodes {
 /// pool. Graphical functions are excluded because they are content-de-
 /// duplicated (#582) rather than flat-counted -- their per-fragment base
 /// comes from a shared `GfDedup` remap, not a running sum.
+///
+/// The three `u16`-addressed counts are held as `usize` on purpose. They are
+/// COUNTS, not ids: a count of exactly `U16_ID_CAPACITY` describes a full table
+/// whose every id (`0..=u16::MAX`) is representable, and a phase that follows it
+/// with none of that resource assigns no id at all. Narrowing them here would
+/// reject that program even though M3 -- *every assigned id is representable* --
+/// holds for it; the one place that can tell is [`resource_base`], which sees
+/// the following fragment's length and is where the bound therefore lives.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ContextResourceCounts {
-    pub modules: u16,
-    pub views: u16,
+    pub modules: usize,
+    pub views: usize,
     pub temps: u32,
-    pub dim_lists: u16,
+    pub dim_lists: usize,
 }
 
 impl ContextResourceCounts {
@@ -1288,12 +1296,11 @@ impl ContextResourceCounts {
     /// benefit of any caller that genuinely wants the disjoint per-phase temp
     /// count (e.g. the `Sum` strategy / `combine_scc_fragment` accounting).
     ///
-    /// Fallible for M3: these sums become the next phase's `ctx_base`, so a
-    /// count past `u16::MAX` would hand the next phase a truncated base and
-    /// every id it assigns would name the wrong entry of the module's table.
-    /// A `usize` accumulator plus one range check at the end reports that
-    /// instead of wrapping.
-    pub fn from_fragments(fragments: &[&PerVarBytecodes]) -> Result<Self, String> {
+    /// Infallible: summing counts cannot violate M3 by itself, because a base
+    /// only has to be representable once a fragment uses it to name something.
+    /// The check lives in [`resource_base`], which is handed both the base and
+    /// the length of the fragment about to consume it.
+    pub fn from_fragments(fragments: &[&PerVarBytecodes]) -> Self {
         let mut modules: usize = 0;
         let mut views: usize = 0;
         let mut temps: u32 = 0;
@@ -1312,12 +1319,12 @@ impl ContextResourceCounts {
             temps += frag_temp_count;
             dim_lists += frag.dim_lists.len();
         }
-        Ok(ContextResourceCounts {
-            modules: fits_u16_id(modules, "module declaration")?,
-            views: fits_u16_id(views, "static view")?,
+        ContextResourceCounts {
+            modules,
+            views,
             temps,
-            dim_lists: fits_u16_id(dim_lists, "dimension list")?,
-        })
+            dim_lists,
+        }
     }
 }
 
@@ -1325,45 +1332,43 @@ impl ContextResourceCounts {
 /// `0..=u16::MAX`.
 const U16_ID_CAPACITY: usize = u16::MAX as usize + 1;
 
-/// Narrow a resource count to the `u16` base offset a later phase is renumbered
-/// against, reporting M3 rather than truncating.
-///
-/// The silent `as u16` this replaces would have wrapped that base back into the
-/// low ids, which reads as a perfectly valid program that names the wrong
-/// literal / module / view / dim-list -- wrong numbers, no diagnostic. That is
-/// the same failure mode `GraphicalFunctionId` (#582) and `TempId` (#583)
-/// already fail loud on; the `u16` resources were the unguarded members of the
-/// family.
-pub(crate) fn fits_u16_id(count: usize, label: &str) -> Result<u16, String> {
-    u16::try_from(count).map_err(|_| {
-        format!(
-            "{label} count {count} cannot be used as a resource base offset: \
-             the largest 16-bit id is {}",
-            u16::MAX
-        )
-    })
-}
-
 /// The base id for a fragment's `frag_len` entries appended to a merged table
 /// that already holds `merged_len`, itself offset by `ctx_base` (M2 + M3).
+///
+/// **This is the only place the `u16` capacity bound is stated.** Every base a
+/// `u16`-addressed resource is renumbered against comes from here -- the
+/// merger's four, and the running offsets `db::assemble::renumber_initials_phase`
+/// tracks by hand -- so the boundary cannot be one value in one place and a
+/// different one in another. Everything upstream counts in `usize`.
 ///
 /// The ids this fragment will use are `base .. base + frag_len`, so the check
 /// is that the LAST of them is still representable: `base + frag_len` must not
 /// exceed the table capacity. Computed in `usize` and narrowed once, so neither
 /// the base nor the end can wrap on the way to the comparison.
 ///
+/// **`end > U16_ID_CAPACITY` is the load-bearing line, and the `>` is exact.**
+/// `end` is one past the last id, so `end == U16_ID_CAPACITY` means the last id
+/// is `u16::MAX` -- addressable. Tightening it to `>=` rejects a table that
+/// fills the id space exactly, which is a legal program; a reader "simplifying"
+/// it that way is the live risk, and `literal_pool_past_u16_capacity_fails_loud`
+/// / `a_full_ctx_base_bounds_only_the_phases_that_use_it` /
+/// `the_initials_phase_shares_the_mergers_capacity_bound` all red if they do.
+///
 /// A fragment carrying NONE of this resource is exempt: it names no id, so
-/// there is nothing to represent, and the base it is handed is never used. That
-/// is not a hypothetical -- a table at exactly capacity followed by an empty
-/// fragment would otherwise be rejected with a message saying a count of
-/// `U16_ID_CAPACITY` exceeds `U16_ID_CAPACITY`.
-fn resource_base(
-    ctx_base: u16,
+/// there is nothing to represent, and the base it is handed is never used. Note
+/// what that exemption does and does not buy. It does NOT move the boundary --
+/// deleting it leaves every test green, because the check above already admits
+/// a full table. What it buys is that `base as u16` cannot WRAP when `base` is
+/// exactly `U16_ID_CAPACITY`: the value is dead (no caller reads a base for a
+/// fragment with no entries), but returning a saturated 65,535 rather than a
+/// wrapped 0 keeps the dead value from ever being mistaken for a live one.
+pub(crate) fn resource_base(
+    ctx_base: usize,
     merged_len: usize,
     frag_len: usize,
     label: &str,
 ) -> Result<u16, String> {
-    let base = ctx_base as usize + merged_len;
+    let base = ctx_base + merged_len;
     let end = base + frag_len;
     if frag_len == 0 {
         // No id to assign; hand back a base the caller will not use, saturated
@@ -1512,13 +1517,20 @@ pub(crate) enum TempStrategy {
 /// reach another's entry, so M1 is never satisfied by accidental sharing.
 /// Pinned by `flat_resource_ranges_are_disjoint_and_tile_the_merged_table`.
 ///
-/// **M3 -- ids fit their bytecode id type.** Every assigned id is
+/// **M3 -- ids fit their bytecode id type.** Every ASSIGNED id is
 /// representable in the type the opcode field carries (`LiteralId`/`ModuleId`/
 /// `ViewId`/`DimListId` are `u16`, `TempId` and `GraphicalFunctionId` are
 /// `u8`). A merged table that outgrows its id type is a loud `Err`, never a
-/// wrapped id silently naming a different resource. Pinned by
-/// `literal_pool_past_u16_capacity_fails_loud`,
-/// `renumber_opcode_u16_addition_overflow_is_loud`,
+/// wrapped id silently naming a different resource. Note what the obligation
+/// does NOT say: a table of exactly `U16_ID_CAPACITY` entries satisfies it, and
+/// so does any number of later phases that add nothing to one -- so the counts
+/// that become a later phase's base are carried in `usize` and the bound is
+/// discharged in exactly one function, [`resource_base`], which is the only
+/// point that sees both a base and the length of the fragment about to consume
+/// it. Pinned by `literal_pool_past_u16_capacity_fails_loud` (within a phase),
+/// `a_full_ctx_base_bounds_only_the_phases_that_use_it` (across phases),
+/// `the_initials_phase_shares_the_mergers_capacity_bound` (the initials phase's
+/// own running offsets), `renumber_opcode_u16_addition_overflow_is_loud`,
 /// `test_renumber_opcode_u8_addition_overflow` and
 /// `test_concatenate_genuinely_distinct_gf_over_capacity_fails_loud`.
 ///
@@ -3632,7 +3644,7 @@ mod tests {
             dim_lists: vec![vec![1, 2]],
         };
 
-        let counts = ContextResourceCounts::from_fragments(&[&frag]).unwrap();
+        let counts = ContextResourceCounts::from_fragments(&[&frag]);
         assert_eq!(counts.modules, 0);
         assert_eq!(counts.views, 0);
         assert_eq!(counts.temps, 2);
@@ -3667,7 +3679,7 @@ mod tests {
             dim_lists: vec![],
         };
 
-        let counts = ContextResourceCounts::from_fragments(&[&frag_a, &frag_b]).unwrap();
+        let counts = ContextResourceCounts::from_fragments(&[&frag_a, &frag_b]);
         assert_eq!(
             counts.temps, 2,
             "temps should be sum of per-fragment counts, not max"
@@ -3900,6 +3912,12 @@ mod tests {
     // `renumber_opcode` added them unchecked, so a merged table past 65,536
     // entries produced a wrapped id that names a real, in-range resource. The
     // program runs and returns different numbers, with no diagnostic anywhere.
+    //
+    // The bound is EXACT in both directions -- a table of 65,536 entries is
+    // addressable, 65,537 is not -- and the tests below say so at each of the
+    // three places a base is computed, because the first fix stated it once per
+    // place and the three disagreed: the cross-phase and initials-phase
+    // narrowings rejected a count of exactly 65,536 that the merger accepts.
     // ====================================================================
 
     /// A fragment carrying `n` literals and nothing else.
@@ -3955,6 +3973,119 @@ mod tests {
         };
         concatenate_fragments(&[&a, &c, &empty], &ContextResourceCounts::default())
             .expect("a fragment with no literals must not be bounded by a full pool");
+    }
+
+    /// A fragment carrying `n` dim lists and nothing else.
+    fn dim_list_frag(n: usize) -> PerVarBytecodes {
+        PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![],
+                code: vec![
+                    SymbolicOpcode::PushVarViewDirect {
+                        var: SymVarRef::base(Ident::new("x")),
+                        dim_list_id: 0,
+                    },
+                    SymbolicOpcode::Ret,
+                ],
+            },
+            graphical_functions: vec![],
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![],
+            dim_lists: vec![vec![1u16]; n],
+        }
+    }
+
+    /// The same bound, one level up: across PHASES, where the base is a
+    /// preceding phase's count rather than a running merged length.
+    ///
+    /// The literal pool cannot reach this path -- literals are phase-local, so
+    /// their `ctx_base` is always 0 -- which is why the exactness the test above
+    /// pins did not extend to the three resources that DO carry a `ctx_base`.
+    /// Those went through a separate narrowing (`ContextResourceCounts` held
+    /// `u16` fields and `assemble_module` summed them with a checked add), and
+    /// that narrowing rejected a count of exactly `U16_ID_CAPACITY` outright --
+    /// disagreeing with `resource_base`, which accepts a table of exactly that
+    /// size because every id in it is `<= u16::MAX`. A model whose initials
+    /// filled the table and whose flows and stocks then named no dim list at all
+    /// was rejected with every one of its ids valid.
+    #[test]
+    fn a_full_ctx_base_bounds_only_the_phases_that_use_it() {
+        let cap = U16_ID_CAPACITY;
+        let full = dim_list_frag(cap);
+        let one = dim_list_frag(1);
+        let none = dim_list_frag(0);
+
+        // A phase count is just a count: filling the table exactly is legal, and
+        // saying so is not the same as handing out an id past the end.
+        let at_capacity = ContextResourceCounts::from_fragments(&[&full]);
+        assert_eq!(at_capacity.dim_lists, cap);
+
+        // A following phase that names no dim list assigns no id, so it merges.
+        concatenate_fragments(&[&none], &at_capacity)
+            .expect("a phase carrying no dim lists is not bounded by a full table");
+
+        // One that names even a single dim list would need id 65,536.
+        let err = concatenate_fragments(&[&one], &at_capacity)
+            .expect_err("a dim list id past u16 capacity must be reported, not wrapped");
+        assert!(
+            err.contains("dimension list") && err.contains("16-bit"),
+            "expected a loud dim-list-capacity error, got: {err}"
+        );
+
+        // ...and the bound is exact from below: one entry short of capacity, the
+        // following phase's single entry is id 65,535 and merges.
+        let nearly = ContextResourceCounts::from_fragments(&[&dim_list_frag(cap - 1)]);
+        concatenate_fragments(&[&one], &nearly)
+            .expect("the last addressable dim list id (u16::MAX) must merge");
+
+        // The same exactness within one phase's merged table, so the two halves
+        // of the bound are stated against the same resource.
+        concatenate_fragments(
+            &[&dim_list_frag(cap - 1), &one],
+            &ContextResourceCounts::default(),
+        )
+        .expect("a merged table of exactly u16::MAX + 1 dim lists is addressable");
+        concatenate_fragments(&[&full, &one], &ContextResourceCounts::default())
+            .expect_err("one dim list past a full merged table must be reported");
+        concatenate_fragments(&[&full, &none], &ContextResourceCounts::default())
+            .expect("a fragment with no dim lists must not be bounded by a full table");
+    }
+
+    /// The initials phase tracks its own running offsets rather than going
+    /// through the merger (each initial keeps its own bytecode, so each is
+    /// renumbered at literal offset 0), and it has to agree with the merger
+    /// about where the table ends.
+    ///
+    /// It did not: it narrowed each initial's count and its running total to
+    /// `u16` eagerly, so an initials list that filled the table exactly was
+    /// rejected the moment the LAST initial's count was folded in -- with
+    /// nothing left to assign an id to.
+    #[test]
+    fn the_initials_phase_shares_the_mergers_capacity_bound() {
+        let cap = U16_ID_CAPACITY;
+        let full = dim_list_frag(cap);
+        let one = dim_list_frag(1);
+        let none = dim_list_frag(0);
+
+        let run = |frags: &[&PerVarBytecodes]| -> Result<(), String> {
+            let dedup = GfDedup::build(frags)?;
+            let named: Vec<(String, &PerVarBytecodes)> = frags
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (format!("init{i}"), *f))
+                .collect();
+            crate::db::renumber_initials_phase(&named, &dedup).map(|_| ())
+        };
+
+        run(&[&full]).expect("initials that fill the dim-list table exactly are addressable");
+        run(&[&full, &none]).expect("an initial naming no dim list is not bounded by a full table");
+        let err = run(&[&full, &one])
+            .expect_err("an initial needing dim list id 65,536 must be reported");
+        assert!(
+            err.contains("dimension list") && err.contains("16-bit"),
+            "expected a loud dim-list-capacity error, got: {err}"
+        );
     }
 
     /// M3 for the per-opcode add. `renumber_opcode` can be reached with a base the

@@ -1291,27 +1291,34 @@ pub(crate) fn combine_scc_fragment(
 /// `Err` on M3, for the same reason `absorb_non_gf` checks its own bases: these
 /// offsets index the all-phases tables the module reports, so a silently
 /// truncated one produces a well-formed initial that names a different module,
-/// view or dimension list.
+/// view or dimension list. The bound itself is not restated here -- the running
+/// offsets are `usize` and each is narrowed by `symbolic::resource_base`, the
+/// one place that knows both a base and the length of the fragment about to use
+/// it, so an initial that carries none of a resource is exempt exactly as a
+/// merged fragment is.
 pub(crate) fn renumber_initials_phase(
     initial_frags: &[(String, &crate::compiler::symbolic::PerVarBytecodes)],
     gf_dedup: &crate::compiler::symbolic::GfDedup,
 ) -> Result<Vec<crate::compiler::symbolic::SymbolicCompiledInitial>, String> {
     use crate::compiler::symbolic::{
-        SymbolicByteCode, SymbolicCompiledInitial, checked_add_u16, fits_u16_id, renumber_opcode,
+        SymbolicByteCode, SymbolicCompiledInitial, renumber_opcode, resource_base,
     };
 
     let mut compiled_initials: Vec<SymbolicCompiledInitial> = Vec::new();
-    let mut mod_off: u16 = 0;
-    let mut view_off: u16 = 0;
+    let mut mod_off: usize = 0;
+    let mut view_off: usize = 0;
     let temp_off: u32 = 0;
-    let mut dl_off: u16 = 0;
+    let mut dl_off: usize = 0;
     for (i, (name, bc)) in initial_frags.iter().enumerate() {
         let gf_remap = gf_dedup.remap(i);
+        let mod_base = resource_base(0, mod_off, bc.module_decls.len(), "module declaration")?;
+        let view_base = resource_base(0, view_off, bc.static_views.len(), "static view")?;
+        let dl_base = resource_base(0, dl_off, bc.dim_lists.len(), "dimension list")?;
         let renumbered_code = bc
             .symbolic
             .code
             .iter()
-            .map(|op| renumber_opcode(op, 0, gf_remap, mod_off, view_off, temp_off, dl_off))
+            .map(|op| renumber_opcode(op, 0, gf_remap, mod_base, view_base, temp_off, dl_base))
             .collect::<Result<Vec<_>, _>>()?;
         compiled_initials.push(SymbolicCompiledInitial {
             ident: Ident::new(name),
@@ -1320,21 +1327,9 @@ pub(crate) fn renumber_initials_phase(
                 code: renumbered_code,
             },
         });
-        mod_off = checked_add_u16(
-            mod_off,
-            fits_u16_id(bc.module_decls.len(), "module declaration")?,
-            "ModuleId",
-        )?;
-        view_off = checked_add_u16(
-            view_off,
-            fits_u16_id(bc.static_views.len(), "static view")?,
-            "ViewId",
-        )?;
-        dl_off = checked_add_u16(
-            dl_off,
-            fits_u16_id(bc.dim_lists.len(), "dimension list")?,
-            "DimListId",
-        )?;
+        mod_off += bc.module_decls.len();
+        view_off += bc.static_views.len();
+        dl_off += bc.dim_lists.len();
     }
     Ok(compiled_initials)
 }
@@ -1363,8 +1358,8 @@ pub fn assemble_module<'db>(
     module_inputs: ModuleInputSet<'db>,
 ) -> Result<std::sync::Arc<crate::bytecode::CompiledModule>, String> {
     use crate::compiler::symbolic::{
-        ContextResourceCounts, SymbolicCompiledModule, checked_add_u16,
-        concatenate_fragments_with_gf, resolve_module,
+        ContextResourceCounts, SymbolicCompiledModule, concatenate_fragments_with_gf,
+        resolve_module,
     };
 
     // The interned set stores the sorted canonical names; the plain lowering
@@ -1810,8 +1805,8 @@ pub fn assemble_module<'db>(
     // merge. The all-phases ordering is: initials, then flows, then stocks.
     let initial_refs: Vec<&crate::compiler::symbolic::PerVarBytecodes> =
         initial_frags.iter().map(|(_, bc)| *bc).collect();
-    let initial_counts = ContextResourceCounts::from_fragments(&initial_refs)?;
-    let flow_counts = ContextResourceCounts::from_fragments(&flow_frags)?;
+    let initial_counts = ContextResourceCounts::from_fragments(&initial_refs);
+    let flow_counts = ContextResourceCounts::from_fragments(&flow_frags);
 
     // #583: temps are NOT a per-phase-offset resource. The plain-phase
     // concat recycles every fragment's 0-based temps into ONE shared
@@ -1828,17 +1823,18 @@ pub fn assemble_module<'db>(
         temps: 0,
         ..initial_counts.clone()
     };
-    // Checked (M3): `from_fragments` bounds each phase's count individually,
-    // so each addend can be `u16::MAX` and the sum can reach twice that. The
-    // all-phases re-merge below would error on its own bound a few lines
-    // later, but only after this line has already wrapped in release or
-    // panicked in debug -- and M3 is "EVERY assigned id is representable",
-    // not "some later check happens to catch it".
+    // Summed in `usize` and left there. M3 -- every ASSIGNED id is
+    // representable -- is discharged by `symbolic::resource_base` when a stock
+    // fragment actually consumes one of these bases, which is the only point
+    // where "the table is full" and "this fragment wants an id past the end"
+    // can be told apart. Bounding the sum here instead would reject a model
+    // whose initials and flows fill the table exactly and whose stocks phase
+    // then names nothing -- a program in which every id is valid.
     let stock_base = ContextResourceCounts {
-        modules: checked_add_u16(initial_counts.modules, flow_counts.modules, "ModuleId")?,
-        views: checked_add_u16(initial_counts.views, flow_counts.views, "ViewId")?,
+        modules: initial_counts.modules + flow_counts.modules,
+        views: initial_counts.views + flow_counts.views,
         temps: 0,
-        dim_lists: checked_add_u16(initial_counts.dim_lists, flow_counts.dim_lists, "DimListId")?,
+        dim_lists: initial_counts.dim_lists + flow_counts.dim_lists,
     };
 
     // #582: graphical functions are content-de-duplicated across ALL

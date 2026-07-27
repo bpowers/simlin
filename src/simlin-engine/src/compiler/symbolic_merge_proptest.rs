@@ -624,9 +624,9 @@ fn denote(op: &SymbolicOpcode, tables: &ResourceTables<'_>) -> Result<Denotation
         static_views: Vec::new(),
         dim_lists: Vec::new(),
     };
-    let index = |id: u16, base: u16, len: usize, what: &str| -> Result<usize, String> {
+    let index = |id: u16, base: usize, len: usize, what: &str| -> Result<usize, String> {
         let idx = (id as usize)
-            .checked_sub(base as usize)
+            .checked_sub(base)
             .ok_or_else(|| format!("{what} id {id} is below its ctx_base {base}"))?;
         if idx >= len {
             return Err(format!(
@@ -1385,10 +1385,8 @@ fn check_phase_split(
     let b = a + (n - a) / 2;
     let phases: [&[&PerVarBytecodes]; 3] = [&refs[..a], &refs[a..b], &refs[b..]];
 
-    let counts0 = ContextResourceCounts::from_fragments(phases[0])
-        .map_err(|e| TestCaseError::fail(format!("counts: {e}")))?;
-    let counts1 = ContextResourceCounts::from_fragments(phases[1])
-        .map_err(|e| TestCaseError::fail(format!("counts: {e}")))?;
+    let counts0 = ContextResourceCounts::from_fragments(phases[0]);
+    let counts1 = ContextResourceCounts::from_fragments(phases[1]);
     // Exactly `assemble_module`'s bases: modules / views / dim-lists sum
     // across preceding phases, temps stay at 0 because the temp pool is
     // shared by every phase rather than partitioned.
