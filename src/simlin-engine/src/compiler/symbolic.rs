@@ -1284,11 +1284,19 @@ impl ContextResourceCounts {
     /// rather than this per-phase sum. The field is summed here for the
     /// benefit of any caller that genuinely wants the disjoint per-phase temp
     /// count (e.g. the `Sum` strategy / `combine_scc_fragment` accounting).
-    pub fn from_fragments(fragments: &[&PerVarBytecodes]) -> Self {
-        let mut counts = ContextResourceCounts::default();
+    /// Fallible: these sums become the next phase's `ctx_base`, so a count past
+    /// `u16::MAX` would hand the next phase a truncated base and every id it
+    /// assigns would name the wrong entry of the module's table. A `usize`
+    /// accumulator plus one range check at the end reports that instead of
+    /// wrapping.
+    pub fn from_fragments(fragments: &[&PerVarBytecodes]) -> Result<Self, String> {
+        let mut modules: usize = 0;
+        let mut views: usize = 0;
+        let mut temps: u32 = 0;
+        let mut dim_lists: usize = 0;
         for frag in fragments {
-            counts.modules += frag.module_decls.len() as u16;
-            counts.views += frag.static_views.len() as u16;
+            modules += frag.module_decls.len();
+            views += frag.static_views.len();
             // Each fragment's temps start at 0, so the disjoint-layout total
             // is the sum of each fragment's (max_id + 1), not the global max.
             let frag_temp_count = frag
@@ -1297,11 +1305,85 @@ impl ContextResourceCounts {
                 .map(|(id, _)| *id + 1)
                 .max()
                 .unwrap_or(0);
-            counts.temps += frag_temp_count;
-            counts.dim_lists += frag.dim_lists.len() as u16;
+            temps += frag_temp_count;
+            dim_lists += frag.dim_lists.len();
         }
-        counts
+        Ok(ContextResourceCounts {
+            modules: fits_u16_id(modules, "module declaration")?,
+            views: fits_u16_id(views, "static view")?,
+            temps,
+            dim_lists: fits_u16_id(dim_lists, "dimension list")?,
+        })
     }
+}
+
+/// How many entries a `u16`-addressed merged resource table can hold: ids run
+/// `0..=u16::MAX`.
+const U16_ID_CAPACITY: usize = u16::MAX as usize + 1;
+
+/// Narrow a resource count to the `u16` base offset a later phase is renumbered
+/// against, reporting overflow rather than truncating.
+///
+/// The silent `as u16` this replaces would have wrapped that base back into the
+/// low ids, which reads as a perfectly valid program that names the wrong
+/// literal / module / view / dim-list -- wrong numbers, no diagnostic. That is
+/// the same failure mode `GraphicalFunctionId` (#582) and `TempId` (#583)
+/// already fail loud on; the `u16` resources were the unguarded members of the
+/// family.
+pub(crate) fn fits_u16_id(count: usize, label: &str) -> Result<u16, String> {
+    u16::try_from(count).map_err(|_| {
+        format!(
+            "{label} count {count} cannot be used as a resource base offset: \
+             the largest 16-bit id is {}",
+            u16::MAX
+        )
+    })
+}
+
+/// The base id for a fragment's `frag_len` entries appended to a merged table
+/// that already holds `merged_len`, itself offset by `ctx_base`.
+///
+/// The ids this fragment will use are `base .. base + frag_len`, so the check
+/// is that the LAST of them is still representable: `base + frag_len` must not
+/// exceed the table capacity. Computed in `usize` and narrowed once, so neither
+/// the base nor the end can wrap on the way to the comparison.
+///
+/// A fragment carrying NONE of this resource is exempt: it names no id, so
+/// there is nothing to represent, and the base it is handed is never used. That
+/// is not a hypothetical -- a table at exactly capacity followed by an empty
+/// fragment would otherwise be rejected with a message saying a count of
+/// `U16_ID_CAPACITY` exceeds `U16_ID_CAPACITY`.
+fn resource_base(
+    ctx_base: u16,
+    merged_len: usize,
+    frag_len: usize,
+    label: &str,
+) -> Result<u16, String> {
+    let base = ctx_base as usize + merged_len;
+    let end = base + frag_len;
+    if frag_len == 0 {
+        // No id to assign; hand back a base the caller will not use, saturated
+        // so the narrowing itself cannot wrap.
+        return Ok(base.min(u16::MAX as usize) as u16);
+    }
+    if end > U16_ID_CAPACITY {
+        return Err(format!(
+            "merged {label} count {end} exceeds the bytecode id capacity of \
+             {U16_ID_CAPACITY} (ids are 16-bit)"
+        ));
+    }
+    Ok(base as u16)
+}
+
+/// Add a fragment-local resource id to its fragment's base, reporting overflow
+/// rather than wrapping. The `u16` twin of `checked_add_u8`.
+pub(crate) fn checked_add_u16(base: u16, off: u16, label: &str) -> Result<u16, String> {
+    base.checked_add(off).ok_or_else(|| {
+        format!(
+            "{label} overflow: {base} + {off} exceeds u16::MAX ({})",
+            u16::MAX
+        )
+    })
 }
 
 /// The five flat resource-ID base offsets a single fragment's non-GF
@@ -1589,7 +1671,7 @@ impl FragmentMerger {
         &mut self,
         frag: &PerVarBytecodes,
     ) -> Result<(FragmentResourceOffsets, GfRemap), String> {
-        let off = self.absorb_non_gf(frag);
+        let off = self.absorb_non_gf(frag)?;
         let gf_remap = self.absorb_gf(frag)?;
         Ok((off, gf_remap))
     }
@@ -1607,15 +1689,38 @@ impl FragmentMerger {
     /// max-merge into one identity pool (plain-phase concat, matching the
     /// monolithic keyed max-merge). Graphical functions are handled
     /// separately by `absorb_gf` (content-de-duplicated, #582).
-    pub(crate) fn absorb_non_gf(&mut self, frag: &PerVarBytecodes) -> FragmentResourceOffsets {
+    ///
+    /// `Err` when a merged table outgrows its `u16` id type. The base offsets
+    /// are checked here rather than only at `renumber_opcode` because a
+    /// fragment may carry entries no opcode reads (over-collected dependency
+    /// resources), and those still consume ids for the fragments after it.
+    pub(crate) fn absorb_non_gf(
+        &mut self,
+        frag: &PerVarBytecodes,
+    ) -> Result<FragmentResourceOffsets, String> {
         // Literals are phase-local; no ctx_base offset needed. Modules,
         // views, and dim-lists are appended unshifted, so their offset is
         // `ctx_base + cumulative_appended` (no double-count: the appended
         // entries do NOT carry the ctx_base, so `merged_X.len()` excludes
         // it). Temps are different: see below.
-        let lit_offset = self.merged_literals.len() as u16;
-        let mod_offset = self.merged_modules.len() as u16 + self.ctx_base.modules;
-        let view_offset = self.merged_views.len() as u16 + self.ctx_base.views;
+        let lit_offset = resource_base(
+            0,
+            self.merged_literals.len(),
+            frag.symbolic.literals.len(),
+            "literal",
+        )?;
+        let mod_offset = resource_base(
+            self.ctx_base.modules,
+            self.merged_modules.len(),
+            frag.module_decls.len(),
+            "module declaration",
+        )?;
+        let view_offset = resource_base(
+            self.ctx_base.views,
+            self.merged_views.len(),
+            frag.static_views.len(),
+            "static view",
+        )?;
         // #583: temps recycle (plain-phase) or sum (interleaved SCC).
         //
         // `Recycle`: a FIXED base (`ctx_base.temps`, which is 0 for every
@@ -1637,7 +1742,12 @@ impl FragmentMerger {
             TempStrategy::Recycle => self.ctx_base.temps,
             TempStrategy::Sum => self.merged_temp_sizes.len() as u32 + self.ctx_base.temps,
         };
-        let dl_offset = self.merged_dim_lists.len() as u16 + self.ctx_base.dim_lists;
+        let dl_offset = resource_base(
+            self.ctx_base.dim_lists,
+            self.merged_dim_lists.len(),
+            frag.dim_lists.len(),
+            "dimension list",
+        )?;
 
         self.merged_literals
             .extend_from_slice(&frag.symbolic.literals);
@@ -1668,13 +1778,13 @@ impl FragmentMerger {
                 self.merged_temp_sizes[new_id as usize].max(*size);
         }
 
-        FragmentResourceOffsets {
+        Ok(FragmentResourceOffsets {
             lit_offset,
             mod_offset,
             view_offset,
             temp_offset,
             dl_offset,
-        }
+        })
     }
 
     /// Content-de-duplicate one fragment's graphical-function *blocks* into
@@ -1929,7 +2039,7 @@ pub(crate) fn concatenate_fragments_with_gf(
     for (i, frag) in fragments.iter().enumerate() {
         // Only the flat resources are merged here; GF numbering comes from
         // the shared `dedup` so it is coherent across phases.
-        let off = merger.absorb_non_gf(frag);
+        let off = merger.absorb_non_gf(frag)?;
         renumber_fragment_code(
             &frag.symbolic.code,
             &off,
@@ -1984,9 +2094,11 @@ fn remap_gf(
 /// is translated through `gf_remap` (the fragment's per-slot local->global
 /// map from `FragmentMerger::absorb_gf`) rather than a flat add.
 ///
-/// Returns `Err` if a per-opcode temp id would overflow `TempId` (= `u8`)
-/// after offsetting (the `checked_add_u8` below) or if a `base_gf` is out of
-/// range for `gf_remap` (a corrupt fragment).
+/// Every offsetting add is checked: a wrapped id is a well-formed program that
+/// names a different resource, so the failure mode of getting this wrong is
+/// wrong numbers with no diagnostic. `Err` on a temp id past `TempId` (= `u8`),
+/// on any `u16` id past its type, or on a `base_gf` out of range for
+/// `gf_remap` (a corrupt fragment).
 ///
 /// There is no separate `temp_off > u8::MAX` precheck (#583): the plain-
 /// phase concat recycles temps into one identity pool whose `temp_off` is 0
@@ -1996,6 +2108,12 @@ fn remap_gf(
 /// an SCC summing past 255 -- is still caught loud by `checked_add_u8`,
 /// which adds the actual `temp_id` to the offset (the precheck only saw the
 /// offset, so it could not have been the real bound anyway).
+///
+/// The `u16` adds are belt-and-braces alongside `absorb_non_gf`'s capacity
+/// check: that one bounds the merged TABLE, this one bounds the id an
+/// individual opcode carries, and a caller can reach this function with a base
+/// the merger did not compute (`assemble_module`'s per-initial renumber loop
+/// tracks its own running offsets).
 pub(crate) fn renumber_opcode(
     op: &SymbolicOpcode,
     lit_off: u16,
@@ -2017,10 +2135,12 @@ pub(crate) fn renumber_opcode(
         )
     })?;
     Ok(match op {
-        SymbolicOpcode::LoadConstant { id } => SymbolicOpcode::LoadConstant { id: *id + lit_off },
+        SymbolicOpcode::LoadConstant { id } => SymbolicOpcode::LoadConstant {
+            id: checked_add_u16(*id, lit_off, "LiteralId")?,
+        },
         SymbolicOpcode::AssignConstCurr { var, literal_id } => SymbolicOpcode::AssignConstCurr {
             var: var.clone(),
-            literal_id: *literal_id + lit_off,
+            literal_id: checked_add_u16(*literal_id, lit_off, "LiteralId")?,
         },
         SymbolicOpcode::Lookup {
             base_gf,
@@ -2032,23 +2152,23 @@ pub(crate) fn renumber_opcode(
             mode: *mode,
         },
         SymbolicOpcode::EvalModule { id, n_inputs } => SymbolicOpcode::EvalModule {
-            id: *id + mod_off,
+            id: checked_add_u16(*id, mod_off, "ModuleId")?,
             n_inputs: *n_inputs,
         },
         SymbolicOpcode::PushStaticView { view_id } => SymbolicOpcode::PushStaticView {
-            view_id: *view_id + view_off,
+            view_id: checked_add_u16(*view_id, view_off, "ViewId")?,
         },
         SymbolicOpcode::PushTempView {
             temp_id,
             dim_list_id,
         } => SymbolicOpcode::PushTempView {
             temp_id: checked_add_u8(*temp_id, temp_off_u8, "TempId")?,
-            dim_list_id: *dim_list_id + dl_off,
+            dim_list_id: checked_add_u16(*dim_list_id, dl_off, "DimListId")?,
         },
         SymbolicOpcode::PushVarViewDirect { var, dim_list_id } => {
             SymbolicOpcode::PushVarViewDirect {
                 var: var.clone(),
-                dim_list_id: *dim_list_id + dl_off,
+                dim_list_id: checked_add_u16(*dim_list_id, dl_off, "DimListId")?,
             }
         }
         SymbolicOpcode::LoadTempConst { temp_id, index } => SymbolicOpcode::LoadTempConst {
@@ -3380,7 +3500,7 @@ mod tests {
             dim_lists: vec![vec![1, 2]],
         };
 
-        let counts = ContextResourceCounts::from_fragments(&[&frag]);
+        let counts = ContextResourceCounts::from_fragments(&[&frag]).unwrap();
         assert_eq!(counts.modules, 0);
         assert_eq!(counts.views, 0);
         assert_eq!(counts.temps, 2);
@@ -3415,7 +3535,7 @@ mod tests {
             dim_lists: vec![],
         };
 
-        let counts = ContextResourceCounts::from_fragments(&[&frag_a, &frag_b]);
+        let counts = ContextResourceCounts::from_fragments(&[&frag_a, &frag_b]).unwrap();
         assert_eq!(
             counts.temps, 2,
             "temps should be sum of per-fragment counts, not max"
@@ -3636,6 +3756,117 @@ mod tests {
              feed the VM a wrong full-source extent and break genuine VECTOR \
              ELM MAP results"
         );
+    }
+
+    // ====================================================================
+    // M3: a resource id past its bytecode type is reported, never wrapped.
+    //
+    // `GraphicalFunctionId` (#582) and `TempId` (#583) both overflowed on
+    // C-LEARN and both fail loud. The four `u16` resources -- literals, module
+    // decls, static views, dim lists -- were the unguarded members of the same
+    // family: `absorb_non_gf` narrowed their bases with `as u16` and
+    // `renumber_opcode` added them unchecked, so a merged table past 65,536
+    // entries produced a wrapped id that names a real, in-range resource. The
+    // program runs and returns different numbers, with no diagnostic anywhere.
+    // ====================================================================
+
+    /// A fragment carrying `n` literals and nothing else.
+    fn literal_pool_frag(n: usize) -> PerVarBytecodes {
+        PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![1.0; n],
+                code: vec![SymbolicOpcode::LoadConstant { id: 0 }, SymbolicOpcode::Ret],
+            },
+            graphical_functions: vec![],
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![],
+            dim_lists: vec![],
+        }
+    }
+
+    /// M3 for the literal pool, the cheapest `u16` resource to overflow and the
+    /// one whose failure is worst: a wrapped `LiteralId` names a real, in-range
+    /// literal, so the program runs and returns different numbers.
+    #[test]
+    fn literal_pool_past_u16_capacity_fails_loud() {
+        let cap = u16::MAX as usize + 1;
+        let a = literal_pool_frag(cap - 1);
+        let b = literal_pool_frag(4);
+        let err = concatenate_fragments(&[&a, &b], &ContextResourceCounts::default())
+            .expect_err("a literal pool past u16 capacity must be reported, not wrapped");
+        assert!(
+            err.contains("literal") && err.contains("16-bit"),
+            "expected a loud literal-capacity error, got: {err}"
+        );
+
+        // ...and one entry less is still fine, so the bound is exact rather than
+        // conservative.
+        let c = literal_pool_frag(1);
+        concatenate_fragments(&[&a, &c], &ContextResourceCounts::default())
+            .expect("a pool of exactly u16::MAX + 1 literals is addressable");
+
+        // A fragment carrying NONE of the resource is exempt even at a full
+        // table: it names no id, so there is nothing that has to be
+        // representable. Without the exemption the base -- which this fragment
+        // never uses -- would be rejected for being one past `u16::MAX`.
+        let empty = PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![],
+                code: vec![SymbolicOpcode::Ret],
+            },
+            graphical_functions: vec![],
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![],
+            dim_lists: vec![],
+        };
+        concatenate_fragments(&[&a, &c, &empty], &ContextResourceCounts::default())
+            .expect("a fragment with no literals must not be bounded by a full pool");
+    }
+
+    /// M3 for the per-opcode add. `renumber_opcode` can be reached with a base the
+    /// merger did not compute -- `assemble_module`'s per-initial loop tracks its
+    /// own running module / view / dim-list offsets -- so the add is checked there
+    /// too rather than relying on the merger's table bound alone.
+    #[test]
+    fn renumber_opcode_u16_addition_overflow_is_loud() {
+        let cases: Vec<(SymbolicOpcode, &str, [u16; 4])> = vec![
+            (
+                SymbolicOpcode::LoadConstant { id: u16::MAX },
+                "LiteralId",
+                [1, 0, 0, 0],
+            ),
+            (
+                SymbolicOpcode::EvalModule {
+                    id: u16::MAX,
+                    n_inputs: 0,
+                },
+                "ModuleId",
+                [0, 1, 0, 0],
+            ),
+            (
+                SymbolicOpcode::PushStaticView { view_id: u16::MAX },
+                "ViewId",
+                [0, 0, 1, 0],
+            ),
+            (
+                SymbolicOpcode::PushVarViewDirect {
+                    var: SymVarRef::base(Ident::new("x")),
+                    dim_list_id: u16::MAX,
+                },
+                "DimListId",
+                [0, 0, 0, 1],
+            ),
+        ];
+        for (op, label, [lit, md, vw, dl]) in cases {
+            let err = renumber_opcode(&op, lit, &[], md, vw, 0, dl)
+                .expect_err("an id at u16::MAX plus a non-zero base must be reported");
+            assert!(
+                err.contains(label) && err.contains("overflow"),
+                "expected a loud {label} overflow, got: {err}"
+            );
+        }
     }
 
     #[test]

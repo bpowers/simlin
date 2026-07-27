@@ -1231,8 +1231,8 @@ pub fn assemble_module<'db>(
     module_inputs: ModuleInputSet<'db>,
 ) -> Result<std::sync::Arc<crate::bytecode::CompiledModule>, String> {
     use crate::compiler::symbolic::{
-        ContextResourceCounts, SymbolicCompiledInitial, SymbolicCompiledModule,
-        concatenate_fragments_with_gf, resolve_module,
+        ContextResourceCounts, SymbolicCompiledInitial, SymbolicCompiledModule, checked_add_u16,
+        concatenate_fragments_with_gf, fits_u16_id, resolve_module,
     };
 
     // The interned set stores the sorted canonical names; the plain lowering
@@ -1678,8 +1678,8 @@ pub fn assemble_module<'db>(
     // merge. The all-phases ordering is: initials, then flows, then stocks.
     let initial_refs: Vec<&crate::compiler::symbolic::PerVarBytecodes> =
         initial_frags.iter().map(|(_, bc)| *bc).collect();
-    let initial_counts = ContextResourceCounts::from_fragments(&initial_refs);
-    let flow_counts = ContextResourceCounts::from_fragments(&flow_frags);
+    let initial_counts = ContextResourceCounts::from_fragments(&initial_refs)?;
+    let flow_counts = ContextResourceCounts::from_fragments(&flow_frags)?;
 
     // #583: temps are NOT a per-phase-offset resource. The plain-phase
     // concat recycles every fragment's 0-based temps into ONE shared
@@ -1696,11 +1696,15 @@ pub fn assemble_module<'db>(
         temps: 0,
         ..initial_counts.clone()
     };
+    // Checked: `from_fragments` bounds each phase's count individually, so each
+    // addend can be `u16::MAX` and the sum can reach twice that. The all-phases
+    // re-merge below would error on its own bound a few lines later, but only
+    // after this line has already wrapped in release or panicked in debug.
     let stock_base = ContextResourceCounts {
-        modules: initial_counts.modules + flow_counts.modules,
-        views: initial_counts.views + flow_counts.views,
+        modules: checked_add_u16(initial_counts.modules, flow_counts.modules, "ModuleId")?,
+        views: checked_add_u16(initial_counts.views, flow_counts.views, "ViewId")?,
         temps: 0,
-        dim_lists: initial_counts.dim_lists + flow_counts.dim_lists,
+        dim_lists: checked_add_u16(initial_counts.dim_lists, flow_counts.dim_lists, "DimListId")?,
     };
 
     // #582: graphical functions are content-de-duplicated across ALL
@@ -1768,12 +1772,28 @@ pub fn assemble_module<'db>(
                 code: renumbered_code,
             },
         });
-        init_mod_off += bc.module_decls.len() as u16;
-        init_view_off += bc.static_views.len() as u16;
+        // Checked, for the same reason `FragmentMerger::absorb_non_gf` checks
+        // its own bases: these three offsets index the ALL-PHASES tables the
+        // module reports, so a silently truncated one produces a well-formed
+        // initial that names a different module / view / dim list.
+        init_mod_off = checked_add_u16(
+            init_mod_off,
+            fits_u16_id(bc.module_decls.len(), "module declaration")?,
+            "ModuleId",
+        )?;
+        init_view_off = checked_add_u16(
+            init_view_off,
+            fits_u16_id(bc.static_views.len(), "static view")?,
+            "ViewId",
+        )?;
         // `init_temp_off` is NOT advanced (#583): temps recycle into the
         // shared identity pool, so every initial's temp ids stay
         // fragment-local and index the same `merged.temp_offsets` table.
-        init_dl_off += bc.dim_lists.len() as u16;
+        init_dl_off = checked_add_u16(
+            init_dl_off,
+            fits_u16_id(bc.dim_lists.len(), "dimension list")?,
+            "DimListId",
+        )?;
     }
 
     // The all-phases merge for the shared context side-channels (modules,
