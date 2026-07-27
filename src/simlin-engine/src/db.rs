@@ -128,6 +128,14 @@ pub use assemble::{assemble_module, assemble_simulation};
 // `crate::db::...` / `super::...`.
 #[cfg(test)]
 pub(crate) use assemble::{calc_flattened_offsets_incremental, combine_scc_fragment};
+// `renumber_initials_phase` is the initials half of assembly's phase renumber.
+// The root re-export exists so the merger's M8 property
+// (`compiler::symbolic_merge_proptest`) can drive the REAL function rather than
+// re-deriving it: as an inline loop inside `assemble_module` it was unreachable
+// from a test, and freezing two of its three accumulators left the whole
+// repository green.
+#[cfg(test)]
+pub(crate) use assemble::renumber_initials_phase;
 
 pub use dep_graph::{
     ModelDepGraphResult, ResolvedScc, RunlistMembership, SccPhase, model_dependency_graph,
@@ -1377,6 +1385,8 @@ pub fn compile_project_incremental(
     }
 }
 
+#[cfg(test)]
+mod combined_fragment_proptest;
 #[cfg(test)]
 mod combined_fragment_tests;
 #[cfg(test)]

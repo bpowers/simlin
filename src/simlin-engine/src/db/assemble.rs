@@ -1265,6 +1265,78 @@ pub(crate) fn combine_scc_fragment(
     Ok(merger.into_per_var_bytecodes(combined_code))
 }
 
+/// Renumber the INITIALS phase into one `SymbolicCompiledInitial` per fragment.
+///
+/// The other two phases go through `concatenate_fragments_with_gf`, which
+/// merges their fragments into a single stream. Initials cannot: `eval_initials`
+/// runs them one at a time, so each keeps its own bytecode -- and therefore its
+/// own literal pool, which is why every initial is renumbered at literal offset
+/// 0 rather than at a running one.
+///
+/// Everything else must still land where the all-phases merge put it (M8): the
+/// module / view / dim-list offsets are the running counts over the preceding
+/// initials, exactly the bases `FragmentMerger::absorb_non_gf` would hand out,
+/// and the GF base comes from the shared dedup (initial `i` is `all_frags[i]`,
+/// since initials come first). Temps are NOT advanced (#583) -- they recycle
+/// into the one identity pool every phase shares.
+///
+/// This is a third hand-rolled copy of the merger's flat accounting, kept
+/// because of the literal-pool difference above. It is a free function rather
+/// than an inline loop specifically so the M8 property can drive it: as an
+/// inline loop, freezing `init_view_off` or `init_dl_off` left the entire
+/// repository green.
+///
+/// `Err` on M3, for the same reason `absorb_non_gf` checks its own bases: these
+/// offsets index the all-phases tables the module reports, so a silently
+/// truncated one produces a well-formed initial that names a different module,
+/// view or dimension list.
+pub(crate) fn renumber_initials_phase(
+    initial_frags: &[(String, &crate::compiler::symbolic::PerVarBytecodes)],
+    gf_dedup: &crate::compiler::symbolic::GfDedup,
+) -> Result<Vec<crate::compiler::symbolic::SymbolicCompiledInitial>, String> {
+    use crate::compiler::symbolic::{
+        SymbolicByteCode, SymbolicCompiledInitial, checked_add_u16, fits_u16_id, renumber_opcode,
+    };
+
+    let mut compiled_initials: Vec<SymbolicCompiledInitial> = Vec::new();
+    let mut mod_off: u16 = 0;
+    let mut view_off: u16 = 0;
+    let temp_off: u32 = 0;
+    let mut dl_off: u16 = 0;
+    for (i, (name, bc)) in initial_frags.iter().enumerate() {
+        let gf_remap = gf_dedup.remap(i);
+        let renumbered_code = bc
+            .symbolic
+            .code
+            .iter()
+            .map(|op| renumber_opcode(op, 0, gf_remap, mod_off, view_off, temp_off, dl_off))
+            .collect::<Result<Vec<_>, _>>()?;
+        compiled_initials.push(SymbolicCompiledInitial {
+            ident: Ident::new(name),
+            bytecode: SymbolicByteCode {
+                literals: bc.symbolic.literals.clone(),
+                code: renumbered_code,
+            },
+        });
+        mod_off = checked_add_u16(
+            mod_off,
+            fits_u16_id(bc.module_decls.len(), "module declaration")?,
+            "ModuleId",
+        )?;
+        view_off = checked_add_u16(
+            view_off,
+            fits_u16_id(bc.static_views.len(), "static view")?,
+            "ViewId",
+        )?;
+        dl_off = checked_add_u16(
+            dl_off,
+            fits_u16_id(bc.dim_lists.len(), "dimension list")?,
+            "DimListId",
+        )?;
+    }
+    Ok(compiled_initials)
+}
+
 /// Assemble a complete CompiledModule from per-variable fragments.
 ///
 /// Salsa-tracked: the per-module assembly (fragment concatenation, SCC
@@ -1289,8 +1361,8 @@ pub fn assemble_module<'db>(
     module_inputs: ModuleInputSet<'db>,
 ) -> Result<std::sync::Arc<crate::bytecode::CompiledModule>, String> {
     use crate::compiler::symbolic::{
-        ContextResourceCounts, SymbolicCompiledInitial, SymbolicCompiledModule, checked_add_u16,
-        concatenate_fragments_with_gf, fits_u16_id, resolve_module,
+        ContextResourceCounts, SymbolicCompiledModule, checked_add_u16,
+        concatenate_fragments_with_gf, resolve_module,
     };
 
     // The interned set stores the sorted canonical names; the plain lowering
@@ -1754,10 +1826,12 @@ pub fn assemble_module<'db>(
         temps: 0,
         ..initial_counts.clone()
     };
-    // Checked: `from_fragments` bounds each phase's count individually, so each
-    // addend can be `u16::MAX` and the sum can reach twice that. The all-phases
-    // re-merge below would error on its own bound a few lines later, but only
-    // after this line has already wrapped in release or panicked in debug.
+    // Checked (M3): `from_fragments` bounds each phase's count individually,
+    // so each addend can be `u16::MAX` and the sum can reach twice that. The
+    // all-phases re-merge below would error on its own bound a few lines
+    // later, but only after this line has already wrapped in release or
+    // panicked in debug -- and M3 is "EVERY assigned id is representable",
+    // not "some later check happens to catch it".
     let stock_base = ContextResourceCounts {
         modules: checked_add_u16(initial_counts.modules, flow_counts.modules, "ModuleId")?,
         views: checked_add_u16(initial_counts.views, flow_counts.views, "ViewId")?,
@@ -1792,67 +1866,7 @@ pub fn assemble_module<'db>(
     let stocks_concat =
         concatenate_fragments_with_gf(&stock_frags, &stock_base, &gf_dedup, n_init + n_flow)?;
 
-    // Build SymbolicCompiledInitial for each initial variable, renumbered
-    // so context resource IDs (GFs, modules, views, temps, dim_lists) match
-    // the all-phases merge. Literal IDs are local to each initial's bytecode
-    // so they get no base offset. The GF base comes from the shared dedup
-    // (initial `i` is `all_frags[i]`); the other resources stay flat.
-    let mut compiled_initials: Vec<SymbolicCompiledInitial> = Vec::new();
-    let mut init_mod_off: u16 = 0;
-    let mut init_view_off: u16 = 0;
-    // #583: temps recycle into the shared identity pool (the same pool the
-    // `merged` table below builds), so each initial's temp ids stay
-    // fragment-local (offset 0) -- they are NOT advanced per initial.
-    let init_temp_off: u32 = 0;
-    let mut init_dl_off: u16 = 0;
-    for (i, (name, bc)) in initial_frags.iter().enumerate() {
-        let gf_remap = gf_dedup.remap(i);
-        let renumbered_code: Vec<crate::compiler::symbolic::SymbolicOpcode> = bc
-            .symbolic
-            .code
-            .iter()
-            .map(|op| {
-                crate::compiler::symbolic::renumber_opcode(
-                    op,
-                    0, // literals are local to each initial's bytecode
-                    gf_remap,
-                    init_mod_off,
-                    init_view_off,
-                    init_temp_off,
-                    init_dl_off,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        compiled_initials.push(SymbolicCompiledInitial {
-            ident: Ident::new(name),
-            bytecode: crate::compiler::symbolic::SymbolicByteCode {
-                literals: bc.symbolic.literals.clone(),
-                code: renumbered_code,
-            },
-        });
-        // Checked, for the same reason `FragmentMerger::absorb_non_gf` checks
-        // its own bases: these three offsets index the ALL-PHASES tables the
-        // module reports, so a silently truncated one produces a well-formed
-        // initial that names a different module / view / dim list.
-        init_mod_off = checked_add_u16(
-            init_mod_off,
-            fits_u16_id(bc.module_decls.len(), "module declaration")?,
-            "ModuleId",
-        )?;
-        init_view_off = checked_add_u16(
-            init_view_off,
-            fits_u16_id(bc.static_views.len(), "static view")?,
-            "ViewId",
-        )?;
-        // `init_temp_off` is NOT advanced (#583): temps recycle into the
-        // shared identity pool, so every initial's temp ids stay
-        // fragment-local and index the same `merged.temp_offsets` table.
-        init_dl_off = checked_add_u16(
-            init_dl_off,
-            fits_u16_id(bc.dim_lists.len(), "dimension list")?,
-            "DimListId",
-        )?;
-    }
+    let compiled_initials = renumber_initials_phase(&initial_frags, &gf_dedup)?;
 
     // The all-phases merge for the shared context side-channels (modules,
     // views, temps, dim_lists); its `graphical_functions` is the dedup's

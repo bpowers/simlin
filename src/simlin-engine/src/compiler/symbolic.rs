@@ -1287,11 +1287,12 @@ impl ContextResourceCounts {
     /// rather than this per-phase sum. The field is summed here for the
     /// benefit of any caller that genuinely wants the disjoint per-phase temp
     /// count (e.g. the `Sum` strategy / `combine_scc_fragment` accounting).
-    /// Fallible: these sums become the next phase's `ctx_base`, so a count past
-    /// `u16::MAX` would hand the next phase a truncated base and every id it
-    /// assigns would name the wrong entry of the module's table. A `usize`
-    /// accumulator plus one range check at the end reports that instead of
-    /// wrapping.
+    ///
+    /// Fallible for M3: these sums become the next phase's `ctx_base`, so a
+    /// count past `u16::MAX` would hand the next phase a truncated base and
+    /// every id it assigns would name the wrong entry of the module's table.
+    /// A `usize` accumulator plus one range check at the end reports that
+    /// instead of wrapping.
     pub fn from_fragments(fragments: &[&PerVarBytecodes]) -> Result<Self, String> {
         let mut modules: usize = 0;
         let mut views: usize = 0;
@@ -1325,7 +1326,7 @@ impl ContextResourceCounts {
 const U16_ID_CAPACITY: usize = u16::MAX as usize + 1;
 
 /// Narrow a resource count to the `u16` base offset a later phase is renumbered
-/// against, reporting overflow rather than truncating.
+/// against, reporting M3 rather than truncating.
 ///
 /// The silent `as u16` this replaces would have wrapped that base back into the
 /// low ids, which reads as a perfectly valid program that names the wrong
@@ -1344,7 +1345,7 @@ pub(crate) fn fits_u16_id(count: usize, label: &str) -> Result<u16, String> {
 }
 
 /// The base id for a fragment's `frag_len` entries appended to a merged table
-/// that already holds `merged_len`, itself offset by `ctx_base`.
+/// that already holds `merged_len`, itself offset by `ctx_base` (M2 + M3).
 ///
 /// The ids this fragment will use are `base .. base + frag_len`, so the check
 /// is that the LAST of them is still representable: `base + frag_len` must not
@@ -1378,7 +1379,7 @@ fn resource_base(
     Ok(base as u16)
 }
 
-/// Add a fragment-local resource id to its fragment's base, reporting overflow
+/// Add a fragment-local resource id to its fragment's base, reporting M3
 /// rather than wrapping. The `u16` twin of `checked_add_u8`.
 pub(crate) fn checked_add_u16(base: u16, off: u16, label: &str) -> Result<u16, String> {
     base.checked_add(off).ok_or_else(|| {
@@ -1420,71 +1421,182 @@ pub(crate) type GfRemap = SmallVec<[GraphicalFunctionId; 8]>;
 /// producing builtins like `VectorSortOrder`/`VectorElmMap`): a fragment is
 /// one variable's bytecode, its temps are 0-based, and they are written and
 /// read entirely within that variable's expression evaluation -- dead once
-/// the variable's runlist segment completes. The two consumers differ in
-/// whether their fragments' temp live ranges can overlap:
+/// the variable's runlist segment completes.
 ///
-/// - `Recycle` (plain-phase `concatenate_fragments`): fragments are emitted
-///   as sequential, non-overlapping runlist segments, so two fragments'
-///   temps are never simultaneously live. They are max-merged into ONE
-///   shared identity pool keyed by temp id -- variable A's temp 0 and
-///   variable B's temp 0 collapse to global slot 0, the slot's size the max
-///   of the two. This exactly matches the monolithic `Module::compile` keyed
-///   max-merge (`compiler/mod.rs`), so the incremental temp count equals the
-///   monolithic `n_temps` instead of summing to a count that overflows the
-///   `TempId` (= `u8`) namespace.
+/// Temps are therefore the ONE merged resource that may legitimately be
+/// shared between fragments, and obligation M5 is what bounds the sharing:
+/// **in the merged opcode stream, the uses of one merged temp slot must not
+/// interleave between two fragments.** Two fragments may share a slot only if
+/// the emitter lays their opcodes out as disjoint contiguous runs; if it
+/// interleaves them, a shared slot means one fragment reads storage the other
+/// has already overwritten. The strategy is how the caller declares which
+/// emission shape it is about to produce:
 ///
-/// - `Sum` (`combine_scc_fragment`): the combined SCC fragment INTERLEAVES
-///   its members' per-element segments per `element_order`, so members' temp
-///   live ranges OVERLAP. Each member's temps must get a DISJOINT id range
-///   (advancing per member) -- recycling them onto a shared slot would make
-///   two simultaneously-live temps alias and silently miscompile the SCC.
+/// - `Recycle` -- the caller emits each fragment's opcodes as one contiguous
+///   run, in fragment order (`concatenate_fragments_with_gf`; the fragments
+///   are sequential, non-overlapping runlist segments). Temps collapse by
+///   IDENTITY into one shared pool: fragment A's temp 0 and fragment B's
+///   temp 0 both become slot `base + 0`, and that slot's size is the MAX over
+///   its users, so it is large enough for each of them in turn. Sharing is
+///   safe because no two users are live at the same time, and it is necessary
+///   because summing 0-based per-fragment temp counts across a whole model
+///   overflows the `TempId` (= `u8`) namespace -- the GH #583 failure on
+///   C-LEARN, whose flows phase legitimately needs 347 summed slots but far
+///   fewer recycled ones. The `u8` width is why recycling is the fix rather
+///   than an optimization; widening the id type was the rejected alternative
+///   (see #583).
+///
+/// - `Sum` -- the caller INTERLEAVES fragments' opcodes (`combine_scc_fragment`
+///   emits a resolved recurrence SCC's members' per-element segments in
+///   `element_order`, so `ce[0], ecc[0], ce[1], ecc[1]`). Members' temp live
+///   ranges overlap, so identity recycling would alias two simultaneously-live
+///   temps and silently miscompile the SCC. Each fragment gets a DISJOINT id
+///   range instead, which trivially satisfies M5 because no slot has two users
+///   at all. An SCC is a handful of members, so the summed count stays far
+///   inside `u8`.
+///
+/// Both arms are pinned as the live-range property itself rather than as a
+/// layout comparison: see `merged_temp_slot_uses_never_interleave` and
+/// `recycle_shares_by_identity_and_sizes_by_max` in
+/// `symbolic_merge_proptest.rs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TempStrategy {
-    /// Max-merge fragment temps into one identity-keyed pool (plain-phase
-    /// concat; matches monolithic recycling).
+    /// Collapse fragment temps by identity into one shared pool, each slot
+    /// sized to the max of its users. For an emitter that lays fragments out
+    /// as disjoint contiguous runs.
     Recycle,
-    /// Advance a disjoint temp id range per fragment (combined SCC fragment;
-    /// interleaved segments need non-overlapping live ranges).
+    /// Give each fragment a disjoint temp id range. For an emitter that
+    /// interleaves fragments' opcodes.
     Sum,
 }
 
 /// Running merge state for combining `PerVarBytecodes` into a single
 /// resource namespace.
 ///
-/// This is the shared core of `concatenate_fragments` and the
+/// This is the shared core of `concatenate_fragments_with_gf` and the
 /// per-element-granular `combine_scc_fragment` (a multi-member recurrence
-/// SCC's combined fragment). The accounting that must hold across both --
-/// every fragment's literals/GFs/modules/views/dim-lists land in a
-/// disjoint, non-colliding ID range -- is implemented exactly once here so
-/// the two consumers cannot drift. Temps are the one resource whose layout
-/// differs: see `TempStrategy`. `concatenate_fragments` absorbs each
-/// fragment and immediately renumbers its whole (Ret-stripped) code;
-/// `combine_scc_fragment` absorbs each *member* once and renumbers that
-/// member's per-element segments with the member's offsets, emitting the
-/// segments in the SCC's interleaved `element_order`.
+/// SCC's combined fragment). Both consumers absorb fragments through this one
+/// implementation so they cannot drift: `concatenate_fragments_with_gf`
+/// absorbs each fragment and immediately renumbers its whole (Ret-stripped)
+/// code, while `combine_scc_fragment` absorbs each *member* once and
+/// renumbers that member's per-element segments with the member's offsets,
+/// emitting the segments in the SCC's interleaved `element_order`.
 ///
-/// `ctx_base` provides context resource ID offsets inherited from
-/// preceding phases. Literal IDs are always phase-local (each phase's
-/// bytecode has its own literal pool) so they are not affected by
-/// `ctx_base`. Temps recycle into ONE global identity pool, so their
-/// `ctx_base.temps` is 0 for every phase (the pool is not partitioned by
-/// phase). When assembling a single phase in isolation, pass
+/// # What the merged fragment owes
+///
+/// A fragment is one variable's one phase, compiled against nothing but its
+/// own resources: its opcodes carry ids into its OWN `literals`,
+/// `graphical_functions`, `module_decls`, `static_views`, temp slots and
+/// `dim_lists`. Merging relocates those private id spaces into one shared
+/// space. These are the obligations that makes sound, stated as properties of
+/// the merged fragment -- not as a comparison with any other compiler. Each
+/// names the test that pins it. Unqualified test names are in the sibling
+/// `symbolic_merge_proptest.rs`; the interleaving consumer's half lives in
+/// `db/combined_fragment_proptest.rs`.
+///
+/// **M1 -- referential integrity.** For every absorbed fragment `F` and every
+/// opcode of `F`, the renumbered opcode names the same resource VALUE in the
+/// merged tables that the original named in `F`'s own tables:
+/// `merged.literals[id + lit_off] == F.literals[id]`, and likewise for module
+/// decls, static views (up to M5's temp-base shift), dim lists (up to the
+/// 4-element truncation), and every table of a GF run. This is the whole
+/// point of the merge; M2-M4 are the means. Pinned by
+/// `merged_ids_dereference_to_their_own_fragments_resources`, with
+/// `forced_rich_fragments_exercise_every_resource_kind` as its non-vacuity
+/// guard.
+///
+/// **M2 -- flat resources are disjoint.** Literals, module decls, static views
+/// and dim lists are APPENDED: fragment `i`'s entries occupy
+/// `[base_i, base_i + |R_i|)`, those ranges are pairwise disjoint, and
+/// together they tile the merged table in fragment order. No fragment can
+/// reach another's entry, so M1 is never satisfied by accidental sharing.
+/// Pinned by `flat_resource_ranges_are_disjoint_and_tile_the_merged_table`.
+///
+/// **M3 -- ids fit their bytecode id type.** Every assigned id is
+/// representable in the type the opcode field carries (`LiteralId`/`ModuleId`/
+/// `ViewId`/`DimListId` are `u16`, `TempId` and `GraphicalFunctionId` are
+/// `u8`). A merged table that outgrows its id type is a loud `Err`, never a
+/// wrapped id silently naming a different resource. Pinned by
+/// `literal_pool_past_u16_capacity_fails_loud`,
+/// `renumber_opcode_u16_addition_overflow_is_loud`,
+/// `test_renumber_opcode_u8_addition_overflow` and
+/// `test_concatenate_genuinely_distinct_gf_over_capacity_fails_loud`.
+///
+/// **M4 -- graphical functions share by content, and only by content.** GFs
+/// are the one resource that deliberately does NOT get a disjoint range: N
+/// consumers of one dependency's arrayed GF each re-extract the same tables,
+/// and appending all N is how the `u8` `GraphicalFunctionId` overflowed
+/// (#582). Two local slots may map to one merged id only when their content
+/// is bit-identical; a `Lookup`/`LookupArray` run `[b, b + table_count)` stays
+/// contiguous and in order; and the remap is TOTAL over `[0, gf_len)`, so even
+/// a slot no opcode reads keeps its own content. Pinned by
+/// `gf_dedup_preserves_runs_and_never_merges_distinct_content`.
+///
+/// **M5 -- temps never alias between simultaneously-live fragments.** The one
+/// shareable resource; see [`TempStrategy`] for the live-range argument and
+/// which strategy a given emission shape needs. `temp_offsets` is the prefix
+/// sum of the merged sizes, so distinct slots' storage never overlaps either.
+/// Pinned by `merged_temp_slot_uses_never_interleave` and
+/// `recycle_shares_by_identity_and_sizes_by_max` for the sequential emitter,
+/// and by `db::combined_fragment_proptest`'s
+/// `interleaved_members_never_share_a_temp_slot` for the interleaving one.
+///
+/// **M6 -- absorption is 1:1 on opcodes.** The merged code is each fragment's
+/// Ret-stripped opcodes, contiguous and in fragment order, plus one terminal
+/// `Ret`. Two downstream boundaries are COUNTS into this stream and would move
+/// silently if it were not 1:1: `flows_invariant_opcode_len` (the
+/// run-invariant flow prefix, GH #712, computed in `db::assemble` as a sum of
+/// Ret-stripped fragment lengths) and the SCC per-element segmentation.
+/// Pinned by `merge_is_one_to_one_on_opcodes_and_prefix_lengths_are_boundaries`
+/// -- which asserts the stronger form the boundary actually needs, that a
+/// fragment's renumbering never depends on what FOLLOWS it -- and, for the
+/// interleaving emitter, by `db::combined_fragment_proptest`'s
+/// `interleave_conserves_opcodes_and_follows_element_order`.
+///
+/// **M7 -- variable references are not the merger's business.** Renumbering
+/// touches resource ids only: every `SymVarRef` comes through byte-identical
+/// and every opcode keeps its variant. Addresses are assigned exactly once,
+/// later, by `resolve_module`. Pinned by the `skeleton` half of
+/// `merged_ids_dereference_to_their_own_fragments_resources`: the comparison
+/// blanks only the resource ids, so every `SymVarRef` and every jump offset
+/// must survive byte-identical.
+///
+/// **M8 -- the phase split agrees with the whole-model merge.** `assemble_module`
+/// renumbers initials, flows and stocks SEPARATELY, but takes the module's
+/// `module_decls` / `static_views` / `temp_offsets` / `dim_lists` tables from a
+/// single all-phases merge. So merging one phase with `ctx_base` set to the
+/// summed counts of the preceding phases must assign each fragment exactly the
+/// ids the all-phases merge assigns it -- otherwise a flows opcode indexes the
+/// module's table with an id computed against a different table. Literals are
+/// the deliberate exception: each phase's bytecode carries its own pool and
+/// the all-phases pool is discarded, so `ctx_base` does not apply to them.
+/// Pinned by `phase_split_assigns_the_same_ids_as_the_all_phases_merge`, with
+/// `forced_rich_phase_split_uses_non_zero_bases` as its non-vacuity guard --
+/// with an all-zero `ctx_base` the split IS the all-phases merge, so the
+/// property would pass without testing anything.
+///
+/// `ctx_base` provides the context resource id offsets inherited from
+/// preceding phases (M8). Temps recycle into ONE pool shared by every phase,
+/// so `ctx_base.temps` is 0 for every phase -- the pool is not partitioned by
+/// phase. When merging a single phase in isolation, pass
 /// `ContextResourceCounts::default()`.
 pub(crate) struct FragmentMerger {
     ctx_base: ContextResourceCounts,
     temp_strategy: TempStrategy,
     merged_literals: Vec<f64>,
     merged_gf: Vec<Vec<(f64, f64)>>,
-    /// Cross-fragment graphical-function de-duplication index (#582). Maps a
-    /// GF *block* -- a maximal contiguous run of one or more lookup tables,
-    /// the granularity the monolithic `Compiler::new` lays out one-per-
-    /// variable -- keyed by its bit-exact content, to the global `merged_gf`
-    /// offset its first occurrence was appended at. A dependency arrayed GF
-    /// referenced by N consumer fragments produces N fragments each carrying
-    /// the *same* block (every consumer re-extracts the dependency's
-    /// `Vec<Table>` -- see `db/var_fragment.rs`); de-duplicating the block
-    /// appends it once and remaps every consumer's `base_gf` by the single
-    /// shared offset, matching the monolithic layout.
+    /// Cross-fragment graphical-function de-duplication index (#582, M4).
+    /// Maps a GF *block* -- a maximal contiguous run of one or more lookup
+    /// tables, the granularity `Compiler::new` lays a fragment's tables out in
+    /// (one run per table-bearing variable, `codegen.rs`) -- keyed by its
+    /// bit-exact content, to the global `merged_gf` offset its first
+    /// occurrence was appended at. A dependency arrayed GF referenced by N
+    /// consumer fragments produces N fragments each carrying the *same* block
+    /// (every consumer re-extracts the dependency's `Vec<Table>` -- see
+    /// `db/var_fragment.rs`); de-duplicating the block appends it once and
+    /// remaps every consumer's `base_gf` by the single shared offset, which is
+    /// what keeps the merged count proportional to the DISTINCT tables a model
+    /// has rather than to how many fragments mention them.
     ///
     /// A fragment's blocks are the *maximal* contiguous intervals its
     /// `Lookup`/`LookupArray` opcodes reference (overlapping/nested ranges
@@ -1538,24 +1650,28 @@ fn gf_block_key(tables: &[Vec<(f64, f64)>]) -> GfBlockKey {
 /// `(start, len)` blocks covering `[0, gf_len)` exactly, sorted by `start`
 /// (#582).
 ///
-/// Each `Lookup`/`LookupArray` `base_gf` addresses a run of `table_count`
-/// tables starting at `base_gf`, and `base_gf` is always an originating
-/// variable's block start (the monolithic `Compiler::new` only ever emits a
-/// `base_gf` from its one-per-variable `table_base_ids` map). Within a
-/// fragment one such run can be *nested* inside another: a per-element
-/// arrayed GF `g` is read both as the whole array (`LookupArray { base, |D|
-/// }`) and at one element (`Lookup { base + e, 1 }` -- fully inside the
-/// array's range). The whole-array run is the real block; the nested
-/// element run is a sub-reference, NOT a separate block (splitting the
+/// This is a property of the FRAGMENT, read off its own opcodes, and it needs
+/// exactly two things from the emitter that produced it (`Compiler::new` --
+/// the one codegen both the fragment path and the test-only whole-model path
+/// share): each `base_gf` an opcode carries is the start of some table-bearing
+/// variable's run, and distinct variables' runs are disjoint. Both hold
+/// because `Compiler::new` assigns every `base_gf` out of one
+/// `table_base_ids` map built by laying each variable's tables down
+/// contiguously from a monotonically advancing cursor.
+///
+/// Given that, a `Lookup`/`LookupArray` run `[base_gf, base_gf + table_count)`
+/// can be *nested* inside another run but never partially overlap it: a
+/// per-element arrayed GF `g` is read both as the whole array
+/// (`LookupArray { base, |D| }`) and at one element (`Lookup { base + e, 1 }`,
+/// fully inside the array's range). The whole-array run is the real block; the
+/// nested element run is a sub-reference, NOT a separate block (splitting the
 /// block at the element boundary could scatter the array across the deduped
-/// table and miscompile the `[base .. base + table_count]` array lookup).
-/// Distinct variables' blocks are laid out *disjointly* by `Compiler::new`,
-/// so opcode runs are only ever disjoint or nested -- never partially
-/// overlapping. The blocks are therefore the *maximal-by-inclusion* opcode
-/// runs (nested runs dropped), plus one block per maximal *un-referenced*
-/// gap (over-collected dependency tables `db/var_fragment.rs` gathered but
-/// no opcode reads -- never read, so an imperfect gap boundary cannot
-/// miscompile, only mildly affect the deduped count).
+/// table and miscompile the `[base .. base + table_count]` array lookup). The
+/// blocks are therefore the *maximal-by-inclusion* opcode runs (nested runs
+/// dropped), plus one block per maximal *un-referenced* gap (over-collected
+/// dependency tables `db/var_fragment.rs` gathered but no opcode reads --
+/// never read, so an imperfect gap boundary cannot miscompile, only mildly
+/// affect the deduped count).
 ///
 /// `Err` only if a run extends past `gf_len` or two runs partially overlap
 /// (a corrupt fragment the engine never produces); loud-safe.
@@ -1643,9 +1759,10 @@ impl FragmentMerger {
         Self::new_with_temp_strategy(ctx_base, TempStrategy::Sum)
     }
 
-    /// New merger with an explicit temp strategy. `concatenate_fragments`
-    /// (plain-phase, sequential segments) uses `TempStrategy::Recycle` to
-    /// match the monolithic keyed max-merge; the SCC path uses `Sum`.
+    /// New merger with an explicit temp strategy (M5). A caller that emits
+    /// each fragment's opcodes as one contiguous run passes
+    /// `TempStrategy::Recycle`; one that interleaves them passes `Sum`. See
+    /// [`TempStrategy`].
     pub(crate) fn new_with_temp_strategy(
         ctx_base: &ContextResourceCounts,
         temp_strategy: TempStrategy,
@@ -1681,27 +1798,34 @@ impl FragmentMerger {
 
     /// Absorb one fragment's flat (non-GF) side-channels -- literals,
     /// modules, views, temp sizes, dim lists -- into the running merge
-    /// state and return the five flat resource base offsets. The literal /
-    /// module / view / dim-list offsets are computed from the *pre-merge*
-    /// lengths (each is a distinct resource, laid out disjointly), then those
-    /// side-channels are appended (`Temp`-based static views shifted by this
-    /// fragment's `temp_offset`, dim-lists truncated to 4). The *temp* offset
-    /// instead follows `temp_strategy` (#583): `Sum` advances per fragment
-    /// (disjoint ranges, for `combine_scc_fragment`'s interleaved segments);
-    /// `Recycle` uses the fixed `ctx_base.temps` so every fragment's temps
-    /// max-merge into one identity pool (plain-phase concat, matching the
-    /// monolithic keyed max-merge). Graphical functions are handled
-    /// separately by `absorb_gf` (content-de-duplicated, #582).
+    /// state and return the five flat resource base offsets.
     ///
-    /// `Err` when a merged table outgrows its `u16` id type. The base offsets
-    /// are checked here rather than only at `renumber_opcode` because a
-    /// fragment may carry entries no opcode reads (over-collected dependency
+    /// M2: the literal / module / view / dim-list offsets are the *pre-merge*
+    /// lengths, and the fragment's entries are then appended, so this
+    /// fragment's entries occupy exactly `[base, base + len)` and no earlier
+    /// fragment's range can overlap it. Two things are rewritten on the way
+    /// in, and both are M1 (a merged entry must still denote what the
+    /// fragment's entry denoted): a `Temp`-based static view is shifted by
+    /// this fragment's `temp_offset` so it still points at the same temp, and
+    /// a dim-list is truncated to the 4 elements the `(u8, [u16; 4])` merged
+    /// representation holds.
+    ///
+    /// The *temp* offset instead follows `temp_strategy` (#583, M5): `Sum`
+    /// advances per fragment so each gets a disjoint range;  `Recycle` uses
+    /// the fixed `ctx_base.temps` so every fragment's temp `t` lands on the
+    /// same slot `t + base`, max-merged below. See [`TempStrategy`] for which
+    /// emission shape needs which. Graphical functions are handled separately
+    /// by `absorb_gf` (content-de-duplicated, #582, M4).
+    ///
+    /// `Err` on M3: a merged table that outgrows its `u16` id type. The base
+    /// offsets are checked here rather than only at `renumber_opcode` because
+    /// a fragment may carry entries no opcode reads (over-collected dependency
     /// resources), and those still consume ids for the fragments after it.
     pub(crate) fn absorb_non_gf(
         &mut self,
         frag: &PerVarBytecodes,
     ) -> Result<FragmentResourceOffsets, String> {
-        // Literals are phase-local; no ctx_base offset needed. Modules,
+        // Literals are phase-local; no ctx_base offset needed (M8). Modules,
         // views, and dim-lists are appended unshifted, so their offset is
         // `ctx_base + cumulative_appended` (no double-count: the appended
         // entries do NOT carry the ctx_base, so `merged_X.len()` excludes
@@ -1729,18 +1853,18 @@ impl FragmentMerger {
         // `Recycle`: a FIXED base (`ctx_base.temps`, which is 0 for every
         //   plain phase since temps share ONE global identity pool). The
         //   per-fragment max-merge below places fragment temp id `t` at slot
-        //   `t + base`, so every fragment's id 0 collapses to the same slot
-        //   -- the monolithic keyed max-merge.
+        //   `t + base`, so every fragment's id 0 collapses to the same slot.
         // `Sum`: advance by the running pool length so each fragment gets a
-        //   disjoint range (interleaved SCC segments need non-overlapping
-        //   live ranges). NOTE the previous unconditional
+        //   disjoint range (interleaved segments need non-overlapping live
+        //   ranges). NOTE the previous unconditional
         //   `merged_temp_sizes.len() + ctx_base.temps` double-counted
         //   `ctx_base.temps`: temps are stored at `id + temp_offset` (which
         //   already includes the base), so `merged_temp_sizes.len()` absorbs
         //   the base -- adding it again diverged `flows_concat` from the
-        //   all-phases `merged` table. The recycle path's fixed base removes
-        //   that divergence; the Sum path runs only with `ctx_base.temps == 0`
-        //   (`combine_scc_fragment` passes a default ctx_base).
+        //   all-phases `merged` table (an M8 violation). The recycle path's
+        //   fixed base removes that divergence; the Sum path runs only with
+        //   `ctx_base.temps == 0` (`combine_scc_fragment` passes a default
+        //   ctx_base).
         let temp_offset = match self.temp_strategy {
             TempStrategy::Recycle => self.ctx_base.temps,
             TempStrategy::Sum => self.merged_temp_sizes.len() as u32 + self.ctx_base.temps,
@@ -1987,10 +2111,10 @@ pub(crate) struct GfDedup {
 }
 
 impl GfDedup {
-    /// De-duplicate the GF table lists of `fragments` (in order) by
-    /// bit-exact content, matching the monolithic `Compiler::new`'s
-    /// one-list-per-variable layout. Value-exact: genuinely-different lists
-    /// never share an offset. `Err` if the *distinct* GF count exceeds
+    /// De-duplicate the GF blocks of `fragments` (in order) by bit-exact
+    /// content (M4). Value-exact: two blocks share an offset only when their
+    /// content is identical, so a `Lookup` can never be redirected to a
+    /// different table. `Err` if the *distinct* GF count exceeds
     /// `GraphicalFunctionId` capacity (the genuine-capacity case the dedup
     /// cannot help -- escalate, do not widen the ID width here).
     pub fn build(fragments: &[&PerVarBytecodes]) -> Result<Self, String> {
@@ -2021,21 +2145,22 @@ impl GfDedup {
 /// over (0 when `dedup` covers exactly `fragments`; the running phase
 /// offset when one `GfDedup` spans initials + flows + stocks).
 ///
-/// The non-GF resource accounting is byte-for-byte the original
-/// `concatenate_fragments` loop -- only the GF base now comes from the
-/// shared deduped remap instead of a flat `gf_off`, so the output is
-/// identical to before for any model whose GF table lists were already
-/// distinct.
+/// This is the sequential-emission consumer of `FragmentMerger`: each
+/// fragment's Ret-stripped opcodes are appended as ONE contiguous run, in
+/// fragment order (M6), which is what makes `TempStrategy::Recycle` sound
+/// here (M5) and what makes a prefix of the fragment list correspond to a
+/// prefix of the merged opcode stream -- the boundary `assemble_module`
+/// counts for the run-invariant flow prefix.
 pub(crate) fn concatenate_fragments_with_gf(
     fragments: &[&PerVarBytecodes],
     ctx_base: &ContextResourceCounts,
     dedup: &GfDedup,
     gf_index_base: usize,
 ) -> Result<ConcatenatedBytecodes, String> {
-    // Plain-phase concat: temps RECYCLE into one identity pool (matching the
-    // monolithic keyed max-merge), since fragments are sequential, non-
-    // overlapping runlist segments. `combine_scc_fragment` (interleaved
-    // segments) uses the disjoint `Sum` path instead.
+    // Fragments are appended whole and in order below, so no two fragments'
+    // temp uses interleave and they may share slots by identity (M5).
+    // `combine_scc_fragment`, which interleaves per-element segments, uses the
+    // disjoint `Sum` path instead.
     let mut merger = FragmentMerger::new_with_temp_strategy(ctx_base, TempStrategy::Recycle);
     let mut merged_code: Vec<SymbolicOpcode> = Vec::new();
 
@@ -2097,11 +2222,11 @@ fn remap_gf(
 /// is translated through `gf_remap` (the fragment's per-slot local->global
 /// map from `FragmentMerger::absorb_gf`) rather than a flat add.
 ///
-/// Every offsetting add is checked: a wrapped id is a well-formed program that
-/// names a different resource, so the failure mode of getting this wrong is
-/// wrong numbers with no diagnostic. `Err` on a temp id past `TempId` (= `u8`),
-/// on any `u16` id past its type, or on a `base_gf` out of range for
-/// `gf_remap` (a corrupt fragment).
+/// Every offsetting add is checked (M3): a wrapped id is a well-formed
+/// program that names a different resource, so the failure mode of getting
+/// this wrong is wrong numbers with no diagnostic. `Err` on a temp id past
+/// `TempId` (= `u8`), on any `u16` id past its type, or on a `base_gf` out of
+/// range for `gf_remap` (a corrupt fragment).
 ///
 /// There is no separate `temp_off > u8::MAX` precheck (#583): the plain-
 /// phase concat recycles temps into one identity pool whose `temp_off` is 0
@@ -2244,6 +2369,10 @@ pub(crate) fn renumber_opcode(
 #[cfg(test)]
 #[path = "symbolic_builder_tests.rs"]
 mod builder_tests;
+
+#[cfg(test)]
+#[path = "symbolic_merge_proptest.rs"]
+mod merge_proptest;
 
 // ============================================================================
 // Tests
@@ -3885,17 +4014,18 @@ mod tests {
     }
 
     // ====================================================================
-    // #582: cross-fragment graphical-function de-duplication.
+    // #582, M4: cross-fragment graphical-function de-duplication.
     //
     // `concatenate_fragments` previously appended every fragment's
     // `graphical_functions` with no de-duplication (the flat running
     // `gf_offset = merged_gf.len()`), so a dependency arrayed GF referenced
     // by N consumer fragments duplicated N times and `renumber_opcode`'s
     // `gf_off > u8::MAX` guard tripped once the duplicated count crossed
-    // 255 -- even though the *distinct* count is small. The monolithic
-    // `Compiler::new` (codegen.rs) carries each variable's GF list exactly
-    // once (its `module.tables` map is keyed by ident), so the incremental
-    // path was incorrect-by-omission, not merely capacity-limited.
+    // 255 -- even though the *distinct* count is small. Codegen lays each
+    // table-bearing variable's tables down exactly once per fragment (its
+    // `tables` map is keyed by ident); the duplication was entirely ACROSS
+    // fragments, which is why de-duplicating on block content is a complete
+    // fix rather than a capacity workaround.
     // ====================================================================
 
     /// Build a single-`Lookup` fragment carrying one scalar GF table whose
@@ -4157,20 +4287,26 @@ mod tests {
     }
 
     // ====================================================================
-    // #583: match the monolithic temp recycling in the plain-phase concat.
+    // #583, M5: the sequential concat shares temp slots by IDENTITY.
     //
-    // The monolithic `Module::compile` flattens every variable's exprs into
-    // one runlist and max-merges their temps via a `HashMap<temp_id, size>`
-    // (`compiler/mod.rs`): since each variable's temps are 0-based scratch
-    // that die at that variable's runlist-segment end, variable A's temp 0
-    // and variable B's temp 0 collapse to ONE global slot 0. The plain-phase
-    // incremental concat must produce the SAME identity-recycled pool (one
-    // shared pool across initials/flows/stocks), not a per-fragment SUM --
-    // summing both wastes slots AND, with a non-zero phase ctx_base, drives
-    // the renumbered `temp_id` past `u8::MAX` (the C-LEARN
-    // `temp offset ... exceeds TempId capacity` failure). `combine_scc_fragment`
-    // stays on the disjoint (sum) path because its per-element segments
-    // interleave (overlapping live ranges) -- see `db/combined_fragment_tests`.
+    // A fragment's temps are 0-based scratch that dies at the end of that
+    // fragment's runlist segment, and `concatenate_fragments_with_gf` emits
+    // each fragment as one contiguous run, so no two fragments' temp uses
+    // interleave and fragment A's temp 0 may occupy the same slot as fragment
+    // B's temp 0 -- sized to the MAX of its users, since each of them holds it
+    // alone for the length of its own segment. That sharing is not an
+    // optimization: `TempId` is `u8`, and summing 0-based per-fragment counts
+    // across a model overflows it (the C-LEARN
+    // `temp offset ... exceeds TempId capacity` failure, #583).
+    // `combine_scc_fragment` interleaves per-element segments, so its members'
+    // live ranges DO overlap and it stays on the disjoint `Sum` path -- see
+    // `db/combined_fragment_tests`.
+    //
+    // These fixtures pin the rule on hand-built shapes; the general statement
+    // (over arbitrary fragment sets, including the non-interleaving property
+    // that is the actual justification) is
+    // `symbolic_merge_proptest::recycle_shares_by_identity_and_sizes_by_max`
+    // and `merged_temp_slot_uses_never_interleave`.
     // ====================================================================
 
     /// Build a single-variable-shaped fragment carrying a `VectorSortOrder`
@@ -4196,51 +4332,30 @@ mod tests {
         }
     }
 
-    /// The monolithic `Module::compile` temp count: the keyed max-merge of
-    /// every fragment's `(temp_id, size)` pairs (`compiler/mod.rs` flattens
-    /// every variable's exprs and merges into one `HashMap<temp_id, size>`).
-    /// `n_temps` is the number of distinct ids (== `max_id + 1` for the
-    /// dense 0-based ids real per-variable fragments produce).
-    fn monolithic_n_temps(frags: &[&PerVarBytecodes]) -> usize {
-        let mut map: HashMap<u32, usize> = HashMap::new();
-        for frag in frags {
-            for (id, size) in &frag.temp_sizes {
-                let e = map.entry(*id).or_insert(0);
-                *e = (*e).max(*size);
-            }
-        }
-        map.len()
-    }
-
     #[test]
-    fn test_concatenate_recycles_temps_to_match_monolithic() {
+    fn test_concatenate_recycles_three_id_zero_temps_onto_one_slot() {
         // Three per-variable fragments, each with its own 0-based temp 0.
-        // Monolithic recycles them to ONE slot (n_temps == 1). The plain-
-        // phase concat must do the same: a single shared identity pool, not
-        // three summed slots.
+        // They are emitted as three disjoint contiguous runs, so all three may
+        // hold ONE slot in turn: the pool is one slot wide, sized to the
+        // largest of them.
         let frag_a = sort_order_temp_frag(0, 4);
         let frag_b = sort_order_temp_frag(0, 8);
         let frag_c = sort_order_temp_frag(0, 2);
         let refs: Vec<&PerVarBytecodes> = vec![&frag_a, &frag_b, &frag_c];
 
-        let expected = monolithic_n_temps(&refs);
-        assert_eq!(expected, 1, "monolithic recycles three id-0 temps to one");
-
         let no_base = ContextResourceCounts::default();
         let merged = concatenate_fragments(&refs, &no_base).unwrap();
 
-        // The recycled pool has exactly `expected` slots, and the surviving
-        // slot's size is the MAX over the fragments that used it (8), since
-        // they share the storage (the monolithic keyed max-merge).
         assert_eq!(
             merged.temp_offsets.len(),
-            expected,
-            "incremental plain-phase temp count must EQUAL the monolithic \
-             Module::compile n_temps (recycle, not sum)"
+            1,
+            "three fragments' id-0 temps must recycle onto one shared slot, \
+             not sum to three"
         );
         assert_eq!(
             merged.temp_total_size, 8,
-            "the recycled slot's size is the max over the fragments using it"
+            "a shared slot must be sized to the LARGEST of its users, or the \
+             fragment needing 8 elements would write past its storage"
         );
 
         // Every renumbered temp opcode must resolve in-range (index < pool).
@@ -4258,9 +4373,9 @@ mod tests {
 
     #[test]
     fn test_concatenate_temp_recycle_distinct_ids_max_merge() {
-        // A fragment using temp ids {0, 1} and another using {0}. Monolithic
-        // merges to ids {0, 1} (2 slots, sizes max-merged per id). The
-        // plain-phase concat must match: 2 slots, not 3 summed.
+        // A fragment using temp ids {0, 1} and another using {0}: the pool is
+        // the UNION of the ids (2 slots), each sized to the max of the
+        // fragments using that id -- not 3 summed slots.
         let frag_a = PerVarBytecodes {
             symbolic: SymbolicByteCode {
                 literals: vec![],
@@ -4282,11 +4397,12 @@ mod tests {
         let frag_b = sort_order_temp_frag(0, 8);
         let refs: Vec<&PerVarBytecodes> = vec![&frag_a, &frag_b];
 
-        let expected = monolithic_n_temps(&refs);
-        assert_eq!(expected, 2, "ids {{0,1}} merged with {{0}} -> 2 distinct");
-
         let merged = concatenate_fragments(&refs, &ContextResourceCounts::default()).unwrap();
-        assert_eq!(merged.temp_offsets.len(), expected);
+        assert_eq!(
+            merged.temp_offsets.len(),
+            2,
+            "ids {{0,1}} unioned with {{0}} -> 2 slots"
+        );
         // Slot 0 size = max(4, 8) = 8; slot 1 size = 6.
         assert_eq!(merged.temp_total_size, 8 + 6);
 
