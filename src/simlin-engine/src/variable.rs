@@ -83,13 +83,11 @@ pub enum Variable<MI = ModuleInput, E = Expr2> {
         inflows: Vec<Ident<Canonical>>,
         outflows: Vec<Ident<Canonical>>,
         non_negative: bool,
-        /// Legacy field from the monolithic compilation path. In the salsa incremental
-        /// path, equation errors are emitted via `CompilationDiagnostic` accumulators
-        /// instead of being stored here. New code should use `db::collect_model_diagnostics`.
+        /// How parsing and lowering report a failure on this variable; see the
+        /// note on [`Variable::equation_errors`].
         errors: Vec<EquationError>,
-        /// Legacy field from the monolithic compilation path. In the salsa incremental
-        /// path, unit errors are emitted via `CompilationDiagnostic` accumulators
-        /// instead of being stored here. New code should use `db::collect_model_diagnostics`.
+        /// How parsing reports a malformed `<units>` string on this variable;
+        /// see the note on [`Variable::unit_errors`].
         unit_errors: Vec<UnitError>,
     },
     Var {
@@ -102,13 +100,11 @@ pub enum Variable<MI = ModuleInput, E = Expr2> {
         non_negative: bool,
         is_flow: bool,
         is_table_only: bool,
-        /// Legacy field from the monolithic compilation path. In the salsa incremental
-        /// path, equation errors are emitted via `CompilationDiagnostic` accumulators
-        /// instead of being stored here. New code should use `db::collect_model_diagnostics`.
+        /// How parsing and lowering report a failure on this variable; see the
+        /// note on [`Variable::equation_errors`].
         errors: Vec<EquationError>,
-        /// Legacy field from the monolithic compilation path. In the salsa incremental
-        /// path, unit errors are emitted via `CompilationDiagnostic` accumulators
-        /// instead of being stored here. New code should use `db::collect_model_diagnostics`.
+        /// How parsing reports a malformed `<units>` string on this variable;
+        /// see the note on [`Variable::unit_errors`].
         unit_errors: Vec<UnitError>,
     },
     Module {
@@ -117,13 +113,11 @@ pub enum Variable<MI = ModuleInput, E = Expr2> {
         model_name: Ident<Canonical>,
         units: Option<datamodel::UnitMap>,
         inputs: Vec<MI>,
-        /// Legacy field from the monolithic compilation path. In the salsa incremental
-        /// path, equation errors are emitted via `CompilationDiagnostic` accumulators
-        /// instead of being stored here. New code should use `db::collect_model_diagnostics`.
+        /// How parsing and lowering report a failure on this variable; see the
+        /// note on [`Variable::equation_errors`].
         errors: Vec<EquationError>,
-        /// Legacy field from the monolithic compilation path. In the salsa incremental
-        /// path, unit errors are emitted via `CompilationDiagnostic` accumulators
-        /// instead of being stored here. New code should use `db::collect_model_diagnostics`.
+        /// How parsing reports a malformed `<units>` string on this variable;
+        /// see the note on [`Variable::unit_errors`].
         unit_errors: Vec<UnitError>,
     },
 }
@@ -212,9 +206,27 @@ impl<MI, E> Variable<MI, E> {
         matches!(self, Variable::Module { .. })
     }
 
-    /// Returns equation errors stored in the legacy monolithic-path fields.
-    /// In the salsa incremental path, errors are emitted as `CompilationDiagnostic`
-    /// accumulators rather than stored here; prefer `db::collect_model_diagnostics`.
+    /// The equation errors parsing and lowering recorded on this variable.
+    ///
+    /// **This is a live error channel, not residue from the monolithic
+    /// compiler.** `parse_var` writes an equation's parse errors here and
+    /// `model::lower_variable` appends the errors `lower_ast` raises, because
+    /// both produce a `Variable` and have nowhere else to put a failure. The
+    /// salsa path READS it: `db::var_fragment::lower_var_fragment` turns each
+    /// entry into a `Diagnostic`, at two sites. The read of the LOWERED
+    /// variable is the one nothing else covers -- drop it and every
+    /// `MismatchedDimensions` disappears
+    /// (`db::diagnostic_tests::variable_error_fields_are_the_lowering_channel`
+    /// is the standing gate). The read of the PARSED variable sees a strict
+    /// subset, since `lower_variable` clones the parse errors forward, but it
+    /// is where the conveyor/queue driven-flow `EmptyEquation` suppression
+    /// applies, so dropping it turns a spec-sanctioned empty equation into a
+    /// phantom error (`db::diagnostic_tests`'
+    /// `test_conveyor_driven_flow_empty_equation_suppressed` and its two
+    /// siblings).
+    ///
+    /// So `db::collect_model_diagnostics` is not an ALTERNATIVE source for
+    /// these -- it is the same errors, downstream of this field.
     pub fn equation_errors(&self) -> Option<Vec<EquationError>> {
         let errors = match self {
             Variable::Stock { errors, .. }
@@ -228,9 +240,13 @@ impl<MI, E> Variable<MI, E> {
         }
     }
 
-    /// Returns unit errors stored in the legacy monolithic-path fields.
-    /// In the salsa incremental path, errors are emitted as `CompilationDiagnostic`
-    /// accumulators rather than stored here; prefer `db::collect_model_diagnostics`.
+    /// The malformed-`<units>`-string errors parsing recorded on this variable.
+    ///
+    /// Live for the same reason as [`Variable::equation_errors`]: `parse_var`
+    /// is where a unit string is parsed, and `lower_var_fragment` reads this
+    /// field to emit the non-fatal `DiagnosticError::Unit` rows. Unit
+    /// *consistency* mismatches are a different pass (`db::units`) and never
+    /// land here -- nothing appends to this field after parsing.
     pub fn unit_errors(&self) -> Option<Vec<UnitError>> {
         let errors = match self {
             Variable::Stock { unit_errors, .. }
@@ -241,28 +257,6 @@ impl<MI, E> Variable<MI, E> {
             None
         } else {
             Some(errors.clone())
-        }
-    }
-
-    /// Appends an equation error to the legacy monolithic-path storage on this variable.
-    /// The monolithic path (non-salsa) uses mutation to collect errors after parsing;
-    /// the salsa path accumulates them via `CompilationDiagnostic` instead.
-    pub fn push_error(&mut self, err: EquationError) {
-        match self {
-            Variable::Stock { errors, .. }
-            | Variable::Var { errors, .. }
-            | Variable::Module { errors, .. } => errors.push(err),
-        }
-    }
-
-    /// Appends a unit error to the legacy monolithic-path storage on this variable.
-    /// The monolithic path (non-salsa) uses mutation to collect errors after unit checking;
-    /// the salsa path accumulates them via `CompilationDiagnostic` instead.
-    pub fn push_unit_error(&mut self, err: UnitError) {
-        match self {
-            Variable::Stock { unit_errors, .. }
-            | Variable::Var { unit_errors, .. }
-            | Variable::Module { unit_errors, .. } => unit_errors.push(err),
         }
     }
 

@@ -143,13 +143,19 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Owner**: unassigned
 - **Last reviewed**: 2026-02-15
 
-### 17. Remove Legacy Error Fields from Variable/ModelStage Types
+### 17. Embedded Error Fields on Variable/ModelStage Types
 
 - **Component**: simlin-engine
-- **Severity**: low
-- **Description**: The `errors` and `unit_errors` fields on `Variable`, and the `errors` field on `ModelStage0`/`ModelStage1`, are now redundant with the salsa incremental compilation pipeline. Diagnostics are collected via `collect_all_diagnostics` / `collect_model_diagnostics` from tracked functions, making the embedded error fields dead weight carried through the monolithic compilation path. Removing them would simplify the data model and reduce confusion about the source of truth for errors. This cleanup was identified as Step 13 in the incremental compilation design (`docs/design/incremental-compilation.md`) but is not required by any acceptance criterion.
+- **Severity**: RESOLVED (2026-07-26) -- **the original premise was half wrong; do not act on it**
+- **Description**: This entry used to claim that the `errors`/`unit_errors` fields on `Variable` and the `errors` field on `ModelStage0`/`ModelStage1` were all "redundant with the salsa incremental compilation pipeline ... dead weight carried through the monolithic compilation path", and that removing them would simplify the data model. Every read site was classified before acting, and the four fields fall into two very different groups.
+
+  **`Variable::errors` and `Variable::unit_errors` are LIVE error channels, not residue.** They are how parsing and lowering report a failure on a variable, and the salsa diagnostics are *downstream* of them: `db::var_fragment::lower_var_fragment` reads `parsed.variable.unit_errors()` (the malformed-`<units>`-string rows), `parsed.variable.equation_errors()` (parse errors, where the conveyor/queue driven-flow `EmptyEquation` suppression applies) and `lowered.equation_errors()` (`MismatchedDimensions` and everything else `lower_ast` raises), and turns each entry into a `Diagnostic`. Emptying the lowered read makes every dimension-mismatch diagnostic vanish; emptying the parsed read turns a spec-sanctioned empty equation on a conveyor-driven flow into a phantom error. Deleting these fields without first replacing the channel would silently drop diagnostics. The claim is now pinned as a test rather than left as prose: `db::diagnostic_tests::variable_error_fields_are_the_lowering_channel` asserts both that the stage's value carries the error in the field and that the matching diagnostic reaches `collect_all_diagnostics`.
+
+  **`ModelStage0::errors` and `ModelStage1::errors` are read only by test-only code**, which is the half of the claim that held. `ModelStage0::errors` carries the duplicate-canonical-ident collision (GH #891) and is read only by `ModelStage1::new`; `ModelStage1::errors` is the monolithic path's simulatability gate (`compiler::Module::new` refuses a model with a non-empty list) and is otherwise read only by tests. They are kept and documented as such on the types: the gate is the reason they exist, `compiler::Module::new` has no salsa database to consult instead, and it is the only thing stopping that path from mis-compiling a resolved recurrence SCC (see `project::tests::build_module_refuses_a_resolved_recurrence_scc`). What WAS dead has been deleted -- `Variable::push_error` and `ModelStage1::get_unit_errors`, which existed for the mutation-based error collection the second dependency walk did before GH #568 unified the cycle gate, plus `Variable::push_unit_error` and the write-only `ModelStage1::unit_warnings`, which had no caller and no non-`None` writer respectively even before that.
+
+  Test helpers that used to report the monolithic path's embedded errors (`test_common::TestProject::compile`/`build_module`) now report `collect_all_diagnostics` instead: the production source of truth, and a different and better set rather than a strict superset. It gains the unknown-dependency, bare-lookup-table and assembly diagnostics and a source location on every row; it loses the model-level `VariablesHaveErrors` roll-up, the `("project", UnitDefinitionErrors)` row, and the old path's cycle verdict on element-acyclic recurrences -- the last being the whole point of deleting it.
 - **Owner**: unassigned
-- **Last reviewed**: 2026-02-22
+- **Last reviewed**: 2026-07-26
 
 ### 18. Dimension-Granularity Incremental Invalidation
 

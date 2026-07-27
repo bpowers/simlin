@@ -8,7 +8,7 @@ use std::hash::Hash;
 use crate::ast::{Expr0, lower_ast};
 use crate::common::{
     Canonical, EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result,
-    UnitError, canonicalize,
+    canonicalize,
 };
 use crate::dimensions::DimensionsContext;
 use crate::variable::{ModuleInput, Variable, identifier_set};
@@ -50,6 +50,17 @@ pub struct ModelStage0 {
     pub ident: Ident<Canonical>,
     pub display_name: String,
     pub variables: HashMap<Ident<Canonical>, VariableStage0>,
+    /// Model-level errors recorded while building this stage: today only the
+    /// duplicate-canonical-ident collision (GH #891), which the canonical-keyed
+    /// `variables` map above would otherwise swallow last-wins.
+    ///
+    /// Read only by [`ModelStage1::new`], which copies it into
+    /// [`ModelStage1::errors`] -- the monolithic path's simulatability gate.
+    /// Production's own duplicate-ident diagnostic is a separate derivation
+    /// (`db::model_duplicate_variables` -> `emit_duplicate_variable_diagnostics`)
+    /// over the raw `declared_variable_idents` input, so the two are
+    /// independent, and `db::stages_tests` compares this field against the
+    /// salsa-free `ModelStage0::new_in_project` oracle.
     pub errors: Option<Vec<Error>>,
     /// implicit is true if this model was implicitly added to the project
     /// by virtue of it being in the stdlib (or some similar reason)
@@ -73,18 +84,17 @@ pub struct ModelStage1 {
     pub name: Ident<Canonical>,
     pub display_name: String,
     pub variables: HashMap<Ident<Canonical>, Variable>,
-    /// Model-level errors are also accumulated via the salsa accumulator in
-    /// `compile_var_fragment` and `check_model_units`. This field is retained
-    /// because several test helpers inspect it directly.
-    pub errors: Option<Vec<Error>>,
-    /// Unit warnings are also accumulated via the salsa accumulator in
-    /// `check_model_units`. This field is retained for the test-only
-    /// `Project::from_salsa` construction path.
+    /// The monolithic path's simulatability gate: `compiler::Module::new`
+    /// refuses to build a module from a model with a non-empty list here.
     ///
-    /// Contains unit-related issues that should be surfaced to users but
-    /// should NOT block simulation. Unit mismatches are common in real-world
-    /// models and should not prevent running simulations.
-    pub unit_warnings: Option<Vec<Error>>,
+    /// Filled by [`ModelStage1::set_dependencies`] from three sources -- the
+    /// Stage0 duplicate-ident collision, the production dependency graph's
+    /// `has_cycle` verdict, and a roll-up of the equation errors the variables
+    /// themselves carry. It is NOT an alternative to the salsa diagnostics: it
+    /// is deliberately coarser (a code, no location), it exists only on this
+    /// test-only construction path, and everything that reports errors to a
+    /// user goes through `db::collect_all_diagnostics` instead.
+    pub errors: Option<Vec<Error>>,
     /// model_deps is the transitive set of model names referenced from modules in this model
     pub model_deps: Option<BTreeSet<Ident<Canonical>>>,
     pub instantiations: Option<HashMap<ModuleInputSet, ModuleStage2>>,
@@ -664,7 +674,6 @@ impl ModelStage1 {
                 .map(|(ident, v)| (ident.clone(), lower_variable(&model_scope, v)))
                 .collect(),
             errors: model_s0.errors.clone(),
-            unit_warnings: None,
             model_deps: Some(model_deps),
             instantiations: None,
             implicit: model_s0.implicit,
@@ -805,19 +814,12 @@ impl ModelStage1 {
         };
     }
 
-    /// Returns unit errors from variables in this model. The salsa incremental
-    /// path emits unit errors through `CompilationDiagnostic` accumulators;
-    /// prefer `db::collect_model_diagnostics` for new code.
-    pub fn get_unit_errors(&self) -> HashMap<Ident<Canonical>, Vec<UnitError>> {
-        self.variables
-            .iter()
-            .flat_map(|(ident, var)| var.unit_errors().map(|errs| (ident.clone(), errs)))
-            .collect()
-    }
-
-    /// Returns equation errors from variables in this model. The salsa
-    /// incremental path emits equation errors through `CompilationDiagnostic`
-    /// accumulators; prefer `db::collect_model_diagnostics` for new code.
+    /// The equation errors this model's variables carry, keyed by variable.
+    ///
+    /// A projection of [`Variable::equation_errors`] over the model, used by
+    /// the roll-up above and by the tests that check it. User-facing reporting
+    /// goes through `db::collect_all_diagnostics`, which reports the same
+    /// errors with a source location attached.
     pub fn get_variable_errors(&self) -> HashMap<Ident<Canonical>, Vec<EquationError>> {
         self.variables
             .iter()
