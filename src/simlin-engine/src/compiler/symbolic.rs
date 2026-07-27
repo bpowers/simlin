@@ -1332,6 +1332,50 @@ impl ContextResourceCounts {
 /// `0..=u16::MAX`.
 const U16_ID_CAPACITY: usize = u16::MAX as usize + 1;
 
+#[cfg(test)]
+thread_local! {
+    static ID_CAPACITY_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The capacity [`resource_base`] bounds against: `U16_ID_CAPACITY`, except
+/// under an [`IdCapacityGuard`] in a test.
+///
+/// The override exists so a test can reach the bound with a tiny fixture
+/// instead of one large enough to genuinely fill a 16-bit id space -- a
+/// 65,537-entry model would blow the per-test time budget many times over
+/// (`docs/dev/rust.md#test-time-budgets`). It does not add a second statement
+/// of the bound: the comparison still happens once, in `resource_base`; only
+/// the constant it compares against moves.
+#[inline]
+fn id_capacity() -> usize {
+    #[cfg(test)]
+    if let Some(cap) = ID_CAPACITY_OVERRIDE.with(|c| c.get()) {
+        return cap;
+    }
+    U16_ID_CAPACITY
+}
+
+/// Shrink the resource-id capacity for the current thread, restoring it on
+/// drop. Thread-local because tests run in parallel.
+#[cfg(test)]
+pub(crate) struct IdCapacityGuard;
+
+#[cfg(test)]
+impl IdCapacityGuard {
+    pub(crate) fn new(capacity: usize) -> Self {
+        ID_CAPACITY_OVERRIDE.with(|c| c.set(Some(capacity)));
+        IdCapacityGuard
+    }
+}
+
+#[cfg(test)]
+impl Drop for IdCapacityGuard {
+    fn drop(&mut self) {
+        ID_CAPACITY_OVERRIDE.with(|c| c.set(None));
+    }
+}
+
 /// The base id for a fragment's `frag_len` entries appended to a merged table
 /// that already holds `merged_len`, itself offset by `ctx_base` (M2 + M3).
 ///
@@ -1375,10 +1419,11 @@ pub(crate) fn resource_base(
         // so the narrowing itself cannot wrap.
         return Ok(base.min(u16::MAX as usize) as u16);
     }
-    if end > U16_ID_CAPACITY {
+    let capacity = id_capacity();
+    if end > capacity {
         return Err(format!(
             "merged {label} count {end} exceeds the bytecode id capacity of \
-             {U16_ID_CAPACITY} (ids are 16-bit)"
+             {capacity} (ids are 16-bit)"
         ));
     }
     Ok(base as u16)
@@ -1408,6 +1453,34 @@ pub(crate) struct FragmentResourceOffsets {
     pub view_offset: u16,
     pub temp_offset: u32,
     pub dl_offset: u16,
+}
+
+/// The four bases for the SHARED CONTEXT resources alone -- what
+/// [`FragmentMerger::absorb_context`] can honestly report.
+///
+/// Separate from [`FragmentResourceOffsets`] so that "this absorb assigned no
+/// literal id" is a property of the type rather than a placeholder value. The
+/// all-phases aggregation keeps no literal pool, and a `lit_offset: 0` sitting
+/// in its result would be indistinguishable from a real base of zero.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ContextResourceOffsets {
+    pub mod_offset: u16,
+    pub view_offset: u16,
+    pub temp_offset: u32,
+    pub dl_offset: u16,
+}
+
+impl ContextResourceOffsets {
+    /// Pair these context bases with the literal base of the same absorb.
+    fn with_literals(self, lit_offset: u16) -> FragmentResourceOffsets {
+        FragmentResourceOffsets {
+            lit_offset,
+            mod_offset: self.mod_offset,
+            view_offset: self.view_offset,
+            temp_offset: self.temp_offset,
+            dl_offset: self.dl_offset,
+        }
+    }
 }
 
 /// Per-fragment local-GF-slot -> global-(deduped)-GF-slot map. Index `i`
@@ -1527,10 +1600,17 @@ pub(crate) enum TempStrategy {
 /// that become a later phase's base are carried in `usize` and the bound is
 /// discharged in exactly one function, [`resource_base`], which is the only
 /// point that sees both a base and the length of the fragment about to consume
-/// it. Pinned by `literal_pool_past_u16_capacity_fails_loud` (within a phase),
-/// `a_full_ctx_base_bounds_only_the_phases_that_use_it` (across phases),
-/// `the_initials_phase_shares_the_mergers_capacity_bound` (the initials phase's
-/// own running offsets), `renumber_opcode_u16_addition_overflow_is_loud`,
+/// it. "Assigned" also means assigned to something the module KEEPS: a merge
+/// whose pool is discarded names no id, so bounding it rejects programs that
+/// are entirely valid. That is not hypothetical either -- it is why the
+/// all-phases aggregation is [`merge_context_side_channels`] and not a full
+/// merge. Pinned by `literal_pool_past_u16_capacity_fails_loud` (within a
+/// phase), `a_full_ctx_base_bounds_only_the_phases_that_use_it` (across
+/// phases), `the_initials_phase_shares_the_mergers_capacity_bound` (the
+/// initials phase's own running offsets),
+/// `the_all_phases_aggregation_does_not_bound_the_literal_pool` and
+/// `assembly_bounds_the_retained_pools_and_not_the_aggregate` (retained vs
+/// discarded), `renumber_opcode_u16_addition_overflow_is_loud`,
 /// `test_renumber_opcode_u8_addition_overflow` and
 /// `test_concatenate_genuinely_distinct_gf_over_capacity_fails_loud`.
 ///
@@ -1837,17 +1917,38 @@ impl FragmentMerger {
         &mut self,
         frag: &PerVarBytecodes,
     ) -> Result<FragmentResourceOffsets, String> {
-        // Literals are phase-local; no ctx_base offset needed (M8). Modules,
-        // views, and dim-lists are appended unshifted, so their offset is
-        // `ctx_base + cumulative_appended` (no double-count: the appended
-        // entries do NOT carry the ctx_base, so `merged_X.len()` excludes
-        // it). Temps are different: see below.
+        // Literals are phase-local; no ctx_base offset needed (M8). They are
+        // also the ONE resource an aggregation may legitimately not want, which
+        // is why they are the half that lives here rather than in
+        // `absorb_context` -- see that method's rustdoc.
         let lit_offset = resource_base(
             0,
             self.merged_literals.len(),
             frag.symbolic.literals.len(),
             "literal",
         )?;
+        let ctx = self.absorb_context(frag)?;
+        self.merged_literals
+            .extend_from_slice(&frag.symbolic.literals);
+        Ok(ctx.with_literals(lit_offset))
+    }
+
+    /// Absorb one fragment's SHARED CONTEXT side-channels -- module decls,
+    /// static views, temp sizes, dim lists -- and return their base offsets.
+    /// The literal pool is deliberately not touched.
+    ///
+    /// This is the whole of `absorb_non_gf` except the literal pool, and it is
+    /// separate because the two have different lifetimes in the assembled
+    /// module. The context tables are shared by every phase and reported ONCE,
+    /// by the all-phases aggregation ([`merge_context_side_channels`]); the
+    /// literal pools are per-phase and each is retained by the phase that built
+    /// it. An aggregation that wants the former must not be bounded by the
+    /// latter, because it assigns no merged literal id to anything.
+    fn absorb_context(&mut self, frag: &PerVarBytecodes) -> Result<ContextResourceOffsets, String> {
+        // Modules, views, and dim-lists are appended unshifted, so their offset
+        // is `ctx_base + cumulative_appended` (no double-count: the appended
+        // entries do NOT carry the ctx_base, so `merged_X.len()` excludes it).
+        // Temps are different: see below.
         let mod_offset = resource_base(
             self.ctx_base.modules,
             self.merged_modules.len(),
@@ -1888,8 +1989,6 @@ impl FragmentMerger {
             "dimension list",
         )?;
 
-        self.merged_literals
-            .extend_from_slice(&frag.symbolic.literals);
         self.merged_modules.extend_from_slice(&frag.module_decls);
         self.merged_views.extend(frag.static_views.iter().map(|sv| {
             let base = match &sv.base {
@@ -1917,8 +2016,7 @@ impl FragmentMerger {
                 self.merged_temp_sizes[new_id as usize].max(*size);
         }
 
-        Ok(FragmentResourceOffsets {
-            lit_offset,
+        Ok(ContextResourceOffsets {
             mod_offset,
             view_offset,
             temp_offset,
@@ -1989,11 +2087,28 @@ impl FragmentMerger {
     /// `code` is the already-renumbered, Ret-stripped opcode stream;
     /// a single trailing `Ret` is appended iff `code` is non-empty
     /// (preserving the original `concatenate_fragments` behavior).
-    fn into_concatenated(self, mut code: Vec<SymbolicOpcode>) -> ConcatenatedBytecodes {
+    fn into_concatenated(mut self, mut code: Vec<SymbolicOpcode>) -> ConcatenatedBytecodes {
         if !code.is_empty() {
             code.push(SymbolicOpcode::Ret);
         }
+        let literals = std::mem::take(&mut self.merged_literals);
+        let side = self.into_side_channels();
+        ConcatenatedBytecodes {
+            bytecode: SymbolicByteCode { literals, code },
+            graphical_functions: side.graphical_functions,
+            module_decls: side.module_decls,
+            static_views: side.static_views,
+            temp_offsets: side.temp_offsets,
+            temp_total_size: side.temp_total_size,
+            dim_lists: side.dim_lists,
+        }
+    }
 
+    /// Consume the merger and finalize just the SHARED CONTEXT side-channels,
+    /// discarding any literal pool. `temp_offsets` is the prefix sum of the
+    /// merged temp sizes, computed here and nowhere else so the two finishers
+    /// cannot disagree about the temp layout.
+    fn into_side_channels(self) -> ContextSideChannels {
         let mut temp_offsets = Vec::with_capacity(self.merged_temp_sizes.len());
         let mut offset = 0usize;
         for &size in &self.merged_temp_sizes {
@@ -2001,11 +2116,7 @@ impl FragmentMerger {
             offset += size;
         }
 
-        ConcatenatedBytecodes {
-            bytecode: SymbolicByteCode {
-                literals: self.merged_literals,
-                code,
-            },
+        ContextSideChannels {
             graphical_functions: self.merged_gf,
             module_decls: self.merged_modules,
             static_views: self.merged_views,
@@ -2086,6 +2197,59 @@ pub(crate) fn renumber_fragment_code(
         )?);
     }
     Ok(())
+}
+
+/// The context resources every phase of an assembled module SHARES, reported
+/// once. These are the only things the all-phases aggregation exists to
+/// produce; the bytecode and literal pool a full merge would also build are
+/// per-phase and are retained by the phases that build them.
+pub(crate) struct ContextSideChannels {
+    pub graphical_functions: Vec<Vec<(f64, f64)>>,
+    pub module_decls: Vec<SymbolicModuleDecl>,
+    pub static_views: Vec<SymbolicStaticView>,
+    pub temp_offsets: Vec<usize>,
+    pub temp_total_size: usize,
+    pub dim_lists: Vec<(u8, [u16; 4])>,
+}
+
+/// Aggregate the SHARED CONTEXT resources of every fragment in a module, in the
+/// all-phases order (initials, flows, stocks), so the module reports one
+/// module-decl / static-view / temp / dim-list table that each phase's
+/// separately-renumbered ids index.
+///
+/// This is deliberately NOT a merge. The phases that keep bytecode
+/// (`concatenate_fragments_with_gf` for flows and stocks,
+/// `db::assemble::renumber_initials_phase` for initials) each keep their own
+/// literal pool, so an aggregate pool over all three corresponds to no id the
+/// module retains. Building one was not merely wasted work: it put the whole
+/// model's literal count under `resource_base`'s `u16` bound, so a model whose
+/// every RETAINED pool was comfortably addressable failed to assemble once the
+/// three phases' pools summed past 65,536 -- roughly 33k scalar stocks, which
+/// is inside the size class this compiler targets. Assembly used to survive it
+/// by wrapping the offsets of a stream nobody read; the capacity check turned
+/// that into a hard error.
+///
+/// M8 is unaffected: it obliges the per-phase renumber and the all-phases
+/// aggregation to assign the same *context* ids, and literals were never part
+/// of it (`absorb_non_gf` bases them at 0 in every phase precisely because they
+/// are phase-local). Graphical functions come from the shared `dedup`, exactly
+/// as they do for a phase merge.
+pub(crate) fn merge_context_side_channels(
+    fragments: &[&PerVarBytecodes],
+    ctx_base: &ContextResourceCounts,
+    dedup: &GfDedup,
+) -> Result<ContextSideChannels, String> {
+    // `Recycle` to match the phase merges: temp slots collapse by identity into
+    // the one pool every phase shares, and this aggregation is what sizes it.
+    let mut merger = FragmentMerger::new_with_temp_strategy(ctx_base, TempStrategy::Recycle);
+    for frag in fragments {
+        merger.absorb_context(frag)?;
+    }
+    let mut side = merger.into_side_channels();
+    // The merger never touched GF (`absorb_context`), so install the shared
+    // deduped table; every phase reports the same `graphical_functions`.
+    side.graphical_functions = dedup.tables.clone();
+    Ok(side)
 }
 
 /// Merge a single phase's `PerVarBytecodes` into one stream, renumbering
@@ -4086,6 +4250,100 @@ mod tests {
             err.contains("dimension list") && err.contains("16-bit"),
             "expected a loud dim-list-capacity error, got: {err}"
         );
+    }
+
+    /// The all-phases aggregation of the shared context tables must NOT bound
+    /// the model's literal count, because it retains no literal pool.
+    ///
+    /// Each compiled initial keeps its own pool and the flows and stocks phases
+    /// keep one each; the aggregation exists only for the module-decl /
+    /// static-view / temp / dim-list tables those three phases' ids index. A
+    /// full merge over every fragment additionally built a literal pool spanning
+    /// the whole model and threw it away -- but not before `resource_base`
+    /// bounded it, so a model whose every RETAINED pool was comfortably
+    /// addressable stopped assembling once the three summed past capacity.
+    #[test]
+    fn the_all_phases_aggregation_does_not_bound_the_literal_pool() {
+        let cap = U16_ID_CAPACITY;
+        // Two fragments that together overrun the literal id space.
+        let full = literal_pool_frag(cap);
+        let one = literal_pool_frag(1);
+        let frags = [&full, &one];
+        let dedup = GfDedup::build(&frags).expect("no GFs to dedup");
+
+        // Merging them into ONE stream assigns literal id 65,536 and is an
+        // error -- that pool would be retained, so the bound is right.
+        let err =
+            concatenate_fragments_with_gf(&frags, &ContextResourceCounts::default(), &dedup, 0)
+                .expect_err("a retained pool past capacity must be reported");
+        assert!(
+            err.contains("literal") && err.contains("16-bit"),
+            "expected a loud literal-capacity error, got: {err}"
+        );
+
+        // Aggregating their context side-channels assigns no literal id at all,
+        // so the same fragments are fine.
+        let side = merge_context_side_channels(&frags, &ContextResourceCounts::default(), &dedup)
+            .expect("the side-channel aggregation must not be bounded by a literal pool");
+        assert!(
+            side.module_decls.is_empty() && side.static_views.is_empty(),
+            "these fragments carry no context resources; only literals"
+        );
+    }
+
+    /// The same property end-to-end, through `assemble_module` on a real model,
+    /// so a future refactor that points the all-phases aggregation back at a
+    /// full merge fails here rather than only at the unit level.
+    ///
+    /// Reaching the bound honestly would need a model with 65,537 literals,
+    /// which is orders of magnitude outside the per-test time budget, so the
+    /// capacity is shrunk instead (`docs/dev/rust.md#test-time-budgets`, the
+    /// repo's stated preference over building a fixture large enough to trip a
+    /// production threshold). Five scalar stocks give one literal per initial
+    /// (five pools of one), five in the flows pool and five in the stocks pool
+    /// -- fifteen in aggregate. At a capacity of 8 every RETAINED pool fits and
+    /// only the discarded aggregate does not.
+    ///
+    /// The second half is what stops this from being a test that merely proves
+    /// a check was deleted: at a capacity of 4 the flows pool genuinely does not
+    /// fit, and assembly must still fail.
+    #[test]
+    fn assembly_bounds_the_retained_pools_and_not_the_aggregate() {
+        use crate::test_common::TestProject;
+
+        let model = || {
+            let mut p = TestProject::new("literal_capacity");
+            for i in 0..5 {
+                p = p
+                    .stock(
+                        &format!("s{i}"),
+                        &format!("{}", i + 1),
+                        &[&format!("f{i}")],
+                        &[],
+                        None,
+                    )
+                    .flow(&format!("f{i}"), &format!("{}", 10 + i), None);
+            }
+            p
+        };
+
+        {
+            let _cap = IdCapacityGuard::new(8);
+            model()
+                .compile_incremental()
+                .expect("every retained literal pool fits; only the discarded aggregate does not");
+        }
+
+        {
+            let _cap = IdCapacityGuard::new(4);
+            let err = model()
+                .compile_incremental()
+                .expect_err("the flows phase's own five-literal pool does not fit in four ids");
+            assert!(
+                format!("{err:?}").contains("literal"),
+                "expected the failure to name the literal pool, got: {err:?}"
+            );
+        }
     }
 
     /// M3 for the per-opcode add. `renumber_opcode` can be reached with a base the

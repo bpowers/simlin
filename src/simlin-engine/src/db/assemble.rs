@@ -1359,7 +1359,7 @@ pub fn assemble_module<'db>(
 ) -> Result<std::sync::Arc<crate::bytecode::CompiledModule>, String> {
     use crate::compiler::symbolic::{
         ContextResourceCounts, SymbolicCompiledModule, concatenate_fragments_with_gf,
-        resolve_module,
+        merge_context_side_channels, resolve_module,
     };
 
     // The interned set stores the sorted canonical names; the plain lowering
@@ -1866,11 +1866,17 @@ pub fn assemble_module<'db>(
 
     let compiled_initials = renumber_initials_phase(&initial_frags, &gf_dedup)?;
 
-    // The all-phases merge for the shared context side-channels (modules,
-    // views, temps, dim_lists); its `graphical_functions` is the dedup's
-    // single table (set by `concatenate_fragments_with_gf`), shared by all
-    // three phases.
-    let merged = concatenate_fragments_with_gf(&all_frags, &no_base, &gf_dedup, 0)?;
+    // The all-phases aggregation of the shared context side-channels (modules,
+    // views, temps, dim_lists); its `graphical_functions` is the dedup's single
+    // table, shared by all three phases.
+    //
+    // This is `merge_context_side_channels` and not a full merge because the
+    // three phases above already keep every stream this module retains. A full
+    // merge additionally built an opcode stream and a literal pool spanning the
+    // whole model, both dropped on the floor here -- and bounded the model's
+    // AGGREGATE literal count against the `u16` id capacity in the process,
+    // failing assembly for models whose every retained pool was fine.
+    let merged = merge_context_side_channels(&all_frags, &no_base, &gf_dedup)?;
 
     // Build dimension metadata from project dimensions (mirrors
     // Compiler::populate_dimension_metadata). Read the project-global converted
