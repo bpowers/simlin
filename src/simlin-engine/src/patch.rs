@@ -477,6 +477,33 @@ fn apply_rename_variable(
     let old_ident = Ident::new(from);
     let new_ident = Ident::new(to);
 
+    // Refuse a target name that has NO spelling in the equation language.
+    //
+    // `Lexer::quoted_identifier` terminates on the first `"` and the grammar has
+    // no escape of any kind, so a canonical name containing `"` can be written
+    // neither bare nor quoted. Renaming TO one is not merely useless: this
+    // function reprints every dependent equation, so it would persist
+    // `c = "x"y" + 1` into the datamodel and the previously-valid model would
+    // stop compiling with `UnclosedQuotedIdent` -- the same silent, saved
+    // corruption GH #976 fixed for keyword names, through this same entry point.
+    //
+    // Rejecting at the front door rather than teaching the lexer an escape is
+    // deliberate: nothing is lost by refusing a name that nothing could ever
+    // reference, and the alternative is a grammar change. Note the check is on
+    // `to` only -- renaming AWAY from such a name is how a model that already
+    // has one gets repaired. The error code is the one recompiling would have
+    // produced, so the rejection and the failure it prevents read alike.
+    if new_ident.as_str().contains('"') {
+        return Err(Error::new(
+            ErrorKind::Model,
+            ErrorCode::UnclosedQuotedIdent,
+            Some(format!(
+                "cannot rename to `{to}`: a name containing a double quote cannot be \
+                 referenced in an equation"
+            )),
+        ));
+    }
+
     if old_ident == new_ident {
         // Canonically-identical rename: only the display spelling changes
         // (e.g. "students" -> "Students"). Every reference resolves through

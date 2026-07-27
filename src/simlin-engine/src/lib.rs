@@ -49,6 +49,8 @@ mod json_proptest;
 pub mod json_sdai;
 #[cfg(test)]
 mod json_sdai_proptest;
+#[cfg(test)]
+mod keyword_ident_tests;
 pub mod layout;
 mod lexer;
 #[cfg(test)]

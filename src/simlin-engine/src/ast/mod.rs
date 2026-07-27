@@ -456,11 +456,27 @@ fn binary_op_latex(op: BinaryOp) -> BinaryOpLatex {
 }
 
 /// Check whether a canonicalized identifier needs double-quoting to be
-/// re-parseable.  Names containing characters outside XID_Start/XID_Continue
-/// (like `$`, `⁚`, `/`) must be quoted -- as must a name whose FIRST character
-/// is not `XID_Start` even if every character is alphanumeric (`1stock`, a legal
-/// quoted XMILE name: bare, the lexer reads the number `1` then the identifier
-/// `stock`).
+/// re-parseable **in the equation language** (`LexerType::Equation`). Three ways
+/// a name fails to be bare-spellable, one per clause below:
+///
+/// * a character outside XID_Start/XID_Continue (`$`, `⁚`, `/`);
+/// * a FIRST character that is not `XID_Start`, even when every character is
+///   alphanumeric (`1stock`, a legal quoted XMILE name: bare, the lexer reads
+///   the number `1` then the identifier `stock`);
+/// * a name the lexer resolves to a KEYWORD instead of an identifier
+///   ([`crate::lexer::is_reserved_word`] -- `if`, `mod`, `nan`, ...).  XMILE
+///   lets a modeler quote any name, so `"if"` is a legal variable and
+///   canonicalization keeps it as `if`; printed bare it re-parses as the `if`
+///   of a conditional (`nan` re-parses as the NaN *literal*), which is how a
+///   `patch` rename silently rewrote a valid model into an unparseable one
+///   (GH #976).  The predicate delegates to the lexer's own table rather than
+///   restating it, so printer and lexer cannot disagree about what a keyword
+///   is.
+///
+/// The units lexer shares that keyword table and differs only in also admitting
+/// `$` inside identifiers, so this predicate is *conservative* -- never wrong --
+/// if it is ever asked about a unit expression.  It is not today: every caller
+/// prints equation text.
 ///
 /// `pub(crate)` because this is the single "can this name be spelled bare"
 /// predicate: `print_ident` uses it for the `print_eqn` path and
@@ -480,7 +496,7 @@ pub(crate) fn needs_quoting(canonical: &str) -> bool {
             return true;
         }
     }
-    false
+    crate::lexer::is_reserved_word(canonical)
 }
 
 /// Canonicalize an identifier for display, re-quoting if the canonical form
@@ -1543,7 +1559,8 @@ fn test_latex_printers_agree_on_if_under_an_operator() {
     );
 }
 
-/// `parse(print_eqn(e)) == e` over the FULL operator set.
+/// `parse(print_eqn(e)) == e` over the FULL operator set and over a NAME POOL
+/// that reaches every clause of [`needs_quoting`].
 ///
 /// The MDL writer's fixpoint proptest (`mdl::writer_proptest`) re-reads with
 /// `mdl::parser`, whose binary precedence table is inverted (GH #914), so its
@@ -1556,8 +1573,75 @@ fn test_latex_printers_agree_on_if_under_an_operator() {
 mod print_eqn_proptest {
     use super::*;
     use crate::common::RawIdent;
-    use crate::lexer::LexerType;
+    use crate::lexer::{LexerType, Token};
     use proptest::prelude::*;
+
+    /// Identifiers reaching every clause of [`needs_quoting`], so the round-trip
+    /// property is sensitive to the quoting decision and not only to operator
+    /// placement: bare-legal names, all eight equation-language KEYWORDS
+    /// (GH #976), a leading-digit name (`1stock`, the case `17d4e7c0` fixed), a
+    /// name carrying the synthetic `⁚`/`→` characters LTM mints, and a `·`
+    /// module-qualified name (`XID_Continue`, so it stays bare).
+    ///
+    /// Spelled out rather than read from `lexer::KEYWORDS`: a fixture derived
+    /// from the table under test could not notice that table losing an entry.
+    const NAME_POOL: [&str; 13] = [
+        "a", "b", "_c", "if", "then", "else", "not", "mod", "and", "or", "nan", "1stock", "m·out",
+    ];
+
+    /// Rewrite every identifier to its canonical form.
+    ///
+    /// `print_ident` canonicalizes as it prints, and a quoted name comes back
+    /// from the parser with its quotes still attached to the `RawIdent`, so RAW
+    /// ident equality is not the property `print_eqn` promises -- CANONICAL
+    /// ident equality is. On the bare names this is the identity, so the
+    /// operator coverage is unaffected. The match is exhaustive with no `_` arm,
+    /// so a new `Expr0` variant is a compile error here.
+    fn canonicalize_idents(expr: Expr0) -> Expr0 {
+        fn canon(raw: &RawIdent) -> RawIdent {
+            RawIdent::new(canonicalize(raw.as_str()).into_owned())
+        }
+        match expr {
+            Expr0::Const(text, value, loc) => Expr0::Const(text, value, loc),
+            Expr0::Var(id, loc) => Expr0::Var(canon(&id), loc),
+            Expr0::App(UntypedBuiltinFn(func, args), loc) => Expr0::App(
+                UntypedBuiltinFn(func, args.into_iter().map(canonicalize_idents).collect()),
+                loc,
+            ),
+            Expr0::Subscript(id, args, loc) => Expr0::Subscript(
+                canon(&id),
+                args.into_iter().map(canonicalize_index_idents).collect(),
+                loc,
+            ),
+            Expr0::Op1(op, l, loc) => Expr0::Op1(op, Box::new(canonicalize_idents(*l)), loc),
+            Expr0::Op2(op, l, r, loc) => Expr0::Op2(
+                op,
+                Box::new(canonicalize_idents(*l)),
+                Box::new(canonicalize_idents(*r)),
+                loc,
+            ),
+            Expr0::If(c, t, f, loc) => Expr0::If(
+                Box::new(canonicalize_idents(*c)),
+                Box::new(canonicalize_idents(*t)),
+                Box::new(canonicalize_idents(*f)),
+                loc,
+            ),
+        }
+    }
+
+    fn canonicalize_index_idents(index: IndexExpr0) -> IndexExpr0 {
+        match index {
+            IndexExpr0::Wildcard(loc) => IndexExpr0::Wildcard(loc),
+            IndexExpr0::StarRange(dim, loc) => {
+                IndexExpr0::StarRange(RawIdent::new(canonicalize(dim.as_str()).into_owned()), loc)
+            }
+            IndexExpr0::Range(l, r, loc) => {
+                IndexExpr0::Range(canonicalize_idents(l), canonicalize_idents(r), loc)
+            }
+            IndexExpr0::DimPosition(n, loc) => IndexExpr0::DimPosition(n, loc),
+            IndexExpr0::Expr(e) => IndexExpr0::Expr(canonicalize_idents(e)),
+        }
+    }
 
     /// Every `BinaryOp`, so a new variant cannot be silently skipped: the match is
     /// exhaustive and adding a variant is a compile error here.
@@ -1577,7 +1661,7 @@ mod print_eqn_proptest {
 
     fn expr_strategy() -> impl Strategy<Value = Expr0> {
         let leaf = prop_oneof![
-            prop::sample::select(&["a", "b", "c"][..])
+            prop::sample::select(&NAME_POOL[..])
                 .prop_map(|n| Expr0::Var(RawIdent::new_from_str(n), Loc::default())),
             prop::sample::select(&[0.0f64, 1.0, 2.5][..]).prop_map(|v| Expr0::Const(
                 format!("{v}"),
@@ -1624,6 +1708,74 @@ mod print_eqn_proptest {
         })
     }
 
+    /// Does `text` lex as ONE identifier covering the whole input?
+    ///
+    /// This is the lexer-side statement of "bare-spellable", derived by running
+    /// the lexer rather than by restating its character classes -- which is the
+    /// point: `needs_quoting` restates them, and the restatement was incomplete
+    /// (GH #976).
+    fn lexes_as_one_whole_ident(text: &str) -> bool {
+        let mut lexer = crate::lexer::Lexer::new(text, LexerType::Equation);
+        match (lexer.next(), lexer.next()) {
+            (Some(Ok((start, Token::Ident(word), end))), None) => {
+                start == 0 && end == text.len() && word == text
+            }
+            _ => false,
+        }
+    }
+
+    /// Names in the shapes canonicalization can produce, plus arbitrary short
+    /// strings over the alphabet those shapes draw from. `"` is excluded, and
+    /// [`a_canonical_name_containing_a_quote_is_unspellable`] says why.
+    fn name_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            prop::sample::select(&NAME_POOL[..]).prop_map(str::to_string),
+            "[a-zA-Z0-9_·⁚$→]{1,6}",
+        ]
+    }
+
+    /// The one name shape `needs_quoting` cannot rescue, pinned rather than
+    /// quietly excluded from the property above.
+    ///
+    /// `canonicalize` preserves an embedded `"` (an XMILE `name="a&quot;b"`
+    /// reaches the compiler as the canonical `a"b`), and `Lexer::quoted_ident`
+    /// terminates on the FIRST `"` with no escape sequence of any kind -- so
+    /// `a"b` has no bare spelling AND no quoted spelling. `needs_quoting`
+    /// correctly says "quote it"; there is simply nothing to say.
+    ///
+    /// Such a name IS reachable -- the XMILE reader admits
+    /// `<aux name="a&quot;b">` with zero diagnostics -- and a rename TO one
+    /// used to persist a corrupted model through the same `patch.rs` path as
+    /// GH #976: the rename reprints every dependent equation, so `c = a + 1`
+    /// became `c = "x"y" + 1` and the previously-valid model stopped compiling
+    /// with `UnclosedQuotedIdent`. That direction is now refused at the front
+    /// door by `patch::apply_rename_variable`, which is where the loudness
+    /// belongs; giving the name a spelling instead would mean an escape in the
+    /// lexer's quoted-identifier rule, a language change and not a printer one.
+    ///
+    /// So what remains is exactly this: a name that can be DEFINED (by either
+    /// reader) but never REFERENCED. This test is the characterization pin for
+    /// that state, and it reds if the lexer ever grows an escape -- which is
+    /// when `print_ident` needs revisiting.
+    #[test]
+    fn a_canonical_name_containing_a_quote_is_unspellable() {
+        let canonical = canonicalize("a\"b");
+        assert_eq!(
+            "a\"b",
+            canonical.as_ref(),
+            "the quote survives canonicalization"
+        );
+        assert!(needs_quoting(&canonical));
+        assert!(!lexes_as_one_whole_ident(&canonical), "no bare spelling");
+
+        let printed = print_ident(&canonical);
+        assert_eq!("\"a\"b\"", printed);
+        assert!(
+            !lexes_as_one_whole_ident(&printed),
+            "no quoted spelling either: the lexer has no escape inside a quoted ident"
+        );
+    }
+
     proptest! {
         #[test]
         fn print_eqn_roundtrips_over_the_full_operator_set(expr in expr_strategy()) {
@@ -1634,11 +1786,34 @@ mod print_eqn_proptest {
                 "print_eqn output did not re-parse: {printed:?} ({reparsed:?})"
             );
             prop_assert_eq!(
-                expr.clone().strip_loc(),
-                reparsed.unwrap().unwrap().strip_loc(),
+                canonicalize_idents(expr.clone()).strip_loc(),
+                canonicalize_idents(reparsed.unwrap().unwrap()).strip_loc(),
                 "print_eqn output re-parsed to a DIFFERENT AST: {}",
                 printed
             );
+        }
+
+        /// The completeness guard for [`needs_quoting`]: a name it calls
+        /// bare-spellable must ACTUALLY lex as one identifier. Stating it against
+        /// the lexer (rather than against a second copy of the character rules)
+        /// is what makes the predicate checkable: every past hole here --
+        /// leading digit, keyword -- was a clause the printer never knew about.
+        ///
+        /// The converse is deliberately not asserted. Over-quoting is always
+        /// safe, and `ltm_augment::quote_ident` relies on that to keep quoting
+        /// `·`-qualified names the lexer would happily read bare.
+        #[test]
+        fn a_bare_spellable_name_lexes_as_one_identifier(name in name_strategy()) {
+            let canonical = canonicalize(&name);
+            prop_assume!(!canonical.is_empty());
+            if !needs_quoting(&canonical) {
+                prop_assert!(
+                    lexes_as_one_whole_ident(&canonical),
+                    "needs_quoting says `{}` can be spelled bare, but the lexer does not \
+                     read it as a single identifier",
+                    canonical
+                );
+            }
         }
     }
 }

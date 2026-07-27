@@ -237,8 +237,70 @@ impl XmileFormatter {
             }
         }
 
-        // Apply space-to-underbar transformation
-        quoted_space_to_underbar(name)
+        self.quote_reference(name)
+    }
+
+    /// Spell an MDL variable name as a REFERENCE inside an emitted equation.
+    ///
+    /// The MDL importer writes equation text into `datamodel::Equation`, and
+    /// that text is read back by *our* equation lexer -- so the quoting rule
+    /// here belongs to the equation language, not to MDL, and it is
+    /// [`crate::ast::needs_quoting`]: the same predicate `ast::print_ident` and
+    /// `ltm_augment::quote_ident` use. This used to be
+    /// [`quoted_space_to_underbar`], which quotes only on `.`, and that missed
+    /// every other name our lexer cannot read bare (GH #976). Two examples from
+    /// the checked-in corpus: `Marg Capital'Energy per Capital` emitted a bare
+    /// `'`, which our lexer reads as the TRANSPOSE operator, and
+    /// `data revenue k$` emitted a bare `$`, which it cannot read at all.
+    ///
+    /// Widening is safe in one direction by construction: a name
+    /// `needs_quoting` rejects cannot be read bare, so quoting it converts a
+    /// broken import into a working one. The `.` case is subsumed rather than
+    /// dropped (`.` is not `XID_Continue`), and that one is about IDENTITY as
+    /// much as lexing -- a bare `a.b` canonicalizes to the module-separator
+    /// `a·b` while the quoted form canonicalizes to the literal-period
+    /// sentinel, which is what the definition side produced.
+    ///
+    /// The keyword clause covers seven of our eight keywords. Vensim reserves
+    /// none of them, so `IDch15d.mdl` (which declares `MOD`) and
+    /// `test_lookups_funcnames.mdl` (which declares `mod`) are legal Vensim that
+    /// imported to an `UnrecognizedToken` on every reference.
+    ///
+    /// **`nan` is deliberately excluded, and that is a disclosed residual.** Our
+    /// importer represents Vensim's `A FUNCTION OF(...)` -- "this variable has no
+    /// equation" -- as the stored equation text `NAN`
+    /// ([`XmileFormatter::format_call_ctx`]'s "a function of" arm), and the MDL
+    /// writer prints that back as a bare `NaN`. Quoting `nan` here would bind
+    /// that placeholder to any variable actually named `nan`, so a round trip
+    /// would compute the variable's value for a variable that has none. Fixing
+    /// it on the writer side does not work either: per Vensim's documentation
+    /// `A FUNCTION OF` "is not intended for use in writing equations, and
+    /// precludes simulation", so emitting it would produce a file Vensim cannot
+    /// run at all -- there is no writer-side spelling that resolves this.
+    ///
+    /// So a bare `nan` reference naming a declared variable still reads as the
+    /// NaN literal: a KNOWN, PRE-EXISTING, silent case, unchanged by this
+    /// change, narrower than the seven it fixes, and pinned by
+    /// `keyword_ident_tests::a_bare_nan_reference_in_mdl_is_still_the_literal`.
+    /// Fixing it properly means changing how the importer represents "no
+    /// equation" -- a distinct piece of work.
+    fn quote_reference(&self, name: &str) -> String {
+        let result = name.replace(' ', "_");
+        if result.starts_with('"') {
+            // Already quoted (#846): re-quoting would grow a second layer.
+            return result;
+        }
+        // `nan` is pure ASCII letters, so the keyword clause is the only reason
+        // `needs_quoting` could be rejecting it -- excluding it here cannot
+        // suppress a character-class or leading-character rejection.
+        if result.eq_ignore_ascii_case("nan") {
+            return result;
+        }
+        if crate::ast::needs_quoting(&result) {
+            format!("\"{}\"", result)
+        } else {
+            result
+        }
     }
 
     // Each match arm has an inner `if args.len() >= N` guarding access to
@@ -789,6 +851,12 @@ pub fn space_to_underbar(name: &str) -> String {
 }
 
 /// Replace spaces with underscores, quoting if the name contains periods.
+///
+/// This is the DEFINITION-side spelling: it produces a `datamodel` variable
+/// *ident* (see `mdl::convert::helpers::variable_ident`), which is a name and
+/// not equation text. A reference to that variable inside an equation goes
+/// through [`XmileFormatter::quote_reference`] instead, because that text has to
+/// survive our own lexer.
 pub fn quoted_space_to_underbar(name: &str) -> String {
     let result = name.replace(' ', "_");
     if result.contains('.') && !result.starts_with('"') {

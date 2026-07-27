@@ -1619,9 +1619,12 @@ fn scalar_feeder_bare_in_arrayed_reducer_compiles_and_simulates() {
 // Verified: re-introducing the `quote_ident` regression leaves every other
 // fixture green and fails THIS one, via the `AllCompile` expectation.
 //
-// Deliberately a leading DIGIT and not a keyword: a keyword-named source would
-// fail today against open GH #976 (`ast::needs_quoting` has no keyword check),
-// which is out of scope here. This fixture must be green on correct code.
+// A leading DIGIT rather than a keyword, and one fixture rather than two: since
+// GH #976 both classes are decided by the SAME `ast::needs_quoting` delegation,
+// so a second golden would re-test the same branch of `quote_ident` with a
+// different input. The keyword class is pinned where the distinction actually
+// lives -- `ltm_tests::link_score_quotes_every_keyword_named_source`, which
+// ranges over the whole keyword table and asserts the generated arm PARSES.
 // ---------------------------------------------------------------------------
 
 fn unquotable_source_name_model() -> datamodel::Project {

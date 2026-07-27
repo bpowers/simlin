@@ -620,6 +620,59 @@ fn link_score_quotes_a_canonical_name_that_cannot_be_bare() {
     );
 }
 
+/// The keyword twin of the test above (GH #976), and the LTM half of that
+/// issue's damage.
+///
+/// `if` is a legal XMILE variable name that canonicalizes to `if`, but the lexer
+/// resolves a bare `if` to the keyword before it ever considers an identifier.
+/// `quote_ident` tested "every char is alphanumeric or `_`" plus
+/// `ast::needs_quoting`, and a keyword satisfied BOTH -- so the generated guard
+/// form spelled the source bare, the arm did not parse, the fragment compiled to
+/// no bytecode, and the link score read a constant 0 behind a Warning nobody has
+/// to look at. The keyword clause now lives in `needs_quoting`, so `quote_ident`
+/// inherits it through the delegation it already had.
+///
+/// Ranges over every keyword rather than sampling `if`: the predicate reads a
+/// table, and a table is exactly the thing that can be right for one entry.
+#[test]
+fn link_score_quotes_every_keyword_named_source() {
+    for keyword in ["if", "then", "else", "not", "mod", "and", "or", "nan"] {
+        let project = TestProject::new("keyword_ident")
+            .stock(keyword, "0", &["inflow"], &[], None)
+            .flow("inflow", &format!("\"{keyword}\" * 0.1"), None)
+            .build_datamodel();
+
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let model = sync.models["main"].source;
+
+        let link_id = LtmLinkId::new(&db, keyword.to_string(), "inflow".to_string());
+        let scored =
+            link_score_equation_text_shaped(&db, link_id, RefShape::Bare, model, sync.project);
+        let ShapedLinkScore::Scored(lsv) = scored else {
+            panic!("the {keyword} -> inflow link score should be scored, got: {scored:?}");
+        };
+
+        let crate::db::LtmEquation::Scalar(arm) = &lsv.equation else {
+            panic!(
+                "a scalar target's link score should be Scalar, got: {:?}",
+                lsv.name
+            );
+        };
+        assert!(
+            arm.text.contains(&format!("\"{keyword}\"")),
+            "a keyword-named source must be quoted in the generated text, got: {}",
+            arm.text
+        );
+        assert!(
+            arm.expr.is_some(),
+            "the generated link-score equation must PARSE (an unparseable arm carries no \
+             AST, compiles to no bytecode, and silently zeroes the score); text was: {}",
+            arm.text
+        );
+    }
+}
+
 /// An unparseable generated arm degrades LOUDLY and WITHOUT PANICKING, for the
 /// scalar shape AND for an `Arrayed` equation whose OTHER arms parse fine.
 ///

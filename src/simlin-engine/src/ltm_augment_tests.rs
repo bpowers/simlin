@@ -825,6 +825,62 @@ fn test_generate_rank_keeps_delta_ratio() {
     assert!(!partial.contains("PREVIOUS("), "partial: {partial}");
 }
 
+/// [`quote_ident`]'s two conjuncts, and why neither is redundant.
+///
+/// It quotes when EITHER "every char is alphanumeric or `_`" fails or
+/// [`crate::ast::needs_quoting`] says the name is not bare-spellable. Since
+/// GH #976 the second conjunct subsumes the leading-digit AND keyword cases, so
+/// the natural next simplification is to delete the first and delegate outright.
+/// That would be a behavior change with no bug behind it: `·` (U+00B7) is
+/// `XID_Continue`, so `needs_quoting` alone reads a module-qualified composite
+/// as bare-spellable and every module-composite link score's emitted text moves.
+///
+/// This test is the tripwire for that simplification. Delete the alphanumeric
+/// conjunct and the `·` row reds; delete the `needs_quoting` conjunct and the
+/// keyword and leading-digit rows red.
+#[test]
+fn quote_ident_needs_both_of_its_conjuncts() {
+    // Bare-spellable by both predicates: no quotes.
+    for bare in ["x", "some_var", "v2", "_leading_underscore"] {
+        assert_eq!(bare, quote_ident(bare), "`{bare}` should stay bare");
+    }
+
+    // Rejected by `needs_quoting` only -- the alphanumeric conjunct accepts a
+    // leading digit and accepts a keyword.
+    for name in [
+        "1stock", "if", "then", "else", "not", "mod", "and", "or", "nan",
+    ] {
+        assert!(
+            crate::ast::needs_quoting(name),
+            "`{name}` must not be bare-spellable"
+        );
+        assert_eq!(format!("\"{name}\""), quote_ident(name));
+    }
+
+    // Rejected by BOTH conjuncts: `$` is not XID_Start and `⁚` (U+205A) is not
+    // XID_Continue, so `needs_quoting` refuses a synthetic name on its own. Here
+    // for coverage of the shape LTM actually mints, not to isolate a conjunct.
+    for name in ["$⁚ltm⁚composite⁚out", "$⁚ltm⁚link_score⁚a→b"] {
+        assert!(crate::ast::needs_quoting(name));
+        assert_eq!(
+            format!("\"{name}\""),
+            quote_ident(name),
+            "`{name}` must stay quoted"
+        );
+    }
+
+    // Rejected by the alphanumeric conjunct ONLY. This is the row -- the only
+    // row -- that makes that conjunct load-bearing: `·` (U+00B7) IS
+    // XID_Continue, so `needs_quoting` alone would spell a module-qualified
+    // composite bare.
+    assert!(
+        !crate::ast::needs_quoting("m·out1"),
+        "the `·` case must be carried by the alphanumeric conjunct, not by \
+         needs_quoting -- if this flips, the conjunct really has become redundant"
+    );
+    assert_eq!("\"m·out1\"", quote_ident("m·out1"));
+}
+
 /// GH #910: the implicit WITH-LOOKUP wrap must be applied EXACTLY to the
 /// partials that are a full re-evaluation of the reducer (gf-input units) and
 /// NEVER to the delta-ratio stand-ins (which are the target's own, already
