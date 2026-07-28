@@ -311,6 +311,10 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             // A macro body instantiating a module likewise collapses to the wire
             // Generic code; the engine code and the message carry the detail.
             engine::ErrorCode::MacroContainsModule => SimlinErrorCode::Generic,
+            // An unfilled equation (a variable whose equation is nothing but the
+            // NaN literal) likewise collapses to the wire Generic code; the
+            // message names the variable, which is the whole point of it.
+            engine::ErrorCode::UnfilledEquation => SimlinErrorCode::Generic,
         }
     }
 }

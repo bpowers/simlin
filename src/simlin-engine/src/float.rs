@@ -34,6 +34,14 @@
 //!    variable must evaluate to NaN -- an unfilled equation is the clearest case
 //!    -- a warning naming the variable replaces the entire backward hunt. That
 //!    is the argument for such diagnostics, and it is worth more than it looks.
+//!    The clearest case is now diagnosed: a variable whose whole equation is the
+//!    NaN literal gets a `Warning` naming it
+//!    (`crate::common::ErrorCode::UnfilledEquation`, decided by
+//!    `crate::variable::unfilled_arms` and emitted per model by
+//!    `crate::db::diagnostic`). That shape is where Vensim's `A FUNCTION OF(...)`
+//!    sketch placeholder lands, and Vensim itself refuses to simulate a model
+//!    containing one -- so without the warning we returned NaN where the source
+//!    tool declined to answer at all.
 //! 2. *A NaN the engine manufactures is noise in a channel debugged by hand.* On
 //!    the graph it is indistinguishable from the user's own division by zero, so
 //!    it costs someone a debugging session that ends at our bug. That is what

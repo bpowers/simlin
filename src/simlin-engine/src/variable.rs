@@ -490,6 +490,99 @@ pub(crate) fn var_is_lookup_only(eqn: Option<&datamodel::Equation>, has_tables: 
     }
 }
 
+/// Does `equation` consist of nothing but the NaN literal?
+///
+/// Decided by LEXING rather than by comparing against the string `"nan"`: the
+/// spelling of the literal lives in `lexer::KEYWORDS`, and restating it here
+/// would be a second copy of that table to keep in step (the same reason
+/// `ast::needs_quoting` reads `lexer::is_reserved_word`, GH #976). Lexing also
+/// settles case and surrounding whitespace for free -- both spellings occur in
+/// practice, since the MDL importer writes `NAN` for `A FUNCTION OF(...)` while
+/// the MDL writer prints a `Const` NaN back as `NaN`.
+///
+/// "Nothing but" is exactly one token, so a NaN nested in a larger expression
+/// (`nan + 0`, `IF x > 0 THEN 1 ELSE nan`) is NOT this -- that is a modeller
+/// deliberately using NaN as a sentinel, a different claim with a different
+/// remedy. A parenthesized `(nan)` is likewise outside the rule; nothing
+/// produces it, and admitting it would mean deciding how far to unwrap.
+pub(crate) fn is_nan_literal(equation: &str) -> bool {
+    use crate::lexer::{Lexer, LexerType, Token};
+    let mut lexer = Lexer::new(equation, LexerType::Equation);
+    matches!(lexer.next(), Some(Ok((_, Token::Nan, _)))) && lexer.next().is_none()
+}
+
+/// Which of a variable's equation arms are UNFILLED -- carry the NaN literal
+/// where a formula belongs (see [`is_nan_literal`]).
+///
+/// An "arm" is one whole equation: the single formula of a scalar or
+/// apply-to-all variable, one `<element>` entry of a per-element arrayed
+/// variable, or an arrayed variable's EXCEPT default (the formula for every
+/// element with no entry of its own).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum UnfilledArms {
+    /// The variable has NO equation anywhere: its scalar/apply-to-all formula is
+    /// the NaN literal, or every arm of its arrayed equation is (its EXCEPT
+    /// default included, when it has one).
+    Whole,
+    /// Only part of an arrayed variable is unfilled: these element subscripts,
+    /// in declaration order, plus the EXCEPT default when `default` is set.
+    Partial {
+        elements: Vec<String>,
+        default: bool,
+    },
+}
+
+/// Classify `equation` by which of its arms are unfilled, or `None` when none
+/// are.
+///
+/// Arms rather than whole variables, deliberately. An arrayed variable's
+/// elements are separate simulated series, so an unfilled `x[b]` stops `x[b]`'s
+/// line on the graph exactly the way an unfilled scalar stops its own, and costs
+/// the same backward hunt (`crate::float`). Reporting only the all-arms case
+/// would go silent precisely where the model is most confusing -- some lines
+/// fine, one stopping -- so a partially-unfilled variable is reported too, and
+/// [`UnfilledArms::Partial`] names the arms so the message can point at them.
+/// Either way it is at most ONE finding per variable, never one per element.
+pub(crate) fn unfilled_arms(equation: &datamodel::Equation) -> Option<UnfilledArms> {
+    use crate::datamodel::Equation;
+    match equation {
+        // One arm covering the whole variable: a scalar formula, or one formula
+        // applied to every element.
+        Equation::Scalar(s) | Equation::ApplyToAll(_, s) => {
+            is_nan_literal(s).then_some(UnfilledArms::Whole)
+        }
+        Equation::Arrayed(_, elements, default, has_except_default) => {
+            let unfilled: Vec<String> = elements
+                .iter()
+                .filter(|(_, eqn, _, _)| is_nan_literal(eqn))
+                .map(|(subscript, _, _, _)| subscript.clone())
+                .collect();
+            // `has_except_default` is what makes the default LIVE, so a `Some`
+            // default with the flag clear is not an arm at all. The pairing is
+            // reachable: the MDL converter keeps a default as round-trip
+            // metadata while setting the flag false when EXCEPT is the sole
+            // source of elements (`mdl::convert::variables`), and the compiler
+            // falls back to the default for a missing element only under the
+            // same flag (`compiler::expand_arrayed_with_hoisting`). Reading the
+            // text without the flag would report a NaN nothing ever evaluates.
+            let default = default.as_deref().filter(|_| *has_except_default);
+            let default_unfilled = default.is_some_and(is_nan_literal);
+            if unfilled.is_empty() && !default_unfilled {
+                None
+            } else if unfilled.len() == elements.len() && (default.is_none() || default_unfilled) {
+                // Nothing the variable can evaluate to is anything but NaN --
+                // including the elements the default covers, if there is one.
+                Some(UnfilledArms::Whole)
+            } else {
+                Some(UnfilledArms::Partial {
+                    elements: unfilled,
+                    default: default_unfilled,
+                })
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod is_lookup_only_tests {
     use super::*;

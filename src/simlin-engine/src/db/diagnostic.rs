@@ -113,6 +113,10 @@ pub enum DiagnosticError {
 ///    variable's `<element>` entry whose subscript names no declared
 ///    element combination is silently dropped everywhere downstream, so a
 ///    typo'd subscript simulates plausibly-but-wrong with no signal (GH #905).
+/// 4c. `emit_unfilled_equation_warnings` -- the unconditional
+///    `UnfilledEquation` advisory: a variable whose equation is nothing but
+///    the NaN literal has no usable equation, so it and everything downstream
+///    of it simulate as NaN.
 /// 5. When LTM is enabled, `emit_conveyor_ltm_degraded_warnings` and
 ///    `emit_queue_ltm_degraded_warnings` -- one `Warning` per conveyor stock
 ///    and per queue stock in THIS model, because LTM's flow-to-stock link-score
@@ -211,6 +215,12 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // typo'd equation does not vanish without a trace. Unconditional, like
     // the conveyor spec advisories above.
     emit_unknown_element_subscript_warnings(db, model, project);
+
+    // Unfilled equations: a variable whose equation is nothing but the NaN
+    // literal, which is where Vensim's `A FUNCTION OF(...)` placeholder lands.
+    // Unconditional, for the same reason as the two advisories above -- it
+    // describes the simulation, not an analysis overlay.
+    emit_unfilled_equation_warnings(db, model);
 
     // When LTM is enabled, also trigger the LTM diagnostic pass so that
     // diagnostics accumulated by the LTM pipeline surface through
@@ -762,6 +772,133 @@ fn emit_unknown_element_subscript_warnings(
             })
             .accumulate(db);
         }
+    }
+}
+
+/// Is `var`'s own equation only a FALLBACK -- a stand-in for a value a calling
+/// model normally supplies -- rather than the formula that produces its value?
+///
+/// A module input port's equation is dead whenever a caller binds the port: the
+/// compiler replaces it with the caller's expression, so the port simulates as
+/// the caller's value. Warning about a NaN there is a false positive in every
+/// clause -- the port is not NaN, nothing downstream of it is NaN, and nobody
+/// forgot to write anything (verified on a running two-instance model: the port
+/// reads 5 and its consumer 10, with no NaN in the results).
+///
+/// The engine has TWO spellings of "input port" and this needs both. The second
+/// is NOT subsumed by the first -- checked by running the suite with only the
+/// first, which brings all five stdlib findings back:
+///
+/// 1. `can_be_module_input` -- XMILE `access="input"`, the declaration a modeller
+///    writes on a reusable sub-model of their own. This is the general rule, and
+///    the one that matters: the `NAN`-port idiom is one we author and ship in
+///    clause 2's templates, so it is the shape a modeller copies from us.
+/// 2. [`source_model_is_stdlib`] -- our five SMOOTH/DELAY/TREND templates declare
+///    `initial_value` as `<eqn>NAN</eqn>` but carry `Compat::default()`, because
+///    they detect binding with the `isModuleInput(initial_value)` builtin in the
+///    consuming equation instead of with `access="input"`. `db::sync` splices
+///    every template into every project, so without this clause every model ever
+///    compiled reports five findings it did not earn. It is the shared predicate
+///    (GH #988), not a third spelling of the stdlib test.
+///
+/// Collapsing the two would mean marking the templates' ports `access="input"`,
+/// which changes `can_be_module_input` on shipped stdlib variables and therefore
+/// module instantiation itself -- far past what a diagnostic should move.
+///
+/// The cost, accepted: an input port that NO caller binds does fall back to its
+/// own equation, and a NaN one really is NaN. That case now goes unwarned.
+/// Recovering it needs per-instantiation binding analysis, and the rule this
+/// diagnostic states is about a formula nobody wrote -- an input port's equation
+/// is not where its value comes from.
+fn equation_is_a_module_input_fallback(
+    db: &dyn Db,
+    model: SourceModel,
+    var: SourceVariable,
+) -> bool {
+    var.can_be_module_input(db) || source_model_is_stdlib(db, model)
+}
+
+/// Emit one Warning-severity [`crate::common::ErrorCode::UnfilledEquation`]
+/// diagnostic per variable in `model` whose equation is nothing but the NaN
+/// literal (`crate::variable::unfilled_arms`).
+///
+/// What the shape means and why it earns a diagnostic is on the `ErrorCode`
+/// variant and, one level down, on `crate::float`'s module docs. What follows is
+/// only what is specific to emitting it HERE.
+///
+/// Engine-side rather than reader-side on purpose: `compat::open_vensim` returns
+/// a bare `Result<Project>` with no warnings channel, while this accumulator
+/// already reaches every consumer (the CLI, MCP, the FFI, pysimlin). Emitting
+/// here also covers a hand-authored XMILE `<eqn>NAN</eqn>`, which is correct --
+/// the variable has no usable equation however it got that way.
+///
+/// Module input ports are skipped -- see [`equation_is_a_module_input_fallback`],
+/// which is load-bearing rather than tidy.
+///
+/// Warning, not Error: the model still compiles and the rest of it is worth
+/// simulating. `FormattedErrors::push` counts `Error` severity only, so this
+/// cannot raise `has_model_errors` / `has_variable_errors` and cannot turn a
+/// passing CLI run or `get_errors` check red.
+///
+/// Variables are visited in sorted-name order so accumulation is deterministic.
+fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel) {
+    use crate::common::{Error, ErrorCode, ErrorKind};
+    use crate::variable::{UnfilledArms, unfilled_arms};
+    use salsa::Accumulator;
+
+    let source_vars = model.variables(db);
+    let mut var_names: Vec<&String> = source_vars.keys().collect();
+    var_names.sort_unstable();
+
+    let model_name = model.name(db);
+    for var_name in var_names {
+        let svar = source_vars[var_name];
+        if equation_is_a_module_input_fallback(db, model, svar) {
+            continue;
+        }
+        let Some(unfilled) = unfilled_arms(svar.equation(db)) else {
+            continue;
+        };
+        // A stock's `equation` is its INITIAL VALUE, not a formula re-evaluated
+        // each step, so "has no equation" reads oddly for a stock that has
+        // flows. The NaN claim below is unchanged either way -- a NaN initial
+        // poisons the integration for the whole run.
+        let (noun, missing) = if svar.kind(db) == SourceVariableKind::Stock {
+            ("stock", "no initial value")
+        } else {
+            ("variable", "no equation")
+        };
+        let subject = match &unfilled {
+            UnfilledArms::Whole => format!("{noun} '{var_name}' has {missing}"),
+            UnfilledArms::Partial { elements, default } => {
+                let mut arms: Vec<String> = elements.iter().map(|e| format!("'{e}'")).collect();
+                if *default {
+                    arms.push("every element with no equation of its own".to_string());
+                }
+                format!(
+                    "array {noun} '{var_name}' has {missing} for {}",
+                    arms.join(", ")
+                )
+            }
+        };
+        let msg = format!(
+            "{subject}: a NaN literal stands where the formula belongs, so it simulates as NaN \
+             -- and because NaN is absorbing, so does every variable downstream of it. Vensim's \
+             Sketch tool writes 'A FUNCTION OF(...)' for an equation that has not been written \
+             yet and refuses to simulate a model containing one; our importer stores that \
+             placeholder as this NaN literal."
+        );
+        CompilationDiagnostic(Diagnostic {
+            model: model_name.clone(),
+            variable: Some(var_name.clone()),
+            error: DiagnosticError::Model(Error::new(
+                ErrorKind::Model,
+                ErrorCode::UnfilledEquation,
+                Some(msg),
+            )),
+            severity: DiagnosticSeverity::Warning,
+        })
+        .accumulate(db);
     }
 }
 

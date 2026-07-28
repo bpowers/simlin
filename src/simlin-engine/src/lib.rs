@@ -95,6 +95,8 @@ mod test_sir_xmile;
 #[cfg(test)]
 mod testutils;
 #[cfg(test)]
+mod unfilled_equation_tests;
+#[cfg(test)]
 mod unit_checking_test;
 mod units;
 mod units_check;

@@ -622,6 +622,25 @@ pub enum ErrorCode {
     /// module *targeting* a macro model is unaffected; only a module *inside* one
     /// is rejected. See `MacroRegistry::build`'s Pass 4 for the full argument.
     MacroContainsModule,
+    /// A variable's equation is nothing but the NaN literal, so the variable has
+    /// no usable equation and every value it produces is NaN.
+    ///
+    /// This is where Vensim's `A FUNCTION OF(...)` sketch placeholder lands: the
+    /// modeller drew the variable and its inputs but has not written the formula
+    /// yet, and our MDL importer stores that as the equation text `NAN`. Vensim's
+    /// own documentation says the construct "precludes simulation" -- Vensim
+    /// refuses to run such a model -- while we compile it, simulate it, and hand
+    /// back NaN. A hand-authored XMILE `<eqn>NAN</eqn>` reaches the same place and
+    /// means the same thing.
+    ///
+    /// Warning-level, not Error: the rest of the model is worth simulating, and
+    /// `FormattedErrors::push` counts `Error` severity only, so this must not flip
+    /// the failure-shaped flags. Its value is ATTRIBUTION -- see `crate::float`'s
+    /// module docs for why. A NaN is absorbing, so every variable downstream shows
+    /// the identical stopped line, and the modeller's next task is a backward hunt
+    /// through the dependency graph for the origin. Naming the one variable the
+    /// engine knows STRUCTURALLY must be NaN replaces that entire hunt.
+    UnfilledEquation,
 }
 
 impl fmt::Display for ErrorCode {
@@ -709,6 +728,7 @@ impl fmt::Display for ErrorCode {
             ConveyorInitListUnsupported => "conveyor_init_list_unsupported",
             UnknownElementSubscript => "unknown_element_subscript",
             MacroContainsModule => "macro_contains_module",
+            UnfilledEquation => "unfilled_equation",
         };
 
         write!(f, "{name}")
