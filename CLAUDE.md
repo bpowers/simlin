@@ -96,6 +96,8 @@ IMPORTANT: If feedback seems non-actionable, it means you need comments explaini
 
 **CRITICAL**: A test that pins one arm of an N-way decision reads exactly like a test that pins the decision. Derive the rows from the enumeration -- the variant list, the call-site list, the axis list -- and cover every arm, or state in the test which arms it does not cover and where they are covered instead. "It passes" and "it constrains the code" are different claims.
 
+**CRITICAL**: A test that hand-builds its inputs proves nothing about the inputs production supplies. If a fixture constructs a dependency set, a scope, or a context by hand, either derive it through the same function production calls or justify in the test why the hand-built value is the one production produces. This has shipped a fix that could not fire: the fixture supplied a dependency set the extractor never generates, so the test passed on an input that does not occur and the defect it claimed to cover survived untouched.
+
 ## Claims About Other Tools
 
 Vensim, Stella, and the XMILE specification are external systems. What one of them does is a **fact to be checked, not a premise to reason from** -- and the sources are cheap:
