@@ -785,7 +785,8 @@ fn resolve_equation_dimensions(
         .collect()
 }
 
-/// Do `equation`'s explicit arms already name every slot its dimensions declare?
+/// What the compiler will do with `equation`'s arms: which of them reach a slot,
+/// and whether any declared slot is left without one.
 ///
 /// `None` when the answer cannot be determined -- an unresolvable dimension name
 /// (already reported as `BadDimensionName`), which the caller treats as "say
@@ -796,34 +797,40 @@ fn resolve_equation_dimensions(
 /// equation with `elements.get(&CanonicalElementName::from_raw(combination.join(",")))`
 /// and falls back to the EXCEPT default only on a miss, so that lookup IS the
 /// fact being asked about; deriving it any other way would be re-deriving the
-/// compiler's own decision by a second route. (`emit_unknown_element_subscript_warnings`
-/// accepts the UNION of that rule and the conveyor init-list matcher's, because
-/// it is asking a different question -- "does ANY consumer resolve this entry?"
-/// -- and its rustdoc records that the two rules diverge.)
+/// compiler's own decision by a second route. Both facts read that one lookup in
+/// opposite directions -- a declared slot with no arm leaves the slot uncovered,
+/// an arm matching no declared slot is ignored -- so they come from a single
+/// pair of sets rather than from two independent scans.
+///
+/// (`emit_unknown_element_subscript_warnings` accepts the UNION of that rule and
+/// the conveyor init-list matcher's, because it is asking a different question
+/// -- "does ANY consumer resolve this entry?" -- and its rustdoc records that
+/// the two rules diverge. That advisory keeps reporting an unknown subscript;
+/// what this one must not do is additionally claim the ignored arm simulates as
+/// NaN when no slot does.)
 fn arm_coverage(
     project_dims: &[crate::datamodel::Dimension],
     equation: &crate::datamodel::Equation,
 ) -> Option<crate::variable::ArmCoverage> {
     use crate::common::CanonicalElementName;
     use crate::variable::ArmCoverage;
+    use std::collections::HashSet;
 
     let crate::datamodel::Equation::Arrayed(dim_names, elements, _, _) = equation else {
-        // A scalar's single formula, and an apply-to-all's, IS every slot's.
-        return Some(ArmCoverage::CoversEverySlot);
+        return Some(ArmCoverage::whole_variable());
     };
     let dims = resolve_equation_dimensions(project_dims, dim_names)?;
-    let arm_keys: std::collections::HashSet<CanonicalElementName> = elements
+    let arm_keys: HashSet<CanonicalElementName> = elements
         .iter()
         .map(|(subscript, _, _, _)| CanonicalElementName::from_raw(subscript))
         .collect();
-    let covers_all = crate::dimensions::SubscriptIterator::new(&dims).all(|combination| {
-        arm_keys.contains(&CanonicalElementName::from_raw(&combination.join(",")))
-    });
-    Some(if covers_all {
-        ArmCoverage::CoversEverySlot
-    } else {
-        ArmCoverage::LeavesSlotsUncovered
-    })
+    let declared_keys: HashSet<CanonicalElementName> =
+        crate::dimensions::SubscriptIterator::new(&dims)
+            .map(|combination| CanonicalElementName::from_raw(&combination.join(",")))
+            .collect();
+    let leaves_slots_uncovered = declared_keys.iter().any(|key| !arm_keys.contains(key));
+    let effective_arms = arm_keys.intersection(&declared_keys).cloned().collect();
+    Some(ArmCoverage::new(effective_arms, leaves_slots_uncovered))
 }
 
 /// Is `var`'s own equation only a FALLBACK -- a stand-in for a value a calling
@@ -912,7 +919,7 @@ fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel, project: Sou
         let Some(coverage) = arm_coverage(project_dims, equation) else {
             continue;
         };
-        let Some(unfilled) = unfilled_arms(equation, coverage) else {
+        let Some(unfilled) = unfilled_arms(equation, &coverage) else {
             continue;
         };
         // A stock's `equation` is its INITIAL VALUE, not a formula re-evaluated

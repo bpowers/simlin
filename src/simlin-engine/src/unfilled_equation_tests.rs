@@ -17,7 +17,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::common::ErrorCode;
+use crate::common::{CanonicalElementName, ErrorCode};
 use crate::datamodel;
 use crate::db::{
     Diagnostic, DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
@@ -129,10 +129,14 @@ fn arrayed(arms: Vec<Arm>, default: Option<&str>, live: bool) -> datamodel::Equa
 // The table is their product and `the_decision_table_covers_every_cell` checks
 // that mechanically, so the row count is DERIVED rather than asserted.
 
-/// How many of the per-element arms are unfilled. Four states: `unfilled_arms`
-/// tests `unfilled.is_empty()` and `unfilled.len() == elements.len()`, and those
-/// two comparisons distinguish exactly these -- with the empty-`elements` case
-/// separate because it satisfies BOTH (`0 == 0`).
+/// How many of the EFFECTIVE per-element arms are unfilled -- effective meaning
+/// the compiler would select the arm for some slot. Four states: `unfilled_arms`
+/// tests `unfilled.is_empty()` and `unfilled.len() == effective_count`, and those
+/// two comparisons distinguish exactly these -- with the no-arms case separate
+/// because it satisfies BOTH (`0 == 0`).
+///
+/// `no-arms` covers "written with no arms" and "every arm names nothing" alike:
+/// after filtering they are the same variable, entirely default- or zero-filled.
 const ARM_STATES: [&str; 4] = ["no-arms", "none-unfilled", "some-unfilled", "all-unfilled"];
 
 /// The state of the EXCEPT default. Four states: it is dropped unless
@@ -157,18 +161,39 @@ const DEFAULT_STATES: [&str; 4] = [
 /// reported as wholly unfilled.
 const COVERAGE_STATES: [&str; 2] = ["covers-every-slot", "leaves-slots-uncovered"];
 
-fn coverage_state(coverage: ArmCoverage) -> &'static str {
-    match coverage {
-        ArmCoverage::CoversEverySlot => "covers-every-slot",
-        ArmCoverage::LeavesSlotsUncovered => "leaves-slots-uncovered",
+fn coverage_state(coverage: &ArmCoverage) -> &'static str {
+    if coverage.leaves_slots_uncovered() {
+        "leaves-slots-uncovered"
+    } else {
+        "covers-every-slot"
     }
+}
+
+/// The coverage an arrayed fixture is classified under: every arm it declares is
+/// effective (the fixtures use only real subscripts), plus the coverage state
+/// being exercised.
+///
+/// Ineffective arms are deliberately NOT a fifth axis. Whether one exists cannot
+/// change any verdict once they are filtered, and asserting that INVARIANT over
+/// the whole table (`an_arm_the_compiler_never_selects_cannot_change_the_verdict`)
+/// is both a stronger claim and a smaller one than doubling the product.
+fn coverage_for(eqn: &datamodel::Equation, leaves_slots_uncovered: bool) -> ArmCoverage {
+    let datamodel::Equation::Arrayed(_, arms, _, _) = eqn else {
+        return ArmCoverage::whole_variable();
+    };
+    ArmCoverage::new(
+        arms.iter()
+            .map(|(subscript, _, _, _)| CanonicalElementName::from_raw(subscript))
+            .collect(),
+        leaves_slots_uncovered,
+    )
 }
 
 /// The cell of the decision space a row occupies, computed from the row's
 /// EQUATION and COVERAGE rather than from its label -- so a mislabelled row
 /// cannot fake coverage. `Scalar` and `ApplyToAll` carry one arm and no default,
 /// so their only axis is whether that arm is unfilled.
-fn decision_cell(eqn: &datamodel::Equation, coverage: ArmCoverage) -> String {
+fn decision_cell(eqn: &datamodel::Equation, coverage: &ArmCoverage) -> String {
     match eqn {
         datamodel::Equation::Scalar(s) | datamodel::Equation::ApplyToAll(_, s) => {
             let filled = if is_nan_literal(s) {
@@ -407,44 +432,40 @@ fn decision_table() -> Vec<(
             .clone();
         // The generated fixture must actually LAND in the cell it is filed
         // under, or the coverage check below would be measuring labels.
-        assert_eq!(cell, decision_cell(&eqn, coverage), "fixture/cell mismatch");
+        assert_eq!(
+            cell,
+            decision_cell(&eqn, &coverage),
+            "fixture/cell mismatch"
+        );
         rows.push((cell, eqn, coverage, expected));
     };
 
-    push(
-        "Scalar/unfilled".to_string(),
-        datamodel::Equation::Scalar("NAN".to_string()),
-        ArmCoverage::CoversEverySlot,
-    );
-    push(
-        "Scalar/filled".to_string(),
-        datamodel::Equation::Scalar("3 * x".to_string()),
-        ArmCoverage::CoversEverySlot,
-    );
-    push(
-        "ApplyToAll/unfilled".to_string(),
-        datamodel::Equation::ApplyToAll(dims(), "nan".to_string()),
-        ArmCoverage::CoversEverySlot,
-    );
-    push(
-        "ApplyToAll/filled".to_string(),
-        datamodel::Equation::ApplyToAll(dims(), "3 * x".to_string()),
-        ArmCoverage::CoversEverySlot,
-    );
+    for (cell, eqn) in [
+        ("Scalar/unfilled", datamodel::Equation::Scalar("NAN".into())),
+        ("Scalar/filled", datamodel::Equation::Scalar("3 * x".into())),
+        (
+            "ApplyToAll/unfilled",
+            datamodel::Equation::ApplyToAll(dims(), "nan".into()),
+        ),
+        (
+            "ApplyToAll/filled",
+            datamodel::Equation::ApplyToAll(dims(), "3 * x".into()),
+        ),
+    ] {
+        let coverage = coverage_for(&eqn, false);
+        push(cell.to_string(), eqn, coverage);
+    }
     for arms in ARM_STATES {
         for default in DEFAULT_STATES {
             for coverage_name in COVERAGE_STATES {
                 if arms == "no-arms" && coverage_name == "covers-every-slot" {
                     continue;
                 }
-                let coverage = if coverage_name == "covers-every-slot" {
-                    ArmCoverage::CoversEverySlot
-                } else {
-                    ArmCoverage::LeavesSlotsUncovered
-                };
+                let eqn = arrayed_fixture(arms, default);
+                let coverage = coverage_for(&eqn, coverage_name == "leaves-slots-uncovered");
                 push(
                     format!("Arrayed/{arms}/{default}/{coverage_name}"),
-                    arrayed_fixture(arms, default),
+                    eqn,
                     coverage,
                 );
             }
@@ -458,9 +479,40 @@ fn the_decision_table_pins_every_row() {
     for (cell, eqn, coverage, expected) in decision_table() {
         assert_eq!(
             expected,
-            unfilled_arms(&eqn, coverage),
+            unfilled_arms(&eqn, &coverage),
             "decision-table cell {cell:?} disagrees"
         );
+    }
+}
+
+/// An arm the compiler never selects cannot change ANY verdict.
+///
+/// Stated as an invariant over the whole table rather than as a fifth axis. An
+/// ineffective arm is not a state the verdict depends on -- it is a thing that
+/// must not matter -- and "adding one changes nothing, anywhere, whatever its
+/// text" is both a stronger claim than 24 extra hand-authored rows and a much
+/// smaller one. Both texts are exercised because the NaN one is the whole point
+/// (it used to be reported as a slot that stops) and the filled one is the
+/// control that would catch a filter keyed on the text instead of the subscript.
+#[test]
+fn an_arm_the_compiler_never_selects_cannot_change_the_verdict() {
+    for (cell, eqn, coverage, expected) in decision_table() {
+        let datamodel::Equation::Arrayed(dim_names, arms, default, live) = &eqn else {
+            continue;
+        };
+        for text in ["NAN", "7"] {
+            let mut with_typo = arms.clone();
+            with_typo.push(arm("typo", text));
+            let perturbed =
+                datamodel::Equation::Arrayed(dim_names.clone(), with_typo, default.clone(), *live);
+            // `coverage` lists only the fixture's own arms as effective, so the
+            // appended one is ignored exactly as the compiler ignores it.
+            assert_eq!(
+                expected,
+                unfilled_arms(&perturbed, &coverage),
+                "cell {cell:?}: an ignored `typo={text}` arm changed the verdict"
+            );
+        }
     }
 }
 
@@ -494,7 +546,7 @@ fn every_authored_verdict_names_a_real_cell() {
 fn the_decision_table_covers_every_cell() {
     let covered: BTreeSet<String> = decision_table()
         .iter()
-        .map(|(_, eqn, coverage, _)| decision_cell(eqn, *coverage))
+        .map(|(_, eqn, coverage, _)| decision_cell(eqn, coverage))
         .collect();
     let expected = expected_cells();
     assert_eq!(
@@ -830,6 +882,86 @@ fn a_sparse_array_of_unfilled_arms_names_the_arms_not_the_variable() {
         "the armless slot compiles to a finite 0 -- which is why the whole \
          variable does not 'have no equation'"
     );
+}
+
+/// Every `UnknownElementSubscript` diagnostic the project reports, as
+/// `(variable, message)`. The unfilled-equation filter must not silence this
+/// one: a subscript naming nothing is still worth telling the modeller about.
+fn unknown_subscript_findings(project: &datamodel::Project) -> Vec<(String, String)> {
+    diagnostics(project)
+        .into_iter()
+        .filter_map(|d| match &d.error {
+            DiagnosticError::Model(e) if e.code == ErrorCode::UnknownElementSubscript => Some((
+                d.variable.clone().unwrap_or_default(),
+                e.get_details().unwrap_or_default().to_string(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An arm whose subscript names nothing is not an arm: the compiler ignores it,
+/// so it cannot be a slot that simulates as NaN.
+///
+/// `typo=NAN` beside arms that already cover `D`. Every declared slot is finite
+/// (1 and 2), so there is no unfilled equation to report at all -- but the
+/// modeller must still hear that `typo` names nothing, which is the SIBLING
+/// advisory's job and is asserted here so the filter cannot silence it.
+#[test]
+fn an_unknown_subscript_arm_is_not_an_unfilled_equation() {
+    let project = read_xmile(
+        r#"<dimensions><dim name="D"><elem name="a"/><elem name="b"/></dim></dimensions>"#,
+        r#"
+        <aux name="typo_only">
+          <element subscript="a"><eqn>1</eqn></element>
+          <element subscript="b"><eqn>2</eqn></element>
+          <element subscript="typo"><eqn>NAN</eqn></element>
+          <dimensions><dim name="D"/></dimensions>
+        </aux>"#,
+    );
+    assert_eq!(
+        Vec::<(String, String, String)>::new(),
+        unfilled_findings(&project),
+        "the compiler drops the `typo` arm, so no slot simulates as NaN"
+    );
+    assert_eq!(
+        1,
+        unknown_subscript_findings(&project).len(),
+        "the unknown-subscript advisory must still fire -- what was wrong was \
+         the SECOND warning claiming `typo` simulates as NaN, not this one"
+    );
+    assert_eq!(1.0, final_value(&project, "typo_only[a]"));
+    assert_eq!(2.0, final_value(&project, "typo_only[b]"));
+}
+
+/// A GENUINE unfilled arm alongside a typo'd one still gets reported -- and only
+/// the genuine one is named.
+///
+/// This is the half that a filter which simply gave up on any variable carrying
+/// an unknown subscript would break, so it is the control that keeps the fix
+/// from over-correcting.
+#[test]
+fn a_genuine_unfilled_arm_survives_a_typod_sibling() {
+    let project = read_xmile(
+        r#"<dimensions><dim name="D"><elem name="a"/><elem name="b"/></dim></dimensions>"#,
+        r#"
+        <aux name="mixed">
+          <element subscript="a"><eqn>1</eqn></element>
+          <element subscript="b"><eqn>NAN</eqn></element>
+          <element subscript="typo"><eqn>NAN</eqn></element>
+          <dimensions><dim name="D"/></dimensions>
+        </aux>"#,
+    );
+    let findings = unfilled_findings(&project);
+    assert_eq!(1, findings.len(), "{findings:#?}");
+    assert!(
+        findings[0].2.contains("no equation for 'b'") && !findings[0].2.contains("typo"),
+        "only the arm that reaches a slot may be named: {:?}",
+        findings[0].2
+    );
+    assert_eq!(1, unknown_subscript_findings(&project).len());
+    assert_eq!(1.0, final_value(&project, "mixed[a]"));
+    assert!(final_value(&project, "mixed[b]").is_nan());
 }
 
 /// The message may not claim that everything downstream of the unfilled variable
