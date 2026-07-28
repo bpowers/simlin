@@ -785,69 +785,28 @@ fn resolve_equation_dimensions(
         .collect()
 }
 
-/// Which of `equation`'s arms the compiler will SELECT, and whether any declared
-/// slot falls past all of them.
+/// The parsed `Ast` for `var`'s equation, or `None` when it has none (an
+/// unparseable equation or an unresolvable dimension name, both of which
+/// `compile_var_fragment` already reports).
 ///
-/// `None` when the answer cannot be determined -- an unresolvable dimension name
-/// (already reported as `BadDimensionName`), which the caller treats as "say
-/// nothing about this variable" rather than guessing.
+/// This is a memo READ, not a parse. `model_all_diagnostics` triggers
+/// `compile_var_fragment` for every variable before this pass runs, and that
+/// path parses through `parse_source_variable_with_module_context` under
+/// `model_module_ident_context(db, model, project, vec![])` -- the same key used
+/// here, so the memo is already populated and shared rather than a second parse
+/// under a second key.
 ///
-/// This is `compiler::expand_arrayed_with_hoisting`'s own selection, performed
-/// the way it performs it: build the arm map, then walk the declared element
-/// combinations looking each one up and falling to the EXCEPT default only on a
-/// miss. Two properties come from doing it that way rather than from testing
-/// arms individually, and each was a review finding when it was absent -- an arm
-/// naming no declared combination is never the answer to any lookup, and among
-/// arms sharing a canonical key only the LAST survives the map.
-///
-/// The last-wins rule is not restated here: `HashMap` collection over `elements`
-/// in declaration order is the same operation `variable::parse_equation` performs
-/// to build the AST the compiler actually consumes, so the surviving arm is the
-/// same one by construction. `a_shadowed_duplicate_arm_is_not_reported` pins that
-/// agreement against a SIMULATED value rather than against this reasoning.
-///
-/// (`emit_unknown_element_subscript_warnings` accepts the UNION of this rule and
-/// the conveyor init-list matcher's, because it is asking a different question
-/// -- "does ANY consumer resolve this entry?" -- and its rustdoc records that
-/// the two rules diverge. That advisory keeps reporting an unknown subscript;
-/// what this one must not do is additionally claim the ignored arm simulates as
-/// NaN when no slot does.)
-///
-/// Callers must gate this on `variable::may_have_unfilled_arms`: the walk is
-/// O(declared slots) and this runs on the interactive path.
-fn arm_selection(
-    project_dims: &[crate::datamodel::Dimension],
-    equation: &crate::datamodel::Equation,
-) -> Option<crate::variable::ArmSelection> {
-    use crate::common::CanonicalElementName;
-    use crate::variable::ArmSelection;
-    use std::collections::{HashMap, HashSet};
-
-    let crate::datamodel::Equation::Arrayed(dim_names, elements, _, _) = equation else {
-        return Some(ArmSelection::whole_variable());
-    };
-    let dims = resolve_equation_dimensions(project_dims, dim_names)?;
-    // Keyed by canonical name, valued by POSITION, collected in declaration
-    // order so a later duplicate overwrites an earlier one -- exactly what
-    // happens to the arm itself in `parse_equation`'s map.
-    let arm_positions: HashMap<CanonicalElementName, usize> = elements
-        .iter()
-        .enumerate()
-        .map(|(index, (subscript, _, _, _))| (CanonicalElementName::from_raw(subscript), index))
-        .collect();
-
-    let mut selected_arms: HashSet<usize> = HashSet::new();
-    let mut default_is_selected = false;
-    for combination in crate::dimensions::SubscriptIterator::new(&dims) {
-        let key = CanonicalElementName::from_raw(&combination.join(","));
-        match arm_positions.get(&key) {
-            Some(index) => {
-                selected_arms.insert(*index);
-            }
-            None => default_is_selected = true,
-        }
-    }
-    Some(ArmSelection::new(selected_arms, default_is_selected))
+/// Callers must still gate on `variable::may_have_unfilled_arms` first: this is
+/// cheap, but the classification it feeds walks the equation's declared slots.
+fn parsed_equation_ast(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    var: SourceVariable,
+) -> Option<crate::ast::Ast<crate::ast::Expr0>> {
+    let module_ident_context = model_module_ident_context(db, model, project, vec![]);
+    let parsed = parse_source_variable_with_module_context(db, var, project, module_ident_context);
+    parsed.variable.ast().cloned()
 }
 
 /// Is `var`'s own equation only a FALLBACK -- a stand-in for a value a calling
@@ -925,7 +884,6 @@ fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel, project: Sou
     let mut var_names: Vec<&String> = source_vars.keys().collect();
     var_names.sort_unstable();
 
-    let project_dims = project.dimensions(db);
     let model_name = model.name(db);
     // A variable literally named `nan` makes the stored text `NAN` ambiguous --
     // see `may_have_unfilled_arms`. The map is canonically keyed, so this covers
@@ -936,19 +894,19 @@ fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel, project: Sou
         if equation_is_a_module_input_fallback(db, model, svar) {
             continue;
         }
-        let equation = svar.equation(db);
-        // Cheap superset test FIRST. `arm_selection` walks the equation's whole
-        // Cartesian element product, and this pass runs on the interactive path,
-        // so an ordinary arrayed variable must not pay for a warning it cannot
-        // emit. Every finding names an arm or the default, so a variable with no
-        // lone-NaN text among them has nothing to report.
-        if !may_have_unfilled_arms(equation, nan_names_a_variable) {
+        // Cheap TEXT test FIRST, so an ordinary variable pays only this. The
+        // classification below walks the equation's declared slots, and this
+        // pass runs on the interactive path, so an arrayed variable must not pay
+        // for a warning it cannot emit. Every finding names an arm or the
+        // default, so a variable with no lone-NaN text among them has nothing to
+        // report.
+        if !may_have_unfilled_arms(svar.equation(db), nan_names_a_variable) {
             continue;
         }
-        let Some(selection) = arm_selection(project_dims, equation) else {
+        let Some(ast) = parsed_equation_ast(db, model, project, svar) else {
             continue;
         };
-        let Some(unfilled) = unfilled_arms(equation, &selection) else {
+        let Some(unfilled) = unfilled_arms(&ast) else {
             continue;
         };
         // A stock's `equation` is its INITIAL VALUE, not a formula re-evaluated

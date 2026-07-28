@@ -15,15 +15,16 @@
 //! fixture that hand-built a `datamodel::Equation::Scalar("NAN")` would prove
 //! nothing about that.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
-use crate::common::ErrorCode;
+use crate::ast::{Ast, Expr0};
+use crate::common::{CanonicalElementName, ErrorCode};
 use crate::datamodel;
 use crate::db::{
     Diagnostic, DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
     compile_project_incremental, sync_from_datamodel_incremental,
 };
-use crate::variable::{ArmSelection, UnfilledArms, is_nan_literal, unfilled_arms};
+use crate::variable::{UnfilledArms, is_nan_literal, unfilled_arms};
 
 // ---------------------------------------------------------------------------
 // The atom: is this equation text nothing but the NaN literal?
@@ -81,70 +82,105 @@ fn the_atom_rejects_everything_that_is_not_a_lone_nan() {
 }
 
 // ---------------------------------------------------------------------------
-// The per-shape decision, enumerated from `datamodel::Equation`'s variants
+// The per-shape decision, over the PARSED equation
 // ---------------------------------------------------------------------------
+//
+// The classifier now takes `Ast<Expr0>`, so these fixtures are parsed ASTs. That
+// is deliberate rather than incidental: the four stages between an equation as
+// written and the arms the compiler evaluates (empty-arm drop, last-wins over
+// duplicate canonical subscripts, dimension resolution, declared-slot lookup)
+// are the parser's and the compiler's, and every review finding on this
+// diagnostic came from re-deriving one of them by hand. The table pins the
+// verdict given a parsed equation; the stages that produce it are pinned by the
+// end-to-end tests further down, which go through a real reader.
 
-/// The `datamodel::Equation` variant `eqn` is, as an EXHAUSTIVE match with no
-/// catch-all arm: a new equation shape added to the datamodel is a compile error
-/// right here, which is what makes the decision table's coverage checkable
-/// rather than asserted.
-fn equation_shape(eqn: &datamodel::Equation) -> &'static str {
-    match eqn {
-        datamodel::Equation::Scalar(_) => "Scalar",
-        datamodel::Equation::ApplyToAll(..) => "ApplyToAll",
-        datamodel::Equation::Arrayed(..) => "Arrayed",
+/// The `Ast` shape `ast` is, as an EXHAUSTIVE match with no catch-all arm: a new
+/// shape is a compile error right here, which is what makes the decision table's
+/// coverage checkable rather than asserted.
+fn equation_shape(ast: &Ast<Expr0>) -> &'static str {
+    match ast {
+        Ast::Scalar(_) => "Scalar",
+        Ast::ApplyToAll(..) => "ApplyToAll",
+        Ast::Arrayed(..) => "Arrayed",
     }
 }
 
-/// Counted from `datamodel::Equation`: three variants, three shapes.
+/// Counted from `ast::Ast`: three variants, three shapes.
 const EQUATION_SHAPES: [&str; 3] = ["Scalar", "ApplyToAll", "Arrayed"];
 
-fn dims() -> Vec<String> {
-    vec!["items".to_string()]
+/// Parse one arm's or formula's text the way `variable::parse_equation` does.
+/// `None` for text with no expression at all, which is exactly what that
+/// function drops before collecting its map.
+fn expr(text: &str) -> Option<Expr0> {
+    Expr0::new(text, crate::lexer::LexerType::Equation).expect("fixture must parse")
 }
 
-/// One per-element arm of an `Equation::Arrayed`:
-/// `(subscript, equation, initial equation, graphical function)`.
-type Arm = (
-    String,
-    String,
-    Option<String>,
-    Option<datamodel::GraphicalFunction>,
-);
-
-fn arm(subscript: &str, eqn: &str) -> Arm {
-    (subscript.to_string(), eqn.to_string(), None, None)
+fn scalar_ast(text: &str) -> Ast<Expr0> {
+    Ast::Scalar(expr(text).expect("fixture must have an expression"))
 }
 
-/// An `Equation::Arrayed` with `default` as its EXCEPT default. `live` is the
-/// `has_except_default` flag, which is what makes the default apply to elements
-/// with no entry of their own -- a `Some` default with the flag clear is dead.
-fn arrayed(arms: Vec<Arm>, default: Option<&str>, live: bool) -> datamodel::Equation {
-    datamodel::Equation::Arrayed(dims(), arms, default.map(str::to_string), live)
+fn a2a_ast(text: &str) -> Ast<Expr0> {
+    Ast::ApplyToAll(
+        test_dims(&["a", "b"]),
+        expr(text).expect("fixture must have an expression"),
+    )
 }
 
-// THREE axes decide an `Arrayed` verdict. The first two are properties of the
-// equation TEXT; the third is not derivable from it at all, which is how the
-// first version of this table came to be wrong in both directions at once.
-// The table is their product and `the_decision_table_covers_every_cell` checks
-// that mechanically, so the row count is DERIVED rather than asserted.
+/// Resolved dimensions declaring exactly `elements`, built through the same
+/// `From<&datamodel::Dimension>` conversion the parser uses.
+fn test_dims(elements: &[&str]) -> Vec<crate::dimensions::Dimension> {
+    vec![crate::dimensions::Dimension::from(
+        &datamodel::Dimension::named(
+            "d".to_string(),
+            elements.iter().map(|e| e.to_string()).collect(),
+        ),
+    )]
+}
 
-/// How many of the SELECTED per-element arms are unfilled -- selected meaning
-/// the compiler evaluates that arm for some slot. Four states: `unfilled_arms`
-/// tests `unfilled.is_empty()` and `unfilled.len() == selected_count`, and those
-/// two comparisons distinguish exactly these -- with the no-arms case separate
-/// because it satisfies BOTH (`0 == 0`).
+/// Build an arrayed `Ast` the way `parse_equation` would: arms keyed
+/// canonically with empty ones dropped, over `declared` elements.
+fn arrayed_ast(
+    declared: &[&str],
+    arms: &[(&str, &str)],
+    default: Option<&str>,
+    apply_default_to_missing: bool,
+) -> Ast<Expr0> {
+    let elements: HashMap<CanonicalElementName, Expr0> = arms
+        .iter()
+        .filter_map(|(subscript, text)| {
+            expr(text).map(|e| (CanonicalElementName::from_raw(subscript), e))
+        })
+        .collect();
+    Ast::Arrayed(
+        test_dims(declared),
+        elements,
+        default.and_then(expr),
+        apply_default_to_missing,
+    )
+}
+
+// THREE axes decide an `Arrayed` verdict, and every one of them is now a
+// property of the parsed fixture rather than a parameter -- which is why
+// `decision_cell` can compute the cell from the `Ast` alone.
+
+/// How many of the arms a declared slot SELECTS are unfilled. Four states:
+/// `unfilled_arms` tests `unfilled.is_empty()` and
+/// `unfilled.len() == slots_with_an_arm`, and those two comparisons distinguish
+/// exactly these -- with the no-arms case separate because it satisfies BOTH
+/// (`0 == 0`).
 ///
-/// `no-arms` covers "written with no arms" and "no arm is selected" alike: to the
-/// compiled model they are the same variable, entirely default- or zero-filled.
+/// `no-arms` covers every way a variable ends up with no selected arm at all:
+/// none written, every arm empty (the parser drops those), or every subscript
+/// naming nothing. To the compiled model they are one variable, entirely
+/// default- or zero-filled.
 const ARM_STATES: [&str; 4] = ["no-arms", "none-unfilled", "some-unfilled", "all-unfilled"];
 
-/// The state of the EXCEPT default. Four states: it is dropped unless
-/// `has_except_default` is set, and only then is its text read.
+/// The state of the EXCEPT default: absent, present but not applied to missing
+/// slots, applied-and-filled, or applied-and-unfilled.
 ///
 /// A dead default whose text is FILLED is deliberately not a fifth state: the
-/// flag drops the default before its text is ever looked at, so it is the same
-/// state as `dead-default` by construction, not by coincidence.
+/// flag is checked before the text is read, so it is the same state as
+/// `dead-default` by construction, not by coincidence.
 const DEFAULT_STATES: [&str; 4] = [
     "no-default",
     "dead-default",
@@ -154,73 +190,59 @@ const DEFAULT_STATES: [&str; 4] = [
 
 /// Whether any declared slot falls past all the arms, so the EXCEPT default (or
 /// the compiler's silent `0`) decides its value.
-///
-/// This axis is the one no amount of staring at the equation's text can supply
-/// -- it needs the dimensions RESOLVED -- and leaving it out made the verdict
-/// wrong in both directions on models that run today: a NaN default no slot can
-/// reach was reported, and a sparse array whose omitted slots compile to `0` was
-/// reported as wholly unfilled.
 const COVERAGE_STATES: [&str; 2] = ["covers-every-slot", "leaves-slots-uncovered"];
 
-fn coverage_state(selection: &ArmSelection) -> &'static str {
-    if selection.default_is_selected() {
-        "leaves-slots-uncovered"
-    } else {
-        "covers-every-slot"
-    }
-}
-
-/// The selection an arrayed fixture is classified under: every arm it declares
-/// is selected (the fixtures use only real, distinct subscripts), plus the
-/// coverage state being exercised.
-///
-/// Arms the compiler does NOT select are deliberately not a further axis.
-/// Whether one exists cannot change any verdict once selection is the input, and
-/// asserting that INVARIANT over the whole table
-/// (`an_arm_the_compiler_never_selects_cannot_change_the_verdict`) is both a
-/// stronger claim and a smaller one than multiplying the product.
-fn coverage_for(eqn: &datamodel::Equation, default_is_selected: bool) -> ArmSelection {
-    let datamodel::Equation::Arrayed(_, arms, _, _) = eqn else {
-        return ArmSelection::whole_variable();
-    };
-    ArmSelection::new((0..arms.len()).collect(), default_is_selected)
-}
-
-/// The cell of the decision space a row occupies, computed from the row's
-/// EQUATION and COVERAGE rather than from its label -- so a mislabelled row
-/// cannot fake coverage. `Scalar` and `ApplyToAll` carry one arm and no default,
-/// so their only axis is whether that arm is unfilled.
-fn decision_cell(eqn: &datamodel::Equation, coverage: &ArmSelection) -> String {
-    match eqn {
-        datamodel::Equation::Scalar(s) | datamodel::Equation::ApplyToAll(_, s) => {
-            let filled = if is_nan_literal(s) {
+/// The cell of the decision space a fixture occupies, computed from the `Ast`
+/// itself rather than from a label -- so a mislabelled row cannot fake coverage.
+fn decision_cell(ast: &Ast<Expr0>) -> String {
+    match ast {
+        Ast::Scalar(e) | Ast::ApplyToAll(_, e) => {
+            let filled = if crate::variable::is_nan_constant_for_test(e) {
                 "unfilled"
             } else {
                 "filled"
             };
-            format!("{}/{filled}", equation_shape(eqn))
+            format!("{}/{filled}", equation_shape(ast))
         }
-        datamodel::Equation::Arrayed(_, elements, default, live) => {
-            let unfilled = elements
-                .iter()
-                .filter(|(_, e, _, _)| is_nan_literal(e))
-                .count();
-            let arms = if elements.is_empty() {
+        Ast::Arrayed(dims, elements, default, live) => {
+            let mut with_arm = 0usize;
+            let mut unfilled = 0usize;
+            let mut uncovered = false;
+            for combination in crate::dimensions::SubscriptIterator::new(dims) {
+                let key = CanonicalElementName::from_raw(&combination.join(","));
+                match elements.get(&key) {
+                    Some(e) => {
+                        with_arm += 1;
+                        if crate::variable::is_nan_constant_for_test(e) {
+                            unfilled += 1;
+                        }
+                    }
+                    None => uncovered = true,
+                }
+            }
+            let arms = if with_arm == 0 {
                 "no-arms"
             } else if unfilled == 0 {
                 "none-unfilled"
-            } else if unfilled == elements.len() {
+            } else if unfilled == with_arm {
                 "all-unfilled"
             } else {
                 "some-unfilled"
             };
-            let default = match (default.as_deref(), live) {
+            let default = match (default.as_ref(), live) {
                 (None, _) => "no-default",
                 (Some(_), false) => "dead-default",
-                (Some(d), true) if is_nan_literal(d) => "live-unfilled-default",
+                (Some(d), true) if crate::variable::is_nan_constant_for_test(d) => {
+                    "live-unfilled-default"
+                }
                 (Some(_), true) => "live-filled-default",
             };
-            format!("Arrayed/{arms}/{default}/{}", coverage_state(coverage))
+            let coverage = if uncovered {
+                "leaves-slots-uncovered"
+            } else {
+                "covers-every-slot"
+            };
+            format!("Arrayed/{arms}/{default}/{coverage}")
         }
     }
 }
@@ -230,10 +252,8 @@ fn decision_cell(eqn: &datamodel::Equation, coverage: &ArmSelection) -> String {
 /// **2 (Scalar) + 2 (ApplyToAll) + [(4 arm-states x 4 default-states x 2
 /// coverage-states) - 4 impossible] = 32.**
 ///
-/// The four excluded cells are `no-arms` x `covers-every-slot`: zero arms cannot
-/// name every slot of a dimension that has at least one. Feeding the classifier
-/// that pair would pin behaviour for an input the emitter cannot construct,
-/// which is worth less than saying why it is absent.
+/// The four excluded cells are `no-arms` x `covers-every-slot`: with no selected
+/// arm, every declared slot is by definition uncovered.
 fn expected_cells() -> BTreeSet<String> {
     let mut cells = BTreeSet::new();
     for shape in ["Scalar", "ApplyToAll"] {
@@ -254,16 +274,21 @@ fn expected_cells() -> BTreeSet<String> {
     cells
 }
 
-/// Build the arrayed fixture for one `(arms, default)` cell. Generated rather
-/// than hand-written so the table cannot drift out of the axis product; the
-/// EXPECTED VERDICTS in [`decision_table`] stay authored, which is the half that
-/// must not be derived from the implementation.
-fn arrayed_fixture(arms: &str, default: &str) -> datamodel::Equation {
-    let arms = match arms {
-        "no-arms" => vec![],
-        "none-unfilled" => vec![arm("a", "1"), arm("b", "2")],
-        "some-unfilled" => vec![arm("a", "1"), arm("b", "NAN")],
-        "all-unfilled" => vec![arm("a", "NAN"), arm("b", "nan")],
+/// Build the arrayed fixture for one `(arms, default, coverage)` cell.
+///
+/// Coverage is expressed by DECLARING a third element the arms do not name,
+/// rather than by a flag, because that is how a real sparse array expresses it.
+fn arrayed_fixture(arms: &str, default: &str, coverage: &str) -> Ast<Expr0> {
+    let declared: &[&str] = if coverage == "covers-every-slot" {
+        &["a", "b"]
+    } else {
+        &["a", "b", "c"]
+    };
+    let arms: &[(&str, &str)] = match arms {
+        "no-arms" => &[],
+        "none-unfilled" => &[("a", "1"), ("b", "2")],
+        "some-unfilled" => &[("a", "1"), ("b", "NAN")],
+        "all-unfilled" => &[("a", "NAN"), ("b", "nan")],
         other => panic!("unknown arm state {other:?}"),
     };
     let (default, live) = match default {
@@ -273,7 +298,7 @@ fn arrayed_fixture(arms: &str, default: &str) -> datamodel::Equation {
         "live-unfilled-default" => (Some("nan"), true),
         other => panic!("unknown default state {other:?}"),
     };
-    arrayed(arms, default, live)
+    arrayed_ast(declared, arms, default, live)
 }
 
 /// The verdict each cell must produce, authored cell by cell.
@@ -281,8 +306,9 @@ fn arrayed_fixture(arms: &str, default: &str) -> datamodel::Equation {
 /// Deliberately a flat list of literals rather than a `match` with grouped or
 /// wildcard arms: a grouped expectation is a second copy of the rule under test,
 /// and would agree with a wrong implementation for the same wrong reason. Every
-/// entry here was worked out from what the compiled model actually evaluates,
-/// slot by slot.
+/// entry was worked out from what the compiled model evaluates, slot by slot.
+///
+/// Element names are CANONICAL, because that is how the parsed arm map is keyed.
 #[allow(clippy::type_complexity)]
 fn expected_verdicts() -> Vec<(&'static str, Option<UnfilledArms>)> {
     let whole = || Some(UnfilledArms::Whole);
@@ -298,8 +324,8 @@ fn expected_verdicts() -> Vec<(&'static str, Option<UnfilledArms>)> {
         ("Scalar/filled", None),
         ("ApplyToAll/unfilled", whole()),
         ("ApplyToAll/filled", None),
-        // -- COVERS EVERY SLOT. No slot can reach the default, so it is dead
-        //    code whatever its text says and all four default states agree.
+        // -- COVERS EVERY SLOT. No slot reaches the default, so it is dead code
+        //    whatever its text says and all four default states agree.
         ("Arrayed/none-unfilled/no-default/covers-every-slot", None),
         ("Arrayed/none-unfilled/dead-default/covers-every-slot", None),
         (
@@ -307,8 +333,6 @@ fn expected_verdicts() -> Vec<(&'static str, Option<UnfilledArms>)> {
             None,
         ),
         (
-            // P2-1, first half: this warned before the coverage axis existed,
-            // on a model whose compiled slots hold 1 and 2 and no NaN at all.
             "Arrayed/none-unfilled/live-unfilled-default/covers-every-slot",
             None,
         ),
@@ -350,7 +374,6 @@ fn expected_verdicts() -> Vec<(&'static str, Option<UnfilledArms>)> {
             None,
         ),
         (
-            // Every slot falls to the default, and the default is unfilled.
             "Arrayed/no-arms/live-unfilled-default/leaves-slots-uncovered",
             whole(),
         ),
@@ -383,14 +406,13 @@ fn expected_verdicts() -> Vec<(&'static str, Option<UnfilledArms>)> {
             partial(&["b"], false),
         ),
         (
-            // The only cell producing a non-empty element list AND `default`,
-            // i.e. the message branch that joins the two.
+            // The only cell producing a non-empty element list AND `default`.
             "Arrayed/some-unfilled/live-unfilled-default/leaves-slots-uncovered",
             partial(&["b"], true),
         ),
         (
-            // P2-1, second half: every ARM is unfilled, but the uncovered slots
-            // compile to a finite 0, so the variable is not wholly unfilled.
+            // Every ARM is unfilled, but the uncovered slot compiles to a finite
+            // 0, so the variable is not wholly unfilled.
             "Arrayed/all-unfilled/no-default/leaves-slots-uncovered",
             partial(&["a", "b"], false),
         ),
@@ -412,15 +434,10 @@ fn expected_verdicts() -> Vec<(&'static str, Option<UnfilledArms>)> {
 /// The decision table: one row per cell, fixtures generated from the axes and
 /// verdicts taken from [`expected_verdicts`].
 #[allow(clippy::type_complexity)]
-fn decision_table() -> Vec<(
-    String,
-    datamodel::Equation,
-    ArmSelection,
-    Option<UnfilledArms>,
-)> {
+fn decision_table() -> Vec<(String, Ast<Expr0>, Option<UnfilledArms>)> {
     let verdicts = expected_verdicts();
     let mut rows = Vec::new();
-    let mut push = |cell: String, eqn: datamodel::Equation, coverage: ArmSelection| {
+    let mut push = |cell: String, ast: Ast<Expr0>| {
         let expected = verdicts
             .iter()
             .find(|(name, _)| *name == cell)
@@ -429,41 +446,27 @@ fn decision_table() -> Vec<(
             .clone();
         // The generated fixture must actually LAND in the cell it is filed
         // under, or the coverage check below would be measuring labels.
-        assert_eq!(
-            cell,
-            decision_cell(&eqn, &coverage),
-            "fixture/cell mismatch"
-        );
-        rows.push((cell, eqn, coverage, expected));
+        assert_eq!(cell, decision_cell(&ast), "fixture/cell mismatch");
+        rows.push((cell, ast, expected));
     };
 
-    for (cell, eqn) in [
-        ("Scalar/unfilled", datamodel::Equation::Scalar("NAN".into())),
-        ("Scalar/filled", datamodel::Equation::Scalar("3 * x".into())),
-        (
-            "ApplyToAll/unfilled",
-            datamodel::Equation::ApplyToAll(dims(), "nan".into()),
-        ),
-        (
-            "ApplyToAll/filled",
-            datamodel::Equation::ApplyToAll(dims(), "3 * x".into()),
-        ),
+    for (cell, ast) in [
+        ("Scalar/unfilled", scalar_ast("NAN")),
+        ("Scalar/filled", scalar_ast("3 * x")),
+        ("ApplyToAll/unfilled", a2a_ast("nan")),
+        ("ApplyToAll/filled", a2a_ast("3 * x")),
     ] {
-        let coverage = coverage_for(&eqn, false);
-        push(cell.to_string(), eqn, coverage);
+        push(cell.to_string(), ast);
     }
     for arms in ARM_STATES {
         for default in DEFAULT_STATES {
-            for coverage_name in COVERAGE_STATES {
-                if arms == "no-arms" && coverage_name == "covers-every-slot" {
+            for coverage in COVERAGE_STATES {
+                if arms == "no-arms" && coverage == "covers-every-slot" {
                     continue;
                 }
-                let eqn = arrayed_fixture(arms, default);
-                let coverage = coverage_for(&eqn, coverage_name == "leaves-slots-uncovered");
                 push(
-                    format!("Arrayed/{arms}/{default}/{coverage_name}"),
-                    eqn,
-                    coverage,
+                    format!("Arrayed/{arms}/{default}/{coverage}"),
+                    arrayed_fixture(arms, default, coverage),
                 );
             }
         }
@@ -473,10 +476,10 @@ fn decision_table() -> Vec<(
 
 #[test]
 fn the_decision_table_pins_every_row() {
-    for (cell, eqn, coverage, expected) in decision_table() {
+    for (cell, ast, expected) in decision_table() {
         assert_eq!(
             expected,
-            unfilled_arms(&eqn, &coverage),
+            unfilled_arms(&ast),
             "decision-table cell {cell:?} disagrees"
         );
     }
@@ -484,47 +487,34 @@ fn the_decision_table_pins_every_row() {
 
 /// An arm the compiler never selects cannot change ANY verdict.
 ///
-/// Stated as an invariant over the whole table rather than as a fifth axis. An
-/// ineffective arm is not a state the verdict depends on -- it is a thing that
+/// Stated as an invariant over the whole table rather than as a further axis. An
+/// unselected arm is not a state the verdict depends on -- it is a thing that
 /// must not matter -- and "adding one changes nothing, anywhere, whatever its
-/// text" is both a stronger claim than 24 extra hand-authored rows and a much
-/// smaller one. Both texts are exercised because the NaN one is the whole point
-/// (it used to be reported as a slot that stops) and the filled one is the
-/// control that would catch a filter keyed on the text instead of the subscript.
+/// text" is a stronger claim than duplicating every row, and a much smaller one.
+///
+/// The arm is added with a subscript naming no declared element, which is the
+/// only way an unselected arm can still be present in the PARSED map: the parser
+/// has already dropped empty arms and collapsed duplicates, so those two ways of
+/// going unselected cannot reach this classifier at all. That is the point of
+/// classifying the parsed form -- two of the four pipeline stages stop being
+/// something this code can get wrong.
 #[test]
 fn an_arm_the_compiler_never_selects_cannot_change_the_verdict() {
-    for (cell, eqn, selection, expected) in decision_table() {
-        let datamodel::Equation::Arrayed(dim_names, arms, default, live) = &eqn else {
+    for (cell, ast, expected) in decision_table() {
+        let Ast::Arrayed(dims, elements, default, live) = &ast else {
             continue;
         };
         for text in ["NAN", "7"] {
-            // Appended: the arm sits at a position the selection does not name,
-            // which is how an unknown subscript and a losing duplicate both
-            // reach the classifier.
-            let mut appended = arms.clone();
-            appended.push(arm("ignored", text));
-            let perturbed =
-                datamodel::Equation::Arrayed(dim_names.clone(), appended, default.clone(), *live);
-            assert_eq!(
-                expected,
-                unfilled_arms(&perturbed, &selection),
-                "cell {cell:?}: an appended unselected `{text}` arm changed the verdict"
+            let mut with_extra = elements.clone();
+            with_extra.insert(
+                CanonicalElementName::from_raw("ignored"),
+                expr(text).unwrap(),
             );
-
-            // Prepended, with every real arm's index shifted by one: this is the
-            // SHADOWED-DUPLICATE shape specifically, where the arm the compiler
-            // drops comes BEFORE the one it keeps. Appending alone would never
-            // exercise it, since the survivor is always the later entry.
-            let mut prepended = vec![arm("shadowed", text)];
-            prepended.extend(arms.iter().cloned());
-            let shifted =
-                ArmSelection::new((1..=arms.len()).collect(), selection.default_is_selected());
-            let perturbed =
-                datamodel::Equation::Arrayed(dim_names.clone(), prepended, default.clone(), *live);
+            let perturbed = Ast::Arrayed(dims.clone(), with_extra, default.clone(), *live);
             assert_eq!(
                 expected,
-                unfilled_arms(&perturbed, &shifted),
-                "cell {cell:?}: a shadowed leading `{text}` arm changed the verdict"
+                unfilled_arms(&perturbed),
+                "cell {cell:?}: an unselected `{text}` arm changed the verdict"
             );
         }
     }
@@ -546,21 +536,14 @@ fn every_authored_verdict_names_a_real_cell() {
 /// The table must cover the decision space EXACTLY: every cell present, and no
 /// row outside it.
 ///
-/// This is the check that makes the row count derived rather than asserted.
-/// Set equality both ways is the point -- a subset test would let a shrinking
-/// table pass, and the previous version of this file asserted only that the
-/// three `Equation` variants appeared, which cannot see a missing combination
-/// of the two `Arrayed` axes. Three cells were in fact missing.
-///
-/// What the pieces guarantee together: `equation_shape` and `decision_cell` are
-/// catch-all-free matches over `datamodel::Equation`, so a new variant is a
-/// compile error in both; the author must then name its cells, and this
-/// assertion fails until `expected_cells` and the table agree about them.
+/// This is the check that makes the row count derived rather than asserted. Set
+/// equality both ways is the point -- a subset test would let a shrinking table
+/// pass.
 #[test]
 fn the_decision_table_covers_every_cell() {
     let covered: BTreeSet<String> = decision_table()
         .iter()
-        .map(|(_, eqn, coverage, _)| decision_cell(eqn, coverage))
+        .map(|(_, ast, _)| decision_cell(ast))
         .collect();
     let expected = expected_cells();
     assert_eq!(
@@ -578,11 +561,9 @@ fn the_decision_table_covers_every_cell() {
         "2 + 2 + (4 arm-states x 4 default-states x 2 coverage-states - 4 impossible)"
     );
 
-    // The shape list is still worth pinning on its own: it is what the two
-    // catch-all-free matches above are enumerated FROM.
     let shapes: BTreeSet<&str> = decision_table()
         .iter()
-        .map(|(_, eqn, _, _)| equation_shape(eqn))
+        .map(|(_, ast, _)| equation_shape(ast))
         .collect();
     assert_eq!(BTreeSet::from(EQUATION_SHAPES), shapes);
 }
@@ -1015,26 +996,53 @@ fn a_nan_variable_in_another_model_does_not_suppress_this_one() {
     assert_eq!("main", findings[0].0);
 }
 
-/// The suppression is total within such a model: every equation the decision
-/// table says IS reportable stops being reportable.
+/// The suppression is total: every equation shape that can reach a finding
+/// stops being reportable when the model declares a variable named `nan`.
 ///
-/// Stated as an invariant over the table rather than as a fifth axis, for the
-/// same reason as the unselected-arm invariant: `nan` naming a variable is not a
-/// state the verdict varies with, it is a condition under which no claim can be
-/// made at all. Thirty-two checks from one loop rather than 32 duplicated rows.
+/// Stated over the GATE rather than over the decision table, because the gate is
+/// where the rule lives and the gate reads the datamodel equation while the
+/// table reads the parsed one. The four rows are the four ways the gate can say
+/// yes -- one per `datamodel::Equation` variant, plus the default-only case that
+/// probe O showed was unpinned.
 #[test]
-fn declaring_nan_suppresses_every_reportable_cell() {
-    for (cell, eqn, _selection, expected) in decision_table() {
-        if expected.is_none() {
-            continue;
-        }
+fn declaring_nan_suppresses_every_reportable_shape() {
+    let dim = || vec!["d".to_string()];
+    let elem = |subscript: &str, text: &str| {
+        (
+            subscript.to_string(),
+            text.to_string(),
+            None,
+            None::<datamodel::GraphicalFunction>,
+        )
+    };
+    let reportable = [
+        ("scalar", datamodel::Equation::Scalar("NAN".to_string())),
+        (
+            "apply-to-all",
+            datamodel::Equation::ApplyToAll(dim(), "nan".to_string()),
+        ),
+        (
+            "arrayed arm",
+            datamodel::Equation::Arrayed(dim(), vec![elem("a", "NAN")], None, false),
+        ),
+        (
+            "arrayed default only",
+            datamodel::Equation::Arrayed(
+                dim(),
+                vec![elem("a", "1")],
+                Some("NAN".to_string()),
+                true,
+            ),
+        ),
+    ];
+    for (label, eqn) in reportable {
         assert!(
             crate::variable::may_have_unfilled_arms(&eqn, false),
-            "cell {cell:?} reports, so it must pass the gate in an ordinary model"
+            "{label} must pass the gate in an ordinary model"
         );
         assert!(
             !crate::variable::may_have_unfilled_arms(&eqn, true),
-            "cell {cell:?} must make no claim when `nan` names a variable"
+            "{label} must make no claim when `nan` names a variable"
         );
     }
 }
@@ -1073,6 +1081,46 @@ fn a_variable_whose_only_nan_is_the_default_is_still_reported() {
     assert!(
         final_value(&project, "defaulted[c]").is_nan(),
         "the slot that falls to the NaN default is the one that stops"
+    );
+}
+
+/// An arm with an EMPTY equation does not cover its slot: the parser drops it,
+/// so the slot falls to the EXCEPT default like any other armless slot.
+///
+/// This was the fourth instance of the arms-as-written class and the first FALSE
+/// NEGATIVE -- `a` looked covered, so the live `NAN` default looked unreachable
+/// and nothing was reported, while `a` really does simulate as NaN. It is fixed
+/// not by mirroring the parser's empty-drop but by classifying the parsed form,
+/// where the drop has already happened.
+#[test]
+fn an_empty_arm_does_not_cover_its_slot() {
+    let project = read_xmile(
+        r#"<dimensions><dim name="D"><elem name="a"/><elem name="b"/></dim></dimensions>"#,
+        r#"
+        <aux name="hollow">
+          <eqn>NAN</eqn>
+          <element subscript="a"><eqn></eqn></element>
+          <element subscript="b"><eqn>2</eqn></element>
+          <dimensions><dim name="D"/></dimensions>
+        </aux>"#,
+    );
+    // The premise: the slot really is NaN, so a missing warning is a missing
+    // one and not a difference of opinion. `b` is the control -- it has a real
+    // arm, so it is finite and the finding must not name it.
+    assert!(
+        final_value(&project, "hollow[a]").is_nan(),
+        "the empty arm is dropped and the slot takes the NaN default"
+    );
+    assert_eq!(2.0, final_value(&project, "hollow[b]"));
+    let findings = unfilled_findings(&project);
+    assert_eq!(1, findings.len(), "{findings:#?}");
+    assert_eq!("hollow", findings[0].1);
+    assert!(
+        findings[0]
+            .2
+            .contains("no equation for every element with no equation of its own"),
+        "the slot that stops is the one taking the default: {:?}",
+        findings[0].2
     );
 }
 

@@ -532,65 +532,8 @@ pub(crate) enum UnfilledArms {
     },
 }
 
-/// Which of an arrayed equation's arms the COMPILER SELECTS, and whether any
-/// declared slot falls past all of them.
-///
-/// This is the structure that closes a defect CLASS rather than an instance.
-/// Three separate findings -- an arm shadowed because the others already cover
-/// the dimension, an arm whose subscript names nothing, and an arm a later
-/// duplicate overrides -- were all one mistake: classifying the arms AS WRITTEN
-/// when the only ones that can make a slot NaN are the ones the compiler
-/// SELECTS. Asking the selection question directly makes all three consequences
-/// instead of cases.
-///
-/// The selection is `compiler::expand_arrayed_with_hoisting`'s own two steps,
-/// per declared element combination: look the combination's key up among the
-/// arms, and fall to the EXCEPT default only on a miss. `db::diagnostic::arm_selection`
-/// performs exactly that walk.
-///
-/// **Arms are identified by INDEX, not by canonical key**, which is what makes
-/// the duplicate case fall out. `a=NAN` followed by `A=1` canonicalizes to one
-/// key, and `variable::parse_equation` collects arms into a `HashMap` so the
-/// LAST one wins; a key-based set would mark that key selected and leave the
-/// classifier examining both source entries, reporting the shadowed `a=NAN`
-/// though the compiled slot holds 1. An index names the surviving arm exactly.
-///
-/// It cannot be read off a `datamodel::Equation`: the walk needs the equation's
-/// dimensions RESOLVED against the project's declarations, which is a database
-/// read. So the caller computes it and [`unfilled_arms`] stays pure.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Default)]
-pub(crate) struct ArmSelection {
-    /// Positions in the equation's `elements` list of the arms that are the
-    /// selected equation for at least one declared slot.
-    selected_arms: HashSet<usize>,
-    /// True when at least one declared slot has no arm at all, so its value
-    /// comes from the EXCEPT default if one is live and from the compiler's
-    /// silent `0` otherwise.
-    default_is_selected: bool,
-}
-
-impl ArmSelection {
-    pub(crate) fn new(selected_arms: HashSet<usize>, default_is_selected: bool) -> Self {
-        ArmSelection {
-            selected_arms,
-            default_is_selected,
-        }
-    }
-
-    /// A scalar or apply-to-all variable: no per-element arms, and its one
-    /// formula is every slot's, so nothing falls through.
-    pub(crate) fn whole_variable() -> Self {
-        ArmSelection::default()
-    }
-
-    pub(crate) fn default_is_selected(&self) -> bool {
-        self.default_is_selected
-    }
-}
-
-/// Classify `equation` by which of its arms are unfilled, or `None` when none
-/// are.
+/// Classify a variable's PARSED equation by which of its arms are unfilled, or
+/// `None` when none are.
 ///
 /// Arms rather than whole variables, deliberately. An arrayed variable's
 /// elements are separate simulated series, so an unfilled `x[b]` stops `x[b]`'s
@@ -601,64 +544,68 @@ impl ArmSelection {
 /// [`UnfilledArms::Partial`] names the arms so the message can point at them.
 /// Either way it is at most ONE finding per variable, never one per element.
 ///
-/// `selection` is what makes the verdict a statement about SLOTS rather than
-/// about text. Three review findings were the same mistake -- an arm shadowed by
-/// full coverage, an arm naming nothing, an arm overridden by a later duplicate
-/// -- and each reported a variable as NaN on a model that simulates finite. They
-/// are not three cases here: an arm the compiler does not select is simply not
-/// among the arms this looks at.
+/// # Why this takes the parsed `Ast`, not the `datamodel::Equation`
 ///
-/// Reporting stays at ARM granularity even though the decision is per slot,
-/// because the message must stay bounded: a live NaN default covering 400 slots
-/// is one phrase, not 400 element names.
-pub(crate) fn unfilled_arms(
-    equation: &datamodel::Equation,
-    selection: &ArmSelection,
-) -> Option<UnfilledArms> {
-    use crate::datamodel::Equation;
-    match equation {
+/// Four review findings on this diagnostic were the same mistake, each caught
+/// one at a time: an arm shadowed because the others cover the dimension, an arm
+/// whose subscript names nothing, an arm a later duplicate overrides, and an arm
+/// whose equation is EMPTY. Every one is a gap between the arms AS WRITTEN and
+/// the arms the compiler EVALUATES, and the first three were each fixed by
+/// re-deriving one more stage of that pipeline by hand. The fourth proved the
+/// approach wrong: the hand-derived selection was missing a stage, and missing
+/// one silently -- it reported nothing where a slot really was NaN.
+///
+/// So this no longer re-derives anything. [`parse_equation`] already performs
+/// the pipeline, and its `Ast` IS the result: empty and unparseable arms
+/// dropped, duplicate canonical subscripts collapsed last-wins, dimensions
+/// resolved. The one stage that is not in the `Ast` -- which declared slot takes
+/// which arm -- is the `SubscriptIterator` walk below, and it is the compiler's
+/// own (`compiler::expand_arrayed_with_hoisting` looks each combination's key up
+/// in this same map and falls to the EXCEPT default only on a miss). Nothing
+/// here mirrors a stage that exists elsewhere.
+///
+/// The consequence for arrayed reporting: element names come out CANONICAL and
+/// in row-major declared order, because that is how the map is keyed and how the
+/// slots are walked. The as-written spelling is not recoverable from the `Ast`,
+/// and asking the datamodel for it would mean re-deriving the last-wins rule to
+/// know which spelling survived -- exactly the re-derivation this avoids.
+pub(crate) fn unfilled_arms(ast: &Ast<Expr0>) -> Option<UnfilledArms> {
+    match ast {
         // One arm covering the whole variable: a scalar formula, or one formula
         // applied to every element.
-        Equation::Scalar(s) | Equation::ApplyToAll(_, s) => {
-            is_nan_literal(s).then_some(UnfilledArms::Whole)
+        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
+            is_nan_constant(expr).then_some(UnfilledArms::Whole)
         }
-        Equation::Arrayed(_, elements, default, has_except_default) => {
-            // Only an arm the compiler SELECTS can be what a slot evaluates to.
-            // Every other arm is inert text: it names no slot, or a duplicate
-            // overrides it, so its NaN is not a series that stops.
-            //
-            // This also folds "no arm is selected" into the no-arms case, which
-            // is right -- such a variable is entirely default- or zero-filled,
-            // exactly as if it had been written with no arms at all.
-            let selected = elements
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| selection.selected_arms.contains(index))
-                .map(|(_, arm)| arm);
-            let selected_count = selected.clone().count();
-            let unfilled: Vec<String> = selected
-                .filter(|(_, eqn, _, _)| is_nan_literal(eqn))
-                .map(|(subscript, _, _, _)| subscript.clone())
-                .collect();
-            // Two independent things have to hold before the default's TEXT
-            // means anything. It must be SELECTED -- `expand_arrayed_with_hoisting`
-            // consults it only for a slot no arm names, so with the arms covering
-            // the dimension it is dead code. And it must be LIVE --
-            // `has_except_default` is what lets it apply at all, and the MDL
-            // converter keeps a dead one as round-trip metadata
-            // (`mdl::convert::variables`).
-            let default_unfilled = selection.default_is_selected()
-                && *has_except_default
-                && default.as_deref().is_some_and(is_nan_literal);
-            // What the slots with no arm evaluate to: the default's formula when
-            // it is live, else the compiler's silent `0` -- which is finite, so
-            // it is NOT an unfilled equation. (That silent zero is its own
-            // reportable shape and a deliberately separate one: GH #905.)
-            let slots_past_the_arms_are_nan = !selection.default_is_selected() || default_unfilled;
+        Ast::Arrayed(dims, elements, default, apply_default_to_missing) => {
+            let mut unfilled: Vec<String> = vec![];
+            let mut slots_with_an_arm = 0usize;
+            let mut default_is_selected = false;
+            for combination in crate::dimensions::SubscriptIterator::new(dims) {
+                let key = CanonicalElementName::from_raw(&combination.join(","));
+                match elements.get(&key) {
+                    Some(expr) => {
+                        slots_with_an_arm += 1;
+                        if is_nan_constant(expr) {
+                            unfilled.push(key.as_str().to_string());
+                        }
+                    }
+                    // No arm names this slot, so its value comes from the EXCEPT
+                    // default when one is live and from the compiler's silent
+                    // `0` otherwise.
+                    None => default_is_selected = true,
+                }
+            }
+            let default_unfilled = default_is_selected
+                && *apply_default_to_missing
+                && default.as_ref().is_some_and(is_nan_constant);
+            // The silent `0` is finite, so a slot that falls to it is NOT an
+            // unfilled equation. (It is its own reportable shape, and a
+            // deliberately separate one: GH #905.)
+            let slots_past_the_arms_are_nan = !default_is_selected || default_unfilled;
 
             if unfilled.is_empty() && !default_unfilled {
                 None
-            } else if unfilled.len() == selected_count && slots_past_the_arms_are_nan {
+            } else if unfilled.len() == slots_with_an_arm && slots_past_the_arms_are_nan {
                 // Every slot the variable has evaluates to NaN.
                 Some(UnfilledArms::Whole)
             } else {
@@ -669,6 +616,22 @@ pub(crate) fn unfilled_arms(
             }
         }
     }
+}
+
+/// Is `expr` exactly a NaN constant -- the whole formula, not a NaN inside one?
+///
+/// A root-level `Expr0::Const` IS the whole equation: the parser builds no node
+/// for parentheses, so this is the parsed twin of [`is_nan_literal`]'s
+/// single-token rule and agrees with it on every text that reaches here.
+fn is_nan_constant(expr: &Expr0) -> bool {
+    matches!(expr, Expr0::Const(_, literal, _) if literal.value().is_nan())
+}
+
+/// [`is_nan_constant`] for the decision table, which must compute a fixture's
+/// cell by the same rule the classifier uses.
+#[cfg(test)]
+pub(crate) fn is_nan_constant_for_test(expr: &Expr0) -> bool {
+    is_nan_constant(expr)
 }
 
 /// Could `equation` possibly produce an unfilled-equation finding?
