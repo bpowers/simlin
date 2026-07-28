@@ -1180,23 +1180,52 @@ fn char_per_element_dynamic_index() {
 }
 
 // Finding 1 materiality guard: the DYNAMIC-index sibling of the ambiguous-pin
-// guard. The frozen `pop[Region, idx]` occurrence lowers to a `PREVIOUS(idx)`
+// guard. The frozen `pop[Region, idx]` occurrence lowers to a `PREVIOUS(idx, idx)`
 // lag; the buggy blanket-skip would instead leave `idx` un-lagged, a
 // value-divergent change the constant-`pop` text golden alone would still catch
-// (the golden diverges) but whose RUNTIME consequence this guard freezes. HEAD's
-// series carries a NaN at the first live step (a pre-existing HEAD behavior: the
-// synthesized `PREVIOUS(idx)` capture-helper aux reads an uninitialized value at
-// the initial step; tracked separately as a latent bug). Reproducing that NaN is
-// the byte-parity contract; the un-lagged regression makes the same step FINITE,
-// so `results[1]` being NaN is the exact discriminator. This guard therefore
-// pins (a) every fragment compiles (the `PREVIOUS(idx)` helper is well-formed),
-// (b) the first-live-step score is NaN (the dynamic-index lag is present), and
-// (c) a later step is finite and non-zero (the score is materially live).
+// (the golden diverges) but whose RUNTIME consequence this guard freezes.
+//
+// GH #975 changed what the runtime discriminator can be. Before it, the lag's
+// signature was a NaN at the first live step: the wrap emitted a UNARY
+// `PREVIOUS(idx)`, which desugars to a `0` first-DT value, and `0` is out of
+// range for a 1-based subscript -- so the synthesized capture-helper aux
+// evaluated to NaN at t=0 and the outer `PREVIOUS` served that NaN as the first
+// live step. The freeze now names the un-lagged index as its own first-DT value,
+// so every step is finite and "finite at step 1" no longer discriminates
+// anything.
+//
+// The model is therefore this guard's OWN rather than `per_element_dynamic_index_model`'s
+// (which it used to share): there `pop[.,young]` and `pop[.,old]` hold the same
+// value at every step, so the lagged and un-lagged index reads are numerically
+// indistinguishable and the NaN was the only available signal. Here `skew` adds
+// material to `old` and not to `young`, so the two Age rows diverge and the
+// capture helper's series -- `pop[nyc, idx_{t-1}]` -- is different from the
+// un-lagged `pop[nyc, idx_t]` at every step after the first.
+//
+// The guard pins (a) every fragment compiles (the `PREVIOUS(idx, idx)` helper is
+// well-formed), (b) the capture helper is FINITE at t=0 and equals the LAGGED
+// element read at every step -- checked against the model's own simulated `pop`
+// series, with the un-lagged read asserted to differ so the check has teeth --
+// and (c) the score itself is finite at the first live step and materially live
+// after it.
 fn per_element_dynamic_index_feedback_model() -> datamodel::Project {
-    // Same shape as `per_element_dynamic_index_model` (pop is already a
-    // growth-fed stock there), reused directly so the guard and the text pin
-    // exercise the identical model.
-    per_element_dynamic_index_model()
+    TestProject::new("dyn_index_feedback")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("Age", &["young", "old"])
+        .scalar_aux("idx", "1 + (TIME MOD 2)")
+        // Per-Age drift with no dependency on `pop`: it separates the two Age
+        // rows without adding a feedback loop that would change the shape under
+        // test.
+        .array_with_ranges("agedrift[Age]", vec![("young", "0"), ("old", "5")])
+        .array_flow("skew[Region,Age]", "agedrift[Age]", None)
+        .array_flow(
+            "growth[Region]",
+            "pop[Region, young] * pop[Region, idx] * 0.001",
+            None,
+        )
+        .array_stock("pop[Region,Age]", "10", &["growth", "skew"], &[], None)
+        .build_datamodel()
 }
 
 #[test]
@@ -1256,17 +1285,63 @@ fn per_element_dynamic_index_scores_preserve_head_lag() {
         .expect("simulation should run to completion");
     let results = vm.into_results();
     let rows: Vec<_> = results.iter().collect();
-    for off in score_offsets {
-        // Step 1 (the first live step) reproduces HEAD's NaN, the signature of
-        // the `PREVIOUS(idx)` lag reading its uninitialized capture helper. An
-        // un-lagged regression (`idx` not wrapped) makes this step FINITE.
-        assert!(
-            rows[1][off].is_nan(),
-            "dynamic-index pop->growth score at offset {off} step 1 must be NaN \
-             (the preserved PREVIOUS(idx) dynamic-index lag); a finite value means \
-             the lag was dropped"
+    let series = |name: &str| -> Vec<f64> {
+        let off = compiled.offsets[&Ident::<Canonical>::new(name)];
+        rows.iter().map(|r| r[off]).collect()
+    };
+
+    // (b) The capture helper: `pop[nyc, PREVIOUS(idx, idx)]`, hoisted out of the
+    // frozen occurrence by `builtins_visitor::make_temp_arg`. It is the slot
+    // GH #975 was about -- the outer `PREVIOUS` serves its t=0 value as the
+    // score's first live step -- so it is asserted directly rather than through
+    // the score.
+    let helper = "$\u{205A}$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc,young]\u{2192}growth[nyc]\u{205A}0\u{205A}arg0";
+    let helper_series = series(helper);
+    assert!(
+        helper_series[0].is_finite(),
+        "the synthesized PREVIOUS(idx) capture helper must have a well-defined \
+         value at the initial step (GH #975); got {:?}",
+        helper_series
+    );
+    // The lag itself, checked elementwise against the model's own `pop` series:
+    // `idx` is `1 + (TIME MOD 2)`, so the LAGGED read selects `young` at t=0/1
+    // and alternates thereafter, while the UN-lagged read selects the other row.
+    // `young`/`old` diverge (see the fixture), so the two are distinguishable.
+    let idx_series = series("idx");
+    let young = series("pop[nyc,young]");
+    let old = series("pop[nyc,old]");
+    let row_at = |i: usize, index: f64| if index == 1.0 { young[i] } else { old[i] };
+    let mut lag_is_observable = false;
+    for t in 0..helper_series.len() {
+        // At t=0 the freeze's own first-DT initial value applies: the un-lagged
+        // index. Afterwards it is the index one step back.
+        let lagged_index = if t == 0 {
+            idx_series[0]
+        } else {
+            idx_series[t - 1]
+        };
+        assert_eq!(
+            helper_series[t],
+            row_at(t, lagged_index),
+            "the capture helper must read pop at the LAGGED index at step {t}; \
+             helper={helper_series:?} idx={idx_series:?} young={young:?} old={old:?}"
         );
-        // A later step is finite and non-zero: the score is materially live.
+        lag_is_observable |= row_at(t, lagged_index) != row_at(t, idx_series[t]);
+    }
+    assert!(
+        lag_is_observable,
+        "the fixture must distinguish the lagged read from the un-lagged one, or \
+         the assertion above cannot detect a dropped lag; young={young:?} old={old:?}"
+    );
+
+    // (c) The scores themselves: finite from the first live step on (the NaN
+    // GH #975 removed), and materially live afterwards.
+    for off in score_offsets {
+        assert!(
+            rows[1][off].is_finite(),
+            "dynamic-index pop->growth score at offset {off} step 1 must be finite: \
+             the synthesized PREVIOUS(idx) capture helper is initialized (GH #975)"
+        );
         let has_finite_nonzero = rows
             .iter()
             .skip(2)
@@ -1986,9 +2061,11 @@ fn lookup_table_runtime_index_is_frozen_through_the_production_path() {
         &["link_score\u{205A}src\u{2192}y"],
     );
     assert!(
-        text.contains("lookup(g[PREVIOUS(idx)], src)"),
+        text.contains("lookup(g[PREVIOUS(idx, idx)], src)"),
         "the table index must be frozen even though production does not classify \
-         it as a dependency; got: {text}"
+         it as a dependency, and (GH #975) its freeze must name the un-lagged \
+         index as its first-DT initial value rather than the desugared 0, which \
+         is out of range for a 1-based subscript; got: {text}"
     );
     assert!(
         !text.contains("lookup(PREVIOUS("),

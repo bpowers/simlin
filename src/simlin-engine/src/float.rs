@@ -39,7 +39,13 @@
 //!    it costs someone a debugging session that ends at our bug. That is what
 //!    makes GH #975 (a spurious first-step NaN in a generated LTM link score) a
 //!    real defect rather than a cosmetic one, and the reason to fix that class
-//!    properly rather than narrowly.
+//!    properly rather than narrowly. Its root cause is the shape to watch for:
+//!    the engine wrote an equation of its own -- the ceteris-paribus freeze of a
+//!    dynamic subscript index -- whose first-DT value was the language default
+//!    `0`, which is in range for no dimension. The fix names the un-lagged index
+//!    as that freeze's initial value instead
+//!    (`crate::ltm_augment::freeze_at_previous`), so nothing manufactures the
+//!    NaN in the first place.
 //!
 //! **The technical footnote**, which follows from the above rather than
 //! motivating it: the engine needs no machinery that treats a NaN as a value

@@ -230,6 +230,10 @@ struct WrapCtx<'a> {
     /// occurrence's structural path (tracked as the wrap descends), not a
     /// re-derivation on the reparsed `Expr0`.
     occ: &'a OccurrenceLookup<'a>,
+    /// True while the descent is inside a subscript INDEX expression, which is
+    /// the one position where a frozen read's FIRST-DT value has to be chosen
+    /// rather than defaulted. See [`freeze_at_previous`] (GH #975).
+    in_subscript_index: bool,
     /// The `PerElement` row-pinning context (GH #525, T6), `Some` only for
     /// [`generate_per_element_link_equation`].
     ///
@@ -246,6 +250,14 @@ struct WrapCtx<'a> {
     /// [`post_transform::pin_source_subscript_indices`].
     pin: Option<&'a PerElementRefCtx<'a>>,
 }
+
+/// The first-DT initial value of every `PREVIOUS` the LTM walkers SYNTHESIZE
+/// ([`freeze_at_previous`], GH #975), in its own file only to keep this one
+/// under the project line-count lint.
+#[path = "ltm_augment_freeze.rs"]
+mod freeze;
+
+use freeze::freeze_at_previous;
 
 /// Append child index `i` to `path`, yielding the child node's structural path.
 /// The wrap's recursion mirrors `db::ltm_ir::walk_all_in_expr`'s child-index
@@ -375,6 +387,7 @@ fn wrap_non_matching_in_previous(
         live_shape,
         live_reducer_text,
         other_deps,
+        in_subscript_index,
         ..
     } = ctx;
     // Track A stage 1: hold a designated hoisted reducer subexpression LIVE
@@ -417,10 +430,10 @@ fn wrap_non_matching_in_previous(
                     }
                     expr
                 } else {
-                    Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
+                    freeze_at_previous(expr, loc, in_subscript_index)
                 }
             } else if other_deps.contains(&canonical) {
-                Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
+                freeze_at_previous(expr, loc, in_subscript_index)
             } else {
                 expr
             }
@@ -561,6 +574,7 @@ fn wrap_non_matching_in_previous(
                                 true,
                                 &child_path(path, i),
                                 frozen,
+                                axis_dim_at(ctx, &canonical, i),
                             )
                         },
                     ),
@@ -580,6 +594,7 @@ fn wrap_non_matching_in_previous(
                                         false,
                                         &child_path(path, i),
                                         frozen,
+                                        axis_dim_at(ctx, &canonical, i),
                                     )
                                 }
                             })
@@ -627,6 +642,7 @@ fn wrap_non_matching_in_previous(
                     skip_index_qualification,
                     &child_path(path, i),
                     child_frozen,
+                    axis_dim_at(ctx, &canonical, i),
                 )
             };
             let indices: Vec<IndexExpr0> = match ctx.pin.filter(|_| &canonical == live_source) {
@@ -646,10 +662,7 @@ fn wrap_non_matching_in_previous(
             };
             let subscript = Expr0::Subscript(ident, indices, loc);
             if will_wrap {
-                Expr0::App(
-                    UntypedBuiltinFn("PREVIOUS".to_string(), vec![subscript]),
-                    loc,
-                )
+                freeze_at_previous(subscript, loc, in_subscript_index)
             } else {
                 subscript
             }
@@ -791,7 +804,7 @@ fn wrap_non_matching_in_previous(
                     ),
                     None => reducer,
                 };
-                return Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![reducer]), loc);
+                return freeze_at_previous(reducer, loc, in_subscript_index);
             }
             let args = args
                 .into_iter()
@@ -958,6 +971,12 @@ fn freeze_lookup_table_indices(
                 true,
                 &child_path(path, i),
                 frozen,
+                // A literal `None`, and a KNOWN GAP: a table holder is by
+                // construction absent from `dep_dims` (GH #606), so an
+                // `axis_dim_at` call here could only ever return `None` and
+                // would read as coverage for a path that is not fixed -- GH #984
+                // still reproduces here. See `index_axis_verdict`.
+                None,
             )
         })
         .collect();
@@ -980,12 +999,26 @@ fn freeze_lookup_table_indices(
 /// unambiguous), and `PREVIOUS(dep[dim·elem])` compiles to a direct LoadPrev
 /// at the element's slot.
 ///
-/// Qualification requires knowing *which* dimension the element belongs to.
-/// The wrapper does not know the subscripted variable's declared dimensions,
-/// so it only qualifies names that exactly one project dimension declares
-/// (`dimension_uniquely_containing_element`); names shared by multiple
-/// dimensions -- or shadowed cases the caller cannot distinguish -- keep the
-/// conservative wrapping behavior.
+/// Qualification requires knowing *which* dimension the element belongs to, and
+/// this helper does not know the subscripted variable's declared dimensions: it
+/// qualifies only names that exactly one PROJECT dimension declares
+/// (`dimension_uniquely_containing_element`), and names shared by several
+/// dimensions keep the conservative wrapping behavior.
+///
+/// **That is why this is now a FALLBACK.** When the axis IS known,
+/// [`index_axis_verdict`] answers the same question against the indexed
+/// variable's own axis and this helper is not consulted at all. Ranging over
+/// the project's dimensions instead of the axis's own elements is not merely
+/// imprecise -- it disagrees with `compiler::subscript::normalize_subscripts3`,
+/// so a variable colliding with an UNRELATED dimension's element name is
+/// qualified onto that dimension and the frozen read lands on a slot the
+/// `PREVIOUS(target)` anchor never touched.
+///
+/// **It still runs on two PRODUCTION paths, not only at the test entry points**
+/// -- every `LOOKUP` table index and everything under
+/// `generate_per_element_link_equation` -- so the defect above is present tense
+/// there. [`index_axis_verdict`]'s rustdoc enumerates the three shapes and says
+/// why each reaches this.
 fn qualify_element_index(
     index: &IndexExpr0,
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
@@ -1008,6 +1041,87 @@ fn qualify_element_index(
     )))
 }
 
+/// What a bare-identifier index NAMES on the axis it indexes -- the engine's own
+/// precedence rule, applied to the wrap.
+///
+/// `axis` is the declared `Dimension` at this index's position of the
+/// subscripted variable, looked up in [`axis_dim_at`]. When it is known,
+/// every "is this a selector or a runtime read?" question below is answered by
+/// [`crate::dimensions::resolve_axis_index_name`] -- the SAME predicate
+/// `compiler::subscript::normalize_subscripts3` implements and that GH #986
+/// unified `ltm_agg::classify_axis_access` and
+/// `post_transform::pin_dimension_name_indices` onto. The wrap was the third
+/// consumer and was left on two project-wide predicates
+/// (`dimension_uniquely_containing_element` and `is_element_of_any_dimension`),
+/// which range over EVERY dimension in the project while the compiler ranges
+/// over the axis's own declared elements.
+///
+/// That disagreement was a wrong NUMBER, not a missed optimization. A model
+/// variable whose canonical name happens to be an element of some UNRELATED
+/// dimension (a `Scenario = [base, high, low]` beside a variable named `base`)
+/// read as a runtime value to the simulation and as a static selector to the
+/// wrap, so the ceteris-paribus partial left it LIVE: the "frozen" partial moved
+/// with it and the link score reported real influence for an edge with no causal
+/// dependence at all. Worse, `qualify_element_index` then rewrote it to
+/// `otherdim·name`, naming an element of a dimension the subscripted variable is
+/// not declared over -- which still compiles, and reads a different slot than the
+/// anchor did.
+///
+/// Returning `None` means the axis is unknown and the caller keeps the
+/// pre-existing project-wide behaviour. **That is NOT merely the test entry
+/// points, and it is NOT conservative**: on a collision the fallback does not
+/// decline to answer, it answers wrongly. Three shapes reach it, and two are
+/// production:
+///
+/// - a `LOOKUP` **table index** -- always, because a graphical-function holder is
+///   by construction absent from `dep_dims` (GH #606 keeps it off the dependency
+///   graph). See `freeze_lookup_table_indices`, which passes `None` explicitly.
+/// - **`generate_per_element_link_equation`**, which threads `dep_dims: None`.
+/// - the text-in/text-out test entry points, which have no table to thread.
+///
+/// So the wrap is not one consumer of this precedence rule but three call-site
+/// families with two different answers. GH #986's unification reaches the
+/// arrayed / scalar / A2A / stock-flow emitters and no others; the remaining two
+/// are named at their call sites and are their own change.
+fn index_axis_verdict(
+    name: &str,
+    axis: Option<&crate::dimensions::Dimension>,
+    iter_ctx: Option<&IteratedDimCtx<'_>>,
+) -> Option<crate::dimensions::AxisIndexName> {
+    let axis = axis?;
+    Some(crate::dimensions::resolve_axis_index_name(
+        name,
+        axis,
+        |dim| {
+            iter_ctx.is_some_and(|ic| {
+                ic.target_iterated_dims
+                    .iter()
+                    .any(|d| d.eq_ignore_ascii_case(dim))
+            })
+        },
+    ))
+}
+
+/// The declared dimension at index position `pos` of `ident`.
+///
+/// Reads `IteratedDimCtx::dep_dims`, the target's dep -> declared-dimensions
+/// table the db layer already threads here for the GH #526 other-dep
+/// correspondence check. Reusing it rather than adding a second table is what
+/// keeps the two questions -- "does this dep's axis correspond positionally?"
+/// and "what does this index NAME on that axis?" -- answered from one source;
+/// a second table built by a second route is how the wrap and the compiler came
+/// to disagree in the first place.
+///
+/// A dep absent from the table (a scalar, an implicit/synthetic name, or a
+/// caller that threads no `iter_ctx`) yields `None`, and the caller falls back.
+fn axis_dim_at<'a>(
+    ctx: &WrapCtx<'a>,
+    ident: &Ident<Canonical>,
+    pos: usize,
+) -> Option<&'a crate::dimensions::Dimension> {
+    ctx.iter_ctx?.dep_dims?.get(ident.as_str())?.get(pos)
+}
+
 fn wrap_index_non_matching_in_previous(
     index: IndexExpr0,
     ctx: &WrapCtx<'_>,
@@ -1015,6 +1129,7 @@ fn wrap_index_non_matching_in_previous(
     skip_element_qualification: bool,
     path: &[u16],
     frozen: bool,
+    axis: Option<&crate::dimensions::Dimension>,
 ) -> IndexExpr0 {
     // Only `dims_ctx` (element/dimension recognition) and `iter_ctx` (the
     // iterated-dim-name guard) are read directly here; the full wrap context
@@ -1022,6 +1137,49 @@ fn wrap_index_non_matching_in_previous(
     let &WrapCtx {
         dims_ctx, iter_ctx, ..
     } = ctx;
+    // The axis-resolved verdict, when the axis is known. It SUPERSEDES the two
+    // project-wide element guards below -- see [`index_axis_verdict`].
+    let axis_verdict = match &index {
+        IndexExpr0::Expr(Expr0::Var(name, _)) => index_axis_verdict(name.as_str(), axis, iter_ctx),
+        _ => None,
+    };
+    if let Some(verdict) = &axis_verdict {
+        use crate::dimensions::AxisIndexName;
+        match verdict {
+            // An element THIS axis declares: a static selector. Qualify it with
+            // the axis's own dimension -- the only qualification that is right
+            // for a name several dimensions declare, and the one the pre-GH #986
+            // `dimension_uniquely_containing_element` could not produce.
+            AxisIndexName::Element(elem) => {
+                if skip_element_qualification {
+                    return index;
+                }
+                let IndexExpr0::Expr(Expr0::Var(_, loc)) = &index else {
+                    unreachable!("axis_verdict is Some only for a bare Var index")
+                };
+                return IndexExpr0::Expr(Expr0::Var(
+                    RawIdent::new_from_str(&format!(
+                        "{}\u{B7}{}",
+                        axis.expect("verdict implies an axis").name(),
+                        elem.as_str()
+                    )),
+                    *loc,
+                ));
+            }
+            // A dimension the enclosing equation iterates: an iteration
+            // reference, left verbatim exactly as the guard below does.
+            AxisIndexName::IteratedDim => return index,
+            // Neither: a runtime read. Fall through to the recursive wrap, which
+            // freezes it if it is a dep. This is the arm the project-wide
+            // predicates got wrong.
+            AxisIndexName::Unresolved => {}
+        }
+    }
+    // The project-wide fallbacks, reached only when the axis is UNKNOWN (see
+    // [`index_axis_verdict`]). They answer the same questions over the project's
+    // whole element/dimension namespace instead of the axis's own, which is
+    // sound only when there is no axis to consult.
+    let axis_unknown = axis_verdict.is_none();
     // An index that unambiguously names a dimension element is an element
     // selector, never a causal reference: qualify it and leave it unwrapped
     // (GH #587). This must be checked BEFORE the recursive wrap below, which
@@ -1034,7 +1192,9 @@ fn wrap_index_non_matching_in_previous(
     // and the lowering qualifies it consistently. The recursive wrap still runs
     // for a genuinely-dynamic index below, so a frozen `pop[Region, idx]` keeps
     // its `PREVIOUS(idx)` lag.
-    if !skip_element_qualification && let Some(qualified) = qualify_element_index(&index, dims_ctx)
+    if axis_unknown
+        && !skip_element_qualification
+        && let Some(qualified) = qualify_element_index(&index, dims_ctx)
     {
         return qualified;
     }
@@ -1055,6 +1215,8 @@ fn wrap_index_non_matching_in_previous(
     // An index that names a dimension element which *cannot* be qualified
     // (declared by multiple dimensions at different positions, e.g. C-LEARN's
     // region elements) is still left verbatim rather than PREVIOUS-wrapped.
+    // Like `qualify_element_index` above, this ranges over the whole project and
+    // so runs only when the axis is unknown -- see `index_axis_verdict`.
     // Wrapping it would make the subscript dynamic (`dep[PREVIOUS(elem)]`),
     // forcing a synthesized helper aux per call site -- the dominant residual
     // helper source on large arrayed models (GH #654) -- and is also
@@ -1063,7 +1225,8 @@ fn wrap_index_non_matching_in_previous(
     // a non-shadowed element compiles to a static subscript (direct
     // LoadPrev), a genuinely-dynamic index still synthesizes its helper
     // there, with single-lag semantics.
-    if let IndexExpr0::Expr(Expr0::Var(name, _)) = &index
+    if axis_unknown
+        && let IndexExpr0::Expr(Expr0::Var(name, _)) = &index
         && let Some(ctx) = dims_ctx
         && ctx.is_element_of_any_dimension(&crate::common::CanonicalElementName::from_raw(
             &canonicalize(name.as_str()),
@@ -1083,7 +1246,7 @@ fn wrap_index_non_matching_in_previous(
     // element downstream, exactly as in the target's own equation. The
     // `iter_ctx` leg covers callers without a project dims context (the
     // iterated/source dims are dimension names by construction).
-    if let IndexExpr0::Expr(Expr0::Var(name, _)) = &index {
+    if axis_unknown && let IndexExpr0::Expr(Expr0::Var(name, _)) = &index {
         let canonical = canonicalize(name.as_str());
         let names_project_dim =
             dims_ctx.is_some_and(|ctx| ctx.is_dimension_name(canonical.as_ref()));
@@ -1104,6 +1267,15 @@ fn wrap_index_non_matching_in_previous(
     // `other_dep_mismatch` doom DOES propagate: an index-nested mismatched
     // collapse dooms the changed-first partial just the same.
     let mut idx_out = WrapOutcome::default();
+    // Everything below here contributes to an INDEX value, so every freeze
+    // performed under it takes the un-lagged operand as its first-DT initial
+    // value rather than the desugared `0`, which is out of range for a 1-based
+    // subscript (GH #975; see [`freeze_at_previous`]).
+    let index_ctx = WrapCtx {
+        in_subscript_index: true,
+        ..*ctx
+    };
+    let ctx = &index_ctx;
     // The index expression is at `path` (the walk pushes the index position
     // before descending); a `Range`'s two operands are children 0 and 1 of
     // that, mirroring `walk_all_in_expr`.
@@ -1414,6 +1586,8 @@ fn wrap_changed_first_ast(
         iter_ctx,
         dims_ctx,
         occ,
+        // The walk starts at the slot's root expression, never inside an index.
+        in_subscript_index: false,
         pin,
     };
     let mut out = WrapOutcome::default();
@@ -1951,13 +2125,21 @@ fn shaped_guard_form_text(
 /// `arr[target + 1]` style index reference is frozen too; the outer
 /// subscripted variable itself is wrapped only when it names `target`
 /// (defensive -- the feeder this is used for is scalar and so is always a
-/// bare `Var` reference).
-fn wrap_matching_in_previous(expr: Expr0, target: &Ident<Canonical>) -> Expr0 {
+/// bare `Var` reference). An index-position freeze takes the un-lagged operand
+/// as its first-DT initial value, exactly as the changed-first walker does
+/// ([`freeze_at_previous`], GH #975) -- `in_subscript_index` carries that
+/// position down the descent.
+fn wrap_matching_in_previous(
+    expr: Expr0,
+    target: &Ident<Canonical>,
+    in_subscript_index: bool,
+) -> Expr0 {
+    let recurse = |e: Expr0| wrap_matching_in_previous(e, target, in_subscript_index);
     match expr {
         Expr0::Const(..) => expr,
         Expr0::Var(ref ident, loc) => {
             if &Ident::<Canonical>::new(ident.as_str()) == target {
-                Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
+                freeze_at_previous(expr, loc, in_subscript_index)
             } else {
                 expr
             }
@@ -1966,16 +2148,15 @@ fn wrap_matching_in_previous(expr: Expr0, target: &Ident<Canonical>) -> Expr0 {
             let indices: Vec<IndexExpr0> = indices
                 .into_iter()
                 .map(|idx| match idx {
-                    IndexExpr0::Expr(e) => IndexExpr0::Expr(wrap_matching_in_previous(e, target)),
+                    IndexExpr0::Expr(e) => {
+                        IndexExpr0::Expr(wrap_matching_in_previous(e, target, true))
+                    }
                     other => other,
                 })
                 .collect();
             let subscript = Expr0::Subscript(ident.clone(), indices, loc);
             if &Ident::<Canonical>::new(ident.as_str()) == target {
-                Expr0::App(
-                    UntypedBuiltinFn("PREVIOUS".to_string(), vec![subscript]),
-                    loc,
-                )
+                freeze_at_previous(subscript, loc, in_subscript_index)
             } else {
                 subscript
             }
@@ -1985,25 +2166,17 @@ fn wrap_matching_in_previous(expr: Expr0, target: &Ident<Canonical>) -> Expr0 {
             if name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init") {
                 return Expr0::App(UntypedBuiltinFn(name, args), loc);
             }
-            let args = args
-                .into_iter()
-                .map(|a| wrap_matching_in_previous(a, target))
-                .collect();
+            let args = args.into_iter().map(recurse).collect();
             Expr0::App(UntypedBuiltinFn(name, args), loc)
         }
-        Expr0::Op1(op, arg, loc) => {
-            Expr0::Op1(op, Box::new(wrap_matching_in_previous(*arg, target)), loc)
+        Expr0::Op1(op, arg, loc) => Expr0::Op1(op, Box::new(recurse(*arg)), loc),
+        Expr0::Op2(op, l, r, loc) => {
+            Expr0::Op2(op, Box::new(recurse(*l)), Box::new(recurse(*r)), loc)
         }
-        Expr0::Op2(op, l, r, loc) => Expr0::Op2(
-            op,
-            Box::new(wrap_matching_in_previous(*l, target)),
-            Box::new(wrap_matching_in_previous(*r, target)),
-            loc,
-        ),
         Expr0::If(c, t, f, loc) => Expr0::If(
-            Box::new(wrap_matching_in_previous(*c, target)),
-            Box::new(wrap_matching_in_previous(*t, target)),
-            Box::new(wrap_matching_in_previous(*f, target)),
+            Box::new(recurse(*c)),
+            Box::new(recurse(*t)),
+            Box::new(recurse(*f)),
             loc,
         ),
     }
@@ -2068,7 +2241,7 @@ pub(crate) fn generate_scalar_feeder_to_agg_equation(
         return Err(PartialEquationError::new(agg_equation_text));
     };
     let feeder_ident = Ident::<Canonical>::new(feeder);
-    let frozen = print_eqn(&wrap_matching_in_previous(ast, &feeder_ident));
+    let frozen = print_eqn(&wrap_matching_in_previous(ast, &feeder_ident, false));
     let frozen = match gf_table_ref {
         Some(table_ref) => format!("LOOKUP({table_ref}, {frozen})"),
         None => frozen,
@@ -2139,7 +2312,11 @@ pub(crate) fn generate_iterated_feeder_to_agg_equation(
     let pinned = pin_iterated_dim_indices(ast, iterated_dims, slot_parts_qualified)
         .ok_or_else(|| PartialEquationError::unfreezable(agg_equation_text))?;
     let feeder_ident = Ident::<Canonical>::new(feeder);
-    let frozen = print_eqn(&wrap_matching_in_previous(pinned.clone(), &feeder_ident));
+    let frozen = print_eqn(&wrap_matching_in_previous(
+        pinned.clone(),
+        &feeder_ident,
+        false,
+    ));
     if frozen == print_eqn(&pinned) {
         // No feeder occurrence was frozen: the "frozen" evaluation would
         // equal the agg slot itself and the score a silent constant 0.
@@ -2628,9 +2805,15 @@ pub(crate) fn generate_per_element_link_equation(
     let iter_ctx = IteratedDimCtx {
         source_dim_names: &source_dim_names,
         target_iterated_dims,
-        // The `PerElement` live shape suppresses the GH #526 other-dep collapse
-        // entirely (see `wrap_non_matching_in_previous`), so the verdict's
-        // `dep_dims` are never consulted; none to thread.
+        // KNOWN GAP, and the comment this replaces is why. It read "the
+        // `PerElement` live shape suppresses the GH #526 other-dep collapse
+        // entirely, so the verdict's `dep_dims` are never consulted; none to
+        // thread" -- true when `other_dep_verdict` was the ONLY consumer.
+        // `axis_dim_at` is a second one, so `None` here leaves every subscript
+        // index under this emitter on the project-wide fallbacks: a silent wrong
+        // number on a collision, reproduced on a compiling model. See
+        // `index_axis_verdict`; threading it is its own change, because the two
+        // consumers want different tables.
         dep_dims: None,
     };
     let ref_ctx = PerElementRefCtx {

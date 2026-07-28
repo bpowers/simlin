@@ -1997,9 +1997,11 @@ fn test_partial_equation_lookup_table_index_is_frozen() {
             "g[nyc]",
         ),
         (
+            // The freeze is in INDEX position, so it names the un-lagged index
+            // as its first-DT initial value (GH #975).
             "a runtime index read -- frozen, head still bare",
             "g[idx]",
-            "g[PREVIOUS(idx)]",
+            "g[PREVIOUS(idx, idx)]",
         ),
     ] {
         for func in ["lookup", "lookup_forward", "lookup_backward"] {
@@ -2795,12 +2797,15 @@ fn partial_equation_dynamic_index_wraps_inner_deps() {
         build_partial_equation_shaped("arr[idx + helper]", &deps, &live, &shape, &dims, None, None)
             .unwrap();
 
+    // Both freezes sit in INDEX position, so each names its own un-lagged
+    // operand as its first-DT initial value (GH #975) rather than defaulting to
+    // the desugared `0`, which is out of range for a 1-based subscript.
     assert!(
-        partial.contains("PREVIOUS(idx)"),
+        partial.contains("PREVIOUS(idx, idx)"),
         "idx must be wrapped in PREVIOUS for ceteris-paribus; got: {partial}",
     );
     assert!(
-        partial.contains("PREVIOUS(helper)"),
+        partial.contains("PREVIOUS(helper, helper)"),
         "helper must be wrapped in PREVIOUS for ceteris-paribus; got: {partial}",
     );
     // The outer arr[...] reference must stay live (no PREVIOUS wrap
@@ -4690,7 +4695,7 @@ fn test_wrap_matching_in_previous_skips_already_lagged() {
     })
     .unwrap()
     .unwrap();
-    let wrapped = wrap_matching_in_previous(ast, &Ident::<Canonical>::new("scale"));
+    let wrapped = wrap_matching_in_previous(ast, &Ident::<Canonical>::new("scale"), false);
     let text = print_eqn(&wrapped);
     // (The parse/print roundtrip lowercases the pre-existing `PREVIOUS` call
     // name; the newly-inserted wrappers keep the uppercase spelling. Both
@@ -4698,6 +4703,27 @@ fn test_wrap_matching_in_previous_skips_already_lagged() {
     assert_eq!(
         text, "sum(arr[*] * PREVIOUS(scale)) + previous(scale) + abs(PREVIOUS(scale))",
         "only un-lagged occurrences of the target are wrapped"
+    );
+}
+
+/// GH #975, `wrap_matching_in_previous`'s half of the index-position rule: a
+/// freeze that lands in a subscript INDEX carries the un-lagged index as its
+/// first-DT initial value, while a freeze in a VALUE position keeps the bare
+/// unary spelling (desugared to a `0` initial, which is only sound for a value).
+///
+/// One fixture reaches both positions -- `arr[scale]` (index) and `scale * 2`
+/// (value) -- so the test cannot pass by treating every freeze alike.
+#[test]
+fn test_wrap_matching_in_previous_seeds_index_freezes_with_the_unlagged_index() {
+    let ast = Expr0::new("arr[scale] + scale * 2", crate::lexer::LexerType::Equation)
+        .unwrap()
+        .unwrap();
+    let wrapped = wrap_matching_in_previous(ast, &Ident::<Canonical>::new("scale"), false);
+    assert_eq!(
+        print_eqn(&wrapped),
+        "arr[PREVIOUS(scale, scale)] + PREVIOUS(scale) * 2",
+        "an index-position freeze names its own initial value; a value-position \
+         freeze keeps the unary spelling"
     );
 }
 

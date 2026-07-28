@@ -818,18 +818,19 @@ fn per_element_pin_freezes_a_runtime_table_arg_index() {
         (
             "a variable index -- the simplest runtime element read",
             "pop[Region, idx]",
-            "lookup(pop[region\u{B7}boston, PREVIOUS(idx)]",
+            "lookup(pop[region\u{B7}boston, PREVIOUS(idx, idx)]",
         ),
         (
             "a compound index: the freeze reaches the read, not the whole expression",
             "pop[Region, idx + 1]",
-            "lookup(pop[region\u{B7}boston, PREVIOUS(idx) + 1]",
+            "lookup(pop[region\u{B7}boston, PREVIOUS(idx, idx) + 1]",
         ),
         (
             "a nested source read selecting the element at runtime",
             "pop[Region, pop[Region, old]]",
             "lookup(pop[region\u{B7}boston, \
-             PREVIOUS(pop[region\u{B7}boston, age\u{B7}old])]",
+             PREVIOUS(pop[region\u{B7}boston, age\u{B7}old], \
+             pop[region\u{B7}boston, age\u{B7}old])]",
         ),
     ];
 
@@ -1302,13 +1303,13 @@ fn per_element_pin_index_verdict_enumeration() {
         (
             "an undeclared bare name -- a variable selecting the element",
             "pop[Region, idx]",
-            Some("pop[region\u{B7}boston, PREVIOUS(idx)]"),
+            Some("pop[region\u{B7}boston, PREVIOUS(idx, idx)]"),
             Some("pop[region\u{B7}boston, idx]"),
         ),
         (
             "an arithmetic index expression",
             "pop[Region, idx + 1]",
-            Some("pop[region\u{B7}boston, PREVIOUS(idx) + 1]"),
+            Some("pop[region\u{B7}boston, PREVIOUS(idx, idx) + 1]"),
             Some("pop[region\u{B7}boston, idx + 1]"),
         ),
         (
@@ -1316,7 +1317,8 @@ fn per_element_pin_index_verdict_enumeration() {
             "pop[Region, pop[Region, young]]",
             Some(
                 "pop[region\u{B7}boston, \
-                 PREVIOUS(pop[region\u{B7}boston, age\u{B7}young])]",
+                 PREVIOUS(pop[region\u{B7}boston, age\u{B7}young], \
+                 pop[region\u{B7}boston, age\u{B7}young])]",
             ),
             Some("pop[region\u{B7}boston, pop[region\u{B7}boston, age\u{B7}young]]"),
         ),
