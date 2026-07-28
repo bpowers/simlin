@@ -785,52 +785,69 @@ fn resolve_equation_dimensions(
         .collect()
 }
 
-/// What the compiler will do with `equation`'s arms: which of them reach a slot,
-/// and whether any declared slot is left without one.
+/// Which of `equation`'s arms the compiler will SELECT, and whether any declared
+/// slot falls past all of them.
 ///
 /// `None` when the answer cannot be determined -- an unresolvable dimension name
 /// (already reported as `BadDimensionName`), which the caller treats as "say
 /// nothing about this variable" rather than guessing.
 ///
-/// The membership rule is deliberately the COMPILER's, not this file's sibling
-/// advisory's. `compiler::expand_arrayed_with_hoisting` selects a slot's
-/// equation with `elements.get(&CanonicalElementName::from_raw(combination.join(",")))`
-/// and falls back to the EXCEPT default only on a miss, so that lookup IS the
-/// fact being asked about; deriving it any other way would be re-deriving the
-/// compiler's own decision by a second route. Both facts read that one lookup in
-/// opposite directions -- a declared slot with no arm leaves the slot uncovered,
-/// an arm matching no declared slot is ignored -- so they come from a single
-/// pair of sets rather than from two independent scans.
+/// This is `compiler::expand_arrayed_with_hoisting`'s own selection, performed
+/// the way it performs it: build the arm map, then walk the declared element
+/// combinations looking each one up and falling to the EXCEPT default only on a
+/// miss. Two properties come from doing it that way rather than from testing
+/// arms individually, and each was a review finding when it was absent -- an arm
+/// naming no declared combination is never the answer to any lookup, and among
+/// arms sharing a canonical key only the LAST survives the map.
 ///
-/// (`emit_unknown_element_subscript_warnings` accepts the UNION of that rule and
+/// The last-wins rule is not restated here: `HashMap` collection over `elements`
+/// in declaration order is the same operation `variable::parse_equation` performs
+/// to build the AST the compiler actually consumes, so the surviving arm is the
+/// same one by construction. `a_shadowed_duplicate_arm_is_not_reported` pins that
+/// agreement against a SIMULATED value rather than against this reasoning.
+///
+/// (`emit_unknown_element_subscript_warnings` accepts the UNION of this rule and
 /// the conveyor init-list matcher's, because it is asking a different question
 /// -- "does ANY consumer resolve this entry?" -- and its rustdoc records that
 /// the two rules diverge. That advisory keeps reporting an unknown subscript;
 /// what this one must not do is additionally claim the ignored arm simulates as
 /// NaN when no slot does.)
-fn arm_coverage(
+///
+/// Callers must gate this on `variable::may_have_unfilled_arms`: the walk is
+/// O(declared slots) and this runs on the interactive path.
+fn arm_selection(
     project_dims: &[crate::datamodel::Dimension],
     equation: &crate::datamodel::Equation,
-) -> Option<crate::variable::ArmCoverage> {
+) -> Option<crate::variable::ArmSelection> {
     use crate::common::CanonicalElementName;
-    use crate::variable::ArmCoverage;
-    use std::collections::HashSet;
+    use crate::variable::ArmSelection;
+    use std::collections::{HashMap, HashSet};
 
     let crate::datamodel::Equation::Arrayed(dim_names, elements, _, _) = equation else {
-        return Some(ArmCoverage::whole_variable());
+        return Some(ArmSelection::whole_variable());
     };
     let dims = resolve_equation_dimensions(project_dims, dim_names)?;
-    let arm_keys: HashSet<CanonicalElementName> = elements
+    // Keyed by canonical name, valued by POSITION, collected in declaration
+    // order so a later duplicate overwrites an earlier one -- exactly what
+    // happens to the arm itself in `parse_equation`'s map.
+    let arm_positions: HashMap<CanonicalElementName, usize> = elements
         .iter()
-        .map(|(subscript, _, _, _)| CanonicalElementName::from_raw(subscript))
+        .enumerate()
+        .map(|(index, (subscript, _, _, _))| (CanonicalElementName::from_raw(subscript), index))
         .collect();
-    let declared_keys: HashSet<CanonicalElementName> =
-        crate::dimensions::SubscriptIterator::new(&dims)
-            .map(|combination| CanonicalElementName::from_raw(&combination.join(",")))
-            .collect();
-    let leaves_slots_uncovered = declared_keys.iter().any(|key| !arm_keys.contains(key));
-    let effective_arms = arm_keys.intersection(&declared_keys).cloned().collect();
-    Some(ArmCoverage::new(effective_arms, leaves_slots_uncovered))
+
+    let mut selected_arms: HashSet<usize> = HashSet::new();
+    let mut default_is_selected = false;
+    for combination in crate::dimensions::SubscriptIterator::new(&dims) {
+        let key = CanonicalElementName::from_raw(&combination.join(","));
+        match arm_positions.get(&key) {
+            Some(index) => {
+                selected_arms.insert(*index);
+            }
+            None => default_is_selected = true,
+        }
+    }
+    Some(ArmSelection::new(selected_arms, default_is_selected))
 }
 
 /// Is `var`'s own equation only a FALLBACK -- a stand-in for a value a calling
@@ -901,7 +918,7 @@ fn equation_is_a_module_input_fallback(
 /// Variables are visited in sorted-name order so accumulation is deterministic.
 fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel, project: SourceProject) {
     use crate::common::{Error, ErrorCode, ErrorKind};
-    use crate::variable::{UnfilledArms, unfilled_arms};
+    use crate::variable::{UnfilledArms, may_have_unfilled_arms, unfilled_arms};
     use salsa::Accumulator;
 
     let source_vars = model.variables(db);
@@ -916,10 +933,18 @@ fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel, project: Sou
             continue;
         }
         let equation = svar.equation(db);
-        let Some(coverage) = arm_coverage(project_dims, equation) else {
+        // Cheap superset test FIRST. `arm_selection` walks the equation's whole
+        // Cartesian element product, and this pass runs on the interactive path,
+        // so an ordinary arrayed variable must not pay for a warning it cannot
+        // emit. Every finding names an arm or the default, so a variable with no
+        // lone-NaN text among them has nothing to report.
+        if !may_have_unfilled_arms(equation) {
+            continue;
+        }
+        let Some(selection) = arm_selection(project_dims, equation) else {
             continue;
         };
-        let Some(unfilled) = unfilled_arms(equation, &coverage) else {
+        let Some(unfilled) = unfilled_arms(equation, &selection) else {
             continue;
         };
         // A stock's `equation` is its INITIAL VALUE, not a formula re-evaluated

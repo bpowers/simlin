@@ -532,63 +532,60 @@ pub(crate) enum UnfilledArms {
     },
 }
 
-/// What the COMPILER will do with an arrayed equation's arms: which of them
-/// reach a slot, and whether any slot is left over.
+/// Which of an arrayed equation's arms the COMPILER SELECTS, and whether any
+/// declared slot falls past all of them.
 ///
-/// Two facts, one source. `compiler::expand_arrayed_with_hoisting` walks the
-/// declared element combinations and looks each one up among the arms; both
-/// questions below are that same lookup read in opposite directions, so they are
-/// derived together from one pair of sets.
+/// This is the structure that closes a defect CLASS rather than an instance.
+/// Three separate findings -- an arm shadowed because the others already cover
+/// the dimension, an arm whose subscript names nothing, and an arm a later
+/// duplicate overrides -- were all one mistake: classifying the arms AS WRITTEN
+/// when the only ones that can make a slot NaN are the ones the compiler
+/// SELECTS. Asking the selection question directly makes all three consequences
+/// instead of cases.
 ///
-/// Neither can be read off a `datamodel::Equation`: both need the equation's
+/// The selection is `compiler::expand_arrayed_with_hoisting`'s own two steps,
+/// per declared element combination: look the combination's key up among the
+/// arms, and fall to the EXCEPT default only on a miss. `db::diagnostic::arm_selection`
+/// performs exactly that walk.
+///
+/// **Arms are identified by INDEX, not by canonical key**, which is what makes
+/// the duplicate case fall out. `a=NAN` followed by `A=1` canonicalizes to one
+/// key, and `variable::parse_equation` collects arms into a `HashMap` so the
+/// LAST one wins; a key-based set would mark that key selected and leave the
+/// classifier examining both source entries, reporting the shadowed `a=NAN`
+/// though the compiled slot holds 1. An index names the surviving arm exactly.
+///
+/// It cannot be read off a `datamodel::Equation`: the walk needs the equation's
 /// dimensions RESOLVED against the project's declarations, which is a database
-/// read. So they are computed by the caller (`db::diagnostic::arm_coverage`) and
-/// passed in, leaving [`unfilled_arms`] a pure classifier.
-// `Debug` is feature-gated because `CanonicalElementName`'s is: an
-// unconditional derive here compiles under the test profile (which enables
-// `debug-derive`) and fails the release build libsimlin/pysimlin use.
+/// read. So the caller computes it and [`unfilled_arms`] stays pure.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct ArmCoverage {
-    /// The canonical keys of the arms the compiler will actually SELECT.
-    ///
-    /// An arm outside this set names no declared element combination, so the
-    /// compiler ignores it wholesale: it contributes no slot, and its text --
-    /// NaN or not -- can never be what any slot evaluates to. Classifying such
-    /// an arm claimed a variable simulated as NaN when every one of its slots
-    /// was finite.
-    effective_arms: HashSet<CanonicalElementName>,
-    /// True when at least one declared slot has no arm naming it, so something
-    /// else decides that slot's value -- the EXCEPT default if one is live, else
-    /// the compiler's silent `0`. False for a scalar or apply-to-all variable:
-    /// its single formula IS every slot's.
-    leaves_slots_uncovered: bool,
+#[derive(Clone, PartialEq, Eq, Default)]
+pub(crate) struct ArmSelection {
+    /// Positions in the equation's `elements` list of the arms that are the
+    /// selected equation for at least one declared slot.
+    selected_arms: HashSet<usize>,
+    /// True when at least one declared slot has no arm at all, so its value
+    /// comes from the EXCEPT default if one is live and from the compiler's
+    /// silent `0` otherwise.
+    default_is_selected: bool,
 }
 
-impl ArmCoverage {
-    pub(crate) fn new(
-        effective_arms: HashSet<CanonicalElementName>,
-        leaves_slots_uncovered: bool,
-    ) -> Self {
-        ArmCoverage {
-            effective_arms,
-            leaves_slots_uncovered,
+impl ArmSelection {
+    pub(crate) fn new(selected_arms: HashSet<usize>, default_is_selected: bool) -> Self {
+        ArmSelection {
+            selected_arms,
+            default_is_selected,
         }
     }
 
-    /// A scalar or apply-to-all variable: no per-element arms to be ineffective,
-    /// and its one formula leaves no slot uncovered.
+    /// A scalar or apply-to-all variable: no per-element arms, and its one
+    /// formula is every slot's, so nothing falls through.
     pub(crate) fn whole_variable() -> Self {
-        ArmCoverage::new(HashSet::new(), false)
+        ArmSelection::default()
     }
 
-    pub(crate) fn leaves_slots_uncovered(&self) -> bool {
-        self.leaves_slots_uncovered
-    }
-
-    fn is_effective(&self, subscript: &str) -> bool {
-        self.effective_arms
-            .contains(&CanonicalElementName::from_raw(subscript))
+    pub(crate) fn default_is_selected(&self) -> bool {
+        self.default_is_selected
     }
 }
 
@@ -604,22 +601,19 @@ impl ArmCoverage {
 /// [`UnfilledArms::Partial`] names the arms so the message can point at them.
 /// Either way it is at most ONE finding per variable, never one per element.
 ///
-/// `coverage` is load-bearing in three ways, and the verdict was wrong in all
-/// three without it -- each on a model that runs and simulates finite today.
-/// A NaN EXCEPT default that no slot can reach is not an unfilled equation (arms
-/// `a=1,b=2` over `D=[a,b]` with default `NAN`). A sparse array's omitted slots
-/// are not covered by its listed arms (arms `a=NAN,b=NAN` over `D=[a,b,c]`
-/// claimed the WHOLE variable had no equation, though `[c]` compiles to `0`).
-/// And an arm whose subscript names nothing is not an arm at all (`typo=NAN`
-/// beside `a=1,b=2` claimed `typo` simulated as NaN, though the compiler drops
-/// it and both real slots are finite).
+/// `selection` is what makes the verdict a statement about SLOTS rather than
+/// about text. Three review findings were the same mistake -- an arm shadowed by
+/// full coverage, an arm naming nothing, an arm overridden by a later duplicate
+/// -- and each reported a variable as NaN on a model that simulates finite. They
+/// are not three cases here: an arm the compiler does not select is simply not
+/// among the arms this looks at.
 ///
-/// All three are the same gap -- between the arms AS WRITTEN and the arms that
-/// REACH A SLOT -- which is why they are one parameter and not three. What a
-/// slot evaluates to is not something the arms' text alone can answer.
+/// Reporting stays at ARM granularity even though the decision is per slot,
+/// because the message must stay bounded: a live NaN default covering 400 slots
+/// is one phrase, not 400 element names.
 pub(crate) fn unfilled_arms(
     equation: &datamodel::Equation,
-    coverage: &ArmCoverage,
+    selection: &ArmSelection,
 ) -> Option<UnfilledArms> {
     use crate::datamodel::Equation;
     match equation {
@@ -629,43 +623,42 @@ pub(crate) fn unfilled_arms(
             is_nan_literal(s).then_some(UnfilledArms::Whole)
         }
         Equation::Arrayed(_, elements, default, has_except_default) => {
-            // Only the arms the compiler will SELECT can make a slot NaN. An arm
-            // it ignores is not evidence about any value, so it is dropped here
-            // rather than being reported as a slot that stops.
+            // Only an arm the compiler SELECTS can be what a slot evaluates to.
+            // Every other arm is inert text: it names no slot, or a duplicate
+            // overrides it, so its NaN is not a series that stops.
             //
-            // Note this also folds "every arm names nothing" into the no-arms
-            // case, which is right: such a variable is entirely default- or
-            // zero-filled, exactly as if it had been written with no arms.
-            let effective = elements
+            // This also folds "no arm is selected" into the no-arms case, which
+            // is right -- such a variable is entirely default- or zero-filled,
+            // exactly as if it had been written with no arms at all.
+            let selected = elements
                 .iter()
-                .filter(|(subscript, _, _, _)| coverage.is_effective(subscript));
-            let effective_count = effective.clone().count();
-            let unfilled: Vec<String> = effective
+                .enumerate()
+                .filter(|(index, _)| selection.selected_arms.contains(index))
+                .map(|(_, arm)| arm);
+            let selected_count = selected.clone().count();
+            let unfilled: Vec<String> = selected
                 .filter(|(_, eqn, _, _)| is_nan_literal(eqn))
                 .map(|(subscript, _, _, _)| subscript.clone())
                 .collect();
             // Two independent things have to hold before the default's TEXT
-            // means anything. It must be LIVE -- `has_except_default` is what
-            // makes it apply to a slot with no arm, and the MDL converter keeps
-            // a dead one as round-trip metadata (`mdl::convert::variables`)
-            // while the compiler consults it only under the flag
-            // (`compiler::expand_arrayed_with_hoisting`). And it must be
-            // REACHABLE -- `expand_arrayed_with_hoisting` looks at the default
-            // only for a slot the arms do not name, so when the arms cover the
-            // whole dimension the default is dead code whatever the flag says.
-            let default_unfilled = coverage.leaves_slots_uncovered()
+            // means anything. It must be SELECTED -- `expand_arrayed_with_hoisting`
+            // consults it only for a slot no arm names, so with the arms covering
+            // the dimension it is dead code. And it must be LIVE --
+            // `has_except_default` is what lets it apply at all, and the MDL
+            // converter keeps a dead one as round-trip metadata
+            // (`mdl::convert::variables`).
+            let default_unfilled = selection.default_is_selected()
                 && *has_except_default
                 && default.as_deref().is_some_and(is_nan_literal);
-            // What the slots with no arm of their own evaluate to: the default's
-            // formula when it is live and reachable, else the compiler's silent
-            // `0` -- which is finite, so it is NOT an unfilled equation. (The
-            // silent zero is its own reportable shape, and a deliberately
-            // separate one: GH #905 covers it.)
-            let uncovered_slots_are_nan = !coverage.leaves_slots_uncovered() || default_unfilled;
+            // What the slots with no arm evaluate to: the default's formula when
+            // it is live, else the compiler's silent `0` -- which is finite, so
+            // it is NOT an unfilled equation. (That silent zero is its own
+            // reportable shape and a deliberately separate one: GH #905.)
+            let slots_past_the_arms_are_nan = !selection.default_is_selected() || default_unfilled;
 
             if unfilled.is_empty() && !default_unfilled {
                 None
-            } else if unfilled.len() == effective_count && uncovered_slots_are_nan {
+            } else if unfilled.len() == selected_count && slots_past_the_arms_are_nan {
                 // Every slot the variable has evaluates to NaN.
                 Some(UnfilledArms::Whole)
             } else {
@@ -674,6 +667,32 @@ pub(crate) fn unfilled_arms(
                     default: default_unfilled,
                 })
             }
+        }
+    }
+}
+
+/// Could `equation` possibly produce an unfilled-equation finding?
+///
+/// A cheap superset test, and the ONLY thing an ordinary variable pays. Every
+/// finding names either an arm or the EXCEPT default, so if no arm text and no
+/// default text is a lone NaN there is nothing to report and the caller can skip
+/// the slot walk entirely -- which for an arrayed variable means skipping a
+/// Cartesian product over its declared elements.
+///
+/// That matters because `db::diagnostic::model_all_diagnostics` runs on the
+/// interactive path: without this gate every arrayed variable in a model paid an
+/// O(slot-count) allocation on every keystroke, for a warning almost none of
+/// them will ever emit.
+///
+/// It must stay a SUPERSET of what [`unfilled_arms`] reports, which it is by
+/// construction: that function only ever looks at these same texts.
+pub(crate) fn may_have_unfilled_arms(equation: &datamodel::Equation) -> bool {
+    use crate::datamodel::Equation;
+    match equation {
+        Equation::Scalar(s) | Equation::ApplyToAll(_, s) => is_nan_literal(s),
+        Equation::Arrayed(_, elements, default, _) => {
+            elements.iter().any(|(_, eqn, _, _)| is_nan_literal(eqn))
+                || default.as_deref().is_some_and(is_nan_literal)
         }
     }
 }
