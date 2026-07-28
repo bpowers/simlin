@@ -1131,7 +1131,7 @@ LTM machinery (the Expr0-walk-time `is_array_reducer_name`, `classify_reducer`,
 the static-polarity `agg_reducer_is_monotone`) is a thin reader of it, so the
 "is this a reducer" / "what kind" answers can't drift apart. AST-identical
 subexpressions (keyed by canonical printed equation text, since `Expr2` is
-not `Eq`) dedupe to one node.
+not `Hash` and so cannot key a map directly) dedupe to one node.
 
 **Read slice and result dims.** Each `AggNode` carries a
 `read_slice: Vec<AxisRead>` -- one `AxisRead ∈ {Pinned(elem), Iterated(dim),

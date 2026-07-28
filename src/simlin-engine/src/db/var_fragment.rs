@@ -395,7 +395,11 @@ fn collect_var_dependencies(
                 } else {
                     Some(crate::ast::Ast::ApplyToAll(
                         dep_dims,
-                        crate::ast::Expr2::Const("0".to_string(), 0.0, crate::ast::Loc::default()),
+                        crate::ast::Expr2::Const(
+                            "0".to_string(),
+                            crate::ast::Literal::new(0.0),
+                            crate::ast::Loc::default(),
+                        ),
                     ))
                 };
                 let dep_var = if meta.is_stock {

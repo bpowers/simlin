@@ -40,12 +40,16 @@
 //! which sorted Debug strings and was sound only by the accident that its
 //! fixtures had no `Equation::Arrayed`.
 //!
-//! The rule: compare with `PartialEq`. If you must reach for Debug text because
-//! a NaN literal defeats `PartialEq` (GH #987/#981 -- `ModelStage0` compares
-//! parsed `f64` constants, and every SMOOTH/DELAY/TREND template declares
-//! `initial_value = NAN`, so such a stage is not even equal to itself), then it
-//! is sound ONLY for fixtures with no per-element equations, and the test must
-//! say so.
+//! The rule: compare with `PartialEq`, always. The one thing that used to force
+//! a Debug-text oracle is gone -- a stage carrying a NaN EQUATION LITERAL was
+//! not equal even to ITSELF, because `ModelStage0` compares parsed float
+//! constants and every SMOOTH/DELAY/TREND template declares
+//! `initial_value = NAN`. Since GH #987/#981 those constants are
+//! `ast::Literal`, compared by bit pattern, so every stage here -- stdlib
+//! templates included -- equals a bit-identical rebuild. One float-bearing
+//! field on these memos is still outside that: `variable::Table`'s `Vec<f64>`
+//! lookup points (see `ast::Literal`'s scope note). No fixture in this file has
+//! a graphical function, let alone a NaN in one, so the rule holds here.
 
 use super::*;
 use crate::common::{Canonical, ErrorCode, Ident};
@@ -546,14 +550,19 @@ fn omitting_stdlib_models_from_the_lowering_scope_is_inert_today() {
 /// `errors` (the duplicate-ident pair), `implicit`, `is_macro` and
 /// `macro_params`.
 ///
-/// The comparison ranges over the USER models only. The stdlib templates are in
-/// the project -- `main` instantiates `stdlib⁚smth1` and both scopes hold all of
-/// them -- but SMOOTH/DELAY/TREND bodies declare `initial_value = NAN`, and
-/// `ModelStage0` derives `PartialEq`, so a stdlib stage carrying a NaN literal
-/// does not even compare equal to ITSELF. Asserting on one would fail for a
-/// reason unrelated to what is being tested (GH #987/#981);
-/// `cached_stdlib_stage0_equals_implicit_datamodel_build` covers the stdlib side
-/// on `npv`, the one template with no NaN.
+/// The comparison ranges over EVERY model the sync produced -- the three user
+/// models and all nine spliced stdlib templates. It used to be restricted to
+/// the user models because five of the nine templates declare
+/// `initial_value = NAN` and a stage holding a bare `f64` NaN did not compare
+/// equal even to ITSELF, so a stdlib assertion failed for a reason unrelated to
+/// what is being tested. `ast::Literal` compares float literals by bit pattern
+/// (GH #987/#981), so those stages are now ordinary values and the oracle can
+/// cover them.
+///
+/// The row-count assertion is not about a newly added stdlib template -- both
+/// sides derive their stdlib half from `stdlib::MODEL_NAMES`, so one of those
+/// is covered automatically. What it catches is `every_shape_project()` gaining
+/// or losing a USER model that the hard-coded list below does not follow.
 #[test]
 fn cached_stages_equal_the_datamodel_driven_build_for_every_model_shape() {
     let db = SimlinDb::default();
@@ -568,7 +577,19 @@ fn cached_stages_equal_the_datamodel_driven_build_for_every_model_shape() {
     let oracle_s0: HashMap<&Ident<Canonical>, &ModelStage0> =
         all_s0.iter().map(|m| (&m.ident, m)).collect();
 
-    for name in ["main", "sub", "scaled"] {
+    let mut names: Vec<String> = vec!["main".to_string(), "sub".to_string(), "scaled".to_string()];
+    names.extend(
+        crate::stdlib::MODEL_NAMES
+            .iter()
+            .map(|n| format!("stdlib\u{205A}{n}")),
+    );
+    assert_eq!(
+        names.len(),
+        oracle_s0.len(),
+        "every model the oracle builds must be asserted on"
+    );
+    for name in &names {
+        let name = name.as_str();
         let ident: Ident<Canonical> = Ident::new(name);
         let source = sync.models[name].source;
         assert!(
@@ -793,11 +814,16 @@ fn model_stage0_parses_a_stdlib_model_under_the_extended_module_context() {
 /// decisions above (`implicit: true`, and every variable name in the
 /// module-ident set).
 ///
-/// `npv` is the fixture rather than the more representative `smth1` because
-/// `ModelStage0`'s derived `PartialEq` compares the parsed `f64` constants, and
-/// every SMOOTH/DELAY/TREND template declares `initial_value = NAN`: `NaN !=
-/// NaN` makes those stages unequal even to a bit-identical rebuild. `npv`
-/// carries no NaN literal, so equality is meaningful there.
+/// The fixture is `smth1`, the representative SMOOTH template. It used to have
+/// to be `npv` -- the one template with no NaN literal -- because
+/// `ModelStage0`'s derived `PartialEq` compared bare parsed `f64` constants and
+/// every SMOOTH/DELAY/TREND template declares `initial_value = NAN`, so those
+/// stages were unequal even to a bit-identical rebuild. `ast::Literal` compares
+/// float literals by bit pattern (GH #987/#981), so a stage whose NaN is an
+/// EQUATION LITERAL is equal to itself and the natural fixture works. (A NaN
+/// arriving through a graphical function's points is a different field and is
+/// still non-reflexive -- see `ast::Literal`'s scope note; no stdlib template
+/// has a graphical function.)
 #[test]
 fn cached_stdlib_stage0_equals_implicit_datamodel_build() {
     let db = SimlinDb::default();
@@ -807,15 +833,26 @@ fn cached_stdlib_stage0_equals_implicit_datamodel_build() {
     let project = x_project(sim_specs_with_units("month"), &[main]);
     let sync = sync_from_datamodel(&db, &project);
 
-    let source = sync.models["stdlib\u{205A}npv"].source;
+    let source = sync.models["stdlib\u{205A}smth1"].source;
     let cached = model_stage0(&db, source, sync.project);
     assert!(cached.implicit, "a stdlib model's Stage0 is implicit");
     assert!(
         cached.variables.len() > 1,
         "the fixture stdlib model has a body to compare"
     );
+    assert!(
+        cached.variables.values().any(|v| {
+            v.ast().is_some_and(|ast| match ast {
+                crate::ast::Ast::Scalar(e) => {
+                    matches!(e, crate::ast::Expr0::Const(_, n, _) if n.value().is_nan())
+                }
+                _ => false,
+            })
+        }),
+        "the fixture must actually carry the NaN literal this test is here to cover"
+    );
 
-    let stdlib_dm = crate::stdlib::get("npv").expect("npv is a stdlib model");
+    let stdlib_dm = crate::stdlib::get("smth1").expect("smth1 is a stdlib model");
     let oracle = ModelStage0::new(
         &stdlib_dm,
         project_datamodel_dims(&db, sync.project),
@@ -1591,6 +1628,112 @@ fn an_unrelated_models_edit_invalidates_neither_stage_nor_unit_check() {
         },
         "the EDITED model's stage and unit check must re-execute, or the fixture proves nothing"
     );
+}
+
+/// A model carrying a USER-AUTHORED NaN literal backdates its stage exactly
+/// like one without: a revision bump that re-executes `model_stage0` and
+/// rebuilds a bit-identical value must NOT re-execute `model_stage1`.
+///
+/// This is the reachable half of GH #987's EQUATION-LITERAL path. `ModelStage0`
+/// derives `PartialEq` and holds parsed float constants; with a bare `f64` a
+/// NaN-bearing stage was never equal to its own rebuild, so salsa could never
+/// backdate it and every downstream query in the cone re-ran on every revision
+/// bump -- on the interactive diagnostics path, per keystroke. The issue's own
+/// reachability argument rests on the stdlib `initial_value = NAN`, but that
+/// half is inert (those inputs never change after sync), so the fixture here is
+/// a user equation, which is the shape that actually pays.
+///
+/// A NaN reaching the same memo through a GRAPHICAL FUNCTION's points is a
+/// different, still-unfixed field (`variable::Table`'s `Vec<f64>`); this lever
+/// measures that one identically, which is how it was confirmed. See
+/// `ast::Literal`'s scope note.
+///
+/// The lever is the project's UNIT table: `model_stage0` reads
+/// `project_units_context` and `model_stage1` does not, so adding an unrelated
+/// unit re-executes stage0 and leaves stage1's re-execution decided purely by
+/// whether the rebuilt stage compares equal to the old one.
+///
+/// Two rows, derived from the one axis the change is about -- whether the
+/// model's equations carry a NaN literal -- and they must produce identical
+/// counts. The control row is what makes the NaN row attributable: under the
+/// mutation probe (bare `f64` equality inside `ast::Literal`) the control stays
+/// green and the NaN row reds.
+#[test]
+fn a_nan_bearing_models_stage_backdates_like_any_other() {
+    // The control row runs FIRST so that a mutation probe fails on the NaN row
+    // with the control already green -- attribution, not just a red test.
+    for (label, eqn) in [("control", "1 + 2"), ("nan literal", "1 + nan")] {
+        let build = |extra_unit: bool| {
+            let mut project = x_project(
+                sim_specs_with_units("month"),
+                &[x_model("main", vec![x_aux("x", eqn, Some("widget"))])],
+            );
+            if extra_unit {
+                project.units.push(datamodel::Unit {
+                    name: "gizmo".to_owned(),
+                    equation: None,
+                    disabled: false,
+                    aliases: vec![],
+                });
+            }
+            project
+        };
+
+        let mut db = SimlinDb::default();
+        let state1 = sync_from_datamodel_incremental(&mut db, &build(false), None);
+        let sync1 = state1.to_sync_result();
+        let main = sync1.models["main"].source;
+        let _ = model_stage1(&db, main, sync1.project);
+
+        // Guard against a vacuous pass: the NaN row's stage really does hold a
+        // NaN literal, so the equality being measured is the one at issue.
+        let holds_nan = model_stage0(&db, main, sync1.project)
+            .variables
+            .values()
+            .any(|v| {
+                v.ast().is_some_and(|ast| match ast {
+                    crate::ast::Ast::Scalar(e) => expr0_holds_nan(e),
+                    _ => false,
+                })
+            });
+        assert_eq!(
+            holds_nan,
+            label == "nan literal",
+            "{label}: the fixture must carry a NaN literal iff it is the NaN row"
+        );
+
+        reset_query_executions();
+        let state2 = sync_from_datamodel_incremental(&mut db, &build(true), Some(&state1));
+        let sync2 = state2.to_sync_result();
+        let _ = model_stage1(&db, sync2.models["main"].source, sync2.project);
+        assert_eq!(
+            query_executions(),
+            QueryExecutions {
+                stage0: 1,
+                stage1: 0,
+                unit_check: 0,
+            },
+            "{label}: the units edit must re-execute stage0 and, because the rebuilt \
+             stage is bit-identical, backdate it so stage1 is reused"
+        );
+    }
+}
+
+/// Does this `Expr0` tree contain a NaN literal? Used only by the fixture guard
+/// above.
+fn expr0_holds_nan(expr: &crate::ast::Expr0) -> bool {
+    use crate::ast::Expr0;
+    match expr {
+        Expr0::Const(_, n, _) => n.value().is_nan(),
+        Expr0::Var(_, _) => false,
+        Expr0::App(crate::builtins::UntypedBuiltinFn(_, args), _) => {
+            args.iter().any(expr0_holds_nan)
+        }
+        Expr0::Subscript(_, _, _) => false,
+        Expr0::Op1(_, inner, _) => expr0_holds_nan(inner),
+        Expr0::Op2(_, l, r, _) => expr0_holds_nan(l) || expr0_holds_nan(r),
+        Expr0::If(c, t, f, _) => expr0_holds_nan(c) || expr0_holds_nan(t) || expr0_holds_nan(f),
+    }
 }
 
 /// Editing a model that `main` instantiates DOES re-execute `main`'s lowered

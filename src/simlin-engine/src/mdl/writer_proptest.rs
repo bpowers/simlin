@@ -205,11 +205,31 @@ const GRAMMAR_VARS: &[&str] = &["a", "b", "c"];
 
 fn const_leaf() -> impl Strategy<Value = Expr0> {
     prop_oneof![
-        (0i64..1000).prop_map(|n| Expr0::Const(n.to_string(), n as f64, Loc::default())),
-        Just(Expr0::Const("0.5".to_owned(), 0.5, Loc::default())),
-        Just(Expr0::Const("1.5".to_owned(), 1.5, Loc::default())),
-        Just(Expr0::Const("3.5".to_owned(), 3.5, Loc::default())),
-        Just(Expr0::Const("2.25".to_owned(), 2.25, Loc::default())),
+        (0i64..1000).prop_map(|n| Expr0::Const(
+            n.to_string(),
+            crate::ast::Literal::new(n as f64),
+            Loc::default()
+        )),
+        Just(Expr0::Const(
+            "0.5".to_owned(),
+            crate::ast::Literal::new(0.5),
+            Loc::default()
+        )),
+        Just(Expr0::Const(
+            "1.5".to_owned(),
+            crate::ast::Literal::new(1.5),
+            Loc::default()
+        )),
+        Just(Expr0::Const(
+            "3.5".to_owned(),
+            crate::ast::Literal::new(3.5),
+            Loc::default()
+        )),
+        Just(Expr0::Const(
+            "2.25".to_owned(),
+            crate::ast::Literal::new(2.25),
+            Loc::default()
+        )),
     ]
 }
 

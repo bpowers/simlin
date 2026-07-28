@@ -272,6 +272,79 @@ fn safediv_mixed_with_div() {
     );
 }
 
+/// [`super::is_reserved_word`] must agree with the lexer it speaks for: a word
+/// it calls reserved is exactly a word `identifierish` resolves to something
+/// other than [`Token::Ident`]. The verdicts are derived from `KEYWORDS` here
+/// so the pairing cannot go stale when an entry is added or removed -- the
+/// independent, hand-written keyword list lives with the consumers
+/// (`keyword_ident_tests`, `ast::print_eqn_proptest`), which is where a table
+/// that silently SHRANK would show up.
+mod reserved_word_tests {
+    use super::super::{KEYWORDS, is_reserved_word};
+    use super::*;
+
+    /// The predicate and `identifierish` must give the same verdict for every
+    /// entry, in every ASCII casing.
+    #[test]
+    fn every_keyword_is_reserved_in_any_casing() {
+        for (keyword, _) in KEYWORDS {
+            for spelling in [keyword.to_string(), keyword.to_uppercase(), {
+                let mut s = keyword.to_string();
+                s[..1].make_ascii_uppercase();
+                s
+            }] {
+                assert!(
+                    is_reserved_word(&spelling),
+                    "`{spelling}` must be reserved: the lexer resolves it to a keyword"
+                );
+                let mut lexer = Lexer::new(&spelling, LexerType::Equation);
+                let token = lexer.next().expect("one token").expect("lexes");
+                assert!(
+                    !matches!(token.1, Token::Ident(_)),
+                    "`{spelling}` lexed as an identifier, so it should not be reserved"
+                );
+            }
+        }
+    }
+
+    /// A word that is not in the table lexes as an identifier and is not
+    /// reserved -- including the near-misses that merely CONTAIN a keyword, and
+    /// the Unicode near-miss `İF`, whose full lowercase is `i` + a combining dot
+    /// (NOT `if`). That last one is why the predicate lowercases per Unicode
+    /// `char` exactly as `identifierish` does; a naive byte fold would still
+    /// answer correctly here, but only by accident of length.
+    #[test]
+    fn a_non_keyword_is_not_reserved() {
+        for word in [
+            "a", "iff", "ifx", "notes", "modulo", "_if", "if2", "band", "\u{130}F",
+        ] {
+            assert!(!is_reserved_word(word), "`{word}` must not be reserved");
+            let mut lexer = Lexer::new(word, LexerType::Equation);
+            assert_eq!(
+                Some(Ok((0, Token::Ident(word), word.len()))),
+                lexer.next(),
+                "`{word}` must lex as a whole identifier"
+            );
+        }
+    }
+
+    /// The units lexer shares this keyword table -- only the identifier
+    /// character classes differ (units additionally admit `$`). Pinned because
+    /// `ast::needs_quoting` documents itself as an EQUATION-language predicate
+    /// on the strength of it.
+    #[test]
+    fn the_units_lexer_shares_the_keyword_table() {
+        for (keyword, _) in KEYWORDS {
+            let mut lexer = Lexer::new(keyword, LexerType::Units);
+            let token = lexer.next().expect("one token").expect("lexes");
+            assert!(
+                !matches!(token.1, Token::Ident(_)),
+                "`{keyword}` must be a keyword in units mode too"
+            );
+        }
+    }
+}
+
 mod scan_number_tests {
     use super::super::scan_number;
 

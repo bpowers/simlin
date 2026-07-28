@@ -86,6 +86,31 @@ const KEYWORDS: &[(&str, Token<'static>)] = &[
     ("nan", Nan),
 ];
 
+/// Does `word`, written bare, lex as a keyword rather than as an identifier?
+///
+/// [`Lexer::identifierish`] resolves a bare word against [`KEYWORDS`] BEFORE
+/// falling back to `Token::Ident`, so a variable whose canonical name is one of
+/// these can never be *referenced* bare -- it has to be double-quoted, even
+/// though XMILE happily lets a modeler name a variable `"if"`. This is the
+/// lexer's half of [`crate::ast::needs_quoting`], exposed so the printer reads
+/// this table instead of duplicating it.
+///
+/// Case-insensitive because `identifierish` lowercases before the lookup, so the
+/// verdict must not depend on the caller having canonicalized first -- and it
+/// lowercases the same way, per Unicode `char` rather than per ASCII byte, so
+/// the two cannot disagree on any input. Comparing char-wise makes that
+/// equivalent to `identifierish`'s `word.to_lowercase() == keyword` while
+/// allocating nothing on the printer path; the one place `str::to_lowercase`
+/// differs from the char-wise mapping is the Greek final-sigma rule, and a
+/// lowercase form containing `ς` matches no keyword either way.
+pub(crate) fn is_reserved_word(word: &str) -> bool {
+    KEYWORDS.iter().any(|(keyword, _)| {
+        word.chars()
+            .flat_map(char::to_lowercase)
+            .eq(keyword.chars())
+    })
+}
+
 impl<'input> Lexer<'input> {
     pub fn new(input: &'input str, lexer_type: LexerType) -> Self {
         let mut t = Lexer {

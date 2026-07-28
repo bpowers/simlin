@@ -4,6 +4,7 @@
 
 use crate::ast::expr0::{BinaryOp, UnaryOp};
 use crate::ast::expr1::{Expr1, IndexExpr1};
+use crate::ast::literal::Literal;
 use crate::builtins::{BuiltinContents, BuiltinFn, Loc, walk_builtin_expr};
 use crate::common::{Canonical, CanonicalDimensionName, EquationResult, Ident};
 use crate::dimensions::Dimension;
@@ -18,7 +19,7 @@ use crate::eqn_err;
 /// All complex view calculations (strides, offsets, etc.) are deferred
 /// to the compiler phase where we have more context.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone, salsa::Update)]
+#[derive(PartialEq, Eq, Clone, salsa::Update)]
 pub enum ArrayBounds {
     /// Array bounds for a named variable (from the model)
     Named {
@@ -70,7 +71,7 @@ impl ArrayBounds {
 /// IndexExpr represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone, salsa::Update)]
+#[derive(PartialEq, Eq, Clone, salsa::Update)]
 pub enum IndexExpr2 {
     Wildcard(Loc),
     // *:dimension_name
@@ -108,6 +109,20 @@ impl IndexExpr2 {
         }
     }
 
+    /// The [`Expr2::strip_loc_and_bounds`] twin for one subscript index.
+    pub(crate) fn strip_loc_and_bounds(self) -> Self {
+        let loc = Loc::default();
+        match self {
+            IndexExpr2::Wildcard(_) => IndexExpr2::Wildcard(loc),
+            IndexExpr2::StarRange(dim, _) => IndexExpr2::StarRange(dim, loc),
+            IndexExpr2::Range(l, r, _) => {
+                IndexExpr2::Range(l.strip_loc_and_bounds(), r.strip_loc_and_bounds(), loc)
+            }
+            IndexExpr2::DimPosition(n, _) => IndexExpr2::DimPosition(n, loc),
+            IndexExpr2::Expr(e) => IndexExpr2::Expr(e.strip_loc_and_bounds()),
+        }
+    }
+
     #[allow(dead_code)]
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
@@ -133,11 +148,17 @@ impl IndexExpr2 {
 
 /// Expr represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
+///
+/// `Eq` is derived for the reason spelled out on [`crate::ast::Expr0`]: this is
+/// the layer that rides on `ModelStage1` and `ltm_agg::AggNodesResult`, whose
+/// salsa backdating is decided by comparing a memo with its own rebuild, so a
+/// field that is not equal to itself defeats it. `Eq` makes that a compile-time
+/// property rather than a convention.
 #[allow(dead_code)]
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone, salsa::Update)]
+#[derive(PartialEq, Eq, Clone, salsa::Update)]
 pub enum Expr2 {
-    Const(String, f64, Loc),
+    Const(String, Literal, Loc),
     Var(Ident<Canonical>, Option<ArrayBounds>, Loc),
     App(BuiltinFn<Expr2>, Option<ArrayBounds>, Loc),
     Subscript(Ident<Canonical>, Vec<IndexExpr2>, Option<ArrayBounds>, Loc),
@@ -194,6 +215,63 @@ pub trait Expr2Context {
 }
 
 impl Expr2 {
+    /// The expression with every `Loc` zeroed and every [`ArrayBounds`]
+    /// annotation dropped -- its position- and lowering-independent form.
+    ///
+    /// Both stripped fields are artifacts of *where* an expression was
+    /// written rather than *what* it means: a `Loc` is a byte range into one
+    /// variable's equation text, and a `Temp` bound carries a temp id the
+    /// lowering context handed out in equation order. Two occurrences of the
+    /// same subexpression in different equations therefore differ in both
+    /// while denoting the same thing, so a cache that stores an expression
+    /// keyed on its canonical printed form (`ltm_agg::AggNode`) must store
+    /// this form or its value stops being a function of its key.
+    ///
+    /// Necessary, not sufficient: `Expr2::Const` holds an `f64`, whose `==` is
+    /// not reflexive on NaN, so a NaN-bearing expression compares unequal to
+    /// itself however it is normalized. See `ltm_agg::AggNode::reducer` for
+    /// that residual and the root fix it waits on.
+    pub(crate) fn strip_loc_and_bounds(self) -> Self {
+        let loc = Loc::default();
+        match self {
+            Expr2::Const(text, value, _) => Expr2::Const(text, value, loc),
+            Expr2::Var(ident, _, _) => Expr2::Var(ident, None, loc),
+            Expr2::App(builtin, _, _) => Expr2::App(
+                builtin
+                    .map(|arg| arg.strip_loc_and_bounds())
+                    .strip_own_locs(),
+                None,
+                loc,
+            ),
+            Expr2::Subscript(ident, indices, _, _) => Expr2::Subscript(
+                ident,
+                indices
+                    .into_iter()
+                    .map(IndexExpr2::strip_loc_and_bounds)
+                    .collect(),
+                None,
+                loc,
+            ),
+            Expr2::Op1(op, rhs, _, _) => {
+                Expr2::Op1(op, Box::new(rhs.strip_loc_and_bounds()), None, loc)
+            }
+            Expr2::Op2(op, lhs, rhs, _, _) => Expr2::Op2(
+                op,
+                Box::new(lhs.strip_loc_and_bounds()),
+                Box::new(rhs.strip_loc_and_bounds()),
+                None,
+                loc,
+            ),
+            Expr2::If(cond, then_e, else_e, _, _) => Expr2::If(
+                Box::new(cond.strip_loc_and_bounds()),
+                Box::new(then_e.strip_loc_and_bounds()),
+                Box::new(else_e.strip_loc_and_bounds()),
+                None,
+                loc,
+            ),
+        }
+    }
+
     /// Extract the array bounds from an expression, if it has one
     pub(crate) fn get_array_bounds(&self) -> Option<&ArrayBounds> {
         match self {
@@ -553,8 +631,9 @@ impl Expr2 {
             Expr2::Const(_, val, _) => {
                 // Numeric constant - interpret as 1-based index.
                 // Guard against overflow: val must be in range [1, isize::MAX].
-                if *val >= 1.0 && *val <= isize::MAX as f64 {
-                    Some((*val as usize).saturating_sub(1))
+                let val = val.value();
+                if val >= 1.0 && val <= isize::MAX as f64 {
+                    Some((val as usize).saturating_sub(1))
                 } else {
                     None
                 }
@@ -740,7 +819,11 @@ impl Expr2 {
                             let dim_name = CanonicalDimensionName::from_raw(id.as_str());
                             if let Some(len) = ctx.get_dimension_len(&dim_name) {
                                 // Return a constant expression with the dimension size
-                                return Ok(Expr2::Const(len.to_string(), len as f64, loc));
+                                return Ok(Expr2::Const(
+                                    len.to_string(),
+                                    Literal::new(len as f64),
+                                    loc,
+                                ));
                             }
                             // If we can't find the dimension length, fall through to normal processing
                             // which will produce an appropriate error
@@ -1043,7 +1126,8 @@ fn const_int_eval(ast: &Expr2) -> EquationResult<i32> {
     use crate::float::approx_eq;
     match ast {
         Expr2::Const(_, n, loc) => {
-            if approx_eq(*n, n.round()) {
+            let n = n.value();
+            if approx_eq(n, n.round()) {
                 Ok(n.round() as i32)
             } else {
                 eqn_err!(ExpectedInteger, loc.start, loc.end)
@@ -1236,7 +1320,7 @@ mod tests {
     fn test_const_int_eval() {
         // Helper to create const expression
         fn const_expr(val: f64) -> Expr2 {
-            Expr2::Const(val.to_string(), val, Loc::default())
+            Expr2::Const(val.to_string(), Literal::new(val), Loc::default())
         }
 
         // Test basic constants
@@ -1448,7 +1532,11 @@ mod tests {
         let subscript_expr = Expr1::Subscript(
             Ident::new("matrix"),
             vec![
-                IndexExpr1::Expr(Expr1::Const("1".to_string(), 1.0, Loc::default())),
+                IndexExpr1::Expr(Expr1::Const(
+                    "1".to_string(),
+                    Literal::new(1.0),
+                    Loc::default(),
+                )),
                 IndexExpr1::Wildcard(Loc::default()),
             ],
             Loc::default(),
@@ -1489,7 +1577,7 @@ mod tests {
             Ident::new("vector"),
             vec![IndexExpr1::Expr(Expr1::Const(
                 "2".to_string(),
-                2.0,
+                Literal::new(2.0),
                 Loc::default(),
             ))],
             Loc::default(),
@@ -1594,7 +1682,11 @@ mod tests {
         let add_expr = Expr1::Op2(
             BinaryOp::Add,
             Box::new(Expr1::Var(Ident::new("array_var"), Loc::default())),
-            Box::new(Expr1::Const("10".to_string(), 10.0, Loc::default())),
+            Box::new(Expr1::Const(
+                "10".to_string(),
+                Literal::new(10.0),
+                Loc::default(),
+            )),
             Loc::default(),
         );
         let expr2 = Expr2::from(add_expr, &mut ctx).unwrap();
@@ -1667,7 +1759,11 @@ mod tests {
 
         // Test if expression with array in both branches
         let if_expr = Expr1::If(
-            Box::new(Expr1::Const("1".to_string(), 1.0, Loc::default())),
+            Box::new(Expr1::Const(
+                "1".to_string(),
+                Literal::new(1.0),
+                Loc::default(),
+            )),
             Box::new(Expr1::Var(Ident::new("array_var"), Loc::default())),
             Box::new(Expr1::Var(Ident::new("array_var"), Loc::default())),
             Loc::default(),

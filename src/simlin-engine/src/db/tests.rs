@@ -466,7 +466,7 @@ fn test_parse_source_variable_scalar() {
     let ast = parsed.variable.ast();
     assert!(ast.is_some());
     if let Some(crate::ast::Ast::Scalar(Expr0::Const(_, val, _))) = ast {
-        assert_eq!(*val, 100.0);
+        assert_eq!(*val, crate::ast::Literal::new(100.0));
     } else {
         panic!("Expected Scalar(Const(100.0)), got {:?}", ast);
     }
@@ -655,7 +655,7 @@ fn test_incrementality_unchanged_variable_not_reparsed() {
     if let Some(crate::ast::Ast::Scalar(crate::ast::Expr0::Const(_, val, _))) =
         alpha_result_2.variable.ast()
     {
-        assert_eq!(*val, 42.0);
+        assert_eq!(*val, crate::ast::Literal::new(42.0));
     } else {
         panic!(
             "Expected alpha to parse as Const(42.0), got {:?}",
@@ -2643,7 +2643,7 @@ fn test_incremental_sync_preserves_cache_for_unchanged_variable() {
     if let Some(crate::ast::Ast::Scalar(crate::ast::Expr0::Const(_, val, _))) =
         alpha_result.variable.ast()
     {
-        assert_eq!(*val, 42.0);
+        assert_eq!(*val, crate::ast::Literal::new(42.0));
     } else {
         panic!(
             "Expected alpha to parse as Const(42.0), got {:?}",
@@ -2818,7 +2818,7 @@ fn test_incremental_sync_successive_patches() {
     if let Some(crate::ast::Ast::Scalar(crate::ast::Expr0::Const(_, val, _))) =
         result.variable.ast()
     {
-        assert_eq!(*val, 999.0);
+        assert_eq!(*val, crate::ast::Literal::new(999.0));
     } else {
         panic!("Expected Const(999.0), got {:?}", result.variable.ast());
     }

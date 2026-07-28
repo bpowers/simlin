@@ -2,6 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use crate::ast::literal::Literal;
 use crate::builtins::{Loc, UntypedBuiltinFn, is_0_arity_builtin_fn_ci};
 use crate::common::{EquationError, RawIdent};
 use crate::lexer::LexerType;
@@ -70,10 +71,19 @@ impl BinaryOp {
 
 /// Expr0 represents a parsed equation, before any calls to
 /// builtin functions have been checked/resolved.
+///
+/// The `Eq` derive is load-bearing, not decoration: `Expr0` rides on
+/// salsa-cached values (`db::query::ParsedVariableResult`, `ModelStage0`,
+/// `db::ltm::LtmArm`) whose backdating is decided by comparing an old value
+/// with a rebuilt one, so a variant that is not equal to ITSELF permanently
+/// defeats that comparison. A bare `f64` is exactly such a field (`NaN !=
+/// NaN`), and `Eq` rejects it at compile time -- which is why the literal is an
+/// [`Literal`], compared by bit pattern. The same argument applies to `Expr1`,
+/// `Expr2` and `Expr3`; see [`Literal`] for the full statement.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone, salsa::Update)]
+#[derive(PartialEq, Eq, Clone, salsa::Update)]
 pub enum Expr0 {
-    Const(String, f64, Loc),
+    Const(String, Literal, Loc),
     Var(RawIdent, Loc),
     App(UntypedBuiltinFn<Expr0>, Loc),
     Subscript(RawIdent, Vec<IndexExpr0>, Loc),
@@ -83,7 +93,7 @@ pub enum Expr0 {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone, salsa::Update)]
+#[derive(PartialEq, Eq, Clone, salsa::Update)]
 pub enum IndexExpr0 {
     Wildcard(Loc),
     StarRange(RawIdent, Loc),
@@ -280,7 +290,7 @@ impl Expr0 {
 
 impl Default for Expr0 {
     fn default() -> Self {
-        Expr0::Const("0.0".to_string(), 0.0, Loc::default())
+        Expr0::Const("0.0".to_string(), Literal::new(0.0), Loc::default())
     }
 }
 
@@ -291,9 +301,9 @@ fn test_parse() {
     use Expr0::*;
 
     let if1 = Box::new(If(
-        Box::new(Const("1".to_string(), 1.0, Loc::default())),
-        Box::new(Const("2".to_string(), 2.0, Loc::default())),
-        Box::new(Const("3".to_string(), 3.0, Loc::default())),
+        Box::new(Const("1".to_string(), Literal::new(1.0), Loc::default())),
+        Box::new(Const("2".to_string(), Literal::new(2.0), Loc::default())),
+        Box::new(Const("3".to_string(), Literal::new(3.0), Loc::default())),
         Loc::default(),
     ));
 
@@ -304,8 +314,8 @@ fn test_parse() {
             Box::new(Var(RawIdent::new_from_str("foo"), Loc::default())),
             Loc::default(),
         )),
-        Box::new(Const("2".to_string(), 2.0, Loc::default())),
-        Box::new(Const("3".to_string(), 3.0, Loc::default())),
+        Box::new(Const("2".to_string(), Literal::new(2.0), Loc::default())),
+        Box::new(Const("3".to_string(), Literal::new(3.0), Loc::default())),
         Loc::default(),
     ));
 
@@ -319,8 +329,8 @@ fn test_parse() {
             )),
             Loc::default(),
         )),
-        Box::new(Const("1".to_string(), 1.0, Loc::default())),
-        Box::new(Const("0".to_string(), 0.0, Loc::default())),
+        Box::new(Const("1".to_string(), Literal::new(1.0), Loc::default())),
+        Box::new(Const("0".to_string(), Literal::new(0.0), Loc::default())),
         Loc::default(),
     ));
 
@@ -331,8 +341,8 @@ fn test_parse() {
             Box::new(Var(RawIdent::new_from_str("false_input"), Loc::default())),
             Loc::default(),
         )),
-        Box::new(Const("1".to_string(), 1.0, Loc::default())),
-        Box::new(Const("0".to_string(), 0.0, Loc::default())),
+        Box::new(Const("1".to_string(), Literal::new(1.0), Loc::default())),
+        Box::new(Const("0".to_string(), Literal::new(0.0), Loc::default())),
         Loc::default(),
     ));
 
@@ -345,13 +355,17 @@ fn test_parse() {
 
     let subscript1 = Box::new(Subscript(
         RawIdent::new_from_str("a"),
-        vec![IndexExpr0::Expr(Const("1".to_owned(), 1.0, Loc::default()))],
+        vec![IndexExpr0::Expr(Const(
+            "1".to_owned(),
+            Literal::new(1.0),
+            Loc::default(),
+        ))],
         Loc::default(),
     ));
     let subscript2 = Box::new(Subscript(
         RawIdent::new_from_str("a"),
         vec![
-            IndexExpr0::Expr(Const("2".to_owned(), 2.0, Loc::default())),
+            IndexExpr0::Expr(Const("2".to_owned(), Literal::new(2.0), Loc::default())),
             IndexExpr0::Expr(App(
                 UntypedBuiltinFn(
                     "int".to_owned(),
@@ -384,8 +398,8 @@ fn test_parse() {
     let subscript5 = Box::new(Subscript(
         RawIdent::new_from_str("a"),
         vec![IndexExpr0::Range(
-            Const("1".to_owned(), 1.0, Loc::default()),
-            Const("2".to_owned(), 2.0, Loc::default()),
+            Const("1".to_owned(), Literal::new(1.0), Loc::default()),
+            Const("2".to_owned(), Literal::new(2.0), Loc::default()),
             Loc::default(),
         )],
         Loc::default(),
@@ -435,13 +449,13 @@ fn test_parse() {
                             UntypedBuiltinFn("time".to_owned(), vec![]),
                             Loc::default(),
                         )),
-                        Box::new(Const("5".to_owned(), 5.0, Loc::default())),
+                        Box::new(Const("5".to_owned(), Literal::new(5.0), Loc::default())),
                         Loc::default(),
                     )],
                 ),
                 Loc::default(),
             )),
-            Box::new(Const("1".to_owned(), 1.0, Loc::default())),
+            Box::new(Const("1".to_owned(), Literal::new(1.0), Loc::default())),
             Loc::default(),
         ))],
         Loc::default(),
@@ -460,7 +474,7 @@ fn test_parse() {
             RawIdent::new_from_str("matrix"),
             vec![
                 IndexExpr0::Wildcard(Loc::default()),
-                IndexExpr0::Expr(Const("1".to_owned(), 1.0, Loc::default())),
+                IndexExpr0::Expr(Const("1".to_owned(), Literal::new(1.0), Loc::default())),
             ],
             Loc::default(),
         )),
@@ -541,7 +555,7 @@ fn test_parse() {
     assert!(matches!(&ast, Expr0::Const(_, _, _)));
     if let Expr0::Const(id, n, _) = &ast {
         assert_eq!("NaN", id);
-        assert!(n.is_nan());
+        assert!(n.value().is_nan());
     }
     let printed = ast::print_eqn(&ast);
     assert_eq!("NaN", &printed);
@@ -609,8 +623,8 @@ fn test_safediv_operator() {
         UntypedBuiltinFn(
             "safediv".to_owned(),
             vec![
-                Const("1".to_owned(), 1.0, Loc::default()),
-                Const("2".to_owned(), 2.0, Loc::default()),
+                Const("1".to_owned(), Literal::new(1.0), Loc::default()),
+                Const("2".to_owned(), Literal::new(2.0), Loc::default()),
             ],
         ),
         Loc::default(),

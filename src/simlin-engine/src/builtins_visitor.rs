@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
-use crate::ast::{Ast, BinaryOp, Expr0, IndexExpr0, print_eqn};
+use crate::ast::{Ast, BinaryOp, Expr0, IndexExpr0, Literal, print_eqn};
 use crate::builtins::{UntypedBuiltinFn, is_builtin_fn};
 use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, EquationError, Ident, RawIdent,
@@ -73,8 +73,9 @@ pub(crate) fn contains_module_call(expr: &Expr0, macro_registry: &MacroRegistry)
 
 fn parse_module_order_arg(expr: &Expr0) -> Option<u32> {
     if let Expr0::Const(_, n, _) = expr {
+        let n = n.value();
         let rounded = n.round();
-        if (*n - rounded).abs() < 1e-9 && rounded >= 0.0 {
+        if (n - rounded).abs() < 1e-9 && rounded >= 0.0 {
             return Some(rounded as u32);
         }
     }
@@ -483,7 +484,7 @@ impl<'a> BuiltinVisitor<'a> {
                                 // For indexed dimensions, the subscript element is a number
                                 // Use it directly as a Const
                                 let val: f64 = subscript[i].parse().unwrap_or(0.0);
-                                return Const(subscript[i].clone(), val, loc);
+                                return Const(subscript[i].clone(), Literal::new(val), loc);
                             }
                             Dimension::Named(_, _) => {
                                 // For named dimensions, use qualified element (dimension·element).
@@ -1040,7 +1041,7 @@ impl<'a> BuiltinVisitor<'a> {
                 }
                 let args = if func == "previous" && args.len() == 1 {
                     let mut args = args;
-                    args.push(Const("0".to_string(), 0.0, loc));
+                    args.push(Const("0".to_string(), Literal::new(0.0), loc));
                     args
                 } else {
                     args

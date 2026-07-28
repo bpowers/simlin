@@ -1647,118 +1647,618 @@ mod occurrence_ir_tests {
     }
 }
 
-/// F3: a `SiteId` child index must never WRAP. The addressable range is pinned
-/// at its exact boundary, so a variadic builtin's 65,536th content declines to
-/// be addressed rather than re-using child 0's path.
-///
-/// Pinned on the pure boundary function rather than by building a 65,536-argument
-/// `MEAN` call: the fixture would be enormous and slow (the 3-minute suite cap),
-/// while the boundary is the entire property. The consequence of getting this
-/// wrong is silent -- a wrapped index makes the wrap's lookup return a different
-/// occurrence, so it holds or freezes the wrong reference and emits a plausible
-/// wrong score -- which is why the guard returns `None` instead of a wrapped
-/// value, and why the walker records no occurrence for such a child.
-#[test]
-fn site_child_index_declines_rather_than_wrapping() {
-    use super::site_child_index;
+// ── Layer 4: the LTM front door (GH #978 / #979) ───────────────────────────
+//
+// `SiteId` occurrence identity is a path of `u16` child indices. Three of the
+// walk's `push` sites take a count that the AST node's own shape does NOT bound
+// -- and they are exactly the three arms of `SiteWidthAxis`:
+//
+//   | axis                | what varies                        | reachable via         |
+//   |---------------------|------------------------------------|-----------------------|
+//   | `ArrayedSlots`      | `Ast::Arrayed` per-element slots   | any `<element>` list  |
+//   | `BuiltinContents`   | one builtin call's contents        | `MEAN` (the only      |
+//   |                     |                                    | variadic `BuiltinFn`) |
+//   | `SubscriptIndices`  | one subscript's index list         | any `x[a, b, ...]`    |
+//
+// Every OTHER push is a literal fixed by the node (`Ast::Scalar`/`ApplyToAll`'s
+// single slot `0`, `Op1`'s one operand, `Op2`'s two, `Expr2::If`'s three, an
+// `IndexExpr2::Range`'s two halves), which is why they have no arm and no test
+// row: `expr_site_width_rejection`'s `match` is exhaustive with no catch-all, so
+// a new variant with a variable child count is a compile error there.
+//
+// Each axis gets ONE fixture asserted in BOTH directions -- admitted at the
+// production limit, refused when the limit is lowered below its width -- so the
+// accept half cannot pass vacuously.
+mod front_door_tests {
+    use super::*;
+    use crate::db::ltm_ir::{
+        MAX_SITE_CHILDREN, SiteChildrenLimitGuard, SiteWidthAxis, model_ltm_reference_sites,
+    };
 
-    assert_eq!(site_child_index(0), Some(0));
-    assert_eq!(site_child_index(1), Some(1));
-    // The last addressable child: one below `UNADDRESSABLE_CHILD`, which is
-    // reserved as the consumer's provably-unmatchable sentinel (see the sibling
-    // test `unaddressable_child_sentinel_is_never_a_real_child_index`).
-    assert_eq!(site_child_index(65_534), Some(65_534));
-    assert_eq!(site_child_index(65_535), None);
-    // Past the range must DECLINE, not wrap to 0 (which would collide with the
-    // first child's SiteId and silently mis-address the occurrence).
-    assert_eq!(site_child_index(65_536), None);
-    assert_eq!(site_child_index(65_537), None);
-    assert_eq!(site_child_index(usize::MAX), None);
-}
-
-/// The unaddressable-child sentinel must be a value `site_child_index` NEVER
-/// emits. That reservation is what makes the consumer's fallback provable: the
-/// ceteris-paribus wrap appends `UNADDRESSABLE_CHILD` for an over-arity child, so
-/// if the producer could also emit it, a recorded occurrence would share the
-/// path and the lookup would alias exactly the sibling it is trying to avoid.
-#[test]
-fn unaddressable_child_sentinel_is_never_a_real_child_index() {
-    use super::{UNADDRESSABLE_CHILD, site_child_index};
-
-    // The last ADDRESSABLE index is one below the sentinel.
-    assert_eq!(site_child_index(65_534), Some(65_534));
-    assert_eq!(UNADDRESSABLE_CHILD, u16::MAX);
-    // The sentinel's own numeric position is declined, not returned.
-    assert_eq!(site_child_index(UNADDRESSABLE_CHILD as usize), None);
-    // ...so no `n` whatsoever maps to it.
-    for n in [0usize, 1, 65_534, 65_535, 65_536, usize::MAX] {
-        assert_ne!(
-            site_child_index(n),
-            Some(UNADDRESSABLE_CHILD),
-            "n = {n} must not map to the reserved sentinel"
-        );
+    /// Sync `project` onto a FRESH db and hand `model_ltm_reference_sites`' full
+    /// result for `main` to `body`. A fresh db per call is required: the query is
+    /// salsa-memoized, so re-running it on one db under a different
+    /// `SiteChildrenLimitGuard` would return the first limit's answer.
+    fn with_ir(project: &TestProject, body: impl FnOnce(&LtmReferenceSitesResult)) {
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        body(model_ltm_reference_sites(
+            &db,
+            sync.models["main"].source,
+            sync.project,
+        ));
     }
-}
 
-/// Occurrence suppression inside an unaddressable builtin child must NOT
-/// suppress the per-EDGE reference site.
-///
-/// The two views serve different consumers. The occurrence view is
-/// SiteId-keyed, so a child the path cannot address must record nothing (else
-/// the wrap aliases a sibling). The per-edge view is name-keyed and feeds
-/// `model_edge_shapes` and the element causal graph -- and a MISSING IR entry
-/// there does not mean "no reference": consumers default it to a single `Bare`
-/// site, which would misclassify a `FixedIndex`/`DynamicIndex` reference and
-/// emit wrong element edges and link scores. So the edge must keep its real
-/// shape even when its occurrence is dropped.
-///
-/// Pinned on the accumulator rather than through a 65,536-argument builtin: the
-/// suppression counter is only ever raised at that arity, so a fixture-driven
-/// test would be enormous while this asserts the exact invariant.
-#[test]
-fn suppressed_occurrences_still_record_edge_sites() {
-    use super::{RefShape, ReferenceSite, WalkAccum};
-    use std::collections::HashMap;
+    /// An `Ast::Arrayed` target with three per-element equations, so the walk
+    /// numbers four slots (three elements plus the trailing default slot
+    /// `ArrayedSlotMap` addresses unconditionally).
+    fn arrayed_slots_fixture() -> TestProject {
+        TestProject::new("main")
+            .named_dimension("Region", &["a", "b", "c"])
+            .array_aux("population[Region]", "100")
+            .array_flow_with_ranges(
+                "births[Region]",
+                vec![
+                    ("a", "population[a] * 0.1"),
+                    ("b", "population[b] * 0.2"),
+                    ("c", "population[c] * 0.3"),
+                ],
+            )
+    }
 
-    let mut sites: HashMap<String, Vec<ReferenceSite>> = HashMap::new();
-    let mut occurrences = Vec::new();
-    {
-        let mut acc = WalkAccum {
-            sites: &mut sites,
-            occurrences: &mut occurrences,
-            path: vec![0],
-            // As if inside a builtin child whose index cannot be addressed.
-            suppress_occurrences: 1,
+    /// A three-argument `MEAN`, the only variadic `BuiltinFn`.
+    fn builtin_contents_fixture() -> TestProject {
+        TestProject::new("main")
+            .scalar_aux("a", "1")
+            .scalar_aux("b", "2")
+            .scalar_aux("c", "3")
+            .scalar_aux("avg", "MEAN(a, b, c)")
+    }
+
+    /// A two-index subscript. The index count is bounded by the AST alone:
+    /// `Expr2::from` does not narrow it to the subscripted variable's declared
+    /// arity (it simply ignores indices past `dims.len()`), which is why this
+    /// axis needs the front door despite GH #979 claiming it was bounded.
+    fn subscript_indices_fixture() -> TestProject {
+        TestProject::new("main")
+            .named_dimension("D1", &["x", "y"])
+            .named_dimension("D2", &["p", "q"])
+            .array_aux("matrix[D1,D2]", "1")
+            .array_aux("total[D1,D2]", "matrix[D1, D2] * 2")
+    }
+
+    /// Every axis is admitted at the production limit: an ordinary model records
+    /// its occurrences and carries no rejection. This is the control for the
+    /// three refusal tests below -- each uses the SAME fixture with the limit
+    /// lowered, so the refusal cannot be an artifact of the fixture.
+    #[test]
+    fn production_limit_admits_every_axis() {
+        for (name, project, target) in [
+            ("arrayed slots", arrayed_slots_fixture(), "births"),
+            ("builtin contents", builtin_contents_fixture(), "avg"),
+            ("subscript indices", subscript_indices_fixture(), "total"),
+        ] {
+            with_ir(&project, |ir| {
+                assert_eq!(
+                    ir.site_width_rejection, None,
+                    "{name}: an ordinary model must pass the front door"
+                );
+                assert!(
+                    ir.occurrences.contains_key(target),
+                    "{name}: `{target}` must record its occurrences; got {:?}",
+                    ir.occurrences.keys().collect::<Vec<_>>()
+                );
+            });
+        }
+    }
+
+    /// The boundary itself, on all three axes: an equation needing EXACTLY
+    /// `limit` children is fully addressable (indices `0 ..= limit - 1`) and must
+    /// be ADMITTED. The comparison is `>`, and off-by-one to `>=` is a real
+    /// hazard in the direction this session says to measure rather than reason
+    /// about: it would refuse a legal equation and cost the whole model every
+    /// link, loop and pathway score, silently.
+    ///
+    /// These rows reuse the refusal tests' own fixtures, one limit higher, so
+    /// each axis is asserted at `n == limit` (accept) and `n == limit + 1`
+    /// (refuse) against the same equation. Without them, `>` -> `>=` on the
+    /// builtin and subscript axes left the entire suite green.
+    #[test]
+    fn a_width_exactly_at_the_limit_is_admitted_on_every_axis() {
+        // ArrayedSlots: 3 element equations + the reserved default slot = 4.
+        {
+            let _guard = SiteChildrenLimitGuard::new(4);
+            with_ir(&arrayed_slots_fixture(), |ir| {
+                assert_eq!(
+                    ir.site_width_rejection, None,
+                    "4 slots at limit 4 are all addressable (0..=3)"
+                );
+                assert!(ir.occurrences.contains_key("births"));
+            });
+        }
+        // BuiltinContents: `MEAN(a, b, c)` yields exactly 3 contents.
+        {
+            let _guard = SiteChildrenLimitGuard::new(3);
+            with_ir(&builtin_contents_fixture(), |ir| {
+                assert_eq!(
+                    ir.site_width_rejection, None,
+                    "3 builtin contents at limit 3 are all addressable (0..=2)"
+                );
+                assert!(ir.occurrences.contains_key("avg"));
+            });
+        }
+        // SubscriptIndices: `matrix[D1, D2]` carries exactly 2 indices.
+        {
+            let _guard = SiteChildrenLimitGuard::new(2);
+            with_ir(&subscript_indices_fixture(), |ir| {
+                assert_eq!(
+                    ir.site_width_rejection, None,
+                    "2 subscript indices at limit 2 are all addressable (0..=1)"
+                );
+                assert!(ir.occurrences.contains_key("total"));
+            });
+        }
+    }
+
+    #[test]
+    fn lowered_limit_refuses_an_over_wide_arrayed_slot_count() {
+        // Three element equations need four slots; a limit of three cannot tell
+        // the fourth apart from the first.
+        let _guard = SiteChildrenLimitGuard::new(3);
+        with_ir(&arrayed_slots_fixture(), |ir| {
+            let rejection = ir
+                .site_width_rejection
+                .as_ref()
+                .expect("a 4-slot target must be refused at limit 3");
+            assert_eq!(rejection.variable, "births");
+            assert_eq!(rejection.axis, SiteWidthAxis::ArrayedSlots);
+            assert_eq!(rejection.count, 4, "3 element equations plus the default");
+            assert_eq!(rejection.limit, 3);
+
+            // The occurrence view records NOTHING for the refused equation, so
+            // no two of its references can share a `SiteId`...
+            assert!(
+                !ir.occurrences.contains_key("births"),
+                "a refused equation must mint no SiteId; got {:?}",
+                ir.occurrences.get("births")
+            );
+            // ...while the per-edge view stays complete AND keeps its real
+            // shapes. A missing entry there is read as a single `Bare` site by
+            // `model_element_causal_edges`, which would MISCLASSIFY these
+            // literal-element reads and emit wrong element edges.
+            let edge = ir
+                .sites
+                .get(&("population".to_string(), "births".to_string()))
+                .expect("the per-edge view is path-free and must survive refusal");
+            assert_eq!(edge.len(), 3, "one site per element equation: {edge:?}");
+            for site in edge {
+                assert!(
+                    matches!(site.shape, RefShape::FixedIndex(_)),
+                    "the edge must keep its real shape, not degrade to Bare: {site:?}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn lowered_limit_refuses_an_over_arity_builtin() {
+        let _guard = SiteChildrenLimitGuard::new(2);
+        with_ir(&builtin_contents_fixture(), |ir| {
+            let rejection = ir
+                .site_width_rejection
+                .as_ref()
+                .expect("a 3-argument MEAN must be refused at limit 2");
+            assert_eq!(rejection.variable, "avg");
+            assert_eq!(rejection.axis, SiteWidthAxis::BuiltinContents);
+            assert_eq!(rejection.count, 3);
+            assert!(!ir.occurrences.contains_key("avg"));
+            // The edges into `avg` survive with their real shapes.
+            for from in ["a", "b", "c"] {
+                let edge = ir
+                    .sites
+                    .get(&(from.to_string(), "avg".to_string()))
+                    .unwrap_or_else(|| panic!("edge {from}->avg must survive refusal"));
+                assert_eq!(edge.len(), 1, "{from}: {edge:?}");
+            }
+        });
+    }
+
+    #[test]
+    fn lowered_limit_refuses_an_over_wide_subscript() {
+        let _guard = SiteChildrenLimitGuard::new(1);
+        with_ir(&subscript_indices_fixture(), |ir| {
+            let rejection = ir
+                .site_width_rejection
+                .as_ref()
+                .expect("a 2-index subscript must be refused at limit 1");
+            assert_eq!(rejection.variable, "total");
+            assert_eq!(rejection.axis, SiteWidthAxis::SubscriptIndices);
+            assert_eq!(rejection.count, 2);
+            assert!(!ir.occurrences.contains_key("total"));
+            let edge = ir
+                .sites
+                .get(&("matrix".to_string(), "total".to_string()))
+                .expect("edge matrix->total must survive refusal");
+            assert_eq!(edge.len(), 1, "{edge:?}");
+            assert_eq!(
+                edge[0].shape,
+                RefShape::Bare,
+                "`matrix[D1,D2]` in an A2A-over-[D1,D2] body is the same-element read"
+            );
+        });
+    }
+
+    /// The premise that makes `SubscriptIndices` a genuinely unbounded axis --
+    /// verified by running the lowering, not by reading it.
+    ///
+    /// GH #979 asserts this axis is "bounded by the reference's declared
+    /// subscript arity". It is not: `Expr2::from`'s `Expr1::Subscript` arm
+    /// collects EVERY index and only consults `dims[i]` while `i < dims.len()`,
+    /// so a subscript with more indices than the variable declares reaches the
+    /// IR with all of them. (`classify_occurrence_axes` already accounts for
+    /// that shape, calling it an arity mismatch.) If a future change narrows the
+    /// index list during lowering, this reds -- and the axis, with its front-door
+    /// arm, can be retired.
+    #[test]
+    fn a_subscript_keeps_more_indices_than_the_variable_declares() {
+        let _guard = SiteChildrenLimitGuard::new(1);
+        let project = TestProject::new("main")
+            .indexed_dimension("D", 3)
+            .array_aux("arr[D]", "1")
+            // `arr` declares ONE dimension; this reference carries two indices.
+            .scalar_aux("target", "arr[1, 2]");
+        with_ir(&project, |ir| {
+            let rejection = ir
+                .site_width_rejection
+                .as_ref()
+                .expect("an over-arity subscript must reach the IR with both indices");
+            assert_eq!(rejection.variable, "target");
+            assert_eq!(rejection.axis, SiteWidthAxis::SubscriptIndices);
+            assert_eq!(
+                rejection.count, 2,
+                "both indices survive lowering, though `arr` declares one dimension"
+            );
+        });
+    }
+
+    /// The check must find an over-wide node wherever it sits, so it has to
+    /// descend every child edge it can descend. The rows below are ELEVEN, one
+    /// per recursive call in `expr_site_width_rejection` -- `Op1`'s operand,
+    /// `Op2`'s two, `If`'s three, an `App`'s `Expr` content and its
+    /// `LookupTable` content, a `Subscript`'s `IndexExpr2::Expr` and its
+    /// `Range`'s two halves. (`Const`/`Var` are leaves; `Wildcard`, `StarRange`
+    /// and `DimPosition` carry no `Expr2`. Neither has a row because neither has
+    /// a call.) Deleting any one descent reds exactly its row.
+    ///
+    /// The `LookupTable` and `Range` rows exist because a first version of this
+    /// test had 8 rows while the checker had 11 calls, and deleting either
+    /// descent left the whole suite green. The `LookupTable` row is the one that
+    /// matters most: that descent is not conservatism, it is the only coverage of
+    /// a path the CONSUMER builds and the producer walk never does (see
+    /// `ast_site_width_rejection`'s rustdoc).
+    #[test]
+    fn the_check_descends_every_expression_edge() {
+        // A 3-argument `MEAN` is over-wide at limit 2; every other node in these
+        // equations has at most 2 children, so a row can only fail by failing to
+        // reach the `MEAN`. (`LOOKUP`'s two contents and a `Range`'s two halves
+        // are each 2, exactly at the limit.)
+        let rows: &[(&str, &str)] = &[
+            ("Op1 operand", "-MEAN(a, b, c)"),
+            ("Op2 left", "MEAN(a, b, c) + 1"),
+            ("Op2 right", "1 + MEAN(a, b, c)"),
+            ("If cond", "IF MEAN(a, b, c) > 0 THEN 1 ELSE 2"),
+            ("If then", "IF a > 0 THEN MEAN(a, b, c) ELSE 2"),
+            ("If else", "IF a > 0 THEN 1 ELSE MEAN(a, b, c)"),
+            ("App Expr content", "ABS(MEAN(a, b, c))"),
+            ("App LookupTable content", "LOOKUP(MEAN(a, b, c), 1)"),
+            ("Subscript IndexExpr2::Expr", "arr[MEAN(a, b, c)]"),
+            ("Subscript Range low", "SUM(arr[MEAN(a, b, c):3])"),
+            ("Subscript Range high", "SUM(arr[1:MEAN(a, b, c)])"),
+        ];
+        for (edge, equation) in rows {
+            let _guard = SiteChildrenLimitGuard::new(2);
+            let project = TestProject::new("main")
+                .indexed_dimension("D", 3)
+                .array_aux("arr[D]", "1")
+                .scalar_aux("a", "1")
+                .scalar_aux("b", "2")
+                .scalar_aux("c", "3")
+                .scalar_aux("target", equation);
+            with_ir(&project, |ir| {
+                let rejection = ir
+                    .site_width_rejection
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("{edge}: `{equation}` must be refused at limit 2"));
+                assert_eq!(rejection.variable, "target", "{edge}");
+                assert_eq!(rejection.axis, SiteWidthAxis::BuiltinContents, "{edge}");
+                assert_eq!(rejection.count, 3, "{edge}");
+            });
+        }
+    }
+
+    /// The same, one row per `Ast` shape: the check runs on whichever equation
+    /// form the target carries, including an `Ast::Arrayed`'s per-element AND
+    /// default expressions (which `ast_site_width_rejection` walks separately
+    /// from the slot count itself).
+    #[test]
+    fn the_check_descends_every_equation_shape() {
+        // Limit 3 with a FOUR-argument `MEAN`, so the arrayed rows' own slot
+        // counts (at most 2 elements plus the default = 3) stay inside the limit
+        // and the rejection can only come from descending into the equation.
+        const OVER_WIDE: &str = "MEAN(a, b, c, d)";
+        let leaves = |p: TestProject| {
+            p.scalar_aux("a", "1")
+                .scalar_aux("b", "2")
+                .scalar_aux("c", "3")
+                .scalar_aux("d", "4")
         };
-        acc.push_ref_site(
-            "pop",
-            RefShape::FixedIndex(vec!["nyc".to_string()]),
-            None,
-            &[],
-        );
-        acc.push_occurrence(
-            super::OccurrenceRef::Variable("pop".to_string()),
-            RefShape::FixedIndex(vec!["nyc".to_string()]),
-            Vec::new(),
-            &[],
-            false,
-        );
+        let scalar = leaves(TestProject::new("main")).scalar_aux("target", OVER_WIDE);
+        let apply_to_all = leaves(TestProject::new("main").named_dimension("Region", &["x", "y"]))
+            .array_aux("target[Region]", OVER_WIDE);
+        // A per-element equation, in the slot the walk numbers first.
+        let arrayed_element =
+            leaves(TestProject::new("main").named_dimension("Region", &["x", "y"]))
+                .array_flow_with_ranges("target[Region]", vec![("x", OVER_WIDE), ("y", "1")]);
+        // The default (EXCEPT) equation, the slot AFTER the last element.
+        let arrayed_default =
+            leaves(TestProject::new("main").named_dimension("Region", &["x", "y"]))
+                .array_with_default_and_overrides("target[Region]", OVER_WIDE, vec![("x", "1")]);
+
+        for (shape, project) in [
+            ("Ast::Scalar", scalar),
+            ("Ast::ApplyToAll", apply_to_all),
+            ("Ast::Arrayed element", arrayed_element),
+            ("Ast::Arrayed default", arrayed_default),
+        ] {
+            let _guard = SiteChildrenLimitGuard::new(3);
+            with_ir(&project, |ir| {
+                let rejection = ir
+                    .site_width_rejection
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("{shape}: must be refused at limit 3"));
+                assert_eq!(rejection.variable, "target", "{shape}");
+                assert_eq!(rejection.axis, SiteWidthAxis::BuiltinContents, "{shape}");
+                assert_eq!(rejection.count, 4, "{shape}");
+            });
+        }
     }
 
-    // The occurrence is dropped (it could not be addressed)...
-    assert!(
-        occurrences.is_empty(),
-        "an unaddressable child must record no occurrence"
-    );
-    // ...but the edge site survives, WITH its real shape.
-    let pop_sites = sites.get("pop").expect(
-        "the per-edge reference site must survive suppression -- a missing IR \
-         entry is defaulted to `Bare` by consumers, misclassifying the reference",
-    );
-    assert_eq!(pop_sites.len(), 1);
-    assert_eq!(
-        pop_sites[0].shape,
-        RefShape::FixedIndex(vec!["nyc".to_string()]),
-        "the edge must keep its real shape, not degrade to Bare"
-    );
+    /// An over-wide equation that references NO model variable must still be
+    /// refused, and the refusal must name the canonically-FIRST offender.
+    ///
+    /// Both halves guard the driver rather than the checker. The walk skips a
+    /// target with neither reference sites nor occurrences, so capturing the
+    /// verdict after that skip would silently admit a model whose widest
+    /// equation happens to be constant-only; and the first-offender pick is what
+    /// makes the emitted diagnostic reproducible across processes, which a
+    /// `HashMap`-ordered scan would not be.
+    #[test]
+    fn a_reference_free_over_wide_equation_is_refused_and_names_the_first_offender() {
+        let _guard = SiteChildrenLimitGuard::new(2);
+        let project = TestProject::new("main")
+            // Canonically after `avg_early`, and also over-wide.
+            .scalar_aux("zz_avg_late", "MEAN(1, 2, 3)")
+            .scalar_aux("avg_early", "MEAN(4, 5, 6)");
+        with_ir(&project, |ir| {
+            let rejection = ir
+                .site_width_rejection
+                .as_ref()
+                .expect("a constant-only MEAN(1, 2, 3) is still an over-wide equation");
+            assert_eq!(
+                rejection.variable, "avg_early",
+                "the canonically-first offender must be reported"
+            );
+            assert_eq!(rejection.axis, SiteWidthAxis::BuiltinContents);
+        });
+    }
+
+    /// The production limit is the whole `u16` range: with no value reserved as
+    /// a sentinel, child `u16::MAX` is an ordinary, addressable child.
+    #[test]
+    fn the_production_limit_is_the_whole_u16_range() {
+        assert_eq!(MAX_SITE_CHILDREN, u16::MAX as usize + 1);
+        assert_eq!(u16::try_from(MAX_SITE_CHILDREN - 1), Ok(u16::MAX));
+    }
+
+    /// A refusal must reach the user AND stop LTM generation for the model: the
+    /// two halves of "refuse LTM for this model with a diagnostic". Asserted in
+    /// both directions on one fixture, so neither half can pass vacuously.
+    #[test]
+    fn refusal_emits_no_ltm_vars_and_warns_through_the_diagnostic_surface() {
+        use crate::db::{
+            DiagnosticError, DiagnosticSeverity, collect_model_diagnostics, model_ltm_variables,
+        };
+        use salsa::Setter;
+
+        // A stock/flow feedback loop whose flow equation is a 3-argument `MEAN`:
+        // scoreable at the production limit, over-wide at limit 2.
+        let fixture = || {
+            TestProject::new("main")
+                .stock("level", "100", &["inflow"], &[], None)
+                .flow("inflow", "MEAN(level, drain, boost)", None)
+                .scalar_aux("drain", "1")
+                .scalar_aux("boost", "2")
+        };
+
+        let width_warnings = |db: &SimlinDb, model, project| -> Vec<String> {
+            collect_model_diagnostics(db, model, project)
+                .into_iter()
+                .filter(|d| d.severity == DiagnosticSeverity::Warning)
+                .filter_map(|d| match d.error {
+                    DiagnosticError::Assembly(msg)
+                        if msg.contains("LTM analysis was skipped for this model") =>
+                    {
+                        Some(msg)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Control: at the production limit the model IS scored and no width
+        // warning is emitted.
+        {
+            let mut db = SimlinDb::default();
+            let (project, model) = {
+                let sync = sync_from_datamodel(&db, &fixture().build_datamodel());
+                (sync.project, sync.models["main"].source)
+            };
+            project.set_ltm_enabled(&mut db).to(true);
+            assert!(
+                !model_ltm_variables(&db, model, project).vars.is_empty(),
+                "the control fixture must be scoreable, or the refusal below proves nothing"
+            );
+            assert!(
+                width_warnings(&db, model, project).is_empty(),
+                "no width warning at the production limit"
+            );
+        }
+
+        // Refusal: no LTM variable at all, plus a Warning naming the variable.
+        {
+            let _guard = SiteChildrenLimitGuard::new(2);
+            let mut db = SimlinDb::default();
+            let (project, model) = {
+                let sync = sync_from_datamodel(&db, &fixture().build_datamodel());
+                (sync.project, sync.models["main"].source)
+            };
+            project.set_ltm_enabled(&mut db).to(true);
+            assert!(
+                model_ltm_variables(&db, model, project).vars.is_empty(),
+                "a refused model must emit no link, loop, or pathway score"
+            );
+            let warnings = width_warnings(&db, model, project);
+            assert_eq!(
+                warnings.len(),
+                1,
+                "exactly one width refusal must reach collect_model_diagnostics; got {warnings:?}"
+            );
+            assert!(
+                warnings[0].contains("inflow"),
+                "the warning must name the offending variable: {}",
+                warnings[0]
+            );
+            // ...and the noun phrase must be the FIRED axis's, not another
+            // arm's. Spelled literally rather than as `describe()` so a swap of
+            // two arms' strings cannot move both sides of the comparison.
+            assert!(
+                warnings[0].contains("arguments to one builtin call"),
+                "the warning must describe the axis that actually fired: {}",
+                warnings[0]
+            );
+        }
+    }
+
+    /// `SiteWidthAxis::describe()` is a three-arm decision whose strings are the
+    /// user-facing noun phrase in the refusal `Warning`, so it gets one row per
+    /// arm with the text spelled literally. Nothing else in the suite would
+    /// notice two arms being swapped: the end-to-end assertion above pins the
+    /// arm-to-message wiring, and these pin the strings themselves.
+    #[test]
+    fn every_axis_describes_itself() {
+        let rows = [
+            (
+                SiteWidthAxis::ArrayedSlots,
+                "equation slots (per-element equations plus a default)",
+            ),
+            (
+                SiteWidthAxis::BuiltinContents,
+                "arguments to one builtin call",
+            ),
+            (SiteWidthAxis::SubscriptIndices, "indices in one subscript"),
+        ];
+        for (axis, expected) in rows {
+            assert_eq!(axis.describe(), expected, "{axis:?}");
+        }
+        // Distinct, so a message cannot describe two axes the same way.
+        let described: std::collections::HashSet<&str> =
+            rows.iter().map(|(a, _)| a.describe()).collect();
+        assert_eq!(described.len(), rows.len());
+    }
+
+    /// A refusal costs the SCORES, not the STRUCTURE.
+    ///
+    /// This is the batch's central claim about blast radius, and it is what makes
+    /// a whole-model refusal an acceptable trade: the per-edge `sites` view is
+    /// name-keyed and path-free, so it is untouched by a width refusal, and the
+    /// two surfaces that read it -- `model_edge_shapes` and the loop enumeration
+    /// behind `model_detected_loops` -- keep answering exactly as before. If a
+    /// later change routes either surface through the occurrence stream, or makes
+    /// the refusal empty `sites`, this reds and the trade has to be re-argued.
+    ///
+    /// The fixture is ARRAYED with literal-element reads on purpose. Both
+    /// consumers default a MISSING per-edge entry to a single `Bare` site, so on
+    /// a scalar model "the view survived" and "the view was emptied and
+    /// defaulted" are indistinguishable and the test would pass under a
+    /// `sites.clear()` -- verified: an earlier scalar version of this test did.
+    /// `FixedIndex` shapes are what make the difference observable.
+    #[test]
+    fn a_refusal_leaves_edge_shapes_and_detected_loops_unchanged() {
+        use crate::db::{model_detected_loops, model_edge_shapes};
+
+        // `level[Region]` -> `growth[Region]` -> `level[Region]`: a feedback loop
+        // whose per-element flow equations read the stock by LITERAL element, so
+        // the edge carries `FixedIndex` sites rather than `Bare`. Three element
+        // equations need four slots, so it is refused at limit 3.
+        let fixture = || {
+            TestProject::new("main")
+                .named_dimension("Region", &["a", "b", "c"])
+                .array_stock("level[Region]", "100", &["growth"], &[], None)
+                .array_flow_with_ranges(
+                    "growth[Region]",
+                    vec![
+                        ("a", "level[a] * 0.1"),
+                        ("b", "level[b] * 0.1"),
+                        ("c", "level[c] * 0.1"),
+                    ],
+                )
+        };
+        let structure = || {
+            let db = SimlinDb::default();
+            let sync = sync_from_datamodel(&db, &fixture().build_datamodel());
+            let (model, project) = (sync.models["main"].source, sync.project);
+            let loops: Vec<(String, Vec<String>)> = model_detected_loops(&db, model, project)
+                .loops
+                .iter()
+                .map(|l| (l.id.clone(), l.variables.clone()))
+                .collect();
+            (loops, model_edge_shapes(&db, model, project).clone())
+        };
+
+        let (loops_ok, shapes_ok) = structure();
+        assert!(
+            !loops_ok.is_empty(),
+            "the fixture must detect a loop, or the comparison below is vacuous"
+        );
+        // The guard that makes the comparison able to fail: at least one edge
+        // must carry a NON-`Bare` shape, since `Bare` is exactly what a cleared
+        // view degrades to.
+        assert!(
+            shapes_ok
+                .edge_shapes
+                .values()
+                .any(|s| s.iter().any(|shape| !matches!(shape, RefShape::Bare))),
+            "the fixture must carry a non-Bare edge shape: {:?}",
+            shapes_ok.edge_shapes
+        );
+
+        let (loops_refused, shapes_refused) = {
+            let _guard = SiteChildrenLimitGuard::new(3);
+            // Confirm the refusal really fires for this fixture at this limit.
+            with_ir(&fixture(), |ir| {
+                assert!(ir.site_width_rejection.is_some(), "refusal must fire");
+            });
+            structure()
+        };
+
+        assert_eq!(
+            loops_refused, loops_ok,
+            "loop DETECTION reads the path-free per-edge view and must be unaffected"
+        );
+        assert_eq!(
+            shapes_refused, shapes_ok,
+            "`model_edge_shapes` reads the same view and must be byte-equal"
+        );
+    }
 }

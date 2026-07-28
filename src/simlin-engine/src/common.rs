@@ -206,6 +206,9 @@ impl Drop for Interned {
 ///   string content. `Arc<Interned>`/`str` are not covered by salsa's blanket
 ///   `Update` impls, so this is provided manually here; the public newtypes
 ///   keep `#[derive(salsa::Update)]`, whose per-field dispatch finds this impl.
+///   The GENERIC newtype `Ident<State>` needs one extra thing for that to hold
+///   -- an `Update` impl on the `Canonical`/`Raw` markers, since salsa's derive
+///   bounds every type parameter -- see [`Ident`] (GH #972).
 #[derive(Clone)]
 pub(crate) struct CanonicalStorage(std::sync::Arc<Interned>);
 
@@ -619,6 +622,32 @@ pub enum ErrorCode {
     /// module *targeting* a macro model is unaffected; only a module *inside* one
     /// is rejected. See `MacroRegistry::build`'s Pass 4 for the full argument.
     MacroContainsModule,
+    /// A variable's equation is nothing but the NaN literal, so the variable has
+    /// no usable equation and every value it produces is NaN.
+    ///
+    /// This is where Vensim's `A FUNCTION OF(...)` sketch placeholder lands: the
+    /// modeller drew the variable and its inputs but has not written the formula
+    /// yet, and our MDL importer stores that as the equation text `NAN`. Vensim's
+    /// own documentation says the construct "precludes simulation" -- Vensim
+    /// refuses to run such a model -- while we compile it, simulate it, and hand
+    /// back NaN. A hand-authored XMILE `<eqn>NAN</eqn>` reaches the same place and
+    /// means the same thing.
+    ///
+    /// Warning-level, not Error: the rest of the model is worth simulating, and
+    /// `FormattedErrors::push` counts `Error` severity only, so this must not flip
+    /// the failure-shaped flags. Its value is ATTRIBUTION -- see `crate::float`'s
+    /// module docs for why. A NaN spreads through arithmetic to whatever reads it,
+    /// so the modeller's next task is a backward hunt through the dependency graph
+    /// for the origin. Naming the one variable the engine knows STRUCTURALLY must
+    /// be NaN replaces that entire hunt.
+    ///
+    /// The spread is through arithmetic only, which is why neither this doc nor
+    /// the emitted message claims every downstream variable is NaN: IEEE
+    /// comparisons against a NaN are false, so `IF x > 0 THEN 1 ELSE 0` reading a
+    /// NaN `x` returns a finite `0` and everything below it is finite too. A
+    /// diagnostic that asserted otherwise would send the modeller looking in the
+    /// wrong place.
+    UnfilledEquation,
 }
 
 impl fmt::Display for ErrorCode {
@@ -706,6 +735,7 @@ impl fmt::Display for ErrorCode {
             ConveyorInitListUnsupported => "conveyor_init_list_unsupported",
             UnknownElementSubscript => "unknown_element_subscript",
             MacroContainsModule => "macro_contains_module",
+            UnfilledEquation => "unfilled_equation",
         };
 
         write!(f, "{name}")
@@ -2111,6 +2141,49 @@ mod interned_identifier_tests {
         assert!(!unchanged, "equal values must report no change");
         assert_eq!(slot.as_str(), "new_value");
     }
+
+    /// An `Ident<Canonical>` field inside a `#[derive(salsa::Update)]` container
+    /// must resolve through `Ident`'s OWN derived impl -- and hence through
+    /// `CanonicalStorage::maybe_update` -- rather than through salsa's
+    /// `'static + PartialEq` fallback (GH #972).
+    ///
+    /// The evidence is the resolution itself. `salsa::plumbing::UpdateDispatch`
+    /// is the derive's per-field entry point, and it carries exactly two
+    /// `maybe_update`s: an INHERENT one on `Dispatch<D> where D: Update`, and a
+    /// `Fallback` TRAIT one. `UpdateFallback` is deliberately NOT imported in
+    /// this module, so naming `UpdateDispatch::<Ident<Canonical>>::maybe_update`
+    /// can only resolve to the inherent -- `Update`-backed -- method. Before the
+    /// markers gained `Update`, this line did not compile at all, which is the
+    /// same E0277 the issue's probe reported.
+    #[test]
+    fn an_ident_field_dispatches_through_its_own_update_impl() {
+        let dispatch: unsafe fn(*mut Ident<Canonical>, Ident<Canonical>) -> bool =
+            salsa::plumbing::UpdateDispatch::<Ident<Canonical>>::maybe_update;
+
+        // And it behaves as the delegation implies: change reported iff the
+        // canonical string differs, which is `CanonicalStorage`'s rule.
+        let mut slot = Ident::<Canonical>::new("old_value");
+        let changed = {
+            // SAFETY (test): `&mut slot` is a valid, owned `Ident`; we pass its
+            // pointer and a fresh owned value, matching the `maybe_update`
+            // contract.
+            #[allow(unsafe_code)]
+            unsafe {
+                dispatch(&mut slot as *mut _, Ident::<Canonical>::new("new_value"))
+            }
+        };
+        assert!(changed, "a differing ident must report a change");
+        assert_eq!(slot.as_str(), "new_value");
+
+        let unchanged = {
+            #[allow(unsafe_code)]
+            unsafe {
+                dispatch(&mut slot as *mut _, Ident::<Canonical>::new("new_value"))
+            }
+        };
+        assert!(!unchanged, "an equal ident must report no change");
+        assert_eq!(slot.as_str(), "new_value");
+    }
 }
 
 // Implementations for identifier types
@@ -2298,11 +2371,23 @@ impl AsRef<str> for RawElementName {
 // canonicalization guarantees through the type system.
 
 /// Marker type for canonical identifiers
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+///
+/// `salsa::Update` is derived even though the marker holds no data and is never
+/// stored on its own. Salsa's derive adds an `Update` bound to EVERY type
+/// parameter, so without it `Ident<Canonical>: salsa::Update` is unsatisfiable
+/// and an `Ident` field inside a `#[derive(salsa::Update)]` container silently
+/// resolves through salsa's `'static + PartialEq` fallback instead of through
+/// [`CanonicalStorage`]'s manual impl (GH #972). The derive is the whole fix: on
+/// a field-less struct it generates the "nothing can differ, report no change"
+/// body -- exactly salsa's own `PhantomData<T>` impl -- so the `unsafe` trait's
+/// obligation is discharged vacuously and no `unsafe` is hand-written here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::Update)]
 pub struct Canonical;
 
 /// Marker type for raw (non-canonical) identifiers
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+///
+/// `salsa::Update` for the same reason as [`Canonical`]; see its docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::Update)]
 pub struct Raw;
 
 /// An owned identifier with state tracking (canonical or raw).
@@ -2314,11 +2399,43 @@ pub struct Raw;
 /// `PartialOrd`/`salsa::Update` delegate to that handle's manual impls (value
 /// equality, value-based hash consistent with `Borrow<str>`, lexicographic
 /// ordering), preserving the previous `String`-backed semantics.
+///
+/// The `salsa::Update` half of that claim is only true because [`Canonical`] and
+/// [`Raw`] derive `Update` themselves: salsa's derive adds an `Update` bound to
+/// every type parameter, so a marker without one makes the generated
+/// `unsafe impl<State: salsa::Update> Update for Ident<State>` unsatisfiable,
+/// and a container's per-field dispatch quietly resolves `Ident<Canonical>`
+/// through salsa's `'static + PartialEq` fallback instead (GH #972). That
+/// fallback happens to be value-correct here -- `Ident`'s derived `PartialEq`
+/// bottoms out in the same interned comparison `CanonicalStorage::maybe_update`
+/// makes -- so this was never a wrong answer, only a doc claiming a delegation
+/// that could not occur. The assertion below is what keeps the claim honest: it
+/// is a compile error the moment the bound stops being satisfiable.
+///
+/// Scope of the fix, stated so nobody over-reads it: salsa calls a FIELD's
+/// `maybe_update` only for tracked STRUCTS (`salsa-macro-rules`'
+/// `setup_tracked_struct`), while a tracked FUNCTION's memo backdates through
+/// `values_equal`/`PartialEq` (`salsa::function::backdate`) and an input setter
+/// overwrites outright. This crate declares no tracked structs -- every
+/// `#[salsa::tracked]` item here is a function -- so making the bound
+/// satisfiable changes which impl the compiler SELECTS and changes no runtime
+/// behavior at all today. It is a correctness-of-documentation fix plus
+/// forward-compatibility for the first tracked struct, not a behavior change.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::Update)]
 pub struct Ident<State = Canonical> {
     inner: CanonicalStorage,
     _phantom: PhantomData<State>,
 }
+
+// The derived `Update` on `Ident<State>` must be *reachable* at both marker
+// states, not merely present. A prose claim about which `maybe_update` runs is
+// unfalsifiable; instantiating the bound turns it into a build failure.
+const _: fn() = || {
+    fn assert_update<T: salsa::Update>() {}
+    assert_update::<Ident<Canonical>>();
+    assert_update::<Ident<Raw>>();
+    assert_update::<CanonicalStorage>();
+};
 
 /// A borrowed identifier reference with state tracking
 /// This is the key type that enables zero-copy substring operations

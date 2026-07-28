@@ -17,6 +17,11 @@ pub enum Method {
     RungeKutta4,
 }
 
+/// Its `f64` time specs are compared with the DERIVED (IEEE) `PartialEq`; see
+/// the "Float equality in this crate" section on `crate::ast::Literal` for the
+/// project's position on float equality in cache keys (GH #642). A NaN here is
+/// not reachable from a valid `SimSpecs`, so only the signed-zero direction
+/// applies, and it is inert for a start/stop/dt.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
 pub struct Specs {

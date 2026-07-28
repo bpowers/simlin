@@ -2,7 +2,90 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Floating-point utility functions for the simulation engine.
+//! Floating-point utility functions for the simulation engine, and the two
+//! "this number is not ordinary data" conventions the engine works with.
+//!
+//! Those two are best read together, because they pull in opposite directions:
+//! [`NA`] is Vensim's "missing data" sentinel and is FINITE and comparable **on
+//! purpose**, while a NaN is a propagating failure signal. If you are asking why
+//! this codebase treats NaN the way it does, the answer is below.
+//!
+//! # What a NaN means here: a diagnostic, not a value
+//!
+//! **What a practitioner sees, and what it costs them.** A line on a graph that
+//! stops. The modeller's next task is *provenance*: search backward through the
+//! dependency graph for where the NaN came from, because a NaN spreads through
+//! ARITHMETIC to whatever reads it, so a stopped line usually means the origin is
+//! upstream rather than here. The graph says that something broke and not what.
+//! That backward hunt is the real cost of a NaN, and it is paid by hand.
+//!
+//! **The exception matters during that hunt, so it is stated here rather than
+//! discovered.** NaN is absorbing in arithmetic, NOT through comparisons and
+//! conditionals. Every IEEE comparison against a NaN is false, so
+//! `IF x > 0 THEN 1 ELSE 0` with a NaN `x` takes the ELSE branch and returns a
+//! perfectly finite `0` -- and everything downstream of THAT is finite too. Two
+//! consequences for a modeller tracing an origin: a finite variable does not
+//! clear its inputs (it may be sitting on the NaN behind a conditional), and a
+//! NaN can vanish partway down a chain rather than reaching the output that
+//! would have revealed it. So "everything downstream is NaN" is the common case,
+//! not the rule, and any diagnostic that claims otherwise is giving the modeller
+//! false guidance.
+//!
+//! **What it usually is.** Most often the runtime result of a division by zero,
+//! which then propagates through everything reading it. Sometimes it is
+//! deliberate: a modeller uses it as a sentinel to catch behaviour leaving a
+//! sensible range. Either way it means something is broken -- not that a normal
+//! computation produced an unusual number. ([`NA`] is the opposite case, and is
+//! why it is finite: "missing data" is a value the model tests for, so it has to
+//! survive comparison and arithmetic.)
+//!
+//! **Two consequences for the engine**, which are the part a maintainer needs:
+//!
+//! 1. *Attributing a NaN to its origin is high-value*, because the alternative
+//!    is that hand search. Wherever the engine knows STRUCTURALLY that a
+//!    variable must evaluate to NaN -- an unfilled equation is the clearest case
+//!    -- a warning naming the variable replaces the entire backward hunt. That
+//!    is the argument for such diagnostics, and it is worth more than it looks.
+//!    The clearest case is now diagnosed: a variable whose whole equation is the
+//!    NaN literal gets a `Warning` naming it
+//!    (`crate::common::ErrorCode::UnfilledEquation`, decided by
+//!    `crate::variable::unfilled_arms` and emitted per model by
+//!    `crate::db::diagnostic`). That shape is where Vensim's `A FUNCTION OF(...)`
+//!    sketch placeholder lands, and Vensim itself refuses to simulate a model
+//!    containing one -- so without the warning we returned NaN where the source
+//!    tool declined to answer at all.
+//! 2. *A NaN the engine manufactures is noise in a channel debugged by hand.* On
+//!    the graph it is indistinguishable from the user's own division by zero, so
+//!    it costs someone a debugging session that ends at our bug. That is what
+//!    makes GH #975 (a spurious first-step NaN in a generated LTM link score) a
+//!    real defect rather than a cosmetic one, and the reason to fix that class
+//!    properly rather than narrowly. Its root cause is the shape to watch for:
+//!    the engine wrote an equation of its own -- the ceteris-paribus freeze of a
+//!    dynamic subscript index -- whose first-DT value was the language default
+//!    `0`, which is in range for no dimension. The fix names the un-lagged index
+//!    as that freeze's initial value instead
+//!    (`crate::ltm_augment::freeze_at_previous`), so nothing manufactures the
+//!    NaN in the first place.
+//!
+//! **The technical footnote**, which follows from the above rather than
+//! motivating it: the engine needs no machinery that treats a NaN as a value
+//! with structure worth preserving.
+//!
+//! A practitioner cannot author a NaN payload. There is exactly one NaN spelling
+//! at the language surface -- the lexer's `nan` keyword -- and it yields one
+//! canonical `f64::NAN` (`0x7ff8_0000_0000_0000`). The engine can manufacture
+//! one too, by folding an arithmetic NaN at compile time
+//! (`crate::compiler::fold` on `0/0`) or by computing one at runtime; on
+//! x86-64 those carry the hardware default quiet NaN
+//! (`0xfff8_0000_0000_0000`) instead. That difference is deterministic and,
+//! more to the point, semantically empty: a NaN is a NaN.
+//!
+//! So comparing NaNs by BIT PATTERN -- which `crate::ast::Literal` does, so a
+//! cached value is equal to itself and salsa can backdate it -- draws no
+//! distinction anyone can author or observe, while IEEE `==` (`NaN != NaN`)
+//! makes a value unequal to its own rebuild. Bit comparison is the right default
+//! wherever a float feeds a cache key; `ast::Literal` records where it is
+//! implemented, which types are still outside it, and why that is accepted.
 
 /// Vensim's `:NA:` ("missing data") sentinel: the *finite* number `-2^109`.
 ///
@@ -11,7 +94,10 @@
 /// That existence test only works because `:NA:` is finite: ordinary `=`
 /// equality (`approx_eq`) matches the sentinel against itself, and arithmetic on
 /// `:NA:` computes a finite result rather than poisoning the expression the way
-/// NaN (which is absorbing) would. Both `:NA:` paths in the engine -- the
+/// NaN (which IS absorbing in arithmetic) would. Note the existence test itself
+/// is the shape that would NOT have been rescued by a NaN: an `x = NAN`
+/// comparison is false rather than poisoning, so the idiom would silently take
+/// its else-branch instead of failing loudly. Both `:NA:` paths -- the
 /// expression literal (via the MDL->XMILE formatter) and the data-list literal
 /// (via the MDL number-list parser) -- route to this single constant so the
 /// representation is consistent and Vensim-faithful.

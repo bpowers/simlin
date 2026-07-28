@@ -1794,33 +1794,17 @@ where
 /// first), so the hop polarity -- and hence the polarity-prefixed loop ids
 /// the runtime join is keyed on -- is decided in exactly one place.
 fn source_to_agg_hop_polarity(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
     var_graph: &crate::ltm::CausalGraph,
     from_var_level: &str,
     agg: &crate::ltm_agg::AggNode,
 ) -> crate::ltm::LinkPolarity {
-    use crate::ltm::LinkPolarity;
-
-    // Reconstruct the agg's lowered AST from its equation text (the agg is
-    // not a model variable, so the graph's variable map has no AST for it).
-    // Mirrors `emit_source_to_agg_link_scores`' reconstruction.
-    let agg_eqn = if agg.result_dims.is_empty() {
-        super::LtmEquation::scalar(agg.equation_text.clone())
-    } else {
-        super::LtmEquation::apply_to_all(agg.result_dims.clone(), agg.equation_text.clone())
-    };
-    let Some(agg_var) =
-        super::parse::reconstruct_ltm_var_lowered(db, &agg.name, &agg_eqn, model, project)
-    else {
-        return LinkPolarity::Unknown;
-    };
-    let Some(agg_ast) = agg_var.ast() else {
-        return LinkPolarity::Unknown;
-    };
+    // The agg's body is the reducer call the enumerator classified, carried
+    // on the node (GH #983). It used to be recovered by printing
+    // `equation_text`, re-parsing it and re-lowering it against a freshly
+    // built scope -- and an agg whose reconstruction failed came back
+    // `Unknown`, degrading every loop through it to `Undetermined`.
     let source = Ident::<Canonical>::new(from_var_level);
-    var_graph.source_to_agg_polarity(&source, agg_ast)
+    var_graph.source_to_agg_polarity(&source, &agg.reducer)
 }
 
 /// Recover the polarity of synthetic-aggregate-node hops in `loops` (GH #516).
@@ -1888,8 +1872,7 @@ pub(crate) fn recover_agg_hop_polarities(
                 .iter()
                 .find(|(name, _)| name.as_str() == to_var_level)
             {
-                let p =
-                    source_to_agg_hop_polarity(db, model, project, var_graph, from_var_level, agg);
+                let p = source_to_agg_hop_polarity(var_graph, from_var_level, agg);
                 if p != LinkPolarity::Unknown {
                     link.polarity = p;
                     patched = true;

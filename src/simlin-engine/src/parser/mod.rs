@@ -7,7 +7,7 @@
 //! This parser replaces the LALRPOP-generated parser with equivalent functionality.
 //! It uses the existing lexer and produces the same AST types (Expr0, IndexExpr0).
 
-use crate::ast::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
+use crate::ast::{BinaryOp, Expr0, IndexExpr0, Literal, UnaryOp};
 use crate::builtins::{Loc, UntypedBuiltinFn};
 use crate::common::{EquationError, ErrorCode, RawIdent};
 use crate::lexer::{Lexer, LexerType, Spanned, Token};
@@ -564,7 +564,11 @@ impl<'input> Parser<'input> {
                 let (lpos, tok, rpos) = *self.advance().unwrap();
                 if let Token::Num(s) = tok {
                     match s.parse::<f64>() {
-                        Ok(n) => Ok(Expr0::Const(s.to_string(), n, Loc::new(lpos, rpos))),
+                        Ok(n) => Ok(Expr0::Const(
+                            s.to_string(),
+                            Literal::new(n),
+                            Loc::new(lpos, rpos),
+                        )),
                         Err(_) => Err(EquationError {
                             start: lpos as u16,
                             end: rpos as u16,
@@ -579,7 +583,7 @@ impl<'input> Parser<'input> {
                 let (lpos, _, rpos) = *self.advance().unwrap();
                 Ok(Expr0::Const(
                     "NaN".to_string(),
-                    f64::NAN,
+                    Literal::new(f64::NAN),
                     Loc::new(lpos, rpos),
                 ))
             }

@@ -54,10 +54,10 @@ pub(crate) use with_lookup::{
 #[path = "ltm_augment_post_transform.rs"]
 mod post_transform;
 
-pub(crate) use post_transform::per_element_row_for_target;
 #[cfg(test)]
 pub(crate) use post_transform::substitute_reducers_in_equation;
 use post_transform::{PerElementRefCtx, qualify_axis_element, substitute_reducers_in_expr0};
+pub(crate) use post_transform::{dep_element_pins, per_element_row_for_target};
 
 /// Context for recognizing GH #511 iterated-dimension source references in
 /// the partial-equation builder: the live source's declared dimension names
@@ -195,7 +195,10 @@ struct WrapOutcome {
 /// ([`wrap_non_matching_in_previous`] / [`wrap_index_non_matching_in_previous`]),
 /// bundled so the deep recursion threads one `&WrapCtx` instead of a long
 /// positional argument list. Every field is a `Copy` reference, so the body
-/// destructures it back into the historically-named locals with no clones.
+/// destructures it back into the historically-named locals with no clones --
+/// and the whole struct is `Copy`, which lets the `LOOKUP` table-argument
+/// descent rebind exactly one field (see [`OccurrenceLookup::empty`]).
+#[derive(Clone, Copy)]
 struct WrapCtx<'a> {
     /// The source variable whose live shape is held out of `PREVIOUS`
     /// wrapping; all its other occurrences (and every other-dep reference)
@@ -227,6 +230,10 @@ struct WrapCtx<'a> {
     /// occurrence's structural path (tracked as the wrap descends), not a
     /// re-derivation on the reparsed `Expr0`.
     occ: &'a OccurrenceLookup<'a>,
+    /// True while the descent is inside a subscript INDEX expression, which is
+    /// the one position where a frozen read's FIRST-DT value has to be chosen
+    /// rather than defaulted. See [`freeze_at_previous`] (GH #975).
+    in_subscript_index: bool,
     /// The `PerElement` row-pinning context (GH #525, T6), `Some` only for
     /// [`generate_per_element_link_equation`].
     ///
@@ -244,6 +251,14 @@ struct WrapCtx<'a> {
     pin: Option<&'a PerElementRefCtx<'a>>,
 }
 
+/// The first-DT initial value of every `PREVIOUS` the LTM walkers SYNTHESIZE
+/// ([`freeze_at_previous`], GH #975), in its own file only to keep this one
+/// under the project line-count lint.
+#[path = "ltm_augment_freeze.rs"]
+mod freeze;
+
+use freeze::freeze_at_previous;
+
 /// Append child index `i` to `path`, yielding the child node's structural path.
 /// The wrap's recursion mirrors `db::ltm_ir::walk_all_in_expr`'s child-index
 /// construction exactly, so the path at any node equals that occurrence's
@@ -252,29 +267,32 @@ struct WrapCtx<'a> {
 /// `classifier_agreement_tests::assert_occurrence_stream_aligns` proves
 /// corpus-wide. Cloning per descent is cheap: LTM equations are short.
 ///
-/// `i` is a `usize` and the conversion is CHECKED, mapping an over-arity child
-/// (a variadic builtin with 65,536+ arguments) to
-/// [`db::ltm_ir::UNADDRESSABLE_CHILD`] rather than letting `as u16` wrap. That
-/// matters because wrapping produced an EARLIER sibling's path: the lookup would
-/// return an unrelated occurrence, `missing_occurrence` would never fire, and
-/// the wrap would freeze the wrong reference and emit a plausible wrong score.
-/// The sentinel is a value `site_child_index` never emits, so every lookup at or
-/// below such a child provably MISSES -- which turns the case into the existing
-/// loud skip-and-warn. Callers additionally flag it directly (see the `App` arms)
-/// rather than relying only on the downstream miss.
+/// `i` fits a `u16` by the LTM front door, not by luck: `model_ltm_reference_sites`
+/// refuses a target equation needing more than
+/// [`MAX_SITE_CHILDREN`](crate::db::ltm_ir::MAX_SITE_CHILDREN) children at one
+/// level, and `model_ltm_variables` then emits no LTM variable for that model at
+/// all -- so the wrap never runs on an equation whose child indices could
+/// overflow. **The front door is the whole of the soundness argument here.**
+///
+/// The conversion saturates rather than wrapping, which is strictly better --
+/// wrapping maps child 65,536 onto child 0, so it can alias an ARBITRARY earlier
+/// sibling. But saturating is not a safety net: this change deleted the reserved
+/// unaddressable-child sentinel that used to hold `u16::MAX` back, so `u16::MAX`
+/// is now an ordinary, addressable child index (pinned by `db::ltm_ir::ltm_ir_tests`'
+/// `the_production_limit_is_the_whole_u16_range`). A violated precondition would
+/// therefore land on sibling 65,535's real recorded `SiteId` -- exactly the alias
+/// the sentinel used to make impossible. Do not read the saturation as
+/// protection; read it as "the failure mode is one specific collision instead of
+/// an arbitrary one, and the front door is what keeps it unreachable".
+///
+/// It is not a `panic`/`expect` because release builds use `panic = abort`:
+/// aborting the host process is a worse answer than an unreachable collision on
+/// a model for which no link score is generated at all.
 fn child_path(path: &[u16], i: usize) -> Vec<u16> {
     let mut v = Vec::with_capacity(path.len() + 1);
     v.extend_from_slice(path);
-    v.push(u16::try_from(i).unwrap_or(crate::db::ltm_ir::UNADDRESSABLE_CHILD));
+    v.push(u16::try_from(i).unwrap_or(u16::MAX));
     v
-}
-
-/// Whether builtin child index `i` can be addressed by a `SiteId` element. The
-/// wrap's `App` arms set [`WrapOutcome::missing_occurrence`] when this is false,
-/// so the partial is abandoned LOUDLY at the overflow point instead of depending
-/// on a lookup miss further down.
-fn child_is_addressable(i: usize) -> bool {
-    crate::db::ltm_ir::site_child_index(i).is_some()
 }
 
 /// The `Collapse` / `Mismatch` / `NotIterated` verdict for an iterated-dimension
@@ -369,6 +387,7 @@ fn wrap_non_matching_in_previous(
         live_shape,
         live_reducer_text,
         other_deps,
+        in_subscript_index,
         ..
     } = ctx;
     // Track A stage 1: hold a designated hoisted reducer subexpression LIVE
@@ -411,10 +430,10 @@ fn wrap_non_matching_in_previous(
                     }
                     expr
                 } else {
-                    Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
+                    freeze_at_previous(expr, loc, in_subscript_index)
                 }
             } else if other_deps.contains(&canonical) {
-                Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
+                freeze_at_previous(expr, loc, in_subscript_index)
             } else {
                 expr
             }
@@ -555,6 +574,7 @@ fn wrap_non_matching_in_previous(
                                 true,
                                 &child_path(path, i),
                                 frozen,
+                                axis_dim_at(ctx, &canonical, i),
                             )
                         },
                     ),
@@ -574,6 +594,7 @@ fn wrap_non_matching_in_previous(
                                         false,
                                         &child_path(path, i),
                                         frozen,
+                                        axis_dim_at(ctx, &canonical, i),
                                     )
                                 }
                             })
@@ -621,6 +642,7 @@ fn wrap_non_matching_in_previous(
                     skip_index_qualification,
                     &child_path(path, i),
                     child_frozen,
+                    axis_dim_at(ctx, &canonical, i),
                 )
             };
             let indices: Vec<IndexExpr0> = match ctx.pin.filter(|_| &canonical == live_source) {
@@ -640,10 +662,7 @@ fn wrap_non_matching_in_previous(
             };
             let subscript = Expr0::Subscript(ident, indices, loc);
             if will_wrap {
-                Expr0::App(
-                    UntypedBuiltinFn("PREVIOUS".to_string(), vec![subscript]),
-                    loc,
-                )
+                freeze_at_previous(subscript, loc, in_subscript_index)
             } else {
                 subscript
             }
@@ -674,61 +693,63 @@ fn wrap_non_matching_in_previous(
                         ctx.occ,
                         path,
                         &mut out.missing_occurrence,
-                        // This call lags (or freezes) everything inside it,
-                        // subscript index reads included, so a runtime table
-                        // index in there is already ceteris-paribus.
-                        true,
                     ),
                     None => call,
                 };
             }
             // A LOOKUP call's first argument names a graphical-function table
-            // (a lookup-only variable, or the WITH-LOOKUP self-reference); it
-            // is static data the compiler resolves to a table id, not a causal
-            // value reference. Wrapping it in PREVIOUS produces
+            // (a lookup-only variable, or the WITH-LOOKUP self-reference); the
+            // table HEAD is static data the compiler resolves to a table id, not
+            // a causal value reference. Wrapping it in PREVIOUS produces
             // `lookup(PREVIOUS(table), ...)`, which cannot compile (a
             // table-only variable has no value slot), so the whole link-score
             // fragment silently zeroes -- the failure mode behind WRLD3's
-            // identically-zero table-mediated link scores. Hold the table
-            // argument verbatim and transform only the index argument(s).
+            // identically-zero table-mediated link scores. Hold the HEAD
+            // verbatim.
+            //
+            // Its subscript INDEX expressions are a different thing entirely
+            // (GH #984): `compiler::codegen::extract_table_info`'s
+            // `Expr::Subscript` arm builds the element offset out of the live
+            // index `Expr`s, so `LOOKUP(g[idx], x)` reads `idx` at the CURRENT
+            // step. Held verbatim, every partial of that target varied with
+            // `idx`, misattributing its movement to whichever source the partial
+            // isolates -- a wrong number with no diagnostic. So the indices go
+            // through the wrap's own index pass like any other other-dep.
             if matches!(
                 name.to_ascii_lowercase().as_str(),
                 "lookup" | "lookup_forward" | "lookup_backward"
             ) && !args.is_empty()
             {
-                // The table arg (child 0) is held verbatim; only the index
-                // arg(s) are wrapped. Child indices match the `Expr2` walk,
-                // which counts the skipped `LookupTable` slot as child 0.
+                // Child indices match the `Expr2` walk, which counts the skipped
+                // `LookupTable` slot as child 0.
                 let new_args = args
                     .into_iter()
                     .enumerate()
                     .map(|(i, a)| {
                         if i == 0 {
-                            // Static table data, not a causal value read: held
-                            // verbatim by the wrap, but still row-pinned (the
-                            // pin-only descent) so a `PerElement` lowering does
-                            // not leave a dimension-name subscript behind.
+                            let a = freeze_lookup_table_indices(
+                                a,
+                                ctx,
+                                out,
+                                &child_path(path, i),
+                                frozen,
+                            );
+                            // The head is still held verbatim, but a `PerElement`
+                            // lowering must reach every source reference inside
+                            // the argument (the head itself can BE the source):
+                            // an un-pinned dimension-name subscript cannot
+                            // resolve in a scalar fragment.
                             match ctx.pin {
                                 Some(pin_ctx) => post_transform::pin_only_source_refs(
                                     a,
                                     pin_ctx,
-                                    ctx.occ,
+                                    &OccurrenceLookup::empty(),
                                     &child_path(path, i),
                                     &mut out.missing_occurrence,
-                                    // The wrap holds the table arg VERBATIM, so
-                                    // it inherits the enclosing freeze and
-                                    // nothing more: a runtime index in a bare
-                                    // table argument stays live (declined), the
-                                    // same argument inside a frozen subtree is
-                                    // already lagged (kept).
-                                    frozen,
                                 ),
                                 None => a,
                             }
                         } else {
-                            if !child_is_addressable(i) {
-                                out.missing_occurrence = true;
-                            }
                             wrap_non_matching_in_previous(a, ctx, out, &child_path(path, i), frozen)
                         }
                     })
@@ -780,23 +801,15 @@ fn wrap_non_matching_in_previous(
                         ctx.occ,
                         path,
                         &mut out.missing_occurrence,
-                        // Frozen whole, one line below.
-                        true,
                     ),
                     None => reducer,
                 };
-                return Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![reducer]), loc);
+                return freeze_at_previous(reducer, loc, in_subscript_index);
             }
             let args = args
                 .into_iter()
                 .enumerate()
                 .map(|(i, a)| {
-                    // An over-arity child cannot be addressed by a `SiteId`, so
-                    // every occurrence decision inside it is unavailable: abandon
-                    // the partial loudly rather than wrap on a guessed path.
-                    if !child_is_addressable(i) {
-                        out.missing_occurrence = true;
-                    }
                     wrap_non_matching_in_previous(a, ctx, out, &child_path(path, i), frozen)
                 })
                 .collect();
@@ -858,155 +871,116 @@ fn wrap_non_matching_in_previous(
     }
 }
 
-/// If `index` is a bare identifier that unambiguously names a dimension
-/// element (per `dims_ctx`), return its qualified `dimension·element` form;
-/// otherwise `None`.
+/// Freeze the runtime value reads in a `LOOKUP` TABLE argument's subscript
+/// indices, leaving the table HEAD (and every static element selector) exactly
+/// as written (GH #984).
 ///
-/// Subscript indices that name dimension elements are *element selectors*,
-/// not causal references. Treating them like variable references and
-/// PREVIOUS-wrapping them (the pre-GH#587 behavior) turns a statically
-/// resolvable index into a dynamic expression: the resulting
-/// `dep[PREVIOUS(elem)]` needs a helper-aux chain whose innermost helper
-/// (`$arg = elem`, a bare element name as an equation) cannot compile, so the
-/// link score silently stubs to zero. Qualifying instead keeps the index a
-/// compile-time constant: it can never be confused with a variable reference
-/// (XMILE forbids dimension/variable name collisions, so `dim·elem` is
-/// unambiguous), and `PREVIOUS(dep[dim·elem])` compiles to a direct LoadPrev
-/// at the element's slot.
+/// This is the whole of the fix, and it is one rule for every caller: the
+/// wrap's own index pass ([`wrap_index_non_matching_in_previous`]) decides what
+/// a table index is, exactly as it does for an ordinary subscript. Static
+/// selectors -- a literal element, a dimension name, `@N`, a numeric literal --
+/// hit its guards and come back untouched; a genuine value read (`idx`,
+/// `idx + 1`) reaches the recursive wrap and comes back frozen.
 ///
-/// Qualification requires knowing *which* dimension the element belongs to.
-/// The wrapper does not know the subscripted variable's declared dimensions,
-/// so it only qualifies names that exactly one project dimension declares
-/// (`dimension_uniquely_containing_element`); names shared by multiple
-/// dimensions -- or shadowed cases the caller cannot distinguish -- keep the
-/// conservative wrapping behavior.
-fn qualify_element_index(
-    index: &IndexExpr0,
-    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
-) -> Option<IndexExpr0> {
-    let ctx = dims_ctx?;
-    let IndexExpr0::Expr(Expr0::Var(name, loc)) = index else {
-        return None;
-    };
-    let canonical = canonicalize(name.as_str());
-    // Already-qualified `dim·element` references resolve via `lookup`; keep
-    // them verbatim (they are already static).
-    if ctx.lookup(&canonical).is_some() {
-        return Some(index.clone());
-    }
-    let elem = crate::common::CanonicalElementName::from_raw(&canonical);
-    let dim_name = ctx.dimension_uniquely_containing_element(&elem)?;
-    Some(IndexExpr0::Expr(Expr0::Var(
-        RawIdent::new_from_str(&format!("{}\u{B7}{}", dim_name.as_str(), canonical)),
-        *loc,
-    )))
-}
-
-fn wrap_index_non_matching_in_previous(
-    index: IndexExpr0,
+/// Four deliberate choices:
+///
+/// - only an `Expr0::Subscript` has indices to freeze. A bare `Var` table is
+///   already static, and anything else is `BadTable` at codegen (the table
+///   argument must select exactly one element), so there is nothing here to
+///   decide about it;
+/// - the descent's dep set is WIDENED with the idents appearing in these
+///   indices, and without that the freeze does not fire at all. The wrap freezes
+///   an ident only when it is in `other_deps`, and `other_deps` comes from
+///   `variable::classify_dependencies`, whose `BuiltinContents::LookupTable` arm
+///   records the table's ident and **never walks the table expression** -- so an
+///   index variable referenced ONLY inside a table argument (the issue's own
+///   `LOOKUP(g[idx], x)`) is not a dependency and was returned live. Widening is
+///   scoped to this argument's own indices, so nothing else in the equation sees
+///   the added names, and the element / dimension-name guards in
+///   [`wrap_index_non_matching_in_previous`] run BEFORE the `other_deps` check --
+///   so adding an element or dimension name to the set cannot make it wrap. (The
+///   dep set itself is left alone: dropping a table index from a variable's
+///   dependencies is arguably an engine bug in its own right, but it is a
+///   runlist-ordering question, not this rule's, and fixing it there is a
+///   separate change);
+/// - element QUALIFICATION is suppressed (`skip_element_qualification`). A
+///   literal element index is static either way, and leaving it verbatim keeps
+///   this change to the reads it is about: on the `PerElement` path the row
+///   pinning already qualifies it from the source's own declared dims (which is
+///   the only qualification that is right for an ambiguous element name), and on
+///   the other paths the target's own equation carries the same spelling;
+/// - inside an enclosing FREEZE nothing is done. `frozen` here means the whole
+///   `LOOKUP` sits in a subtree the wrap is about to lag (a wrapped other-dep's
+///   subscript index is the only way to get here -- a pre-existing
+///   `PREVIOUS`/`INIT` and a whole-frozen reducer never reach this arm at all),
+///   so the index read is already ceteris-paribus and a second `PREVIOUS` would
+///   read two steps back.
+///
+/// Because this discharges the index everywhere the arm runs -- for ANY index
+/// ident, not only one that happens to be a dependency elsewhere -- and the
+/// enclosing freeze discharges it everywhere the arm does not,
+/// `post_transform::pin_dimension_name_indices` no longer has to REFUSE a table
+/// argument carrying a runtime index -- it keeps it and says nothing. That
+/// refusal, its `frozen` plumbing, and the warned skip it produced are deleted.
+fn freeze_lookup_table_indices(
+    arg: Expr0,
     ctx: &WrapCtx<'_>,
     out: &mut WrapOutcome,
-    skip_element_qualification: bool,
     path: &[u16],
     frozen: bool,
-) -> IndexExpr0 {
-    // Only `dims_ctx` (element/dimension recognition) and `iter_ctx` (the
-    // iterated-dim-name guard) are read directly here; the full wrap context
-    // rides `ctx` into the recursive `wrap_non_matching_in_previous` calls.
-    let &WrapCtx {
-        dims_ctx, iter_ctx, ..
-    } = ctx;
-    // An index that unambiguously names a dimension element is an element
-    // selector, never a causal reference: qualify it and leave it unwrapped
-    // (GH #587). This must be checked BEFORE the recursive wrap below, which
-    // would otherwise treat the element name as a dep reference.
-    //
-    // `skip_element_qualification` is set on the `PerElement` frozen-live-source
-    // path (Track A stage 1, finding 1): there the row-pinning lowering owns
-    // source-index qualification from `from_dims`, so a literal element index is
-    // left bare here (the element-verbatim guards below still keep it unwrapped)
-    // and the lowering qualifies it consistently. The recursive wrap still runs
-    // for a genuinely-dynamic index below, so a frozen `pop[Region, idx]` keeps
-    // its `PREVIOUS(idx)` lag.
-    if !skip_element_qualification && let Some(qualified) = qualify_element_index(&index, dims_ctx)
-    {
-        return qualified;
+) -> Expr0 {
+    let Expr0::Subscript(ident, indices, loc) = arg else {
+        return arg;
+    };
+    if frozen {
+        return Expr0::Subscript(ident, indices, loc);
     }
-    // An index that names a dimension element which *cannot* be qualified
-    // (declared by multiple dimensions at different positions, e.g. C-LEARN's
-    // region elements) is still left verbatim rather than PREVIOUS-wrapped.
-    // Wrapping it would make the subscript dynamic (`dep[PREVIOUS(elem)]`),
-    // forcing a synthesized helper aux per call site -- the dominant residual
-    // helper source on large arrayed models (GH #654) -- and is also
-    // semantically wrong for a genuinely-dynamic index (the index would be
-    // read from two steps ago instead of one). The downstream parse decides:
-    // a non-shadowed element compiles to a static subscript (direct
-    // LoadPrev), a genuinely-dynamic index still synthesizes its helper
-    // there, with single-lag semantics.
-    if let IndexExpr0::Expr(Expr0::Var(name, _)) = &index
-        && let Some(ctx) = dims_ctx
-        && ctx.is_element_of_any_dimension(&crate::common::CanonicalElementName::from_raw(
-            &canonicalize(name.as_str()),
-        ))
-    {
-        return index;
-    }
-    // An index that names a DIMENSION (`matrix[D1, c1]`'s `D1`,
-    // `SUM(matrix[State, *])`'s `State` -- the iterated-dim reference form)
-    // is a dimension selector, never a causal reference (GH #759). The two
-    // guards above cover dimension *elements*; a dimension *name* is
-    // neither an element nor qualifiable, so it previously fell through to
-    // the recursive wrap whenever a caller's (over-collected) dep set
-    // contained it: the frozen reference became `dep[PREVIOUS(d1), ..]`,
-    // whose PREVIOUS-capture helper cannot compile, silently stubbing the
-    // score to 0. Leave it verbatim -- the A2A expansion resolves it per
-    // element downstream, exactly as in the target's own equation. The
-    // `iter_ctx` leg covers callers without a project dims context (the
-    // iterated/source dims are dimension names by construction).
-    if let IndexExpr0::Expr(Expr0::Var(name, _)) = &index {
-        let canonical = canonicalize(name.as_str());
-        let names_project_dim =
-            dims_ctx.is_some_and(|ctx| ctx.is_dimension_name(canonical.as_ref()));
-        let names_iterated_dim = iter_ctx.is_some_and(|ctx| {
-            ctx.target_iterated_dims
-                .iter()
-                .chain(ctx.source_dim_names.iter())
-                .any(|d| d.as_str() == canonical.as_ref())
-        });
-        if names_project_dim || names_iterated_dim {
-            return index;
+    // Every ident under these indices is a read the wrap must be able to freeze,
+    // whether or not the dependency extractor knows about it (see the rustdoc).
+    let mut index_deps: HashSet<Ident<Canonical>> = ctx.other_deps.clone();
+    for idx in &indices {
+        let mut add = |e: &Expr0| {
+            index_deps.extend(expr_reference_idents(e).into_iter().map(|n| Ident::new(&n)));
+        };
+        match idx {
+            IndexExpr0::Expr(e) => add(e),
+            IndexExpr0::Range(l, r, _) => {
+                add(l);
+                add(r);
+            }
+            // Wildcard / star-range / `@N` carry no `Expr0`.
+            _ => {}
         }
     }
-    // Indices are inner content of a live reference (or of a
-    // PREVIOUS-wrapped one); a `live_source` occurrence reachable only
-    // through an index is not the live reference itself, so do not
-    // capture it -- pass a throwaway live-ref sink. The GH #526
-    // `other_dep_mismatch` doom DOES propagate: an index-nested mismatched
-    // collapse dooms the changed-first partial just the same.
-    let mut idx_out = WrapOutcome::default();
-    // The index expression is at `path` (the walk pushes the index position
-    // before descending); a `Range`'s two operands are children 0 and 1 of
-    // that, mirroring `walk_all_in_expr`.
-    let result = match index {
-        IndexExpr0::Expr(e) => IndexExpr0::Expr(wrap_non_matching_in_previous(
-            e,
-            ctx,
-            &mut idx_out,
-            path,
-            frozen,
-        )),
-        IndexExpr0::Range(l, r, loc) => IndexExpr0::Range(
-            wrap_non_matching_in_previous(l, ctx, &mut idx_out, &child_path(path, 0), frozen),
-            wrap_non_matching_in_previous(r, ctx, &mut idx_out, &child_path(path, 1), frozen),
-            loc,
-        ),
-        other => other,
+    // The IR records no occurrence anywhere under a table argument, so the
+    // descent uses an empty lookup rather than this slot's -- see
+    // [`OccurrenceLookup::empty`] for why a real one would be unsound.
+    let table_ctx = WrapCtx {
+        occ: &OccurrenceLookup::empty(),
+        other_deps: &index_deps,
+        ..*ctx
     };
-    out.other_dep_mismatch |= idx_out.other_dep_mismatch;
-    // A live-source subscript nested inside an index (`other[from[x]]`) desyncs
-    // the same way; propagate its loud miss flag out of the throwaway sink.
-    out.missing_occurrence |= idx_out.missing_occurrence;
-    result
+    let indices = indices
+        .into_iter()
+        .enumerate()
+        .map(|(i, idx)| {
+            wrap_index_non_matching_in_previous(
+                idx,
+                &table_ctx,
+                out,
+                true,
+                &child_path(path, i),
+                frozen,
+                // A literal `None`, and a KNOWN GAP: a table holder is by
+                // construction absent from `dep_dims` (GH #606), so an
+                // `axis_dim_at` call here could only ever return `None` and
+                // would read as coverage for a path that is not fixed -- GH #984
+                // still reproduces here. See `index_axis_verdict`.
+                None,
+            )
+        })
+        .collect();
+    Expr0::Subscript(ident, indices, loc)
 }
 
 /// A parse failure in a ceteris-paribus partial-equation builder.
@@ -1294,6 +1268,8 @@ fn wrap_changed_first_ast(
         iter_ctx,
         dims_ctx,
         occ,
+        // The walk starts at the slot's root expression, never inside an index.
+        in_subscript_index: false,
         pin,
     };
     let mut out = WrapOutcome::default();
@@ -1423,12 +1399,24 @@ fn contains_unfreezable_previous(expr: &Expr0) -> bool {
 /// must not be touched. References already inside a `PREVIOUS(...)`/`INIT(...)`
 /// call are skipped (already lagged/frozen, not a live read this partial
 /// must account for). The reducer set comes from
-/// `reducer_collapses_to_scalar`, so it also includes SIZE -- harmless: an
-/// equation whose only reducer is SIZE keeps the changed-first convention
-/// (the whole reducer is freezable as `PREVIOUS(size(...))`), so it does
-/// not reach this gate. RANK is excluded by that predicate: it is
+/// [`crate::ltm_agg::reducer_collapses_to_scalar`], so it also includes SIZE
+/// -- harmless: an equation whose only reducer is SIZE keeps the changed-first
+/// convention (the whole reducer is freezable as `PREVIOUS(size(...))`,
+/// because [`expr_is_array_slice_valued`] reads the SAME predicate), so it
+/// does not reach this gate. RANK is excluded by that predicate: it is
 /// array-valued and uses its own agg-routing path (GH #771/#776), so its
 /// bare arg is not this scalar-reducer feeder shape.
+///
+/// This is deliberately NOT `db::ltm_ir::OccurrenceSite::in_reducer`, which
+/// looks like the same "is this reference inside a reducer?" question but is
+/// the LTM ROUTING one ("did an aggregate node get minted for this call?") and
+/// therefore inverts on exactly SIZE and RANK. Consuming the IR bit here would
+/// flip a bare arrayed source inside `RANK(...)` from scored (via the GH #742
+/// arrayed-capture path) to loudly declined -- a user-visible score change
+/// with no argument behind it. Assessed in GH #982 and left as two predicates;
+/// `ltm_agg::reducer_collapses_to_scalar`'s doc carries the comparison and
+/// `ltm_agg::REDUCER_DECISION_TABLE` pins both of them row by row, so neither
+/// can drift.
 fn references_bare_source_inside_reducer(
     expr: &Expr0,
     source: &Ident<Canonical>,
@@ -1819,13 +1807,21 @@ fn shaped_guard_form_text(
 /// `arr[target + 1]` style index reference is frozen too; the outer
 /// subscripted variable itself is wrapped only when it names `target`
 /// (defensive -- the feeder this is used for is scalar and so is always a
-/// bare `Var` reference).
-fn wrap_matching_in_previous(expr: Expr0, target: &Ident<Canonical>) -> Expr0 {
+/// bare `Var` reference). An index-position freeze takes the un-lagged operand
+/// as its first-DT initial value, exactly as the changed-first walker does
+/// ([`freeze_at_previous`], GH #975) -- `in_subscript_index` carries that
+/// position down the descent.
+fn wrap_matching_in_previous(
+    expr: Expr0,
+    target: &Ident<Canonical>,
+    in_subscript_index: bool,
+) -> Expr0 {
+    let recurse = |e: Expr0| wrap_matching_in_previous(e, target, in_subscript_index);
     match expr {
         Expr0::Const(..) => expr,
         Expr0::Var(ref ident, loc) => {
             if &Ident::<Canonical>::new(ident.as_str()) == target {
-                Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
+                freeze_at_previous(expr, loc, in_subscript_index)
             } else {
                 expr
             }
@@ -1834,16 +1830,15 @@ fn wrap_matching_in_previous(expr: Expr0, target: &Ident<Canonical>) -> Expr0 {
             let indices: Vec<IndexExpr0> = indices
                 .into_iter()
                 .map(|idx| match idx {
-                    IndexExpr0::Expr(e) => IndexExpr0::Expr(wrap_matching_in_previous(e, target)),
+                    IndexExpr0::Expr(e) => {
+                        IndexExpr0::Expr(wrap_matching_in_previous(e, target, true))
+                    }
                     other => other,
                 })
                 .collect();
             let subscript = Expr0::Subscript(ident.clone(), indices, loc);
             if &Ident::<Canonical>::new(ident.as_str()) == target {
-                Expr0::App(
-                    UntypedBuiltinFn("PREVIOUS".to_string(), vec![subscript]),
-                    loc,
-                )
+                freeze_at_previous(subscript, loc, in_subscript_index)
             } else {
                 subscript
             }
@@ -1853,25 +1848,17 @@ fn wrap_matching_in_previous(expr: Expr0, target: &Ident<Canonical>) -> Expr0 {
             if name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init") {
                 return Expr0::App(UntypedBuiltinFn(name, args), loc);
             }
-            let args = args
-                .into_iter()
-                .map(|a| wrap_matching_in_previous(a, target))
-                .collect();
+            let args = args.into_iter().map(recurse).collect();
             Expr0::App(UntypedBuiltinFn(name, args), loc)
         }
-        Expr0::Op1(op, arg, loc) => {
-            Expr0::Op1(op, Box::new(wrap_matching_in_previous(*arg, target)), loc)
+        Expr0::Op1(op, arg, loc) => Expr0::Op1(op, Box::new(recurse(*arg)), loc),
+        Expr0::Op2(op, l, r, loc) => {
+            Expr0::Op2(op, Box::new(recurse(*l)), Box::new(recurse(*r)), loc)
         }
-        Expr0::Op2(op, l, r, loc) => Expr0::Op2(
-            op,
-            Box::new(wrap_matching_in_previous(*l, target)),
-            Box::new(wrap_matching_in_previous(*r, target)),
-            loc,
-        ),
         Expr0::If(c, t, f, loc) => Expr0::If(
-            Box::new(wrap_matching_in_previous(*c, target)),
-            Box::new(wrap_matching_in_previous(*t, target)),
-            Box::new(wrap_matching_in_previous(*f, target)),
+            Box::new(recurse(*c)),
+            Box::new(recurse(*t)),
+            Box::new(recurse(*f)),
             loc,
         ),
     }
@@ -1936,7 +1923,7 @@ pub(crate) fn generate_scalar_feeder_to_agg_equation(
         return Err(PartialEquationError::new(agg_equation_text));
     };
     let feeder_ident = Ident::<Canonical>::new(feeder);
-    let frozen = print_eqn(&wrap_matching_in_previous(ast, &feeder_ident));
+    let frozen = print_eqn(&wrap_matching_in_previous(ast, &feeder_ident, false));
     let frozen = match gf_table_ref {
         Some(table_ref) => format!("LOOKUP({table_ref}, {frozen})"),
         None => frozen,
@@ -2007,7 +1994,11 @@ pub(crate) fn generate_iterated_feeder_to_agg_equation(
     let pinned = pin_iterated_dim_indices(ast, iterated_dims, slot_parts_qualified)
         .ok_or_else(|| PartialEquationError::unfreezable(agg_equation_text))?;
     let feeder_ident = Ident::<Canonical>::new(feeder);
-    let frozen = print_eqn(&wrap_matching_in_previous(pinned.clone(), &feeder_ident));
+    let frozen = print_eqn(&wrap_matching_in_previous(
+        pinned.clone(),
+        &feeder_ident,
+        false,
+    ));
     if frozen == print_eqn(&pinned) {
         // No feeder occurrence was frozen: the "frozen" evaluation would
         // equal the agg slot itself and the score a silent constant 0.
@@ -2122,26 +2113,60 @@ fn pin_iterated_dim_indices(expr: Expr0, dims: &[String], parts: &[String]) -> O
     })
 }
 
-/// Replace every bare `Var(id)` reference in `equation_text` where `id`
-/// (canonicalized) is in `idents` with `Subscript(id, [element])`,
-/// pinning that variable to `element`.
+/// Where ONE dep is pinned in a scalar per-element link-score equation: the
+/// element it reads at that target element, as one
+/// `(canonical dimension name, element spelling)` pair per dimension **that dep
+/// declares** and that the target element projects onto, in the dep's own
+/// declaration order.
+///
+/// Carrying the dep's OWN dimensions rather than the target's is the whole
+/// content of GH #974. A bare arrayed reference inside an apply-to-all body
+/// reads its own axes' coordinates matched by dimension NAME, so a dep
+/// declaring a strict subset of the target's dimensions (`w[Age]` under
+/// `growth[Region,Age]`) must be pinned over that subset, and a dep declaring
+/// the same dimensions in another order (`w[Age,Region]`) must be pinned in ITS
+/// order. Pinning both with the target's full tuple produced an over-arity
+/// subscript in the first case (a fragment that fails to compile, so the score
+/// reads a constant 0) and a compilable, silently TRANSPOSED read in the
+/// second. The projection itself is `post_transform::dep_element_pins`; this
+/// type is just how the answer travels to the rewrite.
+#[derive(Clone)]
+pub(crate) struct DepElementPin {
+    /// The resolved axes, in the dep's declaration order.
+    pub(crate) axes: Vec<(String, String)>,
+    /// Whether `axes` covers EVERY dimension the dep declares. Only a complete
+    /// pin can subscript a BARE reference, which must be spelled at the dep's
+    /// full arity; an incomplete one still substitutes the dimension-name
+    /// indices of an already-subscripted reference, which is all that reference
+    /// needs.
+    pub(crate) complete: bool,
+}
+
+/// Replace every reference to a pinned dep in `equation_text` with that dep's
+/// own element subscript, per [`pins`](DepElementPin).
 ///
 /// Used when collapsing a scalar-source -> arrayed-target link score into
 /// per-target-element scalar variables: the target's A2A equation body
-/// references arrayed deps that share the target's dimension *bare* (the
+/// references arrayed deps that share the target's dimensions *bare* (the
 /// A2A expansion subscripts them at runtime), but a *scalar* per-element
-/// link-score variable must spell out the subscript. `idents` is the set
-/// of those deps (the caller computes it -- it needs to know which deps
-/// are arrayed and share the target's dimension).
+/// link-score variable must spell out the subscript. `pins` says which deps
+/// those are and which element each one reads -- the caller computes it,
+/// because deciding that needs the deps' declared dimensions and the project's
+/// dimension mappings.
 ///
-/// `Subscript` nodes are left untouched: a dep that already carries an
-/// explicit subscript (an `Ast::Arrayed` per-element slot wrote
-/// `population[NYC]`) is already element-pinned, and double-subscripting
-/// would be nonsensical. Function-name identifiers and identifiers not in
-/// `idents` are likewise left alone. The result is re-printed in the
-/// canonical equation format (via parse + `print_eqn`).
+/// A bare `Var(id)` reference to a COMPLETELY-pinned dep becomes
+/// `Subscript(id, <its row>)`. An already-`Subscript`ed reference keeps its
+/// literal element indices, but an index naming one of the dep's OWN
+/// dimensions (`dep[Region]`, the A2A iterated reference form) reads "the
+/// current element" -- which in a per-element scalar equation is exactly the
+/// element being pinned -- so it is substituted whether or not the pin is
+/// complete. Left unpinned, such an index is unresolvable in scalar context
+/// and forces a synthesized helper aux per occurrence (GH #654: ~27k of
+/// C-LEARN's ~30k residual helpers came from this form). Function-name
+/// identifiers and identifiers absent from `pins` are left alone. The result is
+/// re-printed in the canonical equation format (via parse + `print_eqn`).
 ///
-/// Returns `Ok(equation_text)` unchanged when `idents` is empty (nothing to
+/// Returns `Ok(equation_text)` unchanged when `pins` is empty (nothing to
 /// pin -- a legitimate no-op), and `Err([`PartialEquationError`])` when the
 /// (already-PREVIOUS-wrapped) partial text fails to re-parse. The latter is
 /// loud rather than a silent lowercased-input fallback for the same reason
@@ -2149,93 +2174,74 @@ fn pin_iterated_dim_indices(expr: Expr0, dims: &[String], parts: &[String]) -> O
 /// not even compile, and a silent wrong equation is worse than skipping the
 /// score with a warning.
 ///
-/// `element` is a single element name (`"nyc"`, or qualified `"region·nyc"`)
-/// for a one-dimensional target, or a comma-joined tuple (`"nyc,adult"` /
-/// `"region·nyc,age·adult"`) for a multi-dimensional one -- the same form
-/// `db::ltm::cartesian_subscripts` produces (and `qualify_element_csv`
-/// qualifies) and the `parse_link_offsets` discovery parser expects on the
-/// `to` side.
+/// Each element spelling is a single element name (`"nyc"`, or qualified
+/// `"region·nyc"`) -- the same form `db::ltm::cartesian_subscripts` produces
+/// (and `qualify_element_csv` qualifies) and the `parse_link_offsets` discovery
+/// parser expects on the `to` side.
 pub(crate) fn subscript_idents_at_element(
     equation_text: &str,
-    idents: &HashSet<Ident<Canonical>>,
-    element: &str,
+    pins: &HashMap<Ident<Canonical>, DepElementPin>,
 ) -> Result<String, PartialEquationError> {
-    if idents.is_empty() {
+    if pins.is_empty() {
         return Ok(equation_text.to_string());
     }
     let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
         return Err(PartialEquationError::new(equation_text));
     };
-    let index_exprs: Vec<IndexExpr0> = element
-        .split(',')
-        .map(|e| {
-            IndexExpr0::Expr(Expr0::Var(
-                crate::common::RawIdent::new_from_str(e.trim()),
-                crate::ast::Loc::default(),
-            ))
-        })
-        .collect();
-    // Qualified element parts (`region·nyc`) also pin *dimension-name*
-    // subscript indices: a dep referenced as `dep[Region]` (the A2A iterated
-    // form) reads the same element a bare `dep` reference would, so in a
-    // per-element scalar equation it must be pinned to that element. The map
-    // is keyed by the canonical dimension name each qualified part names.
-    let dim_to_index: Vec<(String, IndexExpr0)> = element
-        .split(',')
-        .zip(index_exprs.iter())
-        .filter_map(|(part, idx_expr)| {
-            let part = part.trim();
-            part.split_once('\u{00B7}')
-                .map(|(dim, _)| (canonicalize(dim).into_owned(), idx_expr.clone()))
-        })
-        .collect();
-    Ok(print_eqn(&subscript_idents_in_expr0(
-        ast,
-        idents,
-        &index_exprs,
-        &dim_to_index,
-    )))
+    Ok(print_eqn(&subscript_idents_in_expr0(ast, pins)))
+}
+
+/// The `IndexExpr0` a pin entry's element spelling becomes.
+fn pin_index(elem: &str) -> IndexExpr0 {
+    IndexExpr0::Expr(Expr0::Var(
+        crate::common::RawIdent::new_from_str(elem),
+        crate::ast::Loc::default(),
+    ))
 }
 
 fn subscript_idents_in_expr0(
     expr: Expr0,
-    idents: &HashSet<Ident<Canonical>>,
-    index_exprs: &[IndexExpr0],
-    dim_to_index: &[(String, IndexExpr0)],
+    pins: &HashMap<Ident<Canonical>, DepElementPin>,
 ) -> Expr0 {
     match expr {
         Expr0::Const(..) => expr,
         Expr0::Var(ref ident, loc) => {
             let canonical = Ident::new(ident.as_str());
-            if idents.contains(&canonical) {
-                Expr0::Subscript(ident.clone(), index_exprs.to_vec(), loc)
-            } else {
-                expr
+            // Only a COMPLETE pin can spell a bare reference: a subscript
+            // covering some of the dep's axes is not a legal reference at all.
+            match pins.get(&canonical).filter(|pin| pin.complete) {
+                Some(pin) => Expr0::Subscript(
+                    ident.clone(),
+                    pin.axes.iter().map(|(_, elem)| pin_index(elem)).collect(),
+                    loc,
+                ),
+                None => expr,
             }
         }
         // An already-subscripted reference to a pinned dep: indices that are
         // *element literals* are already pinned and stay, but an index that
-        // names one of the pinned DIMENSIONS (`dep[Region]`, the A2A iterated
-        // reference form) reads "the current element" -- which in a
-        // per-element scalar equation is exactly the element being pinned.
-        // Left unpinned, such an index is unresolvable in scalar context and
-        // forces a synthesized helper aux per occurrence (GH #654: ~27k of
-        // C-LEARN's ~30k residual helpers came from this form).
+        // names one of that dep's own DIMENSIONS gets this element's coordinate
+        // for it. The lookup is over the DEP's dimensions, so a subset-dims or
+        // reordered dep resolves each of its axes correctly (GH #974) -- and an
+        // axis the target does not project (`pop[Region, idx]` under a
+        // `growth[Region]` target, whose `Age` axis the reference pins itself)
+        // simply has no entry, which is why an INCOMPLETE pin still applies here.
         Expr0::Subscript(ident, indices, loc) => {
             let canonical = Ident::new(ident.as_str());
-            if !idents.contains(&canonical) || dim_to_index.is_empty() {
+            let Some(pin) = pins.get(&canonical) else {
                 return Expr0::Subscript(ident, indices, loc);
-            }
+            };
             let indices = indices
                 .into_iter()
                 .map(|idx| {
                     if let IndexExpr0::Expr(Expr0::Var(name, _)) = &idx {
                         let idx_canonical = canonicalize(name.as_str());
-                        if let Some((_, pinned)) = dim_to_index
+                        if let Some((_, elem)) = pin
+                            .axes
                             .iter()
                             .find(|(dim, _)| dim.as_str() == idx_canonical.as_ref())
                         {
-                            return pinned.clone();
+                            return pin_index(elem);
                         }
                     }
                     idx
@@ -2246,55 +2252,23 @@ fn subscript_idents_in_expr0(
         Expr0::App(UntypedBuiltinFn(name, args), loc) => {
             let args = args
                 .into_iter()
-                .map(|a| subscript_idents_in_expr0(a, idents, index_exprs, dim_to_index))
+                .map(|a| subscript_idents_in_expr0(a, pins))
                 .collect();
             Expr0::App(UntypedBuiltinFn(name, args), loc)
         }
-        Expr0::Op1(op, inner, loc) => Expr0::Op1(
-            op,
-            Box::new(subscript_idents_in_expr0(
-                *inner,
-                idents,
-                index_exprs,
-                dim_to_index,
-            )),
-            loc,
-        ),
+        Expr0::Op1(op, inner, loc) => {
+            Expr0::Op1(op, Box::new(subscript_idents_in_expr0(*inner, pins)), loc)
+        }
         Expr0::Op2(op, lhs, rhs, loc) => Expr0::Op2(
             op,
-            Box::new(subscript_idents_in_expr0(
-                *lhs,
-                idents,
-                index_exprs,
-                dim_to_index,
-            )),
-            Box::new(subscript_idents_in_expr0(
-                *rhs,
-                idents,
-                index_exprs,
-                dim_to_index,
-            )),
+            Box::new(subscript_idents_in_expr0(*lhs, pins)),
+            Box::new(subscript_idents_in_expr0(*rhs, pins)),
             loc,
         ),
         Expr0::If(cond, then_expr, else_expr, loc) => Expr0::If(
-            Box::new(subscript_idents_in_expr0(
-                *cond,
-                idents,
-                index_exprs,
-                dim_to_index,
-            )),
-            Box::new(subscript_idents_in_expr0(
-                *then_expr,
-                idents,
-                index_exprs,
-                dim_to_index,
-            )),
-            Box::new(subscript_idents_in_expr0(
-                *else_expr,
-                idents,
-                index_exprs,
-                dim_to_index,
-            )),
+            Box::new(subscript_idents_in_expr0(*cond, pins)),
+            Box::new(subscript_idents_in_expr0(*then_expr, pins)),
+            Box::new(subscript_idents_in_expr0(*else_expr, pins)),
             loc,
         ),
     }
@@ -2322,13 +2296,14 @@ fn subscript_idents_in_expr0(
 /// canonical text to its agg name; it is empty for a true scalar `from`. `to_deps`
 /// is the full dependency set of that equation (computed with the target's AST
 /// dimensions so element-name subscripts are not mistaken for variables), plus
-/// the agg names. `to_deps_to_subscript` is the subset of `to_deps` that
-/// must be element-pinned -- the arrayed deps that share the target's
-/// dimension (the target self-reference is pinned implicitly via the
-/// already-subscripted `to[element]` reference the guard form is built
-/// around). The source itself is never in this set: an arrayed-agg source is
-/// pinned via its `source_pins` entry instead, since the full target tuple
-/// over-subscripts it in the broadcast case (GH #528).
+/// the agg names. `to_deps_to_subscript` is the pin table for the subset of
+/// `to_deps` that must be element-pinned -- the arrayed deps whose every
+/// declared dimension this target element projects onto, each mapped to the
+/// element IT reads (see [`DepElementPin`]; the target self-reference is pinned
+/// implicitly via the already-subscripted `to[element]` reference the guard
+/// form is built around). The source itself is never in this table: an
+/// arrayed-agg source is pinned via its `source_pins` entry instead, since an
+/// agg has no declared dimensions of its own to project onto (GH #528).
 ///
 /// `source_ref_override`: the pre-rendered (quoted, possibly element-pinned)
 /// reference expression to use for the `Δsource` denominator. `None` uses the
@@ -2338,9 +2313,9 @@ fn subscript_idents_in_expr0(
 /// partial) numerator do; a bare agg reference in a scalar equation would not
 /// compile and the link score would stub to zero.
 ///
-/// `source_pins`: the per-ident pin map (GH #751) -- for each `(ident,
-/// slot)` entry, that ident's references in the partial BODY are pinned to
-/// the (qualified) `slot` element tuple. Empty for a true scalar source
+/// `source_pins`: the per-ident pin list (GH #751) -- for each `(ident, pin)`
+/// entry, that ident's references in the partial BODY are pinned to the
+/// (qualified) element tuple `pin` names. Empty for a true scalar source
 /// (no pinning). The arrayed-agg caller passes one entry per ARRAYED agg
 /// referenced by the substituted equation: the LIVE agg's entry carries the
 /// target element's projection onto its `result_dims` axes -- the same slot
@@ -2349,13 +2324,13 @@ fn subscript_idents_in_expr0(
 /// equation) carries the projection onto ITS OWN `result_dims`, so its
 /// `PREVIOUS(...)` freeze reads one slot instead of the ill-typed bare
 /// multi-slot reference that failed fragment compile and stubbed the score
-/// to 0 (GH #751). Pinning these idents through `to_deps_to_subscript`
-/// instead would use the target's FULL element tuple, which over-subscripts
-/// an agg in the broadcast case (`agg[D1]` feeding `to[D1,D2]`): the
-/// fragment fails to compile and the score is stubbed to a constant 0
-/// (GH #528). For the diagonal case (`result_dims` == `to`'s dims) the
-/// projection IS the full tuple, so the equation is unchanged. A SCALAR
-/// co-agg needs no entry: its bare `PREVIOUS(name)` freeze compiles as-is.
+/// to 0 (GH #751). This is a SEPARATE channel from `to_deps_to_subscript`
+/// because an agg is a synthetic aux with no declared dimensions: its slot
+/// space is the hoisted reducer's `result_dims`, which the declared-dimension
+/// projection behind `to_deps_to_subscript` cannot derive. For the diagonal
+/// case (`result_dims` == `to`'s dims) the projection IS the full tuple, so
+/// the equation is unchanged. A SCALAR co-agg needs no entry: its bare
+/// `PREVIOUS(name)` freeze compiles as-is.
 ///
 /// `gf_table_ref` is the implicit WITH-LOOKUP wrap for THIS target element
 /// (GH #910): the partial is a full re-evaluation of the target's element
@@ -2382,9 +2357,9 @@ pub(crate) fn generate_scalar_to_element_equation(
     to_elem_eqn: &Expr0,
     reducer_subst: &HashMap<String, String>,
     to_deps: &HashSet<Ident<Canonical>>,
-    to_deps_to_subscript: &HashSet<Ident<Canonical>>,
+    to_deps_to_subscript: &HashMap<Ident<Canonical>, DepElementPin>,
     source_ref_override: Option<&str>,
-    source_pins: &[(Ident<Canonical>, String)],
+    source_pins: &[(Ident<Canonical>, DepElementPin)],
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
     gf_table_ref: Option<&str>,
     occ: &OccurrenceLookup<'_>,
@@ -2433,16 +2408,18 @@ pub(crate) fn generate_scalar_to_element_equation(
         return Err(PartialEquationError::unfreezable(&print_eqn(to_elem_eqn)));
     }
     let partial = print_eqn(&substitute_reducers_in_expr0(wrapped, reducer_subst));
-    let mut partial = subscript_idents_at_element(&partial, to_deps_to_subscript, element)?;
+    let mut partial = subscript_idents_at_element(&partial, to_deps_to_subscript)?;
     // Pin each mapped ident's references (the live source's numerator
     // occurrence and any PREVIOUS-wrapped co-agg freezes alike) to its own
-    // projected slot -- separate passes from the full-tuple
-    // `to_deps_to_subscript` pinning above, because each agg's slot is the
-    // projection onto ITS `result_dims`, not the target's full tuple. The
-    // passes touch disjoint idents, so application order is irrelevant.
-    for (ident, slot) in source_pins {
-        let one: HashSet<Ident<Canonical>> = std::iter::once(ident.clone()).collect();
-        partial = subscript_idents_at_element(&partial, &one, slot)?;
+    // projected slot -- separate passes from the `to_deps_to_subscript` pinning
+    // above, because each agg's slot is the projection onto ITS `result_dims`
+    // rather than onto its declared dimensions (an agg is not a model variable
+    // and has none). The passes touch disjoint idents, so application order is
+    // irrelevant.
+    for (ident, pin) in source_pins {
+        let one: HashMap<Ident<Canonical>, DepElementPin> =
+            std::iter::once((ident.clone(), pin.clone())).collect();
+        partial = subscript_idents_at_element(&partial, &one)?;
     }
     // The wrap goes on LAST because it is not part of the target's equation:
     // everything above rewrites that equation within its own (gf-input) domain
@@ -2497,9 +2474,11 @@ pub(crate) fn generate_per_element_link_equation(
     element_qualified: &str,
     to_elem_eqn: &Expr0,
     to_deps: &HashSet<Ident<Canonical>>,
-    to_deps_to_subscript: &HashSet<Ident<Canonical>>,
+    to_deps_to_subscript: &HashMap<Ident<Canonical>, DepElementPin>,
     from_dims: &[crate::dimensions::Dimension],
     target_elem_by_dim: &HashMap<String, (String, usize)>,
+    target_dims: &[crate::dimensions::Dimension],
+    target_elements: &[String],
     target_iterated_dims: &[String],
     dims_ctx: &crate::dimensions::DimensionsContext,
     gf_table_ref: Option<&str>,
@@ -2510,9 +2489,15 @@ pub(crate) fn generate_per_element_link_equation(
     let iter_ctx = IteratedDimCtx {
         source_dim_names: &source_dim_names,
         target_iterated_dims,
-        // The `PerElement` live shape suppresses the GH #526 other-dep collapse
-        // entirely (see `wrap_non_matching_in_previous`), so the verdict's
-        // `dep_dims` are never consulted; none to thread.
+        // KNOWN GAP, and the comment this replaces is why. It read "the
+        // `PerElement` live shape suppresses the GH #526 other-dep collapse
+        // entirely, so the verdict's `dep_dims` are never consulted; none to
+        // thread" -- true when `other_dep_verdict` was the ONLY consumer.
+        // `axis_dim_at` is a second one, so `None` here leaves every subscript
+        // index under this emitter on the project-wide fallbacks: a silent wrong
+        // number on a collision, reproduced on a compiling model. See
+        // `index_axis_verdict`; threading it is its own change, because the two
+        // consumers want different tables.
         dep_dims: None,
     };
     let ref_ctx = PerElementRefCtx {
@@ -2520,6 +2505,8 @@ pub(crate) fn generate_per_element_link_equation(
         site_axes,
         row_parts_bare,
         from_dims,
+        target_dims,
+        target_elements,
         target_elem_by_dim,
         dim_ctx: dims_ctx,
     };
@@ -2571,8 +2558,7 @@ pub(crate) fn generate_per_element_link_equation(
         return Err(PartialEquationError::unfreezable(&print_eqn(to_elem_eqn)));
     }
     let partial = print_eqn(&wrapped);
-    let mut partial =
-        subscript_idents_at_element(&partial, to_deps_to_subscript, element_qualified)?;
+    let mut partial = subscript_idents_at_element(&partial, to_deps_to_subscript)?;
     if let Some(table_ref) = gf_table_ref {
         partial = format!("LOOKUP({table_ref}, {partial})");
     }
@@ -2678,24 +2664,29 @@ fn live_reducer_text_for_agg<'a>(
 
 /// Quote a canonical identifier for use in a generated equation string.
 /// Identifiers the equation lexer cannot read bare need double quotes: special
-/// characters (`$`, `⁚`, `·`) and ALSO a name whose first character cannot START
-/// an identifier (`1stock` -- a legal quoted XMILE name, but bare the lexer
-/// reads the number `1` then the identifier `stock`).
+/// characters (`$`, `⁚`, `·`), a name whose first character cannot START an
+/// identifier (`1stock` -- a legal quoted XMILE name, but bare the lexer reads
+/// the number `1` then the identifier `stock`), and a name the lexer resolves to
+/// a KEYWORD (`if`, `mod`, `nan`, ...).
 ///
-/// The leading-character rule is [`crate::ast::needs_quoting`], the same
-/// predicate the `print_eqn` path's `print_ident` uses -- so the two spellings
-/// of one name inside a single generated equation cannot disagree. They did:
-/// this used to test only "every char is alphanumeric or `_`", which a leading
-/// digit satisfies, so a guard form emitted `print_eqn`'s quoted `"1stock"` in
-/// the partial beside a bare `1stock` in the `SIGN(...)` factor -- an
-/// unparseable equation, hence a silently-zeroed link score on a valid model.
+/// The leading-character and keyword rules are [`crate::ast::needs_quoting`],
+/// the same predicate the `print_eqn` path's `print_ident` uses -- so the two
+/// spellings of one name inside a single generated equation cannot disagree.
+/// They did: this used to test only "every char is alphanumeric or `_`", which a
+/// leading digit satisfies, so a guard form emitted `print_eqn`'s quoted
+/// `"1stock"` in the partial beside a bare `1stock` in the `SIGN(...)` factor --
+/// an unparseable equation, hence a silently-zeroed link score on a valid model.
+/// A keyword satisfied that test too, and is now covered by the same delegation
+/// (GH #976).
 ///
 /// This deliberately stays MORE conservative than `print_ident` rather than
 /// delegating outright: `·` (U+00B7) IS `XID_Continue`, so `needs_quoting`
 /// alone would spell a module-output composite bare (`mod·out1`). That parses,
 /// but it would rewrite the emitted text of every module-composite link score
-/// -- a behavior change with no bug behind it. So a name is bare only when BOTH
-/// predicates allow it; the conjunction can only ever add quotes.
+/// -- a behavior change with no bug behind it. So the alphanumeric conjunct is
+/// NOT redundant; a name is bare only when BOTH predicates allow it, and the
+/// conjunction can only ever add quotes. `quote_ident_needs_both_of_its_conjuncts`
+/// pins each conjunct on the row only it rejects.
 pub(crate) fn quote_ident(ident: &str) -> String {
     let bare_spellable =
         ident.chars().all(|c| c.is_alphanumeric() || c == '_') && !crate::ast::needs_quoting(ident);
@@ -3372,7 +3363,10 @@ fn build_arrayed_link_score_equation(
     // `slot` is the per-element occurrence-stream slot: `walk_all_in_expr`
     // numbers `Ast::Arrayed` slots in canonical element-key-sorted order (then
     // the default after the last element), so the wrap for element `slot`
-    // consumes exactly that slot's occurrences.
+    // consumes exactly that slot's occurrences. Both `slot as u16` conversions
+    // below are in range by the LTM front door, which refuses a target needing
+    // more slots than `db::ltm_ir::MAX_SITE_CHILDREN` can tell apart -- so this
+    // model would have emitted no link score to reach here.
     let slot_equation = |expr: &crate::ast::Expr2,
                          gf_table_ref: Option<&str>,
                          slot: u16|
@@ -4379,28 +4373,7 @@ fn classify_reducer_in_expr(
 
     match expr {
         Expr2::App(builtin, _, _) => {
-            // Check if this builtin is a reducer whose argument references
-            // the source variable.
-            if let Some((kind, name, body)) =
-                classify_builtin_if_references_source(builtin, source_ident)
-            {
-                return Some(ClassifiedReducer {
-                    kind,
-                    name,
-                    is_bare: is_top_level,
-                    body,
-                });
-            }
-            // Even if this particular App node isn't the reducer we want,
-            // recurse into its arguments to find nested reducers.
-            // Any reducer found inside a non-reducer App is nested.
-            let mut result = None;
-            builtin.for_each_expr_ref(|sub_expr| {
-                if result.is_none() {
-                    result = classify_reducer_in_expr(sub_expr, source_ident, false);
-                }
-            });
-            result
+            classify_reducer_in_builtin(builtin, source_ident, is_top_level)
         }
         Expr2::Op1(_, inner, _, _) => classify_reducer_in_expr(inner, source_ident, false),
         Expr2::Op2(_, lhs, rhs, _, _) => classify_reducer_in_expr(lhs, source_ident, false)
@@ -4412,6 +4385,42 @@ fn classify_reducer_in_expr(
         }
         Expr2::Var(..) | Expr2::Const(..) | Expr2::Subscript(..) => None,
     }
+}
+
+/// [`classify_reducer_in_expr`]'s `App` arm, reachable directly from a
+/// `BuiltinFn` the caller already holds.
+///
+/// This is how the link-score emitters read the reducer kind, name and body
+/// off [`crate::ltm_agg::AggNode::reducer`] (GH #983): an aggregate node's
+/// equation IS one reducer call, so `is_top_level = true` reproduces exactly
+/// what walking a reconstructed `Ast::Scalar(App(..))` used to produce --
+/// including the nested-reducer fallback below, which fires when the outer
+/// reducer's array argument does not itself reference `source_ident`.
+pub(crate) fn classify_reducer_in_builtin(
+    builtin: &crate::builtins::BuiltinFn<crate::ast::Expr2>,
+    source_ident: &str,
+    is_top_level: bool,
+) -> Option<ClassifiedReducer> {
+    // Check if this builtin is a reducer whose argument references the
+    // source variable.
+    if let Some((kind, name, body)) = classify_builtin_if_references_source(builtin, source_ident) {
+        return Some(ClassifiedReducer {
+            kind,
+            name,
+            is_bare: is_top_level,
+            body,
+        });
+    }
+    // Even if this particular App node isn't the reducer we want, recurse
+    // into its arguments to find nested reducers. Any reducer found inside a
+    // non-reducer App is nested.
+    let mut result = None;
+    builtin.for_each_expr_ref(|sub_expr| {
+        if result.is_none() {
+            result = classify_reducer_in_expr(sub_expr, source_ident, false);
+        }
+    });
+    result
 }
 
 /// If `builtin` is a recognized array reducer (per
@@ -5656,6 +5665,14 @@ fn generate_nonlinear_partial(
         }
     }
 }
+
+/// The wrap's subscript-INDEX pass, in its own file only to keep this one under
+/// the project line-count lint. Re-exported so callers keep naming these
+/// `crate::ltm_augment::*`.
+#[path = "ltm_augment_index.rs"]
+mod index_pass;
+
+use index_pass::{axis_dim_at, wrap_index_non_matching_in_previous};
 
 #[cfg(test)]
 #[path = "ltm_augment_tests.rs"]

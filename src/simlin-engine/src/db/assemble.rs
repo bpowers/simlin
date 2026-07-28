@@ -146,7 +146,11 @@ pub(crate) fn build_stub_variable(
     } else {
         Some(crate::ast::Ast::ApplyToAll(
             dims.to_vec(),
-            crate::ast::Expr2::Const("0".to_string(), 0.0, crate::ast::Loc::default()),
+            crate::ast::Expr2::Const(
+                "0".to_string(),
+                crate::ast::Literal::new(0.0),
+                crate::ast::Loc::default(),
+            ),
         ))
     };
 
@@ -286,7 +290,11 @@ pub(crate) fn build_submodel_metadata<'arena>(
                     .collect();
                 Some(crate::ast::Ast::ApplyToAll(
                     dims,
-                    crate::ast::Expr2::Const("0".to_string(), 0.0, crate::ast::Loc::default()),
+                    crate::ast::Expr2::Const(
+                        "0".to_string(),
+                        crate::ast::Literal::new(0.0),
+                        crate::ast::Loc::default(),
+                    ),
                 ))
             };
             let stub: &'arena crate::variable::Variable =

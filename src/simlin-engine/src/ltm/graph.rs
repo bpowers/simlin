@@ -1279,19 +1279,19 @@ impl CausalGraph {
     }
 
     /// Polarity of a `feeder → $⁚ltm⁚agg` hop: the discriminating analysis of
-    /// the agg's (lowered) body with respect to a *scalar feeder* referenced
-    /// inside the reducer (GH #737 review follow-up). `agg_ast` is the agg's
-    /// own lowered equation (the caller reconstructs it from
-    /// `AggNode::equation_text`, since the agg has no node in this
-    /// variable-level graph). See
+    /// the agg's reducer call with respect to a *scalar feeder* referenced
+    /// inside it (GH #737 review follow-up). `reducer` is
+    /// `ltm_agg::AggNode::reducer`, the classified builtin the agg stands in
+    /// for -- the agg has no node in this variable-level graph, so there is
+    /// no AST here to look it up from. See
     /// [`super::polarity::analyze_source_to_agg_polarity`] for the
     /// positive-by-convention Mul rule and the Unknown fallback.
     pub(crate) fn source_to_agg_polarity(
         &self,
         feeder: &Ident<Canonical>,
-        agg_ast: &crate::ast::Ast<crate::ast::Expr2>,
+        reducer: &crate::builtins::BuiltinFn<crate::ast::Expr2>,
     ) -> LinkPolarity {
-        super::polarity::analyze_source_to_agg_polarity(agg_ast, feeder, &self.variables)
+        super::polarity::analyze_source_to_agg_polarity(reducer, feeder, &self.variables)
     }
 
     /// Compute per-link polarity for all edges in the causal graph.

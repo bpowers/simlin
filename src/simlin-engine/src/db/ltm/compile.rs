@@ -1367,7 +1367,7 @@ pub(crate) fn compile_ltm_equation_fragment(
                             canonical_dims,
                             crate::ast::Expr2::Const(
                                 "0".to_string(),
-                                0.0,
+                                crate::ast::Literal::new(0.0),
                                 crate::ast::Loc::default(),
                             ),
                         ))
@@ -1431,7 +1431,7 @@ pub(crate) fn compile_ltm_equation_fragment(
                             canonical_dims,
                             crate::ast::Expr2::Const(
                                 "0".to_string(),
-                                0.0,
+                                crate::ast::Literal::new(0.0),
                                 crate::ast::Loc::default(),
                             ),
                         ))
@@ -2569,7 +2569,11 @@ mod pass1_gate_tests {
     use crate::common::{Canonical, Ident};
 
     fn c() -> Box<Expr2> {
-        Box::new(Expr2::Const("0".to_string(), 0.0, Loc::default()))
+        Box::new(Expr2::Const(
+            "0".to_string(),
+            crate::ast::Literal::new(0.0),
+            Loc::default(),
+        ))
     }
 
     fn app(builtin: BuiltinFn<Expr2>) -> Expr2 {

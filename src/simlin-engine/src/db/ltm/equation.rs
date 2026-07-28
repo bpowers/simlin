@@ -360,3 +360,78 @@ impl LtmEquation {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{LtmArm, LtmEquation};
+
+    /// GH #981's exact measurement, inverted.
+    ///
+    /// The issue's throwaway probe recorded that two `LtmArm::new("NaN")` were
+    /// UNEQUAL, that two `LtmEquation::scalar("1 + NaN")` were UNEQUAL, and --
+    /// the part that mattered -- that `<LtmEquation as salsa::Update>::
+    /// maybe_update` returned CHANGED for identical text, so the backdating
+    /// mechanism itself was affected and not merely `PartialEq`. Since the
+    /// literal on `Expr0::Const` is an `ast::Literal` compared by bit pattern,
+    /// all three are equal/UNCHANGED, and `link_score_equation_text_shaped` can
+    /// backdate so the expensive `compile_ltm_var_fragment` is reused.
+    ///
+    /// The controls (an ordinary equation, and a genuinely edited one) are what
+    /// keep this from passing by making salsa blind.
+    #[test]
+    fn a_nan_bearing_ltm_equation_is_equal_to_itself_and_backdates() {
+        assert!(
+            LtmArm::new("NaN".to_string()).expr.is_some(),
+            "the fixture text must parse, or nothing below measures the AST"
+        );
+        assert_eq!(
+            LtmArm::new("NaN".to_string()),
+            LtmArm::new("NaN".to_string())
+        );
+        assert_eq!(
+            LtmEquation::scalar("1 + NaN".to_string()),
+            LtmEquation::scalar("1 + NaN".to_string())
+        );
+        assert_eq!(
+            LtmEquation::scalar("1 + 2".to_string()),
+            LtmEquation::scalar("1 + 2".to_string()),
+            "control: an ordinary equation was always equal to itself"
+        );
+        assert_ne!(
+            LtmEquation::scalar("1 + NaN".to_string()),
+            LtmEquation::scalar("2 + NaN".to_string()),
+            "control: a genuine difference must still be visible"
+        );
+
+        use salsa::plumbing::UpdateDispatch;
+        let mut slot = LtmEquation::scalar("1 + NaN".to_string());
+        let changed = {
+            // SAFETY (test): `&mut slot` is a valid, owned `LtmEquation` and the
+            // new value is a fresh owned one, matching the
+            // `Update::maybe_update` contract.
+            #[allow(unsafe_code)]
+            unsafe {
+                UpdateDispatch::<LtmEquation>::maybe_update(
+                    &mut slot,
+                    LtmEquation::scalar("1 + NaN".to_string()),
+                )
+            }
+        };
+        assert!(
+            !changed,
+            "identical NaN-bearing LTM equation text must backdate (GH #981)"
+        );
+
+        let changed = {
+            // SAFETY (test): as above.
+            #[allow(unsafe_code)]
+            unsafe {
+                UpdateDispatch::<LtmEquation>::maybe_update(
+                    &mut slot,
+                    LtmEquation::scalar("2 + NaN".to_string()),
+                )
+            }
+        };
+        assert!(changed, "a genuinely edited equation must report CHANGED");
+    }
+}

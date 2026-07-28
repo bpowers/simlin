@@ -17,17 +17,16 @@
 //! itself (`scalarize`, `retarget_dims`, `dimensions`); the thin wrappers below
 //! keep the call sites' free-function spelling.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::builtins_visitor::{empty_macro_registry, instantiate_implicit_modules};
 use crate::common::{Canonical, Ident};
 use crate::datamodel;
 use crate::dimensions::DimensionsContext;
 
-use crate::db::{Db, ParsedVariableResult, SourceModel, SourceProject};
-use crate::db::{project_datamodel_dims, project_dimensions_context};
+use crate::db::ParsedVariableResult;
 
-use super::{LtmEquation, ltm_module_idents};
+use super::LtmEquation;
 
 /// Parse an LTM synthetic variable's typed equation into a
 /// `Variable<ModuleInput, Expr0>` plus any implicit helper/module variables the
@@ -98,63 +97,6 @@ pub(super) fn parse_ltm_equation(
         variable,
         implicit_vars,
     }
-}
-
-pub(super) fn parse_ltm_equation_for_model_with_ids(
-    db: &dyn Db,
-    var_name: &str,
-    equation: &LtmEquation,
-    project: SourceProject,
-    module_idents: &HashSet<Ident<Canonical>>,
-    model_var_names: &HashSet<Ident<Canonical>>,
-) -> ParsedVariableResult {
-    let dims = project_datamodel_dims(db, project);
-    parse_ltm_equation(
-        var_name,
-        equation,
-        dims,
-        Some(module_idents),
-        Some(model_var_names),
-    )
-}
-
-/// Parse *and lower* an LTM equation to a `Variable<ModuleInput, Expr2>`
-/// (the type `classify_reducer` and the rest of the type-checked AST machinery
-/// expect). Mirrors the parse-then-lower boilerplate `compile_ltm_equation_fragment`
-/// does; scoped with an empty model set and the project's datamodel dimensions.
-/// Returns `None` if the equation fails to parse.
-pub(super) fn reconstruct_ltm_var_lowered(
-    db: &dyn Db,
-    var_name: &str,
-    equation: &LtmEquation,
-    model: SourceModel,
-    project: SourceProject,
-) -> Option<crate::variable::Variable> {
-    let dim_context = project_dimensions_context(db, project);
-    let module_idents = ltm_module_idents(db, model, project);
-    let model_var_names = super::ltm_model_var_names(db, model, project);
-    let parsed = parse_ltm_equation_for_model_with_ids(
-        db,
-        var_name,
-        equation,
-        project,
-        module_idents,
-        model_var_names,
-    );
-    if parsed
-        .variable
-        .equation_errors()
-        .is_some_and(|e| !e.is_empty())
-    {
-        return None;
-    }
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: dim_context,
-        model_name: "",
-    };
-    Some(crate::model::lower_variable(&scope, &parsed.variable))
 }
 
 /// The dimension names an LTM `LtmEquation` carries (datamodel casing),

@@ -49,6 +49,8 @@ mod json_proptest;
 pub mod json_sdai;
 #[cfg(test)]
 mod json_sdai_proptest;
+#[cfg(test)]
+mod keyword_ident_tests;
 pub mod layout;
 mod lexer;
 #[cfg(test)]
@@ -92,6 +94,8 @@ mod test_open_vensim;
 mod test_sir_xmile;
 #[cfg(test)]
 mod testutils;
+#[cfg(test)]
+mod unfilled_equation_tests;
 #[cfg(test)]
 mod unit_checking_test;
 mod units;

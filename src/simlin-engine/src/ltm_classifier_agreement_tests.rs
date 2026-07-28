@@ -195,6 +195,28 @@ fn expr0_routes_through_agg(name: &str, arity: usize) -> bool {
     )
 }
 
+/// The equivalence [`expr0_routes_through_agg`]'s doc asserts, as a test.
+///
+/// This walk marks `in_reducer` from a NAME, so it cannot call
+/// `builtin_routes_through_agg` (which needs a `BuiltinFn`) and restates the
+/// rule instead. A restatement that drifts would not fail the gate loudly --
+/// it would quietly change WHICH occurrences the gate compares, weakening it
+/// rather than breaking it. So the two are checked against each other over the
+/// shared decision table (GH #982), whose 11 rows reach every arm of
+/// `reducer_kind_from_name`.
+#[test]
+fn expr0_reducer_routing_twin_matches_production() {
+    for row in crate::ltm_agg::REDUCER_DECISION_TABLE {
+        assert_eq!(
+            expr0_routes_through_agg(row.name, row.arity),
+            row.routes_through_agg,
+            "{}/{}: the Expr0 twin must agree with builtin_routes_through_agg",
+            row.name,
+            row.arity
+        );
+    }
+}
+
 /// Walk a reparsed `Expr0` tree left-to-right depth-first, recording every
 /// occurrence of a model variable (a head `Var`/`Subscript` whose ident is a
 /// key of `variables`), mirroring the structure of the Expr2 production walker

@@ -269,6 +269,65 @@ impl<Expr> BuiltinFn<Expr> {
             .unwrap()
     }
 
+    /// Zero every `Loc` this builtin carries ITSELF -- the three lookup forms
+    /// and `IsModuleInput` are the only variants with one. Argument
+    /// expressions are untouched; a caller normalizing a whole tree strips
+    /// those with [`Self::map`].
+    ///
+    /// Written as an exhaustive match with no catch-all (the `Loc`-free
+    /// variants are bound whole through one or-pattern) so a new
+    /// `Loc`-carrying variant is a compile error here rather than a silently
+    /// retained source position.
+    /// NOTE: keep variant coverage in sync with `try_map` above.
+    pub(crate) fn strip_own_locs(self) -> Self {
+        use BuiltinFn::*;
+        match self {
+            Lookup(a, b, _) => Lookup(a, b, Loc::default()),
+            LookupForward(a, b, _) => LookupForward(a, b, Loc::default()),
+            LookupBackward(a, b, _) => LookupBackward(a, b, Loc::default()),
+            IsModuleInput(id, _) => IsModuleInput(id, Loc::default()),
+            locless @ (Abs(_)
+            | Arccos(_)
+            | Arcsin(_)
+            | Arctan(_)
+            | Cos(_)
+            | Exp(_)
+            | Inf
+            | Int(_)
+            | Ln(_)
+            | Log10(_)
+            | Max(_, _)
+            | Mean(_)
+            | Min(_, _)
+            | Pi
+            | Pulse(_, _, _)
+            | Quantum(_, _)
+            | Ramp(_, _, _)
+            | SafeDiv(_, _, _)
+            | Sign(_)
+            | Sshape(_, _, _)
+            | Sin(_)
+            | Sqrt(_)
+            | Step(_, _)
+            | Tan(_)
+            | Time
+            | TimeStep
+            | StartTime
+            | FinalTime
+            | Rank(_, _)
+            | Size(_)
+            | Stddev(_)
+            | Sum(_)
+            | VectorSelect(_, _, _, _, _)
+            | VectorElmMap(_, _)
+            | VectorSortOrder(_, _)
+            | AllocateAvailable(_, _, _)
+            | AllocateByPriority(_, _, _, _, _)
+            | Previous(_, _)
+            | Init(_)) => locless,
+        }
+    }
+
     /// Call a closure on each expression argument by reference.
     /// NOTE: keep variant coverage in sync with `try_map` above.
     pub fn for_each_expr_ref<F>(&self, mut f: F)

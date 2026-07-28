@@ -620,6 +620,59 @@ fn link_score_quotes_a_canonical_name_that_cannot_be_bare() {
     );
 }
 
+/// The keyword twin of the test above (GH #976), and the LTM half of that
+/// issue's damage.
+///
+/// `if` is a legal XMILE variable name that canonicalizes to `if`, but the lexer
+/// resolves a bare `if` to the keyword before it ever considers an identifier.
+/// `quote_ident` tested "every char is alphanumeric or `_`" plus
+/// `ast::needs_quoting`, and a keyword satisfied BOTH -- so the generated guard
+/// form spelled the source bare, the arm did not parse, the fragment compiled to
+/// no bytecode, and the link score read a constant 0 behind a Warning nobody has
+/// to look at. The keyword clause now lives in `needs_quoting`, so `quote_ident`
+/// inherits it through the delegation it already had.
+///
+/// Ranges over every keyword rather than sampling `if`: the predicate reads a
+/// table, and a table is exactly the thing that can be right for one entry.
+#[test]
+fn link_score_quotes_every_keyword_named_source() {
+    for keyword in ["if", "then", "else", "not", "mod", "and", "or", "nan"] {
+        let project = TestProject::new("keyword_ident")
+            .stock(keyword, "0", &["inflow"], &[], None)
+            .flow("inflow", &format!("\"{keyword}\" * 0.1"), None)
+            .build_datamodel();
+
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let model = sync.models["main"].source;
+
+        let link_id = LtmLinkId::new(&db, keyword.to_string(), "inflow".to_string());
+        let scored =
+            link_score_equation_text_shaped(&db, link_id, RefShape::Bare, model, sync.project);
+        let ShapedLinkScore::Scored(lsv) = scored else {
+            panic!("the {keyword} -> inflow link score should be scored, got: {scored:?}");
+        };
+
+        let crate::db::LtmEquation::Scalar(arm) = &lsv.equation else {
+            panic!(
+                "a scalar target's link score should be Scalar, got: {:?}",
+                lsv.name
+            );
+        };
+        assert!(
+            arm.text.contains(&format!("\"{keyword}\"")),
+            "a keyword-named source must be quoted in the generated text, got: {}",
+            arm.text
+        );
+        assert!(
+            arm.expr.is_some(),
+            "the generated link-score equation must PARSE (an unparseable arm carries no \
+             AST, compiles to no bytecode, and silently zeroes the score); text was: {}",
+            arm.text
+        );
+    }
+}
+
 /// An unparseable generated arm degrades LOUDLY and WITHOUT PANICKING, for the
 /// scalar shape AND for an `Arrayed` equation whose OTHER arms parse fine.
 ///
@@ -1036,3 +1089,271 @@ fn collect_agg_petals_groups_single_agg_circuits() {
 // structurally impossible. The emitted (changed-LAST) text for that probe is
 // still pinned by the `scalar_feeder_bare_in_hoisted_reducer` characterization
 // golden (`db::ltm_char_tests`).
+
+// ---------------------------------------------------------------------------
+// GH #986 (third consumer): the ceteris-paribus wrap resolves a bare-identifier
+// subscript index against the AXIS IT INDEXES, not against the project's whole
+// element namespace.
+//
+// `dimensions::resolve_axis_index_name` is the engine's single
+// element-vs-dimension precedence rule, and it is what
+// `compiler::subscript::normalize_subscripts3` implements. GH #986 unified
+// `ltm_agg::classify_axis_access` and `post_transform::pin_dimension_name_indices`
+// onto it and left the wrap on two PROJECT-WIDE predicates
+// (`dimension_uniquely_containing_element`, `is_element_of_any_dimension`).
+//
+// The consequence was a wrong NUMBER with no diagnostic. A model variable whose
+// canonical name happens to be an element of an UNRELATED dimension read as a
+// runtime value to the simulation and as a static element selector to the wrap,
+// so the "ceteris-paribus" partial left it LIVE and moved with it -- reporting
+// real influence for an edge with no causal dependence at all. The qualification
+// step made it worse: the index was rewritten to `otherdim·name`, naming an
+// element of a dimension the subscripted variable is not even declared over,
+// which still compiles and reads a different slot than the anchor did.
+// ---------------------------------------------------------------------------
+
+/// `share[boston]` reads `q`/`gtab` at the runtime index `ctr`, and has no
+/// causal dependence on `pop[nyc]` whatsoever.
+///
+/// `declare_bucket` adds a dimension **no equation references**, whose first
+/// element is named `ctr` -- the same canonical name as the model variable. It
+/// changes nothing about the simulation; before the fix it changed the emitted
+/// link score.
+///
+/// `indexed_name` only varies the subscripted variable's NAME. Both iterations
+/// exercise the SAME path -- an ordinary arrayed variable subscripted directly --
+/// and that is deliberate, because it is the only path the fix reaches.
+///
+/// **The `LOOKUP` table-index path is NOT covered here, and not by anything
+/// else, because the fix does not reach it.** A graphical-function table holder
+/// is by construction absent from `IteratedDimCtx::dep_dims` (GH #606 keeps it
+/// off the dependency graph), so `ltm_augment::axis_dim_at` can never resolve its
+/// axis and `freeze_lookup_table_indices` passes a literal `None`. GH #984's
+/// defect still reproduces there on a model that compiles with zero diagnostics;
+/// the reproduction is recorded on GH #984. Writing a `LOOKUP` fixture here would
+/// pin the CURRENT (wrong) behaviour or fail -- neither is what this test is for.
+///
+/// An earlier revision of this rustdoc claimed the two iterations covered a
+/// `LOOKUP` holder and an ordinary variable. They never did: the fixture has no
+/// `LOOKUP`, no `GraphicalFunction`, and no lookup-only aux. That false claim is
+/// exactly how the gap shipped -- the reviewer's fixture was a `LOOKUP`, the
+/// reproduction was an ordinary subscript, a different guard fired, and nobody
+/// noticed.
+fn colliding_index_name_model(declare_bucket: bool, second_name: bool) -> datamodel::Project {
+    let mut p = TestProject::new("colliding_index")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston", "la"])
+        .named_dimension("Slot", &["s1", "s2"]);
+    if declare_bucket {
+        // Declared, never referenced. `ctr` collides with the model variable.
+        p = p.named_dimension("Bucket", &["ctr", "spare"]);
+    }
+    let indexed = if second_name { "gtab" } else { "q" };
+    p.aux("tick", "1", None)
+        .stock("counter", "0", &["tick"], &[], None)
+        .aux("drive", "1 + counter", None)
+        // 1, 2, 1, 2, ... -- a genuine runtime index.
+        .aux("ctr", "1 + (INT(counter) MOD 2)", None)
+        .array_with_ranges(
+            &format!("{indexed}[Slot]"),
+            vec![("s1", "1 * drive"), ("s2", "10 * drive")],
+        )
+        .array_flow_with_ranges(
+            "share[Region]",
+            vec![
+                ("nyc", "pop[nyc] * 0.01"),
+                ("boston", &format!("{indexed}[ctr] * 0.002 + 0 * ctr")),
+                ("la", "pop[la] * 0.03"),
+            ],
+        )
+        .array_flow_with_ranges(
+            "inflow[Region]",
+            vec![
+                ("nyc", "share[nyc]"),
+                ("boston", "share[boston]"),
+                ("la", "share[la]"),
+            ],
+        )
+        .array_stock("pop[Region]", "10", &["inflow"], &[], None)
+        .build_datamodel()
+}
+
+/// The `boston` arm of the `pop[nyc] -> share` link score, plus the model's
+/// diagnostics -- so a "the two agree" assertion can never be two compile
+/// failures agreeing.
+fn colliding_index_boston_arm(project: &datamodel::Project) -> (String, usize) {
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, project);
+    let diags = crate::db::collect_all_diagnostics(&db, sync.project);
+    let ltm = crate::db::model_ltm_variables(&db, sync.models["main"].source, sync.project);
+    let arm = ltm
+        .vars
+        .iter()
+        .find(|v| {
+            v.name.contains("link_score")
+                && v.name.contains("pop[nyc]")
+                && v.name.ends_with("share")
+        })
+        .map(|v| match &v.equation {
+            crate::db::LtmEquation::Arrayed { elements, .. } => elements
+                .iter()
+                .find(|(e, _)| e == "boston")
+                .map(|(_, arm)| arm.text.clone())
+                .unwrap_or_else(|| panic!("no boston arm in {:?}", elements)),
+            other => panic!("expected an arrayed score, got {other:?}"),
+        })
+        .expect("pop[nyc]->share link score");
+    (arm, diags.len())
+}
+
+#[test]
+fn a_colliding_index_name_is_resolved_against_the_axis_it_indexes() {
+    for second_name in [true, false] {
+        let (with_bucket, with_diags) =
+            colliding_index_boston_arm(&colliding_index_name_model(true, second_name));
+        let (without_bucket, without_diags) =
+            colliding_index_boston_arm(&colliding_index_name_model(false, second_name));
+        let label = if second_name { "gtab" } else { "q" };
+
+        // Both models compile cleanly: the equality below is two real scores
+        // agreeing, not two failures.
+        assert_eq!(
+            (with_diags, without_diags),
+            (0, 0),
+            "{label}: both models must compile with no diagnostics"
+        );
+
+        // The property, stated the way a modeller would hit it: declaring a
+        // dimension that no equation references cannot change a link score.
+        assert_eq!(
+            with_bucket, without_bucket,
+            "{label}: declaring an unreferenced dimension whose element name \
+             collides with a model variable changed the emitted partial"
+        );
+
+        // `ctr` is a runtime read on a `Slot` axis that declares no element
+        // `ctr`, so the ceteris-paribus wrap freezes it. (The
+        // `PREVIOUS(ctr, ctr)` spelling is GH #975's index-position initial
+        // value.)
+        assert!(
+            with_bucket.contains("PREVIOUS(ctr, ctr)"),
+            "{label}: the index must be frozen, not left live; got: {with_bucket}"
+        );
+        // The pre-fix failure mode, pinned by name so a regression cannot pass
+        // by merely differing: the index was rewritten to `bucket·ctr`, an
+        // element of a dimension `q`/`gtab` is not declared over -- which still
+        // compiles and reads a different slot than the anchor did.
+        assert!(
+            !with_bucket.contains("bucket\u{B7}ctr"),
+            "{label}: the index must not be qualified onto an unrelated \
+             dimension; got: {with_bucket}"
+        );
+
+        // The same property on the SIMULATED series, which is what a
+        // practitioner sees. Text equality already implies it, but the emitted
+        // text is an intermediate: this is the assertion that would survive a
+        // rewrite of how the partial is spelled.
+        assert_eq!(
+            colliding_index_boston_series(&colliding_index_name_model(true, second_name)),
+            colliding_index_boston_series(&colliding_index_name_model(false, second_name)),
+            "{label}: declaring an unreferenced dimension changed the link score"
+        );
+    }
+}
+
+/// The simulated `boston` slot of the `pop[nyc] -> share` link score.
+///
+/// NOTE what this deliberately does NOT assert: that the series is ZERO.
+/// `share[boston]` has no causal dependence on `pop[nyc]`, so a fully
+/// ceteris-paribus partial would be identically zero -- and it is not; it runs
+/// -1.06 / +0.73 / -1.03 / +0.82 on this fixture. That residual is a SEPARATE
+/// defect from the one above and predates this branch: an index frozen inside an
+/// already-frozen head is DOUBLE-lagged (the partial reads `q` at `t-1` indexed
+/// by `ctr` at `t-2`, where the anchor `PREVIOUS(share)` used `ctr` at `t-1`).
+/// The current behaviour is PINNED but has never been ADJUDICATED, and the
+/// distinction matters for whoever picks this up.
+/// `db::ltm_char_tests::per_element_dynamic_index_scores_preserve_head_lag` and
+/// three siblings do freeze the lag, but that pin was written to catch a blanket
+/// skip of the whole index pass and merely uses the lag as its discriminator --
+/// it argues nowhere that reading the index at `t-2` against an anchor that read
+/// it at `t-1` is right. The codebase's own position is the opposite:
+/// `wrap_index_non_matching_in_previous`'s GH #759 comment calls reading an index
+/// two steps back "semantically wrong for a genuinely-dynamic index".
+///
+/// Deferred because it is a SEMANTICS question -- what ceteris paribus means for
+/// an index read under a freeze -- and it interacts with GH #975's own head-lag
+/// pin, not because the current answer has been settled. A crude probe
+/// (`if frozen { return index; }`, which disables the entire index pass, not just
+/// the re-freeze) takes this fixture to exactly 0 and reds 5 tests; that is an
+/// UPPER BOUND on the cost of the narrow change, not a measurement of it.
+fn colliding_index_boston_series(project: &datamodel::Project) -> Vec<u64> {
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, project);
+    use salsa::Setter;
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    let sync = sync_from_datamodel(&db, project);
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
+        .expect("the fixture must compile");
+    let offsets = compiled.offsets.clone();
+    let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("run");
+    let results = vm.into_results();
+    let name = offsets
+        .keys()
+        .map(|k| k.as_str().to_string())
+        .find(|k| k.contains("link_score") && k.contains("pop[nyc]") && k.ends_with("share"))
+        .expect("the pop[nyc]->share link score must be emitted");
+    // `+ 1` is the `boston` slot: `Region = [nyc, boston, la]`, laid out in
+    // declaration order.
+    let base = offsets[&crate::common::Ident::new(&name)] + 1;
+    // Compared by BIT PATTERN, so a difference cannot hide in a rounding
+    // tolerance -- the claim is that the two models produce the same score, not
+    // a similar one.
+    (0..results.step_count)
+        .map(|s| results.data[s * results.step_size + base].to_bits())
+        .collect()
+}
+
+#[test]
+fn an_index_naming_the_axis_own_element_stays_a_static_selector() {
+    // The control that keeps the fix from being "freeze every bare index":
+    // `s1` IS an element of `gtab`'s own `Slot` axis, so it is a selector and
+    // must stay unwrapped (and qualified onto its own dimension).
+    let project = TestProject::new("axis_element_index")
+        .named_dimension("Region", &["nyc", "boston", "la"])
+        .named_dimension("Slot", &["s1", "s2"])
+        .aux("tick", "1", None)
+        .stock("counter", "0", &["tick"], &[], None)
+        .aux("drive", "1 + counter", None)
+        .array_with_ranges("q[Slot]", vec![("s1", "1 * drive"), ("s2", "10 * drive")])
+        .array_flow_with_ranges(
+            "share[Region]",
+            vec![
+                ("nyc", "pop[nyc] * 0.01"),
+                ("boston", "q[s1] * 0.002"),
+                ("la", "pop[la] * 0.03"),
+            ],
+        )
+        .array_flow_with_ranges(
+            "inflow[Region]",
+            vec![
+                ("nyc", "share[nyc]"),
+                ("boston", "share[boston]"),
+                ("la", "share[la]"),
+            ],
+        )
+        .array_stock("pop[Region]", "10", &["inflow"], &[], None)
+        .build_datamodel();
+    let (arm, diags) = colliding_index_boston_arm(&project);
+    assert_eq!(diags, 0, "the control model must compile cleanly");
+    assert!(
+        arm.contains("q[slot\u{B7}s1]"),
+        "an element of the indexed variable's OWN axis is a static selector, \
+         qualified onto that axis; got: {arm}"
+    );
+    assert!(
+        !arm.contains("PREVIOUS(s1"),
+        "a static element selector must never be frozen; got: {arm}"
+    );
+}

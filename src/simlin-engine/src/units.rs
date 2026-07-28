@@ -277,7 +277,8 @@ impl Context {
 fn const_int_eval(ast: &Expr0) -> EquationResult<i32> {
     match ast {
         Expr0::Const(_, n, loc) => {
-            if approx_eq(*n, n.round()) {
+            let n = n.value();
+            if approx_eq(n, n.round()) {
                 Ok(n.round() as i32)
             } else {
                 eqn_err!(ExpectedInteger, loc.start, loc.end)

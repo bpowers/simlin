@@ -685,7 +685,7 @@ pub(crate) fn const_scalar_expr(expr: &str) -> Option<f64> {
     use crate::ast::{Expr0, UnaryOp};
     fn eval(ast: &Expr0) -> Option<f64> {
         match ast {
-            Expr0::Const(_, v, _) => Some(*v),
+            Expr0::Const(_, v, _) => Some(v.value()),
             Expr0::Op1(UnaryOp::Positive, inner, _) => eval(inner),
             Expr0::Op1(UnaryOp::Negative, inner, _) => eval(inner).map(|v| -v),
             _ => None,
@@ -1815,8 +1815,9 @@ fn const_slat_index(idx: &crate::ast::IndexExpr0) -> Option<usize> {
     let IndexExpr0::Expr(Expr0::Const(_, val, _)) = idx else {
         return None;
     };
-    if val.is_finite() && *val >= 0.0 && val.fract() == 0.0 {
-        Some(*val as usize)
+    let val = val.value();
+    if val.is_finite() && val >= 0.0 && val.fract() == 0.0 {
+        Some(val as usize)
     } else {
         None
     }

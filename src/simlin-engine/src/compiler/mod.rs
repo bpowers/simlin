@@ -652,11 +652,19 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
     let mut elements = HashMap::new();
     elements.insert(
         CanonicalElementName::from_raw("a"),
-        crate::ast::Expr2::Const("1".to_string(), 1.0, Loc::default()),
+        crate::ast::Expr2::Const(
+            "1".to_string(),
+            crate::ast::Literal::new(1.0),
+            Loc::default(),
+        ),
     );
     elements.insert(
         CanonicalElementName::from_raw("b"),
-        crate::ast::Expr2::Const("2".to_string(), 2.0, Loc::default()),
+        crate::ast::Expr2::Const(
+            "2".to_string(),
+            crate::ast::Literal::new(2.0),
+            Loc::default(),
+        ),
     );
 
     let var = Variable::Var {
@@ -666,7 +674,7 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
             elements,
             Some(crate::ast::Expr2::Const(
                 "7".to_string(),
-                7.0,
+                crate::ast::Literal::new(7.0),
                 Loc::default(),
             )),
             true,

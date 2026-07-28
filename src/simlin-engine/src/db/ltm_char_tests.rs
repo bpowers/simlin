@@ -406,6 +406,256 @@ fn per_element_subset_dep_scores_are_live_not_silent_zero() {
 }
 
 // ---------------------------------------------------------------------------
+// GH #974: pinning a BARE arrayed reference over the DEP's declared dimensions.
+//
+// The two guards below cover the issue's two sibling arms, which share one
+// projection (`post_transform::dep_element_pins`, enumerated by
+// `dep_element_pins_projection_enumeration`) but reach it through different
+// call paths: an other-dep's bare reference goes through
+// `subscript_idents_at_element`, and a bare reference to the LIVE SOURCE goes
+// through the wrap's own `pin_bare_source_ref`.
+//
+// Both models below compile with ZERO diagnostics before the fix -- the defects
+// are entirely inside LTM generation.
+// ---------------------------------------------------------------------------
+
+/// The equation text of the one link-score variable whose name contains every
+/// fragment in `name_parts`, for a model built with [`char_fixture_db`].
+fn link_score_text(
+    db: &SimlinDb,
+    model: SourceModel,
+    project: SourceProject,
+    name_parts: &[&str],
+) -> String {
+    let ltm = model_ltm_variables(db, model, project);
+    let matching: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| name_parts.iter().all(|p| v.name.contains(p)))
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "expected exactly one link score matching {name_parts:?}, got {:?}",
+        matching.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+    matching[0].equation.source_text().to_string()
+}
+
+fn bare_dep_own_dims_model() -> datamodel::Project {
+    TestProject::new("bare_dep_own_dims")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("Age", &["young", "old"])
+        .array_with_ranges_direct(
+            "regw",
+            vec!["Region".to_string()],
+            vec![("nyc", "10"), ("boston", "20")],
+            None,
+        )
+        .array_with_ranges_direct(
+            "agew",
+            vec!["Age".to_string()],
+            vec![("young", "1"), ("old", "2")],
+            None,
+        )
+        // Three deps referenced BARE in `growth`'s body, differing only in how
+        // their declared dimensions relate to the target's: identical, the same
+        // two REORDERED, and a strict SUBSET.
+        .array_aux_direct(
+            "same",
+            vec!["Region".to_string(), "Age".to_string()],
+            "regw[Region] + agew[Age]",
+            None,
+        )
+        .array_aux_direct(
+            "flip",
+            vec!["Age".to_string(), "Region".to_string()],
+            "agew[Age] * 100 + regw[Region]",
+            None,
+        )
+        .array_aux_direct("w", vec!["Age".to_string()], "agew[Age] * 1000", None)
+        .array_flow(
+            "growth[Region,Age]",
+            "pop[Region, young] * (same + flip + w) * 0.0001",
+            None,
+        )
+        .array_stock("pop[Region,Age]", "10", &["growth"], &[], None)
+        .build_datamodel()
+}
+
+/// A BARE arrayed dep in a per-element link-score partial is pinned over the
+/// dimensions IT declares, matched by name -- not over the target's element
+/// tuple (GH #974, arm 1).
+///
+/// The test states the executed semantics first and the generated text second,
+/// because the first is what makes the second right. The numeric oracle reads
+/// the deps' own series out of a real run and asserts
+/// `growth[nyc,old] == pop[nyc,young] * (same[nyc,old] + flip[old,nyc] +
+/// w[old]) * 1e-4`: a bare reference reads each of its OWN axes' coordinates by
+/// dimension name, so the reordered `flip[Age,Region]` reads `[old,nyc]` and the
+/// subset `w[Age]` reads `[old]`. Every element carries a distinct value, so a
+/// wrong element changes the sum.
+///
+/// The pre-fix pin used the target's tuple `[region·nyc, age·old]` for all
+/// three, which failed in two DIFFERENT ways -- and the difference is why both
+/// rows are here. `w` got an arity-2 subscript over a 1-D variable, so its
+/// fragment failed to compile and the score read a constant 0 (loud, via the
+/// four `Assembly` warnings the issue reports). `flip` got an arity-2 subscript
+/// that RESOLVED -- both indices are valid element references for the axes they
+/// landed on -- so it compiled and silently read `flip[young,boston]`. That
+/// second row had no diagnostic of any kind.
+#[test]
+fn bare_arrayed_dep_is_pinned_over_its_own_declared_dims() {
+    let project = bare_dep_own_dims_model();
+
+    // 1. What the SIMULATION reads. This is the claim the pin has to match, and
+    //    it is checked against the engine rather than assumed.
+    let plain_db = SimlinDb::default();
+    let plain_project = sync_from_datamodel(&plain_db, &project).project;
+    let compiled = compile_project_incremental(&plain_db, plain_project, "main")
+        .expect("the model compiles with no LTM");
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+    let at = |row: &[f64], name: &str| -> f64 {
+        let off = compiled
+            .offsets
+            .iter()
+            .find(|(k, _)| k.as_str() == name)
+            .unwrap_or_else(|| panic!("no slot named {name}"))
+            .1;
+        row[*off]
+    };
+    let last = results.iter().next_back().expect("at least one saved step");
+    let expected = at(last, "pop[nyc,young]")
+        * (at(last, "same[nyc,old]") + at(last, "flip[old,nyc]") + at(last, "w[old]"))
+        * 0.0001;
+    assert!(
+        (at(last, "growth[nyc,old]") - expected).abs() < 1e-9,
+        "a bare arrayed reference must read each of its OWN axes' coordinates by \
+         dimension name: growth[nyc,old] = {}, expected {expected}",
+        at(last, "growth[nyc,old]")
+    );
+    // Non-vacuity: the discriminating elements must differ, or a transposed or
+    // over-arity read would produce the same number.
+    assert_ne!(at(last, "flip[old,nyc]"), at(last, "flip[young,boston]"));
+    assert_ne!(at(last, "same[nyc,old]"), at(last, "same[boston,old]"));
+
+    // 2. What the LTM partial spells, which must be the same reads.
+    let (db, model, source_project) = char_fixture_db(&project);
+    assert!(
+        fragment_compile_failures(&db, model, source_project).is_empty(),
+        "every per-element link-score fragment must compile: the subset-dims `w` \
+         pin was arity-2 over a 1-D variable before the fix"
+    );
+    let text = link_score_text(
+        &db,
+        model,
+        source_project,
+        &[
+            "link_score\u{205A}pop[nyc,young]",
+            "\u{2192}growth[nyc,old]",
+        ],
+    );
+    for expected in [
+        "previous(same[region\u{B7}nyc, age\u{B7}old])",
+        "previous(flip[age\u{B7}old, region\u{B7}nyc])",
+        "previous(w[age\u{B7}old])",
+    ] {
+        assert!(
+            text.contains(expected),
+            "expected {expected:?} in the partial; got: {text}"
+        );
+    }
+    assert!(
+        !text.contains("flip[region\u{B7}nyc, age\u{B7}old]"),
+        "the reordered dep must not be pinned with the TARGET's tuple -- that \
+         spelling compiles and reads flip[young,boston]; got: {text}"
+    );
+}
+
+/// A BARE reference to the LIVE SOURCE inside a positionally-MAPPED per-element
+/// target is pinned through the correspondence (GH #974, arm 2).
+///
+/// `growth[State,Age] = pop[State, young] * pop * 0.01` over a `pop[Region,Age]`
+/// source: the emitting `PerElement` site is `pop[State, young]`, and the bare
+/// `pop` beside it is a second occurrence the wrap freezes. `pin_bare_source_ref`
+/// matched dimension NAMES only, found no `Region` coordinate in a `State`-keyed
+/// projection, and left the reference bare -- so the freeze became a bare
+/// multi-slot `PREVIOUS(pop)`, which cannot compile in a scalar fragment. All
+/// four per-element scores on the edge read a constant 0 behind four `Assembly`
+/// warnings.
+///
+/// The correspondence is positional, so `state·west` (State's first element)
+/// reads `region·nyc` (Region's first) -- the same element the executed A2A
+/// lowering reads for that slot.
+#[test]
+fn mapped_bare_live_source_ref_is_pinned_through_the_correspondence() {
+    let project = TestProject::new("mapped_bare_live_source")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("Age", &["young", "old"])
+        .named_dimension_with_mapping("State", &["west", "east"], "Region")
+        .array_stock("pop[Region,Age]", "10", &["popinflow"], &[], None)
+        .array_flow("popinflow[Region,Age]", "1", None)
+        .array_flow("growth[State,Age]", "pop[State, young] * pop * 0.01", None)
+        .array_stock("stock[State,Age]", "0", &["growth"], &[], None)
+        .build_datamodel();
+
+    let (db, model, source_project) = char_fixture_db(&project);
+    assert!(
+        fragment_compile_failures(&db, model, source_project).is_empty(),
+        "the bare mapped live-source reference must be pinned, not left as a bare \
+         multi-slot PREVIOUS(pop) that fails to compile"
+    );
+    let text = link_score_text(
+        &db,
+        model,
+        source_project,
+        &[
+            "link_score\u{205A}pop[nyc,young]",
+            "\u{2192}growth[west,young]",
+        ],
+    );
+    assert!(
+        text.contains("PREVIOUS(pop[region\u{B7}nyc, age\u{B7}young])"),
+        "the bare live-source occurrence must be pinned to the mapped row for \
+         this target element; got: {text}"
+    );
+    assert!(
+        !text.contains("PREVIOUS(pop) "),
+        "the bare multi-slot freeze must be gone; got: {text}"
+    );
+
+    // ...and the scores must be materially live, not a compiled constant 0.
+    let compiled = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM incremental compilation should succeed");
+    let score_offsets: Vec<usize> = compiled
+        .offsets
+        .iter()
+        .filter(|(k, _)| {
+            k.as_str().contains("link_score\u{205A}pop[") && k.as_str().contains("\u{2192}growth[")
+        })
+        .map(|(_, v)| *v)
+        .collect();
+    assert_eq!(
+        score_offsets.len(),
+        4,
+        "expected four per-element mapped pop->growth link scores"
+    );
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+    for off in score_offsets {
+        assert!(
+            results.iter().any(|row| row[off] != 0.0),
+            "mapped per-element pop->growth link score at offset {off} is all-zero"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Model A3: per-element target whose body carries an additional pop occurrence
 // of DIFFERENT shape -- an all-iterated (`Bare`) live-source reference --
 // alongside the emitting `PerElement` site.
@@ -930,23 +1180,52 @@ fn char_per_element_dynamic_index() {
 }
 
 // Finding 1 materiality guard: the DYNAMIC-index sibling of the ambiguous-pin
-// guard. The frozen `pop[Region, idx]` occurrence lowers to a `PREVIOUS(idx)`
+// guard. The frozen `pop[Region, idx]` occurrence lowers to a `PREVIOUS(idx, idx)`
 // lag; the buggy blanket-skip would instead leave `idx` un-lagged, a
 // value-divergent change the constant-`pop` text golden alone would still catch
-// (the golden diverges) but whose RUNTIME consequence this guard freezes. HEAD's
-// series carries a NaN at the first live step (a pre-existing HEAD behavior: the
-// synthesized `PREVIOUS(idx)` capture-helper aux reads an uninitialized value at
-// the initial step; tracked separately as a latent bug). Reproducing that NaN is
-// the byte-parity contract; the un-lagged regression makes the same step FINITE,
-// so `results[1]` being NaN is the exact discriminator. This guard therefore
-// pins (a) every fragment compiles (the `PREVIOUS(idx)` helper is well-formed),
-// (b) the first-live-step score is NaN (the dynamic-index lag is present), and
-// (c) a later step is finite and non-zero (the score is materially live).
+// (the golden diverges) but whose RUNTIME consequence this guard freezes.
+//
+// GH #975 changed what the runtime discriminator can be. Before it, the lag's
+// signature was a NaN at the first live step: the wrap emitted a UNARY
+// `PREVIOUS(idx)`, which desugars to a `0` first-DT value, and `0` is out of
+// range for a 1-based subscript -- so the synthesized capture-helper aux
+// evaluated to NaN at t=0 and the outer `PREVIOUS` served that NaN as the first
+// live step. The freeze now names the un-lagged index as its own first-DT value,
+// so every step is finite and "finite at step 1" no longer discriminates
+// anything.
+//
+// The model is therefore this guard's OWN rather than `per_element_dynamic_index_model`'s
+// (which it used to share): there `pop[.,young]` and `pop[.,old]` hold the same
+// value at every step, so the lagged and un-lagged index reads are numerically
+// indistinguishable and the NaN was the only available signal. Here `skew` adds
+// material to `old` and not to `young`, so the two Age rows diverge and the
+// capture helper's series -- `pop[nyc, idx_{t-1}]` -- is different from the
+// un-lagged `pop[nyc, idx_t]` at every step after the first.
+//
+// The guard pins (a) every fragment compiles (the `PREVIOUS(idx, idx)` helper is
+// well-formed), (b) the capture helper is FINITE at t=0 and equals the LAGGED
+// element read at every step -- checked against the model's own simulated `pop`
+// series, with the un-lagged read asserted to differ so the check has teeth --
+// and (c) the score itself is finite at the first live step and materially live
+// after it.
 fn per_element_dynamic_index_feedback_model() -> datamodel::Project {
-    // Same shape as `per_element_dynamic_index_model` (pop is already a
-    // growth-fed stock there), reused directly so the guard and the text pin
-    // exercise the identical model.
-    per_element_dynamic_index_model()
+    TestProject::new("dyn_index_feedback")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("Age", &["young", "old"])
+        .scalar_aux("idx", "1 + (TIME MOD 2)")
+        // Per-Age drift with no dependency on `pop`: it separates the two Age
+        // rows without adding a feedback loop that would change the shape under
+        // test.
+        .array_with_ranges("agedrift[Age]", vec![("young", "0"), ("old", "5")])
+        .array_flow("skew[Region,Age]", "agedrift[Age]", None)
+        .array_flow(
+            "growth[Region]",
+            "pop[Region, young] * pop[Region, idx] * 0.001",
+            None,
+        )
+        .array_stock("pop[Region,Age]", "10", &["growth", "skew"], &[], None)
+        .build_datamodel()
 }
 
 #[test]
@@ -1006,17 +1285,63 @@ fn per_element_dynamic_index_scores_preserve_head_lag() {
         .expect("simulation should run to completion");
     let results = vm.into_results();
     let rows: Vec<_> = results.iter().collect();
-    for off in score_offsets {
-        // Step 1 (the first live step) reproduces HEAD's NaN, the signature of
-        // the `PREVIOUS(idx)` lag reading its uninitialized capture helper. An
-        // un-lagged regression (`idx` not wrapped) makes this step FINITE.
-        assert!(
-            rows[1][off].is_nan(),
-            "dynamic-index pop->growth score at offset {off} step 1 must be NaN \
-             (the preserved PREVIOUS(idx) dynamic-index lag); a finite value means \
-             the lag was dropped"
+    let series = |name: &str| -> Vec<f64> {
+        let off = compiled.offsets[&Ident::<Canonical>::new(name)];
+        rows.iter().map(|r| r[off]).collect()
+    };
+
+    // (b) The capture helper: `pop[nyc, PREVIOUS(idx, idx)]`, hoisted out of the
+    // frozen occurrence by `builtins_visitor::make_temp_arg`. It is the slot
+    // GH #975 was about -- the outer `PREVIOUS` serves its t=0 value as the
+    // score's first live step -- so it is asserted directly rather than through
+    // the score.
+    let helper = "$\u{205A}$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc,young]\u{2192}growth[nyc]\u{205A}0\u{205A}arg0";
+    let helper_series = series(helper);
+    assert!(
+        helper_series[0].is_finite(),
+        "the synthesized PREVIOUS(idx) capture helper must have a well-defined \
+         value at the initial step (GH #975); got {:?}",
+        helper_series
+    );
+    // The lag itself, checked elementwise against the model's own `pop` series:
+    // `idx` is `1 + (TIME MOD 2)`, so the LAGGED read selects `young` at t=0/1
+    // and alternates thereafter, while the UN-lagged read selects the other row.
+    // `young`/`old` diverge (see the fixture), so the two are distinguishable.
+    let idx_series = series("idx");
+    let young = series("pop[nyc,young]");
+    let old = series("pop[nyc,old]");
+    let row_at = |i: usize, index: f64| if index == 1.0 { young[i] } else { old[i] };
+    let mut lag_is_observable = false;
+    for t in 0..helper_series.len() {
+        // At t=0 the freeze's own first-DT initial value applies: the un-lagged
+        // index. Afterwards it is the index one step back.
+        let lagged_index = if t == 0 {
+            idx_series[0]
+        } else {
+            idx_series[t - 1]
+        };
+        assert_eq!(
+            helper_series[t],
+            row_at(t, lagged_index),
+            "the capture helper must read pop at the LAGGED index at step {t}; \
+             helper={helper_series:?} idx={idx_series:?} young={young:?} old={old:?}"
         );
-        // A later step is finite and non-zero: the score is materially live.
+        lag_is_observable |= row_at(t, lagged_index) != row_at(t, idx_series[t]);
+    }
+    assert!(
+        lag_is_observable,
+        "the fixture must distinguish the lagged read from the un-lagged one, or \
+         the assertion above cannot detect a dropped lag; young={young:?} old={old:?}"
+    );
+
+    // (c) The scores themselves: finite from the first live step on (the NaN
+    // GH #975 removed), and materially live afterwards.
+    for off in score_offsets {
+        assert!(
+            rows[1][off].is_finite(),
+            "dynamic-index pop->growth score at offset {off} step 1 must be finite: \
+             the synthesized PREVIOUS(idx) capture helper is initialized (GH #975)"
+        );
         let has_finite_nonzero = rows
             .iter()
             .skip(2)
@@ -1619,9 +1944,12 @@ fn scalar_feeder_bare_in_arrayed_reducer_compiles_and_simulates() {
 // Verified: re-introducing the `quote_ident` regression leaves every other
 // fixture green and fails THIS one, via the `AllCompile` expectation.
 //
-// Deliberately a leading DIGIT and not a keyword: a keyword-named source would
-// fail today against open GH #976 (`ast::needs_quoting` has no keyword check),
-// which is out of scope here. This fixture must be green on correct code.
+// A leading DIGIT rather than a keyword, and one fixture rather than two: since
+// GH #976 both classes are decided by the SAME `ast::needs_quoting` delegation,
+// so a second golden would re-test the same branch of `quote_ident` with a
+// different input. The keyword class is pinned where the distinction actually
+// lives -- `ltm_tests::link_score_quotes_every_keyword_named_source`, which
+// ranges over the whole keyword table and asserts the generated arm PARSES.
 // ---------------------------------------------------------------------------
 
 fn unquotable_source_name_model() -> datamodel::Project {
@@ -1641,5 +1969,545 @@ fn char_unquotable_source_name() {
         unquotable_source_name_model(),
         "link_score\u{205A}1pop",
         FragmentExpectation::AllCompile,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GH #984, the REACHABLE half, end to end: a `LOOKUP` inside a scored target's
+// equation. No other char fixture has one, so nothing else covers the arm at
+// the model level.
+//
+// The runtime-index half of #984 has NO model fixture on purpose. A `LOOKUP`
+// table argument carrying a runtime index does not compile on this engine at
+// all: the TARGET's own fragment fails with an `EquationError` `DoesNotExist`
+// and `compile_project_incremental` reports `NotSimulatable`, so the silent
+// wrong score the issue describes cannot be reached from a compiling model
+// today. Three independent constructions were tried and all three fail the
+// same way -- an arrayed lookup-only table (`LOOKUP(gtab[idx], src)`), an
+// arrayed graphical-function aux, and Vensim's own per-element arrayed-GF
+// application (`g[idx](src)` via the MDL reader) -- while every static-index
+// twin compiles. The wrap-level behaviour is therefore pinned where it is
+// decided, by `ltm_augment::tests::test_partial_equation_lookup_table_index_is_frozen`
+// (the general path) and `per_element_pin_freezes_a_runtime_table_arg_index`
+// (the per-element path); fabricating a model fixture here would mean shipping
+// one that does not exercise the engine.
+// ---------------------------------------------------------------------------
+
+/// The MDL source for the arrayed-GF `LOOKUP` fixtures: `y = g[<index>](src)`,
+/// Vensim's per-element arrayed-GF application, which lowers to
+/// `LOOKUP(g[<index>], src)`. That is how a `LOOKUP` gets into a target equation
+/// without the LTM layer synthesizing it.
+fn arrayed_gf_lookup_mdl(index: &str) -> String {
+    format!(
+        "\
+{{UTF-8}}
+D: A1, A2 ~~|
+g[A1]( (0,0),(1,10),(2,20) ) ~~|
+g[A2]( (0,0),(1,100),(2,200) ) ~~|
+idx = 1 + MODULO(Time, 2) ~~|
+inflow = 1 ~~|
+src= INTEG(inflow, 1) ~~|
+y = g[{index}](src) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 3 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+"
+    )
+}
+
+/// GH #984 through the PRODUCTION path: a runtime table index is frozen when the
+/// dep set is the one production derives, not one a test hands in.
+///
+/// This is the test the first version of the fix needed and did not have. The
+/// wrap freezes an ident only if it is in `other_deps`, and `other_deps` comes
+/// from `variable::identifier_set`, whose `BuiltinContents::LookupTable` arm
+/// never walks the table expression -- so `idx`, referenced only as a table
+/// index, is not a dependency of `y` and the freeze could not fire. The unit
+/// tests supplied `idx` by hand and passed on an input production cannot
+/// produce. Here nothing is supplied: `model_ltm_variables` builds the dep set
+/// itself, so the assertion below is only satisfiable by
+/// `freeze_lookup_table_indices` widening the set from the index's own idents.
+///
+/// The target does NOT compile -- a `LOOKUP` table argument with a runtime index
+/// is refused upstream, which is the documented reachability limitation above --
+/// so this asserts the generated TEXT rather than a score series, and asserts the
+/// upstream refusal too so the reason is recorded rather than hidden.
+#[test]
+fn lookup_table_runtime_index_is_frozen_through_the_production_path() {
+    use crate::db::{DiagnosticError, collect_model_diagnostics};
+
+    let project = crate::open_vensim(&arrayed_gf_lookup_mdl("idx")).expect("the MDL parses");
+
+    // The upstream limitation, asserted rather than assumed: `y` itself has no
+    // bytecode, which is why there is no numeric oracle here.
+    let plain_db = SimlinDb::default();
+    let plain = sync_from_datamodel(&plain_db, &project);
+    assert!(
+        collect_model_diagnostics(&plain_db, plain.models["main"].source, plain.project)
+            .iter()
+            .any(|d| d.variable.as_deref() == Some("y")
+                && matches!(&d.error, DiagnosticError::Equation(_))),
+        "the fixture's whole point is that a runtime table index is refused \
+         upstream; if `y` now compiles, replace this text assertion with a \
+         numeric one"
+    );
+
+    let (db, model, source_project) = char_fixture_db(&project);
+    let text = link_score_text(
+        &db,
+        model,
+        source_project,
+        &["link_score\u{205A}src\u{2192}y"],
+    );
+    assert!(
+        text.contains("lookup(g[PREVIOUS(idx, idx)], src)"),
+        "the table index must be frozen even though production does not classify \
+         it as a dependency, and (GH #975) its freeze must name the un-lagged \
+         index as its first-DT initial value rather than the desugared 0, which \
+         is out of range for a 1-based subscript; got: {text}"
+    );
+    assert!(
+        !text.contains("lookup(PREVIOUS("),
+        "the table HEAD must stay bare; got: {text}"
+    );
+}
+
+/// A static arrayed-GF table index survives the ceteris-paribus wrap untouched,
+/// and the score compiles.
+///
+/// Both halves of the `LOOKUP` arm are visible in one partial: the table HEAD
+/// `g[a1]` is NOT wrapped in `PREVIOUS` (a graphical-function table has no value
+/// slot, so `lookup(PREVIOUS(g[a1]), ...)` would fail to compile and zero the
+/// score -- the WRLD3 failure mode), and its STATIC element index is not frozen
+/// either (there is no runtime read to hold). The live source stays live in the
+/// second argument.
+///
+/// This is the reachable half of the arm, and the control for its sibling
+/// [`lookup_table_runtime_index_is_frozen_through_the_production_path`]: same
+/// model, same production path, index static instead of runtime.
+#[test]
+fn lookup_table_head_and_static_index_survive_the_wrap() {
+    let project = crate::open_vensim(&arrayed_gf_lookup_mdl("A1")).expect("the MDL parses");
+    let (db, model, source_project) = char_fixture_db(&project);
+    assert!(
+        fragment_compile_failures(&db, model, source_project).is_empty(),
+        "the table-mediated link score must compile"
+    );
+
+    let text = link_score_text(
+        &db,
+        model,
+        source_project,
+        &["link_score\u{205A}src\u{2192}y"],
+    );
+    assert!(
+        text.contains("lookup(g[a1], src)"),
+        "the table head must stay bare and its static index untouched; got: {text}"
+    );
+    assert!(
+        !text.contains("lookup(PREVIOUS("),
+        "a PREVIOUS of a table has no value slot; got: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2-1 / P2-2 of the whole-branch review: the per-element pin projection keyed
+// its axis lookup by dimension NAME, which is not an axis identity. Both shapes
+// below COMPILE AND RUN, so each was a silent wrong row rather than a latent
+// one, and each is measured against the VM before its pin is asserted.
+//
+// This is the second time in this area a name-keyed table produced a wrong row
+// (GH #986 was the first), which is why the projection now asks
+// `compiler::dimensions::allocate_implicit_axes_partial` instead of restating
+// the rule.
+// ---------------------------------------------------------------------------
+
+/// Read one variable's final-step value out of a compiled+run model.
+fn final_value(project: &datamodel::Project, name: &str) -> f64 {
+    let db = SimlinDb::default();
+    let sp = sync_from_datamodel(&db, project).project;
+    let compiled = compile_project_incremental(&db, sp, "main").expect("the fixture compiles");
+    let off = *compiled
+        .offsets
+        .iter()
+        .find(|(k, _)| k.as_str() == name)
+        .unwrap_or_else(|| panic!("no slot named {name}"))
+        .1;
+    let mut vm = crate::vm::Vm::new(compiled).expect("VM creation should succeed");
+    vm.run_to_end().expect("simulation should run");
+    vm.into_results().iter().next_back().expect("a saved step")[off]
+}
+
+fn repeated_dimension_model() -> datamodel::Project {
+    TestProject::new("repeated_target_dim")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .array_with_ranges_direct(
+            "w",
+            vec!["Region".to_string()],
+            vec![("nyc", "1"), ("boston", "2")],
+            None,
+        )
+        // A stock, so the model is stateful and LTM scores it at all.
+        .flow("inflow", "1", None)
+        .stock("driver", "3", &["inflow"], &[], None)
+        // `target` repeats `Region`: two axes, one name.
+        .array_aux_direct(
+            "target",
+            vec!["Region".to_string(), "Region".to_string()],
+            "driver * w",
+            None,
+        )
+        .build_datamodel()
+}
+
+/// A target that REPEATS a dimension gives a bare dep the FIRST axis, and the
+/// pin must say so (P2-1).
+///
+/// `target[Region,Region] = driver * w` with `w[Region]`: the simulation reads
+/// `w` at the FIRST `Region` coordinate, so `target[nyc,boston]` reads `w[nyc]`.
+/// The pin projection keyed its lookup by dimension name, so the second axis
+/// overwrote the first and it emitted `PREVIOUS(w[region·boston])` -- a fragment
+/// that compiles and reads the other row.
+#[test]
+fn repeated_target_dimension_reads_the_first_axis() {
+    let project = repeated_dimension_model();
+
+    // What the simulation reads, measured. `w[nyc]` and `w[boston]` differ, so
+    // the two candidate reads are distinguishable.
+    assert_ne!(
+        final_value(&project, "w[nyc]"),
+        final_value(&project, "w[boston]")
+    );
+    assert_eq!(
+        final_value(&project, "target[nyc,boston]"),
+        final_value(&project, "driver") * final_value(&project, "w[nyc]"),
+        "a bare dep under a repeated-dimension target reads the FIRST axis"
+    );
+
+    // ...and the pin spells that row.
+    let (db, model, source_project) = char_fixture_db(&project);
+    let text = link_score_text(
+        &db,
+        model,
+        source_project,
+        &["link_score\u{205A}driver\u{2192}target[nyc,boston]"],
+    );
+    assert!(
+        text.contains("previous(w[region\u{B7}nyc])"),
+        "the pin must read the FIRST Region axis, as the simulation does; got: {text}"
+    );
+    assert!(
+        !text.contains("previous(w[region\u{B7}boston])"),
+        "a name-keyed lookup keeps only the LAST axis and spells the wrong row; \
+         got: {text}"
+    );
+}
+
+fn doubly_mapped_model() -> datamodel::Project {
+    let mut project = TestProject::new("doubly_mapped")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("T", &["t1", "t2"])
+        .named_dimension("U", &["u1", "u2"])
+        .array_with_ranges_direct(
+            "aw",
+            vec!["A".to_string()],
+            vec![("a1", "1"), ("a2", "2")],
+            None,
+        )
+        .array_with_ranges_direct(
+            "bw",
+            vec!["B".to_string()],
+            vec![("b1", "10"), ("b2", "20")],
+            None,
+        )
+        .flow("inflow", "1", None)
+        .stock("driver", "1", &["inflow"], &[], None)
+        .array_aux_direct(
+            "dep",
+            vec!["A".to_string(), "B".to_string()],
+            "aw[A] + bw[B]",
+            None,
+        )
+        .array_aux_direct(
+            "target",
+            vec!["T".to_string(), "U".to_string()],
+            "driver * dep",
+            None,
+        )
+        .build_datamodel();
+    // `A` and `B` each map to BOTH target dimensions, so an independent per-axis
+    // search hands both of them `T`.
+    let both = || {
+        vec![
+            datamodel::DimensionMapping {
+                target: "T".to_string(),
+                element_map: vec![],
+            },
+            datamodel::DimensionMapping {
+                target: "U".to_string(),
+                element_map: vec![],
+            },
+        ]
+    };
+    let mut a =
+        datamodel::Dimension::named("A".to_string(), vec!["a1".to_string(), "a2".to_string()]);
+    a.mappings = both();
+    let mut b =
+        datamodel::Dimension::named("B".to_string(), vec!["b1".to_string(), "b2".to_string()]);
+    b.mappings = both();
+    project.dimensions.push(a);
+    project.dimensions.push(b);
+    project
+}
+
+/// Two dependency axes that can each map to either target axis are allocated
+/// ONE-TO-ONE, in declaration order (P2-2).
+///
+/// `target[T,U] = driver * dep` with `dep[A,B]`, where `A` and `B` both carry
+/// positional mappings to both `T` and `U`. The simulation consumes each target
+/// axis once, so `target[t1,u2]` reads `dep[a1,b2]`. The pin projection searched
+/// per dependency axis independently with no `used` set, so both claimed `T` and
+/// it emitted `PREVIOUS(dep[a1,b1])` -- again compilable and again the wrong row.
+#[test]
+fn doubly_mapped_dep_axes_are_allocated_one_to_one() {
+    let project = doubly_mapped_model();
+
+    // What the simulation reads, measured; the two candidate rows differ.
+    assert_ne!(
+        final_value(&project, "dep[a1,b1]"),
+        final_value(&project, "dep[a1,b2]")
+    );
+    assert_eq!(
+        final_value(&project, "target[t1,u2]"),
+        final_value(&project, "driver") * final_value(&project, "dep[a1,b2]"),
+        "each target axis is consumed once: A takes T, B takes U"
+    );
+
+    // ...and the pin spells that row.
+    let (db, model, source_project) = char_fixture_db(&project);
+    let text = link_score_text(
+        &db,
+        model,
+        source_project,
+        &["link_score\u{205A}driver\u{2192}target[t1,u2]"],
+    );
+    assert!(
+        text.contains("previous(dep[a\u{B7}a1, b\u{B7}b2])"),
+        "the pin must allocate one-to-one, as the simulation does; got: {text}"
+    );
+    assert!(
+        !text.contains("previous(dep[a\u{B7}a1, b\u{B7}b1])"),
+        "an independent per-axis search gives both dep axes the FIRST target \
+         axis and spells the wrong row; got: {text}"
+    );
+}
+
+/// A `PerElement` edge whose target REPEATS a dimension is declined loudly.
+///
+/// The scalar-source and agg emitters project positionally and handle a repeated
+/// dimension correctly (`repeated_target_dimension_reads_the_first_axis`), but the
+/// per-element emitter's row derivations address a target axis by its dimension
+/// NAME -- that is what an `AxisRead::Iterated` carries -- and two axes with one
+/// name are indistinguishable to them. Emitting anyway produces a partial that
+/// compiles and reads whichever axis the lookup resolved to, so the edge is
+/// skipped with a `Warning` instead: loud beats a plausible wrong number, which
+/// is the trade this area has taken every time.
+///
+/// The fixture's own equation compiles and runs, so the decline is LTM's and not
+/// a consequence of an unsupported model.
+#[test]
+fn per_element_edge_declines_a_repeated_dimension_target() {
+    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
+
+    let project = TestProject::new("per_element_repeated_dim")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("Age", &["young", "old"])
+        .array_flow("growth[Region,Age]", "1", None)
+        .array_stock("pop[Region,Age]", "10", &["growth"], &[], None)
+        // `pop[Region, young]` is a PerElement site; the target repeats `Region`.
+        .array_aux_direct(
+            "target",
+            vec!["Region".to_string(), "Region".to_string()],
+            "pop[Region, young]",
+            None,
+        )
+        .build_datamodel();
+
+    // The model itself is fine -- the decline below is LTM's.
+    let plain_db = SimlinDb::default();
+    let plain = sync_from_datamodel(&plain_db, &project).project;
+    compile_project_incremental(&plain_db, plain, "main")
+        .expect("the repeated-dimension model compiles");
+
+    let (db, model, source_project) = char_fixture_db(&project);
+    let diags = collect_model_diagnostics(&db, model, source_project);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.severity == DiagnosticSeverity::Warning
+                && matches!(&d.error, DiagnosticError::Assembly(m)
+                if m.contains("repeats a dimension") && m.contains("pop") && m.contains("target"))),
+        "the edge must be declined with a Warning naming it; got {:?}",
+        diags.iter().map(|d| &d.error).collect::<Vec<_>>()
+    );
+
+    // ...and no per-element score is emitted for it, rather than a wrong one.
+    let ltm = model_ltm_variables(&db, model, source_project);
+    let per_element: Vec<&String> = ltm
+        .vars
+        .iter()
+        .map(|v| &v.name)
+        .filter(|n| n.contains("link_score\u{205A}pop[") && n.contains("\u{2192}target["))
+        .collect();
+    assert!(
+        per_element.is_empty(),
+        "a declined edge must emit no per-element score; got {per_element:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2-8: an index on an INDEXED axis has no `dim·elem` spelling.
+//
+// The reported mechanism does not hold, and the measurements are in the test
+// below rather than only in the report. `q["1"]` -- a legal quoted
+// numeric-named variable used as an index -- is NOT a runtime read: the
+// compiler's dynamic-subscript lowering resolves it through
+// `Dimension::get_offset`, which for an indexed dimension parses the
+// identifier's text, so `q["1"]` and `q[1]` are the same static position. The
+// defect at that line was the QUALIFICATION, not the resolution.
+// ---------------------------------------------------------------------------
+
+/// The `q["1"]` fixture: an indexed dimension, a variable legally named `1`,
+/// and a target that indexes `q` with it. `index_expr` is the spelling under
+/// test.
+fn indexed_axis_index_model(index_expr: &str, one_value: &str) -> datamodel::Project {
+    let mut project = TestProject::new("indexed_axis_index")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .aux("\"1\"", one_value, None)
+        .flow("inflow", "1", None)
+        .stock("source", "1", &["inflow"], &[], None)
+        .aux("target", &format!("source + q[{index_expr}]"), None)
+        .build_datamodel();
+    project
+        .dimensions
+        .push(datamodel::Dimension::indexed("D".to_string(), 3));
+    project
+        .models
+        .get_mut(0)
+        .expect("main model")
+        .variables
+        .push(crate::datamodel::Variable::Aux(datamodel::Aux {
+            ident: "q".to_string(),
+            equation: crate::datamodel::Equation::Arrayed(
+                vec!["D".to_string()],
+                vec![
+                    ("1".to_string(), "100".to_string(), None, None),
+                    ("2".to_string(), "200".to_string(), None, None),
+                    ("3".to_string(), "300".to_string(), None, None),
+                ],
+                None,
+                false,
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+    project
+}
+
+/// A quoted numeric-named variable used as an index into an INDEXED axis is a
+/// STATIC position, and the ceteris-paribus wrap must leave it spellable.
+///
+/// Batch 1 made `needs_quoting` leading-digit-aware so a variable named `1`
+/// round-trips as `"1"`, which is what makes this shape appear in generated
+/// text at all; the two changes meet here.
+///
+/// The first half is the measurement that settles what the reference means. A
+/// review pass read `compiler::subscript::normalize_subscripts3` -- which does
+/// decline a bare identifier on an indexed axis -- and concluded the compiler
+/// treats `q["1"]` as a runtime read of the variable. It does not: declining
+/// there routes to the DYNAMIC lowering (`compiler::context`), whose first move
+/// is `Dimension::get_offset(ident)`, and that parses an indexed axis's
+/// identifier text into a position. So `q["1"]` is position 1 no matter what
+/// the variable holds -- asserted here by running the model with two different
+/// values for it.
+///
+/// The second half is the defect that WAS there: the wrap qualified the
+/// resolved element as `d·1`, a spelling `DimensionsContext::lookup` resolves
+/// only for a NAMED dimension. The capture helper that froze it could not
+/// compile, so both link scores read a constant 0 behind `Assembly` warnings.
+/// A loud degradation rather than a wrong row -- and the reported fix, refusing
+/// to resolve the identifier at all, would have turned it INTO a wrong row by
+/// freezing an index the compiler resolves statically (`q[PREVIOUS("1")]` reads
+/// whatever the variable held last step; the equation reads `q[1]`).
+#[test]
+fn quoted_numeric_index_on_an_indexed_axis_is_a_static_position() {
+    // 1. What the reference MEANS, measured: independent of the variable's value.
+    for (one_value, label) in [("2", "variable 1 = 2"), ("3", "variable 1 = 3")] {
+        let project = indexed_axis_index_model("\"1\"", one_value);
+        assert_eq!(
+            final_value(&project, "target"),
+            final_value(&project, "source") + final_value(&project, "q[1]"),
+            "{label}: `q[\"1\"]` is the static position 1, not a read of the \
+             variable named 1"
+        );
+        // Non-vacuity: the candidate rows differ, so a runtime read would show.
+        assert_ne!(final_value(&project, "q[1]"), final_value(&project, "q[2]"));
+        assert_ne!(final_value(&project, "q[1]"), final_value(&project, "q[3]"));
+    }
+
+    // 2. ...so the wrap must spell it the way the equation does, and the
+    //    fragments must compile. `q["1"]` and `q[1]` are the same position, so
+    //    both spellings are checked.
+    for (index_expr, expected) in [("\"1\"", "PREVIOUS(q[\"1\"])"), ("1", "PREVIOUS(q[1])")] {
+        let project = indexed_axis_index_model(index_expr, "2");
+        let (db, model, source_project) = char_fixture_db(&project);
+        assert!(
+            fragment_compile_failures(&db, model, source_project).is_empty(),
+            "q[{index_expr}]: every link-score fragment must compile; a `d·1` \
+             qualification does not resolve on an indexed axis and zeroes the score"
+        );
+        let text = link_score_text(
+            &db,
+            model,
+            source_project,
+            &["link_score\u{205A}source\u{2192}target"],
+        );
+        assert!(
+            text.contains(expected),
+            "q[{index_expr}]: expected {expected:?} in the partial; got: {text}"
+        );
+        assert!(
+            !text.contains("d\u{B7}1"),
+            "q[{index_expr}]: an indexed axis has no `dim·elem` spelling; got: {text}"
+        );
+    }
+}
+
+/// `DimName.N` on an indexed axis is unreachable, pinned rather than handled.
+///
+/// `compiler::subscript` and `compiler::context` both accept `D.2` as a static
+/// position, and `dimensions::resolve_axis_index_name` deliberately does not --
+/// a disclosed conservative gap. It stays a gap because the shape does not
+/// compile in the first place: the TARGET's own fragment fails, so no link
+/// score for it is ever asked for. If this test starts failing, the gap has
+/// become reachable and the resolver needs the `DimName.N` form.
+#[test]
+fn dim_name_dot_index_does_not_compile_so_the_resolver_gap_is_inert() {
+    use crate::db::compile_project_incremental;
+    let project = indexed_axis_index_model("D.2", "2");
+    let db = SimlinDb::default();
+    let sp = sync_from_datamodel(&db, &project).project;
+    assert!(
+        compile_project_incremental(&db, sp, "main").is_err(),
+        "`q[D.2]` is expected NOT to compile; if it now does, \
+         `resolve_axis_index_name` must learn the `DimName.N` static position \
+         or the wrap will freeze it and read the wrong row"
     );
 }

@@ -294,6 +294,13 @@ pub(crate) enum SymbolicOpcode {
 
 /// Symbolic version of `ByteCode`. Contains the literal pool (unchanged)
 /// and symbolic opcodes.
+///
+/// Its `f64`s are compared with the DERIVED (IEEE) `PartialEq`, not by bit
+/// pattern: a NaN makes this value unequal to a bit-identical rebuild and so
+/// unable to backdate, and two pools differing only in a zero's sign compare
+/// equal. Both are accepted, knowingly -- see the "Float equality in this
+/// crate" section on [`crate::ast::Literal`] for the position, the corrected
+/// premise behind GH #642, and what would change the decision.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SymbolicByteCode {
     pub literals: Vec<f64>,
@@ -383,6 +390,13 @@ pub(crate) struct CompiledVarFragment {
 }
 
 /// Bytecodes plus side-channel data for one variable in one phase.
+///
+/// This is the value of the TRACKED `db::compile_var_fragment`, read by the
+/// TRACKED `db::assemble_module` -- which is why GH #642's "the only consumer is
+/// non-tracked" reasoning does not hold here. Its floats (the literal pool
+/// inside `symbolic`, and `graphical_functions`) keep the derived IEEE
+/// `PartialEq`; see the "Float equality in this crate" section on
+/// [`crate::ast::Literal`] for why that is accepted rather than open.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PerVarBytecodes {
     pub symbolic: SymbolicByteCode,

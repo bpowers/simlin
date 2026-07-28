@@ -3,6 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use crate::ast::expr0::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
+use crate::ast::literal::Literal;
 pub use crate::builtins::Loc;
 use crate::builtins::{BuiltinFn, UntypedBuiltinFn};
 use crate::common::{Canonical, EquationResult, Ident};
@@ -12,7 +13,7 @@ use crate::model::ScopeStage0;
 /// IndexExpr1 represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 pub enum IndexExpr1 {
     Wildcard(Loc),
     // *:dimension_name
@@ -54,10 +55,14 @@ impl IndexExpr1 {
 
 /// Expr represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
+///
+/// `Eq` is derived for the reason spelled out on [`Expr0`]: it makes
+/// "reflexive, therefore backdateable" a compile-checked property, which is what
+/// keeps a future float-bearing field from being a bare `f64`.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 pub enum Expr1 {
-    Const(String, f64, Loc),
+    Const(String, Literal, Loc),
     Var(Ident<Canonical>, Loc),
     App(BuiltinFn<Expr1>, Loc),
     Subscript(Ident<Canonical>, Vec<IndexExpr1>, Loc),
@@ -275,7 +280,7 @@ impl Expr1 {
                     "previous" => {
                         if args.len() == 1 {
                             let a = args.remove(0);
-                            let zero = Expr1::Const("0".to_string(), 0.0, loc);
+                            let zero = Expr1::Const("0".to_string(), Literal::new(0.0), loc);
                             BuiltinFn::Previous(Box::new(a), Box::new(zero))
                         } else if args.len() == 2 {
                             let b = args.remove(1);
@@ -324,7 +329,7 @@ impl Expr1 {
             Expr1::Const(s, n, loc) => Expr1::Const(s, n, loc),
             Expr1::Var(id, loc) => {
                 if let Some(off) = scope.dimensions.lookup(id.as_str()) {
-                    Expr1::Const(id.to_string(), off as f64, loc)
+                    Expr1::Const(id.to_string(), Literal::new(off as f64), loc)
                 } else {
                     Expr1::Var(id, loc)
                 }
@@ -487,6 +492,6 @@ impl Expr1 {
 
 impl Default for Expr1 {
     fn default() -> Self {
-        Expr1::Const("0.0".to_string(), 0.0, Loc::default())
+        Expr1::Const("0.0".to_string(), Literal::new(0.0), Loc::default())
     }
 }

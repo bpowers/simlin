@@ -22,6 +22,15 @@ use crate::module_functions::MacroRegistry;
 use crate::units::parse_units;
 use crate::{ErrorCode, eqn_err, units};
 
+/// A graphical function's points, as the compiler and the VM read them.
+///
+/// The `f64`s keep the derived (IEEE) `PartialEq`, so a lookup table holding a
+/// NaN y-point makes this -- and every `ModelStage0` / `ModelStage1` /
+/// `db::query::ParsedVariableResult` carrying it -- unequal to a bit-identical
+/// rebuild, defeating salsa backdating. The XMILE reader admits one, since
+/// `f64::from_str` accepts `"NaN"` in a `<ypts>` list unvalidated. Accepted
+/// knowingly, on the same terms as the bytecode types: see the "Float equality
+/// in this crate" section on [`crate::ast::Literal`].
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, salsa::Update)]
 pub struct Table {
@@ -478,6 +487,212 @@ pub(crate) fn var_is_lookup_only(eqn: Option<&datamodel::Equation>, has_tables: 
                 && default.as_deref().map(is_empty_or_sentinel).unwrap_or(true)
         }
         None => false,
+    }
+}
+
+/// Does `equation` consist of nothing but the NaN literal?
+///
+/// Decided by LEXING rather than by comparing against the string `"nan"`: the
+/// spelling of the literal lives in `lexer::KEYWORDS`, and restating it here
+/// would be a second copy of that table to keep in step (the same reason
+/// `ast::needs_quoting` reads `lexer::is_reserved_word`, GH #976). Lexing also
+/// settles case and surrounding whitespace for free -- both spellings occur in
+/// practice, since the MDL importer writes `NAN` for `A FUNCTION OF(...)` while
+/// the MDL writer prints a `Const` NaN back as `NaN`.
+///
+/// "Nothing but" is exactly one token, so a NaN nested in a larger expression
+/// (`nan + 0`, `IF x > 0 THEN 1 ELSE nan`) is NOT this -- that is a modeller
+/// deliberately using NaN as a sentinel, a different claim with a different
+/// remedy. A parenthesized `(nan)` is likewise outside the rule; nothing
+/// produces it, and admitting it would mean deciding how far to unwrap.
+pub(crate) fn is_nan_literal(equation: &str) -> bool {
+    use crate::lexer::{Lexer, LexerType, Token};
+    let mut lexer = Lexer::new(equation, LexerType::Equation);
+    matches!(lexer.next(), Some(Ok((_, Token::Nan, _)))) && lexer.next().is_none()
+}
+
+/// Which of a variable's equation arms are UNFILLED -- carry the NaN literal
+/// where a formula belongs (see [`is_nan_literal`]).
+///
+/// An "arm" is one whole equation: the single formula of a scalar or
+/// apply-to-all variable, one `<element>` entry of a per-element arrayed
+/// variable, or an arrayed variable's EXCEPT default (the formula for every
+/// element with no entry of its own).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UnfilledArms {
+    /// The variable has NO equation anywhere: its scalar/apply-to-all formula is
+    /// the NaN literal, or every arm of its arrayed equation is (its EXCEPT
+    /// default included, when it has one).
+    Whole,
+    /// Only part of an arrayed variable is unfilled: these element subscripts,
+    /// in declaration order, plus the EXCEPT default when `default` is set.
+    Partial {
+        elements: Vec<String>,
+        default: bool,
+    },
+}
+
+/// Classify a variable's PARSED equation by which of its arms are unfilled, or
+/// `None` when none are.
+///
+/// Arms rather than whole variables, deliberately. An arrayed variable's
+/// elements are separate simulated series, so an unfilled `x[b]` stops `x[b]`'s
+/// line on the graph exactly the way an unfilled scalar stops its own, and costs
+/// the same backward hunt (`crate::float`). Reporting only the all-arms case
+/// would go silent precisely where the model is most confusing -- some lines
+/// fine, one stopping -- so a partially-unfilled variable is reported too, and
+/// [`UnfilledArms::Partial`] names the arms so the message can point at them.
+/// Either way it is at most ONE finding per variable, never one per element.
+///
+/// # Why this takes the parsed `Ast`, not the `datamodel::Equation`
+///
+/// Four review findings on this diagnostic were the same mistake, each caught
+/// one at a time: an arm shadowed because the others cover the dimension, an arm
+/// whose subscript names nothing, an arm a later duplicate overrides, and an arm
+/// whose equation is EMPTY. Every one is a gap between the arms AS WRITTEN and
+/// the arms the compiler EVALUATES, and the first three were each fixed by
+/// re-deriving one more stage of that pipeline by hand. The fourth proved the
+/// approach wrong: the hand-derived selection was missing a stage, and missing
+/// one silently -- it reported nothing where a slot really was NaN.
+///
+/// So this no longer re-derives anything. [`parse_equation`] already performs
+/// the pipeline, and its `Ast` IS the result: empty and unparseable arms
+/// dropped, duplicate canonical subscripts collapsed last-wins, dimensions
+/// resolved. The one stage that is not in the `Ast` -- which declared slot takes
+/// which arm -- is the `SubscriptIterator` walk below, and it is the compiler's
+/// own (`compiler::expand_arrayed_with_hoisting` looks each combination's key up
+/// in this same map and falls to the EXCEPT default only on a miss). Nothing
+/// here mirrors a stage that exists elsewhere.
+///
+/// The consequence for arrayed reporting: element names come out CANONICAL and
+/// in row-major declared order, because that is how the map is keyed and how the
+/// slots are walked. The as-written spelling is not recoverable from the `Ast`,
+/// and asking the datamodel for it would mean re-deriving the last-wins rule to
+/// know which spelling survived -- exactly the re-derivation this avoids.
+pub(crate) fn unfilled_arms(ast: &Ast<Expr0>) -> Option<UnfilledArms> {
+    match ast {
+        // One arm covering the whole variable: a scalar formula, or one formula
+        // applied to every element.
+        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
+            is_nan_constant(expr).then_some(UnfilledArms::Whole)
+        }
+        Ast::Arrayed(dims, elements, default, apply_default_to_missing) => {
+            let mut unfilled: Vec<String> = vec![];
+            let mut slots_with_an_arm = 0usize;
+            let mut default_is_selected = false;
+            for combination in crate::dimensions::SubscriptIterator::new(dims) {
+                let key = CanonicalElementName::from_raw(&combination.join(","));
+                match elements.get(&key) {
+                    Some(expr) => {
+                        slots_with_an_arm += 1;
+                        if is_nan_constant(expr) {
+                            unfilled.push(key.as_str().to_string());
+                        }
+                    }
+                    // No arm names this slot, so its value comes from the EXCEPT
+                    // default when one is live and from the compiler's silent
+                    // `0` otherwise.
+                    None => default_is_selected = true,
+                }
+            }
+            let default_unfilled = default_is_selected
+                && *apply_default_to_missing
+                && default.as_ref().is_some_and(is_nan_constant);
+            // The silent `0` is finite, so a slot that falls to it is NOT an
+            // unfilled equation. (It is its own reportable shape, and a
+            // deliberately separate one: GH #905.)
+            let slots_past_the_arms_are_nan = !default_is_selected || default_unfilled;
+
+            if unfilled.is_empty() && !default_unfilled {
+                None
+            } else if unfilled.len() == slots_with_an_arm && slots_past_the_arms_are_nan {
+                // Every slot the variable has evaluates to NaN.
+                Some(UnfilledArms::Whole)
+            } else {
+                Some(UnfilledArms::Partial {
+                    elements: unfilled,
+                    default: default_unfilled,
+                })
+            }
+        }
+    }
+}
+
+/// Is `expr` exactly a NaN constant -- the whole formula, not a NaN inside one?
+///
+/// A root-level `Expr0::Const` IS the whole equation: the parser builds no node
+/// for parentheses, so this is the parsed twin of [`is_nan_literal`]'s
+/// single-token rule and agrees with it on every text that reaches here.
+fn is_nan_constant(expr: &Expr0) -> bool {
+    matches!(expr, Expr0::Const(_, literal, _) if literal.value().is_nan())
+}
+
+/// [`is_nan_constant`] for the decision table, which must compute a fixture's
+/// cell by the same rule the classifier uses.
+#[cfg(test)]
+pub(crate) fn is_nan_constant_for_test(expr: &Expr0) -> bool {
+    is_nan_constant(expr)
+}
+
+/// Could `equation` possibly produce an unfilled-equation finding?
+///
+/// A cheap superset test, and the ONLY thing an ordinary variable pays. Every
+/// finding names either an arm or the EXCEPT default, so if no arm text and no
+/// default text is a lone NaN there is nothing to report and the caller can skip
+/// the slot walk entirely -- which for an arrayed variable means skipping a
+/// Cartesian product over its declared elements.
+///
+/// That matters because `db::diagnostic::model_all_diagnostics` runs on the
+/// interactive path: without this gate every arrayed variable in a model paid an
+/// O(slot-count) allocation on every keystroke, for a warning almost none of
+/// them will ever emit.
+///
+/// It must stay a SUPERSET of what [`unfilled_arms`] reports, which it is by
+/// construction: that function only ever looks at these same texts.
+///
+/// # `nan_names_a_variable`: declining to make an undecidable claim
+///
+/// When the model declares a variable actually NAMED `nan`, the stored text
+/// `NAN` has two readings and nothing here can tell them apart, so this returns
+/// `false` and the variable is not reported at all.
+///
+/// The ambiguity is one we chose. The MDL importer quotes every keyword-shaped
+/// variable reference EXCEPT `nan` (`mdl::xmile_compat`'s `quote_reference`),
+/// because quoting it would bind Vensim's `A FUNCTION OF(...)` placeholder --
+/// which we store as the text `NAN` -- to any like-named variable, and a
+/// round-tripped model would then compute a value for a variable that has none.
+/// That trade is deliberate and is pinned by
+/// `keyword_ident_tests::a_bare_nan_reference_in_mdl_is_still_the_literal`,
+/// which records the residual it leaves: `b = nan` referring to a declared `nan`
+/// still reads as the literal. So a model containing both shapes stores them
+/// identically, and `b = nan` -- a formula the modeller really did write --
+/// looked exactly like a placeholder they never filled in.
+///
+/// Silence is the right answer rather than a guess in either direction. This
+/// warning's whole value is that a practitioner can trust it and skip the
+/// backward hunt (`crate::float`), so a warning that MIGHT be false is worse
+/// than one that is absent. Note this is not the declared-name resolution rule
+/// batch 1 rejected: that one resolved the ambiguity in favour of one reading
+/// and would have shipped a wrong VALUE. This ships no claim.
+///
+/// Scoped to the ambiguity, not to the model: the flag only ever suppresses
+/// equations whose text IS the bare literal, which is the only text with two
+/// readings. Every other diagnostic in the pass is untouched, and in a model
+/// with no variable named `nan` -- every ordinary model -- nothing changes.
+pub(crate) fn may_have_unfilled_arms(
+    equation: &datamodel::Equation,
+    nan_names_a_variable: bool,
+) -> bool {
+    if nan_names_a_variable {
+        return false;
+    }
+    use crate::datamodel::Equation;
+    match equation {
+        Equation::Scalar(s) | Equation::ApplyToAll(_, s) => is_nan_literal(s),
+        Equation::Arrayed(_, elements, default, _) => {
+            elements.iter().any(|(_, eqn, _, _)| is_nan_literal(eqn))
+                || default.as_deref().is_some_and(is_nan_literal)
+        }
     }
 }
 
@@ -1206,7 +1421,7 @@ pub fn previous_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
 ///
 /// Panics on parse or lowering errors -- intended for test use only.
 #[cfg(test)]
-fn scalar_ast(eqn: &str) -> Ast<Expr2> {
+pub(crate) fn scalar_ast(eqn: &str) -> Ast<Expr2> {
     use crate::ast::lower_ast;
 
     let (ast, err) = parse_equation(
@@ -1256,8 +1471,8 @@ fn test_classify_dependencies_matrix() {
     }
 
     let loc = Loc::new(0, 1);
-    let const_one = Expr2::Const("1".to_string(), 1.0, loc);
-    let const_zero = Expr2::Const("0".to_string(), 0.0, loc);
+    let const_one = Expr2::Const("1".to_string(), crate::ast::Literal::new(1.0), loc);
+    let const_zero = Expr2::Const("0".to_string(), crate::ast::Literal::new(0.0), loc);
 
     let module_inputs_with_input: BTreeSet<Ident<Canonical>> =
         [Ident::new("input")].into_iter().collect();
@@ -1950,7 +2165,7 @@ fn test_tables() {
         ident: Ident::new("lookup_function_table"),
         ast: Some(Ast::Scalar(Expr0::Const(
             "0".to_string(),
-            0.0,
+            crate::ast::Literal::new(0.0),
             Loc::new(0, 1),
         ))),
         init_ast: None,

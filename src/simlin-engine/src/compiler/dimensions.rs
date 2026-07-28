@@ -6,6 +6,156 @@ use std::collections::HashMap;
 
 use crate::dimensions::{Dimension, DimensionsContext};
 
+/// For each dimension of `dims`, the POSITION in `active_dims` whose subscript
+/// supplies it, or `None` for a dimension no active axis supplies -- the
+/// engine's SINGLE implicit-subscript axis allocation, the rule behind a BARE
+/// arrayed reference inside an apply-to-all body.
+///
+/// Two properties matter to every caller and neither is re-derivable safely:
+///
+/// - the answer is POSITIONAL, so a target that repeats a dimension
+///   (`target[D,D]`) is handled by index rather than by name. A map keyed by
+///   dimension name collapses the two occurrences and answers with whichever was
+///   inserted last;
+/// - the allocation is ONE-TO-ONE: each active axis is consumed at most once
+///   (`used`), so two dependency axes that could each match the same active axis
+///   are given different ones in declaration order. Searching per dependency axis
+///   independently lets both claim the first match.
+///
+/// Both were live silent-wrong-row defects in the LTM per-element projection
+/// (P2-1 / P2-2 of the whole-branch review) precisely because that projection
+/// re-derived this rule instead of asking for it. `crate::ltm_augment` now calls
+/// this, so its pins and the executed reads agree by construction rather than by
+/// parallel implementation. Do not add a second copy of this decision.
+///
+/// The compiler wants the TOTAL answer and errors without it, so it calls
+/// [`allocate_implicit_axes`]; the LTM projection wants the partial one, because
+/// a SUBSCRIPTED reference spells some of its own axes and only needs the rest
+/// resolved. One algorithm, two projections of its result.
+pub(crate) fn allocate_implicit_axes_partial(
+    dims: &[Dimension],
+    active_dims: &[Dimension],
+    dimensions_ctx: &DimensionsContext,
+) -> Vec<Option<usize>> {
+    let mut alloc: Vec<Option<usize>> = Vec::with_capacity(dims.len());
+
+    // Track which active dimensions have been used.
+    let mut used: Vec<bool> = vec![false; active_dims.len()];
+
+    for dim in dims.iter() {
+        // FIRST PASS: Try to find an exact name match anywhere in unused active dims.
+        // This prevents size-based fallback from grabbing the wrong dimension when
+        // the correct name match exists later in the list.
+        let name_match_idx = active_dims.iter().enumerate().find_map(|(i, candidate)| {
+            if !used[i] && candidate.name() == dim.name() {
+                Some(i)
+            } else {
+                None
+            }
+        });
+
+        if let Some(idx) = name_match_idx {
+            alloc.push(Some(idx));
+            used[idx] = true;
+            continue;
+        }
+
+        // SECOND PASS: Check for dimension mapping matches in both directions.
+        // Forward: dim has any mapping to an active dimension
+        // Reverse: active_dim has any mapping to dim
+        let mapping_match_idx = {
+            // Forward: dim has mapping to active dim (or active is subdim of mapping target)
+            let mut found = active_dims.iter().enumerate().find_map(|(i, candidate)| {
+                if used[i] {
+                    return None;
+                }
+                let candidate_name = candidate.canonical_name();
+                if dimensions_ctx.has_mapping_to(dim.canonical_name(), candidate_name) {
+                    return Some(i);
+                }
+                if dimensions_ctx.has_mapping_to_parent_of(dim.canonical_name(), candidate_name) {
+                    return Some(i);
+                }
+                None
+            });
+            // Reverse: active_dim has mapping to dim
+            if found.is_none() {
+                found = active_dims.iter().enumerate().find_map(|(i, candidate)| {
+                    if used[i] {
+                        return None;
+                    }
+                    if dimensions_ctx
+                        .has_mapping_to(candidate.canonical_name(), dim.canonical_name())
+                    {
+                        return Some(i);
+                    }
+                    None
+                });
+            }
+            found
+        };
+
+        if let Some(idx) = mapping_match_idx {
+            alloc.push(Some(idx));
+            used[idx] = true;
+            continue;
+        }
+
+        // THIRD PASS: Only if no name or mapping match exists, try size-based matching
+        // for indexed dimensions. Find the first unused indexed dimension with
+        // the same size.
+        //
+        // IMPORTANT: Size-based fallback only applies when BOTH dimensions are
+        // indexed. Named dimensions must match by name (or subdimension relationship)
+        // because their elements have semantic meaning. For example, Cities=[Boston,
+        // Seattle] and Products=[Widgets,Gadgets] shouldn't match just because both
+        // have size 2 - that would be semantically incorrect.
+        //
+        // NOTE: The two-pass (name -> size) matching logic is shared with the VM via
+        // dimensions::match_dimensions_two_pass. This compiler version adds a mapping
+        // pass between name and size matching.
+        let size_match_idx = if let Dimension::Indexed(_, dim_size) = dim {
+            active_dims.iter().enumerate().find_map(|(i, candidate)| {
+                if !used[i]
+                    && let Dimension::Indexed(_, candidate_size) = candidate
+                    && dim_size == candidate_size
+                {
+                    return Some(i);
+                }
+                None
+            })
+        } else {
+            None
+        };
+
+        alloc.push(size_match_idx);
+        if let Some(idx) = size_match_idx {
+            used[idx] = true;
+        }
+    }
+
+    alloc
+}
+
+/// [`allocate_implicit_axes_partial`] with every dimension resolved, or `None`.
+///
+/// `None` is the compiler's `MismatchedDimensions`: no complete allocation
+/// exists. That subsumes the old explicit `dims.len() > active_dims.len()` bail
+/// by pigeonhole -- the allocation is one-to-one, so a longer `dims` always
+/// leaves an axis unresolved -- and it subsumes the old equal-arity
+/// [`find_dimension_reordering`] fast path, which could only fire on a
+/// duplicate-free permutation, where the partial allocation's first pass finds
+/// the same unique partner for every dimension.
+pub(crate) fn allocate_implicit_axes(
+    dims: &[Dimension],
+    active_dims: &[Dimension],
+    dimensions_ctx: &DimensionsContext,
+) -> Option<Vec<usize>> {
+    allocate_implicit_axes_partial(dims, active_dims, dimensions_ctx)
+        .into_iter()
+        .collect()
+}
+
 /// Three-pass dimension matching: name -> mapping -> size.
 ///
 /// For each source dimension, finds the target dimension by trying in order:
