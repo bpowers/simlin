@@ -1215,7 +1215,7 @@ pub fn previous_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
 ///
 /// Panics on parse or lowering errors -- intended for test use only.
 #[cfg(test)]
-fn scalar_ast(eqn: &str) -> Ast<Expr2> {
+pub(crate) fn scalar_ast(eqn: &str) -> Ast<Expr2> {
     use crate::ast::lower_ast;
 
     let (ast, err) = parse_equation(

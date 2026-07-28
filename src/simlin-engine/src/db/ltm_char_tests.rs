@@ -406,6 +406,256 @@ fn per_element_subset_dep_scores_are_live_not_silent_zero() {
 }
 
 // ---------------------------------------------------------------------------
+// GH #974: pinning a BARE arrayed reference over the DEP's declared dimensions.
+//
+// The two guards below cover the issue's two sibling arms, which share one
+// projection (`post_transform::dep_element_pins`, enumerated by
+// `dep_element_pins_projection_enumeration`) but reach it through different
+// call paths: an other-dep's bare reference goes through
+// `subscript_idents_at_element`, and a bare reference to the LIVE SOURCE goes
+// through the wrap's own `pin_bare_source_ref`.
+//
+// Both models below compile with ZERO diagnostics before the fix -- the defects
+// are entirely inside LTM generation.
+// ---------------------------------------------------------------------------
+
+/// The equation text of the one link-score variable whose name contains every
+/// fragment in `name_parts`, for a model built with [`char_fixture_db`].
+fn link_score_text(
+    db: &SimlinDb,
+    model: SourceModel,
+    project: SourceProject,
+    name_parts: &[&str],
+) -> String {
+    let ltm = model_ltm_variables(db, model, project);
+    let matching: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| name_parts.iter().all(|p| v.name.contains(p)))
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "expected exactly one link score matching {name_parts:?}, got {:?}",
+        matching.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+    matching[0].equation.source_text().to_string()
+}
+
+fn bare_dep_own_dims_model() -> datamodel::Project {
+    TestProject::new("bare_dep_own_dims")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("Age", &["young", "old"])
+        .array_with_ranges_direct(
+            "regw",
+            vec!["Region".to_string()],
+            vec![("nyc", "10"), ("boston", "20")],
+            None,
+        )
+        .array_with_ranges_direct(
+            "agew",
+            vec!["Age".to_string()],
+            vec![("young", "1"), ("old", "2")],
+            None,
+        )
+        // Three deps referenced BARE in `growth`'s body, differing only in how
+        // their declared dimensions relate to the target's: identical, the same
+        // two REORDERED, and a strict SUBSET.
+        .array_aux_direct(
+            "same",
+            vec!["Region".to_string(), "Age".to_string()],
+            "regw[Region] + agew[Age]",
+            None,
+        )
+        .array_aux_direct(
+            "flip",
+            vec!["Age".to_string(), "Region".to_string()],
+            "agew[Age] * 100 + regw[Region]",
+            None,
+        )
+        .array_aux_direct("w", vec!["Age".to_string()], "agew[Age] * 1000", None)
+        .array_flow(
+            "growth[Region,Age]",
+            "pop[Region, young] * (same + flip + w) * 0.0001",
+            None,
+        )
+        .array_stock("pop[Region,Age]", "10", &["growth"], &[], None)
+        .build_datamodel()
+}
+
+/// A BARE arrayed dep in a per-element link-score partial is pinned over the
+/// dimensions IT declares, matched by name -- not over the target's element
+/// tuple (GH #974, arm 1).
+///
+/// The test states the executed semantics first and the generated text second,
+/// because the first is what makes the second right. The numeric oracle reads
+/// the deps' own series out of a real run and asserts
+/// `growth[nyc,old] == pop[nyc,young] * (same[nyc,old] + flip[old,nyc] +
+/// w[old]) * 1e-4`: a bare reference reads each of its OWN axes' coordinates by
+/// dimension name, so the reordered `flip[Age,Region]` reads `[old,nyc]` and the
+/// subset `w[Age]` reads `[old]`. Every element carries a distinct value, so a
+/// wrong element changes the sum.
+///
+/// The pre-fix pin used the target's tuple `[region·nyc, age·old]` for all
+/// three, which failed in two DIFFERENT ways -- and the difference is why both
+/// rows are here. `w` got an arity-2 subscript over a 1-D variable, so its
+/// fragment failed to compile and the score read a constant 0 (loud, via the
+/// four `Assembly` warnings the issue reports). `flip` got an arity-2 subscript
+/// that RESOLVED -- both indices are valid element references for the axes they
+/// landed on -- so it compiled and silently read `flip[young,boston]`. That
+/// second row had no diagnostic of any kind.
+#[test]
+fn bare_arrayed_dep_is_pinned_over_its_own_declared_dims() {
+    let project = bare_dep_own_dims_model();
+
+    // 1. What the SIMULATION reads. This is the claim the pin has to match, and
+    //    it is checked against the engine rather than assumed.
+    let plain_db = SimlinDb::default();
+    let plain_project = sync_from_datamodel(&plain_db, &project).project;
+    let compiled = compile_project_incremental(&plain_db, plain_project, "main")
+        .expect("the model compiles with no LTM");
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+    let at = |row: &[f64], name: &str| -> f64 {
+        let off = compiled
+            .offsets
+            .iter()
+            .find(|(k, _)| k.as_str() == name)
+            .unwrap_or_else(|| panic!("no slot named {name}"))
+            .1;
+        row[*off]
+    };
+    let last = results.iter().next_back().expect("at least one saved step");
+    let expected = at(last, "pop[nyc,young]")
+        * (at(last, "same[nyc,old]") + at(last, "flip[old,nyc]") + at(last, "w[old]"))
+        * 0.0001;
+    assert!(
+        (at(last, "growth[nyc,old]") - expected).abs() < 1e-9,
+        "a bare arrayed reference must read each of its OWN axes' coordinates by \
+         dimension name: growth[nyc,old] = {}, expected {expected}",
+        at(last, "growth[nyc,old]")
+    );
+    // Non-vacuity: the discriminating elements must differ, or a transposed or
+    // over-arity read would produce the same number.
+    assert_ne!(at(last, "flip[old,nyc]"), at(last, "flip[young,boston]"));
+    assert_ne!(at(last, "same[nyc,old]"), at(last, "same[boston,old]"));
+
+    // 2. What the LTM partial spells, which must be the same reads.
+    let (db, model, source_project) = char_fixture_db(&project);
+    assert!(
+        fragment_compile_failures(&db, model, source_project).is_empty(),
+        "every per-element link-score fragment must compile: the subset-dims `w` \
+         pin was arity-2 over a 1-D variable before the fix"
+    );
+    let text = link_score_text(
+        &db,
+        model,
+        source_project,
+        &[
+            "link_score\u{205A}pop[nyc,young]",
+            "\u{2192}growth[nyc,old]",
+        ],
+    );
+    for expected in [
+        "previous(same[region\u{B7}nyc, age\u{B7}old])",
+        "previous(flip[age\u{B7}old, region\u{B7}nyc])",
+        "previous(w[age\u{B7}old])",
+    ] {
+        assert!(
+            text.contains(expected),
+            "expected {expected:?} in the partial; got: {text}"
+        );
+    }
+    assert!(
+        !text.contains("flip[region\u{B7}nyc, age\u{B7}old]"),
+        "the reordered dep must not be pinned with the TARGET's tuple -- that \
+         spelling compiles and reads flip[young,boston]; got: {text}"
+    );
+}
+
+/// A BARE reference to the LIVE SOURCE inside a positionally-MAPPED per-element
+/// target is pinned through the correspondence (GH #974, arm 2).
+///
+/// `growth[State,Age] = pop[State, young] * pop * 0.01` over a `pop[Region,Age]`
+/// source: the emitting `PerElement` site is `pop[State, young]`, and the bare
+/// `pop` beside it is a second occurrence the wrap freezes. `pin_bare_source_ref`
+/// matched dimension NAMES only, found no `Region` coordinate in a `State`-keyed
+/// projection, and left the reference bare -- so the freeze became a bare
+/// multi-slot `PREVIOUS(pop)`, which cannot compile in a scalar fragment. All
+/// four per-element scores on the edge read a constant 0 behind four `Assembly`
+/// warnings.
+///
+/// The correspondence is positional, so `state·west` (State's first element)
+/// reads `region·nyc` (Region's first) -- the same element the executed A2A
+/// lowering reads for that slot.
+#[test]
+fn mapped_bare_live_source_ref_is_pinned_through_the_correspondence() {
+    let project = TestProject::new("mapped_bare_live_source")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("Age", &["young", "old"])
+        .named_dimension_with_mapping("State", &["west", "east"], "Region")
+        .array_stock("pop[Region,Age]", "10", &["popinflow"], &[], None)
+        .array_flow("popinflow[Region,Age]", "1", None)
+        .array_flow("growth[State,Age]", "pop[State, young] * pop * 0.01", None)
+        .array_stock("stock[State,Age]", "0", &["growth"], &[], None)
+        .build_datamodel();
+
+    let (db, model, source_project) = char_fixture_db(&project);
+    assert!(
+        fragment_compile_failures(&db, model, source_project).is_empty(),
+        "the bare mapped live-source reference must be pinned, not left as a bare \
+         multi-slot PREVIOUS(pop) that fails to compile"
+    );
+    let text = link_score_text(
+        &db,
+        model,
+        source_project,
+        &[
+            "link_score\u{205A}pop[nyc,young]",
+            "\u{2192}growth[west,young]",
+        ],
+    );
+    assert!(
+        text.contains("PREVIOUS(pop[region\u{B7}nyc, age\u{B7}young])"),
+        "the bare live-source occurrence must be pinned to the mapped row for \
+         this target element; got: {text}"
+    );
+    assert!(
+        !text.contains("PREVIOUS(pop) "),
+        "the bare multi-slot freeze must be gone; got: {text}"
+    );
+
+    // ...and the scores must be materially live, not a compiled constant 0.
+    let compiled = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM incremental compilation should succeed");
+    let score_offsets: Vec<usize> = compiled
+        .offsets
+        .iter()
+        .filter(|(k, _)| {
+            k.as_str().contains("link_score\u{205A}pop[") && k.as_str().contains("\u{2192}growth[")
+        })
+        .map(|(_, v)| *v)
+        .collect();
+    assert_eq!(
+        score_offsets.len(),
+        4,
+        "expected four per-element mapped pop->growth link scores"
+    );
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+    for off in score_offsets {
+        assert!(
+            results.iter().any(|row| row[off] != 0.0),
+            "mapped per-element pop->growth link score at offset {off} is all-zero"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Model A3: per-element target whose body carries an additional pop occurrence
 // of DIFFERENT shape -- an all-iterated (`Bare`) live-source reference --
 // alongside the emitting `PerElement` site.
@@ -1644,5 +1894,142 @@ fn char_unquotable_source_name() {
         unquotable_source_name_model(),
         "link_score\u{205A}1pop",
         FragmentExpectation::AllCompile,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GH #984, the REACHABLE half, end to end: a `LOOKUP` inside a scored target's
+// equation. No other char fixture has one, so nothing else covers the arm at
+// the model level.
+//
+// The runtime-index half of #984 has NO model fixture on purpose. A `LOOKUP`
+// table argument carrying a runtime index does not compile on this engine at
+// all: the TARGET's own fragment fails with an `EquationError` `DoesNotExist`
+// and `compile_project_incremental` reports `NotSimulatable`, so the silent
+// wrong score the issue describes cannot be reached from a compiling model
+// today. Three independent constructions were tried and all three fail the
+// same way -- an arrayed lookup-only table (`LOOKUP(gtab[idx], src)`), an
+// arrayed graphical-function aux, and Vensim's own per-element arrayed-GF
+// application (`g[idx](src)` via the MDL reader) -- while every static-index
+// twin compiles. The wrap-level behaviour is therefore pinned where it is
+// decided, by `ltm_augment::tests::test_partial_equation_lookup_table_index_is_frozen`
+// (the general path) and `per_element_pin_freezes_a_runtime_table_arg_index`
+// (the per-element path); fabricating a model fixture here would mean shipping
+// one that does not exercise the engine.
+// ---------------------------------------------------------------------------
+
+/// The MDL source for the arrayed-GF `LOOKUP` fixtures: `y = g[<index>](src)`,
+/// Vensim's per-element arrayed-GF application, which lowers to
+/// `LOOKUP(g[<index>], src)`. That is how a `LOOKUP` gets into a target equation
+/// without the LTM layer synthesizing it.
+fn arrayed_gf_lookup_mdl(index: &str) -> String {
+    format!(
+        "\
+{{UTF-8}}
+D: A1, A2 ~~|
+g[A1]( (0,0),(1,10),(2,20) ) ~~|
+g[A2]( (0,0),(1,100),(2,200) ) ~~|
+idx = 1 + MODULO(Time, 2) ~~|
+inflow = 1 ~~|
+src= INTEG(inflow, 1) ~~|
+y = g[{index}](src) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 3 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+"
+    )
+}
+
+/// GH #984 through the PRODUCTION path: a runtime table index is frozen when the
+/// dep set is the one production derives, not one a test hands in.
+///
+/// This is the test the first version of the fix needed and did not have. The
+/// wrap freezes an ident only if it is in `other_deps`, and `other_deps` comes
+/// from `variable::identifier_set`, whose `BuiltinContents::LookupTable` arm
+/// never walks the table expression -- so `idx`, referenced only as a table
+/// index, is not a dependency of `y` and the freeze could not fire. The unit
+/// tests supplied `idx` by hand and passed on an input production cannot
+/// produce. Here nothing is supplied: `model_ltm_variables` builds the dep set
+/// itself, so the assertion below is only satisfiable by
+/// `freeze_lookup_table_indices` widening the set from the index's own idents.
+///
+/// The target does NOT compile -- a `LOOKUP` table argument with a runtime index
+/// is refused upstream, which is the documented reachability limitation above --
+/// so this asserts the generated TEXT rather than a score series, and asserts the
+/// upstream refusal too so the reason is recorded rather than hidden.
+#[test]
+fn lookup_table_runtime_index_is_frozen_through_the_production_path() {
+    use crate::db::{DiagnosticError, collect_model_diagnostics};
+
+    let project = crate::open_vensim(&arrayed_gf_lookup_mdl("idx")).expect("the MDL parses");
+
+    // The upstream limitation, asserted rather than assumed: `y` itself has no
+    // bytecode, which is why there is no numeric oracle here.
+    let plain_db = SimlinDb::default();
+    let plain = sync_from_datamodel(&plain_db, &project);
+    assert!(
+        collect_model_diagnostics(&plain_db, plain.models["main"].source, plain.project)
+            .iter()
+            .any(|d| d.variable.as_deref() == Some("y")
+                && matches!(&d.error, DiagnosticError::Equation(_))),
+        "the fixture's whole point is that a runtime table index is refused \
+         upstream; if `y` now compiles, replace this text assertion with a \
+         numeric one"
+    );
+
+    let (db, model, source_project) = char_fixture_db(&project);
+    let text = link_score_text(
+        &db,
+        model,
+        source_project,
+        &["link_score\u{205A}src\u{2192}y"],
+    );
+    assert!(
+        text.contains("lookup(g[PREVIOUS(idx)], src)"),
+        "the table index must be frozen even though production does not classify \
+         it as a dependency; got: {text}"
+    );
+    assert!(
+        !text.contains("lookup(PREVIOUS("),
+        "the table HEAD must stay bare; got: {text}"
+    );
+}
+
+/// A static arrayed-GF table index survives the ceteris-paribus wrap untouched,
+/// and the score compiles.
+///
+/// Both halves of the `LOOKUP` arm are visible in one partial: the table HEAD
+/// `g[a1]` is NOT wrapped in `PREVIOUS` (a graphical-function table has no value
+/// slot, so `lookup(PREVIOUS(g[a1]), ...)` would fail to compile and zero the
+/// score -- the WRLD3 failure mode), and its STATIC element index is not frozen
+/// either (there is no runtime read to hold). The live source stays live in the
+/// second argument.
+///
+/// This is the reachable half of the arm, and the control for its sibling
+/// [`lookup_table_runtime_index_is_frozen_through_the_production_path`]: same
+/// model, same production path, index static instead of runtime.
+#[test]
+fn lookup_table_head_and_static_index_survive_the_wrap() {
+    let project = crate::open_vensim(&arrayed_gf_lookup_mdl("A1")).expect("the MDL parses");
+    let (db, model, source_project) = char_fixture_db(&project);
+    assert!(
+        fragment_compile_failures(&db, model, source_project).is_empty(),
+        "the table-mediated link score must compile"
+    );
+
+    let text = link_score_text(
+        &db,
+        model,
+        source_project,
+        &["link_score\u{205A}src\u{2192}y"],
+    );
+    assert!(
+        text.contains("lookup(g[a1], src)"),
+        "the table head must stay bare and its static index untouched; got: {text}"
+    );
+    assert!(
+        !text.contains("lookup(PREVIOUS("),
+        "a PREVIOUS of a table has no value slot; got: {text}"
     );
 }

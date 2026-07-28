@@ -22,11 +22,76 @@ use crate::db::{
     variable_dimensions,
 };
 
+use crate::ltm_augment::DepElementPin;
+
 use super::compile::{ShapedLinkScore, link_score_equation_text_shaped};
 use super::loops::{
     ReadSliceRow, ReadSliceRowParts, cartesian_subscripts, read_slice_row_parts, read_slice_rows,
 };
 use super::parse::{ltm_equation_dimensions, retarget_ltm_equation_dims};
+
+/// The arrayed deps of one target equation that a per-element link-score
+/// partial can element-pin, each with its DECLARED dimensions.
+///
+/// The declared dimensions are what the pin is projected over (GH #974), so
+/// they are resolved once per target equation here and reused for every target
+/// element by [`crate::ltm_augment::dep_element_pins`]. A dep is a candidate
+/// when it is a non-module arrayed model variable and `keep` admits it (the
+/// per-element emitter excludes the live source, whose pinning is the wrap's
+/// job); whether it can actually be pinned AT a given element is the
+/// projection's answer, not this filter's.
+fn pinnable_arrayed_deps(
+    db: &dyn Db,
+    source_vars: &HashMap<String, SourceVariable>,
+    project: SourceProject,
+    deps: &HashSet<Ident<Canonical>>,
+    keep: impl Fn(&Ident<Canonical>) -> bool,
+) -> Vec<(Ident<Canonical>, Vec<crate::dimensions::Dimension>)> {
+    let mut pinnable: Vec<(Ident<Canonical>, Vec<crate::dimensions::Dimension>)> = deps
+        .iter()
+        .filter(|d| keep(d))
+        .filter_map(|d| {
+            let sv = source_vars.get(d.as_str())?;
+            if sv.kind(db) == SourceVariableKind::Module {
+                return None;
+            }
+            let dims = variable_dimensions(db, *sv, project);
+            (!dims.is_empty()).then(|| (d.clone(), dims.clone()))
+        })
+        .collect();
+    // `deps` is a `HashSet`, and the pin table it feeds is consumed as a map,
+    // so ordering is unobservable in the emitted text -- sorted anyway so a
+    // debug dump of this vector is reproducible run to run.
+    pinnable.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+    pinnable
+}
+
+/// The projection data one target element supplies: target dimension
+/// (canonical) -> (that element's coordinate on the dimension, its index within
+/// the dimension's element list).
+///
+/// `element` is a comma-joined BARE element tuple over `to_dims`, and
+/// `dim_element_lists` is `to_dims`' element lists (already computed by every
+/// caller for `cartesian_subscripts`). A part that names no element of its
+/// dimension leaves that dimension out of the map, which the row derivations
+/// read as "not projectable" -- the conservative direction.
+fn target_elem_by_dim_for(
+    to_dims: &[crate::dimensions::Dimension],
+    dim_element_lists: &[Vec<String>],
+    element: &str,
+) -> HashMap<String, (String, usize)> {
+    let parts: Vec<&str> = element.split(',').collect();
+    if parts.len() != to_dims.len() {
+        return HashMap::new();
+    }
+    let mut by_dim = HashMap::with_capacity(to_dims.len());
+    for ((dim, elems), part) in to_dims.iter().zip(dim_element_lists).zip(&parts) {
+        if let Some(idx) = elems.iter().position(|e| e == part) {
+            by_dim.insert(dim.name().to_string(), ((*part).to_string(), idx));
+        }
+    }
+    by_dim
+}
 
 /// The occurrence-stream slot each target element maps to when the
 /// ceteris-paribus wrap walks one slot's expression at a time.
@@ -1202,33 +1267,20 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     };
 
     // Which target deps must be pinned to the element in the per-element
-    // scalar equation: the arrayed deps that share a dimension with the
-    // target. (Scalar deps stay bare; the target self-reference is
-    // pinned implicitly via the subscripted `to[elem]` in the guard
-    // form built by `generate_scalar_to_element_equation`.)
-    let deps_to_subscript = |deps: &HashSet<Ident<Canonical>>| -> HashSet<Ident<Canonical>> {
-        deps.iter()
-            .filter(|d| {
-                source_vars
-                    .get(d.as_str())
-                    .filter(|sv| sv.kind(db) != SourceVariableKind::Module)
-                    .map(|sv| {
-                        let dd = variable_dimensions(db, *sv, project);
-                        !dd.is_empty()
-                            && dd
-                                .iter()
-                                .any(|x| to_dims.iter().any(|td| td.name() == x.name()))
-                    })
-                    .unwrap_or(false)
-            })
-            .cloned()
-            .collect()
+    // scalar equation: the arrayed deps, each over its OWN declared dimensions.
+    // (Scalar deps stay bare; the target self-reference is pinned implicitly
+    // via the subscripted `to[elem]` in the guard form built by
+    // `generate_scalar_to_element_equation`.)
+    let pinnable_deps = |deps: &HashSet<Ident<Canonical>>| {
+        pinnable_arrayed_deps(db, source_vars, project, deps, |_| true)
     };
 
     let dim_element_lists: Vec<Vec<String>> = to_dims
         .iter()
         .map(crate::ltm_augment::dimension_element_names)
         .collect();
+    let to_dim_names: Vec<String> = to_dims.iter().map(|d| d.name().to_string()).collect();
+    let dim_ctx = project_dimensions_context(db, project);
     let elements = cartesian_subscripts(&dim_element_lists);
     // GH #910: resolved once for the whole target -- see `WithLookupSlotRefs`.
     let slot_refs = crate::ltm_augment::WithLookupSlotRefs::new(&to_var, target_ast_dims);
@@ -1262,7 +1314,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     let build_var = |element: &str,
                      elem_eqn: Option<&crate::ast::Expr0>,
                      elem_deps: &HashSet<Ident<Canonical>>,
-                     deps_to_sub: &HashSet<Ident<Canonical>>|
+                     pinnable: &[(Ident<Canonical>, Vec<crate::dimensions::Dimension>)]|
      -> Option<LtmSyntheticVar> {
         let name = format!(
             "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
@@ -1290,6 +1342,14 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             let gf_table_ref =
                 slot_refs.for_element(&crate::common::CanonicalElementName::from_raw(element));
             let occ = slot_occurrences.for_slot(slot_map.slot_for(element));
+            // Each arrayed dep is pinned over ITS OWN declared dimensions,
+            // projected off this target element (GH #974).
+            let deps_to_sub = crate::ltm_augment::dep_element_pins(
+                pinnable,
+                &to_dim_names,
+                &target_elem_by_dim_for(&to_dims, &dim_element_lists, element),
+                dim_ctx,
+            );
             match crate::ltm_augment::generate_scalar_to_element_equation(
                 from,
                 to,
@@ -1302,13 +1362,13 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 // substitution is a no-op.
                 &std::collections::HashMap::new(),
                 elem_deps,
-                deps_to_sub,
+                &deps_to_sub,
                 // A true scalar source: the bare `quote_ident(from)`
                 // denominator is correct, and there is no source subscript
                 // to pin in the partial body.
                 None,
                 &[],
-                Some(project_dimensions_context(db, project)),
+                Some(dim_ctx),
                 gf_table_ref.as_deref(),
                 &occ,
             ) {
@@ -1345,14 +1405,15 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     let mut cross_vars = Vec::with_capacity(elements.len());
     match ast {
         // ApplyToAll: one shared body for every element, so its text, its
-        // dependency set, and the subset to element-pin are all
-        // element-invariant -- compute them once, outside the loop.
+        // dependency set, and the deps' declared dimensions are all
+        // element-invariant -- compute them once, outside the loop. Only the
+        // pin PROJECTION varies per element, and that is `build_var`'s job.
         Ast::ApplyToAll(_, expr) => {
             let elem_eqn = crate::patch::expr2_to_expr0(expr);
             let elem_deps = crate::variable::identifier_set(ast, target_ast_dims, None);
-            let deps_to_sub = deps_to_subscript(&elem_deps);
+            let pinnable = pinnable_deps(&elem_deps);
             for element in &elements {
-                match build_var(element, Some(&elem_eqn), &elem_deps, &deps_to_sub) {
+                match build_var(element, Some(&elem_eqn), &elem_deps, &pinnable) {
                     Some(v) => cross_vars.push(v),
                     None => {
                         unscoreable_edges.insert((from.to_string(), to.to_string()));
@@ -1385,8 +1446,8 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                         // partials.
                         None => (None, HashSet::new()),
                     };
-                let deps_to_sub = deps_to_subscript(&elem_deps);
-                match build_var(element, elem_eqn.as_ref(), &elem_deps, &deps_to_sub) {
+                let pinnable = pinnable_deps(&elem_deps);
+                match build_var(element, elem_eqn.as_ref(), &elem_deps, &pinnable) {
                     Some(v) => cross_vars.push(v),
                     None => {
                         unscoreable_edges.insert((from.to_string(), to.to_string()));
@@ -2363,11 +2424,11 @@ fn emit_per_element_link_scores(
     use crate::common::{Canonical, Ident};
 
     /// One target element's equation parts: (body text, full dep set, the
-    /// arrayed deps to element-pin).
+    /// arrayed deps to element-pin with their declared dimensions).
     type ElemEqnParts = (
         crate::ast::Expr0,
         HashSet<Ident<Canonical>>,
-        HashSet<Ident<Canonical>>,
+        Vec<(Ident<Canonical>, Vec<crate::dimensions::Dimension>)>,
     );
 
     let Some(from_sv) = source_vars.get(from) else {
@@ -2421,34 +2482,19 @@ fn emit_per_element_link_scores(
     // the whole stream, which was quadratic in the element count.
     let slot_occurrences = crate::ltm_augment::SlotOccurrences::new(to_occurrences);
 
-    // Arrayed deps sharing a target dim get element-pinned in the scalar
-    // per-element equation (mirroring `try_scalar_to_arrayed_link_scores`);
-    // the source itself is excluded -- its occurrences are pinned per-row
-    // by the equation builder's rewrite pass.
-    let deps_to_subscript = |deps: &HashSet<Ident<Canonical>>| -> HashSet<Ident<Canonical>> {
-        deps.iter()
-            .filter(|d| {
-                d.as_str() != from
-                    && source_vars
-                        .get(d.as_str())
-                        .filter(|sv| sv.kind(db) != SourceVariableKind::Module)
-                        .map(|sv| {
-                            let dd = variable_dimensions(db, *sv, project);
-                            !dd.is_empty()
-                                && dd
-                                    .iter()
-                                    .any(|x| to_dims.iter().any(|td| td.name() == x.name()))
-                        })
-                        .unwrap_or(false)
-            })
-            .cloned()
-            .collect()
+    // Arrayed deps get element-pinned in the scalar per-element equation, each
+    // over its OWN declared dimensions (mirroring
+    // `try_scalar_to_arrayed_link_scores`); the source itself is excluded --
+    // its occurrences are pinned per-row by the wrap's own row lowering.
+    let pinnable_deps = |deps: &HashSet<Ident<Canonical>>| {
+        pinnable_arrayed_deps(db, source_vars, project, deps, |d| d.as_str() != from)
     };
 
     let to_dim_element_lists: Vec<Vec<String>> = to_dims
         .iter()
         .map(crate::ltm_augment::dimension_element_names)
         .collect();
+    let to_dim_names: Vec<String> = to_dims.iter().map(|d| d.name().to_string()).collect();
     let elements = cartesian_subscripts(&to_dim_element_lists);
 
     // Per target element: the body text + dep sets (shared for A2A,
@@ -2456,8 +2502,8 @@ fn emit_per_element_link_scores(
     let a2a_parts: Option<ElemEqnParts> = if let Ast::ApplyToAll(_, expr) = ast {
         let eqn = crate::patch::expr2_to_expr0(expr);
         let deps = crate::variable::identifier_set(ast, target_ast_dims, None);
-        let to_sub = deps_to_subscript(&deps);
-        Some((eqn, deps, to_sub))
+        let pinnable = pinnable_deps(&deps);
+        Some((eqn, deps, pinnable))
     } else {
         None
     };
@@ -2472,17 +2518,10 @@ fn emit_per_element_link_scores(
     for element in &elements {
         // The projection data `e` supplies: target dim (canonical) ->
         // (element name, index within that dim's element list).
-        let parts: Vec<&str> = element.split(',').collect();
-        if parts.len() != to_dims.len() {
+        if element.split(',').count() != to_dims.len() {
             continue;
         }
-        let mut target_elem_by_dim: HashMap<String, (String, usize)> = HashMap::new();
-        for ((dim, elems), part) in to_dims.iter().zip(&to_dim_element_lists).zip(&parts) {
-            let Some(idx) = elems.iter().position(|e| e == part) else {
-                continue;
-            };
-            target_elem_by_dim.insert(dim.name().to_string(), ((*part).to_string(), idx));
-        }
+        let target_elem_by_dim = target_elem_by_dim_for(&to_dims, &to_dim_element_lists, element);
         let qualified_element = crate::ltm_augment::qualify_element_csv(element, &to_dims);
         // GH #910: the partials below re-evaluate this element's RAW equation
         // while the guard form ratios them against `Δto[e]` -- which is
@@ -2504,8 +2543,8 @@ fn emit_per_element_link_scores(
                             target_ast_dims,
                             None,
                         );
-                        let to_sub = deps_to_subscript(&deps);
-                        Some((eqn, deps, to_sub))
+                        let pinnable = pinnable_deps(&deps);
+                        Some((eqn, deps, pinnable))
                     }
                     // No slot, no default: a hole -- this element has no
                     // equation, so the site cannot occur in it; skip.
@@ -2514,9 +2553,17 @@ fn emit_per_element_link_scores(
             }
             _ => None,
         };
-        let Some((body_eqn, deps, to_sub)) = a2a_parts.as_ref().or(slot_parts.as_ref()) else {
+        let Some((body_eqn, deps, pinnable)) = a2a_parts.as_ref().or(slot_parts.as_ref()) else {
             continue;
         };
+        // Each arrayed dep pinned over ITS OWN declared dimensions, projected
+        // off this target element (GH #974).
+        let to_sub = crate::ltm_augment::dep_element_pins(
+            pinnable,
+            &to_dim_names,
+            &target_elem_by_dim,
+            dim_ctx,
+        );
 
         for (axes, site_target_element) in sites {
             // A site inside an `Ast::Arrayed` slot contributes only to its
@@ -2566,7 +2613,7 @@ fn emit_per_element_link_scores(
                 &qualified_element,
                 body_eqn,
                 deps,
-                to_sub,
+                &to_sub,
                 from_dims,
                 &target_elem_by_dim,
                 &target_iterated_dims,
@@ -3233,38 +3280,27 @@ pub(super) fn emit_agg_to_target_link_scores(
     for other_agg in reducer_subst.values() {
         all_deps.insert(Ident::<Canonical>::new(other_agg));
     }
-    let deps_to_subscript: HashSet<Ident<Canonical>> = all_deps
-        .iter()
-        .filter(|d| {
-            source_vars
-                .get(d.as_str())
-                .filter(|sv| sv.kind(db) != SourceVariableKind::Module)
-                .map(|sv| {
-                    let dd = variable_dimensions(db, *sv, project);
-                    !dd.is_empty()
-                        && dd
-                            .iter()
-                            .any(|x| to_dims.iter().any(|td| td.name() == x.name()))
-                })
-                .unwrap_or(false)
-        })
-        .cloned()
-        .collect();
+    let pinnable_deps = pinnable_arrayed_deps(db, source_vars, project, &all_deps, |_| true);
     // An arrayed agg (`result_dims` non-empty) is element-pinned in the
     // per-target-element equation too: `$⁚ltm⁚agg⁚0` → `$⁚ltm⁚agg⁚0[<slot>]`.
-    // But NOT via `deps_to_subscript`: that set pins to `to`'s FULL element
-    // tuple, which is an agg's correct subscript only in the diagonal case
-    // (`result_dims` == `to`'s dims) and over-subscripts the agg in the
-    // broadcast case (`agg[D1]` feeding `to[D1,D2]` -- the fragment then
-    // fails to compile and the score is stubbed to a constant 0, zeroing
-    // every loop through the agg; GH #528). Instead EACH arrayed agg --
-    // the live one AND every frozen co-agg (GH #751) -- is pinned to the
-    // target element's PROJECTION onto its own `result_dims` axes (for the
-    // live agg, the same slot the link-score name and the `Δsource`
-    // denominator carry) via `generate_scalar_to_element_equation`'s
-    // per-ident `source_pins`, computed by `source_pins_for_target` below.
+    // But NOT via `pinnable_deps`: that projection needs a variable's DECLARED
+    // dimensions, and a synthetic agg is not a model variable and has none --
+    // its slot space is the hoisted reducer's `result_dims`, which is the
+    // target's full element tuple only in the diagonal case and a strict
+    // prefix in the broadcast case (`agg[D1]` feeding `to[D1,D2]`; GH #528).
+    // So EACH arrayed agg -- the live one AND every frozen co-agg (GH #751) --
+    // is pinned to the target element's PROJECTION onto its own `result_dims`
+    // axes (for the live agg, the same slot the link-score name and the
+    // `Δsource` denominator carry) via
+    // `generate_scalar_to_element_equation`'s per-ident `source_pins`,
+    // computed by `source_pins_for_target` below.
 
     let dim_ctx = project_dimensions_context(db, project);
+    let to_dim_names: Vec<String> = to_dims.iter().map(|d| d.name().to_string()).collect();
+    let dim_element_lists_for_target: Vec<Vec<String>> = to_dims
+        .iter()
+        .map(crate::ltm_augment::dimension_element_names)
+        .collect();
     #[derive(Clone)]
     struct AggTargetProjectionAxis {
         target_pos: usize,
@@ -3394,7 +3430,7 @@ pub(super) fn emit_agg_to_target_link_scores(
     // the AGG'S result-dim space, so mapped target dims pin the helper slot they
     // actually read (`state·s1`), not the target slot (`region·r1`).
     let qualified_pin_for_target =
-        |projection: &AggTargetProjection, element: &str| -> Option<String> {
+        |projection: &AggTargetProjection, element: &str| -> Option<DepElementPin> {
             let slot_parts = slot_parts_for_target(projection, element)?;
             if slot_parts.is_empty() {
                 return None;
@@ -3405,7 +3441,18 @@ pub(super) fn emit_agg_to_target_link_scores(
                 .iter()
                 .map(|axis| axis.result_dim.clone())
                 .collect();
-            Some(crate::ltm_augment::qualify_element_csv(&slot, &result_dims))
+            let qualified = crate::ltm_augment::qualify_element_csv(&slot, &result_dims);
+            Some(DepElementPin {
+                axes: result_dims
+                    .iter()
+                    .zip(qualified.split(','))
+                    .map(|(dim, elem)| (dim.name().to_string(), elem.to_string()))
+                    .collect(),
+                // An agg's slot space IS its `result_dims`, and the projection
+                // either covers all of them or returned `None` above, so a bare
+                // agg reference is always spellable here.
+                complete: true,
+            })
         };
     // Every ARRAYED agg referenced by the substituted equation needs a body
     // pin (GH #751): the LIVE agg (held live; the GH #528 projection) and
@@ -3432,13 +3479,23 @@ pub(super) fn emit_agg_to_target_link_scores(
     };
     // The per-ident pin map for one target element: each arrayed agg pinned
     // to the target element's projection onto its own result axes.
-    let source_pins_for_target = |element: &str| -> Vec<(Ident<Canonical>, String)> {
+    let source_pins_for_target = |element: &str| -> Vec<(Ident<Canonical>, DepElementPin)> {
         arrayed_agg_pin_projections
             .iter()
             .filter_map(|(ident, projection)| {
-                qualified_pin_for_target(projection, element).map(|slot| (ident.clone(), slot))
+                qualified_pin_for_target(projection, element).map(|pin| (ident.clone(), pin))
             })
             .collect()
+    };
+    // Each arrayed model-variable dep pinned over ITS OWN declared dimensions,
+    // projected off the target element (GH #974).
+    let deps_to_subscript = |element: &str| {
+        crate::ltm_augment::dep_element_pins(
+            &pinnable_deps,
+            &to_dim_names,
+            &target_elem_by_dim_for(&to_dims, &dim_element_lists_for_target, element),
+            dim_ctx,
+        )
     };
 
     // Track A stage 1: reducer -> agg-name substitution is now a POST-transform
@@ -3535,7 +3592,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                     &to_own_eqn,
                     &reducer_subst,
                     &all_deps,
-                    &deps_to_subscript,
+                    &deps_to_subscript(element),
                     Some(&agg_source_ref_for_target(element)),
                     &source_pins_for_target(element),
                     Some(project_dimensions_context(db, project)),
@@ -3614,7 +3671,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                             &crate::patch::expr2_to_expr0(slot_expr),
                             &reducer_subst,
                             &slot_deps,
-                            &deps_to_subscript,
+                            &deps_to_subscript(element),
                             Some(&agg_source_ref_for_target(element)),
                             &source_pins_for_target(element),
                             Some(project_dimensions_context(db, project)),

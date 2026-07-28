@@ -101,6 +101,76 @@ pub enum Dimension {
     Named(CanonicalDimensionName, NamedDimension),
 }
 
+/// How a bare-identifier subscript index resolves against ONE axis of the
+/// variable being subscripted -- see [`resolve_axis_index_name`].
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
+pub enum AxisIndexName {
+    /// The axis's own dimension declares this name as an ELEMENT. Carries the
+    /// element's canonical name.
+    Element(String),
+    /// Not an element of this axis, but a dimension the enclosing equation
+    /// ITERATES -- the apply-to-all placeholder form, which stands for whatever
+    /// element the current iteration selects.
+    IteratedDim,
+    /// Neither: a variable read, or a name nothing in scope declares.
+    Unresolved,
+}
+
+/// Resolve a bare-identifier subscript index against the axis it indexes: the
+/// engine's SINGLE precedence rule for the element-vs-dimension-name question.
+///
+/// The axis's own declared ELEMENTS are tried first; only a name the axis does
+/// not declare is read as a dimension the enclosing equation iterates. The two
+/// readings collide when a dimension declares an element whose name is also a
+/// dimension name -- `Category = [Region, x]` beside a `Region` dimension --
+/// which XMILE permits, and the order is what decides which row a reference
+/// like `effect[Region, Region]` reads.
+///
+/// **Element-first is the engine's executed behaviour**, and that is the
+/// binding reason: `compiler::subscript::normalize_subscripts3`'s
+/// `IndexExpr3::Expr` / `Expr3::Var` arm looks the name up in the axis's own
+/// `indexed_elements` ("First check if it's a named dimension element (takes
+/// priority)") and only then emits an `IndexOp::ActiveDimRef` for a dimension
+/// name; its `IndexExpr3::Dimension` arm does the same. Anything that DESCRIBES
+/// a reference -- an LTM read slice, an access shape, an element-graph edge --
+/// must resolve it the way the simulation does, or it describes rows the
+/// simulation never reads.
+///
+/// The XMILE spec (`docs/reference/xmile-v1.0.html`) points the same way but
+/// does not settle this exact pair, and the difference is worth being precise
+/// about. Footnote [9] settles the ADJACENT pair outright -- "if a variable name
+/// is the same as an element name, the element name prevails (i.e., the variable
+/// name is hidden within that subscript)" -- but that is variable-vs-element,
+/// not dimension-name-vs-element. What bears on this pair is section 2.1's
+/// namespace rule, "Dimension names, in turn, define their own Element
+/// namespace ... Element names are resolved by context when they appear inside
+/// square brackets of a variable", together with section 3.7.1's "Subscript
+/// index names MAY be used unambiguously as part of a subscript (i.e., inside
+/// the square brackets) ... once the dimensions assigned to the variable have
+/// been specified". Inside brackets, at a position whose dimension is known, the
+/// spec designates the index-name reading and calls it unambiguous; the
+/// apply-to-all dimension-name form is introduced afterwards, as an additional
+/// spelling, and cannot retroactively make the base one ambiguous. That is an
+/// argument from the namespace rule, not a quotation of a rule for this pair.
+///
+/// `target_iterates` answers "does the enclosing equation iterate this
+/// dimension?" -- the caller's own notion of scope (the LTM callers pass the
+/// target equation's iterated dimensions).
+pub fn resolve_axis_index_name(
+    name: &str,
+    axis_dim: &Dimension,
+    target_iterates: impl FnOnce(&str) -> bool,
+) -> AxisIndexName {
+    if let Some(elem) = axis_dim.canonical_element(name) {
+        return AxisIndexName::Element(elem);
+    }
+    if target_iterates(name) {
+        return AxisIndexName::IteratedDim;
+    }
+    AxisIndexName::Unresolved
+}
+
 impl Dimension {
     pub fn len(&self) -> usize {
         match self {
@@ -119,6 +189,28 @@ impl Dimension {
     pub fn canonical_name(&self) -> &CanonicalDimensionName {
         match self {
             Dimension::Indexed(name, _) | Dimension::Named(name, _) => name,
+        }
+    }
+
+    /// The canonical name of the element `name` selects on this axis, or `None`
+    /// when the axis declares no such element.
+    ///
+    /// For a NAMED dimension that is the element name itself; for an INDEXED one
+    /// it is the 1-based position re-formatted (`"01"` -> `"1"`), so the answer
+    /// always matches the names `ltm_augment::dimension_element_names` produces
+    /// for the same axis. Membership is the same test `get_offset` performs and
+    /// the same one `compiler::subscript` resolves an index against.
+    pub fn canonical_element(&self, name: &str) -> Option<String> {
+        match self {
+            Dimension::Named(_, named) => named
+                .indexed_elements
+                .get_key_value(&CanonicalElementName::from_raw(name))
+                .map(|(elem, _)| elem.as_str().to_string()),
+            Dimension::Indexed(_, size) => name
+                .parse::<u32>()
+                .ok()
+                .filter(|n| *n >= 1 && n <= size)
+                .map(|n| n.to_string()),
         }
     }
 

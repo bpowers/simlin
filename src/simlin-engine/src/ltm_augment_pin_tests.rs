@@ -78,6 +78,7 @@ fn per_element_pin_descends_into_range_endpoints() {
         row_parts_bare: &row_parts_bare,
         from_dims: &from_dims,
         target_elem_by_dim: &target_elem_by_dim,
+        target_iterated_dims: &target_iterated_dims,
         dim_ctx: &dim_ctx,
     };
 
@@ -105,7 +106,7 @@ fn per_element_pin_descends_into_range_endpoints() {
     );
     let mut unlowerable = false;
     let lowered =
-        super::post_transform::pin_only_source_refs(ast, &ctx, &occ, &[], &mut unlowerable, true);
+        super::post_transform::pin_only_source_refs(ast, &ctx, &occ, &[], &mut unlowerable);
     assert!(
         !unlowerable,
         "the range-bound occurrence IS recorded, so the pin must lower it rather than \
@@ -122,6 +123,190 @@ fn per_element_pin_descends_into_range_endpoints() {
         text.contains("boston"),
         "the range-bound occurrence must be pinned to this instantiation's row; \
          got: {text}"
+    );
+}
+
+/// The full ENUMERATION of [`super::post_transform::dep_element_pins`]: how a
+/// dep's DECLARED dimensions relate to the target element, and what pin each
+/// relation yields (GH #974).
+///
+/// This is the projection behind every bare-reference pin -- the rule
+/// `subscript_idents_at_element` consumes and the rule `pin_bare_source_ref`
+/// reuses for the live source -- so the rows are derived from the two
+/// enumerations it composes, not from examples:
+///
+/// - per AXIS, [`dep_axis_elements`](super::post_transform) has three outcomes:
+///   the target ITERATES the dep's own dimension (identity), the target
+///   iterates a dimension with a usable positional CORRESPONDENCE to it
+///   (`mapped_element_correspondence`), or neither (declined). The declined arm
+///   is reached two ways -- an unrelated dimension, and an explicit ELEMENT map,
+///   which the correspondence refuses because execution resolves positionally
+///   and ignores it (GH #756) -- and both are rows;
+/// - per DEP, the axis outcomes combine into three: every axis resolved
+///   (`complete`, the only kind that may subscript a bare reference), some
+///   resolved (present but incomplete -- it may still substitute a
+///   dimension-name index), none resolved (absent from the table entirely).
+///
+/// The order rows exist because the pin is spelled in the DEP's declaration
+/// order, not the target's: `flip[Age,Region]` under a `growth[Region,Age]`
+/// target is the shape whose pre-fix full-target-tuple pin COMPILED and read
+/// the wrong element.
+///
+/// One arm is deliberately unrowed: `per_element_row_for_target` can also
+/// decline an axis whose correspondence has no entry at the target element's
+/// index. That is a mid-edit dimension inconsistency (a mapping whose two
+/// dimensions differ in size), it declines exactly like the rows here, and no
+/// well-formed project reaches it.
+#[test]
+fn dep_element_pins_projection_enumeration() {
+    use crate::dimensions::DimensionsContext;
+
+    // `state` is POSITIONALLY mapped to `region`, so a `State` axis reads the
+    // region coordinate's positional partner; `other` is unrelated to both.
+    let build_ctx = |element_map: Vec<(String, String)>| {
+        let mut state = datamodel::Dimension::named(
+            "state".to_string(),
+            vec!["west".to_string(), "east".to_string()],
+        );
+        state.mappings = vec![datamodel::DimensionMapping {
+            target: "region".to_string(),
+            element_map,
+        }];
+        DimensionsContext::from(
+            [
+                datamodel::Dimension::named(
+                    "region".to_string(),
+                    vec!["nyc".to_string(), "boston".to_string()],
+                ),
+                datamodel::Dimension::named(
+                    "age".to_string(),
+                    vec!["young".to_string(), "old".to_string()],
+                ),
+                state,
+                datamodel::Dimension::named(
+                    "other".to_string(),
+                    vec!["o1".to_string(), "o2".to_string()],
+                ),
+            ]
+            .as_slice(),
+        )
+    };
+    let region = make_named_dimension("region", &["nyc", "boston"]);
+    let age = make_named_dimension("age", &["young", "old"]);
+    let state = make_named_dimension("state", &["west", "east"]);
+    let other = make_named_dimension("other", &["o1", "o2"]);
+
+    // Target `growth[Region,Age]` at element `(boston, old)` -- both
+    // coordinates are the SECOND element of their dimension, which is what
+    // makes the positional correspondence observable (`state·east`).
+    let target_iterated_dims = vec!["region".to_string(), "age".to_string()];
+    let mut target_elem_by_dim: HashMap<String, (String, usize)> = HashMap::new();
+    target_elem_by_dim.insert("region".to_string(), ("boston".to_string(), 1usize));
+    target_elem_by_dim.insert("age".to_string(), ("old".to_string(), 1usize));
+
+    let pinnable: Vec<(Ident<Canonical>, Vec<crate::dimensions::Dimension>)> = vec![
+        // identity, in the target's own order
+        (Ident::new("same"), vec![region.clone(), age.clone()]),
+        // identity, REORDERED -- the silent-wrong-element row
+        (Ident::new("flip"), vec![age.clone(), region.clone()]),
+        // a strict SUBSET -- the arity row
+        (Ident::new("sub"), vec![age.clone()]),
+        // a positionally MAPPED axis beside an identity one
+        (Ident::new("mapped"), vec![state.clone(), age.clone()]),
+        // one axis resolves, one does not -> incomplete
+        (Ident::new("partial"), vec![region.clone(), other.clone()]),
+        // nothing resolves -> absent
+        (Ident::new("unrelated"), vec![other.clone()]),
+    ];
+
+    let axes_of = |pins: &HashMap<Ident<Canonical>, crate::ltm_augment::DepElementPin>,
+                   name: &str|
+     -> Option<(Vec<(String, String)>, bool)> {
+        pins.get(&Ident::<Canonical>::new(name))
+            .map(|p| (p.axes.clone(), p.complete))
+    };
+    let axis = |dim: &str, elem: &str| (dim.to_string(), elem.to_string());
+
+    let positional = build_ctx(vec![]);
+    let pins = super::post_transform::dep_element_pins(
+        &pinnable,
+        &target_iterated_dims,
+        &target_elem_by_dim,
+        &positional,
+    );
+
+    assert_eq!(
+        axes_of(&pins, "same"),
+        Some((
+            vec![
+                axis("region", "region\u{B7}boston"),
+                axis("age", "age\u{B7}old")
+            ],
+            true
+        )),
+        "a dep declaring the target's own dimensions in the target's order pins \
+         to the target element"
+    );
+    assert_eq!(
+        axes_of(&pins, "flip"),
+        Some((
+            vec![
+                axis("age", "age\u{B7}old"),
+                axis("region", "region\u{B7}boston")
+            ],
+            true
+        )),
+        "a REORDERED dep must be pinned in ITS OWN declaration order -- the \
+         target's tuple would compile and read the transposed element"
+    );
+    assert_eq!(
+        axes_of(&pins, "sub"),
+        Some((vec![axis("age", "age\u{B7}old")], true)),
+        "a subset-dims dep must be pinned over its own single axis, not the \
+         target's full tuple"
+    );
+    assert_eq!(
+        axes_of(&pins, "mapped"),
+        Some((
+            vec![
+                axis("state", "state\u{B7}east"),
+                axis("age", "age\u{B7}old")
+            ],
+            true
+        )),
+        "a positionally-mapped axis reads the corresponding element of its own \
+         dimension (`boston` is Region's second, so State's second is `east`)"
+    );
+    assert_eq!(
+        axes_of(&pins, "partial"),
+        Some((vec![axis("region", "region\u{B7}boston")], false)),
+        "a dep with one unprojectable axis stays in the table (its dimension-name \
+         indices are still substitutable) but is NOT complete"
+    );
+    assert_eq!(
+        axes_of(&pins, "unrelated"),
+        None,
+        "a dep no axis of which projects has nothing to rewrite and must be absent"
+    );
+
+    // An EXPLICIT element map is declined by `mapped_element_correspondence`
+    // (execution resolves positionally and ignores it, GH #756), so the same
+    // `mapped[State,Age]` dep loses its State axis and becomes incomplete.
+    let element_mapped = build_ctx(vec![
+        ("west".to_string(), "boston".to_string()),
+        ("east".to_string(), "nyc".to_string()),
+    ]);
+    let pins = super::post_transform::dep_element_pins(
+        &pinnable,
+        &target_iterated_dims,
+        &target_elem_by_dim,
+        &element_mapped,
+    );
+    assert_eq!(
+        axes_of(&pins, "mapped"),
+        Some((vec![axis("age", "age\u{B7}old")], false)),
+        "an element-mapped axis must decline: following the map would spell a \
+         read the positionally-resolving simulation never performs"
     );
 }
 
@@ -389,7 +574,7 @@ impl PinFixture {
             ast,
             deps,
             // Nothing to element-pin by name: the source's pinning is the wrap's job.
-            &HashSet::new(),
+            &HashMap::new(),
             &self.from_dims,
             &self.target_elem_by_dim,
             &self.target_iterated_dims,
@@ -592,71 +777,79 @@ fn per_element_pin_lowers_structurally_inside_a_lookup_table_arg() {
     );
 }
 
-/// The loud net BEHIND the structural pin: a BARE table argument whose index the
-/// rule cannot discharge statically is declined, and the whole partial abandoned.
+/// GH #984, both halves at once: a `LOOKUP` table argument's HEAD stays bare and
+/// its runtime INDEX gets frozen.
 ///
-/// The rule resolves exactly three index forms -- the axis's own dimension name,
-/// an element that axis declares, and a numeric literal. Everything else is
-/// declined here, for one of two DIFFERENT reasons, and the difference matters
-/// because only one of them is unconditional:
+/// The two halves pull against each other, which is why the issue asks for one
+/// test that pins both. The head must NOT be wrapped: a graphical-function table
+/// has no value slot, so `lookup(PREVIOUS(table), ...)` cannot compile and the
+/// whole fragment silently zeroes -- the WRLD3 failure mode. But the index IS a
+/// value read: `codegen::extract_table_info`'s `Expr::Subscript` arm builds the
+/// element offset out of the live index `Expr`s, so a live `idx` made EVERY
+/// partial of that target vary with `idx`'s current-step movement, attributing it
+/// to whichever source the partial isolates. Holding the whole ARGUMENT verbatim
+/// bought the first at the price of the second.
 ///
-/// - a RUNTIME read (`pop[Region, idx]`, `pop[Region, pop[Region, old]]`) COMPILES
-///   fine; the problem is ceteris paribus. A BARE `LOOKUP` table argument is not
-///   inside a freeze -- the wrap holds it verbatim, since a `PREVIOUS` of a table
-///   has no value slot -- so the index stays LIVE, and
-///   `codegen::extract_table_info` evaluates it to select the table element. The
-///   `young` partial would then vary with the current-step value of `old`,
-///   misattributing one row's influence to another. Pinning these purely because
-///   it made the fragment COMPILE is what a reviewer caught on this branch. Inside
-///   a freeze the same index is already lagged and is KEPT -- see
-///   [`per_element_pin_keeps_a_runtime_table_index_inside_a_freeze`];
-/// - the rule having NO ANSWER (`pop[State, old]` on a source declared over
-///   `[Region, Age]`) is a compilability verdict and is loud everywhere: resolving
-///   it would need to decide that `State` reads `Region` through a positional
-///   mapping rather than being a mismatched or transposed axis, and that per-axis
-///   CLASSIFICATION is `db::ltm_ir`'s -- which recorded nothing here.
+/// The rows are the three shapes an index read can take -- a bare variable, a
+/// compound expression around one, and a nested source subscript -- so the
+/// freeze is shown to reach inside a compound index (`PREVIOUS(idx) + 1`, not
+/// `PREVIOUS(idx + 1)`) rather than only replacing whole indices. The static
+/// selectors, the unspellable ones, and the frozen-context column are the
+/// sibling [`per_element_pin_index_verdict_enumeration`]'s job.
 ///
-/// Together with [`per_element_pin_lowers_structurally_inside_a_lookup_table_arg`]
-/// and the frozen twin, this is the whole contract: statically-resolvable table
-/// arguments are pinned and scored, already-lagged runtime ones are pinned as far
-/// as they go, and the rest stays loud instead of emitting either an un-pinned
-/// dimension-name subscript (a dropped fragment reading 0) or a plausible wrong
-/// score.
+/// Before the fix each of these was a loud DECLINE
+/// (`WrapOutcome::missing_occurrence` -> a warned skip), which threw away every
+/// per-element score on the edge including the live site's own. Freezing keeps
+/// the score AND makes it ceteris-paribus.
+///
+/// **`idx` is deliberately NOT in the declared dep set**, and that is the whole
+/// difference between a fixture and an oracle here. Production derives the wrap's
+/// dep set from `variable::identifier_set`, whose `BuiltinContents::LookupTable`
+/// arm does not walk the table expression, so an index variable referenced only
+/// inside a table argument is NOT a dependency -- asserted below on the fixture's
+/// own equation rather than assumed. Declaring `idx` a dep would make the freeze
+/// fire through the ordinary other-dep path and the test would pass on an input
+/// production cannot produce, which is exactly how the first version of this fix
+/// shipped without firing at all.
 #[test]
-fn per_element_pin_declines_every_non_static_bare_table_arg_index() {
-    // Each case is `(label, equation, deps, extra project dims)`. `state` is a
-    // real dimension positionally parallel to `region` -- the shape whose
-    // resolution would need the mapping classifier.
-    let cases: [(&str, &str, &[&str], Vec<datamodel::Dimension>); 3] = [
+fn per_element_pin_freezes_a_runtime_table_arg_index() {
+    // `(label, table argument, the expected frozen spelling)`.
+    let cases: [(&str, &str, &str); 3] = [
         (
             "a variable index -- the simplest runtime element read",
-            "pop[Region, young] + LOOKUP(pop[Region, idx], input)",
-            &["input", "idx"],
-            vec![],
+            "pop[Region, idx]",
+            "lookup(pop[region\u{B7}boston, PREVIOUS(idx)]",
+        ),
+        (
+            "a compound index: the freeze reaches the read, not the whole expression",
+            "pop[Region, idx + 1]",
+            "lookup(pop[region\u{B7}boston, PREVIOUS(idx) + 1]",
         ),
         (
             "a nested source read selecting the element at runtime",
-            "pop[Region, young] + LOOKUP(pop[Region, pop[Region, old]], input)",
-            &["input"],
-            vec![],
-        ),
-        (
-            "another dimension's name, which only the IR can classify",
-            "pop[Region, young] + LOOKUP(pop[State, old], input)",
-            &["input"],
-            vec![datamodel::Dimension::named(
-                "state".to_string(),
-                vec!["ny".to_string(), "ma".to_string()],
-            )],
+            "pop[Region, pop[Region, old]]",
+            "lookup(pop[region\u{B7}boston, \
+             PREVIOUS(pop[region\u{B7}boston, age\u{B7}old])]",
         ),
     ];
 
-    for (label, eqn, deps, extra_dims) in cases {
-        let fx = PinFixture::new(extra_dims);
-        let (ast, deps, occurrences) = fx.parse(eqn, deps);
+    for (label, table_arg, expected) in cases {
+        let fx = PinFixture::new(vec![]);
+        let eqn = format!("pop[Region, young] + LOOKUP({table_arg}, input)");
+        // The dep list is the production one for this equation: `input` is a
+        // dependency and `idx` is not. Checked against the extractor itself, so
+        // the fixture cannot drift from what production supplies.
+        assert!(
+            !crate::variable::identifier_set(&crate::variable::scalar_ast(&eqn), &[], None)
+                .contains(&Ident::<Canonical>::new("idx")),
+            "{label}: production's dep extractor must NOT report a table-only \
+             index as a dependency, or this fixture is testing the ordinary \
+             other-dep path instead of the table-index freeze"
+        );
+        let (ast, deps, occurrences) = fx.parse(&eqn, &["input"]);
         // Non-vacuity: the table argument is the reference WITHOUT an occurrence
-        // (the IR skips it whole), so the decline must come from the structural
-        // rule rather than from the IR.
+        // (the IR skips it whole), so the freeze comes from the wrap's own index
+        // pass rather than from the IR's classification.
         assert_eq!(
             PinFixture::source_occurrences(&occurrences),
             1,
@@ -664,17 +857,24 @@ fn per_element_pin_declines_every_non_static_bare_table_arg_index() {
              {occurrences:?}"
         );
         let slot_occurrences = SlotOccurrences::new(&occurrences);
-        let err = fx.generate(&ast, &deps, &slot_occurrences.for_slot(0));
+        let text = fx
+            .generate(&ast, &deps, &slot_occurrences.for_slot(0))
+            .unwrap_or_else(|e| {
+                panic!("{label}: the partial must be emitted, not declined: {e:?}")
+            });
         assert!(
-            matches!(
-                err,
-                Err(PartialEquationError {
-                    kind: PartialEquationErrorKind::UnfreezablePartial,
-                    ..
-                })
-            ),
-            "{label}: must be a loud Err, never an Ok equation carrying an \
-             un-pinned subscript or an unattributed live read: {err:?}"
+            text.contains(expected),
+            "{label}: expected the frozen index {expected:?}; got: {text}"
+        );
+        assert!(
+            !text.contains("lookup(PREVIOUS("),
+            "{label}: the table HEAD must stay bare -- a PREVIOUS of a table has no \
+             value slot; got: {text}"
+        );
+        assert!(
+            text.contains("pop[boston, young]"),
+            "{label}: the LIVE occurrence must keep its bare row spelling -- the \
+             pre-fix decline threw its score away too; got: {text}"
         );
     }
 }
@@ -706,7 +906,11 @@ fn per_element_pin_keeps_a_runtime_table_index_inside_a_freeze() {
         ),
     ] {
         let fx = PinFixture::new(vec![]);
-        let (ast, deps, occurrences) = fx.parse(eqn, &["input", "idx", "other"]);
+        // `idx` is not declared: production does not classify a table-only index
+        // as a dependency (see `per_element_pin_freezes_a_runtime_table_arg_index`),
+        // and this test's point is that the enclosing freeze -- not the dep set --
+        // is what makes the index ceteris-paribus here.
+        let (ast, deps, occurrences) = fx.parse(eqn, &["input", "other"]);
         assert_eq!(
             PinFixture::source_occurrences(&occurrences),
             1,
@@ -786,9 +990,11 @@ fn per_element_pin_keeps_a_runtime_table_index_inside_a_freeze() {
 /// Everything here is already lagged by the enclosing `PREVIOUS`, index reads
 /// included, so pinning is sufficient and NO further freeze is wanted (a nested
 /// `PREVIOUS` would read two steps back). That is exactly what distinguishes this
-/// from the table-argument case, which is not inside a freeze and is therefore
-/// declined -- see
-/// [`per_element_pin_declines_a_table_arg_with_a_runtime_index`].
+/// from an UNFROZEN table argument, whose index is a live read and so is frozen
+/// rather than merely pinned -- see
+/// [`per_element_pin_freezes_a_runtime_table_arg_index`], and
+/// [`per_element_pin_keeps_a_runtime_table_index_inside_a_freeze`] for the same
+/// argument inside a freeze, where this test's reasoning applies instead.
 #[test]
 fn per_element_pin_descends_into_a_source_subscript_index_expression() {
     let fx = PinFixture::new(vec![]);
@@ -843,6 +1049,13 @@ type PinIndexCell<'a> = (&'a str, &'a str, Option<&'a str>, Option<&'a str>);
 /// `fx`'s own shape -- it is what makes the equation a `PerElement` target at all,
 /// and it is deliberately not the cell under test. The cell under test is the
 /// table argument, which the IR records NOTHING for.
+///
+/// The declared dep list is `["input"]` and NOT `["input", "idx"]`, matching what
+/// `variable::identifier_set` reports for these equations: a variable appearing
+/// only as a table-argument subscript index is not a dependency, so a row that
+/// declared it would exercise the ordinary other-dep freeze instead of the
+/// table-index one. `per_element_pin_freezes_a_runtime_table_arg_index` asserts
+/// that against the extractor itself.
 fn assert_pin_index_verdicts(fx: &PinFixture, live_ref: &str, cases: &[PinIndexCell<'_>]) {
     // A DIMENSION-name subscript surviving into a scalar fragment is the silent
     // zero this whole rule exists to prevent, so every cell forbids one on any
@@ -861,7 +1074,7 @@ fn assert_pin_index_verdicts(fx: &PinFixture, live_ref: &str, cases: &[PinIndexC
             } else {
                 format!("{live_ref} + LOOKUP({subscript}, input)")
             };
-            let (ast, deps, occurrences) = fx.parse(&eqn, &["input", "idx"]);
+            let (ast, deps, occurrences) = fx.parse(&eqn, &["input"]);
             // Non-vacuity, every cell: the table argument is the reference the IR
             // records NOTHING for, so the rule is what decides -- not the IR.
             assert_eq!(
@@ -922,9 +1135,10 @@ fn assert_pin_index_verdicts(fx: &PinFixture, live_ref: &str, cases: &[PinIndexC
 /// landing in the wrong bucket. Each was fixed after someone supplied the
 /// counterexample. This test exists so the space is stated rather than sampled:
 /// the rule sorts an index into exactly one of
-/// [`super::post_transform::IndexVerdict`]'s four outcomes, and the outcome
-/// depends on the index's spelling and (for `RuntimeRead` alone) on whether the
-/// subtree is already frozen. Two columns, eighteen rows, no gaps.
+/// [`super::post_transform::IndexVerdict`]'s three outcomes -- `Pinned`, `Keep`,
+/// `Unspellable` -- purely on the index's spelling, and the WRAP separately
+/// decides whether a runtime read needs freezing. Two columns, eighteen rows, no
+/// gaps.
 ///
 /// "No gaps" is a checkable claim, not a hope: `IndexExpr0` has exactly five
 /// variants and every one has a row -- `Wildcard`, `StarRange`, `Range`,
@@ -952,19 +1166,22 @@ fn assert_pin_index_verdicts(fx: &PinFixture, live_ref: &str, cases: &[PinIndexC
 ///
 /// Reading the table: see [`PinIndexCell`]. The unfrozen column is a bare `LOOKUP`
 /// table argument; the frozen column is the same argument inside a pre-existing
-/// `PREVIOUS`. Only the runtime-read rows differ between columns -- that is the
-/// whole content of the compilability-vs-ceteris-paribus split.
+/// `PREVIOUS`. Only the runtime-read rows differ between columns, and since
+/// GH #984 the difference is a FREEZE rather than a refusal: a bare table
+/// argument's index is wrapped in `PREVIOUS` by
+/// `ltm_augment::freeze_lookup_table_indices`, while the same index inside a
+/// pre-existing freeze is already lagged and is left alone. Every static row is
+/// identical in both columns, and every unspellable row is loud in both.
 ///
-/// Two rows are marked UNREACHABLE and assert current behavior rather than a
+/// Three rows are marked UNREACHABLE and assert current behavior rather than a
 /// derived requirement, because a compilable model cannot produce them: codegen's
-/// `extract_table_info` rejects a range or wildcard table index outright
-/// (`BadTable`, "range subscripts not supported in lookup tables"), so the
-/// TARGET's own equation would fail to compile long before its link scores are
-/// generated. Their frozen cells are therefore honestly uncertain: the rule
-/// currently accepts them, and if they ever became reachable the failure would
-/// surface as a fragment-compile Warning rather than a warned skip -- loud either
-/// way, through a different channel. Left as-is deliberately rather than guessed
-/// into `Unspellable`, since no reachable shape distinguishes the two choices.
+/// `extract_table_info` rejects a range, wildcard or star-range table index
+/// outright (`BadTable`, "range subscripts not supported in lookup tables"), so
+/// the TARGET's own equation would fail to compile long before its link scores are
+/// generated. If one ever became reachable the failure would surface as a
+/// fragment-compile Warning rather than a warned skip -- loud either way, through
+/// a different channel. Left as-is deliberately rather than guessed into
+/// `Unspellable`, since no reachable shape distinguishes the two choices.
 ///
 /// One further row (the numeric literal) is about the RULE's verdict, not about
 /// downstream compilability: a numeric index into a NAMED dimension is not
@@ -1022,18 +1239,17 @@ fn per_element_pin_index_verdict_enumeration() {
             Some("pop[region\u{B7}boston, 1 + 1]"),
         ),
         (
-            // A 0-arity BUILTIN index is where the widening deliberately STOPS.
-            // `reify_0_arity_builtins` turns `time` into an `Expr0::App` before this
-            // rule sees it, and telling `TIME` (varies every step) from `PI` (does
-            // not) inside `App` would mean a fourth copy of the builtin
-            // classification `builtins`/`compiler::invariance` own. So the arm stays
-            // loud in the bare column -- the CONSERVATIVE direction, a warned skip
-            // rather than a confident wrong score. A stated boundary, not a gap: if
-            // this ever needs to pin, the fix is to consult that classification, not
-            // to guess here.
-            "a 0-arity builtin index (deliberately still loud)",
+            // A 0-arity BUILTIN index used to be loud in the bare column, because
+            // the rule could not tell `TIME` (varies every step) from `PI` (does
+            // not) inside an `Expr0::App` without a fourth copy of the builtin
+            // classification `builtins`/`compiler::invariance` own -- so it
+            // declined conservatively. It no longer has to decide: the rule keeps
+            // the index either way, and the wrap's index pass leaves a 0-arity
+            // builtin live exactly as it does everywhere else in a partial (TIME
+            // is not a dep being isolated, and the guard form reads it live too).
+            "a 0-arity builtin index",
             "pop[Region, TIME]",
-            None,
+            Some("pop[region\u{B7}boston, time()]"),
             Some("pop[region\u{B7}boston, time()]"),
         ),
         // --- unspellable: a COMPILABILITY verdict, so loud in BOTH contexts ----
@@ -1079,42 +1295,48 @@ fn per_element_pin_index_verdict_enumeration() {
             None,
             None,
         ),
-        // --- runtime reads: a CETERIS-PARIBUS verdict, so context decides ------
+        // --- runtime reads: kept by the rule, FROZEN by the wrap when bare -----
+        // The two columns differ by exactly one `PREVIOUS`, which IS the GH #984
+        // fix: a bare table argument's index read is lagged, and the same read
+        // inside a pre-existing freeze is left alone rather than double-lagged.
         (
             "an undeclared bare name -- a variable selecting the element",
             "pop[Region, idx]",
-            None,
+            Some("pop[region\u{B7}boston, PREVIOUS(idx)]"),
             Some("pop[region\u{B7}boston, idx]"),
         ),
         (
             "an arithmetic index expression",
             "pop[Region, idx + 1]",
-            None,
+            Some("pop[region\u{B7}boston, PREVIOUS(idx) + 1]"),
             Some("pop[region\u{B7}boston, idx + 1]"),
         ),
         (
             "a nested source subscript selecting the element",
             "pop[Region, pop[Region, young]]",
-            None,
+            Some(
+                "pop[region\u{B7}boston, \
+                 PREVIOUS(pop[region\u{B7}boston, age\u{B7}young])]",
+            ),
             Some("pop[region\u{B7}boston, pop[region\u{B7}boston, age\u{B7}young]]"),
         ),
         // --- UNREACHABLE from a compilable model -- see fn docs ---------------
         (
             "a range index (UNREACHABLE: codegen rejects it as a table index)",
             "pop[Region, 1:2]",
-            None,
+            Some("pop[region\u{B7}boston,"),
             Some("pop[region\u{B7}boston,"),
         ),
         (
             "a wildcard index (UNREACHABLE: codegen rejects it as a table index)",
             "pop[Region, *]",
-            None,
+            Some("pop[region\u{B7}boston,"),
             Some("pop[region\u{B7}boston,"),
         ),
         (
             "a star-range index (UNREACHABLE: codegen rejects it as a table index)",
             "pop[Region, *:Age]",
-            None,
+            Some("pop[region\u{B7}boston,"),
             Some("pop[region\u{B7}boston,"),
         ),
     ];

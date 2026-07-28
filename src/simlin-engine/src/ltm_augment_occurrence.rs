@@ -98,6 +98,32 @@ impl<'a> SlotOccurrences<'a> {
     }
 }
 
+impl OccurrenceLookup<'static> {
+    /// The lookup for a subtree the IR records NOTHING for, by design.
+    ///
+    /// There is exactly one such subtree: a `LOOKUP` TABLE argument, which
+    /// `db::ltm_ir`'s walker skips whole ("a graphical-function table reference
+    /// is static data, not a causal edge"). The wrap descends into that
+    /// argument's subscript INDEX expressions anyway, because those ARE runtime
+    /// value reads and have to be frozen for ceteris paribus (GH #984) -- and
+    /// descending with the slot's real lookup would be unsound in two ways at
+    /// once. A path hit under a table argument would be a COLLISION (the paths
+    /// there belong to no recorded occurrence), and a MISS on a live-source
+    /// subscript would trip the desync guard, whose premise -- an occurrence for
+    /// every live-source subscript head -- is exactly what does not hold here.
+    ///
+    /// With an empty lookup the guard is inert (it keys on `is_empty`) and every
+    /// shape lookup misses uniformly, so nothing under a table argument is
+    /// treated as the live reference: a source read there is frozen, which is
+    /// the conservative and ceteris-paribus-correct answer for a reference the
+    /// IR attributes nothing to. The `PerElement` row pinning is unaffected --
+    /// it discharges a table argument structurally, by name, needing no
+    /// occurrence at all.
+    pub(super) fn empty() -> Self {
+        OccurrenceLookup { entries: &[] }
+    }
+}
+
 impl<'a> OccurrenceLookup<'a> {
     /// The occurrence at exactly `path`, if any (a genuine causal reference at
     /// that node). `None` for a node that is not a recorded occurrence (a

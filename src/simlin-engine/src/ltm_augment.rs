@@ -54,10 +54,10 @@ pub(crate) use with_lookup::{
 #[path = "ltm_augment_post_transform.rs"]
 mod post_transform;
 
-pub(crate) use post_transform::per_element_row_for_target;
 #[cfg(test)]
 pub(crate) use post_transform::substitute_reducers_in_equation;
 use post_transform::{PerElementRefCtx, qualify_axis_element, substitute_reducers_in_expr0};
+pub(crate) use post_transform::{dep_element_pins, per_element_row_for_target};
 
 /// Context for recognizing GH #511 iterated-dimension source references in
 /// the partial-equation builder: the live source's declared dimension names
@@ -195,7 +195,10 @@ struct WrapOutcome {
 /// ([`wrap_non_matching_in_previous`] / [`wrap_index_non_matching_in_previous`]),
 /// bundled so the deep recursion threads one `&WrapCtx` instead of a long
 /// positional argument list. Every field is a `Copy` reference, so the body
-/// destructures it back into the historically-named locals with no clones.
+/// destructures it back into the historically-named locals with no clones --
+/// and the whole struct is `Copy`, which lets the `LOOKUP` table-argument
+/// descent rebind exactly one field (see [`OccurrenceLookup::empty`]).
+#[derive(Clone, Copy)]
 struct WrapCtx<'a> {
     /// The source variable whose live shape is held out of `PREVIOUS`
     /// wrapping; all its other occurrences (and every other-dep reference)
@@ -677,54 +680,59 @@ fn wrap_non_matching_in_previous(
                         ctx.occ,
                         path,
                         &mut out.missing_occurrence,
-                        // This call lags (or freezes) everything inside it,
-                        // subscript index reads included, so a runtime table
-                        // index in there is already ceteris-paribus.
-                        true,
                     ),
                     None => call,
                 };
             }
             // A LOOKUP call's first argument names a graphical-function table
-            // (a lookup-only variable, or the WITH-LOOKUP self-reference); it
-            // is static data the compiler resolves to a table id, not a causal
-            // value reference. Wrapping it in PREVIOUS produces
+            // (a lookup-only variable, or the WITH-LOOKUP self-reference); the
+            // table HEAD is static data the compiler resolves to a table id, not
+            // a causal value reference. Wrapping it in PREVIOUS produces
             // `lookup(PREVIOUS(table), ...)`, which cannot compile (a
             // table-only variable has no value slot), so the whole link-score
             // fragment silently zeroes -- the failure mode behind WRLD3's
-            // identically-zero table-mediated link scores. Hold the table
-            // argument verbatim and transform only the index argument(s).
+            // identically-zero table-mediated link scores. Hold the HEAD
+            // verbatim.
+            //
+            // Its subscript INDEX expressions are a different thing entirely
+            // (GH #984): `compiler::codegen::extract_table_info`'s
+            // `Expr::Subscript` arm builds the element offset out of the live
+            // index `Expr`s, so `LOOKUP(g[idx], x)` reads `idx` at the CURRENT
+            // step. Held verbatim, every partial of that target varied with
+            // `idx`, misattributing its movement to whichever source the partial
+            // isolates -- a wrong number with no diagnostic. So the indices go
+            // through the wrap's own index pass like any other other-dep.
             if matches!(
                 name.to_ascii_lowercase().as_str(),
                 "lookup" | "lookup_forward" | "lookup_backward"
             ) && !args.is_empty()
             {
-                // The table arg (child 0) is held verbatim; only the index
-                // arg(s) are wrapped. Child indices match the `Expr2` walk,
-                // which counts the skipped `LookupTable` slot as child 0.
+                // Child indices match the `Expr2` walk, which counts the skipped
+                // `LookupTable` slot as child 0.
                 let new_args = args
                     .into_iter()
                     .enumerate()
                     .map(|(i, a)| {
                         if i == 0 {
-                            // Static table data, not a causal value read: held
-                            // verbatim by the wrap, but still row-pinned (the
-                            // pin-only descent) so a `PerElement` lowering does
-                            // not leave a dimension-name subscript behind.
+                            let a = freeze_lookup_table_indices(
+                                a,
+                                ctx,
+                                out,
+                                &child_path(path, i),
+                                frozen,
+                            );
+                            // The head is still held verbatim, but a `PerElement`
+                            // lowering must reach every source reference inside
+                            // the argument (the head itself can BE the source):
+                            // an un-pinned dimension-name subscript cannot
+                            // resolve in a scalar fragment.
                             match ctx.pin {
                                 Some(pin_ctx) => post_transform::pin_only_source_refs(
                                     a,
                                     pin_ctx,
-                                    ctx.occ,
+                                    &OccurrenceLookup::empty(),
                                     &child_path(path, i),
                                     &mut out.missing_occurrence,
-                                    // The wrap holds the table arg VERBATIM, so
-                                    // it inherits the enclosing freeze and
-                                    // nothing more: a runtime index in a bare
-                                    // table argument stays live (declined), the
-                                    // same argument inside a frozen subtree is
-                                    // already lagged (kept).
-                                    frozen,
                                 ),
                                 None => a,
                             }
@@ -780,8 +788,6 @@ fn wrap_non_matching_in_previous(
                         ctx.occ,
                         path,
                         &mut out.missing_occurrence,
-                        // Frozen whole, one line below.
-                        true,
                     ),
                     None => reducer,
                 };
@@ -850,6 +856,112 @@ fn wrap_non_matching_in_previous(
             loc,
         ),
     }
+}
+
+/// Freeze the runtime value reads in a `LOOKUP` TABLE argument's subscript
+/// indices, leaving the table HEAD (and every static element selector) exactly
+/// as written (GH #984).
+///
+/// This is the whole of the fix, and it is one rule for every caller: the
+/// wrap's own index pass ([`wrap_index_non_matching_in_previous`]) decides what
+/// a table index is, exactly as it does for an ordinary subscript. Static
+/// selectors -- a literal element, a dimension name, `@N`, a numeric literal --
+/// hit its guards and come back untouched; a genuine value read (`idx`,
+/// `idx + 1`) reaches the recursive wrap and comes back frozen.
+///
+/// Four deliberate choices:
+///
+/// - only an `Expr0::Subscript` has indices to freeze. A bare `Var` table is
+///   already static, and anything else is `BadTable` at codegen (the table
+///   argument must select exactly one element), so there is nothing here to
+///   decide about it;
+/// - the descent's dep set is WIDENED with the idents appearing in these
+///   indices, and without that the freeze does not fire at all. The wrap freezes
+///   an ident only when it is in `other_deps`, and `other_deps` comes from
+///   `variable::classify_dependencies`, whose `BuiltinContents::LookupTable` arm
+///   records the table's ident and **never walks the table expression** -- so an
+///   index variable referenced ONLY inside a table argument (the issue's own
+///   `LOOKUP(g[idx], x)`) is not a dependency and was returned live. Widening is
+///   scoped to this argument's own indices, so nothing else in the equation sees
+///   the added names, and the element / dimension-name guards in
+///   [`wrap_index_non_matching_in_previous`] run BEFORE the `other_deps` check --
+///   so adding an element or dimension name to the set cannot make it wrap. (The
+///   dep set itself is left alone: dropping a table index from a variable's
+///   dependencies is arguably an engine bug in its own right, but it is a
+///   runlist-ordering question, not this rule's, and fixing it there is a
+///   separate change);
+/// - element QUALIFICATION is suppressed (`skip_element_qualification`). A
+///   literal element index is static either way, and leaving it verbatim keeps
+///   this change to the reads it is about: on the `PerElement` path the row
+///   pinning already qualifies it from the source's own declared dims (which is
+///   the only qualification that is right for an ambiguous element name), and on
+///   the other paths the target's own equation carries the same spelling;
+/// - inside an enclosing FREEZE nothing is done. `frozen` here means the whole
+///   `LOOKUP` sits in a subtree the wrap is about to lag (a wrapped other-dep's
+///   subscript index is the only way to get here -- a pre-existing
+///   `PREVIOUS`/`INIT` and a whole-frozen reducer never reach this arm at all),
+///   so the index read is already ceteris-paribus and a second `PREVIOUS` would
+///   read two steps back.
+///
+/// Because this discharges the index everywhere the arm runs -- for ANY index
+/// ident, not only one that happens to be a dependency elsewhere -- and the
+/// enclosing freeze discharges it everywhere the arm does not,
+/// `post_transform::pin_dimension_name_indices` no longer has to REFUSE a table
+/// argument carrying a runtime index -- it keeps it and says nothing. That
+/// refusal, its `frozen` plumbing, and the warned skip it produced are deleted.
+fn freeze_lookup_table_indices(
+    arg: Expr0,
+    ctx: &WrapCtx<'_>,
+    out: &mut WrapOutcome,
+    path: &[u16],
+    frozen: bool,
+) -> Expr0 {
+    let Expr0::Subscript(ident, indices, loc) = arg else {
+        return arg;
+    };
+    if frozen {
+        return Expr0::Subscript(ident, indices, loc);
+    }
+    // Every ident under these indices is a read the wrap must be able to freeze,
+    // whether or not the dependency extractor knows about it (see the rustdoc).
+    let mut index_deps: HashSet<Ident<Canonical>> = ctx.other_deps.clone();
+    for idx in &indices {
+        let mut add = |e: &Expr0| {
+            index_deps.extend(expr_reference_idents(e).into_iter().map(|n| Ident::new(&n)));
+        };
+        match idx {
+            IndexExpr0::Expr(e) => add(e),
+            IndexExpr0::Range(l, r, _) => {
+                add(l);
+                add(r);
+            }
+            // Wildcard / star-range / `@N` carry no `Expr0`.
+            _ => {}
+        }
+    }
+    // The IR records no occurrence anywhere under a table argument, so the
+    // descent uses an empty lookup rather than this slot's -- see
+    // [`OccurrenceLookup::empty`] for why a real one would be unsound.
+    let table_ctx = WrapCtx {
+        occ: &OccurrenceLookup::empty(),
+        other_deps: &index_deps,
+        ..*ctx
+    };
+    let indices = indices
+        .into_iter()
+        .enumerate()
+        .map(|(i, idx)| {
+            wrap_index_non_matching_in_previous(
+                idx,
+                &table_ctx,
+                out,
+                true,
+                &child_path(path, i),
+                frozen,
+            )
+        })
+        .collect();
+    Expr0::Subscript(ident, indices, loc)
 }
 
 /// If `index` is a bare identifier that unambiguously names a dimension
@@ -925,6 +1037,20 @@ fn wrap_index_non_matching_in_previous(
     if !skip_element_qualification && let Some(qualified) = qualify_element_index(&index, dims_ctx)
     {
         return qualified;
+    }
+    // An ALREADY-`dim·element`-qualified index is a static element selector
+    // whatever the qualification mode: it carries its own dimension and resolves
+    // to a constant offset. `qualify_element_index` returns it verbatim too, but
+    // that call is suppressed on the paths that own qualification themselves, so
+    // the guard has to stand on its own. It was latent before GH #984 -- the
+    // suppressed path only wrapped an ident present in `other_deps`, and no
+    // variable is named `dim·elem` -- and became reachable when the table-index
+    // freeze started widening that set with the index's own idents.
+    if let IndexExpr0::Expr(Expr0::Var(name, _)) = &index
+        && let Some(ctx) = dims_ctx
+        && ctx.lookup(&canonicalize(name.as_str())).is_some()
+    {
+        return index;
     }
     // An index that names a dimension element which *cannot* be qualified
     // (declared by multiple dimensions at different positions, e.g. C-LEARN's
@@ -2128,26 +2254,60 @@ fn pin_iterated_dim_indices(expr: Expr0, dims: &[String], parts: &[String]) -> O
     })
 }
 
-/// Replace every bare `Var(id)` reference in `equation_text` where `id`
-/// (canonicalized) is in `idents` with `Subscript(id, [element])`,
-/// pinning that variable to `element`.
+/// Where ONE dep is pinned in a scalar per-element link-score equation: the
+/// element it reads at that target element, as one
+/// `(canonical dimension name, element spelling)` pair per dimension **that dep
+/// declares** and that the target element projects onto, in the dep's own
+/// declaration order.
+///
+/// Carrying the dep's OWN dimensions rather than the target's is the whole
+/// content of GH #974. A bare arrayed reference inside an apply-to-all body
+/// reads its own axes' coordinates matched by dimension NAME, so a dep
+/// declaring a strict subset of the target's dimensions (`w[Age]` under
+/// `growth[Region,Age]`) must be pinned over that subset, and a dep declaring
+/// the same dimensions in another order (`w[Age,Region]`) must be pinned in ITS
+/// order. Pinning both with the target's full tuple produced an over-arity
+/// subscript in the first case (a fragment that fails to compile, so the score
+/// reads a constant 0) and a compilable, silently TRANSPOSED read in the
+/// second. The projection itself is `post_transform::dep_element_pins`; this
+/// type is just how the answer travels to the rewrite.
+#[derive(Clone)]
+pub(crate) struct DepElementPin {
+    /// The resolved axes, in the dep's declaration order.
+    pub(crate) axes: Vec<(String, String)>,
+    /// Whether `axes` covers EVERY dimension the dep declares. Only a complete
+    /// pin can subscript a BARE reference, which must be spelled at the dep's
+    /// full arity; an incomplete one still substitutes the dimension-name
+    /// indices of an already-subscripted reference, which is all that reference
+    /// needs.
+    pub(crate) complete: bool,
+}
+
+/// Replace every reference to a pinned dep in `equation_text` with that dep's
+/// own element subscript, per [`pins`](DepElementPin).
 ///
 /// Used when collapsing a scalar-source -> arrayed-target link score into
 /// per-target-element scalar variables: the target's A2A equation body
-/// references arrayed deps that share the target's dimension *bare* (the
+/// references arrayed deps that share the target's dimensions *bare* (the
 /// A2A expansion subscripts them at runtime), but a *scalar* per-element
-/// link-score variable must spell out the subscript. `idents` is the set
-/// of those deps (the caller computes it -- it needs to know which deps
-/// are arrayed and share the target's dimension).
+/// link-score variable must spell out the subscript. `pins` says which deps
+/// those are and which element each one reads -- the caller computes it,
+/// because deciding that needs the deps' declared dimensions and the project's
+/// dimension mappings.
 ///
-/// `Subscript` nodes are left untouched: a dep that already carries an
-/// explicit subscript (an `Ast::Arrayed` per-element slot wrote
-/// `population[NYC]`) is already element-pinned, and double-subscripting
-/// would be nonsensical. Function-name identifiers and identifiers not in
-/// `idents` are likewise left alone. The result is re-printed in the
-/// canonical equation format (via parse + `print_eqn`).
+/// A bare `Var(id)` reference to a COMPLETELY-pinned dep becomes
+/// `Subscript(id, <its row>)`. An already-`Subscript`ed reference keeps its
+/// literal element indices, but an index naming one of the dep's OWN
+/// dimensions (`dep[Region]`, the A2A iterated reference form) reads "the
+/// current element" -- which in a per-element scalar equation is exactly the
+/// element being pinned -- so it is substituted whether or not the pin is
+/// complete. Left unpinned, such an index is unresolvable in scalar context
+/// and forces a synthesized helper aux per occurrence (GH #654: ~27k of
+/// C-LEARN's ~30k residual helpers came from this form). Function-name
+/// identifiers and identifiers absent from `pins` are left alone. The result is
+/// re-printed in the canonical equation format (via parse + `print_eqn`).
 ///
-/// Returns `Ok(equation_text)` unchanged when `idents` is empty (nothing to
+/// Returns `Ok(equation_text)` unchanged when `pins` is empty (nothing to
 /// pin -- a legitimate no-op), and `Err([`PartialEquationError`])` when the
 /// (already-PREVIOUS-wrapped) partial text fails to re-parse. The latter is
 /// loud rather than a silent lowercased-input fallback for the same reason
@@ -2155,93 +2315,74 @@ fn pin_iterated_dim_indices(expr: Expr0, dims: &[String], parts: &[String]) -> O
 /// not even compile, and a silent wrong equation is worse than skipping the
 /// score with a warning.
 ///
-/// `element` is a single element name (`"nyc"`, or qualified `"region·nyc"`)
-/// for a one-dimensional target, or a comma-joined tuple (`"nyc,adult"` /
-/// `"region·nyc,age·adult"`) for a multi-dimensional one -- the same form
-/// `db::ltm::cartesian_subscripts` produces (and `qualify_element_csv`
-/// qualifies) and the `parse_link_offsets` discovery parser expects on the
-/// `to` side.
+/// Each element spelling is a single element name (`"nyc"`, or qualified
+/// `"region·nyc"`) -- the same form `db::ltm::cartesian_subscripts` produces
+/// (and `qualify_element_csv` qualifies) and the `parse_link_offsets` discovery
+/// parser expects on the `to` side.
 pub(crate) fn subscript_idents_at_element(
     equation_text: &str,
-    idents: &HashSet<Ident<Canonical>>,
-    element: &str,
+    pins: &HashMap<Ident<Canonical>, DepElementPin>,
 ) -> Result<String, PartialEquationError> {
-    if idents.is_empty() {
+    if pins.is_empty() {
         return Ok(equation_text.to_string());
     }
     let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
         return Err(PartialEquationError::new(equation_text));
     };
-    let index_exprs: Vec<IndexExpr0> = element
-        .split(',')
-        .map(|e| {
-            IndexExpr0::Expr(Expr0::Var(
-                crate::common::RawIdent::new_from_str(e.trim()),
-                crate::ast::Loc::default(),
-            ))
-        })
-        .collect();
-    // Qualified element parts (`region·nyc`) also pin *dimension-name*
-    // subscript indices: a dep referenced as `dep[Region]` (the A2A iterated
-    // form) reads the same element a bare `dep` reference would, so in a
-    // per-element scalar equation it must be pinned to that element. The map
-    // is keyed by the canonical dimension name each qualified part names.
-    let dim_to_index: Vec<(String, IndexExpr0)> = element
-        .split(',')
-        .zip(index_exprs.iter())
-        .filter_map(|(part, idx_expr)| {
-            let part = part.trim();
-            part.split_once('\u{00B7}')
-                .map(|(dim, _)| (canonicalize(dim).into_owned(), idx_expr.clone()))
-        })
-        .collect();
-    Ok(print_eqn(&subscript_idents_in_expr0(
-        ast,
-        idents,
-        &index_exprs,
-        &dim_to_index,
-    )))
+    Ok(print_eqn(&subscript_idents_in_expr0(ast, pins)))
+}
+
+/// The `IndexExpr0` a pin entry's element spelling becomes.
+fn pin_index(elem: &str) -> IndexExpr0 {
+    IndexExpr0::Expr(Expr0::Var(
+        crate::common::RawIdent::new_from_str(elem),
+        crate::ast::Loc::default(),
+    ))
 }
 
 fn subscript_idents_in_expr0(
     expr: Expr0,
-    idents: &HashSet<Ident<Canonical>>,
-    index_exprs: &[IndexExpr0],
-    dim_to_index: &[(String, IndexExpr0)],
+    pins: &HashMap<Ident<Canonical>, DepElementPin>,
 ) -> Expr0 {
     match expr {
         Expr0::Const(..) => expr,
         Expr0::Var(ref ident, loc) => {
             let canonical = Ident::new(ident.as_str());
-            if idents.contains(&canonical) {
-                Expr0::Subscript(ident.clone(), index_exprs.to_vec(), loc)
-            } else {
-                expr
+            // Only a COMPLETE pin can spell a bare reference: a subscript
+            // covering some of the dep's axes is not a legal reference at all.
+            match pins.get(&canonical).filter(|pin| pin.complete) {
+                Some(pin) => Expr0::Subscript(
+                    ident.clone(),
+                    pin.axes.iter().map(|(_, elem)| pin_index(elem)).collect(),
+                    loc,
+                ),
+                None => expr,
             }
         }
         // An already-subscripted reference to a pinned dep: indices that are
         // *element literals* are already pinned and stay, but an index that
-        // names one of the pinned DIMENSIONS (`dep[Region]`, the A2A iterated
-        // reference form) reads "the current element" -- which in a
-        // per-element scalar equation is exactly the element being pinned.
-        // Left unpinned, such an index is unresolvable in scalar context and
-        // forces a synthesized helper aux per occurrence (GH #654: ~27k of
-        // C-LEARN's ~30k residual helpers came from this form).
+        // names one of that dep's own DIMENSIONS gets this element's coordinate
+        // for it. The lookup is over the DEP's dimensions, so a subset-dims or
+        // reordered dep resolves each of its axes correctly (GH #974) -- and an
+        // axis the target does not project (`pop[Region, idx]` under a
+        // `growth[Region]` target, whose `Age` axis the reference pins itself)
+        // simply has no entry, which is why an INCOMPLETE pin still applies here.
         Expr0::Subscript(ident, indices, loc) => {
             let canonical = Ident::new(ident.as_str());
-            if !idents.contains(&canonical) || dim_to_index.is_empty() {
+            let Some(pin) = pins.get(&canonical) else {
                 return Expr0::Subscript(ident, indices, loc);
-            }
+            };
             let indices = indices
                 .into_iter()
                 .map(|idx| {
                     if let IndexExpr0::Expr(Expr0::Var(name, _)) = &idx {
                         let idx_canonical = canonicalize(name.as_str());
-                        if let Some((_, pinned)) = dim_to_index
+                        if let Some((_, elem)) = pin
+                            .axes
                             .iter()
                             .find(|(dim, _)| dim.as_str() == idx_canonical.as_ref())
                         {
-                            return pinned.clone();
+                            return pin_index(elem);
                         }
                     }
                     idx
@@ -2252,55 +2393,23 @@ fn subscript_idents_in_expr0(
         Expr0::App(UntypedBuiltinFn(name, args), loc) => {
             let args = args
                 .into_iter()
-                .map(|a| subscript_idents_in_expr0(a, idents, index_exprs, dim_to_index))
+                .map(|a| subscript_idents_in_expr0(a, pins))
                 .collect();
             Expr0::App(UntypedBuiltinFn(name, args), loc)
         }
-        Expr0::Op1(op, inner, loc) => Expr0::Op1(
-            op,
-            Box::new(subscript_idents_in_expr0(
-                *inner,
-                idents,
-                index_exprs,
-                dim_to_index,
-            )),
-            loc,
-        ),
+        Expr0::Op1(op, inner, loc) => {
+            Expr0::Op1(op, Box::new(subscript_idents_in_expr0(*inner, pins)), loc)
+        }
         Expr0::Op2(op, lhs, rhs, loc) => Expr0::Op2(
             op,
-            Box::new(subscript_idents_in_expr0(
-                *lhs,
-                idents,
-                index_exprs,
-                dim_to_index,
-            )),
-            Box::new(subscript_idents_in_expr0(
-                *rhs,
-                idents,
-                index_exprs,
-                dim_to_index,
-            )),
+            Box::new(subscript_idents_in_expr0(*lhs, pins)),
+            Box::new(subscript_idents_in_expr0(*rhs, pins)),
             loc,
         ),
         Expr0::If(cond, then_expr, else_expr, loc) => Expr0::If(
-            Box::new(subscript_idents_in_expr0(
-                *cond,
-                idents,
-                index_exprs,
-                dim_to_index,
-            )),
-            Box::new(subscript_idents_in_expr0(
-                *then_expr,
-                idents,
-                index_exprs,
-                dim_to_index,
-            )),
-            Box::new(subscript_idents_in_expr0(
-                *else_expr,
-                idents,
-                index_exprs,
-                dim_to_index,
-            )),
+            Box::new(subscript_idents_in_expr0(*cond, pins)),
+            Box::new(subscript_idents_in_expr0(*then_expr, pins)),
+            Box::new(subscript_idents_in_expr0(*else_expr, pins)),
             loc,
         ),
     }
@@ -2328,13 +2437,14 @@ fn subscript_idents_in_expr0(
 /// canonical text to its agg name; it is empty for a true scalar `from`. `to_deps`
 /// is the full dependency set of that equation (computed with the target's AST
 /// dimensions so element-name subscripts are not mistaken for variables), plus
-/// the agg names. `to_deps_to_subscript` is the subset of `to_deps` that
-/// must be element-pinned -- the arrayed deps that share the target's
-/// dimension (the target self-reference is pinned implicitly via the
-/// already-subscripted `to[element]` reference the guard form is built
-/// around). The source itself is never in this set: an arrayed-agg source is
-/// pinned via its `source_pins` entry instead, since the full target tuple
-/// over-subscripts it in the broadcast case (GH #528).
+/// the agg names. `to_deps_to_subscript` is the pin table for the subset of
+/// `to_deps` that must be element-pinned -- the arrayed deps whose every
+/// declared dimension this target element projects onto, each mapped to the
+/// element IT reads (see [`DepElementPin`]; the target self-reference is pinned
+/// implicitly via the already-subscripted `to[element]` reference the guard
+/// form is built around). The source itself is never in this table: an
+/// arrayed-agg source is pinned via its `source_pins` entry instead, since an
+/// agg has no declared dimensions of its own to project onto (GH #528).
 ///
 /// `source_ref_override`: the pre-rendered (quoted, possibly element-pinned)
 /// reference expression to use for the `Δsource` denominator. `None` uses the
@@ -2344,9 +2454,9 @@ fn subscript_idents_in_expr0(
 /// partial) numerator do; a bare agg reference in a scalar equation would not
 /// compile and the link score would stub to zero.
 ///
-/// `source_pins`: the per-ident pin map (GH #751) -- for each `(ident,
-/// slot)` entry, that ident's references in the partial BODY are pinned to
-/// the (qualified) `slot` element tuple. Empty for a true scalar source
+/// `source_pins`: the per-ident pin list (GH #751) -- for each `(ident, pin)`
+/// entry, that ident's references in the partial BODY are pinned to the
+/// (qualified) element tuple `pin` names. Empty for a true scalar source
 /// (no pinning). The arrayed-agg caller passes one entry per ARRAYED agg
 /// referenced by the substituted equation: the LIVE agg's entry carries the
 /// target element's projection onto its `result_dims` axes -- the same slot
@@ -2355,13 +2465,13 @@ fn subscript_idents_in_expr0(
 /// equation) carries the projection onto ITS OWN `result_dims`, so its
 /// `PREVIOUS(...)` freeze reads one slot instead of the ill-typed bare
 /// multi-slot reference that failed fragment compile and stubbed the score
-/// to 0 (GH #751). Pinning these idents through `to_deps_to_subscript`
-/// instead would use the target's FULL element tuple, which over-subscripts
-/// an agg in the broadcast case (`agg[D1]` feeding `to[D1,D2]`): the
-/// fragment fails to compile and the score is stubbed to a constant 0
-/// (GH #528). For the diagonal case (`result_dims` == `to`'s dims) the
-/// projection IS the full tuple, so the equation is unchanged. A SCALAR
-/// co-agg needs no entry: its bare `PREVIOUS(name)` freeze compiles as-is.
+/// to 0 (GH #751). This is a SEPARATE channel from `to_deps_to_subscript`
+/// because an agg is a synthetic aux with no declared dimensions: its slot
+/// space is the hoisted reducer's `result_dims`, which the declared-dimension
+/// projection behind `to_deps_to_subscript` cannot derive. For the diagonal
+/// case (`result_dims` == `to`'s dims) the projection IS the full tuple, so
+/// the equation is unchanged. A SCALAR co-agg needs no entry: its bare
+/// `PREVIOUS(name)` freeze compiles as-is.
 ///
 /// `gf_table_ref` is the implicit WITH-LOOKUP wrap for THIS target element
 /// (GH #910): the partial is a full re-evaluation of the target's element
@@ -2388,9 +2498,9 @@ pub(crate) fn generate_scalar_to_element_equation(
     to_elem_eqn: &Expr0,
     reducer_subst: &HashMap<String, String>,
     to_deps: &HashSet<Ident<Canonical>>,
-    to_deps_to_subscript: &HashSet<Ident<Canonical>>,
+    to_deps_to_subscript: &HashMap<Ident<Canonical>, DepElementPin>,
     source_ref_override: Option<&str>,
-    source_pins: &[(Ident<Canonical>, String)],
+    source_pins: &[(Ident<Canonical>, DepElementPin)],
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
     gf_table_ref: Option<&str>,
     occ: &OccurrenceLookup<'_>,
@@ -2439,16 +2549,18 @@ pub(crate) fn generate_scalar_to_element_equation(
         return Err(PartialEquationError::unfreezable(&print_eqn(to_elem_eqn)));
     }
     let partial = print_eqn(&substitute_reducers_in_expr0(wrapped, reducer_subst));
-    let mut partial = subscript_idents_at_element(&partial, to_deps_to_subscript, element)?;
+    let mut partial = subscript_idents_at_element(&partial, to_deps_to_subscript)?;
     // Pin each mapped ident's references (the live source's numerator
     // occurrence and any PREVIOUS-wrapped co-agg freezes alike) to its own
-    // projected slot -- separate passes from the full-tuple
-    // `to_deps_to_subscript` pinning above, because each agg's slot is the
-    // projection onto ITS `result_dims`, not the target's full tuple. The
-    // passes touch disjoint idents, so application order is irrelevant.
-    for (ident, slot) in source_pins {
-        let one: HashSet<Ident<Canonical>> = std::iter::once(ident.clone()).collect();
-        partial = subscript_idents_at_element(&partial, &one, slot)?;
+    // projected slot -- separate passes from the `to_deps_to_subscript` pinning
+    // above, because each agg's slot is the projection onto ITS `result_dims`
+    // rather than onto its declared dimensions (an agg is not a model variable
+    // and has none). The passes touch disjoint idents, so application order is
+    // irrelevant.
+    for (ident, pin) in source_pins {
+        let one: HashMap<Ident<Canonical>, DepElementPin> =
+            std::iter::once((ident.clone(), pin.clone())).collect();
+        partial = subscript_idents_at_element(&partial, &one)?;
     }
     // The wrap goes on LAST because it is not part of the target's equation:
     // everything above rewrites that equation within its own (gf-input) domain
@@ -2503,7 +2615,7 @@ pub(crate) fn generate_per_element_link_equation(
     element_qualified: &str,
     to_elem_eqn: &Expr0,
     to_deps: &HashSet<Ident<Canonical>>,
-    to_deps_to_subscript: &HashSet<Ident<Canonical>>,
+    to_deps_to_subscript: &HashMap<Ident<Canonical>, DepElementPin>,
     from_dims: &[crate::dimensions::Dimension],
     target_elem_by_dim: &HashMap<String, (String, usize)>,
     target_iterated_dims: &[String],
@@ -2527,6 +2639,7 @@ pub(crate) fn generate_per_element_link_equation(
         row_parts_bare,
         from_dims,
         target_elem_by_dim,
+        target_iterated_dims,
         dim_ctx: dims_ctx,
     };
     // The ceteris-paribus wrap runs on the target element's OWN equation,
@@ -2577,8 +2690,7 @@ pub(crate) fn generate_per_element_link_equation(
         return Err(PartialEquationError::unfreezable(&print_eqn(to_elem_eqn)));
     }
     let partial = print_eqn(&wrapped);
-    let mut partial =
-        subscript_idents_at_element(&partial, to_deps_to_subscript, element_qualified)?;
+    let mut partial = subscript_idents_at_element(&partial, to_deps_to_subscript)?;
     if let Some(table_ref) = gf_table_ref {
         partial = format!("LOOKUP({table_ref}, {partial})");
     }

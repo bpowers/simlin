@@ -47,6 +47,40 @@ fn deps_set(idents: &[&str]) -> HashSet<Ident<Canonical>> {
     idents.iter().map(|s| Ident::new(s)).collect()
 }
 
+/// Build a [`subscript_idents_at_element`] pin table literally: each dep with
+/// the `(dimension, element)` pairs IT is pinned over, in its own declared
+/// order. Spelling the dep's own dimensions out is the point -- production
+/// derives them from the dep's declaration
+/// (`crate::ltm_augment::dep_element_pins`), and the tests below pin what that
+/// derivation is obliged to produce.
+fn pin_table(pins: &[(&str, &[(&str, &str)])]) -> HashMap<Ident<Canonical>, DepElementPin> {
+    pin_table_with_completeness(pins, true)
+}
+
+/// [`pin_table`] with the `complete` flag chosen explicitly: an INCOMPLETE pin
+/// is one whose dep declares a dimension this target element does not project
+/// onto, so it may substitute dimension-name indices but may not subscript a
+/// bare reference.
+fn pin_table_with_completeness(
+    pins: &[(&str, &[(&str, &str)])],
+    complete: bool,
+) -> HashMap<Ident<Canonical>, DepElementPin> {
+    pins.iter()
+        .map(|(ident, axes)| {
+            (
+                Ident::new(ident),
+                DepElementPin {
+                    axes: axes
+                        .iter()
+                        .map(|(dim, elem)| ((*dim).to_string(), (*elem).to_string()))
+                        .collect(),
+                    complete,
+                },
+            )
+        })
+        .collect()
+}
+
 /// Source-dimension element names for the per-shape partial-equation
 /// tests using a single `Region` dimension with elements `nyc` and
 /// `boston` (canonical lowercase form, in source-declared order).
@@ -300,13 +334,15 @@ fn substitute_reducers_empty_reducers_passes_through_unparseable() {
 /// (~27k call sites, GH #654).
 #[test]
 fn test_subscript_idents_at_element_pins_dimension_name_indices() {
-    let idents = deps_set(&["reference_emissions", "pct_change"]);
+    let pins = pin_table(&[
+        ("reference_emissions", &[("cop", "cop·oecd_us")]),
+        ("pct_change", &[("cop", "cop·oecd_us")]),
+    ]);
     // Parsed function names round-trip lowercased through print_eqn, so
     // the expected text spells `previous(...)`.
     let result = subscript_idents_at_element(
         "PREVIOUS(reference_emissions[cop]) * (PREVIOUS(pct_change[cop]) / c + 1)",
-        &idents,
-        "cop·oecd_us",
+        &pins,
     )
     .unwrap();
     assert_eq!(
@@ -320,13 +356,11 @@ fn test_subscript_idents_at_element_pins_dimension_name_indices() {
 /// a different order) pins each index to the right element.
 #[test]
 fn test_subscript_idents_at_element_pins_by_dimension_name() {
-    let idents = deps_set(&["row_input", "matrix"]);
-    let result = subscript_idents_at_element(
-        "row_input[age] + matrix[age,region]",
-        &idents,
-        "region·nyc,age·adult",
-    )
-    .unwrap();
+    let pins = pin_table(&[
+        ("row_input", &[("age", "age·adult")]),
+        ("matrix", &[("age", "age·adult"), ("region", "region·nyc")]),
+    ]);
+    let result = subscript_idents_at_element("row_input[age] + matrix[age,region]", &pins).unwrap();
     assert_eq!(
         result,
         "row_input[age·adult] + matrix[age·adult, region·nyc]"
@@ -334,15 +368,63 @@ fn test_subscript_idents_at_element_pins_by_dimension_name() {
 }
 
 /// Indices that are already element literals (not dimension names) are
-/// left untouched, and unqualified pinned elements (no `dim·` part)
-/// cannot pin dimension-name indices -- those keep the conservative form.
+/// left untouched: only an index naming one of the DEP's own dimensions is
+/// the "current element" form the pin substitutes.
 #[test]
 fn test_subscript_idents_at_element_leaves_literal_indices() {
-    let idents = deps_set(&["dep"]);
+    let pins = pin_table(&[("dep", &[("region", "region·la")])]);
     // `nyc` is an element literal, not the dimension name `region`.
-    let result =
-        subscript_idents_at_element("dep[nyc] + dep[region]", &idents, "region·la").unwrap();
+    let result = subscript_idents_at_element("dep[nyc] + dep[region]", &pins).unwrap();
     assert_eq!(result, "dep[nyc] + dep[region·la]");
+}
+
+/// A BARE reference to a pinned dep is subscripted over the dep's OWN
+/// dimensions -- the arm GH #974 is about.
+///
+/// Rows, derived from the ways a dep's declared dimensions can relate to the
+/// target's (here `growth[Region,Age]`), which is what the projection behind
+/// the table has to get right:
+///
+/// | dep's dims | pre-#974 full-tuple pin | correct |
+/// |---|---|---|
+/// | same, same order (`same[Region,Age]`) | `same[region·nyc, age·old]` | identical -- the case that always worked |
+/// | same, REORDERED (`flip[Age,Region]`) | `flip[region·nyc, age·old]` -- compiles, reads the WRONG element | `flip[age·old, region·nyc]` |
+/// | a strict SUBSET (`w[Age]`) | `w[region·nyc, age·old]` -- arity 2 over a 1-D variable, fragment fails to compile | `w[age·old]` |
+///
+/// The reordered row is the one that had no diagnostic at all: both indices
+/// resolve numerically, so the partial compiled and silently read
+/// `flip[young, boston]`.
+#[test]
+fn test_subscript_idents_at_element_pins_bare_refs_over_the_deps_own_dims() {
+    let pins = pin_table(&[
+        ("same", &[("region", "region·nyc"), ("age", "age·old")]),
+        ("flip", &[("age", "age·old"), ("region", "region·nyc")]),
+        ("w", &[("age", "age·old")]),
+    ]);
+    let result = subscript_idents_at_element("same * flip * w", &pins).unwrap();
+    assert_eq!(
+        result,
+        "same[region·nyc, age·old] * flip[age·old, region·nyc] * w[age·old]"
+    );
+}
+
+/// An INCOMPLETE pin -- a dep declaring a dimension this target element does
+/// not project onto (`pop[Region,Age]` read from a `growth[Region]` body) --
+/// substitutes the dimension-name index of a SUBSCRIPTED reference but leaves a
+/// BARE reference alone.
+///
+/// Both halves are load-bearing and pull opposite ways. Substituting the
+/// `Region` index is the GH #654 helper-aux fix: a surviving dimension name in
+/// a scalar fragment forces a synthesized capture helper that cannot compile.
+/// Leaving the bare reference alone is GH #974: there is no correct full-arity
+/// subscript to give it, and the pre-fix full-target-tuple pin spelled the
+/// arity-1 `pop[region·nyc]` over a 2-D variable. Bare stays bare, which fails
+/// to compile LOUDLY rather than reading a wrong element.
+#[test]
+fn test_subscript_idents_at_element_incomplete_pin_leaves_bare_refs_alone() {
+    let pins = pin_table_with_completeness(&[("pop", &[("region", "region·nyc")])], false);
+    let result = subscript_idents_at_element("pop[Region, idx] + pop", &pins).unwrap();
+    assert_eq!(result, "pop[region·nyc, idx] + pop");
 }
 
 // -- dimension_element_names tests --
@@ -1865,6 +1947,101 @@ fn test_partial_equation_lookup_table_arg_not_wrapped() {
     }
 }
 
+/// GH #984 on the GENERAL (non-`PerElement`) path: the table argument's HEAD
+/// stays bare while its subscript INDEX reads are frozen.
+///
+/// The `PerElement` callers thread a row-pinning context and reach the table
+/// argument through the pin-only descent; every OTHER caller passes `pin: None`,
+/// and for them the arm returned the whole argument completely untouched -- no
+/// descent, no freeze, nothing. So `y = LOOKUP(g[idx], x)` made every partial of
+/// `y` vary with `idx`'s current-step movement
+/// (`compiler::codegen::extract_table_info` builds the element offset out of the
+/// live index `Expr`s), attributing it to whichever source the partial isolates.
+/// There is no diagnostic behind that: the fragment compiles and the score is
+/// just wrong.
+///
+/// The rows are derived from what a table argument can be, since that is what
+/// the arm dispatches on: a bare `Var` (no indices at all), a subscript with a
+/// STATIC selector (nothing to freeze), and a subscript with a runtime read (the
+/// defect). Each is checked for all three `LOOKUP` spellings, because the arm
+/// matches on the name and a fix that missed one would leave the extrapolating
+/// variants wrong.
+///
+/// **The dep set is DERIVED, not declared**, and that is what makes this an
+/// oracle. Production builds the wrap's `other_deps` from
+/// `variable::identifier_set`, whose `BuiltinContents::LookupTable` arm records
+/// the table's ident and never walks the table expression -- so `idx` is not a
+/// dependency of `y = LOOKUP(g[idx], x)` and the wrap's ordinary
+/// `other_deps.contains(..)` freeze can never fire for it. Calling
+/// `identifier_set` here rather than hand-writing `deps_set(&[.., "idx", ..])`
+/// is the difference between testing the fix and testing an input production
+/// cannot produce: the first version of this fix passed a hand-written set and
+/// shipped without firing at all.
+#[test]
+fn test_partial_equation_lookup_table_index_is_frozen() {
+    // `region`/`nyc` give the static row a real element to be static about.
+    let dims = crate::dimensions::DimensionsContext::from(
+        [datamodel::Dimension::named(
+            "region".to_string(),
+            vec!["nyc".to_string(), "boston".to_string()],
+        )]
+        .as_slice(),
+    );
+    let source = Ident::<Canonical>::new("food");
+
+    for (label, table_arg, expected_table_arg) in [
+        ("a bare table -- nothing to index", "g", "g"),
+        (
+            "a STATIC element selector -- nothing to freeze",
+            "g[nyc]",
+            "g[nyc]",
+        ),
+        (
+            "a runtime index read -- frozen, head still bare",
+            "g[idx]",
+            "g[PREVIOUS(idx)]",
+        ),
+    ] {
+        for func in ["lookup", "lookup_forward", "lookup_backward"] {
+            let equation = format!("{func}({table_arg}, food / subsistence)");
+            // Production's dep set for this exact equation, through the exact
+            // function production calls.
+            let deps =
+                crate::variable::identifier_set(&crate::variable::scalar_ast(&equation), &[], None);
+            let partial = build_partial_equation_shaped(
+                &equation,
+                &deps,
+                &source,
+                &RefShape::Bare,
+                &[],
+                None,
+                Some(&dims),
+            )
+            .unwrap_or_else(|e| panic!("{label} ({func}): the partial must be emitted: {e:?}"));
+            assert_eq!(
+                partial,
+                format!("{func}({expected_table_arg}, food / PREVIOUS(subsistence))"),
+                "{label} ({func})"
+            );
+        }
+    }
+
+    // Non-vacuity for the third row: the derived set really does omit the index
+    // ident, so the freeze there cannot be coming from the ordinary other-dep
+    // path. This is the fact the whole test hangs on, so it is asserted rather
+    // than described.
+    let deps = crate::variable::identifier_set(
+        &crate::variable::scalar_ast("lookup(g[idx], food / subsistence)"),
+        &[],
+        None,
+    );
+    assert!(
+        !deps.contains(&Ident::<Canonical>::new("idx")),
+        "production's dep extractor must NOT report a table-only index as a \
+         dependency; got {deps:?}"
+    );
+}
+
 /// The WITH LOOKUP lowering references the variable's own table as
 /// `lookup(self_var, input)`. The self-reference is the table holder, so
 /// it stays bare; the (live) input is held live and other deps wrapped.
@@ -2195,22 +2372,21 @@ fn build_partial_equation_shaped_no_deps_to_wrap_is_ok() {
 
 /// `subscript_idents_at_element` shares the same loud-failure contract:
 /// an unparseable (already-partial) equation returns `Err`, while an
-/// empty `idents` set is a legitimate no-op that returns the text
-/// unchanged.
+/// empty pin table is a legitimate no-op that returns the text unchanged.
 #[test]
 fn subscript_idents_at_element_parse_error_is_err() {
-    let idents = deps_set(&["dep"]);
+    let pins = pin_table(&[("dep", &[("region", "region·nyc")])]);
     let bad = "dep * * other";
-    let result = subscript_idents_at_element(bad, &idents, "region·nyc");
+    let result = subscript_idents_at_element(bad, &pins);
     match result {
         Err(err) => assert_eq!(err.equation_text, bad),
         Ok(out) => panic!("a parse failure must be a loud Err; got Ok({out:?})"),
     }
 
-    // Empty idents: nothing to pin, returns the text verbatim (even text
+    // Empty pin table: nothing to pin, returns the text verbatim (even text
     // that would not parse is irrelevant -- the function short-circuits).
-    let noop = subscript_idents_at_element(bad, &deps_set(&[]), "region·nyc")
-        .expect("empty idents is a no-op, not a parse attempt");
+    let noop = subscript_idents_at_element(bad, &pin_table(&[]))
+        .expect("an empty pin table is a no-op, not a parse attempt");
     assert_eq!(noop, bad);
 }
 
