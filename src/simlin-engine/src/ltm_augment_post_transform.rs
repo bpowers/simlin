@@ -79,14 +79,16 @@ pub(super) struct PerElementRefCtx<'a> {
     pub(super) row_parts_bare: &'a [String],
     /// The source's declared dimensions (for index qualification).
     pub(super) from_dims: &'a [crate::dimensions::Dimension],
+    /// The target equation's dimensions, in axis order and WITH duplicates --
+    /// the positional twin of `target_elem_by_dim`, which a repeated dimension
+    /// makes unrepresentable. [`dep_row_for_target`] consumes these.
+    pub(super) target_dims: &'a [crate::dimensions::Dimension],
+    /// This instantiation's target element, one bare name per axis of
+    /// `target_dims`.
+    pub(super) target_elements: &'a [String],
     /// Target-iterated dim (canonical) -> (element of `e` for that dim,
     /// its index within the dim) -- the projection data `e` supplies.
     pub(super) target_elem_by_dim: &'a HashMap<String, (String, usize)>,
-    /// The target equation's iterated dimensions, canonical and IN ORDER.
-    /// Same set as `target_elem_by_dim`'s keys; carried separately because
-    /// [`dep_row_for_target`]'s mapped search must be deterministic and a
-    /// `HashMap`'s iteration order is not.
-    pub(super) target_iterated_dims: &'a [String],
     pub(super) dim_ctx: &'a crate::dimensions::DimensionsContext,
 }
 
@@ -141,71 +143,73 @@ pub(crate) fn per_element_row_for_target(
 }
 
 /// Per DECLARED dimension of a dep, the element it reads at ONE target element
-/// -- `None` for a dimension this target element projects onto neither by name
-/// nor through a positional mapping. Bare element names, in the dep's own
-/// declaration order.
+/// -- `None` for a dimension the target element does not supply. Bare element
+/// names, in the dep's own declaration order.
 ///
-/// A bare arrayed reference inside an apply-to-all body reads the element the
-/// enclosing iteration selects FOR EACH OF ITS OWN AXES, matched by dimension
-/// NAME and not by position: `growth[Region,Age] = ... w ...` over a `w[Age]`
-/// reads `w[<the Age coordinate>]`, and over a `w[Age,Region]` reads
+/// A bare arrayed reference inside an apply-to-all body reads, for each of its
+/// OWN axes, the element the enclosing iteration selects on the target axis that
+/// axis is allocated to. `growth[Region,Age] = ... w ...` over a `w[Age]` reads
+/// `w[<the Age coordinate>]`, and over a `w[Age,Region]` reads
 /// `w[<Age>,<Region>]` -- the transpose of the target's own tuple. That is the
 /// executed behaviour (pinned by
-/// `bare_arrayed_dep_is_pinned_over_its_own_declared_dims`' numeric oracle),
-/// and it is why pinning such a reference with the target's FULL element tuple
-/// is wrong twice over: over- or under-arity when the dep declares a strict
-/// subset (a fragment that fails to compile, so the score reads a constant 0),
-/// and a compilable, SILENTLY WRONG element when it declares the same
-/// dimensions in another order (GH #974).
+/// `bare_arrayed_dep_is_pinned_over_its_own_declared_dims`' numeric oracle), and
+/// it is why pinning such a reference with the target's FULL element tuple is
+/// wrong twice over: over- or under-arity when the dep declares a strict subset
+/// (a fragment that fails to compile, so the score reads a constant 0), and a
+/// compilable, SILENTLY WRONG element when it declares the same dimensions in
+/// another order (GH #974).
 ///
-/// The per-axis question -- which target coordinate projects onto this
-/// dimension -- is handed to [`per_element_row_for_target`], the single row
-/// derivation, as an [`crate::ltm_agg::AxisRead::Iterated`] pair. That is what
-/// makes the identity axis and a positionally-MAPPED one (`w[Region]` read from
-/// a `growth[State,..]` body under a `State`/`Region` mapping) one arm instead
-/// of two, and it means this accepts exactly the mapped pairs the
-/// occurrence-driven pin and `ltm_agg::classify_axis_access` accept.
+/// **The ALLOCATION is not decided here.** Which target axis supplies which dep
+/// axis is `compiler::dimensions::allocate_implicit_axes` -- the same function
+/// the compiler's own `get_implicit_subscripts` calls to resolve exactly this
+/// reference -- so a pin cannot spell a row the simulation does not read. This
+/// used to be a per-axis `.find` over the target's dimension NAMES, and it got
+/// two shapes wrong for the one reason: a name is not an axis identity. A target
+/// repeating a dimension (`target[D,D]`) has two axes with one name, and a
+/// name-keyed map keeps only the last (the simulation reads the FIRST, measured
+/// by `repeated_target_dimension_reads_the_first_axis`); and two dep axes that
+/// can each map to the same target axis both claimed it, because an independent
+/// search tracks no `used` set (the simulation allocates one-to-one, measured by
+/// `doubly_mapped_dep_axes_are_allocated_one_to_one`). That is the SECOND time in
+/// this area a table keyed by dimension name produced a wrong row -- GH #986 was
+/// the first -- so the rule is now asked for rather than restated.
 ///
-/// The mapped search walks `target_iterated_dims` in the target's declared
-/// ORDER, so a dep dimension reachable from two mapped target dimensions
-/// resolves the same way on every run (`target_elem_by_dim` is a `HashMap`
-/// and cannot be iterated for this).
+/// What remains here is the per-axis ELEMENT translation, which is LTM's own and
+/// deliberately narrower than the compiler's: an axis allocated to a target axis
+/// of a different name resolves through
+/// `DimensionsContext::mapped_element_correspondence`, which declines explicit
+/// element maps (GH #756 -- the executed A2A lowering resolves positionally and
+/// ignores them), so this accepts exactly the mapped pairs the occurrence-driven
+/// pin and `ltm_agg::classify_axis_access` accept.
 fn dep_axis_elements(
     dep_dims: &[crate::dimensions::Dimension],
-    target_iterated_dims: &[String],
-    target_elem_by_dim: &HashMap<String, (String, usize)>,
+    target_dims: &[crate::dimensions::Dimension],
+    target_elements: &[String],
     dim_ctx: &crate::dimensions::DimensionsContext,
 ) -> Vec<Option<String>> {
-    use crate::common::CanonicalDimensionName;
-    use crate::ltm_agg::AxisRead;
+    use crate::common::CanonicalElementName;
+    if target_dims.len() != target_elements.len() {
+        return vec![None; dep_dims.len()];
+    }
+    let alloc =
+        crate::compiler::dimensions::allocate_implicit_axes_partial(dep_dims, target_dims, dim_ctx);
     dep_dims
         .iter()
-        .map(|dep_dim| {
-            let source_dim = dep_dim.name().to_string();
-            // The target iterating the dep's OWN dimension is the identity
-            // projection and always wins; only a name the target does not
-            // iterate goes looking for a mapped partner.
-            let target_dim = if target_elem_by_dim.contains_key(&source_dim) {
-                source_dim.clone()
-            } else {
-                target_iterated_dims
-                    .iter()
-                    .find(|td| {
-                        dim_ctx
-                            .mapped_element_correspondence(
-                                &CanonicalDimensionName::from_raw(td),
-                                dep_dim.canonical_name(),
-                            )
-                            .is_some()
-                    })?
-                    .clone()
-            };
-            let axis = AxisRead::Iterated {
-                dim: target_dim,
-                source_dim,
-            };
-            per_element_row_for_target(std::slice::from_ref(&axis), target_elem_by_dim, dim_ctx)
-                .map(|row| row[0].clone())
+        .zip(alloc)
+        .map(|(dep_dim, target_pos)| {
+            let target_dim = target_dims.get(target_pos?)?;
+            let target_elem = target_elements.get(target_pos?)?;
+            if dep_dim.canonical_name() == target_dim.canonical_name() {
+                return Some(target_elem.clone());
+            }
+            // A different-named axis: the element is whatever the executed A2A
+            // lowering reads there, i.e. the positional correspondence.
+            let corr = dim_ctx.mapped_element_correspondence(
+                target_dim.canonical_name(),
+                dep_dim.canonical_name(),
+            )?;
+            let idx = target_dim.get_offset(&CanonicalElementName::from_raw(target_elem))?;
+            corr.get(idx).map(|e| e.as_str().to_string())
         })
         .collect()
 }
@@ -217,11 +221,11 @@ fn dep_axis_elements(
 /// at all.
 pub(crate) fn dep_row_for_target(
     dep_dims: &[crate::dimensions::Dimension],
-    target_iterated_dims: &[String],
-    target_elem_by_dim: &HashMap<String, (String, usize)>,
+    target_dims: &[crate::dimensions::Dimension],
+    target_elements: &[String],
     dim_ctx: &crate::dimensions::DimensionsContext,
 ) -> Option<Vec<String>> {
-    dep_axis_elements(dep_dims, target_iterated_dims, target_elem_by_dim, dim_ctx)
+    dep_axis_elements(dep_dims, target_dims, target_elements, dim_ctx)
         .into_iter()
         .collect()
 }
@@ -245,15 +249,14 @@ pub(crate) fn dep_row_for_target(
 /// target equation by the caller; only the projection is per element.
 pub(crate) fn dep_element_pins(
     pinnable: &[(Ident<Canonical>, Vec<crate::dimensions::Dimension>)],
-    target_iterated_dims: &[String],
-    target_elem_by_dim: &HashMap<String, (String, usize)>,
+    target_dims: &[crate::dimensions::Dimension],
+    target_elements: &[String],
     dim_ctx: &crate::dimensions::DimensionsContext,
 ) -> HashMap<Ident<Canonical>, DepElementPin> {
     pinnable
         .iter()
         .filter_map(|(ident, dep_dims)| {
-            let elems =
-                dep_axis_elements(dep_dims, target_iterated_dims, target_elem_by_dim, dim_ctx);
+            let elems = dep_axis_elements(dep_dims, target_dims, target_elements, dim_ctx);
             let complete = elems.iter().all(Option::is_some);
             let axes: Vec<(String, String)> = elems
                 .iter()
@@ -432,8 +435,8 @@ pub(super) fn pin_source_subscript_indices(
 pub(super) fn pin_bare_source_ref(ctx: &PerElementRefCtx<'_>) -> Option<Vec<IndexExpr0>> {
     dep_row_for_target(
         ctx.from_dims,
-        ctx.target_iterated_dims,
-        ctx.target_elem_by_dim,
+        ctx.target_dims,
+        ctx.target_elements,
         ctx.dim_ctx,
     )
     .map(|row| qualified_row_indices(&row, ctx))

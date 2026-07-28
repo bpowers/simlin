@@ -2110,3 +2110,260 @@ fn lookup_table_head_and_static_index_survive_the_wrap() {
         "a PREVIOUS of a table has no value slot; got: {text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// P2-1 / P2-2 of the whole-branch review: the per-element pin projection keyed
+// its axis lookup by dimension NAME, which is not an axis identity. Both shapes
+// below COMPILE AND RUN, so each was a silent wrong row rather than a latent
+// one, and each is measured against the VM before its pin is asserted.
+//
+// This is the second time in this area a name-keyed table produced a wrong row
+// (GH #986 was the first), which is why the projection now asks
+// `compiler::dimensions::allocate_implicit_axes_partial` instead of restating
+// the rule.
+// ---------------------------------------------------------------------------
+
+/// Read one variable's final-step value out of a compiled+run model.
+fn final_value(project: &datamodel::Project, name: &str) -> f64 {
+    let db = SimlinDb::default();
+    let sp = sync_from_datamodel(&db, project).project;
+    let compiled = compile_project_incremental(&db, sp, "main").expect("the fixture compiles");
+    let off = *compiled
+        .offsets
+        .iter()
+        .find(|(k, _)| k.as_str() == name)
+        .unwrap_or_else(|| panic!("no slot named {name}"))
+        .1;
+    let mut vm = crate::vm::Vm::new(compiled).expect("VM creation should succeed");
+    vm.run_to_end().expect("simulation should run");
+    vm.into_results().iter().next_back().expect("a saved step")[off]
+}
+
+fn repeated_dimension_model() -> datamodel::Project {
+    TestProject::new("repeated_target_dim")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .array_with_ranges_direct(
+            "w",
+            vec!["Region".to_string()],
+            vec![("nyc", "1"), ("boston", "2")],
+            None,
+        )
+        // A stock, so the model is stateful and LTM scores it at all.
+        .flow("inflow", "1", None)
+        .stock("driver", "3", &["inflow"], &[], None)
+        // `target` repeats `Region`: two axes, one name.
+        .array_aux_direct(
+            "target",
+            vec!["Region".to_string(), "Region".to_string()],
+            "driver * w",
+            None,
+        )
+        .build_datamodel()
+}
+
+/// A target that REPEATS a dimension gives a bare dep the FIRST axis, and the
+/// pin must say so (P2-1).
+///
+/// `target[Region,Region] = driver * w` with `w[Region]`: the simulation reads
+/// `w` at the FIRST `Region` coordinate, so `target[nyc,boston]` reads `w[nyc]`.
+/// The pin projection keyed its lookup by dimension name, so the second axis
+/// overwrote the first and it emitted `PREVIOUS(w[region·boston])` -- a fragment
+/// that compiles and reads the other row.
+#[test]
+fn repeated_target_dimension_reads_the_first_axis() {
+    let project = repeated_dimension_model();
+
+    // What the simulation reads, measured. `w[nyc]` and `w[boston]` differ, so
+    // the two candidate reads are distinguishable.
+    assert_ne!(
+        final_value(&project, "w[nyc]"),
+        final_value(&project, "w[boston]")
+    );
+    assert_eq!(
+        final_value(&project, "target[nyc,boston]"),
+        final_value(&project, "driver") * final_value(&project, "w[nyc]"),
+        "a bare dep under a repeated-dimension target reads the FIRST axis"
+    );
+
+    // ...and the pin spells that row.
+    let (db, model, source_project) = char_fixture_db(&project);
+    let text = link_score_text(
+        &db,
+        model,
+        source_project,
+        &["link_score\u{205A}driver\u{2192}target[nyc,boston]"],
+    );
+    assert!(
+        text.contains("previous(w[region\u{B7}nyc])"),
+        "the pin must read the FIRST Region axis, as the simulation does; got: {text}"
+    );
+    assert!(
+        !text.contains("previous(w[region\u{B7}boston])"),
+        "a name-keyed lookup keeps only the LAST axis and spells the wrong row; \
+         got: {text}"
+    );
+}
+
+fn doubly_mapped_model() -> datamodel::Project {
+    let mut project = TestProject::new("doubly_mapped")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("T", &["t1", "t2"])
+        .named_dimension("U", &["u1", "u2"])
+        .array_with_ranges_direct(
+            "aw",
+            vec!["A".to_string()],
+            vec![("a1", "1"), ("a2", "2")],
+            None,
+        )
+        .array_with_ranges_direct(
+            "bw",
+            vec!["B".to_string()],
+            vec![("b1", "10"), ("b2", "20")],
+            None,
+        )
+        .flow("inflow", "1", None)
+        .stock("driver", "1", &["inflow"], &[], None)
+        .array_aux_direct(
+            "dep",
+            vec!["A".to_string(), "B".to_string()],
+            "aw[A] + bw[B]",
+            None,
+        )
+        .array_aux_direct(
+            "target",
+            vec!["T".to_string(), "U".to_string()],
+            "driver * dep",
+            None,
+        )
+        .build_datamodel();
+    // `A` and `B` each map to BOTH target dimensions, so an independent per-axis
+    // search hands both of them `T`.
+    let both = || {
+        vec![
+            datamodel::DimensionMapping {
+                target: "T".to_string(),
+                element_map: vec![],
+            },
+            datamodel::DimensionMapping {
+                target: "U".to_string(),
+                element_map: vec![],
+            },
+        ]
+    };
+    let mut a =
+        datamodel::Dimension::named("A".to_string(), vec!["a1".to_string(), "a2".to_string()]);
+    a.mappings = both();
+    let mut b =
+        datamodel::Dimension::named("B".to_string(), vec!["b1".to_string(), "b2".to_string()]);
+    b.mappings = both();
+    project.dimensions.push(a);
+    project.dimensions.push(b);
+    project
+}
+
+/// Two dependency axes that can each map to either target axis are allocated
+/// ONE-TO-ONE, in declaration order (P2-2).
+///
+/// `target[T,U] = driver * dep` with `dep[A,B]`, where `A` and `B` both carry
+/// positional mappings to both `T` and `U`. The simulation consumes each target
+/// axis once, so `target[t1,u2]` reads `dep[a1,b2]`. The pin projection searched
+/// per dependency axis independently with no `used` set, so both claimed `T` and
+/// it emitted `PREVIOUS(dep[a1,b1])` -- again compilable and again the wrong row.
+#[test]
+fn doubly_mapped_dep_axes_are_allocated_one_to_one() {
+    let project = doubly_mapped_model();
+
+    // What the simulation reads, measured; the two candidate rows differ.
+    assert_ne!(
+        final_value(&project, "dep[a1,b1]"),
+        final_value(&project, "dep[a1,b2]")
+    );
+    assert_eq!(
+        final_value(&project, "target[t1,u2]"),
+        final_value(&project, "driver") * final_value(&project, "dep[a1,b2]"),
+        "each target axis is consumed once: A takes T, B takes U"
+    );
+
+    // ...and the pin spells that row.
+    let (db, model, source_project) = char_fixture_db(&project);
+    let text = link_score_text(
+        &db,
+        model,
+        source_project,
+        &["link_score\u{205A}driver\u{2192}target[t1,u2]"],
+    );
+    assert!(
+        text.contains("previous(dep[a\u{B7}a1, b\u{B7}b2])"),
+        "the pin must allocate one-to-one, as the simulation does; got: {text}"
+    );
+    assert!(
+        !text.contains("previous(dep[a\u{B7}a1, b\u{B7}b1])"),
+        "an independent per-axis search gives both dep axes the FIRST target \
+         axis and spells the wrong row; got: {text}"
+    );
+}
+
+/// A `PerElement` edge whose target REPEATS a dimension is declined loudly.
+///
+/// The scalar-source and agg emitters project positionally and handle a repeated
+/// dimension correctly (`repeated_target_dimension_reads_the_first_axis`), but the
+/// per-element emitter's row derivations address a target axis by its dimension
+/// NAME -- that is what an `AxisRead::Iterated` carries -- and two axes with one
+/// name are indistinguishable to them. Emitting anyway produces a partial that
+/// compiles and reads whichever axis the lookup resolved to, so the edge is
+/// skipped with a `Warning` instead: loud beats a plausible wrong number, which
+/// is the trade this area has taken every time.
+///
+/// The fixture's own equation compiles and runs, so the decline is LTM's and not
+/// a consequence of an unsupported model.
+#[test]
+fn per_element_edge_declines_a_repeated_dimension_target() {
+    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
+
+    let project = TestProject::new("per_element_repeated_dim")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("Age", &["young", "old"])
+        .array_flow("growth[Region,Age]", "1", None)
+        .array_stock("pop[Region,Age]", "10", &["growth"], &[], None)
+        // `pop[Region, young]` is a PerElement site; the target repeats `Region`.
+        .array_aux_direct(
+            "target",
+            vec!["Region".to_string(), "Region".to_string()],
+            "pop[Region, young]",
+            None,
+        )
+        .build_datamodel();
+
+    // The model itself is fine -- the decline below is LTM's.
+    let plain_db = SimlinDb::default();
+    let plain = sync_from_datamodel(&plain_db, &project).project;
+    compile_project_incremental(&plain_db, plain, "main")
+        .expect("the repeated-dimension model compiles");
+
+    let (db, model, source_project) = char_fixture_db(&project);
+    let diags = collect_model_diagnostics(&db, model, source_project);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.severity == DiagnosticSeverity::Warning
+                && matches!(&d.error, DiagnosticError::Assembly(m)
+                if m.contains("repeats a dimension") && m.contains("pop") && m.contains("target"))),
+        "the edge must be declined with a Warning naming it; got {:?}",
+        diags.iter().map(|d| &d.error).collect::<Vec<_>>()
+    );
+
+    // ...and no per-element score is emitted for it, rather than a wrong one.
+    let ltm = model_ltm_variables(&db, model, source_project);
+    let per_element: Vec<&String> = ltm
+        .vars
+        .iter()
+        .map(|v| &v.name)
+        .filter(|n| n.contains("link_score\u{205A}pop[") && n.contains("\u{2192}target["))
+        .collect();
+    assert!(
+        per_element.is_empty(),
+        "a declined edge must emit no per-element score; got {per_element:?}"
+    );
+}

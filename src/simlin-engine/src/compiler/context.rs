@@ -16,7 +16,9 @@ use crate::dimensions::{Dimension, DimensionsContext};
 use crate::variable::Variable;
 use crate::{Error, sim_err};
 
-use super::dimensions::{UnaryOp, find_dimension_reordering, match_dimensions_with_mapping};
+use super::dimensions::{
+    UnaryOp, allocate_implicit_axes, find_dimension_reordering, match_dimensions_with_mapping,
+};
 use super::expr::{BuiltinFn, Expr, SubscriptIndex, VarRef};
 use super::subscript::{
     IndexOp, Subscript3Config, ViewBuildConfig, ViewBuildResult, build_view_from_ops,
@@ -253,6 +255,14 @@ impl Context<'_> {
         self.get_submodel_metadata(self.model_name, ident)
     }
 
+    /// The active subscript each of `dims` reads, for a BARE arrayed reference
+    /// inside an apply-to-all body.
+    ///
+    /// The axis ALLOCATION -- which active axis supplies which of `dims` -- is
+    /// `dimensions::allocate_implicit_axes`, shared with the LTM per-element
+    /// projection so a link-score pin cannot spell a row this reference does not
+    /// read. See that function for the two properties (positional, one-to-one)
+    /// that a name-keyed re-derivation gets wrong.
     fn get_implicit_subscripts(&self, dims: &[Dimension], ident: &str) -> Result<Vec<&str>> {
         if self.active_dimension.is_none() {
             return sim_err!(ArrayReferenceNeedsExplicitSubscripts, ident.to_owned());
@@ -261,151 +271,13 @@ impl Context<'_> {
         let active_subscripts = self.active_subscript.as_ref().unwrap();
         assert_eq!(active_dims.len(), active_subscripts.len());
 
-        // Check if dimensions can be reordered to match
-        if dims.len() == active_dims.len() {
-            // Get dimension names (all canonical at this point)
-            let source_dim_names: Vec<String> = dims.iter().map(|d| d.name().to_string()).collect();
-            let target_dim_names: Vec<String> =
-                active_dims.iter().map(|d| d.name().to_string()).collect();
-
-            // Check if dimensions can be reordered
-            // Note: we're asking "how to reorder target to match source"
-            if let Some(_reordering) =
-                find_dimension_reordering(&target_dim_names, &source_dim_names)
-            {
-                // Build subscripts in the order needed by the source dims
-                // reordering[i] tells us which target dimension to use for source position i
-                let mut subscripts: Vec<&str> = Vec::with_capacity(dims.len());
-                for source_dim in dims {
-                    // Find which active dimension matches this source dimension
-                    for (j, active_dim) in active_dims.iter().enumerate() {
-                        if active_dim.name() == source_dim.name() {
-                            subscripts.push(active_subscripts[j].as_str());
-                            break;
-                        }
-                    }
-                }
-                return Ok(subscripts);
-            }
+        match allocate_implicit_axes(dims, active_dims, self.dimensions_ctx) {
+            Some(alloc) => Ok(alloc
+                .into_iter()
+                .map(|i| active_subscripts[i].as_str())
+                .collect()),
+            None => sim_err!(MismatchedDimensions, ident.to_owned()),
         }
-
-        // Fall back to original logic for partial dimension matching
-        // if we need more dimensions than are implicit, that's an error
-        if dims.len() > active_dims.len() {
-            return sim_err!(MismatchedDimensions, ident.to_owned());
-        }
-
-        // goal: if this is a valid equation, dims will be a subset of active_dims (order preserving)
-
-        let mut subscripts: Vec<&str> = Vec::with_capacity(dims.len());
-
-        // Track which active dimensions have been used
-        let mut used: Vec<bool> = vec![false; active_dims.len()];
-
-        for dim in dims.iter() {
-            // FIRST PASS: Try to find an exact name match anywhere in unused active dims.
-            // This prevents size-based fallback from grabbing the wrong dimension when
-            // the correct name match exists later in the list.
-            let name_match_idx = active_dims.iter().enumerate().find_map(|(i, candidate)| {
-                if !used[i] && candidate.name() == dim.name() {
-                    Some(i)
-                } else {
-                    None
-                }
-            });
-
-            if let Some(idx) = name_match_idx {
-                subscripts.push(active_subscripts[idx].as_str());
-                used[idx] = true;
-                continue;
-            }
-
-            // SECOND PASS: Check for dimension mapping matches in both directions.
-            // Forward: dim has any mapping to an active dimension
-            // Reverse: active_dim has any mapping to dim
-            let mapping_match_idx = {
-                // Forward: dim has mapping to active dim (or active is subdim of mapping target)
-                let mut found = active_dims.iter().enumerate().find_map(|(i, candidate)| {
-                    if used[i] {
-                        return None;
-                    }
-                    let candidate_name = candidate.canonical_name();
-                    if self
-                        .dimensions_ctx
-                        .has_mapping_to(dim.canonical_name(), candidate_name)
-                    {
-                        return Some(i);
-                    }
-                    if self
-                        .dimensions_ctx
-                        .has_mapping_to_parent_of(dim.canonical_name(), candidate_name)
-                    {
-                        return Some(i);
-                    }
-                    None
-                });
-                // Reverse: active_dim has mapping to dim
-                if found.is_none() {
-                    found = active_dims.iter().enumerate().find_map(|(i, candidate)| {
-                        if used[i] {
-                            return None;
-                        }
-                        if self
-                            .dimensions_ctx
-                            .has_mapping_to(candidate.canonical_name(), dim.canonical_name())
-                        {
-                            return Some(i);
-                        }
-                        None
-                    });
-                }
-                found
-            };
-
-            if let Some(idx) = mapping_match_idx {
-                subscripts.push(active_subscripts[idx].as_str());
-                used[idx] = true;
-                continue;
-            }
-
-            // THIRD PASS: Only if no name or mapping match exists, try size-based matching
-            // for indexed dimensions. Find the first unused indexed dimension with
-            // the same size.
-            //
-            // IMPORTANT: Size-based fallback only applies when BOTH dimensions are
-            // indexed. Named dimensions must match by name (or subdimension relationship)
-            // because their elements have semantic meaning. For example, Cities=[Boston,
-            // Seattle] and Products=[Widgets,Gadgets] shouldn't match just because both
-            // have size 2 - that would be semantically incorrect.
-            //
-            // NOTE: The two-pass (name -> size) matching logic is shared with the VM via
-            // dimensions::match_dimensions_two_pass. This compiler version adds a mapping
-            // pass between name and size matching.
-            let size_match_idx = if let Dimension::Indexed(_, dim_size) = dim {
-                active_dims.iter().enumerate().find_map(|(i, candidate)| {
-                    if !used[i]
-                        && let Dimension::Indexed(_, candidate_size) = candidate
-                        && dim_size == candidate_size
-                    {
-                        return Some(i);
-                    }
-                    None
-                })
-            } else {
-                None
-            };
-
-            if let Some(idx) = size_match_idx {
-                subscripts.push(active_subscripts[idx].as_str());
-                used[idx] = true;
-                continue;
-            }
-
-            // No match found
-            return sim_err!(MismatchedDimensions, ident.to_owned());
-        }
-
-        Ok(subscripts)
     }
 
     fn get_implicit_subscript_off(&self, dims: &[Dimension], ident: &str) -> Result<usize> {

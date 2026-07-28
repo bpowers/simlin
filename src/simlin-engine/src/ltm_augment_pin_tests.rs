@@ -72,13 +72,16 @@ fn per_element_pin_descends_into_range_endpoints() {
     let mut target_elem_by_dim = HashMap::new();
     target_elem_by_dim.insert("region".to_string(), ("boston".to_string(), 1usize));
 
+    let target_dims = vec![make_named_dimension("region", &["nyc", "boston"])];
+    let target_elements = vec!["boston".to_string()];
     let ctx = super::post_transform::PerElementRefCtx {
         from: &from,
         site_axes: &site_axes,
         row_parts_bare: &row_parts_bare,
         from_dims: &from_dims,
+        target_dims: &target_dims,
+        target_elements: &target_elements,
         target_elem_by_dim: &target_elem_by_dim,
-        target_iterated_dims: &target_iterated_dims,
         dim_ctx: &dim_ctx,
     };
 
@@ -172,6 +175,22 @@ fn dep_element_pins_projection_enumeration() {
             target: "region".to_string(),
             element_map,
         }];
+        // `dblx`/`dbly` each map to BOTH target axes, so a per-axis search that
+        // tracks no `used` set hands them the same one (P2-2).
+        let dbl = |name: &str, elems: Vec<String>| {
+            let mut d = datamodel::Dimension::named(name.to_string(), elems);
+            d.mappings = vec![
+                datamodel::DimensionMapping {
+                    target: "region".to_string(),
+                    element_map: vec![],
+                },
+                datamodel::DimensionMapping {
+                    target: "age".to_string(),
+                    element_map: vec![],
+                },
+            ];
+            d
+        };
         DimensionsContext::from(
             [
                 datamodel::Dimension::named(
@@ -183,6 +202,8 @@ fn dep_element_pins_projection_enumeration() {
                     vec!["young".to_string(), "old".to_string()],
                 ),
                 state,
+                dbl("dblx", vec!["x1".to_string(), "x2".to_string()]),
+                dbl("dbly", vec!["y1".to_string(), "y2".to_string()]),
                 datamodel::Dimension::named(
                     "other".to_string(),
                     vec!["o1".to_string(), "o2".to_string()],
@@ -195,14 +216,14 @@ fn dep_element_pins_projection_enumeration() {
     let age = make_named_dimension("age", &["young", "old"]);
     let state = make_named_dimension("state", &["west", "east"]);
     let other = make_named_dimension("other", &["o1", "o2"]);
+    let dblx = make_named_dimension("dblx", &["x1", "x2"]);
+    let dbly = make_named_dimension("dbly", &["y1", "y2"]);
 
     // Target `growth[Region,Age]` at element `(boston, old)` -- both
     // coordinates are the SECOND element of their dimension, which is what
     // makes the positional correspondence observable (`state·east`).
-    let target_iterated_dims = vec!["region".to_string(), "age".to_string()];
-    let mut target_elem_by_dim: HashMap<String, (String, usize)> = HashMap::new();
-    target_elem_by_dim.insert("region".to_string(), ("boston".to_string(), 1usize));
-    target_elem_by_dim.insert("age".to_string(), ("old".to_string(), 1usize));
+    let target_dims = vec![region.clone(), age.clone()];
+    let target_elements = vec!["boston".to_string(), "young".to_string()];
 
     let pinnable: Vec<(Ident<Canonical>, Vec<crate::dimensions::Dimension>)> = vec![
         // identity, in the target's own order
@@ -217,6 +238,9 @@ fn dep_element_pins_projection_enumeration() {
         (Ident::new("partial"), vec![region.clone(), other.clone()]),
         // nothing resolves -> absent
         (Ident::new("unrelated"), vec![other.clone()]),
+        // P2-2: BOTH axes can map to BOTH target axes. The allocation must be
+        // one-to-one and in declaration order, matching the compiler.
+        (Ident::new("doubly"), vec![dblx.clone(), dbly.clone()]),
     ];
 
     let axes_of = |pins: &HashMap<Ident<Canonical>, crate::ltm_augment::DepElementPin>,
@@ -230,8 +254,8 @@ fn dep_element_pins_projection_enumeration() {
     let positional = build_ctx(vec![]);
     let pins = super::post_transform::dep_element_pins(
         &pinnable,
-        &target_iterated_dims,
-        &target_elem_by_dim,
+        &target_dims,
+        &target_elements,
         &positional,
     );
 
@@ -240,7 +264,7 @@ fn dep_element_pins_projection_enumeration() {
         Some((
             vec![
                 axis("region", "region\u{B7}boston"),
-                axis("age", "age\u{B7}old")
+                axis("age", "age\u{B7}young")
             ],
             true
         )),
@@ -251,7 +275,7 @@ fn dep_element_pins_projection_enumeration() {
         axes_of(&pins, "flip"),
         Some((
             vec![
-                axis("age", "age\u{B7}old"),
+                axis("age", "age\u{B7}young"),
                 axis("region", "region\u{B7}boston")
             ],
             true
@@ -261,7 +285,7 @@ fn dep_element_pins_projection_enumeration() {
     );
     assert_eq!(
         axes_of(&pins, "sub"),
-        Some((vec![axis("age", "age\u{B7}old")], true)),
+        Some((vec![axis("age", "age\u{B7}young")], true)),
         "a subset-dims dep must be pinned over its own single axis, not the \
          target's full tuple"
     );
@@ -270,7 +294,7 @@ fn dep_element_pins_projection_enumeration() {
         Some((
             vec![
                 axis("state", "state\u{B7}east"),
-                axis("age", "age\u{B7}old")
+                axis("age", "age\u{B7}young")
             ],
             true
         )),
@@ -288,6 +312,41 @@ fn dep_element_pins_projection_enumeration() {
         None,
         "a dep no axis of which projects has nothing to rewrite and must be absent"
     );
+    // P2-2: each target axis is consumed once, so the second dep axis gets the
+    // second target axis rather than re-claiming the first. `boston` is Region's
+    // second element and `old` is Age's, so a one-to-one allocation reads each
+    // mapped dimension's SECOND element.
+    assert_eq!(
+        axes_of(&pins, "doubly"),
+        Some((
+            vec![axis("dblx", "dblx\u{B7}x2"), axis("dbly", "dbly\u{B7}y1")],
+            true
+        )),
+        "two dep axes that can each map to either target axis must be allocated \
+         ONE-TO-ONE in declaration order, as the compiler allocates them; an \
+         independent per-axis search gives both the first target axis"
+    );
+
+    // P2-1: a target that REPEATS a dimension. The two axes are different reads,
+    // and the simulation gives a bare dep the FIRST -- measured by
+    // `repeated_target_dimension_reads_the_first_axis`. A map keyed by dimension
+    // name cannot express this at all; the positional projection can.
+    let repeated_dims = vec![region.clone(), region.clone()];
+    let repeated_elements = vec!["nyc".to_string(), "boston".to_string()];
+    let repeated_pins = super::post_transform::dep_element_pins(
+        &[(Ident::new("w"), vec![region.clone()])],
+        &repeated_dims,
+        &repeated_elements,
+        &positional,
+    );
+    assert_eq!(
+        repeated_pins
+            .get(&Ident::<Canonical>::new("w"))
+            .map(|p| (p.axes.clone(), p.complete)),
+        Some((vec![axis("region", "region\u{B7}nyc")], true)),
+        "a subset dep under a repeated-dimension target reads the FIRST axis; a \
+         name-keyed map keeps only the last and would say `boston`"
+    );
 
     // An EXPLICIT element map is declined by `mapped_element_correspondence`
     // (execution resolves positionally and ignores it, GH #756), so the same
@@ -298,13 +357,13 @@ fn dep_element_pins_projection_enumeration() {
     ]);
     let pins = super::post_transform::dep_element_pins(
         &pinnable,
-        &target_iterated_dims,
-        &target_elem_by_dim,
+        &target_dims,
+        &target_elements,
         &element_mapped,
     );
     assert_eq!(
         axes_of(&pins, "mapped"),
-        Some((vec![axis("age", "age\u{B7}old")], false)),
+        Some((vec![axis("age", "age\u{B7}young")], false)),
         "an element-mapped axis must decline: following the map would spell a \
          read the positionally-resolving simulation never performs"
     );
@@ -332,6 +391,14 @@ struct PinFixture {
     /// The QUALIFIED target element this instantiation emits for -- `region·boston`
     /// for [`PinFixture::new`], `state·ma` for [`PinFixture::mapped`].
     target_element: String,
+    /// The target equation's dimensions in AXIS order, and this instantiation's
+    /// element as a positional tuple over them. Every fixture here iterates one
+    /// dimension, so these are the one-element twins of `target_iterated_dims`
+    /// and `target_elem_by_dim` -- carried separately because a repeated
+    /// dimension makes the name-keyed pair unrepresentable, which is what the
+    /// pin projection now refuses to depend on.
+    target_dims: Vec<crate::dimensions::Dimension>,
+    target_elements: Vec<String>,
 }
 
 impl PinFixture {
@@ -377,6 +444,8 @@ impl PinFixture {
             row_parts_bare: vec!["boston".to_string(), "young".to_string()],
             target_elem_by_dim,
             target_element: "region\u{B7}boston".to_string(),
+            target_dims: vec![make_named_dimension("region", &["nyc", "boston"])],
+            target_elements: vec!["boston".to_string()],
         }
     }
 
@@ -455,6 +524,8 @@ impl PinFixture {
             row_parts_bare: vec!["boston".to_string(), "young".to_string()],
             target_elem_by_dim,
             target_element: "state\u{B7}ma".to_string(),
+            target_dims: vec![make_named_dimension("state", &["ny", "ma"])],
+            target_elements: vec!["ma".to_string()],
         }
     }
 
@@ -507,6 +578,8 @@ impl PinFixture {
             row_parts_bare: vec!["boston".to_string(), "old".to_string()],
             target_elem_by_dim,
             target_element: "region\u{B7}boston".to_string(),
+            target_dims: vec![make_named_dimension("region", &["nyc", "boston"])],
+            target_elements: vec!["boston".to_string()],
         }
     }
 
@@ -577,6 +650,8 @@ impl PinFixture {
             &HashMap::new(),
             &self.from_dims,
             &self.target_elem_by_dim,
+            &self.target_dims,
+            &self.target_elements,
             &self.target_iterated_dims,
             &self.dim_ctx,
             None,

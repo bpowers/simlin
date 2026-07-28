@@ -66,9 +66,32 @@ fn pinnable_arrayed_deps(
     pinnable
 }
 
+/// The target element as a POSITIONAL tuple over `to_dims`: one bare element
+/// name per axis, in axis order, duplicates and all.
+///
+/// This -- not a map keyed by dimension name -- is what the pin projection
+/// consumes, because a target may repeat a dimension (`target[D,D]`) and the two
+/// axes then read different coordinates. Empty when the tuple's arity does not
+/// match, which the projection reads as "no axis resolves".
+fn target_element_parts(to_dims: &[crate::dimensions::Dimension], element: &str) -> Vec<String> {
+    let parts: Vec<String> = element.split(',').map(|p| p.trim().to_string()).collect();
+    if parts.len() == to_dims.len() {
+        parts
+    } else {
+        Vec::new()
+    }
+}
+
 /// The projection data one target element supplies: target dimension
 /// (canonical) -> (that element's coordinate on the dimension, its index within
 /// the dimension's element list).
+///
+/// Keyed by NAME, so a target that repeats a dimension is not representable
+/// here: the second axis overwrites the first. Its one remaining consumer
+/// (`per_element_row_for_target`, whose `AxisRead::Iterated` interface is
+/// name-keyed too) is guarded by `emit_per_element_link_scores` declining a
+/// repeated-dimension target outright. The pin projection does NOT use this --
+/// see [`target_element_parts`].
 ///
 /// `element` is a comma-joined BARE element tuple over `to_dims`, and
 /// `dim_element_lists` is `to_dims`' element lists (already computed by every
@@ -84,10 +107,18 @@ fn target_elem_by_dim_for(
     if parts.len() != to_dims.len() {
         return HashMap::new();
     }
-    let mut by_dim = HashMap::with_capacity(to_dims.len());
+    let mut by_dim: HashMap<String, (String, usize)> = HashMap::with_capacity(to_dims.len());
     for ((dim, elems), part) in to_dims.iter().zip(dim_element_lists).zip(&parts) {
         if let Some(idx) = elems.iter().position(|e| e == part) {
-            by_dim.insert(dim.name().to_string(), ((*part).to_string(), idx));
+            // FIRST occurrence wins: a dimension-NAME index resolves to the first
+            // active axis with that name (`compiler::subscript`'s `ActiveDimRef`
+            // is `active_dims.position(..)`), so if this map is ever asked about
+            // a repeated dimension it should answer the way the compiler does.
+            // `emit_per_element_link_scores` declines such a target outright, so
+            // this is the fallback behind that guard rather than the guarantee.
+            by_dim
+                .entry(dim.name().to_string())
+                .or_insert_with(|| ((*part).to_string(), idx));
         }
     }
     by_dim
@@ -1279,7 +1310,6 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         .iter()
         .map(crate::ltm_augment::dimension_element_names)
         .collect();
-    let to_dim_names: Vec<String> = to_dims.iter().map(|d| d.name().to_string()).collect();
     let dim_ctx = project_dimensions_context(db, project);
     let elements = cartesian_subscripts(&dim_element_lists);
     // GH #910: resolved once for the whole target -- see `WithLookupSlotRefs`.
@@ -1346,8 +1376,8 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             // projected off this target element (GH #974).
             let deps_to_sub = crate::ltm_augment::dep_element_pins(
                 pinnable,
-                &to_dim_names,
-                &target_elem_by_dim_for(&to_dims, &dim_element_lists, element),
+                &to_dims,
+                &target_element_parts(&to_dims, element),
                 dim_ctx,
             );
             match crate::ltm_augment::generate_scalar_to_element_equation(
@@ -1459,6 +1489,31 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         Ast::Scalar(_) => unreachable!("target is arrayed"),
     }
     Some(cross_vars)
+}
+
+/// Accumulate the `Warning` for a `PerElement` edge whose target REPEATS a
+/// dimension (`target[D,D]`).
+///
+/// The per-element row derivations address a target axis by its dimension NAME,
+/// so two axes sharing one name are indistinguishable to them. Rather than emit
+/// a partial that compiles and reads whichever axis the lookup resolved to, the
+/// edge gets no link-score variable and loops through it are dropped -- the same
+/// loud-skip contract the disjoint and dim-incompatible classes follow.
+fn emit_repeated_target_dimension_warning(db: &dyn Db, model: SourceModel, from: &str, to: &str) {
+    use salsa::Accumulator;
+    let msg = format!(
+        "LTM link score for edge {from} -> {to} could not be computed: {to} repeats a \
+         dimension in its subscripts, and the per-element row derivation addresses a \
+         target axis by dimension name, so it cannot tell the two axes apart; this edge \
+         will have no link-score variable and feedback loops through it will not be scored"
+    );
+    CompilationDiagnostic(Diagnostic {
+        model: model.name(db).clone(),
+        variable: None,
+        error: DiagnosticError::Assembly(msg),
+        severity: DiagnosticSeverity::Warning,
+    })
+    .accumulate(db);
 }
 
 /// Accumulate the AC3.4 `Warning` for a disjoint-dim arrayed -> arrayed
@@ -2494,7 +2549,6 @@ fn emit_per_element_link_scores(
         .iter()
         .map(crate::ltm_augment::dimension_element_names)
         .collect();
-    let to_dim_names: Vec<String> = to_dims.iter().map(|d| d.name().to_string()).collect();
     let elements = cartesian_subscripts(&to_dim_element_lists);
 
     // Per target element: the body text + dep sets (shared for A2A,
@@ -2507,6 +2561,31 @@ fn emit_per_element_link_scores(
     } else {
         None
     };
+
+    // A target that REPEATS a dimension (`target[D,D]`) is not projectable by
+    // this emitter, so decline the edge rather than emit a wrong row. Every row
+    // derivation it reaches -- `per_element_row_for_target` and
+    // `pin_dimension_name_indices` -- is asked its question as a dimension NAME
+    // (that is what an `AxisRead::Iterated` and a dimension-name index carry), and
+    // two axes sharing one name have two different coordinates. The simulation
+    // resolves such an index to the FIRST matching axis; a partial that guesses
+    // otherwise compiles and reads the other row, which is the failure this whole
+    // area keeps producing (P2-1, and GH #986 before it). The SCALAR-source and
+    // AGG emitters do not go through those derivations -- they project
+    // positionally via `dep_element_pins` -- and are unaffected
+    // (`repeated_target_dimension_reads_the_first_axis`).
+    if to_dims.len()
+        != to_dims
+            .iter()
+            .map(|d| d.canonical_name())
+            .collect::<HashSet<_>>()
+            .len()
+    {
+        if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+            emit_repeated_target_dimension_warning(db, model, from, to);
+        }
+        return true;
+    }
 
     // Name-level dedup: two sites can in principle derive the same
     // (row, e) name; first emission wins (matching the per-shape pass's
@@ -2560,8 +2639,8 @@ fn emit_per_element_link_scores(
         // off this target element (GH #974).
         let to_sub = crate::ltm_augment::dep_element_pins(
             pinnable,
-            &to_dim_names,
-            &target_elem_by_dim,
+            &to_dims,
+            &target_element_parts(&to_dims, element),
             dim_ctx,
         );
 
@@ -2616,6 +2695,8 @@ fn emit_per_element_link_scores(
                 &to_sub,
                 from_dims,
                 &target_elem_by_dim,
+                &to_dims,
+                &target_element_parts(&to_dims, element),
                 &target_iterated_dims,
                 dim_ctx,
                 gf_table_ref.as_deref(),
@@ -3296,11 +3377,6 @@ pub(super) fn emit_agg_to_target_link_scores(
     // computed by `source_pins_for_target` below.
 
     let dim_ctx = project_dimensions_context(db, project);
-    let to_dim_names: Vec<String> = to_dims.iter().map(|d| d.name().to_string()).collect();
-    let dim_element_lists_for_target: Vec<Vec<String>> = to_dims
-        .iter()
-        .map(crate::ltm_augment::dimension_element_names)
-        .collect();
     #[derive(Clone)]
     struct AggTargetProjectionAxis {
         target_pos: usize,
@@ -3492,8 +3568,8 @@ pub(super) fn emit_agg_to_target_link_scores(
     let deps_to_subscript = |element: &str| {
         crate::ltm_augment::dep_element_pins(
             &pinnable_deps,
-            &to_dim_names,
-            &target_elem_by_dim_for(&to_dims, &dim_element_lists_for_target, element),
+            &to_dims,
+            &target_element_parts(&to_dims, element),
             dim_ctx,
         )
     };

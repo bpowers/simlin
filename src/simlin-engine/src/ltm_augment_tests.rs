@@ -22,7 +22,13 @@ fn make_named_dimension(name: &str, elements: &[&str]) -> Dimension {
     let indexed: HashMap<CanonicalElementName, usize> = canonical_elements
         .iter()
         .enumerate()
-        .map(|(i, e)| (e.clone(), i))
+        // 1-indexed, matching `impl From<&datamodel::Dimension>` -- production
+        // subtracts 1 in `get_offset`/`get_element_index`, so a 0-based helper
+        // silently shifts every element lookup down by one. That went unnoticed
+        // until the pin projection started calling `get_offset` on a fixture
+        // dimension, where it turned `boston` (Region's second element) into
+        // index 0 and read the wrong mapped partner.
+        .map(|(i, e)| (e.clone(), i + 1))
         .collect();
     Dimension::Named(
         CanonicalDimensionName::from_raw(name),
