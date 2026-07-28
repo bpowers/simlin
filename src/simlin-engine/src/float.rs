@@ -14,10 +14,22 @@
 //!
 //! **What a practitioner sees, and what it costs them.** A line on a graph that
 //! stops. The modeller's next task is *provenance*: search backward through the
-//! dependency graph for where the NaN came from, because NaN is absorbing --
-//! every variable downstream of the origin shows the identical symptom, so the
-//! graph says that something broke and not what. That backward hunt is the real
-//! cost of a NaN, and it is paid by hand.
+//! dependency graph for where the NaN came from, because a NaN spreads through
+//! ARITHMETIC to whatever reads it, so a stopped line usually means the origin is
+//! upstream rather than here. The graph says that something broke and not what.
+//! That backward hunt is the real cost of a NaN, and it is paid by hand.
+//!
+//! **The exception matters during that hunt, so it is stated here rather than
+//! discovered.** NaN is absorbing in arithmetic, NOT through comparisons and
+//! conditionals. Every IEEE comparison against a NaN is false, so
+//! `IF x > 0 THEN 1 ELSE 0` with a NaN `x` takes the ELSE branch and returns a
+//! perfectly finite `0` -- and everything downstream of THAT is finite too. Two
+//! consequences for a modeller tracing an origin: a finite variable does not
+//! clear its inputs (it may be sitting on the NaN behind a conditional), and a
+//! NaN can vanish partway down a chain rather than reaching the output that
+//! would have revealed it. So "everything downstream is NaN" is the common case,
+//! not the rule, and any diagnostic that claims otherwise is giving the modeller
+//! false guidance.
 //!
 //! **What it usually is.** Most often the runtime result of a division by zero,
 //! which then propagates through everything reading it. Sometimes it is
@@ -82,7 +94,10 @@
 /// That existence test only works because `:NA:` is finite: ordinary `=`
 /// equality (`approx_eq`) matches the sentinel against itself, and arithmetic on
 /// `:NA:` computes a finite result rather than poisoning the expression the way
-/// NaN (which is absorbing) would. Both `:NA:` paths in the engine -- the
+/// NaN (which IS absorbing in arithmetic) would. Note the existence test itself
+/// is the shape that would NOT have been rescued by a NaN: an `x = NAN`
+/// comparison is false rather than poisoning, so the idiom would silently take
+/// its else-branch instead of failing loudly. Both `:NA:` paths -- the
 /// expression literal (via the MDL->XMILE formatter) and the data-list literal
 /// (via the MDL number-list parser) -- route to this single constant so the
 /// representation is consistent and Vensim-faithful.

@@ -115,8 +115,8 @@ pub enum DiagnosticError {
 ///    typo'd subscript simulates plausibly-but-wrong with no signal (GH #905).
 /// 4c. `emit_unfilled_equation_warnings` -- the unconditional
 ///    `UnfilledEquation` advisory: a variable whose equation is nothing but
-///    the NaN literal has no usable equation, so it and everything downstream
-///    of it simulate as NaN.
+///    the NaN literal has no usable equation, so it simulates as NaN and that
+///    NaN spreads through arithmetic into whatever reads it.
 /// 5. When LTM is enabled, `emit_conveyor_ltm_degraded_warnings` and
 ///    `emit_queue_ltm_degraded_warnings` -- one `Warning` per conveyor stock
 ///    and per queue stock in THIS model, because LTM's flow-to-stock link-score
@@ -220,7 +220,7 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // literal, which is where Vensim's `A FUNCTION OF(...)` placeholder lands.
     // Unconditional, for the same reason as the two advisories above -- it
     // describes the simulation, not an analysis overlay.
-    emit_unfilled_equation_warnings(db, model);
+    emit_unfilled_equation_warnings(db, model, project);
 
     // When LTM is enabled, also trigger the LTM diagnostic pass so that
     // diagnostics accumulated by the LTM pipeline surface through
@@ -673,7 +673,6 @@ fn emit_unknown_element_subscript_warnings(
     project: SourceProject,
 ) {
     use crate::common::{CanonicalElementName, Error, ErrorCode, ErrorKind};
-    use crate::dimensions::Dimension;
     use salsa::Accumulator;
     use std::collections::HashSet;
 
@@ -694,21 +693,9 @@ fn emit_unknown_element_subscript_warnings(
             continue;
         }
 
-        // Resolve the variable's dimension names against the project's
-        // dimension definitions by canonical name (the same rule as
-        // `variable::get_dimensions`). Any unresolved name means the
-        // equation already carries BadDimensionName -- skip.
-        let dims: Option<Vec<Dimension>> = dim_names
-            .iter()
-            .map(|name| {
-                let canonical = crate::canonicalize(name);
-                project_dims
-                    .iter()
-                    .find(|d| crate::canonicalize(d.name()) == canonical)
-                    .map(Dimension::from)
-            })
-            .collect();
-        let Some(dims) = dims else {
+        // Any unresolved dimension name means the equation already carries
+        // BadDimensionName -- skip rather than cascade on top of it.
+        let Some(dims) = resolve_equation_dimensions(project_dims, dim_names) else {
             continue;
         };
 
@@ -773,6 +760,70 @@ fn emit_unknown_element_subscript_warnings(
             .accumulate(db);
         }
     }
+}
+
+/// Resolve an arrayed equation's dimension NAMES against the project's
+/// dimension declarations, by canonical name -- the same rule as
+/// `variable::get_dimensions`. `None` if any name is unresolvable, which means
+/// the equation already carries `BadDimensionName` from `compile_var_fragment`.
+///
+/// Shared by the two arrayed-equation advisories so they cannot drift about what
+/// a dimension name resolves to.
+fn resolve_equation_dimensions(
+    project_dims: &[crate::datamodel::Dimension],
+    dim_names: &[String],
+) -> Option<Vec<crate::dimensions::Dimension>> {
+    dim_names
+        .iter()
+        .map(|name| {
+            let canonical = crate::canonicalize(name);
+            project_dims
+                .iter()
+                .find(|d| crate::canonicalize(d.name()) == canonical)
+                .map(crate::dimensions::Dimension::from)
+        })
+        .collect()
+}
+
+/// Do `equation`'s explicit arms already name every slot its dimensions declare?
+///
+/// `None` when the answer cannot be determined -- an unresolvable dimension name
+/// (already reported as `BadDimensionName`), which the caller treats as "say
+/// nothing about this variable" rather than guessing.
+///
+/// The membership rule is deliberately the COMPILER's, not this file's sibling
+/// advisory's. `compiler::expand_arrayed_with_hoisting` selects a slot's
+/// equation with `elements.get(&CanonicalElementName::from_raw(combination.join(",")))`
+/// and falls back to the EXCEPT default only on a miss, so that lookup IS the
+/// fact being asked about; deriving it any other way would be re-deriving the
+/// compiler's own decision by a second route. (`emit_unknown_element_subscript_warnings`
+/// accepts the UNION of that rule and the conveyor init-list matcher's, because
+/// it is asking a different question -- "does ANY consumer resolve this entry?"
+/// -- and its rustdoc records that the two rules diverge.)
+fn arm_coverage(
+    project_dims: &[crate::datamodel::Dimension],
+    equation: &crate::datamodel::Equation,
+) -> Option<crate::variable::ArmCoverage> {
+    use crate::common::CanonicalElementName;
+    use crate::variable::ArmCoverage;
+
+    let crate::datamodel::Equation::Arrayed(dim_names, elements, _, _) = equation else {
+        // A scalar's single formula, and an apply-to-all's, IS every slot's.
+        return Some(ArmCoverage::CoversEverySlot);
+    };
+    let dims = resolve_equation_dimensions(project_dims, dim_names)?;
+    let arm_keys: std::collections::HashSet<CanonicalElementName> = elements
+        .iter()
+        .map(|(subscript, _, _, _)| CanonicalElementName::from_raw(subscript))
+        .collect();
+    let covers_all = crate::dimensions::SubscriptIterator::new(&dims).all(|combination| {
+        arm_keys.contains(&CanonicalElementName::from_raw(&combination.join(",")))
+    });
+    Some(if covers_all {
+        ArmCoverage::CoversEverySlot
+    } else {
+        ArmCoverage::LeavesSlotsUncovered
+    })
 }
 
 /// Is `var`'s own equation only a FALLBACK -- a stand-in for a value a calling
@@ -841,7 +892,7 @@ fn equation_is_a_module_input_fallback(
 /// passing CLI run or `get_errors` check red.
 ///
 /// Variables are visited in sorted-name order so accumulation is deterministic.
-fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel) {
+fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel, project: SourceProject) {
     use crate::common::{Error, ErrorCode, ErrorKind};
     use crate::variable::{UnfilledArms, unfilled_arms};
     use salsa::Accumulator;
@@ -850,13 +901,18 @@ fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel) {
     let mut var_names: Vec<&String> = source_vars.keys().collect();
     var_names.sort_unstable();
 
+    let project_dims = project.dimensions(db);
     let model_name = model.name(db);
     for var_name in var_names {
         let svar = source_vars[var_name];
         if equation_is_a_module_input_fallback(db, model, svar) {
             continue;
         }
-        let Some(unfilled) = unfilled_arms(svar.equation(db)) else {
+        let equation = svar.equation(db);
+        let Some(coverage) = arm_coverage(project_dims, equation) else {
+            continue;
+        };
+        let Some(unfilled) = unfilled_arms(equation, coverage) else {
             continue;
         };
         // A stock's `equation` is its INITIAL VALUE, not a formula re-evaluated
@@ -881,12 +937,17 @@ fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel) {
                 )
             }
         };
+        // The NaN claim is deliberately scoped to ARITHMETIC. NaN is not
+        // absorbing through comparisons -- `IF x > 0 THEN 1 ELSE 0` reading a
+        // NaN `x` returns a finite 0 -- so "every variable downstream is NaN"
+        // would be false guidance for exactly the backward search this
+        // diagnostic exists to shorten (see `crate::float`).
         let msg = format!(
-            "{subject}: a NaN literal stands where the formula belongs, so it simulates as NaN \
-             -- and because NaN is absorbing, so does every variable downstream of it. Vensim's \
-             Sketch tool writes 'A FUNCTION OF(...)' for an equation that has not been written \
-             yet and refuses to simulate a model containing one; our importer stores that \
-             placeholder as this NaN literal."
+            "{subject}: a NaN literal stands where the formula belongs, so it simulates as NaN, \
+             and that NaN spreads through arithmetic into whatever reads it. Vensim's Sketch \
+             tool writes 'A FUNCTION OF(...)' for an equation that has not been written yet and \
+             refuses to simulate a model containing one; our importer stores that placeholder as \
+             this NaN literal."
         );
         CompilationDiagnostic(Diagnostic {
             model: model_name.clone(),

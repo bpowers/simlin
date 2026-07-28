@@ -518,7 +518,7 @@ pub(crate) fn is_nan_literal(equation: &str) -> bool {
 /// apply-to-all variable, one `<element>` entry of a per-element arrayed
 /// variable, or an arrayed variable's EXCEPT default (the formula for every
 /// element with no entry of its own).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UnfilledArms {
     /// The variable has NO equation anywhere: its scalar/apply-to-all formula is
     /// the NaN literal, or every arm of its arrayed equation is (its EXCEPT
@@ -532,6 +532,27 @@ pub(crate) enum UnfilledArms {
     },
 }
 
+/// Whether a variable's explicit arms already name every slot its dimensions
+/// declare -- the fact that decides what the slots WITHOUT an arm evaluate to,
+/// and therefore whether an EXCEPT default is reachable at all.
+///
+/// This cannot be read off a `datamodel::Equation`: it needs the equation's
+/// dimensions RESOLVED against the project's declarations, which is a database
+/// read. So it is computed by the caller (`db::diagnostic::arm_coverage`) and
+/// passed in, leaving [`unfilled_arms`] a pure classifier. The alternative --
+/// giving the classifier the resolved element set -- would move a salsa read
+/// into a pure function for no gain, since a single bit is all the verdict uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArmCoverage {
+    /// Every declared slot has an equation of its own. A scalar or apply-to-all
+    /// variable is always this: its single formula IS every slot's.
+    CoversEverySlot,
+    /// At least one declared slot has no arm naming it, so something else
+    /// decides that slot's value -- the EXCEPT default if one is live, else the
+    /// compiler's silent `0`.
+    LeavesSlotsUncovered,
+}
+
 /// Classify `equation` by which of its arms are unfilled, or `None` when none
 /// are.
 ///
@@ -543,7 +564,19 @@ pub(crate) enum UnfilledArms {
 /// fine, one stopping -- so a partially-unfilled variable is reported too, and
 /// [`UnfilledArms::Partial`] names the arms so the message can point at them.
 /// Either way it is at most ONE finding per variable, never one per element.
-pub(crate) fn unfilled_arms(equation: &datamodel::Equation) -> Option<UnfilledArms> {
+///
+/// `coverage` is load-bearing for both directions of the arrayed verdict, and
+/// both were wrong without it. A NaN EXCEPT default that no slot can reach is
+/// not an unfilled equation (arms `a=1,b=2` over `D=[a,b]` with default `NAN`
+/// warned, though the compiled model contains no NaN at all), and a sparse
+/// array's omitted slots are not covered by its listed arms (arms `a=NAN,b=NAN`
+/// over `D=[a,b,c]` claimed the WHOLE variable had no equation, though `[c]`
+/// compiles to `0`). Both follow from the same rule: what an armless slot
+/// evaluates to is not something the arms' text can answer.
+pub(crate) fn unfilled_arms(
+    equation: &datamodel::Equation,
+    coverage: ArmCoverage,
+) -> Option<UnfilledArms> {
     use crate::datamodel::Equation;
     match equation {
         // One arm covering the whole variable: a scalar formula, or one formula
@@ -557,21 +590,30 @@ pub(crate) fn unfilled_arms(equation: &datamodel::Equation) -> Option<UnfilledAr
                 .filter(|(_, eqn, _, _)| is_nan_literal(eqn))
                 .map(|(subscript, _, _, _)| subscript.clone())
                 .collect();
-            // `has_except_default` is what makes the default LIVE, so a `Some`
-            // default with the flag clear is not an arm at all. The pairing is
-            // reachable: the MDL converter keeps a default as round-trip
-            // metadata while setting the flag false when EXCEPT is the sole
-            // source of elements (`mdl::convert::variables`), and the compiler
-            // falls back to the default for a missing element only under the
-            // same flag (`compiler::expand_arrayed_with_hoisting`). Reading the
-            // text without the flag would report a NaN nothing ever evaluates.
-            let default = default.as_deref().filter(|_| *has_except_default);
-            let default_unfilled = default.is_some_and(is_nan_literal);
+            // Two independent things have to hold before the default's TEXT
+            // means anything. It must be LIVE -- `has_except_default` is what
+            // makes it apply to a slot with no arm, and the MDL converter keeps
+            // a dead one as round-trip metadata (`mdl::convert::variables`)
+            // while the compiler consults it only under the flag
+            // (`compiler::expand_arrayed_with_hoisting`). And it must be
+            // REACHABLE -- `expand_arrayed_with_hoisting` looks at the default
+            // only for a slot the arms do not name, so when the arms cover the
+            // whole dimension the default is dead code whatever the flag says.
+            let default_unfilled = coverage == ArmCoverage::LeavesSlotsUncovered
+                && *has_except_default
+                && default.as_deref().is_some_and(is_nan_literal);
+            // What the slots with no arm of their own evaluate to: the default's
+            // formula when it is live and reachable, else the compiler's silent
+            // `0` -- which is finite, so it is NOT an unfilled equation. (The
+            // silent zero is its own reportable shape, and a deliberately
+            // separate one: GH #905 covers it.)
+            let uncovered_slots_are_nan =
+                coverage == ArmCoverage::CoversEverySlot || default_unfilled;
+
             if unfilled.is_empty() && !default_unfilled {
                 None
-            } else if unfilled.len() == elements.len() && (default.is_none() || default_unfilled) {
-                // Nothing the variable can evaluate to is anything but NaN --
-                // including the elements the default covers, if there is one.
+            } else if unfilled.len() == elements.len() && uncovered_slots_are_nan {
+                // Every slot the variable has evaluates to NaN.
                 Some(UnfilledArms::Whole)
             } else {
                 Some(UnfilledArms::Partial {

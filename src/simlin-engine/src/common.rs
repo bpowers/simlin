@@ -636,10 +636,17 @@ pub enum ErrorCode {
     /// Warning-level, not Error: the rest of the model is worth simulating, and
     /// `FormattedErrors::push` counts `Error` severity only, so this must not flip
     /// the failure-shaped flags. Its value is ATTRIBUTION -- see `crate::float`'s
-    /// module docs for why. A NaN is absorbing, so every variable downstream shows
-    /// the identical stopped line, and the modeller's next task is a backward hunt
-    /// through the dependency graph for the origin. Naming the one variable the
-    /// engine knows STRUCTURALLY must be NaN replaces that entire hunt.
+    /// module docs for why. A NaN spreads through arithmetic to whatever reads it,
+    /// so the modeller's next task is a backward hunt through the dependency graph
+    /// for the origin. Naming the one variable the engine knows STRUCTURALLY must
+    /// be NaN replaces that entire hunt.
+    ///
+    /// The spread is through arithmetic only, which is why neither this doc nor
+    /// the emitted message claims every downstream variable is NaN: IEEE
+    /// comparisons against a NaN are false, so `IF x > 0 THEN 1 ELSE 0` reading a
+    /// NaN `x` returns a finite `0` and everything below it is finite too. A
+    /// diagnostic that asserted otherwise would send the modeller looking in the
+    /// wrong place.
     UnfilledEquation,
 }
 
