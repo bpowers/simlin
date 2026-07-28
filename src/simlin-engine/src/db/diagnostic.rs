@@ -927,6 +927,10 @@ fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel, project: Sou
 
     let project_dims = project.dimensions(db);
     let model_name = model.name(db);
+    // A variable literally named `nan` makes the stored text `NAN` ambiguous --
+    // see `may_have_unfilled_arms`. The map is canonically keyed, so this covers
+    // every spelling (`NaN`, `NAN`, ...) that canonicalizes to the same name.
+    let nan_names_a_variable = source_vars.contains_key("nan");
     for var_name in var_names {
         let svar = source_vars[var_name];
         if equation_is_a_module_input_fallback(db, model, svar) {
@@ -938,7 +942,7 @@ fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel, project: Sou
         // so an ordinary arrayed variable must not pay for a warning it cannot
         // emit. Every finding names an arm or the default, so a variable with no
         // lone-NaN text among them has nothing to report.
-        if !may_have_unfilled_arms(equation) {
+        if !may_have_unfilled_arms(equation, nan_names_a_variable) {
             continue;
         }
         let Some(selection) = arm_selection(project_dims, equation) else {

@@ -686,7 +686,43 @@ pub(crate) fn unfilled_arms(
 ///
 /// It must stay a SUPERSET of what [`unfilled_arms`] reports, which it is by
 /// construction: that function only ever looks at these same texts.
-pub(crate) fn may_have_unfilled_arms(equation: &datamodel::Equation) -> bool {
+///
+/// # `nan_names_a_variable`: declining to make an undecidable claim
+///
+/// When the model declares a variable actually NAMED `nan`, the stored text
+/// `NAN` has two readings and nothing here can tell them apart, so this returns
+/// `false` and the variable is not reported at all.
+///
+/// The ambiguity is one we chose. The MDL importer quotes every keyword-shaped
+/// variable reference EXCEPT `nan` (`mdl::xmile_compat`'s `quote_reference`),
+/// because quoting it would bind Vensim's `A FUNCTION OF(...)` placeholder --
+/// which we store as the text `NAN` -- to any like-named variable, and a
+/// round-tripped model would then compute a value for a variable that has none.
+/// That trade is deliberate and is pinned by
+/// `keyword_ident_tests::a_bare_nan_reference_in_mdl_is_still_the_literal`,
+/// which records the residual it leaves: `b = nan` referring to a declared `nan`
+/// still reads as the literal. So a model containing both shapes stores them
+/// identically, and `b = nan` -- a formula the modeller really did write --
+/// looked exactly like a placeholder they never filled in.
+///
+/// Silence is the right answer rather than a guess in either direction. This
+/// warning's whole value is that a practitioner can trust it and skip the
+/// backward hunt (`crate::float`), so a warning that MIGHT be false is worse
+/// than one that is absent. Note this is not the declared-name resolution rule
+/// batch 1 rejected: that one resolved the ambiguity in favour of one reading
+/// and would have shipped a wrong VALUE. This ships no claim.
+///
+/// Scoped to the ambiguity, not to the model: the flag only ever suppresses
+/// equations whose text IS the bare literal, which is the only text with two
+/// readings. Every other diagnostic in the pass is untouched, and in a model
+/// with no variable named `nan` -- every ordinary model -- nothing changes.
+pub(crate) fn may_have_unfilled_arms(
+    equation: &datamodel::Equation,
+    nan_names_a_variable: bool,
+) -> bool {
+    if nan_names_a_variable {
+        return false;
+    }
     use crate::datamodel::Equation;
     match equation {
         Equation::Scalar(s) | Equation::ApplyToAll(_, s) => is_nan_literal(s),

@@ -948,6 +948,97 @@ fn an_unknown_subscript_arm_is_not_an_unfilled_equation() {
     assert_eq!(2.0, final_value(&project, "typo_only[b]"));
 }
 
+/// A model that declares a variable NAMED `nan` gets no unfilled-equation
+/// findings, because in such a model the stored text `NAN` has two readings.
+///
+/// This is two of this branch's changes meeting, not a defect in either. Batch 1
+/// deliberately excluded `nan` from the MDL importer's keyword quoting -- quoting
+/// it would bind Vensim's `A FUNCTION OF(...)` placeholder to any like-named
+/// variable -- and disclosed the residual in
+/// `keyword_ident_tests::a_bare_nan_reference_in_mdl_is_still_the_literal`. So
+/// `b = nan` here IS a formula the modeller wrote, stored identically to a
+/// placeholder they never wrote, and "b has no equation" was false.
+///
+/// The assertions bracket the ambiguity from both sides: `b` really is NaN at
+/// runtime (batch 1's residual, unchanged by this), so the NaN half of the old
+/// message was true and only the "has no equation" half was false -- which is
+/// exactly why declining to claim beats guessing.
+#[test]
+fn a_model_declaring_a_variable_named_nan_gets_no_findings() {
+    let mdl = concat!(
+        "nan = 3\n\t~\t\n\t~\t|\n\n",
+        "b = nan\n\t~\t\n\t~\t|\n\n",
+        "\\\\\\---/// Sketch information - do not modify anything except names\n"
+    );
+    let project = crate::compat::open_vensim(mdl).expect("MDL must parse");
+    assert_eq!(
+        Vec::<(String, String, String)>::new(),
+        unfilled_findings(&project),
+        "`b = nan` is a reference the modeller wrote; we cannot tell it from a \
+         placeholder, so we must not claim `b` has no equation"
+    );
+    assert_eq!(3.0, final_value(&project, "nan"));
+    assert!(
+        final_value(&project, "b").is_nan(),
+        "batch 1's disclosed residual: the bare reference still reads as the \
+         literal, so the NaN itself was never the false part of the message"
+    );
+}
+
+/// The ambiguity is scoped to the MODEL that declares `nan`, because that is the
+/// scope in which a bare reference resolves.
+///
+/// A sub-model declaring `nan` says nothing about how the main model's `NAN`
+/// reads, so the main model's placeholder is still reported. Without this, one
+/// oddly-named variable anywhere in a project would silence the diagnostic
+/// everywhere in it.
+#[test]
+fn a_nan_variable_in_another_model_does_not_suppress_this_one() {
+    let project = read_xmile_with_models(
+        "",
+        r#"
+        <aux name="marketing"><eqn>NAN</eqn></aux>
+        <module name="m" simlin:model_name="sub"><connect to="m.port" from="marketing"/></module>"#,
+        r#"<model name="sub"><variables>
+        <aux name="port" access="input"><eqn>0</eqn></aux>
+        <aux name="nan"><eqn>3</eqn></aux>
+        <aux name="out"><eqn>port + nan</eqn></aux>
+        </variables></model>"#,
+    );
+    let findings = unfilled_findings(&project);
+    assert_eq!(
+        vec!["marketing".to_string()],
+        findings.iter().map(|f| f.1.clone()).collect::<Vec<_>>(),
+        "the sub-model's `nan` cannot make the MAIN model's text ambiguous: \
+         {findings:#?}"
+    );
+    assert_eq!("main", findings[0].0);
+}
+
+/// The suppression is total within such a model: every equation the decision
+/// table says IS reportable stops being reportable.
+///
+/// Stated as an invariant over the table rather than as a fifth axis, for the
+/// same reason as the unselected-arm invariant: `nan` naming a variable is not a
+/// state the verdict varies with, it is a condition under which no claim can be
+/// made at all. Thirty-two checks from one loop rather than 32 duplicated rows.
+#[test]
+fn declaring_nan_suppresses_every_reportable_cell() {
+    for (cell, eqn, _selection, expected) in decision_table() {
+        if expected.is_none() {
+            continue;
+        }
+        assert!(
+            crate::variable::may_have_unfilled_arms(&eqn, false),
+            "cell {cell:?} reports, so it must pass the gate in an ordinary model"
+        );
+        assert!(
+            !crate::variable::may_have_unfilled_arms(&eqn, true),
+            "cell {cell:?} must make no claim when `nan` names a variable"
+        );
+    }
+}
+
 /// A variable whose ONLY NaN is its EXCEPT default is still reported.
 ///
 /// Every arm is filled; the uncovered slot `c` falls to the default and is the
