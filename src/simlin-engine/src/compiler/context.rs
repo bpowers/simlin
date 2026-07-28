@@ -1321,7 +1321,7 @@ impl Context<'_> {
             }
 
             // Handle common variants directly (no longer converting to Expr2)
-            Expr3::Const(_, n, loc) => Ok(Expr::Const(*n, *loc)),
+            Expr3::Const(_, n, loc) => Ok(Expr::Const(n.value(), *loc)),
 
             Expr3::Var(id, _, loc) => {
                 // Check if this identifier is a dimension name
@@ -2859,8 +2859,16 @@ fn test_lower() {
                 None,
                 Loc::default(),
             )),
-            Box::new(Const("1".to_string(), 1.0, Loc::default())),
-            Box::new(Const("0".to_string(), 0.0, Loc::default())),
+            Box::new(Const(
+                "1".to_string(),
+                crate::ast::Literal::new(1.0),
+                Loc::default(),
+            )),
+            Box::new(Const(
+                "0".to_string(),
+                crate::ast::Literal::new(0.0),
+                Loc::default(),
+            )),
             None,
             Loc::default(),
         ))
@@ -2966,8 +2974,16 @@ fn test_lower() {
                 None,
                 Loc::default(),
             )),
-            Box::new(Const("1".to_string(), 1.0, Loc::default())),
-            Box::new(Const("0".to_string(), 0.0, Loc::default())),
+            Box::new(Const(
+                "1".to_string(),
+                crate::ast::Literal::new(1.0),
+                Loc::default(),
+            )),
+            Box::new(Const(
+                "0".to_string(),
+                crate::ast::Literal::new(0.0),
+                Loc::default(),
+            )),
             None,
             Loc::default(),
         ))
@@ -3190,7 +3206,11 @@ fn test_positional_fallback_ignores_unrelated_mapping() {
         ident: Ident::new("source_var"),
         ast: Some(ast::Ast::ApplyToAll(
             vec![Dimension::from(&source)],
-            ast::Expr2::Const("0".to_string(), 0.0, Loc::default()),
+            ast::Expr2::Const(
+                "0".to_string(),
+                crate::ast::Literal::new(0.0),
+                Loc::default(),
+            ),
         )),
         init_ast: None,
         eqn: None,

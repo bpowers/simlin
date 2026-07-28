@@ -5,6 +5,7 @@
 use crate::ast::array_view::ArrayView;
 use crate::ast::expr0::{BinaryOp, UnaryOp};
 use crate::ast::expr2::{ArrayBounds, Expr2, IndexExpr2};
+use crate::ast::literal::Literal;
 use crate::builtins::{BuiltinFn, Loc};
 use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, EquationResult, Ident,
@@ -18,7 +19,7 @@ use crate::eqn_err;
 /// During the expr2 → expr3 lowering pass, all wildcards are resolved
 /// to explicit StarRange expressions based on the variable's dimensions.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 pub enum IndexExpr3 {
     /// Star range (*:dim or dim.*) - preserves dimension for iteration.
     /// This includes both user-specified star ranges AND wildcards that
@@ -87,11 +88,16 @@ impl IndexExpr3 {
 /// - Keeps string representation in Const for debugging
 /// - No module-specific variants (EvalModule, ModuleInput)
 /// - No assignment variants (AssignCurr, AssignNext)
+///
+/// `Eq` is derived for the reason spelled out on [`crate::ast::Expr0`], even
+/// though this layer is not itself salsa-cached: it keeps all four layers under
+/// one rule, so a float-bearing variant added here cannot be a bare `f64` and
+/// then be copied down to a layer where it would matter.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 pub enum Expr3 {
     // Core variants (similar to Expr2)
-    Const(String, f64, Loc),
+    Const(String, Literal, Loc),
     Var(Ident<Canonical>, Option<ArrayBounds>, Loc),
     App(BuiltinFn<Expr3>, Option<ArrayBounds>, Loc),
     /// Dynamic subscript - indices computed at runtime
@@ -336,8 +342,8 @@ impl IndexExpr3 {
                 {
                     // Convert 1-based indices to 0-based for StaticRange
                     // StaticRange stores (0-based start, 0-based exclusive end)
-                    let start_0based = (*start_val as usize).saturating_sub(1);
-                    let end_0based = *end_val as usize; // end is already exclusive in XMILE
+                    let start_0based = (start_val.value() as usize).saturating_sub(1);
+                    let end_0based = end_val.value() as usize; // end is already exclusive in XMILE
                     return Ok(IndexExpr3::StaticRange(start_0based, end_0based, *loc));
                 }
 
@@ -708,7 +714,8 @@ impl<'a> Pass1Context<'a> {
                         if active_dim_name.as_str() == dim_name.as_str() {
                             // Found a match - resolve to the concrete index
                             if let Some(index) = Self::subscript_to_index(dim, sub) {
-                                let const_expr = Expr3::Const(index.to_string(), index, loc);
+                                let const_expr =
+                                    Expr3::Const(index.to_string(), Literal::new(index), loc);
                                 return (IndexExpr3::Expr(const_expr), false);
                             }
                             // subscript_to_index returned None - subscript not valid for dimension.
@@ -1392,7 +1399,7 @@ mod tests {
 
     #[test]
     fn test_expr3_const() {
-        let expr = Expr3::Const("42".to_string(), 42.0, Loc::new(0, 2));
+        let expr = Expr3::Const("42".to_string(), Literal::new(42.0), Loc::new(0, 2));
         assert_eq!(expr.get_loc(), Loc::new(0, 2));
         assert!(expr.get_array_bounds().is_none());
         assert!(expr.get_array_view().is_none());
@@ -1447,7 +1454,7 @@ mod tests {
 
     #[test]
     fn test_expr3_assign_temp() {
-        let inner = Expr3::Const("1".to_string(), 1.0, Loc::new(0, 1));
+        let inner = Expr3::Const("1".to_string(), Literal::new(1.0), Loc::new(0, 1));
         let view = ArrayView::contiguous(vec![2, 3]);
         let expr = Expr3::AssignTemp(0, Box::new(inner), view);
 
@@ -1459,8 +1466,16 @@ mod tests {
     fn test_expr3_strip_loc() {
         let expr = Expr3::Op2(
             BinaryOp::Add,
-            Box::new(Expr3::Const("1".to_string(), 1.0, Loc::new(0, 1))),
-            Box::new(Expr3::Const("2".to_string(), 2.0, Loc::new(4, 5))),
+            Box::new(Expr3::Const(
+                "1".to_string(),
+                Literal::new(1.0),
+                Loc::new(0, 1),
+            )),
+            Box::new(Expr3::Const(
+                "2".to_string(),
+                Literal::new(2.0),
+                Loc::new(4, 5),
+            )),
             None,
             Loc::new(0, 5),
         );
@@ -1714,7 +1729,11 @@ mod tests {
             Ident::new("matrix"),
             vec![
                 IndexExpr2::Wildcard(Loc::new(7, 8)),
-                IndexExpr2::Expr(Expr2::Const("2".to_string(), 2.0, Loc::new(10, 11))),
+                IndexExpr2::Expr(Expr2::Const(
+                    "2".to_string(),
+                    Literal::new(2.0),
+                    Loc::new(10, 11),
+                )),
             ],
             None,
             Loc::new(0, 12),
@@ -1737,7 +1756,7 @@ mod tests {
                 // Second subscript: constant expression
                 match &args[1] {
                     IndexExpr3::Expr(Expr3::Const(_, val, _)) => {
-                        assert_eq!(*val, 2.0);
+                        assert_eq!(*val, Literal::new(2.0));
                     }
                     _ => panic!("Expected Expr(Const) for second subscript"),
                 }
@@ -1843,7 +1862,11 @@ mod tests {
             vec![
                 IndexExpr2::Wildcard(Loc::new(5, 6)),
                 IndexExpr2::Wildcard(Loc::new(8, 9)),
-                IndexExpr2::Expr(Expr2::Const("5".to_string(), 5.0, Loc::new(11, 12))),
+                IndexExpr2::Expr(Expr2::Const(
+                    "5".to_string(),
+                    Literal::new(5.0),
+                    Loc::new(11, 12),
+                )),
             ],
             None,
             Loc::new(0, 13),
@@ -1868,7 +1891,9 @@ mod tests {
 
                 // Third subscript: constant expression
                 match &args[2] {
-                    IndexExpr3::Expr(Expr3::Const(_, val, _)) => assert_eq!(*val, 5.0),
+                    IndexExpr3::Expr(Expr3::Const(_, val, _)) => {
+                        assert_eq!(*val, Literal::new(5.0))
+                    }
                     _ => panic!("Expected Expr(Const) for third subscript"),
                 }
             }
@@ -2076,7 +2101,7 @@ mod tests {
             Loc::new(0, 6),
         );
 
-        let one = Expr3::Const("1".to_string(), 1.0, Loc::new(10, 11));
+        let one = Expr3::Const("1".to_string(), Literal::new(1.0), Loc::new(10, 11));
 
         // arr[*] + 1 - has array bounds because arr[*] is an array
         let add_expr = Expr3::Op2(
@@ -2143,7 +2168,7 @@ mod tests {
             Loc::new(0, 11),
         );
 
-        let one = Expr3::Const("1".to_string(), 1.0, Loc::new(14, 15));
+        let one = Expr3::Const("1".to_string(), Literal::new(1.0), Loc::new(14, 15));
 
         // arr[*, Col] + 1 - has dimension reference
         let add_expr = Expr3::Op2(
@@ -2275,7 +2300,11 @@ mod tests {
         let a_add = Expr3::Op2(
             BinaryOp::Add,
             Box::new(a_sub),
-            Box::new(Expr3::Const("1".to_string(), 1.0, Loc::new(6, 7))),
+            Box::new(Expr3::Const(
+                "1".to_string(),
+                Literal::new(1.0),
+                Loc::new(6, 7),
+            )),
             Some(a_bounds),
             Loc::new(0, 7),
         );
@@ -2293,7 +2322,11 @@ mod tests {
         let b_mul = Expr3::Op2(
             BinaryOp::Mul,
             Box::new(b_sub),
-            Box::new(Expr3::Const("2".to_string(), 2.0, Loc::new(6, 7))),
+            Box::new(Expr3::Const(
+                "2".to_string(),
+                Literal::new(2.0),
+                Loc::new(6, 7),
+            )),
             Some(b_bounds),
             Loc::new(0, 7),
         );
@@ -2396,7 +2429,11 @@ mod tests {
         let false_branch = Expr3::Op2(
             BinaryOp::Add,
             Box::new(arr2_sub),
-            Box::new(Expr3::Const("1".to_string(), 1.0, Loc::new(7, 8))),
+            Box::new(Expr3::Const(
+                "1".to_string(),
+                Literal::new(1.0),
+                Loc::new(7, 8),
+            )),
             Some(arr2_bounds),
             Loc::new(0, 8),
         );
@@ -2448,7 +2485,11 @@ mod tests {
         let add_expr = Expr3::Op2(
             BinaryOp::Add,
             Box::new(subscript),
-            Box::new(Expr3::Const("1".to_string(), 1.0, Loc::new(10, 11))),
+            Box::new(Expr3::Const(
+                "1".to_string(),
+                Literal::new(1.0),
+                Loc::new(10, 11),
+            )),
             Some(arr_bounds),
             Loc::new(0, 11),
         );
@@ -2513,7 +2554,11 @@ mod tests {
         let left_op = Expr3::Op2(
             BinaryOp::Add,
             Box::new(arr_sub),
-            Box::new(Expr3::Const("1".to_string(), 1.0, Loc::new(7, 8))),
+            Box::new(Expr3::Const(
+                "1".to_string(),
+                Literal::new(1.0),
+                Loc::new(7, 8),
+            )),
             Some(arr_bounds.clone()),
             Loc::new(0, 8),
         );
@@ -2522,7 +2567,11 @@ mod tests {
         let right_op = Expr3::Op2(
             BinaryOp::Sub,
             Box::new(arr2_sub),
-            Box::new(Expr3::Const("1".to_string(), 1.0, Loc::new(15, 16))),
+            Box::new(Expr3::Const(
+                "1".to_string(),
+                Literal::new(1.0),
+                Loc::new(15, 16),
+            )),
             Some(arr2_bounds),
             Loc::new(0, 16),
         );
@@ -2592,7 +2641,7 @@ mod tests {
             Loc::new(0, 11),
         );
 
-        let one = Expr3::Const("1".to_string(), 1.0, Loc::new(14, 15));
+        let one = Expr3::Const("1".to_string(), Literal::new(1.0), Loc::new(14, 15));
 
         // arr[*, Col] + 1 - the array bounds after subscripting should be [3]
         // because Col is pinned to a single value
@@ -2669,7 +2718,7 @@ mod tests {
             Loc::new(0, 11),
         );
 
-        let one = Expr3::Const("1".to_string(), 1.0, Loc::new(14, 15));
+        let one = Expr3::Const("1".to_string(), Literal::new(1.0), Loc::new(14, 15));
 
         let add_expr = Expr3::Op2(
             BinaryOp::Add,
@@ -2723,7 +2772,11 @@ mod tests {
         let add_expr = Expr3::Op2(
             BinaryOp::Add,
             Box::new(subscript),
-            Box::new(Expr3::Const("1".to_string(), 1.0, Loc::new(10, 11))),
+            Box::new(Expr3::Const(
+                "1".to_string(),
+                Literal::new(1.0),
+                Loc::new(10, 11),
+            )),
             Some(arr_bounds), // Has array bounds
             Loc::new(0, 11),
         );
@@ -2876,7 +2929,11 @@ mod tests {
         let add_expr = Expr3::Op2(
             BinaryOp::Add,
             Box::new(subscript),
-            Box::new(Expr3::Const("1".to_string(), 1.0, Loc::new(23, 24))),
+            Box::new(Expr3::Const(
+                "1".to_string(),
+                Literal::new(1.0),
+                Loc::new(23, 24),
+            )),
             Some(arr_bounds),
             Loc::new(0, 24),
         );
@@ -2906,7 +2963,7 @@ mod tests {
                         // First index (Row) should be resolved to a constant
                         match &indices[0] {
                             IndexExpr3::Expr(Expr3::Const(_, val, _)) => {
-                                assert_eq!(*val, 2.0, "Row should be resolved to 2");
+                                assert_eq!(*val, Literal::new(2.0), "Row should be resolved to 2");
                             }
                             _ => panic!("Expected Row to be resolved, got {:?}", indices[0]),
                         }

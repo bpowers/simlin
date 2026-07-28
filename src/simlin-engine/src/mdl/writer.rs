@@ -775,13 +775,15 @@ fn is_var(expr: &Expr0, name: &str) -> bool {
 
 /// Returns true when `expr` is `Const(_, v, _)` with value exactly `v`.
 fn is_const(expr: &Expr0, v: f64) -> bool {
-    matches!(expr, Expr0::Const(_, n, _) if (*n - v).abs() < f64::EPSILON)
+    matches!(expr, Expr0::Const(_, n, _) if (n.value() - v).abs() < f64::EPSILON)
 }
 
 /// Structurally compare two Expr0 trees, ignoring source locations.
 fn exprs_equal(a: &Expr0, b: &Expr0) -> bool {
     match (a, b) {
-        (Expr0::Const(_, av, _), Expr0::Const(_, bv, _)) => (av - bv).abs() < f64::EPSILON,
+        (Expr0::Const(_, av, _), Expr0::Const(_, bv, _)) => {
+            (av.value() - bv.value()).abs() < f64::EPSILON
+        }
         (Expr0::Var(aid, _), Expr0::Var(bid, _)) => aid == bid,
         (Expr0::App(UntypedBuiltinFn(af, aa), _), Expr0::App(UntypedBuiltinFn(bf, ba), _)) => {
             af == bf && aa.len() == ba.len() && aa.iter().zip(ba).all(|(x, y)| exprs_equal(x, y))

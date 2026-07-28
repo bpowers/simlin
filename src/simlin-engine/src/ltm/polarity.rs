@@ -189,7 +189,8 @@ pub(super) fn analyze_agg_consumer_polarity(
 /// Rebuild `expr`, replacing every subtree whose canonical printed form
 /// equals `target_text` with a bare `Var(replacement)`. Used only by
 /// [`analyze_agg_consumer_polarity`]; the printed-form comparison mirrors
-/// how `enumerate_agg_nodes` keys aggregate nodes (`Expr2` is not `Eq`).
+/// how `enumerate_agg_nodes` keys aggregate nodes (`Expr2` is `Eq` but not
+/// `Hash`, so the dedup map is keyed by that printed form).
 fn substitute_subexpr_in_expr2(
     expr: &Expr2,
     target_text: &str,
@@ -823,7 +824,7 @@ pub(super) fn expr_references_var(expr: &Expr2, var: &Ident<Canonical>) -> bool 
 /// Check if expression is a positive constant
 pub(super) fn is_positive_constant(expr: &Expr2) -> bool {
     match expr {
-        Expr2::Const(_, n, _) => *n > 0.0,
+        Expr2::Const(_, n, _) => n.value() > 0.0,
         _ => false,
     }
 }
@@ -831,7 +832,7 @@ pub(super) fn is_positive_constant(expr: &Expr2) -> bool {
 /// Check if expression is a negative constant
 pub(super) fn is_negative_constant(expr: &Expr2) -> bool {
     match expr {
-        Expr2::Const(_, n, _) => *n < 0.0,
+        Expr2::Const(_, n, _) => n.value() < 0.0,
         _ => false,
     }
 }

@@ -150,7 +150,7 @@ pub(crate) fn normalize_subscripts3(
                     match expr {
                         Expr3::Const(_, val, _) => {
                             // Numeric constant - convert from 1-based to 0-based
-                            Some((*val as isize - 1).max(0) as usize)
+                            Some((val.value() as isize - 1).max(0) as usize)
                         }
                         Expr3::Var(ident, _, _) => {
                             // Could be a named dimension element - use O(1) hash lookup
@@ -182,7 +182,7 @@ pub(crate) fn normalize_subscripts3(
             IndexExpr3::Expr(expr) => {
                 match expr {
                     Expr3::Const(_, val, _) => {
-                        let idx = (*val as isize - 1).max(0) as usize;
+                        let idx = (val.value() as isize - 1).max(0) as usize;
                         IndexOp::Single(idx)
                     }
                     Expr3::Var(ident, _, _) => {

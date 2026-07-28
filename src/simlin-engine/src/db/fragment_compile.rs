@@ -827,7 +827,11 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
             } else {
                 Some(crate::ast::Ast::ApplyToAll(
                     dep_dims,
-                    crate::ast::Expr2::Const("0".to_string(), 0.0, crate::ast::Loc::default()),
+                    crate::ast::Expr2::Const(
+                        "0".to_string(),
+                        crate::ast::Literal::new(0.0),
+                        crate::ast::Loc::default(),
+                    ),
                 ))
             };
             let dep_var = if is_stock {

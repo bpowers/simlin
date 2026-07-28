@@ -358,7 +358,7 @@ fn test_link_polarity_detection() {
         Box::new(Expr2::Var(x_var.clone(), None, crate::ast::Loc::default())),
         Box::new(Expr2::Const(
             "2".to_string(),
-            2.0,
+            crate::ast::Literal::new(2.0),
             crate::ast::Loc::default(),
         )),
         None,
@@ -374,7 +374,7 @@ fn test_link_polarity_detection() {
         BinaryOp::Sub,
         Box::new(Expr2::Const(
             "0".to_string(),
-            0.0,
+            crate::ast::Literal::new(0.0),
             crate::ast::Loc::default(),
         )),
         Box::new(Expr2::Var(x_var.clone(), None, crate::ast::Loc::default())),
@@ -391,7 +391,7 @@ fn test_link_polarity_detection() {
         Box::new(Expr2::Var(x_var.clone(), None, crate::ast::Loc::default())),
         Box::new(Expr2::Const(
             "-3".to_string(),
-            -3.0,
+            crate::ast::Literal::new(-3.0),
             crate::ast::Loc::default(),
         )),
         None,
@@ -415,7 +415,7 @@ fn test_polarity_mul_both_operands_referencing_source_is_unknown() {
     let loc = crate::ast::Loc::default();
     let x_var: Ident<Canonical> = Ident::new("x");
     let var = |n: &str| Expr2::Var(Ident::new(n), None, loc);
-    let cnst = |v: f64| Expr2::Const(format!("{v}"), v, loc);
+    let cnst = |v: f64| Expr2::Const(format!("{v}"), crate::ast::Literal::new(v), loc);
     let op2 =
         |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
     let empty_vars = HashMap::new();
@@ -455,7 +455,7 @@ fn test_polarity_div_numerator_value_sign_guards_denominator_flip() {
     let loc = crate::ast::Loc::default();
     let y_var: Ident<Canonical> = Ident::new("y");
     let var = |n: &str| Expr2::Var(Ident::new(n), None, loc);
-    let cnst = |v: f64| Expr2::Const(format!("{v}"), v, loc);
+    let cnst = |v: f64| Expr2::Const(format!("{v}"), crate::ast::Literal::new(v), loc);
     let op2 =
         |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
     let empty_vars = HashMap::new();
@@ -497,7 +497,7 @@ fn test_polarity_div_denominator_value_sign_guards_numerator_polarity() {
     let loc = crate::ast::Loc::default();
     let x_var: Ident<Canonical> = Ident::new("x");
     let var = |n: &str| Expr2::Var(Ident::new(n), None, loc);
-    let cnst = |v: f64| Expr2::Const(format!("{v}"), v, loc);
+    let cnst = |v: f64| Expr2::Const(format!("{v}"), crate::ast::Literal::new(v), loc);
     let op2 =
         |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
     let empty_vars = HashMap::new();
@@ -566,7 +566,7 @@ fn test_polarity_div_both_sides_referencing_source_is_unknown() {
     let loc = crate::ast::Loc::default();
     let x_var: Ident<Canonical> = Ident::new("x");
     let var = |n: &str| Expr2::Var(Ident::new(n), None, loc);
-    let cnst = |v: f64| Expr2::Const(format!("{v}"), v, loc);
+    let cnst = |v: f64| Expr2::Const(format!("{v}"), crate::ast::Literal::new(v), loc);
     let op2 =
         |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
     let empty_vars = HashMap::new();
@@ -659,900 +659,6 @@ fn test_get_variable_dependencies_no_ast() {
     assert!(
         deps.is_empty(),
         "Dependencies must be empty for variable without AST"
-    );
-}
-
-#[test]
-fn test_flip_polarity() {
-    // Test flip_polarity function (covers lines 1049-1054)
-    assert_eq!(
-        flip_polarity(LinkPolarity::Positive),
-        LinkPolarity::Negative
-    );
-    assert_eq!(
-        flip_polarity(LinkPolarity::Negative),
-        LinkPolarity::Positive
-    );
-    assert_eq!(flip_polarity(LinkPolarity::Unknown), LinkPolarity::Unknown);
-}
-
-#[test]
-fn test_is_positive_constant() {
-    // Test is_positive_constant function (covers lines 1058-1062)
-    use crate::ast::{Expr2, Loc};
-
-    let pos_const = Expr2::Const("5".to_string(), 5.0, Loc::default());
-    assert!(is_positive_constant(&pos_const), "5.0 should be positive");
-
-    let neg_const = Expr2::Const("-5".to_string(), -5.0, Loc::default());
-    assert!(
-        !is_positive_constant(&neg_const),
-        "-5.0 should not be positive"
-    );
-
-    let zero_const = Expr2::Const("0".to_string(), 0.0, Loc::default());
-    assert!(
-        !is_positive_constant(&zero_const),
-        "0.0 should not be positive"
-    );
-
-    let var_expr = Expr2::Var(Ident::new("x"), None, Loc::default());
-    assert!(
-        !is_positive_constant(&var_expr),
-        "Variable should not be positive constant"
-    );
-}
-
-#[test]
-fn test_is_negative_constant() {
-    // Test is_negative_constant function (covers lines 1066-1070)
-    use crate::ast::{Expr2, Loc};
-
-    let neg_const = Expr2::Const("-3".to_string(), -3.0, Loc::default());
-    assert!(is_negative_constant(&neg_const), "-3.0 should be negative");
-
-    let pos_const = Expr2::Const("3".to_string(), 3.0, Loc::default());
-    assert!(
-        !is_negative_constant(&pos_const),
-        "3.0 should not be negative"
-    );
-
-    let zero_const = Expr2::Const("0".to_string(), 0.0, Loc::default());
-    assert!(
-        !is_negative_constant(&zero_const),
-        "0.0 should not be negative"
-    );
-
-    let var_expr = Expr2::Var(Ident::new("y"), None, Loc::default());
-    assert!(
-        !is_negative_constant(&var_expr),
-        "Variable should not be negative constant"
-    );
-}
-
-#[test]
-fn test_analyze_link_polarity_arrayed() {
-    // Test analyze_link_polarity with Arrayed AST (covers lines 935-947)
-    use crate::ast::{Ast, Expr2, Loc};
-    use crate::common::CanonicalElementName;
-    use std::collections::HashMap;
-
-    let x_var = Ident::new("x");
-
-    // Create arrayed AST with consistent positive polarity
-    let mut elements = HashMap::new();
-    elements.insert(
-        CanonicalElementName::from_raw("dim1"),
-        Expr2::Op2(
-            BinaryOp::Mul,
-            Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
-            Box::new(Expr2::Const("2".to_string(), 2.0, Loc::default())),
-            None,
-            Loc::default(),
-        ),
-    );
-    elements.insert(
-        CanonicalElementName::from_raw("dim2"),
-        Expr2::Op2(
-            BinaryOp::Add,
-            Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
-            Box::new(Expr2::Const("10".to_string(), 10.0, Loc::default())),
-            None,
-            Loc::default(),
-        ),
-    );
-
-    let ast = Ast::Arrayed(vec![], elements, None, false);
-    let empty_vars = HashMap::new();
-    let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
-    assert_eq!(
-        polarity,
-        LinkPolarity::Positive,
-        "Consistent positive elements should be positive"
-    );
-
-    // Test with mixed polarities
-    let mut mixed_elements = HashMap::new();
-    mixed_elements.insert(
-        CanonicalElementName::from_raw("dim1"),
-        Expr2::Var(x_var.clone(), None, Loc::default()),
-    );
-    mixed_elements.insert(
-        CanonicalElementName::from_raw("dim2"),
-        Expr2::Op1(
-            crate::ast::UnaryOp::Negative,
-            Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
-            None,
-            Loc::default(),
-        ),
-    );
-
-    let mixed_ast = Ast::Arrayed(vec![], mixed_elements, None, false);
-    let mixed_polarity = analyze_link_polarity(&mixed_ast, &x_var, &empty_vars);
-    assert_eq!(
-        mixed_polarity,
-        LinkPolarity::Unknown,
-        "Mixed polarities should be Unknown"
-    );
-}
-
-#[test]
-fn test_analyze_expr_polarity_if_then_else() {
-    // Test analyze_expr_polarity with If-Then-Else (covers lines 1033-1042)
-    use crate::ast::{Expr2, Loc};
-
-    let x_var = Ident::new("x");
-
-    // If with same polarity in both branches
-    let if_expr = Expr2::If(
-        Box::new(Expr2::Const("1".to_string(), 1.0, Loc::default())),
-        Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
-        Box::new(Expr2::Op2(
-            BinaryOp::Mul,
-            Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
-            Box::new(Expr2::Const("2".to_string(), 2.0, Loc::default())),
-            None,
-            Loc::default(),
-        )),
-        None,
-        Loc::default(),
-    );
-
-    let polarity =
-        analyze_expr_polarity_with_context(&if_expr, &x_var, LinkPolarity::Positive, None);
-    assert_eq!(
-        polarity,
-        LinkPolarity::Positive,
-        "Same polarity branches should return that polarity"
-    );
-
-    // If with different polarities in branches
-    let mixed_if = Expr2::If(
-        Box::new(Expr2::Const("1".to_string(), 1.0, Loc::default())),
-        Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
-        Box::new(Expr2::Op1(
-            crate::ast::UnaryOp::Negative,
-            Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
-            None,
-            Loc::default(),
-        )),
-        None,
-        Loc::default(),
-    );
-
-    let mixed_polarity =
-        analyze_expr_polarity_with_context(&mixed_if, &x_var, LinkPolarity::Positive, None);
-    assert_eq!(
-        mixed_polarity,
-        LinkPolarity::Unknown,
-        "Different polarity branches should be Unknown"
-    );
-}
-
-#[test]
-fn test_analyze_expr_polarity_unary_not() {
-    // Test analyze_expr_polarity with unary NOT operator (covers lines 1026-1031)
-    use crate::ast::{Expr2, Loc, UnaryOp};
-
-    let x_var = Ident::new("x");
-
-    let not_expr = Expr2::Op1(
-        UnaryOp::Not,
-        Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
-        None,
-        Loc::default(),
-    );
-
-    let polarity =
-        analyze_expr_polarity_with_context(&not_expr, &x_var, LinkPolarity::Positive, None);
-    assert_eq!(
-        polarity,
-        LinkPolarity::Negative,
-        "NOT should flip polarity from positive to negative"
-    );
-}
-
-#[test]
-fn test_analyze_expr_polarity_division_edge_cases() {
-    // Test division polarity analysis edge cases (covers lines 1013-1022)
-    use crate::ast::{Expr2, Loc};
-
-    let x_var = Ident::new("x");
-    let y_var = Ident::new("y");
-
-    // Division with variable in numerator
-    let div_num = Expr2::Op2(
-        BinaryOp::Div,
-        Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
-        Box::new(Expr2::Const("10".to_string(), 10.0, Loc::default())),
-        None,
-        Loc::default(),
-    );
-
-    let pol_num =
-        analyze_expr_polarity_with_context(&div_num, &x_var, LinkPolarity::Positive, None);
-    assert_eq!(
-        pol_num,
-        LinkPolarity::Positive,
-        "Variable in numerator should keep polarity"
-    );
-
-    // Division with different variable in denominator (not the one we're tracking)
-    let div_other = Expr2::Op2(
-        BinaryOp::Div,
-        Box::new(Expr2::Const("100".to_string(), 100.0, Loc::default())),
-        Box::new(Expr2::Var(y_var.clone(), None, Loc::default())),
-        None,
-        Loc::default(),
-    );
-
-    let pol_other =
-        analyze_expr_polarity_with_context(&div_other, &x_var, LinkPolarity::Positive, None);
-    assert_eq!(
-        pol_other,
-        LinkPolarity::Unknown,
-        "Unrelated variable should give Unknown"
-    );
-}
-
-#[test]
-fn test_analyze_expr_polarity_array_reducers() {
-    // Array reducers SUM, MEAN, MAX (single-arg), MIN (single-arg) are monotone
-    // in their argument: their polarity equals the inner expression's polarity.
-    // STDDEV and RANK are not monotone: they must return Unknown even when the
-    // argument has a known polarity.
-    use crate::ast::{Expr2, Loc, UnaryOp};
-    use crate::builtins::BuiltinFn;
-
-    let x_var = Ident::new("x");
-    let pos_inner = || Expr2::Var(x_var.clone(), None, Loc::default());
-    let neg_inner = || {
-        Expr2::Op1(
-            UnaryOp::Negative,
-            Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
-            None,
-            Loc::default(),
-        )
-    };
-
-    // SUM passes through positive polarity.
-    let sum_pos = Expr2::App(BuiltinFn::Sum(Box::new(pos_inner())), None, Loc::default());
-    assert_eq!(
-        analyze_expr_polarity_with_context(&sum_pos, &x_var, LinkPolarity::Positive, None),
-        LinkPolarity::Positive,
-        "SUM(x) should pass through positive polarity",
-    );
-
-    // SUM passes through negative polarity (e.g. SUM(-x)).
-    let sum_neg = Expr2::App(BuiltinFn::Sum(Box::new(neg_inner())), None, Loc::default());
-    assert_eq!(
-        analyze_expr_polarity_with_context(&sum_neg, &x_var, LinkPolarity::Positive, None),
-        LinkPolarity::Negative,
-        "SUM(-x) should pass through negative polarity",
-    );
-
-    // MEAN with a single (array) argument passes through positive polarity.
-    let mean_pos = Expr2::App(BuiltinFn::Mean(vec![pos_inner()]), None, Loc::default());
-    assert_eq!(
-        analyze_expr_polarity_with_context(&mean_pos, &x_var, LinkPolarity::Positive, None),
-        LinkPolarity::Positive,
-        "MEAN(x) should pass through positive polarity",
-    );
-
-    // MEAN with a single (array) argument passes through negative polarity.
-    let mean_neg = Expr2::App(BuiltinFn::Mean(vec![neg_inner()]), None, Loc::default());
-    assert_eq!(
-        analyze_expr_polarity_with_context(&mean_neg, &x_var, LinkPolarity::Positive, None),
-        LinkPolarity::Negative,
-        "MEAN(-x) should pass through negative polarity",
-    );
-
-    // Array MAX (no second argument) passes through inner polarity.
-    let max_array_pos = Expr2::App(
-        BuiltinFn::Max(Box::new(pos_inner()), None),
-        None,
-        Loc::default(),
-    );
-    assert_eq!(
-        analyze_expr_polarity_with_context(&max_array_pos, &x_var, LinkPolarity::Positive, None),
-        LinkPolarity::Positive,
-        "MAX(x) (array form) should pass through positive polarity",
-    );
-    let max_array_neg = Expr2::App(
-        BuiltinFn::Max(Box::new(neg_inner()), None),
-        None,
-        Loc::default(),
-    );
-    assert_eq!(
-        analyze_expr_polarity_with_context(&max_array_neg, &x_var, LinkPolarity::Positive, None),
-        LinkPolarity::Negative,
-        "MAX(-x) (array form) should pass through negative polarity",
-    );
-
-    // Array MIN (no second argument) passes through inner polarity.
-    let min_array_pos = Expr2::App(
-        BuiltinFn::Min(Box::new(pos_inner()), None),
-        None,
-        Loc::default(),
-    );
-    assert_eq!(
-        analyze_expr_polarity_with_context(&min_array_pos, &x_var, LinkPolarity::Positive, None),
-        LinkPolarity::Positive,
-        "MIN(x) (array form) should pass through positive polarity",
-    );
-    let min_array_neg = Expr2::App(
-        BuiltinFn::Min(Box::new(neg_inner()), None),
-        None,
-        Loc::default(),
-    );
-    assert_eq!(
-        analyze_expr_polarity_with_context(&min_array_neg, &x_var, LinkPolarity::Positive, None),
-        LinkPolarity::Negative,
-        "MIN(-x) (array form) should pass through negative polarity",
-    );
-
-    // STDDEV is non-monotone: even with a positive-polarity argument, the result
-    // is Unknown because variance has no fixed sign w.r.t. its inputs.
-    let stddev = Expr2::App(
-        BuiltinFn::Stddev(Box::new(pos_inner())),
-        None,
-        Loc::default(),
-    );
-    assert_eq!(
-        analyze_expr_polarity_with_context(&stddev, &x_var, LinkPolarity::Positive, None),
-        LinkPolarity::Unknown,
-        "STDDEV must always return Unknown polarity",
-    );
-
-    // RANK depends on the rest of the array, so polarity is undefined.
-    let direction = Expr2::Const("1".to_string(), 1.0, Loc::default());
-    let rank = Expr2::App(
-        BuiltinFn::Rank(Box::new(pos_inner()), Box::new(direction)),
-        None,
-        Loc::default(),
-    );
-    assert_eq!(
-        analyze_expr_polarity_with_context(&rank, &x_var, LinkPolarity::Positive, None),
-        LinkPolarity::Unknown,
-        "RANK must always return Unknown polarity",
-    );
-}
-
-/// Verify reducer polarity propagates through the actual parsed shape:
-/// `SUM(x[*])` lowers to `Sum(Box::new(Subscript(x, [Wildcard], _, _)))`,
-/// not `Sum(Box::new(Var(x, ...)))`. Without an `Expr2::Subscript` arm in
-/// `analyze_expr_polarity_with_context`, the new reducer arms fall through
-/// to Unknown for the production case the issue actually targets.
-#[test]
-fn test_analyze_expr_polarity_array_reducers_subscript_wildcard() {
-    use crate::ast::{Expr2, IndexExpr2, Loc, UnaryOp};
-    use crate::builtins::BuiltinFn;
-    use LinkPolarity::{Negative, Positive, Unknown};
-
-    let x = Ident::new("x");
-    let y = Ident::new("y");
-    let sub = |id: &Ident<Canonical>| {
-        Expr2::Subscript(
-            id.clone(),
-            vec![IndexExpr2::Wildcard(Loc::default())],
-            None,
-            Loc::default(),
-        )
-    };
-    let app = |b: BuiltinFn<Expr2>| Expr2::App(b, None, Loc::default());
-    let neg = |e: Expr2| Expr2::Op1(UnaryOp::Negative, Box::new(e), None, Loc::default());
-    let one = || Expr2::Const("1".to_string(), 1.0, Loc::default());
-
-    // (label, expression, context_polarity, expected_polarity)
-    let cases: Vec<(&str, Expr2, LinkPolarity, LinkPolarity)> = vec![
-        (
-            "SUM(x[*]) +",
-            app(BuiltinFn::Sum(Box::new(sub(&x)))),
-            Positive,
-            Positive,
-        ),
-        (
-            "SUM(x[*]) -",
-            app(BuiltinFn::Sum(Box::new(sub(&x)))),
-            Negative,
-            Negative,
-        ),
-        (
-            "SUM(-x[*])",
-            app(BuiltinFn::Sum(Box::new(neg(sub(&x))))),
-            Positive,
-            Negative,
-        ),
-        (
-            "SUM(y[*])",
-            app(BuiltinFn::Sum(Box::new(sub(&y)))),
-            Positive,
-            Unknown,
-        ),
-        (
-            "MEAN(x[*])",
-            app(BuiltinFn::Mean(vec![sub(&x)])),
-            Positive,
-            Positive,
-        ),
-        (
-            "MAX(x[*])",
-            app(BuiltinFn::Max(Box::new(sub(&x)), None)),
-            Positive,
-            Positive,
-        ),
-        (
-            "MIN(x[*])",
-            app(BuiltinFn::Min(Box::new(sub(&x)), None)),
-            Positive,
-            Positive,
-        ),
-        (
-            "STDDEV(x[*])",
-            app(BuiltinFn::Stddev(Box::new(sub(&x)))),
-            Positive,
-            Unknown,
-        ),
-        (
-            "RANK(x[*], 1)",
-            app(BuiltinFn::Rank(Box::new(sub(&x)), Box::new(one()))),
-            Positive,
-            Unknown,
-        ),
-    ];
-
-    for (label, expr, ctx, want) in &cases {
-        assert_eq!(
-            analyze_expr_polarity_with_context(expr, &x, *ctx, None),
-            *want,
-            "{label}",
-        );
-    }
-}
-
-/// The Subscript arm must distinguish between indices that are independent
-/// of `from_var` (literal, wildcard, expressions over other variables) and
-/// indices that themselves reference `from_var`. In the latter case the
-/// relationship between `from_var` and the subscripted result is non-monotone:
-/// changing `from_var` shifts both the lookup target AND the index, so no
-/// single polarity describes the result. The dominant cases (`SUM(arr[*])`,
-/// `arr[Region]`, indices over OTHER variables) keep their original behavior
-/// of returning `current_polarity` because their indices don't reference
-/// `from_var`.
-#[test]
-fn test_analyze_expr_polarity_subscript_self_indexing() {
-    use crate::ast::{Expr2, IndexExpr2, Loc};
-    use crate::builtins::BuiltinFn;
-    use LinkPolarity::{Positive, Unknown};
-
-    let arr = Ident::new("arr");
-    let other = Ident::new("other");
-    let i = Ident::new("i");
-
-    let var = |id: &Ident<Canonical>| Expr2::Var(id.clone(), None, Loc::default());
-    let lit = |n: f64| Expr2::Const(format!("{n}"), n, Loc::default());
-
-    // arr[*] -- wildcard index, no reference to arr in the index.
-    let arr_wildcard = Expr2::Subscript(
-        arr.clone(),
-        vec![IndexExpr2::Wildcard(Loc::default())],
-        None,
-        Loc::default(),
-    );
-    assert_eq!(
-        analyze_expr_polarity_with_context(&arr_wildcard, &arr, Positive, None),
-        Positive,
-        "arr[*] preserves current_polarity",
-    );
-
-    // arr[3] -- literal index, no reference to arr in the index.
-    let arr_literal = Expr2::Subscript(
-        arr.clone(),
-        vec![IndexExpr2::Expr(lit(3.0))],
-        None,
-        Loc::default(),
-    );
-    assert_eq!(
-        analyze_expr_polarity_with_context(&arr_literal, &arr, Positive, None),
-        Positive,
-        "arr[3] preserves current_polarity",
-    );
-
-    // arr[i] where i is a different variable -- index references some OTHER
-    // variable, but not from_var (= arr). Polarity contract still holds.
-    let arr_other_index = Expr2::Subscript(
-        arr.clone(),
-        vec![IndexExpr2::Expr(var(&i))],
-        None,
-        Loc::default(),
-    );
-    assert_eq!(
-        analyze_expr_polarity_with_context(&arr_other_index, &arr, Positive, None),
-        Positive,
-        "arr[i] (i != from_var) preserves current_polarity",
-    );
-
-    // arr[arr] -- index trivially references arr. Result is non-monotone
-    // because shifting arr shifts both the lookup target and the index.
-    let arr_self_var = Expr2::Subscript(
-        arr.clone(),
-        vec![IndexExpr2::Expr(var(&arr))],
-        None,
-        Loc::default(),
-    );
-    assert_eq!(
-        analyze_expr_polarity_with_context(&arr_self_var, &arr, Positive, None),
-        Unknown,
-        "arr[arr] is non-monotone",
-    );
-
-    // arr[INT(arr[i])] -- the canonical self-indexing case. Index references
-    // arr through a nested subscript; relationship is non-monotone.
-    let inner = Expr2::Subscript(
-        arr.clone(),
-        vec![IndexExpr2::Expr(var(&i))],
-        None,
-        Loc::default(),
-    );
-    let int_inner = Expr2::App(BuiltinFn::Int(Box::new(inner)), None, Loc::default());
-    let arr_self_nested = Expr2::Subscript(
-        arr.clone(),
-        vec![IndexExpr2::Expr(int_inner)],
-        None,
-        Loc::default(),
-    );
-    assert_eq!(
-        analyze_expr_polarity_with_context(&arr_self_nested, &arr, Positive, None),
-        Unknown,
-        "arr[INT(arr[i])] is non-monotone",
-    );
-
-    // other[*] where from_var is arr -- subscripted array is not from_var.
-    // Existing behavior: contributes Unknown because the arm conservatively
-    // can't classify references through other arrays.
-    let other_wildcard = Expr2::Subscript(
-        other.clone(),
-        vec![IndexExpr2::Wildcard(Loc::default())],
-        None,
-        Loc::default(),
-    );
-    assert_eq!(
-        analyze_expr_polarity_with_context(&other_wildcard, &arr, Positive, None),
-        Unknown,
-        "other[*] (other != from_var) returns Unknown",
-    );
-}
-
-#[test]
-fn test_graphical_function_polarity() {
-    use crate::variable::Table;
-
-    // Test 1: Monotonically increasing function (positive polarity)
-    let increasing_table =
-        Table::new_for_test(vec![0.0, 1.0, 2.0, 3.0, 4.0], vec![0.0, 2.0, 4.0, 6.0, 8.0]);
-    assert_eq!(
-        analyze_graphical_function_polarity(&increasing_table),
-        LinkPolarity::Positive,
-        "Monotonically increasing function should have positive polarity"
-    );
-
-    // Test 2: Monotonically decreasing function (negative polarity)
-    let decreasing_table = Table::new_for_test(
-        vec![0.0, 1.0, 2.0, 3.0, 4.0],
-        vec![10.0, 8.0, 6.0, 4.0, 2.0],
-    );
-    assert_eq!(
-        analyze_graphical_function_polarity(&decreasing_table),
-        LinkPolarity::Negative,
-        "Monotonically decreasing function should have negative polarity"
-    );
-
-    // Test 3: Non-monotonic function (unknown polarity)
-    let non_monotonic_table =
-        Table::new_for_test(vec![0.0, 1.0, 2.0, 3.0, 4.0], vec![0.0, 5.0, 3.0, 7.0, 2.0]);
-    assert_eq!(
-        analyze_graphical_function_polarity(&non_monotonic_table),
-        LinkPolarity::Unknown,
-        "Non-monotonic function should have unknown polarity"
-    );
-
-    // Test 4: Constant function (unknown polarity - no change)
-    let constant_table = Table::new_for_test(vec![0.0, 1.0, 2.0, 3.0], vec![5.0, 5.0, 5.0, 5.0]);
-    assert_eq!(
-        analyze_graphical_function_polarity(&constant_table),
-        LinkPolarity::Unknown,
-        "Constant function should have unknown polarity"
-    );
-
-    // Test 5: Single point (edge case)
-    let single_point_table = Table::new_for_test(vec![1.0], vec![2.0]);
-    assert_eq!(
-        analyze_graphical_function_polarity(&single_point_table),
-        LinkPolarity::Unknown,
-        "Single point should have unknown polarity"
-    );
-
-    // Test 6: Nearly constant with small variations (testing tolerance)
-    let nearly_constant_table =
-        Table::new_for_test(vec![0.0, 1.0, 2.0, 3.0], vec![5.0, 5.0001, 5.0002, 5.0003]);
-    assert_eq!(
-        analyze_graphical_function_polarity(&nearly_constant_table),
-        LinkPolarity::Positive,
-        "Nearly constant but increasing should have positive polarity"
-    );
-}
-
-#[test]
-fn test_graphical_function_polarity_tolerates_import_noise() {
-    use crate::variable::Table;
-
-    // A table that is monotone non-decreasing modulo round-trip numeric-import
-    // noise: the second segment dips by ~2e-7 against a 1.5-wide y-range. The
-    // y-range-relative epsilon (1e-6 * 1.5 = 1.5e-6) absorbs the dip, so the
-    // table reads as Positive. With the old absolute 1e-10 epsilon this dip
-    // broke monotonicity and the table read as Unknown (#492).
-    let import_noise_table = Table::new_for_test(
-        vec![0.0, 1.0, 2.0, 3.0, 4.0],
-        vec![0.0, 0.5000001, 0.4999999, 1.0, 1.5],
-    );
-    assert_eq!(
-        analyze_graphical_function_polarity(&import_noise_table),
-        LinkPolarity::Positive,
-        "A monotone-modulo-import-noise table should read as Positive"
-    );
-
-    // A genuine ~0.7 reversal against a 1.0 y-range: far larger than the
-    // relative epsilon (1e-6), so the table is correctly Unknown.
-    let real_reversal_table =
-        Table::new_for_test(vec![0.0, 1.0, 2.0, 3.0], vec![0.0, 1.0, 0.3, 0.7]);
-    assert_eq!(
-        analyze_graphical_function_polarity(&real_reversal_table),
-        LinkPolarity::Unknown,
-        "A genuinely non-monotone table is still Unknown"
-    );
-
-    // A perfectly constant table: y_max - y_min == 0 so epsilon clamps to
-    // 1e-12; every dy == 0 is a plateau (not > 1e-12, not < -1e-12), so the
-    // table is still classified constant and reads as Unknown.
-    let constant_table = Table::new_for_test(vec![0.0, 1.0, 2.0], vec![5.0, 5.0, 5.0]);
-    assert_eq!(
-        analyze_graphical_function_polarity(&constant_table),
-        LinkPolarity::Unknown,
-        "A constant table is still Unknown"
-    );
-}
-
-#[test]
-fn test_graphical_function_polarity_uses_slope_not_y_delta() {
-    use crate::variable::Table;
-
-    // Non-uniform x-spacing where the y-delta heuristic and the slope heuristic
-    // DISAGREE on the verdict (#536). The middle segment is a genuine, steep,
-    // local DECREASE over a very narrow x-interval (dx = 0.001), so the table is
-    // NOT monotone -- the correct answer is Unknown.
-    //
-    //   x = [0, 100, 100.001, 200]
-    //   y = [0,  10,  9.99999,  20]
-    //
-    //   y-range = 20, so the y-range-relative dy epsilon is 1e-6 * 20 = 2e-5.
-    //   The middle dy is -1e-5, which is *below* that epsilon, so the y-delta
-    //   heuristic SUPPRESSES the dip as a plateau and -- seeing only the two
-    //   surrounding increases -- wrongly classifies the table as Positive.
-    //
-    //   The middle segment's SLOPE, however, is -1e-5 / 0.001 = -0.01, far
-    //   steeper (in magnitude) than the table's average slope (20/200 = 0.1)
-    //   times the relative tolerance, so the slope heuristic correctly sees a
-    //   real local decrease and returns Unknown.
-    let narrow_dip_table = Table::new_for_test(
-        vec![0.0, 100.0, 100.001, 200.0],
-        vec![0.0, 10.0, 9.99999, 20.0],
-    );
-    assert_eq!(
-        analyze_graphical_function_polarity(&narrow_dip_table),
-        LinkPolarity::Unknown,
-        "a steep narrow local decrease must be caught by the slope heuristic, not \
-         smoothed over by the y-delta heuristic"
-    );
-
-    // The mirror case: a steep narrow local INCREASE in an otherwise-decreasing
-    // table must likewise flip a naive Negative to Unknown.
-    let narrow_bump_table = Table::new_for_test(
-        vec![0.0, 100.0, 100.001, 200.0],
-        vec![20.0, 10.0, 10.00001, 0.0],
-    );
-    assert_eq!(
-        analyze_graphical_function_polarity(&narrow_bump_table),
-        LinkPolarity::Unknown,
-        "a steep narrow local increase must flip an otherwise-decreasing table to Unknown"
-    );
-
-    // A genuinely monotone table with non-uniform x-spacing (no sign change in
-    // slope) must still classify correctly: every segment slopes up, so the
-    // verdict is Positive even though the dx values vary by orders of magnitude.
-    let monotone_nonuniform_table =
-        Table::new_for_test(vec![0.0, 0.001, 100.0, 200.0], vec![0.0, 5.0, 10.0, 20.0]);
-    assert_eq!(
-        analyze_graphical_function_polarity(&monotone_nonuniform_table),
-        LinkPolarity::Positive,
-        "a monotone table with non-uniform x-spacing stays Positive"
-    );
-
-    // Degenerate vertical segment (x[i] == x[i-1]) with differing y: two outputs
-    // for one input is an ambiguous lookup with undefined slope, so bail to
-    // Unknown.
-    let vertical_segment_table =
-        Table::new_for_test(vec![0.0, 1.0, 1.0, 2.0], vec![0.0, 1.0, 5.0, 6.0]);
-    assert_eq!(
-        analyze_graphical_function_polarity(&vertical_segment_table),
-        LinkPolarity::Unknown,
-        "a vertical (dx == 0, dy != 0) segment has undefined slope and must read as Unknown"
-    );
-
-    // A duplicated point (x[i] == x[i-1] AND y[i] == y[i-1]) is redundant, not
-    // ambiguous: it must be skipped as non-determining and not poison an
-    // otherwise-monotone verdict.
-    let duplicate_point_table =
-        Table::new_for_test(vec![0.0, 1.0, 1.0, 2.0], vec![0.0, 1.0, 1.0, 2.0]);
-    assert_eq!(
-        analyze_graphical_function_polarity(&duplicate_point_table),
-        LinkPolarity::Positive,
-        "a redundant duplicate point must not flip a monotone-increasing table"
-    );
-}
-
-/// GH #536 tolerance regression: a many-point uniformly-spaced monotone table
-/// with a single small import-noise dip must still classify Positive even after
-/// the slope-based tolerance was introduced (#536).
-///
-/// Root cause: the original #536 fix set `slope_epsilon = 1e-6 * (y_max -
-/// y_min) / x_span`, which is `1e-6 * avg_slope_mag`. For a uniformly-spaced
-/// n-point table `dx = x_span / (n - 1)`, so the effective per-segment dy
-/// threshold becomes `slope_epsilon * dx = 1e-6 * (y_max - y_min) / (n - 1)` --
-/// which is `(n - 1)x` tighter than the old #492 threshold `1e-6 * (y_max -
-/// y_min)`. A 50-point table therefore has a threshold ~49x tighter, and a
-/// noise dip that sat safely inside the #492 window now crosses it and flips the
-/// classification to Unknown.
-///
-/// The correct fix scales the tolerance by `avg_dx = x_span / (n - 1)`, giving
-/// `slope_epsilon = 1e-6 * (y_max - y_min) / avg_dx`. Then for uniform spacing
-/// `dx == avg_dx` and the per-segment dy threshold is `slope_epsilon * dx =
-/// 1e-6 * (y_max - y_min)` -- exactly the old #492 behavior. For non-uniform
-/// spacing the threshold still scales by `dx / avg_dx`, so narrow steep segments
-/// still trip correctly (the #536 motivation is preserved).
-#[test]
-fn test_graphical_function_polarity_uniform_50pt_import_noise() {
-    use crate::variable::Table;
-
-    // Build a 50-point uniformly-spaced monotone-increasing table on [0, 49]
-    // with y rising from 0.0 to 1.0. One interior point (index 25) has a
-    // downward import-noise dip of -5e-8.
-    //
-    // With 50 points: y_range = 1.0, x_span = 49.0, avg_dx = 1.0.
-    // Old #492 threshold: 1e-6 * 1.0 = 1e-6. The dip (-5e-8) is far below that
-    // threshold in magnitude, so the old code classified Positive.
-    //
-    // Buggy #536 slope_epsilon = 1e-6 * 1.0 / 49.0 ≈ 2.04e-8.
-    // The dip's slope = -5e-8 / 1.0 = -5e-8, which is < -2.04e-8, so the
-    // buggy code classifies Unknown (the #492 regression).
-    //
-    // Fixed #536 slope_epsilon = 1e-6 * 1.0 / avg_dx = 1e-6 * 1.0 / 1.0 = 1e-6.
-    // The dip's slope (-5e-8) is within [-1e-6, 1e-6], so the fixed code
-    // correctly classifies Positive.
-    let n = 50usize;
-    let x_span = (n - 1) as f64; // 49.0
-    let noise_dip_idx = 25usize;
-    // The noise magnitude must be:
-    //   - within the old #492 threshold: 1e-6 * y_range = 1e-6 * 1.0 = 1e-6
-    //   - outside the buggy #536 threshold: 1e-6 * y_range / (n-1) = 1e-6/49 ≈ 2.04e-8
-    // Choosing 5e-8: between 2.04e-8 and 1e-6, so buggy code fails and correct
-    // code passes.
-    let noise_magnitude = 5e-8_f64;
-
-    // Build a strictly-increasing base curve and then pull y[noise_dip_idx]
-    // BELOW y[noise_dip_idx - 1] by noise_magnitude.  This makes the segment
-    // (noise_dip_idx - 1) -> noise_dip_idx have a genuinely negative slope:
-    //   dy = -noise_magnitude, dx = 1.0, slope = -5e-8.
-    // The following segment noise_dip_idx -> (noise_dip_idx + 1) is then
-    // extra-positive (+2/49 + noise_magnitude), so the table overall is nearly
-    // monotone.
-    let xs: Vec<f64> = (0..n).map(|i| i as f64).collect();
-    let base_y: Vec<f64> = (0..n).map(|i| i as f64 / x_span).collect();
-    let ys: Vec<f64> = (0..n)
-        .map(|i| {
-            if i == noise_dip_idx {
-                // pull this point below its predecessor: slope (i-1)->i is -5e-8
-                base_y[noise_dip_idx - 1] - noise_magnitude
-            } else {
-                base_y[i]
-            }
-        })
-        .collect();
-
-    let table = Table::new_for_test(xs, ys);
-    assert_eq!(
-        analyze_graphical_function_polarity(&table),
-        LinkPolarity::Positive,
-        "a 50-point uniformly-spaced monotone table with a single {noise_magnitude:.0e} \
-         import-noise dip (within the #492 tolerance 1e-6 * y_range = 1e-6) must \
-         classify Positive; slope_epsilon must scale by avg_dx so uniform-spacing \
-         behavior matches the pre-#536 y-delta threshold (GH #536 regression)"
-    );
-}
-
-#[test]
-fn test_lookup_table_polarity_in_links() {
-    use crate::datamodel;
-
-    // Create a model with a lookup table. The flow scales the lookup result
-    // by a positive CONSTANT (not by `water` itself): with `water` appearing
-    // in both factors of a product, the partial `L(w) + w*L'(w)` is
-    // sign-indefinite without value reasoning, so the sound answer would be
-    // Unknown -- this test isolates the table-monotonicity propagation.
-    let mut model_vars = vec![
-        x_stock("water", "100", &[], &["outflow"], None),
-        x_flow("outflow", "0.5 * lookup(lookup, water)", None),
-    ];
-
-    // Create the lookup table auxiliary
-    let mut lookup_var = x_aux("lookup", "0", None);
-    if let datamodel::Variable::Aux(aux) = &mut lookup_var {
-        aux.gf = Some(datamodel::GraphicalFunction {
-            kind: datamodel::GraphicalFunctionKind::Continuous,
-            x_points: Some(vec![0.0, 50.0, 100.0, 150.0]),
-            y_points: vec![0.1, 0.2, 0.3, 0.4],
-            x_scale: datamodel::GraphicalFunctionScale {
-                min: 0.0,
-                max: 150.0,
-            },
-            y_scale: datamodel::GraphicalFunctionScale { min: 0.1, max: 0.4 },
-        });
-    }
-    model_vars.push(lookup_var);
-
-    let model = x_model("main", model_vars);
-    let sim_specs = sim_specs_with_units("months");
-    let datamodel_project = x_project(sim_specs, &[model]);
-    let db = SimlinDb::default();
-    let result = sync_from_datamodel(&db, &datamodel_project);
-    let model = result.models["main"].source;
-
-    // Check per-link polarity via compute_link_polarities
-    let polarities = compute_link_polarities(&db, model, result.project);
-    let water_to_outflow_key = ("water".to_string(), "outflow".to_string());
-    assert_eq!(
-        polarities[&water_to_outflow_key],
-        LinkPolarity::Positive,
-        "Monotonically increasing lookup table should preserve positive polarity"
-    );
-
-    // Verify loop polarity via model_detected_loops
-    let detected = model_detected_loops(&db, model, result.project);
-    assert_eq!(detected.loops.len(), 1, "Should have one loop");
-    // water -> outflow: Positive (increasing lookup), outflow -> water: Negative (outflow)
-    assert_eq!(
-        detected.loops[0].polarity,
-        DetectedLoopPolarity::Balancing,
-        "Loop with one negative link should be balancing"
     );
 }
 
@@ -1929,7 +1035,11 @@ fn gf_var_for_test(
         ident: Ident::new(ident),
         ast: Some(Ast::ApplyToAll(
             dims,
-            Expr2::Const("0".to_string(), 0.0, Loc::default()),
+            Expr2::Const(
+                "0".to_string(),
+                crate::ast::Literal::new(0.0),
+                Loc::default(),
+            ),
         )),
         init_ast: None,
         eqn: None,
@@ -1994,7 +1104,13 @@ fn test_lookup_table_polarity_defensive_subscript_branches() {
         ))
     };
     let var = |id: &str| Expr2::Var(Ident::new(id), None, Loc::default());
-    let int_const = |n: i64| Expr2::Const(n.to_string(), n as f64, Loc::default());
+    let int_const = |n: i64| {
+        Expr2::Const(
+            n.to_string(),
+            crate::ast::Literal::new(n as f64),
+            Loc::default(),
+        )
+    };
 
     // (a) `curve[1]` -- a 1-based integer literal into the single dimension.
     // Picks NYC's (offset 0) decreasing table -> Negative. `curve[2]` picks
@@ -2711,7 +1827,13 @@ fn test_builtin_polarity_max_min_scalar() {
 
     let x_var = Ident::new("x");
     let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
-    let const_5 = || Box::new(Expr2::Const("5".to_string(), 5.0, Loc::default()));
+    let const_5 = || {
+        Box::new(Expr2::Const(
+            "5".to_string(),
+            crate::ast::Literal::new(5.0),
+            Loc::default(),
+        ))
+    };
     let empty_vars = HashMap::new();
 
     // Max(x, 5): only x depends on from_var -> propagate x's polarity
@@ -2751,7 +1873,13 @@ fn test_expr_references_var() {
     let x_var = Ident::new("x");
     let y_var = Ident::new("y");
     let x_expr = || Expr2::Var(x_var.clone(), None, Loc::default());
-    let const_5 = || Expr2::Const("5".to_string(), 5.0, Loc::default());
+    let const_5 = || {
+        Expr2::Const(
+            "5".to_string(),
+            crate::ast::Literal::new(5.0),
+            Loc::default(),
+        )
+    };
 
     assert!(!expr_references_var(&const_5(), &x_var));
     assert!(expr_references_var(&x_expr(), &x_var));
@@ -2836,7 +1964,13 @@ fn test_max_min_polarity_with_non_monotone_arg() {
     let x_var = Ident::new("x");
     let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
     let abs_x = || Box::new(Expr2::App(BuiltinFn::Abs(x_expr()), None, Loc::default()));
-    let const_5 = || Box::new(Expr2::Const("5".to_string(), 5.0, Loc::default()));
+    let const_5 = || {
+        Box::new(Expr2::Const(
+            "5".to_string(),
+            crate::ast::Literal::new(5.0),
+            Loc::default(),
+        ))
+    };
     let empty_vars = HashMap::new();
 
     // MAX(ABS(x), x): ABS(x) is non-monotonically dependent on x,
@@ -3001,7 +2135,13 @@ fn test_add_sub_div_polarity_with_non_monotone_arg() {
     let x_var = Ident::new("x");
     let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
     let abs_x = || Box::new(Expr2::App(BuiltinFn::Abs(x_expr()), None, Loc::default()));
-    let const_5 = || Box::new(Expr2::Const("5".to_string(), 5.0, Loc::default()));
+    let const_5 = || {
+        Box::new(Expr2::Const(
+            "5".to_string(),
+            crate::ast::Literal::new(5.0),
+            Loc::default(),
+        ))
+    };
     let empty_vars = HashMap::new();
 
     // x + ABS(x): ABS(x) non-monotonically depends on x → Unknown
@@ -5912,7 +5052,7 @@ fn test_source_to_agg_polarity_discriminates_body_sign() {
     let loc = crate::ast::Loc::default();
     let scale: Ident<Canonical> = Ident::new("scale");
     let var = |n: &str| Expr2::Var(Ident::new(n), None, loc);
-    let cnst = |v: f64| Expr2::Const(format!("{v}"), v, loc);
+    let cnst = |v: f64| Expr2::Const(format!("{v}"), crate::ast::Literal::new(v), loc);
     let op2 =
         |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
     let pop_wild = || {
@@ -5990,6 +5130,12 @@ fn test_source_to_agg_polarity_discriminates_body_sign() {
         "the general analyzer must NOT adopt the convention Mul rule"
     );
 }
+
+/// Static link-polarity analysis tests, in a sibling file to keep this one
+/// under the project line-count lint. A child module, so `use super::*`
+/// reaches this file's imports and private helpers.
+#[path = "polarity_tests.rs"]
+mod polarity;
 
 /// Implicit WITH-LOOKUP link-polarity tests (GH #910), in a sibling file to
 /// keep this one under the project line-count lint. A child module, so

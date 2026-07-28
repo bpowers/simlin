@@ -79,7 +79,7 @@ fn classify_expr0_rejects_out_of_range_integer_literal() {
     let dims = vec![vec!["1".to_string(), "2".to_string()]];
     let indices = vec![IndexExpr0::Expr(Expr0::Const(
         "999".to_string(),
-        999.0,
+        crate::ast::Literal::new(999.0),
         Loc::default(),
     ))];
 
@@ -100,7 +100,7 @@ fn classify_expr0_rejects_out_of_range_integer_literal() {
     // Sanity: the same classifier still accepts an in-range integer.
     let in_range = vec![IndexExpr0::Expr(Expr0::Const(
         "1".to_string(),
-        1.0,
+        crate::ast::Literal::new(1.0),
         Loc::default(),
     ))];
     let in_range_shape = classify_expr0_subscript_shape(&in_range, &dims, None, None);
@@ -135,7 +135,7 @@ fn classify_expr0_canonicalizes_integer_literal_subscript() {
     ];
     let indices = vec![IndexExpr0::Expr(Expr0::Const(
         "01".to_string(),
-        1.0,
+        crate::ast::Literal::new(1.0),
         Loc::default(),
     ))];
 
@@ -496,7 +496,11 @@ fn test_classify_reducer_stddev() {
 #[test]
 fn test_classify_reducer_rank() {
     let inner = subscript_wildcard("population");
-    let direction = Expr2::Const("1".to_string(), 1.0, Loc::default());
+    let direction = Expr2::Const(
+        "1".to_string(),
+        crate::ast::Literal::new(1.0),
+        Loc::default(),
+    );
     let expr = Expr2::App(
         BuiltinFn::Rank(Box::new(inner), Box::new(direction)),
         None,
@@ -553,8 +557,16 @@ fn test_classify_reducer_nested_in_expression() {
     // Reducer is NOT at the top level, so is_bare should be false.
     let inner = subscript_wildcard("population");
     let sum_expr = Expr2::App(BuiltinFn::Sum(Box::new(inner)), None, Loc::default());
-    let two = Expr2::Const("2".to_string(), 2.0, Loc::default());
-    let one = Expr2::Const("1".to_string(), 1.0, Loc::default());
+    let two = Expr2::Const(
+        "2".to_string(),
+        crate::ast::Literal::new(2.0),
+        Loc::default(),
+    );
+    let one = Expr2::Const(
+        "1".to_string(),
+        crate::ast::Literal::new(1.0),
+        Loc::default(),
+    );
     let mul = Expr2::Op2(
         crate::ast::BinaryOp::Mul,
         Box::new(two),
@@ -583,7 +595,11 @@ fn test_classify_reducer_nested_in_scalar_max() {
     // The SUM is nested inside a non-reducer App, so is_bare should be false.
     let inner = subscript_wildcard("population");
     let sum_expr = Expr2::App(BuiltinFn::Sum(Box::new(inner)), None, Loc::default());
-    let zero = Expr2::Const("0".to_string(), 0.0, Loc::default());
+    let zero = Expr2::Const(
+        "0".to_string(),
+        crate::ast::Literal::new(0.0),
+        Loc::default(),
+    );
     let expr = Expr2::App(
         BuiltinFn::Max(Box::new(sum_expr), Some(Box::new(zero))),
         None,
@@ -1514,7 +1530,11 @@ fn test_body_aware_nested_reducer_falls_back_to_delta_ratio() {
 fn test_classify_reducer_returns_body_ast() {
     let pop = subscript_wildcard("pop");
     let weight = subscript_wildcard("weight");
-    let one = Expr2::Const("1".to_string(), 1.0, Loc::default());
+    let one = Expr2::Const(
+        "1".to_string(),
+        crate::ast::Literal::new(1.0),
+        Loc::default(),
+    );
     let coeff = Expr2::Op2(
         crate::ast::BinaryOp::Sub,
         Box::new(one),

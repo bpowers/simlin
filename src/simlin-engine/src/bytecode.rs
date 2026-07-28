@@ -1641,6 +1641,14 @@ impl StaticArrayView {
 
 /// Context data shared across all bytecode runlists in a module.
 /// Contains tables that opcodes reference by index.
+///
+/// Its graphical-function `f64`s are compared with the DERIVED (IEEE)
+/// `PartialEq`, not by bit pattern: a NaN makes this value unequal to a
+/// bit-identical rebuild and so unable to backdate, and two tables differing
+/// only in a zero's sign compare equal. Both are accepted, knowingly -- see the
+/// "Float equality in this crate" section on [`crate::ast::Literal`] for the
+/// position, the corrected premise behind GH #642, and what would change the
+/// decision.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Default, PartialEq)]
 pub struct ByteCodeContext {
@@ -1758,6 +1766,14 @@ impl ByteCodeContext {
     }
 }
 
+/// One runlist's concrete opcode stream plus the literal pool it indexes.
+///
+/// The pool's `f64`s are compared with the DERIVED (IEEE) `PartialEq`, not by
+/// bit pattern: a NaN makes this value unequal to a bit-identical rebuild and
+/// so unable to backdate, and two pools differing only in a zero's sign compare
+/// equal. Both are accepted, knowingly -- see the "Float equality in this
+/// crate" section on [`crate::ast::Literal`] for the position, the corrected
+/// premise behind GH #642, and what would change the decision.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Default, PartialEq)]
 pub struct ByteCode {

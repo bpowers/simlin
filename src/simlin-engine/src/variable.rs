@@ -22,6 +22,15 @@ use crate::module_functions::MacroRegistry;
 use crate::units::parse_units;
 use crate::{ErrorCode, eqn_err, units};
 
+/// A graphical function's points, as the compiler and the VM read them.
+///
+/// The `f64`s keep the derived (IEEE) `PartialEq`, so a lookup table holding a
+/// NaN y-point makes this -- and every `ModelStage0` / `ModelStage1` /
+/// `db::query::ParsedVariableResult` carrying it -- unequal to a bit-identical
+/// rebuild, defeating salsa backdating. The XMILE reader admits one, since
+/// `f64::from_str` accepts `"NaN"` in a `<ypts>` list unvalidated. Accepted
+/// knowingly, on the same terms as the bytecode types: see the "Float equality
+/// in this crate" section on [`crate::ast::Literal`].
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, salsa::Update)]
 pub struct Table {
@@ -1256,8 +1265,8 @@ fn test_classify_dependencies_matrix() {
     }
 
     let loc = Loc::new(0, 1);
-    let const_one = Expr2::Const("1".to_string(), 1.0, loc);
-    let const_zero = Expr2::Const("0".to_string(), 0.0, loc);
+    let const_one = Expr2::Const("1".to_string(), crate::ast::Literal::new(1.0), loc);
+    let const_zero = Expr2::Const("0".to_string(), crate::ast::Literal::new(0.0), loc);
 
     let module_inputs_with_input: BTreeSet<Ident<Canonical>> =
         [Ident::new("input")].into_iter().collect();
@@ -1950,7 +1959,7 @@ fn test_tables() {
         ident: Ident::new("lookup_function_table"),
         ast: Some(Ast::Scalar(Expr0::Const(
             "0".to_string(),
-            0.0,
+            crate::ast::Literal::new(0.0),
             Loc::new(0, 1),
         ))),
         init_ast: None,

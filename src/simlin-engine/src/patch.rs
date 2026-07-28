@@ -1920,7 +1920,11 @@ mod tests {
         let mut exprs = std::collections::HashMap::new();
         exprs.insert(
             CanonicalElementName::from_raw("north"),
-            Expr2::Const("2".to_string(), 2.0, crate::ast::Loc::default()),
+            Expr2::Const(
+                "2".to_string(),
+                crate::ast::Literal::new(2.0),
+                crate::ast::Loc::default(),
+            ),
         );
         let ast = Ast::Arrayed(vec![], exprs, None, false);
 

@@ -19,19 +19,21 @@ fn parse_eq(input: &str) -> Result<Option<Expr0>, Vec<EquationError>> {
 #[test]
 fn test_parse_number() {
     let ast = parse_eq("42").unwrap().unwrap();
-    assert!(matches!(ast, Expr0::Const(s, n, _) if s == "42" && n == 42.0));
+    assert!(matches!(ast, Expr0::Const(s, n, _) if s == "42" && n == Literal::new(42.0)));
 }
 
 #[test]
 fn test_parse_float() {
     let ast = parse_eq("2.75").unwrap().unwrap();
-    assert!(matches!(ast, Expr0::Const(s, n, _) if s == "2.75" && (n - 2.75).abs() < 0.001));
+    assert!(
+        matches!(ast, Expr0::Const(s, n, _) if s == "2.75" && (n.value() - 2.75).abs() < 0.001)
+    );
 }
 
 #[test]
 fn test_parse_scientific_notation() {
     let ast = parse_eq("1e10").unwrap().unwrap();
-    assert!(matches!(ast, Expr0::Const(s, n, _) if s == "1e10" && n == 1e10));
+    assert!(matches!(ast, Expr0::Const(s, n, _) if s == "1e10" && n == Literal::new(1e10)));
 }
 
 #[test]
@@ -39,7 +41,7 @@ fn test_parse_nan() {
     let ast = parse_eq("NaN").unwrap().unwrap();
     if let Expr0::Const(s, n, _) = ast {
         assert_eq!(s, "NaN");
-        assert!(n.is_nan());
+        assert!(n.value().is_nan());
     } else {
         panic!("Expected Const");
     }
@@ -60,7 +62,7 @@ fn test_parse_quoted_identifier() {
 #[test]
 fn test_parse_parenthesized() {
     let ast = parse_eq("(42)").unwrap().unwrap().strip_loc();
-    let expected = Expr0::Const("42".to_string(), 42.0, Loc::default());
+    let expected = Expr0::Const("42".to_string(), Literal::new(42.0), Loc::default());
     assert_eq!(ast, expected);
 }
 
@@ -93,7 +95,7 @@ fn test_parse_subscript_simple() {
         RawIdent::new_from_str("a"),
         vec![IndexExpr0::Expr(Expr0::Const(
             "1".to_string(),
-            1.0,
+            Literal::new(1.0),
             Loc::default(),
         ))],
         Loc::default(),
@@ -107,8 +109,16 @@ fn test_parse_subscript_multiple() {
     let expected = Expr0::Subscript(
         RawIdent::new_from_str("a"),
         vec![
-            IndexExpr0::Expr(Expr0::Const("1".to_string(), 1.0, Loc::default())),
-            IndexExpr0::Expr(Expr0::Const("2".to_string(), 2.0, Loc::default())),
+            IndexExpr0::Expr(Expr0::Const(
+                "1".to_string(),
+                Literal::new(1.0),
+                Loc::default(),
+            )),
+            IndexExpr0::Expr(Expr0::Const(
+                "2".to_string(),
+                Literal::new(2.0),
+                Loc::default(),
+            )),
         ],
         Loc::default(),
     );
@@ -174,8 +184,8 @@ fn test_parse_subscript_range() {
     let expected = Expr0::Subscript(
         RawIdent::new_from_str("a"),
         vec![IndexExpr0::Range(
-            Expr0::Const("1".to_string(), 1.0, Loc::default()),
-            Expr0::Const("2".to_string(), 2.0, Loc::default()),
+            Expr0::Const("1".to_string(), Literal::new(1.0), Loc::default()),
+            Expr0::Const("2".to_string(), Literal::new(2.0), Loc::default()),
             Loc::default(),
         )],
         Loc::default(),
@@ -231,7 +241,7 @@ fn test_parse_subscript_trailing_comma() {
         RawIdent::new_from_str("a"),
         vec![IndexExpr0::Expr(Expr0::Const(
             "1".to_string(),
-            1.0,
+            Literal::new(1.0),
             Loc::default(),
         ))],
         Loc::default(),
@@ -285,7 +295,11 @@ fn test_parse_subscript_transpose() {
             RawIdent::new_from_str("matrix"),
             vec![
                 IndexExpr0::Wildcard(Loc::default()),
-                IndexExpr0::Expr(Expr0::Const("1".to_string(), 1.0, Loc::default())),
+                IndexExpr0::Expr(Expr0::Const(
+                    "1".to_string(),
+                    Literal::new(1.0),
+                    Loc::default(),
+                )),
             ],
             Loc::default(),
         )),
@@ -474,11 +488,23 @@ fn test_parse_exponentiation_right_associative() {
     let ast = parse_eq("2^3^4").unwrap().unwrap().strip_loc();
     let expected = Expr0::Op2(
         BinaryOp::Exp,
-        Box::new(Expr0::Const("2".to_string(), 2.0, Loc::default())),
+        Box::new(Expr0::Const(
+            "2".to_string(),
+            Literal::new(2.0),
+            Loc::default(),
+        )),
         Box::new(Expr0::Op2(
             BinaryOp::Exp,
-            Box::new(Expr0::Const("3".to_string(), 3.0, Loc::default())),
-            Box::new(Expr0::Const("4".to_string(), 4.0, Loc::default())),
+            Box::new(Expr0::Const(
+                "3".to_string(),
+                Literal::new(3.0),
+                Loc::default(),
+            )),
+            Box::new(Expr0::Const(
+                "4".to_string(),
+                Literal::new(4.0),
+                Loc::default(),
+            )),
             Loc::default(),
         )),
         Loc::default(),
@@ -683,7 +709,7 @@ fn var(name: &str) -> Expr0 {
 }
 
 fn num(s: &str, v: f64) -> Expr0 {
-    Expr0::Const(s.to_string(), v, Loc::default())
+    Expr0::Const(s.to_string(), Literal::new(v), Loc::default())
 }
 
 /// A stacked unary minus is legal Vensim (`x = - -3`), and the MDL importer's
@@ -968,9 +994,21 @@ fn test_exponent_does_not_swallow_multiplicative() {
 fn test_parse_if_simple() {
     let ast = parse_eq("if 1 then 2 else 3").unwrap().unwrap().strip_loc();
     let expected = Expr0::If(
-        Box::new(Expr0::Const("1".to_string(), 1.0, Loc::default())),
-        Box::new(Expr0::Const("2".to_string(), 2.0, Loc::default())),
-        Box::new(Expr0::Const("3".to_string(), 3.0, Loc::default())),
+        Box::new(Expr0::Const(
+            "1".to_string(),
+            Literal::new(1.0),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Const(
+            "2".to_string(),
+            Literal::new(2.0),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Const(
+            "3".to_string(),
+            Literal::new(3.0),
+            Loc::default(),
+        )),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -989,8 +1027,16 @@ fn test_parse_if_with_condition() {
             Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
             Loc::default(),
         )),
-        Box::new(Expr0::Const("1".to_string(), 1.0, Loc::default())),
-        Box::new(Expr0::Const("0".to_string(), 0.0, Loc::default())),
+        Box::new(Expr0::Const(
+            "1".to_string(),
+            Literal::new(1.0),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Const(
+            "0".to_string(),
+            Literal::new(0.0),
+            Loc::default(),
+        )),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -1003,9 +1049,21 @@ fn test_parse_if_parenthesized() {
         .unwrap()
         .strip_loc();
     let expected = Expr0::If(
-        Box::new(Expr0::Const("1".to_string(), 1.0, Loc::default())),
-        Box::new(Expr0::Const("2".to_string(), 2.0, Loc::default())),
-        Box::new(Expr0::Const("3".to_string(), 3.0, Loc::default())),
+        Box::new(Expr0::Const(
+            "1".to_string(),
+            Literal::new(1.0),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Const(
+            "2".to_string(),
+            Literal::new(2.0),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Const(
+            "3".to_string(),
+            Literal::new(3.0),
+            Loc::default(),
+        )),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -1024,8 +1082,16 @@ fn test_parse_if_with_logical() {
             Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
             Loc::default(),
         )),
-        Box::new(Expr0::Const("1".to_string(), 1.0, Loc::default())),
-        Box::new(Expr0::Const("0".to_string(), 0.0, Loc::default())),
+        Box::new(Expr0::Const(
+            "1".to_string(),
+            Literal::new(1.0),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Const(
+            "0".to_string(),
+            Literal::new(0.0),
+            Loc::default(),
+        )),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -1158,13 +1224,21 @@ fn test_complex_time_subscript() {
                     vec![Expr0::Op2(
                         BinaryOp::Mod,
                         Box::new(Expr0::Var(RawIdent::new_from_str("TIME"), Loc::default())),
-                        Box::new(Expr0::Const("5".to_string(), 5.0, Loc::default())),
+                        Box::new(Expr0::Const(
+                            "5".to_string(),
+                            Literal::new(5.0),
+                            Loc::default(),
+                        )),
                         Loc::default(),
                     )],
                 ),
                 Loc::default(),
             )),
-            Box::new(Expr0::Const("1".to_string(), 1.0, Loc::default())),
+            Box::new(Expr0::Const(
+                "1".to_string(),
+                Literal::new(1.0),
+                Loc::default(),
+            )),
             Loc::default(),
         ))],
         Loc::default(),
@@ -1621,7 +1695,11 @@ fn test_subscript_with_expression() {
         vec![IndexExpr0::Expr(Expr0::Op2(
             BinaryOp::Add,
             Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
-            Box::new(Expr0::Const("1".to_string(), 1.0, Loc::default())),
+            Box::new(Expr0::Const(
+                "1".to_string(),
+                Literal::new(1.0),
+                Loc::default(),
+            )),
             Loc::default(),
         ))],
         Loc::default(),
@@ -1646,11 +1724,23 @@ fn test_deeply_nested_if() {
         Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
         Box::new(Expr0::If(
             Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
-            Box::new(Expr0::Const("1".to_string(), 1.0, Loc::default())),
-            Box::new(Expr0::Const("2".to_string(), 2.0, Loc::default())),
+            Box::new(Expr0::Const(
+                "1".to_string(),
+                Literal::new(1.0),
+                Loc::default(),
+            )),
+            Box::new(Expr0::Const(
+                "2".to_string(),
+                Literal::new(2.0),
+                Loc::default(),
+            )),
             Loc::default(),
         )),
-        Box::new(Expr0::Const("3".to_string(), 3.0, Loc::default())),
+        Box::new(Expr0::Const(
+            "3".to_string(),
+            Literal::new(3.0),
+            Loc::default(),
+        )),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -1770,13 +1860,15 @@ fn test_safe_div_chain() {
 #[test]
 fn test_scientific_negative_exponent() {
     let ast = parse_eq("1.5e-3").unwrap().unwrap();
-    assert!(matches!(ast, Expr0::Const(s, n, _) if s == "1.5e-3" && (n - 0.0015).abs() < 1e-10));
+    assert!(
+        matches!(ast, Expr0::Const(s, n, _) if s == "1.5e-3" && (n.value() - 0.0015).abs() < 1e-10)
+    );
 }
 
 #[test]
 fn test_leading_decimal() {
     let ast = parse_eq(".5").unwrap().unwrap();
-    assert!(matches!(ast, Expr0::Const(s, n, _) if s == ".5" && (n - 0.5).abs() < 1e-10));
+    assert!(matches!(ast, Expr0::Const(s, n, _) if s == ".5" && (n.value() - 0.5).abs() < 1e-10));
 }
 
 #[test]
@@ -1802,8 +1894,16 @@ fn test_if_with_complex_condition() {
             )),
             Loc::default(),
         )),
-        Box::new(Expr0::Const("1".to_string(), 1.0, Loc::default())),
-        Box::new(Expr0::Const("0".to_string(), 0.0, Loc::default())),
+        Box::new(Expr0::Const(
+            "1".to_string(),
+            Literal::new(1.0),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Const(
+            "0".to_string(),
+            Literal::new(0.0),
+            Loc::default(),
+        )),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -1907,13 +2007,13 @@ fn test_multiple_subscripts_with_ranges() {
         RawIdent::new_from_str("a"),
         vec![
             IndexExpr0::Range(
-                Expr0::Const("1".to_string(), 1.0, Loc::default()),
-                Expr0::Const("2".to_string(), 2.0, Loc::default()),
+                Expr0::Const("1".to_string(), Literal::new(1.0), Loc::default()),
+                Expr0::Const("2".to_string(), Literal::new(2.0), Loc::default()),
                 Loc::default(),
             ),
             IndexExpr0::Range(
-                Expr0::Const("3".to_string(), 3.0, Loc::default()),
-                Expr0::Const("4".to_string(), 4.0, Loc::default()),
+                Expr0::Const("3".to_string(), Literal::new(3.0), Loc::default()),
+                Expr0::Const("4".to_string(), Literal::new(4.0), Loc::default()),
                 Loc::default(),
             ),
         ],

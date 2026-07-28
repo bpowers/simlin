@@ -23,7 +23,8 @@
 //! synthetic names are assigned `$⁚ltm⁚agg⁚0`, `1`, ... in first-encounter
 //! order. AST-identical *synthetic* reducer subexpressions dedupe to a single
 //! agg node (canonicalization is via printed equation text, since `Expr2` is
-//! not `Eq`). Variable-backed aggs are never deduped (see below).
+//! not `Hash` and so cannot key a map directly). Variable-backed aggs are never
+//! deduped (see below).
 //!
 //! Two kinds of aggregate node:
 //! - **Synthetic** (`is_synthetic == true`): the reducer is a *sub-expression*
@@ -531,7 +532,7 @@ pub struct AggSource {
 
 /// One aggregate node: the stand-in for a maximal reducer subexpression.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
 pub struct AggNode {
     /// The aggregate node's name. For a synthetic agg this is
     /// `$⁚ltm⁚agg⁚{n}`; for a variable-backed agg this is the owning
@@ -594,9 +595,10 @@ pub struct AggNode {
     ///
     /// # What the stored form does and does not normalize
     ///
-    /// Stored in [`Expr2::strip_loc_and_bounds`] form, which removes TWO of the
-    /// three ways this field can make the salsa-cached `AggNodesResult`
-    /// compare unequal to an identical rebuild. It does not remove the third.
+    /// Stored in [`Expr2::strip_loc_and_bounds`] form, which removes two of the
+    /// three ways this field could make the salsa-cached `AggNodesResult`
+    /// compare unequal to an identical rebuild; the third is closed at the root
+    /// instead.
     ///
     /// * `Loc` -- removed, and load-bearing. Two AST-identical occurrences in
     ///   different equations carry different `Loc`s, so storing them raw would
@@ -615,20 +617,17 @@ pub struct AggNode {
     ///   equation order, and the cached value would become sensitive to
     ///   unrelated edits elsewhere in the owning equation. Neither reader looks
     ///   at one either -- `expr2_to_expr0` drops them outright.
-    /// * The `f64` on `Expr2::Const` -- **NOT removed, and not removable.** A
-    ///   derived `PartialEq` over an `f64` is not reflexive on NaN, so a model
-    ///   whose hoisted reducer contains a `nan` literal
-    ///   (`out = 1 + SUM(pop[*] * nan)`) yields two enumerations that are
-    ///   structurally identical and compare UNEQUAL -- permanently defeating
-    ///   this query's backdating, so every revision bump re-executes
-    ///   `model_element_causal_edges` / `model_ltm_reference_sites` /
-    ///   `model_ltm_variables`. No normalization can fix it here: dropping a
-    ///   NaN literal would change what the equation means. It is the GH
-    ///   #987/#981 class (the same mechanism that forces `db::stages_tests`'
-    ///   stdlib oracle onto `npv`), and it is fixed at the ROOT by making AST
-    ///   float literals compare by bit pattern. Today's broken behaviour is
-    ///   pinned by `a_nan_literal_in_a_reducer_defeats_agg_backdating`, which
-    ///   that fix must invert.
+    /// * The float literal on `Expr2::Const` -- **not normalized here, and not
+    ///   normalizable here:** dropping a `nan` literal would change what the
+    ///   equation means. It is closed at the ROOT instead. The literal is an
+    ///   [`crate::ast::Literal`], compared by BIT PATTERN, so a model whose
+    ///   hoisted reducer contains a `nan` (`out = 1 + SUM(pop[*] * nan)`)
+    ///   enumerates to a value equal to an identical rebuild and backdates like
+    ///   any other. With a bare `f64` it could not (`NaN != NaN`), and every
+    ///   revision bump re-executed `model_element_causal_edges` /
+    ///   `model_ltm_reference_sites` / `model_ltm_variables` -- the GH #987/#981
+    ///   class. Pinned by
+    ///   `a_nan_literal_in_a_reducer_does_not_defeat_agg_backdating`.
     pub reducer: BuiltinFn<Expr2>,
 }
 
@@ -732,7 +731,7 @@ impl AggNode {
 /// filtered out by the `is_synthetic` checks downstream, leaving the inline
 /// reducer on the conservative direct-scoring path -- a name-ordering bug).
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Default, salsa::Update)]
+#[derive(Clone, PartialEq, Eq, Default, salsa::Update)]
 pub struct AggNodesResult {
     /// Aggregate nodes in first-encounter (deterministic) order.
     pub aggs: Vec<AggNode>,
@@ -5754,10 +5753,11 @@ mod tests {
     /// leaves the salsa-cached `AggNodesResult` equal.
     ///
     /// **This is one of the two ways the backdating claim can fail, and it
-    /// measures only this one.** The other is `f64` non-reflexivity on a NaN
-    /// literal, which normalization cannot touch;
-    /// [`a_nan_literal_in_a_reducer_defeats_agg_backdating`] pins that arm
-    /// (today: broken) and names the root fix.
+    /// measures only this one.** The other is float non-reflexivity on a NaN
+    /// literal, which normalization cannot touch and which is closed at the
+    /// root by [`crate::ast::Literal`]'s bit-pattern equality;
+    /// [`a_nan_literal_in_a_reducer_does_not_defeat_agg_backdating`] pins that
+    /// arm.
     ///
     /// The two spellings differ ONLY in a leading term that mints no
     /// aggregate node of its own -- a `SIZE` call, which is recognized as a
@@ -5819,40 +5819,27 @@ mod tests {
         );
     }
 
-    // CHARACTERIZATION, NOT A CONTRACT: this asserts today's BROKEN behaviour
-    // so the fix has something to turn red.
+    // The third channel by which `AggNode::reducer` (GH #983) could make the
+    // salsa-cached, `PartialEq`-compared `AggNodesResult` unequal to an
+    // identical rebuild: the `f64` on `Expr2::Const`, which
+    // `strip_loc_and_bounds` cannot normalize away (there is no rewrite that
+    // removes a NaN literal without changing what the equation means).
     //
-    // `AggNode::reducer` (GH #983) puts an `Expr2` inside the salsa-cached,
-    // `PartialEq`-compared `AggNodesResult`, and `Expr2::Const` holds a bare
-    // `f64`. A derived `PartialEq` over an `f64` is not reflexive on NaN, so a
-    // model whose hoisted reducer contains a `nan` literal enumerates to a
-    // value that is structurally identical to an independent rebuild and
-    // compares UNEQUAL to it. Salsa's backdating criterion is exactly that
-    // equality, so such a model can never backdate `enumerate_agg_nodes`:
-    // every revision bump, from any unrelated edit anywhere in the project,
-    // re-executes `model_element_causal_edges`, `model_ltm_reference_sites`
-    // and `model_ltm_variables` -- the whole LTM compile.
+    // It is closed at the ROOT rather than here: `ast::Literal` compares float
+    // literals by BIT PATTERN, so `nan == nan` and a bit-identical AST is
+    // equal to itself (GH #987/#981). Salsa's backdating criterion is exactly
+    // that equality, so without the root fix every revision bump -- from any
+    // unrelated edit anywhere in the project -- re-executed
+    // `model_element_causal_edges`, `model_ltm_reference_sites` and
+    // `model_ltm_variables` for any model with a `nan` in a hoisted reducer.
     //
-    // `strip_loc_and_bounds` closes the `Loc` and `ArrayBounds` channels (see
-    // `the_carried_reducer_is_normalized_so_offset_only_edits_backdate`); it
-    // cannot close this one, because there is no normalization that removes a
-    // NaN literal without changing what the equation means. This is the GH
-    // #987/#981 class -- the same mechanism that forces `db::stages_tests`'
-    // stdlib value oracle onto `npv` rather than `smth1` -- and the root fix is
-    // to make AST float literals compare by BIT PATTERN.
-    //
-    // When that lands, this test MUST be inverted, not deleted: switch to
-    // `assert_eq`, rename the test (it asserts the opposite of
-    // `defeats_agg_backdating` afterwards) along with the
-    // `nan_backdating_is_broken` project name, and update the three rustdocs
-    // that cite it by name -- `AggNode::reducer`,
-    // `the_carried_reducer_is_normalized_so_offset_only_edits_backdate`, and
-    // the `ltm_agg.rs` bullet in `simlin-engine/CLAUDE.md`. Its failure is the
-    // signal that the root fix reached this query.
+    // This test was written inverted (`assert_ne!`) as the characterization of
+    // that defect; flipping it is how the root fix demonstrates it reached a
+    // real consumer rather than only its own unit test.
     #[test]
-    fn a_nan_literal_in_a_reducer_defeats_agg_backdating() {
+    fn a_nan_literal_in_a_reducer_does_not_defeat_agg_backdating() {
         let build = || {
-            TestProject::new("nan_backdating_is_broken")
+            TestProject::new("nan_backdating")
                 .named_dimension("Region", &["nyc", "boston"])
                 .array_aux("pop[Region]", "1")
                 .scalar_aux("out", "1 + SUM(pop[*] * nan)")
@@ -5868,13 +5855,12 @@ mod tests {
             "the NaN-bearing reducer must still be hoisted for this to measure anything"
         );
 
-        assert_ne!(
+        assert_eq!(
             agg_nodes(&build()),
             agg_nodes(&build()),
-            "TODAY'S BEHAVIOUR, not the desired one: two enumerations of an \
-             identical NaN-bearing model compare unequal, so `enumerate_agg_nodes` \
-             can never backdate for this model. Making AST float literals compare \
-             by bit pattern (GH #987/#981) must flip this to `assert_eq!`."
+            "two enumerations of an identical NaN-bearing model must compare \
+             equal, so `enumerate_agg_nodes` backdates for this model like any \
+             other"
         );
     }
 }

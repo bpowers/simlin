@@ -8,7 +8,7 @@ use crate::sim_err;
 /// Information about a sparse (non-contiguous) dimension in an array view.
 /// Used when a subdimension's elements are not contiguous in the parent dimension.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 pub struct SparseInfo {
     /// Which dimension (0-indexed) in the view is sparse
     pub dim_index: usize,
@@ -22,7 +22,7 @@ pub struct SparseInfo {
 /// how we iterate over existing data (changing offsets and strides) rather than
 /// creating new arrays.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 pub struct ArrayView {
     /// Dimension sizes after slicing/viewing
     pub dims: Vec<usize>,

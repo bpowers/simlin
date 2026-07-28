@@ -17,6 +17,7 @@ mod expr0;
 mod expr1;
 mod expr2;
 mod expr3;
+mod literal;
 
 pub use array_view::{ArrayView, SparseInfo};
 pub use expr0::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
@@ -25,6 +26,7 @@ pub use expr1::Expr1;
 pub use expr2::{ArrayBounds, Expr2, Expr2Context, IndexExpr2};
 #[allow(unused_imports)]
 pub use expr3::{Expr3, Expr3LowerContext, IndexExpr3, Pass1Context};
+pub use literal::Literal;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, salsa::Update)]
@@ -699,7 +701,11 @@ fn test_print_eqn() {
     );
     assert_eq!(
         "4.7",
-        print_eqn(&Expr0::Const("4.7".to_string(), 4.7, Loc::new(0, 3)))
+        print_eqn(&Expr0::Const(
+            "4.7".to_string(),
+            Literal::new(4.7),
+            Loc::new(0, 3)
+        ))
     );
     assert_eq!(
         "lookup(a, 1.0)",
@@ -708,7 +714,7 @@ fn test_print_eqn() {
                 "lookup".to_string(),
                 vec![
                     Expr0::Var(RawIdent::new_from_str("a"), Loc::new(7, 8)),
-                    Expr0::Const("1.0".to_string(), 1.0, Loc::new(10, 13))
+                    Expr0::Const("1.0".to_string(), Literal::new(1.0), Loc::new(10, 13))
                 ]
             ),
             Loc::new(0, 14),
@@ -757,8 +763,16 @@ fn t_op1(op: UnaryOp, inner: Expr0) -> Expr0 {
 fn t_if() -> Expr0 {
     Expr0::If(
         Box::new(t_var("a")),
-        Box::new(Expr0::Const("1".to_string(), 1.0, Loc::default())),
-        Box::new(Expr0::Const("0".to_string(), 0.0, Loc::default())),
+        Box::new(Expr0::Const(
+            "1".to_string(),
+            Literal::new(1.0),
+            Loc::default(),
+        )),
+        Box::new(Expr0::Const(
+            "0".to_string(),
+            Literal::new(0.0),
+            Loc::default(),
+        )),
         Loc::default(),
     )
 }
@@ -776,7 +790,7 @@ fn test_print_eqn_parenthesizes_if_under_an_operator() {
     assert_print_reparse_roundtrip(
         &t_op2(
             BinaryOp::Add,
-            Expr0::Const("1".to_string(), 1.0, Loc::default()),
+            Expr0::Const("1".to_string(), Literal::new(1.0), Loc::default()),
             t_if(),
         ),
         "1 + (if (a) then (1) else (0))",
@@ -983,7 +997,7 @@ impl LatexVisitor {
     fn walk(&mut self, expr: &Expr2) -> String {
         match expr {
             Expr2::Const(s, n, _) => {
-                if n.is_nan() {
+                if n.value().is_nan() {
                     "\\mathrm{{NaN}}".to_owned()
                 } else {
                     s.clone()
@@ -1062,7 +1076,7 @@ pub fn latex_eqn(expr: &Expr2) -> String {
 pub fn latex_eqn_expr0(expr: &Expr0) -> String {
     match expr {
         Expr0::Const(s, n, _) => {
-            if n.is_nan() {
+            if n.value().is_nan() {
                 "\\mathrm{{NaN}}".to_owned()
             } else {
                 s.clone()
@@ -1168,7 +1182,7 @@ pub fn latex_eqn_expr0_annotated(expr: &Expr0) -> String {
     let loc = expr.get_loc();
     let inner = match expr {
         Expr0::Const(s, n, _) => {
-            if n.is_nan() {
+            if n.value().is_nan() {
                 "\\mathrm{{NaN}}".to_owned()
             } else {
                 s.clone()
@@ -1358,7 +1372,11 @@ fn test_latex_eqn() {
             Box::new(Expr2::Op2(
                 BinaryOp::Sub,
                 Box::new(Expr2::Var(Ident::new("a_c"), None, Loc::new(0, 0))),
-                Box::new(Expr2::Const("1".to_string(), 1.0, Loc::new(0, 0))),
+                Box::new(Expr2::Const(
+                    "1".to_string(),
+                    Literal::new(1.0),
+                    Loc::new(0, 0)
+                )),
                 None,
                 Loc::new(0, 0),
             )),
@@ -1375,7 +1393,11 @@ fn test_latex_eqn() {
             Box::new(Expr2::Op2(
                 BinaryOp::Sub,
                 Box::new(Expr2::Var(Ident::new("a_c"), None, Loc::new(0, 0))),
-                Box::new(Expr2::Const("1".to_string(), 1.0, Loc::new(0, 0))),
+                Box::new(Expr2::Const(
+                    "1".to_string(),
+                    Literal::new(1.0),
+                    Loc::new(0, 0)
+                )),
                 None,
                 Loc::new(0, 0),
             )),
@@ -1412,14 +1434,22 @@ fn test_latex_eqn() {
     );
     assert_eq!(
         "4.7",
-        latex_eqn(&Expr2::Const("4.7".to_string(), 4.7, Loc::new(0, 3)))
+        latex_eqn(&Expr2::Const(
+            "4.7".to_string(),
+            Literal::new(4.7),
+            Loc::new(0, 3)
+        ))
     );
     assert_eq!(
         "\\operatorname{lookup}(\\mathrm{a}, 1.0)",
         latex_eqn(&Expr2::App(
             crate::builtins::BuiltinFn::Lookup(
                 Box::new(Expr2::Var(Ident::new("a"), None, Default::default())),
-                Box::new(Expr2::Const("1.0".to_owned(), 1.0, Default::default())),
+                Box::new(Expr2::Const(
+                    "1.0".to_owned(),
+                    Literal::new(1.0),
+                    Default::default()
+                )),
                 Default::default(),
             ),
             None,
@@ -1530,8 +1560,16 @@ fn test_latex_printers_agree_on_if_under_an_operator() {
 
     let cases2 = Expr2::If(
         Box::new(Expr2::Var(Ident::new("a"), None, Loc::default())),
-        Box::new(Expr2::Const("1".to_string(), 1.0, Loc::default())),
-        Box::new(Expr2::Const("0".to_string(), 0.0, Loc::default())),
+        Box::new(Expr2::Const(
+            "1".to_string(),
+            Literal::new(1.0),
+            Loc::default(),
+        )),
+        Box::new(Expr2::Const(
+            "0".to_string(),
+            Literal::new(0.0),
+            Loc::default(),
+        )),
         None,
         Loc::default(),
     );
@@ -1665,7 +1703,7 @@ mod print_eqn_proptest {
                 .prop_map(|n| Expr0::Var(RawIdent::new_from_str(n), Loc::default())),
             prop::sample::select(&[0.0f64, 1.0, 2.5][..]).prop_map(|v| Expr0::Const(
                 format!("{v}"),
-                v,
+                Literal::new(v),
                 Loc::default()
             )),
         ];
@@ -1981,7 +2019,11 @@ mod ast_tests {
 
         // Test if expression with mismatched dimensions
         let if_expr = Expr1::If(
-            Box::new(Expr1::Const("1".to_string(), 1.0, Loc::default())),
+            Box::new(Expr1::Const(
+                "1".to_string(),
+                Literal::new(1.0),
+                Loc::default(),
+            )),
             Box::new(Expr1::Var(Ident::new("regional_data"), Loc::default())),
             Box::new(Expr1::Var(Ident::new("product_data"), Loc::default())),
             Loc::new(0, 20),
