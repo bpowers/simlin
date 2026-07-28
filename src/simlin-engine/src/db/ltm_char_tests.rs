@@ -2367,3 +2367,147 @@ fn per_element_edge_declines_a_repeated_dimension_target() {
         "a declined edge must emit no per-element score; got {per_element:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// P2-8: an index on an INDEXED axis has no `dim·elem` spelling.
+//
+// The reported mechanism does not hold, and the measurements are in the test
+// below rather than only in the report. `q["1"]` -- a legal quoted
+// numeric-named variable used as an index -- is NOT a runtime read: the
+// compiler's dynamic-subscript lowering resolves it through
+// `Dimension::get_offset`, which for an indexed dimension parses the
+// identifier's text, so `q["1"]` and `q[1]` are the same static position. The
+// defect at that line was the QUALIFICATION, not the resolution.
+// ---------------------------------------------------------------------------
+
+/// The `q["1"]` fixture: an indexed dimension, a variable legally named `1`,
+/// and a target that indexes `q` with it. `index_expr` is the spelling under
+/// test.
+fn indexed_axis_index_model(index_expr: &str, one_value: &str) -> datamodel::Project {
+    let mut project = TestProject::new("indexed_axis_index")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .aux("\"1\"", one_value, None)
+        .flow("inflow", "1", None)
+        .stock("source", "1", &["inflow"], &[], None)
+        .aux("target", &format!("source + q[{index_expr}]"), None)
+        .build_datamodel();
+    project
+        .dimensions
+        .push(datamodel::Dimension::indexed("D".to_string(), 3));
+    project
+        .models
+        .get_mut(0)
+        .expect("main model")
+        .variables
+        .push(crate::datamodel::Variable::Aux(datamodel::Aux {
+            ident: "q".to_string(),
+            equation: crate::datamodel::Equation::Arrayed(
+                vec!["D".to_string()],
+                vec![
+                    ("1".to_string(), "100".to_string(), None, None),
+                    ("2".to_string(), "200".to_string(), None, None),
+                    ("3".to_string(), "300".to_string(), None, None),
+                ],
+                None,
+                false,
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+    project
+}
+
+/// A quoted numeric-named variable used as an index into an INDEXED axis is a
+/// STATIC position, and the ceteris-paribus wrap must leave it spellable.
+///
+/// Batch 1 made `needs_quoting` leading-digit-aware so a variable named `1`
+/// round-trips as `"1"`, which is what makes this shape appear in generated
+/// text at all; the two changes meet here.
+///
+/// The first half is the measurement that settles what the reference means. A
+/// review pass read `compiler::subscript::normalize_subscripts3` -- which does
+/// decline a bare identifier on an indexed axis -- and concluded the compiler
+/// treats `q["1"]` as a runtime read of the variable. It does not: declining
+/// there routes to the DYNAMIC lowering (`compiler::context`), whose first move
+/// is `Dimension::get_offset(ident)`, and that parses an indexed axis's
+/// identifier text into a position. So `q["1"]` is position 1 no matter what
+/// the variable holds -- asserted here by running the model with two different
+/// values for it.
+///
+/// The second half is the defect that WAS there: the wrap qualified the
+/// resolved element as `d·1`, a spelling `DimensionsContext::lookup` resolves
+/// only for a NAMED dimension. The capture helper that froze it could not
+/// compile, so both link scores read a constant 0 behind `Assembly` warnings.
+/// A loud degradation rather than a wrong row -- and the reported fix, refusing
+/// to resolve the identifier at all, would have turned it INTO a wrong row by
+/// freezing an index the compiler resolves statically (`q[PREVIOUS("1")]` reads
+/// whatever the variable held last step; the equation reads `q[1]`).
+#[test]
+fn quoted_numeric_index_on_an_indexed_axis_is_a_static_position() {
+    // 1. What the reference MEANS, measured: independent of the variable's value.
+    for (one_value, label) in [("2", "variable 1 = 2"), ("3", "variable 1 = 3")] {
+        let project = indexed_axis_index_model("\"1\"", one_value);
+        assert_eq!(
+            final_value(&project, "target"),
+            final_value(&project, "source") + final_value(&project, "q[1]"),
+            "{label}: `q[\"1\"]` is the static position 1, not a read of the \
+             variable named 1"
+        );
+        // Non-vacuity: the candidate rows differ, so a runtime read would show.
+        assert_ne!(final_value(&project, "q[1]"), final_value(&project, "q[2]"));
+        assert_ne!(final_value(&project, "q[1]"), final_value(&project, "q[3]"));
+    }
+
+    // 2. ...so the wrap must spell it the way the equation does, and the
+    //    fragments must compile. `q["1"]` and `q[1]` are the same position, so
+    //    both spellings are checked.
+    for (index_expr, expected) in [("\"1\"", "PREVIOUS(q[\"1\"])"), ("1", "PREVIOUS(q[1])")] {
+        let project = indexed_axis_index_model(index_expr, "2");
+        let (db, model, source_project) = char_fixture_db(&project);
+        assert!(
+            fragment_compile_failures(&db, model, source_project).is_empty(),
+            "q[{index_expr}]: every link-score fragment must compile; a `d·1` \
+             qualification does not resolve on an indexed axis and zeroes the score"
+        );
+        let text = link_score_text(
+            &db,
+            model,
+            source_project,
+            &["link_score\u{205A}source\u{2192}target"],
+        );
+        assert!(
+            text.contains(expected),
+            "q[{index_expr}]: expected {expected:?} in the partial; got: {text}"
+        );
+        assert!(
+            !text.contains("d\u{B7}1"),
+            "q[{index_expr}]: an indexed axis has no `dim·elem` spelling; got: {text}"
+        );
+    }
+}
+
+/// `DimName.N` on an indexed axis is unreachable, pinned rather than handled.
+///
+/// `compiler::subscript` and `compiler::context` both accept `D.2` as a static
+/// position, and `dimensions::resolve_axis_index_name` deliberately does not --
+/// a disclosed conservative gap. It stays a gap because the shape does not
+/// compile in the first place: the TARGET's own fragment fails, so no link
+/// score for it is ever asked for. If this test starts failing, the gap has
+/// become reachable and the resolver needs the `DimName.N` form.
+#[test]
+fn dim_name_dot_index_does_not_compile_so_the_resolver_gap_is_inert() {
+    use crate::db::compile_project_incremental;
+    let project = indexed_axis_index_model("D.2", "2");
+    let db = SimlinDb::default();
+    let sp = sync_from_datamodel(&db, &project).project;
+    assert!(
+        compile_project_incremental(&db, sp, "main").is_err(),
+        "`q[D.2]` is expected NOT to compile; if it now does, \
+         `resolve_axis_index_name` must learn the `DimName.N` static position \
+         or the wrap will freeze it and read the wrong row"
+    );
+}
