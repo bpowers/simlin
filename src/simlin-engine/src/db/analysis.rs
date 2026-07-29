@@ -3407,8 +3407,16 @@ pub(crate) fn reconstruct_model_variables(
         // Add implicit variables (module instances from SMOOTH/DELAY expansion)
         for implicit_dm_var in &parsed.implicit_vars {
             let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
-            let lowered_imp = reconstruct_implicit_variable(db, model, &scope, implicit_dm_var);
-            variables.insert(Ident::new(&imp_name), lowered_imp);
+            // `or_insert_with`, not `insert`: an explicit variable wins a
+            // canonical-name collision with a synthesized implicit one. That
+            // is the precedence `reconstruct_single_variable` had when it
+            // searched explicit variables first, and it now reads this map.
+            // Unreachable today -- implicit names carry the reserved `$⁚`
+            // prefix -- so this fixes no bug; it keeps the two from being
+            // able to differ.
+            variables.entry(Ident::new(&imp_name)).or_insert_with(|| {
+                reconstruct_implicit_variable(db, model, &scope, implicit_dm_var)
+            });
         }
     }
 
@@ -3417,8 +3425,14 @@ pub(crate) fn reconstruct_model_variables(
 
 /// Reconstruct a single `Variable` by name from a model's parse results.
 ///
-/// Checks explicit source variables first, then searches implicit variables
-/// (from SMOOTH/DELAY module expansion) if the name isn't found.
+/// A projection of [`reconstruct_model_variables`] rather than its own
+/// parse-and-lower: the map that query caches already holds every explicit and
+/// implicit variable, built by the same construction against the same scope.
+/// Deriving one from the other is not merely cheaper (the LTM link-score
+/// emitter calls this once per link, and on C-LEARN that is 6,721 times) --
+/// it also means the two can no longer disagree about what a name resolves
+/// to, which they could when each searched the model its own way.
+///
 /// Returns None if the name doesn't match any variable in the model.
 pub(super) fn reconstruct_single_variable(
     db: &dyn Db,
@@ -3426,59 +3440,11 @@ pub(super) fn reconstruct_single_variable(
     project: SourceProject,
     var_name: &str,
 ) -> Option<crate::variable::Variable> {
-    use crate::common::{Canonical, Ident};
-
-    let source_vars = model.variables(db);
-    let module_ctx = model_module_ident_context(db, model, project, vec![]);
-    // The canonicalized dimension context comes from the project-global
-    // salsa-cached query; every parse and lowering below reads that one value.
-    let dim_context = project_dimensions_context(db, project);
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: dim_context,
-        model_name: "",
-    };
-
-    // Check explicit variables first
-    if let Some(source_var) = source_vars.get(var_name) {
-        // Explicit module instances take the same direct-construction path
-        // as implicit ones (see `reconstruct_implicit_variable`'s doc): the
-        // generic parse+lower path resolves module inputs against
-        // `scope.models`, which is EMPTY here, so `resolve_module_input`
-        // drops every input and the reconstructed `Variable::Module` carries
-        // `inputs: []`. The LTM module link-score generators match the
-        // edge's source against those inputs to pick the composite-reference
-        // (exhaustive) or output-port delta-ratio (discovery) formula; with
-        // the inputs lost they silently fell through to a bare-module-name
-        // delta-ratio whose fragment cannot compile, zeroing every
-        // input→user-module link score.
-        let dm_var = super::datamodel_variable_from_source(db, *source_var);
-        if matches!(dm_var, datamodel::Variable::Module(_)) {
-            return Some(reconstruct_implicit_variable(db, model, &scope, &dm_var));
-        }
-        let parsed =
-            parse_source_variable_with_module_context(db, *source_var, project, module_ctx);
-        let lowered = crate::model::lower_variable(&scope, &parsed.variable);
-        return Some(lowered);
-    }
-
-    // Search implicit variables from all source variables
-    let canonical_target: Ident<Canonical> = Ident::new(var_name);
-
-    for (_name, source_var) in source_vars.iter() {
-        let parsed =
-            parse_source_variable_with_module_context(db, *source_var, project, module_ctx);
-        for implicit_dm_var in &parsed.implicit_vars {
-            let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
-            if Ident::<Canonical>::new(&imp_name) == canonical_target {
-                let lowered_imp = reconstruct_implicit_variable(db, model, &scope, implicit_dm_var);
-                return Some(lowered_imp);
-            }
-        }
-    }
-
-    None
+    reconstruct_model_variables(db, model, project)
+        .get(&crate::common::Ident::<crate::common::Canonical>::new(
+            var_name,
+        ))
+        .cloned()
 }
 
 /// Reconstruct an implicit (compiler-generated) variable from its datamodel form.
