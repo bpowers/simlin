@@ -1077,7 +1077,7 @@ impl Expr3LowerContext for Context<'_> {
     /// sub-model's own metadata and gets the dimensions this method did not.
     /// Bare references, whole-array copies and transposes all produced correct
     /// results before the fix.
-    fn get_dimensions(&self, ident: &str) -> Option<Vec<Dimension>> {
+    fn get_dimensions(&self, ident: &str) -> Option<&[Dimension]> {
         let canonical = canonicalize(ident);
         let vars = self.metadata.get(self.model_name)?;
         // A plain name is its own key, so the direct lookup answers it without
@@ -1092,7 +1092,7 @@ impl Expr3LowerContext for Context<'_> {
                 .get_metadata(&Ident::from_unchecked(canonical.into_owned()))
                 .ok()?,
         };
-        var_metadata.var.get_dimensions().map(|dims| dims.to_vec())
+        var_metadata.var.get_dimensions()
     }
 
     fn is_dimension_name(&self, ident: &str) -> bool {

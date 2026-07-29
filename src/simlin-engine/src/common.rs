@@ -907,7 +907,7 @@ fn is_canonical(name: &str) -> bool {
             // This covers both uppercase (Lu) and titlecase (Lt) Unicode
             // categories -- titlecase letters like ǅ are NOT uppercase but
             // to_lowercase() still maps them to a different character (ǆ).
-            c if c.to_lowercase().ne(std::iter::once(c)) => return false,
+            c if changes_when_lowercased(c) => return false,
             _ => {}
         }
     }
@@ -923,7 +923,97 @@ fn is_canonical(name: &str) -> bool {
 /// Note: the borrowed slice may be a sub-slice of the input when there is
 /// leading/trailing whitespace but the trimmed content is already canonical.
 /// The returned `Cow` borrows from the input `&str` in all borrowed cases.
+/// Whether `to_lowercase` would change `c`, i.e. Unicode's
+/// `Changes_When_Lowercased`.
+///
+/// Spelled as two `next()` calls rather than `c.to_lowercase().ne(once(c))`:
+/// the iterator-comparison form goes through the generic `Iterator::eq_by`,
+/// which does not collapse, and this predicate is on the identifier fast path.
+#[inline]
+fn changes_when_lowercased(c: char) -> bool {
+    let mut lower = c.to_lowercase();
+    lower.next() != Some(c) || lower.next().is_some()
+}
+
+/// Per-byte "this byte alone cannot make a name non-canonical" table, the
+/// fast path's whole decision.
+///
+/// `false` for every non-ASCII byte (the Unicode rules need `char`s), for the
+/// characters [`is_canonical`] rejects outright, for ASCII uppercase, and for
+/// the backslash -- which is excluded not because it is always wrong but
+/// because deciding needs a lookahead, and a backslash in an identifier is
+/// rare enough that paying the slower check for it is free.
+///
+/// A byte table rather than a 128-bit mask, which was measured and is worse on
+/// both counts: the mask needs a range test and a variable shift per byte,
+/// where the table is one load the scan can keep in flight.
+static CANONICAL_BYTE: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut b = 0usize;
+    while b < 128 {
+        table[b] = !matches!(
+            b as u8,
+            b'"' | b'.' | b' ' | b'\n' | b'\r' | b'\t' | b'\\' | b'A'..=b'Z'
+        );
+        b += 1;
+    }
+    table
+};
+
+/// Whether `name` is already canonical AND `str::trim` would not change it --
+/// [`is_canonical`] composed with "needs no trimming", decided in one pass.
+///
+/// The point of handling non-ASCII here rather than bailing to
+/// [`is_canonical`] is that a non-ASCII character costs one decode instead of
+/// demoting the WHOLE string to that function's Unicode arm: LTM's synthetic
+/// variable names are mostly ASCII with a handful of U+205A / U+2192
+/// separators, and re-canonicalizing one used to case-check every character.
+///
+/// Conservative in one direction and never the other: a character this rejects
+/// may still be canonical (any non-ASCII whitespace, say), in which case the
+/// caller's `trim` + [`is_canonical`] pair answers exactly as it always did --
+/// only slower. Nothing it ACCEPTS may be non-canonical.
+fn is_canonical_needing_no_trim(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if CANONICAL_BYTE[b as usize] {
+            i += 1;
+            continue;
+        }
+        if b < 0x80 {
+            // An ASCII byte the table rejects: uppercase, a character
+            // `is_canonical` rejects outright, or a backslash (whose verdict
+            // needs a lookahead this scan deliberately does not take).
+            return false;
+        }
+        // Non-ASCII. Only two of `is_canonical`'s Unicode rules can apply --
+        // every character it rejects by value is ASCII apart from U+00A0, and
+        // `char::is_whitespace` covers that one. Rejecting EVERY Unicode
+        // whitespace (not just U+00A0) is what makes "needs no trimming" sound:
+        // `str::trim` strips the whole White_Space property.
+        let Some(c) = name[i..].chars().next() else {
+            return false;
+        };
+        if c.is_whitespace() || changes_when_lowercased(c) {
+            return false;
+        }
+        i += c.len_utf8();
+    }
+    true
+}
+
 pub fn canonicalize(name: &str) -> Cow<'_, str> {
+    // Fastest path: one scan proving the name is already canonical AND needs
+    // no trimming. This is the overwhelmingly common case -- every already-canonical
+    // identifier the compiler re-canonicalizes on its way through a map lookup
+    // or an AST lowering lands here -- and it replaces a Unicode `trim`, an
+    // `is_ascii` scan, and `is_canonical`'s own scan with a single pass.
+    if is_canonical_needing_no_trim(name) {
+        return Cow::Borrowed(name);
+    }
+
     // Fast path: if the name is already trimmed and canonical, avoid allocation.
     let trimmed = name.trim();
     if is_canonical(trimmed) {
@@ -1484,6 +1574,36 @@ mod canonicalize_invariant_tests {
             let s: String = pieces.concat();
             prop_assert_eq!(&*canonicalize(&s), &*canonicalize_slow_path(&s),
                 "canonicalize disagrees with the unfused reference for {:?}", s);
+        }
+    }
+
+    /// A canonical name is returned BORROWED, non-ASCII separators included.
+    ///
+    /// The engine's own generated identifiers -- LTM link/loop scores, the
+    /// module separator, the literal-period sentinel -- are mostly ASCII with a
+    /// few non-ASCII separators, and they are re-canonicalized constantly on
+    /// their way through map lookups and AST lowerings. Answering "already
+    /// canonical" for them without allocating is the point of the fused scan,
+    /// and it is invisible in a correctness test: demoting them to the slow
+    /// path returns an EQUAL `Cow::Owned`, so only the discriminant shows it.
+    #[test]
+    fn engine_generated_names_canonicalize_without_allocating() {
+        let names = [
+            "population",
+            "net_flow_2",
+            "model\u{00b7}variable",
+            "goal_1\u{2024}5_for_temperature",
+            "$\u{205a}ltm\u{205a}link_score\u{205a}food\u{2192}population",
+            "$\u{205a}ltm\u{205a}loop_score\u{205a}r1",
+            "$\u{205a}ltm\u{205a}agg\u{205a}3",
+            "stdlib\u{205a}smth1",
+        ];
+        for name in names {
+            assert!(
+                matches!(canonicalize(name), Cow::Borrowed(_)),
+                "{name:?} is canonical and must not be re-built"
+            );
+            assert_eq!(&*canonicalize(name), &*canonicalize_slow_path(name));
         }
     }
 
@@ -2804,6 +2924,37 @@ impl AsRef<str> for Ident<Canonical> {
 impl std::borrow::Borrow<str> for Ident<Canonical> {
     fn borrow(&self) -> &str {
         self.inner.as_str()
+    }
+}
+
+// Re-tagging one canonical newtype as another, for the cases where the source
+// value's TYPE already proves the string is canonical: `Ident<Canonical>` and
+// the dimension/element names are three tags over one interned storage, so
+// there is nothing to compute and nothing to allocate -- the payload is shared
+// and the conversion is a refcount bump.
+//
+// Spelling this `CanonicalDimensionName::from_raw(ident.as_str())` instead is
+// what these exist to stop: that re-runs the whole canonicalize pass over a
+// string that is canonical by construction, then takes a shard of the global
+// interner to look up a payload the caller is already holding. On the array
+// lowering path (`Expr3::from_expr2` expanding a bare array reference into one
+// star range per declared dimension) that was measured at 6% of a C-LEARN
+// compile's total instructions.
+impl From<&Ident<Canonical>> for CanonicalDimensionName {
+    fn from(ident: &Ident<Canonical>) -> Self {
+        CanonicalDimensionName(ident.inner.clone())
+    }
+}
+
+impl From<&Ident<Canonical>> for CanonicalElementName {
+    fn from(ident: &Ident<Canonical>) -> Self {
+        CanonicalElementName(ident.inner.clone())
+    }
+}
+
+impl From<&CanonicalDimensionName> for CanonicalElementName {
+    fn from(name: &CanonicalDimensionName) -> Self {
+        CanonicalElementName(name.0.clone())
     }
 }
 

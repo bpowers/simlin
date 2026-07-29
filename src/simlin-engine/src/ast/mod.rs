@@ -178,11 +178,11 @@ impl<'a> ArrayContext<'a> {
 }
 
 impl<'a> Expr2Context for ArrayContext<'a> {
-    fn get_dimensions(&self, ident: &str) -> Option<Vec<crate::dimensions::Dimension>> {
+    fn get_dimensions(&self, ident: &str) -> Option<&[crate::dimensions::Dimension]> {
         // During AST lowering, we may encounter variables that don't exist yet
         // (e.g., in tests or when processing incomplete models)
         let var = self.get_variable(self.model_name, ident)?;
-        var.get_dimensions().map(|dims| dims.to_vec())
+        var.get_dimensions()
     }
 
     fn allocate_temp_id(&mut self) -> u32 {
@@ -205,10 +205,9 @@ impl<'a> Expr2Context for ArrayContext<'a> {
     }
 
     fn is_indexed_dimension(&self, name: &str) -> bool {
-        let canonical_name = crate::common::CanonicalDimensionName::from_raw(name);
         self.scope
             .dimensions
-            .get(&canonical_name)
+            .get_by_raw_name(name)
             .map(|dim| matches!(dim, crate::dimensions::Dimension::Indexed(_, _)))
             .unwrap_or(false)
     }

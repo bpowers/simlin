@@ -286,7 +286,7 @@ impl Expr3 {
 /// - Detecting dimension name references in subscripts
 pub trait Expr3LowerContext {
     /// Get the dimensions of a variable, or None if it's a scalar.
-    fn get_dimensions(&self, ident: &str) -> Option<Vec<Dimension>>;
+    fn get_dimensions(&self, ident: &str) -> Option<&[Dimension]>;
 
     /// Check if an identifier is a dimension name (not a variable).
     /// Used to detect A2A dimension references in subscripts.
@@ -325,7 +325,7 @@ impl IndexExpr3 {
                 // For named dimensions like Cities{Boston,NYC,LA}, this becomes StarRange("cities").
                 // The downstream compiler/evaluator must recognize that StarRange(parent_dim)
                 // means "iterate over all elements" (equivalent to IndexOp::Wildcard).
-                let dim_name = CanonicalDimensionName::from_raw(dim.name());
+                let dim_name = dim.canonical_name().clone();
                 Ok(IndexExpr3::StarRange(dim_name, *loc))
             }
             IndexExpr2::StarRange(subdim_name, loc) => {
@@ -362,13 +362,13 @@ impl IndexExpr3 {
                     && ctx.is_dimension_name(ident.as_str())
                 {
                     // Check if this is an element of the parent dimension first
-                    let element_name = CanonicalElementName::from_raw(ident.as_str());
+                    let element_name = CanonicalElementName::from(ident);
                     let is_element_of_parent = dim
                         .map(|d| d.get_offset(&element_name).is_some())
                         .unwrap_or(false);
 
                     if !is_element_of_parent {
-                        let canonical = CanonicalDimensionName::from_raw(ident.as_str());
+                        let canonical = CanonicalDimensionName::from(ident);
                         return Ok(IndexExpr3::Dimension(canonical, *loc));
                     }
                 }
@@ -401,10 +401,7 @@ impl Expr3 {
                     // which are immediately resolved to star ranges
                     let subscripts: Vec<IndexExpr3> = dims
                         .iter()
-                        .map(|dim| {
-                            let dim_name = CanonicalDimensionName::from_raw(dim.name());
-                            IndexExpr3::StarRange(dim_name, *loc)
-                        })
+                        .map(|dim| IndexExpr3::StarRange(dim.canonical_name().clone(), *loc))
                         .collect();
 
                     return Ok(Expr3::Subscript(
@@ -441,7 +438,7 @@ impl Expr3 {
                 // Validate subscript count matches dimension count.
                 // This catches cases like arr[*, *, *] on a 2D array before
                 // we hit misleading errors in individual subscript lowering.
-                if let Some(ref d) = dims
+                if let Some(d) = dims
                     && args.len() > d.len()
                 {
                     // Find the first out-of-bounds subscript for error location
@@ -450,12 +447,11 @@ impl Expr3 {
                     return eqn_err!(MismatchedDimensions, extra_loc.start, extra_loc.end);
                 }
 
-                let dims_ref = dims.as_deref();
                 let lowered_args: EquationResult<Vec<IndexExpr3>> = args
                     .iter()
                     .enumerate()
                     .map(|(i, arg)| {
-                        let dim = dims_ref.and_then(|d| d.get(i));
+                        let dim = dims.and_then(|d| d.get(i));
                         IndexExpr3::from_index_expr2(arg, dim, ctx)
                     })
                     .collect();
@@ -710,8 +706,7 @@ impl<'a> Pass1Context<'a> {
                 {
                     // Find the active dimension that matches this dimension name
                     for (dim, sub) in active_dims.iter().zip(active_subs.iter()) {
-                        let active_dim_name = CanonicalDimensionName::from_raw(dim.name());
-                        if active_dim_name.as_str() == dim_name.as_str() {
+                        if dim.name() == dim_name.as_str() {
                             // Found a match - resolve to the concrete index
                             if let Some(index) = Self::subscript_to_index(dim, sub) {
                                 let const_expr =
@@ -1576,8 +1571,8 @@ mod tests {
     }
 
     impl Expr3LowerContext for TestLowerContext {
-        fn get_dimensions(&self, ident: &str) -> Option<Vec<Dimension>> {
-            self.dimensions.get(ident).cloned()
+        fn get_dimensions(&self, ident: &str) -> Option<&[Dimension]> {
+            self.dimensions.get(ident).map(|dims| dims.as_slice())
         }
 
         fn is_dimension_name(&self, ident: &str) -> bool {
