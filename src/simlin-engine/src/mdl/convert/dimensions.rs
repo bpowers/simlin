@@ -60,7 +60,7 @@ impl<'input> ConversionContext<'input> {
 
         for (original_name, canonical) in subscript_names {
             let dim = self.build_dimension_recursive(&original_name, &canonical)?;
-            self.dimensions.push(dim);
+            self.push_dimension(dim);
         }
 
         // Phase 3: build dimension_elements map
@@ -91,6 +91,10 @@ impl<'input> ConversionContext<'input> {
 
         // Phase 5: materialize equivalence dimensions as actual Dimension entries
         // and add them to dimension_elements for expand_subscript to find them
+        // Built first and applied after: `push_dimension` takes `&mut self`
+        // (it invalidates the memoized dimension context), which cannot be
+        // called while `self.equivalences` is borrowed by the loop.
+        let mut aliases: Vec<(String, Dimension)> = Vec::new();
         for (src, dst) in &self.equivalences {
             if let Some(target_dim) = self
                 .dimensions
@@ -109,13 +113,15 @@ impl<'input> ConversionContext<'input> {
                     parent: None,
                 };
                 alias.set_maps_to(dst.clone());
-                // Add alias to dimension_elements so expand_subscript can find it
-                if let DimensionElements::Named(elements) = &alias.elements {
-                    self.dimension_elements
-                        .insert(src.clone(), elements.clone());
-                }
-                self.dimensions.push(alias);
+                aliases.push((src.clone(), alias));
             }
+        }
+        for (src, alias) in aliases {
+            // Add alias to dimension_elements so expand_subscript can find it
+            if let DimensionElements::Named(elements) = &alias.elements {
+                self.dimension_elements.insert(src, elements.clone());
+            }
+            self.push_dimension(alias);
         }
 
         Ok(())

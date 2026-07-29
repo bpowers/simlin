@@ -53,6 +53,17 @@ pub struct ConversionContext<'input> {
     symbols: HashMap<String, SymbolInfo<'input>>,
     /// Collected dimensions
     dimensions: Vec<Dimension>,
+    /// [`Self::dimensions`] in canonicalized `DimensionsContext` form, built on
+    /// first use.
+    ///
+    /// Cached because it is read once per ELEMENT of every arrayed variable
+    /// (`build_element_context`, resolving cross-dimension mapping
+    /// substitutions), and building it canonicalizes and interns every
+    /// dimension's every element name -- 2% of a C-LEARN import's instructions
+    /// spent rebuilding one immutable value. Invalidated by
+    /// [`Self::push_dimension`], which is the only way `dimensions` grows, so
+    /// the cache cannot go stale by construction rather than by convention.
+    dims_ctx: std::sync::OnceLock<crate::dimensions::DimensionsContext>,
     /// Dimension equivalences: source canonical -> target canonical
     equivalences: HashMap<String, String>,
     /// Original (pre-canonicalization) names for equivalence sources
@@ -162,6 +173,7 @@ impl<'input> ConversionContext<'input> {
             items,
             symbols: HashMap::with_capacity(n_items),
             dimensions,
+            dims_ctx: std::sync::OnceLock::new(),
             equivalences: HashMap::new(),
             equivalence_original_names: HashMap::new(),
             sim_specs,
@@ -179,6 +191,24 @@ impl<'input> ConversionContext<'input> {
             data_provider,
             file_aliases,
         }
+    }
+
+    /// Append a dimension, dropping the memoized [`Self::dims_ctx`].
+    ///
+    /// The ONLY place `dimensions` grows; going through it is what makes the
+    /// memo correct without relying on the phase ordering (dimension building
+    /// happens to finish before any variable is converted today).
+    pub(in crate::mdl::convert) fn push_dimension(&mut self, dim: Dimension) {
+        self.dimensions.push(dim);
+        self.dims_ctx.take();
+    }
+
+    /// The canonicalized form of [`Self::dimensions`], built once.
+    pub(in crate::mdl::convert) fn dimensions_context(
+        &self,
+    ) -> &crate::dimensions::DimensionsContext {
+        self.dims_ctx
+            .get_or_init(|| crate::dimensions::DimensionsContext::from(self.dimensions.as_slice()))
     }
 
     /// Convert the MDL to a Project.

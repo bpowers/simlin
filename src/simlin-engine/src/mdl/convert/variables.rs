@@ -717,7 +717,6 @@ impl<'input> ConversionContext<'input> {
     ) -> crate::mdl::xmile_compat::ElementContext {
         use crate::common::CanonicalDimensionName;
         use crate::common::CanonicalElementName;
-        use crate::dimensions::DimensionsContext;
         use crate::mdl::xmile_compat::ElementContext;
 
         debug_assert_eq!(
@@ -746,7 +745,7 @@ impl<'input> ConversionContext<'input> {
         // specific element via the mapping. For example, if DimD maps to
         // DimA and we're iterating at DimA=A2, then DimD -> D1 (where
         // D1 is the DimD element that maps to A2).
-        let dims_ctx = DimensionsContext::from(self.dimensions.as_slice());
+        let dims_ctx = self.dimensions_context();
         for dim_canonical in self.dimension_elements.keys() {
             if substitutions.contains_key(dim_canonical)
                 || subrange_mappings.contains_key(dim_canonical)
