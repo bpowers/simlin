@@ -83,7 +83,7 @@ use crate::common::{Canonical, Ident};
 use crate::datamodel;
 use crate::db::{
     Db, ModuleIdentContext, SourceModel, SourceProject, model_duplicate_variables,
-    model_module_ident_context, parse_source_variable_with_module_context, project_datamodel_dims,
+    model_module_ident_context, parse_source_variable_with_module_context,
     project_dimensions_context, project_units_context,
 };
 use crate::model::{ModelStage0, ModelStage1, ScopeStage0, VariableStage0};
@@ -485,7 +485,7 @@ pub(crate) fn model_stage0(db: &dyn Db, model: SourceModel, project: SourceProje
     note_execution(&STAGE0_EXECUTIONS);
 
     let units_ctx = project_units_context(db, project);
-    let dm_dims = project_datamodel_dims(db, project);
+    let dim_ctx = project_dimensions_context(db, project);
 
     let display_name = model.name(db);
     let ident: Ident<Canonical> = Ident::new(display_name);
@@ -510,7 +510,7 @@ pub(crate) fn model_stage0(db: &dyn Db, model: SourceModel, project: SourceProje
     // second generation into the `nested` sink.
     let mut nested_implicit: Vec<datamodel::Variable> = Vec::new();
     var_list.extend(implicit_dm.into_iter().map(|dm_var| {
-        crate::variable::parse_var(dm_dims, &dm_var, &mut nested_implicit, units_ctx, |mi| {
+        crate::variable::parse_var(dim_ctx, &dm_var, &mut nested_implicit, units_ctx, |mi| {
             Ok(Some(mi.clone()))
         })
     }));

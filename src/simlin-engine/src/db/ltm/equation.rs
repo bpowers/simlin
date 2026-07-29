@@ -26,7 +26,6 @@ use std::collections::HashMap;
 
 use crate::ast::{Ast, Expr0};
 use crate::common::{CanonicalElementName, EquationError};
-use crate::datamodel;
 use crate::lexer::LexerType;
 
 /// One equation arm: the authoritative parsed AST plus its diagnostic text.
@@ -306,7 +305,7 @@ impl LtmEquation {
     /// init-phase ast to build.
     pub fn to_flow_ast(
         &self,
-        dimensions: &[datamodel::Dimension],
+        dimensions: &crate::dimensions::DimensionsContext,
     ) -> (Option<Ast<Expr0>>, Vec<EquationError>) {
         // A generated arm that failed to parse rejects the whole equation,
         // BEFORE any shape-specific assembly -- see the note above on why the

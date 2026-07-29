@@ -21,7 +21,6 @@ use std::collections::HashSet;
 
 use crate::builtins_visitor::{empty_macro_registry, instantiate_implicit_modules};
 use crate::common::{Canonical, Ident};
-use crate::datamodel;
 use crate::dimensions::DimensionsContext;
 
 use crate::db::ParsedVariableResult;
@@ -46,11 +45,10 @@ use super::LtmEquation;
 pub(super) fn parse_ltm_equation(
     var_name: &str,
     equation: &LtmEquation,
-    dims: &[datamodel::Dimension],
+    dims: &DimensionsContext,
     module_idents: Option<&HashSet<Ident<Canonical>>>,
     model_var_names: Option<&HashSet<Ident<Canonical>>>,
 ) -> ParsedVariableResult {
-    let dimensions_ctx = DimensionsContext::from(dims);
     let (flow_ast, mut errors) = equation.to_flow_ast(dims);
 
     let mut implicit_vars = Vec::new();
@@ -58,7 +56,7 @@ pub(super) fn parse_ltm_equation(
         Some(ast) => match instantiate_implicit_modules(
             var_name,
             ast,
-            Some(&dimensions_ctx),
+            Some(dims),
             module_idents,
             model_var_names,
             // LTM synthetic equations are engine-generated and never contain

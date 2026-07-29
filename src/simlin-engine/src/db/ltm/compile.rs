@@ -26,8 +26,8 @@ use crate::db::{
     compile_phase_to_per_var_bytecodes, compute_layout, extract_tables_from_source_var,
     fragment_emit_ctx, model_dependency_graph, model_implicit_var_info, model_module_ident_context,
     model_module_map, parse_source_variable_with_module_context, project_converted_dimensions,
-    project_datamodel_dims, project_dimensions_context, project_units_context,
-    reconstruct_single_variable, variable_dimensions, variable_size,
+    project_dimensions_context, project_units_context, reconstruct_single_variable,
+    variable_dimensions, variable_size,
 };
 
 use super::parse::{ltm_equation_dimensions, parse_ltm_equation, scalarize_ltm_equation};
@@ -101,6 +101,35 @@ pub fn compile_ltm_var_fragment(
 
     let equation = scalarize_ltm_equation(lsv.equation.clone());
     compile_ltm_equation_fragment(db, &lsv.name, &equation, model, project)
+}
+
+// How many times `link_score_equation_text_shaped`'s body has run on this
+// thread (test-only).
+//
+// The query documents a per-involved-variable incrementality claim, and only a
+// body-entry count can check it: salsa BACKDATES a re-executed query whose
+// value compares equal, so the memo neither moves nor changes and pointer
+// equality reads identical whether the body ran or not. Thread-local for the
+// same reasons `db::stages`' counters are -- see the note there, including the
+// warning about what happens if this subtree is ever parallelized.
+#[cfg(test)]
+thread_local! {
+    static SHAPED_LINK_SCORE_EXECUTIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+/// Zero the counter (test-only). Call it after the fixture is synced and
+/// first compiled, so setup work is not charged to the measured edit.
+#[cfg(test)]
+pub(crate) fn reset_shaped_link_score_executions() {
+    SHAPED_LINK_SCORE_EXECUTIONS.with(|c| c.set(0));
+}
+
+/// Read the counter (test-only).
+#[cfg(test)]
+pub(crate) fn shaped_link_score_executions() -> usize {
+    SHAPED_LINK_SCORE_EXECUTIONS.with(|c| c.get())
 }
 
 /// Outcome of [`link_score_equation_text_shaped`] for one
@@ -190,6 +219,9 @@ pub fn link_score_equation_text_shaped<'db>(
     use crate::common::{Canonical, Ident};
     use crate::db::LtmSyntheticVar;
     use crate::db::module_link_score_equation;
+
+    #[cfg(test)]
+    SHAPED_LINK_SCORE_EXECUTIONS.with(|c| c.set(c.get() + 1));
 
     let from_name = link_id.link_from(db);
     let to_name = link_id.link_to(db);
@@ -785,7 +817,7 @@ fn lower_ltm_variable(
 
     let model_name_str = model.name(db);
     let module_ctx = model_module_ident_context(db, model, project, vec![]);
-    let dims = project_datamodel_dims(db, project);
+    let dim_ctx = project_dimensions_context(db, project);
     let units_ctx = project_units_context(db, project);
     let mut stage0_vars: HashMap<Ident<Canonical>, crate::model::VariableStage0> = HashMap::new();
     stage0_vars.insert(Ident::new(parsed_variable.ident()), parsed_variable.clone());
@@ -799,7 +831,7 @@ fn lower_ltm_variable(
             // in their own right; here only the dep's own dimensions matter.
             let mut nested = Vec::new();
             let dep_parsed =
-                crate::variable::parse_var(dims, implicit_dm, &mut nested, units_ctx, |mi| {
+                crate::variable::parse_var(dim_ctx, implicit_dm, &mut nested, units_ctx, |mi| {
                     Ok(Some(mi.clone()))
                 });
             stage0_vars.insert(Ident::new(dep_name), dep_parsed);
@@ -853,7 +885,6 @@ pub(crate) fn compile_ltm_equation_fragment(
     // Project-global dims (datamodel form, used to resolve the equation's
     // dimension names) plus the canonicalized context + converted dims, all
     // from the salsa-cached queries rather than rebuilt per LTM fragment.
-    let dims = project_datamodel_dims(db, project);
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
@@ -865,7 +896,7 @@ pub(crate) fn compile_ltm_equation_fragment(
     let parsed = parse_ltm_equation(
         var_name,
         equation,
-        dims,
+        dim_context,
         Some(module_idents),
         Some(model_var_names),
     );
@@ -899,8 +930,10 @@ pub(crate) fn compile_ltm_equation_fragment(
     // Arena for sub-model stub variables allocated by build_submodel_metadata
     let arena = bumpalo::Bump::new();
 
-    let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
-        HashMap::new();
+    let mut mini_metadata: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::compiler::VariableMetadata<'_>,
+    > = Default::default();
 
     // Add implicit time/dt/initial_time/final_time variables
     {
@@ -1526,10 +1559,10 @@ pub(crate) fn compile_ltm_equation_fragment(
     }
 
     // Build the all_metadata map
-    let mut all_metadata: HashMap<
+    let mut all_metadata: crate::common::IdentMap<
         Ident<Canonical>,
-        HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
-    > = HashMap::new();
+        crate::common::IdentMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
+    > = Default::default();
     all_metadata.insert(model_name_ident.clone(), mini_metadata);
 
     // Populate sub-model metadata for implicit module sub-models
@@ -1546,20 +1579,22 @@ pub(crate) fn compile_ltm_equation_fragment(
     // function runs once per LTM synthetic var, ~6.7k times on C-LEARN).
     let base_module_models = model_module_map(db, model, project);
     let merged_module_models;
-    let module_models: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        if implicit_module_refs.is_empty() {
-            base_module_models
-        } else {
-            merged_module_models = {
-                let mut merged = base_module_models.clone();
-                let current_model_modules = merged.entry(model_name_ident.clone()).or_default();
-                for (var_ident, (sub_model_name, _input_set)) in &implicit_module_refs {
-                    current_model_modules.insert(var_ident.clone(), sub_model_name.clone());
-                }
-                merged
-            };
-            &merged_module_models
+    let module_models: &crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    > = if implicit_module_refs.is_empty() {
+        base_module_models
+    } else {
+        merged_module_models = {
+            let mut merged = base_module_models.clone();
+            let current_model_modules = merged.entry(model_name_ident.clone()).or_default();
+            for (var_ident, (sub_model_name, _input_set)) in &implicit_module_refs {
+                current_model_modules.insert(var_ident.clone(), sub_model_name.clone());
+            }
+            merged
         };
+        &merged_module_models
+    };
 
     // The LTM synthetic var's fragment goes through the SAME emission entry
     // point the explicit and implicit paths use. This site used to carry a
@@ -1968,9 +2003,8 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         }
     }
 
-    // Project-global dims (datamodel form needed by `parse_var`) plus the
-    // canonicalized context + converted dims, from the salsa-cached queries.
-    let dims = project_datamodel_dims(db, project);
+    // The project-global canonicalized dimension context + converted dims,
+    // from the salsa-cached queries.
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
@@ -1978,7 +2012,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
 
     let mut dummy_implicits = Vec::new();
     let parsed_implicit = crate::variable::parse_var(
-        dims,
+        dim_context,
         implicit_dm_var,
         &mut dummy_implicits,
         units_ctx,
@@ -2049,8 +2083,10 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
     // Arena for sub-model stub variables
     let arena = bumpalo::Bump::new();
 
-    let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
-        HashMap::new();
+    let mut mini_metadata: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::compiler::VariableMetadata<'_>,
+    > = Default::default();
 
     // Add implicit time/dt/initial_time/final_time
     {
@@ -2426,10 +2462,10 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         }
     }
 
-    let mut all_metadata: HashMap<
+    let mut all_metadata: crate::common::IdentMap<
         Ident<Canonical>,
-        HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
-    > = HashMap::new();
+        crate::common::IdentMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
+    > = Default::default();
     all_metadata.insert(model_name_ident.clone(), mini_metadata);
 
     // Build sub-model metadata for module-type implicit vars and any
@@ -2467,23 +2503,25 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
     let base_module_models = model_module_map(db, model, project);
     let ltm_module_refs = model_ltm_implicit_module_refs(db, model, project);
     let merged_module_models;
-    let module_models: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        if module_refs.is_empty() && ltm_module_refs.is_empty() {
-            base_module_models
-        } else {
-            merged_module_models = {
-                let mut merged = base_module_models.clone();
-                let current_model_modules = merged.entry(model_name_ident.clone()).or_default();
-                for (var_ident, (sub_model_name, _input_set)) in &module_refs {
-                    current_model_modules.insert(var_ident.clone(), sub_model_name.clone());
-                }
-                for (im_ident, sub_model_name) in ltm_module_refs.iter() {
-                    current_model_modules.insert(im_ident.clone(), sub_model_name.clone());
-                }
-                merged
-            };
-            &merged_module_models
+    let module_models: &crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    > = if module_refs.is_empty() && ltm_module_refs.is_empty() {
+        base_module_models
+    } else {
+        merged_module_models = {
+            let mut merged = base_module_models.clone();
+            let current_model_modules = merged.entry(model_name_ident.clone()).or_default();
+            for (var_ident, (sub_model_name, _input_set)) in &module_refs {
+                current_model_modules.insert(var_ident.clone(), sub_model_name.clone());
+            }
+            for (im_ident, sub_model_name) in ltm_module_refs.iter() {
+                current_model_modules.insert(im_ident.clone(), sub_model_name.clone());
+            }
+            merged
         };
+        &merged_module_models
+    };
 
     // Same single emission entry point as every other fragment site. This was
     // the second hand-copied duplicate of that body; it differed from the

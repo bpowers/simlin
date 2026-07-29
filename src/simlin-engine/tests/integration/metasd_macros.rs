@@ -467,10 +467,13 @@ fn metasd_expansion_tier() {
 
 /// macros.AC6.4 (expansion tier, the heavy real-world models). Same
 /// assertion as `metasd_expansion_tier` for the large models whose
-/// compile exceeds the per-test time budget (beer-game ~1.2s, FREE ~1.2s,
-/// covid19, scirev7 ~2.5s, scirev8 ~3.6s). `#[ignore]`d with a documented
-/// opt-in per `docs/dev/rust.md`.
-// Run with: cargo test -p simlin-engine --test integration --release -- --ignored metasd_expansion_tier_heavy
+/// compile used to exceed the per-test time budget.
+///
+/// Still `#[ignore]`d, but no longer for time: `metasd_expansion_tier_full`
+/// now runs by default and is a strict superset of this, so running both in
+/// the default suite would buy nothing. Kept as the focused subset to reach for
+/// when the full tier fails and the light models are not the culprit.
+// Run with: cargo test -p simlin-engine --test integration -- --ignored metasd_expansion_tier_heavy
 #[test]
 #[ignore]
 fn metasd_expansion_tier_heavy() {
@@ -479,12 +482,13 @@ fn metasd_expansion_tier_heavy() {
 
 /// The full expansion tier over ALL 17 macro-using files in one run
 /// (light + heavy), the AC6.4 "all 14 macro-using metasd models pass the
-/// expansion tier" check. `#[ignore]`d (sum of compiles ~10s, over the
-/// per-test budget); the default `metasd_expansion_tier` covers the light
-/// subset on every build.
-// Run with: cargo test -p simlin-engine --test integration --release -- --ignored metasd_expansion_tier_full
+/// expansion tier" check.
+///
+/// Runs by default. The "sum of compiles ~10s" that put it over the per-test
+/// budget is now under three seconds on a debug build, and this is the
+/// assertion the acceptance criterion is actually about -- the light-subset
+/// `metasd_expansion_tier` was the compromise, not the goal.
 #[test]
-#[ignore]
 fn metasd_expansion_tier_full() {
     run_expansion_tier(CORPUS.iter());
 }

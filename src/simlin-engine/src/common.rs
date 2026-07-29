@@ -907,7 +907,7 @@ fn is_canonical(name: &str) -> bool {
             // This covers both uppercase (Lu) and titlecase (Lt) Unicode
             // categories -- titlecase letters like ǅ are NOT uppercase but
             // to_lowercase() still maps them to a different character (ǆ).
-            c if c.to_lowercase().ne(std::iter::once(c)) => return false,
+            c if changes_when_lowercased(c) => return false,
             _ => {}
         }
     }
@@ -923,7 +923,117 @@ fn is_canonical(name: &str) -> bool {
 /// Note: the borrowed slice may be a sub-slice of the input when there is
 /// leading/trailing whitespace but the trimmed content is already canonical.
 /// The returned `Cow` borrows from the input `&str` in all borrowed cases.
+/// The engine's hash map for identifier-keyed lookups.
+///
+/// `FxHashMap`, not `std::collections::HashMap`. Identifier lookups are the
+/// compiler's densest operation -- a name resolution per AST node, per element,
+/// per fragment -- and SipHash over a short string was measured at 4-6% of a
+/// large model's compile cycles. FxHash's fixed seed additionally makes
+/// iteration order reproducible across processes, which is the direction this
+/// crate already wants (GH #595): a salsa-cached value built by iterating a map
+/// must not differ run to run.
+///
+/// The cost, stated because it is the reason this is not the default
+/// everywhere: a fixed seed means an adversary who chooses the KEYS can force
+/// collisions, and the keys here are variable names out of a model file. Every
+/// engine entry point today compiles a model on behalf of the person who
+/// supplied it -- the CLI, the local MCP and viewer servers, pysimlin, and the
+/// browser's wasm bundle -- so a collision attack costs the attacker their own
+/// compile. Do not extend this alias to a map keyed by input from a party other
+/// than the one paying for the work.
+pub(crate) type IdentMap<K, V> = std::collections::HashMap<K, V, rustc_hash::FxBuildHasher>;
+
+/// Whether `to_lowercase` would change `c`, i.e. Unicode's
+/// `Changes_When_Lowercased`.
+///
+/// Spelled as two `next()` calls rather than `c.to_lowercase().ne(once(c))`:
+/// the iterator-comparison form goes through the generic `Iterator::eq_by`,
+/// which does not collapse, and this predicate is on the identifier fast path.
+#[inline]
+fn changes_when_lowercased(c: char) -> bool {
+    let mut lower = c.to_lowercase();
+    lower.next() != Some(c) || lower.next().is_some()
+}
+
+/// Per-byte "this byte alone cannot make a name non-canonical" table, the
+/// fast path's whole decision.
+///
+/// `false` for every non-ASCII byte (the Unicode rules need `char`s), for the
+/// characters [`is_canonical`] rejects outright, for ASCII uppercase, and for
+/// the backslash -- which is excluded not because it is always wrong but
+/// because deciding needs a lookahead, and a backslash in an identifier is
+/// rare enough that paying the slower check for it is free.
+///
+/// A byte table rather than a 128-bit mask, which was measured and is worse on
+/// both counts: the mask needs a range test and a variable shift per byte,
+/// where the table is one load the scan can keep in flight.
+static CANONICAL_BYTE: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut b = 0usize;
+    while b < 128 {
+        table[b] = !matches!(
+            b as u8,
+            b'"' | b'.' | b' ' | b'\n' | b'\r' | b'\t' | b'\\' | b'A'..=b'Z'
+        );
+        b += 1;
+    }
+    table
+};
+
+/// Whether `name` is already canonical AND `str::trim` would not change it --
+/// [`is_canonical`] composed with "needs no trimming", decided in one pass.
+///
+/// The point of handling non-ASCII here rather than bailing to
+/// [`is_canonical`] is that a non-ASCII character costs one decode instead of
+/// demoting the WHOLE string to that function's Unicode arm: LTM's synthetic
+/// variable names are mostly ASCII with a handful of U+205A / U+2192
+/// separators, and re-canonicalizing one used to case-check every character.
+///
+/// Conservative in one direction and never the other: a character this rejects
+/// may still be canonical (any non-ASCII whitespace, say), in which case the
+/// caller's `trim` + [`is_canonical`] pair answers exactly as it always did --
+/// only slower. Nothing it ACCEPTS may be non-canonical.
+fn is_canonical_needing_no_trim(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if CANONICAL_BYTE[b as usize] {
+            i += 1;
+            continue;
+        }
+        if b < 0x80 {
+            // An ASCII byte the table rejects: uppercase, a character
+            // `is_canonical` rejects outright, or a backslash (whose verdict
+            // needs a lookahead this scan deliberately does not take).
+            return false;
+        }
+        // Non-ASCII. Only two of `is_canonical`'s Unicode rules can apply --
+        // every character it rejects by value is ASCII apart from U+00A0, and
+        // `char::is_whitespace` covers that one. Rejecting EVERY Unicode
+        // whitespace (not just U+00A0) is what makes "needs no trimming" sound:
+        // `str::trim` strips the whole White_Space property.
+        let Some(c) = name[i..].chars().next() else {
+            return false;
+        };
+        if c.is_whitespace() || changes_when_lowercased(c) {
+            return false;
+        }
+        i += c.len_utf8();
+    }
+    true
+}
+
 pub fn canonicalize(name: &str) -> Cow<'_, str> {
+    // Fastest path: one scan proving the name is already canonical AND needs
+    // no trimming. This is the overwhelmingly common case -- every already-canonical
+    // identifier the compiler re-canonicalizes on its way through a map lookup
+    // or an AST lowering lands here -- and it replaces a Unicode `trim`, an
+    // `is_ascii` scan, and `is_canonical`'s own scan with a single pass.
+    if is_canonical_needing_no_trim(name) {
+        return Cow::Borrowed(name);
+    }
+
     // Fast path: if the name is already trimmed and canonical, avoid allocation.
     let trimmed = name.trim();
     if is_canonical(trimmed) {
@@ -932,7 +1042,15 @@ pub fn canonicalize(name: &str) -> Cow<'_, str> {
         return Cow::Borrowed(trimmed);
     }
 
-    // Slow path: full canonicalization with allocation.
+    // Slow path: four rewrites per identifier part -- period mapping,
+    // doubled-backslash unescaping, whitespace collapse, lowercasing. Each is
+    // guarded by a cheap "is there anything to do" test and skipped by
+    // borrowing when there is not, and the last two are fused for an ASCII part
+    // so they write straight into the output. Spelling them as four
+    // unconditional `String`-returning steps cost four allocations and a
+    // two-way substring searcher per part even for a name whose only defect was
+    // its capitalization -- and this is the single hottest function in a large
+    // model's compile, reached once per identifier occurrence.
     let mut canonicalized_name = String::with_capacity(trimmed.len());
 
     for part in IdentifierPartIterator::new(trimmed) {
@@ -953,22 +1071,83 @@ pub fn canonicalize(name: &str) -> Cow<'_, str> {
             } else {
                 Cow::Borrowed(inner)
             }
-        } else {
+        } else if part.contains('.') {
             // Replace periods with middle dots (·) for module hierarchy separators.
             // This allows us to distinguish between:
             // - Module separators: model.variable -> model·variable
             // - Literal periods in quoted names: "a.b" -> a<U+2024>b
             Cow::Owned(part.replace('.', "·"))
+        } else {
+            Cow::Borrowed(part)
         };
 
-        let part = part.replace("\\\\", "\\");
-        let part = replace_whitespace_with_underscore(&part);
-        let part = part.to_lowercase();
+        // Unescape doubled backslashes. Guarded on a single-character search
+        // (which is memchr) rather than on the two-character pattern, whose
+        // searcher setup costs more than the scan: no backslash at all implies
+        // no doubled one, and a part holding a lone backslash is rare enough
+        // that letting it fall through to a no-op `replace` is free.
+        let part = if part.contains('\\') {
+            Cow::Owned(part.replace("\\\\", "\\"))
+        } else {
+            part
+        };
 
-        canonicalized_name.push_str(&part);
+        push_whitespace_folded_lowercase(&mut canonicalized_name, &part);
     }
 
     Cow::Owned(canonicalized_name)
+}
+
+/// Append `part` to `out` with the last two canonicalization steps applied:
+/// [`replace_whitespace_with_underscore`], then `to_lowercase`.
+///
+/// The ASCII arm fuses the two into one pass that writes directly into `out`.
+/// That is sound for exactly two reasons, both of which fail outside ASCII:
+/// ASCII lowercasing is per-byte and context-free (`str::to_lowercase` is
+/// context-sensitive in general -- Greek capital sigma lowercases differently
+/// at the end of a word), and the only non-ASCII character the whitespace pass
+/// recognizes, U+00A0, cannot occur. The non-ASCII arm therefore keeps the two
+/// steps separate and unchanged, and skips `to_lowercase` when no character
+/// would change -- the same predicate `is_canonical` uses.
+fn push_whitespace_folded_lowercase(out: &mut String, part: &str) {
+    if part.is_ascii() {
+        let bytes = part.as_bytes();
+        let mut in_whitespace = false;
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            // A literal `\n` / `\r` escape (two characters) counts as
+            // whitespace; any other backslash passes through.
+            if b == b'\\' && matches!(bytes.get(i + 1), Some(b'n' | b'r')) {
+                i += 2;
+                if !in_whitespace {
+                    out.push('_');
+                    in_whitespace = true;
+                }
+            } else if matches!(b, b'\n' | b'\r' | b'\t' | b' ') {
+                i += 1;
+                if !in_whitespace {
+                    out.push('_');
+                    in_whitespace = true;
+                }
+            } else {
+                i += 1;
+                in_whitespace = false;
+                out.push(char::from(b.to_ascii_lowercase()));
+            }
+        }
+        return;
+    }
+
+    let replaced = replace_whitespace_with_underscore(part);
+    if replaced
+        .chars()
+        .any(|c| c.to_lowercase().ne(std::iter::once(c)))
+    {
+        out.push_str(&replaced.to_lowercase());
+    } else {
+        out.push_str(&replaced);
+    }
 }
 
 /// Group a variable-ident list by canonical form and return the colliding
@@ -1370,6 +1549,23 @@ mod canonicalize_invariant_tests {
         result
     }
 
+    /// The alphabet that actually reaches every branch of the slow path.
+    ///
+    /// `\PC{0,100}` alone does not: the branches are selected by quotes,
+    /// periods, backslashes, the two literal escapes, whitespace runs, and
+    /// characters whose lowercasing is context-sensitive or non-ASCII, and a
+    /// generator over all non-control characters produces those roughly never.
+    /// Two of these deserve naming. `Σ` is the one character for which
+    /// `str::to_lowercase` is context-sensitive (it lowercases to `ς` at the
+    /// end of a word and `σ` elsewhere), which is why the fused rewrite is
+    /// restricted to ASCII. `\u{00A0}` is the one non-ASCII character
+    /// `replace_whitespace_with_underscore` treats as whitespace, and `str::
+    /// trim` also strips it, so it exercises both the trim and the fold.
+    const SLOW_PATH_ALPHABET: &[&str] = &[
+        "a", "Z", "_", "0", ".", " ", "\t", "\n", "\r", "\\", "\"", "·", "\u{2024}", "\u{00A0}",
+        "Σ", "σ", "ς", "É", "ǅ", "İ",
+    ];
+
     proptest! {
         #[test]
         fn fast_path_agrees_with_slow_path(s in "\\PC{0,100}") {
@@ -1383,6 +1579,90 @@ mod canonicalize_invariant_tests {
                 prop_assert_eq!(*b, s.trim(),
                     "Borrowed result should equal trimmed input for {:?}", s);
             }
+        }
+
+        /// The same differential check, driven by [`SLOW_PATH_ALPHABET`] so the
+        /// slow path's branches are reached rather than hoped for. Named
+        /// separately from the broad-alphabet property because the two catch
+        /// different things: that one covers the input space, this one covers
+        /// the code.
+        #[test]
+        fn canonicalize_agrees_with_the_unfused_reference(
+            pieces in proptest::collection::vec(
+                proptest::sample::select(SLOW_PATH_ALPHABET), 0..24)
+        ) {
+            let s: String = pieces.concat();
+            prop_assert_eq!(&*canonicalize(&s), &*canonicalize_slow_path(&s),
+                "canonicalize disagrees with the unfused reference for {:?}", s);
+        }
+    }
+
+    /// A canonical name is returned BORROWED, non-ASCII separators included.
+    ///
+    /// The engine's own generated identifiers -- LTM link/loop scores, the
+    /// module separator, the literal-period sentinel -- are mostly ASCII with a
+    /// few non-ASCII separators, and they are re-canonicalized constantly on
+    /// their way through map lookups and AST lowerings. Answering "already
+    /// canonical" for them without allocating is the point of the fused scan,
+    /// and it is invisible in a correctness test: demoting them to the slow
+    /// path returns an EQUAL `Cow::Owned`, so only the discriminant shows it.
+    #[test]
+    fn engine_generated_names_canonicalize_without_allocating() {
+        let names = [
+            "population",
+            "net_flow_2",
+            "model\u{00b7}variable",
+            "goal_1\u{2024}5_for_temperature",
+            "$\u{205a}ltm\u{205a}link_score\u{205a}food\u{2192}population",
+            "$\u{205a}ltm\u{205a}loop_score\u{205a}r1",
+            "$\u{205a}ltm\u{205a}agg\u{205a}3",
+            "stdlib\u{205a}smth1",
+        ];
+        for name in names {
+            assert!(
+                matches!(canonicalize(name), Cow::Borrowed(_)),
+                "{name:?} is canonical and must not be re-built"
+            );
+            assert_eq!(&*canonicalize(name), &*canonicalize_slow_path(name));
+        }
+    }
+
+    /// Hand-written cases for the interactions the fused ASCII rewrite has to
+    /// get right, each of which composes two steps whose order matters.
+    #[test]
+    fn fused_ascii_fold_matches_the_reference_on_step_interactions() {
+        let cases = [
+            // Doubled backslash collapses BEFORE the escape scan sees it, so
+            // `\\n` is a backslash followed by `n`, i.e. an escape.
+            "A\\\\nB",
+            // ...whereas a single backslash before `n` is already the escape,
+            // and a lone trailing backslash passes through.
+            "A\\nB",
+            "A\\",
+            // Whitespace runs (mixed real and escaped) collapse to one `_`.
+            "A \t\nB",
+            "A\\n\\rB",
+            "A \\n B",
+            // A backslash that is not an escape resets the run, so the
+            // whitespace on either side of it yields two underscores.
+            "A \\ B",
+            // Quoted parts keep their interior spacing rules but lose the
+            // quotes, and a period inside them is the literal-period sentinel.
+            "\"A B\".C",
+            "\"a.b\"",
+            // Mixed quoted/unquoted parts in one identifier.
+            "Mod.\"Var Name\".Sub",
+            // Leading/trailing whitespace is trimmed before anything else.
+            "  Net Flow  ",
+            // A part that is purely whitespace.
+            "A. .B",
+        ];
+        for case in cases {
+            assert_eq!(
+                &*canonicalize(case),
+                &*canonicalize_slow_path(case),
+                "canonicalize disagrees with the unfused reference for {case:?}"
+            );
         }
     }
 
@@ -2664,6 +2944,56 @@ impl AsRef<str> for Ident<Canonical> {
 impl std::borrow::Borrow<str> for Ident<Canonical> {
     fn borrow(&self) -> &str {
         self.inner.as_str()
+    }
+}
+
+// Re-tagging one canonical newtype as another, for the cases where the source
+// value's TYPE already proves the string is canonical: `Ident<Canonical>` and
+// the dimension/element names are three tags over one interned storage, so
+// there is nothing to compute and nothing to allocate -- the payload is shared
+// and the conversion is a refcount bump.
+//
+// Spelling this `CanonicalDimensionName::from_raw(ident.as_str())` instead is
+// what these exist to stop: that re-runs the whole canonicalize pass over a
+// string that is canonical by construction, then takes a shard of the global
+// interner to look up a payload the caller is already holding. On the array
+// lowering path (`Expr3::from_expr2` expanding a bare array reference into one
+// star range per declared dimension) that was measured at 6% of a C-LEARN
+// compile's total instructions.
+impl From<&Ident<Canonical>> for CanonicalDimensionName {
+    fn from(ident: &Ident<Canonical>) -> Self {
+        CanonicalDimensionName(ident.inner.clone())
+    }
+}
+
+impl From<&Ident<Canonical>> for CanonicalElementName {
+    fn from(ident: &Ident<Canonical>) -> Self {
+        CanonicalElementName(ident.inner.clone())
+    }
+}
+
+impl From<&CanonicalDimensionName> for CanonicalElementName {
+    fn from(name: &CanonicalDimensionName) -> Self {
+        CanonicalElementName(name.0.clone())
+    }
+}
+
+// The same, for the two other newtypes over `CanonicalStorage`. Probing a map
+// with a `&str` skips the global interner entirely: constructing a
+// `CanonicalDimensionName`/`CanonicalElementName` just to ask whether a key is
+// present takes a sharded mutex, allocates an `Arc` payload on first sighting,
+// and bumps/drops a refcount every time -- all to produce a value the lookup
+// discards. Sound for exactly the reason above: `CanonicalStorage::hash` hashes
+// the string content, so a `&str` probe hashes identically to the stored key.
+impl std::borrow::Borrow<str> for CanonicalDimensionName {
+    fn borrow(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::borrow::Borrow<str> for CanonicalElementName {
+    fn borrow(&self) -> &str {
+        self.0.as_str()
     }
 }
 

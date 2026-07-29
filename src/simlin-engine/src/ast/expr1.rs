@@ -24,14 +24,14 @@ pub enum IndexExpr1 {
 }
 
 impl IndexExpr1 {
-    pub(crate) fn from(expr: IndexExpr0) -> EquationResult<Self> {
+    pub(crate) fn from(expr: &IndexExpr0) -> EquationResult<Self> {
         let expr = match expr {
-            IndexExpr0::Wildcard(loc) => IndexExpr1::Wildcard(loc),
-            IndexExpr0::StarRange(ident, loc) => IndexExpr1::StarRange(ident.canonicalize(), loc),
+            IndexExpr0::Wildcard(loc) => IndexExpr1::Wildcard(*loc),
+            IndexExpr0::StarRange(ident, loc) => IndexExpr1::StarRange(ident.canonicalize(), *loc),
             IndexExpr0::Range(l, r, loc) => {
-                IndexExpr1::Range(Expr1::from(l)?, Expr1::from(r)?, loc)
+                IndexExpr1::Range(Expr1::from(l)?, Expr1::from(r)?, *loc)
             }
-            IndexExpr0::DimPosition(n, loc) => IndexExpr1::DimPosition(n, loc),
+            IndexExpr0::DimPosition(n, loc) => IndexExpr1::DimPosition(*n, *loc),
             IndexExpr0::Expr(e) => IndexExpr1::Expr(Expr1::from(e)?),
         };
 
@@ -72,13 +72,23 @@ pub enum Expr1 {
 }
 
 impl Expr1 {
-    pub(crate) fn from(expr: Expr0) -> EquationResult<Self> {
+    /// Lower a parsed `Expr0` into an `Expr1`, by REFERENCE.
+    ///
+    /// Deliberately not by value even though every field is either copied or
+    /// re-derived here: `Expr1` is a different tree with different identifier
+    /// types, so it is built from scratch either way, and taking `&Expr0` is
+    /// what lets `lower_ast` read a variable's parsed AST straight out of its
+    /// (shared, salsa-cached) home. Consuming it forced the caller to deep-copy
+    /// the whole `Expr0` tree -- a `Box` per node and a `String` per identifier
+    /// -- purely so this function could destroy it, which was the single
+    /// largest source of allocations in a C-LEARN compile.
+    pub(crate) fn from(expr: &Expr0) -> EquationResult<Self> {
         let expr = match expr {
-            Expr0::Const(s, n, loc) => Expr1::Const(s, n, loc),
-            Expr0::Var(id, loc) => Expr1::Var(id.canonicalize(), loc),
+            Expr0::Const(s, n, loc) => Expr1::Const(s.clone(), *n, *loc),
+            Expr0::Var(id, loc) => Expr1::Var(id.canonicalize(), *loc),
             Expr0::App(UntypedBuiltinFn(id, orig_args), loc) => {
-                let args: EquationResult<Vec<Expr1>> =
-                    orig_args.into_iter().map(Expr1::from).collect();
+                let loc = *loc;
+                let args: EquationResult<Vec<Expr1>> = orig_args.iter().map(Expr1::from).collect();
                 let mut args = args?;
 
                 macro_rules! check_arity {
@@ -301,21 +311,21 @@ impl Expr1 {
             }
             Expr0::Subscript(id, args, loc) => {
                 let args: EquationResult<Vec<IndexExpr1>> =
-                    args.into_iter().map(IndexExpr1::from).collect();
-                Expr1::Subscript(id.canonicalize(), args?, loc)
+                    args.iter().map(IndexExpr1::from).collect();
+                Expr1::Subscript(id.canonicalize(), args?, *loc)
             }
-            Expr0::Op1(op, l, loc) => Expr1::Op1(op, Box::new(Expr1::from(*l)?), loc),
+            Expr0::Op1(op, l, loc) => Expr1::Op1(*op, Box::new(Expr1::from(l)?), *loc),
             Expr0::Op2(op, l, r, loc) => Expr1::Op2(
-                op,
-                Box::new(Expr1::from(*l)?),
-                Box::new(Expr1::from(*r)?),
-                loc,
+                *op,
+                Box::new(Expr1::from(l)?),
+                Box::new(Expr1::from(r)?),
+                *loc,
             ),
             Expr0::If(cond, t, f, loc) => Expr1::If(
-                Box::new(Expr1::from(*cond)?),
-                Box::new(Expr1::from(*t)?),
-                Box::new(Expr1::from(*f)?),
-                loc,
+                Box::new(Expr1::from(cond)?),
+                Box::new(Expr1::from(t)?),
+                Box::new(Expr1::from(f)?),
+                *loc,
             ),
         };
         Ok(expr)

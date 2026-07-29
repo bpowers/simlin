@@ -157,8 +157,13 @@ pub struct CausalGraph {
     pub(crate) edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
     /// Set of stocks in the model
     pub(crate) stocks: HashSet<Ident<Canonical>>,
-    /// Variables in the model for polarity analysis
-    pub(crate) variables: HashMap<Ident<Canonical>, Variable>,
+    /// Variables in the model for polarity analysis.
+    ///
+    /// Shared rather than owned: the map is the salsa-cached
+    /// `db::reconstruct_model_variables`, and a graph is built many times per
+    /// LTM compile (once per query that needs polarity or module structure)
+    /// while the variables in it do not change between those builds.
+    pub(crate) variables: std::sync::Arc<HashMap<Ident<Canonical>, Variable>>,
     /// Module instances and their internal graphs
     pub(crate) module_graphs: HashMap<Ident<Canonical>, Box<CausalGraph>>,
 }
@@ -286,7 +291,7 @@ impl CausalGraph {
         Ok(CausalGraph {
             edges,
             stocks,
-            variables,
+            variables: std::sync::Arc::new(variables),
             module_graphs,
         })
     }

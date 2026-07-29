@@ -571,7 +571,10 @@ pub(crate) fn lower_var_fragment(
     converted_dims: &[crate::dimensions::Dimension],
     dim_context: &crate::dimensions::DimensionsContext,
     model_name_ident: &Ident<Canonical>,
-    module_models: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>>,
+    module_models: &crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    >,
     inputs: &BTreeSet<Ident<Canonical>>,
 ) -> LoweredVarFragment {
     let var_ident = var.ident(db).clone();
@@ -826,8 +829,10 @@ pub(crate) fn lower_var_fragment(
     // implicit globals are absent for a separate reason: they lower to
     // `LoadGlobalVar` at fixed absolute slots and never go through a symbol
     // table at all.)
-    let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
-        HashMap::new();
+    let mut mini_metadata: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::compiler::VariableMetadata<'_>,
+    > = Default::default();
 
     // Add self
     mini_metadata.insert(
@@ -885,10 +890,10 @@ pub(crate) fn lower_var_fragment(
     }
 
     // Build the all_metadata map (model_name -> var_name -> metadata)
-    let mut all_metadata: HashMap<
+    let mut all_metadata: crate::common::IdentMap<
         Ident<Canonical>,
-        HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
-    > = HashMap::new();
+        crate::common::IdentMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
+    > = Default::default();
     all_metadata.insert(model_name_ident.clone(), mini_metadata);
 
     // Populate sub-model metadata for implicit and explicit module sub-models

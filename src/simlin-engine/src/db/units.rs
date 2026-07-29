@@ -46,8 +46,7 @@ use crate::datamodel;
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel,
     SourceProject, SourceVariable, model_scope_models, model_scope_stage0, model_stage0,
-    model_stage1, project_datamodel_dims, project_dimensions_context, project_units_context,
-    source_model_is_stdlib,
+    model_stage1, project_dimensions_context, project_units_context, source_model_is_stdlib,
 };
 
 /// Collect the identifiers that must share units because they sit in the
@@ -656,11 +655,11 @@ fn check_conveyor_param_units(
     // inference and the ordinary unit check) or the cached stage itself: the
     // synthetic auxes must not add constraints to the model under analysis, and
     // must never reach another reader of the memo.
-    let dm_dims = project_datamodel_dims(db, project);
+    let dim_ctx = project_dimensions_context(db, project);
     let mut aug_ms0 = model_stage0(db, model, project).clone();
     for dm_var in &synth_dm_vars {
         let mut dummy: Vec<datamodel::Variable> = Vec::new();
-        let vs0 = crate::variable::parse_var(dm_dims, dm_var, &mut dummy, units_ctx, |mi| {
+        let vs0 = crate::variable::parse_var(dim_ctx, dm_var, &mut dummy, units_ctx, |mi| {
             Ok(Some(mi.clone()))
         });
         aug_ms0.variables.insert(Ident::new(vs0.ident()), vs0);
@@ -673,7 +672,7 @@ fn check_conveyor_param_units(
     let models_s0 = model_scope_stage0(db, model, project);
     let scope = crate::model::ScopeStage0 {
         models: &models_s0,
-        dimensions: project_dimensions_context(db, project),
+        dimensions: dim_ctx,
         model_name: aug_ms0.ident.as_str(),
     };
     let aug_s1 = crate::model::ModelStage1::new(&scope, &aug_ms0);

@@ -2,19 +2,18 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
 use std::sync::Mutex;
 
 use smallvec::SmallVec;
 
-use crate::common::{CanonicalDimensionName, CanonicalElementName};
+use crate::common::{CanonicalDimensionName, CanonicalElementName, IdentMap};
 use crate::datamodel;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, salsa::Update)]
 pub struct NamedDimension {
     pub elements: Vec<CanonicalElementName>,
-    pub indexed_elements: HashMap<CanonicalElementName, usize>,
+    pub indexed_elements: IdentMap<CanonicalElementName, usize>,
     /// If this dimension maps to another (e.g., DimA -> DimB), the target dimension name.
     /// Elements correspond positionally: elements[i] of this dimension corresponds to
     /// elements[i] of the target dimension.
@@ -39,8 +38,12 @@ impl NamedDimension {
     /// The input should be in canonical form (lowercase, spaces as underscores).
     /// This is more efficient than iterating through `elements` for large dimensions.
     pub fn get_element_index(&self, element: &str) -> Option<usize> {
+        // Probe by `&str` (`CanonicalElementName: Borrow<str>`) rather than
+        // building a `CanonicalElementName`: a lookup has no reason to take a
+        // shard of the global interner and install an `Arc` payload for a name
+        // it is only asking about.
         self.indexed_elements
-            .get(&CanonicalElementName::from_raw(element))
+            .get(crate::common::canonicalize(element).as_ref())
             .map(|&idx| idx - 1) // Convert from 1-based to 0-based
     }
 }
@@ -82,7 +85,7 @@ impl SubdimensionRelation {
 #[derive(Default)]
 struct RelationshipCache {
     cache: Mutex<
-        HashMap<(CanonicalDimensionName, CanonicalDimensionName), Option<SubdimensionRelation>>,
+        IdentMap<(CanonicalDimensionName, CanonicalDimensionName), Option<SubdimensionRelation>>,
     >,
 }
 
@@ -252,7 +255,7 @@ impl From<&datamodel::Dimension> for Dimension {
                     .iter()
                     .map(|e| CanonicalElementName::from_raw(e))
                     .collect();
-                let indexed_elements: HashMap<CanonicalElementName, usize> = canonical_elements
+                let indexed_elements: IdentMap<CanonicalElementName, usize> = canonical_elements
                     .iter()
                     .enumerate()
                     // system dynamic indexes are 1-indexed
@@ -306,9 +309,9 @@ pub struct DimensionsContext {
     /// sharing is safe. The `relationship_cache` memo stays per-instance
     /// (cloned cold), which only costs re-deriving subdimension relations on
     /// first use.
-    dimensions: std::sync::Arc<HashMap<CanonicalDimensionName, Dimension>>,
+    dimensions: std::sync::Arc<IdentMap<CanonicalDimensionName, Dimension>>,
     /// For indexed subdimensions, maps child dimension name to its declared parent.
-    indexed_parents: std::sync::Arc<HashMap<CanonicalDimensionName, CanonicalDimensionName>>,
+    indexed_parents: std::sync::Arc<IdentMap<CanonicalDimensionName, CanonicalDimensionName>>,
     relationship_cache: RelationshipCache,
 }
 
@@ -380,7 +383,7 @@ impl DimensionsContext {
             }
         }
 
-        let indexed_parents: HashMap<CanonicalDimensionName, CanonicalDimensionName> = dimensions
+        let indexed_parents: IdentMap<CanonicalDimensionName, CanonicalDimensionName> = dimensions
             .iter()
             .filter_map(|dim| {
                 dim.parent.as_ref().map(|parent_name| {
@@ -414,17 +417,31 @@ impl DimensionsContext {
         self.dimensions.get(name)
     }
 
+    /// Get a dimension by a name that may not be in canonical form yet.
+    ///
+    /// The `&str` probe (via `CanonicalDimensionName: Borrow<str>`) is the
+    /// point: a lookup must not intern. `CanonicalDimensionName::from_raw`
+    /// takes a shard of the global interner and installs an `Arc` payload for
+    /// a name that may not even be a dimension, and every miss leaves a
+    /// refcount round trip behind -- on the parse path that is per dimension
+    /// reference per variable.
+    pub(crate) fn get_by_raw_name(&self, name: &str) -> Option<&Dimension> {
+        self.dimensions
+            .get(crate::common::canonicalize(name).as_ref())
+    }
+
     pub(crate) fn is_dimension_name(&self, name: &str) -> bool {
-        let canonical_name = CanonicalDimensionName::from_raw(name);
-        self.dimensions.contains_key(&canonical_name)
+        self.dimensions
+            .contains_key(crate::common::canonicalize(name).as_ref())
     }
 
     pub(crate) fn lookup(&self, element: &str) -> Option<u32> {
         if let Some(pos) = element.find('·') {
-            let dimension_name = CanonicalDimensionName::from_raw(&element[..pos]);
-            let element_name = CanonicalElementName::from_raw(&element[pos + '·'.len_utf8()..]);
-            if let Some(Dimension::Named(_, dimension)) = self.dimensions.get(&dimension_name)
-                && let Some(off) = dimension.indexed_elements.get(&element_name)
+            let dimension_name = crate::common::canonicalize(&element[..pos]);
+            let element_name = crate::common::canonicalize(&element[pos + '·'.len_utf8()..]);
+            if let Some(Dimension::Named(_, dimension)) =
+                self.dimensions.get(dimension_name.as_ref())
+                && let Some(off) = dimension.indexed_elements.get(element_name.as_ref())
             {
                 return Some(*off as u32);
             }

@@ -398,7 +398,7 @@ fn expand_pin_on_element_graph(
     let sub_graph = crate::ltm::CausalGraph {
         edges: sub_edges,
         stocks: sub_stocks,
-        variables: HashMap::new(),
+        variables: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     };
 

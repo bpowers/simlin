@@ -178,11 +178,11 @@ impl<'a> ArrayContext<'a> {
 }
 
 impl<'a> Expr2Context for ArrayContext<'a> {
-    fn get_dimensions(&self, ident: &str) -> Option<Vec<crate::dimensions::Dimension>> {
+    fn get_dimensions(&self, ident: &str) -> Option<&[crate::dimensions::Dimension]> {
         // During AST lowering, we may encounter variables that don't exist yet
         // (e.g., in tests or when processing incomplete models)
         let var = self.get_variable(self.model_name, ident)?;
-        var.get_dimensions().map(|dims| dims.to_vec())
+        var.get_dimensions()
     }
 
     fn allocate_temp_id(&mut self) -> u32 {
@@ -205,10 +205,9 @@ impl<'a> Expr2Context for ArrayContext<'a> {
     }
 
     fn is_indexed_dimension(&self, name: &str) -> bool {
-        let canonical_name = crate::common::CanonicalDimensionName::from_raw(name);
         self.scope
             .dimensions
-            .get(&canonical_name)
+            .get_by_raw_name(name)
             .map(|dim| matches!(dim, crate::dimensions::Dimension::Indexed(_, _)))
             .unwrap_or(false)
     }
@@ -232,7 +231,7 @@ impl<'a> Expr2Context for ArrayContext<'a> {
     }
 }
 
-pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<Ast<Expr2>> {
+pub(crate) fn lower_ast(scope: &ScopeStage0, ast: &Ast<Expr0>) -> EquationResult<Ast<Expr2>> {
     match ast {
         Ast::Scalar(expr) => {
             let mut ctx = ArrayContext::new(scope, scope.model_name);
@@ -246,18 +245,18 @@ pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<
             Expr1::from(expr)
                 .map(|expr| expr.constify_dimensions(scope))
                 .and_then(|expr| Expr2::from(expr, &mut ctx))
-                .map(|expr| Ast::ApplyToAll(dims, expr))
+                .map(|expr| Ast::ApplyToAll(dims.clone(), expr))
         }
         Ast::Arrayed(dims, elements, default_expr, apply_default_to_missing) => {
             let mut ctx = ArrayContext::with_array_context(scope, scope.model_name);
             let elements: EquationResult<HashMap<CanonicalElementName, Expr2>> = elements
-                .into_iter()
+                .iter()
                 .map(|(id, expr)| {
                     match Expr1::from(expr)
                         .map(|expr| expr.constify_dimensions(scope))
                         .and_then(|expr| Expr2::from(expr, &mut ctx))
                     {
-                        Ok(expr) => Ok((id, expr)),
+                        Ok(expr) => Ok((id.clone(), expr)),
                         Err(err) => Err(err),
                     }
                 })
@@ -272,10 +271,10 @@ pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<
             };
             match elements {
                 Ok(elements) => Ok(Ast::Arrayed(
-                    dims,
+                    dims.clone(),
                     elements,
                     default_expr,
-                    apply_default_to_missing,
+                    *apply_default_to_missing,
                 )),
                 Err(err) => Err(err),
             }

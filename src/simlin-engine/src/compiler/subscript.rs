@@ -83,8 +83,6 @@ pub(crate) fn normalize_subscripts3(
     args: &[IndexExpr3],
     config: &Subscript3Config,
 ) -> Option<Vec<IndexOp>> {
-    use crate::common::CanonicalDimensionName;
-
     let mut operations = Vec::with_capacity(args.len());
 
     for (i, arg) in args.iter().enumerate() {
@@ -93,7 +91,7 @@ pub(crate) fn normalize_subscripts3(
         }
 
         let parent_dim = &config.dims[i];
-        let parent_name = CanonicalDimensionName::from_raw(parent_dim.name());
+        let parent_name = parent_dim.canonical_name();
 
         let op = match arg {
             IndexExpr3::StarRange(subdim_name, _) => {
@@ -125,7 +123,7 @@ pub(crate) fn normalize_subscripts3(
                         // Named subdimension - look up relationship
                         let relation = config
                             .dimensions_ctx
-                            .get_subdimension_relation(subdim_name, &parent_name)?;
+                            .get_subdimension_relation(subdim_name, parent_name)?;
 
                         if relation.is_contiguous() {
                             let start = relation.start_offset();
@@ -235,14 +233,14 @@ pub(crate) fn normalize_subscripts3(
                             let is_dim_name = config
                                 .all_dimensions
                                 .iter()
-                                .any(|d| &*canonicalize(d.name()) == ident.as_str());
+                                .any(|d| d.name() == ident.as_str());
 
                             if is_dim_name {
                                 // It's a dimension name - find matching active dimension
                                 let active_dims = config.active_dimension?;
                                 let active_idx = active_dims
                                     .iter()
-                                    .position(|ad| &*canonicalize(ad.name()) == ident.as_str())?;
+                                    .position(|ad| ad.name() == ident.as_str())?;
                                 IndexOp::ActiveDimRef(active_idx)
                             } else {
                                 // Not a known element or dimension - need dynamic handling
@@ -269,24 +267,20 @@ pub(crate) fn normalize_subscripts3(
                 // A2A dimension reference - need to find matching active dimension.
                 // Check by name first, then by dimension mapping.
                 let active_dims = config.active_dimension?;
+                // Both sides are already canonical -- `name` is a
+                // `CanonicalDimensionName` and a `dimensions::Dimension`'s name
+                // is one by construction -- so neither needs re-canonicalizing
+                // or re-interning to be compared or looked up.
                 let active_idx = active_dims
                     .iter()
-                    .position(|ad| &*canonicalize(ad.name()) == name.as_str())
+                    .position(|ad| ad.name() == name.as_str())
                     .or_else(|| {
                         // Try dimension mapping in both directions (handles
                         // multi-target dimensions correctly).
-                        let dim_name =
-                            crate::common::CanonicalDimensionName::from_raw(name.as_str());
                         active_dims.iter().position(|ad| {
-                            let active_canonical = crate::common::CanonicalDimensionName::from_raw(
-                                &canonicalize(ad.name()),
-                            );
-                            config
-                                .dimensions_ctx
-                                .has_mapping_to(&dim_name, &active_canonical)
-                                || config
-                                    .dimensions_ctx
-                                    .has_mapping_to(&active_canonical, &dim_name)
+                            let active_canonical = ad.canonical_name();
+                            config.dimensions_ctx.has_mapping_to(name, active_canonical)
+                                || config.dimensions_ctx.has_mapping_to(active_canonical, name)
                         })
                     })?;
                 IndexOp::ActiveDimRef(active_idx)

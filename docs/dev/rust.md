@@ -73,6 +73,22 @@ fn my_expensive_test() { ... }
 
 Prefer `--release` for expensive tests -- enumeration, simulation, and layout code can be 10-50x faster than debug.
 
+**`#[ignore]` for runtime is a judgement about today's engine, so re-take it after the engine gets faster.** An ignored gate does not run in pre-commit or CI, which means it catches nothing until someone remembers to ask for it -- `clearn_ltm_var_count_guardrail`'s own doc comment recorded a regression that slipped through for exactly that reason. After a compile-time improvement, time the ignored set and un-ignore what now fits:
+
+```bash
+cargo test -p simlin-engine --test integration --no-run
+RUSTC_BOOTSTRAP=1 cargo test -p simlin-engine --test integration -- --ignored \
+  -Z unstable-options --report-time 2>&1 | grep 'ok <' | sort -t'<' -k2 -rn
+```
+
+Then check the whole suite against CI's budget rather than trusting a developer machine, which has far more cores than a runner:
+
+```bash
+RUST_TEST_THREADS=4 taskset -c 0-3 cargo test --workspace   # approximates a CI runner
+```
+
+When a test stays ignored, say WHY in the attribute or the doc comment, and make the reason falsifiable: "runtime class" goes stale, while "executing C-LEARN under the non-JIT wasm interpreter, which no compiler speedup touches" or "a strict subset of a test that now runs by default" does not.
+
 ## Code Quality
 
 - No placeholder comments ("this is a placeholder"). Use `todo!()` or `unimplemented!()` macros for stubbed-out code, but generally continue working until the implementation is complete.

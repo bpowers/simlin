@@ -86,7 +86,7 @@ impl IndexExpr2 {
         let expr = match expr {
             IndexExpr1::Wildcard(loc) => IndexExpr2::Wildcard(loc),
             IndexExpr1::StarRange(ident, loc) => {
-                IndexExpr2::StarRange(CanonicalDimensionName::from_raw(ident.as_str()), loc)
+                IndexExpr2::StarRange(CanonicalDimensionName::from(&ident), loc)
             }
             IndexExpr1::Range(l, r, loc) => {
                 IndexExpr2::Range(Expr2::from(l, ctx)?, Expr2::from(r, ctx)?, loc)
@@ -171,7 +171,7 @@ pub enum Expr2 {
 /// Provides access to variable dimension information and temp ID allocation
 pub trait Expr2Context {
     /// Get the dimensions of a variable, or None if it's a scalar
-    fn get_dimensions(&self, ident: &str) -> Option<Vec<Dimension>>;
+    fn get_dimensions(&self, ident: &str) -> Option<&[Dimension]>;
 
     /// Allocate a new temp ID for the current equation
     fn allocate_temp_id(&mut self) -> u32;
@@ -816,7 +816,7 @@ impl Expr2 {
                             && ctx.is_dimension_name(id.as_str())
                         {
                             // Convert SIZE(DimName) to a constant
-                            let dim_name = CanonicalDimensionName::from_raw(id.as_str());
+                            let dim_name = CanonicalDimensionName::from(id);
                             if let Some(len) = ctx.get_dimension_len(&dim_name) {
                                 // Return a constant expression with the dimension size
                                 return Ok(Expr2::Const(
@@ -1223,8 +1223,8 @@ mod tests {
     }
 
     impl Expr2Context for TestContext {
-        fn get_dimensions(&self, ident: &str) -> Option<Vec<Dimension>> {
-            self.dimensions.get(ident).cloned()
+        fn get_dimensions(&self, ident: &str) -> Option<&[Dimension]> {
+            self.dimensions.get(ident).map(|dims| dims.as_slice())
         }
 
         fn allocate_temp_id(&mut self) -> u32 {

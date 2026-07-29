@@ -9,6 +9,9 @@
 //!
 //! - `parse_mdl` -- MDL text -> `datamodel::Project` (lexing + parsing + conversion)
 //! - `bytecode_compile` -- `datamodel::Project` -> `CompiledSimulation` (bytecode generation)
+//! - `ltm_compile` -- the same, with LTM (Loops That Matter) enabled, which adds
+//!   causal-edge extraction, loop enumeration, and synthetic link/loop-score
+//!   variable generation on top of ordinary compilation
 //! - `full_pipeline` -- MDL text -> `CompiledSimulation` (all stages end-to-end)
 //! - `salsa_incremental` -- measures `compile_project_incremental` on synthetic
 //!   chain models after a single-variable equation edit or variable add/remove
@@ -29,7 +32,9 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use simlin_engine::datamodel::{self, Aux, Compat, Dt, Equation, SimMethod, SimSpecs, Variable};
-use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+use simlin_engine::db::{
+    SimlinDb, compile_project_incremental, set_project_ltm_enabled, sync_from_datamodel_incremental,
+};
 use simlin_engine::open_vensim;
 
 /// Model metadata for benchmark parameterization.
@@ -123,6 +128,57 @@ fn bench_bytecode_compile(c: &mut Criterion) {
                 b.iter(|| {
                     let mut db = SimlinDb::default();
                     let state = sync_from_datamodel_incremental(&mut db, datamodel, None);
+                    black_box(compile_project_incremental(&db, state.project, "main").unwrap())
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Models the `ltm_compile` group runs. Deliberately not all of [`MODELS`]:
+/// C-LEARN under LTM is a multi-minute compile (~37k synthetic variables), far
+/// outside a criterion sample budget. WRLD3 is the largest model that compiles
+/// with LTM in a benchmarkable time, and it is the model this group exists for
+/// -- its 428 causal edges each get a synthetic link-score variable, so the
+/// LTM-only stages dominate its ordinary compile by roughly an order of
+/// magnitude.
+static LTM_MODELS: &[&str] = &["wrld3"];
+
+/// Benchmark: datamodel::Project -> CompiledSimulation with LTM enabled.
+///
+/// Covers the whole LTM surface -- element causal edges, loop enumeration,
+/// synthetic link/loop-score generation (`model_ltm_variables`), and the
+/// per-link fragment compiles -- on top of the ordinary bytecode compile the
+/// `bytecode_compile` group measures, so the difference between the two groups
+/// is the LTM cost.
+fn bench_ltm_compile(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ltm_compile");
+    group.measurement_time(Duration::from_secs(10));
+
+    for fixture in MODELS.iter().filter(|f| LTM_MODELS.contains(&f.name)) {
+        let contents = load_model(fixture);
+        let datamodel = open_vensim(&contents).unwrap();
+
+        if !is_simulatable(&datamodel) {
+            eprintln!(
+                "skipping ltm_compile/{}: model is not simulatable",
+                fixture.name
+            );
+            continue;
+        }
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(fixture.name),
+            &datamodel,
+            |b, datamodel| {
+                b.iter(|| {
+                    let mut db = SimlinDb::default();
+                    let state = sync_from_datamodel_incremental(&mut db, datamodel, None);
+                    // The flag rides on the project input, so it must be set
+                    // before the first compile; every LTM query reads it.
+                    set_project_ltm_enabled(&mut db, state.project, true);
                     black_box(compile_project_incremental(&db, state.project, "main").unwrap())
                 });
             },
@@ -317,6 +373,7 @@ criterion_group!(
     benches,
     bench_parse_mdl,
     bench_bytecode_compile,
+    bench_ltm_compile,
     bench_full_pipeline,
     bench_incremental_equation_edit,
     bench_incremental_add_remove,

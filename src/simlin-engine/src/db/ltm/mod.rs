@@ -29,7 +29,7 @@ use crate::ltm::strip_subscript;
 use super::{
     Db, SourceModel, SourceProject, SourceVariable, SourceVariableKind, compute_layout,
     model_causal_edges, model_implicit_var_info, project_datamodel_dims,
-    reconstruct_single_variable,
+    project_dimensions_context, reconstruct_single_variable,
 };
 
 mod compile;
@@ -846,7 +846,7 @@ pub fn model_ltm_implicit_var_info(
 
     let ltm_vars = model_ltm_variables(db, model, project);
 
-    let dims = project_datamodel_dims(db, project);
+    let dim_ctx = project_dimensions_context(db, project);
     let module_idents = ltm_module_idents(db, model, project);
     let model_var_names = ltm_model_var_names(db, model, project);
 
@@ -856,7 +856,7 @@ pub fn model_ltm_implicit_var_info(
         let parsed = parse_ltm_equation(
             &ltm_var.name,
             &ltm_var.equation,
-            dims,
+            dim_ctx,
             Some(module_idents),
             Some(model_var_names),
         );
