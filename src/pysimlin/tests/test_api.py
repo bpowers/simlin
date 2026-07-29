@@ -1,5 +1,6 @@
 """Tests for the top-level pysimlin API."""
 
+import importlib.metadata as importlib_metadata
 from pathlib import Path
 
 import pandas as pd
@@ -7,6 +8,24 @@ import pytest
 
 import simlin
 from simlin import Model, Project, Run
+
+
+class TestPackageVersion:
+    """``simlin.__version__`` must report the installed distribution.
+
+    It was a hardcoded ``"0.1.0"`` that had not moved in dozens of releases,
+    so every bug report carrying it named a version that does not exist.
+    """
+
+    def test_version_matches_installed_distribution(self) -> None:
+        try:
+            expected = importlib_metadata.version("pysimlin")
+        except importlib_metadata.PackageNotFoundError:
+            pytest.skip("pysimlin is not installed as a distribution")
+        assert simlin.__version__ == expected
+
+    def test_version_is_not_the_stale_literal(self) -> None:
+        assert simlin.__version__ != "0.1.0"
 
 
 class TestLoadFunction:

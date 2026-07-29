@@ -461,6 +461,19 @@ class Sim:
             sit on stocks in the same SCC partition, they DO normalize against
             each other and the relative score is meaningful as usual.
 
+        .. warning::
+            **That raw-series read is element 0 only, on an ARRAYED loop.**
+            :meth:`get_series` resolves a name to one slot, and the synthetic's
+            base offset is the loop's first element; appending a subscript
+            (``...loop_score:pin1[boston]``) does not resolve, because the LTM
+            synthetics are absent from :meth:`get_var_names`. So on a loop with
+            :meth:`get_loop_element_count` above 1, the raw read reports a
+            DIFFERENT element than this method's own bare (argmax-abs
+            aggregate) result and than :attr:`Loop.behavior_time_series`, with
+            nothing to signal the mismatch. Check
+            :meth:`get_loop_element_count` before relying on a raw read, and
+            treat per-element raw scores as unavailable today.
+
         Args:
             loop_id: The identifier of the loop (e.g. ``"r1"``).
             element: For arrayed (Apply-to-All) loops, the specific

@@ -5,10 +5,18 @@ This package provides a Pythonic interface to the Simlin simulation engine,
 allowing you to load, run, and analyze system dynamics models.
 """
 
-__version__ = "0.1.0"
-
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _dist_version
 from pathlib import Path
 from typing import Union
+
+try:
+    __version__ = _dist_version("pysimlin")
+except PackageNotFoundError:
+    # Imported from the source tree with no installed distribution (the
+    # in-place `setup.py build_ext` development path). There is no version to
+    # report, and inventing one is how this drifted before.
+    __version__ = "0.0.0+unknown"
 
 from .analysis import (
     Analysis,
