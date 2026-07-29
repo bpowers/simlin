@@ -1317,7 +1317,7 @@ pub fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm::Causal
     crate::ltm::CausalGraph {
         edges,
         stocks,
-        variables: HashMap::new(),
+        variables: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     }
 }
@@ -1363,7 +1363,9 @@ pub(crate) fn causal_graph_with_modules(
 /// The `(variables, module_graphs)` maps a CausalGraph carries for polarity
 /// analysis, stock enrichment, and the GH #698 per-exit-port recompute.
 type CausalGraphModuleData = (
-    HashMap<crate::common::Ident<crate::common::Canonical>, crate::variable::Variable>,
+    std::sync::Arc<
+        HashMap<crate::common::Ident<crate::common::Canonical>, crate::variable::Variable>,
+    >,
     HashMap<crate::common::Ident<crate::common::Canonical>, Box<crate::ltm::CausalGraph>>,
 );
 
@@ -2851,7 +2853,7 @@ pub fn causal_graph_from_element_edges(
     crate::ltm::CausalGraph {
         edges,
         stocks,
-        variables: HashMap::new(),
+        variables: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     }
 }
@@ -3177,7 +3179,7 @@ pub fn model_loop_circuits_tiered(
         let graph = crate::ltm::CausalGraph {
             edges: sub_edge_idents,
             stocks: sub_stocks,
-            variables: HashMap::new(),
+            variables: std::sync::Arc::new(HashMap::new()),
             module_graphs: HashMap::new(),
         };
         let scc = graph.largest_scc_size();
@@ -3347,11 +3349,22 @@ pub fn model_element_cycle_partitions(
 
 /// Reconstruct `Variable` objects from salsa-tracked parse results for
 /// all variables in a model (including implicit variables).
+///
+/// Cached, and returning a SHARED map, because it is expensive and repeated:
+/// it lowers every variable in the model, and the LTM pipeline builds a causal
+/// graph once per query that needs polarity or module structure. On a world3
+/// LTM compile it ran 923 times and was 58% of all instructions executed.
+/// Nothing between those calls can change its answer -- it reads only the
+/// model's variable set and the per-variable parse memos -- so the repetition
+/// was pure recomputation.
+#[salsa::tracked]
 pub(crate) fn reconstruct_model_variables(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
-) -> HashMap<crate::common::Ident<crate::common::Canonical>, crate::variable::Variable> {
+) -> std::sync::Arc<
+    HashMap<crate::common::Ident<crate::common::Canonical>, crate::variable::Variable>,
+> {
     use crate::common::{Canonical, Ident};
 
     let source_vars = model.variables(db);
@@ -3399,7 +3412,7 @@ pub(crate) fn reconstruct_model_variables(
         }
     }
 
-    variables
+    std::sync::Arc::new(variables)
 }
 
 /// Reconstruct a single `Variable` by name from a model's parse results.
