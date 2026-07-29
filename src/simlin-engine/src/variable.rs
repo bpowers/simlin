@@ -366,13 +366,13 @@ pub(crate) fn reorder_arrayed_element_tables<T>(
 /// [`reorder_arrayed_element_tables`]), NOT by `elems` Vec position. For scalar
 /// variables or arrayed without per-element gfs, uses the variable-level gf.
 ///
-/// `dimensions` are the project/model dimension definitions; the arrayed
-/// equation's dimension names are resolved against them to drive the
+/// `dimensions` is the project/model dimension context; the arrayed
+/// equation's dimension names are resolved against it to drive the
 /// element-name -> dimension-index reorder.
 fn build_tables(
     gf: &Option<datamodel::GraphicalFunction>,
     equation: &datamodel::Equation,
-    dimensions: &[datamodel::Dimension],
+    dimensions: &DimensionsContext,
 ) -> (Vec<Table>, Vec<EquationError>) {
     let mut errors = Vec::new();
 
@@ -743,14 +743,14 @@ mod is_lookup_only_tests {
 }
 
 pub(crate) fn get_dimensions(
-    dimensions: &[datamodel::Dimension],
+    dimensions: &DimensionsContext,
     names: &[DimensionName],
 ) -> Result<Vec<Dimension>, EquationError> {
     names
         .iter()
         .map(|name| -> Result<Dimension, EquationError> {
             // Match by canonical name, not raw string equality: a dimension's
-            // identity is its canonical name (the dims map is keyed by it, so
+            // identity is its canonical name (the context is keyed by it, so
             // two distinct dimensions can never canonicalize to the same
             // string). A synthesized `Equation::ApplyToAll` whose dimension
             // names came from `print_eqn` carries CANONICAL names (`hfc_type`),
@@ -760,20 +760,23 @@ pub(crate) fn get_dimensions(
             // PREVIOUS/INIT helper regression on C-LEARN's capitalized
             // dimensions). Importer-produced equations already match exactly,
             // so canonical matching is a strict superset.
-            let canonical_name = canonicalize(name);
-            for dim in dimensions {
-                if canonicalize(dim.name()) == canonical_name {
-                    return Ok(Dimension::from(dim));
-                }
+            //
+            // Taking the already-built `DimensionsContext` rather than the raw
+            // `&[datamodel::Dimension]` turns this from a linear scan that
+            // re-canonicalized every declared dimension name per lookup (and
+            // then rebuilt the matched `Dimension` from scratch, re-interning
+            // its every element name) into one canonicalize plus a hash probe.
+            match dimensions.get_by_raw_name(name) {
+                Some(dim) => Ok(dim.clone()),
+                None => eqn_err!(BadDimensionName, 0, 0),
             }
-            eqn_err!(BadDimensionName, 0, 0)
         })
         .collect()
 }
 
 fn parse_equation(
     eqn: &datamodel::Equation,
-    dimensions: &[datamodel::Dimension],
+    dimensions: &DimensionsContext,
     is_initial: bool,
     active_initial: Option<&str>,
 ) -> (Option<Ast<Expr0>>, Vec<EquationError>) {
@@ -856,7 +859,7 @@ fn parse_equation(
 }
 
 pub fn parse_var<MI, F>(
-    dimensions: &[datamodel::Dimension],
+    dimensions: &DimensionsContext,
     v: &datamodel::Variable,
     implicit_vars: &mut Vec<datamodel::Variable>,
     units_ctx: &units::Context,
@@ -910,7 +913,7 @@ where
 /// to the intrinsic, not recurse into the like-named macro).
 #[allow(clippy::too_many_arguments)]
 pub fn parse_var_with_module_context<MI, F>(
-    dimensions: &[datamodel::Dimension],
+    dimensions: &DimensionsContext,
     v: &datamodel::Variable,
     implicit_vars: &mut Vec<datamodel::Variable>,
     units_ctx: &units::Context,
@@ -928,9 +931,6 @@ where
     // rebinding here -- unifying a borrowed `Some(&'a _)` with the
     // `&'static` empty default before the parse closure captures it would
     // force the closure (and hence `'a`) to `'static`.
-    // Create DimensionsContext for dimension mapping lookups in builtin expansion
-    let dimensions_ctx = DimensionsContext::from(dimensions);
-
     let mut parse_and_lower_eqn = |ident: &str,
                                    eqn: &datamodel::Equation,
                                    is_initial: bool,
@@ -946,7 +946,7 @@ where
                 match instantiate_implicit_modules(
                     ident,
                     ast,
-                    Some(&dimensions_ctx),
+                    Some(dimensions),
                     module_idents,
                     model_var_names,
                     registry,
@@ -1426,7 +1426,7 @@ pub(crate) fn scalar_ast(eqn: &str) -> Ast<Expr2> {
 
     let (ast, err) = parse_equation(
         &datamodel::Equation::Scalar(eqn.to_owned()),
-        &[],
+        &DimensionsContext::default(),
         false,
         None,
     );
@@ -2091,7 +2091,12 @@ fn test_parse_equation_arrayed_preserves_default_expression() {
         true,
     );
 
-    let (ast, errors) = parse_equation(&equation, &dimensions, false, None);
+    let (ast, errors) = parse_equation(
+        &equation,
+        &DimensionsContext::from(&dimensions),
+        false,
+        None,
+    );
     assert!(errors.is_empty(), "arrayed parse should not emit errors");
 
     let Some(Ast::Arrayed(_, _, default_expr, apply_default_to_missing)) = ast else {
@@ -2122,7 +2127,12 @@ fn test_parse_equation_arrayed_applies_default_when_element_matches_default() {
         true,
     );
 
-    let (ast, errors) = parse_equation(&equation, &dimensions, false, None);
+    let (ast, errors) = parse_equation(
+        &equation,
+        &DimensionsContext::from(&dimensions),
+        false,
+        None,
+    );
     assert!(errors.is_empty(), "arrayed parse should not emit errors");
 
     let Some(Ast::Arrayed(_, _, default_expr, apply_default_to_missing)) = ast else {
@@ -2199,7 +2209,8 @@ fn test_tables() {
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let unit_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let output = parse_var(&[], &input, &mut implicit_vars, &unit_ctx, |mi| {
+    let dims_ctx = DimensionsContext::default();
+    let output = parse_var(&dims_ctx, &input, &mut implicit_vars, &unit_ctx, |mi| {
         Ok(Some(mi.clone()))
     });
 

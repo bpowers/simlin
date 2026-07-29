@@ -39,8 +39,12 @@ impl NamedDimension {
     /// The input should be in canonical form (lowercase, spaces as underscores).
     /// This is more efficient than iterating through `elements` for large dimensions.
     pub fn get_element_index(&self, element: &str) -> Option<usize> {
+        // Probe by `&str` (`CanonicalElementName: Borrow<str>`) rather than
+        // building a `CanonicalElementName`: a lookup has no reason to take a
+        // shard of the global interner and install an `Arc` payload for a name
+        // it is only asking about.
         self.indexed_elements
-            .get(&CanonicalElementName::from_raw(element))
+            .get(crate::common::canonicalize(element).as_ref())
             .map(|&idx| idx - 1) // Convert from 1-based to 0-based
     }
 }
@@ -414,17 +418,31 @@ impl DimensionsContext {
         self.dimensions.get(name)
     }
 
+    /// Get a dimension by a name that may not be in canonical form yet.
+    ///
+    /// The `&str` probe (via `CanonicalDimensionName: Borrow<str>`) is the
+    /// point: a lookup must not intern. `CanonicalDimensionName::from_raw`
+    /// takes a shard of the global interner and installs an `Arc` payload for
+    /// a name that may not even be a dimension, and every miss leaves a
+    /// refcount round trip behind -- on the parse path that is per dimension
+    /// reference per variable.
+    pub(crate) fn get_by_raw_name(&self, name: &str) -> Option<&Dimension> {
+        self.dimensions
+            .get(crate::common::canonicalize(name).as_ref())
+    }
+
     pub(crate) fn is_dimension_name(&self, name: &str) -> bool {
-        let canonical_name = CanonicalDimensionName::from_raw(name);
-        self.dimensions.contains_key(&canonical_name)
+        self.dimensions
+            .contains_key(crate::common::canonicalize(name).as_ref())
     }
 
     pub(crate) fn lookup(&self, element: &str) -> Option<u32> {
         if let Some(pos) = element.find('·') {
-            let dimension_name = CanonicalDimensionName::from_raw(&element[..pos]);
-            let element_name = CanonicalElementName::from_raw(&element[pos + '·'.len_utf8()..]);
-            if let Some(Dimension::Named(_, dimension)) = self.dimensions.get(&dimension_name)
-                && let Some(off) = dimension.indexed_elements.get(&element_name)
+            let dimension_name = crate::common::canonicalize(&element[..pos]);
+            let element_name = crate::common::canonicalize(&element[pos + '·'.len_utf8()..]);
+            if let Some(Dimension::Named(_, dimension)) =
+                self.dimensions.get(dimension_name.as_ref())
+                && let Some(off) = dimension.indexed_elements.get(element_name.as_ref())
             {
                 return Some(*off as u32);
             }

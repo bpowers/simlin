@@ -356,14 +356,13 @@ fn lower_implicit_var<'db>(
     let implicit_dm_var = parsed.implicit_vars.get(meta.index_in_parent)?;
     let implicit_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
 
-    let dm_dims = project_datamodel_dims(db, project);
     let dim_context = project_dimensions_context(db, project);
 
     let units_ctx = project_units_context(db, project);
 
     let mut dummy_implicits = Vec::new();
     let parsed_implicit = crate::variable::parse_var(
-        dm_dims,
+        dim_context,
         implicit_dm_var,
         &mut dummy_implicits,
         units_ctx,

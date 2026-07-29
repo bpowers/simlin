@@ -26,8 +26,8 @@ use crate::db::{
     compile_phase_to_per_var_bytecodes, compute_layout, extract_tables_from_source_var,
     fragment_emit_ctx, model_dependency_graph, model_implicit_var_info, model_module_ident_context,
     model_module_map, parse_source_variable_with_module_context, project_converted_dimensions,
-    project_datamodel_dims, project_dimensions_context, project_units_context,
-    reconstruct_single_variable, variable_dimensions, variable_size,
+    project_dimensions_context, project_units_context, reconstruct_single_variable,
+    variable_dimensions, variable_size,
 };
 
 use super::parse::{ltm_equation_dimensions, parse_ltm_equation, scalarize_ltm_equation};
@@ -785,7 +785,7 @@ fn lower_ltm_variable(
 
     let model_name_str = model.name(db);
     let module_ctx = model_module_ident_context(db, model, project, vec![]);
-    let dims = project_datamodel_dims(db, project);
+    let dim_ctx = project_dimensions_context(db, project);
     let units_ctx = project_units_context(db, project);
     let mut stage0_vars: HashMap<Ident<Canonical>, crate::model::VariableStage0> = HashMap::new();
     stage0_vars.insert(Ident::new(parsed_variable.ident()), parsed_variable.clone());
@@ -799,7 +799,7 @@ fn lower_ltm_variable(
             // in their own right; here only the dep's own dimensions matter.
             let mut nested = Vec::new();
             let dep_parsed =
-                crate::variable::parse_var(dims, implicit_dm, &mut nested, units_ctx, |mi| {
+                crate::variable::parse_var(dim_ctx, implicit_dm, &mut nested, units_ctx, |mi| {
                     Ok(Some(mi.clone()))
                 });
             stage0_vars.insert(Ident::new(dep_name), dep_parsed);
@@ -853,7 +853,6 @@ pub(crate) fn compile_ltm_equation_fragment(
     // Project-global dims (datamodel form, used to resolve the equation's
     // dimension names) plus the canonicalized context + converted dims, all
     // from the salsa-cached queries rather than rebuilt per LTM fragment.
-    let dims = project_datamodel_dims(db, project);
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
@@ -865,7 +864,7 @@ pub(crate) fn compile_ltm_equation_fragment(
     let parsed = parse_ltm_equation(
         var_name,
         equation,
-        dims,
+        dim_context,
         Some(module_idents),
         Some(model_var_names),
     );
@@ -1968,9 +1967,8 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         }
     }
 
-    // Project-global dims (datamodel form needed by `parse_var`) plus the
-    // canonicalized context + converted dims, from the salsa-cached queries.
-    let dims = project_datamodel_dims(db, project);
+    // The project-global canonicalized dimension context + converted dims,
+    // from the salsa-cached queries.
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
@@ -1978,7 +1976,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
 
     let mut dummy_implicits = Vec::new();
     let parsed_implicit = crate::variable::parse_var(
-        dims,
+        dim_context,
         implicit_dm_var,
         &mut dummy_implicits,
         units_ctx,

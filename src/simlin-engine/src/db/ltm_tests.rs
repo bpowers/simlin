@@ -726,7 +726,7 @@ fn unparseable_generated_arm_degrades_loudly_without_panicking() {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let model = sync.models["main"].source;
-    let dims = crate::db::project_datamodel_dims(&db, sync.project);
+    let dims = crate::db::project_dimensions_context(&db, sync.project);
 
     // (b) Scalar: no ast, errors surfaced, fragment rejected.
     let scalar = LtmEquation::scalar(bad.to_string());

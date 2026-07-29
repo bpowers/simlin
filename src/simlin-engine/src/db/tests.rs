@@ -565,7 +565,7 @@ fn test_parse_source_variable_matches_direct_parse() {
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let mut implicit_vars = Vec::new();
     let direct_result = parse_var(
-        &project.dimensions,
+        &crate::dimensions::DimensionsContext::from(project.dimensions.as_slice()),
         dm_var,
         &mut implicit_vars,
         &units_ctx,

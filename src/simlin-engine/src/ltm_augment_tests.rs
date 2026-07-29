@@ -3297,7 +3297,7 @@ fn arrayed_var_from_text(
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let mut implicit_vars = Vec::new();
     let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
-        dims,
+        &crate::dimensions::DimensionsContext::from(dims),
         &dm_var,
         &mut implicit_vars,
         &units_ctx,
@@ -3355,7 +3355,7 @@ fn scalar_aux_from_text(ident: &str, eqn_text: &str) -> Variable {
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let mut implicit_vars = Vec::new();
     let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
-        &[],
+        &crate::dimensions::DimensionsContext::default(),
         &dm_var,
         &mut implicit_vars,
         &units_ctx,
@@ -3548,7 +3548,7 @@ fn lower_dm_var(
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let mut implicit_vars = Vec::new();
     let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
-        dims,
+        &crate::dimensions::DimensionsContext::from(dims),
         &dm_var,
         &mut implicit_vars,
         &units_ctx,
@@ -3958,7 +3958,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         compat: crate::datamodel::Compat::default(),
     });
     let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
-        &dims,
+        &crate::dimensions::DimensionsContext::from(dims.as_slice()),
         &a2a_dm,
         &mut implicit,
         &units_ctx,

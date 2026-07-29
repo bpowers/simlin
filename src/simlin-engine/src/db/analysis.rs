@@ -3356,9 +3356,8 @@ pub(crate) fn reconstruct_model_variables(
 
     let source_vars = model.variables(db);
     let module_ctx = model_module_ident_context(db, model, project, vec![]);
-    // The datamodel dims are needed by `reconstruct_implicit_variable`; the
-    // canonicalized context comes from the project-global salsa-cached query.
-    let dims = project_datamodel_dims(db, project);
+    // The canonicalized dimension context comes from the project-global
+    // salsa-cached query; every parse and lowering below reads that one value.
     let dim_context = project_dimensions_context(db, project);
     let models = HashMap::new();
     let scope = crate::model::ScopeStage0 {
@@ -3382,7 +3381,7 @@ pub(crate) fn reconstruct_model_variables(
         // must keep module wiring.)
         let dm_var = super::datamodel_variable_from_source(db, *source_var);
         if matches!(dm_var, datamodel::Variable::Module(_)) {
-            let lowered = reconstruct_implicit_variable(db, model, dims, &scope, &dm_var);
+            let lowered = reconstruct_implicit_variable(db, model, &scope, &dm_var);
             variables.insert(Ident::new(name), lowered);
             continue;
         }
@@ -3395,8 +3394,7 @@ pub(crate) fn reconstruct_model_variables(
         // Add implicit variables (module instances from SMOOTH/DELAY expansion)
         for implicit_dm_var in &parsed.implicit_vars {
             let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
-            let lowered_imp =
-                reconstruct_implicit_variable(db, model, dims, &scope, implicit_dm_var);
+            let lowered_imp = reconstruct_implicit_variable(db, model, &scope, implicit_dm_var);
             variables.insert(Ident::new(&imp_name), lowered_imp);
         }
     }
@@ -3419,9 +3417,8 @@ pub(super) fn reconstruct_single_variable(
 
     let source_vars = model.variables(db);
     let module_ctx = model_module_ident_context(db, model, project, vec![]);
-    // The datamodel dims are needed by `reconstruct_implicit_variable`; the
-    // canonicalized context comes from the project-global salsa-cached query.
-    let dims = project_datamodel_dims(db, project);
+    // The canonicalized dimension context comes from the project-global
+    // salsa-cached query; every parse and lowering below reads that one value.
     let dim_context = project_dimensions_context(db, project);
     let models = HashMap::new();
     let scope = crate::model::ScopeStage0 {
@@ -3445,9 +3442,7 @@ pub(super) fn reconstruct_single_variable(
         // input→user-module link score.
         let dm_var = super::datamodel_variable_from_source(db, *source_var);
         if matches!(dm_var, datamodel::Variable::Module(_)) {
-            return Some(reconstruct_implicit_variable(
-                db, model, dims, &scope, &dm_var,
-            ));
+            return Some(reconstruct_implicit_variable(db, model, &scope, &dm_var));
         }
         let parsed =
             parse_source_variable_with_module_context(db, *source_var, project, module_ctx);
@@ -3464,8 +3459,7 @@ pub(super) fn reconstruct_single_variable(
         for implicit_dm_var in &parsed.implicit_vars {
             let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
             if Ident::<Canonical>::new(&imp_name) == canonical_target {
-                let lowered_imp =
-                    reconstruct_implicit_variable(db, model, dims, &scope, implicit_dm_var);
+                let lowered_imp = reconstruct_implicit_variable(db, model, &scope, implicit_dm_var);
                 return Some(lowered_imp);
             }
         }
@@ -3483,7 +3477,6 @@ pub(super) fn reconstruct_single_variable(
 fn reconstruct_implicit_variable(
     db: &dyn Db,
     model: SourceModel,
-    dims: &[datamodel::Dimension],
     scope: &crate::model::ScopeStage0<'_>,
     implicit_dm_var: &datamodel::Variable,
 ) -> crate::variable::Variable {
@@ -3514,7 +3507,7 @@ fn reconstruct_implicit_variable(
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let mut dummy_implicits = Vec::new();
     let parsed_imp = crate::variable::parse_var(
-        dims,
+        scope.dimensions,
         implicit_dm_var,
         &mut dummy_implicits,
         &units_ctx,

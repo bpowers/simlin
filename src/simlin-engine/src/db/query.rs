@@ -189,11 +189,18 @@ fn parse_source_variable_impl(
             .cloned()
             .collect()
     };
+    // Built from the NARROWED `dims`, not from the project-wide
+    // `project_dimensions_context`: this parse's dimension dependency is
+    // deliberately only the dimensions the variable references, so that an
+    // unrelated dimension edit does not invalidate every cached parse
+    // (`db::dimension_invalidation_tests`). A scalar variable's `dims` is
+    // empty, so this is free in the common case.
+    let dim_ctx = crate::dimensions::DimensionsContext::from(&dims);
     let units_ctx = project_units_context(db, project);
     let dm_var = datamodel_variable_from_source(db, var);
     let mut implicit_vars = Vec::new();
     let variable = crate::variable::parse_var_with_module_context(
-        &dims,
+        &dim_ctx,
         &dm_var,
         &mut implicit_vars,
         units_ctx,
@@ -338,10 +345,8 @@ fn variable_direct_dependencies_impl(
         _ => {
             let parsed =
                 parse_source_variable_with_module_context(db, var, project, module_ident_context);
-            // The datamodel-form dims are still needed for the implicit-var
-            // parse below; the canonicalized context + converted dims come from
-            // the project-global salsa-cached queries (no per-variable rebuild).
-            let dims = project_datamodel_dims(db, project);
+            // The canonicalized context + converted dims come from the
+            // project-global salsa-cached queries (no per-variable rebuild).
             let dim_context = project_dimensions_context(db, project);
             let converted_dims = project_converted_dimensions(db, project);
             let models = HashMap::new();
@@ -367,7 +372,7 @@ fn variable_direct_dependencies_impl(
             };
 
             let implicit_vars =
-                extract_implicit_var_deps(parsed, dims, dim_context, converted_dims, module_inputs);
+                extract_implicit_var_deps(parsed, dim_context, converted_dims, module_inputs);
 
             VariableDeps {
                 dt_deps: dt_classification

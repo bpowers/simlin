@@ -143,9 +143,13 @@ fn test_previous_qualified_element_subscript_no_helper() {
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
-        crate::variable::parse_var(&dims, &aux, &mut implicit_vars, &units_ctx, |mi| {
-            Ok(Some(mi.clone()))
-        });
+        crate::variable::parse_var(
+            &crate::dimensions::DimensionsContext::from(dims.as_slice()),
+            &aux,
+            &mut implicit_vars,
+            &units_ctx,
+            |mi| Ok(Some(mi.clone())),
+        );
     assert!(
         parsed.equation_errors().is_none(),
         "equation should parse cleanly: {:?}",
@@ -338,9 +342,13 @@ fn test_init_qualified_element_subscript_no_helper() {
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
-        crate::variable::parse_var(&dims, &aux, &mut implicit_vars, &units_ctx, |mi| {
-            Ok(Some(mi.clone()))
-        });
+        crate::variable::parse_var(
+            &crate::dimensions::DimensionsContext::from(dims.as_slice()),
+            &aux,
+            &mut implicit_vars,
+            &units_ctx,
+            |mi| Ok(Some(mi.clone())),
+        );
     assert!(
         parsed.equation_errors().is_none(),
         "equation should parse cleanly: {:?}",
@@ -421,7 +429,7 @@ fn test_previous_bare_element_no_helper_with_var_names() {
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
         crate::variable::parse_var_with_module_context(
-            &dims,
+            &crate::dimensions::DimensionsContext::from(dims.as_slice()),
             &aux,
             &mut implicit_vars,
             &units_ctx,
@@ -456,7 +464,7 @@ fn test_previous_bare_element_no_helper_with_var_names() {
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
         crate::variable::parse_var_with_module_context(
-            &dims,
+            &crate::dimensions::DimensionsContext::from(dims.as_slice()),
             &aux,
             &mut implicit_vars,
             &units_ctx,
@@ -481,9 +489,13 @@ fn test_previous_bare_element_no_helper_with_var_names() {
     // conservative helper path is also kept.
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
-        crate::variable::parse_var(&dims, &aux, &mut implicit_vars, &units_ctx, |mi| {
-            Ok(Some(mi.clone()))
-        });
+        crate::variable::parse_var(
+            &crate::dimensions::DimensionsContext::from(dims.as_slice()),
+            &aux,
+            &mut implicit_vars,
+            &units_ctx,
+            |mi| Ok(Some(mi.clone())),
+        );
     assert!(parsed.equation_errors().is_none());
     assert_eq!(
         implicit_vars.len(),

@@ -2667,6 +2667,25 @@ impl std::borrow::Borrow<str> for Ident<Canonical> {
     }
 }
 
+// The same, for the two other newtypes over `CanonicalStorage`. Probing a map
+// with a `&str` skips the global interner entirely: constructing a
+// `CanonicalDimensionName`/`CanonicalElementName` just to ask whether a key is
+// present takes a sharded mutex, allocates an `Arc` payload on first sighting,
+// and bumps/drops a refcount every time -- all to produce a value the lookup
+// discards. Sound for exactly the reason above: `CanonicalStorage::hash` hashes
+// the string content, so a `&str` probe hashes identically to the stored key.
+impl std::borrow::Borrow<str> for CanonicalDimensionName {
+    fn borrow(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::borrow::Borrow<str> for CanonicalElementName {
+    fn borrow(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 impl<'a> AsRef<str> for IdentRef<'a, Canonical> {
     fn as_ref(&self) -> &str {
         self.inner

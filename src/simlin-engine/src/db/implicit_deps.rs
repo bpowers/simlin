@@ -23,14 +23,12 @@ pub struct ImplicitVarDeps {
     pub referenced_tables: BTreeSet<String>,
 }
 
-/// `dims`, `dim_context`, and `converted_dims` are three views of the *same*
-/// project dimension list (datamodel form, context form, and converted form);
-/// the caller sources all three from the per-project salsa caches, so they are
-/// consistent by construction. Passing inconsistent slices would silently
-/// misclassify dependencies.
+/// `dim_context` and `converted_dims` are two views of the *same* project
+/// dimension list (context form and converted form); the caller sources both
+/// from the per-project salsa caches, so they are consistent by construction.
+/// Passing inconsistent views would silently misclassify dependencies.
 pub(super) fn extract_implicit_var_deps(
     parsed: &ParsedVariableResult,
-    dims: &[datamodel::Dimension],
     dim_context: &crate::dimensions::DimensionsContext,
     converted_dims: &[crate::dimensions::Dimension],
     module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
@@ -77,7 +75,7 @@ pub(super) fn extract_implicit_var_deps(
 
             let mut dummy_implicits = Vec::new();
             let parsed_implicit = crate::variable::parse_var(
-                dims,
+                dim_context,
                 implicit_var,
                 &mut dummy_implicits,
                 &units_ctx,

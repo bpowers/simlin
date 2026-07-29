@@ -578,12 +578,16 @@ impl ModelStage0 {
         // like-named macro resolves to the intrinsic, not the macro.
         let enclosing_model: Option<&str> =
             x_model.macro_spec.as_ref().map(|_| x_model.name.as_str());
+        // One context for the whole model: `parse_var*` needs the canonical
+        // form, and building it per variable is what the salsa path stopped
+        // doing (it reads the cached `project_dimensions_context` instead).
+        let dimensions_ctx = DimensionsContext::from(dimensions);
         let mut variable_list: Vec<VariableStage0> = x_model
             .variables
             .iter()
             .map(|v| {
                 parse_var_with_module_context(
-                    dimensions,
+                    &dimensions_ctx,
                     v,
                     &mut implicit_vars,
                     units_ctx,
@@ -601,7 +605,7 @@ impl ModelStage0 {
             let mut dummy_implicit_vars: Vec<datamodel::Variable> = Vec::new();
             variable_list.extend(implicit_vars.into_iter().map(|x_var| {
                 parse_var(
-                    dimensions,
+                    &dimensions_ctx,
                     &x_var,
                     &mut dummy_implicit_vars,
                     units_ctx,
@@ -1070,7 +1074,8 @@ fn test_module_parse() {
     let hares_var = &main_model.variables[2];
     assert_eq!("hares", hares_var.get_ident());
 
-    let actual = parse_var(&[], hares_var, &mut implicit_vars, &units_ctx, |mi| {
+    let dims_ctx = DimensionsContext::default();
+    let actual = parse_var(&dims_ctx, hares_var, &mut implicit_vars, &units_ctx, |mi| {
         resolve_module_input(&models, "main", hares_var.get_ident(), &mi.src, &mi.dst)
     });
     assert!(actual.equation_errors().is_none());
