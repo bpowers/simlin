@@ -92,6 +92,16 @@ def _header_to_cdef(header_text: str) -> str:
 
 def _get_library_path() -> str:
     lib_name = "libsimlin.a"
+
+    # An explicit pin wins over the search below: a build driver that just ran
+    # cargo knows exactly which staticlib it produced, and guessing wrong here
+    # silently links a stale engine into the extension (GH #682).
+    pinned = os.environ.get("SIMLIN_STATIC_LIB")
+    if pinned:
+        if not Path(pinned).exists():
+            raise RuntimeError(f"SIMLIN_STATIC_LIB={pinned} does not exist")
+        return pinned
+
     # Common locations: native release, cross-target release, then debug
     workspace_target = repo_root / "target"
     candidates = [

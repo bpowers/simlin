@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Build wheels for multiple platforms."""
 
+import json
+import os
 import platform
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+LIBSIMLIN_DIR = REPO_ROOT / "src" / "libsimlin"
 
 
 def get_platform_tag() -> str:
@@ -27,82 +32,76 @@ def get_platform_tag() -> str:
         raise RuntimeError(f"Unsupported platform: {system} {machine}")
 
 
+def cargo_target_dir() -> Path:
+    """Ask cargo where build artifacts land.
+
+    libsimlin is a workspace member, so its staticlib is written to the
+    *workspace* target directory, not `src/libsimlin/target/`. Deriving the
+    path by hand is how this script previously drifted out of sync with
+    reality; `cargo metadata` is authoritative and honors CARGO_TARGET_DIR
+    and any `build.target-dir` config.
+    """
+    proc = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--no-deps"],
+        cwd=LIBSIMLIN_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return Path(json.loads(proc.stdout)["target_directory"])
+
+
 def build_libsimlin() -> Path:
-    """Build the libsimlin static library."""
+    """Build the libsimlin static library and return the path to it."""
     print("Building libsimlin...")
 
-    # Get the path to the libsimlin directory
-    project_root = Path(__file__).parent.parent.parent.parent
-    libsimlin_dir = project_root / "libsimlin"
-
-    # Build the library. The mimalloc feature swaps in mimalloc as the global
-    # allocator: the engine compile path is allocation-heavy and mimalloc roughly
-    # halves allocator time on native builds (docs/design/engine-performance.md).
-    subprocess.run(
-        ["cargo", "build", "--release", "--features", "mimalloc"], cwd=libsimlin_dir, check=True
-    )
-
-    # Return the path to the built library
-    target_dir = libsimlin_dir / "target" / "release"
-
     system = platform.system()
-    if system == "Darwin" or system == "Linux":
-        lib_path = target_dir / "libsimlin.a"
-    else:
+    if system not in ("Darwin", "Linux"):
         raise RuntimeError(f"Unsupported platform: {system}")
 
+    # The mimalloc feature swaps in mimalloc as the global allocator: the
+    # engine compile path is allocation-heavy and mimalloc roughly halves
+    # allocator time on native builds (docs/design/engine-performance.md).
+    subprocess.run(
+        ["cargo", "build", "--release", "--features", "mimalloc"], cwd=LIBSIMLIN_DIR, check=True
+    )
+
+    lib_path = cargo_target_dir() / "release" / "libsimlin.a"
     if not lib_path.exists():
         raise RuntimeError(f"Library not found at {lib_path}")
 
+    print(f"Built {lib_path}")
     return lib_path
 
 
-def copy_library_to_package(lib_path: Path) -> None:
-    """Copy the library to the package directory."""
-    print(f"Copying library from {lib_path}...")
+def build_wheel(lib_path: Path) -> None:
+    """Build the wheel for the current platform.
 
-    # Get the platform-specific directory
-    system = platform.system()
-    machine = platform.machine()
-
-    package_dir = Path(__file__).parent.parent
-
-    if system == "Darwin" and machine == "arm64":
-        lib_dir = package_dir / "lib" / "darwin_arm64"
-    elif system == "Linux":
-        if machine == "aarch64":
-            lib_dir = package_dir / "lib" / "linux_aarch64"
-        elif machine in ("x86_64", "amd64"):
-            lib_dir = package_dir / "lib" / "linux_x86_64"
-        else:
-            raise RuntimeError(f"Unsupported Linux architecture: {machine}")
-    else:
-        raise RuntimeError(f"Unsupported platform: {system} {machine}")
-
-    # Create the directory and copy the library
-    lib_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = lib_dir / lib_path.name
-    shutil.copy2(lib_path, dest_path)
-    print(f"Library copied to {dest_path}")
-
-
-def build_wheel() -> None:
-    """Build the wheel for the current platform."""
+    ``lib_path`` is pinned into the CFFI link step via ``SIMLIN_STATIC_LIB``
+    so the wheel provably contains the staticlib this script just built,
+    rather than whatever ``_ffi_build``'s fallback search happens to find
+    first (GH #682).
+    """
     print("Building wheel...")
 
     package_dir = Path(__file__).parent.parent
 
-    # Clean up old builds
+    # Clean up old builds. `build/` in particular must go: setuptools skips
+    # recompiling the CFFI extension when its object files look current, which
+    # would relink nothing and ship a stale engine.
     for dir_name in ["build", "dist", "simlin.egg-info"]:
         dir_path = package_dir / dir_name
         if dir_path.exists():
             shutil.rmtree(dir_path)
 
-    # Build the wheel
+    # `python -m build`, not `pip wheel`: this script runs under `uv run`, and
+    # uv-managed virtualenvs have no pip. `build` is declared in the dev extra
+    # and provisions the pyproject build-system requires itself.
     subprocess.run(
-        [sys.executable, "-m", "pip", "wheel", ".", "--no-deps", "-w", "dist"],
+        [sys.executable, "-m", "build", "--wheel", "--outdir", "dist"],
         cwd=package_dir,
         check=True,
+        env={**os.environ, "SIMLIN_STATIC_LIB": str(lib_path)},
     )
 
     # Get the built wheel
@@ -136,14 +135,8 @@ def main() -> None:
     print("Building simlin Python package...")
     print(f"Platform: {platform.system()} {platform.machine()}")
 
-    # Build the library
     lib_path = build_libsimlin()
-
-    # Copy to package
-    copy_library_to_package(lib_path)
-
-    # Build the wheel
-    build_wheel()
+    build_wheel(lib_path)
 
     print("Build complete!")
 
