@@ -194,8 +194,10 @@ fn dump_clearn_unit_diagnostics() {
 /// IF-branch unit difference) plus one umbrella inference warning -- so we
 /// also assert a coarse total bound to catch gross regressions without pinning
 /// the exact residual.
+///
+/// Runs by default: loading the 1.4MB C-LEARN model, which is what this used to
+/// be `#[ignore]`d for, is now under two seconds on a debug build.
 #[test]
-#[ignore = "loads the 1.4MB C-LEARN model; run explicitly with --ignored"]
 fn clearn_unit_error_flood_is_cleared() {
     let project = load_clearn();
     let macro_models: Vec<String> = project

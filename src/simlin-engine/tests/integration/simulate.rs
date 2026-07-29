@@ -2777,11 +2777,13 @@ fn partition_places_invariant_vars_before_dynamic() {
 
 /// Heavy soundness oracle on C-LEARN: assert ZERO of the invariant-classified
 /// slots vary, and report the count for comparison against the prototype's
-/// 678/1368. `#[ignore]`d for runtime class (C-LEARN is ~53k lines).
+/// 678/1368.
 ///
-/// Run with: cargo test --release -- --ignored oracle_clearn
+/// Runs by default. It was `#[ignore]`d for runtime class, which the compile
+/// speedups of the `engine-compile-perf` branch retired: C-LEARN's debug-build
+/// compile now fits the per-test budget. An `#[ignore]`d soundness oracle only
+/// runs when someone remembers to ask for it.
 #[test]
-#[ignore]
 fn oracle_clearn() {
     let datamodel = clearn_datamodel();
     let (n_invariant, violations) = invariance_oracle(&datamodel);
@@ -2796,11 +2798,9 @@ fn oracle_clearn() {
     );
 }
 
-/// Heavy soundness oracle on WORLD3-03.
-///
-/// Run with: cargo test --release -- --ignored oracle_wrld3
+/// Heavy soundness oracle on WORLD3-03. Runs by default (sub-second even on a
+/// debug build); see [`oracle_clearn`] for why its heavy twin does too.
 #[test]
-#[ignore]
 fn oracle_wrld3() {
     let mdl_path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
     let contents = std::fs::read_to_string(mdl_path)
@@ -2845,8 +2845,7 @@ fn midpoint_save_time(specs: &Specs) -> f64 {
 /// available parity check for this model (both backends consume the same
 /// `CompiledSimulation`, so any divergence is a wasm lowering bug). A
 /// `WasmGenError::Unsupported` would be a hard failure: WORLD3 is a
-/// core-simulation model the VM handles. `#[ignore]`d for runtime class, like
-/// the other heavy models.
+/// core-simulation model the VM handles.
 ///
 /// In addition to the single-`run` vs VM parity check, this twin re-runs the
 /// same blob through a TWO-SEGMENT `run_to` (split at the midpoint save time) and
@@ -2855,9 +2854,10 @@ fn midpoint_save_time(specs: &Specs) -> f64 {
 /// Comparing the full final series (both segments run through to `stop`) is exact
 /// regardless of where the cursor paused mid-run.
 ///
-/// Run with: cargo test --release -- --ignored simulates_wrld3_03_wasm
+/// Runs by default: about a second on a debug build. It was `#[ignore]`d for
+/// runtime class alongside the other heavy models, which the compile speedups
+/// of the `engine-compile-perf` branch retired for this one.
 #[test]
-#[ignore]
 fn simulates_wrld3_03_wasm() {
     let mdl_path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
 
@@ -3026,9 +3026,13 @@ const EXPECTED_VDF_RESIDUAL: &[&str] = &[
 // nondeterminism, was fixed in `e24b0080`). The exclusion is a transparent,
 // documented, tracked carve-out -- NOT a tolerance loosening; the hard 1% gate
 // holds for every non-excluded variable and the matched floor is checked after
-// exclusion. Run with: cargo test --release -- --ignored simulates_clearn
+// exclusion.
+//
+// Runs by default. This was `#[ignore]`d for runtime class, which the compile
+// speedups of the `engine-compile-perf` branch retired: the whole test is a few
+// seconds on a debug build. It is the engine's cross-simulator ground-truth
+// gate, so it earns its place in the default run more than any other test here.
 #[test]
-#[ignore]
 fn simulates_clearn() {
     let (vdf_results, results) = run_clearn_vs_vdf();
 
@@ -3103,9 +3107,10 @@ fn run_clearn_vs_vdf() -> (Results, Results) {
 /// `CompiledSimulation` produced by `compile_project_incremental`, so the wasm
 /// output must clear the gate exactly as the VM does (a divergence is a wasm
 /// lowering bug); the residual carve-out is identical because it is a property
-/// of the model + reference data, not the execution engine. `#[ignore]`d for
-/// runtime class -- C-LEARN under the non-JIT interpreter is slow -- exactly
-/// like `simulates_clearn`.
+/// of the model + reference data, not the execution engine. Still `#[ignore]`d
+/// for runtime class, unlike its VM twin `simulates_clearn`: what is slow here
+/// is not compilation but EXECUTING C-LEARN under the non-JIT DLR-FT
+/// interpreter, which no compiler speedup touches (~34s on a debug build).
 ///
 /// A `WasmGenError::Unsupported` here would be a hard failure: C-LEARN is a
 /// core-simulation model the VM handles, so the wasm backend must too.
@@ -3169,12 +3174,9 @@ fn simulates_clearn_wasm() {
 /// symmetric difference if the residual GREW (a regression -- new divergence to
 /// investigate, file under #590/#591) or SHRANK (an engine fix -- prune the now-
 /// passing base from the exclusion). Reuses `classify_vdf_ident` (no comparator
-/// duplication). `#[ignore]`d for runtime class like `simulates_clearn`.
-///
-/// Run with:
-/// cargo test --release -- --ignored clearn_residual_exactness
+/// duplication). Runs by default like `simulates_clearn`, whose fixture it
+/// shares.
 #[test]
-#[ignore]
 fn clearn_residual_exactness() {
     use std::collections::BTreeSet;
 
@@ -5476,10 +5478,9 @@ fn corpus_theil_multi_output_materializes_and_simulates() {
 /// and produced no macro-specific compile diagnostics"; the unrelated
 /// GET-DIRECT-data blocker is reported for Phase-7 tiered-harness scope.
 ///
-/// `#[ignore]` (large COVID model).
-// Run with: cargo test --release -- --ignored corpus_sstats_multi_output_materializes
+/// Runs by default -- a tenth of a second on a debug build, despite the large
+/// COVID model, since it only imports.
 #[test]
-#[ignore]
 fn corpus_sstats_multi_output_materializes() {
     let path = "../../test/metasd/covid19-us-homer/homer v8/Covid19US v8.mdl";
     let contents =
@@ -5834,11 +5835,12 @@ fn macro_attributable_classifier_separates_macro_from_nonmacro() {
 /// `CircularDependency`). It deliberately does NOT assert that all of
 /// C-LEARN compiles -- C-LEARN's non-macro blockers (#552, #553, #363,
 /// model-logic deps) remain out of scope -- only that no macro-specific
-/// error from #554 fires. `#[ignore]` (C-LEARN is ~53k lines / 1.4 MB;
-/// ~4s just to parse).
-// Run with: cargo test --release -- --ignored corpus_clearn_macros_import
+/// error from #554 fires.
+///
+/// Runs by default. The "~4s just to parse C-LEARN" that justified `#[ignore]`
+/// is no longer true -- the `engine-compile-perf` branch cut MDL import by a
+/// third -- and an import regression guard is worth having in the default run.
 #[test]
-#[ignore]
 fn corpus_clearn_macros_import() {
     let path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
     let contents =
@@ -6023,17 +6025,15 @@ fn corpus_clearn_macros_import() {
 ///
 /// Also folded into this number: `-4`, PRE-EXISTING. Some earlier
 /// `conveyor-engine` commit already moved the count to 6,709 without updating
-/// this pin. This gate is `#[ignore]`d, so neither pre-commit nor CI caught it
-/// (tracked separately -- an `#[ignore]`d exact-value pin that nothing runs is
-/// not a guardrail).
+/// this pin. This gate USED to be `#[ignore]`d, so neither pre-commit nor CI
+/// caught it -- an exact-value pin that nothing runs is not a guardrail. It now
+/// runs by default; that is the fix for the problem this paragraph describes.
 ///
 /// Layout impact (the resource this gate protects -- #654's VM limit of 65,536
 /// u16 result slots, NOT `wasmgen::lower`'s unrelated `MAX_UNROLL_UNITS`): the
 /// per-step result-row width goes 30,800 -> 31,198 slots (+398, +1.29%), still
 /// far below the ceiling.
-// Run with: cargo test --release -- --ignored clearn_ltm_var_count_guardrail
 #[test]
-#[ignore]
 fn clearn_ltm_var_count_guardrail() {
     use simlin_engine::db::{model_ltm_variables, set_project_ltm_enabled};
 
@@ -6110,7 +6110,11 @@ fn clearn_ltm_partials_all_parse() {
     );
 }
 
-// Run with: cargo test --release -- --ignored compiles_and_runs_clearn_structural
+// Still `#[ignore]`d, but no longer for time: `simulates_clearn` now runs by
+// default and checks C-LEARN's numbers against `Ref.vdf`, which subsumes
+// "compiles and runs". Kept as the structural-only probe to reach for when the
+// numeric gate fails and the question is whether compilation itself broke.
+// Run with: cargo test -- --ignored compiles_and_runs_clearn_structural
 #[test]
 #[ignore]
 fn compiles_and_runs_clearn_structural() {
