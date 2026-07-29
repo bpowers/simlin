@@ -1357,3 +1357,79 @@ fn an_index_naming_the_axis_own_element_stays_a_static_selector() {
         "a static element selector must never be frozen; got: {arm}"
     );
 }
+
+/// `link_score_equation_text_shaped` documents that "a per-shape link score is
+/// recomputed only when the involved variables (and their shape-classifying
+/// dimensions) change". This is that claim, measured.
+///
+/// It has to be measured as a body-entry COUNT, not as memo identity: salsa
+/// backdates a re-executed query whose value compares equal, so every link
+/// score's memo looks untouched whether its body ran or not. The counter lives
+/// in `db::ltm::compile` beside the query.
+///
+/// The failure this pins is not hypothetical. Routing
+/// `reconstruct_single_variable` straight through the whole-model
+/// `reconstruct_model_variables` map -- which is what a naive "read the cached
+/// map" refactor does -- makes every link score depend on every variable's
+/// lowered form, so ONE unrelated equation edit regenerates all of them. On a
+/// model with thousands of links that is a full LTM rebuild per keystroke.
+#[test]
+fn an_unrelated_equation_edit_does_not_regenerate_every_link_score() {
+    use crate::db::{
+        compile_project_incremental, set_project_ltm_enabled, sync_from_datamodel_incremental,
+    };
+
+    // Two independent feedback loops sharing no variable, so an edit inside
+    // one provably cannot change the other's scores. `untouched_*` is the
+    // half the assertion is about.
+    let project = TestProject::new("ltm_link_score_incrementality")
+        .stock("edited_stock", "10", &["edited_in"], &[], None)
+        .flow("edited_in", "edited_stock * edited_rate", None)
+        .aux("edited_rate", "0.1", None)
+        .stock("untouched_stock", "10", &["untouched_in"], &[], None)
+        .flow("untouched_in", "untouched_stock * untouched_rate", None)
+        .aux("untouched_rate", "0.2", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let state = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, state.project, true);
+    compile_project_incremental(&db, state.project, "main").expect("first compile");
+
+    // Count the whole cold build, so the edit's count has something to be a
+    // fraction OF -- an assertion against a bare number would pass just as
+    // happily on a model that emitted no link scores at all.
+    let cold = super::compile::shaped_link_score_executions();
+    assert!(
+        cold >= 4,
+        "fixture must emit link scores for both loops to be measuring anything, got {cold}"
+    );
+
+    // Edit ONE variable's equation, in the other loop.
+    let mut edited = project.clone();
+    for var in &mut edited.models[0].variables {
+        if let datamodel::Variable::Aux(aux) = var
+            && aux.ident == "edited_rate"
+        {
+            aux.equation = datamodel::Equation::Scalar("0.15".to_string());
+        }
+    }
+
+    super::compile::reset_shaped_link_score_executions();
+    let state2 = sync_from_datamodel_incremental(&mut db, &edited, Some(&state));
+    compile_project_incremental(&db, state2.project, "main").expect("recompile after edit");
+    let after_edit = super::compile::shaped_link_score_executions();
+
+    // The bound is "strictly fewer than the cold build", not an exact number:
+    // which scores touch `edited_rate` is a property of the LTM emitter that
+    // may legitimately change, while "an edit in one loop must not regenerate
+    // the other loop's scores" is the contract. An exact pin would fail on
+    // every unrelated emitter change and teach nothing.
+    assert!(
+        after_edit < cold,
+        "a one-variable equation edit regenerated {after_edit} of {cold} link scores -- \
+         the per-involved-variable incrementality this query documents is gone. \
+         The usual cause is a dependency on a whole-model query (every variable's \
+         lowered form) where a per-variable one would do."
+    );
+}

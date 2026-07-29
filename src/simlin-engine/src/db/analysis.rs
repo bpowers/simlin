@@ -3434,15 +3434,47 @@ pub(crate) fn reconstruct_model_variables(
 /// to, which they could when each searched the model its own way.
 ///
 /// Returns None if the name doesn't match any variable in the model.
+///
+/// A `&str`-taking wrapper over the tracked query below, so that no caller has
+/// to own its name to ask.
 pub(super) fn reconstruct_single_variable(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
     var_name: &str,
 ) -> Option<crate::variable::Variable> {
+    reconstruct_named_variable(db, model, project, var_name.to_string())
+}
+
+/// The salsa FIREWALL over [`reconstruct_model_variables`], and the reason
+/// this is a tracked query rather than a plain map lookup.
+///
+/// The map is whole-model: any variable's equation edit changes it, because it
+/// holds every variable's LOWERED form. A caller that reads it directly
+/// therefore depends on every variable in the model -- which for
+/// `link_score_equation_text_shaped` (tracked per `(from, to, shape)`, and
+/// documented as "recomputed only when the involved variables change") meant
+/// one unrelated edit regenerated EVERY link score. On C-LEARN that is 6,721
+/// of them per keystroke.
+///
+/// This query still reads the whole map and so still re-executes on any edit,
+/// but its VALUE is one variable, so salsa backdates it whenever that variable
+/// is untouched and no reader re-runs. Same shape, and the same reason, as
+/// `db::query::model_variable_by_name` over `SourceModel::variables`.
+///
+/// Pinned by `db::ltm_tests::an_unrelated_equation_edit_does_not_regenerate_
+/// every_link_score`, which counts query-body entries -- pointer equality
+/// cannot see this, since backdating leaves the memo in place either way.
+#[salsa::tracked]
+fn reconstruct_named_variable(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    var_name: String,
+) -> Option<crate::variable::Variable> {
     reconstruct_model_variables(db, model, project)
         .get(&crate::common::Ident::<crate::common::Canonical>::new(
-            var_name,
+            &var_name,
         ))
         .cloned()
 }

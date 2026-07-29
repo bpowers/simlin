@@ -103,6 +103,35 @@ pub fn compile_ltm_var_fragment(
     compile_ltm_equation_fragment(db, &lsv.name, &equation, model, project)
 }
 
+// How many times `link_score_equation_text_shaped`'s body has run on this
+// thread (test-only).
+//
+// The query documents a per-involved-variable incrementality claim, and only a
+// body-entry count can check it: salsa BACKDATES a re-executed query whose
+// value compares equal, so the memo neither moves nor changes and pointer
+// equality reads identical whether the body ran or not. Thread-local for the
+// same reasons `db::stages`' counters are -- see the note there, including the
+// warning about what happens if this subtree is ever parallelized.
+#[cfg(test)]
+thread_local! {
+    static SHAPED_LINK_SCORE_EXECUTIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+/// Zero the counter (test-only). Call it after the fixture is synced and
+/// first compiled, so setup work is not charged to the measured edit.
+#[cfg(test)]
+pub(crate) fn reset_shaped_link_score_executions() {
+    SHAPED_LINK_SCORE_EXECUTIONS.with(|c| c.set(0));
+}
+
+/// Read the counter (test-only).
+#[cfg(test)]
+pub(crate) fn shaped_link_score_executions() -> usize {
+    SHAPED_LINK_SCORE_EXECUTIONS.with(|c| c.get())
+}
+
 /// Outcome of [`link_score_equation_text_shaped`] for one
 /// `(from, to, shape)` tuple.
 ///
@@ -190,6 +219,9 @@ pub fn link_score_equation_text_shaped<'db>(
     use crate::common::{Canonical, Ident};
     use crate::db::LtmSyntheticVar;
     use crate::db::module_link_score_equation;
+
+    #[cfg(test)]
+    SHAPED_LINK_SCORE_EXECUTIONS.with(|c| c.set(c.get() + 1));
 
     let from_name = link_id.link_from(db);
     let to_name = link_id.link_to(db);
