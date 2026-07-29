@@ -231,7 +231,7 @@ impl<'a> Expr2Context for ArrayContext<'a> {
     }
 }
 
-pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<Ast<Expr2>> {
+pub(crate) fn lower_ast(scope: &ScopeStage0, ast: &Ast<Expr0>) -> EquationResult<Ast<Expr2>> {
     match ast {
         Ast::Scalar(expr) => {
             let mut ctx = ArrayContext::new(scope, scope.model_name);
@@ -245,18 +245,18 @@ pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<
             Expr1::from(expr)
                 .map(|expr| expr.constify_dimensions(scope))
                 .and_then(|expr| Expr2::from(expr, &mut ctx))
-                .map(|expr| Ast::ApplyToAll(dims, expr))
+                .map(|expr| Ast::ApplyToAll(dims.clone(), expr))
         }
         Ast::Arrayed(dims, elements, default_expr, apply_default_to_missing) => {
             let mut ctx = ArrayContext::with_array_context(scope, scope.model_name);
             let elements: EquationResult<HashMap<CanonicalElementName, Expr2>> = elements
-                .into_iter()
+                .iter()
                 .map(|(id, expr)| {
                     match Expr1::from(expr)
                         .map(|expr| expr.constify_dimensions(scope))
                         .and_then(|expr| Expr2::from(expr, &mut ctx))
                     {
-                        Ok(expr) => Ok((id, expr)),
+                        Ok(expr) => Ok((id.clone(), expr)),
                         Err(err) => Err(err),
                     }
                 })
@@ -271,10 +271,10 @@ pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<
             };
             match elements {
                 Ok(elements) => Ok(Ast::Arrayed(
-                    dims,
+                    dims.clone(),
                     elements,
                     default_expr,
-                    apply_default_to_missing,
+                    *apply_default_to_missing,
                 )),
                 Err(err) => Err(err),
             }

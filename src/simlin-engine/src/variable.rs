@@ -1436,7 +1436,7 @@ pub(crate) fn scalar_ast(eqn: &str) -> Ast<Expr2> {
         dimensions: &Default::default(),
         model_name: "test",
     };
-    lower_ast(&scope, ast.unwrap()).unwrap()
+    lower_ast(&scope, &ast.unwrap()).unwrap()
 }
 
 /// Table-driven matrix test for `classify_dependencies`.

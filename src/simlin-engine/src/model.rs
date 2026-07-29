@@ -173,15 +173,13 @@ pub(crate) fn lower_variable(scope: &ScopeStage0, var_s0: &VariableStage0) -> Va
             unit_errors,
         } => {
             let mut errors = errors.clone();
-            let ast = ast
-                .as_ref()
-                .and_then(|ast| match lower_ast(scope, ast.clone()) {
-                    Ok(ast) => Some(ast),
-                    Err(err) => {
-                        errors.push(err);
-                        None
-                    }
-                });
+            let ast = ast.as_ref().and_then(|ast| match lower_ast(scope, ast) {
+                Ok(ast) => Some(ast),
+                Err(err) => {
+                    errors.push(err);
+                    None
+                }
+            });
             Variable::Stock {
                 ident: ident.clone(),
                 init_ast: ast,
@@ -208,18 +206,16 @@ pub(crate) fn lower_variable(scope: &ScopeStage0, var_s0: &VariableStage0) -> Va
             unit_errors,
         } => {
             let mut errors = errors.clone();
-            let ast = ast
-                .as_ref()
-                .and_then(|ast| match lower_ast(scope, ast.clone()) {
-                    Ok(ast) => Some(ast),
-                    Err(err) => {
-                        errors.push(err);
-                        None
-                    }
-                });
+            let ast = ast.as_ref().and_then(|ast| match lower_ast(scope, ast) {
+                Ok(ast) => Some(ast),
+                Err(err) => {
+                    errors.push(err);
+                    None
+                }
+            });
             let init_ast = init_ast
                 .as_ref()
-                .and_then(|ast| match lower_ast(scope, ast.clone()) {
+                .and_then(|ast| match lower_ast(scope, ast) {
                     Ok(ast) => Some(ast),
                     Err(err) => {
                         errors.push(err);
