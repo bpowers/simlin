@@ -923,6 +923,26 @@ fn is_canonical(name: &str) -> bool {
 /// Note: the borrowed slice may be a sub-slice of the input when there is
 /// leading/trailing whitespace but the trimmed content is already canonical.
 /// The returned `Cow` borrows from the input `&str` in all borrowed cases.
+/// The engine's hash map for identifier-keyed lookups.
+///
+/// `FxHashMap`, not `std::collections::HashMap`. Identifier lookups are the
+/// compiler's densest operation -- a name resolution per AST node, per element,
+/// per fragment -- and SipHash over a short string was measured at 4-6% of a
+/// large model's compile cycles. FxHash's fixed seed additionally makes
+/// iteration order reproducible across processes, which is the direction this
+/// crate already wants (GH #595): a salsa-cached value built by iterating a map
+/// must not differ run to run.
+///
+/// The cost, stated because it is the reason this is not the default
+/// everywhere: a fixed seed means an adversary who chooses the KEYS can force
+/// collisions, and the keys here are variable names out of a model file. Every
+/// engine entry point today compiles a model on behalf of the person who
+/// supplied it -- the CLI, the local MCP and viewer servers, pysimlin, and the
+/// browser's wasm bundle -- so a collision attack costs the attacker their own
+/// compile. Do not extend this alias to a map keyed by input from a party other
+/// than the one paying for the work.
+pub(crate) type IdentMap<K, V> = std::collections::HashMap<K, V, rustc_hash::FxBuildHasher>;
+
 /// Whether `to_lowercase` would change `c`, i.e. Unicode's
 /// `Changes_When_Lowercased`.
 ///

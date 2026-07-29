@@ -77,8 +77,10 @@ pub struct Var {
 #[test]
 fn test_fold_flows() {
     let inputs = &BTreeSet::new();
-    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        HashMap::new();
+    let module_models: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    > = Default::default();
     let dummy_var = Variable::Var {
         ident: Ident::new(""),
         ast: None,
@@ -92,7 +94,8 @@ fn test_fold_flows() {
         errors: vec![],
         unit_errors: vec![],
     };
-    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
+    let mut metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
+        Default::default();
     metadata.insert(
         Ident::new("a"),
         VariableMetadata {
@@ -125,7 +128,7 @@ fn test_fold_flows() {
             var: &dummy_var,
         },
     );
-    let mut metadata2 = HashMap::new();
+    let mut metadata2 = crate::common::IdentMap::default();
     let main_ident = Ident::new("main");
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
@@ -181,9 +184,11 @@ fn test_module_var_new_missing_input_source_returns_error() {
     let model_name_ident: Ident<Canonical> = Ident::new("sub_model");
 
     // module_models maps "main" -> { "my_module" -> "sub_model" }
-    let mut module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        HashMap::new();
-    let mut main_modules = HashMap::new();
+    let mut module_models: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    > = Default::default();
+    let mut main_modules = crate::common::IdentMap::default();
     main_modules.insert(module_ident.clone(), model_name_ident.clone());
     let main_ident = Ident::new("main");
     module_models.insert(main_ident.clone(), main_modules);
@@ -202,7 +207,8 @@ fn test_module_var_new_missing_input_source_returns_error() {
     };
 
     // metadata only contains "my_module" -- NOT "missing_source"
-    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
+    let mut metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
+        Default::default();
     metadata.insert(
         module_ident.clone(),
         VariableMetadata {
@@ -211,7 +217,7 @@ fn test_module_var_new_missing_input_source_returns_error() {
             var: &module_var,
         },
     );
-    let mut metadata2 = HashMap::new();
+    let mut metadata2 = crate::common::IdentMap::default();
     metadata2.insert(main_ident.clone(), metadata);
 
     let dims_ctx = DimensionsContext::default();
@@ -240,8 +246,10 @@ fn test_module_var_new_missing_input_source_returns_error() {
 #[test]
 fn test_build_stock_update_expr_inflows_only() {
     let inputs = &BTreeSet::new();
-    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        HashMap::new();
+    let module_models: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    > = Default::default();
     let stock_var = Variable::Stock {
         ident: Ident::new("stock"),
         init_ast: None,
@@ -266,7 +274,8 @@ fn test_build_stock_update_expr_inflows_only() {
         errors: vec![],
         unit_errors: vec![],
     };
-    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
+    let mut metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
+        Default::default();
     metadata.insert(
         Ident::new("stock"),
         VariableMetadata {
@@ -283,7 +292,7 @@ fn test_build_stock_update_expr_inflows_only() {
             var: &dummy_var,
         },
     );
-    let mut metadata2 = HashMap::new();
+    let mut metadata2 = crate::common::IdentMap::default();
     let main_ident = Ident::new("main");
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
@@ -339,8 +348,10 @@ fn test_build_stock_update_expr_inflows_only() {
 #[test]
 fn test_build_stock_update_expr_outflows_only() {
     let inputs = &BTreeSet::new();
-    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        HashMap::new();
+    let module_models: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    > = Default::default();
     let stock_var = Variable::Stock {
         ident: Ident::new("stock"),
         init_ast: None,
@@ -365,7 +376,8 @@ fn test_build_stock_update_expr_outflows_only() {
         errors: vec![],
         unit_errors: vec![],
     };
-    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
+    let mut metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
+        Default::default();
     metadata.insert(
         Ident::new("stock"),
         VariableMetadata {
@@ -382,7 +394,7 @@ fn test_build_stock_update_expr_outflows_only() {
             var: &dummy_var,
         },
     );
-    let mut metadata2 = HashMap::new();
+    let mut metadata2 = crate::common::IdentMap::default();
     let main_ident = Ident::new("main");
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
@@ -437,8 +449,10 @@ fn test_build_stock_update_expr_outflows_only() {
 #[test]
 fn test_build_stock_update_expr_no_flows() {
     let inputs = &BTreeSet::new();
-    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        HashMap::new();
+    let module_models: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    > = Default::default();
     let stock_var = Variable::Stock {
         ident: Ident::new("stock"),
         init_ast: None,
@@ -463,7 +477,8 @@ fn test_build_stock_update_expr_no_flows() {
         errors: vec![],
         unit_errors: vec![],
     };
-    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
+    let mut metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
+        Default::default();
     metadata.insert(
         Ident::new("stock"),
         VariableMetadata {
@@ -472,7 +487,7 @@ fn test_build_stock_update_expr_no_flows() {
             var: &dummy_var,
         },
     );
-    let mut metadata2 = HashMap::new();
+    let mut metadata2 = crate::common::IdentMap::default();
     let main_ident = Ident::new("main");
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
@@ -522,8 +537,10 @@ fn test_build_stock_update_expr_no_flows() {
 #[test]
 fn test_build_stock_update_expr_multiple_flows() {
     let inputs = &BTreeSet::new();
-    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        HashMap::new();
+    let module_models: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    > = Default::default();
     let stock_var = Variable::Stock {
         ident: Ident::new("stock"),
         init_ast: None,
@@ -548,7 +565,8 @@ fn test_build_stock_update_expr_multiple_flows() {
         errors: vec![],
         unit_errors: vec![],
     };
-    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
+    let mut metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
+        Default::default();
     for (name, off) in [
         ("stock", 0),
         ("in1", 1),
@@ -565,7 +583,7 @@ fn test_build_stock_update_expr_multiple_flows() {
             },
         );
     }
-    let mut metadata2 = HashMap::new();
+    let mut metadata2 = crate::common::IdentMap::default();
     let main_ident = Ident::new("main");
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
@@ -690,7 +708,8 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
         unit_errors: vec![],
     };
 
-    let mut model_metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
+    let mut model_metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
+        Default::default();
     model_metadata.insert(
         Ident::new("x"),
         VariableMetadata {
@@ -699,13 +718,15 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
             var: &var,
         },
     );
-    let mut metadata = HashMap::new();
+    let mut metadata = crate::common::IdentMap::default();
     let model_name = Ident::new("main");
     metadata.insert(model_name.clone(), model_metadata);
 
     let inputs = BTreeSet::new();
-    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        HashMap::new();
+    let module_models: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    > = Default::default();
     let dims_ctx = DimensionsContext::from(std::slice::from_ref(&datamodel_dim));
     let ident = Ident::new("test");
     let var_sizes = whole_variable_extents(&metadata, &model_name);
@@ -2829,9 +2850,14 @@ pub struct Module {
 pub(crate) fn calc_module_model_map(
     project: &Project,
     model_name: &Ident<Canonical>,
-) -> HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> {
-    let mut all_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        HashMap::new();
+) -> crate::common::IdentMap<
+    Ident<Canonical>,
+    crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+> {
+    let mut all_models: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    > = Default::default();
 
     let model = Arc::clone(&project.models[model_name]);
     let var_names: Vec<&str> = {
@@ -2840,7 +2866,8 @@ pub(crate) fn calc_module_model_map(
         var_names
     };
 
-    let mut current_mapping: HashMap<Ident<Canonical>, Ident<Canonical>> = HashMap::new();
+    let mut current_mapping: crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>> =
+        Default::default();
 
     for ident in var_names.iter() {
         let canonical_ident = Ident::new(ident);
@@ -2865,7 +2892,10 @@ pub(crate) fn build_metadata<'p>(
     project: &'p Project,
     model_name: &Ident<Canonical>,
     is_root: bool,
-    all_offsets: &mut HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata<'p>>>,
+    all_offsets: &mut crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'p>>,
+    >,
 ) {
     use std::sync::LazyLock;
 
@@ -2929,8 +2959,8 @@ pub(crate) fn build_metadata<'p>(
         var_names
     };
     let var_count = var_names.len() + if is_root { IMPLICIT_VAR_COUNT } else { 0 };
-    let mut offsets: HashMap<Ident<Canonical>, VariableMetadata<'p>> =
-        HashMap::with_capacity(var_count);
+    let mut offsets: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'p>> =
+        crate::common::IdentMap::with_capacity_and_hasher(var_count, Default::default());
 
     let mut i = 0;
     if is_root {
@@ -2999,7 +3029,10 @@ pub(crate) fn build_metadata<'p>(
 
 #[cfg(test)]
 fn calc_n_slots(
-    all_metadata: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata<'_>>>,
+    all_metadata: &crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>>,
+    >,
     model_name: &Ident<Canonical>,
 ) -> usize {
     let metadata = &all_metadata[model_name];
@@ -3063,7 +3096,11 @@ impl Module {
         }
 
         let model_name: &Ident<Canonical> = &model.name;
-        let mut metadata = HashMap::with_capacity(project.models.len());
+        let mut metadata: crate::common::IdentMap<_, _> =
+            crate::common::IdentMap::with_capacity_and_hasher(
+                project.models.len(),
+                Default::default(),
+            );
         build_metadata(project, model_name, is_root, &mut metadata);
 
         let n_slots = calc_n_slots(&metadata, model_name);

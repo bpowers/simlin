@@ -2,19 +2,18 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
 use std::sync::Mutex;
 
 use smallvec::SmallVec;
 
-use crate::common::{CanonicalDimensionName, CanonicalElementName};
+use crate::common::{CanonicalDimensionName, CanonicalElementName, IdentMap};
 use crate::datamodel;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, salsa::Update)]
 pub struct NamedDimension {
     pub elements: Vec<CanonicalElementName>,
-    pub indexed_elements: HashMap<CanonicalElementName, usize>,
+    pub indexed_elements: IdentMap<CanonicalElementName, usize>,
     /// If this dimension maps to another (e.g., DimA -> DimB), the target dimension name.
     /// Elements correspond positionally: elements[i] of this dimension corresponds to
     /// elements[i] of the target dimension.
@@ -86,7 +85,7 @@ impl SubdimensionRelation {
 #[derive(Default)]
 struct RelationshipCache {
     cache: Mutex<
-        HashMap<(CanonicalDimensionName, CanonicalDimensionName), Option<SubdimensionRelation>>,
+        IdentMap<(CanonicalDimensionName, CanonicalDimensionName), Option<SubdimensionRelation>>,
     >,
 }
 
@@ -256,7 +255,7 @@ impl From<&datamodel::Dimension> for Dimension {
                     .iter()
                     .map(|e| CanonicalElementName::from_raw(e))
                     .collect();
-                let indexed_elements: HashMap<CanonicalElementName, usize> = canonical_elements
+                let indexed_elements: IdentMap<CanonicalElementName, usize> = canonical_elements
                     .iter()
                     .enumerate()
                     // system dynamic indexes are 1-indexed
@@ -310,9 +309,9 @@ pub struct DimensionsContext {
     /// sharing is safe. The `relationship_cache` memo stays per-instance
     /// (cloned cold), which only costs re-deriving subdimension relations on
     /// first use.
-    dimensions: std::sync::Arc<HashMap<CanonicalDimensionName, Dimension>>,
+    dimensions: std::sync::Arc<IdentMap<CanonicalDimensionName, Dimension>>,
     /// For indexed subdimensions, maps child dimension name to its declared parent.
-    indexed_parents: std::sync::Arc<HashMap<CanonicalDimensionName, CanonicalDimensionName>>,
+    indexed_parents: std::sync::Arc<IdentMap<CanonicalDimensionName, CanonicalDimensionName>>,
     relationship_cache: RelationshipCache,
 }
 
@@ -384,7 +383,7 @@ impl DimensionsContext {
             }
         }
 
-        let indexed_parents: HashMap<CanonicalDimensionName, CanonicalDimensionName> = dimensions
+        let indexed_parents: IdentMap<CanonicalDimensionName, CanonicalDimensionName> = dimensions
             .iter()
             .filter_map(|dim| {
                 dim.parent.as_ref().map(|parent_name| {

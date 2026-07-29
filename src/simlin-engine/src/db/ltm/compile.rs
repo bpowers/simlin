@@ -898,8 +898,10 @@ pub(crate) fn compile_ltm_equation_fragment(
     // Arena for sub-model stub variables allocated by build_submodel_metadata
     let arena = bumpalo::Bump::new();
 
-    let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
-        HashMap::new();
+    let mut mini_metadata: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::compiler::VariableMetadata<'_>,
+    > = Default::default();
 
     // Add implicit time/dt/initial_time/final_time variables
     {
@@ -1525,10 +1527,10 @@ pub(crate) fn compile_ltm_equation_fragment(
     }
 
     // Build the all_metadata map
-    let mut all_metadata: HashMap<
+    let mut all_metadata: crate::common::IdentMap<
         Ident<Canonical>,
-        HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
-    > = HashMap::new();
+        crate::common::IdentMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
+    > = Default::default();
     all_metadata.insert(model_name_ident.clone(), mini_metadata);
 
     // Populate sub-model metadata for implicit module sub-models
@@ -1545,20 +1547,22 @@ pub(crate) fn compile_ltm_equation_fragment(
     // function runs once per LTM synthetic var, ~6.7k times on C-LEARN).
     let base_module_models = model_module_map(db, model, project);
     let merged_module_models;
-    let module_models: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        if implicit_module_refs.is_empty() {
-            base_module_models
-        } else {
-            merged_module_models = {
-                let mut merged = base_module_models.clone();
-                let current_model_modules = merged.entry(model_name_ident.clone()).or_default();
-                for (var_ident, (sub_model_name, _input_set)) in &implicit_module_refs {
-                    current_model_modules.insert(var_ident.clone(), sub_model_name.clone());
-                }
-                merged
-            };
-            &merged_module_models
+    let module_models: &crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    > = if implicit_module_refs.is_empty() {
+        base_module_models
+    } else {
+        merged_module_models = {
+            let mut merged = base_module_models.clone();
+            let current_model_modules = merged.entry(model_name_ident.clone()).or_default();
+            for (var_ident, (sub_model_name, _input_set)) in &implicit_module_refs {
+                current_model_modules.insert(var_ident.clone(), sub_model_name.clone());
+            }
+            merged
         };
+        &merged_module_models
+    };
 
     // The LTM synthetic var's fragment goes through the SAME emission entry
     // point the explicit and implicit paths use. This site used to carry a
@@ -2047,8 +2051,10 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
     // Arena for sub-model stub variables
     let arena = bumpalo::Bump::new();
 
-    let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
-        HashMap::new();
+    let mut mini_metadata: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::compiler::VariableMetadata<'_>,
+    > = Default::default();
 
     // Add implicit time/dt/initial_time/final_time
     {
@@ -2424,10 +2430,10 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         }
     }
 
-    let mut all_metadata: HashMap<
+    let mut all_metadata: crate::common::IdentMap<
         Ident<Canonical>,
-        HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
-    > = HashMap::new();
+        crate::common::IdentMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
+    > = Default::default();
     all_metadata.insert(model_name_ident.clone(), mini_metadata);
 
     // Build sub-model metadata for module-type implicit vars and any
@@ -2465,23 +2471,25 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
     let base_module_models = model_module_map(db, model, project);
     let ltm_module_refs = model_ltm_implicit_module_refs(db, model, project);
     let merged_module_models;
-    let module_models: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        if module_refs.is_empty() && ltm_module_refs.is_empty() {
-            base_module_models
-        } else {
-            merged_module_models = {
-                let mut merged = base_module_models.clone();
-                let current_model_modules = merged.entry(model_name_ident.clone()).or_default();
-                for (var_ident, (sub_model_name, _input_set)) in &module_refs {
-                    current_model_modules.insert(var_ident.clone(), sub_model_name.clone());
-                }
-                for (im_ident, sub_model_name) in ltm_module_refs.iter() {
-                    current_model_modules.insert(im_ident.clone(), sub_model_name.clone());
-                }
-                merged
-            };
-            &merged_module_models
+    let module_models: &crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    > = if module_refs.is_empty() && ltm_module_refs.is_empty() {
+        base_module_models
+    } else {
+        merged_module_models = {
+            let mut merged = base_module_models.clone();
+            let current_model_modules = merged.entry(model_name_ident.clone()).or_default();
+            for (var_ident, (sub_model_name, _input_set)) in &module_refs {
+                current_model_modules.insert(var_ident.clone(), sub_model_name.clone());
+            }
+            for (im_ident, sub_model_name) in ltm_module_refs.iter() {
+                current_model_modules.insert(im_ident.clone(), sub_model_name.clone());
+            }
+            merged
         };
+        &merged_module_models
+    };
 
     // Same single emission entry point as every other fragment site. This was
     // the second hand-copied duplicate of that body; it differed from the

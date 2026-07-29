@@ -198,9 +198,9 @@ pub(crate) fn build_submodel_metadata<'arena>(
     db: &dyn Db,
     sub_model: SourceModel,
     project: SourceProject,
-    all_metadata: &mut HashMap<
+    all_metadata: &mut crate::common::IdentMap<
         Ident<Canonical>,
-        HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'arena>>,
+        crate::common::IdentMap<Ident<Canonical>, crate::compiler::VariableMetadata<'arena>>,
     >,
 ) {
     let sub_model_name: Ident<Canonical> = Ident::new(sub_model.name(db));
@@ -213,8 +213,10 @@ pub(crate) fn build_submodel_metadata<'arena>(
     let source_vars = sub_model.variables(db);
     let project_models = project.models(db);
 
-    let mut sub_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'arena>> =
-        HashMap::new();
+    let mut sub_metadata: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::compiler::VariableMetadata<'arena>,
+    > = Default::default();
 
     let mut sorted_names: Vec<&String> = source_vars.keys().collect();
     sorted_names.sort_unstable();

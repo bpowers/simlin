@@ -97,7 +97,7 @@ pub(super) struct Compiler<'module> {
     /// large LTM builds), and `Compiler::new` interns every dimension and
     /// element name up front -- with a linear-scan intern that was O(D^2)
     /// string comparisons per fragment (GH #655).
-    name_ids: HashMap<String, NameId>,
+    name_ids: crate::common::IdentMap<String, NameId>,
     static_views: Vec<SymbolicStaticView>,
     dim_lists: Vec<(u8, [u16; 4])>,
     // Iteration context - set when compiling inside AssignTemp
@@ -159,7 +159,7 @@ impl<'module> Compiler<'module> {
             dimensions: vec![],
             subdim_relations: vec![],
             names: vec![],
-            name_ids: HashMap::new(),
+            name_ids: Default::default(),
             static_views: vec![],
             dim_lists: Vec::new(),
             in_iteration: false,

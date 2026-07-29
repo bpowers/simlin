@@ -1524,11 +1524,12 @@ mod tests {
             .map(|e| CanonicalElementName::from_raw(e))
             .collect();
 
-        let indexed_elements: HashMap<CanonicalElementName, usize> = canonical_elements
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (e.clone(), i))
-            .collect();
+        let indexed_elements: crate::common::IdentMap<CanonicalElementName, usize> =
+            canonical_elements
+                .iter()
+                .enumerate()
+                .map(|(i, e)| (e.clone(), i))
+                .collect();
 
         Dimension::Named(
             CanonicalDimensionName::from_raw(name),

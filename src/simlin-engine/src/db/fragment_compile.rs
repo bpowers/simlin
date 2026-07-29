@@ -604,8 +604,10 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
     // The minimal symbol table for this helper: itself plus its dependencies,
     // carrying no offsets. See `lower_var_fragment` for why a fragment must not
     // know where its own model's variables live.
-    let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
-        HashMap::new();
+    let mut mini_metadata: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::compiler::VariableMetadata<'_>,
+    > = Default::default();
 
     let project_models = project.models(db);
     let self_size = if meta.is_module {
@@ -877,10 +879,10 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
         }
     }
 
-    let mut all_metadata: HashMap<
+    let mut all_metadata: crate::common::IdentMap<
         Ident<Canonical>,
-        HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
-    > = HashMap::new();
+        crate::common::IdentMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
+    > = Default::default();
     all_metadata.insert(model_name_ident.clone(), mini_metadata);
 
     for sub_model in extra_submodels.values() {
@@ -939,7 +941,7 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
 
         model_module_map(db, model, project).clone()
     } else {
-        HashMap::new()
+        Default::default()
     };
 
     // Reference extents in the per-variable form BOTH halves borrow: lowering's

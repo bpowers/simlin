@@ -2,15 +2,15 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::ast::{
     self, ArrayView, BinaryOp, Expr3, Expr3LowerContext, IndexExpr3, Loc, Pass1Context,
 };
 use crate::common::{
-    Canonical, CanonicalDimensionName, CanonicalElementName, ErrorCode, ErrorKind, Ident, Result,
-    canonicalize,
+    Canonical, CanonicalDimensionName, CanonicalElementName, ErrorCode, ErrorKind, Ident, IdentMap,
+    Result, canonicalize,
 };
 use crate::dimensions::{Dimension, DimensionsContext};
 use crate::variable::Variable;
@@ -50,7 +50,7 @@ pub(crate) struct VariableMetadata<'a> {
 /// the model being compiled plus every sub-model reachable from it, which is
 /// what makes a cross-module name resolvable.
 pub(crate) type MetadataByModel<'a> =
-    HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata<'a>>>;
+    IdentMap<Ident<Canonical>, IdentMap<Ident<Canonical>, VariableMetadata<'a>>>;
 
 /// Project [`super::VarSizes`] out of the symbol table: the extent of every
 /// variable a reference in `model` can address **in whole**.
@@ -176,7 +176,7 @@ pub(crate) struct ContextCore<'a> {
     /// table. Derived, never authored: build it with `whole_variable_extents`.
     pub(crate) var_sizes: &'a super::VarSizes,
     pub(crate) module_models:
-        &'a HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>>,
+        &'a IdentMap<Ident<Canonical>, IdentMap<Ident<Canonical>, Ident<Canonical>>>,
     pub(crate) inputs: &'a BTreeSet<Ident<Canonical>>,
 }
 
@@ -2747,8 +2747,10 @@ fn test_lower() {
     };
 
     let inputs = &BTreeSet::new();
-    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        HashMap::new();
+    let module_models: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    > = Default::default();
     let true_var = Variable::Var {
         ident: Ident::new(""),
         ast: None,
@@ -2775,7 +2777,8 @@ fn test_lower() {
         errors: vec![],
         unit_errors: vec![],
     };
-    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
+    let mut metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
+        Default::default();
     metadata.insert(
         Ident::new("true_input"),
         VariableMetadata {
@@ -2792,7 +2795,7 @@ fn test_lower() {
             var: &false_var,
         },
     );
-    let mut metadata2 = HashMap::new();
+    let mut metadata2 = crate::common::IdentMap::default();
     let main_ident = Ident::new("main");
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
@@ -2862,8 +2865,10 @@ fn test_lower() {
     };
 
     let inputs = &BTreeSet::new();
-    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        HashMap::new();
+    let module_models: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    > = Default::default();
     let true_var = Variable::Var {
         ident: Ident::new(""),
         ast: None,
@@ -2890,7 +2895,8 @@ fn test_lower() {
         errors: vec![],
         unit_errors: vec![],
     };
-    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
+    let mut metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
+        Default::default();
     metadata.insert(
         Ident::new("true_input"),
         VariableMetadata {
@@ -2907,7 +2913,7 @@ fn test_lower() {
             var: &false_var,
         },
     );
-    let mut metadata2 = HashMap::new();
+    let mut metadata2 = crate::common::IdentMap::default();
     let main_ident = Ident::new("main");
     let test_ident = Ident::new("test");
     metadata2.insert(main_ident.clone(), metadata);
@@ -2962,10 +2968,14 @@ fn test_with_active_subscripts_reuses_dimension_storage() {
         CanonicalDimensionName::from_raw("letters"),
         3,
     )];
-    let metadata: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata<'_>>> =
-        HashMap::new();
-    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        HashMap::new();
+    let metadata: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>>,
+    > = Default::default();
+    let module_models: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    > = Default::default();
     let inputs = BTreeSet::new();
 
     let var_sizes = whole_variable_extents(&metadata, &model_name);
@@ -3017,10 +3027,14 @@ fn test_get_implicit_subscript_off_translates_through_mapping_parent() {
         Dimension::from(&sub_a),
         Dimension::from(&dim_b),
     ];
-    let metadata: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata<'_>>> =
-        HashMap::new();
-    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        HashMap::new();
+    let metadata: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>>,
+    > = Default::default();
+    let module_models: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    > = Default::default();
     let inputs = BTreeSet::new();
     let model_name = Ident::new("main");
     let ident = Ident::new("test_var");
@@ -3095,7 +3109,7 @@ fn test_positional_fallback_ignores_unrelated_mapping() {
         unit_errors: vec![],
     };
 
-    let mut model_metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
+    let mut model_metadata: IdentMap<Ident<Canonical>, VariableMetadata<'_>> = Default::default();
     model_metadata.insert(
         Ident::new("source_var"),
         VariableMetadata {
@@ -3105,13 +3119,15 @@ fn test_positional_fallback_ignores_unrelated_mapping() {
         },
     );
 
-    let mut metadata: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata<'_>>> =
-        HashMap::new();
+    let mut metadata: IdentMap<Ident<Canonical>, IdentMap<Ident<Canonical>, VariableMetadata<'_>>> =
+        Default::default();
     let model_name = Ident::new("main");
     metadata.insert(model_name.clone(), model_metadata);
 
-    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
-        HashMap::new();
+    let module_models: crate::common::IdentMap<
+        Ident<Canonical>,
+        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
+    > = Default::default();
     let inputs = BTreeSet::new();
     let ident = Ident::new("test_var");
     let var_sizes = whole_variable_extents(&metadata, &model_name);

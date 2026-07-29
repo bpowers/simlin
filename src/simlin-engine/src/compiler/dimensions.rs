@@ -321,14 +321,12 @@ mod tests {
             .iter()
             .map(|e| crate::common::CanonicalElementName::from_raw(e))
             .collect();
-        let indexed_elements: std::collections::HashMap<
-            crate::common::CanonicalElementName,
-            usize,
-        > = canonical_elements
-            .iter()
-            .enumerate()
-            .map(|(i, elem)| (elem.clone(), i + 1))
-            .collect();
+        let indexed_elements: crate::common::IdentMap<crate::common::CanonicalElementName, usize> =
+            canonical_elements
+                .iter()
+                .enumerate()
+                .map(|(i, elem)| (elem.clone(), i + 1))
+                .collect();
         Dimension::Named(
             CanonicalDimensionName::from_raw(name),
             NamedDimension {

@@ -14,12 +14,11 @@ use crate::db::ltm_ir::OccurrenceRef;
 use crate::dimensions::{Dimension, NamedDimension};
 
 fn make_named_dimension(name: &str, elements: &[&str]) -> Dimension {
-    use std::collections::HashMap;
     let canonical_elements: Vec<CanonicalElementName> = elements
         .iter()
         .map(|e| CanonicalElementName::from_raw(e))
         .collect();
-    let indexed: HashMap<CanonicalElementName, usize> = canonical_elements
+    let indexed: crate::common::IdentMap<CanonicalElementName, usize> = canonical_elements
         .iter()
         .enumerate()
         // 1-indexed, matching `impl From<&datamodel::Dimension>` -- production

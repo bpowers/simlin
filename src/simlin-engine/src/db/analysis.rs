@@ -3500,7 +3500,6 @@ mod emit_edges_for_reference_tests {
     use super::*;
     use crate::common::{CanonicalDimensionName, CanonicalElementName};
     use crate::dimensions::{Dimension, NamedDimension};
-    use std::collections::HashMap as StdHashMap;
 
     /// Build a single-dim `Named` dimension from raw element names.
     /// Mirrors `make_named_dimension` in `ltm_augment.rs::tests` -- inlined
@@ -3510,7 +3509,7 @@ mod emit_edges_for_reference_tests {
             .iter()
             .map(|e| CanonicalElementName::from_raw(e))
             .collect();
-        let indexed: StdHashMap<CanonicalElementName, usize> = canonical_elements
+        let indexed: crate::common::IdentMap<CanonicalElementName, usize> = canonical_elements
             .iter()
             .enumerate()
             .map(|(i, e)| (e.clone(), i + 1))
@@ -4804,7 +4803,6 @@ mod classify_cycle_tests {
     use super::*;
     use crate::common::{CanonicalDimensionName, CanonicalElementName};
     use crate::dimensions::{Dimension, NamedDimension};
-    use std::collections::HashMap as StdHashMap;
 
     /// Helper: build a single-dim Named dimension whose elements are
     /// `["a", "b"]`. The `name` is the canonical dimension name.
@@ -4813,7 +4811,7 @@ mod classify_cycle_tests {
             CanonicalElementName::from_raw("a"),
             CanonicalElementName::from_raw("b"),
         ];
-        let indexed: StdHashMap<CanonicalElementName, usize> = elements
+        let indexed: crate::common::IdentMap<CanonicalElementName, usize> = elements
             .iter()
             .enumerate()
             .map(|(i, e)| (e.clone(), i + 1))
