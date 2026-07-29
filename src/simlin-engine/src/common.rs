@@ -932,7 +932,15 @@ pub fn canonicalize(name: &str) -> Cow<'_, str> {
         return Cow::Borrowed(trimmed);
     }
 
-    // Slow path: full canonicalization with allocation.
+    // Slow path: four rewrites per identifier part -- period mapping,
+    // doubled-backslash unescaping, whitespace collapse, lowercasing. Each is
+    // guarded by a cheap "is there anything to do" test and skipped by
+    // borrowing when there is not, and the last two are fused for an ASCII part
+    // so they write straight into the output. Spelling them as four
+    // unconditional `String`-returning steps cost four allocations and a
+    // two-way substring searcher per part even for a name whose only defect was
+    // its capitalization -- and this is the single hottest function in a large
+    // model's compile, reached once per identifier occurrence.
     let mut canonicalized_name = String::with_capacity(trimmed.len());
 
     for part in IdentifierPartIterator::new(trimmed) {
@@ -953,22 +961,83 @@ pub fn canonicalize(name: &str) -> Cow<'_, str> {
             } else {
                 Cow::Borrowed(inner)
             }
-        } else {
+        } else if part.contains('.') {
             // Replace periods with middle dots (·) for module hierarchy separators.
             // This allows us to distinguish between:
             // - Module separators: model.variable -> model·variable
             // - Literal periods in quoted names: "a.b" -> a<U+2024>b
             Cow::Owned(part.replace('.', "·"))
+        } else {
+            Cow::Borrowed(part)
         };
 
-        let part = part.replace("\\\\", "\\");
-        let part = replace_whitespace_with_underscore(&part);
-        let part = part.to_lowercase();
+        // Unescape doubled backslashes. Guarded on a single-character search
+        // (which is memchr) rather than on the two-character pattern, whose
+        // searcher setup costs more than the scan: no backslash at all implies
+        // no doubled one, and a part holding a lone backslash is rare enough
+        // that letting it fall through to a no-op `replace` is free.
+        let part = if part.contains('\\') {
+            Cow::Owned(part.replace("\\\\", "\\"))
+        } else {
+            part
+        };
 
-        canonicalized_name.push_str(&part);
+        push_whitespace_folded_lowercase(&mut canonicalized_name, &part);
     }
 
     Cow::Owned(canonicalized_name)
+}
+
+/// Append `part` to `out` with the last two canonicalization steps applied:
+/// [`replace_whitespace_with_underscore`], then `to_lowercase`.
+///
+/// The ASCII arm fuses the two into one pass that writes directly into `out`.
+/// That is sound for exactly two reasons, both of which fail outside ASCII:
+/// ASCII lowercasing is per-byte and context-free (`str::to_lowercase` is
+/// context-sensitive in general -- Greek capital sigma lowercases differently
+/// at the end of a word), and the only non-ASCII character the whitespace pass
+/// recognizes, U+00A0, cannot occur. The non-ASCII arm therefore keeps the two
+/// steps separate and unchanged, and skips `to_lowercase` when no character
+/// would change -- the same predicate `is_canonical` uses.
+fn push_whitespace_folded_lowercase(out: &mut String, part: &str) {
+    if part.is_ascii() {
+        let bytes = part.as_bytes();
+        let mut in_whitespace = false;
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            // A literal `\n` / `\r` escape (two characters) counts as
+            // whitespace; any other backslash passes through.
+            if b == b'\\' && matches!(bytes.get(i + 1), Some(b'n' | b'r')) {
+                i += 2;
+                if !in_whitespace {
+                    out.push('_');
+                    in_whitespace = true;
+                }
+            } else if matches!(b, b'\n' | b'\r' | b'\t' | b' ') {
+                i += 1;
+                if !in_whitespace {
+                    out.push('_');
+                    in_whitespace = true;
+                }
+            } else {
+                i += 1;
+                in_whitespace = false;
+                out.push(char::from(b.to_ascii_lowercase()));
+            }
+        }
+        return;
+    }
+
+    let replaced = replace_whitespace_with_underscore(part);
+    if replaced
+        .chars()
+        .any(|c| c.to_lowercase().ne(std::iter::once(c)))
+    {
+        out.push_str(&replaced.to_lowercase());
+    } else {
+        out.push_str(&replaced);
+    }
 }
 
 /// Group a variable-ident list by canonical form and return the colliding
@@ -1370,6 +1439,23 @@ mod canonicalize_invariant_tests {
         result
     }
 
+    /// The alphabet that actually reaches every branch of the slow path.
+    ///
+    /// `\PC{0,100}` alone does not: the branches are selected by quotes,
+    /// periods, backslashes, the two literal escapes, whitespace runs, and
+    /// characters whose lowercasing is context-sensitive or non-ASCII, and a
+    /// generator over all non-control characters produces those roughly never.
+    /// Two of these deserve naming. `Σ` is the one character for which
+    /// `str::to_lowercase` is context-sensitive (it lowercases to `ς` at the
+    /// end of a word and `σ` elsewhere), which is why the fused rewrite is
+    /// restricted to ASCII. `\u{00A0}` is the one non-ASCII character
+    /// `replace_whitespace_with_underscore` treats as whitespace, and `str::
+    /// trim` also strips it, so it exercises both the trim and the fold.
+    const SLOW_PATH_ALPHABET: &[&str] = &[
+        "a", "Z", "_", "0", ".", " ", "\t", "\n", "\r", "\\", "\"", "·", "\u{2024}", "\u{00A0}",
+        "Σ", "σ", "ς", "É", "ǅ", "İ",
+    ];
+
     proptest! {
         #[test]
         fn fast_path_agrees_with_slow_path(s in "\\PC{0,100}") {
@@ -1383,6 +1469,60 @@ mod canonicalize_invariant_tests {
                 prop_assert_eq!(*b, s.trim(),
                     "Borrowed result should equal trimmed input for {:?}", s);
             }
+        }
+
+        /// The same differential check, driven by [`SLOW_PATH_ALPHABET`] so the
+        /// slow path's branches are reached rather than hoped for. Named
+        /// separately from the broad-alphabet property because the two catch
+        /// different things: that one covers the input space, this one covers
+        /// the code.
+        #[test]
+        fn canonicalize_agrees_with_the_unfused_reference(
+            pieces in proptest::collection::vec(
+                proptest::sample::select(SLOW_PATH_ALPHABET), 0..24)
+        ) {
+            let s: String = pieces.concat();
+            prop_assert_eq!(&*canonicalize(&s), &*canonicalize_slow_path(&s),
+                "canonicalize disagrees with the unfused reference for {:?}", s);
+        }
+    }
+
+    /// Hand-written cases for the interactions the fused ASCII rewrite has to
+    /// get right, each of which composes two steps whose order matters.
+    #[test]
+    fn fused_ascii_fold_matches_the_reference_on_step_interactions() {
+        let cases = [
+            // Doubled backslash collapses BEFORE the escape scan sees it, so
+            // `\\n` is a backslash followed by `n`, i.e. an escape.
+            "A\\\\nB",
+            // ...whereas a single backslash before `n` is already the escape,
+            // and a lone trailing backslash passes through.
+            "A\\nB",
+            "A\\",
+            // Whitespace runs (mixed real and escaped) collapse to one `_`.
+            "A \t\nB",
+            "A\\n\\rB",
+            "A \\n B",
+            // A backslash that is not an escape resets the run, so the
+            // whitespace on either side of it yields two underscores.
+            "A \\ B",
+            // Quoted parts keep their interior spacing rules but lose the
+            // quotes, and a period inside them is the literal-period sentinel.
+            "\"A B\".C",
+            "\"a.b\"",
+            // Mixed quoted/unquoted parts in one identifier.
+            "Mod.\"Var Name\".Sub",
+            // Leading/trailing whitespace is trimmed before anything else.
+            "  Net Flow  ",
+            // A part that is purely whitespace.
+            "A. .B",
+        ];
+        for case in cases {
+            assert_eq!(
+                &*canonicalize(case),
+                &*canonicalize_slow_path(case),
+                "canonicalize disagrees with the unfused reference for {case:?}"
+            );
         }
     }
 
