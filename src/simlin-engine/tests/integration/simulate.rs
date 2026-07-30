@@ -6031,8 +6031,12 @@ fn corpus_clearn_macros_import() {
 ///
 /// Layout impact (the resource this gate protects -- #654's VM limit of 65,536
 /// u16 result slots, NOT `wasmgen::lower`'s unrelated `MAX_UNROLL_UNITS`): the
-/// per-step result-row width goes 30,800 -> 31,198 slots (+398, +1.29%), still
-/// far below the ceiling.
+/// per-step result-row width is 30,416 slots, far below the ceiling. It last
+/// moved DOWNWARD, 31,199 -> 30,416 (-783), when the per-element completeness
+/// guard began declining edges whose partial would carry an unresolvable
+/// dimension-name index: those scores are no longer emitted, so they no longer
+/// occupy slots. A decline is the safe direction for this resource; the pin
+/// below exists to catch emission changes in EITHER direction.
 #[test]
 fn clearn_ltm_var_count_guardrail() {
     use simlin_engine::db::{model_ltm_variables, set_project_ltm_enabled};
@@ -6056,7 +6060,7 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 6891,
+        total, 6665,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"

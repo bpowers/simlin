@@ -1153,6 +1153,35 @@ pub struct DepClassification {
     /// it is kept OUT of `all` so it never creates a runlist-ordering or
     /// causal/LTM edge, and is reunited with the dependency set only when the
     /// fragment compiler builds its metadata + tables map (issue #606).
+    ///
+    /// **A consumer wanting a table reference reads THIS FIELD; it is not, and
+    /// must not be, in `all`.** GH #606 justified the exclusion purely in terms
+    /// of runlist ordering and said nothing about the other questions a caller
+    /// can ask, which is how a later consumer came to read the omission as the
+    /// information being unavailable. It is not: this field rides the same
+    /// struct, from the same single pass, over the same AST. Spelled as the
+    /// three questions a caller might mean:
+    ///
+    /// * **ordering** -- NOT a dependency. Static data imposes no
+    ///   evaluation-order constraint, and a lookup-only holder is excluded from
+    ///   every runlist (`Var::is_table_only`), so an edge to it would order
+    ///   against something that is never evaluated.
+    /// * **attribution** -- NOT a dependency. A table cannot vary, so it has no
+    ///   delta and can carry no causal edge or link score. An edge here is a
+    ///   wrong NUMBER, not a crash.
+    /// * **dimension resolution** -- IT IS needed. A table argument's subscript
+    ///   has to be resolved and element-pinned like any other arrayed
+    ///   reference, and that needs the holder's declared dimensions.
+    ///   `db::ltm::link_scores::pinnable_arrayed_deps` is the worked example: it
+    ///   widens the per-element PIN candidates with this field while leaving the
+    ///   ceteris-paribus wrap's dep set alone.
+    ///
+    /// Moving these into `all` and filtering at the consumers was measured and
+    /// rejected: five consumer families see them, four must filter them out, and
+    /// the first one to break is compilation itself (a lookup-only holder has no
+    /// value slot, so the fragment compiler refuses -- `lookup_only_tests`).
+    /// Absent-by-default fails loudly (a consumer that needs tables sees nothing
+    /// and says so); present-by-default fails silently.
     pub referenced_tables: BTreeSet<String>,
 }
 

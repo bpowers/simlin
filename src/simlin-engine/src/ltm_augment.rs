@@ -1032,6 +1032,15 @@ pub(crate) enum PartialEquationErrorKind {
     /// semantics carry a spurious factor (GH #789). Selects a diagnostic
     /// that names the shape and the subscripted-spelling workaround.
     BareReducerFeeder,
+    /// An arrayed dep of the target's equation cannot be projected onto the
+    /// target element this partial is for, so no correct element subscript
+    /// exists for it. `equation_text` carries `dep@element`. Emitting anyway
+    /// leaves the dep's dimension-name subscript in a scalar fragment, which
+    /// becomes a `PREVIOUS`-capture helper that cannot lower WHILE THE PARENT
+    /// STILL COMPILES -- a score that silently reads part of its own equation
+    /// as 0. The reachable cause is an explicit element map, which
+    /// `DimensionsContext::mapped_element_correspondence` declines.
+    UnprojectableDep,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1063,6 +1072,14 @@ impl PartialEquationError {
         PartialEquationError {
             equation_text: equation_text.to_string(),
             kind: PartialEquationErrorKind::BareReducerFeeder,
+        }
+    }
+
+    /// `dep` cannot be projected onto target element `element`.
+    pub(crate) fn unprojectable_dep(dep: &str, element: &str) -> Self {
+        PartialEquationError {
+            equation_text: format!("{dep}@{element}"),
+            kind: PartialEquationErrorKind::UnprojectableDep,
         }
     }
 }
@@ -2189,6 +2206,81 @@ pub(crate) fn subscript_idents_at_element(
         return Err(PartialEquationError::new(equation_text));
     };
     Ok(print_eqn(&subscript_idents_in_expr0(ast, pins)))
+}
+
+/// The first subscript index in `equation_text` that names a project DIMENSION,
+/// or `None` when every index resolves.
+///
+/// A per-element link-score partial is a SCALAR fragment, so every subscript
+/// index in it must select ONE element. An index left as a bare dimension name
+/// still denotes the whole axis: it cannot lower
+/// (`ErrorCode::DimensionInScalarContext`), and when it sits inside a frozen
+/// subtree `builtins_visitor` hoists it into a `PREVIOUS`-capture helper that
+/// fails on its own WHILE THE PARENT STILL COMPILES -- so the score exists and
+/// reads part of its own equation as a constant 0.
+///
+/// This inspects the FINISHED partial rather than predicting from the pin table,
+/// and that is the point: a dep can be unpinnable and still need no pin (an
+/// index that is a runtime variable read, `source[idx]`, resolves by itself), so
+/// "the pin table does not cover this dep" over-declines. What matters is only
+/// whether an unresolvable index survived into the text about to be compiled.
+///
+/// A returned `Some` is the caller's cue to decline the edge loudly rather than
+/// emit a score computed around a hole.
+pub(crate) fn unresolvable_dimension_index(
+    equation_text: &str,
+    dims_ctx: &crate::dimensions::DimensionsContext,
+) -> Option<String> {
+    fn walk(
+        expr: &Expr0,
+        dims_ctx: &crate::dimensions::DimensionsContext,
+        found: &mut Option<String>,
+    ) {
+        if found.is_some() {
+            return;
+        }
+        match expr {
+            Expr0::Const(..) => {}
+            Expr0::Var(..) => {}
+            Expr0::Subscript(ident, indices, _) => {
+                for idx in indices {
+                    if let IndexExpr0::Expr(Expr0::Var(name, _)) = idx {
+                        let canonical = canonicalize(name.as_str());
+                        if dims_ctx.is_dimension_name(canonical.as_ref()) {
+                            *found = Some(format!("{}[{}]", ident.as_str(), canonical));
+                            return;
+                        }
+                    }
+                    if let IndexExpr0::Expr(e) = idx {
+                        walk(e, dims_ctx, found);
+                    }
+                }
+            }
+            Expr0::App(UntypedBuiltinFn(_, args), _) => {
+                for a in args {
+                    walk(a, dims_ctx, found);
+                }
+            }
+            Expr0::Op1(_, l, _) => walk(l, dims_ctx, found),
+            Expr0::Op2(_, l, r, _) => {
+                walk(l, dims_ctx, found);
+                walk(r, dims_ctx, found);
+            }
+            Expr0::If(c, t, f, _) => {
+                walk(c, dims_ctx, found);
+                walk(t, dims_ctx, found);
+                walk(f, dims_ctx, found);
+            }
+        }
+    }
+    let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
+        // Unparseable text is a different failure, reported by the caller that
+        // produced it; this predicate says nothing about it.
+        return None;
+    };
+    let mut found = None;
+    walk(&ast, dims_ctx, &mut found);
+    found
 }
 
 /// The `IndexExpr0` a pin entry's element spelling becomes.

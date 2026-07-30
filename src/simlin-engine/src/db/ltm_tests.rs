@@ -1565,3 +1565,363 @@ fn an_unrelated_equation_edit_does_not_regenerate_every_link_score() {
          lowered form) where a per-variable one would do."
     );
 }
+
+/// An arrayed dep the per-element pin table cannot cover must make the edge
+/// decline LOUDLY, not produce a score computed around a hole.
+///
+/// The shape: `target[cop]` reads `aggregated[agg]`, where `agg` maps to `cop`
+/// through an EXPLICIT element map. `mapped_element_correspondence` declines an
+/// explicit map (the execution split is documented there), so
+/// `dep_element_pins` can project no axis of `aggregated` onto a `cop` element
+/// and the dep is absent from the pin table entirely.
+///
+/// What that produced before this guard: the dimension-name subscript survived
+/// into the scalar partial, `builtins_visitor` hoisted it into a
+/// `PREVIOUS`-capture helper, the helper failed to lower
+/// (`DimensionInScalarContext`) -- and the PARENT still compiled, because it
+/// merely references the helper's slot. So the link score existed, was read by
+/// every loop through it, and evaluated one branch of its own equation as a
+/// constant 0. A wrong number wearing a warning meant for something else.
+///
+/// "No score, warned" beats a wrong score: the edge is now recorded in
+/// `unscoreable_edges` and no `LtmSyntheticVar` is emitted for it, so loops
+/// through it drop rather than reporting a number computed around the hole.
+/// This is the same contract the GH #311 parse failure and the GH #743
+/// unfreezable partial already use.
+#[test]
+fn an_uncoverable_arrayed_dep_declines_the_edge_loudly() {
+    use salsa::Setter;
+
+    let project = TestProject::new("unpinnable_dep")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("cop", &["c1", "c2"])
+        .named_dimension_with_element_mapping(
+            "agg",
+            &["a1", "a2"],
+            "cop",
+            &[("a1", "c2"), ("a2", "c1")],
+        )
+        .array_aux("aggregated[agg]", "TIME * 2")
+        .aux("switch", "1 + SUM(level[*]) * 0.01", None)
+        .array_stock("level[cop]", "1", &["growth"], &[], None)
+        .array_flow("growth[cop]", "target[cop] * 0.1", None)
+        .array_aux(
+            "target[cop]",
+            "if switch > 1.05 then aggregated[agg] else level[cop]",
+        )
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+    let source_model = sync_from_datamodel(&db, &project).models["main"].source;
+
+    let ltm = crate::db::model_ltm_variables(&db, source_model, source_project);
+    let emitted: Vec<&String> = ltm
+        .vars
+        .iter()
+        .map(|v| &v.name)
+        .filter(|n| n.contains("link_score\u{205A}switch\u{2192}target"))
+        .collect();
+    assert!(
+        emitted.is_empty(),
+        "the switch->target edge cannot be scored (its `aggregated[agg]` dep is \
+         unpinnable), so NO link score may be emitted for it; got: {emitted:?}"
+    );
+
+    // The decline must be LOUD, and it must be the only thing left: a helper
+    // that fails while its parent compiles is exactly the silent zero this
+    // guard exists to remove.
+    let diags = crate::db::collect_all_diagnostics(&db, source_project);
+    let silently_degraded: Vec<&String> = diags
+        .iter()
+        .filter_map(|d| match &d.error {
+            crate::db::DiagnosticError::Assembly(m) if m.contains("silently degraded") => {
+                d.variable.as_ref()
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        silently_degraded.is_empty(),
+        "no fragment may be left reading a constant 0 under a compiling parent; \
+         got: {silently_degraded:?}"
+    );
+    // The decline must be LOUD and must be THIS decline: `!diags.is_empty()` is
+    // satisfied by any diagnostic at all, including one from an unrelated defect.
+    assert!(
+        diags.iter().any(|d| match &d.error {
+            crate::db::DiagnosticError::Assembly(m) =>
+                m.contains("cannot be projected onto that target element")
+                    && m.contains("switch\u{2192}target"),
+            _ => false,
+        }),
+        "the switch->target decline must carry the unprojectable-dep warning; got: {:?}",
+        diags
+            .iter()
+            .map(|d| (&d.variable, &d.error))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A `LOOKUP` table argument's dimension-name index must be element-pinned in a
+/// per-element scalar partial, exactly as every other arrayed dep of that target
+/// already is.
+///
+/// The gap (GH #984): a graphical-function holder is deliberately absent from
+/// the DEPENDENCY GRAPH -- `classify_dependencies` records it in
+/// `referenced_tables` and keeps it out of `all` (GH #606) so a table reference
+/// creates no runlist or causal edge -- and `pinnable_arrayed_deps` built the
+/// per-element pin table from that same dep set. So `tbl[region]` reached the
+/// scalar fragment with its dimension-name index intact, the fragment did not
+/// lower (`DimensionInScalarContext`), and the link score was dropped with a
+/// warning. The holder's DECLARED dimensions were never the problem: they sit on
+/// the datamodel like any other variable's, one field away on the same struct
+/// the same pass already returns.
+///
+/// This is C-LEARN's shape in miniature -- `Im 6 FF CO2[COP] = ... LOOKUP(RS CO2
+/// FF[COP], Time/One year) * Adjustment to CO2eq ...`, a scalar source into an
+/// arrayed target whose equation reads a per-element GF holder subscripted by
+/// its own dimension name. All 413 of C-LEARN's occurrences are this IDENTITY
+/// shape (the holder's declared axis IS the dimension the index spells, and the
+/// target iterates it), which is what keeps the pin free of the unresolved
+/// element-map question.
+///
+/// The assertion is the EXACT series, not a property of it. An earlier revision
+/// asserted only "not identically zero" and "all finite" while claiming to
+/// constrain the pinned element -- and it did not: mutating `dep_axis_elements`
+/// to pin every axis to the dep's FIRST element left it green. Worse, that
+/// fixture could not have caught the mutant even in principle, because with
+/// `factor` as the sole varying input the score saturates at exactly 1.0 for
+/// BOTH elements -- `out[a]` and `out[b]` differ (2.04 vs 3.06) while their
+/// scores were identical. `drift` exists to break that saturation: with a second
+/// varying contribution the score becomes a real ratio, the table slope enters
+/// the value, and the two elements separate (0.805 vs 0.861). Both facts are
+/// asserted, and the second is what makes the first mean anything.
+#[test]
+fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
+    use crate::datamodel::{
+        Equation, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale, Variable,
+    };
+    use salsa::Setter;
+
+    // Per-element table: `a` doubles its input, `b` triples it. Distinct slopes
+    // are what make a mis-pinned index visible in the value.
+    let gf = |slope: f64| GraphicalFunction {
+        kind: GraphicalFunctionKind::Continuous,
+        x_points: Some(vec![0.0, 10.0]),
+        y_points: vec![0.0, 10.0 * slope],
+        x_scale: GraphicalFunctionScale {
+            min: 0.0,
+            max: 10.0,
+        },
+        y_scale: GraphicalFunctionScale {
+            min: 0.0,
+            max: 10.0 * slope,
+        },
+    };
+    // A lookup-only holder: empty equation text, the table carried per element.
+    let tbl = Variable::Aux(crate::datamodel::Aux {
+        ident: "tbl".to_string(),
+        equation: Equation::Arrayed(
+            vec!["region".to_string()],
+            vec![
+                ("a".to_string(), String::new(), None, Some(gf(2.0))),
+                ("b".to_string(), String::new(), None, Some(gf(3.0))),
+            ],
+            None,
+            false,
+        ),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: crate::datamodel::Compat::default(),
+    });
+
+    let mut project = TestProject::new("lookup_pin")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("region", &["a", "b"])
+        // The scalar live source, in a feedback loop with the target.
+        .array_stock("level[region]", "1", &["growth"], &[], None)
+        .array_flow("growth[region]", "out[region] * 0.1", None)
+        .aux("factor", "1 + SUM(level[*]) * 0.01", None)
+        .aux("drift", "TIME * 0.5", None)
+        .array_aux("out[region]", "LOOKUP(tbl[region], TIME) * factor + drift")
+        .build_datamodel();
+    project.models[0].variables.push(tbl);
+
+    let mut db = SimlinDb::default();
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    // The model itself must be sound, or the score assertions below are moot.
+    let diags = crate::db::collect_all_diagnostics(&db, source_project);
+    assert!(
+        diags.is_empty(),
+        "the fixture must compile with no diagnostics; got: {:?}",
+        diags
+            .iter()
+            .map(|d| (&d.variable, &d.error))
+            .collect::<Vec<_>>()
+    );
+
+    // The per-element score for the `factor -> out[b]` edge. `b`'s table has
+    // slope 3, so a partial that pinned the index to `a` (slope 2) -- or left it
+    // unpinned -- is a different number, not merely a different spelling.
+    let compiled = crate::db::compile_project_incremental(&db, source_project, "main")
+        .expect("the fixture must compile");
+    let offsets = compiled.offsets.clone();
+    let score_name = offsets
+        .keys()
+        .map(|k| k.as_str().to_string())
+        .find(|k| k.contains("link_score") && k.contains("factor\u{2192}out[b]"))
+        .expect("the factor->out[b] per-element link score must be emitted");
+    let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("run");
+    let results = vm.into_results();
+    let base = offsets[&crate::common::Ident::new(&score_name)];
+    let series: Vec<f64> = (0..results.step_count)
+        .map(|s| results.data[s * results.step_size + base])
+        .collect();
+
+    // The EXACT series, both elements. `b`'s table has slope 3 and `a`'s has 2,
+    // and `drift` supplies a second varying contribution so the score does not
+    // saturate at 1 -- which is what makes the pinned element observable in the
+    // VALUE. Pinning is the whole subject of this test, so the assertion has to
+    // be the number, not a property the number happens to satisfy.
+    let expected_a = [0.0, 0.0, 0.805_022_617_376_384_4, 0.809_579_376_075_400_5];
+    let expected_b = [0.0, 0.0, 0.860_979_814_269_031_9, 0.864_449_016_428_508_1];
+    assert_eq!(
+        series.len(),
+        expected_b.len(),
+        "step count; got: {series:?}"
+    );
+    for (got, want) in series.iter().zip(expected_b.iter()) {
+        assert!(
+            (got - want).abs() < 1e-12,
+            "the {score_name} series must match the correctly-pinned value; \
+             got: {series:?}, want: {expected_b:?}"
+        );
+    }
+    // ...and `a` must differ, which is the property that makes a WRONG pin
+    // detectable at all: if the two elements scored alike, swapping them would
+    // be invisible and the assertion above would constrain nothing about pinning.
+    let a_off = offsets
+        .keys()
+        .map(|k| k.as_str().to_string())
+        .find(|k| k.contains("link_score") && k.contains("factor\u{2192}out[a]"))
+        .map(|n| offsets[&crate::common::Ident::new(&n)])
+        .expect("the factor->out[a] per-element link score must be emitted");
+    let series_a: Vec<f64> = (0..results.step_count)
+        .map(|s| results.data[s * results.step_size + a_off])
+        .collect();
+    for (got, want) in series_a.iter().zip(expected_a.iter()) {
+        assert!(
+            (got - want).abs() < 1e-12,
+            "the factor->out[a] series must match ITS element's table; \
+             got: {series_a:?}, want: {expected_a:?}"
+        );
+    }
+    assert!(
+        series_a
+            .iter()
+            .zip(series.iter())
+            .any(|(x, y)| (x - y).abs() > 1e-6),
+        "the two elements must score differently, or this fixture cannot \
+         detect a mis-pinned index at all; a={series_a:?} b={series:?}"
+    );
+}
+
+/// The completeness guard must hold on the PER-ELEMENT (`PerElement`-shape)
+/// emitter too, not only on the scalar-to-element one.
+///
+/// The guard originally existed at a single site, which was sufficient for
+/// C-LEARN and wrong in general: three siblings emit the same per-element scalar
+/// partial through a `dep_element_pins`-derived table
+/// (`emit_per_element_link_scores` and both arms of
+/// `emit_agg_to_target_link_scores`), and an unguarded one lets exactly the
+/// defect the guard exists to remove back through -- a score that COMPILES while
+/// the `PREVIOUS`-capture helper under it dies and reads a constant 0.
+///
+/// This fixture reaches `emit_per_element_link_scores`: `out[region]` reads
+/// `src[region, t1]`, a 2-D source at a pinned column, which is the mixed
+/// iterated+literal `PerElement` shape (GH #525) that routes there. It also
+/// reads `other[agg]` across an EXPLICIT element map, which
+/// `mapped_element_correspondence` declines -- so that dep has no projectable
+/// element and its dimension-name subscript would survive into the scalar
+/// partial. Nothing exotic: a 2-D read and a mapped dep.
+#[test]
+fn the_completeness_guard_holds_on_the_per_element_emitter() {
+    use salsa::Setter;
+
+    let project = TestProject::new("perelem_guard")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("region", &["a", "b"])
+        .named_dimension("slot", &["t1", "t2"])
+        .named_dimension_with_element_mapping(
+            "agg",
+            &["x", "y"],
+            "region",
+            &[("x", "b"), ("y", "a")],
+        )
+        .array_aux("other[agg]", "TIME * 2")
+        .array_aux_direct(
+            "src",
+            vec!["region".into(), "slot".into()],
+            "level[region] * 0.3",
+            None,
+        )
+        .array_stock("level[region]", "1", &["growth"], &[], None)
+        .array_flow("growth[region]", "out[region] * 0.1", None)
+        .array_aux("out[region]", "src[region, t1] * 0.5 + other[agg]")
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+    let source_model = sync_from_datamodel(&db, &project).models["main"].source;
+
+    let ltm = crate::db::model_ltm_variables(&db, source_model, source_project);
+    let emitted: Vec<&String> = ltm
+        .vars
+        .iter()
+        .map(|v| &v.name)
+        .filter(|n| n.contains("link_score\u{205A}src[") && n.contains("\u{2192}out["))
+        .collect();
+    assert!(
+        emitted.is_empty(),
+        "the src->out per-element edge cannot be scored (its `other[agg]` dep is \
+         unprojectable), so NO link score may be emitted; got: {emitted:?}"
+    );
+
+    let diags = crate::db::collect_all_diagnostics(&db, source_project);
+    let silently_degraded: Vec<&String> = diags
+        .iter()
+        .filter_map(|d| match &d.error {
+            crate::db::DiagnosticError::Assembly(m) if m.contains("silently degraded") => {
+                d.variable.as_ref()
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        silently_degraded.is_empty(),
+        "no fragment may be left reading a constant 0 under a compiling parent; \
+         got: {silently_degraded:?}"
+    );
+    assert!(
+        diags.iter().any(|d| match &d.error {
+            crate::db::DiagnosticError::Assembly(m) =>
+                m.contains("cannot be projected onto that target element")
+                    && m.contains("other[agg]"),
+            _ => false,
+        }),
+        "the decline must carry the unprojectable-dep warning naming the dep; got: {:?}",
+        diags
+            .iter()
+            .map(|d| (&d.variable, &d.error))
+            .collect::<Vec<_>>()
+    );
+}
