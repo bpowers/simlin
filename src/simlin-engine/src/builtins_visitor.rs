@@ -400,6 +400,22 @@ impl<'a> BuiltinVisitor<'a> {
     /// Module variables and qualified module outputs (`module·output`) must
     /// be treated as module-backed so PREVIOUS/INIT can synthesize scalar
     /// helper args before compiling to intrinsic opcodes.
+    ///
+    /// The `·` split runs on the RAW ident, so a fully-quoted composite --
+    /// `"module·port"`, which is what `ltm_augment::quote_ident` emits for every
+    /// module-output reference in a generated LTM equation -- misses: the raw text
+    /// keeps its quotes, the base is `"module` (an unclosed quote that
+    /// `canonicalize` passes through verbatim), and the module lookup fails. That
+    /// miss is INERT, not a latent bug: `canonicalize` strips a balanced quoted
+    /// part, so the whole ident still resolves through `Context::var_ref` to the
+    /// module instance's slot, codegen's `static_slot` accepts the resulting
+    /// `Expr::Var`, and the emitted `LoadPrev` reads exactly the slot a capture
+    /// helper would have. The helper path is needed only for a reference codegen
+    /// cannot take a fixed slot for -- an ARRAYED module output port, which no
+    /// model in the corpus produces. Splitting the canonical form instead would be
+    /// a one-token change; it is not made because it buys no observable behavior
+    /// and the quoted spelling is itself pinned by
+    /// `ltm_augment_tests::quote_ident_needs_both_of_its_conjuncts`.
     fn is_module_backed_ident(&self, ident: &RawIdent) -> bool {
         let canonical = Ident::new(&canonicalize(ident.as_str()));
         if self.is_known_module_ident(&canonical) {
