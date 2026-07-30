@@ -221,17 +221,33 @@ fn main() {
 
     // The failure set, harvested exactly as a consumer sees it: the
     // accumulated warnings from a whole-project diagnostic pass.
+    //
+    // `collect_all_diagnostics` covers EVERY model in the project, while `ltm`
+    // above is the analyzed model's alone -- and a project carries the spliced
+    // stdlib SMOOTH/DELAY templates as models of their own. Keying failures by
+    // variable name without checking the model would let a sub-model failure
+    // be counted as this model's, and -- because the join against `ltm.vars`
+    // would then miss -- misclassified as an implicit helper. Same-named
+    // variables in different models would collide outright. Filter first, and
+    // report what was dropped rather than discarding it silently, since a
+    // non-empty drop means the analyzed model is not the whole story.
     let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
     let mut failed_names: Vec<String> = Vec::new();
     let mut reasons: BTreeMap<String, String> = BTreeMap::new();
+    let mut other_model_failures: BTreeMap<String, usize> = BTreeMap::new();
     for d in &diagnostics {
         let msg = match &d.error {
             simlin_engine::db::DiagnosticError::Assembly(m) => m,
             _ => continue,
         };
-        if msg.contains("failed to compile")
-            && let Some(v) = &d.variable
-        {
+        if !msg.contains("failed to compile") {
+            continue;
+        }
+        if d.model != main_name {
+            *other_model_failures.entry(d.model.clone()).or_insert(0) += 1;
+            continue;
+        }
+        if let Some(v) = &d.variable {
             failed_names.push(v.clone());
             if let Some(r) = msg.split("Reason").nth(1) {
                 reasons.insert(
@@ -247,6 +263,15 @@ fn main() {
         "fragments reported as failing to compile: {}",
         failed_names.len()
     );
+    if other_model_failures.is_empty() {
+        println!("  (no failures in other project models)");
+    } else {
+        let total: usize = other_model_failures.values().sum();
+        println!("  EXCLUDED -- {total} failure(s) in other project models, by model:");
+        for (model, n) in &other_model_failures {
+            println!("    {n:6}  {model}");
+        }
+    }
 
     // --- The actual compiler reasons ---------------------------------------
     //

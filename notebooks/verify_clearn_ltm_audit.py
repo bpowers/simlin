@@ -79,6 +79,6 @@ for cell in code_cells:
                 preview.write_bytes(base64.b64decode(out["data"]["image/png"]))
                 print(f"\nsaved {preview}")
 
-if errors or missing or figures == 0:
+if errors or missing or silent or figures == 0:
     sys.exit(1)
 print("\nOK")

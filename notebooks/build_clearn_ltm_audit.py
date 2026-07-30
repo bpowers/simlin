@@ -19,8 +19,12 @@ Run from the pysimlin venv, synced with the `notebooks` extra. Invoke the venv
 interpreter DIRECTLY: `uv run` re-syncs the project as an editable install and
 replaces any wheel you installed.
 
-    cd src/pysimlin && uv sync --extra dev --extra notebooks
+    (cd src/pysimlin && uv sync --extra dev --extra notebooks)
     src/pysimlin/.venv/bin/python notebooks/build_clearn_ltm_audit.py
+
+Both paths are relative to the REPOSITORY ROOT; the subshell keeps the `cd`
+from leaking into the second command, where it would resolve the interpreter
+as `src/pysimlin/src/pysimlin/.venv/...` and fail before the generator starts.
 """
 
 from pathlib import Path
@@ -972,7 +976,7 @@ md(
 | | Severity |
 |---|---|
 | `dominant_periods` is partition-blind, and contradicts `loops` in the same object. On C-LEARN it never names a climate loop. | **High** -- it is the surface a new user reaches for first, and it is confidently wrong. |
-| ~1,600 LTM fragments fail to compile, silently degrading to constant 0. Loops are unaffected; link-level attribution over the whole policy subgraph is not. | **High** |
+| LTM fragments fail to compile, silently degrading to constant 0 -- the count is whatever section 6 measured on this engine build. Loops are unaffected; link-level attribution over the whole policy subgraph is not. | **High** |
 | Those diagnostics are unreachable unless you call `check()` *after* creating an LTM sim. `run()`/`analyze()` never surface them. | **High** -- it is what makes the previous row silent. |
 | Ranking links by relative score surfaces uncontested targets, which is the opposite of what is wanted. | Medium |
 | Discovery's element-level loop names are rejected by `set_loop_name`, so a discovered loop cannot be pinned. | Medium |
@@ -983,7 +987,7 @@ md(
 
 1. **Make within-partition normalization structural rather than advisory.** Three separate defects here -- `dominant_periods`, the link ranking, and lone-pin degeneracy -- are one root cause: LTM's relative measures are *shares within a group*, and every surface that ranks them globally is dominated by groups of size one. Ranking APIs should either take the group as a parameter or return grouped results, so a cross-group comparison is not expressible.
 
-2. **Close the fragment-compile gap.** 1,600 failures on one real model is a coverage statement about the augmentation layer, concentrated in arrayed per-element equations with dynamic-index or un-hoisted-reducer reads. A generated-corpus harness that asserts every emitted fragment compiles would turn this from a per-model surprise into a gate.
+2. **Close the fragment-compile gap.** The failure count section 6 measured is a coverage statement about the augmentation layer, concentrated in arrayed per-element equations with dynamic-index or un-hoisted-reducer reads. A generated-corpus harness that asserts every emitted fragment compiles would turn this from a per-model surprise into a gate.
 
 3. **Surface LTM diagnostics on the path people use.** `Model.analyze()` and `Model.run()` should report the count of degraded fragments -- the same way the discovery auto-flip warning already works.
 
