@@ -1368,6 +1368,128 @@ fn an_index_naming_the_axis_own_element_stays_a_static_selector() {
     );
 }
 
+/// The third `AxisIndexName` arm, and the one GH #986 left unguarded: the axis
+/// IS known, the index is neither an element of that axis nor a dimension the
+/// target iterates -- so the verdict is `Unresolved` -- and yet the name is a
+/// DIMENSION, which is never a causal value.
+///
+/// The wrap's own dimension-name guard (GH #759) says exactly that, but it was
+/// written when the axis was always unknown and stayed gated on `axis_unknown`,
+/// so this arm reached the recursive wrap and froze a dimension name:
+/// `PREVIOUS(aggregated[PREVIOUS(agg, agg)])`. `builtins_visitor` then hoists that
+/// now-dynamic index into a `PREVIOUS`-capture helper aux
+/// (`aggregated[previous(agg·a1, agg·a1)]`) whose inner argument constant-folds to
+/// the element's offset, and codegen rejects `PREVIOUS(<literal>)` -- so the helper
+/// keeps a layout slot with no bytecode, reads a constant 0, and every score
+/// through it is silently degraded. This accounted for 49 of the 1,603 LTM
+/// fragment-compile failures on C-LEARN.
+///
+/// The fixture is C-LEARN's shape in miniature: `Pct interim change in FF
+/// emissions[COP] = IF THEN ELSE(Time < Emissions reference year[COP], ..., Pct
+/// interim in FF emissions Aggregated[Aggregated Regions])` -- a target iterating
+/// one dimension reading a dep declared over ANOTHER, spelled with that other
+/// dimension's own name (legal because the dep's dimension maps onto the
+/// target's).
+///
+/// This test constrains ONE arm of
+/// [`crate::dimensions::resolve_axis_index_name`] as the wrap consumes it:
+/// `Unresolved` where the name is a DIMENSION. The other two arms are covered,
+/// and not here:
+///
+/// * `Element` -- `an_index_naming_the_axis_own_element_stays_a_static_selector`
+///   (directly above).
+/// * `Unresolved` naming a model VARIABLE, which must still FREEZE --
+///   `a_colliding_index_name_is_resolved_against_the_axis_it_indexes`, whose
+///   `PREVIOUS(ctr, ctr)` assertion is this test's counterweight: together they
+///   say the guard distinguishes a dimension from a variable rather than
+///   declining to freeze bare indices generally.
+/// * `IteratedDim` -- twelve tests, all in `db::ltm_char_tests` except the last:
+///   `char_per_element_{ambiguous_pin, dynamic_index, index_nested_occurrence,
+///   mapped_occurrence, mixed_occurrences, other_deps}`,
+///   `bare_arrayed_dep_is_pinned_over_its_own_declared_dims`,
+///   `per_element_{ambiguous_pin, mapped_occurrence}_scores_are_live_not_silent_zero`,
+///   `mapped_bare_live_source_ref_is_pinned_through_the_correspondence`,
+///   `per_element_dynamic_index_scores_preserve_head_lag`, and
+///   `ltm_augment::tests::gh526_transposed_other_dep_with_threaded_dims_is_unfreezable`.
+///   (`char_per_element_link_scores` does NOT reach it, despite the name.)
+///
+/// **This fixture reaches `IteratedDim` not at all**, and the reason is worth
+/// stating because the fixture LOOKS like it should: `level[cop]` and
+/// `ref_year[cop]` are subscripted by the target's own iterated dimension, but
+/// both are collapsed to a bare `Var` in `wrap_non_matching_in_previous` --
+/// the live source by the GH #511 `Bare` normalization, the other-dep by
+/// `OtherDepVerdict::Collapse` -- BEFORE any index is walked. So no `[cop]`
+/// index ever reaches the index pass, and none appears in the emitted text.
+/// An earlier revision of this comment claimed those indices covered the arm.
+/// Measured, not read: replacing `AxisIndexName::IteratedDim => return index`
+/// with `panic!` leaves this test passing when run alone, and panics in exactly
+/// the twelve tests listed above.
+#[test]
+fn a_dimension_name_index_is_not_frozen_when_the_axis_is_known() {
+    use salsa::Setter;
+
+    let project = TestProject::new("dim_name_index")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("cop", &["c1", "c2"])
+        .named_dimension_with_mapping("agg", &["a1", "a2"], "cop")
+        .array_aux("aggregated[agg]", "TIME * 2")
+        .array_aux("ref_year[cop]", "2")
+        .array_stock("level[cop]", "1", &["growth"], &[], None)
+        .array_flow("growth[cop]", "target[cop] * 0.1", None)
+        .array_aux(
+            "target[cop]",
+            "if TIME < ref_year[cop] then level[cop] else aggregated[agg]",
+        )
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let ltm = crate::db::model_ltm_variables(&db, source_model, source_project);
+    let score = ltm
+        .vars
+        .iter()
+        .find(|v| v.name.ends_with("link_score\u{205A}level\u{2192}target"))
+        .map(|v| match &v.equation {
+            crate::db::LtmEquation::ApplyToAll(_, arm) => arm.text.clone(),
+            other => panic!("expected an apply-to-all score, got {other:?}"),
+        })
+        .expect("the level->target link score must be emitted");
+
+    // The co-source freezes WHOLESALE with its dimension-name index verbatim --
+    // the same shape `ltm_augment_tests::partial_equation_dimension_name_index_
+    // not_wrapped` pins on the axis-unknown path.
+    assert!(
+        score.contains("PREVIOUS(aggregated[agg])"),
+        "a dimension-name index must be left verbatim inside the frozen \
+         co-source; got: {score}"
+    );
+    // The pre-fix spelling, pinned by name so a regression cannot pass by
+    // merely differing. (`PREVIOUS(agg,` rather than `PREVIOUS(agg` -- the
+    // latter also matches the legitimate `PREVIOUS(aggregated...)`.)
+    assert!(
+        !score.contains("PREVIOUS(agg,"),
+        "a dimension name is not a causal value and must never be frozen; \
+         got: {score}"
+    );
+    // The runtime consequence, which is what makes this a defect rather than a
+    // spelling preference: the frozen index forced a capture helper whose
+    // argument constant-folded, so the helper compiled to nothing.
+    let diags = crate::db::collect_all_diagnostics(&db, source_project);
+    assert!(
+        diags.is_empty(),
+        "every LTM fragment and helper must compile; got: {:?}",
+        diags
+            .iter()
+            .map(|d| (&d.variable, &d.error))
+            .collect::<Vec<_>>()
+    );
+}
+
 /// `link_score_equation_text_shaped` documents that "a per-shape link score is
 /// recomputed only when the involved variables (and their shape-classifying
 /// dimensions) change". This is that claim, measured.
