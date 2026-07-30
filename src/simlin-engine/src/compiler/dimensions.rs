@@ -19,8 +19,30 @@ use crate::dimensions::{Dimension, DimensionsContext};
 ///   inserted last;
 /// - the allocation is ONE-TO-ONE: each active axis is consumed at most once
 ///   (`used`), so two dependency axes that could each match the same active axis
-///   are given different ones in declaration order. Searching per dependency axis
-///   independently lets both claim the first match.
+///   are given different ones. Searching per dependency axis independently lets
+///   both claim the first match.
+///
+///   Which of the two gets it is decided by MATCH STRENGTH, not by declaration
+///   order: the three passes are staged flat -- every name match across all
+///   dependency axes, then every mapping match, then every size match -- so a
+///   stronger match always outranks a weaker one no matter which axis is
+///   declared first. Order only breaks ties WITHIN a pass. Running the passes
+///   per dimension instead made declaration order decisive, which is GH #996
+///   (see the FIRST PASS comment in the body), and both
+///   `a_mapping_match_does_not_steal_a_later_name_match` and
+///   `a_size_match_does_not_steal_a_later_mapping_match` pin the corrected rule.
+///   This is the same flat staging the sibling `match_dimensions_with_mapping`
+///   uses; the two functions state one precedence rule and must not drift.
+///
+///   Restaging is inert for the COMPILER path on the corpus: computing the old
+///   allocation alongside the new one at every call and flagging disagreement
+///   found zero across 7,617 calls / 53 distinct shapes (lib + integration), and
+///   556 / 4 while compiling C-LEARN with LTM. Treat that as empirical, not as
+///   proof -- the corpus is a WEAK instrument here. 18 of the 20 lib shapes are
+///   exact identity name matches, and only one reaches the mapping branch at all,
+///   with a single active axis where no reordering is possible. The shapes that
+///   could distinguish the orders are barely exercised, so "no disagreement" is
+///   mostly a statement about the corpus.
 ///
 /// Both were live silent-wrong-row defects in the LTM per-element projection
 /// (P2-1 / P2-2 of the whole-branch review) precisely because that projection
@@ -37,15 +59,35 @@ pub(crate) fn allocate_implicit_axes_partial(
     active_dims: &[Dimension],
     dimensions_ctx: &DimensionsContext,
 ) -> Vec<Option<usize>> {
-    let mut alloc: Vec<Option<usize>> = Vec::with_capacity(dims.len());
+    let mut alloc: Vec<Option<usize>> = vec![None; dims.len()];
 
     // Track which active dimensions have been used.
     let mut used: Vec<bool> = vec![false; active_dims.len()];
 
-    for dim in dims.iter() {
-        // FIRST PASS: Try to find an exact name match anywhere in unused active dims.
-        // This prevents size-based fallback from grabbing the wrong dimension when
-        // the correct name match exists later in the list.
+    // The three passes are STAGED FLAT: every exact name match across all
+    // dependency dimensions, then every mapping match, then every size match.
+    // That is what makes the documented precedence name > mapping > size hold
+    // for the WHOLE allocation rather than only within one dimension's turn,
+    // and it is the structure the sibling `match_dimensions_with_mapping` in
+    // this file already used.
+    //
+    // Run per dimension instead, an earlier axis consumes -- through a weaker
+    // match -- the active axis a later one matches more strongly, and since
+    // `used` is one-to-one the later axis is then left unresolved. That is
+    // GH #996. On C-LEARN it hit TWO production shapes, not one:
+    // `aggregated_definition[cop, aggregated_regions]` read under an
+    // `[aggregated_regions]` target and `[cop, semi_agg]` under `[semi_agg]` --
+    // both because the target's own dimension declares an element map ONTO
+    // `cop`, so `cop` (declared first) took the slot by MAPPING before the
+    // name-matching axis was considered. Each allocated `[Some(0), None]`, the
+    // LTM pin table dropped the dep, and 135 link scores were declined.
+    //
+    // The FIRST PASS's original comment already stated this rule for the SIZE
+    // fallback ("prevents size-based fallback from grabbing the wrong dimension
+    // when the correct name match exists later in the list"); the mapping pass
+    // was added afterwards, between name and size, and reintroduced for mappings
+    // the hazard that comment was written against.
+    for (dim_idx, dim) in dims.iter().enumerate() {
         let name_match_idx = active_dims.iter().enumerate().find_map(|(i, candidate)| {
             if !used[i] && candidate.name() == dim.name() {
                 Some(i)
@@ -55,8 +97,13 @@ pub(crate) fn allocate_implicit_axes_partial(
         });
 
         if let Some(idx) = name_match_idx {
-            alloc.push(Some(idx));
+            alloc[dim_idx] = Some(idx);
             used[idx] = true;
+        }
+    }
+
+    for (dim_idx, dim) in dims.iter().enumerate() {
+        if alloc[dim_idx].is_some() {
             continue;
         }
 
@@ -96,8 +143,13 @@ pub(crate) fn allocate_implicit_axes_partial(
         };
 
         if let Some(idx) = mapping_match_idx {
-            alloc.push(Some(idx));
+            alloc[dim_idx] = Some(idx);
             used[idx] = true;
+        }
+    }
+
+    for (dim_idx, dim) in dims.iter().enumerate() {
+        if alloc[dim_idx].is_some() {
             continue;
         }
 
@@ -128,8 +180,8 @@ pub(crate) fn allocate_implicit_axes_partial(
             None
         };
 
-        alloc.push(size_match_idx);
         if let Some(idx) = size_match_idx {
+            alloc[dim_idx] = Some(idx);
             used[idx] = true;
         }
     }
@@ -336,6 +388,127 @@ mod tests {
                 mappings: vec![],
             },
         )
+    }
+
+    /// GH #996: a NAME match must win globally, not lose to an earlier
+    /// dimension's MAPPING match just because that dimension is processed first.
+    ///
+    /// The hand-built input is exactly what production supplies. Instrumenting
+    /// `ltm_augment_post_transform::dep_element_pins` and running C-LEARN
+    /// (`test/xmutil_test_models/C-LEARN v77 for Vensim.mdl`) dumped, for the
+    /// `rs_ff_co2_ff_aggregated[developed_countries]` link score:
+    ///
+    /// ```text
+    /// dep=aggregated_definition
+    /// dep_dims=["cop","aggregated_regions"]  target_dims=["aggregated_regions"]
+    /// target_elems=["developed_countries"]
+    /// elems=[None, None]  axes=[]  complete=false
+    /// ```
+    ///
+    /// `Aggregated Regions` declares an explicit element map onto `COP`, so
+    /// `cop` -- processed FIRST -- matched the single active slot through the
+    /// mapping pass's reverse branch (`has_mapping_to(aggregated_regions, cop)`),
+    /// and `aggregated_regions`, which matches that slot BY NAME, found it taken.
+    /// Both axes resolved to `None`, `dep_element_pins` dropped the dep, its
+    /// dimension-name subscript survived into a scalar fragment, and 135 C-LEARN
+    /// link scores were declined.
+    ///
+    /// The first pass's own comment already states this rule for the SIZE
+    /// fallback ("prevents size-based fallback from grabbing the wrong dimension
+    /// when the correct name match exists later in the list"); the mapping pass
+    /// was added afterwards and reintroduced the hazard it was written against.
+    #[test]
+    fn a_mapping_match_does_not_steal_a_later_name_match() {
+        use crate::datamodel;
+
+        let cop = datamodel::Dimension::named(
+            "COP".to_string(),
+            vec!["c1".to_string(), "c2".to_string()],
+        );
+        let mut agg = datamodel::Dimension::named(
+            "Aggregated Regions".to_string(),
+            vec!["r1".to_string(), "r2".to_string()],
+        );
+        // Many-to-one, exactly C-LEARN's shape: the map is what makes the
+        // reverse mapping branch fire for `cop`.
+        agg.mappings = vec![datamodel::DimensionMapping {
+            target: "COP".to_string(),
+            element_map: vec![
+                ("r1".to_string(), "c1".to_string()),
+                ("r2".to_string(), "c2".to_string()),
+            ],
+        }];
+        let ctx = crate::dimensions::DimensionsContext::from(&[cop, agg]);
+        let cop_d = ctx
+            .get(&CanonicalDimensionName::from_raw("COP"))
+            .expect("cop")
+            .clone();
+        let agg_d = ctx
+            .get(&CanonicalDimensionName::from_raw("Aggregated Regions"))
+            .expect("agg")
+            .clone();
+
+        // The dep is declared [COP, Aggregated Regions]; the target iterates
+        // Aggregated Regions alone. Only axis 1 corresponds, and it does so BY
+        // NAME -- axis 0 must not consume the slot through its mapping.
+        assert_eq!(
+            allocate_implicit_axes_partial(
+                &[cop_d.clone(), agg_d.clone()],
+                std::slice::from_ref(&agg_d),
+                &ctx
+            ),
+            vec![None, Some(0)],
+            "the name-matching axis must get the slot; a mapping match on an \
+             earlier axis must not consume it first"
+        );
+
+        // Control: with the name-matching axis FIRST the old order already
+        // worked, so this pins that the fix did not simply invert a preference.
+        assert_eq!(
+            allocate_implicit_axes_partial(
+                &[agg_d.clone(), cop_d],
+                std::slice::from_ref(&agg_d),
+                &ctx
+            ),
+            vec![Some(0), None],
+            "declaration order must not change which axis wins"
+        );
+    }
+
+    /// The same precedence, one rung down: a SIZE match on an earlier axis must
+    /// not consume the slot a later axis matches by MAPPING.
+    ///
+    /// This is why all three passes are staged flat rather than two. Hoisting
+    /// only the name pass fixes `name > {mapping, size}` and leaves
+    /// `mapping > size` per-dimension, so this shape still mis-allocated:
+    /// an indexed dep axis grabs the sole indexed active axis by SIZE before the
+    /// axis that maps onto it is ever considered. Not observed in any model --
+    /// it takes two indexed dimensions of equal size plus a mapping -- but the
+    /// rule the function documents is `name > mapping > size`, and a rule that
+    /// holds for two of its three rungs is one a reader cannot rely on.
+    #[test]
+    fn a_size_match_does_not_steal_a_later_mapping_match() {
+        use crate::datamodel;
+
+        let ia = datamodel::Dimension::indexed("IA".to_string(), 2);
+        let ib = datamodel::Dimension::indexed("IB".to_string(), 2);
+        let mut y =
+            datamodel::Dimension::named("Y".to_string(), vec!["y1".to_string(), "y2".to_string()]);
+        y.set_maps_to("IA".to_string());
+        let ctx = crate::dimensions::DimensionsContext::from(&[ia, ib, y]);
+        let get = |n: &str| {
+            ctx.get(&CanonicalDimensionName::from_raw(n))
+                .unwrap_or_else(|| panic!("{n}"))
+                .clone()
+        };
+        let (ia_d, ib_d, y_d) = (get("IA"), get("IB"), get("Y"));
+
+        assert_eq!(
+            allocate_implicit_axes_partial(&[ib_d, y_d], std::slice::from_ref(&ia_d), &ctx),
+            vec![None, Some(0)],
+            "the mapping-matching axis must get the slot; a size match on an \
+             earlier axis must not consume it first"
+        );
     }
 
     #[test]

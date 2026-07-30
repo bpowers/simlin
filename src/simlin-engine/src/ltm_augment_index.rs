@@ -297,7 +297,25 @@ pub(super) fn wrap_index_non_matching_in_previous(
     // element downstream, exactly as in the target's own equation. The
     // `iter_ctx` leg covers callers without a project dims context (the
     // iterated/source dims are dimension names by construction).
-    if axis_unknown && let IndexExpr0::Expr(Expr0::Var(name, _)) = &index {
+    //
+    // Unlike the two element guards above, this one is NOT gated on
+    // `axis_unknown`, and the asymmetry is the point. Those range over the
+    // project's whole ELEMENT namespace, which can disagree with the axis about
+    // which dimension an element belongs to -- so when the axis is known its
+    // verdict must win. A dimension NAME admits no such disagreement: reaching
+    // here with a known axis means the verdict was `Unresolved`, i.e. the axis
+    // does not declare this name as an element and the target does not iterate
+    // it, and a dimension name cannot also be a variable name (the XMILE spec,
+    // `docs/reference/xmile-v1.0.html` §3.7.1: dimension names "need to be
+    // unique and accessible across a whole-model (including submodels). In
+    // addition, they must be distinct from model variables names within the
+    // whole-model") -- so nothing it could be is a causal value. Gating it left
+    // exactly that case (a dep declared over a dimension the target does not
+    // iterate, spelled with its own dimension name, reachable through a
+    // dimension mapping) freezing a dimension name once GH #986 resolved axes;
+    // `db::ltm_tests::a_dimension_name_index_is_not_frozen_when_the_axis_is_known`
+    // is that shape.
+    if let IndexExpr0::Expr(Expr0::Var(name, _)) = &index {
         let canonical = canonicalize(name.as_str());
         let names_project_dim =
             dims_ctx.is_some_and(|ctx| ctx.is_dimension_name(canonical.as_ref()));

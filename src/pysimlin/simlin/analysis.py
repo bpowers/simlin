@@ -225,12 +225,25 @@ class Link:
     def average_relative_score(self) -> float | None:
         """Average the **relative** link score across all time steps.
 
-        This is the importance metric to rank links by: unlike
-        :meth:`average_score`, the relative score is normalized per target
-        into ``[-1, 1]`` and is comparable across the whole model (the
-        fraction of the target's change attributable to this input, GH #652).
-        Rank links by ``abs(link.average_relative_score() or 0.0)`` to find
-        the most important causal links.
+        Unlike :meth:`average_score`, the relative score is normalized per
+        target into ``[-1, 1]``: the fraction of the target's change
+        attributable to this input (GH #652). That makes it meaningful for
+        comparing the inputs *of one target* against each other.
+
+        .. warning::
+
+            **It is not a global importance ranking.** The normalization is
+            per target, so a link into a target with only ONE scored input
+            reads exactly ``±1`` at every step **by construction**, regardless
+            of whether that target matters. Sorting all links by
+            ``abs(average_relative_score())`` therefore floats the links with
+            no competition to the top. Observed on C-LEARN: 143 of 949 scored
+            links have a single-input target, and 58 of the global top 100 by
+            this metric are such links.
+
+            To rank links globally, first group by :attr:`to_var` and either
+            restrict to targets with more than one scored input or weight each
+            target by something that reflects its own importance.
 
         Returns ``None`` when there is no relative-score series, and ``NaN``
         when every step is ``NaN``; the reduction runs over the finite subset
@@ -447,7 +460,27 @@ class Analysis:
     index."""
 
     dominant_periods: tuple[DominantPeriod, ...]
-    """Intervals where a specific set of loops dominates behavior."""
+    """Intervals where a specific set of loops dominates behavior.
+
+    .. warning::
+
+        **Cross-partition, and therefore unreliable when ``partitions`` has
+        more than one entry.** The engine ranks loops for this surface by
+        ``abs(behavior_time_series)`` across the whole model, but that series
+        is a loop's share *within its own cycle partition* (see
+        :class:`Partition`), so the values are not comparable between
+        partitions. A loop ALONE in its partition reads exactly ``±1`` at every
+        active step **by construction**, which beats every loop that has real
+        competition -- so single-loop partitions win every timestep.
+
+        This contradicts :attr:`loops` in the same object, whose
+        "competitive-first" ranking deliberately sorts those same trivial loops
+        LAST. Observed on C-LEARN: ``loops`` ranks the 12 isolated gas-uptake
+        decay loops 141st-153rd of 153, while ``dominant_periods`` reports only
+        those loops as dominant across the entire 1850-2100 run.
+
+        For a model with one partition the surface is fine. Otherwise, group
+        :attr:`loops` by :attr:`Loop.partition` and rank within a partition."""
 
     truncated: bool = False
     """True when the `timeout` elapsed before discovery finished, so

@@ -100,7 +100,7 @@ pub fn compile_ltm_var_fragment(
     };
 
     let equation = scalarize_ltm_equation(lsv.equation.clone());
-    compile_ltm_equation_fragment(db, &lsv.name, &equation, model, project)
+    compile_ltm_equation_fragment(db, &lsv.name, &equation, model, project, None)
 }
 
 // How many times `link_score_equation_text_shaped`'s body has run on this
@@ -873,12 +873,22 @@ fn lower_ltm_variable(
 /// `Scalar` equation gets 1 slot; an `ApplyToAll`/`Arrayed` equation
 /// gets `product(dim_lengths)` slots and is compiled with the A2A /
 /// per-element expansion the compiler applies to those variants.
+///
+/// `why`, when supplied, receives a human-readable reason on failure. The
+/// three ways this function can fail -- a parse error in the generated text,
+/// a lowering `Err` from `compiler::Var::new`, and codegen declining to emit
+/// -- otherwise all collapse into the same `None`/`flow_bytecodes: None`, so a
+/// caller reporting the failure could say only *that* it happened. That cost
+/// was concrete: ~1,600 failures on one real model with no way to tell which
+/// construct was responsible short of instrumenting this function by hand.
+/// Callers that only want the fragment pass `None` and pay nothing.
 pub(crate) fn compile_ltm_equation_fragment(
     db: &dyn Db,
     var_name: &str,
     equation: &LtmEquation,
     model: SourceModel,
     project: SourceProject,
+    mut why: Option<&mut Option<String>>,
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
 
@@ -907,6 +917,16 @@ pub(crate) fn compile_ltm_equation_fragment(
         .equation_errors()
         .is_some_and(|e| !e.is_empty())
     {
+        if let Some(slot) = why.as_deref_mut() {
+            let errs = parsed.variable.equation_errors().unwrap_or_default();
+            *slot = Some(format!(
+                "the generated equation did not parse: {}",
+                errs.iter()
+                    .map(|e| format!("{:?} at {}..{}", e.code, e.start, e.end))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
         return None;
     }
 
@@ -1635,8 +1655,47 @@ pub(crate) fn compile_ltm_equation_fragment(
 
     // LTM vars are always flow-phase only (scalar auxes, not stocks)
     let flow_bytecodes = match build_var(false) {
-        Ok(var_result) => compile_phase(&var_result.ast),
-        Err(_) => None,
+        Ok(var_result) => {
+            if why.is_some() {
+                match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(
+                    &base_ctx,
+                    &var_result.ast,
+                ) {
+                    Ok(bytecodes) => Some(bytecodes),
+                    Err(err) => {
+                        if let Some(slot) = why.as_deref_mut() {
+                            *slot = Some(err);
+                        }
+                        None
+                    }
+                }
+            } else {
+                compile_phase(&var_result.ast)
+            }
+        }
+        Err(err) => {
+            if let Some(slot) = why {
+                // A lowering `Err` of `empty_equation` is usually a MASK: the
+                // variable reached `Var::new` with no AST because the earlier
+                // scope-lowering rejected the equation and left `ast: None`.
+                // Report that upstream rejection when it is there, since
+                // "empty equation" describes a formula we printed in full.
+                let lowered_errs = lowered.equation_errors().unwrap_or_default();
+                *slot = Some(if lowered_errs.is_empty() {
+                    format!("could not be lowered: {err}")
+                } else {
+                    format!(
+                        "could not be lowered: {}",
+                        lowered_errs
+                            .iter()
+                            .map(|e| format!("{:?} at {}..{}", e.code, e.start, e.end))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    )
+                });
+            }
+            None
+        }
     };
 
     Some(VarFragmentResult {
@@ -1699,8 +1758,9 @@ pub(crate) fn compile_ltm_synthetic_fragment(
     // substitutions are applied later in `model_ltm_variables`), so
     // for anything that carries those it would produce the wrong (or
     // a degenerate) fragment.
-    let compile_direct =
-        || compile_ltm_equation_fragment(db, &ltm_var.name, &ltm_var.equation, model, project);
+    let compile_direct = || {
+        compile_ltm_equation_fragment(db, &ltm_var.name, &ltm_var.equation, model, project, None)
+    };
     const LINK_SCORE_PREFIX: &str = "$\u{205A}ltm\u{205A}link_score\u{205A}";
     if ltm_var.name.starts_with(LINK_SCORE_PREFIX) {
         if ltm_var.dimensions.is_empty() {
@@ -1864,13 +1924,39 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
         if compiled_ok {
             continue;
         }
+        // Recover WHY. `compile_ltm_synthetic_fragment` discards the reason
+        // (it has three failure legs and one `None`), so re-run the direct
+        // compile with the reason slot wired up. For every variable that took
+        // the `compile_direct` branch above -- which is every element-pinned
+        // equation, i.e. all of the arrayed-model failures this was written
+        // for -- that is the identical call. For one that took the
+        // salsa-cached `(from, to)` branch the re-derived equation can differ,
+        // so the reason is reported as indicative rather than as the failure.
+        let mut reason: Option<String> = None;
+        let direct_agrees = compile_ltm_equation_fragment(
+            db,
+            &ltm_var.name,
+            &ltm_var.equation,
+            model,
+            project,
+            Some(&mut reason),
+        )
+        .is_none_or(|r| r.fragment.flow_bytecodes.is_none());
+        let detail = match (&reason, direct_agrees) {
+            (Some(r), true) => format!(" Reason: {r}."),
+            (Some(r), false) => format!(
+                " Reason (from recompiling its own equation, which DOES compile -- \
+                 the cached re-derived equation is what failed): {r}."
+            ),
+            (None, _) => String::new(),
+        };
         let msg = format!(
             "LTM synthetic variable '{}' failed to compile; it keeps a \
              layout slot but no bytecode, so it evaluates to a constant 0. \
              Any loop or link score derived from it is silently degraded. \
              This usually means the LTM augmentation layer emitted an \
-             equation the compiler rejected.",
-            ltm_var.name,
+             equation the compiler rejected.{}",
+            ltm_var.name, detail,
         );
         CompilationDiagnostic(Diagnostic {
             model: model.name(db).clone(),
@@ -1916,7 +2002,16 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
     implicit_names.sort();
     for im_name in implicit_names {
         let meta = &ltm_implicit[im_name];
-        let fragment = compile_ltm_implicit_var_fragment(db, meta, model, project, dep_graph, &[]);
+        let mut helper_reason: Option<String> = None;
+        let fragment = compile_ltm_implicit_var_fragment(
+            db,
+            meta,
+            model,
+            project,
+            dep_graph,
+            &[],
+            Some(&mut helper_reason),
+        );
         // The helper's value-bearing phase must have produced bytecode:
         // `compile_ltm_implicit_var_fragment` returns `Some` even when every
         // phase failed (each phase is compiled independently and a failed one
@@ -1942,13 +2037,17 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
         if compiled_ok {
             continue;
         }
+        let helper_detail = match &helper_reason {
+            Some(r) => format!(" Reason: {r}."),
+            None => String::new(),
+        };
         let msg = format!(
             "LTM implicit helper '{}' (synthesized while parsing LTM variable \
              '{}') failed to compile; it keeps a layout slot but no bytecode, \
              so it evaluates to a constant 0. Every link or loop score that \
              reads it is silently degraded. This usually means the LTM \
-             augmentation layer emitted an equation the compiler rejected.",
-            im_name, meta.ltm_parent_name,
+             augmentation layer emitted an equation the compiler rejected.{}",
+            im_name, meta.ltm_parent_name, helper_detail,
         );
         CompilationDiagnostic(Diagnostic {
             model: model.name(db).clone(),
@@ -1976,6 +2075,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
     project: SourceProject,
     _dep_graph: &ModelDepGraphResult,
     module_input_names: &[String],
+    mut why: Option<&mut Option<String>>,
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
 
@@ -2568,10 +2668,47 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         Err(_) => None,
     };
 
+    // Only the value-bearing phase's reason is captured: that is the phase
+    // `model_ltm_fragment_diagnostics` gates on, so it is the one whose
+    // failure turns the helper into a silent constant 0.
     let flow_bytecodes = if !meta.is_stock {
         match build_var(false) {
-            Ok(var_result) => compile_phase(&var_result.ast),
-            Err(_) => None,
+            Ok(var_result) => {
+                if why.is_some() {
+                    match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(
+                        &base_ctx,
+                        &var_result.ast,
+                    ) {
+                        Ok(bytecodes) => Some(bytecodes),
+                        Err(err) => {
+                            if let Some(slot) = why.as_deref_mut() {
+                                *slot = Some(err);
+                            }
+                            None
+                        }
+                    }
+                } else {
+                    compile_phase(&var_result.ast)
+                }
+            }
+            Err(err) => {
+                if let Some(slot) = why {
+                    let lowered_errs = lowered.equation_errors().unwrap_or_default();
+                    *slot = Some(if lowered_errs.is_empty() {
+                        format!("could not be lowered: {err}")
+                    } else {
+                        format!(
+                            "could not be lowered: {}",
+                            lowered_errs
+                                .iter()
+                                .map(|e| format!("{:?} at {}..{}", e.code, e.start, e.end))
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        )
+                    });
+                }
+                None
+            }
         }
     } else {
         None

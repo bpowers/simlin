@@ -198,6 +198,17 @@ class Run:
         Uses greedy algorithm to identify which loops explain the most
         variance in model behavior during each period.
 
+        .. warning::
+
+            Like :attr:`Analysis.dominant_periods`, this ranks loops by
+            ``abs(behavior_time_series)`` across the whole model, but that
+            series is a loop's share *within its own cycle partition*
+            (:attr:`Loop.partition`) and is not comparable between partitions.
+            A loop alone in its partition reads ``±1`` by construction and so
+            outranks every loop that has real competition. Trust this surface
+            only when the model has a single cycle partition; otherwise group
+            :attr:`loops` by partition and rank within one.
+
         Returns empty tuple if analyze_loops=False was used.
 
         Returns:

@@ -313,6 +313,14 @@ class ModelPatchBuilder:
         ``pin{n}`` id. ``variables`` lists the loop's member variables (order
         is irrelevant; the cycle is recovered from the causal graph).
 
+        ``variables`` must be plain variable idents. An element-subscripted
+        name (``"c_in_mixed_layer[deterministic]"``) is rejected with a
+        ``does_not_exist`` error -- and that is exactly the form
+        ``Analysis.loops`` reports on an arrayed model, so a discovered loop
+        cannot be handed back verbatim. Stripping the subscripts pins the whole
+        apply-to-all family rather than the single element instance discovery
+        found; pinning one element is not expressible today.
+
         .. note::
             A pinned loop occupies its own single-slot cycle partition.  When
             it is the only loop scored in that partition -- always so in
@@ -912,8 +920,16 @@ class Model:
         gracefully: a ``RuntimeWarning`` explains why, and the simulation
         reruns without loop analysis so results are still produced.
 
+        Only variables the engine lays out as overridable constants can be
+        overridden; a computed auxiliary, a flow, or a stock raises
+        ``SimlinRuntimeError`` ("not found in offsets map"). An arrayed
+        constant is addressed per element (``"decay_rate[north]"``) -- its bare
+        name is not a slot and is rejected. :meth:`Sim.get_var_names` lists
+        every addressable name.
+
         Args:
-            overrides: Override values for any model variables (by name)
+            overrides: Values for overridable constants, keyed by the name as
+                it appears in :meth:`Sim.get_var_names`
             analyze_loops: Whether to compute loop dominance analysis (LTM)
 
         Returns:

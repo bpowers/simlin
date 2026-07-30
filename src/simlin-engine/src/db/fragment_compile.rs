@@ -189,9 +189,11 @@ pub fn compile_var_fragment<'db>(
     let is_module_input = inputs.contains(&var_ident_canonical);
 
     // The phase-invariant emission context, built once per variable and
-    // borrowed by every phase (up to three). All three fragment emitters --
-    // this one, the implicit-helper one, and both LTM ones -- go through the
-    // same `compile_phase_to_per_var_bytecodes`.
+    // borrowed by every phase (up to three). All the fragment emitters --
+    // this one, the implicit-helper one, and both LTM ones -- share one
+    // emission tail; this one reaches it through the reporting twin
+    // (`compile_phase_to_per_var_bytecodes_reporting`) so it can attribute a
+    // codegen rejection, while the others take the `Option` form.
     let base_ctx = fragment_emit_ctx(
         &model_name_ident,
         &inputs,
@@ -200,8 +202,76 @@ pub fn compile_var_fragment<'db>(
         converted_dims,
         dim_context,
     );
+    // Emit one phase, and make a CODEGEN rejection attributable.
+    //
+    // Lowering failures already accumulate (`accumulate_var_compile_error`
+    // below), but a codegen `Err` used to be discarded by
+    // `compile_phase_to_per_var_bytecodes`'s `.ok()`. The variable then kept
+    // its layout slot with no bytecode and the only signal was
+    // `assemble_module`'s batch `failed to compile fragments for variables:
+    // <names>` -- no reason, no severity, and nothing in
+    // `collect_all_diagnostics` at all. That is the failure mode
+    // `compiler::check_stock_updates_are_emittable`'s rustdoc describes, and
+    // it was live for every codegen rejection: an ordinary hand-written
+    // `out[d] = VECTOR SORT ORDER(PREVIOUS(vals[d]), 1)` reported zero
+    // diagnostics while failing the build.
+    //
+    // The reason rides `DiagnosticError::Assembly`, not `Equation`, because
+    // `EquationError` is `{start, end, code}` with no message field -- see the
+    // KNOWN LOSS note on `accumulate_var_compile_error`. `Assembly` carries a
+    // String, which is what lets the refused construct be named at all.
+    //
+    // The variable name is embedded in that String even though the
+    // `Diagnostic` also carries it in `variable`. Structured consumers read
+    // the field, but `errors.rs`'s `Assembly` arm formats `message` as
+    // "assembly {severity} in model '{model}': {msg}" and does NOT interpolate
+    // `diag.variable` -- and the CLI prints only `message`. So on the surface a
+    // user actually reads, the field alone names nothing; a bare reason would
+    // leave the variable identified only by `assemble_module`'s separate batch
+    // line. The LTM leg solves it the same way, by putting the name in the
+    // string (`db/ltm/compile.rs`'s "LTM synthetic variable '{}' failed to
+    // compile").
+    //
+    // An EMPTY phase is not a failure and is filtered before asking: a
+    // standalone lookup-only table lowers to zero expressions by design
+    // (`compiler::Var::new`'s `is_table_only` arm), so reporting the
+    // reporting form's "nothing to emit" arm would turn a static table into
+    // an error. Today `var_runlist_membership` already keeps such a variable
+    // out of every runlist, so this is defense rather than a live filter.
+    //
+    // Severity is `Error`, unlike the LTM leg's `Warning`, and the asymmetry
+    // is the difference between the two situations: a dropped LTM fragment
+    // degrades an analysis overlay while the model still simulates, whereas a
+    // dropped ORDINARY fragment means `assemble_module` fails the build. The
+    // blast radius was measured rather than argued: a sweep diffing every
+    // `collect_all_diagnostics` row across the whole `test/` corpus, with and
+    // without this hunk, found the added rows land ONLY on projects that
+    // already fail to compile -- no project that compiles gains an error.
+    // That shape is what the severity rests on, and unlike a row count it
+    // stays true as the corpus grows. (`DiagnosticError::Assembly` maps to
+    // `FormattedErrorKind::Simulation`, which `FormattedErrors::push` does not
+    // count toward `has_model_errors`/`has_variable_errors`, so the CLI's
+    // redundant-`NotSimulatable` suppression is unaffected either way.)
     let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
-        compile_phase_to_per_var_bytecodes(&base_ctx, exprs)
+        if exprs.is_empty() {
+            return None;
+        }
+        match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(&base_ctx, exprs) {
+            Ok(bytecodes) => Some(bytecodes),
+            Err(reason) => {
+                let ident = var.ident(db);
+                CompilationDiagnostic(Diagnostic {
+                    model: model.name(db).clone(),
+                    variable: Some(ident.clone()),
+                    error: DiagnosticError::Assembly(format!(
+                        "variable '{ident}' failed to compile: {reason}"
+                    )),
+                    severity: DiagnosticSeverity::Error,
+                })
+                .accumulate(db);
+                None
+            }
+        }
     };
 
     // Accumulate a diagnostic when per-variable compilation (Var::new)

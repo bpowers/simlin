@@ -3035,3 +3035,185 @@ fn variable_error_fields_are_the_lowering_channel() {
         "the recorded lowering error must reach collect_all_diagnostics; got: {diags:?}"
     );
 }
+
+// ---- Codegen rejection is attributable (Option 0) ----
+
+/// An ordinary, hand-written apply-to-all equation that LOWERS cleanly but
+/// that CODEGEN refuses must produce a per-variable diagnostic naming the
+/// variable and carrying codegen's reason.
+///
+/// The shape: an array-valued operand of an array builtin must be a *view*
+/// over storage (`codegen::walk_expr_as_view` accepts only
+/// `StaticSubscript | TempArray | Var | Subscript`). `PREVIOUS(vals[d])` is an
+/// `Expr::App`, so `VECTOR SORT ORDER(PREVIOUS(vals[d]), 1)` reaches codegen
+/// intact and is rejected with `Cannot push view for expression type
+/// Discriminant(7)`. Nothing about this equation involves LTM -- it is the
+/// same defect 244 LTM fragments on C-LEARN hit, reached from a model a user
+/// can type.
+///
+/// Before this was wired up the failure was INVISIBLE: `compile_phase` is
+/// `compile_phase_to_per_var_bytecodes(..)`, which is `.ok()` over the
+/// reporting form, so a codegen `Err` was discarded. `collect_all_diagnostics`
+/// returned nothing at all and the only user-facing signal was
+/// `assemble_module`'s unattributed
+/// `NotSimulatable: failed to compile fragments for variables: out`. That is
+/// the exact failure mode `compiler::check_stock_updates_are_emittable`'s
+/// rustdoc says that guard exists to avoid, and it was live for every codegen
+/// rejection.
+///
+/// Asserting merely that compilation FAILS would have passed before the
+/// change; the assertions below are on the diagnostic's attribution and
+/// reason, which is what actually moved.
+#[test]
+fn codegen_rejection_of_an_ordinary_variable_names_the_variable_and_its_reason() {
+    let project = crate::test_common::TestProject::new("codegen_reject")
+        .named_dimension("d", &["e1", "e2", "e3"])
+        .array_aux("vals[d]", "10")
+        .array_aux("out[d]", "VECTOR SORT ORDER(PREVIOUS(vals[d]), 1)")
+        .build_datamodel();
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    let attributed: Vec<&Diagnostic> = diags
+        .iter()
+        .filter(|d| d.variable.as_deref() == Some("out"))
+        .collect();
+
+    assert!(
+        !attributed.is_empty(),
+        "a codegen rejection must produce a diagnostic naming 'out'; got: {diags:?}"
+    );
+
+    let carries_reason = attributed.iter().any(|d| {
+        d.severity == DiagnosticSeverity::Error
+            && matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains("codegen"))
+    });
+    assert!(
+        carries_reason,
+        "the diagnostic for 'out' must be an Error carrying codegen's reason; got: {attributed:?}"
+    );
+
+    // The reason must be codegen's actual message, not a generic stand-in:
+    // that is the difference between "something failed" and "this construct
+    // was refused", and it is the whole point of the reporting form.
+    let names_construct = attributed.iter().any(
+        |d| matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains("Cannot push view")),
+    );
+    assert!(
+        names_construct,
+        "the reason must name the refused construct; got: {attributed:?}"
+    );
+
+    // The variable must be named in the MESSAGE, not only in the `variable`
+    // field. `errors.rs`'s `Assembly` arm renders `message` as "assembly
+    // {severity} in model '{model}': {msg}" and never interpolates
+    // `diag.variable`, and the CLI prints only `message` -- so a field-only
+    // assertion passes while the surface a user reads names nothing. Asserting
+    // the quoted form keeps it from matching an incidental substring.
+    let message_names_variable = attributed
+        .iter()
+        .any(|d| matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains("'out'")));
+    assert!(
+        message_names_variable,
+        "the message text must name the variable, not just the `variable` field; got: {attributed:?}"
+    );
+}
+
+/// The negative control for the two tests around it: a model that compiles
+/// cleanly must gain NO diagnostic from this path.
+///
+/// Without it, "a codegen rejection is reported" is satisfied just as well by
+/// reporting unconditionally, which would be a far worse regression than the
+/// silence it replaced. The whole-corpus form of this property -- a sweep
+/// diffing every `collect_all_diagnostics` row across the `test/` corpus, with
+/// and without the change -- is what actually established the blast radius:
+/// the added rows land only on models that already fail to compile. This is
+/// the cheap unit-level guard for the same direction.
+#[test]
+fn a_model_that_compiles_gains_no_codegen_diagnostic() {
+    let project = crate::test_common::TestProject::new("codegen_ok")
+        .named_dimension("d", &["e1", "e2", "e3"])
+        .array_aux("vals[d]", "10")
+        // The same builtin, with the operand shape codegen accepts.
+        .array_aux("out[d]", "VECTOR SORT ORDER(vals[d], 1)")
+        .aux("total", "SUM(out[*])", None)
+        .build_datamodel();
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    let assembly: Vec<&Diagnostic> = diags
+        .iter()
+        .filter(|d| matches!(&d.error, DiagnosticError::Assembly(_)))
+        .collect();
+    assert!(
+        assembly.is_empty(),
+        "a compiling model must gain no Assembly diagnostic; got: {assembly:?}"
+    );
+}
+
+/// The same rule for the INITIALS phase.
+///
+/// `compile_var_fragment` calls `compile_phase` at three sites -- initials,
+/// flows, stocks -- and each discards its codegen `Err` independently, so one
+/// wired-up site says nothing about the others. The test above covers flows
+/// (the phase all 244 C-LEARN LTM fragments take); this one covers initials
+/// via an arrayed stock whose INITIAL equation carries the same refused shape.
+///
+/// The stocks phase is deliberately NOT covered, and its call site admits TWO
+/// kinds of variable -- `(is_stock || is_module) && membership.stocks` -- so
+/// both arms need their own reason rather than one standing in for the other:
+///
+/// * a STOCK's stock-phase expression is always the `Expr::AssignNext`
+///   synthesized by `build_stock_update_expr`, and
+///   `compiler::check_stock_updates_are_emittable` rejects a non-`Op2` update
+///   at LOWERING -- which routes through `accumulate_var_compile_error`, the
+///   path that already worked. Provoking a codegen `Err` here would require
+///   defeating that guard first.
+/// * a MODULE's is the `Expr::EvalModule` built by `Var::new`'s
+///   `Variable::Module` arm, whose arguments are each a plain `Expr::Var`
+///   (`Expr::Var(ctx.get_ref(&mi.src)?, ..)`; an unresolvable `src` fails at
+///   lowering, not here). Codegen's `EvalModule` arm walks those arguments and
+///   pushes a declaration, and its `Expr::Var` arm just emits `LoadVar` and
+///   cannot fail. The one other shape a module-kind variable can lower to --
+///   `Var::new`'s input-override prefix, `AssignCurr(dst, ModuleInput(i))`,
+///   when the module's own ident is a module input -- is infallible in codegen
+///   for the same reason. Neither reaches an error path.
+///
+/// Both arms are therefore unreachable TODAY rather than uncovered by
+/// oversight, and each becomes reachable independently: the stock arm if the
+/// lowering guard is relaxed (a `non_negative` clamp, GH #545), the module arm
+/// if module inputs ever lower to something richer than a bare reference. The
+/// wiring itself is shared -- all three sites call the same `compile_phase`
+/// closure -- so the two covered phases exercise the mechanism.
+#[test]
+fn codegen_rejection_in_the_initials_phase_is_attributable_too() {
+    let project = crate::test_common::TestProject::new("codegen_reject_init")
+        .named_dimension("d", &["e1", "e2", "e3"])
+        .array_aux("vals[d]", "10")
+        .array_stock(
+            "lvl[d]",
+            "VECTOR SORT ORDER(PREVIOUS(vals[d]), 1)",
+            &[],
+            &[],
+            None,
+        )
+        .build_datamodel();
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    let carries_reason = diags.iter().any(|d| {
+        d.variable.as_deref() == Some("lvl")
+            && d.severity == DiagnosticSeverity::Error
+            && matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains("codegen"))
+    });
+    assert!(
+        carries_reason,
+        "an initials-phase codegen rejection must name 'lvl' and carry its reason; got: {diags:?}"
+    );
+}

@@ -40,14 +40,54 @@ use super::parse::{ltm_equation_dimensions, retarget_ltm_equation_dims};
 /// per-element emitter excludes the live source, whose pinning is the wrap's
 /// job); whether it can actually be pinned AT a given element is the
 /// projection's answer, not this filter's.
+///
+/// `tables` carries the equation's `LOOKUP` TABLE holders, which are NOT in
+/// `deps` and must still be pinned (GH #984). A graphical-function holder is
+/// deliberately absent from the dependency set -- `classify_dependencies` puts
+/// it in `referenced_tables` and keeps it out of `all` (GH #606) so a table
+/// reference creates no runlist-ordering or causal edge -- and pinning is a
+/// COMPILABILITY obligation, not an attribution one: `tbl[region]` reaching a
+/// scalar fragment with its dimension-name index intact does not lower
+/// (`DimensionInScalarContext`), so the whole link score is dropped. Widening
+/// only the PIN candidates keeps the two obligations separate: the holder gets
+/// its index pinned while still earning no causal edge and no score.
+///
+/// The table HEAD is never frozen, but NOT because this set stays narrow --
+/// that causal claim was here and is false. The head is protected structurally,
+/// by `wrap_non_matching_in_previous`'s `LOOKUP` arm: it routes argument 0 to
+/// `freeze_lookup_table_indices`, which rewrites INDICES and leaves the ident
+/// alone REGARDLESS of `other_deps`. Verified by widening the wrap's dep set
+/// with `referenced_tables` and re-running: series bit-identical, whole suite
+/// green. (Freezing it would indeed fail -- a table-only variable has no value
+/// slot, so `LOOKUP(PREVIOUS(tbl), x)` is `DoesNotExist` -- but nothing here is
+/// what prevents it.) Keeping the sets apart is an ATTRIBUTION decision, stated
+/// above: a table cannot vary, so it must earn no edge. Recorded precisely
+/// because the false version told the next reader that a future widening of the
+/// dep set would be dangerous, when it is merely wrong for a different reason.
+///
+/// What this does NOT establish: that a table argument is always pinnable this
+/// way. Every one of C-LEARN's 413 occurrences is the IDENTITY shape -- the
+/// holder's declared axis IS the dimension the index spells, and the target
+/// iterates it -- so the projection is the identity and no dimension mapping is
+/// consulted. That is a measured property of one corpus, not of the language: a
+/// model reading a table declared over a DIFFERENT axis than the target iterates
+/// needs the mapped element correspondence, which
+/// `DimensionsContext::mapped_element_correspondence` declines for an explicit
+/// element map. Such a reference lands in `dep_element_pins`' incomplete arm and
+/// keeps today's loud drop.
 fn pinnable_arrayed_deps(
     db: &dyn Db,
     source_vars: &HashMap<String, SourceVariable>,
     project: SourceProject,
     deps: &HashSet<Ident<Canonical>>,
+    tables: &std::collections::BTreeSet<String>,
     keep: impl Fn(&Ident<Canonical>) -> bool,
 ) -> Vec<(Ident<Canonical>, Vec<crate::dimensions::Dimension>)> {
     let mut pinnable: Vec<(Ident<Canonical>, Vec<crate::dimensions::Dimension>)> = deps
+        .iter()
+        .cloned()
+        .chain(tables.iter().map(|t| Ident::new(t)))
+        .collect::<HashSet<_>>()
         .iter()
         .filter(|d| keep(d))
         .filter_map(|d| {
@@ -1302,8 +1342,12 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     // (Scalar deps stay bare; the target self-reference is pinned implicitly
     // via the subscripted `to[elem]` in the guard form built by
     // `generate_scalar_to_element_equation`.)
-    let pinnable_deps = |deps: &HashSet<Ident<Canonical>>| {
-        pinnable_arrayed_deps(db, source_vars, project, deps, |_| true)
+    // `tables` is threaded alongside `deps` because a LOOKUP table holder is
+    // absent from the dep set by construction but still needs its index pinned
+    // -- see `pinnable_arrayed_deps`.
+    let pinnable_deps = |deps: &HashSet<Ident<Canonical>>,
+                         tables: &std::collections::BTreeSet<String>| {
+        pinnable_arrayed_deps(db, source_vars, project, deps, tables, |_| true)
     };
 
     let dim_element_lists: Vec<Vec<String>> = to_dims
@@ -1413,6 +1457,31 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             // right link-score value (no sensitivity).
             "0".to_string()
         };
+        // COMPLETENESS: a scalar per-element partial must select ONE element at
+        // every subscript. An index left as a bare DIMENSION name denotes the
+        // whole axis, so it cannot lower -- and when it sits inside a frozen
+        // subtree `builtins_visitor` hoists it into a `PREVIOUS`-capture helper
+        // that fails on its own WHILE THIS SCORE STILL COMPILES, because the
+        // score only references the helper's slot. The result is not an absent
+        // score but a present one reading part of its own equation as a constant
+        // 0, under a warning worded for something else.
+        //
+        // "No score, warned" beats a wrong score, so decline the edge on the same
+        // `PartialEquationError` contract the GH #311 parse failure and the
+        // GH #743 unfreezable partial use: loops through it drop with a warning.
+        //
+        // Checked on the FINISHED text, not predicted from the pin table. A dep
+        // the table cannot cover may still need no pin -- `source[idx]` resolves
+        // through its own runtime index -- so declining whenever a dep is
+        // unpinnable rejects edges that score correctly. Only a surviving
+        // dimension-name index actually breaks.
+        if let Some(offender) = crate::ltm_augment::unresolvable_dimension_index(&equation, dim_ctx)
+        {
+            let err =
+                crate::ltm_augment::PartialEquationError::unprojectable_dep(&offender, element);
+            emit_ltm_partial_equation_warning(db, model, &name, &err);
+            return None;
+        }
         Some(LtmSyntheticVar {
             name,
             equation: LtmEquation::scalar(equation),
@@ -1440,8 +1509,9 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         // pin PROJECTION varies per element, and that is `build_var`'s job.
         Ast::ApplyToAll(_, expr) => {
             let elem_eqn = crate::patch::expr2_to_expr0(expr);
-            let elem_deps = crate::variable::identifier_set(ast, target_ast_dims, None);
-            let pinnable = pinnable_deps(&elem_deps);
+            let elem_dep_class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
+            let elem_deps = elem_dep_class.all.clone();
+            let pinnable = pinnable_deps(&elem_deps, &elem_dep_class.referenced_tables);
             for element in &elements {
                 match build_var(element, Some(&elem_eqn), &elem_deps, &pinnable) {
                     Some(v) => cross_vars.push(v),
@@ -1459,24 +1529,32 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             for element in &elements {
                 let canonical_elem = crate::common::CanonicalElementName::from_raw(element);
                 let slot = per_elem.get(&canonical_elem).or(default_expr.as_ref());
-                let (elem_eqn, elem_deps): (Option<crate::ast::Expr0>, HashSet<Ident<Canonical>>) =
-                    match slot {
-                        Some(expr) => (
+                #[allow(clippy::type_complexity)]
+                let (elem_eqn, elem_deps, elem_tables): (
+                    Option<crate::ast::Expr0>,
+                    HashSet<Ident<Canonical>>,
+                    std::collections::BTreeSet<String>,
+                ) = match slot {
+                    Some(expr) => {
+                        let class = crate::variable::classify_dependencies(
+                            &Ast::Scalar(expr.clone()),
+                            target_ast_dims,
+                            None,
+                        );
+                        (
                             Some(crate::patch::expr2_to_expr0(expr)),
-                            crate::variable::identifier_set(
-                                &Ast::Scalar(expr.clone()),
-                                target_ast_dims,
-                                None,
-                            ),
-                        ),
-                        // No slot and no default: the target has a hole at
-                        // this element. A zero equation is the right
-                        // link-score value (no sensitivity), matching the
-                        // historical placeholder behaviour for un-derivable
-                        // partials.
-                        None => (None, HashSet::new()),
-                    };
-                let pinnable = pinnable_deps(&elem_deps);
+                            class.all,
+                            class.referenced_tables,
+                        )
+                    }
+                    // No slot and no default: the target has a hole at
+                    // this element. A zero equation is the right
+                    // link-score value (no sensitivity), matching the
+                    // historical placeholder behaviour for un-derivable
+                    // partials.
+                    None => (None, HashSet::new(), Default::default()),
+                };
+                let pinnable = pinnable_deps(&elem_deps, &elem_tables);
                 match build_var(element, elem_eqn.as_ref(), &elem_deps, &pinnable) {
                     Some(v) => cross_vars.push(v),
                     None => {
@@ -1948,6 +2026,17 @@ pub(crate) fn ltm_partial_equation_warning_message(
              variable is skipped rather than emitted with a silently-stubbed helper \
              (which would poison the score with a plausible-looking wrong constant \
              -- GH #743)."
+        ),
+        PartialEquationErrorKind::UnprojectableDep => format!(
+            "LTM link-score variable '{variable_name}' could not be generated: the \
+             arrayed dependency '{equation_text}' (dep@element) cannot be projected \
+             onto that target element, so the per-element partial has no correct \
+             subscript for it. The variable is skipped -- and dependent loop scores \
+             dropped -- rather than emitted with the dep's dimension-name subscript \
+             left in a scalar fragment, which compiles to a helper that reads a \
+             constant 0 while the score itself still compiles (a wrong number, not \
+             an absent one). The reachable cause is a dep read across an EXPLICIT \
+             element map, which `mapped_element_correspondence` declines."
         ),
         PartialEquationErrorKind::BareReducerFeeder => format!(
             "LTM link-score variable '{variable_name}' could not be generated: \
@@ -2541,8 +2630,11 @@ fn emit_per_element_link_scores(
     // over its OWN declared dimensions (mirroring
     // `try_scalar_to_arrayed_link_scores`); the source itself is excluded --
     // its occurrences are pinned per-row by the wrap's own row lowering.
-    let pinnable_deps = |deps: &HashSet<Ident<Canonical>>| {
-        pinnable_arrayed_deps(db, source_vars, project, deps, |d| d.as_str() != from)
+    let pinnable_deps = |deps: &HashSet<Ident<Canonical>>,
+                         tables: &std::collections::BTreeSet<String>| {
+        pinnable_arrayed_deps(db, source_vars, project, deps, tables, |d| {
+            d.as_str() != from
+        })
     };
 
     let to_dim_element_lists: Vec<Vec<String>> = to_dims
@@ -2555,8 +2647,9 @@ fn emit_per_element_link_scores(
     // per-slot for Arrayed -- mirroring `try_scalar_to_arrayed_link_scores`).
     let a2a_parts: Option<ElemEqnParts> = if let Ast::ApplyToAll(_, expr) = ast {
         let eqn = crate::patch::expr2_to_expr0(expr);
-        let deps = crate::variable::identifier_set(ast, target_ast_dims, None);
-        let pinnable = pinnable_deps(&deps);
+        let class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
+        let deps = class.all.clone();
+        let pinnable = pinnable_deps(&deps, &class.referenced_tables);
         Some((eqn, deps, pinnable))
     } else {
         None
@@ -2617,12 +2710,13 @@ fn emit_per_element_link_scores(
                 match slot {
                     Some(expr) => {
                         let eqn = crate::patch::expr2_to_expr0(expr);
-                        let deps = crate::variable::identifier_set(
+                        let class = crate::variable::classify_dependencies(
                             &Ast::Scalar(expr.clone()),
                             target_ast_dims,
                             None,
                         );
-                        let pinnable = pinnable_deps(&deps);
+                        let deps = class.all.clone();
+                        let pinnable = pinnable_deps(&deps, &class.referenced_tables);
                         Some((eqn, deps, pinnable))
                     }
                     // No slot, no default: a hole -- this element has no
@@ -2702,13 +2796,30 @@ fn emit_per_element_link_scores(
                 gf_table_ref.as_deref(),
                 &occ,
             ) {
-                Ok(equation) => edge_vars.push(LtmSyntheticVar {
-                    name,
-                    equation: LtmEquation::scalar(equation),
-                    dimensions: vec![], // scalar -- one variable per (row, element)
-                    // bracketed name -> routed direct by `assemble_module`.
-                    compile_directly: false,
-                }),
+                Ok(equation) => {
+                    // Same completeness check as the scalar-to-element emitter
+                    // (see its COMPLETENESS comment): a surviving dimension-name
+                    // index cannot lower, and it becomes a `PREVIOUS`-capture
+                    // helper that dies while THIS score still compiles.
+                    if let Some(offender) =
+                        crate::ltm_augment::unresolvable_dimension_index(&equation, dim_ctx)
+                    {
+                        let err = crate::ltm_augment::PartialEquationError::unprojectable_dep(
+                            &offender, element,
+                        );
+                        if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+                            emit_ltm_partial_equation_warning(db, model, &name, &err);
+                        }
+                        return true;
+                    }
+                    edge_vars.push(LtmSyntheticVar {
+                        name,
+                        equation: LtmEquation::scalar(equation),
+                        dimensions: vec![], // scalar -- one variable per (row, element)
+                        // bracketed name -> routed direct by `assemble_module`.
+                        compile_directly: false,
+                    })
+                }
                 Err(err) => {
                     // One doomed (row, e) dooms the edge (GH #780; fn doc);
                     // warn only on first recording (#758 convention).
@@ -3361,7 +3472,12 @@ pub(super) fn emit_agg_to_target_link_scores(
     for other_agg in reducer_subst.values() {
         all_deps.insert(Ident::<Canonical>::new(other_agg));
     }
-    let pinnable_deps = pinnable_arrayed_deps(db, source_vars, project, &all_deps, |_| true);
+    let table_holders =
+        crate::variable::classify_dependencies(ast, target_ast_dims, None).referenced_tables;
+    let pinnable_deps =
+        pinnable_arrayed_deps(db, source_vars, project, &all_deps, &table_holders, |_| {
+            true
+        });
     // An arrayed agg (`result_dims` non-empty) is element-pinned in the
     // per-target-element equation too: `$⁚ltm⁚agg⁚0` → `$⁚ltm⁚agg⁚0[<slot>]`.
     // But NOT via `pinnable_deps`: that projection needs a variable's DECLARED
@@ -3678,13 +3794,32 @@ pub(super) fn emit_agg_to_target_link_scores(
                     // (the wrap's agg lookups all miss). A2A body is slot 0.
                     &slot_occurrences.for_slot(slot_map.slot_for(element)),
                 ) {
-                    Ok(equation) => edge_vars.push(LtmSyntheticVar {
-                        name,
-                        equation: LtmEquation::scalar(equation),
-                        dimensions: vec![],
-                        // synthetic agg on `from` + bracketed `to` -> routed direct.
-                        compile_directly: false,
-                    }),
+                    Ok(equation) => {
+                        // Same completeness check as the scalar-to-element
+                        // emitter (see its COMPLETENESS comment): a surviving
+                        // dimension-name index cannot lower, and it becomes a
+                        // `PREVIOUS`-capture helper that dies while THIS score
+                        // still compiles.
+                        if let Some(offender) = crate::ltm_augment::unresolvable_dimension_index(
+                            &equation,
+                            project_dimensions_context(db, project),
+                        ) {
+                            let err = crate::ltm_augment::PartialEquationError::unprojectable_dep(
+                                &offender, element,
+                            );
+                            if unscoreable_edges.insert((agg.name.clone(), to.to_string())) {
+                                emit_ltm_partial_equation_warning(db, model, &name, &err);
+                            }
+                            return;
+                        }
+                        edge_vars.push(LtmSyntheticVar {
+                            name,
+                            equation: LtmEquation::scalar(equation),
+                            dimensions: vec![],
+                            // synthetic agg on `from` + bracketed `to` -> routed direct.
+                            compile_directly: false,
+                        })
+                    }
                     Err(err) => {
                         // One doomed element dooms the edge; drop the
                         // already-built per-element vars (`edge_vars` never
@@ -3766,13 +3901,32 @@ pub(super) fn emit_agg_to_target_link_scores(
                     element
                 );
                 match equation {
-                    Ok(equation) => edge_vars.push(LtmSyntheticVar {
-                        name,
-                        equation: LtmEquation::scalar(equation),
-                        dimensions: vec![],
-                        // synthetic agg on `from` + bracketed `to` -> routed direct.
-                        compile_directly: false,
-                    }),
+                    Ok(equation) => {
+                        // Same completeness check as the scalar-to-element
+                        // emitter (see its COMPLETENESS comment): a surviving
+                        // dimension-name index cannot lower, and it becomes a
+                        // `PREVIOUS`-capture helper that dies while THIS score
+                        // still compiles.
+                        if let Some(offender) = crate::ltm_augment::unresolvable_dimension_index(
+                            &equation,
+                            project_dimensions_context(db, project),
+                        ) {
+                            let err = crate::ltm_augment::PartialEquationError::unprojectable_dep(
+                                &offender, element,
+                            );
+                            if unscoreable_edges.insert((agg.name.clone(), to.to_string())) {
+                                emit_ltm_partial_equation_warning(db, model, &name, &err);
+                            }
+                            return;
+                        }
+                        edge_vars.push(LtmSyntheticVar {
+                            name,
+                            equation: LtmEquation::scalar(equation),
+                            dimensions: vec![],
+                            // synthetic agg on `from` + bracketed `to` -> routed direct.
+                            compile_directly: false,
+                        })
+                    }
                     Err(err) => {
                         // One doomed element dooms the edge; drop the
                         // already-built per-element vars (`edge_vars` never

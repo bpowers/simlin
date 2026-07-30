@@ -759,17 +759,85 @@ impl DimensionsContext {
     ///
     /// Semantics:
     /// - **Positional mappings only**: a mapping with a non-empty explicit
-    ///   `element_map` returns `None`. The engine's executed A2A lowering
-    ///   resolves mapped references POSITIONALLY and ignores the element
-    ///   map (different-cardinality maps don't compile at all -- GH #753;
-    ///   the broader positional-vs-element-map execution inconsistency is
-    ///   GH #756), so a map-following diagonal would DROP the
-    ///   true positionally-read edges. Re-enable element-map diagonals
-    ///   here only once the engine honors element maps in execution; the
-    ///   graph-vs-simulation parity test
-    ///   (`element_graph_mapped_element_map_edges_superset_of_simulation_reads`)
-    ///   is written to keep passing across that change.
-    /// - **Direction**: both declaration directions are honored, mirroring
+    ///   `element_map` returns `None`.
+    ///
+    ///   This gate's original justification -- "the engine's executed A2A
+    ///   lowering resolves mapped references POSITIONALLY and ignores the
+    ///   element map" -- is FALSE AS A UNIVERSAL, and the correction matters
+    ///   because it is what made the gate blanket. Execution does both, and
+    ///   which one you get depends on the SPELLING of the reference's
+    ///   subscript, not on the mapping or the direction it was declared in:
+    ///
+    ///   * a subscript naming a dimension the enclosing equation ITERATES
+    ///     (`target[State] = x[State]`, `State` active) is **positional**;
+    ///   * a subscript naming a dimension that is NOT active -- typically the
+    ///     referenced variable's OWN declared dimension (`target[COP] =
+    ///     x[Region]`) -- **follows the element map**;
+    ///   * a BARE reference (`target[COP] = x`) is **positional**, in either
+    ///     declaration direction, and at unequal cardinality fails to compile
+    ///     like the active-dimension spelling. It has no subscript, so the
+    ///     mechanism below never fires for it -- worth stating because
+    ///     `expand_same_element` names `emit_edges_for_reference`'s `Bare` arm
+    ///     as a primary consumer of this correspondence.
+    ///
+    ///   The fork is `ast::expr3`'s `IndexExpr3::Dimension` arm: a name
+    ///   matching an active dimension folds to that dimension's ordinal and
+    ///   indexes the referenced variable's storage raw, never consulting a
+    ///   mapping; a name matching none survives as a dimension reference and
+    ///   reaches `translate_via_mapping`, which honours the map.
+    ///
+    ///   Map-following is the CORRECT behaviour where it happens, checked
+    ///   against real Vensim rather than argued: C-LEARN's
+    ///   `im_6_ff_co2[COP]` reads an `Aggregated Regions`-declared source on
+    ///   the non-active spelling, and its source values and per-element
+    ///   factors are distinct enough that the checked-in `Ref.vdf` uniquely
+    ///   identifies which source region each of the 7 COP elements read --
+    ///   the declared element map every time (positional would put 9.7654
+    ///   where Vensim has 6.7294 for `oecd_eu`). `simulates_clearn` gates it.
+    ///
+    ///   The positional half has NO such ground truth and is recorded here as
+    ///   UNVERIFIED. The argument for doubting it: Vensim's documented trigger
+    ///   for subscript mapping is a right-hand-side subscript absent from the
+    ///   left-hand side, which the active-dimension spelling does not have, so
+    ///   it may not be a mapping use in Vensim at all. Note the structure --
+    ///   that Vensim claim is the PREMISE for the doubt, and it is the weaker
+    ///   of the two: it is PARAPHRASED from a summarising fetch of
+    ///   <https://www.vensim.com/documentation/ref_subscript_mapping.html>,
+    ///   not quoted from the page, and nobody here has read the raw text. So
+    ///   treat neither the positional behaviour nor the reason for doubting it
+    ///   as settled; the `Ref.vdf` evidence above is independent of both and
+    ///   is the load-bearing half of this note.
+    ///
+    ///   **The gate must nevertheless STAY until the spelling is threaded
+    ///   in.** Deleting it is not the fix: with it removed,
+    ///   `element_graph_mapped_element_map_edges_superset_of_simulation_reads`
+    ///   loses a TRUE edge (the forbidden direction for the LTM contract --
+    ///   fewer edges than the simulation reads), and an integration fixture
+    ///   starts reporting loop scores attributed along edges that do not
+    ///   exist (9 lib + 2 integration tests red). A correct fix has to tell
+    ///   the two spellings apart, and this predicate cannot: it is keyed by
+    ///   the dimension PAIR, while the deciding fact -- which dimension name
+    ///   the subscript spells -- belongs to the reference site. Threading it
+    ///   reaches every call site (`db::analysis`, `ltm_agg`,
+    ///   `db::ltm::link_scores`, `ltm_augment_post_transform`), which is why
+    ///   it has not been done.
+    ///
+    ///   The trap, and the most useful thing to know before touching this:
+    ///   **no simulation-level test can catch a mistake here.** The four
+    ///   modules above are the only callers, and all are LTM/analysis --
+    ///   nothing in the compiler, the VM, or the wasm backend consults this,
+    ///   and `DimensionsContext` is not reachable outside the crate at all
+    ///   (`mod dimensions` is private in `lib.rs` and the type is never
+    ///   re-exported), so libsimlin, pysimlin, the CLI and the wasm build
+    ///   cannot reach it even in principle. `simulates_clearn` passes with the
+    ///   gate removed. Only the element-graph parity and LTM tests gate this
+    ///   behaviour.
+    /// - **Direction**: which dimension DECLARED the mapping. Not to be
+    ///   confused with the spelling fork above -- declaration direction has no
+    ///   bearing on whether execution follows the element map, and reading a
+    ///   split in the fixtures as a direction effect is the wrong turn this
+    ///   note exists to prevent. Both declaration directions are honored,
+    ///   mirroring
     ///   [`Self::translate_via_mapping`] (which the compiler's subscript /
     ///   A2A resolution uses): a mapping declared on `iterated_dim` toward
     ///   `source_dim` or one declared on `source_dim` toward
@@ -782,8 +850,16 @@ impl DimensionsContext {
     /// - **Transitivity**: single-hop only, matching `has_mapping_to`. A
     ///   chained `A→B→C` mapping yields `None` for the `(A, C)` pair, just
     ///   as the classifier declines it.
-    /// - **Cardinality**: equal sizes required (positional), per
-    ///   `translate_via_mapping`'s positional path.
+    /// - **Cardinality**: equal sizes required, per
+    ///   `translate_via_mapping`'s positional path -- a property of THIS
+    ///   function, not of the language. GH #753 records that a
+    ///   different-cardinality map "does not compile", and that too holds
+    ///   only for the active-dimension spelling: on the map-following
+    ///   spelling a many-to-one map compiles and runs correctly (C-LEARN's
+    ///   3-element `Aggregated Regions` onto 7-element `COP` is the shipped
+    ///   case, and a 2-onto-4 fixture reproduces it). GH #756 tracks the
+    ///   positional-vs-element-map execution split itself, which the
+    ///   spelling fork above describes.
     /// - **Fallback**: `None` when no direct mapping exists in either
     ///   direction, either dimension is indexed, a non-empty element map
     ///   is declared, or any iterated element fails to translate (a
@@ -801,11 +877,14 @@ impl DimensionsContext {
         {
             return None;
         }
-        // Decline explicit (non-positional) element maps: the executed A2A
-        // lowering resolves mapped references positionally, IGNORING the
-        // element map (see the rustdoc's "Positional mappings only" gate),
-        // so following the map here would emit a diagonal missing the true
-        // positionally-read edges. `None` keeps the broadcast superset.
+        // Decline explicit (non-positional) element maps, keeping the
+        // broadcast superset. Execution follows the element map on one
+        // reference spelling and resolves positionally on the other, and this
+        // predicate is keyed by the dimension PAIR, so it cannot tell which
+        // one it is being asked about; answering either way is wrong for the
+        // other. Read the "Positional mappings only" bullet before changing
+        // this -- deleting it drops a true edge and reds 11 tests, and NO
+        // simulation-level test gates it.
         let has_element_map = |a: &CanonicalDimensionName, b: &CanonicalDimensionName| -> bool {
             self.find_mapping_info(a, b)
                 .is_some_and(|m| !m.element_map.is_empty())
