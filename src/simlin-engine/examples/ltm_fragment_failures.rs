@@ -231,6 +231,23 @@ fn main() {
     // variables in different models would collide outright. Filter first, and
     // report what was dropped rather than discarding it silently, since a
     // non-empty drop means the analyzed model is not the whole story.
+    //
+    // A diagnostic can also carry an EMPTY model name -- `collect_all_diagnostics`
+    // emits the project-level unit and macro-registry errors before its per-model
+    // loop. Those are excluded and counted here too rather than falling through
+    // as this model's; none of them match "failed to compile" today, so the
+    // handling is deliberate rather than load-bearing.
+    //
+    // On C-LEARN the excluded set is empty, which is why no figure this harness
+    // has produced was distorted. That is a property of the corpus, not of the
+    // harness: 9 non-main models carry 162 LTM synthetics between them (the
+    // spliced stdlib SMOOTH/DELAY/TREND/NPV templates plus the RAMP FROM TO,
+    // SAMPLE UNTIL and SSHAPE macros), and they simply all compile. The moment
+    // one of them gains a failing fragment, the unfiltered version would have
+    // charged it to this model AND -- missing the join below -- dropped it into
+    // the implicit-helper bucket, which is the population the "no failing helper
+    // under a compiling parent" invariant is read from. This filter is a
+    // tripwire against that, not a correction to anything already reported.
     let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
     let mut failed_names: Vec<String> = Vec::new();
     let mut reasons: BTreeMap<String, String> = BTreeMap::new();
