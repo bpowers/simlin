@@ -6019,7 +6019,7 @@ fn corpus_clearn_macros_import() {
 ///
 /// Nothing under `test/` pins the corrected values either way, so this exact
 /// count is the only tripwire for the recovery. It is a weak one: any emission
-/// change landing on 6,891 satisfies it. The real guard is the sibling
+/// change landing on its pinned total satisfies it. The real guard is the sibling
 /// `clearn_ltm_partials_all_parse`, which asserts the MECHANISM (zero
 /// `PartialEquationErrorKind::Parse` warnings) rather than a total.
 ///
@@ -6031,12 +6031,34 @@ fn corpus_clearn_macros_import() {
 ///
 /// Layout impact (the resource this gate protects -- #654's VM limit of 65,536
 /// u16 result slots, NOT `wasmgen::lower`'s unrelated `MAX_UNROLL_UNITS`): the
-/// per-step result-row width is 30,416 slots, far below the ceiling. It last
-/// moved DOWNWARD, 31,199 -> 30,416 (-783), when the per-element completeness
-/// guard began declining edges whose partial would carry an unresolvable
-/// dimension-name index: those scores are no longer emitted, so they no longer
-/// occupy slots. A decline is the safe direction for this resource; the pin
-/// below exists to catch emission changes in EITHER direction.
+/// per-step result-row width is **30,947 slots**, 47% of the ceiling, with
+/// 34,589 free.
+///
+/// It last moved UPWARD, 30,416 -> 30,947 (+531), when GH #996 stopped the axis
+/// allocator stealing a name-matched slot: 135 link scores that the per-element
+/// completeness guard had been declining now pin their indices and are emitted
+/// again. An earlier note here argued that DOWNWARD was the safe direction, and
+/// that framing is retired -- direction alone is not the test. What matters is
+/// the margin, and +531 against 34,589 free is immaterial. Across this whole
+/// branch the width is still NET DOWN, **31,248 -> 30,947 (-301)**, measured at
+/// the branch base `e913b3f4`. (An earlier revision cited 31,199 as the base;
+/// that is the width at `541c05a8`, seven commits in, and was wrong. Measuring a
+/// past commit needs a fresh worktree: `git archive` restores commit-time
+/// mtimes, so cargo silently reuses a stale binary and reports the CURRENT
+/// number for the old commit.)
+///
+/// Recorded honestly because the trade is currently one-sided: those 135
+/// variables occupy slots and then FAIL in codegen, because each carries a
+/// second, independent defect (an array-valued operand, GH #995) that pinning
+/// the index does not touch. They are loud failures rather than silent zeros --
+/// the guard still holds, and the silent-zero counter stays at 0 -- but a slot
+/// spent on a fragment that cannot compile buys nothing until #995 lands. The
+/// slots are cheap at this margin and the allocator fix is correct on its own
+/// terms, which is why the emission is accepted; if the margin were tight, the
+/// right move would be to sequence #996 behind #995 instead.
+///
+/// The pin below catches emission changes in EITHER direction, and re-deriving
+/// it means re-measuring BOTH numbers, not just the count.
 #[test]
 fn clearn_ltm_var_count_guardrail() {
     use simlin_engine::db::{model_ltm_variables, set_project_ltm_enabled};
@@ -6060,7 +6082,7 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 6665,
+        total, 6800,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"
@@ -6072,7 +6094,7 @@ fn clearn_ltm_var_count_guardrail() {
 /// `print_eqn` emitted text the engine's own parser rejects.
 ///
 /// The var-count pin above would be satisfied by any emission change that
-/// happened to land on 6,891. This asserts the *mechanism*: zero
+/// happened to land on its pinned total. This asserts the *mechanism*: zero
 /// `PartialEquationErrorKind::Parse` warnings. A regression in the printer
 /// (an operator spelled with a token the lexer lacks, a missing
 /// parenthesization) silently re-drops link scores, and the ceteris-paribus
