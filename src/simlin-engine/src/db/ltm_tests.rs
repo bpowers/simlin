@@ -89,6 +89,7 @@ fn test_ltm_previous_module_var_uses_helper_rewrite() {
         &crate::db::LtmEquation::scalar("PREVIOUS(producer)".to_string()),
         source_model,
         sync.project,
+        None,
     )
     .expect("LTM equation should compile");
 
@@ -140,6 +141,7 @@ fn test_a2a_ltm_equation_fragment_compiles() {
         ),
         source_model,
         sync.project,
+        None,
     )
     .expect("A2A LTM equation should compile");
 
@@ -269,6 +271,7 @@ fn test_a2a_ltm_previous_per_element() {
         ),
         source_model,
         sync.project,
+        None,
     )
     .expect("A2A LTM equation with PREVIOUS should compile");
 
@@ -736,7 +739,7 @@ fn unparseable_generated_arm_degrades_loudly_without_panicking() {
         "scalar must reject loudly"
     );
     assert!(
-        compile_ltm_equation_fragment(&db, "$⁚ltm⁚bad⁚scalar", &scalar, model, sync.project)
+        compile_ltm_equation_fragment(&db, "$⁚ltm⁚bad⁚scalar", &scalar, model, sync.project, None)
             .is_none(),
         "a rejected equation must not produce a fragment (the diagnostic pass \
          reports the missing bytecode)"
@@ -760,8 +763,15 @@ fn unparseable_generated_arm_degrades_loudly_without_panicking() {
          drop the slot and let the surviving sibling keep the fragment alive"
     );
     assert!(
-        compile_ltm_equation_fragment(&db, "$⁚ltm⁚bad⁚arrayed", &arrayed, model, sync.project)
-            .is_none(),
+        compile_ltm_equation_fragment(
+            &db,
+            "$⁚ltm⁚bad⁚arrayed",
+            &arrayed,
+            model,
+            sync.project,
+            None
+        )
+        .is_none(),
         "the arrayed fragment must be rejected -- otherwise the missing slot is \
          zero-filled and no diagnostic fires"
     );

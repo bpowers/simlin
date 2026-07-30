@@ -764,10 +764,26 @@ pub(crate) fn compile_phase_to_per_var_bytecodes(
     base: &crate::compiler::ModuleCtx<'_>,
     exprs: &[crate::compiler::Expr],
 ) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
+    compile_phase_to_per_var_bytecodes_reporting(base, exprs).ok()
+}
+
+/// [`compile_phase_to_per_var_bytecodes`], keeping the emit error instead of
+/// discarding it.
+///
+/// The `Option`-returning form above is what every production emitter wants:
+/// a fragment that will not emit is dropped and the caller carries on. But a
+/// *diagnostic* caller needs to say which construct codegen refused, and
+/// `.ok()?` erased that -- which is why ~1,600 dropped fragments on one real
+/// model reported no cause at all. Behavior is unchanged; only the error's
+/// visibility is.
+pub(crate) fn compile_phase_to_per_var_bytecodes_reporting(
+    base: &crate::compiler::ModuleCtx<'_>,
+    exprs: &[crate::compiler::Expr],
+) -> Result<crate::compiler::symbolic::PerVarBytecodes, String> {
     use crate::compiler::symbolic::PerVarBytecodes;
 
     if exprs.is_empty() {
-        return None;
+        return Err("nothing to emit: the phase lowered to zero expressions".to_string());
     }
 
     // Extract temp sizes from expressions
@@ -791,9 +807,11 @@ pub(crate) fn compile_phase_to_per_var_bytecodes(
         ..*base
     };
 
-    let compiled = emit_ctx.compile().ok()?;
+    let compiled = emit_ctx
+        .compile()
+        .map_err(|err| format!("codegen rejected the lowered expressions: {err}"))?;
 
-    Some(PerVarBytecodes {
+    Ok(PerVarBytecodes {
         symbolic: compiled.compiled_flows,
         graphical_functions: compiled.graphical_functions,
         module_decls: compiled.module_decls,
@@ -1505,6 +1523,7 @@ pub fn assemble_module<'db>(
                 project,
                 dep_graph,
                 module_input_names,
+                None,
             );
             if let Some(result) = im_fragment {
                 // Same layout check as for main LTM vars above.

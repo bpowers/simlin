@@ -581,6 +581,7 @@ fn collect_model_fragments(
                 project,
                 dep_graph,
                 &owned_inputs,
+                None,
             ) {
                 push(&mut out, FragmentKind::LtmImplicit, &result);
             }
