@@ -1823,15 +1823,27 @@ fn element_graph_mapped_diagonal_with_broadcast_dim() {
 /// from which `x` element's value each `target` element equals) -- the LTM
 /// contract is "more edges than necessary, never fewer".
 ///
-/// Today the engine's executed A2A lowering resolves mapped references
-/// POSITIONALLY, ignoring the explicit element map (target[s1] = x[a], the
-/// map notwithstanding; see GH #753 for the related different-cardinality
-/// compile failure), so a map-following diagonal would DROP the true
-/// positionally-read edges -- which is why `mapped_element_correspondence`
-/// declines explicit element maps (conservative broadcast). The test
-/// derives the implied edges from the run itself, so it keeps passing if
-/// the engine later honors element maps in execution and the element-map
-/// diagonal is re-enabled.
+/// On THIS fixture's spelling the executed A2A lowering resolves the
+/// reference POSITIONALLY, ignoring the explicit element map (target[s1] =
+/// x[a], the map notwithstanding), so a map-following diagonal would DROP
+/// the true positionally-read edges -- which is why
+/// `mapped_element_correspondence` declines explicit element maps
+/// (conservative broadcast). Removing that decline reds this test by
+/// dropping the `x[a] -> target[s1]` edge, the direction the LTM contract
+/// forbids.
+///
+/// The qualifier is load-bearing and was missing: this claim is NOT
+/// universal. `x[State]` spells the dimension the equation ITERATES, which
+/// `ast::expr3` folds to an ordinal that indexes `x`'s storage raw; a
+/// subscript naming a NON-active dimension instead reaches
+/// `translate_via_mapping` and DOES follow the element map. Both spellings
+/// are real and both ship -- see `DimensionsContext::mapped_element_correspondence`
+/// for the fork, the Vensim `Ref.vdf` evidence that map-following is correct
+/// where it happens, and why the decline stays anyway. This fixture builds
+/// only the positional spelling, so it constrains only that half.
+///
+/// The test derives the implied edges from the run itself, so it keeps
+/// passing if execution on this spelling later changes.
 #[test]
 fn element_graph_mapped_element_map_edges_superset_of_simulation_reads() {
     let project = TestProject::new("mapped_element_map_parity")
