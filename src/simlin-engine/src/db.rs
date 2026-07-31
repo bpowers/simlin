@@ -736,7 +736,7 @@ fn module_composite_ports(
 /// and the outcome is the same explicit approximation an unlocatable reference
 /// has always taken; it is noted so the next reader does not take `None` for an
 /// absolute.
-fn module_output_ref_in_document_order(
+pub(crate) fn module_output_ref_in_document_order(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
@@ -1413,6 +1413,8 @@ mod fragment_determinism_tests;
 mod incremental_compile_tests;
 #[cfg(test)]
 mod ltm_char_tests;
+#[cfg(test)]
+mod ltm_element_instance_tests;
 #[cfg(test)]
 mod ltm_module_tests;
 #[cfg(test)]

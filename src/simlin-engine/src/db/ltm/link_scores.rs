@@ -983,6 +983,259 @@ pub(super) fn try_cross_dimensional_link_scores(
     Some(cross_vars)
 }
 
+/// Per-target-element link scores for a MODULE source feeding an ARRAYED
+/// reader -- the module twin of [`try_scalar_to_arrayed_link_scores`], and the
+/// fix for GH #716.
+///
+/// A module is a scalar node in the causal graph, so a `module → arrayed` edge
+/// looks like the scalar→arrayed shape and ought to take the same
+/// per-target-element emission. It could not: every `try_*` emitter starts at
+/// `source_vars.get(from)?`, and an IMPLICIT instance
+/// (`$⁚growth⁚0⁚smth1⁚north`, minted by per-element expansion) is not a
+/// `SourceVariable` at all. So the edge fell through to
+/// `emit_per_shape_link_scores` → `module_link_score_equation`, which builds one
+/// partial for the whole arrayed target and `scalarize`s it to the FIRST
+/// element's arm. Two things went wrong at once:
+///
+/// * every instance but the first got the wrong element's partial -- the south
+///   instance's score held the NORTH instance live and froze its own at
+///   `PREVIOUS`, so the numerator was entirely lagged and referenced the wrong
+///   module. That is a wrong answer, not merely a missing one;
+/// * the arm kept its arrayed dependencies as bare whole-array references,
+///   which lower to a whole-array `PREVIOUS` that codegen rejects -- so the
+///   fragment failed, the score read a constant 0, and the wrong answer was
+///   masked by the failure.
+///
+/// Which elements to emit for comes from the reference-site IR rather than from
+/// the instance's name. A per-element expansion mints one instance per element
+/// and each is read by exactly one slot, so the sites carry one
+/// `target_element`; a genuinely scalar module output read from an
+/// `Ast::ApplyToAll` body is read identically by every slot and its sites carry
+/// none. Deriving it from the sites covers both without asking what kind of
+/// module this is, and keeps the emission in lockstep with the element graph,
+/// which reads the same field.
+///
+/// The score's NAME is keyed on the module (the causal node), while the
+/// equation holds the `module·port` composite live (the readable scalar) --
+/// matching what `module_link_score_equation` already did, minus the
+/// scalarization. Element on the `to` side, per
+/// [`try_scalar_to_arrayed_link_scores`]'s convention, because the discovery
+/// parser needs it there.
+///
+/// `None` means "not this shape, carry on"; `Some(vec![])` is the GH #780 loud
+/// decline (warning accumulated, edge recorded, caller must NOT fall through).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
+    db: &dyn Db,
+    source_vars: &HashMap<String, SourceVariable>,
+    from: &str,
+    to: &str,
+    model: SourceModel,
+    project: SourceProject,
+    unscoreable_edges: &mut HashSet<(String, String)>,
+) -> Option<Vec<LtmSyntheticVar>> {
+    // Target must be an arrayed, non-module variable.
+    let to_sv = source_vars.get(to)?;
+    if to_sv.kind(db) == SourceVariableKind::Module {
+        return None;
+    }
+    let to_dims = variable_dimensions(db, *to_sv, project).clone();
+    if to_dims.is_empty() {
+        return None;
+    }
+
+    // What this edge holds LIVE in the partial, and the guard that decides
+    // whether this emitter owns the edge at all.
+    //
+    // A MODULE is read through a `module·port` composite (the bare module name
+    // is a multi-slot block, not a readable scalar); a synthesized helper AUX is
+    // read by its own name. Both are minted per element by the same expansion
+    // and both are absent from `source_vars`, which is exactly why the sibling
+    // emitters -- all of which open with `source_vars.get(from)?` -- cannot
+    // reach either.
+    let module_output =
+        || crate::db::module_output_ref_in_document_order(db, model, project, from, to);
+    let output_ref: String = match source_vars.get(from) {
+        // An explicit `Variable::Module`.
+        Some(sv) if sv.kind(db) == SourceVariableKind::Module => module_output()?,
+        // An ordinary source variable: the scalar/cross-dimensional emitters own
+        // it, and reaching here would double-emit.
+        Some(_) => return None,
+        None => {
+            if crate::db::model_causal_edges(db, model, project)
+                .dynamic_modules
+                .contains_key(from)
+            {
+                module_output()?
+            } else if let Some(meta) =
+                crate::db::model_implicit_var_info(db, model, project).get(from)
+            {
+                // The GH #541 arrayed capture helper is a genuine array, not an
+                // element-bound scalar: it is referenced as `helper[<elem>]` and
+                // the per-element pin belongs on the reference, not here. Pinned
+                // by `an_arrayed_capture_helper_is_not_treated_as_element_bound`.
+                if !meta.dimensions.is_empty() {
+                    return None;
+                }
+                from.to_string()
+            } else {
+                return None;
+            }
+        }
+    };
+
+    // A re-visit of an already-doomed edge: the per-element generator would
+    // re-doom deterministically and duplicate the warning.
+    if unscoreable_edges.contains(&(from.to_string(), to.to_string())) {
+        return Some(vec![]);
+    }
+
+    let to_var = reconstruct_single_variable(db, model, project, to)?;
+    let ast = to_var.ast()?;
+    use crate::ast::Ast;
+    let target_ast_dims: &[crate::dimensions::Dimension] = match ast {
+        Ast::Scalar(_) => &[],
+        Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => dims,
+    };
+
+    let dim_element_lists: Vec<Vec<String>> = to_dims
+        .iter()
+        .map(crate::ltm_augment::dimension_element_names)
+        .collect();
+    // Which target elements read this source -- see the doc above.
+    //
+    // `all` rather than `any`: a MIXED sites list (some slots naming an element,
+    // some not) means at least one reference is not element-attributable, and
+    // narrowing to only the attributable ones would silently drop the rest. The
+    // full element set is the conservative answer there. The cartesian product
+    // is computed only on that branch, since the narrowing case is the common
+    // one and it is proportional to the target's element count.
+    let ir = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
+    let sites = ir.sites.get(&(from.to_string(), to.to_string()));
+    let elements: Vec<String> = match sites {
+        Some(sites) if !sites.is_empty() && sites.iter().all(|s| s.target_element.is_some()) => {
+            let mut v: Vec<String> = sites
+                .iter()
+                .filter_map(|s| s.target_element.clone())
+                .collect();
+            v.sort();
+            v.dedup();
+            v
+        }
+        _ => cartesian_subscripts(&dim_element_lists),
+    };
+
+    let dim_ctx = project_dimensions_context(db, project);
+    let slot_refs = crate::ltm_augment::WithLookupSlotRefs::new(&to_var, target_ast_dims);
+    let to_occurrences: &[crate::db::ltm_ir::OccurrenceSite] =
+        ir.occurrences.get(to).map(Vec::as_slice).unwrap_or(&[]);
+    let slot_map = ArrayedSlotMap::new(ast);
+    let slot_occurrences = crate::ltm_augment::SlotOccurrences::new(to_occurrences);
+
+    let mut vars = Vec::with_capacity(elements.len());
+    for element in &elements {
+        let name = format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
+            from, to, element
+        );
+        // This element's own equation and dependency set -- the same split
+        // `try_scalar_to_arrayed_link_scores` makes, for the same reason: an
+        // `ApplyToAll` target shares one body across slots while an `Arrayed`
+        // one has a distinct body per slot. After per-element expansion a
+        // module-bearing `ApplyToAll` has BECOME `Arrayed`, so this is the arm
+        // that runs for an implicit instance.
+        let canonical_elem = crate::common::CanonicalElementName::from_raw(element);
+        let (elem_eqn, elem_deps, elem_tables) = match ast {
+            Ast::ApplyToAll(_, expr) => {
+                let class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
+                (
+                    Some(crate::patch::expr2_to_expr0(expr)),
+                    class.all,
+                    class.referenced_tables,
+                )
+            }
+            Ast::Arrayed(_, per_elem, default_expr, _) => {
+                match per_elem.get(&canonical_elem).or(default_expr.as_ref()) {
+                    Some(expr) => {
+                        let class = crate::variable::classify_dependencies(
+                            &Ast::Scalar(expr.clone()),
+                            target_ast_dims,
+                            None,
+                        );
+                        (
+                            Some(crate::patch::expr2_to_expr0(expr)),
+                            class.all,
+                            class.referenced_tables,
+                        )
+                    }
+                    // A hole at this element: no sensitivity, score 0.
+                    None => (None, HashSet::new(), Default::default()),
+                }
+            }
+            Ast::Scalar(_) => unreachable!("target is arrayed"),
+        };
+        let pinnable =
+            pinnable_arrayed_deps(db, source_vars, project, &elem_deps, &elem_tables, |_| true);
+
+        let equation = if let Some(elem_eqn) = elem_eqn.as_ref() {
+            let gf_table_ref = slot_refs.for_element(&canonical_elem);
+            let occ = slot_occurrences.for_slot(slot_map.slot_for(element));
+            let deps_to_sub = crate::ltm_augment::dep_element_pins(
+                &pinnable,
+                &to_dims,
+                &target_element_parts(&to_dims, element),
+                dim_ctx,
+            );
+            match crate::ltm_augment::generate_scalar_to_element_equation(
+                // The LIVE source is the readable `module·port` scalar, not the
+                // module node the score is named for.
+                &output_ref,
+                to,
+                &crate::ltm_augment::qualify_element_csv(element, &to_dims),
+                elem_eqn,
+                &HashMap::new(),
+                &elem_deps,
+                &deps_to_sub,
+                None,
+                &[],
+                Some(dim_ctx),
+                gf_table_ref.as_deref(),
+                &occ,
+            ) {
+                Ok(eqn) => eqn,
+                Err(err) => {
+                    emit_ltm_partial_equation_warning(db, model, &name, &err);
+                    unscoreable_edges.insert((from.to_string(), to.to_string()));
+                    return Some(vec![]);
+                }
+            }
+        } else {
+            "0".to_string()
+        };
+
+        // Same completeness guard the sibling emitter applies: a surviving
+        // dimension-name index cannot lower in a scalar fragment, and would
+        // otherwise produce a score that compiles while a capture helper
+        // beneath it reads constant 0.
+        if let Some(offender) = crate::ltm_augment::unresolvable_dimension_index(&equation, dim_ctx)
+        {
+            let err =
+                crate::ltm_augment::PartialEquationError::unprojectable_dep(&offender, element);
+            emit_ltm_partial_equation_warning(db, model, &name, &err);
+            unscoreable_edges.insert((from.to_string(), to.to_string()));
+            return Some(vec![]);
+        }
+
+        vars.push(LtmSyntheticVar {
+            name,
+            equation: LtmEquation::scalar(equation),
+            dimensions: vec![],
+            compile_directly: false,
+        });
+    }
+    Some(vars)
+}
+
 /// Emit the per-(read-row, full-target-element) link scores for an
 /// ARRAYED-owner scalar-result BROADCAST reduce (GH #777):
 /// `share[Region] = SUM(pop[nyc,*])`. The reducer reads a Pinned/subset
@@ -4103,6 +4356,23 @@ pub(super) fn emit_link_scores_for_edge(
         unscoreable_edges,
     ) {
         vars.extend(cross_vars);
+        return;
+    }
+    // Module-source -> arrayed-target edges (GH #716): the module twin of the
+    // arm above, which cannot take an implicit instance because it is not a
+    // `SourceVariable`. Must precede `emit_per_shape_link_scores`, whose
+    // `module_link_score_equation` leg emits the scalarized first-arm stand-in
+    // this replaces.
+    if let Some(module_vars) = try_implicit_scalar_to_arrayed_link_scores(
+        db,
+        source_vars,
+        from,
+        to,
+        model,
+        project,
+        unscoreable_edges,
+    ) {
+        vars.extend(module_vars);
         return;
     }
     // Disjoint-dim arrayed -> arrayed edges with a per-element-equation

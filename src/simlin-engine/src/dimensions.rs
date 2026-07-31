@@ -174,6 +174,59 @@ pub fn resolve_axis_index_name(
     AxisIndexName::Unresolved
 }
 
+/// Resolve a CONSTANT subscript index against the axis it indexes: the
+/// positional companion to [`resolve_axis_index_name`], and the engine's single
+/// statement of what a constified index selects.
+///
+/// A constant index is POSITIONAL. It reaches this point in two spellings and
+/// both mean the same thing:
+///
+/// * a numeric literal the modeller wrote (`pop[2]`), and
+/// * a QUALIFIED `dimension·element` reference, which
+///   [`DimensionsContext::lookup`] turns into that element's 1-based index
+///   *within the dimension it names* and `Expr1::constify_dimensions` rewrites
+///   into an `Expr1::Const`. This is the form
+///   `builtins_visitor::substitute_dimension_refs` synthesizes for every
+///   per-element expansion.
+///
+/// In both cases `compiler::subscript::normalize_subscripts3` lowers the
+/// constant to `IndexOp::Single(value - 1)` -- a raw offset into the
+/// SUBSCRIPTED variable's own axis, with no reference back to the dimension the
+/// qualified name mentioned. So `stock[region·north]`, where `stock` is declared
+/// over `Other`, reads `Other`'s element at `north`'s position in `Region`, NOT
+/// the element of `Other` that happens to be named `north`. Where the two
+/// dimensions list the same names in different orders those readings differ, and
+/// the positional one is what runs -- pinned end-to-end against the VM by
+/// `db::ltm_element_instance_tests::qualified_index_edge_is_positional_not_by_name`.
+///
+/// A describer that resolved this by name would name rows the simulation never
+/// reads, which is the failure `resolve_axis_index_name`'s docs above call out.
+///
+/// Returns the canonical element name at that position, or `None` when the
+/// position is past the axis's end -- there is no element to name, so the caller
+/// stays conservative.
+///
+/// Everything else mirrors `normalize_subscripts3`'s own arithmetic rather than
+/// re-validating it, because the job is to describe the slot the simulation
+/// reads, malformed index included: the conversion is the same saturating
+/// `as isize` (so a NaN position becomes 0, exactly as the VM's does), and a
+/// position below 1 clamps to the first element via the same `.max(0)`. A model
+/// writing `pop[0]` or `pop[nan]` compiles today and reads element 1, so that is
+/// the edge this reports. An infinite position saturates past every axis and
+/// falls out through the bounds check above.
+pub fn resolve_axis_index_position(position: f64, axis_dim: &Dimension) -> Option<String> {
+    let idx = (position as isize - 1).max(0) as usize;
+    if idx >= axis_dim.len() {
+        return None;
+    }
+    match axis_dim {
+        Dimension::Named(_, named) => named.elements.get(idx).map(|e| e.as_str().to_string()),
+        // An indexed dimension's element names are `"1".."N"`, matching
+        // `ltm_augment::dimension_element_names`.
+        Dimension::Indexed(_, _) => Some((idx + 1).to_string()),
+    }
+}
+
 impl Dimension {
     pub fn len(&self) -> usize {
         match self {

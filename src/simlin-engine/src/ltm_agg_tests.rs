@@ -2867,6 +2867,24 @@ fn a_nan_literal_in_a_reducer_does_not_defeat_agg_backdating() {
 /// name, an iterated dimension matching it through a positional mapping, an
 /// iterated dimension with no usable correspondence, and a name that is neither.
 ///
+/// `Expr(Const)` resolves by a different rule than `Expr(Var)`, and its row
+/// says so: a constant index is POSITIONAL (`compiler::subscript` lowers it to
+/// `IndexOp::Single(value - 1)`, a raw offset into this axis), so `pop[2]`
+/// selects the second element of a NAMED dimension rather than naming nothing.
+/// The same rule is what lets a constified `dimension·element` reference resolve
+/// at all.
+///
+/// Two companions, doing different jobs -- this row states the classifier's
+/// answer and neither of them does:
+/// `db::ltm_element_instance_tests::numeric_literal_index_is_positional_in_a_named_dimension`
+/// pins the PREMISE against the VM (that `pop[2]` really reads `boston`), and
+/// `db::ltm_element_instance_tests::a_constant_pinned_reducer_axis_narrows_the_read_slice`
+/// pins the CONSEQUENCE end to end (the read slice this row's `Pinned` produces
+/// narrows `SUM(matrix[2,*])`'s edges to the row it reads). Together they are
+/// what makes this row's answer checkable rather than asserted; alone, this
+/// assertion is the only thing holding `resolve_literal_axis_index`'s constant
+/// arm.
+///
 /// One arm is covered elsewhere rather than here: `StarRange` has three
 /// outcomes (the axis's own dimension, a PROPER subdimension, and a name that
 /// is neither), and the subdimension pair is GH #766's, pinned by the
@@ -3075,8 +3093,9 @@ fn classify_axis_access_resolves_a_colliding_name_element_first() {
             &iterated,
             &ctx
         ),
-        None,
-        "a numeric literal into a NAMED dimension names no element"
+        Some(AxisRead::Pinned("boston".to_string())),
+        "a constant index is POSITIONAL: `pop[2]` selects the axis's SECOND \
+         element, whatever it is named"
     );
     assert_eq!(
         classify_axis_access(

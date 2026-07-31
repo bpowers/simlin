@@ -1,0 +1,576 @@
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+//! An implicit instance minted by per-element expansion belongs to ONE element.
+//!
+//! When a variable's equation calls a module function (a stdlib `SMTH1`/`DELAY1`,
+//! or a project macro), `builtins_visitor::instantiate_implicit_modules` expands
+//! the equation per element and mints a fresh module instance -- plus its
+//! argument-capture helper auxes -- for each one. Those synthetic nodes are
+//! SCALAR: `$⁚growth⁚0⁚smth1⁚north` is the instance belonging to `growth[north]`
+//! and to no other slot.
+//!
+//! Nothing in the LTM layer used to know that, and two consumers paid for it:
+//!
+//! * the element causal graph broadcast a scalar instance across every element
+//!   of its arrayed parent (and every element of an arrayed source into every
+//!   per-element helper), manufacturing cross-element circuits that do not
+//!   exist -- the same class of phantom edge `RefShape::PerElement` was
+//!   introduced to kill (GH #525);
+//! * the module link-score path built one partial for the whole arrayed target
+//!   and `scalarize`d it to the FIRST element's arm, so every instance but the
+//!   first scored the wrong element, and every arrayed dependency was left as a
+//!   bare whole-array `PREVIOUS` that codegen rejects -- a constant-0 score.
+//!
+//! These tests pin the contract for both. The load-bearing one is
+//! [`qualified_index_edge_is_positional_not_by_name`]: the per-element expansion
+//! spells its captured subscript as the QUALIFIED `dim·element` form, which the
+//! simulation resolves POSITIONALLY (`compiler::subscript` lowers the constified
+//! index to `IndexOp::Single(value - 1)`, a raw offset into the subscripted
+//! variable's own axis). A describer that resolves it by NAME names rows the
+//! simulation never reads -- so that test uses two dimensions carrying the same
+//! element names in opposite orders, where the two readings disagree, and checks
+//! the graph against the VM rather than against an assumption.
+//!
+//! ARMS NOT COVERED HERE, deliberately. The walker records a module-output
+//! reference at three sites, and these fixtures exercise one: the bare
+//! `Expr2::Var` arm (`SMTH1(...) * 0.1` reads `module·port` bare). The
+//! `Expr2::Subscript` arm needs an arrayed module OUTPUT subscripted at the
+//! reference site (`mod·out[Region]`), and the `BuiltinContents::Ident` arm
+//! needs a module output in a builtin's ident position; neither is reachable
+//! from a stdlib `SMTH1`/`DELAY1` expansion, which is the shape every arrayed
+//! module call in `test/` takes and the shape this contract was written for.
+//! All three record the same `RefShape::Bare` with the same `target_element` --
+//! three lines of one statement, not three rules -- so deleting either of the
+//! other two is currently caught by nothing. That is a disclosed coverage hole,
+//! not a claim that those arms do not matter: closing it needs a user sub-model
+//! fixture with an arrayed output.
+
+use crate::db::{
+    DiagnosticError, SimlinDb, collect_all_diagnostics, model_element_causal_edges,
+    model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel,
+    sync_from_datamodel_incremental,
+};
+use crate::test_common::TestProject;
+
+/// The element-level causal edges of the fixture's `main` model.
+fn element_edges(project: &TestProject) -> super::ElementCausalEdgesResult {
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    model_element_causal_edges(&db, sync.models["main"].source, sync.project).clone()
+}
+
+fn assert_edge(result: &super::ElementCausalEdgesResult, from: &str, to: &str) {
+    let targets = result.edges.get(from);
+    assert!(
+        targets.is_some_and(|ts| ts.contains(to)),
+        "expected edge {from} -> {to}, but it was missing.\nedges from '{from}': {targets:?}"
+    );
+}
+
+fn assert_no_edge(result: &super::ElementCausalEdgesResult, from: &str, to: &str) {
+    let has = result.edges.get(from).is_some_and(|ts| ts.contains(to));
+    assert!(
+        !has,
+        "expected NO edge {from} -> {to}, but it was present.\nedges from '{from}': {:?}",
+        result.edges.get(from)
+    );
+}
+
+/// An arrayed stock whose inflow smooths the stock: the loop
+/// `stock[e] -> arg0[e] -> smth1[e] -> growth[e] -> stock[e]`, once per element.
+/// This is C-LEARN's `Emissions with Stopped Growth[COP]` shape reduced to two
+/// elements -- an `Equation::ApplyToAll` body containing a module call.
+/// The run is long enough for the loop to actually turn: the score's guard form
+/// yields 0 at `INITIAL_TIME`, and the smoothing stock needs several steps
+/// before its output moves, so a default 2-step run reads all zeros whether or
+/// not the fragment compiled.
+fn smooth_loop_fixture() -> TestProject {
+    TestProject::new("arrayed_smooth_loop")
+        .with_sim_time(0.0, 10.0, 0.25)
+        .named_dimension("Region", &["north", "south"])
+        .array_stock("stock[Region]", "10", &["growth"], &[], None)
+        .array_flow("growth[Region]", "SMTH1(stock[Region], 1) * 0.1", None)
+}
+
+// ---------------------------------------------------------------------------
+// The element graph
+// ---------------------------------------------------------------------------
+
+/// A module instance feeds ONLY the element it was minted for.
+///
+/// `growth`'s reconstructed AST is `Arrayed(["region"], {north:
+/// "$⁚growth⁚0⁚smth1⁚north·output" * 0.1, south: ...})` -- the north slot
+/// references the north instance and nothing else -- so the broadcast to
+/// `growth[south]` has no reference behind it at all.
+#[test]
+fn module_instance_feeds_only_its_own_element() {
+    let edges = element_edges(&smooth_loop_fixture());
+
+    assert_edge(&edges, "$⁚growth⁚0⁚smth1⁚north", "growth[north]");
+    assert_no_edge(&edges, "$⁚growth⁚0⁚smth1⁚north", "growth[south]");
+
+    assert_edge(&edges, "$⁚growth⁚0⁚smth1⁚south", "growth[south]");
+    assert_no_edge(&edges, "$⁚growth⁚0⁚smth1⁚south", "growth[north]");
+}
+
+/// The mirror direction: an arrayed source feeds ONLY the per-element helper
+/// that captured that element.
+///
+/// `$⁚growth⁚0⁚arg0⁚north`'s equation is `stock[region·north]`. `Region` indexes
+/// `stock`'s own dimension here, so position and name agree and the true edge is
+/// the diagonal; [`qualified_index_edge_is_positional_not_by_name`] is the case
+/// that separates the two readings.
+#[test]
+fn arrayed_source_feeds_only_the_helper_that_captured_it() {
+    let edges = element_edges(&smooth_loop_fixture());
+
+    assert_edge(&edges, "stock[north]", "$⁚growth⁚0⁚arg0⁚north");
+    assert_no_edge(&edges, "stock[north]", "$⁚growth⁚0⁚arg0⁚south");
+
+    assert_edge(&edges, "stock[south]", "$⁚growth⁚0⁚arg0⁚south");
+    assert_no_edge(&edges, "stock[south]", "$⁚growth⁚0⁚arg0⁚north");
+}
+
+/// THE test that separates a positional reading from a name-based one.
+///
+/// `Other` declares the same two element NAMES as `Region` in the opposite
+/// ORDER. The per-element expansion of `out[Region]` captures
+/// `stock[region·north]`, and `compiler::subscript` resolves that constified
+/// index as a raw position into `stock`'s own axis (`Other`), so it reads
+/// `Other`'s FIRST element -- `stock[south]`. The VM assertion below is the
+/// oracle: it fixes which element is read without appealing to the graph, so a
+/// name-based "fix" to the element graph fails this test rather than passing it.
+#[test]
+fn qualified_index_edge_is_positional_not_by_name() {
+    let project = TestProject::new("qualified_positional")
+        .named_dimension("Region", &["north", "south"])
+        .named_dimension("Other", &["south", "north"])
+        .array_with_ranges_direct(
+            "stock",
+            vec!["Other".to_string()],
+            vec![("south", "10"), ("north", "20")],
+            None,
+        )
+        .array_aux("out[Region]", "SMTH1(stock[Region], 1)");
+
+    // Oracle first: what does the simulation actually read?
+    let run = project.run_vm_incremental();
+    let north_helper = run
+        .get("$⁚out⁚0⁚arg0⁚north")
+        .expect("the north slot's capture helper should exist");
+    assert_eq!(
+        north_helper.last().copied(),
+        Some(10.0),
+        "`stock[region·north]` must read stock's FIRST positional element \
+         (south == 10), not the element NAMED north (20)"
+    );
+
+    // The graph must describe that same read. The paired positive assertion on
+    // `stock[north]` is what keeps the negative one from passing vacuously if a
+    // node-naming change ever made `stock[north]` an unknown key.
+    let edges = element_edges(&project);
+    assert_edge(&edges, "stock[south]", "$⁚out⁚0⁚arg0⁚north");
+    assert_no_edge(&edges, "stock[north]", "$⁚out⁚0⁚arg0⁚north");
+    assert_edge(&edges, "stock[north]", "$⁚out⁚0⁚arg0⁚south");
+    assert_no_edge(&edges, "stock[south]", "$⁚out⁚0⁚arg0⁚south");
+}
+
+/// The phantom circuits are gone: two independent per-element loops, not the
+/// cross-product of them.
+#[test]
+fn per_element_module_loops_do_not_cross_elements() {
+    let datamodel = smooth_loop_fixture().build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    #[allow(deprecated)]
+    let circuits =
+        super::model_element_loop_circuits(&db, sync.models["main"].source, sync.project).clone();
+
+    assert_eq!(
+        circuits.circuits.len(),
+        2,
+        "expected exactly one loop per element; got {} circuits:\n{:#?}",
+        circuits.circuits.len(),
+        circuits.circuits
+    );
+    for circuit in &circuits.circuits {
+        let nodes: Vec<&str> = circuit
+            .iter()
+            .map(|i| circuits.names[*i as usize].as_str())
+            .collect();
+        let touches_north = nodes.iter().any(|n| n.contains("north"));
+        let touches_south = nodes.iter().any(|n| n.contains("south"));
+        assert!(
+            touches_north ^ touches_south,
+            "a per-element module loop must stay within one element, got {nodes:?}"
+        );
+    }
+}
+
+/// Control: a SCALAR parent's instance is not element-bound, and the
+/// per-element narrowing must leave it exactly as it is.
+///
+/// Note the scalar fixture synthesizes NO capture helper: `SMTH1(stock, 1)`
+/// passes a bare `Var`, so `make_temp_arg` is never reached and the stock wires
+/// straight into the instance. (In the arrayed fixture the same call becomes
+/// `SMTH1(stock[region·north], 1)` -- a `Subscript`, which IS hoisted.) This
+/// test passes at HEAD; it is here to fail if the fix over-reaches.
+#[test]
+fn scalar_module_instance_keeps_its_plain_edges() {
+    let project = TestProject::new("scalar_smooth_loop")
+        .stock("stock", "10", &["growth"], &[], None)
+        .flow("growth", "SMTH1(stock, 1) * 0.1", None);
+    let edges = element_edges(&project);
+
+    assert_edge(&edges, "stock", "$⁚growth⁚0⁚smth1");
+    assert_edge(&edges, "$⁚growth⁚0⁚smth1", "growth");
+}
+
+// ---------------------------------------------------------------------------
+// The link scores
+// ---------------------------------------------------------------------------
+
+/// Every LTM synthetic variable the fixture emits must compile.
+///
+/// A failing fragment keeps its layout slot with no bytecode and reads a
+/// constant 0, so this is the difference between "no score" and "a score that
+/// silently is not one".
+#[test]
+fn arrayed_module_loop_emits_no_failing_fragments() {
+    let datamodel = smooth_loop_fixture().build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+
+    let failures: Vec<String> = collect_all_diagnostics(&db, sync.project)
+        .iter()
+        .filter_map(|d| match &d.error {
+            DiagnosticError::Assembly(msg) if msg.contains("failed to compile") => {
+                Some(format!("{:?}: {msg}", d.variable))
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        failures.is_empty(),
+        "expected every LTM fragment to compile, but {} failed:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// The module link score is emitted PER TARGET ELEMENT, and each instance's
+/// score holds ITS OWN output live.
+///
+/// Before the fix a single scalar `…smth1⁚north→growth` carried element 0's arm
+/// for every instance, so the south instance's score referenced the north
+/// instance -- frozen at `PREVIOUS`, making the numerator entirely lagged. That
+/// is a wrong answer masked by a compile failure, not merely a missing one.
+#[test]
+fn module_link_scores_are_per_target_element_and_hold_their_own_source_live() {
+    let datamodel = smooth_loop_fixture().build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    for elem in ["north", "south"] {
+        let name = format!("$⁚ltm⁚link_score⁚$⁚growth⁚0⁚smth1⁚{elem}→growth[{elem}]");
+        let var = ltm.vars.iter().find(|v| v.name == name).unwrap_or_else(|| {
+            let emitted: Vec<&str> = ltm
+                .vars
+                .iter()
+                .map(|v| v.name.as_str())
+                .filter(|n| n.contains("smth1"))
+                .collect();
+            panic!("expected a per-target-element module link score {name}; emitted: {emitted:#?}")
+        });
+
+        let text = var.equation.source_text();
+        let own = format!("$⁚growth⁚0⁚smth1⁚{elem}·output");
+        assert!(
+            text.contains(&own),
+            "{name} must reference its own instance's output; equation:\n{text}"
+        );
+        let other = if elem == "north" { "south" } else { "north" };
+        let foreign = format!("$⁚growth⁚0⁚smth1⁚{other}·output");
+        assert!(
+            !text.contains(&foreign),
+            "{name} must not reference the {other} instance at all; equation:\n{text}"
+        );
+    }
+}
+
+/// End to end: both per-element loops score, and neither is a constant zero.
+#[test]
+fn both_per_element_module_loops_score_nonzero() {
+    let project = smooth_loop_fixture();
+    let datamodel = project.build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    let loop_scores: Vec<String> = ltm
+        .vars
+        .iter()
+        .map(|v| v.name.clone())
+        .filter(|n| n.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+        .collect();
+    assert_eq!(
+        loop_scores.len(),
+        2,
+        "expected one loop score per element loop, got {loop_scores:?}"
+    );
+
+    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
+        .expect("the LTM-enabled fixture should compile");
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end()
+        .expect("simulation should run to completion");
+    let results = vm.into_results();
+
+    for name in &loop_scores {
+        let offset = *compiled
+            .offsets
+            .get(name.as_str())
+            .unwrap_or_else(|| panic!("{name} has no results offset"));
+        let series: Vec<f64> = (0..results.step_count)
+            .map(|step| results.data[step * results.step_size + offset])
+            .collect();
+        assert!(
+            series.iter().any(|v| v.is_finite() && *v != 0.0),
+            "{name} is identically zero across the whole run, which is what a \
+             dropped fragment looks like: {series:?}"
+        );
+    }
+}
+
+/// The VM oracle for the positional rule's other spelling: a bare numeric
+/// literal into a NAMED dimension.
+///
+/// `compiler::subscript` lowers a constant index to `IndexOp::Single(value - 1)`
+/// regardless of whether the axis is `Indexed` or `Named`, so `pop[2]` reads the
+/// axis's SECOND element. The describers used to decline this (naming no
+/// element, hence a conservative cross-product); they now resolve it, and this
+/// test is what says which answer the simulation gives. Paired with
+/// `ltm_agg::tests::classify_axis_access_resolves_a_colliding_name_element_first`,
+/// whose `Expr(Const)` row asserts the classifier reaches the same element.
+#[test]
+fn numeric_literal_index_is_positional_in_a_named_dimension() {
+    let project = TestProject::new("numeric_named")
+        .named_dimension("Region", &["nyc", "boston"])
+        .array_with_ranges_direct(
+            "pop",
+            vec!["Region".to_string()],
+            vec![("nyc", "11"), ("boston", "22")],
+            None,
+        )
+        .aux("picked", "pop[2]", None);
+
+    assert_eq!(
+        project.run_vm_incremental()["picked"].last().copied(),
+        Some(22.0),
+        "`pop[2]` must read Region's SECOND element (boston == 22)"
+    );
+}
+
+/// The index's POSITION is load-bearing, and a 1-D fixture cannot show it.
+///
+/// `resolve_literal_index` resolves a constant against the axis at the index's
+/// own position. Every other fixture here uses a 1-D source, where position is
+/// always 0 and "the axis at this position" and "the source's first axis" are
+/// the same thing -- so they would all still pass if the lookup ignored the
+/// position entirely. This one separates them: `matrix[1,3]` needs axis 1
+/// (`Wide`, 3 long) to resolve `3`, and reading axis 0 (`Narrow`, 2 long) finds
+/// nothing and falls back to the conservative cross-product.
+#[test]
+fn a_constant_index_resolves_against_the_axis_at_its_own_position() {
+    let project = TestProject::new("positional_axis")
+        .named_dimension("Narrow", &["a", "b"])
+        .named_dimension("Wide", &["p", "q", "r"])
+        .array_with_ranges_direct(
+            "matrix",
+            vec!["Narrow".to_string(), "Wide".to_string()],
+            vec![
+                ("a,p", "11"),
+                ("a,q", "12"),
+                ("a,r", "13"),
+                ("b,p", "21"),
+                ("b,q", "22"),
+                ("b,r", "23"),
+            ],
+            None,
+        )
+        .aux("picked", "matrix[1,3]", None);
+
+    assert_eq!(
+        project.run_vm_incremental()["picked"].last().copied(),
+        Some(13.0),
+        "`matrix[1,3]` must read Narrow's 1st and Wide's 3rd element"
+    );
+
+    let edges = element_edges(&project);
+    assert_edge(&edges, "matrix[a,r]", "picked");
+    for phantom in [
+        "matrix[a,p]",
+        "matrix[a,q]",
+        "matrix[b,p]",
+        "matrix[b,q]",
+        "matrix[b,r]",
+    ] {
+        assert_no_edge(&edges, phantom, "picked");
+    }
+}
+
+/// The positional rule narrows a reducer's read slice too, not just the element
+/// graph -- `ltm_agg::resolve_literal_axis_index` is the second production
+/// copy, and `compute_read_slice` is what consumes it.
+///
+/// `SUM(matrix[2,*])` used to leave axis 0 unclassifiable, which declined the
+/// hoist and left the reference on the conservative cross-product: all four
+/// source elements got an edge into `total`. The pinned axis now resolves, so
+/// only the row the reducer actually reads is attributed.
+#[test]
+fn a_constant_pinned_reducer_axis_narrows_the_read_slice() {
+    let project = TestProject::new("pinned_reducer_axis")
+        .named_dimension("Row", &["a", "b"])
+        .named_dimension("Col", &["p", "q"])
+        .array_with_ranges_direct(
+            "matrix",
+            vec!["Row".to_string(), "Col".to_string()],
+            vec![("a,p", "1"), ("a,q", "2"), ("b,p", "10"), ("b,q", "20")],
+            None,
+        )
+        .aux("total", "SUM(matrix[2,*])", None);
+
+    assert_eq!(
+        project.run_vm_incremental()["total"].last().copied(),
+        Some(30.0),
+        "`SUM(matrix[2,*])` sums Row's SECOND element (b): 10 + 20"
+    );
+
+    let edges = element_edges(&project);
+    assert_edge(&edges, "matrix[b,p]", "total");
+    assert_edge(&edges, "matrix[b,q]", "total");
+    assert_no_edge(&edges, "matrix[a,p]", "total");
+    assert_no_edge(&edges, "matrix[a,q]", "total");
+}
+
+/// The emitter must produce a score for the instance's OWN element and for no
+/// other -- the narrowing that is the whole point of the change.
+///
+/// Separate from
+/// [`module_link_scores_are_per_target_element_and_hold_their_own_source_live`],
+/// which checks that the score that SHOULD exist does and names the right
+/// instance. That one passes unchanged if the emitter also mints
+/// `…smth1⁚north→growth[south]`, and an extra per-element score is not inert:
+/// `ltm_finding::parse_link_offsets` registers it as a discovery-graph edge
+/// `(smth1⁚north, growth[south])`, which is exactly the phantom class this
+/// change removes from the element graph.
+#[test]
+fn a_module_instance_scores_no_element_but_its_own() {
+    let datamodel = smooth_loop_fixture().build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    let emitted: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
+    for (instance, foreign) in [("north", "south"), ("south", "north")] {
+        let phantom = format!("$⁚ltm⁚link_score⁚$⁚growth⁚0⁚smth1⁚{instance}→growth[{foreign}]");
+        assert!(
+            !emitted.contains(&phantom.as_str()),
+            "the {instance} instance feeds only growth[{instance}], so {phantom} \
+             names an edge that does not exist.\nemitted: {emitted:#?}"
+        );
+    }
+}
+
+/// The GH #541 ARRAYED capture helper is not element-bound, and the emitter's
+/// `dimensions.is_empty()` guard must keep it out.
+///
+/// That helper is synthesized for a bare arrayed reference under an
+/// apply-to-all expansion; it is a real `Equation::ApplyToAll` array, carries no
+/// element suffix, and is referenced as `helper[<elem>]` -- so the per-element
+/// pin belongs on the REFERENCE, not on a per-element score of the helper. It
+/// reaches this emitter through the same "absent from `source_vars`" door every
+/// implicit variable does, so only the guard tells them apart.
+///
+/// PRE-EXISTING DEFECT this fixture also exposes, deliberately left alone: the
+/// arrayed helper's own link scores do not compile (`expected array variable
+/// '$⁚growth⁚1⁚arg0' to have dimensions`), so its edges read constant 0 and both
+/// loop scores here are dropped. Measured at `main` with this exact fixture: 5
+/// such failures, identical. It belongs to the arrayed-implicit-helper emitter
+/// -- the same residual family as the mirror-direction edges the branch
+/// discloses -- not to the per-element instance work, and folding it in would
+/// mean a second emitter with its own dimension handling. The assertions here
+/// are scoped so they hold regardless of whether that is fixed.
+#[test]
+fn an_arrayed_capture_helper_is_not_treated_as_element_bound() {
+    // A real feedback loop, so LTM actually emits link scores here -- without a
+    // stock this fixture emits none at all and every assertion below is vacuous.
+    let project = TestProject::new("arrayed_capture_helper")
+        .with_sim_time(0.0, 10.0, 0.25)
+        .named_dimension("Region", &["north", "south"])
+        .array_stock("stock[Region]", "10", &["growth"], &[], None)
+        .array_flow(
+            "growth[Region]",
+            "SMTH1(stock[Region], 1) * 0.1 + PREVIOUS(PREVIOUS(stock)) * 0.001",
+            None,
+        );
+    let datamodel = project.build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+
+    let implicit =
+        crate::db::model_implicit_var_info(&db, sync.models["main"].source_model, sync.project);
+    let arrayed_helpers: Vec<&String> = implicit
+        .iter()
+        .filter(|(_, meta)| !meta.dimensions.is_empty())
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        !arrayed_helpers.is_empty(),
+        "fixture must synthesize an ARRAYED capture helper, else this test is \
+         vacuous; implicit vars: {:?}",
+        implicit.keys().collect::<Vec<_>>()
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    for helper in &arrayed_helpers {
+        let per_element_prefix = format!("$⁚ltm⁚link_score⁚{helper}→");
+        // Positive half, and the discriminator: an ARRAYED source is scored with
+        // the element on the FROM side (`{helper}[north]→growth`), which is the
+        // arrayed-source treatment. The per-element emitter's signature is the
+        // element on the TO side. Asserting the first exists is what keeps the
+        // second's absence from being vacuous -- and it is what fails if the
+        // guard is dropped, since this emitter runs before the one that produces
+        // the from-side form and would claim the edge instead.
+        let from_side = format!("$⁚ltm⁚link_score⁚{helper}[");
+        assert!(
+            ltm.vars
+                .iter()
+                .any(|v| v.name.starts_with(&from_side) && v.name.ends_with("→growth")),
+            "{helper} must keep the ARRAYED-source treatment (element on the from \
+             side).\nemitted: {:#?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+        let bracketed: Vec<&str> = ltm
+            .vars
+            .iter()
+            .map(|v| v.name.as_str())
+            .filter(|n| n.starts_with(&per_element_prefix) && n.ends_with(']'))
+            .collect();
+        assert!(
+            bracketed.is_empty(),
+            "{helper} is a genuine array, not an element-bound scalar, so it must \
+             not get per-target-element scores; got {bracketed:?}"
+        );
+    }
+}
