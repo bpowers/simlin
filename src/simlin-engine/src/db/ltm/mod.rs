@@ -2048,6 +2048,15 @@ pub fn model_ltm_variables(
         .filter(|v| v.name.contains("\u{205A}link_score\u{205A}"))
         .map(|v| v.name.clone())
         .collect();
+    // Warn ONCE per unresolved edge, not once per pathway that traverses it.
+    // `enumerate_pathways_to_outputs` admits up to `MAX_PATHWAYS_PER_PORT`
+    // paths per input port and a converging module graph shares edges across
+    // most of them, while `collect_model_diagnostics` does not deduplicate
+    // accumulator output -- so an un-gated warning here is thousands of
+    // identical rows drowning out every other diagnostic. This mirrors the
+    // warn-once-per-edge convention `unscoreable_edges` already applies on the
+    // link-score side.
+    let mut warned_unresolved: HashSet<(String, String, String)> = HashSet::new();
     for (input_port, port_pathways) in &pathways {
         let mut pathway_names = Vec::new();
         for (idx, pathway_links) in port_pathways.iter().enumerate() {
@@ -2083,7 +2092,13 @@ pub fn model_ltm_variables(
                     // `try_implicit_scalar_to_arrayed_link_scores` both name the
                     // element on the `to` side, which this variable-level
                     // resolution cannot spell.
-                    if !pathway_emitted_names.contains(&resolved) {
+                    if !pathway_emitted_names.contains(&resolved)
+                        && warned_unresolved.insert((
+                            input_port.as_str().to_string(),
+                            link.from.as_str().to_string(),
+                            link.to.as_str().to_string(),
+                        ))
+                    {
                         emit_unresolved_pathway_link_warning(
                             db,
                             model,

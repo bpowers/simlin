@@ -651,3 +651,132 @@ fn an_arrayed_capture_helpers_scores_compile() {
         );
     }
 }
+
+/// A pathway link that cannot be resolved warns ONCE per edge, not once per
+/// pathway that traverses it.
+///
+/// `enumerate_pathways_to_outputs` admits up to `MAX_PATHWAYS_PER_PORT` paths
+/// per input port, a converging sub-model shares edges across most of them, and
+/// `collect_model_diagnostics` does not deduplicate accumulator output. Without
+/// the dedup this is one identical row per (pathway x link), which on a real
+/// module graph buries every other diagnostic.
+///
+/// The fixture is the smallest shape with a SHARED unresolvable edge: the
+/// sub-model's scalar input port feeds an ARRAYED reader (`mid[Region]`), which
+/// is scored per target element (`input_val→mid[nyc]`), so the variable-level
+/// pathway resolution cannot spell it -- and both output ports' pathways run
+/// through that same edge.
+#[test]
+fn an_unresolved_pathway_link_warns_once_per_edge() {
+    use crate::datamodel;
+    use crate::testutils::{x_aux, x_model};
+
+    let input = datamodel::Variable::Aux(datamodel::Aux {
+        ident: "input_val".to_string(),
+        equation: datamodel::Equation::Scalar("0".to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat {
+            can_be_module_input: true,
+            ..datamodel::Compat::default()
+        },
+    });
+    let mid = datamodel::Variable::Aux(datamodel::Aux {
+        ident: "mid".to_string(),
+        equation: datamodel::Equation::ApplyToAll(
+            vec!["Region".to_string()],
+            "input_val * 2".to_string(),
+        ),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    });
+    // TWO output ports, so two pathways from `input_val`, both through `mid`.
+    let sub = x_model(
+        "diamond",
+        vec![
+            input,
+            mid,
+            x_aux("pos", "SUM(mid[*])", None),
+            x_aux("neg", "0 - SUM(mid[*])", None),
+        ],
+    );
+
+    let main = x_model(
+        "main",
+        vec![
+            x_aux("drv", "1", None),
+            datamodel::Variable::Module(datamodel::Module {
+                ident: "m".to_string(),
+                model_name: "diamond".to_string(),
+                documentation: String::new(),
+                units: None,
+                references: vec![datamodel::ModuleReference {
+                    src: "drv".to_string(),
+                    dst: "m.input_val".to_string(),
+                }],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            x_aux("watcher", "m.pos + m.neg", None),
+        ],
+    );
+
+    let mut project = crate::test_common::TestProject::new("pathway_dedup")
+        .named_dimension("Region", &["nyc", "boston"])
+        .build_datamodel();
+    project.models = vec![main, sub];
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+
+    let warnings: Vec<String> = collect_all_diagnostics(&db, sync.project)
+        .iter()
+        .filter_map(|d| match &d.error {
+            DiagnosticError::Assembly(msg) if msg.contains("LTM pathway score") => {
+                Some(msg.clone())
+            }
+            _ => None,
+        })
+        .collect();
+
+    let count_for = |edge: &str| -> usize {
+        warnings
+            .iter()
+            .filter(|m| m.contains(&format!("for edge {edge}")))
+            .count()
+    };
+    // `input_val -> mid` is traversed by BOTH pathways; `mid -> neg` by exactly
+    // one. Equality is the assertion: it says the warning count does not scale
+    // with pathway multiplicity, which is the whole point of the dedup. Without
+    // it the counts are 4 and 2.
+    //
+    // Both are >1 because a sub-model's LTM diagnostics are collected twice --
+    // once directly and once through the parent's subtree, since
+    // `model_all_diagnostics` for `main` reaches `diamond`'s
+    // `model_ltm_variables`. That doubling is uniform, pre-existing, and shared
+    // by every LTM sub-model warning; the single-pathway edge doubling too is
+    // what shows it cannot come from pathway multiplicity. Out of scope here.
+    let shared = count_for("input_val -> mid");
+    let single = count_for("mid -> neg");
+    assert!(
+        shared > 0 && single > 0,
+        "fixture must produce both warnings, else this is vacuous:\n{}",
+        warnings.join("\n")
+    );
+    assert_eq!(
+        shared,
+        single,
+        "an edge traversed by two pathways must warn no more often than one \
+         traversed by a single pathway; got {shared} vs {single}:\n{}",
+        warnings.join("\n")
+    );
+}
