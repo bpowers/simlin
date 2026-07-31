@@ -780,3 +780,131 @@ fn an_unresolved_pathway_link_warns_once_per_edge() {
         warnings.join("\n")
     );
 }
+
+/// Each target element's score must hold the port THAT element reads.
+///
+/// `module_output_ref_in_document_order` answers a per-EDGE question -- "which
+/// output of this module does `to` read first" -- and a per-element emitter must
+/// not reuse one answer for every slot. An `Ast::Arrayed` target may read a
+/// different port of the same module in each slot (`x[a] = m·pos`,
+/// `x[b] = m·neg`), and building `x[b]`'s partial with `m·pos` live means the
+/// live source does not occur in that slot's body at all: the wrap has nothing
+/// to hold live, and the denominator names a port the element never reads.
+#[test]
+fn each_element_scores_the_module_port_that_element_reads() {
+    use crate::datamodel;
+    use crate::testutils::{x_aux, x_model};
+
+    let input = datamodel::Variable::Aux(datamodel::Aux {
+        ident: "input_val".to_string(),
+        equation: datamodel::Equation::Scalar("0".to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat {
+            can_be_module_input: true,
+            ..datamodel::Compat::default()
+        },
+    });
+    let sub = x_model(
+        "posneg",
+        vec![
+            input,
+            x_aux("pos", "input_val * 2", None),
+            x_aux("neg", "0 - input_val", None),
+        ],
+    );
+
+    // Per-element equations reading DIFFERENT ports of the same instance.
+    let x = datamodel::Variable::Aux(datamodel::Aux {
+        ident: "x".to_string(),
+        equation: datamodel::Equation::Arrayed(
+            vec!["Region".to_string()],
+            vec![
+                ("a".to_string(), "m.pos".to_string(), None, None),
+                ("b".to_string(), "m.neg".to_string(), None, None),
+            ],
+            None,
+            false,
+        ),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    });
+    // A stock, so `model_ltm_variables` does not take its stateless early return.
+    let stock = datamodel::Variable::Stock(datamodel::Stock {
+        ident: "s".to_string(),
+        equation: datamodel::Equation::Scalar("1".to_string()),
+        documentation: String::new(),
+        units: None,
+        inflows: vec!["f".to_string()],
+        outflows: vec![],
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    });
+    let main = x_model(
+        "main",
+        vec![
+            x_aux("drv", "s * 0.1", None),
+            datamodel::Variable::Module(datamodel::Module {
+                ident: "m".to_string(),
+                model_name: "posneg".to_string(),
+                documentation: String::new(),
+                units: None,
+                references: vec![datamodel::ModuleReference {
+                    src: "drv".to_string(),
+                    dst: "m.input_val".to_string(),
+                }],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            x,
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "f".to_string(),
+                equation: datamodel::Equation::Scalar("SUM(x[*])".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+            stock,
+        ],
+    );
+
+    let mut project = crate::test_common::TestProject::new("per_element_port")
+        .named_dimension("Region", &["a", "b"])
+        .build_datamodel();
+    project.models = vec![main, sub];
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    for (element, own, foreign) in [("a", "m·pos", "m·neg"), ("b", "m·neg", "m·pos")] {
+        let name = format!("$⁚ltm⁚link_score⁚m→x[{element}]");
+        let var = ltm.vars.iter().find(|v| v.name == name).unwrap_or_else(|| {
+            let emitted: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
+            panic!("expected {name}; emitted: {emitted:#?}")
+        });
+        let text = var.equation.source_text();
+        assert!(
+            text.contains(own),
+            "x[{element}] reads {own}, so its score must hold that port live; \
+             equation:\n{text}"
+        );
+        assert!(
+            !text.contains(foreign),
+            "x[{element}] does not read {foreign}; equation:\n{text}"
+        );
+    }
+}

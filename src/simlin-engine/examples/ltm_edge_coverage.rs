@@ -222,13 +222,26 @@ fn main() {
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
 
-    let main_name = datamodel
+    // `sync.models` is keyed by CANONICAL name, and a model's stored spelling
+    // need not be canonical -- an imported `MAIN` or `Main Model` would miss the
+    // map and panic before producing any report. Canonicalize for both the
+    // search and the lookup; `main_name` is then the canonical spelling, which
+    // is also what `Diagnostic::model` carries, so the per-model filters below
+    // compare like with like.
+    let main_name: String = datamodel
         .models
         .iter()
-        .find(|m| m.name == "main")
-        .map(|m| m.name.clone())
-        .unwrap_or_else(|| datamodel.models[0].name.clone());
-    let source_model = sync.models[main_name.as_str()].source_model;
+        .map(|m| simlin_engine::canonicalize(&m.name).into_owned())
+        .find(|n| n == "main")
+        .unwrap_or_else(|| simlin_engine::canonicalize(&datamodel.models[0].name).into_owned());
+    let source_model = sync
+        .models
+        .get(main_name.as_str())
+        .unwrap_or_else(|| {
+            let known: Vec<&str> = sync.models.keys().map(String::as_str).collect();
+            panic!("model {main_name:?} not in the synced project; have {known:?}")
+        })
+        .source_model;
 
     let elem = model_element_causal_edges(&db, source_model, sync.project);
     let ltm = model_ltm_variables(&db, source_model, sync.project);
@@ -351,14 +364,53 @@ fn main() {
             .map_err(|e| eprintln!("note: simulation failed: {e:?}"))
             .ok()?;
         let results = vm.into_results();
+
+        // A link score's WIDTH. `Results::offsets` gives only a variable's BASE
+        // slot, but an A2A score occupies one slot per element and discovery
+        // reads them all: `parse_link_offsets` expands an arrayed score to
+        // `base + idx`, and `load_step_scores` consumes those slots. Scanning
+        // only the base would call a score dead whose base element happens to be
+        // zero while a later element is live.
+        let width: HashMap<&str, usize> = ltm
+            .vars
+            .iter()
+            .map(|v| {
+                let n: usize = v
+                    .dimensions
+                    .iter()
+                    .map(|d| {
+                        datamodel
+                            .dimensions
+                            .iter()
+                            .find(|dm| {
+                                simlin_engine::canonicalize(dm.name())
+                                    == simlin_engine::canonicalize(d)
+                            })
+                            .map(|dm| dm.len())
+                            .unwrap_or(1)
+                    })
+                    .product();
+                (v.name.as_str(), n.max(1))
+            })
+            .collect();
+
         let mut live = BTreeSet::new();
         for (name, &offset) in results.offsets.iter() {
             if !name.as_str().starts_with(LINK_PREFIX) {
                 continue;
             }
+            let n = width.get(name.as_str()).copied().unwrap_or(1);
+            // The SAME predicate `load_step_scores` applies: NaN maps to zero,
+            // everything else is kept by magnitude. An infinite score is
+            // therefore LIVE to discovery -- rejecting non-finite values here
+            // would call a discovery-visible edge dead.
             let nonzero = (0..results.step_count).any(|step| {
-                let v = results.data[step * results.step_size + offset];
-                v.is_finite() && v != 0.0
+                let base = step * results.step_size + offset;
+                (0..n).any(|i| {
+                    let v = results.data[base + i];
+                    let score = if v.is_nan() { 0.0 } else { v.abs() };
+                    score != 0.0
+                })
             });
             if nonzero {
                 live.insert(name.as_str().to_string());
@@ -500,9 +552,8 @@ fn main() {
 
     if !runtime_rows.is_empty() {
         println!("\n=== RUNTIME: cycle membership x whether any score is non-zero ===");
-        println!(
-            "  (an identically-zero column is what discovery drops, but it is NOT\n                by itself a defect -- an edge with no influence is correctly zero)"
-        );
+        println!("  (an identically-zero column is what discovery drops, but it is NOT");
+        println!("   by itself a defect -- an edge with no influence is correctly zero)");
         println!(
             "  {:<14} {:<32} {:>8}",
             "position", "runtime state", "edges"
@@ -514,9 +565,10 @@ fn main() {
             "\n  edges ON A CYCLE that compile yet are zero at every step: {}",
             compiled_but_zero_on_cycle.len()
         );
-        println!(
-            "    (the population where a score stubbed by a FAILING HELPER beneath it\n                  would hide; #994 measured 0 failing helpers under a compiling parent on\n                  this corpus, so these are expected to be genuine zeros -- but the count\n                  is printed rather than assumed)"
-        );
+        println!("    (the population where a score stubbed by a FAILING HELPER beneath it");
+        println!("     would hide; #994 measured 0 failing helpers under a compiling parent");
+        println!("     on this corpus, so these are expected to be genuine zeros -- but the");
+        println!("     count is printed rather than assumed)");
         for (from, to) in compiled_but_zero_on_cycle.iter().take(if list_dead {
             compiled_but_zero_on_cycle.len()
         } else {

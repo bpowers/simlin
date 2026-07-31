@@ -1055,6 +1055,12 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
     // reach either.
     let module_output =
         || crate::db::module_output_ref_in_document_order(db, model, project, from, to);
+    // Whether the source is a MODULE decides more than the default live
+    // reference: a module is read through a `module·port` composite and an
+    // `Ast::Arrayed` target may read a DIFFERENT port in each slot, so the live
+    // reference has to be resolved per element (below). A helper aux has one
+    // name and no such choice.
+    let mut source_is_module = true;
     let output_ref: String = match source_vars.get(from) {
         // An explicit `Variable::Module`.
         Some(sv) if sv.kind(db) == SourceVariableKind::Module => module_output()?,
@@ -1077,6 +1083,7 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
                 if !meta.dimensions.is_empty() {
                     return None;
                 }
+                source_is_module = false;
                 from.to_string()
             } else {
                 return None;
@@ -1178,18 +1185,46 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
             pinnable_arrayed_deps(db, source_vars, project, &elem_deps, &elem_tables, |_| true);
 
         let equation = if let Some(elem_eqn) = elem_eqn.as_ref() {
+            let slot = slot_map.slot_for(element);
             let gf_table_ref = slot_refs.for_element(&canonical_elem);
-            let occ = slot_occurrences.for_slot(slot_map.slot_for(element));
+            let occ = slot_occurrences.for_slot(slot);
             let deps_to_sub = crate::ltm_augment::dep_element_pins(
                 &pinnable,
                 &to_dims,
                 &target_element_parts(&to_dims, element),
                 dim_ctx,
             );
+            // THIS slot's port, not the edge's first one. An `Ast::Arrayed`
+            // target may read a different output of the same instance in each
+            // slot (`x[a] = m·pos`, `x[b] = m·neg`), and
+            // `module_output_ref_in_document_order` answers a per-EDGE question.
+            // Reusing its answer for every element builds `x[b]`'s partial with
+            // `m·pos` live: the port that slot actually reads is then FROZEN in
+            // the numerator while the guard and the sign come from a port the
+            // element never reads -- a plausible-looking wrong number rather
+            // than a missing one. Falls back to the edge-wide reference when the
+            // slot records no module-output occurrence, which is the shape a
+            // non-module source and an `ApplyToAll` target both take.
+            let live_ref: &str = if source_is_module {
+                to_occurrences
+                    .iter()
+                    .filter(|o| o.site_id.0.first() == Some(&slot))
+                    .find_map(|o| match &o.reference {
+                        crate::db::ltm_ir::OccurrenceRef::ModuleOutput {
+                            module,
+                            composite,
+                            ..
+                        } if module == from => Some(composite.as_str()),
+                        _ => None,
+                    })
+                    .unwrap_or(output_ref.as_str())
+            } else {
+                output_ref.as_str()
+            };
             match crate::ltm_augment::generate_scalar_to_element_equation(
                 // The LIVE source is the readable `module·port` scalar, not the
                 // module node the score is named for.
-                &output_ref,
+                live_ref,
                 to,
                 &crate::ltm_augment::qualify_element_csv(element, &to_dims),
                 elem_eqn,
