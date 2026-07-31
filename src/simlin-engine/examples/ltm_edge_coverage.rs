@@ -28,15 +28,16 @@
 //! as a fallback for a model that does not simulate, and the report says which
 //! measure it used.
 //!
-//! GRANULARITY CAVEAT, deliberate. The cycle/score join is at VARIABLE
-//! granularity, because a link-score name maps to element endpoints through the
-//! same expansion `ltm_finding::parse_link_offsets` performs and duplicating
-//! that here would be a second derivation to keep in step. A pair whose
-//! feed-forward element is unusable while its cyclic element is live is
-//! therefore indistinguishable from the reverse -- so that case is reported as
-//! its own "partially live" state and never folded into the dead-on-cycle
-//! totals, which makes those totals a sound LOWER BOUND rather than an inflated
-//! headline.
+//! GRANULARITY. The two axes join at different levels, on purpose. The DEFECT
+//! axis is per-VARIABLE, because a compile failure is a property of a fragment;
+//! its "partially dead" state is reported separately and never folded into the
+//! dead-on-cycle totals, which keeps those a sound LOWER BOUND. The RUNTIME axis
+//! is per-ELEMENT-EDGE, because that is what discovery scores and searches at --
+//! an A2A score occupies one slot per element, so a per-variable liveness flag
+//! would mark a whole edge live on the strength of one element and hide a dead
+//! cyclic slot behind a live feed-forward one. The element edge set comes from
+//! `ltm_finding::link_score_offsets`, the SAME expansion discovery runs, so this
+//! harness and the thing it measures cannot drift apart.
 //!
 //! Usage:
 //!   cargo run --release -p simlin-engine --example ltm_edge_coverage
@@ -294,7 +295,11 @@ fn main() {
     }
 
     // Variable-level edge -> is any of its element instances inside a cycle?
+    // (The DEFECT axis is per-variable, because a compile failure is.)
     let mut edge_cyclic: BTreeMap<(String, String), bool> = BTreeMap::new();
+    // Element-level edge -> is IT inside a cycle? The RUNTIME axis joins here,
+    // because that is the granularity discovery scores and searches at.
+    let mut element_edge_cyclic: BTreeMap<(String, String), bool> = BTreeMap::new();
     let mut elem_edges = 0usize;
     let mut elem_edges_cyclic = 0usize;
     for (from, tos) in elem.edges.iter() {
@@ -309,6 +314,7 @@ fn main() {
             if cyclic {
                 elem_edges_cyclic += 1;
             }
+            element_edge_cyclic.insert((from.clone(), to.clone()), cyclic);
             let key = (base_of(from).to_string(), base_of(to).to_string());
             let e = edge_cyclic.entry(key).or_insert(false);
             *e |= cyclic;
@@ -337,20 +343,38 @@ fn main() {
         }
     }
 
-    // RUNTIME liveness -- the measure that matches what discovery consumes.
+    // RUNTIME liveness, at ELEMENT granularity -- the measure that matches what
+    // discovery consumes, joined on the keys discovery itself uses.
     //
     // A compiled fragment is NOT the same as a usable score, in two directions
     // the static view cannot see: a score can compile and still read a constant
     // 0 supplied by a helper fragment that failed beneath it, and a perfectly
     // correct score can simply be 0 along this trajectory. `load_step_scores`
-    // drops an edge whose score is 0 AT A STEP, so "is this column ever
-    // non-zero" is the honest question. Compile the LTM-enabled project, run it,
-    // and record which link-score variables are non-zero at some saved step.
+    // drops an edge whose score is 0 at a step, so "is this column ever
+    // non-zero" is the honest question.
+    //
+    // The edge set comes from `ltm_finding::link_score_offsets` -- the SAME
+    // expansion discovery runs -- rather than from a local re-derivation. That
+    // matters twice: an A2A score occupies one slot per element, so a
+    // per-VARIABLE liveness flag would mark a whole edge live on the strength of
+    // one element and mask a dead cyclic slot behind a live feed-forward one;
+    // and the from-side projection that names the source node is subtle enough
+    // that a second implementation would drift from the thing it measures.
     //
     // `None` means the run could not be produced (a model that does not
-    // simulate); the report then falls back to the static view and says so,
-    // rather than silently reporting compile status as liveness.
-    let runtime_nonzero: Option<BTreeSet<String>> = (|| {
+    // simulate); the report then falls back to the static view and says so.
+    struct Runtime {
+        /// Element-level `(from_node, to_node)` edges whose score column is
+        /// non-zero at some saved step.
+        live: BTreeSet<(String, String)>,
+        /// Element-level edges discovery has an offset for at all.
+        covered: BTreeSet<(String, String)>,
+        /// Element-level edges whose owning link-score variable failed to
+        /// compile -- the explanation for a zero, where there is one.
+        failed_fragment: BTreeSet<(String, String)>,
+    }
+
+    let runtime: Option<Runtime> = (|| {
         let compiled =
             simlin_engine::db::compile_project_incremental(&db, sync.project, &main_name)
                 .map_err(|e| {
@@ -365,58 +389,68 @@ fn main() {
             .ok()?;
         let results = vm.into_results();
 
-        // A link score's WIDTH. `Results::offsets` gives only a variable's BASE
-        // slot, but an A2A score occupies one slot per element and discovery
-        // reads them all: `parse_link_offsets` expands an arrayed score to
-        // `base + idx`, and `load_step_scores` consumes those slots. Scanning
-        // only the base would call a score dead whose base element happens to be
-        // zero while a later element is live.
-        let width: HashMap<&str, usize> = ltm
-            .vars
-            .iter()
-            .map(|v| {
-                let n: usize = v
-                    .dimensions
-                    .iter()
-                    .map(|d| {
-                        datamodel
-                            .dimensions
-                            .iter()
-                            .find(|dm| {
-                                simlin_engine::canonicalize(dm.name())
-                                    == simlin_engine::canonicalize(d)
-                            })
-                            .map(|dm| dm.len())
-                            .unwrap_or(1)
-                    })
-                    .product();
-                (v.name.as_str(), n.max(1))
-            })
-            .collect();
-
-        let mut live = BTreeSet::new();
-        for (name, &offset) in results.offsets.iter() {
-            if !name.as_str().starts_with(LINK_PREFIX) {
+        // Which variable owns each slot, so a zero column can be explained. An
+        // A2A score spans `[base, base + width)`.
+        let mut owner: HashMap<usize, &str> = HashMap::new();
+        for var in ltm.vars.iter() {
+            let ident =
+                simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(&var.name);
+            let Some(&base) = results.offsets.get(&ident) else {
                 continue;
-            }
-            let n = width.get(name.as_str()).copied().unwrap_or(1);
-            // The SAME predicate `load_step_scores` applies: NaN maps to zero,
-            // everything else is kept by magnitude. An infinite score is
-            // therefore LIVE to discovery -- rejecting non-finite values here
-            // would call a discovery-visible edge dead.
-            let nonzero = (0..results.step_count).any(|step| {
-                let base = step * results.step_size + offset;
-                (0..n).any(|i| {
-                    let v = results.data[base + i];
-                    let score = if v.is_nan() { 0.0 } else { v.abs() };
-                    score != 0.0
+            };
+            let width: usize = var
+                .dimensions
+                .iter()
+                .map(|d| {
+                    datamodel
+                        .dimensions
+                        .iter()
+                        .find(|dm| {
+                            simlin_engine::canonicalize(dm.name()) == simlin_engine::canonicalize(d)
+                        })
+                        .map(|dm| dm.len())
+                        .unwrap_or(1)
                 })
-            });
-            if nonzero {
-                live.insert(name.as_str().to_string());
+                .product::<usize>()
+                .max(1);
+            for i in 0..width {
+                owner.insert(base + i, var.name.as_str());
             }
         }
-        Some(live)
+
+        let expansion =
+            simlin_engine::analysis::build_link_expansion_context(&db, source_model, sync.project);
+        let offsets = simlin_engine::ltm_finding::link_score_offsets(
+            &results,
+            &ltm.vars,
+            &datamodel.dimensions,
+            &expansion,
+        );
+
+        let mut rt = Runtime {
+            live: BTreeSet::new(),
+            covered: BTreeSet::new(),
+            failed_fragment: BTreeSet::new(),
+        };
+        for ((from, to), offset) in offsets {
+            let key = (from.as_str().to_string(), to.as_str().to_string());
+            rt.covered.insert(key.clone());
+            // The SAME predicate `load_step_scores` applies: NaN maps to zero,
+            // everything else is kept by magnitude -- so an INFINITE score is
+            // live to discovery, and rejecting non-finite values here would call
+            // a discovery-visible edge dead.
+            let nonzero = (0..results.step_count).any(|step| {
+                let v = results.data[step * results.step_size + offset];
+                let score = if v.is_nan() { 0.0 } else { v.abs() };
+                score != 0.0
+            });
+            if nonzero {
+                rt.live.insert(key);
+            } else if owner.get(&offset).is_some_and(|n| failed.contains(*n)) {
+                rt.failed_fragment.insert(key);
+            }
+        }
+        Some(rt)
     })();
 
     /// Per variable-level edge: how many link scores it has, how many fail to
@@ -426,7 +460,6 @@ fn main() {
     struct EdgeScores {
         total: usize,
         failing: usize,
-        runtime_live: usize,
         classes: BTreeSet<&'static str>,
     }
 
@@ -446,12 +479,6 @@ fn main() {
                 .map(|r| failure_class(r, &key.0))
                 .unwrap_or("other");
             entry.classes.insert(class);
-        }
-        if runtime_nonzero
-            .as_ref()
-            .is_some_and(|live| live.contains(&var.name))
-        {
-            entry.runtime_live += 1;
         }
     }
 
@@ -502,17 +529,29 @@ fn main() {
                 .unwrap_or("no score emitted");
             dead_on_cycle.entry(class).or_default().push(edge.clone());
         }
-        if let (Some(e), true) = (edge_scores.get(edge), runtime_nonzero.is_some()) {
-            let rt = if e.runtime_live > 0 {
-                "non-zero at some step"
-            } else if e.failing == e.total {
-                "zero (every score failed to compile)"
+    }
+
+    // The RUNTIME axis, joined at ELEMENT granularity.
+    if let Some(rt) = &runtime {
+        for ((from, to), cyclic) in element_edge_cyclic.iter() {
+            let cyc = if *cyclic {
+                "on a cycle"
             } else {
-                "zero at every step (compiles)"
+                "feed-forward"
             };
-            *runtime_rows.entry((cyc, rt)).or_insert(0) += 1;
-            if *cyclic && e.runtime_live == 0 && e.failing == 0 {
-                compiled_but_zero_on_cycle.push(edge.clone());
+            let key = (from.clone(), to.clone());
+            let state = if rt.live.contains(&key) {
+                "non-zero at some step"
+            } else if rt.failed_fragment.contains(&key) {
+                "zero (its score failed to compile)"
+            } else if rt.covered.contains(&key) {
+                "zero at every step (compiles)"
+            } else {
+                "no score offset at all"
+            };
+            *runtime_rows.entry((cyc, state)).or_insert(0) += 1;
+            if *cyclic && state == "zero at every step (compiles)" {
+                compiled_but_zero_on_cycle.push(key);
             }
         }
     }
@@ -536,12 +575,13 @@ fn main() {
     // pathways, helpers -- while only some of those are link scores.
     println!("  of which fail to compile:        {failed_link_scores}");
     println!("failing LTM fragments (all kinds): {}", failed.len());
-    match &runtime_nonzero {
-        Some(live) => println!(
-            "link scores non-zero at some step: {} (runtime liveness available)",
-            live.len()
+    match &runtime {
+        Some(rt) => println!(
+            "discovery-visible element edges:   {} of {} covered are non-zero at some step",
+            rt.live.len(),
+            rt.covered.len()
         ),
-        None => println!("runtime liveness UNAVAILABLE -- falling back to compile status"),
+        None => println!("runtime liveness UNAVAILABLE -- only the defect axis is reported"),
     }
 
     println!("\n=== DEFECT: cycle membership x whether the scores compile ===");

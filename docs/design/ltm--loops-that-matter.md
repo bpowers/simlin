@@ -569,15 +569,18 @@ nodes carry element subscripts (`s[nyc] → m → growth[nyc]`).
 variable map) before each name comparison -- mirroring the exhaustive twin,
 which strips `link.from`/`link.to`/`next.from`/`next.to` (PR #705 r3353758167).
 The pathway vars stay namespaced by the bare module instance (`m·$⁚ltm⁚path…`),
-so they are looked up with the stripped module name. This is currently latent
-parity defense: an arrayed loop through a multi-output module is not yet
-discoverable end-to-end, because a scalar module output feeding an arrayed
-reader (`growth[Region] = m·pos`) emits a single scalar constant-0 link score
-that drops the loop in discovery (the scalar-module-output → arrayed-reader
-link-score gap, tracked as GH #716); the unit-level
+so they are looked up with the stripped module name. This defense is LIVE, not latent, since
+GH #716 closed. A scalar module output feeding an arrayed reader
+(`growth[Region] = m·pos`) used to emit a single scalar constant-0 link score
+that dropped the loop in discovery; such an edge is now scored per target
+element by `db::ltm::link_scores::try_implicit_scalar_to_arrayed_link_scores`,
+which also owns the per-element module INSTANCES that a per-element expansion
+mints (`$⁚growth⁚0⁚smth1⁚north`), whose partials were previously `scalarize`d
+onto element 0's arm. The unit-level
 `recompute_strips_element_subscripts_before_port_match` exercises the matching
-code directly, and `analyze_model_arrayed_module_loop_blocked_by_scalar_output_gap`
-pins the current masked end-to-end state.
+code directly, and `analyze_model_arrayed_module_loop_is_discovered_per_element`
+pins the end-to-end result: one loop per element of the reader, none crossing
+elements.
 
 Before this fix, discovery read the composite's offset for the `x → m` edge;
 because single-dependency pathways all normalize to magnitude exactly 1, the
