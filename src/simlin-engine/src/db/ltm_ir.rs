@@ -29,7 +29,6 @@
 
 use std::collections::HashMap;
 
-use crate::canonicalize;
 use crate::common::{Canonical, Ident};
 use crate::db::{Db, RefShape, SourceModel, SourceProject, reconstruct_model_variables};
 
@@ -83,53 +82,58 @@ pub(crate) struct ReferenceSite {
 /// indexed dimensions like `1`, `2`) parse as `Expr2::Const`. We accept
 /// both forms.
 ///
-/// Note: `source_dims` is the source variable's *full* dimension list.
-/// In multidimensional subscripts the caller doesn't know which
-/// dimension a literal belongs to; we accept the first dimension whose
-/// element registry contains the canonical name. Literal indices that
-/// don't match any known element classify defensively as `DynamicIndex`,
-/// so the worst case is over-conservative (full cross-product) edges.
+/// The two index spellings resolve by DIFFERENT rules, and this function is
+/// where that split lives -- both halves mirroring
+/// `compiler::subscript::normalize_subscripts3`, which is the authority because
+/// it is what runs:
+///
+/// * `Expr2::Var(ident)` -- a bare element name (`pop[nyc]`) -- resolves BY
+///   NAME, element-first.
+/// * `Expr2::Const(text, value)` -- a numeric literal (`pop[2]`) or a QUALIFIED
+///   `dimension·element` reference that `Expr1::constify_dimensions` already
+///   turned into its 1-based position -- resolves POSITIONALLY against the axis
+///   at this index's own position, via
+///   [`crate::dimensions::resolve_axis_index_position`].
+///
+/// The positional half is why `position` is a parameter. Reading a constant by
+/// NAME (canonicalizing `"region·north"` and hunting for an element so called)
+/// finds nothing, which classified every per-element expansion's captured
+/// subscript as `DynamicIndex` and expanded it to the conservative
+/// cross-product; reading it by name *successfully* would be worse still,
+/// naming a row the simulation does not read whenever the qualified dimension
+/// and the indexed axis order their shared element names differently. See
+/// `resolve_axis_index_position`'s docs for the mechanism and the VM oracle.
+///
+/// Note the asymmetry in `source_dims` use: the NAME half keeps its historical
+/// search across the source's *full* dimension list (in a multidimensional
+/// subscript a literal element name is unambiguous project-wide far more often
+/// than not), while the POSITIONAL half must use the axis at `position`,
+/// because a position means nothing without the axis it indexes. An index that
+/// resolves by neither rule classifies defensively as `DynamicIndex`, so the
+/// worst case stays over-conservative (full cross-product) edges.
 fn resolve_literal_index(
     idx: &crate::ast::IndexExpr2,
+    position: usize,
     source_dims: &[crate::dimensions::Dimension],
 ) -> Option<String> {
     use crate::ast::{Expr2, IndexExpr2};
 
-    // Element names appear as `Var(ident, ...)`; integer literals appear
-    // as `Const(text, value, _)`. Anything else (wildcards, ranges, dim
-    // positions, or compound expressions) is not a literal element.
     let canonical = match idx {
         IndexExpr2::Expr(Expr2::Var(ident, _, _)) => ident.as_str().to_string(),
-        IndexExpr2::Expr(Expr2::Const(text, _, _)) => canonicalize(text).into_owned(),
+        IndexExpr2::Expr(Expr2::Const(_, value, _)) => {
+            return crate::dimensions::resolve_axis_index_position(
+                value.value(),
+                source_dims.get(position)?,
+            );
+        }
         _ => return None,
     };
 
     for dim in source_dims {
-        match dim {
-            crate::dimensions::Dimension::Named(_, named) => {
-                if named.elements.iter().any(|e| e.as_str() == canonical) {
-                    return Some(canonical);
-                }
-            }
-            crate::dimensions::Dimension::Indexed(_, size) => {
-                // Indexed dimensions accept integer literals in the
-                // range [1, size]. Canonicalize via parse-then-format
-                // so non-canonical forms like `pop[01]` reduce to `"1"`
-                // -- matching `dimension_element_names`'s `"1".."N"`
-                // output and the Expr0 sibling
-                // (`ltm_augment::resolve_literal_element_index`).
-                // Returning the original text would let `pop[01]`
-                // serialize as `FixedIndex(["01"])` while the partial
-                // builder reduces to `FixedIndex(["1"])`, the shape
-                // comparison would fail, and the live ref would be
-                // wrapped in `PREVIOUS()`.
-                if let Ok(n) = canonical.parse::<u32>()
-                    && n >= 1
-                    && n <= *size
-                {
-                    return Some(n.to_string());
-                }
-            }
+        if let crate::dimensions::Dimension::Named(_, named) = dim
+            && named.elements.iter().any(|e| e.as_str() == canonical)
+        {
+            return Some(canonical);
         }
     }
     None
@@ -190,8 +194,8 @@ fn classify_subscript_shape(
     }
 
     let mut resolved: Vec<String> = Vec::with_capacity(indices.len());
-    for idx in indices {
-        match resolve_literal_index(idx, source_dims) {
+    for (position, idx) in indices.iter().enumerate() {
+        match resolve_literal_index(idx, position, source_dims) {
             Some(name) => resolved.push(name),
             None => return RefShape::DynamicIndex,
         }
@@ -903,6 +907,11 @@ fn walk_all_in_expr(
                     index_nested,
                 );
             } else if let Some((module, port)) = module_output_parts(ident.as_str(), ctx) {
+                // The causal `from` of a `module·port` read is the MODULE node,
+                // so record the edge view under that name. See
+                // `LtmReferenceSitesResult`'s docs for why absence here was not
+                // neutral: it cost the site its `target_element`.
+                acc.push_ref_site(&module, RefShape::Bare, target_element, reducer_keys);
                 acc.push_occurrence(
                     OccurrenceRef::ModuleOutput {
                         module,
@@ -970,6 +979,11 @@ fn walk_all_in_expr(
                     &ctx.target_iterated_dims,
                     ctx.dim_ctx,
                 );
+                // Edge view: a module is a SCALAR node in the causal graph
+                // whatever its output's own shape, so the edge is `Bare` -- the
+                // same shape the missing-entry fallback assumed. What the entry
+                // adds is `target_element`.
+                acc.push_ref_site(&module, RefShape::Bare, target_element, reducer_keys);
                 acc.push_occurrence(
                     OccurrenceRef::ModuleOutput {
                         module,
@@ -1005,7 +1019,7 @@ fn walk_all_in_expr(
             // `dims.len()`), so this is a third variable-width axis -- covered
             // by the same front door, which makes the conversion in range.
             for (i, idx) in indices.iter().enumerate() {
-                if resolve_literal_index(idx, &from_dims).is_some() {
+                if resolve_literal_index(idx, i, &from_dims).is_some() {
                     continue;
                 }
                 acc.path.push(i as u16);
@@ -1077,6 +1091,12 @@ fn walk_all_in_expr(
                                 index_nested,
                             );
                         } else if let Some((module, port)) = module_output_parts(id, ctx) {
+                            acc.push_ref_site(
+                                &module,
+                                RefShape::Bare,
+                                target_element,
+                                reducer_keys,
+                            );
                             acc.push_occurrence(
                                 OccurrenceRef::ModuleOutput {
                                     module,
@@ -1531,20 +1551,48 @@ struct RawOccurrence {
 /// DFS order over the target's AST so salsa caches the result deterministically.
 ///
 /// An edge that exists in the variable-level causal graph but has no AST
-/// reference (a structural flow→stock edge, a module edge, or a synthesized
-/// reference) simply has *no* entry here -- consumers fall back to a single
-/// `Bare` site for it, exactly as the pre-IR walkers' `is_empty()` /
-/// module pre-checks did.
+/// reference (a structural flow→stock edge, or a synthesized reference) simply
+/// has *no* entry here -- consumers fall back to a single `Bare` site for it,
+/// exactly as the pre-IR walkers' `is_empty()` pre-check did.
+///
+/// One family of module edge left that list: `module → variable`. A
+/// `module·port` read is a real AST reference, so it records a `Bare` site keyed
+/// on the MODULE name -- the same shape the fallback synthesized, so the
+/// classification is unchanged and only `target_element` is new. That difference
+/// is the whole point: the fallback's `None` element made
+/// `emit_edges_for_reference` broadcast a scalar module instance across EVERY
+/// element of an arrayed parent, and a per-element expansion mints one instance
+/// per element (`$⁚growth⁚0⁚smth1⁚north` belongs to `growth[north]` alone), so
+/// the broadcast minted cross-element circuits with no reference behind them --
+/// the phantom-edge class `RefShape::PerElement` exists to kill (GH #525). This
+/// is precisely the asymmetry `WalkAccum::push_ref_site`'s docs warn about: in
+/// the edge view, absence is not neutral.
+///
+/// The other two families still have no entry, and the fallback is still live
+/// for them: a `Variable::Module` has no equation of its own, so a
+/// `variable → module` or `module → module` edge has no AST reference anywhere
+/// to record. That is why `model_edge_shapes` keeps its explicit `to_is_module`
+/// short-circuit rather than relying on entries appearing here.
+///
+/// One shape the entry does NOT repair, because `target_element` cannot express
+/// it: an `Ast::Arrayed` target's DEFAULT slot walks with `target_element:
+/// None`, so a module read in a default expression still broadcasts to every
+/// element -- including elements an explicit slot overrode, whose equations do
+/// not read the module at all. Pre-existing (the fallback broadcast identically,
+/// and an ordinary variable in a default slot over-broadcasts the same way), and
+/// conservative rather than wrong, but it is a hole in this contract: the honest
+/// value there is "every element no explicit slot claimed", which an
+/// `Option<String>` has no room for.
 ///
 /// `occurrences` is the finer, per-reference-occurrence enumeration over the
 /// whole target equation (Track A2a), keyed by TARGET canonical name; each
 /// value `Vec<OccurrenceSite>` is in stable left-to-right DFS order (slots in
-/// sorted key order). It is a *superset* of `sites`' causal references -- it
-/// also enumerates the module-qualified by-name live channel (`OccurrenceRef::ModuleOutput`)
-/// that has no `ClassifiedSite`. It rides alongside `sites`; no current
-/// consumer reads it (A2b is the first). Like `sites`, the HashMap *key*
-/// order is irrelevant (consumers sort keys themselves); only each value
-/// `Vec`'s order is load-bearing for salsa determinism.
+/// sorted key order). It is still a *superset* of `sites`' causal references,
+/// though no longer because of module outputs: an occurrence carries the
+/// `composite` spelling and the per-axis reads, which the edge view has no place
+/// for. Like `sites`, the HashMap *key* order is irrelevant (consumers sort keys
+/// themselves); only each value `Vec`'s order is load-bearing for salsa
+/// determinism.
 ///
 /// `site_width_rejection` is the LTM front door's verdict for the whole model
 /// (GH #978/#979). When it is `Some`, at least one target equation needs more

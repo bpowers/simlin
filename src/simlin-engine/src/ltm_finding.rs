@@ -569,6 +569,37 @@ enum ShapeRank {
     FixedIndex = 1,
 }
 
+/// One element-level causal edge and the results slot holding its link score:
+/// `((from_node, to_node), offset)`, where a node carries its element subscript
+/// (`pop[nyc]`) exactly as `model_element_causal_edges` names it.
+pub type LinkScoreOffset = ((Ident<Canonical>, Ident<Canonical>), usize);
+
+/// The element-level `(from, to) -> results offset` edge set that discovery
+/// searches over.
+///
+/// This is `parse_link_offsets` -- the expansion that turns emitted link-score
+/// VARIABLES into per-element EDGES, including the from-side projection
+/// (`expand_a2a_link_offsets`) that keeps the search graph's node names matching
+/// `model_element_causal_edges` node-for-node.
+///
+/// Exposed for analysis and diagnostic tooling that needs to reason about the
+/// edges discovery actually consumes -- notably
+/// `examples/ltm_edge_coverage.rs`, which reports how many causal edges carry a
+/// live score. Such a tool must not re-derive this mapping: an A2A score
+/// occupies one slot per element and the projection is subtle enough that a
+/// second implementation would drift, and a measuring instrument that disagrees
+/// with the thing it measures is worse than no instrument. Build `expansion`
+/// with [`crate::analysis::build_link_expansion_context`] so the inputs match
+/// the production path too.
+pub fn link_score_offsets(
+    results: &Results,
+    ltm_vars: &[LtmSyntheticVar],
+    dims: &[datamodel::Dimension],
+    expansion: &LinkExpansionContext,
+) -> Vec<LinkScoreOffset> {
+    parse_link_offsets(results, ltm_vars, dims, expansion)
+}
+
 fn parse_link_offsets(
     results: &Results,
     ltm_vars: &[LtmSyntheticVar],
@@ -2243,10 +2274,14 @@ fn discovery_module_exit_port(
 /// the exhaustive twin (db/ltm/mod.rs strips `link.from`/`link.to`/`next.from`/
 /// `next.to`). Without it the exact matches fail for every arrayed module loop
 /// and the recompute declines, re-introducing the wrong-exit-port composite bug
-/// (GH #698 / PR #705 r3353758167). NOTE: an arrayed loop through a multi-output
-/// module is not yet discoverable end-to-end -- a scalar module output feeding
-/// an arrayed reader emits a single scalar constant-0 link score that drops the
-/// loop (GH #716) -- so this is currently latent parity defense.
+/// (GH #698 / PR #705 r3353758167). This stripping is LIVE, not latent: an
+/// arrayed loop through a multi-output module is discoverable end-to-end since
+/// GH #716 was closed. A scalar module output feeding an arrayed reader used to
+/// emit one scalar constant-0 link score, which dropped the loop; it is now
+/// scored per target element by
+/// `db::ltm::link_scores::try_implicit_scalar_to_arrayed_link_scores`, and
+/// `analysis::tests::analyze_model_arrayed_module_loop_is_discovered_per_element`
+/// pins the end-to-end result.
 ///
 /// The pathway selection mirrors `db::ltm::compute_module_link_overrides`: the
 /// pathway indices are recomputed from the sub-model graph via the SAME

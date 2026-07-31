@@ -1877,25 +1877,31 @@ mod tests {
         );
     }
 
-    /// DOCUMENTATION of current end-to-end behavior (NOT the regression guard
-    /// for the subscript fix -- that is the unit-level
-    /// `recompute_strips_element_subscripts_before_port_match` in
-    /// `ltm_finding.rs`, which exercises the matching code directly).
+    /// An arrayed loop through a multi-output module IS discovered, once per
+    /// element -- GH #716, closed.
     ///
-    /// An arrayed loop through a multi-output module currently does NOT form in
-    /// discovery: the scalar module output `m·pos` feeding an arrayed reader
-    /// (`growth[Region] = m·pos * 0.1`) emits a single SCALAR
-    /// `$⁚ltm⁚link_score⁚m→growth = 0` rather than per-element `m→growth[e]`
-    /// scores, so the loop product is 0 and discovery drops it. That upstream
-    /// emission gap (the scalar-module-output -> arrayed-reader link-score gap)
-    /// is tracked as GH #716; until it is fixed, the per-exit-port recompute's
-    /// element-subscript handling (PR #705 r3353758167) is latent defense that
-    /// no end-to-end arrayed module loop can reach. This test pins the current
-    /// "no module loop discovered" state so that closing #716 (which should
-    /// flip this assertion to a reinforcing module loop) is a deliberate,
-    /// reviewed change rather than a silent one.
+    /// This assertion was `== 0` and said so deliberately: the scalar module
+    /// output `m·pos` feeding an arrayed reader (`growth[Region] = m·pos * 0.1`)
+    /// emitted a single SCALAR `$⁚ltm⁚link_score⁚m→growth`, whose fragment could
+    /// not compile and so read a constant 0, and a zero-scored edge is dropped
+    /// from the discovery search graph (`IndexedSearch::load_step_scores`) --
+    /// taking every loop through it with it. `try_implicit_scalar_to_arrayed_link_scores`
+    /// now emits one score per target element, so the loops form.
+    ///
+    /// TWO loops, not one, and not four: `m` is scalar, so every element of
+    /// `growth` genuinely reads it, but each `growth[e]` feeds only `s[e]`, so
+    /// the cycles are `s[e] → total → m → growth[e] → s[e]` per element with no
+    /// cross-element pair among them. The old comment's "a reinforcing module
+    /// loop" (singular) anticipated this shape imprecisely.
+    ///
+    /// It also un-blocks what it used to describe as unreachable: the
+    /// per-exit-port recompute's element-subscript handling (PR #705
+    /// r3353758167) is no longer latent, since an arrayed module loop now
+    /// reaches it end to end. The unit-level guard for that path remains
+    /// `recompute_strips_element_subscripts_before_port_match` in
+    /// `ltm_finding.rs`.
     #[test]
-    fn analyze_model_arrayed_module_loop_blocked_by_scalar_output_gap() {
+    fn analyze_model_arrayed_module_loop_is_discovered_per_element() {
         use crate::testutils::x_aux;
 
         let region = datamodel::Dimension::named(
@@ -1971,17 +1977,25 @@ mod tests {
             .iter()
             .filter(|l| l.variables.iter().any(|v| v == "m"))
             .count();
+        let module_loop_vars: Vec<&Vec<String>> = analysis
+            .loop_dominance
+            .iter()
+            .filter(|l| l.variables.iter().any(|v| v == "m"))
+            .map(|l| &l.variables)
+            .collect();
         assert_eq!(
-            module_loops,
-            0,
-            "documents the GH #716 masking: an arrayed loop through a multi-output module is not \
-             discovered today because `m -> growth[e]` scores a scalar 0. When #716 is fixed this \
-             should flip to a discovered reinforcing module loop -- update deliberately. Found: {:?}",
-            analysis
-                .loop_dominance
-                .iter()
-                .map(|l| &l.variables)
-                .collect::<Vec<_>>()
+            module_loops, 2,
+            "GH #716: one arrayed module loop per element of the reader. Found: {module_loop_vars:?}"
         );
+        // Each loop stays within one element -- a cross-element pair here would
+        // be a phantom, since `growth[e]` feeds only `s[e]`.
+        for vars in &module_loop_vars {
+            let touches_nyc = vars.iter().any(|v| v.contains("nyc"));
+            let touches_boston = vars.iter().any(|v| v.contains("boston"));
+            assert!(
+                touches_nyc ^ touches_boston,
+                "a module loop must stay within one element, got {vars:?}"
+            );
+        }
     }
 }

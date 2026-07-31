@@ -2048,6 +2048,15 @@ pub fn model_ltm_variables(
         .filter(|v| v.name.contains("\u{205A}link_score\u{205A}"))
         .map(|v| v.name.clone())
         .collect();
+    // Warn ONCE per unresolved edge, not once per pathway that traverses it.
+    // `enumerate_pathways_to_outputs` admits up to `MAX_PATHWAYS_PER_PORT`
+    // paths per input port and a converging module graph shares edges across
+    // most of them, while `collect_model_diagnostics` does not deduplicate
+    // accumulator output -- so an un-gated warning here is thousands of
+    // identical rows drowning out every other diagnostic. This mirrors the
+    // warn-once-per-edge convention `unscoreable_edges` already applies on the
+    // link-score side.
+    let mut warned_unresolved: HashSet<(String, String, String)> = HashSet::new();
     for (input_port, port_pathways) in &pathways {
         let mut pathway_names = Vec::new();
         for (idx, pathway_links) in port_pathways.iter().enumerate() {
@@ -2070,6 +2079,35 @@ pub fn model_ltm_variables(
                         &pathway_emitted_names,
                         None,
                     );
+                    // `resolve_link_score_name_for_loop` falls back to the Bare
+                    // name when nothing matches, and the fragment compiler then
+                    // stubs the missing dependency to a constant 0 -- so the
+                    // whole pathway, its composite, and every loop through the
+                    // module silently read 0. That fallback is deliberate here
+                    // (unlike loop-score generation, which drops the loop), but
+                    // it must not be SILENT: `model_ltm_fragment_diagnostics`
+                    // only warns about variables that were emitted, and this
+                    // name never is. A per-target-element score is one shape that
+                    // reaches it -- `try_scalar_to_arrayed_link_scores` and
+                    // `try_implicit_scalar_to_arrayed_link_scores` both name the
+                    // element on the `to` side, which this variable-level
+                    // resolution cannot spell.
+                    if !pathway_emitted_names.contains(&resolved)
+                        && warned_unresolved.insert((
+                            input_port.as_str().to_string(),
+                            link.from.as_str().to_string(),
+                            link.to.as_str().to_string(),
+                        ))
+                    {
+                        emit_unresolved_pathway_link_warning(
+                            db,
+                            model,
+                            input_port.as_str(),
+                            link.from.as_str(),
+                            link.to.as_str(),
+                            &resolved,
+                        );
+                    }
                     format!("\"{resolved}\"")
                 })
                 .collect();
@@ -2161,3 +2199,48 @@ pub fn model_ltm_variables(
 #[cfg(test)]
 #[path = "../ltm_tests.rs"]
 mod ltm_tests;
+
+/// Accumulate a `Warning` when a sub-model PATHWAY equation references a
+/// link-score variable that was never emitted.
+///
+/// `resolve_link_score_name_for_loop` deliberately falls back to the Bare name
+/// for pathway/composite consumers, and the fragment compiler then stubs the
+/// missing dependency to a constant 0 -- so the pathway, the composite built
+/// from it, and every loop through the module read 0. That degradation is
+/// tolerated; being SILENT about it is not. `model_ltm_fragment_diagnostics`
+/// cannot cover it, because it warns about variables that WERE emitted and this
+/// name never is.
+///
+/// The shape that reaches this today is a per-target-element score: both
+/// `try_scalar_to_arrayed_link_scores` and
+/// `try_implicit_scalar_to_arrayed_link_scores` put the element on the `to`
+/// side (`{from}→{to}[{elem}]`), and pathway links come from the
+/// VARIABLE-level graph, so there is no element to spell and no name to match.
+/// The honest fix is a per-element pathway resolution -- the analogue of the
+/// `⁚via⁚` aliases `compute_module_link_overrides` mints for module hops -- and
+/// until that exists this warning is what keeps the zero attributable.
+fn emit_unresolved_pathway_link_warning(
+    db: &dyn Db,
+    model: SourceModel,
+    input_port: &str,
+    from: &str,
+    to: &str,
+    attempted: &str,
+) {
+    use crate::db::{CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity};
+    use salsa::Accumulator;
+    let msg = format!(
+        "LTM pathway score for input port {input_port} references link score \
+         '{attempted}' for edge {from} -> {to}, which was not emitted (the edge is \
+         scored per target element, and a pathway link has no element to name); \
+         that factor reads a constant 0, so this pathway, the composite built from \
+         it, and any loop through this module are degraded"
+    );
+    CompilationDiagnostic(Diagnostic {
+        model: model.name(db).clone(),
+        variable: None,
+        error: DiagnosticError::Assembly(msg),
+        severity: DiagnosticSeverity::Warning,
+    })
+    .accumulate(db);
+}

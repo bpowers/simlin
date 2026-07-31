@@ -1788,21 +1788,30 @@ pub(crate) fn classify_axis_access(
 }
 
 /// Resolve a single subscript index to a literal element name (canonical
-/// lowercase) of `dim`, or `None` for any other shape. The `Expr2`-side
-/// sibling of `db::ltm_ir::resolve_literal_index` / `ltm_augment`'s Expr0
-/// `resolve_literal_element_index`: element names parse as `Expr2::Var`
-/// (the parser keeps the raw element identifier as a `Var`; numeric-offset
-/// resolution happens later in Expr3 lowering); integer literals (used for
-/// indexed dimensions) parse as `Expr2::Const`. For an indexed dimension the
-/// literal is canonicalized via parse-then-format so `pop[01]` reduces to
-/// `"1"`, matching the element names `dimension_element_names` produces.
+/// lowercase) of `dim`, or `None` for any other shape. The per-axis sibling of
+/// `db::ltm_ir::resolve_literal_index`, and it must stay in lockstep with it:
+/// this one decides an `AxisRead::Pinned`, that one an `OccurrenceSite`'s
+/// `RefShape`, and a disagreement desynchronizes `ClassifiedSite::shape` from
+/// `OccurrenceSite::axes` for the same reference.
+///
+/// The same two-spelling split applies. An `Expr2::Var` is a bare element name
+/// and resolves BY NAME against this axis. An `Expr2::Const` is a numeric
+/// literal or a constified qualified `dimension·element` reference, and resolves
+/// POSITIONALLY via [`crate::dimensions::resolve_axis_index_position`] --
+/// see that function for why by-name would describe a row the simulation never
+/// reads.
+///
+/// Unlike the `ltm_ir` sibling, the name half is already scoped to one axis
+/// here, because every caller knows which axis it is classifying.
 fn resolve_literal_axis_index(
     idx: &IndexExpr2,
     dim: &crate::dimensions::Dimension,
 ) -> Option<String> {
     let canonical = match idx {
         IndexExpr2::Expr(Expr2::Var(ident, _, _)) => ident.as_str().to_string(),
-        IndexExpr2::Expr(Expr2::Const(text, _, _)) => canonicalize(text).into_owned(),
+        IndexExpr2::Expr(Expr2::Const(_, value, _)) => {
+            return crate::dimensions::resolve_axis_index_position(value.value(), dim);
+        }
         _ => return None,
     };
     match dim {
