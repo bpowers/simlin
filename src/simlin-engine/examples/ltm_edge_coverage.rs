@@ -222,6 +222,18 @@ fn main() {
                 println!("  score: {} dims={:?}", var.name, var.dimensions);
             }
         }
+        // Every LTM diagnostic naming the needle -- the DECLINE warnings as well
+        // as the compile failures. An edge with no score and no warning is a
+        // silent gap; one with a warning is a decision, and the message says
+        // which.
+        println!("\n=== LTM diagnostics naming {needle:?} ===");
+        for d in simlin_engine::db::collect_all_diagnostics(&db, sync.project).iter() {
+            if let simlin_engine::db::DiagnosticError::Assembly(msg) = &d.error
+                && msg.contains(&needle)
+            {
+                println!("  [{:?}] {msg}", d.severity);
+            }
+        }
     }
 
     // --- cycle membership, at element granularity ---------------------------

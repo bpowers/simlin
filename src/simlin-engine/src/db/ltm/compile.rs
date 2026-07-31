@@ -1358,11 +1358,20 @@ pub(crate) fn compile_ltm_equation_fragment(
                     implicit_submodels.push((mn.to_string(), *sub_model));
                 }
             } else {
+                // An ARRAYED implicit helper needs a dimension-aware stub for
+                // exactly the reason the LTM-side branch below documents: a
+                // consuming `helper[dim·elem]` subscript cannot lower against a
+                // scalar stub ("expected array variable ... to have
+                // dimensions"), so the fragment fails and the score reads a
+                // constant 0. `ImplicitVarMeta::dimensions` is carried for this
+                // -- it was consulted for LTM parse helpers and not for the
+                // model's own implicit vars, which is where the GH #541 arrayed
+                // `PREVIOUS`/`INIT` capture lands.
                 dep_variables.push((
                     dep_ident.clone(),
                     crate::variable::Variable::Var {
                         ident: dep_ident,
-                        ast: None,
+                        ast: stub_ast_for_dimension_names(&im_meta.dimensions, dim_context),
                         init_ast: None,
                         eqn: None,
                         units: None,
@@ -1405,27 +1414,14 @@ pub(crate) fn compile_ltm_equation_fragment(
                     datamodel::Equation::ApplyToAll(dim_names, _)
                     | datamodel::Equation::Arrayed(dim_names, _, _, _),
                 ) => {
-                    let canonical_dims: Vec<crate::dimensions::Dimension> = dim_names
-                        .iter()
-                        .filter_map(|name| {
-                            let canonical = crate::common::CanonicalDimensionName::from_raw(name);
-                            dim_context.get(&canonical).cloned()
-                        })
-                        .collect();
-                    let size: usize = canonical_dims.iter().map(|d| d.len()).product();
-                    let ast = if canonical_dims.is_empty() {
-                        None
-                    } else {
-                        Some(crate::ast::Ast::ApplyToAll(
-                            canonical_dims,
-                            crate::ast::Expr2::Const(
-                                "0".to_string(),
-                                crate::ast::Literal::new(0.0),
-                                crate::ast::Loc::default(),
-                            ),
-                        ))
+                    let ast = stub_ast_for_dimension_names(dim_names, dim_context);
+                    let size = match &ast {
+                        Some(crate::ast::Ast::ApplyToAll(dims, _)) => {
+                            dims.iter().map(|d| d.len()).product::<usize>().max(1)
+                        }
+                        _ => 1,
                     };
-                    (size.max(1), ast)
+                    (size, ast)
                 }
                 _ => (1, None),
             };
@@ -2734,6 +2730,44 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         // run-invariance.
         flow_invariance: None,
     })
+}
+
+/// A dimension-aware dep stub's AST for a helper declared over `dim_names`, or
+/// `None` when it is scalar (or names no dimension the project declares).
+///
+/// The fragment compiler resolves a `helper[dim·elem]` subscript through the
+/// dep stub's `get_dimensions()`, so a stub built with `ast: None` for an
+/// ARRAYED helper fails lowering with "expected array variable ... to have
+/// dimensions" and takes every score that touches the helper to a constant 0.
+/// Only the SHAPE matters -- nothing reads the body -- so the arms are a
+/// constant.
+///
+/// Shared by the two dep-stub branches that can see an arrayed helper: the
+/// model's own implicit vars (`ImplicitVarMeta::dimensions`, where the GH #541
+/// arrayed `PREVIOUS`/`INIT` capture lands) and the LTM parse-time helpers. They
+/// had drifted -- the second handled it, the first did not.
+fn stub_ast_for_dimension_names(
+    dim_names: &[String],
+    dim_context: &crate::dimensions::DimensionsContext,
+) -> Option<crate::ast::Ast<crate::ast::Expr2>> {
+    let canonical_dims: Vec<crate::dimensions::Dimension> = dim_names
+        .iter()
+        .filter_map(|name| {
+            let canonical = crate::common::CanonicalDimensionName::from_raw(name);
+            dim_context.get(&canonical).cloned()
+        })
+        .collect();
+    if canonical_dims.is_empty() {
+        return None;
+    }
+    Some(crate::ast::Ast::ApplyToAll(
+        canonical_dims,
+        crate::ast::Expr2::Const(
+            "0".to_string(),
+            crate::ast::Literal::new(0.0),
+            crate::ast::Loc::default(),
+        ),
+    ))
 }
 
 #[cfg(test)]

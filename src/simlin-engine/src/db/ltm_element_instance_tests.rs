@@ -574,3 +574,80 @@ fn an_arrayed_capture_helper_is_not_treated_as_element_bound() {
         );
     }
 }
+
+/// An ARRAYED capture helper's own link scores must compile.
+///
+/// `ImplicitVarMeta::dimensions` exists so the fragment compiler's dep-stub
+/// builder can give an arrayed implicit helper its real array shape -- its own
+/// rustdoc says so, naming the GH #541 helper as the reason. The LTM fragment
+/// compiler consulted it for LTM-side parse helpers and NOT for the model's own
+/// implicit vars, which got a scalar `Variable::Var` stub with `ast: None`. A
+/// consuming `helper[dim·elem]` subscript then failed lowering with "expected
+/// array variable ... to have dimensions", so every score touching the helper
+/// read a constant 0 and took the loop scores with it.
+#[test]
+fn an_arrayed_capture_helpers_scores_compile() {
+    let project = TestProject::new("arrayed_capture_helper_compiles")
+        .with_sim_time(0.0, 10.0, 0.25)
+        .named_dimension("Region", &["north", "south"])
+        .array_stock("stock[Region]", "10", &["growth"], &[], None)
+        .array_flow(
+            "growth[Region]",
+            "SMTH1(stock[Region], 1) * 0.1 + PREVIOUS(PREVIOUS(stock)) * 0.001",
+            None,
+        );
+    let datamodel = project.build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+
+    let failures: Vec<String> = collect_all_diagnostics(&db, sync.project)
+        .iter()
+        .filter_map(|d| match &d.error {
+            DiagnosticError::Assembly(msg) if msg.contains("failed to compile") => {
+                Some(format!("{:?}: {msg}", d.variable))
+            }
+            _ => None,
+        })
+        .collect();
+
+    // What this fix establishes: no fragment fails because the HELPER ITSELF
+    // has no shape. Before it, `$⁚growth⁚1⁚arg0` was stubbed as a size-1 scalar
+    // and every consumer's `helper[dim·elem]` subscript failed lowering.
+    let helper_shape_failures: Vec<&String> = failures
+        .iter()
+        .filter(|m| m.contains("expected array variable '$⁚growth⁚1⁚arg0'"))
+        .collect();
+    assert!(
+        helper_shape_failures.is_empty(),
+        "an arrayed implicit helper must get a dimension-aware dep stub; {} \
+         fragment(s) still fail on the HELPER's shape:\n{}",
+        helper_shape_failures.len(),
+        failures.join("\n")
+    );
+
+    // SCOPE, stated rather than implied. This fixture still has failures, and
+    // they are two OTHER root causes, both left for separate work:
+    //
+    //  * `PREVIOUS` of an array-valued reference has no codegen path (GH #995),
+    //    so the helper's own partial cannot freeze its arrayed argument. Closing
+    //    it means synthesizing an ARRAYED freeze helper (#995's option B) rather
+    //    than declining -- the same contract behind the array-slice declines on
+    //    C-LEARN's remaining loop-carrying edges.
+    //  * the loop builder subscripts `{helper}[elem]→growth` as though it were
+    //    dimensioned, while the emitter gives it none -- an emitter/consumer
+    //    shape disagreement that survives independently of the above.
+    //
+    // Asserting zero failures here would make this test a hostage to both.
+    // Enumerating the classes it DOES tolerate is what keeps it from silently
+    // absorbing a new one.
+    for msg in &failures {
+        assert!(
+            msg.contains("PREVIOUS requires a variable reference")
+                || msg.contains("expected array variable '$⁚ltm⁚link_score⁚"),
+            "unexpected residual failure class -- this test tolerates only the \
+             GH #995 array-freeze class and the loop-builder shape \
+             disagreement:\n{msg}"
+        );
+    }
+}
