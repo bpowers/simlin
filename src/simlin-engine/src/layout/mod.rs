@@ -4399,6 +4399,9 @@ fn build_feedback_loops_from_metadata(
             variables,
             importance_series: Vec::new(),
             dominant_period: None,
+            // Persisted loop metadata carries no partition information;
+            // the None loops share one dominance group (GH #998).
+            partition: None,
         });
     }
     feedback_loops
@@ -4551,6 +4554,11 @@ fn try_detect_ltm_loops_incremental(
             variables,
             importance_series,
             dominant_period: None,
+            // The detected loop's result-scoped cycle partition (an A2A
+            // loop's index is its first resolving slot's partition), so
+            // dominant-period selection competes partition-mates only
+            // (GH #998).
+            partition: dl.partition,
         });
     }
 

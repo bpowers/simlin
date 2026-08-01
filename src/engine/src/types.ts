@@ -586,10 +586,20 @@ export interface Link {
    *
    * The raw {@link score} normalized, per target and per timestep, against
    * the sum of `|score|` over all of `to`'s scored inputs -- a value in
-   * `[-1, 1]` that IS comparable across targets and is the correct key for
-   * ranking links by importance (GH #652). Present exactly when `score` is.
+   * `[-1, 1]` (GH #652). Comparable between the inputs of ONE target; see
+   * {@link scoredInputCount} for the cross-target ranking caveat. Present
+   * exactly when `score` is.
    */
   readonly relativeScore?: Float64Array;
+  /**
+   * The size of {@link relativeScore}'s normalization group: how many scored
+   * links share this link's `to` target, itself included; 0 when this link
+   * carries no score. A group of ONE reads exactly ±1 at every step BY
+   * CONSTRUCTION, so ranking links globally by `|relativeScore|` floats
+   * such no-competition links to the top -- group links by `to` and rank
+   * within a group, using this field to detect the trivial groups (GH #998).
+   */
+  readonly scoredInputCount: number;
 }
 
 /**
@@ -627,6 +637,11 @@ export interface Loop {
 
 /**
  * A period of time where specific loops are dominant.
+ *
+ * Dominance is computed WITHIN a cycle partition (a loop's importance is its
+ * share of its own partition's total, so cross-partition ranking is not
+ * well-defined); a result carries one period timeline per partition, and
+ * `partition` says which one this period describes.
  */
 export interface DominantPeriod {
   /** IDs of dominant loops during this period */
@@ -635,4 +650,10 @@ export interface DominantPeriod {
   readonly startTime: number;
   /** End time of this period */
   readonly endTime: number;
+  /**
+   * Result-scoped index naming the cycle partition this period describes
+   * (the same index space as `Loop.partition`), or `null` for the shared
+   * group of loops with no partition metadata.
+   */
+  readonly partition: number | null;
 }

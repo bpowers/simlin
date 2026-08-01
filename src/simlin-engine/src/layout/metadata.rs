@@ -25,6 +25,14 @@ pub struct DominantPeriod {
     pub dominant_loops: Vec<String>,
     /// Combined relative score of the dominant loops.
     pub combined_score: f64,
+    /// The cycle partition this period describes (GH #998): dominance is
+    /// computed WITHIN a partition, because a loop's importance series is its
+    /// share of its own partition's total and is not comparable across
+    /// partitions.  `None` labels the shared group of loops that carried no
+    /// partition metadata (the layout fallback path).  On the analysis
+    /// surface this indexes `ModelAnalysis::partitions`, the same space as
+    /// `LoopSummary::partition`.
+    pub partition: Option<usize>,
 }
 
 /// A feedback loop discovered via LTM analysis.
@@ -35,6 +43,11 @@ pub struct FeedbackLoop {
     pub variables: Vec<String>,
     pub importance_series: Vec<f64>,
     pub dominant_period: Option<DominantPeriod>,
+    /// The loop's cycle partition (GH #998), used to group loops for
+    /// dominant-period selection: importance is a share WITHIN a partition,
+    /// so only partition-mates compete.  `None` when the producing surface
+    /// has no partition metadata; all `None` loops share one group.
+    pub partition: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -103,22 +116,65 @@ impl ComputedMetadata {
     }
 }
 
-/// Calculate dominant periods from feedback loop importance series.
+/// Calculate dominant periods from feedback loop importance series,
+/// PER CYCLE PARTITION (GH #998).
 ///
-/// At each timestep, polarity is determined by score sign (positive =
-/// reinforcing, negative = balancing), matching the Praxis reference.
-/// A two-pass approach first computes aggregate totals per polarity,
-/// then selects the winning polarity and accumulates loops until the
-/// combined score reaches 0.5. If neither polarity reaches 0.5, all
-/// loops from whichever polarity has the higher total are used.
+/// A loop's importance series is its signed share of its own cycle
+/// partition's total absolute loop score, so cross-partition values are not
+/// comparable: a loop ALONE in its partition reads exactly `±1` at every
+/// active step by construction, and a flat cross-partition ranking is
+/// dominated by such groups of one (on C-LEARN the isolated trace-gas decay
+/// loops beat every climate loop at every step).  Dominance is therefore
+/// computed within each partition independently, and every returned period
+/// says which partition it describes.
 ///
-/// Consecutive timesteps with the same dominant loop set are grouped
-/// into a single `DominantPeriod`.
+/// Loops with `partition == None` (a surface with no partition metadata,
+/// e.g. the layout fallback path) share one group, which preserves the
+/// pre-partition behavior exactly for that path.
+///
+/// Periods are ordered partition-major -- ascending partition index, the
+/// `None` group last -- with each partition's periods in time order.
+/// Partition indices are dense in first-appearance order over the ranked
+/// (competitive-first) loop list, so partition 0 is the most competitive
+/// group and leads the output.
 ///
 /// `dt` is the time between consecutive entries in each loop's importance_series.
 /// `start_time` is the simulation start time.
 pub fn calculate_dominant_periods(
     loops: &[FeedbackLoop],
+    start_time: f64,
+    dt: f64,
+) -> Vec<DominantPeriod> {
+    // Group loops by partition, preserving each group's input (ranked)
+    // order.  `(is_none, partition)` sorts Some(0), Some(1), ..., None.
+    let mut groups: BTreeMap<(bool, usize), Vec<&FeedbackLoop>> = BTreeMap::new();
+    for l in loops {
+        groups
+            .entry((l.partition.is_none(), l.partition.unwrap_or(0)))
+            .or_default()
+            .push(l);
+    }
+
+    groups
+        .into_values()
+        .flat_map(|group| {
+            let partition = group[0].partition;
+            calculate_dominant_periods_for_group(&group, partition, start_time, dt)
+        })
+        .collect()
+}
+
+/// The per-partition dominance selection: at each timestep, polarity is
+/// determined by score sign (positive = reinforcing, negative = balancing),
+/// matching the Praxis reference.  A two-pass approach first computes
+/// aggregate totals per polarity, then selects the winning polarity and
+/// accumulates loops until the combined score reaches 0.5.  If neither
+/// polarity reaches 0.5, all loops from whichever polarity has the higher
+/// total are used.  Consecutive timesteps with the same dominant loop set
+/// are grouped into a single `DominantPeriod` tagged with `partition`.
+fn calculate_dominant_periods_for_group(
+    loops: &[&FeedbackLoop],
+    partition: Option<usize>,
     start_time: f64,
     dt: f64,
 ) -> Vec<DominantPeriod> {
@@ -257,6 +313,7 @@ pub fn calculate_dominant_periods(
             end: time,
             dominant_loops: dominant_names,
             combined_score: combined,
+            partition,
         });
     }
 
@@ -286,6 +343,7 @@ mod tests {
             ],
             importance_series: vec![],
             dominant_period: None,
+            partition: None,
         };
         assert_eq!(fl.causal_chain(), &["population", "births", "birth_rate"]);
     }
@@ -298,6 +356,7 @@ mod tests {
             variables: vec!["a".to_string(), "b".to_string()],
             importance_series: vec![0.5, -0.3, 0.8, -0.4],
             dominant_period: None,
+            partition: None,
         };
         // abs values: 0.5 + 0.3 + 0.8 + 0.4 = 2.0, mean = 0.5
         let avg = fl.average_importance();
@@ -312,6 +371,7 @@ mod tests {
             variables: vec![],
             importance_series: vec![],
             dominant_period: None,
+            partition: None,
         };
         assert!((fl.average_importance() - 0.0).abs() < f64::EPSILON);
     }
@@ -381,6 +441,7 @@ mod tests {
             variables: vec!["a".to_string(), "b".to_string()],
             importance_series: vec![0.8, 0.7, 0.9],
             dominant_period: None,
+            partition: None,
         }];
         let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
         assert_eq!(periods.len(), 1);
@@ -407,6 +468,7 @@ mod tests {
                 variables: vec!["a".to_string()],
                 importance_series: vec![0.7, 0.6, 0.1, 0.1],
                 dominant_period: None,
+                partition: None,
             },
             FeedbackLoop {
                 name: "B1".to_string(),
@@ -414,6 +476,7 @@ mod tests {
                 variables: vec!["b".to_string()],
                 importance_series: vec![-0.3, -0.4, -0.9, -0.9],
                 dominant_period: None,
+                partition: None,
             },
         ];
         let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
@@ -433,6 +496,7 @@ mod tests {
                 variables: vec!["a".to_string()],
                 importance_series: vec![0.6, 0.8, 0.1, 0.1],
                 dominant_period: None,
+                partition: None,
             },
             FeedbackLoop {
                 name: "B1".to_string(),
@@ -440,6 +504,7 @@ mod tests {
                 variables: vec!["b".to_string()],
                 importance_series: vec![-0.2, -0.1, -0.7, -0.9],
                 dominant_period: None,
+                partition: None,
             },
         ];
         let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
@@ -472,6 +537,7 @@ mod tests {
                 variables: vec!["a".to_string()],
                 importance_series: vec![0.35, 0.20, 0.35],
                 dominant_period: None,
+                partition: None,
             },
             FeedbackLoop {
                 name: "R2".to_string(),
@@ -479,6 +545,7 @@ mod tests {
                 variables: vec!["b".to_string()],
                 importance_series: vec![0.20, 0.35, 0.20],
                 dominant_period: None,
+                partition: None,
             },
         ];
         let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
@@ -509,6 +576,7 @@ mod tests {
             variables: vec!["a".to_string()],
             importance_series: vec![0.8, 0.7, 0.0, 0.9, 0.6],
             dominant_period: None,
+            partition: None,
         }];
         let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
         assert_eq!(
@@ -534,6 +602,7 @@ mod tests {
                 variables: vec!["a".to_string()],
                 importance_series: vec![0.6],
                 dominant_period: None,
+                partition: None,
             },
             FeedbackLoop {
                 name: "A1".to_string(),
@@ -541,6 +610,7 @@ mod tests {
                 variables: vec!["b".to_string()],
                 importance_series: vec![0.3],
                 dominant_period: None,
+                partition: None,
             },
         ];
         let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
@@ -558,6 +628,7 @@ mod tests {
             variables: vec!["a".to_string()],
             importance_series: vec![],
             dominant_period: None,
+            partition: None,
         }];
         let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
         assert!(periods.is_empty());
@@ -576,6 +647,7 @@ mod tests {
                 variables: vec!["a".to_string()],
                 importance_series: vec![0.4],
                 dominant_period: None,
+                partition: None,
             },
             FeedbackLoop {
                 name: "B1".to_string(),
@@ -583,6 +655,7 @@ mod tests {
                 variables: vec!["b".to_string()],
                 importance_series: vec![-0.3],
                 dominant_period: None,
+                partition: None,
             },
             FeedbackLoop {
                 name: "B2".to_string(),
@@ -590,6 +663,7 @@ mod tests {
                 variables: vec!["c".to_string()],
                 importance_series: vec![-0.25],
                 dominant_period: None,
+                partition: None,
             },
         ];
         let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
@@ -616,6 +690,7 @@ mod tests {
                 variables: vec!["a".to_string()],
                 importance_series: vec![0.3],
                 dominant_period: None,
+                partition: None,
             },
             FeedbackLoop {
                 name: "R2".to_string(),
@@ -623,6 +698,7 @@ mod tests {
                 variables: vec!["b".to_string()],
                 importance_series: vec![0.1],
                 dominant_period: None,
+                partition: None,
             },
             FeedbackLoop {
                 name: "B1".to_string(),
@@ -630,6 +706,7 @@ mod tests {
                 variables: vec!["c".to_string()],
                 importance_series: vec![-0.2],
                 dominant_period: None,
+                partition: None,
             },
         ];
         let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
@@ -652,6 +729,7 @@ mod tests {
                 variables: vec!["a".to_string()],
                 importance_series: vec![0.6],
                 dominant_period: None,
+                partition: None,
             },
             FeedbackLoop {
                 name: "B1".to_string(),
@@ -659,6 +737,7 @@ mod tests {
                 variables: vec!["b".to_string()],
                 importance_series: vec![-0.5],
                 dominant_period: None,
+                partition: None,
             },
             FeedbackLoop {
                 name: "B2".to_string(),
@@ -666,6 +745,7 @@ mod tests {
                 variables: vec!["c".to_string()],
                 importance_series: vec![-0.4],
                 dominant_period: None,
+                partition: None,
             },
         ];
         let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
@@ -696,6 +776,7 @@ mod tests {
                 variables: vec!["a".to_string()],
                 importance_series: vec![-0.01],
                 dominant_period: None,
+                partition: None,
             },
             FeedbackLoop {
                 name: "Z1".to_string(),
@@ -703,6 +784,7 @@ mod tests {
                 variables: vec!["b".to_string()],
                 importance_series: vec![0.0],
                 dominant_period: None,
+                partition: None,
             },
         ];
         let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
@@ -713,5 +795,103 @@ mod tests {
             "zero-score loop Z1 should not appear in dominant set, got: {:?}",
             periods[0].dominant_loops,
         );
+    }
+
+    fn partitioned_loop(name: &str, series: Vec<f64>, partition: Option<usize>) -> FeedbackLoop {
+        FeedbackLoop {
+            name: name.to_string(),
+            polarity: LoopPolarity::Undetermined,
+            variables: vec![],
+            importance_series: series,
+            dominant_period: None,
+            partition,
+        }
+    }
+
+    /// The GH #998 shape: a loop ALONE in its partition reads exactly 1.0 at
+    /// every step (its share of a one-loop partition is 1 by construction),
+    /// while a competitive partition's loops trade dominance.  The old flat
+    /// ranking let the singleton smother the competitive partition at every
+    /// step; per-partition selection must report BOTH -- the competitive
+    /// partition's switch structure AND the singleton's trivial period, each
+    /// labeled with its partition.
+    #[test]
+    fn test_dominant_periods_singleton_partition_does_not_smother() {
+        let loops = vec![
+            partitioned_loop("R1", vec![0.7, 0.6, 0.1, 0.1], Some(0)),
+            partitioned_loop("B1", vec![-0.3, -0.4, -0.9, -0.9], Some(0)),
+            // The lone-partition loop: share identically 1.0 while active.
+            partitioned_loop("B_lone", vec![-1.0, -1.0, -1.0, -1.0], Some(1)),
+        ];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+
+        let p0: Vec<_> = periods.iter().filter(|p| p.partition == Some(0)).collect();
+        let p1: Vec<_> = periods.iter().filter(|p| p.partition == Some(1)).collect();
+        assert_eq!(
+            p0.len(),
+            2,
+            "partition 0 must keep its R1->B1 dominance switch: {periods:?}"
+        );
+        assert_eq!(p0[0].dominant_loops, vec!["R1"]);
+        assert_eq!(p0[1].dominant_loops, vec!["B1"]);
+        assert_eq!(
+            p1.len(),
+            1,
+            "the singleton partition reports its own (trivial) period"
+        );
+        assert_eq!(p1[0].dominant_loops, vec!["B_lone"]);
+        assert!(
+            !periods
+                .iter()
+                .any(|p| p.dominant_loops.contains(&"B_lone".to_string())
+                    && p.partition != Some(1)),
+            "the lone loop must never appear in another partition's periods"
+        );
+    }
+
+    /// Periods arrive partition-major: ascending partition index first, the
+    /// None (no-metadata) group last, times ascending within each partition.
+    #[test]
+    fn test_dominant_periods_partition_major_ordering() {
+        let loops = vec![
+            // Deliberately listed out of partition order.
+            partitioned_loop("U_meta", vec![0.9, 0.9], None),
+            partitioned_loop("R_p1", vec![0.8, 0.8], Some(1)),
+            partitioned_loop("R_p0", vec![0.7, 0.7], Some(0)),
+        ];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        let order: Vec<Option<usize>> = periods.iter().map(|p| p.partition).collect();
+        assert_eq!(
+            order,
+            vec![Some(0), Some(1), None],
+            "periods must be partition-major with the None group last"
+        );
+        for pair in periods.windows(2) {
+            if pair[0].partition == pair[1].partition {
+                assert!(pair[0].start <= pair[1].start);
+            }
+        }
+    }
+
+    /// Loops with no partition metadata (the layout fallback path) share ONE
+    /// group, so that path's behavior is byte-identical to the pre-partition
+    /// flat selection -- including cross-loop accumulation to the 0.5
+    /// threshold.
+    #[test]
+    fn test_dominant_periods_none_partitions_share_one_group() {
+        let loops = vec![
+            partitioned_loop("R1", vec![0.35], None),
+            partitioned_loop("R2", vec![0.20], None),
+        ];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        assert_eq!(periods.len(), 1);
+        let mut names = periods[0].dominant_loops.clone();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["R1", "R2"],
+            "None-partition loops must accumulate in one shared group"
+        );
+        assert_eq!(periods[0].partition, None);
     }
 }

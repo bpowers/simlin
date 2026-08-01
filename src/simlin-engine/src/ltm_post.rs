@@ -998,6 +998,67 @@ pub fn compute_rel_loop_score_argmax_abs(
     Some(out)
 }
 
+/// The RAW sibling of [`compute_rel_loop_score_for_element`] (GH #998):
+/// reads element `element_index` of `loop_id`'s raw `loop_score` series with
+/// NO normalization.  This is the accessor the lone-pin workaround needs --
+/// a modeler-pinned loop alone in its cycle partition has a relative score
+/// of exactly `±1` by construction, so its RAW series is the informative
+/// one, and before this the raw read (`get_series` on the synthetic name)
+/// silently resolved to element 0 only.
+///
+/// Conventions match the relative sibling: scalar loops (`n_slots <= 1`)
+/// read slot 0; an `element_index` past `n_slots` yields zero-fill rather
+/// than reading a neighboring column; `None` only when the loop's
+/// `loop_score` variable is absent from `results`.
+pub fn compute_raw_loop_score_for_element(
+    results: &Results,
+    loop_id: &str,
+    n_slots: usize,
+    element_index: usize,
+) -> Option<Vec<f64>> {
+    let off = results.offsets.get(&loop_score_ident(loop_id)).copied()?;
+    let Some(slot) = effective_slot(n_slots, element_index) else {
+        return Some(vec![0.0; results.step_count]);
+    };
+    Some(results.iter().map(|row| row[off + slot]).collect())
+}
+
+/// The RAW sibling of [`compute_rel_loop_score_argmax_abs`] (GH #998): the
+/// bare-id aggregate over an arrayed loop's raw `loop_score` slots -- each
+/// step emits the SIGNED value of the slot with the largest magnitude, ties
+/// broken to the lowest slot index.  Scalar (`n_slots <= 1`) reduces to
+/// identity, so a bare id means the same thing on the raw and relative
+/// accessors (the dominant element's contribution, sign preserved).  Note
+/// the dominant slot is picked by |raw| here and by |relative| there, so
+/// the two aggregates can select different slots at a step where slots sit
+/// in different partitions with different denominators.
+pub fn compute_raw_loop_score_argmax_abs(
+    results: &Results,
+    loop_id: &str,
+    n_slots: usize,
+) -> Option<Vec<f64>> {
+    let off = results.offsets.get(&loop_score_ident(loop_id)).copied()?;
+    let slots = n_slots.max(1);
+    let mut out = Vec::with_capacity(results.step_count);
+    for row in results.iter() {
+        let mut best: f64 = 0.0;
+        let mut best_abs: f64 = -1.0;
+        for k in 0..slots {
+            let Some(slot) = effective_slot(n_slots, k) else {
+                continue;
+            };
+            let v = row[off + slot];
+            // `>` (not `>=`) keeps the lowest-index slot on ties.
+            if v.abs() > best_abs {
+                best_abs = v.abs();
+                best = v;
+            }
+        }
+        out.push(best);
+    }
+    Some(out)
+}
+
 /// One causal link's input to relative-link-score normalization: the
 /// canonical name of the link's `to` target plus its raw LTM link-score
 /// series (`None` for an edge with no score series -- a constant/parameter
@@ -1119,6 +1180,34 @@ pub fn compute_rel_link_scores(
                 })
                 .collect();
             Some(out)
+        })
+        .collect()
+}
+
+/// The size of each link's relative-score normalization group (GH #998):
+/// for a scored link, the number of scored links sharing its `to` target
+/// (itself included); `0` for an unscored link.  Parallel to `links`.
+///
+/// The relative link score is a share WITHIN this group, so a group of ONE
+/// reads exactly `±1` at every step by construction -- carrying no ranking
+/// information.  Exposing the group size makes that degeneracy detectable:
+/// callers ranking links can group by target (the group key is `to`) and
+/// treat `group_size == 1` links as trivially self-normalized.
+pub fn rel_link_group_sizes(links: &[RelLinkInput<'_>]) -> Vec<usize> {
+    let mut scored_by_target: HashMap<&str, usize> = HashMap::new();
+    for link in links {
+        if link.score.is_some() {
+            *scored_by_target.entry(link.to).or_insert(0) += 1;
+        }
+    }
+    links
+        .iter()
+        .map(|link| {
+            if link.score.is_some() {
+                scored_by_target.get(link.to).copied().unwrap_or(0)
+            } else {
+                0
+            }
         })
         .collect()
 }
@@ -3215,6 +3304,142 @@ mod tests {
                 }
             }
         }
+    }
+
+    // --- Raw per-element loop scores (GH #998) ---------------------------
+
+    #[test]
+    fn raw_loop_score_for_element_reads_the_exact_slot() {
+        // A 2-slot arrayed loop: element k must read column off+k verbatim,
+        // with no normalization (this is the RAW series the lone-pin
+        // workaround needs; the relative accessor divides by the partition
+        // denominator).
+        let slot0 = [10.0, -20.0, 30.0];
+        let slot1 = [1.0, 2.0, -3.0];
+        let results = make_results_for_arrayed_loop("r1", &[&slot0, &slot1]);
+        let s0 = compute_raw_loop_score_for_element(&results, "r1", 2, 0).unwrap();
+        let s1 = compute_raw_loop_score_for_element(&results, "r1", 2, 1).unwrap();
+        assert_eq!(s0, slot0.to_vec());
+        assert_eq!(s1, slot1.to_vec());
+    }
+
+    #[test]
+    fn raw_loop_score_argmax_abs_picks_dominant_slot_signed() {
+        // Bare-id aggregate on an arrayed loop: each step emits the SIGNED
+        // value of the slot with the largest |raw| (mirroring the relative
+        // accessor's bare-id semantics), ties to the lowest slot.
+        let slot0 = [10.0, -1.0, 5.0];
+        let slot1 = [-2.0, 7.0, -5.0];
+        let results = make_results_for_arrayed_loop("r1", &[&slot0, &slot1]);
+        let agg = compute_raw_loop_score_argmax_abs(&results, "r1", 2).unwrap();
+        // step 0: |10| > |-2| -> 10; step 1: |7| > |-1| -> 7;
+        // step 2: tie |5| == |-5| -> lowest slot wins -> 5.
+        assert_eq!(agg, vec![10.0, 7.0, 5.0]);
+    }
+
+    #[test]
+    fn raw_loop_score_scalar_is_identity_on_both_paths() {
+        let series = [4.0, -5.0];
+        let results = make_results_for_loops(&[("b1", &series)]);
+        assert_eq!(
+            compute_raw_loop_score_for_element(&results, "b1", 1, 0).unwrap(),
+            series.to_vec()
+        );
+        assert_eq!(
+            compute_raw_loop_score_argmax_abs(&results, "b1", 1).unwrap(),
+            series.to_vec()
+        );
+    }
+
+    #[test]
+    fn raw_loop_score_absent_loop_is_none() {
+        let results = make_results_for_loops(&[("r1", &[1.0])]);
+        assert!(compute_raw_loop_score_for_element(&results, "nope", 1, 0).is_none());
+        assert!(compute_raw_loop_score_argmax_abs(&results, "nope", 1).is_none());
+    }
+
+    #[test]
+    fn raw_loop_score_out_of_range_element_is_zero_fill() {
+        // Matches the relative helper's convention (`effective_slot`): an
+        // ARRAYED loop queried past its own slot count yields zeros, not a
+        // read of a neighboring loop's column -- while a SCALAR loop
+        // broadcasts any element index to its single slot.
+        let slot0 = [1.0, 2.0];
+        let slot1 = [3.0, 4.0];
+        let results = make_results_for_arrayed_loop("r1", &[&slot0, &slot1]);
+        assert_eq!(
+            compute_raw_loop_score_for_element(&results, "r1", 2, 5).unwrap(),
+            vec![0.0, 0.0]
+        );
+        let scalar = make_results_for_loops(&[("b1", &[7.0, 8.0])]);
+        assert_eq!(
+            compute_raw_loop_score_for_element(&scalar, "b1", 1, 3).unwrap(),
+            vec![7.0, 8.0],
+            "a scalar loop broadcasts every element index to slot 0"
+        );
+    }
+
+    /// Like `make_results_for_loops`, but one loop with N contiguous slots
+    /// (the arrayed loop_score layout: columns off..off+n_slots).
+    fn make_results_for_arrayed_loop(id: &str, slots: &[&[f64]]) -> Results {
+        assert!(!slots.is_empty());
+        let step_count = slots[0].len();
+        let step_size = slots.len() + 1;
+        let mut data = vec![0.0_f64; step_count * step_size];
+        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        offsets.insert(Ident::new("time"), 0);
+        offsets.insert(loop_score_ident(id), 1);
+        for (step, row) in data.chunks_mut(step_size).enumerate() {
+            row[0] = step as f64;
+            for (k, slot) in slots.iter().enumerate() {
+                row[1 + k] = slot[step];
+            }
+        }
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: (step_count.saturating_sub(1)) as f64,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        };
+        Results {
+            offsets,
+            data: data.into_boxed_slice(),
+            step_size,
+            step_count,
+            specs: Specs::from(&sim_specs),
+            is_vensim: false,
+        }
+    }
+
+    // --- Link normalization-group sizes (GH #998) ------------------------
+
+    #[test]
+    fn rel_link_group_sizes_count_scored_siblings_per_target() {
+        let s = [1.0];
+        let links = [
+            RelLinkInput {
+                to: "z",
+                score: Some(&s),
+            },
+            RelLinkInput {
+                to: "z",
+                score: Some(&s),
+            },
+            // Unscored sibling: contributes to no group, gets 0 back.
+            RelLinkInput {
+                to: "z",
+                score: None,
+            },
+            // A lone scored input of its own target: group of ONE -- the
+            // ±1-by-construction case callers need to be able to detect.
+            RelLinkInput {
+                to: "y",
+                score: Some(&s),
+            },
+        ];
+        assert_eq!(rel_link_group_sizes(&links), vec![2, 2, 0, 1]);
     }
 
     // --- Relative link scores (GH #652) ---------------------------------

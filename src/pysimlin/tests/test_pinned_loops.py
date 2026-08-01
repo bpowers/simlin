@@ -10,8 +10,10 @@ by its `pin{n}` id through `Sim.get_relative_loop_score`.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 import simlin
+from simlin.errors import SimlinRuntimeError
 from simlin.json_types import Flow, Stock
 
 
@@ -212,6 +214,58 @@ class TestArrayedPinnedLoop:
             aggregate = sim.get_relative_loop_score("pin1")
             assert aggregate.size == by_name.size
             assert np.all(np.isfinite(aggregate))
+
+    def test_arrayed_pin_raw_loop_score_per_element(self, arrayed_population_ltm_path) -> None:
+        """GH #998 (surface 3): per-element RAW loop scores are reachable.
+
+        A lone pin's relative score is +/-1 by construction, so the raw
+        series is the informative one -- and it must be readable PER ELEMENT
+        (the old get_series workaround silently read element 0 only).
+        """
+        model = _arrayed_pin_in_discovery_model(arrayed_population_ltm_path)
+
+        with model.simulate(enable_ltm=True) as sim:
+            sim.run_to_end()
+
+            raw = {
+                element: sim.get_loop_score("pin1", element=element)
+                for element in ("NYC", "Boston", "LA")
+            }
+            # LA is at equilibrium (birth_rate == death_rate): raw 0 throughout.
+            assert np.all(raw["LA"][np.isfinite(raw["LA"])] == 0.0)
+
+            # NYC (0.03 births vs 0.01 deaths) and Boston (0.02 vs 0.01) carry
+            # DIFFERENT raw magnitudes -- the information the +/-1 relative
+            # series discards for a lone pin.
+            nyc_active = raw["NYC"][np.isfinite(raw["NYC"]) & (raw["NYC"] != 0.0)]
+            boston_active = raw["Boston"][np.isfinite(raw["Boston"]) & (raw["Boston"] != 0.0)]
+            assert nyc_active.size > 0
+            assert boston_active.size > 0
+            assert not np.allclose(np.abs(nyc_active), 1.0), (
+                f"the raw series must carry magnitude information, got {nyc_active[:5]}"
+            )
+            assert abs(np.max(np.abs(nyc_active)) - np.max(np.abs(boston_active))) > 1e-9, (
+                "per-element raw magnitudes must differ across elements"
+            )
+
+            # The bare id is the signed argmax-abs aggregate: at each step it
+            # equals one of the per-element values.
+            bare = sim.get_loop_score("pin1")
+            for t in range(bare.size):
+                values = {raw[e][t] for e in raw}
+                assert bare[t] in values, (
+                    f"bare raw aggregate at step {t} must match one element's value"
+                )
+
+            # The relative accessor still reads +/-1 for the active elements
+            # (the lone-pin degeneracy the raw accessor exists to complement).
+            rel = sim.get_relative_loop_score("pin1", element="NYC")
+            rel_active = rel[np.isfinite(rel) & (rel != 0.0)]
+            assert np.allclose(np.abs(rel_active), 1.0)
+
+            # Shared error surface with the relative accessor.
+            with pytest.raises(SimlinRuntimeError):
+                sim.get_loop_score("pin1", element="Tokyo")
 
     def test_arrayed_pin_surfaces_in_run_loops(self, arrayed_population_ltm_path) -> None:
         model = _arrayed_pin_in_discovery_model(arrayed_population_ltm_path)

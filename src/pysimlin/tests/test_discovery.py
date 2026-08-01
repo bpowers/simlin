@@ -134,6 +134,39 @@ class TestAnalyzeDiscovery:
             assert period.start_time <= period.end_time
             assert len(period.dominant_loops) > 0, "a period must name dominant loops"
 
+    def test_dominant_periods_are_per_partition(self, logistic_model: simlin.Model) -> None:
+        """GH #998 (surface 1): dominance is selected WITHIN a cycle
+        partition, and every period says which partition it describes.
+
+        An isolated decay stock adds a single-loop partition whose relative
+        score is exactly -1 while active; under the old flat cross-partition
+        ranking it smothered the competitive partition at every step (on
+        C-LEARN the isolated trace-gas loops hid every climate loop)."""
+        from simlin.json_types import Flow, Stock
+
+        with logistic_model.edit() as (_current, patch):
+            patch.upsert_flow(Flow(name="iso_out", equation="iso * 0.1"))
+            patch.upsert_stock(
+                Stock(name="iso", initial_equation="50", inflows=[], outflows=["iso_out"])
+            )
+        analysis = logistic_model.analyze()
+
+        assert len(analysis.partitions) == 2, "two isolated stocks -> two partitions"
+        competitive = next(i for i, p in enumerate(analysis.partitions) if p.loop_count > 1)
+        lone_loop = next(loop for loop in analysis.loops if any("iso" in v for v in loop.variables))
+        assert lone_loop.partition != competitive
+
+        assert analysis.dominant_periods, "periods must exist"
+        # The competitive partition keeps its own dominance timeline.
+        assert any(p.partition == competitive for p in analysis.dominant_periods), (
+            f"the competitive partition must have periods: {analysis.dominant_periods}"
+        )
+        for period in analysis.dominant_periods:
+            assert period.partition is not None
+            # The lone loop is confined to its own partition's periods.
+            if lone_loop.id in period.dominant_loops:
+                assert period.partition == lone_loop.partition
+
     def test_timeout_seconds_completes(self, logistic_model: simlin.Model) -> None:
         # A generous timeout on a tiny model completes without truncation.
         analysis = logistic_model.analyze(timeout=60.0)

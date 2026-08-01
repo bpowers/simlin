@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from numpy.typing import NDArray
 
     from .run import DominantPeriod
@@ -181,11 +183,24 @@ class Link:
 
     The raw :attr:`score` normalized, per target and per timestep, against
     the sum of ``|score|`` over **all** of :attr:`to_var`'s scored inputs --
-    a value in ``[-1, 1]`` that *is* comparable across the model. Use this
-    (via :meth:`average_relative_score`), not the raw :attr:`score`, when
-    ranking links by importance. ``None`` exactly when :attr:`score` is
-    ``None``; otherwise the same shape as :attr:`score`.
+    a value in ``[-1, 1]`` comparable between the inputs of ONE target.
+    ``None`` exactly when :attr:`score` is ``None``; otherwise the same
+    shape as :attr:`score`.  For ranking see :func:`links_by_target` and
+    :attr:`scored_input_count` (GH #998): a target with a single scored
+    input reads ``±1`` by construction.
     """
+
+    scored_input_count: int = 0
+    """The size of :attr:`relative_score`'s normalization group (GH #998):
+    how many scored links share this link's :attr:`to_var` target, itself
+    included; ``0`` when this link carries no score.
+
+    A group of ONE reads exactly ``±1`` at every step **by construction**
+    (there is nothing else to normalize against), so ranking links globally
+    by ``abs(average_relative_score())`` floats such no-competition links to
+    the top -- on C-LEARN, 58 of the global top 100 were single-input
+    targets.  Group links by target (:func:`links_by_target`) and rank
+    within a group; use this field to detect the trivial groups."""
 
     def __str__(self) -> str:
         """Return a human-readable string representation."""
@@ -234,16 +249,18 @@ class Link:
 
             **It is not a global importance ranking.** The normalization is
             per target, so a link into a target with only ONE scored input
-            reads exactly ``±1`` at every step **by construction**, regardless
-            of whether that target matters. Sorting all links by
-            ``abs(average_relative_score())`` therefore floats the links with
-            no competition to the top. Observed on C-LEARN: 143 of 949 scored
-            links have a single-input target, and 58 of the global top 100 by
-            this metric are such links.
+            (:attr:`scored_input_count` == 1) reads exactly ``±1`` at every
+            step **by construction**, regardless of whether that target
+            matters. Sorting all links by ``abs(average_relative_score())``
+            therefore floats the links with no competition to the top.
+            Observed on C-LEARN: 143 of 949 scored links have a single-input
+            target, and 58 of the global top 100 by this metric were such
+            links.
 
-            To rank links globally, first group by :attr:`to_var` and either
-            restrict to targets with more than one scored input or weight each
-            target by something that reflects its own importance.
+            To rank links, group by target with :func:`links_by_target`
+            (which sorts within each group) and read the groups; a genuinely
+            global ranking would need to weight each target by its own
+            importance, which the relative score deliberately divides out.
 
         Returns ``None`` when there is no relative-score series, and ``NaN``
         when every step is ``NaN``; the reduction runs over the finite subset
@@ -281,6 +298,44 @@ class Link:
         if valid.size == 0:
             return float("nan")
         return float(valid.max())
+
+
+def links_by_target(links: Iterable[Link]) -> dict[str, tuple[Link, ...]]:
+    """Group links by target, ranked within each group (GH #998).
+
+    The relative link score is a share of its TARGET's change, so links are
+    comparable only against the other inputs of the same target -- ranking
+    the whole model's links by ``abs(average_relative_score())`` is
+    dominated by targets with a single scored input, whose share is ``±1``
+    by construction.  This helper makes the grouping structural: it returns
+    ``{target: (links sorted by |average_relative_score()| descending)}``,
+    so a cross-target comparison is something the caller has to build
+    deliberately rather than fall into.
+
+    Unscored links (``relative_score is None``) sort last within their
+    group.  Iterate targets and read each group's top links; a group of one
+    (see :attr:`Link.scored_input_count`) carries no ranking information.
+
+    Example:
+        >>> by_target = links_by_target(sim.get_links())
+        >>> for target, group in by_target.items():
+        ...     if len(group) > 1:
+        ...         print(target, group[0])
+    """
+    grouped: dict[str, list[Link]] = {}
+    for link in links:
+        grouped.setdefault(link.to_var, []).append(link)
+
+    def sort_key(link: Link) -> float:
+        avg = link.average_relative_score()
+        if avg is None or np.isnan(avg):
+            return -1.0
+        return abs(avg)
+
+    return {
+        target: tuple(sorted(group, key=sort_key, reverse=True))
+        for target, group in grouped.items()
+    }
 
 
 @dataclass(frozen=True)
@@ -460,27 +515,21 @@ class Analysis:
     index."""
 
     dominant_periods: tuple[DominantPeriod, ...]
-    """Intervals where a specific set of loops dominates behavior.
+    """Intervals where a specific set of loops dominates behavior, computed
+    PER CYCLE PARTITION.
 
-    .. warning::
-
-        **Cross-partition, and therefore unreliable when ``partitions`` has
-        more than one entry.** The engine ranks loops for this surface by
-        ``abs(behavior_time_series)`` across the whole model, but that series
-        is a loop's share *within its own cycle partition* (see
-        :class:`Partition`), so the values are not comparable between
-        partitions. A loop ALONE in its partition reads exactly ``±1`` at every
-        active step **by construction**, which beats every loop that has real
-        competition -- so single-loop partitions win every timestep.
-
-        This contradicts :attr:`loops` in the same object, whose
-        "competitive-first" ranking deliberately sorts those same trivial loops
-        LAST. Observed on C-LEARN: ``loops`` ranks the 12 isolated gas-uptake
-        decay loops 141st-153rd of 153, while ``dominant_periods`` reports only
-        those loops as dominant across the entire 1850-2100 run.
-
-        For a model with one partition the surface is fine. Otherwise, group
-        :attr:`loops` by :attr:`Loop.partition` and rank within a partition."""
+    A loop's ``behavior_time_series`` is its share *within its own cycle
+    partition* (see :class:`Partition`) and is not comparable between
+    partitions -- a loop ALONE in its partition reads exactly ``±1`` at every
+    active step by construction -- so the engine selects dominance within
+    each partition independently and tags every period with
+    :attr:`~simlin.DominantPeriod.partition` (indexing :attr:`partitions`,
+    the same space as :attr:`Loop.partition`). The tuple carries one period
+    timeline per partition, most-competitive partition first, consistent
+    with the competitive-first ranking of :attr:`loops`. A lone loop's
+    (trivially always-dominant) periods are still reported, confined to its
+    own partition's timeline -- filter on partitions whose
+    :attr:`Partition.loop_count` is above 1 to drop them."""
 
     truncated: bool = False
     """True when the `timeout` elapsed before discovery finished, so

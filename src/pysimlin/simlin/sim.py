@@ -320,6 +320,7 @@ class Sim:
                     polarity=LinkPolarity(c_link.polarity),
                     score=score,
                     relative_score=relative_score,
+                    scored_input_count=int(c_link.scored_input_count),
                 )
                 links.append(link)
 
@@ -454,25 +455,9 @@ class Sim:
             score degenerates to exactly ``+1`` while the loop is active and
             ``-1`` while it opposes (the sign of the raw score).  This is
             expected, not a bug.  For a lone pin the **raw** ``loop_score``
-            series is the informative one: read it via :meth:`get_series` using
-            the loop's raw ``loop_score`` synthetic variable name (the
-            ``loop_score`` synthetic carrying the loop id, joined by the U+205A
-            separator).  When **multiple** pins (or a pin plus enumerated loops)
-            sit on stocks in the same SCC partition, they DO normalize against
-            each other and the relative score is meaningful as usual.
-
-        .. warning::
-            **That raw-series read is element 0 only, on an ARRAYED loop.**
-            :meth:`get_series` resolves a name to one slot, and the synthetic's
-            base offset is the loop's first element; appending a subscript
-            (``...loop_score:pin1[boston]``) does not resolve, because the LTM
-            synthetics are absent from :meth:`get_var_names`. So on a loop with
-            :meth:`get_loop_element_count` above 1, the raw read reports a
-            DIFFERENT element than this method's own bare (argmax-abs
-            aggregate) result and than :attr:`Loop.behavior_time_series`, with
-            nothing to signal the mismatch. Check
-            :meth:`get_loop_element_count` before relying on a raw read, and
-            treat per-element raw scores as unavailable today.
+            series is the informative one: read it via :meth:`get_loop_score`,
+            which takes the same loop-id / ``element`` arguments as this
+            method (per-element access included, GH #998).
 
         Args:
             loop_id: The identifier of the loop (e.g. ``"r1"``).
@@ -516,6 +501,68 @@ class Sim:
                 err_ptr,
             )
             check_out_error(err_ptr, f"Get relative loop score for '{qualified_id}'")
+
+            return results
+
+    def get_loop_score(
+        self,
+        loop_id: str,
+        element: str | int | tuple[str | int, ...] | None = None,
+    ) -> NDArray[np.float64]:
+        """Get the RAW loop score time series for a specific loop (GH #998).
+
+        The raw sibling of :meth:`get_relative_loop_score`: same loop-id and
+        ``element`` arguments, same slot resolution, but the series is the
+        loop's raw ``loop_score`` with NO partition normalization.
+
+        This is the informative series for a loop ALONE in its cycle
+        partition (most notably a lone pinned loop), whose relative score
+        degenerates to exactly ``±1`` by construction.  Unlike reading the
+        raw synthetic through :meth:`get_series` -- which resolves to
+        element 0 only on an arrayed loop -- this accessor supports
+        per-element access through the same subscript resolution the
+        relative accessor uses.
+
+        Args:
+            loop_id: The identifier of the loop (e.g. ``"r1"``, ``"pin1"``).
+            element: For arrayed (Apply-to-All) loops, the specific element
+                slot to read (same forms as
+                :meth:`get_relative_loop_score`).  When ``None``: scalar
+                loops return their single series; arrayed loops return the
+                signed argmax-abs aggregate across slots -- note the
+                dominant slot is picked by raw magnitude here and by
+                relative magnitude there, so the two bare aggregates can
+                pick different slots when slots sit in different partitions.
+
+        Returns:
+            NumPy array of raw loop scores over time.
+
+        Raises:
+            SimlinRuntimeError: If LTM wasn't enabled, the loop doesn't
+                exist, or the ``element`` doesn't resolve (same error surface
+                as :meth:`get_relative_loop_score`).
+        """
+        with self._lock:
+            self._check_alive()
+            step_count = self._get_step_count_unlocked()
+            if step_count <= 0:
+                return np.array([], dtype=np.float64)
+
+            qualified_id = self._format_subscripted_loop_id(loop_id, element)
+            c_loop_id = string_to_c(qualified_id)
+            results = np.zeros(step_count, dtype=np.float64)
+            out_written_ptr = ffi.new("uintptr_t *")
+            err_ptr = ffi.new("SimlinError **")
+
+            lib.simlin_analyze_get_loop_score(
+                self._ptr,
+                c_loop_id,
+                ffi.cast("double *", ffi.from_buffer(results)),
+                step_count,
+                out_written_ptr,
+                err_ptr,
+            )
+            check_out_error(err_ptr, f"Get loop score for '{qualified_id}'")
 
             return results
 

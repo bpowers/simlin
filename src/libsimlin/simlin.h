@@ -283,6 +283,14 @@ typedef struct {
 } SimlinDiscoveredLoop;
 
 // A time interval during which a specific set of loops dominates behavior.
+//
+// Dominance is computed WITHIN a cycle partition (GH #998): a loop's
+// importance series is its share of its own partition's total, so
+// cross-partition ranking is not well-defined and a loop alone in its
+// partition would read exactly 1.0 at every active step.  Each period
+// therefore says which partition it describes, and a result carries one
+// period timeline per partition (partition-major order, most-competitive
+// partition first).
 typedef struct {
   // Start time of this period.
   double start;
@@ -293,6 +301,11 @@ typedef struct {
   uintptr_t dominant_loop_count;
   // Combined relative score of the dominant loops.
   double combined_score;
+  // RESULT-SCOPED index into `SimlinDiscoveryResult.partitions` naming the
+  // cycle partition this period describes -- the same index space as
+  // `SimlinDiscoveredLoop.partition` -- or -1 for the shared group of
+  // loops with no partition metadata.  Appended additively (GH #998).
+  int32_t partition;
 } SimlinDominantPeriod;
 
 // The cohesive output of one discovery run: discovered loops, dominant
@@ -340,11 +353,21 @@ typedef struct {
   // Relative LTM link-score series (length `relative_score_len`), or NULL
   // when `score` is NULL.  The raw score normalized, per target and per
   // timestep, against the sum of `|score|` over all of `to`'s scored
-  // inputs -- a value in `[-1, 1]` that IS comparable across targets and
-  // is the correct key for ranking links by importance (GH #652).  When
-  // non-NULL its length equals `score_len`.
+  // inputs -- a value in `[-1, 1]` (GH #652).  Comparable between the
+  // inputs of ONE target; see `scored_input_count` for the cross-target
+  // ranking caveat.  When non-NULL its length equals `score_len`.
   double *relative_score;
   uintptr_t relative_score_len;
+  // The size of `relative_score`'s normalization group (GH #998): how
+  // many scored links share this link's `to` target, itself included; 0
+  // when this link carries no score.  A group of ONE reads exactly `±1`
+  // at every step BY CONSTRUCTION -- ranking links globally by
+  // `|relative_score|` floats such no-competition links to the top (58 of
+  // C-LEARN's global top 100 were single-input targets).  Group links by
+  // `to` and rank within a group; use this field to detect the trivial
+  // groups.  Appended additively (`simlin_sizeof_link` and the
+  // `@simlin/engine` `LINK_SIZE`/`readLinks` offsets track it).
+  uintptr_t scored_input_count;
 } SimlinLink;
 
 // Collection of links
@@ -637,8 +660,9 @@ void simlin_analyze_rel_loop_score_from_wasm_results(SimlinModel *model,
 // in discovery mode (no enumerated loop scores exist), and in exhaustive mode
 // when it is the lone loop through its stock -- the relative score degenerates
 // to exactly `+1`/`-1` (active/inactive) because there is nothing else to
-// normalize against. For a lone pin the RAW `loop_score` series
-// (`simlin_sim_get_series("$⁚ltm⁚loop_score⁚pin{n}")`) is the informative one.
+// normalize against. For a lone pin the RAW `loop_score` series is the
+// informative one: read it via `simlin_analyze_get_loop_score`, which takes
+// the same loop-id syntax (per-element access included, GH #998).
 // Multiple pins on stocks in the same SCC partition normalize against each
 // other normally. See `engine::ltm_post::compute_rel_loop_scores`.
 //
@@ -666,6 +690,38 @@ void simlin_analyze_get_rel_loop_score(SimlinSim *sim,
                                        uintptr_t len,
                                        uintptr_t *out_written,
                                        SimlinError **out_error);
+
+// Gets the RAW loop score time series for a specific loop (GH #998).
+//
+// The raw sibling of `simlin_analyze_get_relative_loop_score`: same loop-id
+// syntax (bare `r1`, or subscripted `r1[Boston]` / `r1[Boston, 2]` for
+// arrayed loops), same slot resolution, but the series is the loop's raw
+// `loop_score` with NO partition normalization.  A bare id on an arrayed
+// loop returns the signed argmax-abs aggregate across slots (the dominant
+// element's raw contribution at each step); a subscripted id returns that
+// element's own series.
+//
+// This is the accessor a LONE PIN needs: a modeler-pinned loop alone in
+// its cycle partition has a relative score of exactly `+1`/`-1` by
+// construction (nothing else to normalize against), so its raw series is
+// the informative one -- and reading the raw synthetic via
+// `simlin_sim_get_series` resolves to element 0 only on an arrayed loop,
+// silently disagreeing with the relative accessor's aggregate.  This FFI
+// closes that gap with per-element raw access through the same subscript
+// resolution the relative accessor uses.
+//
+// # Safety
+// - `sim` must be a valid pointer to a SimlinSim that has been run to completion
+// - `loop_id` must be a valid C string
+// - `results_ptr` must be a valid pointer to an array of at least `len` doubles
+// - `out_written` must be a writable `*mut usize`
+// - `out_error` may be null or a writable `**mut SimlinError`
+void simlin_analyze_get_loop_score(SimlinSim *sim,
+                                   const char *loop_id,
+                                   double *results_ptr,
+                                   uintptr_t len,
+                                   uintptr_t *out_written,
+                                   SimlinError **out_error);
 
 // Get the number of element slots a loop's `loop_score` series occupies.
 //

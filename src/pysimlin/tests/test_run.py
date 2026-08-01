@@ -110,6 +110,41 @@ class TestRunClass:
 
         assert isinstance(run.dominant_periods, tuple)
 
+    def test_run_dominant_periods_are_per_partition(self, logistic_growth_ltm_path: Path) -> None:
+        """GH #998 (surface 1, runtime path): Run.dominant_periods selects
+        dominance within each cycle partition and tags every period with the
+        partition it describes -- an isolated single-loop partition (relative
+        score identically -1 while active) no longer smothers the competitive
+        partition's timeline."""
+        from simlin.json_types import Flow, Stock
+
+        model = simlin.load(logistic_growth_ltm_path)
+        with model.edit() as (_current, patch):
+            patch.upsert_flow(Flow(name="iso_out", equation="iso * 0.1"))
+            patch.upsert_stock(
+                Stock(name="iso", initial_equation="50", inflows=[], outflows=["iso_out"])
+            )
+        run = model.run(analyze_loops=True)
+
+        lone_loop = next(loop for loop in run.loops if any("iso" in v for v in loop.variables))
+        competitive_partitions = {
+            loop.partition
+            for loop in run.loops
+            if loop.partition is not None and loop.partition != lone_loop.partition
+        }
+        assert competitive_partitions, "the logistic loops keep their own partition"
+
+        periods = run.dominant_periods
+        assert periods, "periods must exist"
+        assert any(p.partition in competitive_partitions for p in periods), (
+            f"the competitive partition must have its own periods: {periods}"
+        )
+        for period in periods:
+            if lone_loop.id in period.dominant_loops:
+                assert period.partition == lone_loop.partition, (
+                    "the lone loop is confined to its own partition's periods"
+                )
+
     def test_run_caching(self, xmile_model_path: Path) -> None:
         """Test that Run properties are cached properly."""
         model = simlin.load(xmile_model_path)

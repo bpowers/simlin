@@ -660,6 +660,101 @@ fn test_analyze_get_links() {
     }
 }
 
+/// GH #998 (surface 2): each link reports the SIZE of its relative-score
+/// normalization group -- how many scored links share its target.  A group
+/// of ONE reads ±1 at every step by construction (no competition), so the
+/// count is what lets callers ranking links detect that degeneracy.  On the
+/// predator-prey fixture the stock targets (`prey`, `pred`) each have two
+/// scored inputs while the flow targets have one, and unscored links report
+/// zero.
+#[test]
+fn test_link_scored_input_count_reports_group_size() {
+    let test_project = TestProject::new("test_group_size")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .stock("prey", "100", &["births"], &["deaths"], None)
+        .stock("pred", "20", &["pred_births"], &["pred_deaths"], None)
+        .flow("births", "prey * 0.5", None)
+        .flow("deaths", "prey * pred * 0.01", None)
+        .flow("pred_births", "prey * pred * 0.005", None)
+        .flow("pred_deaths", "pred * 0.3", None);
+
+    let datamodel_project = test_project.build_datamodel();
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+        assert!(err.is_null());
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        let sim = simlin_sim_new(model, true, &mut err);
+        assert!(err.is_null());
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(err.is_null());
+
+        let links = simlin_analyze_get_links(sim, false, &mut err);
+        assert!(err.is_null());
+        let slice = std::slice::from_raw_parts((*links).links, (*links).count);
+
+        // Independently recount scored links per target and check every
+        // link's reported group size against it; unscored links report 0.
+        use std::collections::HashMap;
+        let mut scored_per_target: HashMap<String, usize> = HashMap::new();
+        for link in slice {
+            if !link.score.is_null() && link.score_len > 0 {
+                let to = CStr::from_ptr(link.to).to_str().unwrap().to_string();
+                *scored_per_target.entry(to).or_insert(0) += 1;
+            }
+        }
+        let mut saw_group_of_two = false;
+        let mut saw_group_of_one = false;
+        for link in slice {
+            let to = CStr::from_ptr(link.to).to_str().unwrap().to_string();
+            let scored = !link.score.is_null() && link.score_len > 0;
+            if scored {
+                let expected = scored_per_target[&to];
+                assert_eq!(
+                    link.scored_input_count, expected,
+                    "link into '{to}': reported group size must match the scored sibling count"
+                );
+                match expected {
+                    1 => saw_group_of_one = true,
+                    2 => saw_group_of_two = true,
+                    _ => {}
+                }
+                // The ±1-by-construction signature: a group-of-one link's
+                // relative score has |value| in {0, 1} at every step.
+                if expected == 1 {
+                    let rel =
+                        std::slice::from_raw_parts(link.relative_score, link.relative_score_len);
+                    for (t, r) in rel.iter().enumerate() {
+                        assert!(
+                            r.abs() < 1e-12 || (r.abs() - 1.0).abs() < 1e-12,
+                            "group-of-one link into '{to}' must read 0 or ±1 at step {t}, got {r}"
+                        );
+                    }
+                }
+            } else {
+                assert_eq!(
+                    link.scored_input_count, 0,
+                    "unscored link into '{to}' must report group size 0"
+                );
+            }
+        }
+        // The fixture must actually exercise both group sizes, or the
+        // assertions above constrain nothing.
+        assert!(saw_group_of_two, "a two-input target must appear");
+        assert!(saw_group_of_one, "a single-input target must appear");
+
+        simlin_free_links(links);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 /// GH #652: raw link scores divide by the change in the *target* variable, so
 /// they are not comparable across different targets and can exceed 1 in
 /// magnitude (a link into a slowly-moving target blows up).  The *relative*
@@ -1597,6 +1692,179 @@ fn test_arrayed_case_insensitive_subscript() {
         assert_eq!(canonical, lower);
         assert_eq!(canonical, upper);
         assert_eq!(canonical, mixed);
+
+        simlin_free_loops(loops);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// Read a loop's RAW score series through the GH #998 accessor.
+unsafe fn read_raw_loop_series(
+    sim: *mut SimlinSim,
+    loop_id: &str,
+) -> Result<Vec<f64>, (SimlinErrorCode, String)> {
+    let mut step_count: usize = 0;
+    let mut err: *mut SimlinError = ptr::null_mut();
+    simlin_sim_get_stepcount(sim, &mut step_count, &mut err);
+    assert!(err.is_null());
+
+    let mut scores = vec![0.0_f64; step_count];
+    let loop_id_c = CString::new(loop_id).unwrap();
+    let mut written: usize = 0;
+    err = ptr::null_mut();
+    simlin_analyze_get_loop_score(
+        sim,
+        loop_id_c.as_ptr(),
+        scores.as_mut_ptr(),
+        scores.len(),
+        &mut written,
+        &mut err,
+    );
+    if !err.is_null() {
+        let code = simlin_error_get_code(err);
+        let msg = simlin_error_get_message(err);
+        let msg_str = if msg.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(msg).to_str().unwrap().to_string()
+        };
+        simlin_error_free(err);
+        return Err((code, msg_str));
+    }
+    scores.truncate(written);
+    Ok(scores)
+}
+
+/// GH #998 (surface 3): per-element RAW loop scores are reachable through
+/// the same subscripted loop-id syntax the relative accessor uses.  On this
+/// fixture each element sits in its own single-loop partition, so the
+/// RELATIVE score degenerates to ±1 (a group of one) while the RAW series
+/// carries the informative magnitudes -- and Boston's 4x birth rate gives
+/// its raw slot a strictly larger magnitude than NYC's.  Before this
+/// accessor the only raw read (`simlin_sim_get_series` on the synthetic
+/// name) resolved to element 0 (NYC) regardless of which element dominated.
+#[test]
+fn test_raw_loop_score_per_element_access() {
+    // Two flows per element so the per-element RAW loop scores genuinely
+    // differ: the flow-to-stock link score is the flow's share of the
+    // stock's net change, so the reinforcing (births) loop scores ~1.0 for
+    // NYC (births 0.05p vs deaths 0.1p) and ~2.0 for Boston (0.20p vs
+    // 0.1p).  A single-flow fixture reads ~1.0 for every element and
+    // constrains nothing.
+    let test_project = TestProject::new("arrayed_raw_ffi")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_with_ranges(
+            "birth_rate[Region]",
+            vec![("NYC", "0.05"), ("Boston", "0.20")],
+        )
+        .array_stock("population[Region]", "100", &["births"], &["deaths"], None)
+        .array_flow("births[Region]", "population * birth_rate", None)
+        .array_flow("deaths[Region]", "population * 0.1", None);
+    let datamodel_project = test_project.build_datamodel();
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+    unsafe {
+        let (proj, model, sim) = open_arrayed_sim_with_ltm(&buf);
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        // Pick the births loop (structurally Undetermined -- birth_rate is a
+        // variable, so the static link sign is unknown): its raw score is
+        // ~1.0 for NYC and ~2.0 for Boston, so Boston dominates the bare
+        // aggregate.
+        let loop_id = loop_slice
+            .iter()
+            .find(|l| {
+                let vars = std::slice::from_raw_parts(l.variables, l.var_count);
+                vars.iter()
+                    .any(|v| CStr::from_ptr(*v).to_str().unwrap().contains("births"))
+            })
+            .map(|l| CStr::from_ptr(l.id).to_str().unwrap().to_string())
+            .expect("a loop through births must exist");
+
+        let nyc = read_raw_loop_series(sim, &format!("{loop_id}[NYC]"))
+            .expect("subscripted raw NYC access works");
+        let boston = read_raw_loop_series(sim, &format!("{loop_id}[Boston]"))
+            .expect("subscripted raw Boston access works");
+        let bare = read_raw_loop_series(sim, &loop_id).expect("bare raw access works");
+
+        // The raw magnitudes must differ per element (Boston's 0.20 birth
+        // rate vs NYC's 0.05) -- this is the information the ±1 relative
+        // series discards for a lone loop.
+        let some_step_differs = nyc
+            .iter()
+            .zip(&boston)
+            .any(|(n, b)| n.is_finite() && b.is_finite() && (n - b).abs() > 1e-12);
+        assert!(
+            some_step_differs,
+            "per-element raw series must differ: nyc={nyc:?} boston={boston:?}"
+        );
+        let max_abs = |s: &[f64]| {
+            s.iter()
+                .filter(|v| v.is_finite())
+                .fold(0.0_f64, |acc, v| acc.max(v.abs()))
+        };
+        assert!(
+            max_abs(&boston) > max_abs(&nyc),
+            "Boston's raw magnitude must dominate (4x birth rate)"
+        );
+
+        // Bare id = signed argmax-abs across slots: at every step it equals
+        // one of the per-element values, and at the max-|value| step it is
+        // Boston's.
+        for t in 0..bare.len() {
+            assert!(
+                bare[t] == nyc[t] || bare[t] == boston[t],
+                "bare raw aggregate at step {t} must match one element's value"
+            );
+        }
+        assert!(
+            (max_abs(&bare) - max_abs(&boston)).abs() < 1e-12,
+            "the aggregate's peak must be the dominant (Boston) slot's"
+        );
+
+        // The legacy raw read (`get_series` on the synthetic name) is slot 0
+        // only: it must equal NYC's series, NOT the bare aggregate -- the
+        // silent mismatch GH #998 documented, now resolvable per element.
+        let synthetic = format!("$\u{205A}ltm\u{205A}loop_score\u{205A}{loop_id}");
+        let mut step_count: usize = 0;
+        err = ptr::null_mut();
+        simlin_sim_get_stepcount(sim, &mut step_count, &mut err);
+        assert!(err.is_null());
+        let mut legacy = vec![0.0_f64; step_count];
+        let name_c = CString::new(synthetic).unwrap();
+        let mut written: usize = 0;
+        err = ptr::null_mut();
+        simlin_sim_get_series(
+            sim,
+            name_c.as_ptr(),
+            legacy.as_mut_ptr(),
+            legacy.len(),
+            &mut written,
+            &mut err,
+        );
+        assert!(
+            err.is_null(),
+            "the synthetic loop_score series must resolve"
+        );
+        legacy.truncate(written);
+        assert_eq!(
+            legacy, nyc,
+            "the legacy get_series read is element 0 (NYC) only"
+        );
+
+        // Error surface is shared with the relative accessor.
+        let res = read_raw_loop_series(sim, &format!("{loop_id}[Tokyo]"));
+        assert!(
+            res.is_err(),
+            "unknown element must error on the raw accessor"
+        );
 
         simlin_free_loops(loops);
         simlin_sim_unref(sim);

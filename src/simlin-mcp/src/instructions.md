@@ -84,9 +84,10 @@ ReadModel returns loop analysis data from the Loops That Matter (LTM) algorithm:
   - `variables`: Ordered list of variable names around the loop
   - `importance`: Array of signed relative loop scores (-1 to 1) per simulation timestep. This is the loop's share of its cycle partition's total absolute loop score, with the sign of the loop's contribution preserved (a balancing loop reads negative). `abs(importance)` is the fraction of partition activity this loop drives at that timestep. Loops arrive already ranked: loops that compete with other loops in their cycle partition come first (ordered by mean `abs(importance)`), and loops trivially alone in their partition -- whose relative score is exactly 1 by construction, e.g. an isolated stock-decay loop, carrying no information -- come last. Treat the list order as the dominance ranking; re-ranking by raw mean `abs(importance)` would re-surface the trivially-isolated loops at the top
 
-- `dominantLoopsByPeriod`: Time intervals showing which loop dominates. Each period has:
+- `dominantLoopsByPeriod`: Time intervals showing which loop dominates, computed per cycle partition (a loop's importance is its share WITHIN its partition, so dominance across partitions is not comparable). The list carries one period timeline per partition, most-competitive partition first. Each period has:
   - `startTime`, `endTime`: Time range
   - `dominantLoops`: Names of the loops that dominate during this period
+  - `partition`: Index into `partitions` naming which cycle partition this period describes (the same index space as each loop's `partition`); absent for loops with no partition metadata
 
 ### Naming loops with setLoopName
 

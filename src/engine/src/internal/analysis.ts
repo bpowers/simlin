@@ -253,7 +253,7 @@ export function simlin_analyze_get_relative_loop_score(
 const LOOP_SIZE = 40;
 // SimlinLink: from: ptr(4), to: ptr(4), polarity: u32(4), score: ptr(4),
 // score_len: usize(4), relative_score: ptr(4), relative_score_len: usize(4) = 28 bytes
-const LINK_SIZE = 28;
+const LINK_SIZE = 32;
 // Pointer size for wasm32
 const PTR_SIZE = 4;
 let structSizesValidated = false;
@@ -391,6 +391,7 @@ export function readLinks(linksPtr: SimlinLinksPtr): Link[] {
     const scoreLen = view.getUint32(ptr + 16, true);
     const relScorePtr = view.getUint32(ptr + 20, true);
     const relScoreLen = view.getUint32(ptr + 24, true);
+    const scoredInputCount = view.getUint32(ptr + 28, true);
 
     const from = wasmToString(fromPtr) ?? '';
     const to = wasmToString(toPtr) ?? '';
@@ -406,7 +407,7 @@ export function readLinks(linksPtr: SimlinLinksPtr): Link[] {
       relativeScore = readFloat64Array(relScorePtr, relScoreLen);
     }
 
-    links.push({ from, to, polarity, score, relativeScore });
+    links.push({ from, to, polarity, score, relativeScore, scoredInputCount });
   }
 
   return links;
