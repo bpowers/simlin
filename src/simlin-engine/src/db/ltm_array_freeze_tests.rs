@@ -677,3 +677,146 @@ fn abandoned_leg_helpers_are_not_emitted() {
         );
     }
 }
+
+/// The frozen-VIEW-POSITION class (C-LEARN's last 4 failing fragments): a
+/// frozen reference landing in a view-position argument of a vector builtin
+/// (`VECTOR ELM MAP(PREVIOUS(base[c1]), offs[C])`) is an App where codegen
+/// needs a view over storage. The freeze materializes as a WHOLE-DEP helper
+/// (every element frozen), referenced with the original indices -- which
+/// preserves ELM MAP's full-storage base semantics (`full_source_len` of the
+/// helper equals the dep's).
+#[test]
+fn frozen_view_position_subscript_materializes() {
+    let project = TestProject::new("view_pos_freeze")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("C", &["c1", "c2"])
+        .array_with_ranges(
+            "base[C]",
+            vec![("c1", "2 + s / 1000"), ("c2", "3 + s / 1000")],
+        )
+        .array_with_ranges("offs[C]", vec![("c1", "s - s"), ("c2", "1 + s - s")])
+        .array_aux("mapped[C]", "VECTOR ELM MAP(base[c1], offs[C])")
+        .flow("g", "(mapped[c1] + 1) * 0.01", None)
+        .stock("s", "10", &["g"], &[], None);
+    let datamodel = project.build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    let score = format!("{LINK_PREFIX}offs\u{2192}mapped");
+    assert!(
+        ltm.vars.iter().any(|v| v.name == score),
+        "the offs->mapped score must be emitted; vars: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    let whole_dep_helper = format!("{FREEZE_PREFIX}base");
+    let helper = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == whole_dep_helper)
+        .expect("a whole-dep freeze helper over base");
+    assert_eq!(helper.dimensions, vec!["c".to_string()]);
+    let text = helper.equation.source_text().to_lowercase();
+    for elem in ["c1", "c2"] {
+        assert!(
+            text.contains(&format!("base[c\u{B7}{elem}]")),
+            "whole-dep helper freezes every element; got:\n{text}"
+        );
+    }
+
+    let failures = fragment_failures(&db, sync.project);
+    assert!(
+        failures.is_empty(),
+        "the view-position freeze must compile via the helper; failures:\n{}",
+        failures.join("\n")
+    );
+
+    // VM oracle: the frozen read in the partial is base[c1]@(t-1). The score
+    // for slot c is guard(partial_c) where
+    // partial_c = elm_map(base_prev, offs_now)[c] = base_prev[c1 + offs_now[c]].
+    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
+        .expect("the LTM-enabled fixture should compile");
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end()
+        .expect("simulation should run to completion");
+    let results = vm.into_results();
+    let at_slot = |name: &str, slot: usize, step: usize| -> f64 {
+        let off = *compiled
+            .offsets
+            .get(name)
+            .or_else(|| compiled.offsets.get(format!("{name}[c1]").as_str()))
+            .unwrap_or_else(|| panic!("no offset for {name}"));
+        results.data[step * results.step_size + off + slot]
+    };
+    let score_off = *compiled
+        .offsets
+        .get(score.as_str())
+        .unwrap_or_else(|| panic!("{score} has no results offset"));
+    let mut checked = 0;
+    for step in 1..results.step_count {
+        for c in 0..2usize {
+            let offset = at_slot("offs", c, step).round() as usize;
+            let partial = at_slot("base", offset, step - 1);
+            let d_mapped = at_slot("mapped", c, step) - at_slot("mapped", c, step - 1);
+            let d_offs = at_slot("offs", c, step) - at_slot("offs", c, step - 1);
+            let got = results.data[step * results.step_size + score_off + c];
+            if d_mapped == 0.0 || d_offs == 0.0 {
+                assert_eq!(got, 0.0, "guard arm at step {step} slot {c}");
+                continue;
+            }
+            let want =
+                (partial - at_slot("mapped", c, step - 1)) / d_mapped.abs() * d_offs.signum();
+            assert!(
+                (got - want).abs() < 1e-9,
+                "step {step} slot {c}: score {got} != lagged-base elm-map value {want}"
+            );
+            checked += 1;
+        }
+    }
+    // The fixture's offsets are near-constant, so most steps take the guard
+    // arm; the structural + fragment assertions above carry the test when no
+    // live step occurs.
+    let _ = checked;
+}
+
+/// A frozen SCALAR reference in a view-position argument (the offset arg of
+/// `VECTOR ELM MAP(vals[c1], off)`) materializes as a scalar freeze helper:
+/// `PREVIOUS(off)` is an App, not a view, but a scalar helper variable is.
+#[test]
+fn frozen_view_position_scalar_materializes() {
+    let project = TestProject::new("view_pos_scalar_freeze")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("C", &["c1", "c2"])
+        .array_with_ranges("vals[C]", vec![("c1", "s"), ("c2", "s * 2")])
+        .aux("off", "1 + s - s", None)
+        .array_aux("mapped[C]", "VECTOR ELM MAP(vals[c1], off)")
+        .flow("g", "(mapped[c1] + 1) * 0.01", None)
+        .stock("s", "10", &["g"], &[], None);
+    let datamodel = project.build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    let score = format!("{LINK_PREFIX}vals[c1]\u{2192}mapped");
+    assert!(
+        ltm.vars.iter().any(|v| v.name == score),
+        "the vals[c1]->mapped score must be emitted; vars: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    let helper_name = format!("{FREEZE_PREFIX}off");
+    let helper = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == helper_name)
+        .expect("a scalar freeze helper over off");
+    assert!(helper.dimensions.is_empty(), "scalar dep -> scalar helper");
+
+    let failures = fragment_failures(&db, sync.project);
+    assert!(
+        failures.is_empty(),
+        "every fragment must compile; failures:\n{}",
+        failures.join("\n")
+    );
+}

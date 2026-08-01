@@ -442,9 +442,22 @@ pub fn link_score_equation_text_shaped<'db>(
 /// compiled verbatim (`compile_directly` -- the (from, to)-keyed salsa path
 /// has no meaning for a helper).
 pub(super) fn freeze_helper_var(h: crate::ltm_augment::ArrayFreezeHelper) -> LtmSyntheticVar {
+    // A scalar whole-dep helper (a frozen SCALAR reference in a view
+    // position) has no dims and exactly one arm.
+    let equation = if h.dims.is_empty() {
+        let body = h
+            .arms
+            .into_iter()
+            .next()
+            .map(|(_, body)| body)
+            .unwrap_or_else(|| "0".to_string());
+        LtmEquation::scalar(body)
+    } else {
+        LtmEquation::arrayed(h.dims.clone(), h.arms, None, false)
+    };
     LtmSyntheticVar {
         name: h.name,
-        equation: LtmEquation::arrayed(h.dims.clone(), h.arms, None, false),
+        equation,
         dimensions: h.dims,
         compile_directly: true,
     }

@@ -232,8 +232,8 @@ fn static_index_text(e: &Expr0, axis: &Dimension, dims_ctx: &DimensionsContext) 
     }
 }
 
-/// Is `expr` a slice-valued direct subscript -- the one shape the
-/// materializer handles?
+/// Is `expr` a slice-valued direct subscript -- the shape the row-projected
+/// materialization handles?
 fn is_direct_slice_subscript(expr: &Expr0) -> bool {
     matches!(
         expr,
@@ -242,6 +242,58 @@ fn is_direct_slice_subscript(expr: &Expr0) -> bool {
                 .iter()
                 .any(|idx| matches!(idx, IndexExpr0::Wildcard(_) | IndexExpr0::StarRange(_, _)))
     )
+}
+
+/// Build the WHOLE-DEP freeze helper for `base` (the frozen-view-position
+/// class): every element of the dep frozen, `dims` = the dep's full declared
+/// dimensions (empty for a scalar dep -- a one-arm scalar helper).
+///
+/// Unlike the row-projected slice helpers, the reference keeps the frozen
+/// call's ORIGINAL indices (or wildcards for a bare arrayed reference), so
+/// the helper's storage mirrors the dep's storage 1:1 -- which is what
+/// preserves `VECTOR ELM MAP`'s full-storage base semantics
+/// (`codegen::full_source_len` of a subscript is the whole variable's
+/// extent, and the helper's extent equals the dep's).
+fn materialize_whole_dep(
+    base: &crate::common::RawIdent,
+    fallback: Option<&Expr0>,
+    dep_dims: &HashMap<String, Vec<Dimension>>,
+) -> Option<ArrayFreezeHelper> {
+    let base_canonical = canonicalize(base.as_str());
+    let declared = dep_dims.get(base_canonical.as_ref())?;
+    let fallback_text = match fallback {
+        None => None,
+        Some(Expr0::Const(text, _, _)) => Some(text.clone()),
+        Some(_) => return None,
+    };
+    let sanitize = |text: &str| text.replace('\u{B7}', "\u{205A}");
+    let name = format!(
+        "{FREEZE_HELPER_PREFIX}{}",
+        sanitize(base_canonical.as_ref())
+    );
+    let axes: Vec<FreezeAxis> = declared.iter().map(sliced_axis_full).collect();
+    let dims: Vec<String> = axes
+        .iter()
+        .filter_map(|axis| match axis {
+            FreezeAxis::Sliced { dim_name, .. } => Some(dim_name.clone()),
+            FreezeAxis::Kept(_) => None,
+        })
+        .collect();
+    let base_q = quote_ident(base_canonical.as_ref());
+    if dims.is_empty() {
+        // Scalar dep: a one-arm scalar helper (`h = PREVIOUS(off)`).
+        let body = match &fallback_text {
+            Some(fb) => format!("PREVIOUS({base_q}, {fb})"),
+            None => format!("PREVIOUS({base_q})"),
+        };
+        return Some(ArrayFreezeHelper {
+            name,
+            dims,
+            arms: vec![(String::new(), body)],
+        });
+    }
+    let arms = cartesian_arms(&axes, &base_q, fallback_text.as_deref());
+    Some(ArrayFreezeHelper { name, dims, arms })
 }
 
 /// Try to materialize one `PREVIOUS(<slice>[, fallback])` call. `None` leaves
@@ -316,13 +368,24 @@ fn materialize_one(
         .collect();
     debug_assert!(!dims.is_empty(), "caller guards on a slice being present");
 
-    // Row-major cartesian product over the sliced axes, kept indices
-    // interleaved at their positions -- the same order the slice's view
-    // iterates, so helper slot k IS slice row k. `acc` accumulates
-    // (subscript-csv, index-csv) pairs; arm body text is rendered after the
-    // product is complete.
+    let base_q = quote_ident(base_canonical.as_ref());
+    let arms = cartesian_arms(&axes, &base_q, fallback_text.as_deref());
+
+    Some(ArrayFreezeHelper { name, dims, arms })
+}
+
+/// Row-major cartesian product over the sliced axes, kept indices interleaved
+/// at their positions -- the same order the slice's (or whole dep's) view
+/// iterates, so helper slot k IS row k.
+fn cartesian_arms(
+    axes: &[FreezeAxis],
+    base_q: &str,
+    fallback_text: Option<&str>,
+) -> Vec<(String, String)> {
+    // `acc` accumulates (subscript-csv, index-csv) pairs; arm body text is
+    // rendered after the product is complete.
     let mut acc: Vec<(Vec<String>, Vec<String>)> = vec![(vec![], vec![])];
-    for axis in &axes {
+    for axis in axes {
         match axis {
             FreezeAxis::Kept(text) => {
                 for (_, idxs) in acc.iter_mut() {
@@ -349,18 +412,16 @@ fn materialize_one(
         }
     }
     let mut arms: Vec<(String, String)> = Vec::with_capacity(acc.len());
-    let base_q = quote_ident(base_canonical.as_ref());
     for (subs, idxs) in acc {
         let subscript = subs.join(",");
         let read = format!("{base_q}[{}]", idxs.join(","));
-        let body = match &fallback_text {
+        let body = match fallback_text {
             Some(fb) => format!("PREVIOUS({read}, {fb})"),
             None => format!("PREVIOUS({read})"),
         };
         arms.push((subscript, body));
     }
-
-    Some(ArrayFreezeHelper { name, dims, arms })
+    arms
 }
 
 /// Rewrite every materializable `PREVIOUS(<slice>)` in `expr` into a
@@ -378,8 +439,35 @@ pub(crate) fn materialize_array_freezes(
     dims_ctx: &DimensionsContext,
     out: &mut Vec<ArrayFreezeHelper>,
 ) -> Expr0 {
+    materialize_inner(expr, dep_dims, dims_ctx, out, false)
+}
+
+/// The VIEW-POSITION argument indices of an array builtin -- the arguments
+/// codegen compiles with `walk_expr_as_view` (a view over storage, never a
+/// scalar value). A frozen reference landing in one of these positions is an
+/// `App` where a view is required, so it must materialize as a WHOLE-DEP
+/// freeze helper even when its subscript has no slice axes. Mirrors the
+/// `walk_expr_as_view` call sites in `compiler::codegen`'s `AssignTemp` /
+/// `VectorSelect` arms; a new vector builtin must be added in both places.
+fn view_arg_positions(func: &str) -> &'static [usize] {
+    match func.to_ascii_lowercase().as_str() {
+        "vector_select" | "vector_elm_map" | "allocate_available" | "allocate_by_priority" => {
+            &[0, 1]
+        }
+        "vector_sort_order" | "rank" => &[0],
+        _ => &[],
+    }
+}
+
+fn materialize_inner(
+    expr: Expr0,
+    dep_dims: &HashMap<String, Vec<Dimension>>,
+    dims_ctx: &DimensionsContext,
+    out: &mut Vec<ArrayFreezeHelper>,
+    in_view_position: bool,
+) -> Expr0 {
     let recurse = |e: Expr0, out: &mut Vec<ArrayFreezeHelper>| {
-        materialize_array_freezes(e, dep_dims, dims_ctx, out)
+        materialize_inner(e, dep_dims, dims_ctx, out, false)
     };
     match expr {
         Expr0::Const(..) | Expr0::Var(..) => expr,
@@ -426,8 +514,58 @@ pub(crate) fn materialize_array_freezes(
                 None => Expr0::App(UntypedBuiltinFn(name, args), loc),
             }
         }
+        // The frozen-VIEW-POSITION class: `PREVIOUS(<ref>)` sitting where
+        // codegen requires a view over storage (a vector builtin's array
+        // argument). The slice arm above did not match (no slice axes), but
+        // an App is not a view either -- materialize the freeze as a
+        // WHOLE-DEP helper and re-spell the reference against it: the
+        // original indices for a subscripted ref (the helper's storage
+        // mirrors the dep's 1:1, preserving ELM MAP's full-storage base
+        // semantics), wildcards for a bare arrayed ref, bare for a scalar.
+        Expr0::App(UntypedBuiltinFn(name, args), loc)
+            if in_view_position && name.eq_ignore_ascii_case("previous") =>
+        {
+            let materialized = match args.first() {
+                Some(Expr0::Subscript(base, _, _)) | Some(Expr0::Var(base, _)) => {
+                    materialize_whole_dep(base, args.get(1), dep_dims)
+                }
+                _ => None,
+            };
+            match materialized {
+                Some(helper) => {
+                    let helper_ident = crate::common::RawIdent::new_from_str(&helper.name);
+                    let helper_ref = match &args[0] {
+                        Expr0::Subscript(_, indices, _) => {
+                            Expr0::Subscript(helper_ident, indices.clone(), loc)
+                        }
+                        Expr0::Var(_, _) if !helper.dims.is_empty() => Expr0::Subscript(
+                            helper_ident,
+                            helper
+                                .dims
+                                .iter()
+                                .map(|_| IndexExpr0::Wildcard(loc))
+                                .collect(),
+                            loc,
+                        ),
+                        _ => Expr0::Var(helper_ident, loc),
+                    };
+                    if !out.iter().any(|h| h.name == helper.name) {
+                        out.push(helper);
+                    }
+                    helper_ref
+                }
+                None => Expr0::App(UntypedBuiltinFn(name, args), loc),
+            }
+        }
         Expr0::App(UntypedBuiltinFn(name, args), loc) => {
-            let args = args.into_iter().map(|a| recurse(a, out)).collect();
+            let view_positions = view_arg_positions(&name);
+            let args = args
+                .into_iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    materialize_inner(a, dep_dims, dims_ctx, out, view_positions.contains(&i))
+                })
+                .collect();
             Expr0::App(UntypedBuiltinFn(name, args), loc)
         }
         Expr0::Subscript(base, indices, loc) => {

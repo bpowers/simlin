@@ -1802,9 +1802,23 @@ fn shaped_guard_form_text(
     // qualify each arm against the AXIS dimension) and the dimensions
     // context; absent either, the expression is returned untouched and the
     // pre-existing doom checks decide.
-    let dep_dims_for_freeze = iter_ctx.and_then(|c| c.dep_dims);
+    //
+    // The table is AUGMENTED (on a local clone -- `iter_ctx.dep_dims` feeds
+    // the GH #526 verdict and must keep its arrayed-only contract) with the
+    // remaining deps as empty-dims entries, so a frozen SCALAR reference in a
+    // view-position argument can materialize as a scalar helper. A dep whose
+    // arrayedness the table cannot see (an arrayed implicit var) is thereby
+    // mislabeled scalar and its helper fails to compile LOUDLY -- the same
+    // failure mode the un-materialized freeze had.
+    let dep_dims_for_freeze = iter_ctx.and_then(|c| c.dep_dims).map(|dd| {
+        let mut m = dd.clone();
+        for d in deps {
+            m.entry(d.as_str().to_string()).or_default();
+        }
+        m
+    });
     let materialize = |expr: Expr0, helpers: &mut Vec<ArrayFreezeHelper>| -> Expr0 {
-        match (dep_dims_for_freeze, dims_ctx) {
+        match (dep_dims_for_freeze.as_ref(), dims_ctx) {
             (Some(dd), Some(dc)) => materialize_array_freezes(expr, dd, dc, helpers),
             _ => expr,
         }
@@ -2662,7 +2676,16 @@ pub(crate) fn generate_scalar_to_element_equation(
             std::iter::once((ident.clone(), pin.clone())).collect();
         pinned = subscript_idents_in_expr0(pinned, &one);
     }
-    let pinned = match (dep_dims, dims_ctx) {
+    // Same scalar-dep augmentation as `shaped_guard_form_text` (see there):
+    // a frozen scalar in a view-position argument needs a scalar helper.
+    let freeze_dep_dims = dep_dims.map(|dd| {
+        let mut m = dd.clone();
+        for d in to_deps {
+            m.entry(d.as_str().to_string()).or_default();
+        }
+        m
+    });
+    let pinned = match (freeze_dep_dims.as_ref(), dims_ctx) {
         (Some(dd), Some(dc)) => materialize_array_freezes(pinned, dd, dc, freeze_helpers),
         _ => pinned,
     };
