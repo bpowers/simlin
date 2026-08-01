@@ -947,7 +947,17 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
         let info = model_implicit_var_info(db, model, project);
         let meta = info.get(&canonical_name)?;
         let is_initial = matches!(phase, SccPhase::Initial);
-        return compile_implicit_var_phase_bytecodes(db, meta, model, project, &[], is_initial);
+        // The cycle-gate probe wants only the fragment; failures stay silent
+        // here (the production assembly path attributes them, GH #1000).
+        return compile_implicit_var_phase_bytecodes(
+            db,
+            meta,
+            model,
+            project,
+            &[],
+            is_initial,
+            None,
+        );
     };
 
     // Caller-owned, lowering-independent context, read EXACTLY as

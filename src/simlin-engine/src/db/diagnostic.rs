@@ -183,6 +183,27 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
         let _fragment = compile_var_fragment(db, *source_var, model, project, empty_inputs);
     }
 
+    // Trigger the implicit-helper fragment compiles (GH #1000): a failure in
+    // a SMOOTH/DELAY/TREND capture helper otherwise surfaces only as
+    // `assemble_module`'s unattributed batch message, and the accumulation
+    // `compile_implicit_var_fragment` performs there is dormant (GH #581).
+    // Probed with the empty input set, exactly as the LTM implicit probe in
+    // `model_ltm_fragment_diagnostics`: byte-identical to assembly for the
+    // root, and for sub-model instances the input set only flips load kinds,
+    // never compile success. Unlike `compile_var_fragment` this is NOT a
+    // tracked query (the parent's parse result provides the caching), so the
+    // probe recompiles the helpers on each diagnostics collection -- the
+    // same cost the LTM implicit probe already pays, and small next to the
+    // per-variable pass above.
+    {
+        let implicit_info = crate::db::model_implicit_var_info(db, model, project);
+        let dep_graph = crate::db::model_dependency_graph(db, model, project, empty_inputs);
+        for meta in implicit_info.values() {
+            let _ =
+                crate::db::compile_implicit_var_fragment(db, meta, model, project, dep_graph, &[]);
+        }
+    }
+
     // Trigger unit checking. This is a separate tracked function so
     // that unit inference results are individually cached and
     // invalidated only when unit-relevant inputs change. It lives in the
