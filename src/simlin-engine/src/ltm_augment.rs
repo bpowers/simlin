@@ -1049,6 +1049,20 @@ pub(crate) enum PartialEquationErrorKind {
     /// as 0. The reachable cause is an explicit element map, which
     /// `DimensionsContext::mapped_element_correspondence` declines.
     UnprojectableDep,
+    /// The target's equation applies an ORDER-STATISTIC, array-producing
+    /// builtin (`VECTOR SORT ORDER`, `RANK`, `ALLOCATE AVAILABLE`,
+    /// `ALLOCATE BY PRIORITY`) and this partial is a per-element SCALAR one
+    /// (GH #995 option C): the scalarization pins the builtin's argument down
+    /// to a single element, and an order statistic of one element is
+    /// meaningless (`vm_vector_sort_order` on a 1-element view is rank 0
+    /// always). Today such a fragment also fails codegen loudly
+    /// ("array-producing builtin outside AssignTemp context"); declining at
+    /// generation keeps the drop loud even if a future Pass-1 widening
+    /// (option A) makes the fragment compile -- which would otherwise convert
+    /// it into a silent constant-0 partial. The element pin belongs on the
+    /// RESULT (the A2A-shaped whole-array score, which stays emitted), never
+    /// on a rank-like builtin's argument.
+    RankLikePartial,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1088,6 +1102,64 @@ impl PartialEquationError {
         PartialEquationError {
             equation_text: format!("{dep}@{element}"),
             kind: PartialEquationErrorKind::UnprojectableDep,
+        }
+    }
+
+    fn rank_like_partial(equation_text: &str) -> Self {
+        PartialEquationError {
+            equation_text: equation_text.to_string(),
+            kind: PartialEquationErrorKind::RankLikePartial,
+        }
+    }
+}
+
+/// Does `expr` apply an ARRAY-PRODUCING builtin -- the set a per-element
+/// SCALAR partial must decline over (GH #995 option C)?
+///
+/// The set is exactly codegen's AssignTemp-required family
+/// (`compiler::codegen`'s `TodoArrayBuiltin` arms): `VECTOR SORT ORDER`,
+/// `RANK`, `ALLOCATE AVAILABLE`, `ALLOCATE BY PRIORITY`, and
+/// `VECTOR ELM MAP` -- every builtin whose RESULT is an array, which a
+/// scalar fragment cannot hold. The order-statistic subset (everything but
+/// ELM MAP) is additionally a semantic trap: pinning its argument to one
+/// element changes the ranking rather than selecting a slot, so those must
+/// stay declined even if a future Pass-1 widening makes the fragment
+/// compile. Deliberately NOT in the set: `VECTOR SELECT`, whose selection
+/// reduces to a scalar (per-element pinning of the non-reduced axes is
+/// exactly right). This is the same result-type distinction
+/// `ltm_agg::reducer_collapses_to_scalar` draws for `RANK` (GH #771/#742),
+/// applied at the partial-generation boundary.
+fn contains_rank_like_builtin(expr: &Expr0) -> bool {
+    let is_rank_like = |name: &str| {
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "vector_sort_order"
+                | "rank"
+                | "allocate_available"
+                | "allocate_by_priority"
+                | "vector_elm_map"
+        )
+    };
+    match expr {
+        Expr0::Const(..) | Expr0::Var(..) => false,
+        Expr0::Subscript(_, indices, _) => indices.iter().any(|idx| match idx {
+            IndexExpr0::Expr(e) => contains_rank_like_builtin(e),
+            IndexExpr0::Range(l, r, _) => {
+                contains_rank_like_builtin(l) || contains_rank_like_builtin(r)
+            }
+            IndexExpr0::Wildcard(_)
+            | IndexExpr0::StarRange(_, _)
+            | IndexExpr0::DimPosition(_, _) => false,
+        }),
+        Expr0::App(UntypedBuiltinFn(name, args), _) => {
+            is_rank_like(name) || args.iter().any(contains_rank_like_builtin)
+        }
+        Expr0::Op1(_, inner, _) => contains_rank_like_builtin(inner),
+        Expr0::Op2(_, l, r, _) => contains_rank_like_builtin(l) || contains_rank_like_builtin(r),
+        Expr0::If(c, t, e, _) => {
+            contains_rank_like_builtin(c)
+                || contains_rank_like_builtin(t)
+                || contains_rank_like_builtin(e)
         }
     }
 }
@@ -2548,6 +2620,19 @@ pub(crate) fn generate_scalar_to_element_equation(
     // failure. The later text passes pin only bare dep idents, so the quoted
     // helper reference is inert to them.
     let substituted = substitute_reducers_in_expr0(wrapped, reducer_subst);
+    // GH #995 option C: a per-element SCALAR partial must not carry an
+    // order-statistic builtin -- the scalarization pins its argument down to
+    // one element, whose rank is meaningless. Checked on the SUBSTITUTED
+    // AST, not the raw target equation: a rank-like call that was HOISTED
+    // into a synthetic agg (`reducer_subst`) is gone from the partial -- the
+    // agg reference carries the correctly-slotted whole-array rank (the
+    // GH #742/#771 machinery) and must not be declined. Only a SURVIVING
+    // spelled-out call is the trap.
+    if contains_rank_like_builtin(&substituted) {
+        return Err(PartialEquationError::rank_like_partial(&print_eqn(
+            to_elem_eqn,
+        )));
+    }
     // Element pinning runs on the AST (the same `subscript_idents_in_expr0`
     // core the text-level `subscript_idents_at_element` wraps -- print + parse
     // of our own output is a canonical fixpoint, so this is byte-identical),
@@ -2639,6 +2724,14 @@ pub(crate) fn generate_per_element_link_equation(
     occ: &OccurrenceLookup<'_>,
 ) -> Result<String, PartialEquationError> {
     let from_canonical = Ident::<Canonical>::new(from);
+    // GH #995 option C: same rank-like decline as
+    // `generate_scalar_to_element_equation` -- this emitter's output is a
+    // per-(row, element) SCALAR partial too.
+    if contains_rank_like_builtin(to_elem_eqn) {
+        return Err(PartialEquationError::rank_like_partial(&print_eqn(
+            to_elem_eqn,
+        )));
+    }
     let source_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
     let iter_ctx = IteratedDimCtx {
         source_dim_names: &source_dim_names,

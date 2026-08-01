@@ -2383,6 +2383,19 @@ pub(crate) fn ltm_partial_equation_warning_message(
              an absent one). The reachable cause is a dep read across an EXPLICIT \
              element map, which `mapped_element_correspondence` declines."
         ),
+        PartialEquationErrorKind::RankLikePartial => format!(
+            "LTM link-score variable '{variable_name}' could not be generated: the \
+             target's equation '{equation_text}' applies an array-producing \
+             builtin (VECTOR SORT ORDER, RANK, ALLOCATE, or VECTOR ELM MAP), \
+             whose array result a per-element scalar partial cannot hold -- and \
+             for the order-statistic builtins the scalarization would also pin \
+             the ranked array down to a single element, whose order statistic is \
+             meaningless (a 1-element rank is always 0). The edge is declined -- \
+             and dependent loop scores dropped -- rather than scored with a \
+             plausible-looking constant; the whole-array (A2A-shaped) score of \
+             the same target still carries the edge's attribution where one is \
+             emitted (GH #995)."
+        ),
         PartialEquationErrorKind::BareReducerFeeder => format!(
             "LTM link-score variable '{variable_name}' could not be generated: \
              '{equation_text}' references the arrayed source variable BARE \

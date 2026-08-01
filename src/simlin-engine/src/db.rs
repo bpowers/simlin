@@ -1430,6 +1430,8 @@ mod ltm_element_instance_tests;
 #[cfg(test)]
 mod ltm_module_tests;
 #[cfg(test)]
+mod ltm_rank_decline_tests;
+#[cfg(test)]
 mod ltm_unified_tests;
 #[cfg(test)]
 mod module_cycle_tests;
