@@ -141,8 +141,10 @@ fn classify_axis(
                         .collect();
                     (elements, indices)
                 }
-                // An INDEXED subrange of an indexed (or named) axis reads the
-                // first N rows; its "elements" are the 1-based positions.
+                // An INDEXED subrange of an INDEXED axis reads the first N
+                // rows; its "elements" are the 1-based positions. (The
+                // mixed named-sub-of-indexed-axis pairing cannot reach here:
+                // `get_subdimension_relation` above declines mixed kinds.)
                 (Dimension::Indexed(_, size), _) => {
                     let elements: Vec<String> = (1..=*size).map(|i| i.to_string()).collect();
                     let indices = elements.clone();
@@ -259,7 +261,12 @@ fn materialize_one(
     }
     // A non-constant fallback cannot be baked into per-row arms (its own
     // references would need the same row substitution); only the desugared
-    // `0` / an explicit constant is carried.
+    // `0` / an explicit constant is carried. NOTE the helper NAME does not
+    // encode the fallback: today every synthesized freeze is unary
+    // (`freeze_at_previous` value position), so two same-slice freezes with
+    // DIFFERENT constant fallbacks cannot arise -- if a caller ever produces
+    // one, the model_ltm_variables dedup debug-asserts on the content
+    // mismatch rather than silently keeping the first.
     let fallback_text = match fallback {
         None => None,
         Some(Expr0::Const(text, _, _)) => Some(text.clone()),
@@ -311,10 +318,9 @@ fn materialize_one(
 
     // Row-major cartesian product over the sliced axes, kept indices
     // interleaved at their positions -- the same order the slice's view
-    // iterates, so helper slot k IS slice row k.
-    let mut arms: Vec<(String, String)> = vec![(String::new(), String::new())];
-    // arms accumulate (subscript-csv, index-csv) pairs first; body text is
-    // rendered after the product is complete.
+    // iterates, so helper slot k IS slice row k. `acc` accumulates
+    // (subscript-csv, index-csv) pairs; arm body text is rendered after the
+    // product is complete.
     let mut acc: Vec<(Vec<String>, Vec<String>)> = vec![(vec![], vec![])];
     for axis in &axes {
         match axis {
@@ -342,7 +348,7 @@ fn materialize_one(
             }
         }
     }
-    arms.clear();
+    let mut arms: Vec<(String, String)> = Vec::with_capacity(acc.len());
     let base_q = quote_ident(base_canonical.as_ref());
     for (subs, idxs) in acc {
         let subscript = subs.join(",");
@@ -389,8 +395,26 @@ pub(crate) fn materialize_array_freezes(
             };
             match materialized {
                 Some(helper) => {
-                    let helper_ref =
-                        Expr0::Var(crate::common::RawIdent::new_from_str(&helper.name), loc);
+                    // The reference is WILDCARD-SUBSCRIPTED (`"helper"[*]`),
+                    // never bare: a bare reference to a variable declared over
+                    // dimension D resolves to the CURRENT element inside an
+                    // apply-to-all equation iterating D, so an A2A-emitted
+                    // link score whose target reduces over its own dimension
+                    // (`sel[C] = SUM(active[*] * year[*])`) would read one
+                    // frozen element where the partial needs the whole frozen
+                    // row -- a silent wrong score. A `[*]` per helper axis is
+                    // a whole-array view in EVERY context (scalar fragments
+                    // included), which is the contract the materialization
+                    // exists to satisfy.
+                    let helper_ref = Expr0::Subscript(
+                        crate::common::RawIdent::new_from_str(&helper.name),
+                        helper
+                            .dims
+                            .iter()
+                            .map(|_| IndexExpr0::Wildcard(loc))
+                            .collect(),
+                        loc,
+                    );
                     if !out.iter().any(|h| h.name == helper.name) {
                         out.push(helper);
                     }
@@ -431,20 +455,6 @@ pub(crate) fn materialize_array_freezes(
             *f = recurse(std::mem::take(&mut *f), out);
             Expr0::If(c, t, f, loc)
         }
-    }
-}
-
-/// The un-frozen (live) form of a frozen reference: `PREVIOUS(x, ...)` -> `x`.
-/// Used by the changed-last leg to rebuild its `Δsource` denominator from a
-/// frozen ref whose freeze was just materialized away.
-pub(crate) fn unfrozen_form(frozen: &Expr0) -> &Expr0 {
-    match frozen {
-        Expr0::App(UntypedBuiltinFn(name, args), _)
-            if name.eq_ignore_ascii_case("previous") && !args.is_empty() =>
-        {
-            &args[0]
-        }
-        other => other,
     }
 }
 
@@ -528,8 +538,18 @@ mod tests {
             helper_summary(h)
         );
         match rewritten {
-            Expr0::Var(ident, _) => assert_eq!(ident.as_str(), h.name),
-            other => panic!("expected the helper reference, got {}", print_eqn(&other)),
+            // Wildcard-subscripted, never bare: a bare reference resolves to
+            // the CURRENT element inside an A2A equation iterating the
+            // helper's dimension (the review's silent-wrong-score hazard).
+            Expr0::Subscript(ident, indices, _) => {
+                assert_eq!(ident.as_str(), h.name);
+                assert_eq!(indices.len(), 1);
+                assert!(matches!(indices[0], IndexExpr0::Wildcard(_)));
+            }
+            other => panic!(
+                "expected the wildcard-subscripted helper reference, got {}",
+                print_eqn(&other)
+            ),
         }
     }
 

@@ -265,7 +265,6 @@ use freeze::freeze_at_previous;
 #[path = "ltm_augment_array_freeze.rs"]
 mod array_freeze;
 
-use array_freeze::unfrozen_form;
 pub(crate) use array_freeze::{ArrayFreezeHelper, FREEZE_HELPER_PREFIX, materialize_array_freezes};
 
 /// Append child index `i` to `path`, yielding the child node's structural path.
@@ -1823,26 +1822,20 @@ fn shaped_guard_form_text(
         return Err(PartialEquationError::unfreezable(&err_text()));
     };
     // Same materialization for the changed-last leg. The source-side
-    // denominator reuses the LIVE (un-frozen) form of the frozen reference:
-    // for the slice shapes that reach this leg only via materialization, the
-    // frozen spelling `SUM(PREVIOUS(<slice>))` cannot compile, while
-    // `SUM(<slice>)` is the Δsource the guard's zero-check and SIGN factor
-    // want (current-vs-previous, via the outer `PREVIOUS(SUM(...))` the
-    // guard form itself adds).
+    // denominator needs no materialization: `frozen_ref` records the LIVE
+    // (pre-freeze) form of the occurrence, so for a slice-shaped source the
+    // guard's `SUM(<live slice>)` is the current-vs-previous Δsource the
+    // zero-check and SIGN factor want, and it compiles as the target's own
+    // equation does.
     let mut last_leg_helpers = Vec::new();
     let changed_last = materialize(changed_last, &mut last_leg_helpers);
     if contains_unfreezable_previous(&changed_last) {
         return Err(PartialEquationError::unfreezable(&err_text()));
     }
-    let frozen_for_guard = if contains_unfreezable_previous(&frozen) {
-        unfrozen_form(&frozen).clone()
-    } else {
-        frozen
-    };
     let source_ref = source_ref_for_guard(
         from,
         shape,
-        Some(&frozen_for_guard),
+        Some(&frozen),
         source_dim_names,
         source_dim_elements,
     );

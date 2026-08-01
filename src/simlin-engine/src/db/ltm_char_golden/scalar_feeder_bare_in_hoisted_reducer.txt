@@ -1,4 +1,4 @@
 $⁚ltm⁚link_score⁚scale→$⁚ltm⁚agg⁚0
 scalar: if (TIME = INITIAL_TIME) then 0 else if (("$⁚ltm⁚agg⁚0" - PREVIOUS("$⁚ltm⁚agg⁚0")) = 0) OR ((scale - PREVIOUS(scale)) = 0) then 0 else SAFEDIV(("$⁚ltm⁚agg⁚0" - (sum(arr[*] * PREVIOUS(scale)))), ABS(("$⁚ltm⁚agg⁚0" - PREVIOUS("$⁚ltm⁚agg⁚0"))), 0) * SIGN((scale - PREVIOUS(scale)))
 $⁚ltm⁚link_score⁚scale→total
-scalar: if (TIME = INITIAL_TIME) then 0 else if ((total - PREVIOUS(total)) = 0) OR ((scale - PREVIOUS(scale)) = 0) then 0 else SAFEDIV(((scale + sum("$⁚ltm⁚freeze⁚arr[*]" * scale)) - PREVIOUS(total)), ABS((total - PREVIOUS(total))), 0) * SIGN((scale - PREVIOUS(scale)))
+scalar: if (TIME = INITIAL_TIME) then 0 else if ((total - PREVIOUS(total)) = 0) OR ((scale - PREVIOUS(scale)) = 0) then 0 else SAFEDIV(((scale + sum("$⁚ltm⁚freeze⁚arr[*]"[*] * scale)) - PREVIOUS(total)), ABS((total - PREVIOUS(total))), 0) * SIGN((scale - PREVIOUS(scale)))

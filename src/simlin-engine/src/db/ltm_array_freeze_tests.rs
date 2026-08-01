@@ -299,9 +299,8 @@ fn freeze_helper_reads_name_correct_rows_for_scattered_subdim() {
 /// slice and a mixed pinned+`*` slice. These used to EMIT fragments that
 /// failed codegen ("Cannot push view ... expected array expression"); they
 /// must now compile via freeze helpers.
-#[test]
-fn scalar_to_arrayed_frozen_wildcard_slice_scores() {
-    let project = TestProject::new("scalar_to_arrayed_freeze")
+fn scalar_to_arrayed_fixture() -> TestProject {
+    TestProject::new("scalar_to_arrayed_freeze")
         .with_sim_time(0.0, 10.0, 0.25)
         .named_dimension("R", &["r1", "r2"])
         .named_dimension("C", &["c1", "c2"])
@@ -316,8 +315,12 @@ fn scalar_to_arrayed_frozen_wildcard_slice_scores() {
             ],
         )
         .flow("g", "agg[r1] * 0.01", None)
-        .stock("s", "10", &["g"], &[], None);
-    let datamodel = project.build_datamodel();
+        .stock("s", "10", &["g"], &[], None)
+}
+
+#[test]
+fn scalar_to_arrayed_frozen_wildcard_slice_scores() {
+    let datamodel = scalar_to_arrayed_fixture().build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
@@ -397,13 +400,31 @@ fn freeze_helpers_are_ordered_before_link_scores() {
 
 /// A shared frozen slice yields ONE helper var, not one per referencing
 /// score: helper names are content-derived, so identical freezes dedup.
+///
+/// The fixture must genuinely PRODUCE duplicates for this to constrain the
+/// dedup: the scalar->arrayed fixture's per-element partials each freeze the
+/// same `vals[*]` slice (one `$⁚ltm⁚freeze⁚vals[*]` per target element before
+/// dedup), where the single-helper select_slice fixture never had two to
+/// collapse and passed with the dedup disabled.
 #[test]
 fn identical_freezes_share_one_helper() {
-    let datamodel = select_slice_fixture().build_datamodel();
+    let datamodel = scalar_to_arrayed_fixture().build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    let vals_helpers: Vec<&str> = ltm
+        .vars
+        .iter()
+        .map(|v| v.name.as_str())
+        .filter(|n| n.starts_with(FREEZE_PREFIX) && n.contains("vals"))
+        .collect();
+    assert_eq!(
+        vals_helpers,
+        vec![format!("{FREEZE_PREFIX}vals[*]").as_str()],
+        "both per-element partials freeze vals[*]; exactly one helper must survive"
+    );
 
     let mut seen: HashSet<&str> = HashSet::new();
     for v in &ltm.vars {
@@ -420,6 +441,14 @@ fn identical_freezes_share_one_helper() {
 /// A slice whose pin is DYNAMIC (a runtime index variable) cannot be
 /// materialized -- each arm would need a static subscript -- so both
 /// conventions stay doomed and the edge keeps its loud decline.
+///
+/// DISCLOSED: the base model itself does not simulate -- a dynamic-pinned
+/// slice (`m[*, idx]`) is an array operand codegen rejects with or without
+/// LTM, and no compiling spelling of the shape was found -- so the decline
+/// arm this pins is defense-in-depth reachable only from already-broken
+/// models. What production supplies here is the EMISSION path
+/// (`model_ltm_variables` runs before, and independent of, simulation
+/// compile), which is exactly what the assertions read.
 #[test]
 fn dynamic_pin_slice_keeps_loud_decline() {
     let project = TestProject::new("dynamic_pin_decline")
@@ -453,4 +482,198 @@ fn dynamic_pin_slice_keeps_loud_decline() {
         !unfreezable_declines(&db, sync.project).is_empty(),
         "the loud UnfreezablePartial decline must survive for dynamic-pinned slices"
     );
+}
+
+/// THE review-driven regression pin: an A2A-emitted link score whose target
+/// reduces over ITS OWN dimension. The `year -> sel` score is
+/// `ApplyToAll([C], ... sum("$:ltm:freeze:active[*]"[*] * year[*]) ...)`, and
+/// a BARE helper reference (a variable declared over C, inside an equation
+/// iterating C) resolves to the CURRENT element -- turning the whole-row
+/// frozen read into a per-element broadcast, a silent wrong score. The
+/// wildcard-subscripted reference reads the full array in every context, and
+/// this VM oracle computes the correct value from the recorded series, so the
+/// broadcast reading fails on numbers rather than on shape.
+#[test]
+fn a2a_score_over_its_own_dimension_reads_the_whole_frozen_row() {
+    let project = TestProject::new("a2a_same_dim")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("C", &["c1", "c2"])
+        .array_with_ranges(
+            "active[C]",
+            vec![("c1", "2 + s / 1000"), ("c2", "3 + s / 1000")],
+        )
+        .array_with_ranges("year[C]", vec![("c1", "s"), ("c2", "s * 2")])
+        .array_aux("sel[C]", "SUM(active[*] * year[*])")
+        .flow("g", "sel[c1] * 0.001", None)
+        .stock("s", "10", &["g"], &[], None);
+    let datamodel = project.build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    let score = format!("{LINK_PREFIX}year\u{2192}sel");
+    assert!(
+        ltm.vars.iter().any(|v| v.name == score),
+        "expected the A2A year->sel score to be emitted"
+    );
+    let failures = fragment_failures(&db, sync.project);
+    assert!(failures.is_empty(), "failures:\n{}", failures.join("\n"));
+
+    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
+        .expect("the LTM-enabled fixture should compile");
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end()
+        .expect("simulation should run to completion");
+    let results = vm.into_results();
+
+    let at = |name: &str, step: usize| -> f64 {
+        let off = *compiled
+            .offsets
+            .get(name)
+            .or_else(|| compiled.offsets.get(format!("{name}[c1]").as_str()))
+            .unwrap_or_else(|| panic!("no offset for {name}"));
+        results.data[step * results.step_size + off]
+    };
+    let at_slot = |name: &str, slot: usize, step: usize| -> f64 {
+        let off = *compiled
+            .offsets
+            .get(name)
+            .or_else(|| compiled.offsets.get(format!("{name}[c1]").as_str()))
+            .unwrap_or_else(|| panic!("no offset for {name}"));
+        results.data[step * results.step_size + off + slot]
+    };
+    let score_off = *compiled
+        .offsets
+        .get(score.as_str())
+        .unwrap_or_else(|| panic!("{score} has no results offset"));
+
+    let mut checked = 0;
+    for step in 1..results.step_count {
+        for c in 0..2usize {
+            // The changed-first partial for slot c: active frozen at the
+            // PREVIOUS step (the WHOLE row), year live.
+            let partial: f64 = (0..2)
+                .map(|k| at_slot("active", k, step - 1) * at_slot("year", k, step))
+                .sum();
+            let d_sel = at_slot("sel", c, step) - at_slot("sel", c, step - 1);
+            let d_year = at_slot("year", c, step) - at_slot("year", c, step - 1);
+            let got = results.data[step * results.step_size + score_off + c];
+            if d_sel == 0.0 || d_year == 0.0 {
+                assert_eq!(got, 0.0, "guard arm at step {step} slot {c}");
+                continue;
+            }
+            let want = (partial - at_slot("sel", c, step - 1)) / d_sel.abs() * d_year.signum();
+            assert!(
+                (got - want).abs() < 1e-9,
+                "step {step} slot {c}: score {got} != whole-frozen-row value {want} \
+                 (a per-element broadcast reading of the helper produces a \
+                 different number here)"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 4, "the oracle must actually check live steps");
+    let _ = at; // silence unused when only at_slot is exercised
+}
+
+/// The pin-before-materialize ordering (review finding): an A2A-shaped slot
+/// body spells the frozen slice's kept axis as its bare DIMENSION name
+/// (`def[*, R]`), which only the per-element pin resolves to a static row.
+/// Materializing before the pin sees a dynamic-looking index and declines,
+/// leaving the inline `PREVIOUS(<slice>)` to fail codegen.
+#[test]
+fn a2a_body_dimension_name_pin_resolves_before_materialization() {
+    let project = TestProject::new("a2a_dim_name_pin")
+        .with_sim_time(0.0, 10.0, 0.25)
+        .named_dimension("R", &["r1", "r2"])
+        .named_dimension("C", &["c1", "c2"])
+        .array_aux("def[C,R]", "1")
+        .array_with_ranges("vals[C]", vec![("c1", "s"), ("c2", "s * 2")])
+        .aux("k", "s * 0.1", None)
+        .array_aux("agg[R]", "VECTOR SELECT(def[*, R], vals[*] * k, 0, 0, 0)")
+        .flow("g", "agg[r1] * 0.01", None)
+        .stock("s", "10", &["g"], &[], None);
+    let datamodel = project.build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
+    for elem in ["r1", "r2"] {
+        let score = format!("{LINK_PREFIX}k\u{2192}agg[{elem}]");
+        assert!(
+            names.contains(&score.as_str()),
+            "expected per-target-element score {score}; vars: {names:#?}"
+        );
+    }
+    let failures = fragment_failures(&db, sync.project);
+    assert!(
+        failures.is_empty(),
+        "the dimension-name-pinned frozen slices must materialize and compile; \
+         failures:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// No orphan helpers (review finding): an ABANDONED changed-first leg's
+/// helpers must not be emitted. Here the `w -> out` changed-first partial
+/// freezes THREE slices -- two materializable (`active[*:SubT]`,
+/// `year[*:SubT]`) and one dynamic-pinned (`m[idx, *]`, unmaterializable) --
+/// so that leg dooms after minting two helpers; the changed-last leg freezes
+/// only `w[*]` and emits. Only the changed-last helper may survive.
+///
+/// DISCLOSED: as in `dynamic_pin_slice_keeps_loud_decline`, the base model
+/// does not simulate (the dynamic-pinned slice is rejected by codegen with or
+/// without LTM); the invariant pinned here is EMISSION bookkeeping, which
+/// production computes before and independent of simulation compile.
+#[test]
+fn abandoned_leg_helpers_are_not_emitted() {
+    let project = TestProject::new("abandoned_leg")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("Target", &["t1", "t2", "t3"])
+        .named_dimension("SubT", &["t1", "t2"])
+        .named_dimension("C", &["c1", "c2"])
+        .named_dimension("R", &["r1", "r2"])
+        .array_aux("active[Target]", "1")
+        .array_aux("year[Target]", "2")
+        .array_aux("m[C,R]", "1")
+        .aux("idx", "1", None)
+        .array_aux("w[C]", "s * 1")
+        .aux(
+            "out",
+            "VECTOR SELECT(active[*:SubT], year[*:SubT], 0, 3, 0) \
+             + VECTOR SELECT(m[idx, *], w[*], 0, 3, 0)",
+            None,
+        )
+        .flow("g", "out * 0.01", None)
+        .stock("s", "10", &["g"], &[], None);
+    let datamodel = project.build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    let helpers: Vec<&str> = ltm
+        .vars
+        .iter()
+        .map(|v| v.name.as_str())
+        .filter(|n| n.starts_with(FREEZE_PREFIX))
+        .collect();
+    // The loop edge is w -> out (active/year/m/idx are constants, hence
+    // feed-forward and unscored in exhaustive mode). Its changed-first leg is
+    // doomed by the m-slice, so the active/year helpers it minted on the way
+    // must be discarded; its changed-last leg freezes w[*] and emits.
+    assert!(
+        helpers.contains(&format!("{FREEZE_PREFIX}w[*]").as_str()),
+        "the changed-last leg's own helper must be emitted; helpers: {helpers:?}"
+    );
+    for orphan in ["active", "year"] {
+        assert!(
+            !helpers.iter().any(|h| h.contains(orphan)),
+            "helper for {orphan} belongs to the ABANDONED changed-first leg and \
+             must not be emitted; helpers: {helpers:?}"
+        );
+    }
 }
