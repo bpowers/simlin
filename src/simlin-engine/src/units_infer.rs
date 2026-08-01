@@ -847,7 +847,16 @@ impl UnitInferer<'_> {
             .cloned()
             .unwrap_or_else(|| [(time_units_name.clone(), 1)].iter().cloned().collect());
 
-        for (id, var) in model.variables.iter() {
+        // Deterministic constraint order: `variables` is a HashMap, and its
+        // per-instance iteration order used to reach TWO observables --
+        // which constraint anchors each signature group in
+        // `find_constraint_mismatches` (hence which VARIABLE a conflict
+        // names, and how many pairs a k-way conflict yields), and the
+        // solver's binding choices. Sorting is the GH #595/#633 recipe:
+        // an unordered collection must not reach an observable (GH #999).
+        let mut sorted_vars: Vec<(&Ident<Canonical>, &Variable)> = model.variables.iter().collect();
+        sorted_vars.sort_unstable_by_key(|(id, _)| id.as_str());
+        for (id, var) in sorted_vars {
             let current_var = format!("{prefix}{id}");
 
             if let Variable::Stock {
@@ -971,7 +980,14 @@ impl UnitInferer<'_> {
                         let array_var: UnitMap =
                             [(format!("@{prefix}{id}"), 1)].iter().cloned().collect();
 
-                        for (_element, expr) in asts.iter() {
+                        // Sorted (GH #999): element order decides which
+                        // element's units the solver binds the array's
+                        // metavariable to first, i.e. the RESOLVED units of a
+                        // mixed-units array -- and with them every downstream
+                        // consistency row's content.
+                        let mut sorted_elements: Vec<_> = asts.iter().collect();
+                        sorted_elements.sort_unstable_by_key(|(element, _)| element.as_str());
+                        for (_element, expr) in sorted_elements {
                             let expr_units =
                                 self.gen_constraints(expr, prefix, &current_var, constraints);
                             // Add a constraint tying this element's units to the array variable
@@ -1024,15 +1040,25 @@ impl UnitInferer<'_> {
                         Ast::Scalar(expr) => expr.get_loc(),
                         Ast::ApplyToAll(_, expr) => expr.get_loc(),
                         Ast::Arrayed(_, asts, default_expr, _) => {
-                            // Use the first element's location if available
-                            asts.values().next().map_or_else(
-                                || {
-                                    default_expr
-                                        .as_ref()
-                                        .map_or(Loc::default(), |e| e.get_loc())
-                                },
-                                |e| e.get_loc(),
-                            )
+                            // The lexicographically-first element's location.
+                            // Deterministic-pick hygiene only: this arm is
+                            // UNREACHABLE today (the `var_units` match above
+                            // returns `Units::Constant` for `Ast::Arrayed`,
+                            // so the enclosing `Units::Explicit` gate never
+                            // admits one) -- kept ordered so a future
+                            // reachability change cannot resurrect the
+                            // GH #999 class here.
+                            asts.iter()
+                                .min_by_key(|(element, _)| element.as_str())
+                                .map(|(_, e)| e)
+                                .map_or_else(
+                                    || {
+                                        default_expr
+                                            .as_ref()
+                                            .map_or(Loc::default(), |e| e.get_loc())
+                                    },
+                                    |e| e.get_loc(),
+                                )
                         }
                     });
                     constraints.push(LocatedConstraint::new(

@@ -178,9 +178,55 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // two SHARE one salsa cache entry per variable -- the win from dropping
     // `is_root`. The module inputs are empty because we are not in an
     // assembly context: this is purely for error detection.
+    // Sorted for deterministic diagnostic emission ORDER (GH #999): the
+    // accumulator drain returns rows in query-execution order, and
+    // `variables` is a HashMap whose per-instance order is random.
     let empty_inputs = ModuleInputSet::empty(db);
-    for (_var_name, source_var) in source_vars.iter() {
+    let mut sorted_vars: Vec<_> = source_vars.iter().collect();
+    sorted_vars.sort_unstable_by_key(|(name, _)| name.as_str());
+    for (_var_name, source_var) in sorted_vars {
         let _fragment = compile_var_fragment(db, *source_var, model, project, empty_inputs);
+    }
+
+    // Trigger the implicit-helper fragment compiles (GH #1000): a failure in
+    // a SMOOTH/DELAY/TREND capture helper otherwise surfaces only as
+    // `assemble_module`'s unattributed batch message, and the accumulation
+    // `compile_implicit_var_fragment` performs there is dormant (GH #581).
+    //
+    // Probed with the EMPTY input set: byte-identical to assembly for the
+    // ROOT model (root assembly uses the empty set), and only there. For a
+    // SUB-MODEL the input set genuinely changes compilation -- input names
+    // widen the module-ident parse context and a reference can resolve
+    // solely through `ContextCore.inputs` -- so this probe can MISS a
+    // failure that only occurs under a parent's bindings (that class keeps
+    // the pre-#1000 unattributed batch message), and, symmetrically, a
+    // degenerate phantom-dst binding (`BadModuleInputDst`-warned, and
+    // nondeterministically compiling due to a pre-existing implicit-index
+    // instability) can fail HERE while assembly passes. Probing each model
+    // at its real instantiation input sets would need root context this
+    // per-model query does not have; the empty set is the honest root-exact
+    // choice, with the sub-model divergence disclosed rather than claimed
+    // away.
+    //
+    // Unlike `compile_var_fragment` this is NOT a tracked query (the
+    // parent's parse result provides the caching) and unlike the LTM
+    // implicit probe (which sits inside the tracked
+    // `model_ltm_fragment_diagnostics`) it lives in THIS query's body, which
+    // `report_untracked_read` above forces to re-execute every revision --
+    // so the helpers recompile on every revision's FIRST collection,
+    // including the per-edit paths that call `collect_all_diagnostics`
+    // (libsimlin `get_errors`, MCP `edit_model`). Measured on C-LEARN that
+    // is ~15ms per first collection; same-revision re-collections recompile
+    // nothing.
+    {
+        let implicit_info = crate::db::model_implicit_var_info(db, model, project);
+        let dep_graph = crate::db::model_dependency_graph(db, model, project, empty_inputs);
+        let mut sorted_implicit: Vec<_> = implicit_info.iter().collect();
+        sorted_implicit.sort_unstable_by_key(|(name, _)| name.as_str());
+        for (_name, meta) in sorted_implicit {
+            let _ =
+                crate::db::compile_implicit_var_fragment(db, meta, model, project, dep_graph, &[]);
+        }
     }
 
     // Trigger unit checking. This is a separate tracked function so
@@ -1164,7 +1210,12 @@ pub fn collect_all_diagnostics(db: &SimlinDb, project: SourceProject) -> Vec<Dia
         });
     }
 
-    for source_model in project.models(db).values() {
+    // Sorted (GH #999): `models` is a HashMap, and its per-instance order
+    // used to reorder the per-model diagnostic BLOCKS run to run on any
+    // multi-model project.
+    let mut sorted_models: Vec<_> = project.models(db).iter().collect();
+    sorted_models.sort_unstable_by_key(|(name, _)| name.as_str());
+    for (_name, source_model) in sorted_models {
         // The module-cycle gate lives in `collect_model_diagnostics` (see
         // `module_cycle_diagnostic`): a model that reaches a cycle reports the
         // cycle instead of running its passes, and a model that reaches none is

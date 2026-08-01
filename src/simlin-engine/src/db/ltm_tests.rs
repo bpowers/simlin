@@ -358,7 +358,7 @@ fn test_stock_to_flow_link_score_handles_apply_to_all() {
     // stock-to-flow ignores `RefShape`, so `Bare` yields the same generator
     // output as the (deleted) legacy `(from, to)`-keyed query did.
     let link_id = LtmLinkId::new(&db, "population".to_string(), "births".to_string());
-    let ShapedLinkScore::Scored(lsv) =
+    let ShapedLinkScore::Scored { var: lsv, .. } =
         link_score_equation_text_shaped(&db, link_id, RefShape::Bare, source_model, sync.project)
     else {
         panic!("stock-to-flow link score should be generated for arrayed model");
@@ -488,7 +488,7 @@ fn test_stock_to_flow_link_score_handles_arrayed() {
         source_model,
         sync.project,
     );
-    let ShapedLinkScore::Scored(lsv) = result else {
+    let ShapedLinkScore::Scored { var: lsv, .. } = result else {
         panic!("stock-to-arrayed-flow link score should be generated, got: {result:?}");
     };
 
@@ -600,7 +600,7 @@ fn link_score_quotes_a_canonical_name_that_cannot_be_bare() {
     // The `1stock -> inflow` edge: the guard form spells both endpoints.
     let link_id = LtmLinkId::new(&db, "1stock".to_string(), "inflow".to_string());
     let scored = link_score_equation_text_shaped(&db, link_id, RefShape::Bare, model, sync.project);
-    let ShapedLinkScore::Scored(lsv) = scored else {
+    let ShapedLinkScore::Scored { var: lsv, .. } = scored else {
         panic!("the 1stock -> inflow link score should be scored, got: {scored:?}");
     };
 
@@ -652,7 +652,7 @@ fn link_score_quotes_every_keyword_named_source() {
         let link_id = LtmLinkId::new(&db, keyword.to_string(), "inflow".to_string());
         let scored =
             link_score_equation_text_shaped(&db, link_id, RefShape::Bare, model, sync.project);
-        let ShapedLinkScore::Scored(lsv) = scored else {
+        let ShapedLinkScore::Scored { var: lsv, .. } = scored else {
             panic!("the {keyword} -> inflow link score should be scored, got: {scored:?}");
         };
 

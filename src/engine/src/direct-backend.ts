@@ -144,6 +144,7 @@ function convertLinks(linksPtr: number): Link[] {
       polarity: convertLinkPolarity(link.polarity),
       score: link.score ?? undefined,
       relativeScore: link.relativeScore ?? undefined,
+      scoredInputCount: link.scoredInputCount,
     }));
   } finally {
     simlin_free_links(linksPtr);

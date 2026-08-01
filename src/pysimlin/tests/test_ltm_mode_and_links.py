@@ -218,6 +218,79 @@ def _predator_prey_model() -> simlin.Model:
     return model
 
 
+class TestScoredInputCount:
+    """GH #998 (surface 2): each link reports the size of its relative-score
+    normalization group, and links_by_target returns grouped (per-target)
+    rankings so cross-group comparison is a deliberate act."""
+
+    def test_scored_input_count_matches_group_size(self) -> None:
+        model = _predator_prey_model()
+        with model.simulate(enable_ltm=True) as sim:
+            sim.run_to_end()
+            links = sim.get_links()
+
+        # Recount scored links per target independently and check the field.
+        scored_per_target: dict[str, int] = {}
+        for lk in links:
+            if lk.has_score():
+                scored_per_target[lk.to_var] = scored_per_target.get(lk.to_var, 0) + 1
+
+        saw_group_of_one = False
+        saw_group_of_two = False
+        for lk in links:
+            if lk.has_score():
+                expected = scored_per_target[lk.to_var]
+                assert lk.scored_input_count == expected, (
+                    f"{lk.from_var} -> {lk.to_var}: scored_input_count "
+                    f"{lk.scored_input_count} != recounted group size {expected}"
+                )
+                if expected == 1:
+                    saw_group_of_one = True
+                    # The +/-1-by-construction signature of a group of one.
+                    import numpy as np
+
+                    rel = lk.relative_score
+                    assert rel is not None
+                    finite = rel[~np.isnan(rel)]
+                    assert np.all(
+                        (np.abs(finite) < 1e-12) | (np.abs(np.abs(finite) - 1.0) < 1e-12)
+                    ), f"group-of-one link must read 0 or +/-1, got {finite[:5]}"
+                elif expected == 2:
+                    saw_group_of_two = True
+            else:
+                assert lk.scored_input_count == 0, (
+                    f"unscored {lk.from_var} -> {lk.to_var} must report 0"
+                )
+        # The fixture must exercise both group sizes (prey/pred stocks have
+        # two scored inputs; the flow targets have one).
+        assert saw_group_of_one
+        assert saw_group_of_two
+
+    def test_links_by_target_groups_and_ranks(self) -> None:
+        from simlin import links_by_target
+
+        model = _predator_prey_model()
+        with model.simulate(enable_ltm=True) as sim:
+            sim.run_to_end()
+            links = sim.get_links()
+
+        grouped = links_by_target(links)
+        # Every link lands in exactly one group, keyed by its target.
+        assert sum(len(g) for g in grouped.values()) == len(links)
+        for target, group in grouped.items():
+            assert all(lk.to_var == target for lk in group)
+            # Ranked by |average_relative_score| descending, unscored last.
+            keys = []
+            for lk in group:
+                avg = lk.average_relative_score()
+                import numpy as np
+
+                keys.append(-1.0 if avg is None or np.isnan(avg) else abs(avg))
+            assert keys == sorted(keys, reverse=True), (
+                f"group {target!r} must be sorted by |avg rel score| desc: {keys}"
+            )
+
+
 class TestRelativeLinkScore:
     """get_links() exposes the relative link score (GH #652): a per-target
     normalized, cross-target-comparable importance series alongside the raw

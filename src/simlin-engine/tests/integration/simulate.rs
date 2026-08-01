@@ -6031,8 +6031,27 @@ fn corpus_clearn_macros_import() {
 ///
 /// Layout impact (the resource this gate protects -- #654's VM limit of 65,536
 /// u16 result slots, NOT `wasmgen::lower`'s unrelated `MAX_UNROLL_UNITS`): the
-/// per-step result-row width is **30,947 slots**, 47% of the ceiling, with
-/// 34,589 free.
+/// per-step result-row width is **29,717 slots**, 45% of the ceiling, with
+/// 35,819 free.
+///
+/// It last moved twice in the GH #995 burndown. The array-freeze
+/// materializer took the count 6,800 -> 6,858 (+58 content-named
+/// `$⁚ltm⁚freeze⁚` helper variables) while the WIDTH went DOWN,
+/// 30,947 -> 29,738 (-1,209): the wrap now replaces each inline
+/// `PREVIOUS(<slice>)` with a helper reference BEFORE the parse-time visitor
+/// sees it, so the visitor stops minting the per-occurrence scalar capture
+/// helpers that used to hold those slices (and fail to compile) -- hundreds
+/// of broken one-slot vars traded for a few dozen compiling arrayed ones.
+/// The option-C array-builtin decline then took it 6,858 -> 6,753 / width
+/// 29,738 -> 29,633: the 105 emitted-but-failing per-element partials --
+/// 21 into VECTOR SORT ORDER targets (`ascending -> target_order`, 7
+/// regions x 3 targets) and 84 into VECTOR ELM MAP targets
+/// (`X[row] -> sorted_target_*`) -- are declined at generation instead of
+/// failing codegen. The frozen-view-position materialization then took it
+/// 6,753 -> 6,757 / width 29,633 -> 29,717: the last 4 failing fragments
+/// (`target_order -> sorted_target_*`, a frozen reference in VECTOR ELM
+/// MAP's view-position source argument) compile via 4 whole-dep freeze
+/// helpers, leaving ZERO failing LTM fragments on C-LEARN.
 ///
 /// It last moved UPWARD, 30,416 -> 30,947 (+531), when GH #996 stopped the axis
 /// allocator stealing a name-matched slot: 135 link scores that the per-element
@@ -6082,7 +6101,7 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 6800,
+        total, 6757,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"

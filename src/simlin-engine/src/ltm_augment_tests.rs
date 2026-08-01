@@ -3398,6 +3398,7 @@ fn generate_link_score_equation_for_link_empty_target_is_err() {
         None,
         None,
         &[],
+        &mut Vec::new(),
     );
     assert!(
         result.is_err(),
@@ -3432,6 +3433,7 @@ fn generate_link_score_equation_for_link_normal_target_is_ok() {
         None,
         None,
         &[],
+        &mut Vec::new(),
     )
     .expect("a normal scalar target must produce a valid link-score equation");
     let text = match &equation {
@@ -3590,6 +3592,7 @@ fn link_score_for_with_lookup_scalar_target_wraps_partial_in_lookup() {
         None,
         None,
         &[],
+        &mut Vec::new(),
     )
     .expect("a with-lookup scalar target must produce a valid link-score equation");
     let text = match &equation {
@@ -3632,6 +3635,7 @@ fn link_score_for_with_lookup_a2a_target_pins_shared_table() {
         None,
         None,
         &[],
+        &mut Vec::new(),
     )
     .expect("a with-lookup A2A target must produce a valid link-score equation");
     let text = match &equation {
@@ -3680,6 +3684,7 @@ fn link_score_for_with_lookup_arrayed_target_wraps_per_slot() {
         None,
         None,
         &[],
+        &mut Vec::new(),
     )
     .expect("a with-lookup arrayed target must produce a valid link-score equation");
 
@@ -3734,6 +3739,7 @@ fn test_arrayed_link_score_population_to_migration_pressure_fixed_nyc() {
         None,
         None,
         &test_occurrences_for_var(&to_var, &from, &source_dim_elements),
+        &mut Vec::new(),
     )
     .unwrap();
 
@@ -3817,6 +3823,7 @@ fn test_arrayed_link_score_population_to_migration_pressure_fixed_boston() {
         None,
         None,
         &test_occurrences_for_var(&to_var, &from, &source_dim_elements),
+        &mut Vec::new(),
     )
     .unwrap();
 
@@ -3883,6 +3890,7 @@ fn test_arrayed_link_score_stock_to_flow_per_element_partials() {
         None,
         None,
         &test_occurrences_for_var(&births, &stock, &source_dim_elements),
+        &mut Vec::new(),
     )
     .unwrap();
 
@@ -3935,6 +3943,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         None,
         None,
         &[],
+        &mut Vec::new(),
     )
     .unwrap();
     assert!(
@@ -3982,6 +3991,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         None,
         None,
         &[],
+        &mut Vec::new(),
     )
     .unwrap();
     match equation {
@@ -5071,6 +5081,7 @@ fn sgft(
         target_ref,
         gf_table_ref,
         &occ,
+        &mut Vec::new(),
     )
 }
 
@@ -5143,6 +5154,7 @@ fn wrap_missing_live_source_occurrence_is_loud_not_silent_freeze() {
         "combined",
         None,
         &occ,
+        &mut Vec::new(),
     );
     assert!(
         err.is_err(),

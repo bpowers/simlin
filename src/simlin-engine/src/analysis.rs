@@ -15,7 +15,7 @@
 //! from "no loops" (GH #660).
 
 use crate::db::{SimlinDb, SourceProject};
-use crate::layout::metadata::{self, DominantPeriod, FeedbackLoop};
+use crate::ltm_dominance::{self, DominantPeriod, FeedbackLoop};
 use crate::{datamodel, json};
 
 /// Summary of a feedback loop discovered via LTM analysis.
@@ -424,10 +424,13 @@ fn run_ltm_pipeline(
 
     let feedback_loops: Vec<FeedbackLoop> = found_loops.iter().map(to_feedback_loop).collect();
 
-    let dominant_loops_by_period = metadata::calculate_dominant_periods(
+    let dominant_loops_by_period = ltm_dominance::calculate_dominant_periods(
         &feedback_loops,
         results.specs.start,
         results.specs.save_step,
+        // Discovery loops carry partition metadata: a None partition is a
+        // module-internal loop competing only against itself.
+        ltm_dominance::PartitionSurface::PartitionBearing,
     );
 
     let loop_dominance: Vec<LoopSummary> = found_loops
@@ -470,17 +473,17 @@ fn build_uid_to_loop_name(
 /// Convert a `FoundLoop` to the `FeedbackLoop` form expected by
 /// `calculate_dominant_periods`.
 fn to_feedback_loop(fl: &crate::ltm_finding::FoundLoop) -> FeedbackLoop {
-    // metadata::LoopPolarity is a 3-way coarse enum; the mostly-* variants
+    // ltm_dominance::LoopPolarity is a 3-way coarse enum; the mostly-* variants
     // collapse into their dominant cousin since the layout-side legend
     // does not visually distinguish them today.
     let polarity = match fl.loop_info.polarity {
         crate::ltm::LoopPolarity::Reinforcing | crate::ltm::LoopPolarity::MostlyReinforcing => {
-            metadata::LoopPolarity::Reinforcing
+            ltm_dominance::LoopPolarity::Reinforcing
         }
         crate::ltm::LoopPolarity::Balancing | crate::ltm::LoopPolarity::MostlyBalancing => {
-            metadata::LoopPolarity::Balancing
+            ltm_dominance::LoopPolarity::Balancing
         }
-        crate::ltm::LoopPolarity::Undetermined => metadata::LoopPolarity::Undetermined,
+        crate::ltm::LoopPolarity::Undetermined => ltm_dominance::LoopPolarity::Undetermined,
     };
 
     let variables = loop_variables(fl);
@@ -499,6 +502,12 @@ fn to_feedback_loop(fl: &crate::ltm_finding::FoundLoop) -> FeedbackLoop {
         variables,
         importance_series,
         dominant_period: None,
+        // The loop's result-scoped cycle partition (indexing
+        // `ModelAnalysis::partitions`), so dominant-period selection
+        // competes partition-mates only (GH #998): the relative
+        // importance series fed above is a share WITHIN this partition
+        // and is not comparable across partitions.
+        partition: fl.partition,
     }
 }
 
@@ -913,6 +922,76 @@ mod tests {
             assert!(
                 w[0] >= w[1] - 1e-9,
                 "loops must be sorted by mean |relative importance| descending: {means:?}"
+            );
+        }
+    }
+
+    // ---- GH #998: dominant periods are computed per partition ----
+
+    /// A two-partition model: `pop` carries two competing loops (births R,
+    /// deaths B) while `iso` carries a single isolated decay loop whose
+    /// relative score is identically -1 while active (a group of one).
+    /// The old flat selection let the lone loop's constant 1.0 smother the
+    /// competitive partition at every step; per-partition selection must
+    /// report periods for BOTH partitions, each labeled, with the lone loop
+    /// confined to its own partition's periods.
+    #[test]
+    fn dominant_periods_are_per_partition() {
+        let project = crate::test_common::TestProject::new("main")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .stock("pop", "100", &["births"], &["deaths"], None)
+            .flow("births", "pop * 0.05", None)
+            .flow("deaths", "pop * pop * 0.0001", None)
+            .stock("iso", "50", &[], &["iso_out"], None)
+            .flow("iso_out", "iso * 0.1", None)
+            .build_datamodel();
+
+        let (mut db, sp) = synced_db(&project);
+        let analysis =
+            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model failed");
+
+        assert_eq!(
+            analysis.partitions.len(),
+            2,
+            "two isolated stocks mean two cycle partitions; got {:?}",
+            analysis.partitions
+        );
+
+        // Identify the lone loop (the only loop in its partition) and the
+        // competitive partition from the loop summaries.
+        let lone = analysis
+            .loop_dominance
+            .iter()
+            .find(|l| l.variables.iter().any(|v| v == "iso"))
+            .expect("the isolated decay loop must be discovered");
+        let competitive = analysis
+            .loop_dominance
+            .iter()
+            .find(|l| l.variables.iter().any(|v| v == "pop"))
+            .expect("a pop loop must be discovered");
+        assert_ne!(lone.partition, competitive.partition);
+
+        // Periods exist for the competitive partition -- the lone loop's
+        // constant share no longer smothers it.
+        assert!(
+            analysis
+                .dominant_loops_by_period
+                .iter()
+                .any(|p| p.partition == competitive.partition),
+            "the competitive partition must have its own dominant periods: {:?}",
+            analysis.dominant_loops_by_period
+        );
+        // The lone loop appears only in periods labeled with ITS partition.
+        for period in &analysis.dominant_loops_by_period {
+            if period.dominant_loops.contains(&lone.loop_id) {
+                assert_eq!(
+                    period.partition, lone.partition,
+                    "the lone loop must be confined to its own partition's periods"
+                );
+            }
+            assert!(
+                period.partition.is_some(),
+                "every discovery-surface period carries its partition"
             );
         }
     }

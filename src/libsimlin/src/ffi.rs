@@ -193,11 +193,25 @@ pub struct SimlinLink {
     /// Relative LTM link-score series (length `relative_score_len`), or NULL
     /// when `score` is NULL.  The raw score normalized, per target and per
     /// timestep, against the sum of `|score|` over all of `to`'s scored
-    /// inputs -- a value in `[-1, 1]` that IS comparable across targets and
-    /// is the correct key for ranking links by importance (GH #652).  When
-    /// non-NULL its length equals `score_len`.
+    /// inputs -- a value in `[-1, 1]` (GH #652).  Comparable between the
+    /// inputs of ONE target; see `scored_input_count` for the cross-target
+    /// ranking caveat.  When non-NULL its length equals `score_len`.
     pub relative_score: *mut f64,
     pub relative_score_len: usize,
+    /// The size of `relative_score`'s normalization group (GH #998): how
+    /// many CONTRIBUTING links share this link's `to` target, itself
+    /// included; 0 when this link never contributes (no score series, or an
+    /// all-NaN one -- an all-NaN series adds no summand to any step's
+    /// denominator, so it is no competition).  A group of ONE reads exactly
+    /// `±1` at every step BY CONSTRUCTION -- ranking links globally by
+    /// `|relative_score|` floats such no-competition links to the top (58 of
+    /// C-LEARN's global top 100 were single-input targets).  Group links by
+    /// `to` and rank within a group; use this field to detect the trivial
+    /// groups.  Per-step residual: a link NaN at SOME steps counts here yet
+    /// leaves its siblings momentarily unopposed at those steps -- a scalar
+    /// cannot carry that.  Appended additively (`simlin_sizeof_link` and the
+    /// `@simlin/engine` `LINK_SIZE`/`readLinks` offsets track it).
+    pub scored_input_count: usize,
 }
 
 /// Collection of links
@@ -264,6 +278,14 @@ pub struct SimlinDiscoveredPartition {
 }
 
 /// A time interval during which a specific set of loops dominates behavior.
+///
+/// Dominance is computed WITHIN a cycle partition (GH #998): a loop's
+/// importance series is its share of its own partition's total, so
+/// cross-partition ranking is not well-defined and a loop alone in its
+/// partition would read exactly 1.0 at every active step.  Each period
+/// therefore says which partition it describes, and a result carries one
+/// period timeline per partition (partition-major order, most-competitive
+/// partition first).
 #[repr(C)]
 pub struct SimlinDominantPeriod {
     /// Start time of this period.
@@ -275,6 +297,13 @@ pub struct SimlinDominantPeriod {
     pub dominant_loop_count: usize,
     /// Combined relative score of the dominant loops.
     pub combined_score: f64,
+    /// RESULT-SCOPED index into `SimlinDiscoveryResult.partitions` naming the
+    /// cycle partition this period describes -- the same index space as
+    /// `SimlinDiscoveredLoop.partition` -- or -1 for a period of a loop with
+    /// no parent-level partition (a module-internal loop, which competes only
+    /// against itself, mirroring the ranking's per-loop Solo groups).
+    /// Appended additively (GH #998).
+    pub partition: i32,
 }
 
 /// The cohesive output of one discovery run: discovered loops, dominant

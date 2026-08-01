@@ -2147,33 +2147,68 @@ pub fn model_ltm_variables(
         });
     }
 
+    // Freeze helpers (GH #995) are minted per referencing partial with
+    // content-derived names, so the same frozen slice reached from several
+    // link scores emits byte-identical duplicates. Collapse them to one --
+    // duplicate names would mint colliding layout slots -- keeping the first
+    // occurrence; a same-name pair with DIFFERENT content would be a
+    // naming-scheme bug, so it is a debug panic rather than silently kept.
+    {
+        let mut seen_freeze: HashMap<String, LtmSyntheticVar> = HashMap::new();
+        vars.retain(|v| {
+            if !v.name.starts_with(crate::ltm_augment::FREEZE_HELPER_PREFIX) {
+                return true;
+            }
+            match seen_freeze.get(&v.name) {
+                Some(first) => {
+                    debug_assert!(
+                        first == v,
+                        "freeze helper name collision with differing content: {}",
+                        v.name
+                    );
+                    false
+                }
+                None => {
+                    seen_freeze.insert(v.name.clone(), v.clone());
+                    true
+                }
+            }
+        });
+    }
+
     // Sort by evaluation-order category so the VM's sequential flow
     // evaluation respects the dependency chain: composites reference paths
     // which reference loop scores which reference link scores, and link
-    // scores referencing an aggregate node read its current-step value, so
-    // the agg fragment must run first. Within each category, sort lexically
-    // for determinism. (`compute_layout` section 3 re-sorts LTM vars purely
-    // by name -- `$⁚ltm⁚agg⁚{n}` < `$⁚ltm⁚link_score⁚...` lexically, so the
-    // agg gets its layout slot before any consumer there too -- but the
-    // runlist order is what the same-timestep ordering hazard turns on, and
-    // that comes from this sort.)
+    // scores referencing an aggregate node OR a freeze helper read its
+    // current-step value, so those fragments must run first. Within each
+    // category, sort lexically for determinism. (`compute_layout` section 3
+    // re-sorts LTM vars purely by name -- `$⁚ltm⁚agg⁚{n}` <
+    // `$⁚ltm⁚freeze⁚...` < `$⁚ltm⁚link_score⁚...` lexically, so both get
+    // their layout slots before any consumer there too -- but the runlist
+    // order is what the same-timestep ordering hazard turns on, and that
+    // comes from this sort.)
     vars.sort_by(|a, b| {
         fn category(name: &str) -> u8 {
             // The agg check uses the `$⁚ltm⁚agg⁚` *prefix*, not a substring
             // search: the `agg → target` link score is named
             // `$⁚ltm⁚link_score⁚$⁚ltm⁚agg⁚{n}→{to}` and contains `⁚agg⁚`,
-            // but it is a link score (category 1) that must run *after* the
+            // but it is a link score (category 2) that must run *after* the
             // agg aux it references.
             if crate::ltm_agg::is_synthetic_agg_name(name) {
                 0 // aggregate nodes: before everything that may reference them
+            } else if name.starts_with(crate::ltm_augment::FREEZE_HELPER_PREFIX) {
+                // Array-freeze helpers (GH #995): pure `PREVIOUS` reads of
+                // model variables, referenced by link scores at their
+                // current-step value -- run before every score.
+                1
             } else if name.contains("\u{205A}composite\u{205A}") {
-                4
+                5
             } else if name.contains("\u{205A}path\u{205A}") {
-                3
+                4
             } else if name.contains("\u{205A}loop_score\u{205A}") {
-                2
+                3
             } else {
-                1 // link_score and anything else
+                2 // link_score and anything else
             }
         }
         category(&a.name)

@@ -48,12 +48,12 @@ Each `Loop` has:
 
 ## Dominant Periods
 
-`run.dominant_periods` identifies contiguous time intervals where specific loops dominate:
+`run.dominant_periods` identifies contiguous time intervals where specific loops dominate. Dominance is computed per cycle partition -- a loop's importance is its share *within* its partition, so loops only compete with partition-mates -- and the tuple carries one period timeline per partition:
 
 ```python
 for period in run.dominant_periods:
     print(
-        f"t=[{period.start_time}, {period.end_time}]: "
+        f"t=[{period.start_time}, {period.end_time}] p{period.partition}: "
         f"loops={period.dominant_loops}"
     )
 ```
@@ -63,6 +63,7 @@ Each `DominantPeriod` has:
 - `dominant_loops` -- Tuple of loop ID strings that dominate during this period
 - `start_time` -- Period start time
 - `end_time` -- Period end time
+- `partition` -- Which cycle partition this period describes (the same index space as `Loop.partition`); a loop alone in its partition is trivially always-dominant there, so lead with partitions holding more than one loop
 - `duration()` -- Returns `end_time - start_time`
 - `contains_loop(loop_id)` -- Check if a specific loop dominates during this period
 

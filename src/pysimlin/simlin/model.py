@@ -840,6 +840,7 @@ class Model:
                         dominant_loops=tuple(dominant_loops),
                         start_time=float(c_period.start),
                         end_time=float(c_period.end),
+                        partition=None if c_period.partition < 0 else int(c_period.partition),
                     )
                 )
 

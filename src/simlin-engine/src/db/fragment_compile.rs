@@ -562,15 +562,55 @@ pub(crate) fn compile_implicit_var_fragment(
     // duplication-free price for a single shared per-phase relation
     // (`compile_implicit_var_phase_bytecodes`, also consumed by
     // `var_phase_symbolic_fragment_prod`'s no-`SourceVariable` arm).
-    let phase = |is_initial: bool| {
-        compile_implicit_var_phase_bytecodes(
+    // Each runlist-gated phase threads the GH #1000 `why` channel: a member
+    // phase that fails to compile lands in `assemble_module`'s batch
+    // "failed to compile fragments" message, so the reason is accumulated
+    // HERE as a diagnostic naming the helper (interpolated into the message
+    // -- `errors.rs`'s `Assembly` arm never renders the `variable` field)
+    // and the parent it was synthesized for. Accumulation attaches to the
+    // enclosing query: `model_all_diagnostics`' implicit probe (drained by
+    // `collect_all_diagnostics`) or `assemble_module` (dormant until
+    // GH #581). Severity is `Error` for the same measured reason as the
+    // explicit path's (see `compile_var_fragment`): the fragment's absence
+    // fails the build, and the corpus sweep shape holds -- added rows land
+    // only on projects that already fail to compile.
+    // Identical reasons across phases collapse to ONE row (a helper whose
+    // initial and flow phases refuse the same construct is one defect, and
+    // duplicate rows are user-visible noise); distinct per-phase reasons
+    // each get their own row.
+    let mut reported_reasons: Vec<String> = Vec::new();
+    let mut phase = |is_initial: bool| {
+        let mut reason: Option<String> = None;
+        let bytecodes = compile_implicit_var_phase_bytecodes(
             db,
             meta,
             model,
             project,
             module_input_names,
             is_initial,
-        )
+            Some(&mut reason),
+        );
+        if bytecodes.is_none() {
+            use salsa::Accumulator;
+            let reason =
+                reason.unwrap_or_else(|| "its equation failed to parse or lower".to_string());
+            if reported_reasons.contains(&reason) {
+                return bytecodes;
+            }
+            reported_reasons.push(reason.clone());
+            crate::db::CompilationDiagnostic(crate::db::Diagnostic {
+                model: model.name(db).clone(),
+                variable: Some(implicit_name.clone()),
+                error: crate::db::DiagnosticError::Assembly(format!(
+                    "implicit variable '{implicit_name}' (synthesized while parsing \
+                     '{}') failed to compile: {reason}",
+                    meta.parent_source_var.ident(db)
+                )),
+                severity: crate::db::DiagnosticSeverity::Error,
+            })
+            .accumulate(db);
+        }
+        bytecodes
     };
 
     let initial_bytecodes = if dep_graph.runlist_initials.contains(&var_ident_str) {
@@ -628,6 +668,13 @@ pub(crate) fn compile_implicit_var_fragment(
 /// Loud-safe `None` (never panics): the shared prefix failed (absent
 /// implicit index / equation errors), a graphical-function table failed to
 /// build, the phase's `Var::new` errored, or codegen failed.
+///
+/// `why`, when supplied, receives a human-readable reason on failure
+/// (GH #1000, the same channel `compile_ltm_equation_fragment` carries): the
+/// lowering `Err` from `Var::new` and a codegen rejection otherwise collapse
+/// into the same `None`, leaving the failure attributable only through
+/// `assemble_module`'s unattributed batch message. Callers that only want
+/// the fragment pass `None` and pay nothing.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_implicit_var_phase_bytecodes(
     db: &dyn Db,
@@ -636,6 +683,7 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
     project: SourceProject,
     module_input_names: &[String],
     is_initial: bool,
+    mut why: Option<&mut Option<String>>,
 ) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
     let module_ident_context =
         model_module_ident_context(db, model, project, module_input_names.to_vec());
@@ -971,7 +1019,14 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
                 Ok(ts) if !ts.is_empty() => {
                     tables.insert(var_ident_canonical.clone(), ts);
                 }
-                Err(_) => return None,
+                Err(err) => {
+                    if let Some(slot) = why.as_deref_mut() {
+                        *slot = Some(format!(
+                            "its graphical-function table failed to build: {err}"
+                        ));
+                    }
+                    return None;
+                }
                 _ => {}
             }
         }
@@ -1029,11 +1084,18 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
         inputs: &inputs,
     };
 
-    let var = crate::compiler::Var::new(
+    let var = match crate::compiler::Var::new(
         &crate::compiler::Context::new(core, &var_ident_canonical, is_initial),
         &lowered,
-    )
-    .ok()?;
+    ) {
+        Ok(var) => var,
+        Err(err) => {
+            if let Some(slot) = why.as_deref_mut() {
+                *slot = Some(format!("could not be lowered: {err}"));
+            }
+            return None;
+        }
+    };
 
     let base_ctx = fragment_emit_ctx(
         &model_name_ident,
@@ -1043,5 +1105,18 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
         converted_dims,
         dim_context,
     );
-    compile_phase_to_per_var_bytecodes(&base_ctx, &var.ast)
+    if why.is_some() {
+        match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(&base_ctx, &var.ast)
+        {
+            Ok(bytecodes) => Some(bytecodes),
+            Err(err) => {
+                if let Some(slot) = why {
+                    *slot = Some(err);
+                }
+                None
+            }
+        }
+    } else {
+        compile_phase_to_per_var_bytecodes(&base_ctx, &var.ast)
+    }
 }

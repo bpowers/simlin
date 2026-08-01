@@ -588,8 +588,9 @@ describe('WASM Integration Tests', () => {
       // polarity_confidence (f64 @24) + partition (i32 @32) + tail pad = 40
       // bytes (partition added in GH #685, atop polarity_confidence GH #495).
       expect(rustSizes.loopSize).toBe(40);
-      // SimlinLink: from + to + polarity + score + score_len + relative_score + relative_score_len
-      expect(rustSizes.linkSize).toBe(28);
+      // SimlinLink: from + to + polarity + score + score_len + relative_score +
+      // relative_score_len + scored_input_count (GH #998) = 32 bytes.
+      expect(rustSizes.linkSize).toBe(32);
     });
   });
 

@@ -26,6 +26,7 @@ from .analysis import (
     LoopPolarity,
     LtmMode,
     Partition,
+    links_by_target,
 )
 from .errors import (
     ErrorCode,
@@ -155,6 +156,7 @@ __all__ = [
     "TimeSpec",
     "UnitIssue",
     "error_code_to_string",
+    "links_by_target",
     "load",
     "load_vdf",
 ]

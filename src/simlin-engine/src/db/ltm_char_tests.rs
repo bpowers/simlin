@@ -2195,7 +2195,7 @@ fn repeated_target_dimension_reads_the_first_axis() {
         &["link_score\u{205A}driver\u{2192}target[nyc,boston]"],
     );
     assert!(
-        text.contains("previous(w[region\u{B7}nyc])"),
+        text.to_lowercase().contains("previous(w[region\u{B7}nyc])"),
         "the pin must read the FIRST Region axis, as the simulation does; got: {text}"
     );
     assert!(
@@ -2294,7 +2294,8 @@ fn doubly_mapped_dep_axes_are_allocated_one_to_one() {
         &["link_score\u{205A}driver\u{2192}target[t1,u2]"],
     );
     assert!(
-        text.contains("previous(dep[a\u{B7}a1, b\u{B7}b2])"),
+        text.to_lowercase()
+            .contains("previous(dep[a\u{B7}a1, b\u{B7}b2])"),
         "the pin must allocate one-to-one, as the simulation does; got: {text}"
     );
     assert!(

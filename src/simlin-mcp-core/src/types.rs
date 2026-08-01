@@ -192,20 +192,30 @@ impl From<&simlin_engine::ltm_finding::DiscoveredPartition> for PartitionOutput 
 }
 
 /// A time interval during which specific loops dominate model behavior.
+///
+/// Dominance is computed WITHIN a cycle partition (GH #998): a loop's
+/// importance is its share of its own partition's total, so cross-partition
+/// ranking is not well-defined.  `partition` says which partition the period
+/// describes (indexing the result's `partitions` list, the same space as
+/// `LoopDominanceSummary::partition`); the output carries one period
+/// timeline per partition, most-competitive partition first.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DominantPeriodOutput {
     pub dominant_loops: Vec<String>,
     pub start_time: f64,
     pub end_time: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partition: Option<usize>,
 }
 
-impl From<simlin_engine::layout::metadata::DominantPeriod> for DominantPeriodOutput {
-    fn from(dp: simlin_engine::layout::metadata::DominantPeriod) -> Self {
+impl From<simlin_engine::ltm_dominance::DominantPeriod> for DominantPeriodOutput {
+    fn from(dp: simlin_engine::ltm_dominance::DominantPeriod) -> Self {
         Self {
             dominant_loops: dp.dominant_loops,
             start_time: dp.start,
             end_time: dp.end,
+            partition: dp.partition,
         }
     }
 }

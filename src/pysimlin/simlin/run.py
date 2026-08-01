@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -27,6 +27,13 @@ class DominantPeriod:
     a specific set of feedback loops collectively explain the majority
     of the model's behavior. These periods are identified by the loop
     dominance analysis algorithm (Loops That Matter / LTM).
+
+    Dominance is computed WITHIN a cycle partition: a loop's importance
+    series is its share of its own partition's total absolute loop score,
+    so cross-partition values are not comparable (a loop alone in its
+    partition reads exactly 1 while active, by construction). A result
+    therefore carries one period timeline per partition, and
+    :attr:`partition` says which one this period describes.
     """
 
     dominant_loops: tuple[str, ...]
@@ -37,6 +44,13 @@ class DominantPeriod:
 
     end_time: float
     """Period end time"""
+
+    partition: int | None = None
+    """Result-scoped index naming the cycle partition this period describes
+    (the same index space as :attr:`Loop.partition` /
+    :attr:`Analysis.partitions`), or ``None`` for a period of a loop with no
+    parent-level partition (a module-internal loop, which competes only
+    against itself)."""
 
     def duration(self) -> float:
         """Calculate the duration of this period.
@@ -193,30 +207,45 @@ class Run:
 
     @property
     def dominant_periods(self) -> tuple[DominantPeriod, ...]:
-        """Time periods where specific loops dominate.
+        """Time periods where specific loops dominate, per cycle partition.
 
-        Uses greedy algorithm to identify which loops explain the most
-        variance in model behavior during each period.
-
-        .. warning::
-
-            Like :attr:`Analysis.dominant_periods`, this ranks loops by
-            ``abs(behavior_time_series)`` across the whole model, but that
-            series is a loop's share *within its own cycle partition*
-            (:attr:`Loop.partition`) and is not comparable between partitions.
-            A loop alone in its partition reads ``±1`` by construction and so
-            outranks every loop that has real competition. Trust this surface
-            only when the model has a single cycle partition; otherwise group
-            :attr:`loops` by partition and rank within one.
+        Uses a greedy algorithm to identify which loops explain the most
+        variance in model behavior during each period.  A loop's
+        ``behavior_time_series`` is its share *within its own cycle
+        partition* (:attr:`Loop.partition`) and is not comparable between
+        partitions -- a loop alone in its partition reads ``±1`` by
+        construction -- so dominance is selected within each partition
+        independently and every period's :attr:`DominantPeriod.partition`
+        says which partition it describes.  The tuple carries one period
+        timeline per partition, ordered by partition index (loops with no
+        partition metadata share one trailing group).
 
         Returns empty tuple if analyze_loops=False was used.
+
+        .. note::
+            **Arrayed (A2A) loops whose element slots span multiple cycle
+            partitions** (element-wise-uncoupled loop families) are grouped
+            by :attr:`Loop.partition`, which is the FIRST resolving slot's
+            partition -- a representative, not the full per-slot story --
+            while :attr:`Loop.behavior_time_series` is the argmax-abs
+            aggregate across all slots.  For such a loop the periods are
+            labeled with the representative partition even at steps where a
+            different slot (in a different partition) dominates; the
+            per-slot partition vector is not exposed over the FFI, so this
+            surface cannot detect the mixed case.  For per-slot fidelity
+            read :meth:`Sim.get_relative_loop_score` with an ``element``
+            argument.  (The engine's layout surface, which has the per-slot
+            data, gives such loops their own solo timeline instead.)
 
         Returns:
             Tuple of DominantPeriod objects
 
         Example:
             >>> for period in run.dominant_periods:
-            ...     print(f"t=[{period.start_time}, {period.end_time}]: {period.dominant_loops}")
+            ...     print(
+            ...         f"t=[{period.start_time}, {period.end_time}] "
+            ...         f"p{period.partition}: {period.dominant_loops}"
+            ...     )
         """
         if self._cached_dominant_periods is None:
             self._cached_dominant_periods = self._calculate_dominant_periods()
@@ -316,16 +345,19 @@ class Run:
         return tuple(loops_with_behavior)
 
     def _calculate_dominant_periods(self, threshold: float = 0.5) -> tuple[DominantPeriod, ...]:
-        """Calculate dominant periods using greedy algorithm.
+        """Calculate dominant periods per cycle partition.
 
-        For each timestep, tries to find a set of same-polarity loops
-        whose combined importance score exceeds the threshold.
+        A loop's importance series is its share of its own partition's total,
+        so only partition-mates compete for dominance: the greedy selection
+        runs within each partition independently and tags every period with
+        the partition it describes.  See :meth:`_group_loops_for_dominance`
+        for how ``partition is None`` loops are grouped.
 
         Args:
             threshold: Minimum combined score for dominance (default 0.5)
 
         Returns:
-            Tuple of DominantPeriod objects
+            Tuple of DominantPeriod objects, partition-major order
         """
         loops = self.loops
         if not loops:
@@ -338,6 +370,58 @@ class Run:
         if len(time_index) == 0:
             return ()
 
+        periods: list[DominantPeriod] = []
+        for partition, group in self._group_loops_for_dominance(list(loops)):
+            periods.extend(
+                self._dominant_periods_for_group(group, partition, time_index, threshold)
+            )
+        return tuple(periods)
+
+    @staticmethod
+    def _group_loops_for_dominance(
+        loops: list[Loop],
+    ) -> list[tuple[int | None, list[Loop]]]:
+        """Group loops into dominance-competition groups (GH #998).
+
+        Loops with a partition index compete only with partition-mates.
+        ``Run.loops`` is a PARTITION-BEARING surface by construction (each
+        loop's ``partition`` comes from the engine's runtime loop
+        primitive), so ``partition is None`` always means "no parent-level
+        partition" -- a module-internal loop whose relative score is ``±1``
+        by construction -- and each such loop is its OWN solo group,
+        mirroring the engine ranking's per-loop Solo groups.  Pooling them
+        (even when EVERY loop is ``None``) would let whichever sorts first
+        smother the rest -- the GH #998 pattern reappearing inside the
+        ``None`` subset.  The engine's flat legacy grouping exists only for
+        its no-metadata layout fallback, a surface pysimlin never reads.
+
+        Returns ``(partition, loops)`` pairs, partition-major: ascending
+        partition index, then the ``None`` solo groups in input order.
+        """
+        partitioned: dict[int, list[Loop]] = {}
+        unpartitioned: list[Loop] = []
+        for loop in loops:
+            if loop.partition is None:
+                unpartitioned.append(loop)
+            else:
+                partitioned.setdefault(loop.partition, []).append(loop)
+
+        ordered: list[tuple[int | None, list[Loop]]] = [
+            (p, partitioned[p]) for p in sorted(partitioned)
+        ]
+        ordered.extend((None, [loop]) for loop in unpartitioned)
+        return ordered
+
+    @staticmethod
+    def _dominant_periods_for_group(
+        loops: list[Loop],
+        partition: int | None,
+        time_index: pd.Index[Any],
+        threshold: float,
+    ) -> list[DominantPeriod]:
+        """The per-partition greedy selection: for each timestep, find a set
+        of same-polarity loops whose combined importance exceeds the
+        threshold, then merge consecutive timesteps with the same set."""
         dominant_loop_sets: list[frozenset[str]] = []
 
         for t_idx in range(len(time_index)):
@@ -396,7 +480,7 @@ class Run:
 
         periods: list[DominantPeriod] = []
         if not dominant_loop_sets:
-            return ()
+            return []
 
         current_set = dominant_loop_sets[0]
         start_idx = 0
@@ -409,6 +493,7 @@ class Run:
                             dominant_loops=tuple(sorted(current_set)),
                             start_time=float(time_index[start_idx]),
                             end_time=float(time_index[i - 1]),
+                            partition=partition,
                         )
                     )
                 current_set = dominant_loop_sets[i]
@@ -420,10 +505,11 @@ class Run:
                     dominant_loops=tuple(sorted(current_set)),
                     start_time=float(time_index[start_idx]),
                     end_time=float(time_index[-1]),
+                    partition=partition,
                 )
             )
 
-        return tuple(periods)
+        return periods
 
     def _extract_time_spec(self) -> TimeSpec:
         """Extract time specification from simulation results.

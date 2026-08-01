@@ -110,6 +110,81 @@ class TestRunClass:
 
         assert isinstance(run.dominant_periods, tuple)
 
+    def test_run_dominant_periods_are_per_partition(self, logistic_growth_ltm_path: Path) -> None:
+        """GH #998 (surface 1, runtime path): Run.dominant_periods selects
+        dominance within each cycle partition and tags every period with the
+        partition it describes -- an isolated single-loop partition (relative
+        score identically -1 while active) no longer smothers the competitive
+        partition's timeline."""
+        from simlin.json_types import Flow, Stock
+
+        model = simlin.load(logistic_growth_ltm_path)
+        with model.edit() as (_current, patch):
+            patch.upsert_flow(Flow(name="iso_out", equation="iso * 0.1"))
+            patch.upsert_stock(
+                Stock(name="iso", initial_equation="50", inflows=[], outflows=["iso_out"])
+            )
+        run = model.run(analyze_loops=True)
+
+        lone_loop = next(loop for loop in run.loops if any("iso" in v for v in loop.variables))
+        competitive_partitions = {
+            loop.partition
+            for loop in run.loops
+            if loop.partition is not None and loop.partition != lone_loop.partition
+        }
+        assert competitive_partitions, "the logistic loops keep their own partition"
+
+        periods = run.dominant_periods
+        assert periods, "periods must exist"
+        assert any(p.partition in competitive_partitions for p in periods), (
+            f"the competitive partition must have its own periods: {periods}"
+        )
+        for period in periods:
+            if lone_loop.id in period.dominant_loops:
+                assert period.partition == lone_loop.partition, (
+                    "the lone loop is confined to its own partition's periods"
+                )
+
+    def test_group_loops_for_dominance_solo_none_on_partitioned_surface(self) -> None:
+        """GH #998: each partition-None loop (module-internal; relative
+        score +/-1 by construction) forms its OWN dominance group --
+        Run.loops is partition-bearing by construction, so this holds even
+        when every loop is None.
+
+        The fixture hand-builds Loop objects because the function's whole
+        input contract is the `partition` field, whose production values are
+        exactly `None` or a dense int -- both shapes covered here.
+        """
+        from simlin.analysis import Loop, LoopPolarity
+        from simlin.run import Run
+
+        def loop(loop_id: str, partition: int | None) -> Loop:
+            return Loop(
+                id=loop_id,
+                variables=("a", "b"),
+                polarity=LoopPolarity.REINFORCING,
+                partition=partition,
+            )
+
+        mixed = [loop("r1", 0), loop("mod_a", None), loop("b1", 0), loop("mod_b", None)]
+        groups = Run._group_loops_for_dominance(mixed)
+        assert [(p, [lo.id for lo in g]) for p, g in groups] == [
+            (0, ["r1", "b1"]),
+            (None, ["mod_a"]),
+            (None, ["mod_b"]),
+        ], "None loops must be solo groups when any loop carries a partition"
+
+        # Run.loops is partition-bearing by construction, so even an
+        # ALL-None loop set stays solo-grouped: pooling would let one
+        # +/-1-by-construction series smother the rest (the PR #1003 codex
+        # review's all-module-internal scenario).
+        all_none = [loop("l1", None), loop("l2", None)]
+        groups = Run._group_loops_for_dominance(all_none)
+        assert [(p, [lo.id for lo in g]) for p, g in groups] == [
+            (None, ["l1"]),
+            (None, ["l2"]),
+        ], "all-None loops must stay solo on the runtime surface"
+
     def test_run_caching(self, xmile_model_path: Path) -> None:
         """Test that Run properties are cached properly."""
         model = simlin.load(xmile_model_path)

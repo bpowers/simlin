@@ -138,8 +138,14 @@ export interface Link {
   polarity: SimlinLinkPolarity;
   score: Float64Array | null;
   // Relative link score (GH #652): the raw score normalized per target into
-  // [-1, 1], comparable across targets. Non-null exactly when score is.
+  // [-1, 1], comparable between one target's inputs. Non-null exactly when
+  // score is.
   relativeScore: Float64Array | null;
+  // The size of relativeScore's normalization group (GH #998): how many
+  // CONTRIBUTING links share this link's `to` target (itself included); 0
+  // for a link that never contributes (unscored, or an all-NaN series). A
+  // group of ONE reads exactly +/-1 by construction.
+  scoredInputCount: number;
 }
 
 // Loop structure - matches SimlinLoop in simlin.h

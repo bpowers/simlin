@@ -59,6 +59,12 @@ pub(crate) struct OwnedLink {
     /// (post-collapse) link set, so the per-target denominator matches the
     /// links the caller actually receives.
     pub(crate) relative_score: Option<Vec<f64>>,
+    /// The size of `relative_score`'s normalization group (GH #998): how many
+    /// scored links share this link's `to` target, itself included; 0 for an
+    /// unscored link.  A group of ONE reads `±1` at every step by
+    /// construction, so this is what lets callers detect that degeneracy
+    /// when ranking links.  Computed alongside `relative_score`.
+    pub(crate) scored_input_count: usize,
 }
 
 /// Resolve the model's unique causal edges and, when `results` is `Some`,
@@ -132,6 +138,7 @@ pub(crate) fn analyze_links_core(
                 polarity,
                 score,
                 relative_score: None,
+                scored_input_count: 0,
             }
         })
         .collect();
@@ -161,6 +168,7 @@ pub(crate) fn analyze_links_core(
             polarity: l.polarity,
             score: l.score,
             relative_score: None,
+            scored_input_count: 0,
         })
         .collect();
     // Normalize relative scores over the *collapsed* set: a collapsed
@@ -193,11 +201,14 @@ fn attach_relative_scores(links: Vec<OwnedLink>) -> Vec<OwnedLink> {
         })
         .collect();
     let rel = engine::ltm_post::compute_rel_link_scores(&inputs, step_count);
+    let group_sizes = engine::ltm_post::rel_link_group_sizes(&inputs);
     links
         .into_iter()
         .zip(rel)
-        .map(|(mut link, relative_score)| {
+        .zip(group_sizes)
+        .map(|((mut link, relative_score), scored_input_count)| {
             link.relative_score = relative_score;
+            link.scored_input_count = scored_input_count;
             link
         })
         .collect()
@@ -287,6 +298,7 @@ pub(crate) unsafe fn owned_links_to_ffi(
             score_len,
             relative_score: relative_score_ptr,
             relative_score_len,
+            scored_input_count: owned.scored_input_count,
         });
     }
 
@@ -944,6 +956,9 @@ unsafe fn discovery_to_ffi(
             dominant_loops,
             dominant_loop_count,
             combined_score: period.combined_score,
+            partition: period
+                .partition
+                .map_or(-1, |p| i32::try_from(p).unwrap_or(-1)),
         });
     }
 
@@ -2017,8 +2032,9 @@ pub unsafe extern "C" fn simlin_analyze_rel_loop_score_from_wasm_results(
 /// in discovery mode (no enumerated loop scores exist), and in exhaustive mode
 /// when it is the lone loop through its stock -- the relative score degenerates
 /// to exactly `+1`/`-1` (active/inactive) because there is nothing else to
-/// normalize against. For a lone pin the RAW `loop_score` series
-/// (`simlin_sim_get_series("$⁚ltm⁚loop_score⁚pin{n}")`) is the informative one.
+/// normalize against. For a lone pin the RAW `loop_score` series is the
+/// informative one: read it via `simlin_analyze_get_loop_score`, which takes
+/// the same loop-id syntax (per-element access included, GH #998).
 /// Multiple pins on stocks in the same SCC partition normalize against each
 /// other normally. See `engine::ltm_post::compute_rel_loop_scores`.
 ///
@@ -2162,6 +2178,142 @@ pub unsafe extern "C" fn simlin_analyze_get_rel_loop_score(
     out_error: *mut *mut SimlinError,
 ) {
     simlin_analyze_get_relative_loop_score(sim, loop_id, results_ptr, len, out_written, out_error);
+}
+
+/// Gets the RAW loop score time series for a specific loop (GH #998).
+///
+/// The raw sibling of `simlin_analyze_get_relative_loop_score`: same loop-id
+/// syntax (bare `r1`, or subscripted `r1[Boston]` / `r1[Boston, 2]` for
+/// arrayed loops), same slot resolution, but the series is the loop's raw
+/// `loop_score` with NO partition normalization.  A bare id on an arrayed
+/// loop returns the signed argmax-abs aggregate across slots (the dominant
+/// element's raw contribution at each step); a subscripted id returns that
+/// element's own series.  A step where EVERY slot is NaN stays NaN in the
+/// aggregate (honest raw data -- unlike the relative accessor's bare-id
+/// aggregate, whose 0.0-on-undefined matches its SAFEDIV "inactive"
+/// convention).
+///
+/// This is the accessor a LONE PIN needs: a modeler-pinned loop alone in
+/// its cycle partition has a relative score of exactly `+1`/`-1` by
+/// construction (nothing else to normalize against), so its raw series is
+/// the informative one -- and reading the raw synthetic via
+/// `simlin_sim_get_series` resolves to element 0 only on an arrayed loop,
+/// silently disagreeing with the relative accessor's aggregate.  This FFI
+/// closes that gap with per-element raw access through the same subscript
+/// resolution the relative accessor uses.
+///
+/// # Safety
+/// - `sim` must be a valid pointer to a SimlinSim that has been run to completion
+/// - `loop_id` must be a valid C string
+/// - `results_ptr` must be a valid pointer to an array of at least `len` doubles
+/// - `out_written` must be a writable `*mut usize`
+/// - `out_error` may be null or a writable `**mut SimlinError`
+#[no_mangle]
+pub unsafe extern "C" fn simlin_analyze_get_loop_score(
+    sim: *mut SimlinSim,
+    loop_id: *const c_char,
+    results_ptr: *mut c_double,
+    len: usize,
+    out_written: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_written.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("out_written pointer must not be NULL"),
+        );
+        return;
+    }
+    if results_ptr.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("results pointer must not be NULL"),
+        );
+        return;
+    }
+    if loop_id.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("loop_id pointer must not be NULL"),
+        );
+        return;
+    }
+
+    let sim_ref = ffi_try!(out_error, require_sim(sim));
+    let raw_loop_id = match CStr::from_ptr(loop_id).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("loop_id is not valid UTF-8"),
+            );
+            return;
+        }
+    };
+
+    let state_guard = sim_ref.state.lock().unwrap();
+    let state = &*state_guard;
+
+    // Same snapshot-backed parse/resolution as the relative accessor, so
+    // the two surface identical error messages and slot semantics.
+    let resolved = match resolve_loop_query(
+        raw_loop_id,
+        &state.loop_partitions,
+        &state.loop_element_index,
+    ) {
+        Ok(r) => r,
+        Err(err) => {
+            store_error(out_error, err);
+            return;
+        }
+    };
+
+    let Some(results) = state.results.as_ref() else {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("simulation has no results; run the simulation first"),
+        );
+        return;
+    };
+
+    let series = match resolved.element_index {
+        Some(k) => engine::ltm_post::compute_raw_loop_score_for_element(
+            results,
+            resolved.base,
+            resolved.n_slots,
+            k,
+        ),
+        None => engine::ltm_post::compute_raw_loop_score_argmax_abs(
+            results,
+            resolved.base,
+            resolved.n_slots,
+        ),
+    };
+    let series = match series {
+        Some(s) => s,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
+                    "loop '{}' does not have loop score data",
+                    resolved.base
+                )),
+            );
+            return;
+        }
+    };
+
+    let count = std::cmp::min(series.len(), len);
+    for (i, v) in series.iter().take(count).enumerate() {
+        *results_ptr.add(i) = *v;
+    }
+    *out_written = count;
 }
 
 /// Get the number of element slots a loop's `loop_score` series occupies.
