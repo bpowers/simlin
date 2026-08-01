@@ -1040,9 +1040,14 @@ impl UnitInferer<'_> {
                         Ast::Scalar(expr) => expr.get_loc(),
                         Ast::ApplyToAll(_, expr) => expr.get_loc(),
                         Ast::Arrayed(_, asts, default_expr, _) => {
-                            // The lexicographically-first element's location
-                            // (a plain `.values().next()` on the HashMap made
-                            // the reported Loc vary run to run, GH #999).
+                            // The lexicographically-first element's location.
+                            // Deterministic-pick hygiene only: this arm is
+                            // UNREACHABLE today (the `var_units` match above
+                            // returns `Units::Constant` for `Ast::Arrayed`,
+                            // so the enclosing `Units::Explicit` gate never
+                            // admits one) -- kept ordered so a future
+                            // reachability change cannot resurrect the
+                            // GH #999 class here.
                             asts.iter()
                                 .min_by_key(|(element, _)| element.as_str())
                                 .map(|(_, e)| e)

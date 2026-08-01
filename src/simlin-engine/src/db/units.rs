@@ -563,7 +563,11 @@ fn check_conveyor_param_units(
         });
     };
 
-    for svar in model.variables(db).values() {
+    // Sorted for deterministic diagnostic emission order (GH #999),
+    // matching every other variable loop that feeds diagnostics.
+    let mut sorted_svars: Vec<_> = model.variables(db).values().collect();
+    sorted_svars.sort_unstable_by_key(|sv| sv.ident(db).as_str());
+    for svar in sorted_svars {
         let compat = svar.compat(db);
         let Some(conv) = &compat.conveyor else {
             continue;

@@ -24,10 +24,10 @@
 use crate::db::{SimlinDb, collect_all_diagnostics, sync_from_datamodel_incremental};
 use crate::test_common::TestProject;
 
-/// A three-way unit conflict on one shared metavariable: `b` carries no
-/// units, and three consumers pin it to widgets, gadgets, and meters. Which
-/// pair of constraints gets reported -- and which variable is named first --
-/// depended on generation order.
+/// A four-way unit conflict on one shared metavariable: `b` carries no
+/// units, and four consumers pin it to widgets, gadgets, meters, and liters.
+/// Which pair of constraints gets reported -- and which variable is named
+/// first -- depended on generation order.
 fn conflicting_units_fixture() -> TestProject {
     TestProject::new("unit_conflict")
         .with_sim_time(0.0, 4.0, 1.0)
@@ -66,12 +66,15 @@ fn unit_diagnostics_are_reproducible_across_runs() {
     }
 }
 
-/// The other three order-reaching observables found while fixing GH #999,
-/// exercised together: a mixed-units ARRAYED variable (element order decided
-/// both the solver's binding for the array's metavariable and the
-/// consistency pass's anchor element -- content AND count varied), plus a
-/// second model (the models map's order reordered per-model diagnostic
-/// blocks).
+/// The other order-reaching observables found while fixing GH #999,
+/// exercised together: a mixed-units ARRAYED variable with unit-bearing
+/// element references (element order decided the solver's binding for the
+/// array's metavariable, the consistency pass's anchor element, AND the
+/// declared-units per-element emission order -- content and count varied),
+/// two SMTH1 calls with mismatched argument units (the db/units
+/// stdlib-argument loop's emission order), two unparsable equations (the
+/// per-variable probe order IS the drain order), and a second model (the
+/// models map's order reordered per-model diagnostic blocks).
 #[test]
 fn arrayed_and_multi_model_diagnostics_are_reproducible() {
     use crate::testutils::{x_aux, x_model, x_module_named};
@@ -89,14 +92,25 @@ fn arrayed_and_multi_model_diagnostics_are_reproducible() {
             "main",
             vec![
                 x_aux("plain", "3", None),
+                // Unit-BEARING element references (a "{units}" suffix on a
+                // literal is an equation COMMENT and produces no constraint;
+                // the first version of this fixture used one and was vacuous
+                // -- reverting the element-loop sorts left it green).
+                x_aux("uw", "3", Some("widgets")),
+                x_aux("ug", "4", Some("gadgets")),
+                x_aux("um", "5", Some("meters")),
                 crate::datamodel::Variable::Aux(crate::datamodel::Aux {
                     ident: "mixed".to_string(),
                     equation: crate::datamodel::Equation::Arrayed(
                         vec!["D".to_string()],
                         vec![
-                            ("d1".to_string(), "3 {widgets}".to_string(), None, None),
-                            ("d2".to_string(), "plain".to_string(), None, None),
-                            ("d3".to_string(), "4 {gadgets}".to_string(), None, None),
+                            ("d1".to_string(), "uw".to_string(), None, None),
+                            // TWO distinct-unit mismatches against the
+                            // declared `widgets` (d2 meters, d3 gadgets):
+                            // one mismatch alone cannot observe the
+                            // per-element emission ORDER.
+                            ("d2".to_string(), "um".to_string(), None, None),
+                            ("d3".to_string(), "ug".to_string(), None, None),
                         ],
                         None,
                         false,
@@ -108,6 +122,17 @@ fn arrayed_and_multi_model_diagnostics_are_reproducible() {
                     uid: None,
                     compat: crate::datamodel::Compat::default(),
                 }),
+                // Two SMTH1 calls with mismatched input/initial units: the
+                // stdlib-module argument check emits one row each, in
+                // variable order (the db/units SMTH-argument loop).
+                x_aux("in_w", "5", Some("widgets")),
+                x_aux("init_g", "6", Some("gadgets")),
+                x_aux("sm_one", "SMTH1(in_w, 5, init_g)", None),
+                x_aux("sm_two", "SMTH1(init_g, 5, in_w)", None),
+                // Two unparsable equations: per-variable Equation-error rows,
+                // whose ORDER is the model_all_diagnostics probe order.
+                x_aux("broken_a", "(", None),
+                x_aux("broken_b", ")", None),
                 x_module_named("m", "sub", &[], None),
             ],
         );
@@ -138,6 +163,135 @@ fn arrayed_and_multi_model_diagnostics_are_reproducible() {
                 )
             })
             .collect();
+        // Each fixture class must actually surface rows -- a class that
+        // produces nothing constrains nothing (the first version of the
+        // arrayed fixture was exactly that kind of vacuous).
+        for needle in ["mixed", "sm_one", "sm_two", "broken_a", "broken_b"] {
+            assert!(
+                rendered.iter().any(|r| r.contains(needle)),
+                "no diagnostic mentions '{needle}'; the fixture class is vacuous: {rendered:#?}"
+            );
+        }
+        match &first {
+            None => first = Some(rendered),
+            Some(expected) => assert_eq!(
+                expected, &rendered,
+                "run {run} produced a different diagnostic set than run 0"
+            ),
+        }
+    }
+}
+
+/// Two conveyor stocks whose `<len>` (transit time) expressions carry
+/// non-time units: `check_conveyor_param_units` synthesizes one hidden aux
+/// per parameter and reports each mismatch, in the order it walks the
+/// model's variables map -- another GH #999 observable.
+#[test]
+fn conveyor_param_unit_diagnostics_are_reproducible() {
+    use crate::testutils::{x_aux, x_model, x_project};
+
+    let belt = |ident: &str| {
+        crate::datamodel::Variable::Stock(crate::datamodel::Stock {
+            ident: ident.to_string(),
+            equation: crate::datamodel::Equation::Scalar("10".to_string()),
+            documentation: String::new(),
+            units: Some("widgets".to_string()),
+            inflows: vec![],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: crate::datamodel::Compat {
+                conveyor: Some(crate::datamodel::Conveyor {
+                    // widgets, where `<len>` requires the time unit (month).
+                    transit_time: "w_len".to_string(),
+                    capacity: None,
+                    inflow_limit: None,
+                    sample: None,
+                    arrest: None,
+                    discrete: false,
+                    batch_integrity: false,
+                    one_at_a_time: true,
+                    exponential_leak: false,
+                    ignore_earlier_zone_losses: false,
+                }),
+                ..crate::datamodel::Compat::default()
+            },
+        })
+    };
+    let mut first: Option<Vec<String>> = None;
+    for run in 0..16 {
+        let main = x_model(
+            "main",
+            vec![
+                x_aux("w_len", "3", Some("widgets")),
+                belt("belt_a"),
+                belt("belt_b"),
+            ],
+        );
+        let datamodel = x_project(
+            crate::datamodel::SimSpecs {
+                start: 0.0,
+                stop: 4.0,
+                dt: crate::datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: crate::datamodel::SimMethod::Euler,
+                time_units: Some("month".to_string()),
+            },
+            &[main],
+        );
+
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        let rendered: Vec<String> = collect_all_diagnostics(&db, sync.project)
+            .iter()
+            .map(|d| format!("{:?} [{:?}] {:?}", d.variable, d.severity, d.error))
+            .collect();
+        for needle in ["belt_a", "belt_b"] {
+            assert!(
+                rendered.iter().any(|r| r.contains(needle)),
+                "no diagnostic mentions '{needle}'; the conveyor fixture is vacuous: {rendered:#?}"
+            );
+        }
+        match &first {
+            None => first = Some(rendered),
+            Some(expected) => assert_eq!(
+                expected, &rendered,
+                "run {run} produced a different diagnostic set than run 0"
+            ),
+        }
+    }
+}
+
+/// Two variables that each synthesize FAILING implicit helpers (the GH #1000
+/// A2A `SMTH1(vals[*], 3)` shape, whose per-element capture helpers hold an
+/// array slice in a scalar equation): the implicit-helper probe loop in
+/// `model_all_diagnostics` decides the order those attribution rows drain in.
+#[test]
+fn implicit_helper_diagnostics_are_reproducible() {
+    let datamodel = TestProject::new("implicit_repro")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .named_dimension("C", &["c1", "c2"])
+        .array_with_ranges("vals[C]", vec![("c1", "s"), ("c2", "s * 2")])
+        .array_aux("out_a[C]", "SMTH1(vals[*], 3)")
+        .array_aux("out_b[C]", "SMTH1(vals[*], 5)")
+        .flow("g", "(out_a[c1] + 1) * 0.01", None)
+        .stock("s", "10", &["g"], &[], None)
+        .build_datamodel();
+
+    let mut first: Option<Vec<String>> = None;
+    for run in 0..16 {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        let rendered: Vec<String> = collect_all_diagnostics(&db, sync.project)
+            .iter()
+            .map(|d| format!("{:?} [{:?}] {:?}", d.variable, d.severity, d.error))
+            .collect();
+        for needle in ["out_a", "out_b"] {
+            assert!(
+                rendered.iter().any(|r| r.contains(needle)),
+                "no diagnostic names a helper of '{needle}'; the fixture is vacuous: {rendered:#?}"
+            );
+        }
         match &first {
             None => first = Some(rendered),
             Some(expected) => assert_eq!(

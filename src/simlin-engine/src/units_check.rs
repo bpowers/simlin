@@ -608,7 +608,13 @@ pub fn check(
                         }
                     }
                     Ast::Arrayed(_, asts, default_expr, _) => {
-                        for (_element, expr) in asts.iter() {
+                        // Sorted (GH #999): the same HashMap-order hazard as
+                        // the element-consistency loop above -- the emission
+                        // order of per-element declared-units mismatches is
+                        // an observable of the diagnostics collection.
+                        let mut sorted_elems: Vec<_> = asts.iter().collect();
+                        sorted_elems.sort_unstable_by_key(|(element, _)| element.as_str());
+                        for (_element, expr) in sorted_elems {
                             if let Some(err) = check_against_expected(expr) {
                                 errors.push((ident.clone(), err));
                             }
