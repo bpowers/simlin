@@ -1406,6 +1406,8 @@ mod combined_fragment_proptest;
 #[cfg(test)]
 mod combined_fragment_tests;
 #[cfg(test)]
+mod diagnostic_determinism_tests;
+#[cfg(test)]
 mod diagnostic_tests;
 #[cfg(test)]
 mod differential_tests;

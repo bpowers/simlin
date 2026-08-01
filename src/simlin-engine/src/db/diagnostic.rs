@@ -178,8 +178,13 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // two SHARE one salsa cache entry per variable -- the win from dropping
     // `is_root`. The module inputs are empty because we are not in an
     // assembly context: this is purely for error detection.
+    // Sorted for deterministic diagnostic emission ORDER (GH #999): the
+    // accumulator drain returns rows in query-execution order, and
+    // `variables` is a HashMap whose per-instance order is random.
     let empty_inputs = ModuleInputSet::empty(db);
-    for (_var_name, source_var) in source_vars.iter() {
+    let mut sorted_vars: Vec<_> = source_vars.iter().collect();
+    sorted_vars.sort_unstable_by_key(|(name, _)| name.as_str());
+    for (_var_name, source_var) in sorted_vars {
         let _fragment = compile_var_fragment(db, *source_var, model, project, empty_inputs);
     }
 
@@ -216,7 +221,9 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     {
         let implicit_info = crate::db::model_implicit_var_info(db, model, project);
         let dep_graph = crate::db::model_dependency_graph(db, model, project, empty_inputs);
-        for meta in implicit_info.values() {
+        let mut sorted_implicit: Vec<_> = implicit_info.iter().collect();
+        sorted_implicit.sort_unstable_by_key(|(name, _)| name.as_str());
+        for (_name, meta) in sorted_implicit {
             let _ =
                 crate::db::compile_implicit_var_fragment(db, meta, model, project, dep_graph, &[]);
         }
@@ -1203,7 +1210,12 @@ pub fn collect_all_diagnostics(db: &SimlinDb, project: SourceProject) -> Vec<Dia
         });
     }
 
-    for source_model in project.models(db).values() {
+    // Sorted (GH #999): `models` is a HashMap, and its per-instance order
+    // used to reorder the per-model diagnostic BLOCKS run to run on any
+    // multi-model project.
+    let mut sorted_models: Vec<_> = project.models(db).iter().collect();
+    sorted_models.sort_unstable_by_key(|(name, _)| name.as_str());
+    for (_name, source_model) in sorted_models {
         // The module-cycle gate lives in `collect_model_diagnostics` (see
         // `module_cycle_diagnostic`): a model that reaches a cycle reports the
         // cycle instead of running its passes, and a model that reaches none is

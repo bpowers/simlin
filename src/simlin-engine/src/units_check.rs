@@ -444,7 +444,13 @@ pub fn check(
         time: time_variable(ctx),
     };
 
-    for (ident, var) in model.variables.iter() {
+    // Deterministic emission order (GH #999): `variables` is a HashMap, and
+    // its per-instance iteration order used to decide the ORDER of the
+    // per-variable consistency errors -- an observable of the diagnostics
+    // collection. The GH #595/#633 recipe: sort before iterating.
+    let mut sorted_vars: Vec<(&Ident<Canonical>, &Variable)> = model.variables.iter().collect();
+    sorted_vars.sort_unstable_by_key(|(id, _)| id.as_str());
+    for (ident, var) in sorted_vars {
         if var.table().is_some() {
             // if a variable has a graphical function the equation is fed into
             // that function like `f(eqn)` -- the units are just whatever is
@@ -453,10 +459,19 @@ pub fn check(
         }
 
         // Check that all elements of arrayed expressions have consistent units,
-        // even when the array variable has no declared units
+        // even when the array variable has no declared units.
+        //
+        // The per-element map is a HashMap, and its iteration order used to
+        // pick the ANCHOR element ("previous element(s)") -- so a mixed-units
+        // variable named DIFFERENT offending elements, and a different NUMBER
+        // of rows, run to run (GH #999: two of the ~184 churned corpus lines
+        // per run were this shape). Sorting by element key makes the anchor
+        // the lexicographically-first element, deterministically.
         if let Some(Ast::Arrayed(_, asts, default_expr, _)) = var.ast() {
             let mut first_units: Option<UnitMap> = None;
-            for (element, expr) in asts.iter() {
+            let mut sorted_elements: Vec<_> = asts.iter().collect();
+            sorted_elements.sort_unstable_by_key(|(element, _)| element.as_str());
+            for (element, expr) in sorted_elements {
                 match units.check(expr) {
                     Ok(Units::Explicit(element_units)) => {
                         if let Some(ref existing) = first_units {

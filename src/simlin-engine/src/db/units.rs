@@ -320,7 +320,11 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
     // feed into the stock's init equation. We check this by looking up
     // each argument's units (declared or inferred) and comparing.
     if has_declared_units {
-        for (var_ident, var) in target_model.variables.iter() {
+        // Sorted for deterministic diagnostic emission order (GH #999),
+        // matching `units_check::check` and `units_infer::gen_all_constraints`.
+        let mut sorted_vars: Vec<_> = target_model.variables.iter().collect();
+        sorted_vars.sort_unstable_by_key(|(id, _)| id.as_str());
+        for (var_ident, var) in sorted_vars {
             if let crate::variable::Variable::Module {
                 model_name: sub_model_name,
                 inputs,
