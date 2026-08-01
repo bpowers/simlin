@@ -21,7 +21,7 @@ For Python-specific standards (thread safety, lock ordering), see [docs/dev/pyth
 
 ## Thread Safety
 
-All wrapper classes have per-instance `threading.Lock`. Lock ordering: release `Model._lock` before calling `Project` methods. See [docs/dev/python.md](/docs/dev/python.md).
+All wrapper classes have a per-instance lock (`Sim`'s is an `RLock` so `get_run()` can hold it across the whole Run snapshot). Lock ordering: release `Model._lock` before calling `Project` methods. See [docs/dev/python.md](/docs/dev/python.md).
 
 ## Non-Standard Commands
 

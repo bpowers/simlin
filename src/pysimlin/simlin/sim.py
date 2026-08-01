@@ -50,10 +50,17 @@ class Sim:
         """Initialize a Sim from a C pointer and Model reference."""
         if ptr == ffi.NULL:
             raise ValueError("Cannot create Sim from NULL pointer")
-        self._lock = threading.Lock()
+        # RLock, not Lock: get_run() holds the lock across the whole Run
+        # snapshot so a concurrent run_to/reset/close cannot tear it, and the
+        # materialization re-enters the individually-locked accessors
+        # (get_series etc.) on the same thread.
+        self._lock = threading.RLock()
         self._ptr = ptr
         self._model = model
-        self._overrides: dict[str, float] = overrides or {}
+        # Copy: the caller owns the dict it passed to Model.simulate(), and
+        # mutating it afterwards must not rewrite what this Sim (and any Run
+        # snapshot taken from it) reports as its overrides.
+        self._overrides: dict[str, float] = dict(overrides) if overrides else {}
         self._ran = False
         _register_finalizer(self, lib.simlin_sim_unref, ptr)
 
@@ -584,7 +591,14 @@ class Sim:
         from .run import Run
 
         run = Run(self, self._overrides)
-        run._materialize()
+        # Hold the lock across the whole materialization: it issues many
+        # individually-locked reads (time series, per-variable series, loops,
+        # ltm mode), and a concurrent run_to/reset/close landing between them
+        # would tear the snapshot. The lock is an RLock, so the re-entrant
+        # accessor calls on this thread are fine.
+        with self._lock:
+            self._check_alive()
+            run._materialize()
         return run
 
     def __enter__(self) -> Self:

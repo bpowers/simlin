@@ -434,6 +434,30 @@ class TestGetRunLifetime:
         assert isinstance(run.loops, tuple)
         assert isinstance(run.dominant_periods, tuple)
 
+    def test_overrides_isolated_from_caller_mutation(self) -> None:
+        """Mutating the caller's overrides dict must not alter a Run's record.
+
+        Sim and Run must copy the overrides mapping at construction; aliasing
+        the caller-owned dict would let post-run mutation rewrite what a saved
+        Run reports it was simulated with.
+        """
+        from pathlib import Path
+
+        fixture = Path(__file__).parent / "logistic-growth.sd.json"
+        model = simlin.load(fixture)
+
+        overrides = {"maximum_growth_rate": 0.12}
+        with model.simulate(overrides=overrides) as sim:
+            sim.run_to_end()
+            run = sim.get_run()
+        overrides["maximum_growth_rate"] = 999.0
+        assert run.overrides == {"maximum_growth_rate": 0.12}
+
+        overrides = {"maximum_growth_rate": 0.12}
+        run = model.run(overrides=overrides, analyze_loops=False)
+        overrides["maximum_growth_rate"] = 999.0
+        assert run.overrides == {"maximum_growth_rate": 0.12}
+
 
 class TestSimRepr:
     """Test string representation of simulations."""

@@ -153,8 +153,8 @@ for issue in model.check():                    # structural problems, if any
 
 `model.edit()` opens a transaction: `current` maps variable names to their
 definitions, and `patch` collects changes. Edits are validated and applied
-together when the `with` block exits; an invalid edit raises
-`SimlinRuntimeError` and leaves the model unchanged.
+together when the `with` block exits; an invalid edit raises a
+`SimlinError` and leaves the model unchanged.
 
 ```python
 # Change an equation
@@ -262,8 +262,8 @@ Rahmandad, 2020):
   `behavior_time_series`: the loop's signed share, in [-1, 1], of the total
   loop activity in its part of the model at each timestep.
 - `loop.average_importance()` / `loop.max_importance()` -- reductions of
-  the absolute value of that series, in [0, 1]. Comparable across loops, so
-  they rank loops by dominance.
+  the absolute value of that series, in [0, 1]. Comparable across loops in
+  the same cycle partition (see below), so they rank loops by dominance.
 - `run.dominant_periods` -- contiguous intervals in which one set of
   same-polarity loops explains the majority of behavior.
 - `run.ltm_mode` -- `"exhaustive"`, `"discovery"`, or `"disabled"` (see the

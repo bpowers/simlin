@@ -106,7 +106,10 @@ class Run:
             overrides: Variable overrides used for this run
         """
         self._sim = sim
-        self._overrides = overrides
+        # Copy: callers own the dict they passed to Model.run()/simulate();
+        # mutating it later must not rewrite this Run's record of what it
+        # was simulated with.
+        self._overrides = dict(overrides)
         self._cached_results: pd.DataFrame | None = None
         self._cached_loops: tuple[Loop, ...] | None = None
         self._cached_dominant_periods: tuple[DominantPeriod, ...] | None = None
