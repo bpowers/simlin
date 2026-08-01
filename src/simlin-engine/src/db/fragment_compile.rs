@@ -423,7 +423,7 @@ fn lower_implicit_var<'db>(
         project,
         module_ident_context,
     );
-    let implicit_dm_var = parsed.implicit_vars.get(meta.index_in_parent)?;
+    let implicit_dm_var = meta.find_in(parsed)?;
     let implicit_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
 
     let dim_context = project_dimensions_context(db, project);
@@ -525,26 +525,22 @@ pub(crate) fn compile_implicit_var_fragment(
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::CompiledVarFragment;
 
-    // Recorded at body entry (before the name is even resolved), keyed by the
-    // parent variable and the implicit index -- the identity this compiler is
+    // Recorded at body entry (before the helper is even resolved), keyed by the
+    // parent variable and the helper's own name -- the identity this compiler is
     // called with. Recording after `lower_implicit_var` would silently omit
     // every entry that failed to lower, which is exactly the work a caching
     // claim needs to account for.
     #[cfg(test)]
     note_fragment_execution(
         FragmentExecKind::Implicit,
-        &format!(
-            "{}#{}",
-            meta.parent_source_var.ident(db),
-            meta.index_in_parent
-        ),
+        &format!("{}#{}", meta.parent_source_var.ident(db), meta.name),
     );
 
     // The implicit var's canonical name (the runlist-gate key). Resolve it
     // through the shared prefix so this and the per-phase compile agree on
     // the name by construction. `None` here is the same loud-safe signal
-    // the per-phase compile returns (absent implicit index / equation
-    // errors).
+    // the per-phase compile returns (the helper is absent from this parse /
+    // equation errors).
     let module_ident_context =
         model_module_ident_context(db, model, project, module_input_names.to_vec());
     let (implicit_name, _lowered) =
@@ -706,7 +702,7 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
         project,
         module_ident_context,
     );
-    let implicit_dm_var = parsed.implicit_vars.get(meta.index_in_parent)?;
+    let implicit_dm_var = meta.find_in(parsed)?;
 
     // Project-global dimension context + converted dims, read from the
     // salsa-cached queries rather than rebuilt per implicit variable.

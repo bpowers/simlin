@@ -2255,9 +2255,7 @@ fn enumerate_module_instances_inner(
         );
         let input_prefix = format!("{name}\u{00B7}");
         let inputs: BTreeSet<Ident<Canonical>> =
-            if let Some(datamodel::Variable::Module(dm_module)) =
-                parsed.implicit_vars.get(meta.index_in_parent)
-            {
+            if let Some(datamodel::Variable::Module(dm_module)) = meta.find_in(parsed) {
                 dm_module
                     .references
                     .iter()

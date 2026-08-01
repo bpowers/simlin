@@ -808,8 +808,6 @@ fn compute_module_link_overrides(
 pub struct LtmImplicitVarMeta {
     /// Canonical name of the LTM variable that created this implicit var
     pub ltm_parent_name: String,
-    /// Index into the parent's implicit_vars list
-    pub index_in_parent: usize,
     /// Whether this implicit var is a stock
     pub is_stock: bool,
     /// Whether this implicit var is a module
@@ -863,7 +861,7 @@ pub fn model_ltm_implicit_var_info(
 
         let project_models = project.models(db);
 
-        for (idx, implicit_dm_var) in parsed.implicit_vars.iter().enumerate() {
+        for implicit_dm_var in parsed.implicit_vars.iter() {
             let im_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
             let is_module = matches!(implicit_dm_var, datamodel::Variable::Module(_));
             let is_stock = matches!(implicit_dm_var, datamodel::Variable::Stock(_));
@@ -900,7 +898,6 @@ pub fn model_ltm_implicit_var_info(
                 im_name,
                 LtmImplicitVarMeta {
                     ltm_parent_name: ltm_var.name.clone(),
-                    index_in_parent: idx,
                     is_stock,
                     is_module,
                     model_name,

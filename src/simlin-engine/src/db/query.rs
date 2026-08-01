@@ -441,7 +441,20 @@ pub fn variable_direct_dependencies<'db>(
 #[derive(Clone, PartialEq, Eq, salsa::Update)]
 pub struct ImplicitVarMeta {
     pub parent_source_var: SourceVariable,
-    pub index_in_parent: usize,
+    /// Canonical name of this helper -- its IDENTITY, and the key it is filed
+    /// under in [`model_implicit_var_info`].
+    ///
+    /// This used to be `index_in_parent`, a position in the parent's
+    /// `implicit_vars` vector, and that was a defect rather than a shortcut
+    /// (GH #1002). A consumer resolves a helper by re-parsing the parent, and
+    /// it does so under the module-ident context of the INSTANCE it is
+    /// compiling -- while this metadata is derived under the no-extra-idents
+    /// context. A position is only meaningful against the exact vector it was
+    /// taken from, so any disagreement between those two parses -- an unstable
+    /// order, or a genuinely different helper set -- silently resolved the
+    /// position to a DIFFERENT helper. A name resolves to that helper or to
+    /// nothing; it can never resolve to another one.
+    pub name: String,
     pub is_stock: bool,
     pub is_module: bool,
     pub model_name: Option<String>,
@@ -458,10 +471,28 @@ pub struct ImplicitVarMeta {
     pub dimensions: Vec<String>,
 }
 
+impl ImplicitVarMeta {
+    /// The helper this metadata names, within one parse of its parent.
+    ///
+    /// `parsed` must be a parse of `self.parent_source_var`; the caller chooses
+    /// the module-ident context, which is exactly why the match is by name (see
+    /// [`ImplicitVarMeta::name`]). `None` means this parse synthesized no such
+    /// helper -- a loud-safe skip for the caller, never a different helper.
+    pub(crate) fn find_in<'a>(
+        &self,
+        parsed: &'a ParsedVariableResult,
+    ) -> Option<&'a datamodel::Variable> {
+        parsed
+            .implicit_vars
+            .iter()
+            .find(|v| canonicalize(v.get_ident()) == self.name)
+    }
+}
+
 impl std::fmt::Debug for ImplicitVarMeta {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImplicitVarMeta")
-            .field("index_in_parent", &self.index_in_parent)
+            .field("name", &self.name)
             .field("is_stock", &self.is_stock)
             .field("size", &self.size)
             .field("dimensions", &self.dimensions)
@@ -488,7 +519,7 @@ pub fn model_implicit_var_info(
             project,
             module_ident_context,
         );
-        for (index, implicit_var) in parsed.implicit_vars.iter().enumerate() {
+        for implicit_var in parsed.implicit_vars.iter() {
             let name = canonicalize(implicit_var.get_ident()).into_owned();
             let is_stock = matches!(implicit_var, datamodel::Variable::Stock(_));
             let is_module = matches!(implicit_var, datamodel::Variable::Module(_));
@@ -526,10 +557,10 @@ pub fn model_implicit_var_info(
                     .product()
             };
             result.insert(
-                name,
+                name.clone(),
                 ImplicitVarMeta {
                     parent_source_var: *source_var,
-                    index_in_parent: index,
+                    name,
                     is_stock,
                     is_module,
                     model_name,
