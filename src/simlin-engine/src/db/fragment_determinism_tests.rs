@@ -400,6 +400,94 @@ fn implicit_helper_signatures(dm: &datamodel::Project, model_name: &str, var: &s
         .collect()
 }
 
+/// A variable's `implicit_vars` may REPEAT a name -- but every repeat must be
+/// byte-identical to its twin.
+///
+/// The uniqueness this originally asserted is FALSE, and finding that out is
+/// the reason the test exists in this shape. `parse_var_with_module_context`
+/// runs `parse_and_lower_eqn` twice over one variable -- once for the dt phase
+/// and once for the initial phase -- and each appends its helpers to the same
+/// vector. For a `Scalar`/`ApplyToAll` equation the initial pass returns
+/// `(None, vec![])` unless the variable carries an `ACTIVE INITIAL`, so nothing
+/// repeats; the `Arrayed` arm has no such early-out and re-parses each slot's
+/// equation, so every helper of a per-element variable appears exactly twice.
+///
+/// What that costs, and why it is checked here: `model_implicit_var_info` is
+/// name-keyed and last-wins, so a meta's `index_hint` points at the LAST
+/// occurrence while `find_in`'s scan fallback returns the FIRST. Those two
+/// differ only when a repeated name carries DIFFERENT content -- so while this
+/// assertion holds, hint and scan are interchangeable and the hint is purely an
+/// optimization. `find_in` is sound either way (it never returns a helper whose
+/// name is not `self.name`); what this pins is that it is also unambiguous.
+///
+/// Two shapes could break it, both PRE-EXISTING and neither in scope here: an
+/// `Arrayed` element carrying its own `<init_eqn>`, and a `Scalar`/`ApplyToAll`
+/// variable carrying `compat.active_initial`. Both make the initial pass parse
+/// a DIFFERENT equation while `BuiltinVisitor`'s `n` counter restarts at zero,
+/// so the two passes can mint the same helper NAME for different bodies --
+/// which `model_implicit_var_info` then collapses to one entry and
+/// `compute_layout` gives one slot. If this test ever reds, that is the finding,
+/// and it needs a phase discriminator in the synthesized name rather than a
+/// change to `find_in`.
+#[test]
+fn repeated_implicit_helper_names_carry_identical_helpers() {
+    let scalar = TestProject::new("uniqueness_scalar")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .scalar_aux("driver", "5")
+        .scalar_aux("combo", "SMTH1(driver, 3) + DELAY1(driver, 2)")
+        .build_datamodel();
+    let per_element = TestProject::new("uniqueness_per_element")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("region", &["east", "west", "north"])
+        .scalar_aux("driver", "5")
+        .array_with_ranges(
+            "arr[region]",
+            vec![
+                ("east", "SMTH1(driver, 3)"),
+                ("west", "SMTH1(driver, 4)"),
+                ("north", "SMTH1(driver, 5)"),
+            ],
+        )
+        .build_datamodel();
+    let a2a = TestProject::new("uniqueness_a2a")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("region", &["east", "west", "north"])
+        .array_aux("src[region]", "5")
+        .array_aux("arr[region]", "SMTH1(src[region], 3)")
+        .build_datamodel();
+
+    for (dm, model, var) in [
+        (&scalar, "main", "combo"),
+        (&per_element, "main", "arr"),
+        (&a2a, "main", "arr"),
+        (&undimensioned_arrayed_project(), "main", "arr"),
+        (&submodel_with_bound_input_project(), "sub", "sm"),
+    ] {
+        let sigs = implicit_helper_signatures(dm, model, var);
+        assert!(
+            !sigs.is_empty(),
+            "`{var}` must synthesize helpers, or this row proves nothing"
+        );
+        // `name -> the one rendering every occurrence of it must share`.
+        let mut by_name: std::collections::BTreeMap<&str, &String> = Default::default();
+        for sig in &sigs {
+            let name = sig.split(" = ").next().unwrap();
+            if let Some(seen) = by_name.get(name) {
+                assert_eq!(
+                    *seen, sig,
+                    "`{var}` synthesized two DIFFERENT helpers under the name \
+                     `{name}`; `model_implicit_var_info` keeps only the last and \
+                     `compute_layout` allocates one slot for it, so one of the \
+                     two is silently discarded. See this test's doc: the fix is a \
+                     phase discriminator in the synthesized name."
+                );
+            } else {
+                by_name.insert(name, sig);
+            }
+        }
+    }
+}
+
 /// A variable's synthesized implicit helpers must be reported in an order that
 /// is a function of its equation.
 ///

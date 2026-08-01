@@ -459,10 +459,22 @@ pub struct ImplicitVarMeta {
     /// lookup HINT, never the identity.
     ///
     /// [`ImplicitVarMeta::find_in`] tries this position first and accepts what
-    /// it finds only if that helper carries `name`; otherwise it scans. A stale
-    /// or wrong hint therefore costs one comparison and cannot change the
-    /// answer, which is the whole difference between this and the
-    /// `index_in_parent` it replaces.
+    /// it finds only if that helper carries `name`; otherwise it scans. So a
+    /// stale or wrong hint costs one comparison and can never yield a helper
+    /// other than `name`'s -- which is the whole difference between this and
+    /// the `index_in_parent` it replaces, and is what the `#[cfg(test)]`
+    /// mutation in `find_in`'s body note pins.
+    ///
+    /// One subtlety, because a name is not quite unique: a variable's
+    /// `implicit_vars` can REPEAT a name, since an `Arrayed` equation is parsed
+    /// once per phase and both passes append. The hint points at the LAST
+    /// occurrence (this map is name-keyed and last-wins, matching what
+    /// `index_in_parent` selected before it), while the scan fallback returns
+    /// the first. Those differ only if a repeated name carries different
+    /// content, which
+    /// `db::fragment_determinism_tests::repeated_implicit_helper_names_carry_identical_helpers`
+    /// pins against -- and whose doc records the two pre-existing shapes that
+    /// would break it.
     ///
     /// It exists because the scan alone is O(k) per helper and so O(k^2) per
     /// parent variable, and `k` is not small on ordinary models: an
