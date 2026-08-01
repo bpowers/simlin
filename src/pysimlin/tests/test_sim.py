@@ -395,6 +395,70 @@ class TestSimContextManager:
             assert isinstance(links, list)
 
 
+class TestGetRunLifetime:
+    """A Run returned by get_run() must remain usable after its Sim closes.
+
+    get_run() is documented as returning "simulation results as a Run
+    object"; the natural usage is `with model.simulate() as sim: ...;
+    run = sim.get_run()` followed by analysis of `run` outside the with
+    block. That requires get_run() to eagerly snapshot every surface the
+    Run exposes rather than lazily reading from the (soon closed) Sim.
+    """
+
+    def test_run_usable_after_sim_closed(self, xmile_model_path) -> None:
+        """Every Run surface works after the simulate() context exits."""
+        model = simlin.load(xmile_model_path)
+        with model.simulate() as sim:
+            sim.run_to_end()
+            step_count = sim.get_step_count()
+            run = sim.get_run()
+
+        df = run.results
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == step_count
+        assert isinstance(run.loops, tuple)
+        assert isinstance(run.dominant_periods, tuple)
+        assert run.ltm_mode == "disabled"
+        assert run.time_spec.stop > run.time_spec.start
+        assert run.overrides == {}
+
+    def test_ltm_run_usable_after_sim_closed(self, xmile_model_path) -> None:
+        """LTM surfaces (loops, ltm_mode) also survive Sim closure."""
+        model = simlin.load(xmile_model_path)
+        with model.simulate(enable_ltm=True) as sim:
+            sim.run_to_end()
+            run = sim.get_run()
+
+        assert len(run.results) > 0
+        assert run.ltm_mode in ("exhaustive", "discovery")
+        assert isinstance(run.loops, tuple)
+        assert isinstance(run.dominant_periods, tuple)
+
+    def test_overrides_isolated_from_caller_mutation(self) -> None:
+        """Mutating the caller's overrides dict must not alter a Run's record.
+
+        Sim and Run must copy the overrides mapping at construction; aliasing
+        the caller-owned dict would let post-run mutation rewrite what a saved
+        Run reports it was simulated with.
+        """
+        from pathlib import Path
+
+        fixture = Path(__file__).parent / "logistic-growth.sd.json"
+        model = simlin.load(fixture)
+
+        overrides = {"maximum_growth_rate": 0.12}
+        with model.simulate(overrides=overrides) as sim:
+            sim.run_to_end()
+            run = sim.get_run()
+        overrides["maximum_growth_rate"] = 999.0
+        assert run.overrides == {"maximum_growth_rate": 0.12}
+
+        overrides = {"maximum_growth_rate": 0.12}
+        run = model.run(overrides=overrides, analyze_loops=False)
+        overrides["maximum_growth_rate"] = 999.0
+        assert run.overrides == {"maximum_growth_rate": 0.12}
+
+
 class TestSimRepr:
     """Test string representation of simulations."""
 

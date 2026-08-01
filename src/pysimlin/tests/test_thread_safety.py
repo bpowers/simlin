@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 import simlin
+from simlin import SimlinRuntimeError
 from simlin._ffi import _finalizer_refs, _refs_lock
 
 
@@ -277,6 +278,134 @@ class TestFinalizerRegistryThreadSafety:
         _refs_lock.release()
 
 
+class TestGetRunSnapshotAtomicity:
+    """get_run() must take its snapshot atomically.
+
+    The Run surfaces (results DataFrame, loops, ltm_mode) are read from the
+    Sim by several separate accessor calls. If another thread advances or
+    resets the Sim between those calls, the snapshot is torn -- e.g. the time
+    index is captured at one length and a variable series at another, and
+    DataFrame construction raises. get_run() therefore holds the Sim lock
+    across the whole materialization.
+    """
+
+    def test_get_run_consistent_while_other_thread_resimulates(
+        self, xmile_model_path: Path
+    ) -> None:
+        model = simlin.load(xmile_model_path)
+        sim = model.simulate()
+        sim.run_to_end()
+        expected_len = sim.get_step_count()
+        expected_cols = set(sim.get_run().results.columns)
+
+        errors: list[Exception] = []
+        stop = threading.Event()
+        barrier = threading.Barrier(2, timeout=10)
+
+        def resimulate() -> None:
+            try:
+                barrier.wait()
+                while not stop.is_set():
+                    sim.reset()
+                    sim.run_to_end()
+            except Exception as exc:
+                errors.append(exc)
+
+        def snapshot() -> None:
+            try:
+                barrier.wait()
+                for _ in range(100):
+                    try:
+                        run = sim.get_run()
+                    except SimlinRuntimeError as exc:
+                        # An atomic snapshot taken between reset() and
+                        # run_to_end() legitimately has no results yet.
+                        # Anything else is a real failure.
+                        if "no results" not in str(exc).lower():
+                            raise
+                        continue
+                    df = run.results
+                    # A torn snapshot manifests as an exception inside
+                    # get_run() (index/column length mismatch) or as a frame
+                    # with missing columns (per-variable reads that raced the
+                    # reset are silently suppressed).
+                    assert len(df) == expected_len, (
+                        f"snapshot has {len(df)} rows, expected {expected_len}"
+                    )
+                    assert set(df.columns) == expected_cols, (
+                        f"snapshot is missing columns: {expected_cols - set(df.columns)}"
+                    )
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                stop.set()
+
+        t1 = threading.Thread(target=resimulate)
+        t2 = threading.Thread(target=snapshot)
+        t1.start()
+        t2.start()
+        t1.join(timeout=30)
+        t2.join(timeout=30)
+
+        assert not errors, f"Torn get_run() snapshot: {errors}"
+
+    def test_reset_cannot_interleave_with_snapshot_reads(self, xmile_model_path: Path) -> None:
+        """Deterministically force a reset() between two snapshot reads.
+
+        The hammer test above depends on thread timing; this one pins the
+        exact interleaving the Sim lock must exclude. The first get_series()
+        call inside get_run()'s materialization unblocks a thread that calls
+        sim.reset(), then waits for it briefly. Without get_run() holding the
+        Sim lock across the whole snapshot, the reset lands mid-snapshot and
+        the remaining per-variable reads see an empty sim (those errors are
+        suppressed, yielding a frame with missing columns). With the lock
+        held, the reset blocks until the snapshot is complete.
+        """
+        model = simlin.load(xmile_model_path)
+        sim = model.simulate()
+        sim.run_to_end()
+        expected_len = sim.get_step_count()
+        expected_cols = set(sim.get_run().results.columns)
+
+        real_get_series = sim.get_series
+        reset_requested = threading.Event()
+        reset_finished = threading.Event()
+        injected = False
+
+        def resetter() -> None:
+            reset_requested.wait(timeout=10)
+            sim.reset()
+            reset_finished.set()
+
+        def injecting_get_series(name: str):
+            nonlocal injected
+            series = real_get_series(name)
+            if not injected:
+                injected = True
+                reset_requested.set()
+                # With the snapshot correctly locked the reset cannot start,
+                # so this wait times out; without the lock the reset completes
+                # here and tears the snapshot.
+                reset_finished.wait(timeout=0.5)
+            return series
+
+        t = threading.Thread(target=resetter)
+        t.start()
+        sim.get_series = injecting_get_series  # type: ignore[method-assign]
+        try:
+            run = sim.get_run()
+        finally:
+            sim.get_series = real_get_series  # type: ignore[method-assign]
+        t.join(timeout=10)
+
+        assert injected, "fault injection never fired; test is vacuous"
+        df = run.results
+        assert len(df) == expected_len
+        assert set(df.columns) == expected_cols, (
+            f"snapshot is missing columns: {expected_cols - set(df.columns)}"
+        )
+
+
 class TestPerObjectLockExists:
     """Verify that wrapper objects carry a threading.Lock."""
 
@@ -293,7 +422,9 @@ class TestPerObjectLockExists:
         assert isinstance(model._lock, type(threading.Lock()))
 
     def test_sim_has_lock(self, xmile_model_path: Path) -> None:
+        # Sim uses an RLock (not a plain Lock) so get_run() can hold it
+        # across the whole snapshot while re-entering locked accessors.
         model = simlin.load(xmile_model_path)
         sim = model.simulate()
         assert hasattr(sim, "_lock")
-        assert isinstance(sim._lock, type(threading.Lock()))
+        assert isinstance(sim._lock, type(threading.RLock()))

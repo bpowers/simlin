@@ -1,17 +1,22 @@
-# pysimlin - Python bindings for Simlin
+# pysimlin
 
-Python bindings for the Simlin system dynamics simulation engine.
+Python bindings for [Simlin](https://simlin.com), a system dynamics
+simulation engine. pysimlin loads models in XMILE (Stella), Vensim MDL, and
+Simlin's native formats, simulates them, and analyzes which feedback loops
+drive behavior over time. Simulation results are pandas DataFrames; model
+structure is plain dataclasses.
 
 ## Features
 
-- Load models from XMILE, Vensim MDL, and Simlin JSON and protobuf formats
-- Run system dynamics simulations with full control
-- Get simulation results as pandas DataFrames
-- Import Vensim VDF binary output files as pandas DataFrames
-- Analyze model structure and feedback loops
-- Edit existing models or build new ones programmatically via Python context managers
-- Full type hints for IDE support
-- Loops That Matter (LTM) analysis for feedback loop importance
+- Load XMILE (`.stmx`, `.xmile`), Vensim (`.mdl`), and Simlin JSON/protobuf models
+- Simulate with per-run parameter overrides; results as pandas DataFrames
+- Loop dominance analysis ("Loops that Matter"): measure each feedback
+  loop's contribution to behavior at every timestep, and find where
+  dominance shifts
+- Inspect model structure: variables, equations, causal links, feedback loops
+- Edit models, or build them from scratch, through a transactional context manager
+- Import Vensim `.vdf` binary output as DataFrames
+- Full type hints
 
 ## Installation
 
@@ -19,439 +24,204 @@ Python bindings for the Simlin system dynamics simulation engine.
 pip install pysimlin
 ```
 
-**Note:** Install with `pip install pysimlin` but import with `import simlin`.
+The distribution is named `pysimlin`; the importable package is `simlin`:
 
-## Requirements
+```python
+import simlin
+```
 
-- Python 3.11 or higher
-- numpy >= 1.22.0
-- pandas >= 1.5.0
-- cffi >= 1.15.0
+Requires Python 3.11+ on macOS (ARM64) or Linux (ARM64, x86_64). Depends on
+numpy, pandas, and cffi.
 
 ## Quick Start
 
+Build a logistic growth model, simulate it, and see which feedback loop
+dominates when:
+
 ```python
 import simlin
-from simlin import Project
 from simlin.json_types import Stock, Flow, Auxiliary
 
-# Create a simple population model programmatically
-project = Project.new(
-    name="population-demo",
-    sim_start=0.0,
-    sim_stop=100.0,
-    dt=0.25,
-    time_units="years"
+project = simlin.Project.new(
+    name="logistic-growth", sim_start=0, sim_stop=100, dt=0.25, time_units="years"
 )
 
 model = project.get_model()
 with model.edit() as (_, patch):
-    # Stock: population level
-    patch.upsert_stock(Stock(
-        name="population",
-        initial_equation="1000",
-        inflows=["births"],
-        outflows=["deaths"]
+    patch.upsert_stock(Stock(name="population", initial_equation="50", inflows=["net_growth"]))
+    patch.upsert_flow(Flow(name="net_growth", equation="population * fractional_growth"))
+    patch.upsert_aux(Auxiliary(
+        name="fractional_growth",
+        equation="max_growth_rate * (1 - population / carrying_capacity)",
     ))
+    patch.upsert_aux(Auxiliary(name="max_growth_rate", equation="0.08"))
+    patch.upsert_aux(Auxiliary(name="carrying_capacity", equation="10000"))
 
-    # Flows: births and deaths
-    patch.upsert_flow(Flow(name="births", equation="population * birth_rate"))
-    patch.upsert_flow(Flow(name="deaths", equation="population * death_rate"))
+run = model.run()
+print(f"final population: {run.results['population'].iloc[-1]:.0f}")
 
-    # Parameters
-    patch.upsert_aux(Auxiliary(name="birth_rate", equation="0.03"))
-    patch.upsert_aux(Auxiliary(name="death_rate", equation="0.02"))
+for loop in run.loops:
+    print(f"{loop.id} ({loop.polarity}): average importance {loop.average_importance():.2f}")
 
-# Run simulation and get results
-run = model.run(analyze_loops=False)
-print(run.results.head())
-
-# Access individual variables
-population_series = run.results["population"]
-print(f"Population grows from {population_series.iloc[0]:.0f} to {population_series.iloc[-1]:.0f}")
+for period in run.dominant_periods:
+    print(f"t=[{period.start_time:.0f}, {period.end_time:.0f}] dominated by {period.dominant_loops}")
 ```
+
+Output:
+
+```
+final population: 9359
+b1 (B): average importance 0.34
+u1 (R): average importance 0.66
+t=[0, 67] dominated by ('u1',)
+t=[67, 100] dominated by ('b1',)
+```
+
+The model has two feedback loops: the reinforcing compounding loop
+(`population -> net_growth -> population`) and the balancing crowding loop
+through `fractional_growth`. `run()` simulates with loop analysis enabled,
+scoring every loop's contribution to behavior at every timestep. The
+reinforcing loop dominates the first two-thirds of the run; as population
+approaches the carrying capacity, the balancing loop takes over -- the
+handoff at t=67 is the inflection point of the S-curve.
+
+Loop ids (`b1`, `u1`) come from structural analysis and are stable
+identifiers; the polarity reported on a `Run` is classified from runtime
+behavior. Here structural analysis cannot sign the link from `population`
+to `net_growth` (the sign of `fractional_growth` is not known statically),
+so the compounding loop is named `u1` -- but its runtime loop scores are
+uniformly positive, so it reports `R`.
 
 ## Examples
 
-### Editing a flow in an existing model
+Complete, runnable programs live in
+[`examples/`](https://github.com/bpowers/simlin/tree/main/src/pysimlin/examples):
 
-<!-- pysimlin-test: reset -->
-```python
-"""Example showing how to edit an existing model's flow equation with pysimlin."""
+- [`edit_existing_model.py`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/examples/edit_existing_model.py)
+  loads an XMILE model, changes a flow's equation, and verifies the change
+  alters behavior.
+- [`population_model.py`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/examples/population_model.py)
+  builds a model from scratch and validates the shape of its output.
 
-from __future__ import annotations
-
-import simlin
-
-
-EXAMPLE_XMILE = b"""<?xml version='1.0' encoding='utf-8'?>
-<xmile version=\"1.0\" xmlns=\"http://docs.oasis-open.org/xmile/ns/XMILE/v1.0\" xmlns:isee=\"http://iseesystems.com/XMILE\" xmlns:simlin=\"https://simlin.com/XMILE/v1.0\">
-  <header>
-    <name>pysimlin-edit-example</name>
-    <vendor>Simlin</vendor>
-    <product version=\"0.1.0\" lang=\"en\">Simlin</product>
-  </header>
-  <sim_specs method=\"Euler\" time_units=\"Year\">
-    <start>0</start>
-    <stop>80</stop>
-    <dt>0.25</dt>
-  </sim_specs>
-  <model name=\"main\">
-    <variables>
-      <stock name=\"population\">
-        <eqn>25</eqn>
-        <inflow>net_birth_rate</inflow>
-      </stock>
-      <flow name=\"net_birth_rate\">
-        <eqn>fractional_growth_rate * population</eqn>
-      </flow>
-      <aux name=\"fractional_growth_rate\">
-        <eqn>maximum_growth_rate * (1 - population / carrying_capacity)</eqn>
-      </aux>
-      <aux name=\"maximum_growth_rate\">
-        <eqn>0.10</eqn>
-      </aux>
-      <aux name=\"carrying_capacity\">
-        <eqn>1000</eqn>
-      </aux>
-    </variables>
-  </model>
-</xmile>
-"""
-
-
-def run_simulation(model: simlin.Model) -> float:
-    """Run the model to the configured stop time and return the ending population."""
-
-    with model.simulate() as sim:
-        sim.run_to_end()
-        return float(sim.get_value("population"))
-
-
-def main() -> None:
-    """Demonstrate editing a flow equation and verify the change takes effect."""
-
-    # Load model from XMILE bytes by writing to temp file first
-    import tempfile
-    import os
-
-    with tempfile.NamedTemporaryFile(suffix=".stmx", delete=False) as f:
-        f.write(EXAMPLE_XMILE)
-        temp_path = f.name
-
-    try:
-        model = simlin.load(temp_path)
-        baseline_final = run_simulation(model)
-
-        with model.edit() as (current, patch):
-            flow = current["net_birth_rate"]
-            flow.equation = "fractional_growth_rate * population * 1.5"
-            patch.upsert_flow(flow)
-
-        accelerated_final = run_simulation(model)
-
-        if not accelerated_final > baseline_final + 10:
-            raise RuntimeError(
-                "Edited model did not accelerate growth as expected: "
-                f"baseline={baseline_final:.2f} accelerated={accelerated_final:.2f}"
-            )
-
-        print(
-            "Updated growth equation increased the final population from "
-            f"{baseline_final:.1f} to {accelerated_final:.1f}."
-        )
-    finally:
-        os.unlink(temp_path)
-
-
-if __name__ == "__main__":
-    main()
-```
-
-### Building a logistic population model programmatically
-
-<!-- pysimlin-test: reset -->
-```python
-"""Create a new Simlin project and build a simple population model using pysimlin's edit API."""
-
-from __future__ import annotations
-
-import simlin
-from simlin.json_types import Stock, Flow, Auxiliary
-
-
-def build_population_project() -> simlin.Project:
-    """Return a project containing a logistic population model created via model.edit()."""
-
-    project = simlin.Project.new(
-        name="pysimlin-population-example",
-        sim_start=0.0,
-        sim_stop=80.0,
-        dt=0.25,
-        time_units="years",
-    )
-
-    model = project.get_model()
-    with model.edit() as (_, patch):
-        population = Stock(
-            name="population",
-            initial_equation="50",
-            inflows=["births"],
-            outflows=["deaths"],
-        )
-        patch.upsert_stock(population)
-
-        births = Flow(
-            name="births",
-            equation="population * birth_rate",
-        )
-        patch.upsert_flow(births)
-
-        deaths = Flow(
-            name="deaths",
-            equation="population * birth_rate * (population / 1000)",
-        )
-        patch.upsert_flow(deaths)
-
-        birth_rate = Auxiliary(
-            name="birth_rate",
-            equation="0.08",
-        )
-        patch.upsert_aux(birth_rate)
-
-    return project
-
-
-def validate_population_curve(values: list[float]) -> None:
-    """Ensure the generated population series shows logistic (S-shaped) growth."""
-
-    if len(values) < 3:
-        raise RuntimeError("Population series is unexpectedly short")
-
-    if any(b < a for a, b in zip(values, values[1:])):
-        raise RuntimeError("Population should not decline in this model")
-
-    initial = values[0]
-    mid = values[len(values) // 2]
-    last = values[-1]
-    growth_first_half = mid - initial
-    growth_second_half = last - mid
-
-    if not growth_first_half > 0:
-        raise RuntimeError("Population failed to grow early in the simulation")
-
-    if not growth_second_half > 0:
-        raise RuntimeError("Population failed to grow late in the simulation")
-
-    if not growth_second_half < growth_first_half:
-        raise RuntimeError("Logistic growth should slow over time")
-
-    if not 950 <= last <= 1025:
-        raise RuntimeError(
-            "Population should approach the carrying capacity (~1000), "
-            f"but ended at {last:.2f}"
-        )
-
-
-def main() -> None:
-    """Build, simulate, and validate the population model."""
-
-    project = build_population_project()
-    errors = project.get_errors()
-    if errors:
-        raise RuntimeError(f"Generated project contains validation errors: {errors}")
-
-    model = project.get_model()
-    with model.simulate() as sim:
-        sim.run_to_end()
-        population_series = [float(value) for value in sim.get_series("population")]
-
-    validate_population_curve(population_series)
-
-    print(
-        "Population grows from "
-        f"{population_series[0]:.1f} to {population_series[-1]:.1f}, forming an S-shaped trajectory."
-    )
-
-
-if __name__ == "__main__":
-    main()
-```
-
-Both examples live under `src/pysimlin/examples/` and are executed by `scripts/pysimlin-tests.sh`.
+Both run in CI on every commit.
 
 ## API Reference
 
+Method-level documentation lives in the docstrings (`help(simlin.Model)`,
+etc.); this section is a guided tour. Its examples continue with the
+`model` built in Quick Start.
+
 ### Loading Models
 
-```python
-import simlin
-from simlin import Project
-from simlin.json_types import Stock, Flow, Auxiliary
-
-# Create a model programmatically (used by all API examples below)
-project = Project.new(
-    name="api-demo",
-    sim_start=0.0,
-    sim_stop=100.0,
-    dt=0.25,
-    time_units="years"
-)
-
-model = project.get_model()
-with model.edit() as (_, patch):
-    patch.upsert_stock(Stock(
-        name="population",
-        initial_equation="1000",
-        inflows=["births"],
-        outflows=["deaths"]
-    ))
-    patch.upsert_flow(Flow(name="births", equation="population * birth_rate"))
-    patch.upsert_flow(Flow(name="deaths", equation="population * death_rate"))
-    patch.upsert_aux(Auxiliary(name="birth_rate", equation="0.03"))
-    patch.upsert_aux(Auxiliary(name="death_rate", equation="0.02"))
-
-print(f"Created model with {len(model.get_var_names())} variables")
-```
-
-You can also load models from files:
+`simlin.load()` reads a model file, auto-detecting the format from its
+extension:
 
 <!-- pysimlin-test: skip -->
 ```python
-# Load from file (auto-detects format from extension)
-model = simlin.load("model.stmx")  # .stmx, .mdl, .json, etc.
-project = model.project
+model = simlin.load("model.stmx")   # XMILE (.stmx, .xmile, .xml)
+model = simlin.load("model.mdl")    # Vensim
+model = simlin.load("model.json")   # Simlin JSON
+project = model.project             # the containing Project
 ```
+
+To start from nothing, create a project with `simlin.Project.new()` and add
+variables with `model.edit()`, as in Quick Start.
 
 ### Working with Models
 
 ```python
 from simlin import VARTYPE_STOCK, VARTYPE_FLOW, VARTYPE_AUX
 
-# Get variable names, optionally filtered by type
-all_names = model.get_var_names()                          # All variable names
-stock_names = model.get_var_names(type_mask=VARTYPE_STOCK) # Stock names only
-flow_names = model.get_var_names(type_mask=VARTYPE_FLOW)   # Flow names only
-aux_names = model.get_var_names(type_mask=VARTYPE_AUX)     # Aux names only
+names = model.get_var_names()                          # all variables
+stocks = model.get_var_names(type_mask=VARTYPE_STOCK)  # just stocks
 
-# Get detailed variable information
-for name in model.get_var_names():
-    var = model.get_variable(name)
-    if var is not None:
-        print(f"{var.name} ({type(var).__name__})")
+var = model.get_variable("population")   # Stock | Flow | Aux | None
+spec = model.time_spec                   # start, stop, dt, units
 
-# Get time configuration
-time_spec = model.time_spec
-print(f"Simulation: t={time_spec.start} to {time_spec.stop}, dt={time_spec.dt}")
+deps = model.get_incoming_links("net_growth")  # direct inputs of one variable
+for link in model.get_links():                 # every causal link, with polarity
+    print(link)                                # e.g. "fractional_growth --+--> net_growth"
 
-# Analyze variable dependencies
-incoming_deps = model.get_incoming_links("population")
+print(model.explain("population"))
+# population is a stock with initial value 50, increased by net_growth, ...
 
-# Get causal links
-links = model.get_links()
-for link in links:
-    print(f"{link.from_var} --{link.polarity}--> {link.to_var}")
-
-# Check for model issues
-issues = model.check()
-for issue in issues:
+for issue in model.check():                    # structural problems, if any
     print(f"{issue.severity}: {issue.message}")
-
-# Get explanation for a variable
-explanation = model.explain("population")
-print(explanation)
 ```
 
 ### Model Editing
 
+`model.edit()` opens a transaction: `current` maps variable names to their
+definitions, and `patch` collects changes. Edits are validated and applied
+together when the `with` block exits; an invalid edit raises a
+`SimlinError` and leaves the model unchanged.
+
 ```python
-from dataclasses import replace
-from simlin.json_types import Stock, Flow, Auxiliary
-
-# Edit existing model variables using context manager
+# Change an equation
 with model.edit() as (current, patch):
-    # Access current variables by name (returns Stock, Flow, Auxiliary, or Module)
-    stock_var = current["population"]
+    cap = current["carrying_capacity"]
+    cap.equation = "12000"
+    patch.upsert_aux(cap)
 
-    # Modify the variable using dataclasses.replace()
-    updated_stock = replace(stock_var, initial_equation="100")
-
-    # Apply the change
-    patch.upsert_stock(updated_stock)
-
-# Create new variables programmatically
+# Add a harvest outflow: create the flow, then attach it to the stock
 with model.edit() as (current, patch):
-    # Create a new auxiliary variable
-    new_aux = Auxiliary(
-        name="growth_rate",
-        equation="0.05",
-    )
-    patch.upsert_aux(new_aux)
-
-    # Create a new flow variable
-    new_flow = Flow(
-        name="births",
-        equation="population * growth_rate",
-    )
-    patch.upsert_flow(new_flow)
+    patch.upsert_flow(Flow(name="harvest", equation="population * harvest_fraction"))
+    patch.upsert_aux(Auxiliary(name="harvest_fraction", equation="0.01"))
+    stock = current["population"]
+    stock.outflows = [*stock.outflows, "harvest"]
+    patch.upsert_stock(stock)
 ```
 
 ### Running Simulations
 
 ```python
-# High-level API: run and get results immediately
-run = model.run(analyze_loops=False)
-print(run.results.head())
+# Simulate to the end of the configured time range
+run = model.run()
 
-# Run with variable overrides
-run = model.run(overrides={"birth_rate": 0.05}, analyze_loops=False)
+# Override constants for a single run (parameters only, not computed variables)
+run = model.run(overrides={"max_growth_rate": 0.12})
 
-# Use the cached base case
-base_case = model.base_case  # Automatically cached
-print(base_case.results["population"].tail())
+# The no-overrides run, computed once and cached
+base = model.base_case
+```
 
-# Low-level API: create simulation for step-by-step control
+`run()` performs loop analysis by default; pass `analyze_loops=False` to
+skip it when you only need the time series. To change the time range or
+`dt`, update the project's sim specs first
+(`model.project.set_sim_specs()`).
+
+For step-by-step control -- inspecting state mid-run, or intervening at a
+specific time -- use `model.simulate()`:
+
+```python
 with model.simulate() as sim:
-    sim.run_to(50.0)        # Run to specific time
-    sim.set_value("growth_rate", 0.10)  # Intervention
-    sim.run_to_end()        # Continue to end
-    run = sim.get_run()     # Get results as Run object
-
-# Enable Loops That Matter analysis
-with model.simulate(enable_ltm=True) as sim:
+    sim.run_to(50.0)
+    sim.set_value("max_growth_rate", 0.12)  # intervene at t=50
     sim.run_to_end()
     run = sim.get_run()
-    print(run.dominant_periods)
 ```
 
 ### Accessing Results
 
+`Run.results` is a pandas DataFrame: the index is simulation time, with one
+column per variable. Arrayed variables appear as one column per element
+(`"stock[element]"`).
+
 ```python
-# Results are pandas DataFrames
-run = model.run(analyze_loops=False)
-df = run.results  # Time series for all variables
-
-# Access specific variables
-population = df["population"]
-births = df["births"]
-
-# Standard pandas operations
-print(df.describe())
+df = run.results
+print(df["population"].describe())
 print(df.tail())
 
-# Get metadata
-time_spec = run.time_spec
-overrides = run.overrides  # Dict of variable overrides used
+spec = run.time_spec       # start/stop/dt of this run
+changed = run.overrides    # overrides used for this run
 ```
 
 ### Importing Vensim Data Files (VDF)
 
 Vensim saves simulation output in a binary `.vdf` format. `simlin.load_vdf`
 reads one directly (no model file needed) and returns a DataFrame shaped
-exactly like `Run.results`: index is time, columns are canonicalized
-variable names, arrayed variables appear as one column per element
-(`"stock[element]"`). Simulation runs, sensitivity runs, and imported
-dataset files are all auto-detected from the file magic.
+exactly like `Run.results`. Simulation runs, sensitivity runs, and imported
+dataset files are auto-detected from the file magic.
 
 <!-- pysimlin-test: skip -->
 ```python
@@ -470,177 +240,226 @@ comparison = pd.DataFrame(
 
 ### Model Interventions
 
-```python
-# Run with different parameter values
-scenarios = {}
-for rate in [0.02, 0.03, 0.04]:
-    run = model.run(
-        overrides={"birth_rate": rate},
-        analyze_loops=False
-    )
-    scenarios[f"rate_{rate}"] = run.results["population"]
+Compare scenarios by running with different overrides:
 
-# Compare scenarios
+```python
 import pandas as pd
-comparison = pd.DataFrame(scenarios)
-print(comparison.tail())
+
+scenarios = {
+    f"growth={rate}": model.run(overrides={"max_growth_rate": rate}).results["population"]
+    for rate in [0.04, 0.08, 0.12]
+}
+print(pd.DataFrame(scenarios).tail())
 ```
 
 ### Feedback Loop Analysis
 
+Every `run()` scores each feedback loop's contribution to model behavior at
+every timestep, using the Loops that Matter method (Schoenberg, Eberlein &
+Rahmandad, 2020):
+
+- `run.loops` -- every feedback loop, with runtime polarity and a
+  `behavior_time_series`: the loop's signed share, in [-1, 1], of the total
+  loop activity in its part of the model at each timestep.
+- `loop.average_importance()` / `loop.max_importance()` -- reductions of
+  the absolute value of that series, in [0, 1]. Comparable across loops in
+  the same cycle partition (see below), so they rank loops by dominance.
+- `run.dominant_periods` -- contiguous intervals in which one set of
+  same-polarity loops explains the majority of behavior.
+- `run.ltm_mode` -- `"exhaustive"`, `"discovery"`, or `"disabled"` (see the
+  next section).
+
 ```python
 run = model.run()
 
-# Access feedback loops with polarity and behavioral importance
-for loop in run.loops:
-    print(f"Loop {loop.id} ({loop.polarity}): {' -> '.join(loop.variables)}")
-    if loop.behavior_time_series is not None:
-        avg_importance = loop.average_importance()
-        print(f"  avg importance = {avg_importance:.3f}")
+most = max(run.loops, key=lambda loop: loop.average_importance() or 0)
+print(f"most influential: {most.id}: {' -> '.join(most.variables)}")
 
-# Analyze dominant periods
 for period in run.dominant_periods:
-    print(f"t=[{period.start_time}, {period.end_time}]: {period.dominant_loops}")
+    print(f"t=[{period.start_time:g}, {period.end_time:g}]: {period.dominant_loops}")
 ```
+
+Importance is normalized within a loop's *cycle partition* -- a group of
+stocks connected by feedback. Models with several independent feedback
+subsystems have several partitions, and scores are only comparable between
+loops in the same one (`loop.partition` indexes `model.loop_partitions`); a
+loop alone in its partition scores exactly 1 by construction.
+
+For loop structure without simulating, use `model.loops`: the same loops
+with structural polarity and no behavior series.
 
 #### Loop Polarity
 
-Loops are classified by polarity, which indicates how they affect the system:
-
-- **R (Reinforcing)**: Loop amplifies changes (positive loop scores)
-- **B (Balancing)**: Loop counteracts changes (negative loop scores)
-- **U (Undetermined)**: Loop polarity cannot be reliably determined
-
-Loop IDs use the polarity as a prefix (e.g., "R1", "B2", "U3").
-
-When you run a simulation, pysimlin computes actual loop scores at each timestep. The polarity is classified based on these runtime values using the Schoenberg & Eberlein (2020) polarity-confidence ratio `|r - |b|| / (r + |b|)`:
-- All loop scores positive: Reinforcing
-- All loop scores negative: Balancing
-- Mixed-sign with one polarity dominating at confidence >= 0.99: Mostly Reinforcing (Rux) or Mostly Balancing (Bux)
-- Mixed-sign with no clear dominance: Undetermined
+- **R (reinforcing)** -- amplifies change: every loop score positive.
+- **B (balancing)** -- counteracts change: every loop score negative.
+- **Rux / Bux (mostly reinforcing / mostly balancing)** -- mixed-sign
+  scores with one side dominating; `loop.polarity_confidence` carries the
+  ratio `|r - |b|| / (r + |b|)` (Schoenberg & Eberlein, 2020), and
+  classification requires confidence >= 0.99.
+- **U (undetermined)** -- mixed-sign scores with no dominant side.
 
 ```python
 from simlin import LoopPolarity
 
-run = model.run()
-
-# Filter by polarity
 reinforcing = [l for l in run.loops if l.polarity == LoopPolarity.REINFORCING]
 balancing = [l for l in run.loops if l.polarity == LoopPolarity.BALANCING]
-undetermined = [l for l in run.loops if l.polarity == LoopPolarity.UNDETERMINED]
-mostly_r = [l for l in run.loops if l.polarity == LoopPolarity.MOSTLY_REINFORCING]
-mostly_b = [l for l in run.loops if l.polarity == LoopPolarity.MOSTLY_BALANCING]
 ```
 
-### Loops That Matter (LTM)
+### Loop Discovery for Large Models
+
+The surfaces above enumerate every feedback loop, which is only tractable
+for smaller models. Past a size gate the engine switches to *discovery*
+mode: `run()` emits a `RuntimeWarning`, `run.ltm_mode` reports
+`"discovery"`, and `run.loops` is empty. For these models, call
+`Model.analyze()` -- an explicit, timeout-guarded search for the loops that
+drive behavior:
+
+<!-- pysimlin-test: skip -->
+```python
+model = simlin.load("wrld3-03.mdl")   # World3: 311 variables
+analysis = model.analyze(timeout=30.0)
+
+if analysis.truncated:
+    print("timeout elapsed; results are partial")
+
+for loop in analysis.loops[:3]:
+    chain = " -> ".join(loop.variables[:3])
+    print(f"{loop.id} ({loop.polarity}) importance {loop.average_importance():.3f}: {chain} ...")
+```
+
+Output for World3, the *Limits to Growth* model
+([`test/metasd/WRLD3-03/wrld3-03.mdl`](https://github.com/bpowers/simlin/tree/main/test/metasd/WRLD3-03)
+in the Simlin repository), where discovery finds 200 loops across 15
+feedback-coupled stocks in under a second:
+
+```
+b51 (B) importance 0.052: population_0_to_14 -> maturation_14_to_15 -> population_15_to_44 ...
+r55 (R) importance 0.033: persistent_pollution -> persistent_pollution_index -> land_fertility_degredation_rate ...
+b24 (B) importance 0.031: persistent_pollution -> persistent_pollution_index -> land_fertility_degredation_rate ...
+```
+
+`analysis.loops` is ranked most-important-first, except that loops with no
+competition in their cycle partition sort last (their relative score is 1
+by construction and says nothing). `analysis.partitions` describes the
+partitions; on models with more than one, compare loops within a partition,
+as above. `analysis.dominant_periods` is also available, but with hundreds
+of loops the per-timestep dominant sets are fine-grained -- ranking by
+`average_importance()` and reading the top loops' variable chains is
+usually the more legible summary.
+
+Two details worth knowing: the `timeout` bounds only the discovery sweep --
+the model is first compiled and simulated with loop instrumentation, and
+that time is not counted against it; and if there are specific loops you
+always want scored, pin them by name with `patch.set_loop_name()` inside
+`model.edit()`.
+
+### Link Scores
+
+Loop scores are built from link scores: with loop analysis enabled, every
+causal link is scored at every timestep. `average_relative_score()` gives
+the fraction of the target's change attributable to that input, in
+[-1, 1] -- use it to rank the inputs of one variable:
 
 ```python
-# Run simulation with LTM enabled
-sim = model.simulate(enable_ltm=True)
-sim.run_to_end()
+with model.simulate(enable_ltm=True) as sim:
+    sim.run_to_end()
+    links = sim.get_links()
 
-# Get links with importance scores over time
-links = sim.get_links()
-for link in links:
-    if link.has_score():
-        print(f"{link.from_var} -> {link.to_var}")
-        print(f"  Average score: {link.average_score():.4f}")
-        print(f"  Max score: {link.max_score():.4f}")
-
-# Get relative loop scores
-loops = model.get_loops()
-if loops:
-    loop_scores = sim.get_relative_loop_score(loops[0].id)
+inputs = [ln for ln in links if ln.to_var == "net_growth"]
+inputs.sort(key=lambda ln: abs(ln.average_relative_score() or 0), reverse=True)
+for ln in inputs:
+    print(f"{ln}: {ln.average_relative_score():.2f}")
 ```
+
+The normalization is per target, so relative scores answer "which of this
+variable's inputs matters most" -- not "which link matters most globally".
+A link into a target with a single scored input reads 1 by construction.
+(The raw `link.score` series is normalized differently for each target and
+is not comparable across targets at all.)
 
 ### Model Export
 
 ```python
-from pathlib import Path
-
-# Export to different formats
-xmile_bytes = project.to_xmile()           # Export as XMILE XML
-json_bytes = project.serialize_json()      # Export as JSON
-
-print(f"XMILE export: {len(xmile_bytes)} bytes")
-print(f"JSON export: {len(json_bytes)} bytes")
-
-# Save to file (example - commented out to avoid creating files)
-# Path("exported.stmx").write_bytes(xmile_bytes)
-# Path("model.json").write_bytes(json_bytes)
+xmile_bytes = project.to_xmile()        # XMILE XML
+json_bytes = project.serialize_json()   # Simlin JSON
 ```
+
+Write the bytes to a file to save the model (`.stmx` for XMILE).
 
 ### Error Handling
 
-```python
-from simlin import (
-    SimlinError,
-    SimlinImportError,
-    SimlinRuntimeError,
-    SimlinCompilationError,
-    ErrorCode
-)
+`project.get_errors()` reports compilation problems for the whole project;
+`model.check()` presents the same information per model.
 
-# Check for compilation errors on the existing project
-errors = project.get_errors()
-if errors:
-    for error in errors:
-        print(f"{error.code.name} in {error.model_name}/{error.variable_name}")
-        print(f"  {error.message}")
-else:
-    print("No errors in project")
+```python
+from simlin import SimlinImportError, ErrorCode
+
+for error in project.get_errors():
+    print(f"{error.code.name} in {error.model_name}/{error.variable_name}: {error.message}")
 ```
 
-When loading models from files, you can catch import errors:
+Loading a malformed file raises `SimlinImportError`:
 
 <!-- pysimlin-test: skip -->
 ```python
 try:
     model = simlin.load("model.stmx")
 except SimlinImportError as e:
-    print(f"Import failed: {e}")
+    print(f"import failed: {e}")
     if e.code == ErrorCode.XML_DESERIALIZATION:
-        print("Invalid XML format")
+        print("invalid XML")
 ```
 
 ## Complete Example
 
-This example demonstrates loading a model from file and comparing scenarios with matplotlib:
+Load a model from a file and compare a policy against the baseline:
 
 <!-- pysimlin-test: skip -->
 ```python
-import simlin
-import pandas as pd
 import matplotlib.pyplot as plt
+import simlin
 
-# Load and run a population model
 model = simlin.load("population_model.stmx")
+baseline = model.base_case
+policy = model.run(overrides={"birth_rate": 0.03})
 
-# Run baseline simulation
-with model.simulate() as sim:
-    sim.run_to_end()
-    baseline = sim.get_run().results
-
-# Run intervention scenario
-with model.simulate() as sim:
-    sim.set_value("birth_rate", 0.03)
-    sim.run_to_end()
-    intervention = sim.get_run().results
-
-# Compare results
 fig, ax = plt.subplots()
-ax.plot(baseline.index, baseline["population"], label="Baseline")
-ax.plot(intervention.index, intervention["population"], label="Intervention")
-ax.set_xlabel("Time")
-ax.set_ylabel("Population")
+ax.plot(baseline.results.index, baseline.results["population"], label="baseline")
+ax.plot(policy.results.index, policy.results["population"], label="policy")
+ax.set_xlabel("time")
+ax.set_ylabel("population")
 ax.legend()
 plt.show()
 ```
 
-## Supported Platforms
+## Using pysimlin from AI Agents
 
-- macOS (ARM64)
-- Linux (ARM64, x86_64)
+pysimlin is designed to be driven by AI agents as well as people. Every
+analysis surface returns plain data -- strings, dataclasses, DataFrames --
+and simulations are deterministic, so runs are reproducible and diffable.
+Three surfaces matter most for an agent's edit-and-verify loop:
+
+```python
+# Ground yourself: a one-line account of any variable
+print(model.explain("net_growth"))
+
+# Verify after editing: structural problems, or an empty tuple
+issues = model.check()
+```
+
+Edits are transactional, so a bad equation cannot corrupt the model -- it
+raises, the model is unchanged, and the message names the offending
+variable:
+
+<!-- pysimlin-test: expect-error -->
+```python
+with model.edit() as (_, patch):
+    patch.upsert_aux(Auxiliary(name="broken", equation="no_such_var * 2"))
+```
+
+Agents that speak [MCP](https://modelcontextprotocol.io) can use the
+[`@simlin/mcp`](https://www.npmjs.com/package/@simlin/mcp) server instead,
+which exposes the same engine as MCP tools.
 
 ## License
 
@@ -648,19 +467,10 @@ Apache License 2.0
 
 ## Development
 
-For development setup and contribution guidelines, see the main [Simlin repository](https://github.com/bpowers/simlin).
-
-### Running Tests
-
-```bash
-cd src/pysimlin
-pip install -e ".[dev]"
-pytest
-```
-
-### Building from Source
+pysimlin is developed in the
+[Simlin monorepo](https://github.com/bpowers/simlin) (`src/pysimlin`). To
+build from source and run its tests, lints, and examples:
 
 ```bash
-cd src/pysimlin
-python -m build
+./scripts/pysimlin-tests.sh
 ```
