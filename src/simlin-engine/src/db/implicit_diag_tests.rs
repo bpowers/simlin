@@ -83,9 +83,20 @@ fn implicit_helper_codegen_failure_is_attributed() {
             msg.contains("Non-scalar StaticSubscript") || msg.contains("codegen"),
             "the refused construct must be named: {msg}"
         );
+        assert!(
+            msg.contains("synthesized while parsing 'out'"),
+            "the PARENT the helper was synthesized for must be named: {msg}"
+        );
         assert_eq!(d.severity, DiagnosticSeverity::Error);
         assert!(d.variable.is_some(), "structured consumers read the field");
     }
+    // One row per helper: the two failing phases (initial + flow) refuse the
+    // same construct, and identical reasons collapse rather than duplicate.
+    assert_eq!(
+        attributed.len(),
+        2,
+        "exactly one row per failing helper (c1, c2): {attributed:#?}"
+    );
 }
 
 /// A COMPILING model with the same builtin gains no implicit-helper

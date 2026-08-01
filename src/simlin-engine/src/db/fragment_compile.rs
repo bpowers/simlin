@@ -574,7 +574,12 @@ pub(crate) fn compile_implicit_var_fragment(
     // explicit path's (see `compile_var_fragment`): the fragment's absence
     // fails the build, and the corpus sweep shape holds -- added rows land
     // only on projects that already fail to compile.
-    let phase = |is_initial: bool| {
+    // Identical reasons across phases collapse to ONE row (a helper whose
+    // initial and flow phases refuse the same construct is one defect, and
+    // duplicate rows are user-visible noise); distinct per-phase reasons
+    // each get their own row.
+    let mut reported_reasons: Vec<String> = Vec::new();
+    let mut phase = |is_initial: bool| {
         let mut reason: Option<String> = None;
         let bytecodes = compile_implicit_var_phase_bytecodes(
             db,
@@ -589,6 +594,10 @@ pub(crate) fn compile_implicit_var_fragment(
             use salsa::Accumulator;
             let reason =
                 reason.unwrap_or_else(|| "its equation failed to parse or lower".to_string());
+            if reported_reasons.contains(&reason) {
+                return bytecodes;
+            }
+            reported_reasons.push(reason.clone());
             crate::db::CompilationDiagnostic(crate::db::Diagnostic {
                 model: model.name(db).clone(),
                 variable: Some(implicit_name.clone()),
@@ -1010,7 +1019,14 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
                 Ok(ts) if !ts.is_empty() => {
                     tables.insert(var_ident_canonical.clone(), ts);
                 }
-                Err(_) => return None,
+                Err(err) => {
+                    if let Some(slot) = why.as_deref_mut() {
+                        *slot = Some(format!(
+                            "its graphical-function table failed to build: {err}"
+                        ));
+                    }
+                    return None;
+                }
                 _ => {}
             }
         }

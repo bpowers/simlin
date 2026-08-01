@@ -187,14 +187,32 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // a SMOOTH/DELAY/TREND capture helper otherwise surfaces only as
     // `assemble_module`'s unattributed batch message, and the accumulation
     // `compile_implicit_var_fragment` performs there is dormant (GH #581).
-    // Probed with the empty input set, exactly as the LTM implicit probe in
-    // `model_ltm_fragment_diagnostics`: byte-identical to assembly for the
-    // root, and for sub-model instances the input set only flips load kinds,
-    // never compile success. Unlike `compile_var_fragment` this is NOT a
-    // tracked query (the parent's parse result provides the caching), so the
-    // probe recompiles the helpers on each diagnostics collection -- the
-    // same cost the LTM implicit probe already pays, and small next to the
-    // per-variable pass above.
+    //
+    // Probed with the EMPTY input set: byte-identical to assembly for the
+    // ROOT model (root assembly uses the empty set), and only there. For a
+    // SUB-MODEL the input set genuinely changes compilation -- input names
+    // widen the module-ident parse context and a reference can resolve
+    // solely through `ContextCore.inputs` -- so this probe can MISS a
+    // failure that only occurs under a parent's bindings (that class keeps
+    // the pre-#1000 unattributed batch message), and, symmetrically, a
+    // degenerate phantom-dst binding (`BadModuleInputDst`-warned, and
+    // nondeterministically compiling due to a pre-existing implicit-index
+    // instability) can fail HERE while assembly passes. Probing each model
+    // at its real instantiation input sets would need root context this
+    // per-model query does not have; the empty set is the honest root-exact
+    // choice, with the sub-model divergence disclosed rather than claimed
+    // away.
+    //
+    // Unlike `compile_var_fragment` this is NOT a tracked query (the
+    // parent's parse result provides the caching) and unlike the LTM
+    // implicit probe (which sits inside the tracked
+    // `model_ltm_fragment_diagnostics`) it lives in THIS query's body, which
+    // `report_untracked_read` above forces to re-execute every revision --
+    // so the helpers recompile on every revision's FIRST collection,
+    // including the per-edit paths that call `collect_all_diagnostics`
+    // (libsimlin `get_errors`, MCP `edit_model`). Measured on C-LEARN that
+    // is ~15ms per first collection; same-revision re-collections recompile
+    // nothing.
     {
         let implicit_info = crate::db::model_implicit_var_info(db, model, project);
         let dep_graph = crate::db::model_dependency_graph(db, model, project, empty_inputs);
