@@ -142,8 +142,9 @@ export interface Link {
   // score is.
   relativeScore: Float64Array | null;
   // The size of relativeScore's normalization group (GH #998): how many
-  // scored links share this link's `to` target (itself included); 0 for an
-  // unscored link. A group of ONE reads exactly +/-1 by construction.
+  // CONTRIBUTING links share this link's `to` target (itself included); 0
+  // for a link that never contributes (unscored, or an all-NaN series). A
+  // group of ONE reads exactly +/-1 by construction.
   scoredInputCount: number;
 }
 

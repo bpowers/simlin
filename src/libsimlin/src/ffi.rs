@@ -199,13 +199,17 @@ pub struct SimlinLink {
     pub relative_score: *mut f64,
     pub relative_score_len: usize,
     /// The size of `relative_score`'s normalization group (GH #998): how
-    /// many scored links share this link's `to` target, itself included; 0
-    /// when this link carries no score.  A group of ONE reads exactly `±1`
-    /// at every step BY CONSTRUCTION -- ranking links globally by
+    /// many CONTRIBUTING links share this link's `to` target, itself
+    /// included; 0 when this link never contributes (no score series, or an
+    /// all-NaN one -- an all-NaN series adds no summand to any step's
+    /// denominator, so it is no competition).  A group of ONE reads exactly
+    /// `±1` at every step BY CONSTRUCTION -- ranking links globally by
     /// `|relative_score|` floats such no-competition links to the top (58 of
     /// C-LEARN's global top 100 were single-input targets).  Group links by
     /// `to` and rank within a group; use this field to detect the trivial
-    /// groups.  Appended additively (`simlin_sizeof_link` and the
+    /// groups.  Per-step residual: a link NaN at SOME steps counts here yet
+    /// leaves its siblings momentarily unopposed at those steps -- a scalar
+    /// cannot carry that.  Appended additively (`simlin_sizeof_link` and the
     /// `@simlin/engine` `LINK_SIZE`/`readLinks` offsets track it).
     pub scored_input_count: usize,
 }

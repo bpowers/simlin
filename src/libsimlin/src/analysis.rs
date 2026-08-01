@@ -2188,7 +2188,10 @@ pub unsafe extern "C" fn simlin_analyze_get_rel_loop_score(
 /// `loop_score` with NO partition normalization.  A bare id on an arrayed
 /// loop returns the signed argmax-abs aggregate across slots (the dominant
 /// element's raw contribution at each step); a subscripted id returns that
-/// element's own series.
+/// element's own series.  A step where EVERY slot is NaN stays NaN in the
+/// aggregate (honest raw data -- unlike the relative accessor's bare-id
+/// aggregate, whose 0.0-on-undefined matches its SAFEDIV "inactive"
+/// convention).
 ///
 /// This is the accessor a LONE PIN needs: a modeler-pinned loop alone in
 /// its cycle partition has a relative score of exactly `+1`/`-1` by

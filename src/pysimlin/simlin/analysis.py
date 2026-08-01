@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable  # noqa: TC003 -- see below
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
 import numpy as np
 
-if TYPE_CHECKING:
-    from collections.abc import Iterable
+# `Iterable` is imported at RUNTIME (the noqa above suppresses ruff's TC003)
+# because it annotates the PUBLIC `links_by_target` signature: with a
+# TYPE_CHECKING-only import, `typing.get_type_hints(simlin.links_by_target)`
+# -- and any doc generator or type-driven framework built on it -- raises
+# NameError. (The `NDArray` annotations below stay TYPE_CHECKING-only; that
+# is the ecosystem-wide numpy convention and predates this module.)
 
+if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from .run import DominantPeriod
@@ -192,15 +198,20 @@ class Link:
 
     scored_input_count: int = 0
     """The size of :attr:`relative_score`'s normalization group (GH #998):
-    how many scored links share this link's :attr:`to_var` target, itself
-    included; ``0`` when this link carries no score.
+    how many CONTRIBUTING links share this link's :attr:`to_var` target,
+    itself included; ``0`` when this link never contributes -- no score
+    series, or an all-NaN one (an all-NaN series adds no summand to any
+    step's denominator, so it is no competition; such series are common on
+    large exhaustive-mode models).
 
     A group of ONE reads exactly ``±1`` at every step **by construction**
     (there is nothing else to normalize against), so ranking links globally
     by ``abs(average_relative_score())`` floats such no-competition links to
     the top -- on C-LEARN, 58 of the global top 100 were single-input
     targets.  Group links by target (:func:`links_by_target`) and rank
-    within a group; use this field to detect the trivial groups."""
+    within a group; use this field to detect the trivial groups.  Per-step
+    residual: a link that is NaN at only SOME steps counts here yet leaves
+    its siblings momentarily unopposed at those steps."""
 
     def __str__(self) -> str:
         """Return a human-readable string representation."""

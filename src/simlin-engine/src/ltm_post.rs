@@ -1028,10 +1028,13 @@ pub fn compute_raw_loop_score_for_element(
 /// step emits the SIGNED value of the slot with the largest magnitude, ties
 /// broken to the lowest slot index.  Scalar (`n_slots <= 1`) reduces to
 /// identity, so a bare id means the same thing on the raw and relative
-/// accessors (the dominant element's contribution, sign preserved).  Note
-/// the dominant slot is picked by |raw| here and by |relative| there, so
-/// the two aggregates can select different slots at a step where slots sit
-/// in different partitions with different denominators.
+/// accessors (the dominant element's contribution, sign preserved).  Two
+/// deliberate divergences from the relative sibling: the dominant slot is
+/// picked by |raw| here and by |relative| there (the two aggregates can
+/// select different slots at a step where slots sit in different partitions
+/// with different denominators), and a step where EVERY slot is NaN stays
+/// NaN here (honest raw data) while the relative aggregate reports 0.0
+/// (its SAFEDIV "inactive" convention).
 pub fn compute_raw_loop_score_argmax_abs(
     results: &Results,
     loop_id: &str,
@@ -1041,20 +1044,29 @@ pub fn compute_raw_loop_score_argmax_abs(
     let slots = n_slots.max(1);
     let mut out = Vec::with_capacity(results.step_count);
     for row in results.iter() {
-        let mut best: f64 = 0.0;
+        // A step where EVERY slot is NaN stays NaN: the raw accessor's
+        // contract is honest data, and a fabricated finite 0.0 would hide
+        // undefined values the per-element accessors report. This is a
+        // DELIBERATE divergence from `compute_rel_loop_score_argmax_abs`,
+        // whose 0.0-on-undefined matches the relative score's SAFEDIV
+        // "inactive" convention (and whose consumers coerce non-finite to 0
+        // anyway). A step with any finite slot picks the finite argmax --
+        // NaN slots are skipped by the comparison below.
+        let mut best: Option<f64> = None;
         let mut best_abs: f64 = -1.0;
         for k in 0..slots {
             let Some(slot) = effective_slot(n_slots, k) else {
                 continue;
             };
             let v = row[off + slot];
-            // `>` (not `>=`) keeps the lowest-index slot on ties.
+            // `>` (not `>=`) keeps the lowest-index slot on ties; a NaN
+            // candidate compares false and never becomes the winner.
             if v.abs() > best_abs {
                 best_abs = v.abs();
-                best = v;
+                best = Some(v);
             }
         }
-        out.push(best);
+        out.push(best.unwrap_or(f64::NAN));
     }
     Some(out)
 }
@@ -1185,26 +1197,45 @@ pub fn compute_rel_link_scores(
 }
 
 /// The size of each link's relative-score normalization group (GH #998):
-/// for a scored link, the number of scored links sharing its `to` target
-/// (itself included); `0` for an unscored link.  Parallel to `links`.
+/// for a CONTRIBUTING link, the number of contributing links sharing its
+/// `to` target (itself included); `0` for a link that never contributes --
+/// no score series, or an all-NaN one.  Parallel to `links`.
 ///
 /// The relative link score is a share WITHIN this group, so a group of ONE
 /// reads exactly `±1` at every step by construction -- carrying no ranking
 /// information.  Exposing the group size makes that degeneracy detectable:
 /// callers ranking links can group by target (the group key is `to`) and
-/// treat `group_size == 1` links as trivially self-normalized.
+/// treat `group_size == 1` links as trivially self-normalized.  Counting
+/// allocated score columns instead of contributors would miss exactly that
+/// case: an all-NaN sibling adds no summand to any step's denominator, so
+/// the lone finite link still reads `±1` -- and all-NaN series are common
+/// on large exhaustive-mode models.
 pub fn rel_link_group_sizes(links: &[RelLinkInput<'_>]) -> Vec<usize> {
-    let mut scored_by_target: HashMap<&str, usize> = HashMap::new();
+    // A link CONTRIBUTES when its series adds at least one summand to its
+    // target's denominator -- i.e. it has at least one non-NaN entry
+    // (`denom_summand` excludes NaN and keeps Inf, and Inf is not NaN). An
+    // all-NaN series never contributes, so counting it would over-report
+    // competition: its finite sibling normalizes against itself alone and
+    // reads +/-1 by construction, which is exactly the degeneracy this
+    // count exists to flag. A never-contributing link (no series, or
+    // all-NaN) reports 0, so `count > 0` means "carries a usable score" and
+    // `count == 1` means "with no competition". Residual, documented rather
+    // than modeled: NaN exclusion is per STEP, so a link that is NaN at
+    // some steps and finite at others counts here yet leaves its siblings
+    // momentarily unopposed at its NaN steps -- a scalar cannot carry that.
+    let contributes =
+        |link: &RelLinkInput<'_>| link.score.is_some_and(|s| s.iter().any(|v| !v.is_nan()));
+    let mut contributing_by_target: HashMap<&str, usize> = HashMap::new();
     for link in links {
-        if link.score.is_some() {
-            *scored_by_target.entry(link.to).or_insert(0) += 1;
+        if contributes(link) {
+            *contributing_by_target.entry(link.to).or_insert(0) += 1;
         }
     }
     links
         .iter()
         .map(|link| {
-            if link.score.is_some() {
-                scored_by_target.get(link.to).copied().unwrap_or(0)
+            if contributes(link) {
+                contributing_by_target.get(link.to).copied().unwrap_or(0)
             } else {
                 0
             }
@@ -3413,6 +3444,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn raw_loop_score_argmax_abs_preserves_all_nan_steps() {
+        // A step where EVERY slot's raw score is NaN must stay NaN in the
+        // bare-id aggregate: the raw accessor's contract is honest data, and
+        // a fabricated 0.0 would hide undefined values the per-element
+        // accessors report (PR #1003 codex review). A step with at least
+        // one finite slot still picks the finite argmax (NaN slots skipped).
+        let slot0 = [f64::NAN, f64::NAN, 3.0];
+        let slot1 = [f64::NAN, -2.0, f64::NAN];
+        let results = make_results_for_arrayed_loop("r1", &[&slot0, &slot1]);
+        let agg = compute_raw_loop_score_argmax_abs(&results, "r1", 2).unwrap();
+        assert!(
+            agg[0].is_nan(),
+            "all-NaN step must stay NaN, got {}",
+            agg[0]
+        );
+        assert_eq!(agg[1], -2.0, "the finite slot wins over a NaN sibling");
+        assert_eq!(agg[2], 3.0);
+    }
+
     // --- Link normalization-group sizes (GH #998) ------------------------
 
     #[test]
@@ -3440,6 +3491,41 @@ mod tests {
             },
         ];
         assert_eq!(rel_link_group_sizes(&links), vec![2, 2, 0, 1]);
+    }
+
+    #[test]
+    fn rel_link_group_sizes_ignore_never_contributing_siblings() {
+        // An ALL-NaN score series never adds a summand to the target's
+        // denominator, so its finite sibling is normalized against itself
+        // alone and reads +/-1 by construction -- the count must say 1, not
+        // 2, or the field misses exactly the degeneracy it exists to flag
+        // (PR #1003 codex review). The all-NaN link itself reports 0, like
+        // an unscored link: count > 0 means "this link carries a usable
+        // score", and count == 1 means "with no competition".
+        let finite = [4.0, 5.0];
+        let all_nan = [f64::NAN, f64::NAN];
+        // A PARTIALLY-NaN series contributes at its finite steps, so it
+        // counts (the per-step flicker is the documented scalar residual).
+        let partial = [f64::NAN, 1.0];
+        let links = [
+            RelLinkInput {
+                to: "z",
+                score: Some(&finite),
+            },
+            RelLinkInput {
+                to: "z",
+                score: Some(&all_nan),
+            },
+            RelLinkInput {
+                to: "y",
+                score: Some(&finite),
+            },
+            RelLinkInput {
+                to: "y",
+                score: Some(&partial),
+            },
+        ];
+        assert_eq!(rel_link_group_sizes(&links), vec![1, 0, 2, 2]);
     }
 
     // --- Relative link scores (GH #652) ---------------------------------

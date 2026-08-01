@@ -361,13 +361,17 @@ typedef struct {
   double *relative_score;
   uintptr_t relative_score_len;
   // The size of `relative_score`'s normalization group (GH #998): how
-  // many scored links share this link's `to` target, itself included; 0
-  // when this link carries no score.  A group of ONE reads exactly `±1`
-  // at every step BY CONSTRUCTION -- ranking links globally by
+  // many CONTRIBUTING links share this link's `to` target, itself
+  // included; 0 when this link never contributes (no score series, or an
+  // all-NaN one -- an all-NaN series adds no summand to any step's
+  // denominator, so it is no competition).  A group of ONE reads exactly
+  // `±1` at every step BY CONSTRUCTION -- ranking links globally by
   // `|relative_score|` floats such no-competition links to the top (58 of
   // C-LEARN's global top 100 were single-input targets).  Group links by
   // `to` and rank within a group; use this field to detect the trivial
-  // groups.  Appended additively (`simlin_sizeof_link` and the
+  // groups.  Per-step residual: a link NaN at SOME steps counts here yet
+  // leaves its siblings momentarily unopposed at those steps -- a scalar
+  // cannot carry that.  Appended additively (`simlin_sizeof_link` and the
   // `@simlin/engine` `LINK_SIZE`/`readLinks` offsets track it).
   uintptr_t scored_input_count;
 } SimlinLink;
@@ -701,7 +705,10 @@ void simlin_analyze_get_rel_loop_score(SimlinSim *sim,
 // `loop_score` with NO partition normalization.  A bare id on an arrayed
 // loop returns the signed argmax-abs aggregate across slots (the dominant
 // element's raw contribution at each step); a subscripted id returns that
-// element's own series.
+// element's own series.  A step where EVERY slot is NaN stays NaN in the
+// aggregate (honest raw data -- unlike the relative accessor's bare-id
+// aggregate, whose 0.0-on-undefined matches its SAFEDIV "inactive"
+// convention).
 //
 // This is the accessor a LONE PIN needs: a modeler-pinned loop alone in
 // its cycle partition has a relative score of exactly `+1`/`-1` by

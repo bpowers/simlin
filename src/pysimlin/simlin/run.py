@@ -222,6 +222,21 @@ class Run:
 
         Returns empty tuple if analyze_loops=False was used.
 
+        .. note::
+            **Arrayed (A2A) loops whose element slots span multiple cycle
+            partitions** (element-wise-uncoupled loop families) are grouped
+            by :attr:`Loop.partition`, which is the FIRST resolving slot's
+            partition -- a representative, not the full per-slot story --
+            while :attr:`Loop.behavior_time_series` is the argmax-abs
+            aggregate across all slots.  For such a loop the periods are
+            labeled with the representative partition even at steps where a
+            different slot (in a different partition) dominates; the
+            per-slot partition vector is not exposed over the FFI, so this
+            surface cannot detect the mixed case.  For per-slot fidelity
+            read :meth:`Sim.get_relative_loop_score` with an ``element``
+            argument.  (The engine's layout surface, which has the per-slot
+            data, gives such loops their own solo timeline instead.)
+
         Returns:
             Tuple of DominantPeriod objects
 

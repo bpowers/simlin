@@ -592,12 +592,14 @@ export interface Link {
    */
   readonly relativeScore?: Float64Array;
   /**
-   * The size of {@link relativeScore}'s normalization group: how many scored
-   * links share this link's `to` target, itself included; 0 when this link
-   * carries no score. A group of ONE reads exactly ±1 at every step BY
-   * CONSTRUCTION, so ranking links globally by `|relativeScore|` floats
-   * such no-competition links to the top -- group links by `to` and rank
-   * within a group, using this field to detect the trivial groups (GH #998).
+   * The size of {@link relativeScore}'s normalization group: how many
+   * CONTRIBUTING links share this link's `to` target, itself included; 0
+   * when this link never contributes (no score series, or an all-NaN one,
+   * which adds no summand to any step's denominator). A group of ONE reads
+   * exactly ±1 at every step BY CONSTRUCTION, so ranking links globally by
+   * `|relativeScore|` floats such no-competition links to the top -- group
+   * links by `to` and rank within a group, using this field to detect the
+   * trivial groups (GH #998).
    */
   readonly scoredInputCount: number;
 }

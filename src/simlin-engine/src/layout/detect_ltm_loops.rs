@@ -161,13 +161,116 @@ fn try_detect_ltm_loops_incremental(
             variables,
             importance_series,
             dominant_period: None,
-            // The detected loop's result-scoped cycle partition (an A2A
-            // loop's index is its first resolving slot's partition), so
-            // dominant-period selection competes partition-mates only
-            // (GH #998).
-            partition: dl.partition,
+            // The partition dominant-period selection competes this loop in
+            // (GH #998) -- `dl.partition` for a single-partition loop, but
+            // NONE (a solo group) when the loop's slots span multiple
+            // partitions: `importance_series` is the argmax-abs aggregate
+            // over per-slot scores each normalized in ITS OWN partition, so
+            // for an element-wise-uncoupled A2A loop the aggregate is not a
+            // within-partition share of `dl.partition` (the first resolving
+            // slot's, a representative) and must not compete inside it (PR
+            // #1003 codex review).
+            partition: dominance_partition(dl.partition, loop_partitions.get(&dl.id)),
         });
     }
 
     Some(feedback_loops)
+}
+
+/// The partition a detected loop's AGGREGATED importance series may compete
+/// in: its single partition when every resolving slot agrees, `None` (a solo
+/// dominance group) when the slots span more than one partition -- the
+/// aggregate mixes shares from different normalization groups and is not
+/// comparable within any single one of them.  Slots that resolve to no
+/// partition are ignored (they contribute zero-fill scores).
+fn dominance_partition(
+    dl_partition: Option<usize>,
+    slot_partitions: Option<&Vec<Option<usize>>>,
+) -> Option<usize> {
+    let Some(slots) = slot_partitions else {
+        return dl_partition;
+    };
+    let mut distinct: Option<usize> = None;
+    for p in slots.iter().flatten() {
+        match distinct {
+            None => distinct = Some(*p),
+            Some(seen) if seen != *p => return None,
+            Some(_) => {}
+        }
+    }
+    dl_partition
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Slots agreeing on one partition (the common coupled A2A case, and
+    /// every scalar loop) keep the loop's representative partition; slots
+    /// spanning two partitions (an element-wise-uncoupled A2A loop) force
+    /// the solo `None` group; unresolved slots are ignored.
+    #[test]
+    fn dominance_partition_solo_for_mixed_slots() {
+        assert_eq!(dominance_partition(Some(0), None), Some(0));
+        assert_eq!(
+            dominance_partition(Some(0), Some(&vec![Some(3), Some(3)])),
+            Some(0)
+        );
+        assert_eq!(
+            dominance_partition(Some(0), Some(&vec![Some(3), None, Some(3)])),
+            Some(0)
+        );
+        assert_eq!(
+            dominance_partition(Some(0), Some(&vec![Some(3), Some(4)])),
+            None
+        );
+        assert_eq!(
+            dominance_partition(None, Some(&vec![Some(3), Some(4)])),
+            None
+        );
+        assert_eq!(dominance_partition(None, Some(&vec![None, None])), None);
+    }
+
+    /// End-to-end through the production pipeline: an element-wise-UNCOUPLED
+    /// A2A loop (two regions, no cross-element edges, so each slot is its
+    /// own cycle partition) gets the solo `None` dominance group -- its
+    /// argmax-abs aggregate mixes two partitions' shares -- while a scalar
+    /// loop keeps its single partition. This is what proves the mixed
+    /// per-slot vectors the pure helper is tested on are the shape
+    /// production supplies.
+    #[test]
+    fn uncoupled_a2a_loop_gets_solo_dominance_group() {
+        let datamodel = crate::test_common::TestProject::new("main")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .named_dimension("R", &["r1", "r2"])
+            .array_with_ranges("rate[R]", vec![("r1", "0.05"), ("r2", "0.2")])
+            .array_stock("pop[R]", "100", &["births"], &[], None)
+            .array_flow("births[R]", "pop * rate", None)
+            .stock("iso", "50", &[], &["iso_out"], None)
+            .flow("iso_out", "iso * 0.1", None)
+            .build_datamodel();
+        let mut db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &datamodel, None);
+
+        let loops = try_detect_ltm_loops(&mut db, sync.project, "main")
+            .expect("LTM loop detection must succeed on this fixture");
+
+        let a2a = loops
+            .iter()
+            .find(|l| l.variables.iter().any(|v| v == "births"))
+            .expect("the arrayed births loop must be detected");
+        assert_eq!(
+            a2a.partition, None,
+            "an uncoupled A2A loop's slots span two partitions, so its              aggregated series must compete in a solo group"
+        );
+
+        let scalar = loops
+            .iter()
+            .find(|l| l.variables.iter().any(|v| v == "iso_out"))
+            .expect("the scalar decay loop must be detected");
+        assert!(
+            scalar.partition.is_some(),
+            "a scalar loop keeps its single cycle partition"
+        );
+    }
 }
