@@ -9275,7 +9275,7 @@ fn gh751_two_arrayed_co_aggs_pin_frozen_agg_to_slot() {
         &ltm.vars,
         "$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0[r1]\u{2192}two_sums[r1]",
     );
-    let eqn = a0_to_r1.equation.source_text();
+    let eqn = a0_to_r1.equation.source_text().to_lowercase();
     assert!(
         eqn.contains("previous(\"$\u{205A}ltm\u{205A}agg\u{205A}1\"[d1\u{B7}r1])"),
         "the frozen co-agg must be PREVIOUS-pinned to its own projected slot; got: {eqn}"

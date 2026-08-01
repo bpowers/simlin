@@ -259,6 +259,15 @@ mod freeze;
 
 use freeze::freeze_at_previous;
 
+/// Materializing an array-slice freeze as its own synthetic variable
+/// (GH #995 option B), in its own file only to keep this one under the
+/// project line-count lint.
+#[path = "ltm_augment_array_freeze.rs"]
+mod array_freeze;
+
+use array_freeze::unfrozen_form;
+pub(crate) use array_freeze::{ArrayFreezeHelper, FREEZE_HELPER_PREFIX, materialize_array_freezes};
+
 /// Append child index `i` to `path`, yielding the child node's structural path.
 /// The wrap's recursion mirrors `db::ltm_ir::walk_all_in_expr`'s child-index
 /// construction exactly, so the path at any node equals that occurrence's
@@ -1706,11 +1715,27 @@ fn shaped_guard_form_text(
     target_ref: &str,
     gf_table_ref: Option<&str>,
     occ: &OccurrenceLookup<'_>,
+    freeze_helpers: &mut Vec<ArrayFreezeHelper>,
 ) -> Result<String, PartialEquationError> {
     let gf_wrap = |partial: String| -> String {
         match gf_table_ref {
             Some(table_ref) => format!("LOOKUP({table_ref}, {partial})"),
             None => partial,
+        }
+    };
+    // The GH #995 array-freeze materializer: rewrite each `PREVIOUS(<slice>)`
+    // this leg's wrap produced into a freeze-helper reference, collecting the
+    // helpers into a LEG-LOCAL vec -- only the leg actually emitted extends
+    // the caller's collector, so an abandoned leg mints no orphan variables.
+    // Needs both the dep -> declared-dims table (to name a bare `*` axis and
+    // qualify each arm against the AXIS dimension) and the dimensions
+    // context; absent either, the expression is returned untouched and the
+    // pre-existing doom checks decide.
+    let dep_dims_for_freeze = iter_ctx.and_then(|c| c.dep_dims);
+    let materialize = |expr: Expr0, helpers: &mut Vec<ArrayFreezeHelper>| -> Expr0 {
+        match (dep_dims_for_freeze, dims_ctx) {
+            (Some(dd), Some(dc)) => materialize_array_freezes(expr, dd, dc, helpers),
+            _ => expr,
         }
     };
     // The diagnostic text a loud skip names. Printed only on a failure path:
@@ -1735,6 +1760,11 @@ fn shaped_guard_form_text(
     if out.missing_occurrence {
         return Err(PartialEquationError::unfreezable(&err_text()));
     }
+    // Materialize BEFORE the doom check: a `PREVIOUS(<slice>)` the helper can
+    // express is no longer a doom. What the materializer declines stays in
+    // the tree verbatim, so `contains_unfreezable_previous` still catches it.
+    let mut first_leg_helpers = Vec::new();
+    let changed_first = materialize(changed_first, &mut first_leg_helpers);
     if !out.other_dep_mismatch && !contains_unfreezable_previous(&changed_first) {
         let source_ref = source_ref_for_guard(
             from,
@@ -1743,6 +1773,7 @@ fn shaped_guard_form_text(
             source_dim_names,
             source_dim_elements,
         );
+        freeze_helpers.append(&mut first_leg_helpers);
         return Ok(link_score_guard_form(
             &gf_wrap(print_eqn(&changed_first)),
             target_ref,
@@ -1791,16 +1822,31 @@ fn shaped_guard_form_text(
         // target's own equation, scoring a silent constant 0.
         return Err(PartialEquationError::unfreezable(&err_text()));
     };
+    // Same materialization for the changed-last leg. The source-side
+    // denominator reuses the LIVE (un-frozen) form of the frozen reference:
+    // for the slice shapes that reach this leg only via materialization, the
+    // frozen spelling `SUM(PREVIOUS(<slice>))` cannot compile, while
+    // `SUM(<slice>)` is the Δsource the guard's zero-check and SIGN factor
+    // want (current-vs-previous, via the outer `PREVIOUS(SUM(...))` the
+    // guard form itself adds).
+    let mut last_leg_helpers = Vec::new();
+    let changed_last = materialize(changed_last, &mut last_leg_helpers);
     if contains_unfreezable_previous(&changed_last) {
         return Err(PartialEquationError::unfreezable(&err_text()));
     }
+    let frozen_for_guard = if contains_unfreezable_previous(&frozen) {
+        unfrozen_form(&frozen).clone()
+    } else {
+        frozen
+    };
     let source_ref = source_ref_for_guard(
         from,
         shape,
-        Some(&frozen),
+        Some(&frozen_for_guard),
         source_dim_names,
         source_dim_elements,
     );
+    freeze_helpers.append(&mut last_leg_helpers);
     // The frozen evaluation is a re-computation of the target's equation,
     // so it needs the same implicit WITH-LOOKUP application the target's
     // own compiled value gets (GH #910).
@@ -2455,6 +2501,8 @@ pub(crate) fn generate_scalar_to_element_equation(
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
     gf_table_ref: Option<&str>,
     occ: &OccurrenceLookup<'_>,
+    dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
+    freeze_helpers: &mut Vec<ArrayFreezeHelper>,
 ) -> Result<String, PartialEquationError> {
     let from_canonical = Ident::new(from);
     let from_q = quote_ident(from);
@@ -2499,8 +2547,24 @@ pub(crate) fn generate_scalar_to_element_equation(
     if out.missing_occurrence || out.other_dep_mismatch {
         return Err(PartialEquationError::unfreezable(&print_eqn(to_elem_eqn)));
     }
-    let partial = print_eqn(&substitute_reducers_in_expr0(wrapped, reducer_subst));
-    let mut partial = subscript_idents_at_element(&partial, to_deps_to_subscript)?;
+    // GH #995: materialize any array-slice freeze the wrap produced (a frozen
+    // `def[*, r1]` other-dep, say) into its helper reference BEFORE printing;
+    // this path never doom-checked, so an inline `PREVIOUS(<slice>)` used to
+    // reach codegen and fail there. What the materializer declines is left
+    // verbatim and keeps that (loud, `model_ltm_fragment_diagnostics`-surfaced)
+    // failure. The later text passes pin only bare dep idents, so the quoted
+    // helper reference is inert to them.
+    let substituted = substitute_reducers_in_expr0(wrapped, reducer_subst);
+    // Element pinning runs on the AST (the same `subscript_idents_in_expr0`
+    // core the text-level `subscript_idents_at_element` wraps -- print + parse
+    // of our own output is a canonical fixpoint, so this is byte-identical),
+    // and it runs BEFORE the GH #995 freeze materializer: an A2A-shaped slot
+    // body spells a frozen slice's non-sliced axis as a bare DIMENSION name
+    // (`PREVIOUS(def[*, Aggregated_Regions])`), which only the pin resolves to
+    // this element's row -- materializing first would see a dynamic-looking
+    // index and decline. The pin passes touch only dep idents, so the quoted
+    // helper reference the materializer swaps in cannot be re-pinned.
+    let mut pinned = subscript_idents_in_expr0(substituted, to_deps_to_subscript);
     // Pin each mapped ident's references (the live source's numerator
     // occurrence and any PREVIOUS-wrapped co-agg freezes alike) to its own
     // projected slot -- separate passes from the `to_deps_to_subscript` pinning
@@ -2511,8 +2575,13 @@ pub(crate) fn generate_scalar_to_element_equation(
     for (ident, pin) in source_pins {
         let one: HashMap<Ident<Canonical>, DepElementPin> =
             std::iter::once((ident.clone(), pin.clone())).collect();
-        partial = subscript_idents_at_element(&partial, &one)?;
+        pinned = subscript_idents_in_expr0(pinned, &one);
     }
+    let pinned = match (dep_dims, dims_ctx) {
+        (Some(dd), Some(dc)) => materialize_array_freezes(pinned, dd, dc, freeze_helpers),
+        _ => pinned,
+    };
+    let mut partial = print_eqn(&pinned);
     // The wrap goes on LAST because it is not part of the target's equation:
     // everything above rewrites that equation within its own (gf-input) domain
     // -- freezing, element pinning, slot projection -- while the `LOOKUP` is the
@@ -3198,6 +3267,7 @@ pub(crate) fn generate_link_score_equation_for_link(
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
     dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
     to_occurrences: &[OccurrenceSite],
+    freeze_helpers: &mut Vec<ArrayFreezeHelper>,
 ) -> Result<LtmEquation, PartialEquationError> {
     generate_link_score_equation(
         from,
@@ -3209,6 +3279,7 @@ pub(crate) fn generate_link_score_equation_for_link(
         dim_ctx,
         dep_dims,
         to_occurrences,
+        freeze_helpers,
     )
 }
 
@@ -3230,6 +3301,7 @@ fn generate_link_score_equation(
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
     dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
     to_occurrences: &[OccurrenceSite],
+    freeze_helpers: &mut Vec<ArrayFreezeHelper>,
 ) -> Result<LtmEquation, PartialEquationError> {
     // Check if this is a stock-to-flow link
     let is_stock_to_flow = matches!(all_vars.get(from), Some(Variable::Stock { .. }))
@@ -3265,6 +3337,7 @@ fn generate_link_score_equation(
             dim_ctx,
             dep_dims,
             to_occurrences,
+            freeze_helpers,
         )
     } else {
         // Use standard auxiliary-to-auxiliary formula
@@ -3279,6 +3352,7 @@ fn generate_link_score_equation(
             dim_ctx,
             dep_dims,
             to_occurrences,
+            freeze_helpers,
         )
     }
 }
@@ -3420,6 +3494,7 @@ fn build_arrayed_link_score_equation(
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
     dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
     to_occurrences: &[OccurrenceSite],
+    freeze_helpers: &mut Vec<ArrayFreezeHelper>,
 ) -> Result<LtmEquation, PartialEquationError> {
     // The #511 iterated-dimension context for the per-slot partials: each
     // per-element slot can itself reference `from` by an iterated dimension
@@ -3461,7 +3536,8 @@ fn build_arrayed_link_score_equation(
     // model would have emitted no link score to reach here.
     let slot_equation = |expr: &crate::ast::Expr2,
                          gf_table_ref: Option<&str>,
-                         slot: u16|
+                         slot: u16,
+                         freeze_helpers: &mut Vec<ArrayFreezeHelper>|
      -> Result<String, PartialEquationError> {
         let elem_eqn = crate::patch::expr2_to_expr0(expr);
         // Per-element dependency set: walk *only this slot's* expression
@@ -3492,6 +3568,7 @@ fn build_arrayed_link_score_equation(
             target_ref,
             gf_table_ref,
             &occ,
+            freeze_helpers,
         )
     };
 
@@ -3507,17 +3584,14 @@ fn build_arrayed_link_score_equation(
         per_elem.iter().collect();
     sorted_slots.sort_by(|a, b| a.0.cmp(b.0));
 
-    let elements: Vec<(String, String)> = sorted_slots
-        .iter()
-        .enumerate()
-        .map(|(slot, (elem, expr))| {
-            let gf_table_ref = slot_refs.for_element(elem);
-            Ok((
-                elem.as_str().to_string(),
-                slot_equation(expr, gf_table_ref.as_deref(), slot as u16)?,
-            ))
-        })
-        .collect::<Result<_, PartialEquationError>>()?;
+    let mut elements: Vec<(String, String)> = Vec::with_capacity(sorted_slots.len());
+    for (slot, (elem, expr)) in sorted_slots.iter().enumerate() {
+        let gf_table_ref = slot_refs.for_element(elem);
+        elements.push((
+            elem.as_str().to_string(),
+            slot_equation(expr, gf_table_ref.as_deref(), slot as u16, freeze_helpers)?,
+        ));
+    }
 
     let default_gf_table_ref = slot_refs.for_default();
     let default_slot = default_expr
@@ -3526,6 +3600,7 @@ fn build_arrayed_link_score_equation(
                 expr,
                 default_gf_table_ref.as_deref(),
                 sorted_slots.len() as u16,
+                freeze_helpers,
             )
         })
         .transpose()?;
@@ -3655,6 +3730,7 @@ fn generate_auxiliary_to_auxiliary_equation(
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
     dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
     to_occurrences: &[OccurrenceSite],
+    freeze_helpers: &mut Vec<ArrayFreezeHelper>,
 ) -> Result<LtmEquation, PartialEquationError> {
     use crate::ast::Ast;
 
@@ -3682,6 +3758,7 @@ fn generate_auxiliary_to_auxiliary_equation(
             dim_ctx,
             dep_dims,
             to_occurrences,
+            freeze_helpers,
         );
     }
 
@@ -3722,6 +3799,7 @@ fn generate_auxiliary_to_auxiliary_equation(
         // (GH #910); `None` for an ordinary aux.
         with_lookup_table_ref(to_var).as_deref(),
         &occ,
+        freeze_helpers,
     )?;
     Ok(link_score_equation_for_target(text, to_var))
 }
@@ -3962,6 +4040,7 @@ fn generate_stock_to_flow_equation(
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
     dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
     to_occurrences: &[OccurrenceSite],
+    freeze_helpers: &mut Vec<ArrayFreezeHelper>,
 ) -> Result<LtmEquation, PartialEquationError> {
     // For stock-to-flow, we need to calculate how the stock influences the flow
     // This is similar to auxiliary-to-auxiliary but we know the 'from' is a stock
@@ -3988,6 +4067,7 @@ fn generate_stock_to_flow_equation(
             dim_ctx,
             dep_dims,
             to_occurrences,
+            freeze_helpers,
         );
     }
 
@@ -4033,6 +4113,7 @@ fn generate_stock_to_flow_equation(
         // A flow can be an implicit WITH-LOOKUP variable too (GH #910).
         with_lookup_table_ref(flow_var).as_deref(),
         &occ,
+        freeze_helpers,
     )?;
     Ok(link_score_equation_for_target(text, flow_var))
 }

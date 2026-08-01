@@ -112,7 +112,7 @@ fn scalar_to_arrayed_reducer_source_recurses_and_degrades_loudly() {
     // The reducer is recursed into (its `scale`-frozen inner slice re-prints
     // as `previous(pop2[...])`), NOT frozen whole as `previous(sum(...))`.
     assert!(
-        eqn.contains("previous(pop2"),
+        eqn.to_lowercase().contains("previous(pop2"),
         "the reducer must be recursed into (other-dep frozen inside it), got: {eqn}"
     );
     assert!(

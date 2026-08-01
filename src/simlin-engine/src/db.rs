@@ -940,6 +940,9 @@ pub(crate) fn module_link_score_equation(
                     .get(to_name)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
+                // No dep-dims table is threaded (see below), so the GH #995
+                // array-freeze materializer cannot fire and this stays empty.
+                let mut freeze_helpers = Vec::new();
                 match crate::ltm_augment::generate_link_score_equation_for_link(
                     &output_ident,
                     &to_ident,
@@ -952,8 +955,15 @@ pub(crate) fn module_link_score_equation(
                     // other-dep check keeps its permissive legacy collapse.
                     None,
                     to_occurrences,
+                    &mut freeze_helpers,
                 ) {
-                    Ok(eqn) => return Some(ltm::scalarize_ltm_equation(eqn)),
+                    Ok(eqn) => {
+                        debug_assert!(
+                            freeze_helpers.is_empty(),
+                            "no dep-dims table means no freeze can materialize"
+                        );
+                        return Some(ltm::scalarize_ltm_equation(eqn));
+                    }
                     // The target's equation couldn't be parsed for the
                     // partial (GH #311): fall back to the unit transfer
                     // rather than emit a silently non-ceteris-paribus
@@ -1411,6 +1421,8 @@ mod fragment_char_tests;
 mod fragment_determinism_tests;
 #[cfg(test)]
 mod incremental_compile_tests;
+#[cfg(test)]
+mod ltm_array_freeze_tests;
 #[cfg(test)]
 mod ltm_char_tests;
 #[cfg(test)]

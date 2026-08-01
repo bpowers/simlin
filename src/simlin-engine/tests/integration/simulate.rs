@@ -6031,8 +6031,17 @@ fn corpus_clearn_macros_import() {
 ///
 /// Layout impact (the resource this gate protects -- #654's VM limit of 65,536
 /// u16 result slots, NOT `wasmgen::lower`'s unrelated `MAX_UNROLL_UNITS`): the
-/// per-step result-row width is **30,947 slots**, 47% of the ceiling, with
-/// 34,589 free.
+/// per-step result-row width is **29,738 slots**, 45% of the ceiling, with
+/// 35,798 free.
+///
+/// It last moved with the GH #995 array-freeze materializer: var count
+/// 6,800 -> 6,858 (+58 content-named `$⁚ltm⁚freeze⁚` helper variables) while
+/// the WIDTH went DOWN, 30,947 -> 29,738 (-1,209): the wrap now replaces each
+/// inline `PREVIOUS(<slice>)` with a helper reference BEFORE the parse-time
+/// visitor sees it, so the visitor stops minting the per-occurrence scalar
+/// capture helpers that used to hold those slices (and fail to compile) --
+/// hundreds of broken one-slot vars traded for a few dozen compiling arrayed
+/// ones.
 ///
 /// It last moved UPWARD, 30,416 -> 30,947 (+531), when GH #996 stopped the axis
 /// allocator stealing a name-matched slot: 135 link scores that the per-element
@@ -6082,7 +6091,7 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 6800,
+        total, 6858,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"

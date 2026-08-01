@@ -1025,6 +1025,30 @@ pub(super) fn try_cross_dimensional_link_scores(
 /// `None` means "not this shape, carry on"; `Some(vec![])` is the GH #780 loud
 /// decline (warning accumulated, edge recorded, caller must NOT fall through).
 #[allow(clippy::too_many_arguments)]
+/// The declared-dims table for the GH #995 array-freeze materializer: every
+/// dep of one target slot that is a dimensioned MODEL variable, keyed by
+/// canonical name. Deliberately unfiltered (unlike `pinnable_arrayed_deps`,
+/// whose projection test would drop exactly the deps a slice freeze needs to
+/// name axes for); a dep with no entry -- an implicit or synthetic name --
+/// simply cannot materialize and keeps its loud decline.
+fn freeze_dep_dims(
+    db: &dyn Db,
+    source_vars: &HashMap<String, SourceVariable>,
+    project: SourceProject,
+    deps: &HashSet<Ident<Canonical>>,
+) -> HashMap<String, Vec<crate::dimensions::Dimension>> {
+    deps.iter()
+        .filter_map(|dep| {
+            let sv = source_vars.get(dep.as_str())?;
+            if sv.kind(db) == SourceVariableKind::Module {
+                return None;
+            }
+            let dims = variable_dimensions(db, *sv, project);
+            (!dims.is_empty()).then(|| (dep.as_str().to_string(), dims.clone()))
+        })
+        .collect()
+}
+
 pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
     db: &dyn Db,
     source_vars: &HashMap<String, SourceVariable>,
@@ -1221,7 +1245,9 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
             } else {
                 output_ref.as_str()
             };
-            match crate::ltm_augment::generate_scalar_to_element_equation(
+            let dep_dims = freeze_dep_dims(db, source_vars, project, &elem_deps);
+            let mut raw_freeze_helpers = Vec::new();
+            let eqn_result = crate::ltm_augment::generate_scalar_to_element_equation(
                 // The LIVE source is the readable `module·port` scalar, not the
                 // module node the score is named for.
                 live_ref,
@@ -1236,7 +1262,15 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
                 Some(dim_ctx),
                 gf_table_ref.as_deref(),
                 &occ,
-            ) {
+                Some(&dep_dims),
+                &mut raw_freeze_helpers,
+            );
+            vars.extend(
+                raw_freeze_helpers
+                    .into_iter()
+                    .map(super::compile::freeze_helper_var),
+            );
+            match eqn_result {
                 Ok(eqn) => eqn,
                 Err(err) => {
                     emit_ltm_partial_equation_warning(db, model, &name, &err);
@@ -1676,7 +1710,8 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     let build_var = |element: &str,
                      elem_eqn: Option<&crate::ast::Expr0>,
                      elem_deps: &HashSet<Ident<Canonical>>,
-                     pinnable: &[(Ident<Canonical>, Vec<crate::dimensions::Dimension>)]|
+                     pinnable: &[(Ident<Canonical>, Vec<crate::dimensions::Dimension>)],
+                     freeze_out: &mut Vec<LtmSyntheticVar>|
      -> Option<LtmSyntheticVar> {
         let name = format!(
             "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
@@ -1712,7 +1747,9 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 &target_element_parts(&to_dims, element),
                 dim_ctx,
             );
-            match crate::ltm_augment::generate_scalar_to_element_equation(
+            let dep_dims = freeze_dep_dims(db, source_vars, project, elem_deps);
+            let mut raw_freeze_helpers = Vec::new();
+            let eqn_result = crate::ltm_augment::generate_scalar_to_element_equation(
                 from,
                 to,
                 // Equation text uses the qualified `dim·element` form (direct
@@ -1733,7 +1770,15 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 Some(dim_ctx),
                 gf_table_ref.as_deref(),
                 &occ,
-            ) {
+                Some(&dep_dims),
+                &mut raw_freeze_helpers,
+            );
+            freeze_out.extend(
+                raw_freeze_helpers
+                    .into_iter()
+                    .map(super::compile::freeze_helper_var),
+            );
+            match eqn_result {
                 Ok(eqn) => eqn,
                 Err(err) => {
                     emit_ltm_partial_equation_warning(db, model, &name, &err);
@@ -1801,7 +1846,13 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             let elem_deps = elem_dep_class.all.clone();
             let pinnable = pinnable_deps(&elem_deps, &elem_dep_class.referenced_tables);
             for element in &elements {
-                match build_var(element, Some(&elem_eqn), &elem_deps, &pinnable) {
+                match build_var(
+                    element,
+                    Some(&elem_eqn),
+                    &elem_deps,
+                    &pinnable,
+                    &mut cross_vars,
+                ) {
                     Some(v) => cross_vars.push(v),
                     None => {
                         unscoreable_edges.insert((from.to_string(), to.to_string()));
@@ -1843,7 +1894,13 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                     None => (None, HashSet::new(), Default::default()),
                 };
                 let pinnable = pinnable_deps(&elem_deps, &elem_tables);
-                match build_var(element, elem_eqn.as_ref(), &elem_deps, &pinnable) {
+                match build_var(
+                    element,
+                    elem_eqn.as_ref(),
+                    &elem_deps,
+                    &pinnable,
+                    &mut cross_vars,
+                ) {
                     Some(v) => cross_vars.push(v),
                     None => {
                         unscoreable_edges.insert((from.to_string(), to.to_string()));
@@ -2512,13 +2569,18 @@ pub(super) fn try_disjoint_dim_arrayed_link_scores(
                 return Some(vec![]);
             }
             ShapedLinkScore::NoVariable => continue,
-            ShapedLinkScore::Scored(mut lsv) => {
+            ShapedLinkScore::Scored {
+                var: lsv,
+                freeze_helpers,
+            } => {
+                let mut lsv = *lsv;
                 // `lsv.name` is already `link_score_var_name(from, to, &shape)`
                 // from the shaped path -- no need to re-derive it here.
                 let dims = ltm_equation_dimensions(&lsv.equation).to_vec();
                 lsv.dimensions = dims.clone();
                 lsv.equation = retarget_ltm_equation_dims(lsv.equation, &dims);
                 lsv.compile_directly = false;
+                vars.extend(freeze_helpers);
                 vars.push(lsv);
             }
         }
@@ -2761,9 +2823,14 @@ pub(super) fn emit_per_shape_link_scores(
                 // composite-less module link); not an unscoreable edge.
                 continue;
             }
-            ShapedLinkScore::Scored(mut lsv) => {
+            ShapedLinkScore::Scored {
+                var: lsv,
+                freeze_helpers,
+            } => {
+                let mut lsv = *lsv;
                 // Set the canonical name and dimensions per Phase 3 Task 4/5.
                 lsv.name = crate::ltm_augment::link_score_var_name(from, to, &shape);
+                vars.extend(freeze_helpers);
                 // Every shape takes the target's dimensions: for FixedIndex
                 // each per-element link score is scalar when the target is
                 // scalar and arrayed when the target is arrayed; Bare (and
@@ -4081,6 +4148,9 @@ pub(super) fn emit_agg_to_target_link_scores(
                     // recorded occurrence, so the real stream is behavior-neutral
                     // (the wrap's agg lookups all miss). A2A body is slot 0.
                     &slot_occurrences.for_slot(slot_map.slot_for(element)),
+                    // No dep-dims table on the agg halves (see the scalar arm).
+                    None,
+                    &mut Vec::new(),
                 ) {
                     Ok(equation) => {
                         // Same completeness check as the scalar-to-element
@@ -4179,6 +4249,10 @@ pub(super) fn emit_agg_to_target_link_scores(
                             // never a recorded occurrence, so the real stream is
                             // behavior-neutral (the wrap's agg lookups all miss).
                             &slot_occurrences.for_slot(slot_map.slot_for(element)),
+                            // No dep-dims table on the agg halves (see the
+                            // scalar arm).
+                            None,
+                            &mut Vec::new(),
                         )
                     }
                 };

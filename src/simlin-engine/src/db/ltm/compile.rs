@@ -93,7 +93,7 @@ pub fn compile_ltm_var_fragment(
         &format!("{}\u{2192}{}", link_id.link_from(db), link_id.link_to(db)),
     );
 
-    let ShapedLinkScore::Scored(lsv) =
+    let ShapedLinkScore::Scored { var: lsv, .. } =
         link_score_equation_text_shaped(db, link_id, RefShape::Bare, model, project)
     else {
         return None;
@@ -167,8 +167,17 @@ pub(crate) fn shaped_link_score_executions() -> usize {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, salsa::Update)]
 pub enum ShapedLinkScore {
-    /// The link-score variable was generated.
-    Scored(LtmSyntheticVar),
+    /// The link-score variable was generated. `freeze_helpers` carries the
+    /// GH #995 array-freeze helper variables the score's partial references
+    /// (usually empty); the emission loop pushes them alongside the score,
+    /// deduplicated by their content-derived names.
+    Scored {
+        /// Boxed to keep the enum small next to its dataless variants
+        /// (clippy `large_enum_variant`); `LtmSyntheticVar` carries whole
+        /// parsed equations.
+        var: Box<LtmSyntheticVar>,
+        freeze_helpers: Vec<LtmSyntheticVar>,
+    },
     /// A `PartialEquationError` made the edge unscoreable; the warning is
     /// accumulated and the caller records the edge in `unscoreable_edges`.
     Unscoreable,
@@ -267,7 +276,13 @@ pub fn link_score_equation_text_shaped<'db>(
             dimensions: vec![],
             compile_directly: false,
         }) {
-            Some(lsv) => ShapedLinkScore::Scored(lsv),
+            // Module-link partials thread no dep-dims table (their GH #526
+            // check keeps the permissive legacy collapse), so no array
+            // freeze can be materialized on this arm.
+            Some(lsv) => ShapedLinkScore::Scored {
+                var: Box::new(lsv),
+                freeze_helpers: vec![],
+            },
             None => ShapedLinkScore::NoVariable,
         };
     }
@@ -386,6 +401,7 @@ pub fn link_score_equation_text_shaped<'db>(
         .map(Vec::as_slice)
         .unwrap_or(&[]);
 
+    let mut raw_freeze_helpers = Vec::new();
     let equation = match crate::ltm_augment::generate_link_score_equation_for_link(
         &from_ident,
         &to_ident,
@@ -396,6 +412,7 @@ pub fn link_score_equation_text_shaped<'db>(
         Some(dim_ctx),
         Some(&dep_dims),
         to_occurrences,
+        &mut raw_freeze_helpers,
     ) {
         Ok(eqn) => eqn,
         Err(err) => {
@@ -404,12 +421,33 @@ pub fn link_score_equation_text_shaped<'db>(
         }
     };
 
-    ShapedLinkScore::Scored(LtmSyntheticVar {
-        name: var_name,
-        equation,
-        dimensions: vec![],
-        compile_directly: false,
-    })
+    ShapedLinkScore::Scored {
+        var: Box::new(LtmSyntheticVar {
+            name: var_name,
+            equation,
+            dimensions: vec![],
+            compile_directly: false,
+        }),
+        freeze_helpers: raw_freeze_helpers
+            .into_iter()
+            .map(freeze_helper_var)
+            .collect(),
+    }
+}
+
+/// Convert a wrap-produced [`crate::ltm_augment::ArrayFreezeHelper`] into the
+/// synthetic variable the emission loop registers: a per-element
+/// (`LtmEquation::Arrayed`) aux whose every arm is a statically-subscripted
+/// `PREVIOUS` read (`LoadPrev`), sized by its `dimensions` for layout, and
+/// compiled verbatim (`compile_directly` -- the (from, to)-keyed salsa path
+/// has no meaning for a helper).
+pub(super) fn freeze_helper_var(h: crate::ltm_augment::ArrayFreezeHelper) -> LtmSyntheticVar {
+    LtmSyntheticVar {
+        name: h.name,
+        equation: LtmEquation::arrayed(h.dims.clone(), h.arms, None, false),
+        dimensions: h.dims,
+        compile_directly: true,
+    }
 }
 
 // Test-only override: forces [`link_score_equation_text_shaped`] to report
@@ -800,12 +838,27 @@ fn lower_ltm_variable(
             Some(datamodel::Equation::ApplyToAll(..) | datamodel::Equation::Arrayed(..))
         )
     };
+    // An ARRAYED sibling LTM var referenced as a dep -- today that is the
+    // GH #995 freeze helper, a whole-array operand of a vector builtin
+    // (`VECTOR SELECT("$⁚ltm⁚freeze⁚…", …)`). The Pass-1 temp decomposition
+    // below can only materialize a computed array argument (`helper * k`) if
+    // the lowering scope knows the helper's dims; without them the reference
+    // lowers as a scalar and codegen rejects the fragment ("expected array
+    // expression"). Same registry lookup (and the same safety argument) as
+    // the dep-stub branch in `compile_ltm_equation_fragment`: this runs from
+    // fragment compilation, strictly after `model_ltm_variables` completed.
+    let find_arrayed_ltm_dep = |name: &str| -> Option<Vec<String>> {
+        let idx = *model_ltm_var_name_index(db, model, project).get(name)?;
+        let lsv = &model_ltm_variables(db, model, project).vars[idx];
+        (!lsv.dimensions.is_empty()).then(|| lsv.dimensions.clone())
+    };
 
     let any_arrayed_dep = dep_names.iter().any(|name| {
         source_vars
             .get(*name)
             .is_some_and(|sv| !variable_dimensions(db, *sv, project).is_empty())
             || find_implicit_dm(name).is_some_and(dm_var_is_arrayed)
+            || find_arrayed_ltm_dep(name).is_some()
     });
     if !any_arrayed_dep {
         return LoweredLtmVariable {
@@ -832,6 +885,26 @@ fn lower_ltm_variable(
             let mut nested = Vec::new();
             let dep_parsed =
                 crate::variable::parse_var(dim_ctx, implicit_dm, &mut nested, units_ctx, |mi| {
+                    Ok(Some(mi.clone()))
+                });
+            stage0_vars.insert(Ident::new(dep_name), dep_parsed);
+        } else if let Some(ltm_dims) = find_arrayed_ltm_dep(dep_name) {
+            // An arrayed sibling LTM var (the GH #995 freeze helper): a
+            // zero-bodied dims-only stub -- only the dep's dimensions matter
+            // to the lowering, exactly like the implicit branch above.
+            let stub = datamodel::Variable::Aux(datamodel::Aux {
+                ident: (*dep_name).to_string(),
+                equation: datamodel::Equation::ApplyToAll(ltm_dims, "0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            });
+            let mut nested = Vec::new();
+            let dep_parsed =
+                crate::variable::parse_var(dim_ctx, &stub, &mut nested, units_ctx, |mi| {
                     Ok(Some(mi.clone()))
                 });
             stage0_vars.insert(Ident::new(dep_name), dep_parsed);
