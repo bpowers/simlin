@@ -450,10 +450,28 @@ pub struct ImplicitVarMeta {
     /// it does so under the module-ident context of the INSTANCE it is
     /// compiling -- while this metadata is derived under the no-extra-idents
     /// context. A position is only meaningful against the exact vector it was
-    /// taken from, so any disagreement between those two parses -- an unstable
-    /// order, or a genuinely different helper set -- silently resolved the
-    /// position to a DIFFERENT helper. A name resolves to that helper or to
-    /// nothing; it can never resolve to another one.
+    /// taken from, so ANY disagreement between those two parses resolved it to
+    /// a different helper, including the merely-reordered case that made
+    /// GH #1002 seed-dependent. A name survives reordering; a position does not.
+    ///
+    /// **A name is not a fully context-stable identity, and the residual is
+    /// bounded rather than absent.** Synthesized names embed `BuiltinVisitor`'s
+    /// walk counter (`$⁚v⁚{n}⁚arg0`), so a context that inserts an EARLIER
+    /// helper shifts every later `n`. `PREVIOUS(port, 0) + SMTH1(port + 1, 3)`
+    /// over a bound `port` is the smallest case: the no-extra-idents parse calls
+    /// `$⁚sm⁚0⁚arg0` the SMTH argument (`port + 1`), the widened parse calls it
+    /// the PREVIOUS capture (`port`), and [`Self::find_in`] returns the latter
+    /// for metadata that meant the former. So the honest guarantee is "a helper
+    /// CARRYING this name, or nothing" -- not "this helper, or nothing".
+    ///
+    /// What bounds it: a name can only collide that way when the two parses
+    /// synthesize different helper SEQUENCES, and that already makes the
+    /// model's layout (derived from one parse) disagree with its runlists
+    /// (derived from the other), so the project fails to compile before any
+    /// mis-resolved fragment could be executed. Pinned by
+    /// `db::fragment_determinism_tests::a_cross_context_helper_name_collision_is_confined_to_a_failing_compile`.
+    /// Closing it properly means making the names themselves context-stable,
+    /// which is GH #372's explicit model-level parse context, not a change here.
     pub name: String,
     /// The position `name` occupied in the parse it was derived from -- a
     /// lookup HINT, never the identity.
@@ -504,8 +522,9 @@ impl ImplicitVarMeta {
     ///
     /// `parsed` must be a parse of `self.parent_source_var`; the caller chooses
     /// the module-ident context, which is exactly why the match is by name (see
-    /// [`ImplicitVarMeta::name`]). `None` means this parse synthesized no such
-    /// helper -- a loud-safe skip for the caller, never a different helper.
+    /// [`ImplicitVarMeta::name`], including the bounded case where a name is
+    /// not context-stable). `None` means this parse synthesized no helper of
+    /// that name -- a loud-safe skip for the caller.
     ///
     /// The `canonicalize` is defence in depth, not load-bearing: a synthesized
     /// helper's ident is built from its parent's already-canonical ident, so

@@ -400,37 +400,32 @@ fn implicit_helper_signatures(dm: &datamodel::Project, model_name: &str, var: &s
         .collect()
 }
 
-/// A variable's `implicit_vars` may REPEAT a name -- but every repeat must be
-/// byte-identical to its twin.
+/// No two helpers of one variable may share a canonical name.
 ///
-/// The uniqueness this originally asserted is FALSE, and finding that out is
-/// the reason the test exists in this shape. `parse_var_with_module_context`
-/// runs `parse_and_lower_eqn` twice over one variable -- once for the dt phase
-/// and once for the initial phase -- and each appends its helpers to the same
-/// vector. For a `Scalar`/`ApplyToAll` equation the initial pass returns
-/// `(None, vec![])` unless the variable carries an `ACTIVE INITIAL`, so nothing
-/// repeats; the `Arrayed` arm has no such early-out and re-parses each slot's
-/// equation, so every helper of a per-element variable appears exactly twice.
+/// This began as an assumption, was disproved, and is now enforced -- the
+/// sequence is worth keeping because the middle step is the defect.
+/// `parse_var_with_module_context` runs `parse_and_lower_eqn` TWICE over one
+/// variable, once per phase, and both passes name their helpers from a counter
+/// that restarts at zero. For a `Scalar`/`ApplyToAll` equation the initial pass
+/// returns nothing unless the variable carries an `ACTIVE INITIAL`; the
+/// `Arrayed` arm has no such early-out and re-parses every slot, so each helper
+/// of a per-element variable used to appear twice.
 ///
-/// What that costs, and why it is checked here: `model_implicit_var_info` is
-/// name-keyed and last-wins, so a meta's `index_hint` points at the LAST
-/// occurrence while `find_in`'s scan fallback returns the FIRST. Those two
-/// differ only when a repeated name carries DIFFERENT content -- so while this
-/// assertion holds, hint and scan are interchangeable and the hint is purely an
-/// optimization. `find_in` is sound either way (it never returns a helper whose
-/// name is not `self.name`); what this pins is that it is also unambiguous.
+/// While the repeats were byte-identical that was merely wasteful. When the
+/// initial pass reads a DIFFERENT equation -- an `Arrayed` element's own init
+/// equation, or `compat.active_initial` -- the two passes mint the SAME name
+/// for different bodies, `model_implicit_var_info` (name-keyed, last-wins)
+/// keeps one, and `compute_layout` gives it one slot. The other body is
+/// discarded in silence and one phase runs the other phase's helper. That is
+/// pinned as a loud failure by
+/// [`an_active_initial_that_collides_a_helper_name_is_refused`].
 ///
-/// Two shapes could break it, both PRE-EXISTING and neither in scope here: an
-/// `Arrayed` element carrying its own `<init_eqn>`, and a `Scalar`/`ApplyToAll`
-/// variable carrying `compat.active_initial`. Both make the initial pass parse
-/// a DIFFERENT equation while `BuiltinVisitor`'s `n` counter restarts at zero,
-/// so the two passes can mint the same helper NAME for different bodies --
-/// which `model_implicit_var_info` then collapses to one entry and
-/// `compute_layout` gives one slot. If this test ever reds, that is the finding,
-/// and it needs a phase discriminator in the synthesized name rather than a
-/// change to `find_in`.
+/// `variable::parse_var_with_module_context` now MERGES across the phases
+/// instead of appending, so a byte-identical repeat collapses and a genuine
+/// collision is an error. Uniqueness is therefore a property of the parse, and
+/// this test is what says so for every route into `implicit_vars`.
 #[test]
-fn repeated_implicit_helper_names_carry_identical_helpers() {
+fn implicit_helper_names_are_unique_within_one_parse() {
     let scalar = TestProject::new("uniqueness_scalar")
         .with_sim_time(0.0, 1.0, 1.0)
         .scalar_aux("driver", "5")
@@ -468,24 +463,150 @@ fn repeated_implicit_helper_names_carry_identical_helpers() {
             !sigs.is_empty(),
             "`{var}` must synthesize helpers, or this row proves nothing"
         );
-        // `name -> the one rendering every occurrence of it must share`.
-        let mut by_name: std::collections::BTreeMap<&str, &String> = Default::default();
-        for sig in &sigs {
-            let name = sig.split(" = ").next().unwrap();
-            if let Some(seen) = by_name.get(name) {
-                assert_eq!(
-                    *seen, sig,
-                    "`{var}` synthesized two DIFFERENT helpers under the name \
-                     `{name}`; `model_implicit_var_info` keeps only the last and \
-                     `compute_layout` allocates one slot for it, so one of the \
-                     two is silently discarded. See this test's doc: the fix is a \
-                     phase discriminator in the synthesized name."
-                );
-            } else {
-                by_name.insert(name, sig);
-            }
+        let names: Vec<&str> = sigs
+            .iter()
+            .map(|s| s.split(" = ").next().unwrap())
+            .collect();
+        let unique: std::collections::BTreeSet<&&str> = names.iter().collect();
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "`{var}` reported two helpers under one name: {names:?}. \
+             `model_implicit_var_info` is name-keyed and `compute_layout` gives \
+             one slot per name, so a repeat is either wasted work or a silently \
+             discarded helper body"
+        );
+    }
+}
+
+/// A helper name is not fully context-stable, and the case where it is not is
+/// confined to a project that already fails to compile.
+///
+/// `ImplicitVarMeta::name` replaced a position with a name, and the PR
+/// originally claimed that made resolution "this helper or nothing". It does
+/// not: synthesized names embed `BuiltinVisitor`'s walk counter, so a context
+/// that inserts an EARLIER helper renames every later one. Here the
+/// no-extra-idents parse calls `$⁚sm⁚0⁚arg0` the SMTH argument and the widened
+/// parse calls it the PREVIOUS capture, so `find_in` hands back a helper the
+/// metadata did not mean.
+///
+/// This test exists to keep that honest and to bound it. The bound is the
+/// second half: a collision of this kind REQUIRES the two parses to synthesize
+/// different helper sequences, which is exactly what makes the model's layout
+/// disagree with its runlists -- so the project fails to compile and no
+/// mis-resolved fragment ever runs. If the compile ever starts succeeding here,
+/// the mis-resolution stops being harmless and this test is what says so.
+///
+/// The real fix is context-stable names, which is GH #372's territory.
+#[test]
+fn a_cross_context_helper_name_collision_is_confined_to_a_failing_compile() {
+    let sub = x_model(
+        "sub",
+        vec![
+            x_aux("port", "0", None),
+            x_aux("sm", "PREVIOUS(port, 0) + SMTH1(port + 1, 3)", None),
+        ],
+    );
+    let main = x_model(
+        "main",
+        vec![
+            x_aux("x", "5", None),
+            x_module("sub", &[("x", "sub.port")], None),
+            x_aux("out", "sub.sm", None),
+        ],
+    );
+    let dm = x_project(sim_specs_with_units("month"), &[main, sub]);
+
+    let db = SimlinDb::default();
+    let project = sync_from_datamodel(&db, &dm).project;
+    let sub_model = *project.models(&db).get("sub").expect("fixture has `sub`");
+    let source_var = sub_model.variables(&db)["sm"];
+
+    let helpers = |extra: Vec<String>| -> Vec<(String, String)> {
+        let ctx = model_module_ident_context(&db, sub_model, project, extra);
+        parse_source_variable_with_module_context(&db, source_var, project, ctx)
+            .implicit_vars
+            .iter()
+            .map(|v| (v.get_ident().to_string(), format!("{:?}", v.get_equation())))
+            .collect()
+    };
+    let derived = helpers(vec![]);
+    let resolved = helpers(
+        instantiation_input_set(&db, project, "sub")
+            .names(&db)
+            .clone(),
+    );
+
+    // The collision itself: one name, two different helpers.
+    let colliding: Vec<&(String, String)> = derived
+        .iter()
+        .filter(|(name, body)| resolved.iter().any(|(n2, b2)| n2 == name && b2 != body))
+        .collect();
+    assert!(
+        !colliding.is_empty(),
+        "the fixture must actually collide a name across the two contexts, or \
+         it is not exercising the residual this test documents.\nderived: \
+         {derived:?}\nresolved: {resolved:?}"
+    );
+
+    // The bound: such a project does not compile, so nothing executes the
+    // helper `find_in` mis-identifies.
+    let err = compile_project_incremental(&db, project, "main").expect_err(
+        "a project whose two parse contexts synthesize different helper \
+         sequences must fail to compile -- that failure is what keeps the \
+         name collision above harmless",
+    );
+    assert!(
+        err.to_string().contains("failed to compile fragments"),
+        "expected the layout-vs-runlist mismatch, got {err}"
+    );
+}
+
+/// Two phases must not be able to claim one helper name with different bodies.
+///
+/// The regression test for the cross-phase merge in
+/// `variable::parse_var_with_module_context`. `v`'s dt equation and its
+/// `ACTIVE INITIAL` both call `SMTH1`, so both passes mint `$⁚v⁚0⁚arg0` -- with
+/// `driver * 2` in one and `driver * 100` in the other. Before the merge this
+/// project COMPILED, keeping only the initial pass's helper, so the dt phase
+/// silently smoothed the wrong expression. Now it is refused.
+///
+/// The fixture deliberately makes both equations reference the SAME variable.
+/// An earlier draft used a different variable in each, and that version failed
+/// to compile even before the fix -- for an unrelated reason (the discarded
+/// helper's dependency was missing from the surviving one's dep set), which
+/// would have made this test pass against the defect it is meant to catch.
+///
+/// Refusal, not repair: making this shape WORK needs a phase discriminator in
+/// the synthesized helper name, which changes every implicit helper's identity
+/// and is its own change. A loud error is the same choice `dedup_vars_by_ident`
+/// already makes for the within-one-pass twin of this collision.
+#[test]
+fn an_active_initial_that_collides_a_helper_name_is_refused() {
+    let mut dm = TestProject::new("active_initial_helper_collision")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .scalar_aux("driver", "5")
+        .scalar_aux("v", "SMTH1(driver * 2, 3)")
+        .build_datamodel();
+    for var in dm.models[0].variables.iter_mut() {
+        if var.get_ident() == "v"
+            && let datamodel::Variable::Aux(a) = var
+        {
+            a.compat.active_initial = Some("SMTH1(driver * 100, 7)".to_string());
         }
     }
+
+    let db = SimlinDb::default();
+    let project = sync_from_datamodel(&db, &dm).project;
+    let err = compile_project_incremental(&db, project, "main").expect_err(
+        "a variable whose two phases mint the same helper name for different \
+         bodies must be refused, not compiled with one of them silently dropped",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains('v'),
+        "the refusal must name the offending variable; got {msg}"
+    );
 }
 
 /// A variable's synthesized implicit helpers must be reported in an order that

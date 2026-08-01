@@ -2153,9 +2153,6 @@ pub fn assemble_simulation(
 
 type ModuleInstanceMap = HashMap<Ident<Canonical>, BTreeSet<BTreeSet<Ident<Canonical>>>>;
 
-/// Enumerate all module instances in a project, starting from the main model.
-/// Returns a map from model name to the set of distinct input sets that model
-/// is instantiated with.
 /// The input sets one model is instantiated with, as PRODUCTION enumerates
 /// them (`#[cfg(test)]` accessor only, mirroring `db::dep_graph`'s
 /// `dt_cycle_sccs` idiom).
@@ -2181,6 +2178,9 @@ pub(crate) fn module_input_sets_for(
         .unwrap_or_default()
 }
 
+/// Enumerate all module instances in a project, starting from the main model.
+/// Returns a map from model name to the set of distinct input sets that model
+/// is instantiated with.
 fn enumerate_module_instances(
     db: &dyn Db,
     project: SourceProject,
