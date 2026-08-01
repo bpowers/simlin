@@ -680,23 +680,34 @@ fn abandoned_leg_helpers_are_not_emitted() {
 
 /// The frozen-VIEW-POSITION class (C-LEARN's last 4 failing fragments): a
 /// frozen reference landing in a view-position argument of a vector builtin
-/// (`VECTOR ELM MAP(PREVIOUS(base[c1]), offs[C])`) is an App where codegen
+/// (`VECTOR ELM MAP(PREVIOUS(base[c2]), offs[C])`) is an App where codegen
 /// needs a view over storage. The freeze materializes as a WHOLE-DEP helper
-/// (every element frozen), referenced with the original indices -- which
+/// (every element frozen), referenced with the ORIGINAL indices -- which
 /// preserves ELM MAP's full-storage base semantics (`full_source_len` of the
-/// helper equals the dep's).
+/// helper equals the dep's, and the pinned element's flat position is the
+/// base).
+///
+/// The fixture is sharpened so the reference FORM is pinned, not just the
+/// helper's existence (a bare or wildcard-subscripted reference passed the
+/// first draft): the pin is `c2` (flat base 1 -- a bare/wildcard reference
+/// lands at base 0/current-element and computes a DIFFERENT number), the
+/// offsets are loop-carrying AND time-varying (so the guard's `d_offs != 0`
+/// arm goes live and the VM oracle actually executes), and the equation text
+/// is asserted to reference the helper AT the original index.
 #[test]
 fn frozen_view_position_subscript_materializes() {
     let project = TestProject::new("view_pos_freeze")
-        .with_sim_time(0.0, 6.0, 1.0)
+        .with_sim_time(0.0, 8.0, 1.0)
         .named_dimension("C", &["c1", "c2"])
         .array_with_ranges(
             "base[C]",
             vec![("c1", "2 + s / 1000"), ("c2", "3 + s / 1000")],
         )
-        .array_with_ranges("offs[C]", vec![("c1", "s - s"), ("c2", "1 + s - s")])
-        .array_aux("mapped[C]", "VECTOR ELM MAP(base[c1], offs[C])")
-        .flow("g", "(mapped[c1] + 1) * 0.01", None)
+        // Loop-carrying (depends on s) and time-varying (int(s) parity
+        // flips as s grows), alternating the elm-map offset 0 / -1.
+        .array_aux("offs[C]", "0 - (INT(s) MOD 2)")
+        .array_aux("mapped[C]", "VECTOR ELM MAP(base[c2], offs[C])")
+        .flow("g", "(mapped[c1] + 1) * 0.7", None)
         .stock("s", "10", &["g"], &[], None);
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
@@ -705,11 +716,25 @@ fn frozen_view_position_subscript_materializes() {
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let score = format!("{LINK_PREFIX}offs\u{2192}mapped");
+    let score_var = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == score)
+        .unwrap_or_else(|| {
+            panic!(
+                "the offs->mapped score must be emitted; vars: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            )
+        });
+    // THE reference-form pin: the helper must be read at the ORIGINAL pinned
+    // index (base 1 in the dep's storage), never bare / wildcarded (base 0).
+    let score_text = score_var.equation.source_text();
     assert!(
-        ltm.vars.iter().any(|v| v.name == score),
-        "the offs->mapped score must be emitted; vars: {:?}",
-        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        score_text.contains("\"$\u{205A}ltm\u{205A}freeze\u{205A}base\"[c\u{B7}c2]")
+            || score_text.contains("\"$\u{205A}ltm\u{205A}freeze\u{205A}base\"[c2]"),
+        "the helper must be referenced at the original index; got:\n{score_text}"
     );
+
     let whole_dep_helper = format!("{FREEZE_PREFIX}base");
     let helper = ltm
         .vars
@@ -732,9 +757,8 @@ fn frozen_view_position_subscript_materializes() {
         failures.join("\n")
     );
 
-    // VM oracle: the frozen read in the partial is base[c1]@(t-1). The score
-    // for slot c is guard(partial_c) where
-    // partial_c = elm_map(base_prev, offs_now)[c] = base_prev[c1 + offs_now[c]].
+    // VM oracle: partial_c = elm_map(base_prev, offs_now)[c]
+    //                      = base_prev[base(c2)=1 + offs_now[c]].
     let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
         .expect("the LTM-enabled fixture should compile");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
@@ -756,8 +780,13 @@ fn frozen_view_position_subscript_materializes() {
     let mut checked = 0;
     for step in 1..results.step_count {
         for c in 0..2usize {
-            let offset = at_slot("offs", c, step).round() as usize;
-            let partial = at_slot("base", offset, step - 1);
+            let flat = (1i64 + at_slot("offs", c, step).round() as i64).clamp(0, 1) as usize;
+            let out_of_range = (1i64 + at_slot("offs", c, step).round() as i64) != flat as i64;
+            let partial = if out_of_range {
+                f64::NAN
+            } else {
+                at_slot("base", flat, step - 1)
+            };
             let d_mapped = at_slot("mapped", c, step) - at_slot("mapped", c, step - 1);
             let d_offs = at_slot("offs", c, step) - at_slot("offs", c, step - 1);
             let got = results.data[step * results.step_size + score_off + c];
@@ -768,16 +797,17 @@ fn frozen_view_position_subscript_materializes() {
             let want =
                 (partial - at_slot("mapped", c, step - 1)) / d_mapped.abs() * d_offs.signum();
             assert!(
-                (got - want).abs() < 1e-9,
-                "step {step} slot {c}: score {got} != lagged-base elm-map value {want}"
+                (got - want).abs() < 1e-9 || (got.is_nan() && want.is_nan()),
+                "step {step} slot {c}: score {got} != lagged-base elm-map value {want} \
+                 (a bare or wildcard helper reference reads the wrong base)"
             );
             checked += 1;
         }
     }
-    // The fixture's offsets are near-constant, so most steps take the guard
-    // arm; the structural + fragment assertions above carry the test when no
-    // live step occurs.
-    let _ = checked;
+    assert!(
+        checked > 0,
+        "the oracle's live branch must execute -- the fixture's offsets vary in time"
+    );
 }
 
 /// A frozen SCALAR reference in a view-position argument (the offset arg of
@@ -812,6 +842,10 @@ fn frozen_view_position_scalar_materializes() {
         .find(|v| v.name == helper_name)
         .expect("a scalar freeze helper over off");
     assert!(helper.dimensions.is_empty(), "scalar dep -> scalar helper");
+    assert!(
+        matches!(helper.equation, crate::db::LtmEquation::Scalar(_)),
+        "a dims-less helper must carry the Scalar equation variant"
+    );
 
     let failures = fragment_failures(&db, sync.project);
     assert!(

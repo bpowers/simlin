@@ -43,7 +43,18 @@
 //!   Sub's elements in Sub's order, each at its name's position in the axis --
 //!   match the slice row-for-row.
 //!
-//! What is deliberately NOT materialized (the slice keeps its existing loud
+//! A second materialization handles the frozen-VIEW-POSITION class: a
+//! `PREVIOUS(<ref>)` with NO slice axes sitting where a vector builtin needs
+//! a view over storage (`VECTOR ELM MAP(PREVIOUS(base[c2]), offs)`). There
+//! the WHOLE dep is frozen (`materialize_whole_dep`) and the reference keeps
+//! the frozen call's original indices, so the helper's storage mirrors the
+//! dep's 1:1 and ELM MAP's full-storage base semantics survive. A frozen
+//! slice in a view position takes the row-projected slice arm instead, whose
+//! `full_source_len` is the ROW length rather than the dep's whole extent --
+//! a narrower out-of-range window than the live slice's; see the note on
+//! that arm.
+//!
+//! What is deliberately NOT materialized (the freeze keeps its existing loud
 //! decline / compile failure): a slice whose kept index is not statically
 //! resolvable (a dynamic pin -- each arm needs a fixed slot), a `*:Sub` whose
 //! `Sub` is not a subdimension of the axis (a mid-edit inconsistency), a
@@ -442,13 +453,20 @@ pub(crate) fn materialize_array_freezes(
     materialize_inner(expr, dep_dims, dims_ctx, out, false)
 }
 
-/// The VIEW-POSITION argument indices of an array builtin -- the arguments
+/// The VIEW-POSITION argument indices of a VECTOR builtin -- the arguments
 /// codegen compiles with `walk_expr_as_view` (a view over storage, never a
 /// scalar value). A frozen reference landing in one of these positions is an
 /// `App` where a view is required, so it must materialize as a WHOLE-DEP
 /// freeze helper even when its subscript has no slice axes. Mirrors the
 /// `walk_expr_as_view` call sites in `compiler::codegen`'s `AssignTemp` /
 /// `VectorSelect` arms; a new vector builtin must be added in both places.
+///
+/// Two other `walk_expr_as_view` families are DELIBERATELY absent: the
+/// scalar-collapsing reducers' argument (`emit_array_reduce` -- a frozen
+/// no-slice ref under an un-hoisted reducer keeps its pre-existing loud
+/// failure; hoisted ones never reach the wrap spelled out), and the
+/// arrayed-GF `LOOKUP` table argument (the wrap holds a table head verbatim
+/// by design -- `freeze_lookup_table_indices` freezes only its indices).
 fn view_arg_positions(func: &str) -> &'static [usize] {
     match func.to_ascii_lowercase().as_str() {
         "vector_select" | "vector_elm_map" | "allocate_available" | "allocate_by_priority" => {
@@ -471,6 +489,14 @@ fn materialize_inner(
     };
     match expr {
         Expr0::Const(..) | Expr0::Var(..) => expr,
+        // NOTE a slice freeze reached here in a VIEW position hands ELM MAP a
+        // helper whose `full_source_len` is the ROW length, not the dep's
+        // whole extent (the live slice reads the whole variable's storage per
+        // `codegen::full_source_len`) -- out-of-range offsets go NaN earlier
+        // in the partial than in the live equation. Pre-existing to the
+        // whole-dep arm below and narrower than the alternative (no score at
+        // all); tightening it would mean routing view-position slices to a
+        // whole-dep helper subscripted with the slice.
         Expr0::App(UntypedBuiltinFn(name, args), loc)
             if name.eq_ignore_ascii_case("previous")
                 && args.first().is_some_and(is_direct_slice_subscript) =>
