@@ -154,18 +154,29 @@ fn get_dimension_names(dimensions: &[Dimension]) -> Vec<CanonicalDimensionName> 
 /// gates it.
 ///
 /// The other path walks every slot with ONE visitor, so the `n` counter that
-/// NAMES each synthesized helper (`$⁚v⁚{n}⁚arg0`) is handed out in iteration
-/// order -- an unstable order would rename the helpers themselves. That is
-/// INERT today and no test covers it, for a reason worth stating rather than
-/// leaving to be rediscovered: the path is taken when `!any_module_call ||
-/// dimensions.is_empty()`, `contains_module_call` is true for every construct
-/// that can synthesize a helper at all (a stdlib call, a macro, `init`,
-/// `previous` -- the sole `make_temp_arg` call site sits inside the
-/// PREVIOUS/INIT routing branch, and `walk_module_call` is the only other
-/// producer), so with no module call there is nothing to name. It is reachable
-/// only by an `Ast::Arrayed` whose declared dimensions failed to resolve to
-/// anything. Ordered anyway, so the rule is uniform and a future widening of
-/// either predicate cannot quietly reintroduce the hazard.
+/// names each synthesized helper (`$⁚v⁚{n}⁚arg0`) is handed out in iteration
+/// order. It is taken when `!any_module_call || dimensions.is_empty()`, and the
+/// two disjuncts are NOT alike:
+///
+/// * `!any_module_call` is inert. `contains_module_call` is true for every
+///   construct that can synthesize a helper at all -- a stdlib call, a macro,
+///   `init`, `previous` -- since the sole `make_temp_arg` call site sits inside
+///   the PREVIOUS/INIT routing branch, and the only other producer is
+///   `expand_module_function`, whose macro and stdlib call sites are gated by
+///   the same predicates `contains_module_call` consults. With no module call
+///   there is nothing to name.
+/// * `dimensions.is_empty()` is LIVE, and not a degenerate path: an `<aux>`
+///   carrying `<element subscript=…>` children with no `<dimensions>` sibling
+///   is an ordinary XMILE document, `xmile::variables`' `convert_equation!`
+///   maps the missing element to an empty dimension list, and the model
+///   compiles. Reverting the ordering here leaves the helper NAMES identical --
+///   the counter is monotonic, so it emits `⁚0⁚`, `⁚1⁚`, `⁚2⁚` however the
+///   slots are walked -- and re-binds which SLOT'S EQUATION each name carries,
+///   which then moves the compiled artifact. Gated by
+///   `db::fragment_determinism_tests::undimensioned_arrayed_helper_bindings_are_stable_across_fresh_databases`,
+///   whose fixture is read through the real XMILE reader rather than
+///   hand-built. (A failed dimension LOOKUP is not this case: it returns
+///   `Err(BadDimensionName)` and yields no AST at all.)
 ///
 /// Sorted by canonical element name rather than walked in declared row-major
 /// order: the map is allowed to be sparse (an `EXCEPT` default covers the
@@ -194,8 +205,8 @@ fn elements_in_stable_order(
 /// * The arrayed `PREVIOUS`/`INIT` helper synthesized in the `Ast::ApplyToAll`
 ///   per-element expansion (GH #541) deliberately omits the element suffix:
 ///   every slot walks the *same cloned* body, so all N copies are
-///   byte-identical `Equation::ApplyToAll` variables. The union MUST collapse
-///   them to one (duplicate names would mint colliding layout slots).
+///   byte-identical `Equation::ApplyToAll` variables. The union collapses them
+///   to one.
 ///
 /// An ident collision whose two variables are NOT byte-identical is a compiler
 /// bug -- exactly the silent corruption a suffix-less helper caused for the

@@ -2156,6 +2156,31 @@ type ModuleInstanceMap = HashMap<Ident<Canonical>, BTreeSet<BTreeSet<Ident<Canon
 /// Enumerate all module instances in a project, starting from the main model.
 /// Returns a map from model name to the set of distinct input sets that model
 /// is instantiated with.
+/// The input sets one model is instantiated with, as PRODUCTION enumerates
+/// them (`#[cfg(test)]` accessor only, mirroring `db::dep_graph`'s
+/// `dt_cycle_sccs` idiom).
+///
+/// A test that needs "the module input set this sub-model actually gets" must
+/// not spell it by hand: a hand-written set is an assumption about the wiring,
+/// and the assumption is exactly what such a test is trying to hold the fixture
+/// to. Routing through `enumerate_module_instances` makes the test's input the
+/// engine's input by construction, so degrading the fixture's wiring changes
+/// the test's answer instead of being silently ignored.
+#[cfg(test)]
+pub(crate) fn module_input_sets_for(
+    db: &dyn Db,
+    project: SourceProject,
+    main_model_name: &str,
+    model_name: &str,
+) -> Vec<BTreeSet<Ident<Canonical>>> {
+    let modules = enumerate_module_instances(db, project, main_model_name)
+        .expect("fixture project must enumerate");
+    modules
+        .get(&Ident::<Canonical>::new(model_name))
+        .map(|sets| sets.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
 fn enumerate_module_instances(
     db: &dyn Db,
     project: SourceProject,

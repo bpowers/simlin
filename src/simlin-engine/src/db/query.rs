@@ -455,6 +455,22 @@ pub struct ImplicitVarMeta {
     /// position to a DIFFERENT helper. A name resolves to that helper or to
     /// nothing; it can never resolve to another one.
     pub name: String,
+    /// The position `name` occupied in the parse it was derived from -- a
+    /// lookup HINT, never the identity.
+    ///
+    /// [`ImplicitVarMeta::find_in`] tries this position first and accepts what
+    /// it finds only if that helper carries `name`; otherwise it scans. A stale
+    /// or wrong hint therefore costs one comparison and cannot change the
+    /// answer, which is the whole difference between this and the
+    /// `index_in_parent` it replaces.
+    ///
+    /// It exists because the scan alone is O(k) per helper and so O(k^2) per
+    /// parent variable, and `k` is not small on ordinary models: an
+    /// apply-to-all `SMTH1` over an N-element dimension mints ~2N helpers on
+    /// ONE variable. Measured on `x[Dim] = SMTH1(y[Dim], 3)`, release, timed
+    /// against the parent commit: at N=800 the scan alone took 2.13s where the
+    /// parent took 1.12s, and with this hint it is 1.16s.
+    pub index_hint: usize,
     pub is_stock: bool,
     pub is_module: bool,
     pub model_name: Option<String>,
@@ -478,14 +494,29 @@ impl ImplicitVarMeta {
     /// the module-ident context, which is exactly why the match is by name (see
     /// [`ImplicitVarMeta::name`]). `None` means this parse synthesized no such
     /// helper -- a loud-safe skip for the caller, never a different helper.
+    ///
+    /// The `canonicalize` is defence in depth, not load-bearing: a synthesized
+    /// helper's ident is built from its parent's already-canonical ident, so
+    /// every name on both sides is canonical and a raw comparison resolves
+    /// identically (checked on a parent named `"My Var"`). Kept because nothing
+    /// in the type system says so and the cost is a borrow.
     pub(crate) fn find_in<'a>(
         &self,
         parsed: &'a ParsedVariableResult,
     ) -> Option<&'a datamodel::Variable> {
-        parsed
-            .implicit_vars
-            .iter()
-            .find(|v| canonicalize(v.get_ident()) == self.name)
+        let is_mine = |v: &datamodel::Variable| canonicalize(v.get_ident()) == self.name;
+        // The hint is right whenever the two parses agree, which is every model
+        // that is not the GH #372 divergence -- so the scan below is the
+        // exceptional path, not the usual one. Verifying the name before
+        // accepting the hint is what keeps this a pure optimization; dropping
+        // that check restores positional identity and reds
+        // `an_implicit_helper_declines_when_the_contexts_synthesize_different_sets`.
+        if let Some(hinted) = parsed.implicit_vars.get(self.index_hint)
+            && is_mine(hinted)
+        {
+            return Some(hinted);
+        }
+        parsed.implicit_vars.iter().find(|v| is_mine(v))
     }
 }
 
@@ -519,7 +550,7 @@ pub fn model_implicit_var_info(
             project,
             module_ident_context,
         );
-        for implicit_var in parsed.implicit_vars.iter() {
+        for (index, implicit_var) in parsed.implicit_vars.iter().enumerate() {
             let name = canonicalize(implicit_var.get_ident()).into_owned();
             let is_stock = matches!(implicit_var, datamodel::Variable::Stock(_));
             let is_module = matches!(implicit_var, datamodel::Variable::Module(_));
@@ -561,6 +592,7 @@ pub fn model_implicit_var_info(
                 ImplicitVarMeta {
                     parent_source_var: *source_var,
                     name,
+                    index_hint: index,
                     is_stock,
                     is_module,
                     model_name,

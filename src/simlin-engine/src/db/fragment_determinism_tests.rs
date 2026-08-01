@@ -291,29 +291,42 @@ fn ltm_fragment_with_temps_is_stable_across_fresh_databases() {
 // mis-resolutions fail to lower, so the sub-model silently lost every helper
 // fragment and the whole project failed to compile -- on a coin flip.
 //
-// Two fixes, and which test gates which is MEASURED (each was reverted alone
-// and the suite re-run), not predicted:
+// Two fixes, in three production edits. Which test gates which is MEASURED --
+// each edit was reverted ALONE, faithfully (the identity revert restores
+// `index_in_parent` and indexes with it, rather than some stronger mutation),
+// and the whole suite re-run three times:
 //
-//   * ORDER, in two places -- `BuiltinVisitor::vars` is insertion-ordered, and
-//     the `Ast::Arrayed` slot map is walked in a stable order. Reverting the
-//     first reds `implicit_helper_order_is_stable_across_fresh_databases`
-//     alone; reverting the second reds
-//     `per_element_implicit_helper_order_is_stable_across_fresh_databases`
-//     alone. Neither reds anything else.
-//   * IDENTITY -- `ImplicitVarMeta` names its helper instead of indexing it.
-//     Reverting it reds the two `an_implicit_helper_*` tests and
-//     `a_submodel_with_a_bound_input_compiles_on_every_fresh_database`.
+//   * ORDER (a): `BuiltinVisitor::vars` is an `IndexMap`. Reverting reds
+//     `implicit_helper_order_is_stable_across_fresh_databases`,
+//     `per_element_implicit_helper_order_is_stable_across_fresh_databases`, and
+//     `undimensioned_arrayed_helper_bindings_are_stable_across_fresh_databases`
+//     -- every route into `implicit_vars` runs through this map.
+//   * ORDER (b): `elements_in_stable_order` at the per-element `Ast::Arrayed`
+//     call site. Reverting reds `per_element_…` alone.
+//   * ORDER (c): `elements_in_stable_order` at the shared-visitor call site.
+//     Reverting reds `undimensioned_arrayed_…` alone.
+//   * IDENTITY: `ImplicitVarMeta::name` replaces `index_in_parent`. Reverting
+//     reds `an_implicit_helper_declines_when_the_contexts_synthesize_different_sets`
+//     ALONE.
 //
-// Both are kept, and the reason is that they close DIFFERENT properties even
-// though either alone would have stopped the reported crash. Identity is what
-// makes a helper resolve to itself, so a compile outcome no longer depends on
-// any ordering at all -- that is why the end-to-end test survives reverting the
-// order fix. Order is what makes the two salsa-cached vectors carrying it
-// (`ParsedVariableResult::implicit_vars`, `VariableDeps::implicit_vars`) equal
-// their own recomputation; without it those values still differ run to run,
-// salsa stops backdating, and the compiled artifact stops being reproducible --
-// the GH #595 class, invisible in every numeric result and in the compile
-// outcome alike.
+// That last cell is the one worth reading twice, because it is not what a
+// first guess predicts. With the order fix standing, a stable order makes a
+// POSITIONAL index resolve correctly whenever the two contexts synthesize the
+// same helper SET -- so `a_submodel_with_a_bound_input_compiles_on_every_fresh_database`
+// and `an_implicit_helper_resolves_to_its_own_name_under_the_instances_input_set`
+// gate the ORDER fix, not the identity one. Only a fixture whose two contexts
+// synthesize DIFFERENT sets can tell positional from named identity, and there
+// is exactly one such test.
+//
+// Both fixes are kept because they close different properties, and either
+// alone would have stopped the reported crash (verified in both directions).
+// Identity makes a helper resolve to itself or to nothing, so no compile
+// outcome depends on any ordering. Order makes the two salsa-cached vectors
+// carrying it (`ParsedVariableResult::implicit_vars`,
+// `VariableDeps::implicit_vars`) equal their own recomputation; without it
+// those values still differ run to run, salsa stops backdating, and the
+// compiled artifact stops being reproducible -- the GH #595 class, invisible in
+// every numeric result and in the compile outcome alike.
 
 /// A sub-model whose body makes a stdlib module call over a BOUND input.
 ///
@@ -340,8 +353,38 @@ fn submodel_with_bound_input_project() -> datamodel::Project {
     x_project(sim_specs_with_units("month"), &[main, sub])
 }
 
-/// The order in which one variable's synthesized implicit helpers are reported.
-fn implicit_helper_order(dm: &datamodel::Project, model_name: &str, var: &str) -> Vec<String> {
+/// The single input set `model_name` is instantiated with, as PRODUCTION
+/// enumerates it.
+///
+/// Reading it out of `enumerate_module_instances` rather than writing
+/// `["port"]` is what makes the "must be instantiated WITH a bound input" guard
+/// below able to fail: a literal round-tripped through `ModuleInputSet` equals
+/// itself no matter what the fixture says.
+#[track_caller]
+fn instantiation_input_set<'db>(
+    db: &'db SimlinDb,
+    project: crate::db::SourceProject,
+    model_name: &str,
+) -> ModuleInputSet<'db> {
+    let sets = crate::db::assemble::module_input_sets_for(db, project, "main", model_name);
+    assert_eq!(
+        sets.len(),
+        1,
+        "fixture must instantiate `{model_name}` exactly once; got {sets:?}"
+    );
+    ModuleInputSet::from_canonical_set(db, &sets[0])
+}
+
+/// One variable's synthesized implicit helpers, in the order reported, each
+/// rendered as `name = equation`.
+///
+/// The equation half is not decoration. Where each slot gets its OWN visitor
+/// the instability shows up in the order of the names; where ONE visitor spans
+/// every slot the names are `$⁚v⁚0⁚…`, `$⁚v⁚1⁚…`, … handed out by a
+/// monotonically increasing counter, so the name LIST is stable no matter which
+/// slot is walked first and only the helper's CONTENT moves between the names.
+/// A name-only probe is blind to exactly the call site that has no other test.
+fn implicit_helper_signatures(dm: &datamodel::Project, model_name: &str, var: &str) -> Vec<String> {
     let db = SimlinDb::default();
     let project = sync_from_datamodel(&db, dm).project;
     let model = *project
@@ -353,7 +396,7 @@ fn implicit_helper_order(dm: &datamodel::Project, model_name: &str, var: &str) -
     parse_source_variable_with_module_context(&db, source_var, project, ctx)
         .implicit_vars
         .iter()
-        .map(|v| v.get_ident().to_string())
+        .map(|v| format!("{} = {:?}", v.get_ident(), v.get_equation()))
         .collect()
 }
 
@@ -374,7 +417,7 @@ fn implicit_helper_order_is_stable_across_fresh_databases() {
         .scalar_aux("combo", "SMTH1(driver, 3) + DELAY1(driver, 2)")
         .build_datamodel();
 
-    let first = implicit_helper_order(&dm, "main", "combo");
+    let first = implicit_helper_signatures(&dm, "main", "combo");
     assert!(
         first.len() >= 4,
         "the fixture must synthesize SEVERAL helpers for one variable, or this \
@@ -383,7 +426,7 @@ fn implicit_helper_order_is_stable_across_fresh_databases() {
     for i in 1..REPEATS {
         assert_eq!(
             first,
-            implicit_helper_order(&dm, "main", "combo"),
+            implicit_helper_signatures(&dm, "main", "combo"),
             "parse #{i} on a fresh database reported `combo`'s implicit helpers \
              in a different order; helper identity is positional, so an unstable \
              order makes a helper resolve to a different variable depending on \
@@ -401,11 +444,20 @@ fn implicit_helper_order_is_stable_across_fresh_databases() {
 /// positional this failed outright -- the two parses disagreed about which
 /// position held which helper, and every helper failed to lower.
 ///
-/// This is the structural half: it holds even if some future change makes the
-/// two contexts synthesize genuinely different helper SETS, which an
-/// order-stability fix alone would not survive.
+/// Measured against the pre-fix defect, ONE sample of this misses 45% of the
+/// time -- the two-entry regime the module header describes -- so it runs the
+/// whole check `REPEATS` times on independent databases like its siblings. A
+/// single-sample probabilistic detector in a file built around repetition is a
+/// coin flip dressed as a test.
 #[test]
 fn an_implicit_helper_resolves_to_its_own_name_under_the_instances_input_set() {
+    for _ in 0..REPEATS {
+        check_helpers_resolve_to_their_own_names();
+    }
+}
+
+#[track_caller]
+fn check_helpers_resolve_to_their_own_names() {
     let dm = submodel_with_bound_input_project();
     let db = SimlinDb::default();
     let project = sync_from_datamodel(&db, &dm).project;
@@ -416,11 +468,13 @@ fn an_implicit_helper_resolves_to_its_own_name_under_the_instances_input_set() {
 
     // The input set `sub` is actually instantiated with, not the empty one:
     // the empty set is the context helper identity was DERIVED under, so
-    // asserting against it could not observe the disagreement.
-    let inputs = ModuleInputSet::from_names(&db, &["port".to_string()]);
-    assert_eq!(
-        inputs.names(&db),
-        &["port".to_string()],
+    // asserting against it could not observe the disagreement. Taken from
+    // production's own enumeration rather than spelled here, so that removing
+    // the fixture's binding fails the guard below instead of leaving a
+    // hand-written `["port"]` quietly describing wiring that no longer exists.
+    let inputs = instantiation_input_set(&db, project, "sub");
+    assert!(
+        !inputs.names(&db).is_empty(),
         "the fixture's sub-model must be instantiated WITH a bound input, or the \
          two parse contexts coincide and this test proves nothing"
     );
@@ -478,7 +532,7 @@ fn per_element_implicit_helper_order_is_stable_across_fresh_databases() {
         )
         .build_datamodel();
 
-    let first = implicit_helper_order(&dm, "main", "arr");
+    let first = implicit_helper_signatures(&dm, "main", "arr");
     assert!(
         first.len() >= 3,
         "the fixture must synthesize a helper per slot, or this test cannot \
@@ -487,10 +541,95 @@ fn per_element_implicit_helper_order_is_stable_across_fresh_databases() {
     for i in 1..REPEATS {
         assert_eq!(
             first,
-            implicit_helper_order(&dm, "main", "arr"),
+            implicit_helper_signatures(&dm, "main", "arr"),
             "parse #{i} on a fresh database unioned `arr`'s per-slot helpers in \
              a different order; the slot map is a `HashMap`, so the union must \
              walk it in a stable order (GH #1002)"
+        );
+    }
+}
+
+/// An arrayed variable with per-element equations and NO declared dimensions,
+/// read through the real XMILE reader.
+///
+/// `<element subscript="...">` children with no `<dimensions>` sibling is a
+/// document an ordinary tool can write, and `xmile::variables`' `convert_equation!`
+/// maps the missing `<dimensions>` to an empty dimension list (`None => vec![]`).
+/// That empty list is what routes the variable to the SHARED-visitor arm of
+/// `instantiate_implicit_modules`' `Ast::Arrayed` branch -- the arm where one
+/// visitor walks every slot and hands out the `n` counter that NAMES each
+/// synthesized helper.
+///
+/// Built by parsing, not by hand: the shape is only interesting because
+/// production mints it, and a hand-built `Equation::Arrayed(vec![], …)` would
+/// be an assumption about the reader rather than a reading of it.
+fn undimensioned_arrayed_project() -> datamodel::Project {
+    let xmile = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+    <header><vendor>simlin</vendor><product version="1.0">simlin</product><name>t</name></header>
+    <sim_specs method="euler"><start>0</start><stop>2</stop><dt>1</dt></sim_specs>
+    <model>
+        <variables>
+            <aux name="driver"><eqn>5</eqn></aux>
+            <aux name="arr">
+                <element subscript="east"><eqn>SMTH1(driver, 3)</eqn></element>
+                <element subscript="west"><eqn>SMTH1(driver, 4)</eqn></element>
+                <element subscript="north"><eqn>SMTH1(driver, 5)</eqn></element>
+            </aux>
+        </variables>
+    </model>
+</xmile>"#;
+    let project = crate::compat::open_xmile(&mut xmile.as_bytes())
+        .expect("the fixture document must parse as XMILE");
+    let arr = project.models[0]
+        .variables
+        .iter()
+        .find(|v| v.get_ident() == "arr")
+        .expect("fixture has an `arr` variable");
+    match arr.get_equation() {
+        Some(datamodel::Equation::Arrayed(dims, _, _, _)) => assert!(
+            dims.is_empty(),
+            "the reader must give this variable an EMPTY dimension list, or the \
+             fixture does not reach the shared-visitor arm; got {dims:?}"
+        ),
+        other => panic!("expected an Arrayed equation from the reader, got {other:?}"),
+    }
+    project
+}
+
+/// The shared-visitor arm binds each helper NAME to a slot's equation in
+/// iteration order, so that order must be a function of the model too.
+///
+/// This arm is separate from the per-element one above and has its own call to
+/// `elements_in_stable_order`; reverting only this one leaves every other test
+/// in the suite green -- it was the one production change in this commit with
+/// no coverage until this test existed.
+///
+/// What moves here is the BINDING, not the name list. One visitor spans every
+/// slot, so its `n` counter hands out `$⁚arr⁚0⁚…`, `$⁚arr⁚1⁚…`, `$⁚arr⁚2⁚…` in
+/// increasing order however the slots are walked -- the names come out
+/// identical every time, and only WHICH slot's equation each name carries
+/// moves. A name-only probe is blind to it, which is why
+/// `implicit_helper_signatures` renders the equation too. (Measured: with the
+/// probe comparing names alone, this mutation survived the whole suite; with
+/// equations, it is caught 3 of 3.)
+#[test]
+fn undimensioned_arrayed_helper_bindings_are_stable_across_fresh_databases() {
+    let dm = undimensioned_arrayed_project();
+
+    let first = implicit_helper_signatures(&dm, "main", "arr");
+    assert!(
+        first.len() >= 3,
+        "the fixture must synthesize a helper per slot, or this test cannot \
+         observe the counter's order at all; got {first:?}"
+    );
+    for i in 1..REPEATS {
+        assert_eq!(
+            first,
+            implicit_helper_signatures(&dm, "main", "arr"),
+            "parse #{i} on a fresh database bound `arr`'s helper names to \
+             different slots' equations; one visitor spans every slot, so an \
+             unstable slot order re-binds them (GH #1002)"
         );
     }
 }
@@ -556,7 +695,12 @@ fn an_implicit_helper_declines_when_the_contexts_synthesize_different_sets() {
         .get("sub")
         .expect("fixture must have a `sub` model");
     let source_var = sub.variables(&db)["sm"];
-    let inputs = ModuleInputSet::from_names(&db, &["port".to_string()]);
+    let inputs = instantiation_input_set(&db, project, "sub");
+    assert!(
+        !inputs.names(&db).is_empty(),
+        "the fixture's sub-model must be instantiated WITH a bound input, or the \
+         two parse contexts coincide and this test proves nothing"
+    );
 
     // The premise, derived rather than asserted from reading: the widened
     // context really does synthesize a different helper list. Without this the
