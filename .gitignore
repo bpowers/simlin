@@ -4,6 +4,8 @@
 
 /asan-test.log
 
+/.playwright-mcp
+
 perf.data
 perf.data.old
 
