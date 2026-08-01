@@ -6043,11 +6043,13 @@ fn corpus_clearn_macros_import() {
 /// helpers that used to hold those slices (and fail to compile) -- hundreds
 /// of broken one-slot vars traded for a few dozen compiling arrayed ones.
 /// The option-C array-builtin decline then took it 6,858 -> 6,753 / width
-/// 29,738 -> 29,633: the emitted-but-failing per-element partials of
-/// VECTOR SORT ORDER and VECTOR ELM MAP targets (105 + 84 fragments) are
-/// declined at generation instead of failing codegen, leaving 4 failing
-/// fragments on C-LEARN (the pre-existing frozen-view-position ELM MAP
-/// class, `target_order -> sorted_target_*`).
+/// 29,738 -> 29,633: the 105 emitted-but-failing per-element partials --
+/// 21 into VECTOR SORT ORDER targets (`ascending -> target_order`, 7
+/// regions x 3 targets) and 84 into VECTOR ELM MAP targets
+/// (`X[row] -> sorted_target_*`) -- are declined at generation instead of
+/// failing codegen, leaving 4 failing fragments on C-LEARN (the
+/// pre-existing frozen-view-position ELM MAP class,
+/// `target_order -> sorted_target_*`).
 ///
 /// It last moved UPWARD, 30,416 -> 30,947 (+531), when GH #996 stopped the axis
 /// allocator stealing a name-matched slot: 135 link scores that the per-element

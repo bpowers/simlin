@@ -2621,13 +2621,20 @@ pub(crate) fn generate_scalar_to_element_equation(
     // helper reference is inert to them.
     let substituted = substitute_reducers_in_expr0(wrapped, reducer_subst);
     // GH #995 option C: a per-element SCALAR partial must not carry an
-    // order-statistic builtin -- the scalarization pins its argument down to
-    // one element, whose rank is meaningless. Checked on the SUBSTITUTED
-    // AST, not the raw target equation: a rank-like call that was HOISTED
-    // into a synthetic agg (`reducer_subst`) is gone from the partial -- the
-    // agg reference carries the correctly-slotted whole-array rank (the
-    // GH #742/#771 machinery) and must not be declined. Only a SURVIVING
-    // spelled-out call is the trap.
+    // array-producing builtin -- its result cannot live in a scalar
+    // fragment, and for the order-statistic subset the scalarization pins
+    // the ranked array to one element, whose rank is meaningless. Checked on
+    // the SUBSTITUTED AST, not the raw target equation: a rank-like call
+    // covered by `reducer_subst` is gone from the partial -- the agg
+    // reference carries the correctly-slotted whole-array rank (GH #742/#771)
+    // and must not be declined. That rescue only applies at the AGG-HALF
+    // call sites, which thread a populated `reducer_subst`; the
+    // scalar-source callers pass an empty map, so a hoisted rank-like call
+    // co-occurring with a scalar dep IS declined there -- an improvement
+    // over the pre-decline behavior (a compiling score whose
+    // `PREVIOUS(RANK(...))` capture helper failed and read constant 0), and
+    // scoreable in principle if those callers ever thread the GH #751
+    // frozen-co-agg substitution.
     if contains_rank_like_builtin(&substituted) {
         return Err(PartialEquationError::rank_like_partial(&print_eqn(
             to_elem_eqn,

@@ -11,7 +11,8 @@
 //! one element, and an order statistic of a single element is meaningless
 //! (`vm_vector_sort_order` on a 1-element view yields rank 0 always). Today
 //! those fragments fail codegen loudly ("array-producing builtin outside
-//! AssignTemp context" -- 105 fragments on C-LEARN); any change that made
+//! AssignTemp context" -- 21 VECTOR SORT ORDER fragments on C-LEARN, plus 84
+//! VECTOR ELM MAP ones on the sibling reason below); any change that made
 //! them compile (e.g. widening Pass-1 materialization, GH #995 option A)
 //! would convert the loud drop into a silent constant-0 partial. Option C
 //! therefore declines the edge at generation, with a warning naming the
@@ -223,4 +224,160 @@ fn per_element_partial_of_elm_map_target_declines_loudly() {
         "declining must leave no failing off->mapped fragments; failures:\n{}",
         failures.join("\n")
     );
+}
+
+/// The predicate RECURSES: a rank-like call nested inside other arithmetic
+/// (`MIN(VECTOR SORT ORDER(...), 5)`) declines too. Deleting the recursion
+/// (checking only the top-level App) survived every prior test while
+/// regressing this shape to emitted-and-failing fragments.
+#[test]
+fn nested_rank_like_call_declines_too() {
+    let project = TestProject::new("nested_rank_decline")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("C", &["c1", "c2"])
+        .array_with_ranges("vals[C]", vec![("c1", "s"), ("c2", "s * 2")])
+        .aux("asc", "1 + s - s", None)
+        .array_aux("order[C]", "MIN(VECTOR SORT ORDER(vals[*], asc), 5)")
+        .flow("g", "(order[c1] + 1) * 0.01", None)
+        .stock("s", "10", &["g"], &[], None);
+    let datamodel = project.build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    let emitted: Vec<&str> = ltm
+        .vars
+        .iter()
+        .map(|v| v.name.as_str())
+        .filter(|n| n.contains("asc\u{2192}order["))
+        .collect();
+    assert!(
+        emitted.is_empty(),
+        "a NESTED rank-like call must decline the per-element partials; got: {emitted:?}"
+    );
+    let failures: Vec<String> = fragment_failures(&db, sync.project)
+        .into_iter()
+        .filter(|f| f.contains("asc\u{2192}order"))
+        .collect();
+    assert!(failures.is_empty(), "failures:\n{}", failures.join("\n"));
+}
+
+/// The ALLOCATE arms of the decline set are live: a market-clearing
+/// allocation is an order statistic over the whole request array, so its
+/// per-element partials decline.
+#[test]
+fn allocate_target_per_element_partials_decline() {
+    let project = TestProject::new("allocate_decline")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("D", &["d1", "d2"])
+        .array_with_ranges("request[D]", vec![("d1", "s"), ("d2", "s * 2")])
+        .array_aux("pp[D,2]", "1")
+        .aux("supply", "s * 0.5", None)
+        .array_aux(
+            "result[D]",
+            "ALLOCATE AVAILABLE(request[*], pp[*,1], supply)",
+        )
+        .flow("g", "(result[d1] + 1) * 0.01", None)
+        .stock("s", "10", &["g"], &[], None);
+    let datamodel = project.build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    let emitted: Vec<&str> = ltm
+        .vars
+        .iter()
+        .map(|v| v.name.as_str())
+        .filter(|n| n.contains("supply\u{2192}result["))
+        .collect();
+    assert!(
+        emitted.is_empty(),
+        "ALLOCATE per-element partials must decline; got: {emitted:?}"
+    );
+    let failures: Vec<String> = fragment_failures(&db, sync.project)
+        .into_iter()
+        .filter(|f| f.contains("supply\u{2192}result"))
+        .collect();
+    assert!(failures.is_empty(), "failures:\n{}", failures.join("\n"));
+}
+
+/// The RANK arm matters most: before the decline, a RANK-bearing target's
+/// per-element scores COMPILED while the `PREVIOUS(RANK(...))` capture
+/// helpers under them failed -- a present-and-wrong score over a constant-0
+/// helper, the silent-degradation class. The decline replaces that with a
+/// loud drop.
+#[test]
+fn rank_target_per_element_partials_decline() {
+    let project = TestProject::new("rank_builtin_decline")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("C", &["c1", "c2"])
+        .array_with_ranges("vals[C]", vec![("c1", "s"), ("c2", "s * 2")])
+        .aux("k", "s * 0.1", None)
+        .array_aux("ranked[C]", "RANK(vals, 1) * k")
+        .flow("g", "(ranked[c1] + 1) * 0.01", None)
+        .stock("s", "10", &["g"], &[], None);
+    let datamodel = project.build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    let emitted: Vec<&str> = ltm
+        .vars
+        .iter()
+        .map(|v| v.name.as_str())
+        .filter(|n| n.contains("k\u{2192}ranked["))
+        .collect();
+    assert!(
+        emitted.is_empty(),
+        "RANK per-element partials must decline; got: {emitted:?}"
+    );
+    let failures: Vec<String> = fragment_failures(&db, sync.project)
+        .into_iter()
+        .filter(|f| f.contains("k\u{2192}ranked"))
+        .collect();
+    assert!(failures.is_empty(), "failures:\n{}", failures.join("\n"));
+}
+
+/// The `generate_per_element_link_equation` guard site, pinned directly (it
+/// was previously covered only by the C-LEARN var-count pin): a mixed
+/// Iterated+Pinned (`PerElement`-shaped) source read inside a rank-bearing
+/// target routes through the per-(row, element) emitter, whose scalar
+/// partials must decline identically.
+#[test]
+fn per_element_shaped_site_in_rank_target_declines() {
+    let project = TestProject::new("per_element_rank_decline")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("R", &["r1", "r2"])
+        .named_dimension("C", &["c1", "c2"])
+        .array_with_ranges("w[R]", vec![("r1", "s"), ("r2", "s * 2")])
+        .array_aux("pop[R,C]", "s * 2")
+        // `pop[R, c1]` is an Iterated+Pinned (PerElement) site; the equation
+        // also ranks w, so every scalar partial of `out` must decline.
+        .array_aux("out[R]", "VECTOR SORT ORDER(w[*], 1) + pop[R, c1]")
+        .flow("g", "(out[r1] + 1) * 0.01", None)
+        .stock("s", "10", &["g"], &[], None);
+    let datamodel = project.build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    let emitted: Vec<&str> = ltm
+        .vars
+        .iter()
+        .map(|v| v.name.as_str())
+        .filter(|n| n.contains("pop[") && n.contains("\u{2192}out["))
+        .collect();
+    assert!(
+        emitted.is_empty(),
+        "PerElement-shaped partials of a rank-bearing target must decline; got: {emitted:?}"
+    );
+    let failures: Vec<String> = fragment_failures(&db, sync.project)
+        .into_iter()
+        .filter(|f| f.contains("\u{2192}out"))
+        .collect();
+    assert!(failures.is_empty(), "failures:\n{}", failures.join("\n"));
 }
