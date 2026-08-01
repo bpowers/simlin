@@ -678,6 +678,152 @@ fn abandoned_leg_helpers_are_not_emitted() {
     }
 }
 
+/// ELM MAP's SOURCE position reads are bounded by the dep's WHOLE storage
+/// (`codegen::full_source_len`), so an offset may legally cross a slice's
+/// row boundary. A frozen SLICE there must therefore materialize as a
+/// whole-dep mirror referenced with the ORIGINAL slice subscript -- a
+/// row-sized helper turned those in-bounds reads into NaN in the partial
+/// only (PR #1003 codex review). The source `dep[r1, *]` is row r1 of a
+/// 2x2 dep; a constant offset of +2 reads row r2's elements -- outside the
+/// slice, inside the dep. `offs` is loop-carrying AND time-varying (2 or
+/// 1 as INT(s)'s parity flips, so the score goes numerically live) and the
+/// A2A-shaped `offs -> mapped` score -- the one whole-array partial that
+/// may hold an ELM MAP result -- is emitted; its changed-first branch
+/// freezes `dep`.
+#[test]
+fn frozen_view_position_slice_keeps_full_storage_reads() {
+    let project = TestProject::new("view_pos_slice_freeze")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("R", &["r1", "r2"])
+        .named_dimension("K", &["k1", "k2"])
+        .array_with_ranges_direct(
+            "dep",
+            vec!["R".to_string(), "K".to_string()],
+            vec![
+                ("r1,k1", "1 + s / 1000"),
+                ("r1,k2", "2 + s / 1000"),
+                ("r2,k1", "3 + s / 1000"),
+                ("r2,k2", "4 + s / 1000"),
+            ],
+            None,
+        )
+        .array_aux("offs[K]", "2 - (INT(s) MOD 2)")
+        .array_aux("mapped[K]", "VECTOR ELM MAP(dep[r1, *], offs[K])")
+        .flow("g", "(mapped[k1] + 1) * 0.7", None)
+        .stock("s", "10", &["g"], &[], None);
+    let datamodel = project.build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    // The frozen dep in the A2A partial must be the WHOLE-DEP mirror read
+    // with the ORIGINAL slice subscript (row pin + wildcard), never a row
+    // helper (whose 2-slot storage the +2 offsets would overrun).
+    let score = format!("{LINK_PREFIX}offs\u{2192}mapped");
+    let score_var = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == score)
+        .unwrap_or_else(|| {
+            panic!(
+                "the offs->mapped score must be emitted; vars: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            )
+        });
+    let score_text = score_var.equation.source_text();
+    let mirror_ref_prefix = format!("\"{FREEZE_PREFIX}dep\"[r");
+    assert!(
+        score_text.contains(&mirror_ref_prefix),
+        "the frozen dep must be the whole-dep mirror with the original pinned \
+         row index; got:\n{score_text}"
+    );
+    let helper = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == format!("{FREEZE_PREFIX}dep"))
+        .expect("a whole-dep freeze mirror over dep");
+    assert_eq!(helper.dimensions, vec!["r".to_string(), "k".to_string()]);
+
+    let failures = fragment_failures(&db, sync.project);
+    assert!(
+        failures.is_empty(),
+        "the view-position slice freeze must compile; failures:\n{}",
+        failures.join("\n")
+    );
+
+    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
+        .expect("the LTM-enabled fixture should compile");
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end()
+        .expect("simulation should run to completion");
+    let results = vm.into_results();
+    let at = |name: &str, first_elem: &str, slot: usize, step: usize| -> f64 {
+        let off = *compiled
+            .offsets
+            .get(name)
+            .or_else(|| {
+                compiled
+                    .offsets
+                    .get(format!("{name}[{first_elem}]").as_str())
+            })
+            .unwrap_or_else(|| panic!("no offset for {name}"));
+        results.data[step * results.step_size + off + slot]
+    };
+
+    // Premise oracle (LIVE semantics): a +2 offset crosses the row
+    // boundary and reads row r2's element -- in bounds against the dep's
+    // full 4-slot storage. If this fails the whole hazard is misdiagnosed.
+    // The offset alternates 2/1 with INT(s)'s parity; require the
+    // cross-row phase to actually occur so the pin is not vacuous.
+    let mut crossed_row = false;
+    for step in 0..results.step_count {
+        for i in 0..2usize {
+            let o = at("offs", "k1", i, step).round() as usize;
+            let src_flat = i + o;
+            if src_flat >= 2 {
+                crossed_row = true;
+            }
+            let want = at("dep", "r1,k1", src_flat, step);
+            let got = at("mapped", "k1", i, step);
+            assert!(
+                (got - want).abs() < 1e-9,
+                "live ELM MAP must read the dep's full storage: mapped[{i}] \
+                 step {step} got {got}, want dep flat {src_flat} = {want}"
+            );
+        }
+    }
+    assert!(
+        crossed_row,
+        "the fixture must exercise a cross-row read, or the regression pin is vacuous"
+    );
+
+    // THE regression pin: the A2A score is FINITE at every slot past the
+    // first step. With a row-sized helper the frozen branch's +2 offsets
+    // overran the 2-slot storage and the series went NaN.
+    let score_off = *compiled
+        .offsets
+        .get(score.as_str())
+        .unwrap_or_else(|| panic!("{score} has no results offset"));
+    let mut nonzero = 0usize;
+    for step in 1..results.step_count {
+        for slot in 0..2usize {
+            let val = results.data[step * results.step_size + score_off + slot];
+            assert!(
+                val.is_finite(),
+                "{score}[slot {slot}] at step {step} must be finite, got {val}"
+            );
+            if val != 0.0 {
+                nonzero += 1;
+            }
+        }
+    }
+    assert!(
+        nonzero > 0,
+        "the score must be live (non-zero somewhere), or the finiteness pin is vacuous"
+    );
+}
+
 /// The frozen-VIEW-POSITION class (C-LEARN's last 4 failing fragments): a
 /// frozen reference landing in a view-position argument of a vector builtin
 /// (`VECTOR ELM MAP(PREVIOUS(base[c2]), offs[C])`) is an App where codegen

@@ -368,19 +368,20 @@ class Run:
     ) -> list[tuple[int | None, list[Loop]]]:
         """Group loops into dominance-competition groups (GH #998).
 
-        Loops with a partition index compete only with partition-mates.  The
-        handling of ``partition is None`` loops depends on whether ANY loop
-        carries a partition: on a partition-bearing surface, ``None`` means
-        "no parent-level partition" (a module-internal loop, whose relative
-        score is ``±1`` by construction), so each such loop is its OWN solo
-        group -- pooling them would let whichever sorts first smother the
-        rest, the GH #998 pattern reappearing inside the ``None`` subset
-        (mirroring the engine ranking's per-loop Solo groups).  When NO loop
-        carries a partition (a surface without partition metadata), they
-        share one flat group, preserving the pre-partition behavior.
+        Loops with a partition index compete only with partition-mates.
+        ``Run.loops`` is a PARTITION-BEARING surface by construction (each
+        loop's ``partition`` comes from the engine's runtime loop
+        primitive), so ``partition is None`` always means "no parent-level
+        partition" -- a module-internal loop whose relative score is ``±1``
+        by construction -- and each such loop is its OWN solo group,
+        mirroring the engine ranking's per-loop Solo groups.  Pooling them
+        (even when EVERY loop is ``None``) would let whichever sorts first
+        smother the rest -- the GH #998 pattern reappearing inside the
+        ``None`` subset.  The engine's flat legacy grouping exists only for
+        its no-metadata layout fallback, a surface pysimlin never reads.
 
         Returns ``(partition, loops)`` pairs, partition-major: ascending
-        partition index, then the ``None`` group(s) in input order.
+        partition index, then the ``None`` solo groups in input order.
         """
         partitioned: dict[int, list[Loop]] = {}
         unpartitioned: list[Loop] = []
@@ -393,10 +394,7 @@ class Run:
         ordered: list[tuple[int | None, list[Loop]]] = [
             (p, partitioned[p]) for p in sorted(partitioned)
         ]
-        if partitioned:
-            ordered.extend((None, [loop]) for loop in unpartitioned)
-        elif unpartitioned:
-            ordered.append((None, unpartitioned))
+        ordered.extend((None, [loop]) for loop in unpartitioned)
         return ordered
 
     @staticmethod

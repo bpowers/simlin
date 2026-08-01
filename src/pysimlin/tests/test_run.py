@@ -146,9 +146,10 @@ class TestRunClass:
                 )
 
     def test_group_loops_for_dominance_solo_none_on_partitioned_surface(self) -> None:
-        """GH #998: on a partition-bearing surface each partition-None loop
-        (module-internal; relative score +/-1 by construction) forms its OWN
-        dominance group; only a surface with NO partition metadata pools them.
+        """GH #998: each partition-None loop (module-internal; relative
+        score +/-1 by construction) forms its OWN dominance group --
+        Run.loops is partition-bearing by construction, so this holds even
+        when every loop is None.
 
         The fixture hand-builds Loop objects because the function's whole
         input contract is the `partition` field, whose production values are
@@ -173,11 +174,16 @@ class TestRunClass:
             (None, ["mod_b"]),
         ], "None loops must be solo groups when any loop carries a partition"
 
-        flat = [loop("l1", None), loop("l2", None)]
-        groups = Run._group_loops_for_dominance(flat)
+        # Run.loops is partition-bearing by construction, so even an
+        # ALL-None loop set stays solo-grouped: pooling would let one
+        # +/-1-by-construction series smother the rest (the PR #1003 codex
+        # review's all-module-internal scenario).
+        all_none = [loop("l1", None), loop("l2", None)]
+        groups = Run._group_loops_for_dominance(all_none)
         assert [(p, [lo.id for lo in g]) for p, g in groups] == [
-            (None, ["l1", "l2"]),
-        ], "an all-None surface keeps the single flat group"
+            (None, ["l1"]),
+            (None, ["l2"]),
+        ], "all-None loops must stay solo on the runtime surface"
 
     def test_run_caching(self, xmile_model_path: Path) -> None:
         """Test that Run properties are cached properly."""

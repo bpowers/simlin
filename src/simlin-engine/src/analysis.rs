@@ -428,6 +428,9 @@ fn run_ltm_pipeline(
         &feedback_loops,
         results.specs.start,
         results.specs.save_step,
+        // Discovery loops carry partition metadata: a None partition is a
+        // module-internal loop competing only against itself.
+        metadata::PartitionSurface::PartitionBearing,
     );
 
     let loop_dominance: Vec<LoopSummary> = found_loops

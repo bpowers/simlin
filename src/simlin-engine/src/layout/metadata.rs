@@ -131,17 +131,18 @@ impl ComputedMetadata {
 /// computed within each partition independently, and every returned period
 /// says which partition it describes.
 ///
-/// The handling of `partition == None` loops depends on whether the surface
-/// carries partition metadata at all.  When EVERY loop is `None` (the layout
-/// persisted-metadata fallback, which has no partition information), they
-/// share one group -- preserving the pre-partition flat behavior exactly for
-/// that path.  When the surface IS partition-bearing (any loop carries
-/// `Some`), each `None` loop instead forms its OWN group: on those surfaces
-/// `None` means "no parent-level partition" (a module-internal loop), such a
-/// loop's relative score is `±1` by construction, and pooling unrelated
-/// `None` loops would let whichever sorts first smother the rest -- the
-/// GH #998 pattern again, and the same reason discovery's ranking gives each
-/// unpartitioned loop its own `NormGroup::Solo` (GH #750).
+/// The handling of `partition == None` loops is decided by the CALLER's
+/// `surface` declaration, not inferred from the loop list -- an inference
+/// ("does any loop carry `Some`?") mislabels a partition-bearing result
+/// whose loops are ALL module-internal (every partition legitimately
+/// `None`), pooling unrelated `±1`-by-construction series so one smothers
+/// the rest (PR #1003 codex review).  On a
+/// [`PartitionSurface::PartitionBearing`] surface each `None` loop forms
+/// its OWN solo group, mirroring discovery's per-loop `NormGroup::Solo`
+/// (GH #750); on [`PartitionSurface::NoMetadata`] (the layout
+/// persisted-metadata fallback, where `None` merely means "no partition
+/// information exists") all loops share one group, preserving the
+/// pre-partition flat selection exactly.
 ///
 /// Periods are ordered partition-major -- ascending partition index, the
 /// `None` group(s) last -- with each partition's periods in time order.  On
@@ -157,9 +158,8 @@ pub fn calculate_dominant_periods(
     loops: &[FeedbackLoop],
     start_time: f64,
     dt: f64,
+    surface: PartitionSurface,
 ) -> Vec<DominantPeriod> {
-    let any_partitioned = loops.iter().any(|l| l.partition.is_some());
-
     // Group the Some-partition loops by partition, preserving each group's
     // input (ranked) order.
     let mut partitioned: BTreeMap<usize, Vec<&FeedbackLoop>> = BTreeMap::new();
@@ -171,16 +171,13 @@ pub fn calculate_dominant_periods(
         }
     }
 
-    let none_groups: Vec<Vec<&FeedbackLoop>> = if any_partitioned {
-        // Partition-bearing surface: each None loop is its own solo group
-        // (see the doc above), in input (ranked) order.
-        unpartitioned.into_iter().map(|l| vec![l]).collect()
-    } else if unpartitioned.is_empty() {
-        Vec::new()
-    } else {
-        // No partition metadata anywhere: one shared group, the exact
-        // pre-partition flat selection.
-        vec![unpartitioned]
+    let none_groups: Vec<Vec<&FeedbackLoop>> = match surface {
+        // Each None loop is its own solo group (see the doc above), in
+        // input (ranked) order.
+        PartitionSurface::PartitionBearing => unpartitioned.into_iter().map(|l| vec![l]).collect(),
+        PartitionSurface::NoMetadata if unpartitioned.is_empty() => Vec::new(),
+        // One shared group: the exact pre-partition flat selection.
+        PartitionSurface::NoMetadata => vec![unpartitioned],
     };
 
     partitioned
@@ -191,6 +188,23 @@ pub fn calculate_dominant_periods(
             calculate_dominant_periods_for_group(&group, partition, start_time, dt)
         })
         .collect()
+}
+
+/// Whether the loops fed to [`calculate_dominant_periods`] come from a
+/// surface that carries cycle-partition metadata.  The caller must declare
+/// this because the loop list itself cannot: an all-`None` list is EITHER a
+/// no-metadata surface (pool everything, the flat legacy selection) or a
+/// partition-bearing result whose every loop is module-internal (each is
+/// its own competition group).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PartitionSurface {
+    /// The loops come from LTM analysis (discovery or detected loops):
+    /// `partition == None` means "no parent-level partition", a loop that
+    /// competes only against itself.
+    PartitionBearing,
+    /// The loops carry no partition metadata at all (persisted layout
+    /// loop metadata): all loops share one flat dominance group.
+    NoMetadata,
 }
 
 /// The per-partition dominance selection: at each timestep, polarity is
@@ -457,7 +471,7 @@ mod tests {
 
     #[test]
     fn test_dominant_periods_empty_loops() {
-        let periods = calculate_dominant_periods(&[], 0.0, 1.0);
+        let periods = calculate_dominant_periods(&[], 0.0, 1.0, PartitionSurface::NoMetadata);
         assert!(periods.is_empty());
     }
 
@@ -472,7 +486,7 @@ mod tests {
             dominant_period: None,
             partition: None,
         }];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
         assert_eq!(periods.len(), 1);
         assert!((periods[0].start - 0.0).abs() < f64::EPSILON);
         assert!((periods[0].end - 2.0).abs() < f64::EPSILON);
@@ -508,7 +522,7 @@ mod tests {
                 partition: None,
             },
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
         assert_eq!(periods.len(), 2);
         assert_eq!(periods[0].dominant_loops, vec!["R1"]);
         assert_eq!(periods[1].dominant_loops, vec!["B1"]);
@@ -536,7 +550,7 @@ mod tests {
                 partition: None,
             },
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
         assert_eq!(periods.len(), 2);
 
         let r1_avg = (0.6 + 0.8) / 2.0;
@@ -577,7 +591,7 @@ mod tests {
                 partition: None,
             },
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
         assert_eq!(
             periods.len(),
             1,
@@ -607,7 +621,7 @@ mod tests {
             dominant_period: None,
             partition: None,
         }];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
         assert_eq!(
             periods.len(),
             2,
@@ -642,7 +656,7 @@ mod tests {
                 partition: None,
             },
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
         assert_eq!(periods.len(), 1);
         // B1 has the higher score so should come first despite being
         // alphabetically after A1.
@@ -659,7 +673,7 @@ mod tests {
             dominant_period: None,
             partition: None,
         }];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
         assert!(periods.is_empty());
     }
 
@@ -695,7 +709,7 @@ mod tests {
                 partition: None,
             },
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
         assert_eq!(periods.len(), 1);
         // R1 should NOT be in the dominant set
         assert!(
@@ -738,7 +752,7 @@ mod tests {
                 partition: None,
             },
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
         assert_eq!(periods.len(), 1);
         // Reinforcing total (0.4) > Balancing total (0.2), so both R1+R2
         let mut names = periods[0].dominant_loops.clone();
@@ -777,7 +791,7 @@ mod tests {
                 partition: None,
             },
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
         assert_eq!(periods.len(), 1);
         // Balancing total (0.9) > reinforcing total (0.6), so balancing
         // should win even though reinforcing also exceeds 0.5.
@@ -816,7 +830,8 @@ mod tests {
                 partition: None,
             },
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        let periods =
+            calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::PartitionBearing);
         assert_eq!(periods.len(), 1);
         assert_eq!(
             periods[0].dominant_loops,
@@ -852,7 +867,8 @@ mod tests {
             // The lone-partition loop: share identically 1.0 while active.
             partitioned_loop("B_lone", vec![-1.0, -1.0, -1.0, -1.0], Some(1)),
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        let periods =
+            calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::PartitionBearing);
 
         let p0: Vec<_> = periods.iter().filter(|p| p.partition == Some(0)).collect();
         let p1: Vec<_> = periods.iter().filter(|p| p.partition == Some(1)).collect();
@@ -888,7 +904,8 @@ mod tests {
             partitioned_loop("R_p1", vec![0.8, 0.8], Some(1)),
             partitioned_loop("R_p0", vec![0.7, 0.7], Some(0)),
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        let periods =
+            calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::PartitionBearing);
         let order: Vec<Option<usize>> = periods.iter().map(|p| p.partition).collect();
         assert_eq!(
             order,
@@ -917,7 +934,8 @@ mod tests {
             partitioned_loop("R_mod", vec![1.0, 1.0], None),
             partitioned_loop("B_mod", vec![-1.0, -1.0], None),
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        let periods =
+            calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::PartitionBearing);
 
         let none_periods: Vec<_> = periods.iter().filter(|p| p.partition.is_none()).collect();
         assert_eq!(
@@ -941,17 +959,46 @@ mod tests {
         assert_eq!(periods[0].partition, Some(0));
     }
 
-    /// Loops with no partition metadata ANYWHERE (the layout fallback path)
-    /// share ONE group, so that path's behavior is byte-identical to the
-    /// pre-partition flat selection -- including cross-loop accumulation to
-    /// the 0.5 threshold.
+    /// The caller's surface declaration -- not an inference over the loop
+    /// list -- decides the `None` handling: a PARTITION-BEARING result whose
+    /// loops are ALL module-internal (every partition legitimately `None`)
+    /// still gets one solo group per loop.  An "any loop carries Some?"
+    /// inference pooled exactly this shape, letting one +/-1 series smother
+    /// the rest (PR #1003 codex review).
+    #[test]
+    fn test_all_none_partition_bearing_loops_stay_solo() {
+        let loops = vec![
+            partitioned_loop("R_mod", vec![1.0, 1.0], None),
+            partitioned_loop("B_mod", vec![-1.0, -1.0], None),
+        ];
+        let periods =
+            calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::PartitionBearing);
+        assert_eq!(
+            periods.len(),
+            2,
+            "each all-None loop keeps its own solo timeline: {periods:?}"
+        );
+        assert!(
+            periods.iter().any(|p| p.dominant_loops == vec!["B_mod"]),
+            "B_mod must not be smothered by R_mod: {periods:?}"
+        );
+        assert!(
+            periods.iter().all(|p| p.dominant_loops.len() == 1),
+            "no pooled period may exist on a partition-bearing surface"
+        );
+    }
+
+    /// On a NO-METADATA surface (the layout persisted-metadata fallback)
+    /// all loops share ONE group, so that path's behavior is byte-identical
+    /// to the pre-partition flat selection -- including cross-loop
+    /// accumulation to the 0.5 threshold.
     #[test]
     fn test_dominant_periods_none_partitions_share_one_group() {
         let loops = vec![
             partitioned_loop("R1", vec![0.35], None),
             partitioned_loop("R2", vec![0.20], None),
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
         assert_eq!(periods.len(), 1);
         let mut names = periods[0].dominant_loops.clone();
         names.sort();

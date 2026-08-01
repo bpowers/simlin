@@ -450,16 +450,37 @@ pub(crate) fn materialize_array_freezes(
     dims_ctx: &DimensionsContext,
     out: &mut Vec<ArrayFreezeHelper>,
 ) -> Expr0 {
-    materialize_inner(expr, dep_dims, dims_ctx, out, false)
+    materialize_inner(expr, dep_dims, dims_ctx, out, ViewPos::No)
 }
 
-/// The VIEW-POSITION argument indices of a VECTOR builtin -- the arguments
-/// codegen compiles with `walk_expr_as_view` (a view over storage, never a
-/// scalar value). A frozen reference landing in one of these positions is an
-/// `App` where a view is required, so it must materialize as a WHOLE-DEP
-/// freeze helper even when its subscript has no slice axes. Mirrors the
-/// `walk_expr_as_view` call sites in `compiler::codegen`'s `AssignTemp` /
-/// `VectorSelect` arms; a new vector builtin must be added in both places.
+/// How a vector builtin's argument position consumes its expression.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewPos {
+    /// Not a view position: a scalar value, or an argument of a non-vector
+    /// call. Slices freeze as row helpers; whole-dep freezing never fires.
+    No,
+    /// A view iterated ELEMENT-WISE (`VECTOR SELECT`'s args, sort/rank/
+    /// allocate arrays, ELM MAP's offsets): every read stays inside the
+    /// view, so a frozen SLICE may materialize as a row helper (same
+    /// values, same iteration), while a frozen no-slice reference still
+    /// needs the whole-dep arm (an App is not a view).
+    Elementwise,
+    /// `VECTOR ELM MAP`'s SOURCE argument (arg 0): reads are bounded by the
+    /// source VARIABLE's full row-major storage (`codegen::full_source_len`
+    /// -- an offset may legally cross the slice's row boundary), so a
+    /// row-sized helper would turn in-bounds reads into NaN in the partial
+    /// only. Frozen slices here must materialize as a whole-dep mirror
+    /// referenced with the ORIGINAL slice subscript.
+    FullStorageBase,
+}
+
+/// Classify a VECTOR builtin's argument position -- the positions codegen
+/// compiles with `walk_expr_as_view` (a view over storage, never a scalar
+/// value). A frozen reference landing in one is an `App` where a view is
+/// required, so it must materialize as a helper the position's read
+/// semantics allow (see `ViewPos`). Mirrors the `walk_expr_as_view` call
+/// sites in `compiler::codegen`'s `AssignTemp` / `VectorSelect` arms; a new
+/// vector builtin must be added in both places.
 ///
 /// Two other `walk_expr_as_view` families are DELIBERATELY absent: the
 /// scalar-collapsing reducers' argument (`emit_array_reduce` -- a frozen
@@ -467,13 +488,22 @@ pub(crate) fn materialize_array_freezes(
 /// failure; hoisted ones never reach the wrap spelled out), and the
 /// arrayed-GF `LOOKUP` table argument (the wrap holds a table head verbatim
 /// by design -- `freeze_lookup_table_indices` freezes only its indices).
-fn view_arg_positions(func: &str) -> &'static [usize] {
+fn view_pos_for_arg(func: &str, i: usize) -> ViewPos {
     match func.to_ascii_lowercase().as_str() {
-        "vector_select" | "vector_elm_map" | "allocate_available" | "allocate_by_priority" => {
-            &[0, 1]
-        }
-        "vector_sort_order" | "rank" => &[0],
-        _ => &[],
+        "vector_elm_map" => match i {
+            0 => ViewPos::FullStorageBase,
+            1 => ViewPos::Elementwise,
+            _ => ViewPos::No,
+        },
+        "vector_select" | "allocate_available" | "allocate_by_priority" => match i {
+            0 | 1 => ViewPos::Elementwise,
+            _ => ViewPos::No,
+        },
+        "vector_sort_order" | "rank" => match i {
+            0 => ViewPos::Elementwise,
+            _ => ViewPos::No,
+        },
+        _ => ViewPos::No,
     }
 }
 
@@ -482,21 +512,28 @@ fn materialize_inner(
     dep_dims: &HashMap<String, Vec<Dimension>>,
     dims_ctx: &DimensionsContext,
     out: &mut Vec<ArrayFreezeHelper>,
-    in_view_position: bool,
+    view_pos: ViewPos,
 ) -> Expr0 {
     let recurse = |e: Expr0, out: &mut Vec<ArrayFreezeHelper>| {
-        materialize_inner(e, dep_dims, dims_ctx, out, false)
+        materialize_inner(e, dep_dims, dims_ctx, out, ViewPos::No)
     };
     match expr {
         Expr0::Const(..) | Expr0::Var(..) => expr,
-        // NOTE a slice freeze reached here in a VIEW position hands ELM MAP a
-        // helper whose `full_source_len` is the ROW length, not the dep's
-        // whole extent (the live slice reads the whole variable's storage per
-        // `codegen::full_source_len`) -- out-of-range offsets go NaN earlier
-        // in the partial than in the live equation. Pre-existing to the
-        // whole-dep arm below and narrower than the alternative (no score at
-        // all); tightening it would mean routing view-position slices to a
-        // whole-dep helper subscripted with the slice.
+        // A frozen SLICE. In a scalar context or an element-wise view
+        // position it materializes as a row helper referenced `[*]` (same
+        // values, same iteration as the live slice). In ELM MAP's
+        // full-storage-base source position a row helper is WRONG -- the
+        // live view's reads are bounded by the dep's whole storage, so an
+        // offset legally crossing the row boundary would go NaN in the
+        // partial only -- and a classifiable slice there is instead
+        // re-routed to a whole-dep mirror referenced with the ORIGINAL
+        // slice subscript (identical view semantics, frozen). A slice
+        // `materialize_one` declines (a dynamic pin index, an unclassifiable
+        // axis) stays verbatim in EVERY position, keeping the loud
+        // UnfreezablePartial decline: the whole-dep mirror would hold a
+        // dynamic index LIVE, changing the frozen head's index-read timing
+        // -- the open GH #759 semantics question this materializer must not
+        // decide.
         Expr0::App(UntypedBuiltinFn(name, args), loc)
             if name.eq_ignore_ascii_case("previous")
                 && args.first().is_some_and(is_direct_slice_subscript) =>
@@ -507,6 +544,32 @@ fn materialize_inner(
                 }
                 _ => None,
             };
+            if materialized.is_some() && view_pos == ViewPos::FullStorageBase {
+                if let (Expr0::Subscript(_, indices, _), Some(helper)) = (
+                    &args[0],
+                    match &args[0] {
+                        Expr0::Subscript(base, _, _) => {
+                            materialize_whole_dep(base, args.get(1), dep_dims)
+                        }
+                        _ => None,
+                    },
+                ) {
+                    let helper_ref = Expr0::Subscript(
+                        crate::common::RawIdent::new_from_str(&helper.name),
+                        indices.clone(),
+                        loc,
+                    );
+                    if !out.iter().any(|h| h.name == helper.name) {
+                        out.push(helper);
+                    }
+                    return helper_ref;
+                }
+                // A dep the whole-dep materializer cannot mirror (absent
+                // from dep_dims / non-const fallback): keep the call
+                // verbatim rather than fall back to the row helper whose
+                // read bound is wrong here.
+                return Expr0::App(UntypedBuiltinFn(name, args), loc);
+            }
             match materialized {
                 Some(helper) => {
                     // The reference is WILDCARD-SUBSCRIPTED (`"helper"[*]`),
@@ -542,14 +605,16 @@ fn materialize_inner(
         }
         // The frozen-VIEW-POSITION class: `PREVIOUS(<ref>)` sitting where
         // codegen requires a view over storage (a vector builtin's array
-        // argument). The slice arm above did not match (no slice axes), but
-        // an App is not a view either -- materialize the freeze as a
-        // WHOLE-DEP helper and re-spell the reference against it: the
-        // original indices for a subscripted ref (the helper's storage
-        // mirrors the dep's 1:1, preserving ELM MAP's full-storage base
-        // semantics), wildcards for a bare arrayed ref, bare for a scalar.
+        // argument) -- slice-bearing subscripts included, since the slice
+        // arm above defers to this one inside a view position. An App is
+        // not a view, so materialize the freeze as a WHOLE-DEP helper and
+        // re-spell the reference against it: the original indices for a
+        // subscripted ref (the helper's storage mirrors the dep's 1:1, so a
+        // slice subscript keeps its view base AND the full-storage read
+        // bound ELM MAP's offsets are entitled to), wildcards for a bare
+        // arrayed ref, bare for a scalar.
         Expr0::App(UntypedBuiltinFn(name, args), loc)
-            if in_view_position && name.eq_ignore_ascii_case("previous") =>
+            if view_pos != ViewPos::No && name.eq_ignore_ascii_case("previous") =>
         {
             let materialized = match args.first() {
                 Some(Expr0::Subscript(base, _, _)) | Some(Expr0::Var(base, _)) => {
@@ -584,12 +649,11 @@ fn materialize_inner(
             }
         }
         Expr0::App(UntypedBuiltinFn(name, args), loc) => {
-            let view_positions = view_arg_positions(&name);
             let args = args
                 .into_iter()
                 .enumerate()
                 .map(|(i, a)| {
-                    materialize_inner(a, dep_dims, dims_ctx, out, view_positions.contains(&i))
+                    materialize_inner(a, dep_dims, dims_ctx, out, view_pos_for_arg(&name, i))
                 })
                 .collect();
             Expr0::App(UntypedBuiltinFn(name, args), loc)
