@@ -1,14 +1,14 @@
 # pysimlin
 
 Python bindings for [Simlin](https://simlin.com), a system dynamics
-simulation engine. pysimlin loads models in XMILE (Stella), Vensim MDL, and
-Simlin's native formats, simulates them, and analyzes which feedback loops
+simulation engine. pysimlin supports opening models in XMILE (Stella), Vensim MDL, and
+Simlin's native formats, editing, simulating, and [Loops That Matter](https://www4.uib.no/en/research/research-projects/loops-that-matter)-based analysis of which feedback loops
 drive behavior over time. Simulation results are pandas DataFrames; model
 structure is plain dataclasses.
 
 ## Features
 
-- Load XMILE (`.stmx`, `.xmile`), Vensim (`.mdl`), and Simlin JSON/protobuf models
+- Load XMILE (`.stmx`, `.xmile`), Vensim (`.mdl`), sd-ai JSON, and Simlin JSON models
 - Simulate with per-run parameter overrides; results as pandas DataFrames
 - Loop dominance analysis ("Loops that Matter"): measure each feedback
   loop's contribution to behavior at every timestep, and find where
@@ -40,7 +40,7 @@ dominates when:
 
 ```python
 import simlin
-from simlin.json_types import Stock, Flow, Auxiliary
+from simlin import Aux, Flow, Stock
 
 project = simlin.Project.new(
     name="logistic-growth", sim_start=0, sim_stop=100, dt=0.25, time_units="years"
@@ -48,14 +48,14 @@ project = simlin.Project.new(
 
 model = project.get_model()
 with model.edit() as (_, patch):
-    patch.upsert_stock(Stock(name="population", initial_equation="50", inflows=["net_growth"]))
-    patch.upsert_flow(Flow(name="net_growth", equation="population * fractional_growth"))
-    patch.upsert_aux(Auxiliary(
+    patch.upsert(Stock(name="population", initial_equation="50", inflows=["net_growth"]))
+    patch.upsert(Flow(name="net_growth", equation="population * fractional_growth"))
+    patch.upsert(Aux(
         name="fractional_growth",
         equation="max_growth_rate * (1 - population / carrying_capacity)",
     ))
-    patch.upsert_aux(Auxiliary(name="max_growth_rate", equation="0.08"))
-    patch.upsert_aux(Auxiliary(name="carrying_capacity", equation="10000"))
+    patch.upsert(Aux(name="max_growth_rate", equation="0.08"))
+    patch.upsert(Aux(name="carrying_capacity", equation="10000"))
 
 run = model.run()
 print(f"final population: {run.results['population'].iloc[-1]:.0f}")
@@ -135,7 +135,7 @@ from simlin import VARTYPE_STOCK, VARTYPE_FLOW, VARTYPE_AUX
 names = model.get_var_names()                          # all variables
 stocks = model.get_var_names(type_mask=VARTYPE_STOCK)  # just stocks
 
-var = model.get_variable("population")   # Stock | Flow | Aux | None
+var = model.get_variable("population")   # Stock | Flow | Aux | Module | None
 spec = model.time_spec                   # start, stop, dt, units
 
 deps = model.get_incoming_links("net_growth")  # direct inputs of one variable
@@ -156,20 +156,23 @@ definitions, and `patch` collects changes. Edits are validated and applied
 together when the `with` block exits; an invalid edit raises a
 `SimlinError` and leaves the model unchanged.
 
+Variables are frozen dataclasses -- the same `Stock`/`Flow`/`Aux` objects
+everywhere, whether you read them or write them. To change one, derive an
+updated copy with `dataclasses.replace` and `upsert` it:
+
 ```python
+from dataclasses import replace
+
 # Change an equation
 with model.edit() as (current, patch):
-    cap = current["carrying_capacity"]
-    cap.equation = "12000"
-    patch.upsert_aux(cap)
+    patch.upsert(replace(current["carrying_capacity"], equation="12000"))
 
 # Add a harvest outflow: create the flow, then attach it to the stock
 with model.edit() as (current, patch):
-    patch.upsert_flow(Flow(name="harvest", equation="population * harvest_fraction"))
-    patch.upsert_aux(Auxiliary(name="harvest_fraction", equation="0.01"))
+    patch.upsert(Flow(name="harvest", equation="population * harvest_fraction"))
+    patch.upsert(Aux(name="harvest_fraction", equation="0.01"))
     stock = current["population"]
-    stock.outflows = [*stock.outflows, "harvest"]
-    patch.upsert_stock(stock)
+    patch.upsert(replace(stock, outflows=[*stock.outflows, "harvest"]))
 ```
 
 ### Running Simulations
@@ -454,7 +457,7 @@ variable:
 <!-- pysimlin-test: expect-error -->
 ```python
 with model.edit() as (_, patch):
-    patch.upsert_aux(Auxiliary(name="broken", equation="no_such_var * 2"))
+    patch.upsert(Aux(name="broken", equation="no_such_var * 2"))
 ```
 
 Agents that speak [MCP](https://modelcontextprotocol.io) can use the

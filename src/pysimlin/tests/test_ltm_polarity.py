@@ -34,9 +34,9 @@ class TestLtmReinforcingLoop:
 
         # Add the reinforcing loop structure using the edit context
         with model.edit() as (_current, patch):
-            from simlin.json_types import Auxiliary, Flow, Stock
+            from simlin.types import Aux, Flow, Stock
 
-            patch.upsert_stock(
+            patch.upsert(
                 Stock(
                     name="population",
                     initial_equation="100",
@@ -44,14 +44,14 @@ class TestLtmReinforcingLoop:
                     outflows=[],
                 )
             )
-            patch.upsert_flow(
+            patch.upsert(
                 Flow(
                     name="births",
                     equation="population * birth_rate",
                 )
             )
-            patch.upsert_aux(
-                Auxiliary(
+            patch.upsert(
+                Aux(
                     name="birth_rate",
                     equation="0.1",
                 )
@@ -112,15 +112,15 @@ class TestLtmBalancingLoop:
 
         # Add the balancing loop structure
         with model.edit() as (_current, patch):
-            from simlin.json_types import Auxiliary, Flow, Stock
+            from simlin.types import Aux, Flow, Stock
 
-            patch.upsert_aux(
-                Auxiliary(
+            patch.upsert(
+                Aux(
                     name="goal",
                     equation="100",
                 )
             )
-            patch.upsert_stock(
+            patch.upsert(
                 Stock(
                     name="level",
                     initial_equation="50",
@@ -128,19 +128,19 @@ class TestLtmBalancingLoop:
                     outflows=[],
                 )
             )
-            patch.upsert_aux(
-                Auxiliary(
+            patch.upsert(
+                Aux(
                     name="gap",
                     equation="goal - level",
                 )
             )
-            patch.upsert_aux(
-                Auxiliary(
+            patch.upsert(
+                Aux(
                     name="adjustment_time",
                     equation="5",
                 )
             )
-            patch.upsert_flow(
+            patch.upsert(
                 Flow(
                     name="adjustment",
                     equation="gap / adjustment_time",
@@ -205,22 +205,20 @@ class TestLtmModuleBoundaryReclassification:
         )
         model = project.main_model
         with model.edit() as (_current, patch):
-            from simlin.json_types import Auxiliary, Flow, Stock
+            from simlin.types import Aux, Flow, Stock
 
-            patch.upsert_stock(
-                Stock(name="s", initial_equation="100", inflows=["growth"], outflows=[])
-            )
-            patch.upsert_aux(Auxiliary(name="smoothed", equation="SMTH1(s, 3)"))
+            patch.upsert(Stock(name="s", initial_equation="100", inflows=["growth"], outflows=[]))
+            patch.upsert(Aux(name="smoothed", equation="SMTH1(s, 3)"))
             # A parabola in the smoothed output: the smoothed value appears
             # with conflicting signs, so the static analyzer cannot sign the
             # smoothed -> effect link and the loop is structurally Undetermined.
-            patch.upsert_aux(
-                Auxiliary(
+            patch.upsert(
+                Aux(
                     name="effect",
                     equation="smoothed * (1000 - smoothed) / 100000",
                 )
             )
-            patch.upsert_flow(Flow(name="growth", equation="effect"))
+            patch.upsert(Flow(name="growth", equation="effect"))
 
         # The structural surface (no runtime data) classifies the loop as U.
         structural = model.loops
@@ -268,14 +266,12 @@ class TestRuntimeLoopsFfiAgreesWithPython:
         )
         model = project.main_model
         with model.edit() as (_current, patch):
-            from simlin.json_types import Auxiliary, Flow, Stock
+            from simlin.types import Aux, Flow, Stock
 
-            patch.upsert_aux(Auxiliary(name="r", equation="0.8"))
-            patch.upsert_aux(Auxiliary(name="k", equation="1000"))
-            patch.upsert_stock(
-                Stock(name="stock", initial_equation="100", inflows=["net"], outflows=[])
-            )
-            patch.upsert_flow(Flow(name="net", equation="r * stock * (1 - stock / k)"))
+            patch.upsert(Aux(name="r", equation="0.8"))
+            patch.upsert(Aux(name="k", equation="1000"))
+            patch.upsert(Stock(name="stock", initial_equation="100", inflows=["net"], outflows=[]))
+            patch.upsert(Flow(name="net", equation="r * stock * (1 - stock / k)"))
         return project
 
     def test_run_loops_match_sim_primitive_on_scalar_loop(self) -> None:
@@ -522,9 +518,9 @@ class TestStructuralPolarityClassification:
         model = project.main_model
 
         with model.edit() as (_current, patch):
-            from simlin.json_types import Auxiliary, Flow, Stock
+            from simlin.types import Aux, Flow, Stock
 
-            patch.upsert_stock(
+            patch.upsert(
                 Stock(
                     name="population",
                     initial_equation="100",
@@ -532,14 +528,14 @@ class TestStructuralPolarityClassification:
                     outflows=[],
                 )
             )
-            patch.upsert_flow(
+            patch.upsert(
                 Flow(
                     name="births",
                     equation="population * birth_rate",
                 )
             )
-            patch.upsert_aux(
-                Auxiliary(
+            patch.upsert(
+                Aux(
                     name="birth_rate",
                     equation="0.1",
                 )
@@ -568,15 +564,15 @@ class TestStructuralPolarityClassification:
         model = project.main_model
 
         with model.edit() as (_current, patch):
-            from simlin.json_types import Auxiliary, Flow, Stock
+            from simlin.types import Aux, Flow, Stock
 
-            patch.upsert_aux(
-                Auxiliary(
+            patch.upsert(
+                Aux(
                     name="goal",
                     equation="100",
                 )
             )
-            patch.upsert_stock(
+            patch.upsert(
                 Stock(
                     name="level",
                     initial_equation="50",
@@ -584,19 +580,19 @@ class TestStructuralPolarityClassification:
                     outflows=[],
                 )
             )
-            patch.upsert_aux(
-                Auxiliary(
+            patch.upsert(
+                Aux(
                     name="gap",
                     equation="goal - level",
                 )
             )
-            patch.upsert_aux(
-                Auxiliary(
+            patch.upsert(
+                Aux(
                     name="adjustment_time",
                     equation="5",
                 )
             )
-            patch.upsert_flow(
+            patch.upsert(
                 Flow(
                     name="adjustment",
                     equation="gap / adjustment_time",
@@ -624,9 +620,9 @@ class TestPolarityConfidence:
         )
         model = project.main_model
         with model.edit() as (_current, patch):
-            from simlin.json_types import Auxiliary, Flow, Stock
+            from simlin.types import Aux, Flow, Stock
 
-            patch.upsert_stock(
+            patch.upsert(
                 Stock(
                     name="population",
                     initial_equation="100",
@@ -634,8 +630,8 @@ class TestPolarityConfidence:
                     outflows=[],
                 )
             )
-            patch.upsert_flow(Flow(name="births", equation="population * birth_rate"))
-            patch.upsert_aux(Auxiliary(name="birth_rate", equation="0.1"))
+            patch.upsert(Flow(name="births", equation="population * birth_rate"))
+            patch.upsert(Aux(name="birth_rate", equation="0.1"))
         return project
 
     def test_structural_loops_carry_confidence_in_range(self) -> None:

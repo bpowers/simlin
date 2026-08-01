@@ -1,61 +1,64 @@
 """cattrs converter configuration for JSON serialization.
 
-Configures cattrs to serialize Python dataclasses to JSON matching
-the Rust serde expectations in libsimlin.
+Maps the unified public variable types (``simlin.types``: Stock, Flow, Aux,
+Module) to and from the engine's wire JSON (src/simlin-engine/src/json.rs),
+and configures cattrs for the remaining wire dataclasses (views, sim specs,
+patches).
+
+The variable mapping is deliberately hand-written rather than generic
+field-by-field serialization, because the public types diverge from the wire
+on purpose:
+
+- ``dimensions`` / ``element_equations`` / ``has_except_default`` fold into
+  the wire's nested ``arrayedEquation`` object;
+- ``non_negative`` and ``active_initial`` are first-class fields publicly but
+  live inside the wire ``compat`` object (the engine's own canonical spot);
+- ``units``/``documentation`` are ``None`` when unspecified publicly, empty
+  strings on the wire;
+- ``uid`` is never written: the engine preserves an existing variable's uid
+  when an upsert payload has none and mints one for new variables
+  (src/simlin-engine/src/patch.rs, upsert_variable).
 """
 
 from __future__ import annotations
 
-from dataclasses import MISSING, fields, replace
+from dataclasses import MISSING, fields
 from typing import TYPE_CHECKING, Any, Union
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from .types import Variable
+
 import cattrs
 
+from .errors import SimlinRuntimeError
 from .json_types import (
-    SPREADFLOW_TYPES,
     AliasViewElement,
-    ArrayedEquation,
-    Auxiliary,
-    AuxiliaryViewElement,
+    AuxViewElement,
     CloudViewElement,
-    Compat,
-    Conveyor,
-    DataSource,
     DeleteVariable,
     DeleteView,
     Dimension,
-    ElementEquation,
-    Flow,
     FlowPoint,
     FlowViewElement,
-    GraphicalFunction,
-    GraphicalFunctionScale,
     JsonModelOperation,
     JsonModelPatch,
     JsonProjectOperation,
     JsonProjectPatch,
-    Leakage,
     LinkPoint,
     LinkViewElement,
     LoopMetadata,
     MacroSpec,
     Model,
     ModelGroup,
-    Module,
-    ModuleReference,
     ModuleViewElement,
     Project,
-    Queue,
     Rect,
     RenameVariable,
     SetLoopName,
     SetSimSpecs,
     SimSpecs,
-    SpreadFlow,
-    Stock,
     StockViewElement,
     Unit,
     UpsertAux,
@@ -66,12 +69,539 @@ from .json_types import (
     View,
     ViewElement,
 )
+from .types import (
+    SPREADFLOW_TYPES,
+    Aux,
+    Compat,
+    Conveyor,
+    DataSource,
+    ElementEquation,
+    Flow,
+    GraphicalFunction,
+    GraphicalFunctionScale,
+    Leakage,
+    Module,
+    ModuleReference,
+    Queue,
+    SpreadFlow,
+    Stock,
+)
 
 
 def _to_camel_case(snake_str: str) -> str:
     """Convert a snake_case string to camelCase."""
     components = snake_str.split("_")
     return components[0] + "".join(x.title() for x in components[1:])
+
+
+# ---------------------------------------------------------------------------
+# Graphical functions
+# ---------------------------------------------------------------------------
+
+
+def _structure_gf(d: dict[str, Any]) -> GraphicalFunction:
+    points = d.get("points")
+    if points:
+        x_points: tuple[float, ...] | None = tuple(p[0] for p in points)
+        y_points: tuple[float, ...] = tuple(p[1] for p in points)
+    else:
+        x_points = None
+        y_points = tuple(d.get("yPoints") or ())
+    x_scale_dict = d.get("xScale")
+    y_scale_dict = d.get("yScale")
+    return GraphicalFunction(
+        y_points=y_points,
+        x_points=x_points,
+        kind=d.get("kind") or "continuous",
+        x_scale=GraphicalFunctionScale(min=x_scale_dict["min"], max=x_scale_dict["max"])
+        if x_scale_dict is not None
+        else None,
+        y_scale=GraphicalFunctionScale(min=y_scale_dict["min"], max=y_scale_dict["max"])
+        if y_scale_dict is not None
+        else None,
+    )
+
+
+def _unstructure_gf(gf: GraphicalFunction) -> dict[str, Any]:
+    d: dict[str, Any] = {}
+    if gf.x_points is not None:
+        d["points"] = [[x, y] for x, y in zip(gf.x_points, gf.y_points, strict=True)]
+    elif gf.y_points:
+        d["yPoints"] = list(gf.y_points)
+    if gf.kind:
+        d["kind"] = gf.kind
+    if gf.x_scale is not None:
+        d["xScale"] = {"min": gf.x_scale.min, "max": gf.x_scale.max}
+    if gf.y_scale is not None:
+        d["yScale"] = {"min": gf.y_scale.min, "max": gf.y_scale.max}
+    return d
+
+
+# ---------------------------------------------------------------------------
+# Compat (wire) <-> Compat (public) + hoisted fields
+# ---------------------------------------------------------------------------
+
+
+def _check_spreadflow(sf_type: str, distribution: str | None) -> None:
+    if sf_type not in SPREADFLOW_TYPES:
+        valid = ", ".join(SPREADFLOW_TYPES)
+        raise ValueError(f"Unknown spreadflow type: {sf_type!r}. Expected one of: {valid}")
+    if sf_type == "dist" and distribution is None:
+        raise ValueError("spreadflow type 'dist' requires a distribution")
+
+
+def _merged_compat_dict(d: dict[str, Any]) -> dict[str, Any]:
+    """A variable's wire compat dict, OR-merged with legacy top-level booleans.
+
+    Old JSON carries nonNegative/canBeModuleInput/isPublic at the top level of
+    the variable; new JSON carries them inside compat. Both are never
+    meaningfully set at once, so OR is safe (mirrors the engine's own legacy
+    handling in json.rs).
+    """
+    c = dict(d.get("compat") or {})
+    for key in ("nonNegative", "canBeModuleInput", "isPublic"):
+        if d.get(key):
+            c[key] = True
+    return c
+
+
+def _public_compat(c: dict[str, Any]) -> Compat | None:
+    """The public Compat remainder of a wire compat dict.
+
+    ``activeInitial`` and ``nonNegative`` are deliberately NOT read here --
+    they are hoisted onto the variable itself by the callers. The nested
+    object checks are ``is not None`` rather than truthiness: a marker-only
+    leakage or queue serializes as ``{}`` (falsy) and must not be dropped.
+    """
+    ds = c.get("dataSource")
+    conveyor = c.get("conveyor")
+    leakage = c.get("leakage")
+    spreadflow = c.get("spreadflow")
+    compat = Compat(
+        can_be_module_input=bool(c.get("canBeModuleInput")),
+        is_public=bool(c.get("isPublic")),
+        data_source=DataSource(
+            kind=ds["kind"],
+            file=ds["file"],
+            tab_or_delimiter=ds["tabOrDelimiter"],
+            row_or_col=ds["rowOrCol"],
+            cell=ds["cell"],
+        )
+        if ds is not None
+        else None,
+        conveyor=Conveyor(
+            transit_time=conveyor["transitTime"],
+            capacity=conveyor.get("capacity"),
+            inflow_limit=conveyor.get("inflowLimit"),
+            sample=conveyor.get("sample"),
+            arrest=conveyor.get("arrest"),
+            discrete=conveyor.get("discrete", False),
+            batch_integrity=conveyor.get("batchIntegrity", False),
+            one_at_a_time=conveyor.get("oneAtATime", False),
+            exponential_leak=conveyor.get("exponentialLeak", False),
+            ignore_earlier_zone_losses=conveyor.get("ignoreEarlierZoneLosses", False),
+        )
+        if conveyor is not None
+        else None,
+        leakage=Leakage(
+            fraction=leakage.get("fraction"),
+            integers=leakage.get("integers", False),
+            zone_start=leakage.get("zoneStart"),
+            zone_end=leakage.get("zoneEnd"),
+        )
+        if leakage is not None
+        else None,
+        spreadflow=_structure_spreadflow_dict(spreadflow) if spreadflow is not None else None,
+        queue=Queue() if c.get("queue") is not None else None,
+        overflow=bool(c.get("overflow")),
+    )
+    return None if compat == Compat() else compat
+
+
+def _structure_spreadflow_dict(d: dict[str, Any]) -> SpreadFlow:
+    sf_type = d["type"]
+    distribution = d.get("distribution")
+    _check_spreadflow(sf_type, distribution)
+    # A stray distribution on a non-dist variant is not part of the wire
+    # format; drop it so unstructure(structure(x)) is canonical.
+    return SpreadFlow(type=sf_type, distribution=distribution if sf_type == "dist" else None)
+
+
+def _unstructure_compat(
+    compat: Compat | None,
+    *,
+    non_negative: bool = False,
+    active_initial: str | None = None,
+) -> dict[str, Any]:
+    """The wire compat dict for a variable: public remainder + hoisted fields.
+
+    Returns ``{}`` when nothing is set; callers omit the empty dict.
+    """
+    d: dict[str, Any] = {}
+    if active_initial:
+        d["activeInitial"] = active_initial
+    if non_negative:
+        d["nonNegative"] = True
+    if compat is None:
+        return d
+    if compat.can_be_module_input:
+        d["canBeModuleInput"] = True
+    if compat.is_public:
+        d["isPublic"] = True
+    if compat.data_source is not None:
+        ds = compat.data_source
+        d["dataSource"] = {
+            "kind": ds.kind,
+            "file": ds.file,
+            "tabOrDelimiter": ds.tab_or_delimiter,
+            "rowOrCol": ds.row_or_col,
+            "cell": ds.cell,
+        }
+    if compat.conveyor is not None:
+        conveyor = compat.conveyor
+        cd: dict[str, Any] = {"transitTime": conveyor.transit_time}
+        if conveyor.capacity is not None:
+            cd["capacity"] = conveyor.capacity
+        if conveyor.inflow_limit is not None:
+            cd["inflowLimit"] = conveyor.inflow_limit
+        if conveyor.sample is not None:
+            cd["sample"] = conveyor.sample
+        if conveyor.arrest is not None:
+            cd["arrest"] = conveyor.arrest
+        if conveyor.discrete:
+            cd["discrete"] = True
+        if conveyor.batch_integrity:
+            cd["batchIntegrity"] = True
+        if conveyor.one_at_a_time:
+            cd["oneAtATime"] = True
+        if conveyor.exponential_leak:
+            cd["exponentialLeak"] = True
+        if conveyor.ignore_earlier_zone_losses:
+            cd["ignoreEarlierZoneLosses"] = True
+        d["conveyor"] = cd
+    if compat.leakage is not None:
+        leakage = compat.leakage
+        ld: dict[str, Any] = {}
+        if leakage.fraction is not None:
+            ld["fraction"] = leakage.fraction
+        if leakage.integers:
+            ld["integers"] = True
+        if leakage.zone_start is not None:
+            ld["zoneStart"] = leakage.zone_start
+        if leakage.zone_end is not None:
+            ld["zoneEnd"] = leakage.zone_end
+        d["leakage"] = ld
+    if compat.spreadflow is not None:
+        sf = compat.spreadflow
+        _check_spreadflow(sf.type, sf.distribution)
+        if sf.type == "dist":
+            d["spreadflow"] = {"type": "dist", "distribution": sf.distribution}
+        else:
+            d["spreadflow"] = {"type": sf.type}
+    if compat.queue is not None:
+        d["queue"] = {}
+    if compat.overflow:
+        d["overflow"] = True
+    return d
+
+
+# ---------------------------------------------------------------------------
+# Arrayed equations
+# ---------------------------------------------------------------------------
+
+
+def _structure_element(d: dict[str, Any]) -> ElementEquation:
+    compat = d.get("compat") or {}
+    gf = d.get("graphicalFunction")
+    return ElementEquation(
+        subscript=d.get("subscript", ""),
+        equation=d.get("equation", ""),
+        active_initial=compat.get("activeInitial") or None,
+        graphical_function=_structure_gf(gf) if gf is not None else None,
+    )
+
+
+def _unstructure_element(elem: ElementEquation) -> dict[str, Any]:
+    d: dict[str, Any] = {"subscript": elem.subscript, "equation": elem.equation}
+    if elem.active_initial:
+        d["compat"] = {"activeInitial": elem.active_initial}
+    if elem.graphical_function is not None:
+        d["graphicalFunction"] = _unstructure_gf(elem.graphical_function)
+    return d
+
+
+def _resolve_arrayed_read(
+    flat_equation: str,
+    arrayed: dict[str, Any],
+    *,
+    legacy_initial: bool = False,
+) -> tuple[str, tuple[str, ...], tuple[ElementEquation, ...], bool | None]:
+    """Fold a wire ``arrayedEquation`` into the unified read shape.
+
+    Returns ``(equation, dimensions, element_equations, has_except_default)``.
+    The resolved equation is, in priority order: the flat wire equation, the
+    arrayed default equation (for stocks, also the legacy ``initialEquation``
+    field old Go-produced JSON carried), or -- for element-by-element
+    variables where every element shares the same text -- that common text
+    (the shape the Vensim importer produces for apply-to-all equations).
+
+    ``has_except_default`` mirrors the engine's legacy inference (json.rs): a
+    default equation with no explicit flag is treated as a live EXCEPT
+    default; no default at all is ``None``.
+    """
+    dimensions = tuple(arrayed.get("dimensions") or ())
+    elements = tuple(_structure_element(e) for e in arrayed.get("elements") or ())
+    default_eq = arrayed.get("equation") or ""
+    if legacy_initial:
+        default_eq = arrayed.get("initialEquation") or default_eq
+
+    has_except: bool | None = None
+    if elements:
+        hed_wire = arrayed.get("hasExceptDefault")
+        if hed_wire is not None:
+            has_except = bool(hed_wire)
+        elif default_eq:
+            has_except = True
+
+    common = ""
+    if elements:
+        first = elements[0].equation
+        if all(e.equation == first for e in elements):
+            common = first
+
+    equation = flat_equation or default_eq or common
+    return equation, dimensions, elements, has_except
+
+
+def _arrayed_dict(
+    dimensions: tuple[str, ...],
+    equation: str,
+    elements: tuple[ElementEquation, ...],
+    has_except_default: bool | None,
+) -> dict[str, Any] | None:
+    """The wire ``arrayedEquation`` dict, or None for a scalar variable.
+
+    With element equations present, the flat ``equation`` is written as the
+    arrayed default only when ``has_except_default`` says there is one --
+    otherwise it is the hoisted common per-element text, which is
+    display-only and must not become a stored default.
+    """
+    if not dimensions:
+        if elements:
+            raise ValueError("element_equations require dimensions to be set")
+        return None
+    d: dict[str, Any] = {"dimensions": list(dimensions)}
+    if elements:
+        if has_except_default is not None and equation:
+            d["equation"] = equation
+            d["hasExceptDefault"] = has_except_default
+        d["elements"] = [_unstructure_element(e) for e in elements]
+    else:
+        d["equation"] = equation
+    return d
+
+
+# ---------------------------------------------------------------------------
+# Variables
+# ---------------------------------------------------------------------------
+
+
+def _arrayed_active_initial(arrayed: dict[str, Any]) -> str | None:
+    """Legacy arrayed-level ACTIVE INITIAL; the engine only emits it at the
+    variable level (compat_to_json), but old JSON may carry it here."""
+    compat = arrayed.get("compat") or {}
+    return compat.get("activeInitial") or None
+
+
+def _structure_stock(d: dict[str, Any]) -> Stock:
+    arrayed = d.get("arrayedEquation") or {}
+    equation, dimensions, elements, has_except = _resolve_arrayed_read(
+        d.get("initialEquation", ""), arrayed, legacy_initial=True
+    )
+    compat = _merged_compat_dict(d)
+    return Stock(
+        name=d["name"],
+        initial_equation=equation,
+        inflows=tuple(d.get("inflows") or ()),
+        outflows=tuple(d.get("outflows") or ()),
+        units=d.get("units") or None,
+        documentation=d.get("documentation") or None,
+        dimensions=dimensions,
+        non_negative=bool(compat.get("nonNegative")),
+        element_equations=elements,
+        has_except_default=has_except,
+        compat=_public_compat(compat),
+    )
+
+
+def _structure_flow(d: dict[str, Any]) -> Flow:
+    arrayed = d.get("arrayedEquation") or {}
+    equation, dimensions, elements, has_except = _resolve_arrayed_read(
+        d.get("equation", ""), arrayed
+    )
+    compat = _merged_compat_dict(d)
+    gf = d.get("graphicalFunction")
+    return Flow(
+        name=d["name"],
+        equation=equation,
+        units=d.get("units") or None,
+        documentation=d.get("documentation") or None,
+        dimensions=dimensions,
+        non_negative=bool(compat.get("nonNegative")),
+        active_initial=compat.get("activeInitial") or _arrayed_active_initial(arrayed),
+        graphical_function=_structure_gf(gf) if gf is not None else None,
+        element_equations=elements,
+        has_except_default=has_except,
+        compat=_public_compat(compat),
+    )
+
+
+def _structure_aux(d: dict[str, Any]) -> Aux:
+    arrayed = d.get("arrayedEquation") or {}
+    equation, dimensions, elements, has_except = _resolve_arrayed_read(
+        d.get("equation", ""), arrayed
+    )
+    compat = _merged_compat_dict(d)
+    gf = d.get("graphicalFunction")
+    return Aux(
+        name=d["name"],
+        equation=equation,
+        active_initial=compat.get("activeInitial") or _arrayed_active_initial(arrayed),
+        units=d.get("units") or None,
+        documentation=d.get("documentation") or None,
+        dimensions=dimensions,
+        graphical_function=_structure_gf(gf) if gf is not None else None,
+        element_equations=elements,
+        has_except_default=has_except,
+        compat=_public_compat(compat),
+    )
+
+
+def _structure_module(d: dict[str, Any]) -> Module:
+    compat = _merged_compat_dict(d)
+    return Module(
+        name=d["name"],
+        model_name=d["modelName"],
+        units=d.get("units") or None,
+        documentation=d.get("documentation") or None,
+        references=tuple(
+            ModuleReference(src=r["src"], dst=r["dst"]) for r in d.get("references") or ()
+        ),
+        compat=_public_compat(compat),
+    )
+
+
+def structure_variable(d: dict[str, Any]) -> Variable:
+    """Parse a type-tagged wire variable dict into the unified type."""
+    var_type = d.get("type")
+    if var_type == "stock":
+        return _structure_stock(d)
+    elif var_type == "flow":
+        return _structure_flow(d)
+    elif var_type == "aux":
+        return _structure_aux(d)
+    elif var_type == "module":
+        return _structure_module(d)
+    else:
+        raise SimlinRuntimeError(f"unknown variable type: {var_type!r}")
+
+
+def _unstructure_stock(var: Stock) -> dict[str, Any]:
+    d: dict[str, Any] = {"name": var.name}
+    arrayed = _arrayed_dict(
+        var.dimensions, var.initial_equation, var.element_equations, var.has_except_default
+    )
+    if arrayed is None and var.initial_equation:
+        d["initialEquation"] = var.initial_equation
+    if var.units:
+        d["units"] = var.units
+    d["inflows"] = list(var.inflows)
+    d["outflows"] = list(var.outflows)
+    if var.documentation:
+        d["documentation"] = var.documentation
+    if arrayed is not None:
+        d["arrayedEquation"] = arrayed
+    compat = _unstructure_compat(var.compat, non_negative=var.non_negative)
+    if compat:
+        d["compat"] = compat
+    return d
+
+
+def _unstructure_flow(var: Flow) -> dict[str, Any]:
+    d: dict[str, Any] = {"name": var.name}
+    arrayed = _arrayed_dict(
+        var.dimensions, var.equation, var.element_equations, var.has_except_default
+    )
+    if arrayed is None and var.equation:
+        d["equation"] = var.equation
+    if var.units:
+        d["units"] = var.units
+    if var.graphical_function is not None:
+        d["graphicalFunction"] = _unstructure_gf(var.graphical_function)
+    if var.documentation:
+        d["documentation"] = var.documentation
+    if arrayed is not None:
+        d["arrayedEquation"] = arrayed
+    compat = _unstructure_compat(
+        var.compat, non_negative=var.non_negative, active_initial=var.active_initial
+    )
+    if compat:
+        d["compat"] = compat
+    return d
+
+
+def _unstructure_aux(var: Aux) -> dict[str, Any]:
+    d: dict[str, Any] = {"name": var.name}
+    arrayed = _arrayed_dict(
+        var.dimensions, var.equation, var.element_equations, var.has_except_default
+    )
+    if arrayed is None and var.equation:
+        d["equation"] = var.equation
+    if var.units:
+        d["units"] = var.units
+    if var.graphical_function is not None:
+        d["graphicalFunction"] = _unstructure_gf(var.graphical_function)
+    if var.documentation:
+        d["documentation"] = var.documentation
+    if arrayed is not None:
+        d["arrayedEquation"] = arrayed
+    compat = _unstructure_compat(var.compat, active_initial=var.active_initial)
+    if compat:
+        d["compat"] = compat
+    return d
+
+
+def _unstructure_module(var: Module) -> dict[str, Any]:
+    d: dict[str, Any] = {"name": var.name, "modelName": var.model_name}
+    if var.units:
+        d["units"] = var.units
+    if var.documentation:
+        d["documentation"] = var.documentation
+    if var.references:
+        d["references"] = [{"src": r.src, "dst": r.dst} for r in var.references]
+    compat = _unstructure_compat(var.compat)
+    if compat:
+        d["compat"] = compat
+    return d
+
+
+def unstructure_variable(var: Variable) -> dict[str, Any]:
+    """Serialize a unified variable to its wire dict (no ``type`` tag)."""
+    if isinstance(var, Stock):
+        return _unstructure_stock(var)
+    elif isinstance(var, Flow):
+        return _unstructure_flow(var)
+    elif isinstance(var, Aux):
+        return _unstructure_aux(var)
+    elif isinstance(var, Module):
+        return _unstructure_module(var)
+    else:
+        raise TypeError(f"expected Stock, Flow, Aux, or Module, got {type(var).__name__}")
+
+
+# ---------------------------------------------------------------------------
+# Generic omit-default machinery for the remaining wire dataclasses
+# ---------------------------------------------------------------------------
 
 
 def _make_omit_default_hook(
@@ -133,16 +663,7 @@ def _make_omit_default_hook(
             if val == default:
                 continue
 
-            unstructured = conv.unstructure(val)
-
-            # A Compat with all-default fields unstructures to {} but is
-            # semantically equivalent to None.  Only apply this to the
-            # 'compat' field to avoid dropping other optional objects
-            # (e.g. GraphicalFunction) that may legitimately be empty.
-            if json_name == "compat" and default is None and unstructured == {}:
-                continue
-
-            result[json_name] = unstructured
+            result[json_name] = conv.unstructure(val)
 
         return result
 
@@ -153,39 +674,18 @@ def _create_converter() -> cattrs.Converter:
     """Create and configure a cattrs converter for JSON serialization."""
     conv = cattrs.Converter()
 
-    # Register handlers for types that need special handling
+    # Unified variable types: hand-written wire mapping
+    conv.register_unstructure_hook(Stock, _unstructure_stock)
+    conv.register_unstructure_hook(Flow, _unstructure_flow)
+    conv.register_unstructure_hook(Aux, _unstructure_aux)
+    conv.register_unstructure_hook(Module, _unstructure_module)
+    conv.register_structure_hook(Stock, lambda d, _: _structure_stock(d))
+    conv.register_structure_hook(Flow, lambda d, _: _structure_flow(d))
+    conv.register_structure_hook(Aux, lambda d, _: _structure_aux(d))
+    conv.register_structure_hook(Module, lambda d, _: _structure_module(d))
 
-    # Handle GraphicalFunction.points as list of [x, y] arrays (matching Rust)
-    def unstructure_gf(gf: GraphicalFunction) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        if gf.points:
-            result["points"] = [[p[0], p[1]] for p in gf.points]
-        if gf.y_points:
-            result["yPoints"] = gf.y_points
-        if gf.kind:
-            result["kind"] = gf.kind
-        if gf.x_scale is not None:
-            result["xScale"] = conv.unstructure(gf.x_scale)
-        if gf.y_scale is not None:
-            result["yScale"] = conv.unstructure(gf.y_scale)
-        return result
-
-    def structure_gf(d: dict[str, Any], _: type) -> GraphicalFunction:
-        points = [(p[0], p[1]) for p in d.get("points", [])]
-        return GraphicalFunction(
-            points=points,
-            y_points=d.get("yPoints", []),
-            kind=d.get("kind", ""),
-            x_scale=conv.structure(d["xScale"], GraphicalFunctionScale)
-            if d.get("xScale") is not None
-            else None,
-            y_scale=conv.structure(d["yScale"], GraphicalFunctionScale)
-            if d.get("yScale") is not None
-            else None,
-        )
-
-    conv.register_unstructure_hook(GraphicalFunction, unstructure_gf)
-    conv.register_structure_hook(GraphicalFunction, structure_gf)
+    conv.register_unstructure_hook(GraphicalFunction, _unstructure_gf)
+    conv.register_structure_hook(GraphicalFunction, lambda d, _: _structure_gf(d))
 
     # Handle RenameVariable: from_ -> from
     def unstructure_rename(rv: RenameVariable) -> dict[str, Any]:
@@ -198,7 +698,7 @@ def _create_converter() -> cattrs.Converter:
     conv.register_structure_hook(RenameVariable, structure_rename)
 
     # Handle JsonModelOperation tagged union
-    # Rust expects: {"type": "upsert_stock", "payload": {"stock": {...}}}
+    # Rust expects: {"type": "upsertStock", "payload": {"stock": {...}}}
     # Register hooks on EACH CONCRETE TYPE to ensure correct serialization
     # regardless of how the op is accessed (directly or via Union type)
 
@@ -277,13 +777,13 @@ def _create_converter() -> cattrs.Converter:
         payload = d["payload"]
 
         if type_name == "upsertStock":
-            return UpsertStock(stock=conv.structure(payload["stock"], Stock))
+            return UpsertStock(stock=_structure_stock(payload["stock"]))
         elif type_name == "upsertFlow":
-            return UpsertFlow(flow=conv.structure(payload["flow"], Flow))
+            return UpsertFlow(flow=_structure_flow(payload["flow"]))
         elif type_name == "upsertAux":
-            return UpsertAux(aux=conv.structure(payload["aux"], Auxiliary))
+            return UpsertAux(aux=_structure_aux(payload["aux"]))
         elif type_name == "upsertModule":
-            return UpsertModule(module=conv.structure(payload["module"], Module))
+            return UpsertModule(module=_structure_module(payload["module"]))
         elif type_name == "deleteVariable":
             return DeleteVariable(ident=payload["ident"])
         elif type_name == "renameVariable":
@@ -346,12 +846,23 @@ def _create_converter() -> cattrs.Converter:
     conv.register_unstructure_hook(Union[SetSimSpecs], unstructure_project_op)
     conv.register_structure_hook(Union[SetSimSpecs], structure_project_op)
 
+    # JsonProjectPatch: the wire key is camelCase ("projectOps"), which the
+    # auto-generated hook would miss (it looks for "project_ops" and silently
+    # structures an empty list).
+    def structure_project_patch(d: dict[str, Any], _: type) -> JsonProjectPatch:
+        return JsonProjectPatch(
+            project_ops=[structure_project_op(o, SetSimSpecs) for o in d.get("projectOps", [])],
+            models=[conv.structure(m, JsonModelPatch) for m in d.get("models", [])],
+        )
+
+    conv.register_structure_hook(JsonProjectPatch, structure_project_patch)
+
     # Handle ViewElement tagged union
     # Rust expects: {"type": "stock", "uid": 1, "name": "foo", ...} (internally tagged)
     _view_element_cls_to_name: dict[type, str] = {
         StockViewElement: "stock",
         FlowViewElement: "flow",
-        AuxiliaryViewElement: "aux",
+        AuxViewElement: "aux",
         CloudViewElement: "cloud",
         LinkViewElement: "link",
         ModuleViewElement: "module",
@@ -387,7 +898,7 @@ def _create_converter() -> cattrs.Converter:
         Union[
             StockViewElement,
             FlowViewElement,
-            AuxiliaryViewElement,
+            AuxViewElement,
             CloudViewElement,
             LinkViewElement,
             ModuleViewElement,
@@ -399,7 +910,7 @@ def _create_converter() -> cattrs.Converter:
         Union[
             StockViewElement,
             FlowViewElement,
-            AuxiliaryViewElement,
+            AuxViewElement,
             CloudViewElement,
             LinkViewElement,
             ModuleViewElement,
@@ -429,8 +940,8 @@ def _create_converter() -> cattrs.Converter:
             label_side=d.get("labelSide", ""),
         )
 
-    def structure_auxiliary_view_element(d: dict[str, Any], _: type) -> AuxiliaryViewElement:
-        return AuxiliaryViewElement(
+    def structure_aux_view_element(d: dict[str, Any], _: type) -> AuxViewElement:
+        return AuxViewElement(
             uid=d["uid"],
             name=d["name"],
             x=d["x"],
@@ -485,137 +996,24 @@ def _create_converter() -> cattrs.Converter:
 
     conv.register_structure_hook(StockViewElement, structure_stock_view_element)
     conv.register_structure_hook(FlowViewElement, structure_flow_view_element)
-    conv.register_structure_hook(AuxiliaryViewElement, structure_auxiliary_view_element)
+    conv.register_structure_hook(AuxViewElement, structure_aux_view_element)
     conv.register_structure_hook(CloudViewElement, structure_cloud_view_element)
     conv.register_structure_hook(LinkViewElement, structure_link_view_element)
     conv.register_structure_hook(ModuleViewElement, structure_module_view_element)
     conv.register_structure_hook(AliasViewElement, structure_alias_view_element)
     conv.register_structure_hook(FlowPoint, structure_flow_point)
 
-    # DataSource / Conveyor / Leakage / Queue: structure from camelCase JSON
-    def structure_data_source(d: dict[str, Any], _: type) -> DataSource:
-        return DataSource(
-            kind=d["kind"],
-            file=d["file"],
-            tab_or_delimiter=d["tabOrDelimiter"],
-            row_or_col=d["rowOrCol"],
-            cell=d["cell"],
-        )
-
-    conv.register_structure_hook(DataSource, structure_data_source)
-
-    def structure_conveyor(d: dict[str, Any], _: type) -> Conveyor:
-        return Conveyor(
-            transit_time=d["transitTime"],
-            capacity=d.get("capacity"),
-            inflow_limit=d.get("inflowLimit"),
-            sample=d.get("sample"),
-            arrest=d.get("arrest"),
-            discrete=d.get("discrete", False),
-            batch_integrity=d.get("batchIntegrity", False),
-            one_at_a_time=d.get("oneAtATime", False),
-            exponential_leak=d.get("exponentialLeak", False),
-            ignore_earlier_zone_losses=d.get("ignoreEarlierZoneLosses", False),
-        )
-
-    conv.register_structure_hook(Conveyor, structure_conveyor)
-
-    def structure_leakage(d: dict[str, Any], _: type) -> Leakage:
-        return Leakage(
-            fraction=d.get("fraction"),
-            integers=d.get("integers", False),
-            zone_start=d.get("zoneStart"),
-            zone_end=d.get("zoneEnd"),
-        )
-
-    conv.register_structure_hook(Leakage, structure_leakage)
-
-    conv.register_structure_hook(Queue, lambda d, _: Queue())
-
-    # SpreadFlow is adjacently tagged in Rust serde ({"type": ..., and
-    # "distribution": ... only for the "dist" variant}); mirror that exactly
-    # rather than going through the generic omit-default machinery, and
-    # validate the tag so a typo fails loudly instead of round-tripping.
-    def _check_spreadflow(sf_type: str, distribution: str | None) -> None:
-        if sf_type not in SPREADFLOW_TYPES:
-            valid = ", ".join(SPREADFLOW_TYPES)
-            raise ValueError(f"Unknown spreadflow type: {sf_type!r}. Expected one of: {valid}")
-        if sf_type == "dist" and distribution is None:
-            raise ValueError("spreadflow type 'dist' requires a distribution")
-
-    def unstructure_spreadflow(sf: SpreadFlow) -> dict[str, Any]:
-        _check_spreadflow(sf.type, sf.distribution)
-        if sf.type == "dist":
-            return {"type": "dist", "distribution": sf.distribution}
-        return {"type": sf.type}
-
-    def structure_spreadflow(d: dict[str, Any], _: type) -> SpreadFlow:
-        sf_type = d["type"]
-        distribution = d.get("distribution")
-        _check_spreadflow(sf_type, distribution)
-        # A stray distribution on a non-dist variant is not part of the wire
-        # format; drop it so unstructure(structure(x)) is canonical.
-        return SpreadFlow(type=sf_type, distribution=distribution if sf_type == "dist" else None)
-
-    conv.register_unstructure_hook(SpreadFlow, unstructure_spreadflow)
-    conv.register_structure_hook(SpreadFlow, structure_spreadflow)
-
-    # Compat: structure from camelCase JSON. The nested-object checks are
-    # `is not None` rather than truthiness: a marker-only leakage or queue
-    # serializes as {} (falsy) and must NOT be dropped.
-    def structure_compat(d: dict[str, Any], _: type) -> Compat:
-        data_source = (
-            conv.structure(d["dataSource"], DataSource) if d.get("dataSource") is not None else None
-        )
-        conveyor = (
-            conv.structure(d["conveyor"], Conveyor) if d.get("conveyor") is not None else None
-        )
-        leakage = conv.structure(d["leakage"], Leakage) if d.get("leakage") is not None else None
-        spreadflow = (
-            conv.structure(d["spreadflow"], SpreadFlow) if d.get("spreadflow") is not None else None
-        )
-        queue = Queue() if d.get("queue") is not None else None
-        return Compat(
-            active_initial=d.get("activeInitial"),
-            non_negative=d.get("nonNegative", False),
-            can_be_module_input=d.get("canBeModuleInput", False),
-            is_public=d.get("isPublic", False),
-            data_source=data_source,
-            conveyor=conveyor,
-            leakage=leakage,
-            spreadflow=spreadflow,
-            queue=queue,
-            overflow=d.get("overflow", False),
-        )
-
-    conv.register_structure_hook(Compat, structure_compat)
-
-    # Register omit-default hooks for variable types
+    # Register omit-default hooks for wire types
     # These skip fields that match their defaults (matching Rust's skip_serializing_if)
     # Required fields are always included (based on the JSON schema)
     type_required_fields: dict[type, set[str]] = {
-        Stock: {"name", "inflows", "outflows"},
-        Flow: {"name"},
-        Auxiliary: {"name"},
-        Module: {"name", "model_name"},
         SimSpecs: {"start_time", "end_time", "dt", "method"},
-        Compat: set(),
-        # DataSource's five fields have no defaults, so they are always
-        # emitted; Conveyor requires only transitTime; a Leakage or Queue with
-        # all fields default serializes as {} (the marker-only encodings).
-        DataSource: set(),
-        Conveyor: {"transit_time"},
-        Leakage: set(),
-        Queue: set(),
-        ArrayedEquation: {"dimensions"},
-        ElementEquation: {"subscript", "equation"},
-        ModuleReference: {"src", "dst"},
         FlowPoint: {"x", "y"},
         LinkPoint: {"x", "y"},
         Rect: {"x", "y", "width", "height"},
         StockViewElement: {"uid", "name", "x", "y"},
         FlowViewElement: {"uid", "name", "x", "y", "points"},
-        AuxiliaryViewElement: {"uid", "name", "x", "y"},
+        AuxViewElement: {"uid", "name", "x", "y"},
         CloudViewElement: {"uid", "flow_uid", "x", "y"},
         LinkViewElement: {"uid", "from_uid", "to_uid"},
         ModuleViewElement: {"uid", "name", "x", "y"},
@@ -626,161 +1024,28 @@ def _create_converter() -> cattrs.Converter:
     for cls, required in type_required_fields.items():
         conv.register_unstructure_hook(cls, _make_omit_default_hook(cls, conv, required))
 
-    # GraphicalFunctionScale: unstructure and structure
-    conv.register_unstructure_hook(GraphicalFunctionScale, lambda x: {"min": x.min, "max": x.max})
-    conv.register_structure_hook(
-        GraphicalFunctionScale,
-        lambda d, _: GraphicalFunctionScale(min=d["min"], max=d["max"]),
-    )
+    # View elements are internally tagged on the wire ({"type": "stock", ...}).
+    # The per-class unstructure hooks must add the tag themselves: cattrs
+    # dispatches a list element by its concrete class, so the Union-level
+    # tagging hook above is never consulted when unstructuring View.elements
+    # (untagged elements are unparseable by the engine's serde).
+    def _make_tagged_view_element_hook(
+        base: Callable[[Any], dict[str, Any]], tag: str
+    ) -> Callable[[Any], dict[str, Any]]:
+        def hook(obj: Any) -> dict[str, Any]:
+            d = base(obj)
+            d["type"] = tag
+            return d
 
-    # ElementEquation: handle optional graphicalFunction
-    def structure_element_equation(d: dict[str, Any], _: type) -> ElementEquation:
-        gf = None
-        if d.get("graphicalFunction"):
-            gf = conv.structure(d["graphicalFunction"], GraphicalFunction)
-        compat = None
-        compat_dict = d.get("compat")
-        if compat_dict:
-            compat = conv.structure(compat_dict, Compat)
-        return ElementEquation(
-            subscript=d["subscript"],
-            equation=d.get("equation", ""),
-            compat=compat,
-            graphical_function=gf,
+        return hook
+
+    for cls, tag in _view_element_cls_to_name.items():
+        conv.register_unstructure_hook(
+            cls,
+            _make_tagged_view_element_hook(
+                _make_omit_default_hook(cls, conv, type_required_fields[cls]), tag
+            ),
         )
-
-    conv.register_structure_hook(ElementEquation, structure_element_equation)
-
-    # ArrayedEquation: handle elements list with nested types
-    def structure_arrayed_equation(d: dict[str, Any], _: type) -> ArrayedEquation:
-        elements = None
-        if d.get("elements"):
-            elements = [conv.structure(e, ElementEquation) for e in d["elements"]]
-        compat = None
-        compat_dict = d.get("compat")
-        if compat_dict:
-            compat = conv.structure(compat_dict, Compat)
-        return ArrayedEquation(
-            dimensions=d.get("dimensions", []),
-            equation=d.get("equation"),
-            compat=compat,
-            elements=elements,
-            has_except_default=d.get("hasExceptDefault"),
-        )
-
-    conv.register_structure_hook(ArrayedEquation, structure_arrayed_equation)
-
-    # ModuleReference: simple structure
-    conv.register_structure_hook(
-        ModuleReference,
-        lambda d, _: ModuleReference(src=d["src"], dst=d["dst"]),
-    )
-
-    _empty_compat = Compat()
-
-    def _structure_merged_compat(d: dict[str, Any]) -> Compat | None:
-        """Structure a variable's compat, OR-merging legacy top-level booleans.
-
-        Old code never writes compat booleans and new code never writes
-        top-level booleans, so both cannot be meaningfully set at once; OR is
-        safe and handles the transitional case where compat exists only for
-        activeInitial alongside top-level boolean flags.
-
-        Uses dataclasses.replace on the fully-structured Compat rather than
-        rebuilding it field-by-field, so every non-legacy field (dataSource,
-        conveyor, leakage, spreadflow, queue, overflow) is preserved -- the
-        old rebuild silently dropped them (GH #882). An all-default result
-        normalizes to None so an absent compat stays absent on the wire.
-        """
-        compat_dict = d.get("compat")
-        base = conv.structure(compat_dict, Compat) if compat_dict else _empty_compat
-        merged = replace(
-            base,
-            non_negative=d.get("nonNegative", False) or base.non_negative,
-            can_be_module_input=d.get("canBeModuleInput", False) or base.can_be_module_input,
-            is_public=d.get("isPublic", False) or base.is_public,
-        )
-        return None if merged == _empty_compat else merged
-
-    # Stock: handle nested types
-    def structure_stock(d: dict[str, Any], _: type) -> Stock:
-        arrayed_equation = None
-        if d.get("arrayedEquation"):
-            arrayed_equation = conv.structure(d["arrayedEquation"], ArrayedEquation)
-        compat = _structure_merged_compat(d)
-        return Stock(
-            name=d["name"],
-            inflows=d.get("inflows", []),
-            outflows=d.get("outflows", []),
-            uid=d.get("uid", 0),
-            initial_equation=d.get("initialEquation", ""),
-            units=d.get("units", ""),
-            documentation=d.get("documentation", ""),
-            arrayed_equation=arrayed_equation,
-            compat=compat,
-        )
-
-    conv.register_structure_hook(Stock, structure_stock)
-
-    # Flow: handle nested types
-    def structure_flow(d: dict[str, Any], _: type) -> Flow:
-        gf = None
-        if d.get("graphicalFunction"):
-            gf = conv.structure(d["graphicalFunction"], GraphicalFunction)
-        arrayed_equation = None
-        if d.get("arrayedEquation"):
-            arrayed_equation = conv.structure(d["arrayedEquation"], ArrayedEquation)
-        compat = _structure_merged_compat(d)
-        return Flow(
-            name=d["name"],
-            uid=d.get("uid", 0),
-            equation=d.get("equation", ""),
-            units=d.get("units", ""),
-            graphical_function=gf,
-            documentation=d.get("documentation", ""),
-            arrayed_equation=arrayed_equation,
-            compat=compat,
-        )
-
-    conv.register_structure_hook(Flow, structure_flow)
-
-    # Auxiliary: handle nested types
-    def structure_auxiliary(d: dict[str, Any], _: type) -> Auxiliary:
-        gf = None
-        if d.get("graphicalFunction"):
-            gf = conv.structure(d["graphicalFunction"], GraphicalFunction)
-        arrayed_equation = None
-        if d.get("arrayedEquation"):
-            arrayed_equation = conv.structure(d["arrayedEquation"], ArrayedEquation)
-        compat = _structure_merged_compat(d)
-        return Auxiliary(
-            name=d["name"],
-            uid=d.get("uid", 0),
-            equation=d.get("equation", ""),
-            units=d.get("units", ""),
-            graphical_function=gf,
-            documentation=d.get("documentation", ""),
-            arrayed_equation=arrayed_equation,
-            compat=compat,
-        )
-
-    conv.register_structure_hook(Auxiliary, structure_auxiliary)
-
-    # Module: handle references list
-    def structure_module(d: dict[str, Any], _: type) -> Module:
-        references = [conv.structure(ref, ModuleReference) for ref in d.get("references", [])]
-        compat = _structure_merged_compat(d)
-        return Module(
-            name=d["name"],
-            model_name=d["modelName"],
-            uid=d.get("uid", 0),
-            units=d.get("units", ""),
-            documentation=d.get("documentation", ""),
-            references=references,
-            compat=compat,
-        )
-
-    conv.register_structure_hook(Module, structure_module)
 
     # Dimension: simple structure
     def structure_dimension(d: dict[str, Any], _: type) -> Dimension:
@@ -870,10 +1135,10 @@ def _create_converter() -> cattrs.Converter:
 
     # Model: handle all nested types
     def structure_model(d: dict[str, Any], _: type) -> Model:
-        stocks = [conv.structure(s, Stock) for s in d.get("stocks", [])]
-        flows = [conv.structure(f, Flow) for f in d.get("flows", [])]
-        auxiliaries = [conv.structure(a, Auxiliary) for a in d.get("auxiliaries", [])]
-        modules = [conv.structure(m, Module) for m in d.get("modules", [])]
+        stocks = [_structure_stock(s) for s in d.get("stocks", [])]
+        flows = [_structure_flow(f) for f in d.get("flows", [])]
+        auxiliaries = [_structure_aux(a) for a in d.get("auxiliaries", [])]
+        modules = [_structure_module(m) for m in d.get("modules", [])]
         sim_specs = None
         if d.get("simSpecs"):
             sim_specs = conv.structure(d["simSpecs"], SimSpecs)
@@ -912,7 +1177,7 @@ def _create_converter() -> cattrs.Converter:
 
     conv.register_structure_hook(Project, structure_project)
 
-    # Register omit-default hooks for new types
+    # Register omit-default hooks for project structure types
     additional_type_required_fields: dict[type, set[str]] = {
         Dimension: {"name"},
         Unit: {"name"},

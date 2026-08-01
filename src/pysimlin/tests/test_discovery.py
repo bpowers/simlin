@@ -142,13 +142,11 @@ class TestAnalyzeDiscovery:
         score is exactly -1 while active; under the old flat cross-partition
         ranking it smothered the competitive partition at every step (on
         C-LEARN the isolated trace-gas loops hid every climate loop)."""
-        from simlin.json_types import Flow, Stock
+        from simlin.types import Flow, Stock
 
         with logistic_model.edit() as (_current, patch):
-            patch.upsert_flow(Flow(name="iso_out", equation="iso * 0.1"))
-            patch.upsert_stock(
-                Stock(name="iso", initial_equation="50", inflows=[], outflows=["iso_out"])
-            )
+            patch.upsert(Flow(name="iso_out", equation="iso * 0.1"))
+            patch.upsert(Stock(name="iso", initial_equation="50", inflows=[], outflows=["iso_out"]))
         analysis = logistic_model.analyze()
 
         assert len(analysis.partitions) == 2, "two isolated stocks -> two partitions"
@@ -255,7 +253,7 @@ def large_horizon_model() -> simlin.Model:
     making the per-timestep discovery sweep reliably exceed a 1ms budget, so a
     tiny timeout truncates deterministically.
     """
-    from simlin.json_types import Auxiliary, Flow, Stock
+    from simlin.types import Aux, Flow, Stock
 
     project = simlin.Project.new(
         name="large_horizon",
@@ -265,7 +263,7 @@ def large_horizon_model() -> simlin.Model:
     )
     model = project.main_model
     with model.edit() as (_current, patch):
-        patch.upsert_stock(
+        patch.upsert(
             Stock(
                 name="population",
                 initial_equation="10",
@@ -273,11 +271,11 @@ def large_horizon_model() -> simlin.Model:
                 outflows=[],
             )
         )
-        patch.upsert_flow(
+        patch.upsert(
             Flow(
                 name="adjustment",
                 equation="(goal - population) * 0.1",
             )
         )
-        patch.upsert_aux(Auxiliary(name="goal", equation="1000"))
+        patch.upsert(Aux(name="goal", equation="1000"))
     return model

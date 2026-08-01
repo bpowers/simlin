@@ -116,14 +116,12 @@ class TestRunClass:
         partition it describes -- an isolated single-loop partition (relative
         score identically -1 while active) no longer smothers the competitive
         partition's timeline."""
-        from simlin.json_types import Flow, Stock
+        from simlin.types import Flow, Stock
 
         model = simlin.load(logistic_growth_ltm_path)
         with model.edit() as (_current, patch):
-            patch.upsert_flow(Flow(name="iso_out", equation="iso * 0.1"))
-            patch.upsert_stock(
-                Stock(name="iso", initial_equation="50", inflows=[], outflows=["iso_out"])
-            )
+            patch.upsert(Flow(name="iso_out", equation="iso * 0.1"))
+            patch.upsert(Stock(name="iso", initial_equation="50", inflows=[], outflows=["iso_out"]))
         run = model.run(analyze_loops=True)
 
         lone_loop = next(loop for loop in run.loops if any("iso" in v for v in loop.variables))

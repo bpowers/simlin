@@ -1,7 +1,10 @@
-"""JSON-compatible dataclasses for the simlin patch API.
+"""Wire-level dataclasses for the simlin patch API.
 
-These types match the Rust JSON types in src/simlin-engine/src/json.rs
-and are used for serializing patches to send to the simulation engine.
+These types back the JSON patch format understood by the engine
+(src/simlin-engine/src/json.rs): patch operations, views, sim specs, and
+project structure. Variables themselves are represented by the unified
+public types in ``simlin.types`` (Stock, Flow, Aux, Module); the converter
+in ``json_converter`` maps those to and from the engine's wire shape.
 """
 
 from __future__ import annotations
@@ -9,214 +12,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Union
 
-# Supporting types
-
-
-@dataclass
-class GraphicalFunctionScale:
-    """Scale for graphical function axes."""
-
-    min: float
-    max: float
-
-
-@dataclass
-class GraphicalFunction:
-    """A graphical/table function (lookup table)."""
-
-    points: list[tuple[float, float]] = field(default_factory=list)
-    y_points: list[float] = field(default_factory=list)
-    kind: str = ""
-    x_scale: GraphicalFunctionScale | None = None
-    y_scale: GraphicalFunctionScale | None = None
-
-
-@dataclass
-class DataSource:
-    """External data reference (GET DIRECT DATA/CONSTANTS/LOOKUPS/SUBSCRIPT).
-
-    Mirrors the Rust ``json::JsonDataSource``: all five fields are required
-    strings on the wire.
-    """
-
-    kind: str
-    file: str
-    tab_or_delimiter: str
-    row_or_col: str
-    cell: str
-
-
-@dataclass
-class Conveyor:
-    """A conveyor stock's options. Mirrors the Rust ``json::Conveyor``.
-
-    Fields hold XMILE expression strings; ``None``/``False`` means the option
-    was absent on the wire (the documented default applies).
-    """
-
-    transit_time: str
-    capacity: str | None = None
-    inflow_limit: str | None = None
-    sample: str | None = None
-    arrest: str | None = None
-    discrete: bool = False
-    batch_integrity: bool = False
-    one_at_a_time: bool = False
-    exponential_leak: bool = False
-    ignore_earlier_zone_losses: bool = False
-
-
-@dataclass
-class Leakage:
-    """Marks a flow as a conveyor leakage outflow. Mirrors ``json::Leakage``.
-
-    A marker-only leakage (all fields default) serializes as ``{}``: the leak
-    fraction then comes from the flow's equation rather than an explicit
-    ``fraction``.
-    """
-
-    fraction: str | None = None
-    integers: bool = False
-    zone_start: str | None = None
-    zone_end: str | None = None
-
-
-# The five valid SpreadFlow variants, as serialized by the Rust
-# `json::SpreadFlow` enum (serde `rename_all = "snake_case"`).
-SPREADFLOW_TYPES = ("beginning", "even", "dest", "dist", "source")
-
-
-@dataclass
-class SpreadFlow:
-    """Conveyor inflow-placement method. Mirrors the Rust ``json::SpreadFlow``.
-
-    Adjacently tagged on the wire: ``{"type": "..."}`` for the payload-free
-    variants and ``{"type": "dist", "distribution": "..."}`` for ``dist``
-    (``distribution`` is required exactly when ``type`` is ``"dist"``).
-    """
-
-    type: str
-    distribution: str | None = None
-
-
-@dataclass
-class Queue:
-    """A queue stock marker. Mirrors ``json::Queue``: serializes as ``{}``."""
-
-
-@dataclass
-class Compat:
-    """Vensim/XMILE compatibility options for a variable.
-
-    The conveyor/queue fields ride on stocks; leakage/spreadflow/overflow on
-    flows. Mirrors the Rust ``json::Compat``.
-    """
-
-    active_initial: str | None = None
-    non_negative: bool = False
-    can_be_module_input: bool = False
-    is_public: bool = False
-    data_source: DataSource | None = None
-    conveyor: Conveyor | None = None
-    leakage: Leakage | None = None
-    spreadflow: SpreadFlow | None = None
-    queue: Queue | None = None
-    overflow: bool = False
-
-
-@dataclass
-class ElementEquation:
-    """An element-specific equation for arrayed variables."""
-
-    subscript: str
-    equation: str
-    compat: Compat | None = None
-    graphical_function: GraphicalFunction | None = None
-
-
-@dataclass
-class ArrayedEquation:
-    """Equation structure for arrayed/subscripted variables.
-
-    ``has_except_default`` is only meaningful alongside ``equation``: ``True``
-    means the shared equation is an EXCEPT default that element equations
-    override (mirrors the Rust ``hasExceptDefault``, ``Option<bool>`` -- absent
-    on the wire when there is no default equation).
-    """
-
-    dimensions: list[str] = field(default_factory=list)
-    equation: str | None = None
-    compat: Compat | None = None
-    elements: list[ElementEquation] | None = None
-    has_except_default: bool | None = None
-
-
-@dataclass
-class ModuleReference:
-    """A reference mapping between module input/output and parent model variable."""
-
-    src: str
-    dst: str
-
-
-# Variable types
-
-
-@dataclass
-class Stock:
-    """A stock (level, accumulation) variable for JSON serialization."""
-
-    name: str
-    inflows: list[str] = field(default_factory=list)
-    outflows: list[str] = field(default_factory=list)
-    uid: int = 0
-    initial_equation: str = ""
-    units: str = ""
-    documentation: str = ""
-    arrayed_equation: ArrayedEquation | None = None
-    compat: Compat | None = None
-
-
-@dataclass
-class Flow:
-    """A flow (rate) variable for JSON serialization."""
-
-    name: str
-    uid: int = 0
-    equation: str = ""
-    units: str = ""
-    graphical_function: GraphicalFunction | None = None
-    documentation: str = ""
-    arrayed_equation: ArrayedEquation | None = None
-    compat: Compat | None = None
-
-
-@dataclass
-class Auxiliary:
-    """An auxiliary (intermediate calculation) variable for JSON serialization."""
-
-    name: str
-    uid: int = 0
-    equation: str = ""
-    units: str = ""
-    graphical_function: GraphicalFunction | None = None
-    documentation: str = ""
-    arrayed_equation: ArrayedEquation | None = None
-    compat: Compat | None = None
-
-
-@dataclass
-class Module:
-    """A module (submodel) variable for JSON serialization."""
-
-    name: str
-    model_name: str
-    uid: int = 0
-    units: str = ""
-    documentation: str = ""
-    references: list[ModuleReference] = field(default_factory=list)
-    compat: Compat | None = None
-
+# Runtime import (not TYPE_CHECKING): cattrs resolves these dataclasses'
+# string annotations against this module's namespace when structuring the
+# patch envelope types.
+from .types import Aux, Flow, Module, Stock  # noqa: TC001
 
 # View types
 
@@ -272,7 +71,7 @@ class FlowViewElement:
 
 
 @dataclass
-class AuxiliaryViewElement:
+class AuxViewElement:
     """Visual element for an auxiliary variable."""
 
     uid: int
@@ -329,7 +128,7 @@ class AliasViewElement:
 ViewElement = Union[
     StockViewElement,
     FlowViewElement,
-    AuxiliaryViewElement,
+    AuxViewElement,
     CloudViewElement,
     LinkViewElement,
     ModuleViewElement,
@@ -422,7 +221,7 @@ class Model:
     name: str
     stocks: list[Stock] = field(default_factory=list)
     flows: list[Flow] = field(default_factory=list)
-    auxiliaries: list[Auxiliary] = field(default_factory=list)
+    auxiliaries: list[Aux] = field(default_factory=list)
     modules: list[Module] = field(default_factory=list)
     sim_specs: SimSpecs | None = None
     views: list[View] = field(default_factory=list)
@@ -463,7 +262,7 @@ class UpsertFlow:
 class UpsertAux:
     """Operation to insert or update an auxiliary variable."""
 
-    aux: Auxiliary
+    aux: Aux
 
 
 @dataclass

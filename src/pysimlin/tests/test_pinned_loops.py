@@ -14,7 +14,7 @@ import pytest
 
 import simlin
 from simlin.errors import SimlinRuntimeError
-from simlin.json_types import Flow, Stock
+from simlin.types import Flow, Stock
 
 
 def _pinned_loop_in_discovery_model() -> simlin.Model:
@@ -30,15 +30,15 @@ def _pinned_loop_in_discovery_model() -> simlin.Model:
         ring = 60
         for i in range(ring):
             nxt = (i + 1) % ring
-            patch.upsert_flow(Flow(name=f"f{i}", equation=f"stock_{nxt} * 0.001"))
-            patch.upsert_stock(
+            patch.upsert(Flow(name=f"f{i}", equation=f"stock_{nxt} * 0.001"))
+            patch.upsert(
                 Stock(name=f"stock_{i}", initial_equation="10", inflows=[f"f{i}"], outflows=[])
             )
         # Small two-stock reinforcing loop: a -> to_b -> b -> to_a -> a.
-        patch.upsert_stock(Stock(name="a", initial_equation="100", inflows=["to_a"], outflows=[]))
-        patch.upsert_stock(Stock(name="b", initial_equation="100", inflows=["to_b"], outflows=[]))
-        patch.upsert_flow(Flow(name="to_b", equation="a * 0.05"))
-        patch.upsert_flow(Flow(name="to_a", equation="b * 0.05"))
+        patch.upsert(Stock(name="a", initial_equation="100", inflows=["to_a"], outflows=[]))
+        patch.upsert(Stock(name="b", initial_equation="100", inflows=["to_b"], outflows=[]))
+        patch.upsert(Flow(name="to_b", equation="a * 0.05"))
+        patch.upsert(Flow(name="to_a", equation="b * 0.05"))
         # Pin the a<->b loop in the same patch (upserts run first, assigning
         # the UIDs SetLoopName resolves against).
         patch.set_loop_name("ab loop", ["a", "to_b", "b", "to_a"])
@@ -50,7 +50,7 @@ def _small_two_loop_model() -> simlin.Model:
     project = simlin.Project.new(name="two_loop", sim_start=0.0, sim_stop=20.0, dt=0.25)
     model = project.main_model
     with model.edit() as (_current, patch):
-        patch.upsert_stock(
+        patch.upsert(
             Stock(
                 name="population",
                 initial_equation="100",
@@ -58,11 +58,11 @@ def _small_two_loop_model() -> simlin.Model:
                 outflows=["deaths"],
             )
         )
-        patch.upsert_flow(Flow(name="births", equation="population * 0.08"))
-        from simlin.json_types import Auxiliary
+        patch.upsert(Flow(name="births", equation="population * 0.08"))
+        from simlin.types import Aux
 
-        patch.upsert_aux(Auxiliary(name="crowding", equation="population / 1000"))
-        patch.upsert_flow(Flow(name="deaths", equation="population * crowding"))
+        patch.upsert(Aux(name="crowding", equation="population / 1000"))
+        patch.upsert(Flow(name="deaths", equation="population * crowding"))
     return model
 
 
@@ -163,8 +163,8 @@ def _arrayed_pin_in_discovery_model(arrayed_population_ltm_path) -> simlin.Model
         ring = 60
         for i in range(ring):
             nxt = (i + 1) % ring
-            patch.upsert_flow(Flow(name=f"f{i}", equation=f"ring_{nxt} * 0.001"))
-            patch.upsert_stock(
+            patch.upsert(Flow(name=f"f{i}", equation=f"ring_{nxt} * 0.001"))
+            patch.upsert(
                 Stock(name=f"ring_{i}", initial_equation="10", inflows=[f"f{i}"], outflows=[])
             )
         # Pin the arrayed births loop (population -> births -> population, all

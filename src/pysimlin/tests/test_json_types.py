@@ -1,8 +1,11 @@
 """Property-based tests for JSON type serialization.
 
 These tests ensure:
-1. JSON roundtrip fidelity (Python -> JSON -> Python)
+1. JSON roundtrip fidelity (Python -> JSON -> Python) for the unified
+   variable types (simlin.types) and the wire/patch types (simlin.json_types)
 2. Schema compliance (generated JSON validates against docs/simlin-project.schema.json)
+3. Exact wire-format fidelity against dicts matching what the Rust
+   serializer in src/simlin-engine/src/json.rs emits
 """
 
 import json
@@ -20,32 +23,33 @@ try:
 except ImportError:
     HAS_JSONSCHEMA = False
 
-from simlin.json_converter import converter
+from simlin.json_converter import converter, structure_variable, unstructure_variable
 from simlin.json_types import (
-    ArrayedEquation,
-    Auxiliary,
+    DeleteVariable,
+    JsonModelPatch,
+    JsonProjectPatch,
+    MacroSpec,
+    Model,
+    ModelGroup,
+    RenameVariable,
+    UpsertFlow,
+    UpsertStock,
+)
+from simlin.types import (
+    Aux,
     Compat,
     Conveyor,
     DataSource,
-    DeleteVariable,
     ElementEquation,
     Flow,
     GraphicalFunction,
     GraphicalFunctionScale,
-    JsonModelPatch,
-    JsonProjectPatch,
     Leakage,
-    MacroSpec,
-    Model,
-    ModelGroup,
     Module,
     ModuleReference,
     Queue,
-    RenameVariable,
     SpreadFlow,
     Stock,
-    UpsertFlow,
-    UpsertStock,
 )
 
 # Load the JSON schema
@@ -104,32 +108,21 @@ def graphical_function_scale_strategy(draw: Any) -> GraphicalFunctionScale:
 @st.composite
 def graphical_function_strategy(draw: Any) -> GraphicalFunction:
     """Generate a graphical function."""
-    use_points = draw(st.booleans())
-    if use_points:
-        num_points = draw(st.integers(min_value=2, max_value=10))
-        points = []
-        for i in range(num_points):
-            x = float(i)
-            y = draw(
-                st.floats(min_value=-100, max_value=100, allow_nan=False, allow_infinity=False)
-            )
-            points.append((x, y))
-        y_points: list[float] = []
-    else:
-        points = []
-        num_y = draw(st.integers(min_value=2, max_value=10))
-        y_points = [
-            draw(st.floats(min_value=-100, max_value=100, allow_nan=False, allow_infinity=False))
-            for _ in range(num_y)
-        ]
+    num_points = draw(st.integers(min_value=2, max_value=6))
+    y_points = tuple(
+        draw(st.floats(min_value=-100, max_value=100, allow_nan=False, allow_infinity=False))
+        for _ in range(num_points)
+    )
+    use_x_points = draw(st.booleans())
+    x_points = tuple(float(i) for i in range(num_points)) if use_x_points else None
 
-    kind = draw(st.sampled_from(["continuous", "discrete", "extrapolate", ""]))
+    kind = draw(st.sampled_from(["continuous", "discrete", "extrapolate"]))
     x_scale = draw(st.one_of(st.none(), graphical_function_scale_strategy()))
     y_scale = draw(st.one_of(st.none(), graphical_function_scale_strategy()))
 
     return GraphicalFunction(
-        points=points,
         y_points=y_points,
+        x_points=x_points,
         kind=kind,
         x_scale=x_scale,
         y_scale=y_scale,
@@ -137,26 +130,27 @@ def graphical_function_strategy(draw: Any) -> GraphicalFunction:
 
 
 @st.composite
-def stock_strategy(draw: Any) -> Stock:
-    """Generate a stock variable."""
-    nn = draw(st.booleans())
+def compat_strategy(draw: Any) -> Compat | None:
+    """Generate the advanced-options remainder (or None)."""
     cbmi = draw(st.booleans())
     is_pub = draw(st.booleans())
-    compat = (
-        Compat(non_negative=nn, can_be_module_input=cbmi, is_public=is_pub)
-        if (nn or cbmi or is_pub)
-        else None
-    )
+    if not (cbmi or is_pub):
+        return None
+    return Compat(can_be_module_input=cbmi, is_public=is_pub)
+
+
+@st.composite
+def stock_strategy(draw: Any) -> Stock:
+    """Generate a stock variable."""
     return Stock(
         name=draw(ident_strategy()),
-        inflows=draw(st.lists(ident_strategy(), min_size=0, max_size=3)),
-        outflows=draw(st.lists(ident_strategy(), min_size=0, max_size=3)),
-        uid=draw(st.integers(min_value=0, max_value=10000)),
         initial_equation=draw(equation_strategy()),
-        units=draw(st.sampled_from(["", "widgets", "people", "dollars"])),
-        documentation=draw(st.sampled_from(["", "A stock variable", "This accumulates over time"])),
-        arrayed_equation=None,  # Keep simple for now
-        compat=compat,
+        inflows=tuple(draw(st.lists(ident_strategy(), min_size=0, max_size=3))),
+        outflows=tuple(draw(st.lists(ident_strategy(), min_size=0, max_size=3))),
+        units=draw(st.sampled_from([None, "widgets", "people", "dollars"])),
+        documentation=draw(st.sampled_from([None, "A stock variable"])),
+        non_negative=draw(st.booleans()),
+        compat=draw(compat_strategy()),
     )
 
 
@@ -165,45 +159,33 @@ def flow_strategy(draw: Any) -> Flow:
     """Generate a flow variable."""
     has_gf = draw(st.booleans())
     gf = draw(graphical_function_strategy()) if has_gf else None
-    nn = draw(st.booleans())
-    cbmi = draw(st.booleans())
-    is_pub = draw(st.booleans())
-    compat = (
-        Compat(non_negative=nn, can_be_module_input=cbmi, is_public=is_pub)
-        if (nn or cbmi or is_pub)
-        else None
-    )
 
     return Flow(
         name=draw(ident_strategy()),
-        uid=draw(st.integers(min_value=0, max_value=10000)),
         equation=draw(equation_strategy()),
-        units=draw(st.sampled_from(["", "widgets/year", "people/month"])),
+        units=draw(st.sampled_from([None, "widgets/year", "people/month"])),
+        documentation=draw(st.sampled_from([None, "A flow variable"])),
+        non_negative=draw(st.booleans()),
+        active_initial=draw(st.sampled_from([None, "42"])),
         graphical_function=gf,
-        documentation=draw(st.sampled_from(["", "A flow variable"])),
-        arrayed_equation=None,
-        compat=compat,
+        compat=draw(compat_strategy()),
     )
 
 
 @st.composite
-def auxiliary_strategy(draw: Any) -> Auxiliary:
+def aux_strategy(draw: Any) -> Aux:
     """Generate an auxiliary variable."""
     has_gf = draw(st.booleans())
     gf = draw(graphical_function_strategy()) if has_gf else None
-    cbmi = draw(st.booleans())
-    is_pub = draw(st.booleans())
-    compat = Compat(can_be_module_input=cbmi, is_public=is_pub) if (cbmi or is_pub) else None
 
-    return Auxiliary(
+    return Aux(
         name=draw(ident_strategy()),
-        uid=draw(st.integers(min_value=0, max_value=10000)),
         equation=draw(equation_strategy()),
-        units=draw(st.sampled_from(["", "dimensionless", "ratio"])),
+        active_initial=draw(st.sampled_from([None, "42"])),
+        units=draw(st.sampled_from([None, "dimensionless", "ratio"])),
+        documentation=draw(st.sampled_from([None, "An auxiliary variable"])),
         graphical_function=gf,
-        documentation=draw(st.sampled_from(["", "An auxiliary variable"])),
-        arrayed_equation=None,
-        compat=compat,
+        compat=draw(compat_strategy()),
     )
 
 
@@ -211,22 +193,57 @@ def auxiliary_strategy(draw: Any) -> Auxiliary:
 def module_strategy(draw: Any) -> Module:
     """Generate a module."""
     num_refs = draw(st.integers(min_value=0, max_value=3))
-    refs = [
+    refs = tuple(
         ModuleReference(src=draw(ident_strategy()), dst=draw(ident_strategy()))
         for _ in range(num_refs)
-    ]
-    cbmi = draw(st.booleans())
-    is_pub = draw(st.booleans())
-    compat = Compat(can_be_module_input=cbmi, is_public=is_pub) if (cbmi or is_pub) else None
+    )
 
     return Module(
         name=draw(ident_strategy()),
         model_name=draw(ident_strategy()),
-        uid=draw(st.integers(min_value=0, max_value=10000)),
-        units=draw(st.sampled_from(["", "widgets"])),
-        documentation=draw(st.sampled_from(["", "A module"])),
+        units=draw(st.sampled_from([None, "widgets"])),
+        documentation=draw(st.sampled_from([None, "A module"])),
         references=refs,
-        compat=compat,
+        compat=draw(compat_strategy()),
+    )
+
+
+@st.composite
+def arrayed_aux_strategy(draw: Any) -> Aux:
+    """Generate an arrayed auxiliary: apply-to-all, element-by-element, or
+    EXCEPT-default shaped."""
+    shape = draw(st.sampled_from(["a2a", "elements", "except"]))
+    if shape == "a2a":
+        return Aux(
+            name=draw(ident_strategy()),
+            equation=draw(equation_strategy()),
+            dimensions=("region",),
+        )
+    elements = tuple(
+        ElementEquation(
+            subscript=sub,
+            equation=draw(equation_strategy()),
+            active_initial=draw(st.sampled_from([None, "1"])),
+        )
+        for sub in ("boston", "nyc")
+    )
+    if shape == "elements":
+        # The unified read hoists common element text into `equation`; a
+        # hand-built value only round-trips when it matches that shape.
+        first = elements[0].equation
+        common = first if all(e.equation == first for e in elements) else ""
+        return Aux(
+            name=draw(ident_strategy()),
+            equation=common,
+            dimensions=("region",),
+            element_equations=elements,
+        )
+    return Aux(
+        name=draw(ident_strategy()),
+        equation=draw(equation_strategy()),
+        dimensions=("region",),
+        element_equations=elements,
+        has_except_default=draw(st.booleans()),
     )
 
 
@@ -234,47 +251,42 @@ def module_strategy(draw: Any) -> Module:
 
 
 class TestJsonRoundtrip:
-    """Tests for JSON serialization roundtrip."""
+    """Tests for JSON serialization roundtrip of the unified types."""
 
     @given(stock=stock_strategy())
     @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_stock_roundtrip(self, stock: Stock) -> None:
         """Stock dataclass roundtrips through JSON correctly."""
-        json_dict = converter.unstructure(stock)
-        json_str = json.dumps(json_dict)
-        parsed = json.loads(json_str)
-        reconstructed = converter.structure(parsed, Stock)
-        assert stock == reconstructed
+        parsed = json.loads(json.dumps(unstructure_variable(stock)))
+        assert structure_variable({"type": "stock", **parsed}) == stock
 
     @given(flow=flow_strategy())
     @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_flow_roundtrip(self, flow: Flow) -> None:
         """Flow dataclass roundtrips through JSON correctly."""
-        json_dict = converter.unstructure(flow)
-        json_str = json.dumps(json_dict)
-        parsed = json.loads(json_str)
-        reconstructed = converter.structure(parsed, Flow)
-        assert flow == reconstructed
+        parsed = json.loads(json.dumps(unstructure_variable(flow)))
+        assert structure_variable({"type": "flow", **parsed}) == flow
 
-    @given(aux=auxiliary_strategy())
+    @given(aux=aux_strategy())
     @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
-    def test_auxiliary_roundtrip(self, aux: Auxiliary) -> None:
-        """Auxiliary dataclass roundtrips through JSON correctly."""
-        json_dict = converter.unstructure(aux)
-        json_str = json.dumps(json_dict)
-        parsed = json.loads(json_str)
-        reconstructed = converter.structure(parsed, Auxiliary)
-        assert aux == reconstructed
+    def test_aux_roundtrip(self, aux: Aux) -> None:
+        """Aux dataclass roundtrips through JSON correctly."""
+        parsed = json.loads(json.dumps(unstructure_variable(aux)))
+        assert structure_variable({"type": "aux", **parsed}) == aux
+
+    @given(aux=arrayed_aux_strategy())
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    def test_arrayed_aux_roundtrip(self, aux: Aux) -> None:
+        """Arrayed auxiliaries (all three shapes) roundtrip correctly."""
+        parsed = json.loads(json.dumps(unstructure_variable(aux)))
+        assert structure_variable({"type": "aux", **parsed}) == aux
 
     @given(module=module_strategy())
     @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_module_roundtrip(self, module: Module) -> None:
         """Module dataclass roundtrips through JSON correctly."""
-        json_dict = converter.unstructure(module)
-        json_str = json.dumps(json_dict)
-        parsed = json.loads(json_str)
-        reconstructed = converter.structure(parsed, Module)
-        assert module == reconstructed
+        parsed = json.loads(json.dumps(unstructure_variable(module)))
+        assert structure_variable({"type": "module", **parsed}) == module
 
 
 class TestMacroSpecRoundtrip:
@@ -287,7 +299,7 @@ class TestMacroSpecRoundtrip:
         unstructured dict uses camelCase keys."""
         model = Model(
             name="smooth_macro",
-            auxiliaries=[Auxiliary(name="output", equation="input * gain")],
+            auxiliaries=[Aux(name="output", equation="input * gain")],
             macro_spec=MacroSpec(
                 parameters=["input", "gain"],
                 primary_output="output",
@@ -333,7 +345,7 @@ class TestMacroSpecRoundtrip:
 
     def test_model_without_macro_spec_omits_key(self) -> None:
         """A non-macro Model has no macroSpec key and restores macro_spec=None."""
-        model = Model(name="ordinary", auxiliaries=[Auxiliary(name="x", equation="1")])
+        model = Model(name="ordinary", auxiliaries=[Aux(name="x", equation="1")])
 
         json_dict = converter.unstructure(model)
         assert "macroSpec" not in json_dict
@@ -351,7 +363,7 @@ class TestModelGroupRoundtrip:
         dict uses camelCase keys."""
         model = Model(
             name="grouped",
-            auxiliaries=[Auxiliary(name="output", equation="1")],
+            auxiliaries=[Aux(name="output", equation="1")],
             groups=[
                 ModelGroup(
                     name="core",
@@ -394,7 +406,7 @@ class TestModelGroupRoundtrip:
 
     def test_model_without_groups_omits_key(self) -> None:
         """A Model with no groups omits the key and restores groups=[]."""
-        model = Model(name="ungrouped", auxiliaries=[Auxiliary(name="x", equation="1")])
+        model = Model(name="ungrouped", auxiliaries=[Aux(name="x", equation="1")])
 
         json_dict = converter.unstructure(model)
         assert "groups" not in json_dict
@@ -506,29 +518,31 @@ class TestSchemaCompliance:
     @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_stock_validates_against_schema(self, stock: Stock) -> None:
         """Generated Stock JSON validates against the schema."""
-        json_dict = converter.unstructure(stock)
-        self._validate_against_def(json_dict, "Stock")
+        self._validate_against_def(unstructure_variable(stock), "Stock")
 
     @given(flow=flow_strategy())
     @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_flow_validates_against_schema(self, flow: Flow) -> None:
         """Generated Flow JSON validates against the schema."""
-        json_dict = converter.unstructure(flow)
-        self._validate_against_def(json_dict, "Flow")
+        self._validate_against_def(unstructure_variable(flow), "Flow")
 
-    @given(aux=auxiliary_strategy())
+    @given(aux=aux_strategy())
     @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
-    def test_auxiliary_validates_against_schema(self, aux: Auxiliary) -> None:
-        """Generated Auxiliary JSON validates against the schema."""
-        json_dict = converter.unstructure(aux)
-        self._validate_against_def(json_dict, "Auxiliary")
+    def test_aux_validates_against_schema(self, aux: Aux) -> None:
+        """Generated Aux JSON validates against the schema."""
+        self._validate_against_def(unstructure_variable(aux), "Auxiliary")
+
+    @given(aux=arrayed_aux_strategy())
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    def test_arrayed_aux_validates_against_schema(self, aux: Aux) -> None:
+        """Generated arrayed Aux JSON validates against the schema."""
+        self._validate_against_def(unstructure_variable(aux), "Auxiliary")
 
     @given(module=module_strategy())
     @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_module_validates_against_schema(self, module: Module) -> None:
         """Generated Module JSON validates against the schema."""
-        json_dict = converter.unstructure(module)
-        self._validate_against_def(json_dict, "Module")
+        self._validate_against_def(unstructure_variable(module), "Module")
 
     def test_model_group_validates_against_schema(self) -> None:
         """Generated ModelGroup JSON validates against the schema."""
@@ -615,44 +629,37 @@ class TestOptionalFieldSerialization:
         assert "arc" in result_zero, "arc=0.0 must be included (different from default None)"
         assert result_zero["arc"] == 0.0
 
-    def test_optional_string_empty_vs_none(self) -> None:
-        """Empty string should only be omitted if it equals the default."""
-        # For Flow, equation defaults to "" so empty string should be omitted
-        flow_empty = Flow(name="test", equation="")
-        result_empty = converter.unstructure(flow_empty)
-        assert "equation" not in result_empty, "equation='' should be omitted (equals default)"
+    def test_empty_equation_is_omitted(self) -> None:
+        """An empty flow equation is omitted from the wire dict."""
+        result_empty = unstructure_variable(Flow(name="test", equation=""))
+        assert "equation" not in result_empty
 
-        # Non-empty equation should be included
-        flow_value = Flow(name="test", equation="x + 1")
-        result_value = converter.unstructure(flow_value)
+        result_value = unstructure_variable(Flow(name="test", equation="x + 1"))
         assert result_value.get("equation") == "x + 1"
 
-    def test_optional_bool_false_vs_default(self) -> None:
-        """False should only be omitted if it equals the default."""
-        # Compat with all-default fields should be omitted
-        flow_default = Flow(name="test", compat=Compat())
-        result_default = converter.unstructure(flow_default)
-        assert "compat" not in result_default, "compat with all defaults should be omitted"
+    def test_all_default_compat_is_omitted(self) -> None:
+        """A Compat with every field default contributes nothing to the wire."""
+        result_default = unstructure_variable(Flow(name="test", compat=Compat()))
+        assert "compat" not in result_default
 
-        # Compat with non-default should be included
-        flow_nn = Flow(name="test", compat=Compat(non_negative=True))
-        result_nn = converter.unstructure(flow_nn)
-        assert result_nn.get("compat", {}).get("nonNegative") is True
+        result_nn = unstructure_variable(Flow(name="test", non_negative=True))
+        assert result_nn.get("compat") == {"nonNegative": True}
 
     def test_empty_graphical_function_not_dropped(self) -> None:
         """An empty GraphicalFunction should not be elided like Compat."""
-        flow = Flow(name="test", graphical_function=GraphicalFunction())
-        result = converter.unstructure(flow)
+        flow = Flow(name="test", graphical_function=GraphicalFunction(y_points=()))
+        result = unstructure_variable(flow)
         assert "graphicalFunction" in result, "empty GraphicalFunction should not be dropped"
 
 
 class TestLegacyCompatMerge:
-    """Tests that legacy top-level booleans merge with compat."""
+    """Legacy top-level booleans merge with compat and hoist correctly."""
 
     def test_legacy_booleans_preserved_when_compat_has_active_initial(self) -> None:
         """Legacy nonNegative/canBeModuleInput/isPublic must not be dropped
         when compat exists only for activeInitial."""
         stock_json: dict[str, Any] = {
+            "type": "stock",
             "name": "pop",
             "initialEquation": "100",
             "inflows": [],
@@ -662,34 +669,39 @@ class TestLegacyCompatMerge:
             "canBeModuleInput": True,
             "isPublic": True,
         }
-        stock = converter.structure(stock_json, Stock)
+        stock = structure_variable(stock_json)
+        assert isinstance(stock, Stock)
+        assert stock.non_negative is True, "legacy nonNegative lost"
         assert stock.compat is not None
-        assert stock.compat.non_negative is True, "legacy nonNegative lost"
         assert stock.compat.can_be_module_input is True, "legacy canBeModuleInput lost"
         assert stock.compat.is_public is True, "legacy isPublic lost"
-        assert stock.compat.active_initial == "50"
 
     def test_flow_legacy_merge(self) -> None:
         flow_json: dict[str, Any] = {
+            "type": "flow",
             "name": "rate",
             "equation": "10",
             "compat": {"activeInitial": "5"},
             "nonNegative": True,
             "isPublic": True,
         }
-        flow = converter.structure(flow_json, Flow)
+        flow = structure_variable(flow_json)
+        assert isinstance(flow, Flow)
+        assert flow.non_negative is True
+        assert flow.active_initial == "5"
         assert flow.compat is not None
-        assert flow.compat.non_negative is True
         assert flow.compat.is_public is True
 
     def test_aux_legacy_merge(self) -> None:
         aux_json: dict[str, Any] = {
+            "type": "aux",
             "name": "val",
             "equation": "1",
             "compat": {"activeInitial": "0"},
             "canBeModuleInput": True,
         }
-        aux = converter.structure(aux_json, Auxiliary)
+        aux = structure_variable(aux_json)
+        assert isinstance(aux, Aux)
         assert aux.compat is not None
         assert aux.compat.can_be_module_input is True
 
@@ -697,9 +709,9 @@ class TestLegacyCompatMerge:
 class TestCompatConveyorWireFormat:
     """Wire-format round-trip tests for the conveyor/queue Compat fields.
 
-    The input dicts below are byte-for-byte what the Rust serializer in
+    The input dicts below match byte-for-byte what the Rust serializer in
     src/simlin-engine/src/json.rs emits (camelCase keys, skip-if-None /
-    skip-if-false omission).  Each test structures the JSON into the Python
+    skip-if-false omission).  Each test structures the JSON into the unified
     dataclass, unstructures it back, and asserts the output equals the input
     exactly -- so absent fields stay absent (no spurious nulls) and no field
     is silently dropped.
@@ -723,7 +735,8 @@ class TestCompatConveyorWireFormat:
                 }
             },
         }
-        stock = converter.structure(stock_json, Stock)
+        stock = structure_variable({"type": "stock", **stock_json})
+        assert isinstance(stock, Stock)
         assert stock.compat is not None
         assert stock.compat.conveyor == Conveyor(
             transit_time="4",
@@ -733,31 +746,38 @@ class TestCompatConveyorWireFormat:
             one_at_a_time=True,
             exponential_leak=True,
         )
-        assert converter.unstructure(stock) == stock_json
+        assert unstructure_variable(stock) == stock_json
 
     def test_conveyor_all_fields_roundtrip(self) -> None:
         """Every Conveyor field survives, including sample/arrest and the
         batchIntegrity/ignoreEarlierZoneLosses booleans."""
-        conveyor_json: dict[str, Any] = {
-            "transitTime": "tt",
-            "capacity": "cap",
-            "inflowLimit": "lim",
-            "sample": "s",
-            "arrest": "a",
-            "discrete": True,
-            "batchIntegrity": True,
-            "oneAtATime": True,
-            "exponentialLeak": True,
-            "ignoreEarlierZoneLosses": True,
+        stock_json: dict[str, Any] = {
+            "name": "belt",
+            "inflows": [],
+            "outflows": [],
+            "compat": {
+                "conveyor": {
+                    "transitTime": "tt",
+                    "capacity": "cap",
+                    "inflowLimit": "lim",
+                    "sample": "s",
+                    "arrest": "a",
+                    "discrete": True,
+                    "batchIntegrity": True,
+                    "oneAtATime": True,
+                    "exponentialLeak": True,
+                    "ignoreEarlierZoneLosses": True,
+                }
+            },
         }
-        conveyor = converter.structure(conveyor_json, Conveyor)
-        assert converter.unstructure(conveyor) == conveyor_json
+        stock = structure_variable({"type": "stock", **stock_json})
+        assert isinstance(stock, Stock)
+        assert unstructure_variable(stock) == stock_json
 
     def test_conveyor_minimal_omits_defaults(self) -> None:
         """A transit-time-only conveyor emits only transitTime."""
-        conveyor = Conveyor(transit_time="4")
-        assert converter.unstructure(conveyor) == {"transitTime": "4"}
-        assert converter.structure({"transitTime": "4"}, Conveyor) == conveyor
+        stock = Stock(name="belt", compat=Compat(conveyor=Conveyor(transit_time="4")))
+        assert unstructure_variable(stock)["compat"] == {"conveyor": {"transitTime": "4"}}
 
     def test_queue_stock_json_roundtrip(self) -> None:
         """A queue stock's marker (compat.queue == {}) survives."""
@@ -768,10 +788,11 @@ class TestCompatConveyorWireFormat:
             "initialEquation": "0",
             "compat": {"queue": {}},
         }
-        stock = converter.structure(stock_json, Stock)
+        stock = structure_variable({"type": "stock", **stock_json})
+        assert isinstance(stock, Stock)
         assert stock.compat is not None
         assert stock.compat.queue == Queue()
-        assert converter.unstructure(stock) == stock_json
+        assert unstructure_variable(stock) == stock_json
 
     def test_leakage_flow_explicit_fraction_roundtrip(self) -> None:
         """A leak flow with an explicit fraction and zone bounds survives."""
@@ -787,12 +808,13 @@ class TestCompatConveyorWireFormat:
                 }
             },
         }
-        flow = converter.structure(flow_json, Flow)
+        flow = structure_variable({"type": "flow", **flow_json})
+        assert isinstance(flow, Flow)
         assert flow.compat is not None
         assert flow.compat.leakage == Leakage(
             fraction="0.1", integers=True, zone_start="1", zone_end="2"
         )
-        assert converter.unstructure(flow) == flow_json
+        assert unstructure_variable(flow) == flow_json
 
     def test_leakage_flow_marker_only_roundtrip(self) -> None:
         """A marker-only leak flow (leakage == {}, the equation-carries-the-
@@ -803,11 +825,12 @@ class TestCompatConveyorWireFormat:
             "equation": "0.01",
             "compat": {"nonNegative": True, "leakage": {}},
         }
-        flow = converter.structure(flow_json, Flow)
+        flow = structure_variable({"type": "flow", **flow_json})
+        assert isinstance(flow, Flow)
+        assert flow.non_negative is True
         assert flow.compat is not None
         assert flow.compat.leakage == Leakage()
-        assert flow.compat.non_negative is True
-        assert converter.unstructure(flow) == flow_json
+        assert unstructure_variable(flow) == flow_json
 
     @pytest.mark.parametrize("variant", ["beginning", "even", "dest", "source"])
     def test_spreadflow_unit_variants_roundtrip(self, variant: str) -> None:
@@ -818,10 +841,11 @@ class TestCompatConveyorWireFormat:
             "equation": "250",
             "compat": {"spreadflow": {"type": variant}},
         }
-        flow = converter.structure(flow_json, Flow)
+        flow = structure_variable({"type": "flow", **flow_json})
+        assert isinstance(flow, Flow)
         assert flow.compat is not None
         assert flow.compat.spreadflow == SpreadFlow(type=variant)
-        assert converter.unstructure(flow) == flow_json
+        assert unstructure_variable(flow) == flow_json
 
     def test_spreadflow_dist_roundtrip(self) -> None:
         """The dist variant is adjacently tagged: type + distribution."""
@@ -830,23 +854,31 @@ class TestCompatConveyorWireFormat:
             "equation": "250",
             "compat": {"spreadflow": {"type": "dist", "distribution": "1,2,1"}},
         }
-        flow = converter.structure(flow_json, Flow)
+        flow = structure_variable({"type": "flow", **flow_json})
+        assert isinstance(flow, Flow)
         assert flow.compat is not None
         assert flow.compat.spreadflow == SpreadFlow(type="dist", distribution="1,2,1")
-        assert converter.unstructure(flow) == flow_json
+        assert unstructure_variable(flow) == flow_json
 
     def test_spreadflow_unknown_type_rejected(self) -> None:
         """An unknown spreadflow type raises instead of passing through."""
+        flow_json = {
+            "type": "flow",
+            "name": "f",
+            "compat": {"spreadflow": {"type": "sideways"}},
+        }
         with pytest.raises(Exception, match="spreadflow"):
-            converter.structure({"type": "sideways"}, SpreadFlow)
+            structure_variable(flow_json)
 
     def test_spreadflow_dist_without_distribution_rejected(self) -> None:
         """A dist spreadflow without its distribution payload raises on both
         the structure and unstructure sides."""
         with pytest.raises(Exception, match="dist"):
-            converter.structure({"type": "dist"}, SpreadFlow)
+            structure_variable(
+                {"type": "flow", "name": "f", "compat": {"spreadflow": {"type": "dist"}}}
+            )
         with pytest.raises(Exception, match="dist"):
-            converter.unstructure(SpreadFlow(type="dist"))
+            unstructure_variable(Flow(name="f", compat=Compat(spreadflow=SpreadFlow(type="dist"))))
 
     def test_overflow_flow_roundtrip(self) -> None:
         """A queue outflow's overflow marker survives."""
@@ -854,10 +886,11 @@ class TestCompatConveyorWireFormat:
             "name": "overflowing",
             "compat": {"overflow": True},
         }
-        flow = converter.structure(flow_json, Flow)
+        flow = structure_variable({"type": "flow", **flow_json})
+        assert isinstance(flow, Flow)
         assert flow.compat is not None
         assert flow.compat.overflow is True
-        assert converter.unstructure(flow) == flow_json
+        assert unstructure_variable(flow) == flow_json
 
     def test_data_source_roundtrip(self) -> None:
         """A variable's external dataSource survives."""
@@ -874,38 +907,40 @@ class TestCompatConveyorWireFormat:
                 }
             },
         }
-        aux = converter.structure(aux_json, Auxiliary)
+        aux = structure_variable({"type": "aux", **aux_json})
+        assert isinstance(aux, Aux)
         assert aux.compat is not None
         assert aux.compat.data_source == DataSource(
             kind="data", file="sales.csv", tab_or_delimiter=",", row_or_col="1", cell="A2"
         )
-        assert converter.unstructure(aux) == aux_json
+        assert unstructure_variable(aux) == aux_json
 
-    def test_compat_dataclass_full_roundtrip(self) -> None:
-        """A Compat carrying every field round-trips Python -> JSON -> Python."""
-        compat = Compat(
-            active_initial="50",
+    def test_compat_full_roundtrip_through_stock(self) -> None:
+        """A Compat carrying every advanced field round-trips through a
+        variable (the shape production serializes)."""
+        stock = Stock(
+            name="s",
+            initial_equation="50",
             non_negative=True,
-            can_be_module_input=True,
-            is_public=True,
-            data_source=DataSource(
-                kind="constants", file="c.csv", tab_or_delimiter="\t", row_or_col="A", cell="B1"
+            compat=Compat(
+                can_be_module_input=True,
+                is_public=True,
+                data_source=DataSource(
+                    kind="constants",
+                    file="c.csv",
+                    tab_or_delimiter="\t",
+                    row_or_col="A",
+                    cell="B1",
+                ),
+                conveyor=Conveyor(transit_time="4", capacity="10"),
+                leakage=Leakage(fraction="0.05"),
+                spreadflow=SpreadFlow(type="dist", distribution="1,1"),
+                queue=Queue(),
+                overflow=True,
             ),
-            conveyor=Conveyor(transit_time="4", capacity="10"),
-            leakage=Leakage(fraction="0.05"),
-            spreadflow=SpreadFlow(type="dist", distribution="1,1"),
-            queue=Queue(),
-            overflow=True,
         )
-        json_dict = converter.unstructure(compat)
-        parsed = json.loads(json.dumps(json_dict))
-        assert converter.structure(parsed, Compat) == compat
-
-    def test_compat_omits_default_conveyor_fields(self) -> None:
-        """New Compat fields are omitted when default (no spurious nulls)."""
-        compat = Compat(non_negative=True)
-        json_dict = converter.unstructure(compat)
-        assert json_dict == {"nonNegative": True}
+        parsed = json.loads(json.dumps(unstructure_variable(stock)))
+        assert structure_variable({"type": "stock", **parsed}) == stock
 
     def test_conveyor_stock_survives_patch_roundtrip(self) -> None:
         """The full patch envelope preserves a conveyor stock -- the shape
@@ -928,67 +963,64 @@ class TestCompatConveyorWireFormat:
         """The legacy top-level boolean merge must not rebuild Compat with
         only the four legacy fields, dropping the conveyor marker."""
         stock_json: dict[str, Any] = {
+            "type": "stock",
             "name": "students",
             "inflows": [],
             "outflows": [],
             "compat": {"conveyor": {"transitTime": "4"}},
             "nonNegative": True,
         }
-        stock = converter.structure(stock_json, Stock)
+        stock = structure_variable(stock_json)
+        assert isinstance(stock, Stock)
+        assert stock.non_negative is True
         assert stock.compat is not None
-        assert stock.compat.non_negative is True
         assert stock.compat.conveyor == Conveyor(transit_time="4")
 
 
-class TestHasExceptDefault:
-    """ArrayedEquation.hasExceptDefault mirrors json.rs (Option<bool>)."""
+class TestElementLevelCompat:
+    """Element-level compat carries ACTIVE INITIAL only.
 
-    @pytest.mark.parametrize("value", [True, False])
-    def test_has_except_default_roundtrip(self, value: bool) -> None:
+    The engine deliberately reads nothing else from an element's compat
+    (src/simlin-engine/src/json.rs, ElementEquation: "Per-element compat
+    carries active_initial ONLY ... other fields hand-authored here are
+    tolerated by serde and dropped"), so the unified ElementEquation models
+    exactly that field.
+    """
+
+    def test_element_active_initial_roundtrip(self) -> None:
         aux_json: dict[str, Any] = {
-            "name": "arr",
+            "name": "rate",
             "arrayedEquation": {
-                "dimensions": ["Region"],
-                "equation": "1",
-                "hasExceptDefault": value,
+                "dimensions": ["region"],
+                "elements": [
+                    {
+                        "subscript": "east",
+                        "equation": "supply_east",
+                        "compat": {"activeInitial": "init_east"},
+                    },
+                    {"subscript": "west", "equation": "supply_west"},
+                ],
             },
         }
-        aux = converter.structure(aux_json, Auxiliary)
-        assert aux.arrayed_equation is not None
-        assert aux.arrayed_equation.has_except_default is value
-        assert converter.unstructure(aux) == aux_json
-
-    def test_has_except_default_absent_stays_absent(self) -> None:
-        """Legacy JSON without hasExceptDefault restores None and stays
-        omitted on re-serialization (matching serde's Option::is_none skip)."""
-        eq = converter.structure({"dimensions": ["Region"], "equation": "1"}, ArrayedEquation)
-        assert eq.has_except_default is None
-        assert "hasExceptDefault" not in converter.unstructure(eq)
-
-
-class TestElementCompatFullFields:
-    """Element- and array-level compat must structure the full Compat, not
-    just activeInitial."""
-
-    def test_element_equation_compat_keeps_non_negative(self) -> None:
-        ee = converter.structure(
-            {"subscript": "east", "equation": "5", "compat": {"nonNegative": True}},
-            ElementEquation,
+        aux = structure_variable({"type": "aux", **aux_json})
+        assert isinstance(aux, Aux)
+        assert aux.element_equations == (
+            ElementEquation(subscript="east", equation="supply_east", active_initial="init_east"),
+            ElementEquation(subscript="west", equation="supply_west"),
         )
-        assert ee.compat is not None
-        assert ee.compat.non_negative is True
-
-    def test_arrayed_equation_compat_keeps_non_negative(self) -> None:
-        eq = converter.structure(
-            {"dimensions": ["Region"], "equation": "1", "compat": {"nonNegative": True}},
-            ArrayedEquation,
-        )
-        assert eq.compat is not None
-        assert eq.compat.non_negative is True
+        assert unstructure_variable(aux) == aux_json
 
 
 class TestNullValueHandling:
     """Tests for correct handling of explicit null values in JSON."""
+
+    def _gf_from_wire(self, gf_dict: dict[str, Any]) -> GraphicalFunction:
+        var = structure_variable(
+            {"type": "aux", "name": "g", "equation": "x", "graphicalFunction": gf_dict}
+        )
+        assert isinstance(var, Aux)
+        assert var.graphical_function is not None
+        return var.graphical_function
 
     def test_graphical_function_with_explicit_null_scales(self) -> None:
         """GraphicalFunction should accept explicit null for xScale/yScale.
@@ -997,110 +1029,160 @@ class TestNullValueHandling:
         explicitly sets xScale or yScale to null, we should treat it as None,
         not raise an error.
         """
-        # JSON with explicit null values for xScale and yScale
-        json_with_null_scales = {
-            "points": [[0.0, 1.0], [1.0, 2.0]],
-            "kind": "continuous",
-            "xScale": None,
-            "yScale": None,
-        }
-        gf = converter.structure(json_with_null_scales, GraphicalFunction)
+        gf = self._gf_from_wire(
+            {
+                "points": [[0.0, 1.0], [1.0, 2.0]],
+                "kind": "continuous",
+                "xScale": None,
+                "yScale": None,
+            }
+        )
         assert gf.x_scale is None
         assert gf.y_scale is None
-        assert gf.points == [(0.0, 1.0), (1.0, 2.0)]
+        assert gf.x_points == (0.0, 1.0)
+        assert gf.y_points == (1.0, 2.0)
         assert gf.kind == "continuous"
 
     def test_graphical_function_with_null_x_scale_only(self) -> None:
         """GraphicalFunction should handle null xScale with valid yScale."""
-        json_with_mixed = {
-            "points": [[0.0, 1.0], [1.0, 2.0]],
-            "xScale": None,
-            "yScale": {"min": 0.0, "max": 10.0},
-        }
-        gf = converter.structure(json_with_mixed, GraphicalFunction)
+        gf = self._gf_from_wire(
+            {
+                "points": [[0.0, 1.0], [1.0, 2.0]],
+                "xScale": None,
+                "yScale": {"min": 0.0, "max": 10.0},
+            }
+        )
         assert gf.x_scale is None
-        assert gf.y_scale is not None
-        assert gf.y_scale.min == 0.0
-        assert gf.y_scale.max == 10.0
+        assert gf.y_scale == GraphicalFunctionScale(min=0.0, max=10.0)
 
     def test_graphical_function_with_null_y_scale_only(self) -> None:
         """GraphicalFunction should handle valid xScale with null yScale."""
-        json_with_mixed = {
-            "points": [[0.0, 1.0], [1.0, 2.0]],
-            "xScale": {"min": -5.0, "max": 5.0},
-            "yScale": None,
-        }
-        gf = converter.structure(json_with_mixed, GraphicalFunction)
-        assert gf.x_scale is not None
-        assert gf.x_scale.min == -5.0
-        assert gf.x_scale.max == 5.0
+        gf = self._gf_from_wire(
+            {
+                "points": [[0.0, 1.0], [1.0, 2.0]],
+                "xScale": {"min": -5.0, "max": 5.0},
+                "yScale": None,
+            }
+        )
+        assert gf.x_scale == GraphicalFunctionScale(min=-5.0, max=5.0)
         assert gf.y_scale is None
 
     def test_graphical_function_without_scale_keys(self) -> None:
         """GraphicalFunction should handle missing x_scale/y_scale keys."""
-        # Keys are completely absent (different from explicit null)
-        json_without_scales = {
-            "points": [[0.0, 1.0], [1.0, 2.0]],
-            "kind": "discrete",
-        }
-        gf = converter.structure(json_without_scales, GraphicalFunction)
+        gf = self._gf_from_wire({"points": [[0.0, 1.0], [1.0, 2.0]], "kind": "discrete"})
         assert gf.x_scale is None
         assert gf.y_scale is None
         assert gf.kind == "discrete"
 
 
-class TestElementEquationCompat:
-    """Tests for element-level compat roundtripping."""
+class TestViewAndLoopOps:
+    """Round-trips and error paths for the view / loop patch operations."""
 
-    def test_element_equation_compat_roundtrip(self) -> None:
-        """ElementEquation with compat.activeInitial roundtrips correctly."""
-        ee = ElementEquation(
-            subscript="north",
-            equation="50",
-            compat=Compat(active_initial="10"),
+    def _roundtrip_op(self, op: Any) -> Any:
+        patch = JsonProjectPatch(models=[JsonModelPatch(name="main", ops=[op])])
+        parsed = json.loads(json.dumps(converter.unstructure(patch)))
+        return converter.structure(parsed, JsonProjectPatch).models[0].ops[0]
+
+    def test_upsert_view_roundtrip(self) -> None:
+        from simlin.json_types import (
+            AliasViewElement,
+            AuxViewElement,
+            CloudViewElement,
+            FlowPoint,
+            FlowViewElement,
+            LinkPoint,
+            LinkViewElement,
+            ModuleViewElement,
+            Rect,
+            StockViewElement,
+            UpsertView,
+            View,
         )
-        json_dict = converter.unstructure(ee)
-        assert "compat" in json_dict
-        assert json_dict["compat"]["activeInitial"] == "10"
-        assert "activeInitial" not in json_dict
 
-        reconstructed = converter.structure(json_dict, ElementEquation)
-        assert reconstructed == ee
-
-    def test_element_equation_no_compat_roundtrip(self) -> None:
-        """ElementEquation without compat omits the field."""
-        ee = ElementEquation(subscript="south", equation="75")
-        json_dict = converter.unstructure(ee)
-        assert "compat" not in json_dict
-
-        reconstructed = converter.structure(json_dict, ElementEquation)
-        assert reconstructed == ee
-
-    def test_arrayed_flow_with_element_compat_roundtrip(self) -> None:
-        """Flow with arrayed elements carrying compat roundtrips correctly."""
-        flow = Flow(
-            name="rate",
-            arrayed_equation=ArrayedEquation(
-                dimensions=["Region"],
-                elements=[
-                    ElementEquation(
-                        subscript="east",
-                        equation="supply_east",
-                        compat=Compat(active_initial="init_east"),
-                    ),
-                    ElementEquation(
-                        subscript="west",
-                        equation="supply_west",
-                    ),
-                ],
-            ),
+        view = View(
+            elements=[
+                StockViewElement(uid=1, name="population", x=10.0, y=20.0),
+                FlowViewElement(
+                    uid=2,
+                    name="births",
+                    x=30.0,
+                    y=20.0,
+                    points=[
+                        FlowPoint(x=25.0, y=20.0, attached_to_uid=1),
+                        FlowPoint(x=40.0, y=20.0),
+                    ],
+                ),
+                AuxViewElement(uid=3, name="rate", x=50.0, y=40.0, label_side="right"),
+                CloudViewElement(uid=4, flow_uid=2, x=45.0, y=20.0),
+                LinkViewElement(uid=5, from_uid=3, to_uid=2, arc=45.0),
+                LinkViewElement(
+                    uid=6, from_uid=1, to_uid=3, multi_points=[LinkPoint(x=1.0, y=2.0)]
+                ),
+                ModuleViewElement(uid=7, name="sub", x=60.0, y=60.0),
+                AliasViewElement(uid=8, alias_of_uid=3, x=70.0, y=70.0),
+            ],
+            kind="stock_flow",
+            view_box=Rect(x=0.0, y=0.0, width=100.0, height=100.0),
+            zoom=1.5,
         )
-        json_dict = converter.unstructure(flow)
-        json_str = json.dumps(json_dict)
-        parsed = json.loads(json_str)
-        reconstructed = converter.structure(parsed, Flow)
-        assert reconstructed == flow
+        op = self._roundtrip_op(UpsertView(index=0, view=view))
+        assert isinstance(op, UpsertView)
+        assert op.index == 0
+        assert op.view == view
 
-        elems = json_dict["arrayedEquation"]["elements"]
-        assert elems[0]["compat"]["activeInitial"] == "init_east"
-        assert "compat" not in elems[1]
+    def test_delete_view_roundtrip(self) -> None:
+        from simlin.json_types import DeleteView
+
+        op = self._roundtrip_op(DeleteView(index=2))
+        assert op == DeleteView(index=2)
+
+    def test_set_loop_name_roundtrip(self) -> None:
+        from simlin.json_types import SetLoopName
+
+        op = self._roundtrip_op(
+            SetLoopName(variables=["population", "births"], name="growth", description="R1")
+        )
+        assert op == SetLoopName(
+            variables=["population", "births"], name="growth", description="R1"
+        )
+
+    def test_set_loop_name_without_description_omits_key(self) -> None:
+        from simlin.json_types import SetLoopName
+
+        op_dict = converter.unstructure(SetLoopName(variables=["a"], name="n"))
+        assert "description" not in op_dict["payload"]
+        assert self._roundtrip_op(SetLoopName(variables=["a"], name="n")) == SetLoopName(
+            variables=["a"], name="n"
+        )
+
+    def test_unknown_model_op_type_rejected(self) -> None:
+        from simlin.json_types import JsonModelOperation
+
+        bad_op = {"type": "frobnicate", "payload": {}}
+        with pytest.raises(Exception, match="Unknown model operation type"):
+            converter.structure(bad_op, JsonModelOperation)
+
+    def test_unknown_project_op_type_rejected(self) -> None:
+        bad = {"projectOps": [{"type": "frobnicate", "payload": {}}]}
+        with pytest.raises(Exception, match="Unknown project operation type"):
+            converter.structure(bad, JsonProjectPatch)
+
+    def test_unknown_view_element_type_rejected(self) -> None:
+        from simlin.json_types import View
+
+        with pytest.raises(Exception, match="Unknown view element type"):
+            converter.structure({"elements": [{"type": "banner", "uid": 1}]}, View)
+
+    def test_set_sim_specs_roundtrip(self) -> None:
+        from simlin.json_types import SetSimSpecs, SimSpecs
+
+        patch = JsonProjectPatch(
+            project_ops=[
+                SetSimSpecs(
+                    sim_specs=SimSpecs(start_time=0.0, end_time=10.0, dt="0.25", method="euler")
+                )
+            ]
+        )
+        parsed = json.loads(json.dumps(converter.unstructure(patch)))
+        reconstructed = converter.structure(parsed, JsonProjectPatch)
+        assert reconstructed.project_ops == patch.project_ops
