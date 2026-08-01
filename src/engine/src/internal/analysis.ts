@@ -252,7 +252,8 @@ export function simlin_analyze_get_relative_loop_score(
 // miscalculation fails loudly.
 const LOOP_SIZE = 40;
 // SimlinLink: from: ptr(4), to: ptr(4), polarity: u32(4), score: ptr(4),
-// score_len: usize(4), relative_score: ptr(4), relative_score_len: usize(4) = 28 bytes
+// score_len: usize(4), relative_score: ptr(4), relative_score_len: usize(4),
+// scored_input_count: usize(4) (GH #998) = 32 bytes
 const LINK_SIZE = 32;
 // Pointer size for wasm32
 const PTR_SIZE = 4;

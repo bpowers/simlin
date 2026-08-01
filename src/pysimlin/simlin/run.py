@@ -48,8 +48,9 @@ class DominantPeriod:
     partition: int | None = None
     """Result-scoped index naming the cycle partition this period describes
     (the same index space as :attr:`Loop.partition` /
-    :attr:`Analysis.partitions`), or ``None`` for the shared group of loops
-    with no partition metadata."""
+    :attr:`Analysis.partitions`), or ``None`` for a period of a loop with no
+    parent-level partition (a module-internal loop, which competes only
+    against itself)."""
 
     def duration(self) -> float:
         """Calculate the duration of this period.
@@ -334,9 +335,8 @@ class Run:
         A loop's importance series is its share of its own partition's total,
         so only partition-mates compete for dominance: the greedy selection
         runs within each partition independently and tags every period with
-        the partition it describes.  Loops with ``partition is None`` share
-        one trailing group (preserving the flat behavior when no partition
-        metadata exists).
+        the partition it describes.  See :meth:`_group_loops_for_dominance`
+        for how ``partition is None`` loops are grouped.
 
         Args:
             threshold: Minimum combined score for dominance (default 0.5)
@@ -355,18 +355,49 @@ class Run:
         if len(time_index) == 0:
             return ()
 
-        groups: dict[int | None, list[Loop]] = {}
-        for loop in loops:
-            groups.setdefault(loop.partition, []).append(loop)
-
         periods: list[DominantPeriod] = []
-        for partition in sorted(groups, key=lambda p: (p is None, p if p is not None else 0)):
+        for partition, group in self._group_loops_for_dominance(list(loops)):
             periods.extend(
-                self._dominant_periods_for_group(
-                    groups[partition], partition, time_index, threshold
-                )
+                self._dominant_periods_for_group(group, partition, time_index, threshold)
             )
         return tuple(periods)
+
+    @staticmethod
+    def _group_loops_for_dominance(
+        loops: list[Loop],
+    ) -> list[tuple[int | None, list[Loop]]]:
+        """Group loops into dominance-competition groups (GH #998).
+
+        Loops with a partition index compete only with partition-mates.  The
+        handling of ``partition is None`` loops depends on whether ANY loop
+        carries a partition: on a partition-bearing surface, ``None`` means
+        "no parent-level partition" (a module-internal loop, whose relative
+        score is ``±1`` by construction), so each such loop is its OWN solo
+        group -- pooling them would let whichever sorts first smother the
+        rest, the GH #998 pattern reappearing inside the ``None`` subset
+        (mirroring the engine ranking's per-loop Solo groups).  When NO loop
+        carries a partition (a surface without partition metadata), they
+        share one flat group, preserving the pre-partition behavior.
+
+        Returns ``(partition, loops)`` pairs, partition-major: ascending
+        partition index, then the ``None`` group(s) in input order.
+        """
+        partitioned: dict[int, list[Loop]] = {}
+        unpartitioned: list[Loop] = []
+        for loop in loops:
+            if loop.partition is None:
+                unpartitioned.append(loop)
+            else:
+                partitioned.setdefault(loop.partition, []).append(loop)
+
+        ordered: list[tuple[int | None, list[Loop]]] = [
+            (p, partitioned[p]) for p in sorted(partitioned)
+        ]
+        if partitioned:
+            ordered.extend((None, [loop]) for loop in unpartitioned)
+        elif unpartitioned:
+            ordered.append((None, unpartitioned))
+        return ordered
 
     @staticmethod
     def _dominant_periods_for_group(

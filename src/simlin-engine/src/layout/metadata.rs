@@ -28,10 +28,12 @@ pub struct DominantPeriod {
     /// The cycle partition this period describes (GH #998): dominance is
     /// computed WITHIN a partition, because a loop's importance series is its
     /// share of its own partition's total and is not comparable across
-    /// partitions.  `None` labels the shared group of loops that carried no
-    /// partition metadata (the layout fallback path).  On the analysis
-    /// surface this indexes `ModelAnalysis::partitions`, the same space as
-    /// `LoopSummary::partition`.
+    /// partitions.  `None` labels a group with no partition index: the
+    /// shared group when NO loop carried partition metadata (the layout
+    /// fallback path), or one solo loop's own timeline on a
+    /// partition-bearing surface (see `calculate_dominant_periods`).  On the
+    /// analysis surface this indexes `ModelAnalysis::partitions`, the same
+    /// space as `LoopSummary::partition`.
     pub partition: Option<usize>,
 }
 
@@ -46,7 +48,8 @@ pub struct FeedbackLoop {
     /// The loop's cycle partition (GH #998), used to group loops for
     /// dominant-period selection: importance is a share WITHIN a partition,
     /// so only partition-mates compete.  `None` when the producing surface
-    /// has no partition metadata; all `None` loops share one group.
+    /// has no partition metadata for this loop; see
+    /// `calculate_dominant_periods` for how `None` loops are grouped.
     pub partition: Option<usize>,
 }
 
@@ -128,15 +131,25 @@ impl ComputedMetadata {
 /// computed within each partition independently, and every returned period
 /// says which partition it describes.
 ///
-/// Loops with `partition == None` (a surface with no partition metadata,
-/// e.g. the layout fallback path) share one group, which preserves the
-/// pre-partition behavior exactly for that path.
+/// The handling of `partition == None` loops depends on whether the surface
+/// carries partition metadata at all.  When EVERY loop is `None` (the layout
+/// persisted-metadata fallback, which has no partition information), they
+/// share one group -- preserving the pre-partition flat behavior exactly for
+/// that path.  When the surface IS partition-bearing (any loop carries
+/// `Some`), each `None` loop instead forms its OWN group: on those surfaces
+/// `None` means "no parent-level partition" (a module-internal loop), such a
+/// loop's relative score is `±1` by construction, and pooling unrelated
+/// `None` loops would let whichever sorts first smother the rest -- the
+/// GH #998 pattern again, and the same reason discovery's ranking gives each
+/// unpartitioned loop its own `NormGroup::Solo` (GH #750).
 ///
 /// Periods are ordered partition-major -- ascending partition index, the
-/// `None` group last -- with each partition's periods in time order.
-/// Partition indices are dense in first-appearance order over the ranked
-/// (competitive-first) loop list, so partition 0 is the most competitive
-/// group and leads the output.
+/// `None` group(s) last -- with each partition's periods in time order.  On
+/// the DISCOVERY surface partition indices are dense in first-appearance
+/// order over its ranked (competitive-first) loop list, so there partition 0
+/// is the most competitive group and leads the output; the layout
+/// detected-loop path derives its indices from the id-sorted detected list
+/// instead, where index 0 carries no competitiveness meaning.
 ///
 /// `dt` is the time between consecutive entries in each loop's importance_series.
 /// `start_time` is the simulation start time.
@@ -145,18 +158,34 @@ pub fn calculate_dominant_periods(
     start_time: f64,
     dt: f64,
 ) -> Vec<DominantPeriod> {
-    // Group loops by partition, preserving each group's input (ranked)
-    // order.  `(is_none, partition)` sorts Some(0), Some(1), ..., None.
-    let mut groups: BTreeMap<(bool, usize), Vec<&FeedbackLoop>> = BTreeMap::new();
+    let any_partitioned = loops.iter().any(|l| l.partition.is_some());
+
+    // Group the Some-partition loops by partition, preserving each group's
+    // input (ranked) order.
+    let mut partitioned: BTreeMap<usize, Vec<&FeedbackLoop>> = BTreeMap::new();
+    let mut unpartitioned: Vec<&FeedbackLoop> = Vec::new();
     for l in loops {
-        groups
-            .entry((l.partition.is_none(), l.partition.unwrap_or(0)))
-            .or_default()
-            .push(l);
+        match l.partition {
+            Some(p) => partitioned.entry(p).or_default().push(l),
+            None => unpartitioned.push(l),
+        }
     }
 
-    groups
+    let none_groups: Vec<Vec<&FeedbackLoop>> = if any_partitioned {
+        // Partition-bearing surface: each None loop is its own solo group
+        // (see the doc above), in input (ranked) order.
+        unpartitioned.into_iter().map(|l| vec![l]).collect()
+    } else if unpartitioned.is_empty() {
+        Vec::new()
+    } else {
+        // No partition metadata anywhere: one shared group, the exact
+        // pre-partition flat selection.
+        vec![unpartitioned]
+    };
+
+    partitioned
         .into_values()
+        .chain(none_groups)
         .flat_map(|group| {
             let partition = group[0].partition;
             calculate_dominant_periods_for_group(&group, partition, start_time, dt)
@@ -873,10 +902,49 @@ mod tests {
         }
     }
 
-    /// Loops with no partition metadata (the layout fallback path) share ONE
-    /// group, so that path's behavior is byte-identical to the pre-partition
-    /// flat selection -- including cross-loop accumulation to the 0.5
-    /// threshold.
+    /// On a PARTITION-BEARING surface, each `None` loop (no parent-level
+    /// partition -- a module-internal loop, whose relative score is +/-1 by
+    /// construction) forms its OWN group, mirroring discovery's
+    /// `NormGroup::Solo` (GH #750): pooling unrelated `None` loops would let
+    /// whichever sorts first smother the rest -- the GH #998 pattern
+    /// reappearing inside the `None` subset.
+    #[test]
+    fn test_none_loops_are_solo_groups_on_a_partitioned_surface() {
+        let loops = vec![
+            partitioned_loop("R_p0", vec![0.7, 0.7], Some(0)),
+            // Two unrelated module-internal loops, both reading +/-1 while
+            // active.  Pooled, R_mod would smother B_mod at every step.
+            partitioned_loop("R_mod", vec![1.0, 1.0], None),
+            partitioned_loop("B_mod", vec![-1.0, -1.0], None),
+        ];
+        let periods = calculate_dominant_periods(&loops, 0.0, 1.0);
+
+        let none_periods: Vec<_> = periods.iter().filter(|p| p.partition.is_none()).collect();
+        assert_eq!(
+            none_periods.len(),
+            2,
+            "each None loop gets its own (solo) timeline: {periods:?}"
+        );
+        assert!(
+            none_periods
+                .iter()
+                .any(|p| p.dominant_loops == vec!["B_mod"]),
+            "B_mod must not be smothered by R_mod: {periods:?}"
+        );
+        assert!(
+            !periods
+                .iter()
+                .any(|p| p.dominant_loops.len() > 1 && p.partition.is_none()),
+            "no pooled None period may exist on a partition-bearing surface"
+        );
+        // The Some-partition group still leads the output.
+        assert_eq!(periods[0].partition, Some(0));
+    }
+
+    /// Loops with no partition metadata ANYWHERE (the layout fallback path)
+    /// share ONE group, so that path's behavior is byte-identical to the
+    /// pre-partition flat selection -- including cross-loop accumulation to
+    /// the 0.5 threshold.
     #[test]
     fn test_dominant_periods_none_partitions_share_one_group() {
         let loops = vec![

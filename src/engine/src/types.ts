@@ -652,8 +652,9 @@ export interface DominantPeriod {
   readonly endTime: number;
   /**
    * Result-scoped index naming the cycle partition this period describes
-   * (the same index space as `Loop.partition`), or `null` for the shared
-   * group of loops with no partition metadata.
+   * (the same index space as `Loop.partition`), or `null` for a period of a
+   * loop with no parent-level partition (a module-internal loop, which
+   * competes only against itself).
    */
   readonly partition: number | null;
 }

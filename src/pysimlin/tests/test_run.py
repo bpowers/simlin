@@ -145,6 +145,40 @@ class TestRunClass:
                     "the lone loop is confined to its own partition's periods"
                 )
 
+    def test_group_loops_for_dominance_solo_none_on_partitioned_surface(self) -> None:
+        """GH #998: on a partition-bearing surface each partition-None loop
+        (module-internal; relative score +/-1 by construction) forms its OWN
+        dominance group; only a surface with NO partition metadata pools them.
+
+        The fixture hand-builds Loop objects because the function's whole
+        input contract is the `partition` field, whose production values are
+        exactly `None` or a dense int -- both shapes covered here.
+        """
+        from simlin.analysis import Loop, LoopPolarity
+        from simlin.run import Run
+
+        def loop(loop_id: str, partition: int | None) -> Loop:
+            return Loop(
+                id=loop_id,
+                variables=("a", "b"),
+                polarity=LoopPolarity.REINFORCING,
+                partition=partition,
+            )
+
+        mixed = [loop("r1", 0), loop("mod_a", None), loop("b1", 0), loop("mod_b", None)]
+        groups = Run._group_loops_for_dominance(mixed)
+        assert [(p, [lo.id for lo in g]) for p, g in groups] == [
+            (0, ["r1", "b1"]),
+            (None, ["mod_a"]),
+            (None, ["mod_b"]),
+        ], "None loops must be solo groups when any loop carries a partition"
+
+        flat = [loop("l1", None), loop("l2", None)]
+        groups = Run._group_loops_for_dominance(flat)
+        assert [(p, [lo.id for lo in g]) for p, g in groups] == [
+            (None, ["l1", "l2"]),
+        ], "an all-None surface keeps the single flat group"
+
     def test_run_caching(self, xmile_model_path: Path) -> None:
         """Test that Run properties are cached properly."""
         model = simlin.load(xmile_model_path)

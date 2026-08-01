@@ -303,8 +303,10 @@ typedef struct {
   double combined_score;
   // RESULT-SCOPED index into `SimlinDiscoveryResult.partitions` naming the
   // cycle partition this period describes -- the same index space as
-  // `SimlinDiscoveredLoop.partition` -- or -1 for the shared group of
-  // loops with no partition metadata.  Appended additively (GH #998).
+  // `SimlinDiscoveredLoop.partition` -- or -1 for a period of a loop with
+  // no parent-level partition (a module-internal loop, which competes only
+  // against itself, mirroring the ranking's per-loop Solo groups).
+  // Appended additively (GH #998).
   int32_t partition;
 } SimlinDominantPeriod;
 

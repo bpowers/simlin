@@ -2333,6 +2333,12 @@ fn discover_loops_returns_loops_periods_and_importance() {
                 !names.is_empty(),
                 "a dominant period must name at least one loop"
             );
+            // GH #998: each period says which cycle partition it describes;
+            // this single-stock model has exactly partition 0.
+            assert_eq!(
+                p.partition, 0,
+                "every period on this one-partition model must be tagged 0"
+            );
         }
 
         // Partition metadata: the single-stock model has exactly one cycle
