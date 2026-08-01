@@ -111,6 +111,24 @@ class Run:
         self._cached_loops: tuple[Loop, ...] | None = None
         self._cached_dominant_periods: tuple[DominantPeriod, ...] | None = None
         self._cached_time_spec: TimeSpec | None = None
+        self._cached_ltm_mode: str | None = None
+
+    def _materialize(self) -> None:
+        """Populate every lazy cache so this Run no longer needs its Sim.
+
+        Called by :meth:`Sim.get_run` before handing the Run to the caller:
+        the natural usage is ``with model.simulate() as sim: run =
+        sim.get_run()`` followed by analysis of ``run`` after the ``with``
+        block closes the Sim, so every surface must be snapshotted while the
+        Sim is still alive. :meth:`Model.run` deliberately does NOT call
+        this -- its Sim is owned by the Run and never closed, and laziness
+        there avoids computing loop surfaces the caller may never touch.
+        """
+        _ = self.results
+        _ = self.loops
+        _ = self.dominant_periods
+        _ = self.time_spec
+        _ = self.ltm_mode
 
     @property
     def results(self) -> pd.DataFrame:
@@ -254,7 +272,9 @@ class Run:
             >>> if run.ltm_mode == "discovery":
             ...     print("loops ranked heuristically; not exhaustively enumerated")
         """
-        return str(self._sim.get_ltm_mode())
+        if self._cached_ltm_mode is None:
+            self._cached_ltm_mode = str(self._sim.get_ltm_mode())
+        return self._cached_ltm_mode
 
     @property
     def time_spec(self) -> TimeSpec:

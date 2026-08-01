@@ -395,6 +395,46 @@ class TestSimContextManager:
             assert isinstance(links, list)
 
 
+class TestGetRunLifetime:
+    """A Run returned by get_run() must remain usable after its Sim closes.
+
+    get_run() is documented as returning "simulation results as a Run
+    object"; the natural usage is `with model.simulate() as sim: ...;
+    run = sim.get_run()` followed by analysis of `run` outside the with
+    block. That requires get_run() to eagerly snapshot every surface the
+    Run exposes rather than lazily reading from the (soon closed) Sim.
+    """
+
+    def test_run_usable_after_sim_closed(self, xmile_model_path) -> None:
+        """Every Run surface works after the simulate() context exits."""
+        model = simlin.load(xmile_model_path)
+        with model.simulate() as sim:
+            sim.run_to_end()
+            step_count = sim.get_step_count()
+            run = sim.get_run()
+
+        df = run.results
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == step_count
+        assert isinstance(run.loops, tuple)
+        assert isinstance(run.dominant_periods, tuple)
+        assert run.ltm_mode == "disabled"
+        assert run.time_spec.stop > run.time_spec.start
+        assert run.overrides == {}
+
+    def test_ltm_run_usable_after_sim_closed(self, xmile_model_path) -> None:
+        """LTM surfaces (loops, ltm_mode) also survive Sim closure."""
+        model = simlin.load(xmile_model_path)
+        with model.simulate(enable_ltm=True) as sim:
+            sim.run_to_end()
+            run = sim.get_run()
+
+        assert len(run.results) > 0
+        assert run.ltm_mode in ("exhaustive", "discovery")
+        assert isinstance(run.loops, tuple)
+        assert isinstance(run.dominant_periods, tuple)
+
+
 class TestSimRepr:
     """Test string representation of simulations."""
 

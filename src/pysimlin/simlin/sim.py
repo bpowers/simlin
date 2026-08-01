@@ -563,8 +563,14 @@ class Sim:
     def get_run(self) -> Run:
         """Get simulation results as a Run object.
 
-        Loop analysis is included if the simulation was created with enable_ltm=True.
-        Can be called before run_to_end() to get partial results.
+        Loop analysis is included if the simulation was created with
+        enable_ltm=True. Can be called mid-run for partial results; calling
+        it on a simulation with no results yet raises ``SimlinRuntimeError``.
+
+        The returned Run is a self-contained snapshot taken at call time: it
+        stays fully usable after this Sim is closed (e.g. after the
+        ``with model.simulate() as sim:`` block exits), and it does not
+        reflect any simulation steps executed after the call.
 
         Returns:
             Run object with results and analysis
@@ -573,11 +579,13 @@ class Sim:
             >>> with model.simulate(enable_ltm=True) as sim:
             ...     sim.run_to_end()
             ...     run = sim.get_run()
-            ...     print(run.dominant_periods)
+            >>> print(run.dominant_periods)
         """
         from .run import Run
 
-        return Run(self, self._overrides)
+        run = Run(self, self._overrides)
+        run._materialize()
+        return run
 
     def __enter__(self) -> Self:
         """Context manager entry point."""
