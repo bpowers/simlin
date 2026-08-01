@@ -40,7 +40,7 @@ use self::connector::{
 };
 use self::detect_ltm_loops::try_detect_ltm_loops;
 use self::graph::{ConstrainedGraphBuilder, Graph, GraphBuilder, Layout, Position};
-use self::metadata::{ComputedMetadata, LoopPolarity, StockFlowChain};
+use self::metadata::{ComputedMetadata, StockFlowChain};
 use self::objective::{
     point_node_footprint_overlap, point_node_footprints, point_node_pileup_count,
 };
@@ -54,6 +54,7 @@ use crate::common::canonicalize;
 use crate::datamodel;
 use crate::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
 use crate::datamodel::{Rect, ViewElement};
+use crate::ltm_dominance::{FeedbackLoop, LoopPolarity, PartitionSurface};
 
 /// A queued element during chain layout BFS traversal.
 struct WorkItem {
@@ -4371,7 +4372,7 @@ fn rendered_dependency_ident(
 fn build_feedback_loops_from_metadata(
     model: &datamodel::Model,
     uid_to_ident: &HashMap<i32, String>,
-) -> Vec<metadata::FeedbackLoop> {
+) -> Vec<FeedbackLoop> {
     let mut feedback_loops = Vec::new();
     for (idx, loop_md) in model.loop_metadata.iter().enumerate() {
         if loop_md.deleted {
@@ -4391,7 +4392,7 @@ fn build_feedback_loops_from_metadata(
             variables.push(first);
         }
 
-        feedback_loops.push(metadata::FeedbackLoop {
+        feedback_loops.push(FeedbackLoop {
             name: if loop_md.name.is_empty() {
                 format!("loop_{}", idx + 1)
             } else {
@@ -4650,10 +4651,10 @@ pub fn compute_metadata(
     // carries none at all.
     let (mut feedback_loops, partition_surface) =
         match try_detect_ltm_loops(db, source_project, actual_model_name) {
-            Some(loops) => (loops, metadata::PartitionSurface::PartitionBearing),
+            Some(loops) => (loops, PartitionSurface::PartitionBearing),
             None => (
                 build_feedback_loops_from_metadata(model, &uid_to_ident),
-                metadata::PartitionSurface::NoMetadata,
+                PartitionSurface::NoMetadata,
             ),
         };
     feedback_loops.sort_by(|a, b| {
@@ -4674,7 +4675,7 @@ pub fn compute_metadata(
         // (save_every = max(1, round(save_step/dt))), so the effective
         // cadence is never faster than dt.
         let effective_save_step = raw_save_step.max(dt);
-        metadata::calculate_dominant_periods(
+        crate::ltm_dominance::calculate_dominant_periods(
             &feedback_loops,
             specs.start,
             effective_save_step,

@@ -58,6 +58,7 @@ mod lookup_only_tests;
 pub mod ltm;
 pub mod ltm_agg;
 pub mod ltm_augment;
+pub mod ltm_dominance;
 pub mod ltm_finding;
 pub mod ltm_post;
 #[cfg(test)]

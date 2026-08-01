@@ -6,14 +6,13 @@
 //!
 //! A submodule of `layout` (split out purely for the per-file line cap;
 //! `scripts/lint-project.sh` rule 2): `compute_metadata` calls
-//! `try_detect_ltm_loops` to build `metadata::FeedbackLoop`s -- with
+//! `try_detect_ltm_loops` to build `ltm_dominance::FeedbackLoop`s -- with
 //! importance series and cycle partitions -- from the incremental salsa LTM
 //! pipeline, falling back to persisted `loop_metadata` when any step fails.
 
 use std::collections::HashMap;
 
-use super::LoopPolarity;
-use super::metadata;
+use crate::ltm_dominance::{FeedbackLoop, LoopPolarity};
 
 /// Try to detect feedback loops using LTM analysis via the incremental
 /// salsa compilation path. Compiles the project, detects loops, augments
@@ -24,7 +23,7 @@ pub(super) fn try_detect_ltm_loops(
     db: &mut crate::db::SimlinDb,
     source_project: crate::db::SourceProject,
     model_name: &str,
-) -> Option<Vec<metadata::FeedbackLoop>> {
+) -> Option<Vec<FeedbackLoop>> {
     try_detect_ltm_loops_incremental(db, source_project, model_name)
 }
 
@@ -33,7 +32,7 @@ fn try_detect_ltm_loops_incremental(
     db: &mut crate::db::SimlinDb,
     source_project: crate::db::SourceProject,
     actual_name: &str,
-) -> Option<Vec<metadata::FeedbackLoop>> {
+) -> Option<Vec<FeedbackLoop>> {
     use salsa::Setter;
 
     let actual_name_owned = actual_name.to_string();
@@ -122,7 +121,7 @@ fn try_detect_ltm_loops_incremental(
     // Phase 3: Build feedback loop structs from VM results.
     let mut feedback_loops = Vec::new();
     for dl in &detected.loops {
-        // metadata::LoopPolarity only carries R/B/U: the layout legend does
+        // ltm_dominance::LoopPolarity only carries R/B/U: the layout legend does
         // not visually distinguish "mostly R" from "R" today, so the
         // mostly-* variants collapse onto their dominant equivalents here.
         // The polarity_confidence on `dl` is dropped at this boundary --
@@ -156,7 +155,7 @@ fn try_detect_ltm_loops_incremental(
 
         let importance_series = importance_by_loop.get(&dl.id).cloned().unwrap_or_default();
 
-        feedback_loops.push(metadata::FeedbackLoop {
+        feedback_loops.push(FeedbackLoop {
             name: dl.id.clone(),
             polarity,
             variables,

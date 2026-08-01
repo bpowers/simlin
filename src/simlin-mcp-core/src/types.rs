@@ -209,8 +209,8 @@ pub struct DominantPeriodOutput {
     pub partition: Option<usize>,
 }
 
-impl From<simlin_engine::layout::metadata::DominantPeriod> for DominantPeriodOutput {
-    fn from(dp: simlin_engine::layout::metadata::DominantPeriod) -> Self {
+impl From<simlin_engine::ltm_dominance::DominantPeriod> for DominantPeriodOutput {
+    fn from(dp: simlin_engine::ltm_dominance::DominantPeriod) -> Self {
         Self {
             dominant_loops: dp.dominant_loops,
             start_time: dp.start,

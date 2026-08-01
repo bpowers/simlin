@@ -15,7 +15,7 @@
 //! from "no loops" (GH #660).
 
 use crate::db::{SimlinDb, SourceProject};
-use crate::layout::metadata::{self, DominantPeriod, FeedbackLoop};
+use crate::ltm_dominance::{self, DominantPeriod, FeedbackLoop};
 use crate::{datamodel, json};
 
 /// Summary of a feedback loop discovered via LTM analysis.
@@ -424,13 +424,13 @@ fn run_ltm_pipeline(
 
     let feedback_loops: Vec<FeedbackLoop> = found_loops.iter().map(to_feedback_loop).collect();
 
-    let dominant_loops_by_period = metadata::calculate_dominant_periods(
+    let dominant_loops_by_period = ltm_dominance::calculate_dominant_periods(
         &feedback_loops,
         results.specs.start,
         results.specs.save_step,
         // Discovery loops carry partition metadata: a None partition is a
         // module-internal loop competing only against itself.
-        metadata::PartitionSurface::PartitionBearing,
+        ltm_dominance::PartitionSurface::PartitionBearing,
     );
 
     let loop_dominance: Vec<LoopSummary> = found_loops
@@ -473,17 +473,17 @@ fn build_uid_to_loop_name(
 /// Convert a `FoundLoop` to the `FeedbackLoop` form expected by
 /// `calculate_dominant_periods`.
 fn to_feedback_loop(fl: &crate::ltm_finding::FoundLoop) -> FeedbackLoop {
-    // metadata::LoopPolarity is a 3-way coarse enum; the mostly-* variants
+    // ltm_dominance::LoopPolarity is a 3-way coarse enum; the mostly-* variants
     // collapse into their dominant cousin since the layout-side legend
     // does not visually distinguish them today.
     let polarity = match fl.loop_info.polarity {
         crate::ltm::LoopPolarity::Reinforcing | crate::ltm::LoopPolarity::MostlyReinforcing => {
-            metadata::LoopPolarity::Reinforcing
+            ltm_dominance::LoopPolarity::Reinforcing
         }
         crate::ltm::LoopPolarity::Balancing | crate::ltm::LoopPolarity::MostlyBalancing => {
-            metadata::LoopPolarity::Balancing
+            ltm_dominance::LoopPolarity::Balancing
         }
-        crate::ltm::LoopPolarity::Undetermined => metadata::LoopPolarity::Undetermined,
+        crate::ltm::LoopPolarity::Undetermined => ltm_dominance::LoopPolarity::Undetermined,
     };
 
     let variables = loop_variables(fl);

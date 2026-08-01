@@ -530,7 +530,7 @@ fn test_ltm_populates_loop_importance() {
 #[test]
 fn test_ltm_detects_polarity() {
     use simlin_engine::layout::compute_metadata;
-    use simlin_engine::layout::metadata::LoopPolarity;
+    use simlin_engine::ltm_dominance::LoopPolarity;
 
     let project = load_project("test/logistic_growth_ltm/logistic_growth.stmx");
     let metadata = compute_metadata(&project, MAIN_MODEL, None).unwrap();
