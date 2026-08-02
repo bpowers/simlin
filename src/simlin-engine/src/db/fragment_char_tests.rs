@@ -2528,7 +2528,10 @@ fn implicit_and_ltm_fragment_cache_granularity() {
         .collect();
     assert_eq!(
         implicit,
-        vec!["smoothed#0", "smoothed#1"],
+        vec![
+            "smoothed#$\u{205A}smoothed\u{205A}0\u{205A}arg1",
+            "smoothed#$\u{205A}smoothed\u{205A}0\u{205A}smth1"
+        ],
         "every implicit helper of the model recompiles on an edit to a variable \
          none of them reads: `compile_implicit_var_fragment` has no cache entry \
          of its own, so its granularity is `assemble_module`'s"

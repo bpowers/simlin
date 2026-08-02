@@ -390,7 +390,8 @@ pub fn compile_var_fragment<'db>(
 /// This is the *single shared relation* (DRY -- "never re-derive") for
 /// "given an `ImplicitVarMeta`, produce the helper's parsed + lowered
 /// form". It is the exact `model_implicit_var_info`-fed chain
-/// `parent → parsed.implicit_vars[index] → parse_var → lower_variable`
+/// `parent → the parse's helper NAMED by the metadata → parse_var →
+/// lower_variable`
 /// (the non-module branch builds via `lower_variable`; the module branch
 /// constructs a `Variable::Module` directly because `lower_variable` with
 /// an empty models map fails `resolve_module_input`). It is consumed by
@@ -405,7 +406,8 @@ pub fn compile_var_fragment<'db>(
 /// that also need it re-call the salsa-`returns(ref)`-cached
 /// `parse_source_variable_with_module_context` (a cache hit -- a borrow,
 /// zero clone), exactly as the pre-extraction code did. Loud-safe `None`
-/// (never panics): the implicit index is absent, the module branch's
+/// (never panics): this parse synthesized no helper of that name, the
+/// module branch's
 /// datamodel variable is not actually a `Module`, or the implicit var has
 /// equation errors. (`lower_variable` itself is total -- any lowering
 /// error surfaces as a `LoweredVarFragment::Fatal` / `Var::new` error
@@ -423,7 +425,7 @@ fn lower_implicit_var<'db>(
         project,
         module_ident_context,
     );
-    let implicit_dm_var = parsed.implicit_vars.get(meta.index_in_parent)?;
+    let implicit_dm_var = meta.find_in(parsed)?;
     let implicit_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
 
     let dim_context = project_dimensions_context(db, project);
@@ -525,26 +527,22 @@ pub(crate) fn compile_implicit_var_fragment(
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::CompiledVarFragment;
 
-    // Recorded at body entry (before the name is even resolved), keyed by the
-    // parent variable and the implicit index -- the identity this compiler is
+    // Recorded at body entry (before the helper is even resolved), keyed by the
+    // parent variable and the helper's own name -- the identity this compiler is
     // called with. Recording after `lower_implicit_var` would silently omit
     // every entry that failed to lower, which is exactly the work a caching
     // claim needs to account for.
     #[cfg(test)]
     note_fragment_execution(
         FragmentExecKind::Implicit,
-        &format!(
-            "{}#{}",
-            meta.parent_source_var.ident(db),
-            meta.index_in_parent
-        ),
+        &format!("{}#{}", meta.parent_source_var.ident(db), meta.name),
     );
 
     // The implicit var's canonical name (the runlist-gate key). Resolve it
     // through the shared prefix so this and the per-phase compile agree on
     // the name by construction. `None` here is the same loud-safe signal
-    // the per-phase compile returns (absent implicit index / equation
-    // errors).
+    // the per-phase compile returns (the helper is absent from this parse /
+    // equation errors).
     let module_ident_context =
         model_module_ident_context(db, model, project, module_input_names.to_vec());
     let (implicit_name, _lowered) =
@@ -666,7 +664,8 @@ pub(crate) fn compile_implicit_var_fragment(
 /// function.
 ///
 /// Loud-safe `None` (never panics): the shared prefix failed (absent
-/// implicit index / equation errors), a graphical-function table failed to
+/// no helper of that name in this parse / equation errors), a
+/// graphical-function table failed to
 /// build, the phase's `Var::new` errored, or codegen failed.
 ///
 /// `why`, when supplied, receives a human-readable reason on failure
@@ -706,7 +705,7 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
         project,
         module_ident_context,
     );
-    let implicit_dm_var = parsed.implicit_vars.get(meta.index_in_parent)?;
+    let implicit_dm_var = meta.find_in(parsed)?;
 
     // Project-global dimension context + converted dims, read from the
     // salsa-cached queries rather than rebuilt per implicit variable.

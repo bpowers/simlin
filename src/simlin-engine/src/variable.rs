@@ -927,6 +927,19 @@ where
     MI: std::fmt::Debug, // TODO: not sure why unwrap_err needs this
     F: Fn(&datamodel::ModuleReference) -> EquationResult<Option<MI>>,
 {
+    // Canonical name -> its index in `implicit_vars`, for the helpers THIS call
+    // contributes. Seeded empty rather than from the caller's vector, which is
+    // deliberate on both counts:
+    //
+    // * only helpers of the SAME parent can collide, since a synthesized name
+    //   embeds its parent's ident (`$⁚{parent}⁚{n}⁚…`) and two parents sharing a
+    //   canonical name is already a `DuplicateVariable` model error (GH #885);
+    // * `model::ModelStage0` passes ONE vector across every variable of a model,
+    //   so seeding from it would make each variable pay for every helper minted
+    //   before it -- quadratic in the model, which is the shape this map exists
+    //   to remove in the first place.
+    let mut implicit_index: HashMap<Ident<Canonical>, usize> = HashMap::new();
+
     // Resolve the default at use (an empty `'static` registry) rather than
     // rebinding here -- unifying a borrowed `Some(&'a _)` with the
     // `&'static` empty default before the parse closure captures it would
@@ -952,8 +965,53 @@ where
                     registry,
                     enclosing_model,
                 ) {
-                    Ok((ast, mut new_vars)) => {
-                        implicit_vars.append(&mut new_vars);
+                    Ok((ast, new_vars)) => {
+                        // MERGE rather than append. This closure runs twice per
+                        // variable -- once for the dt phase, once for the
+                        // initial phase -- and both passes name their helpers
+                        // from a counter that restarts at zero, so the two can
+                        // mint the SAME name for different bodies whenever the
+                        // initial pass reads a different equation (an `Arrayed`
+                        // element's own init equation, or `compat.active_initial`).
+                        // Downstream, `model_implicit_var_info` is name-keyed and
+                        // `compute_layout` allocates one slot per name, so the
+                        // loser used to be discarded in silence and one phase ran
+                        // the other phase's helper body.
+                        //
+                        // The rule is `dedup_vars_by_ident`'s, applied across the
+                        // phases instead of within one: a byte-identical repeat
+                        // collapses (the `Arrayed` arm re-parses every slot on the
+                        // initial pass, so this is the common case and costs
+                        // nothing), and a same-name/different-body pair is a loud
+                        // error rather than a silent pick.
+                        for new_var in new_vars {
+                            let ident = Ident::<Canonical>::new(new_var.get_ident());
+                            // Indexed, not scanned: an apply-to-all `SMTH1` over
+                            // an N-element dimension mints ~2N helpers on one
+                            // variable, and a scan here is the same O(k^2) shape
+                            // `ImplicitVarMeta::index_hint` exists to remove --
+                            // measured at +30% on N=800 before this map.
+                            match implicit_index.get(&ident).map(|i| &implicit_vars[*i]) {
+                                Some(existing) if *existing == new_var => {}
+                                Some(_) => {
+                                    // `DuplicateVariable` rather than the
+                                    // `Generic` its within-one-pass twin uses:
+                                    // this one is reachable from a model a user
+                                    // wrote, so the code should say what went
+                                    // wrong. Two helpers really do claim one
+                                    // name here.
+                                    errors.push(EquationError {
+                                        start: 0,
+                                        end: 0,
+                                        code: ErrorCode::DuplicateVariable,
+                                    });
+                                }
+                                None => {
+                                    implicit_index.insert(ident, implicit_vars.len());
+                                    implicit_vars.push(new_var);
+                                }
+                            }
+                        }
                         Some(ast)
                     }
                     Err(err) => {

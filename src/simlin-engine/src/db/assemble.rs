@@ -862,7 +862,7 @@ pub(crate) fn compile_phase_to_per_var_bytecodes_reporting(
 ///
 /// A synthetic helper (`$\u{205A}` prefix, absent from `model.variables`)
 /// that lands in a recurrence SCC is **parent-sourced**: its symbolic
-/// `PerVarBytecodes` is the parent variable's `implicit_vars[index]`
+/// `PerVarBytecodes` is the parent variable's NAMED implicit helper
 /// compiled through the shared per-phase relation
 /// `compile_implicit_var_phase_bytecodes` (the same chain
 /// `compile_implicit_var_fragment` runs), so the element-graph builder
@@ -926,10 +926,10 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
     // (element-cycle Phase 3 Task 2 / AC3.1). A synthetic helper that
     // lands in a recurrence SCC has no `SourceVariable` but DOES resolve
     // in `model_implicit_var_info`; its symbolic `PerVarBytecodes` is the
-    // parent variable's `implicit_vars[index]` compiled through
+    // parent variable's named implicit helper compiled through
     // the SAME shared per-phase relation the production per-variable
     // assembly uses (`compile_implicit_var_phase_bytecodes` -- the exact
-    // `parent → parsed.implicit_vars[i] → parse_var → lower_variable →
+    // `parent → the parse's helper of that name → parse_var → lower_variable →
     // compile` chain `compile_implicit_var_fragment` runs), so
     // the element-graph builder consumes it exactly like a real member
     // (same layout-independent `SymVarRef` form). The element-cycle SCC
@@ -2153,6 +2153,31 @@ pub fn assemble_simulation(
 
 type ModuleInstanceMap = HashMap<Ident<Canonical>, BTreeSet<BTreeSet<Ident<Canonical>>>>;
 
+/// The input sets one model is instantiated with, as PRODUCTION enumerates
+/// them (`#[cfg(test)]` accessor only, mirroring `db::dep_graph`'s
+/// `dt_cycle_sccs` idiom).
+///
+/// A test that needs "the module input set this sub-model actually gets" must
+/// not spell it by hand: a hand-written set is an assumption about the wiring,
+/// and the assumption is exactly what such a test is trying to hold the fixture
+/// to. Routing through `enumerate_module_instances` makes the test's input the
+/// engine's input by construction, so degrading the fixture's wiring changes
+/// the test's answer instead of being silently ignored.
+#[cfg(test)]
+pub(crate) fn module_input_sets_for(
+    db: &dyn Db,
+    project: SourceProject,
+    main_model_name: &str,
+    model_name: &str,
+) -> Vec<BTreeSet<Ident<Canonical>>> {
+    let modules = enumerate_module_instances(db, project, main_model_name)
+        .expect("fixture project must enumerate");
+    modules
+        .get(&Ident::<Canonical>::new(model_name))
+        .map(|sets| sets.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
 /// Enumerate all module instances in a project, starting from the main model.
 /// Returns a map from model name to the set of distinct input sets that model
 /// is instantiated with.
@@ -2255,9 +2280,7 @@ fn enumerate_module_instances_inner(
         );
         let input_prefix = format!("{name}\u{00B7}");
         let inputs: BTreeSet<Ident<Canonical>> =
-            if let Some(datamodel::Variable::Module(dm_module)) =
-                parsed.implicit_vars.get(meta.index_in_parent)
-            {
+            if let Some(datamodel::Variable::Module(dm_module)) = meta.find_in(parsed) {
                 dm_module
                     .references
                     .iter()

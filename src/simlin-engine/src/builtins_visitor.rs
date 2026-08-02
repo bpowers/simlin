@@ -5,6 +5,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
+use indexmap::IndexMap;
+
 use crate::ast::{Ast, BinaryOp, Expr0, IndexExpr0, Literal, print_eqn};
 use crate::builtins::{UntypedBuiltinFn, is_builtin_fn};
 use crate::common::{
@@ -138,6 +140,57 @@ fn get_dimension_names(dimensions: &[Dimension]) -> Vec<CanonicalDimensionName> 
         .collect()
 }
 
+/// One `Ast::Arrayed` variable's per-element equations, in an order that is a
+/// function of the model rather than of the process's hash seed (GH #1002).
+///
+/// `Ast::Arrayed` stores its slots in a `HashMap`, and both expansion paths in
+/// `instantiate_implicit_modules` read that order into something observable.
+/// The module-call path unions each slot's synthesized helpers into one vector,
+/// whose ORDER rides two salsa-cached values with derived `PartialEq`
+/// (`ParsedVariableResult::implicit_vars` and `VariableDeps::implicit_vars`),
+/// so an unstable order defeats backdating and makes the compiled artifact
+/// irreproducible. That path is the reachable one, and
+/// `db::fragment_determinism_tests::per_element_implicit_helper_order_is_stable_across_fresh_databases`
+/// gates it.
+///
+/// The other path walks every slot with ONE visitor, so the `n` counter that
+/// names each synthesized helper (`$⁚v⁚{n}⁚arg0`) is handed out in iteration
+/// order. It is taken when `!any_module_call || dimensions.is_empty()`, and the
+/// two disjuncts are NOT alike:
+///
+/// * `!any_module_call` is inert. `contains_module_call` is true for every
+///   construct that can synthesize a helper at all -- a stdlib call, a macro,
+///   `init`, `previous` -- since the sole `make_temp_arg` call site sits inside
+///   the PREVIOUS/INIT routing branch, and the only other producer is
+///   `expand_module_function`, whose macro and stdlib call sites are gated by
+///   the same predicates `contains_module_call` consults. With no module call
+///   there is nothing to name.
+/// * `dimensions.is_empty()` is LIVE, and not a degenerate path: an `<aux>`
+///   carrying `<element subscript=…>` children with no `<dimensions>` sibling
+///   is an ordinary XMILE document, `xmile::variables`' `convert_equation!`
+///   maps the missing element to an empty dimension list, and the model
+///   compiles. Reverting the ordering here leaves the helper NAMES identical --
+///   the counter is monotonic, so it emits `⁚0⁚`, `⁚1⁚`, `⁚2⁚` however the
+///   slots are walked -- and re-binds which SLOT'S EQUATION each name carries,
+///   which then moves the compiled artifact. Gated by
+///   `db::fragment_determinism_tests::undimensioned_arrayed_helper_bindings_are_stable_across_fresh_databases`,
+///   whose fixture is read through the real XMILE reader rather than
+///   hand-built. (A failed dimension LOOKUP is not this case: it returns
+///   `Err(BadDimensionName)` and yields no AST at all.)
+///
+/// Sorted by canonical element name rather than walked in declared row-major
+/// order: the map is allowed to be sparse (an `EXCEPT` default covers the
+/// slots it omits), so a `SubscriptIterator` walk would need a rule for a
+/// position the map has no entry for, while a total order over the keys that
+/// are actually present needs none.
+fn elements_in_stable_order(
+    elements: HashMap<CanonicalElementName, Expr0>,
+) -> Vec<(CanonicalElementName, Expr0)> {
+    let mut ordered: Vec<(CanonicalElementName, Expr0)> = elements.into_iter().collect();
+    ordered.sort_by(|(a, _), (b, _)| a.cmp(b));
+    ordered
+}
+
 /// Collapse entries that repeat an earlier entry's identifier, preserving
 /// first-occurrence order -- but ONLY when the duplicates are byte-identical.
 ///
@@ -152,9 +205,8 @@ fn get_dimension_names(dimensions: &[Dimension]) -> Vec<CanonicalDimensionName> 
 /// * The arrayed `PREVIOUS`/`INIT` helper synthesized in the `Ast::ApplyToAll`
 ///   per-element expansion (GH #541) deliberately omits the element suffix:
 ///   every slot walks the *same cloned* body, so all N copies are
-///   byte-identical `Equation::ApplyToAll` variables. The union MUST collapse
-///   them to one (the downstream layout indexes `implicit_vars` positionally,
-///   so duplicate names would mint colliding slots).
+///   byte-identical `Equation::ApplyToAll` variables. The union collapses them
+///   to one.
 ///
 /// An ident collision whose two variables are NOT byte-identical is a compiler
 /// bug -- exactly the silent corruption a suffix-less helper caused for the
@@ -196,7 +248,23 @@ pub struct BuiltinVisitor<'a> {
     /// `is_stdlib_module_function` classification rule, extending the base
     /// set from `collect_module_idents()` at runtime so that nested references
     /// (like `PREVIOUS(SMOOTH(...))`) correctly synthesize scalar helper args.
-    vars: HashMap<Ident<Canonical>, datamodel::Variable>,
+    ///
+    /// Insertion-ordered, and that is load-bearing rather than incidental
+    /// (GH #1002). Every producer of `ParsedVariableResult::implicit_vars`
+    /// emits this map with `.values()`, and `ImplicitVarMeta` used to identify
+    /// a helper by its POSITION in the resulting vector. Rust draws a fresh
+    /// `RandomState` key per `HashMap`, so with a `HashMap` here two parses of
+    /// the same variable -- in ONE process, differing only in their
+    /// `ModuleIdentContext` -- reported the helpers in two different orders,
+    /// and a position recorded against one parse resolved to a different
+    /// helper against the other. Insertion order is the walk's synthesis
+    /// order, so it is a function of the equation alone. Helper identity no
+    /// longer rides on it (see `ImplicitVarMeta::name`), but the two salsa
+    /// values carrying this order -- `ParsedVariableResult::implicit_vars` and
+    /// `VariableDeps::implicit_vars` -- have derived `PartialEq`, so an
+    /// unstable order still defeats backdating and makes the compiled artifact
+    /// irreproducible (the GH #595 class).
+    vars: IndexMap<Ident<Canonical>, datamodel::Variable>,
     n: usize,
     self_allowed: bool,
     /// Full dimension info for A2A context (used to identify indexed vs named dimensions)
@@ -1270,7 +1338,7 @@ pub fn instantiate_implicit_modules(
             if any_module_call && !dimensions.is_empty() {
                 let mut all_vars = Vec::new();
                 let mut new_elements = HashMap::new();
-                for (subscript_key, equation) in elements {
+                for (subscript_key, equation) in elements_in_stable_order(elements) {
                     let subscript_parts: Vec<String> = subscript_key
                         .as_str()
                         .split(',')
@@ -1322,12 +1390,16 @@ pub fn instantiate_implicit_modules(
                     .with_model_var_names(model_var_names)
                     .with_macro_registry(macro_registry)
                     .with_enclosing_model(enclosing_model);
-                let elements: std::result::Result<HashMap<_, _>, EquationError> = elements
-                    .into_iter()
-                    .map(|(subscript, equation)| {
-                        builtin_visitor.walk(equation).map(|ast| (subscript, ast))
-                    })
-                    .collect();
+                // One visitor across every slot, so the `n` counter that names
+                // each synthesized helper is handed out in this iteration
+                // order -- see `elements_in_stable_order`.
+                let elements: std::result::Result<HashMap<_, _>, EquationError> =
+                    elements_in_stable_order(elements)
+                        .into_iter()
+                        .map(|(subscript, equation)| {
+                            builtin_visitor.walk(equation).map(|ast| (subscript, ast))
+                        })
+                        .collect();
                 let transformed_default = if let Some(default_expr) = default_expr {
                     Some(builtin_visitor.walk(default_expr)?)
                 } else {

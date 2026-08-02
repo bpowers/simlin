@@ -441,7 +441,74 @@ pub fn variable_direct_dependencies<'db>(
 #[derive(Clone, PartialEq, Eq, salsa::Update)]
 pub struct ImplicitVarMeta {
     pub parent_source_var: SourceVariable,
-    pub index_in_parent: usize,
+    /// Canonical name of this helper -- its IDENTITY, and the key it is filed
+    /// under in [`model_implicit_var_info`].
+    ///
+    /// This used to be `index_in_parent`, a position in the parent's
+    /// `implicit_vars` vector, and that was a defect rather than a shortcut
+    /// (GH #1002). A consumer resolves a helper by re-parsing the parent, and
+    /// it does so under the module-ident context of the INSTANCE it is
+    /// compiling -- while this metadata is derived under the no-extra-idents
+    /// context. A position is only meaningful against the exact vector it was
+    /// taken from, so ANY disagreement between those two parses resolved it to
+    /// a different helper, including the merely-reordered case that made
+    /// GH #1002 seed-dependent. A name survives reordering; a position does not.
+    ///
+    /// **A name is not a fully context-stable identity, and the residual is
+    /// bounded rather than absent.** Synthesized names embed `BuiltinVisitor`'s
+    /// walk counter (`$⁚v⁚{n}⁚arg0`), so a context that inserts an EARLIER
+    /// helper shifts every later `n`. `PREVIOUS(port, 0) + SMTH1(port + 1, 3)`
+    /// over a bound `port` is the smallest case: the no-extra-idents parse calls
+    /// `$⁚sm⁚0⁚arg0` the SMTH argument (`port + 1`), the widened parse calls it
+    /// the PREVIOUS capture (`port`), and [`Self::find_in`] returns the latter
+    /// for metadata that meant the former. So the honest guarantee is "a helper
+    /// CARRYING this name, or nothing" -- not "this helper, or nothing".
+    ///
+    /// What bounds it: a name can only collide that way when the two parses
+    /// synthesize different helper SEQUENCES, and that already makes the
+    /// model's layout (derived from one parse) disagree with its runlists
+    /// (derived from the other), so the project fails to compile before any
+    /// mis-resolved fragment could be executed. Pinned by
+    /// `db::fragment_determinism_tests::a_cross_context_helper_name_collision_is_confined_to_a_failing_compile`.
+    /// Closing it properly means making the names themselves context-stable,
+    /// which is GH #372's explicit model-level parse context, not a change here.
+    pub name: String,
+    /// The position `name` occupied in the parse it was derived from -- a
+    /// lookup HINT, never the identity.
+    ///
+    /// [`ImplicitVarMeta::find_in`] tries this position first and accepts what
+    /// it finds only if that helper carries `name`; otherwise it scans. So a
+    /// stale or wrong hint costs one comparison and can never yield a helper
+    /// other than `name`'s -- which is the whole difference between this and
+    /// the `index_in_parent` it replaces, and is what the `#[cfg(test)]`
+    /// mutation in `find_in`'s body note pins.
+    ///
+    /// That "cannot change the answer" rests on a PRECONDITION worth naming,
+    /// because it did not always hold: no two entries of one
+    /// `parsed.implicit_vars` may share a name. Otherwise the hint (which
+    /// points at the LAST occurrence, since this map is name-keyed and
+    /// last-wins) and the scan (which returns the first) could select
+    /// different helpers, and the hint would stop being an optimization.
+    /// `variable::parse_var_with_module_context` establishes it by MERGING
+    /// helpers across the dt and initial passes rather than appending, so a
+    /// byte-identical repeat collapses and a genuine collision is refused;
+    /// `db::fragment_determinism_tests::implicit_helper_names_are_unique_within_one_parse`
+    /// is what says so for every route into the vector. Note this is a
+    /// WITHIN-parse property and is independent of the cross-parse residual on
+    /// [`Self::name`] -- there, one name denotes different helpers in two
+    /// different parses, and hint and scan still agree with each other.
+    ///
+    /// It exists because the scan alone is O(k) per helper and so O(k^2) per
+    /// parent variable, and `k` is not small on ordinary models: an
+    /// apply-to-all `SMTH1` over an N-element dimension mints ~2N helpers on
+    /// ONE variable. The clock says N=800 costs 2.13s scanning where the parent
+    /// commit costs 1.12s, and 1.16s with the hint; the instruction count says
+    /// it without a timer, by counting entries examined per compile: 17,289,600
+    /// scanning versus 14,400 with the hint, a 1200x reduction, at a 100% hit
+    /// rate on every model tried (C-LEARN, WRLD3, scirev7, and the synthetic at
+    /// both 200 and 800). The hit rate is the load-bearing number -- a miss is
+    /// only possible under the cross-parse divergence, which does not compile.
+    pub index_hint: usize,
     pub is_stock: bool,
     pub is_module: bool,
     pub model_name: Option<String>,
@@ -458,10 +525,48 @@ pub struct ImplicitVarMeta {
     pub dimensions: Vec<String>,
 }
 
+impl ImplicitVarMeta {
+    /// The helper this metadata names, within one parse of its parent.
+    ///
+    /// `parsed` must be a parse of `self.parent_source_var`; the caller chooses
+    /// the module-ident context, which is exactly why the match is by name (see
+    /// [`ImplicitVarMeta::name`], including the bounded case where a name is
+    /// not context-stable). `None` means this parse synthesized no helper of
+    /// that name -- a loud-safe skip for the caller.
+    ///
+    /// The `canonicalize` is defence in depth, not load-bearing: a synthesized
+    /// helper's ident is built from its parent's already-canonical ident, so
+    /// every name on both sides is canonical and a raw comparison resolves
+    /// identically (checked on a parent named `"My Var"`). Kept because nothing
+    /// in the type system says so and the cost is a borrow.
+    pub(crate) fn find_in<'a>(
+        &self,
+        parsed: &'a ParsedVariableResult,
+    ) -> Option<&'a datamodel::Variable> {
+        let is_mine = |v: &datamodel::Variable| canonicalize(v.get_ident()) == self.name;
+        // The hint is right whenever the two parses agree, which is every model
+        // that is not the GH #372 divergence -- measured at a 100% hit rate on
+        // every model in the corpus, so the scan below is the exceptional path,
+        // not the usual one. Verifying the name before accepting the hint is
+        // what keeps this a pure optimization; dropping
+        // that check restores positional identity and reds
+        // `an_implicit_helper_declines_when_the_contexts_synthesize_different_sets`.
+        if let Some(hinted) = parsed.implicit_vars.get(self.index_hint)
+            && is_mine(hinted)
+        {
+            return Some(hinted);
+        }
+        parsed.implicit_vars.iter().find(|v| is_mine(v))
+    }
+}
+
 impl std::fmt::Debug for ImplicitVarMeta {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImplicitVarMeta")
-            .field("index_in_parent", &self.index_in_parent)
+            .field("name", &self.name)
+            // The hint is not identity, but a WRONG one is exactly what you are
+            // looking at this for, so it is rendered rather than hidden.
+            .field("index_hint", &self.index_hint)
             .field("is_stock", &self.is_stock)
             .field("size", &self.size)
             .field("dimensions", &self.dimensions)
@@ -526,10 +631,11 @@ pub fn model_implicit_var_info(
                     .product()
             };
             result.insert(
-                name,
+                name.clone(),
                 ImplicitVarMeta {
                     parent_source_var: *source_var,
-                    index_in_parent: index,
+                    name,
+                    index_hint: index,
                     is_stock,
                     is_module,
                     model_name,
