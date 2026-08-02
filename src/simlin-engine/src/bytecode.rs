@@ -4134,7 +4134,7 @@ pub struct CompiledInitial {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub struct CompiledModule {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) n_slots: usize,

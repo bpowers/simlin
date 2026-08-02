@@ -29,7 +29,7 @@ pub use expr3::{Expr3, Expr3LowerContext, IndexExpr3, Pass1Context};
 pub use literal::Literal;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Ast<Expr> {
     Scalar(Expr),
     ApplyToAll(Vec<Dimension>, Expr),

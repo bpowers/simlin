@@ -19,18 +19,10 @@
 //! The split exists because the lowered `Vec<Expr>` is the natural reuse
 //! surface for read-only structural probes that need the engine's *own*
 //! per-variable production lowering without re-running it with a
-//! reconstructed context.
-//!
-//! It used to have a second reason -- `Vec<Expr>` does not implement
-//! `salsa::Update`, so lowering had to be a plain function while the caller
-//! stayed the tracked query. That reason was really the *prohibition* on
-//! `Expr` deriving `Update` (an `Expr` was keyed to one model-global slot
-//! layout), and it is gone: since GH #964 an `Expr` references variables by
-//! name and carries no offsets, so it is as layout-independent as the
-//! symbolic bytecode it becomes. Nothing derives `Update` for it yet, but
-//! making this step a tracked query of its own is now a free choice rather
-//! than an unsound one. See the rustdoc on
-//! `model.rs::stage_types_and_error_implement_salsa_update`.
+//! reconstructed context. A lowered `Expr` references variables by name and
+//! carries no offsets (addresses are assigned once, at assembly), so making
+//! this step a tracked query of its own is a free choice, not an unsound
+//! one; it simply is not one yet.
 //!
 //! Because a plain function cannot accumulate salsa diagnostics, the
 //! diagnostics this step would emit are returned **as data**
@@ -532,7 +524,7 @@ fn collect_var_dependencies(
 /// would give its caller a dependency on the whole variables map. Tracked, the
 /// `bool` backdates and only a genuine change of the flow's driven-ness
 /// invalidates the fragment.
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub(crate) fn flow_is_special_stock_driven(
     db: &dyn Db,
     model: SourceModel,

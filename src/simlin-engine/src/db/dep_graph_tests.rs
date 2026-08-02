@@ -1659,7 +1659,7 @@ fn two_stock_init_genuine_element_cycle_is_unresolved() {
 // value (`#[salsa::tracked(returns(ref))]`). salsa decides whether a
 // downstream query must be re-run by *structural equality* of the
 // returned value, so the new `resolved_sccs` field MUST participate in
-// `PartialEq`/`Eq`/`salsa::Update`. If the derive silently skipped the
+// `PartialEq`/`Eq`. If the derive silently skipped the
 // field (or the field were not wired into the struct), two results that
 // differ ONLY in `resolved_sccs` would compare equal and a model whose
 // only change is its resolved-SCC set would not invalidate the cache --

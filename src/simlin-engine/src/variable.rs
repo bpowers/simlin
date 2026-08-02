@@ -32,7 +32,7 @@ use crate::{ErrorCode, eqn_err, units};
 /// knowingly, on the same terms as the bytecode types: see the "Float equality
 /// in this crate" section on [`crate::ast::Literal`].
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub struct Table {
     pub x: Vec<f64>,
     pub y: Vec<f64>,
@@ -73,7 +73,7 @@ impl Table {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleInput {
     // the Variable identifier in the current model we will use for input
     pub src: Ident<Canonical>,
@@ -82,7 +82,7 @@ pub struct ModuleInput {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub enum Variable<MI = ModuleInput, E = Expr2> {
     Stock {
         ident: Ident<Canonical>,

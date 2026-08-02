@@ -33,7 +33,7 @@ use super::{
 
 /// Causal edge structure for a model, built from variable dependency sets
 /// and structural info (stock inflows/outflows, module refs).
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CausalEdgesResult {
     /// Adjacency list: from_var -> {to_var1, to_var2, ...}
     pub edges: HashMap<String, BTreeSet<String>>,
@@ -50,7 +50,7 @@ pub struct CausalEdgesResult {
 /// keep their plain names; arrayed variables use subscript notation
 /// (e.g., `population[NYC]`). Models without arrays produce an element
 /// graph identical to the variable graph.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ElementCausalEdgesResult {
     /// Adjacency list: from_element -> {to_element1, to_element2, ...}
     pub edges: HashMap<String, BTreeSet<String>>,
@@ -113,7 +113,7 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 /// conservative family at all -- it classifies `PerElement` (GH #525) and
 /// gets exact diagonal-with-pinned-axes edges plus per-(row,
 /// full-target-element) scores.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RefShape {
     /// `Expr2::Var(source, ...)` — bare variable reference. In an A2A
     /// context with an arrayed source, this is same-element. In a scalar
@@ -1131,7 +1131,7 @@ fn emit_agg_routed_edges(
 /// [`LoopCircuitsResult::to_named_circuits`].  Prefer
 /// [`LoopCircuitsResult::circuit_names`] or direct index iteration when
 /// you only need to read the names.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoopCircuitsResult {
     /// Unique variable names referenced by any circuit.  The integer
     /// values inside `circuits` index into this vector.  Names are in
@@ -1188,7 +1188,7 @@ impl LoopCircuitsResult {
 }
 
 /// A detected feedback loop with polarity and deterministic ID.
-#[derive(Clone, Debug, PartialEq, salsa::Update)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DetectedLoop {
     /// Deterministic ID: r1, r2, ... (reinforcing/mostly-reinforcing),
     /// b1, b2, ... (balancing/mostly-balancing), u1, u2, ... (undetermined).
@@ -1244,7 +1244,7 @@ pub struct DetectedLoop {
 /// `model_detected_loops` pipeline never produces these variants -- it has
 /// no runtime data -- but downstream consumers must handle them when the
 /// detected loops are enriched with simulated scores.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DetectedLoopPolarity {
     Reinforcing,
     Balancing,
@@ -1261,7 +1261,7 @@ pub enum DetectedLoopPolarity {
 /// `polarity_confidence`; use `PartialEq` for value comparison and the
 /// existing structural fields (`id`, `variables`, `polarity`) when an
 /// equivalence on a stable subset is required.
-#[derive(Clone, Debug, PartialEq, salsa::Update)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DetectedLoopsResult {
     pub loops: Vec<DetectedLoop>,
     /// The cycle partitions referenced by `loops` (each loop's `partition`
@@ -1276,7 +1276,7 @@ pub struct DetectedLoopsResult {
 }
 
 /// Stock-to-stock cycle partitions.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CyclePartitionsResult {
     pub partitions: Vec<Vec<String>>,
     pub stock_partition: HashMap<String, usize>,
@@ -1613,7 +1613,7 @@ pub fn model_causal_edges(
 /// scalar nodes in the causal graph, so per-shape distinctions don't
 /// apply. Unable-to-reconstruct edges (a defensive fallback that
 /// shouldn't happen for well-formed models) likewise map to `{Bare}`.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EdgeShapesResult {
     /// Map from variable-level edge `(from, to)` to the set of
     /// `RefShape`s observed at any reference site of `from` in `to`'s
@@ -2930,7 +2930,7 @@ pub fn model_element_loop_circuits(
 /// element-level Johnson. The shape of the emitted Loop is decided by
 /// the dimensions field: empty -> scalar Loop; non-empty -> A2A Loop
 /// with `dimensions` set.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FastPathCircuit {
     /// Variable names in cycle order (canonical / lower-case).
     pub variables: Vec<String>,
@@ -2965,7 +2965,7 @@ pub struct FastPathCircuit {
 /// pure-scalar cycles never inflate the slow-path subgraph, so this
 /// number is the structurally correct upper bound on the cost of
 /// running slow-path Johnson.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TieredCircuitsResult {
     /// Variable-level cycles that the classifier resolved to a single
     /// Loop without element-level Johnson.
@@ -3357,7 +3357,7 @@ pub fn model_element_cycle_partitions(
 /// Nothing between those calls can change its answer -- it reads only the
 /// model's variable set and the per-variable parse memos -- so the repetition
 /// was pure recomputation.
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub(crate) fn reconstruct_model_variables(
     db: &dyn Db,
     model: SourceModel,
@@ -3465,7 +3465,7 @@ pub(super) fn reconstruct_single_variable(
 /// Pinned by `db::ltm_tests::an_unrelated_equation_edit_does_not_regenerate_
 /// every_link_score`, which counts query-body entries -- pointer equality
 /// cannot see this, since backdating leaves the memo in place either way.
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 fn reconstruct_named_variable(
     db: &dyn Db,
     model: SourceModel,

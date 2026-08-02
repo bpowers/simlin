@@ -398,14 +398,14 @@ pub(crate) fn build_submodel_metadata<'arena>(
 ///
 /// Together, `locally_pure && dep_names ⊆ invariant` is exactly the
 /// per-variable verdict the topological pass needs, with no re-lowering.
-#[derive(Clone, Debug, PartialEq, salsa::Update)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FlowInvarianceSupport {
     pub locally_pure: bool,
     pub dep_names: std::sync::Arc<std::collections::BTreeSet<String>>,
 }
 
 /// Result of per-variable compilation: symbolic bytecodes for each phase.
-#[derive(Clone, Debug, PartialEq, salsa::Update)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct VarFragmentResult {
     pub fragment: crate::compiler::symbolic::CompiledVarFragment,
     /// Invariance support for the flow phase. `None` when the variable has
@@ -1378,16 +1378,13 @@ pub(crate) fn renumber_initials_phase(
 /// combined-fragment build, GF dedup, resolve) is memoized so an unchanged
 /// module (same `model`/`project`/`is_root`/`module_inputs`) is a pure
 /// cache hit -- no re-concatenation, no re-resolve. The success payload rides
-/// behind an `Arc` so the tracked-fn return value is `salsa::Update` (its
-/// inner `CompiledModule` derives `Update` via the per-field `PartialEq`
-/// fallback for the opaque bytecode side-channels) and salsa's clone-out on
-/// each cache-hit read is a single refcount bump rather than a deep bytecode
-/// clone.
+/// behind an `Arc` so salsa's clone-out on each cache-hit read is a single
+/// refcount bump rather than a deep bytecode clone.
 ///
 /// `module_inputs` is an interned `ModuleInputSet` (the sorted canonical input
 /// names). The empty set is the no-inputs case and, being a single interned
 /// id, shares one cache entry across all no-input callers.
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn assemble_module<'db>(
     db: &'db dyn Db,
     model: SourceModel,
@@ -1980,8 +1977,8 @@ pub fn assemble_module<'db>(
     // Resolve symbolic -> concrete offsets. The CompiledModule stays a pure,
     // salsa-cached artifact; the 3-address fusion (R2) is applied later, at
     // Vm::new, to the execution copy of the bytecode. The success payload is
-    // wrapped in an `Arc` so this tracked fn's return type is `salsa::Update`
-    // and salsa's clone-out is a refcount bump (the inner bytecode is large).
+    // wrapped in an `Arc` so salsa's clone-out is a refcount bump (the inner
+    // bytecode is large).
     resolve_module(&sym_module, layout).map(std::sync::Arc::new)
 }
 
@@ -1994,9 +1991,9 @@ pub fn assemble_module<'db>(
 /// changes, only the affected `assemble_module` instances re-execute;
 /// unchanged submodules cache-hit. `main_model_name` is an owned `String`
 /// (a salsa-compatible by-value key); the success payload rides behind an
-/// `Arc` so the return type is `salsa::Update` and clone-out is a refcount
-/// bump rather than a deep clone of the modules/offsets maps.
-#[salsa::tracked]
+/// `Arc` so clone-out is a refcount bump rather than a deep clone of the
+/// modules/offsets maps.
+#[salsa::tracked(returns(clone))]
 pub fn assemble_simulation(
     db: &dyn Db,
     project: SourceProject,

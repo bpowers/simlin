@@ -10,7 +10,7 @@ use crate::canonicalize;
 use crate::common::{DimensionName, ElementName};
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Default, Eq, Clone, salsa::Update)]
+#[derive(Default, Eq, Clone)]
 pub struct UnitMap {
     pub map: BTreeMap<String, i32>,
     pub ctx: Option<Vec<String>>,
@@ -163,7 +163,7 @@ impl FromIterator<(String, i32)> for UnitMap {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Copy, Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub enum GraphicalFunctionKind {
     Continuous,
     Extrapolate,
@@ -171,14 +171,14 @@ pub enum GraphicalFunctionKind {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub struct GraphicalFunctionScale {
     pub min: f64,
     pub max: f64,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub struct GraphicalFunction {
     pub kind: GraphicalFunctionKind,
     pub x_points: Option<Vec<f64>>,
@@ -188,7 +188,7 @@ pub struct GraphicalFunction {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub enum Equation {
     Scalar(String),
     ApplyToAll(Vec<DimensionName>, String),
@@ -234,7 +234,7 @@ impl Equation {
 
 /// The kind of external data function from Vensim's GET DIRECT family.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum DataSourceKind {
     Data,
     Constants,
@@ -246,7 +246,7 @@ pub enum DataSourceKind {
 /// Stores the parsed arguments from GET DIRECT DATA/CONSTANTS/LOOKUPS/SUBSCRIPT
 /// so the MDL writer can reconstruct the original function call.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DataSource {
     /// The kind of data function (Data, Constants, Lookups, Subscript)
     pub kind: DataSourceKind,
@@ -265,7 +265,7 @@ pub struct DataSource {
 /// expression strings (evaluated by the engine); `None` means the tag was
 /// absent and the documented default applies.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Conveyor {
     /// `<len>`: transit time, in time units. Required.
     pub transit_time: String,
@@ -291,7 +291,7 @@ pub struct Conveyor {
 
 /// Marks a flow as a conveyor leakage outflow. See `docs/design/conveyors.md` §3.3, §5.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Leakage {
     /// The leak fraction expression (`<leak>` content or a leak flow's `<eqn>`);
     /// `None` for a bare `<leak/>` marker (leakage TBD, contributes zero).
@@ -306,7 +306,7 @@ pub struct Leakage {
 
 /// isee `isee:spreadflow` inflow-placement method. See `docs/design/conveyors.md` §8.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum SpreadFlow {
     /// All inflow lands at the entry slat (the XMILE default).
     Beginning,
@@ -327,7 +327,7 @@ pub enum SpreadFlow {
 /// attribute does not churn every construction site. `Debug` is `debug-derive`-
 /// gated exactly like its `Compat` siblings (`Conveyor`/`Leakage`/`SpreadFlow`).
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Queue {}
 
 /// Per-variable metadata that is not part of the core equation: XMILE
@@ -337,7 +337,7 @@ pub struct Queue {}
 /// every construction site. Conveyor/leak/spread live here for the same reason
 /// `non_negative` does: they are all optional XMILE stock/flow options.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Default, salsa::Update)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct Compat {
     pub active_initial: Option<String>,
     pub non_negative: bool,
@@ -372,7 +372,7 @@ impl Compat {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Copy, Clone, PartialEq, Eq, Default, salsa::Update)]
+#[derive(Copy, Clone, PartialEq, Eq, Default)]
 pub enum Visibility {
     #[default]
     Private,
@@ -380,7 +380,7 @@ pub enum Visibility {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Copy, Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub enum AiState {
     A, // No information
     B, // Human created. Will only occur when a modeler adds content using AI to an existing model. (Depending on the software implementation these may always be reported as F).
@@ -393,7 +393,7 @@ pub enum AiState {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub struct Stock {
     pub ident: String,
     pub equation: Equation,
@@ -407,7 +407,7 @@ pub struct Stock {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub struct Flow {
     pub ident: String,
     pub equation: Equation,
@@ -420,7 +420,7 @@ pub struct Flow {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub struct Aux {
     pub ident: String,
     pub equation: Equation,
@@ -432,14 +432,14 @@ pub struct Aux {
     pub compat: Compat,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleReference {
     pub src: String,
     pub dst: String,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Module {
     pub ident: String,
     pub model_name: String,
@@ -452,7 +452,7 @@ pub struct Module {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub enum Variable {
     Stock(Stock),
     Flow(Flow),
@@ -868,12 +868,12 @@ pub struct LoopMetadata {
 /// body variables are the formal parameters and which are the outputs.
 /// `Model.macro_spec` is `None` for every non-macro model.
 //
-// `salsa::Update` lets `MacroSpec` be carried directly on the `SourceModel`
-// salsa input (mirroring `Compat`), so the per-project macro registry can be
-// a salsa-tracked query keyed on the macro-marked models -- no mirror type
-// and no separate model-level metadata input.
+// `MacroSpec` is carried directly on the `SourceModel` salsa input (mirroring
+// `Compat`), so the per-project macro registry can be a salsa-tracked query
+// keyed on the macro-marked models -- no mirror type and no separate
+// model-level metadata input.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct MacroSpec {
     /// Formal parameter names, in positional calling order. Each names a body
     /// variable that a macro invocation binds an argument to.
@@ -1043,7 +1043,7 @@ impl Model {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Copy, Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub enum SimMethod {
     Euler,
     RungeKutta2,
@@ -1060,7 +1060,7 @@ impl Default for SimMethod {
 /// Dt is a UI thing: it can be nice to specify exact
 /// fractions that don't display neatly in the UI, like 1/3
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub enum Dt {
     Dt(f64),
     Reciprocal(f64),
@@ -1074,7 +1074,7 @@ impl Default for Dt {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Default, salsa::Update)]
+#[derive(Clone, PartialEq, Default)]
 pub struct SimSpecs {
     pub start: f64,
     pub stop: f64,
@@ -1086,7 +1086,7 @@ pub struct SimSpecs {
 
 /// The elements of a dimension: either indexed (numeric) or named.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum DimensionElements {
     /// Indexed dimension with size (e.g., `Periods(5)` has indices 1-5)
     Indexed(u32),
@@ -1102,7 +1102,7 @@ pub enum DimensionElements {
 /// An element-level mapping (non-empty `element_map`) provides explicit
 /// source -> target element name pairs for arbitrary correspondence.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DimensionMapping {
     /// Target dimension name
     pub target: String,
@@ -1117,7 +1117,7 @@ pub struct DimensionMapping {
 /// which means elements of DimA correspond positionally to elements of DimB.
 /// This is used when a variable indexed by DimB references variables indexed by DimA.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Dimension {
     pub name: String,
     pub elements: DimensionElements,
@@ -1227,7 +1227,7 @@ impl Dimension {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Unit {
     pub name: String,
     pub equation: Option<String>,

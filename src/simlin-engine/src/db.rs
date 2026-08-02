@@ -447,7 +447,7 @@ impl Db for SimlinDb {}
 // under `debug-derive`, off in WASM / pysimlin). Salsa only needs `PartialEq`
 // for incrementality.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub struct LtmSyntheticVar {
     pub name: String,
     pub equation: LtmEquation,
@@ -464,7 +464,7 @@ pub struct LtmSyntheticVar {
 /// per-timestep strongest-path heuristic ([`Discovery`](LtmMode::Discovery)).
 /// A user sees empty or different loop results in the two modes with no
 /// other signal; this enum is that signal, surfaced through the FFI.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LtmMode {
     /// Exhaustive Johnson enumeration of every elementary circuit.
     Exhaustive,
@@ -524,7 +524,7 @@ pub enum LtmMode {
 /// (`Debug`/`Eq` are conditional/absent for the same reasons as
 /// `LtmSyntheticVar`.)
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub struct LtmVariablesResult {
     pub vars: Vec<LtmSyntheticVar>,
     pub loop_partitions: indexmap::IndexMap<String, Vec<Option<usize>>>,
@@ -1390,11 +1390,11 @@ pub fn compile_project_incremental(
             validate_model_overflow_markers(db, models[name])?;
         }
     }
-    // `assemble_simulation` is salsa-tracked, returning an `Arc` so its return
-    // type is `salsa::Update`; clone the `CompiledSimulation` out of the
-    // salsa-owned `Arc` to preserve this entry point's owned return type
-    // byte-for-byte. The error half stays a `String` mapped to
-    // `NotSimulatable`, identical to the prior plain-function behavior.
+    // `assemble_simulation` is salsa-tracked and returns an `Arc`; clone the
+    // `CompiledSimulation` out of the salsa-owned `Arc` to preserve this
+    // entry point's owned return type byte-for-byte. The error half stays a
+    // `String` mapped to `NotSimulatable`, identical to the prior
+    // plain-function behavior.
     match assemble_simulation(db, project, main_model_name.to_string()) {
         Ok(compiled) => Ok((*compiled).clone()),
         Err(msg) => crate::sim_err!(NotSimulatable, msg.clone()),

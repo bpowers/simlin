@@ -408,7 +408,7 @@ pub(crate) fn builtin_routes_through_agg<E>(builtin: &BuiltinFn<E>) -> bool {
 /// (GH #525, T6 of the shape-expressiveness design) embeds an
 /// `AxisRead` vector and `RefShape` lives in `BTreeSet`s /
 /// `HashSet`-keyed dedup maps downstream.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AxisRead {
     /// A single literal element of this source axis is read (`pop[NYC, *]`).
     /// Carries the canonical element name.
@@ -517,7 +517,7 @@ pub(crate) fn iterated_axis_slot_elements(
 /// ITERATED-DIM PROJECTION FEEDER (`frac` in
 /// `SUM(matrix[D1,*] * frac[D1])`) carries its own all-`Iterated`
 /// projection slice -- see [`AggNode::source_is_projection_feeder`].
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AggSource {
     /// Canonical model-variable name.
     pub var: String,
@@ -532,7 +532,7 @@ pub struct AggSource {
 
 /// One aggregate node: the stand-in for a maximal reducer subexpression.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AggNode {
     /// The aggregate node's name. For a synthetic agg this is
     /// `$⁚ltm⁚agg⁚{n}`; for a variable-backed agg this is the owning
@@ -731,7 +731,7 @@ impl AggNode {
 /// filtered out by the `is_synthetic` checks downstream, leaving the inline
 /// reducer on the conservative direct-scoring path -- a name-ordering bug).
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Default, salsa::Update)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct AggNodesResult {
     /// Aggregate nodes in first-encounter (deterministic) order.
     pub aggs: Vec<AggNode>,
@@ -2417,7 +2417,7 @@ pub(crate) fn scalar_feeder_of_variable_backed_agg<'a>(
 /// the projection both invents scores for UNREAD rows (`pop[boston,*]`) and
 /// mis-divides the read rows (the un-pinnable mismatched-arity body dooms the
 /// changed-first partial to the |dz/dz| = 1 fallback) -- a silent wrong number.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum UnhoistedSourceRead {
     /// The reducer reads the full extent of every `from` axis (all `Reduced`
     /// without a subset, or `Iterated` axes that range over their dimension):

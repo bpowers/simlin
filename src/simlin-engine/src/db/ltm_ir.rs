@@ -421,7 +421,7 @@ impl Drop for SiteChildrenLimitGuard {
 /// `Ast::ApplyToAll` target's single slot `0`, `Op1`'s one operand, `Op2`'s two,
 /// `Expr2::If`'s three, and an `IndexExpr2::Range`'s two halves -- so those axes
 /// need no check and have no arm here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::Update)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SiteWidthAxis {
     /// An `Ast::Arrayed` target's equation slots: one per `<element>` equation,
     /// plus the trailing default slot.
@@ -454,7 +454,7 @@ impl SiteWidthAxis {
 /// Carries the first offending variable in the walk's own deterministic order
 /// (variables canonical-sorted, then left-to-right DFS), so the emitted
 /// diagnostic is reproducible across processes.
-#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SiteWidthRejection {
     /// Canonical name of the target variable whose equation is too wide.
     pub variable: String,
@@ -1193,7 +1193,7 @@ fn walk_all_in_expr(
 ///
 /// Successor of `analysis::ReferenceSite`, generalized to fold the
 /// `in_reducer` flag plus the hoisting decision into [`SiteRouting`].
-#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClassifiedSite {
     /// The per-reference access shape: `Bare`, `FixedIndex(elems)`,
     /// `Wildcard`, or `DynamicIndex`.
@@ -1207,7 +1207,7 @@ pub(crate) struct ClassifiedSite {
 }
 
 /// How a [`ClassifiedSite`] feeds the element graph and link scores.
-#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SiteRouting {
     /// Consumers use `shape` / `target_element` directly: the element graph
     /// emits `emit_edges_for_reference`, the link scorer emits the per-shape
@@ -1233,7 +1233,7 @@ pub(crate) enum SiteRouting {
 /// Index into `AggNodesResult.aggs`. The IR records the *synthetic* agg a
 /// `ThroughAgg` site routes through; a consumer that wants the unique set of
 /// routed aggs for a `(from, to)` edge dedups these itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct AggRef(pub usize);
 
 // ── Per-occurrence enumeration (Track A2a) ─────────────────────────────────
@@ -1271,7 +1271,7 @@ pub(crate) struct AggRef(pub usize);
 /// can share an access shape but never a `SiteId`, which is what lets the
 /// transform name the normalizer (the first non-index-nested matching
 /// occurrence) apart from later same-shape ones.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct SiteId(pub Box<[u16]>);
 
 /// What a per-occurrence reference *is* -- the "enumerable as a site at all"
@@ -1287,7 +1287,7 @@ pub(crate) struct SiteId(pub Box<[u16]>);
 /// selector); it does not remove a consumer-visible edge, since variable-level
 /// dep extraction already filtered the token so no keyed consumer ever read
 /// the pre-fix `nyc -> to` walker site.
-#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OccurrenceRef {
     /// A reference to a model variable (the causal `from`). Canonical name.
     Variable(String),
@@ -1350,7 +1350,7 @@ pub(crate) enum OccurrenceRef {
 /// `under_arity_iterated_subscript_is_mismatch_not_collapse` and the
 /// `derive_other_dep_verdict` reference derivation in the tests. One entry per
 /// subscript index (empty for a bare `Var` / module output).
-#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OccurrenceAxis {
     /// A literal element of this axis is read (`AxisRead::Pinned`).
     Pinned(String),
@@ -1487,7 +1487,7 @@ pub(crate) fn derive_other_dep_verdict(
 /// consumers already hold (the generators are handed the target element; the wrap
 /// sees a `PREVIOUS`/`INIT` node directly, and must in any case account for the
 /// freezes it inserts ITSELF, which no field of an occurrence can describe).
-#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OccurrenceSite {
     /// Stable, deterministic occurrence identity within `to`'s equation.
     pub site_id: SiteId,
@@ -1602,7 +1602,7 @@ struct RawOccurrence {
 /// a stream that cannot name every reference. `sites` is unaffected either way:
 /// the per-edge view is name-keyed, carries no path, and feeds the element
 /// causal graph and `model_detected_loops`, which stay correct.
-#[derive(Debug, Clone, Default, PartialEq, Eq, salsa::Update)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct LtmReferenceSitesResult {
     pub sites: HashMap<(String, String), Vec<ClassifiedSite>>,
     pub occurrences: HashMap<String, Vec<OccurrenceSite>>,

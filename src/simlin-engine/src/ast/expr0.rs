@@ -9,7 +9,7 @@ use crate::lexer::LexerType;
 use std::result::Result as StdResult;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Hash, Copy, Clone, salsa::Update)]
+#[derive(PartialEq, Eq, Hash, Copy, Clone)]
 pub enum UnaryOp {
     Positive,
     Negative,
@@ -20,7 +20,7 @@ pub enum UnaryOp {
 /// BinaryOp enumerates the different operators supported in
 /// system dynamics equations.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Hash, Copy, Clone, salsa::Update)]
+#[derive(PartialEq, Eq, Hash, Copy, Clone)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -81,7 +81,7 @@ impl BinaryOp {
 /// [`Literal`], compared by bit pattern. The same argument applies to `Expr1`,
 /// `Expr2` and `Expr3`; see [`Literal`] for the full statement.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Clone, salsa::Update)]
+#[derive(PartialEq, Eq, Clone)]
 pub enum Expr0 {
     Const(String, Literal, Loc),
     Var(RawIdent, Loc),
@@ -93,7 +93,7 @@ pub enum Expr0 {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Clone, salsa::Update)]
+#[derive(PartialEq, Eq, Clone)]
 pub enum IndexExpr0 {
     Wildcard(Loc),
     StarRange(RawIdent, Loc),

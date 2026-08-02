@@ -804,7 +804,7 @@ fn compute_module_link_overrides(
 /// equations in a model so that `compute_layout` can allocate slots and
 /// `assemble_module` can compile them.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub struct LtmImplicitVarMeta {
     /// Canonical name of the LTM variable that created this implicit var
     pub ltm_parent_name: String,
@@ -1036,7 +1036,7 @@ pub fn model_ltm_var_name_index(
 /// (a `returns(ref)` tracked query read by multiple callers would otherwise
 /// double-accumulate). `model_ltm_variables` sets its returned `mode` from
 /// this query, so the two never drift.
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn model_ltm_mode(db: &dyn Db, model: SourceModel, project: SourceProject) -> super::LtmMode {
     use super::{LtmMode, causal_graph_from_edges, model_causal_edges, model_loop_circuits_tiered};
 

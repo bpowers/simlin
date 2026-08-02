@@ -63,7 +63,7 @@ pub(crate) fn combine(op: UnitOp, l: UnitMap, r: UnitMap) -> UnitMap {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default, PartialEq, salsa::Update)]
+#[derive(Clone, Default, PartialEq)]
 pub struct Context {
     pub sim_specs: SimSpecs,
     aliases: HashMap<String, String>,

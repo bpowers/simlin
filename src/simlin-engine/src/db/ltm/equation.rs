@@ -45,7 +45,7 @@ use crate::lexer::LexerType;
 /// `model_ltm_fragment_diagnostics` warns" path never fired and that element's
 /// score read a constant 0 with no diagnostic at all.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub struct LtmArm {
     /// The generator's exact source-form spelling. Retained ONLY for
     /// diagnostics; never re-parsed to compile.
@@ -111,7 +111,7 @@ impl LtmArm {
 /// `DimensionsContext`; they are resolved to `Dimension`s only when lowering
 /// to an `Ast<Expr0>` for compilation ([`LtmEquation::to_flow_ast`]).
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub enum LtmEquation {
     Scalar(LtmArm),
     ApplyToAll(Vec<String>, LtmArm),
@@ -364,21 +364,16 @@ impl LtmEquation {
 mod tests {
     use super::{LtmArm, LtmEquation};
 
-    /// GH #981's exact measurement, inverted.
-    ///
-    /// The issue's throwaway probe recorded that two `LtmArm::new("NaN")` were
-    /// UNEQUAL, that two `LtmEquation::scalar("1 + NaN")` were UNEQUAL, and --
-    /// the part that mattered -- that `<LtmEquation as salsa::Update>::
-    /// maybe_update` returned CHANGED for identical text, so the backdating
-    /// mechanism itself was affected and not merely `PartialEq`. Since the
+    /// Salsa backdates a re-executed query's memo by `PartialEq`, and the
     /// literal on `Expr0::Const` is an `ast::Literal` compared by bit pattern,
-    /// all three are equal/UNCHANGED, and `link_score_equation_text_shaped` can
-    /// backdate so the expensive `compile_ltm_var_fragment` is reused.
+    /// so a NaN-bearing LTM equation is equal to an identical rebuild of
+    /// itself -- which is what lets `link_score_equation_text_shaped` backdate
+    /// and the expensive `compile_ltm_var_fragment` be reused (GH #981).
     ///
     /// The controls (an ordinary equation, and a genuinely edited one) are what
     /// keep this from passing by making salsa blind.
     #[test]
-    fn a_nan_bearing_ltm_equation_is_equal_to_itself_and_backdates() {
+    fn a_nan_bearing_ltm_equation_is_equal_to_itself() {
         assert!(
             LtmArm::new("NaN".to_string()).expr.is_some(),
             "the fixture text must parse, or nothing below measures the AST"
@@ -401,36 +396,5 @@ mod tests {
             LtmEquation::scalar("2 + NaN".to_string()),
             "control: a genuine difference must still be visible"
         );
-
-        use salsa::plumbing::UpdateDispatch;
-        let mut slot = LtmEquation::scalar("1 + NaN".to_string());
-        let changed = {
-            // SAFETY (test): `&mut slot` is a valid, owned `LtmEquation` and the
-            // new value is a fresh owned one, matching the
-            // `Update::maybe_update` contract.
-            #[allow(unsafe_code)]
-            unsafe {
-                UpdateDispatch::<LtmEquation>::maybe_update(
-                    &mut slot,
-                    LtmEquation::scalar("1 + NaN".to_string()),
-                )
-            }
-        };
-        assert!(
-            !changed,
-            "identical NaN-bearing LTM equation text must backdate (GH #981)"
-        );
-
-        let changed = {
-            // SAFETY (test): as above.
-            #[allow(unsafe_code)]
-            unsafe {
-                UpdateDispatch::<LtmEquation>::maybe_update(
-                    &mut slot,
-                    LtmEquation::scalar("2 + NaN".to_string()),
-                )
-            }
-        };
-        assert!(changed, "a genuinely edited equation must report CHANGED");
     }
 }

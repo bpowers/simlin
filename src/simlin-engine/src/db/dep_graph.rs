@@ -1603,7 +1603,7 @@ mod dep_graph_tests;
 ///
 /// Derives the same trait set as `ModelDepGraphResult` (it is reachable
 /// from a salsa return value, so it must participate in salsa equality).
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SccPhase {
     Dt,
     Initial,
@@ -1621,24 +1621,20 @@ pub enum SccPhase {
 /// `PerVarBytecodes`.
 ///
 /// Reachable from `ModelDepGraphResult` (a salsa return value), so it
-/// derives the identical trait set -- in particular `PartialEq`/`Eq`/
-/// `salsa::Update` so a change in the resolved-SCC set invalidates the
-/// salsa cache. `Ident<Canonical>` derives `Ord` + `salsa::Update`,
-/// which makes the `BTreeSet`/`Vec` field types well-formed here.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+/// derives the identical trait set -- in particular `PartialEq`/`Eq`, so a
+/// change in the resolved-SCC set invalidates the salsa cache.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedScc {
     pub members: BTreeSet<Ident<Canonical>>,
     pub element_order: Vec<(Ident<Canonical>, usize)>,
     pub phase: SccPhase,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelDepGraphResult {
-    /// Interned-ident-keyed dependency maps. `Ident<Canonical>` derives
-    /// `salsa::Update`, and salsa's blanket impls cover
-    /// `std::collections::HashMap<K,V>` / `BTreeSet<K>` for `K,V: Update`, so
-    /// these stay on the std `HashMap` (default hasher) -- only the hot
-    /// internal working maps in `model_dependency_graph_impl` use FxHash.
+    /// Interned-ident-keyed dependency maps, on the std `HashMap` (default
+    /// hasher) -- only the hot internal working maps in
+    /// `model_dependency_graph_impl` use FxHash.
     /// `Ident<Canonical>` keys/values are cheap Arc-refcount clones and the
     /// `BTreeSet`s iterate in the same lexicographic order the former
     /// `BTreeSet<String>` did, so a consumer probing by `&str` (via
@@ -1682,7 +1678,7 @@ pub fn model_dependency_graph<'db>(
 }
 
 /// Which of the three phase runlists one variable appears in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RunlistMembership {
     pub initials: bool,
     pub flows: bool,
@@ -1703,7 +1699,7 @@ pub struct RunlistMembership {
 /// Keyed on the `SourceVariable` handle rather than a name so it is invalidated
 /// by a rename of *this* variable through the same field read every other
 /// per-variable query uses.
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn var_runlist_membership<'db>(
     db: &'db dyn Db,
     var: SourceVariable,

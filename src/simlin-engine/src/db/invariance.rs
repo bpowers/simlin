@@ -67,7 +67,7 @@ use crate::db::{
 /// (`model` + `project` + `module_inputs`), so the partition `assemble_module`
 /// applies reads the same verdict that was computed for this exact module
 /// instance.
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub(crate) fn model_flows_invariant<'db>(
     db: &'db dyn Db,
     model: SourceModel,

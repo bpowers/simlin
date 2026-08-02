@@ -91,7 +91,7 @@ impl<'db> ModuleInputSet<'db> {
 
 // ── Variable kind ──────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SourceVariableKind {
     Stock,
     Flow,
@@ -123,7 +123,7 @@ impl SourceVariableKind {
 /// regardless of whether the (heuristic) discovery search surfaced it -- the
 /// `LOOPSCORE` capability from the LTM papers (section 10), built on the
 /// existing loop-naming primitive rather than a new equation builtin.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PinnedLoopSpec {
     /// The user-supplied loop name. Preserved so callers can map the
     /// generated `pin{n}` loop id back to a human label.
@@ -162,17 +162,18 @@ pub struct SourceProject {
     /// colliding model names -- cannot supply. Declaration order is
     /// load-bearing: the build error reports the FIRST-detected duplicate /
     /// collision, so the list must preserve the datamodel's model order.
-    /// `datamodel::MacroSpec` derives `salsa::Update`, so this field type is
-    /// well-formed. See `crate::db::macro_registry`.
+    /// See `crate::db::macro_registry`.
     #[returns(ref)]
     pub macro_declarations: Vec<(String, Option<datamodel::MacroSpec>)>,
     /// Whether LTM (Loops That Matter) synthetic variable compilation is
     /// enabled. When true, `compute_layout` allocates slots and
     /// `assemble_module` compiles fragments for LTM variables.
+    #[returns(clone)]
     pub ltm_enabled: bool,
     /// When true, use discovery mode (`model_ltm_variables` with all links)
     /// which generates scores for every causal edge, not just edges in detected
     /// loops.
+    #[returns(clone)]
     pub ltm_discovery_mode: bool,
 }
 
@@ -217,6 +218,7 @@ pub struct SourceVariable {
     pub ident: String,
     #[returns(ref)]
     pub equation: datamodel::Equation,
+    #[returns(clone)]
     pub kind: SourceVariableKind,
     #[returns(ref)]
     pub units: Option<String>,
@@ -230,7 +232,9 @@ pub struct SourceVariable {
     pub module_refs: Vec<datamodel::ModuleReference>,
     #[returns(ref)]
     pub model_name: String,
+    #[returns(clone)]
     pub non_negative: bool,
+    #[returns(clone)]
     pub can_be_module_input: bool,
     #[returns(ref)]
     pub compat: datamodel::Compat,
@@ -250,7 +254,7 @@ pub struct SourceVariable {
 /// (`build_var_info` -> `model_dependency_graph`, `calc_flattened_offsets`)
 /// must NOT gain a fine-grained dependency on a variable's equation TEXT, which
 /// would invalidate the dependency graph on every unrelated equation edit.
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub(crate) fn source_var_is_table_only(db: &dyn Db, var: SourceVariable) -> bool {
     use crate::variable::is_empty_or_sentinel;
     match var.equation(db) {

@@ -201,14 +201,9 @@ impl Drop for Interned {
 ///   `BTreeSet`/`BTreeMap` orderings and the deterministic byte-stable runlists
 ///   depend on this; a pointer-address ordering would be non-deterministic
 ///   across runs.
-/// - `salsa::Update`: interned values are immutable, so `maybe_update`
-///   overwrites and reports a change iff the new value differs from the old by
-///   string content. `Arc<Interned>`/`str` are not covered by salsa's blanket
-///   `Update` impls, so this is provided manually here; the public newtypes
-///   keep `#[derive(salsa::Update)]`, whose per-field dispatch finds this impl.
-///   The GENERIC newtype `Ident<State>` needs one extra thing for that to hold
-///   -- an `Update` impl on the `Canonical`/`Raw` markers, since salsa's derive
-///   bounds every type parameter -- see [`Ident`] (GH #972).
+/// - salsa: a re-executed query's memo is backdated purely by `PartialEq`
+///   (`values_equal`), so the pointer-equality `PartialEq` above is what
+///   decides whether a downstream query sees a change.
 #[derive(Clone)]
 pub(crate) struct CanonicalStorage(std::sync::Arc<Interned>);
 
@@ -269,35 +264,6 @@ impl Ord for CanonicalStorage {
     }
 }
 
-// SAFETY: `CanonicalStorage` is an owned, immutable interned handle. It owns
-// its (refcounted) data, contains no borrowed `'db` references, and its `Eq`
-// is value equality (consistent with `Hash`), so comparing an old-revision
-// value with a new-revision value is well defined. `maybe_update` therefore
-// follows the standard owned-`Eq` pattern: overwrite and report a change iff
-// the values differ. This mirrors salsa's `update_fallback` but is written by
-// hand because neither `Arc<Interned>` nor `str` is covered by salsa's blanket
-// `Update` impls.
-//
-// The crate is `#![deny(unsafe_code)]`; this is the one opt-in here, mirroring
-// the precedent in `vm.rs`. The `unsafe` is confined to dereferencing the
-// `*mut Self` salsa hands us, under the documented `Update` contract.
-#[allow(unsafe_code)]
-unsafe impl salsa::Update for CanonicalStorage {
-    unsafe fn maybe_update(old_pointer: *mut Self, new_value: Self) -> bool {
-        // SAFETY: by the `Update` contract `old_pointer` points to a valid,
-        // fully-owned `CanonicalStorage` from a (possibly older) revision; an
-        // owned interned handle has no dangling borrows, so taking a `&mut` is
-        // sound.
-        let old = unsafe { &mut *old_pointer };
-        if *old != new_value {
-            *old = new_value;
-            true
-        } else {
-            false
-        }
-    }
-}
-
 /// A canonicalized identifier - guaranteed to be in canonical form (OLD - being replaced)
 ///
 /// Canonical form means:
@@ -308,23 +274,23 @@ unsafe impl salsa::Update for CanonicalStorage {
 ///
 /// A raw, non-canonicalized identifier as it appears in source.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash, salsa::Update)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct RawIdent(String);
 
 /// A canonicalized dimension name
 ///
 /// Backed by interned, de-duplicated storage (see [`CanonicalStorage`]): the
-/// derived `PartialEq`/`Eq`/`Hash`/`Ord`/`PartialOrd`/`salsa::Update` all
-/// delegate to that handle's manual impls (value equality + value hash +
-/// lexicographic order), so the observable behavior is identical to the old
-/// `String` backing while construction and clone avoid allocation.
+/// derived `PartialEq`/`Eq`/`Hash`/`Ord`/`PartialOrd` all delegate to that
+/// handle's manual impls (value equality + value hash + lexicographic order),
+/// so the observable behavior is identical to the old `String` backing while
+/// construction and clone avoid allocation.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::Update)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CanonicalDimensionName(CanonicalStorage);
 
 /// A raw dimension name as it appears in source
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash, salsa::Update)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct RawDimensionName(String);
 
 /// A canonicalized element name (dimension element)
@@ -333,15 +299,15 @@ pub struct RawDimensionName(String);
 /// derived trait impls delegate to that handle, matching the old `String`
 /// backing's behavior without per-construction allocation.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::Update)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CanonicalElementName(CanonicalStorage);
 
 /// A raw element name as it appears in source
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash, salsa::Update)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct RawElementName(String);
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, salsa::Update)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     NoError,      // will never be produced
     DoesNotExist, // the named entity doesn't exist
@@ -742,7 +708,7 @@ impl fmt::Display for ErrorCode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EquationError {
     pub start: u16,
     pub end: u16,
@@ -773,7 +739,7 @@ pub enum ErrorKind {
     Variable,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Error {
     pub kind: ErrorKind,
     pub code: ErrorCode,
@@ -2385,84 +2351,31 @@ mod interned_identifier_tests {
         }
     }
 
-    // ----- Constraint 4: salsa::Update semantics on the handle -----
+    // ----- Constraint 4: salsa backdating semantics on the handle -----
 
+    /// Salsa backdates a re-executed query's memo purely by `PartialEq`
+    /// (`values_equal`), so the handle's equality must be VALUE equality:
+    /// two independently-constructed handles for the same string compare
+    /// equal, and different strings compare unequal. The pointer fast-path
+    /// in `PartialEq` is value-correct only because the interner
+    /// de-duplicates; this pins the observable rule salsa depends on.
     #[test]
-    fn salsa_update_reports_change_only_on_value_difference() {
-        use salsa::Update;
-
-        // Different value -> overwrite and report changed.
-        let mut slot = CanonicalStorage::intern("old_value");
-        let changed = {
-            // SAFETY (test): `&mut slot` is a valid, owned `CanonicalStorage`;
-            // we pass its pointer and a fresh owned value, matching the
-            // `Update::maybe_update` contract.
-            #[allow(unsafe_code)]
-            unsafe {
-                CanonicalStorage::maybe_update(
-                    &mut slot as *mut _,
-                    CanonicalStorage::intern("new_value"),
-                )
-            }
-        };
-        assert!(changed, "differing values must report a change");
-        assert_eq!(slot.as_str(), "new_value");
-
-        // Equal value -> no overwrite, report unchanged.
-        let unchanged = {
-            #[allow(unsafe_code)]
-            unsafe {
-                CanonicalStorage::maybe_update(
-                    &mut slot as *mut _,
-                    CanonicalStorage::intern("new_value"),
-                )
-            }
-        };
-        assert!(!unchanged, "equal values must report no change");
-        assert_eq!(slot.as_str(), "new_value");
-    }
-
-    /// An `Ident<Canonical>` field inside a `#[derive(salsa::Update)]` container
-    /// must resolve through `Ident`'s OWN derived impl -- and hence through
-    /// `CanonicalStorage::maybe_update` -- rather than through salsa's
-    /// `'static + PartialEq` fallback (GH #972).
-    ///
-    /// The evidence is the resolution itself. `salsa::plumbing::UpdateDispatch`
-    /// is the derive's per-field entry point, and it carries exactly two
-    /// `maybe_update`s: an INHERENT one on `Dispatch<D> where D: Update`, and a
-    /// `Fallback` TRAIT one. `UpdateFallback` is deliberately NOT imported in
-    /// this module, so naming `UpdateDispatch::<Ident<Canonical>>::maybe_update`
-    /// can only resolve to the inherent -- `Update`-backed -- method. Before the
-    /// markers gained `Update`, this line did not compile at all, which is the
-    /// same E0277 the issue's probe reported.
-    #[test]
-    fn an_ident_field_dispatches_through_its_own_update_impl() {
-        let dispatch: unsafe fn(*mut Ident<Canonical>, Ident<Canonical>) -> bool =
-            salsa::plumbing::UpdateDispatch::<Ident<Canonical>>::maybe_update;
-
-        // And it behaves as the delegation implies: change reported iff the
-        // canonical string differs, which is `CanonicalStorage`'s rule.
-        let mut slot = Ident::<Canonical>::new("old_value");
-        let changed = {
-            // SAFETY (test): `&mut slot` is a valid, owned `Ident`; we pass its
-            // pointer and a fresh owned value, matching the `maybe_update`
-            // contract.
-            #[allow(unsafe_code)]
-            unsafe {
-                dispatch(&mut slot as *mut _, Ident::<Canonical>::new("new_value"))
-            }
-        };
-        assert!(changed, "a differing ident must report a change");
-        assert_eq!(slot.as_str(), "new_value");
-
-        let unchanged = {
-            #[allow(unsafe_code)]
-            unsafe {
-                dispatch(&mut slot as *mut _, Ident::<Canonical>::new("new_value"))
-            }
-        };
-        assert!(!unchanged, "an equal ident must report no change");
-        assert_eq!(slot.as_str(), "new_value");
+    fn handle_equality_is_value_equality_for_salsa_backdating() {
+        assert_eq!(
+            CanonicalStorage::intern("a_value"),
+            CanonicalStorage::intern("a_value"),
+            "separately-interned equal strings must compare equal"
+        );
+        assert_ne!(
+            CanonicalStorage::intern("a_value"),
+            CanonicalStorage::intern("another_value"),
+            "different strings must compare unequal"
+        );
+        assert_eq!(
+            Ident::<Canonical>::new("a_value"),
+            Ident::<Canonical>::new("a_value"),
+            "Ident equality must delegate to the handle's value equality"
+        );
     }
 }
 
@@ -2651,23 +2564,11 @@ impl AsRef<str> for RawElementName {
 // canonicalization guarantees through the type system.
 
 /// Marker type for canonical identifiers
-///
-/// `salsa::Update` is derived even though the marker holds no data and is never
-/// stored on its own. Salsa's derive adds an `Update` bound to EVERY type
-/// parameter, so without it `Ident<Canonical>: salsa::Update` is unsatisfiable
-/// and an `Ident` field inside a `#[derive(salsa::Update)]` container silently
-/// resolves through salsa's `'static + PartialEq` fallback instead of through
-/// [`CanonicalStorage`]'s manual impl (GH #972). The derive is the whole fix: on
-/// a field-less struct it generates the "nothing can differ, report no change"
-/// body -- exactly salsa's own `PhantomData<T>` impl -- so the `unsafe` trait's
-/// obligation is discharged vacuously and no `unsafe` is hand-written here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::Update)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Canonical;
 
 /// Marker type for raw (non-canonical) identifiers
-///
-/// `salsa::Update` for the same reason as [`Canonical`]; see its docs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::Update)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Raw;
 
 /// An owned identifier with state tracking (canonical or raw).
@@ -2676,46 +2577,16 @@ pub struct Raw;
 /// instantiated), so the storage is the interned [`CanonicalStorage`] handle:
 /// constructing an `Ident` for an already-seen identifier is allocation-free
 /// and `Clone` is a refcount bump. The derived `PartialEq`/`Eq`/`Hash`/`Ord`/
-/// `PartialOrd`/`salsa::Update` delegate to that handle's manual impls (value
-/// equality, value-based hash consistent with `Borrow<str>`, lexicographic
-/// ordering), preserving the previous `String`-backed semantics.
-///
-/// The `salsa::Update` half of that claim is only true because [`Canonical`] and
-/// [`Raw`] derive `Update` themselves: salsa's derive adds an `Update` bound to
-/// every type parameter, so a marker without one makes the generated
-/// `unsafe impl<State: salsa::Update> Update for Ident<State>` unsatisfiable,
-/// and a container's per-field dispatch quietly resolves `Ident<Canonical>`
-/// through salsa's `'static + PartialEq` fallback instead (GH #972). That
-/// fallback happens to be value-correct here -- `Ident`'s derived `PartialEq`
-/// bottoms out in the same interned comparison `CanonicalStorage::maybe_update`
-/// makes -- so this was never a wrong answer, only a doc claiming a delegation
-/// that could not occur. The assertion below is what keeps the claim honest: it
-/// is a compile error the moment the bound stops being satisfiable.
-///
-/// Scope of the fix, stated so nobody over-reads it: salsa calls a FIELD's
-/// `maybe_update` only for tracked STRUCTS (`salsa-macro-rules`'
-/// `setup_tracked_struct`), while a tracked FUNCTION's memo backdates through
-/// `values_equal`/`PartialEq` (`salsa::function::backdate`) and an input setter
-/// overwrites outright. This crate declares no tracked structs -- every
-/// `#[salsa::tracked]` item here is a function -- so making the bound
-/// satisfiable changes which impl the compiler SELECTS and changes no runtime
-/// behavior at all today. It is a correctness-of-documentation fix plus
-/// forward-compatibility for the first tracked struct, not a behavior change.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::Update)]
+/// `PartialOrd` delegate to that handle's manual impls (value equality,
+/// value-based hash consistent with `Borrow<str>`, lexicographic ordering),
+/// preserving the previous `String`-backed semantics. Salsa backdates query
+/// memos purely by `PartialEq`, so that value equality is also what decides
+/// salsa early-cutoff for any value carrying an `Ident`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ident<State = Canonical> {
     inner: CanonicalStorage,
     _phantom: PhantomData<State>,
 }
-
-// The derived `Update` on `Ident<State>` must be *reachable* at both marker
-// states, not merely present. A prose claim about which `maybe_update` runs is
-// unfalsifiable; instantiating the bound turns it into a build failure.
-const _: fn() = || {
-    fn assert_update<T: salsa::Update>() {}
-    assert_update::<Ident<Canonical>>();
-    assert_update::<Ident<Raw>>();
-    assert_update::<CanonicalStorage>();
-};
 
 /// A borrowed identifier reference with state tracking
 /// This is the key type that enables zero-copy substring operations
@@ -3277,7 +3148,7 @@ mod identifier_part_iterator_tests {
 
 // ===== Engine-specific additions =====
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum UnitError {
     DefinitionError(EquationError, Option<String>),
     ConsistencyError(ErrorCode, Loc, Option<String>),

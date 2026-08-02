@@ -5,7 +5,7 @@
 use super::*;
 use std::collections::{BTreeSet, HashMap};
 
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImplicitVarDeps {
     pub name: String,
     pub is_stock: bool,

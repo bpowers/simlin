@@ -135,7 +135,7 @@ enum BytecodeLocation {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub struct CompiledSimulation {
     pub(crate) modules: HashMap<ModuleKey, CompiledModule>,
     pub(crate) specs: Specs,

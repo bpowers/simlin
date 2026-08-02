@@ -165,7 +165,7 @@ pub(crate) fn shaped_link_score_executions() -> usize {
 /// the freshly-rebuilt `unscoreable_edges` set -- on every
 /// `model_ltm_variables` evaluation, whether the query body re-ran or not.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, salsa::Update)]
+#[derive(Clone, PartialEq)]
 pub enum ShapedLinkScore {
     /// The link-score variable was generated. `freeze_helpers` carries the
     /// GH #995 array-freeze helper variables the score's partial references

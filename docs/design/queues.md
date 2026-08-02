@@ -333,7 +333,7 @@ exist.
 - `overflow: bool` on a flow (present iff `<overflow/>`).
 
 `Queue` is a bare marker struct (no options) mirroring `Conveyor`'s placement
-and derive set (`Clone, PartialEq, Eq, salsa::Update`, plus an UNCONDITIONAL
+and derive set (`Clone, PartialEq, Eq`, plus an UNCONDITIONAL
 `Debug` -- a `debug-derive`-gated Debug breaks the no-default-features WASM
 build). Keeping it a struct (rather than a bool) leaves room for any future
 vendor attribute without churning construction sites, matching `Conveyor`.

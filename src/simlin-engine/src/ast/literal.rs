@@ -9,15 +9,13 @@ use std::hash::{Hash, Hasher};
 ///
 /// `Expr0`..`Expr3` (and everything holding one: `ModelStage0`/`ModelStage1`,
 /// `db::query::ParsedVariableResult`, `db::ltm::LtmEquation`,
-/// `ltm_agg::AggNodesResult`, ...) derive `PartialEq` and `salsa::Update`.
-/// Salsa decides whether to *backdate* a re-executed tracked function's memo by
-/// comparing the old value with the new one -- `salsa::Update`'s derive walks
-/// the fields and, for a field type with no `Update` impl of its own, falls back
-/// to that type's `PartialEq` (`salsa::plumbing::UpdateFallback`). A bare `f64`
-/// makes that comparison **non-reflexive**: `NaN != NaN`, so a value holding a
-/// NaN literal never compares equal to itself, is never backdated, and reports
-/// "changed" on every bit-identical re-execution -- taking the whole downstream
-/// query cone with it. Every stdlib SMOOTH/DELAY/TREND template declares
+/// `ltm_agg::AggNodesResult`, ...) derive `PartialEq`. Salsa decides whether to
+/// *backdate* a re-executed tracked function's memo by comparing the old value
+/// with the new one via `PartialEq` (`values_equal`). A bare `f64` makes that
+/// comparison **non-reflexive**: `NaN != NaN`, so a value holding a NaN literal
+/// never compares equal to itself, is never backdated, and reports "changed" on
+/// every bit-identical re-execution -- taking the whole downstream query cone
+/// with it. Every stdlib SMOOTH/DELAY/TREND template declares
 /// `initial_value = NAN` and `db::sync` splices those into every project, so
 /// this was reachable with no user action at all (GH #987, #981).
 ///
@@ -176,34 +174,6 @@ impl Hash for Literal {
     }
 }
 
-// `Literal` deliberately has NO `salsa::Update` impl. The `salsa::Update`
-// derive emits `salsa::plumbing::UpdateDispatch::<Literal>::maybe_update` for
-// the field, under its own `use ::salsa::plumbing::UpdateFallback as _;` -- and
-// that import is the load-bearing line. `Dispatch<D>`'s inherent candidate
-// requires `D: Update`, which `Literal` does not satisfy, so the call resolves
-// to the `UpdateFallback` blanket impl for `'static + PartialEq`: salsa's own
-// `update_fallback`, compare-and-replace against the `PartialEq` above. Writing
-// an `unsafe impl Update` by hand would give the same behaviour with a second,
-// independently-maintained definition of equality that could drift from
-// `PartialEq`; letting the fallback apply means there is exactly one.
-//
-// What defends that, precisely -- because an `Update` impl would NOT break the
-// build on its own; the inherent candidate would silently take over:
-//
-// * `#![deny(unsafe_code)]` (`lib.rs`) is what stops one being added in the
-//   first place, since `Update` is an unsafe trait.
-// * If someone opted out with `#[allow(unsafe_code)]`, the `use UpdateFallback`
-//   below goes unused, and `cargo clippy -- -D warnings` (pre-commit and CI)
-//   turns that warning into an error. Verified by probe.
-// * The assertion itself pins the weaker but still useful property that
-//   `maybe_update` resolves for `Literal` AT ALL -- i.e. that it stays
-//   `'static + PartialEq`, which is what the fallback needs.
-const _: fn() = || {
-    use salsa::plumbing::{UpdateDispatch, UpdateFallback as _};
-    let _resolves: unsafe fn(*mut Literal, Literal) -> bool =
-        UpdateDispatch::<Literal>::maybe_update;
-};
-
 #[cfg(test)]
 mod literal_tests {
     use super::Literal;
@@ -262,37 +232,6 @@ mod literal_tests {
         assert_ne!(Literal::new(1.0), Literal::new(2.0));
         assert_ne!(Literal::new(f64::INFINITY), Literal::new(f64::NEG_INFINITY));
     }
-
-    /// `maybe_update` -- the mechanism salsa actually backdates on -- and not
-    /// merely `PartialEq`. GH #981 measured the derive returning CHANGED for
-    /// identical NaN-bearing input, so this is checked directly at the leaf as
-    /// well as on the whole AST (`ast::literal_ast_tests`).
-    #[test]
-    fn maybe_update_reports_unchanged_for_an_identical_nan() {
-        use salsa::plumbing::{UpdateDispatch, UpdateFallback as _};
-
-        let mut slot = Literal::new(f64::NAN);
-        let changed = {
-            // SAFETY (test): `&mut slot` is a valid, owned `Literal` and the
-            // new value is a fresh owned one, matching the
-            // `Update::maybe_update` contract.
-            #[allow(unsafe_code)]
-            unsafe {
-                UpdateDispatch::<Literal>::maybe_update(&mut slot, Literal::new(f64::NAN))
-            }
-        };
-        assert!(!changed, "an identical NaN literal must backdate");
-
-        let changed = {
-            // SAFETY (test): as above.
-            #[allow(unsafe_code)]
-            unsafe {
-                UpdateDispatch::<Literal>::maybe_update(&mut slot, Literal::new(1.0))
-            }
-        };
-        assert!(changed, "a genuinely different literal must report CHANGED");
-        assert_eq!(slot.value(), 1.0, "and must have written the new value");
-    }
 }
 
 /// The same property one level up, through the PUBLIC parse API: an `Expr0`
@@ -323,54 +262,6 @@ mod literal_ast_tests {
             parse("1 + nan"),
             parse("2 + nan"),
             "a genuine difference must still be visible through a NaN-bearing tree"
-        );
-    }
-
-    /// `maybe_update` -- what salsa actually backdates on -- and not merely
-    /// `PartialEq`. The derive compares fields independently and, for the
-    /// literal, resolves to the `PartialEq` fallback; GH #981 measured this
-    /// returning CHANGED for identical NaN-bearing input.
-    #[test]
-    fn maybe_update_on_an_ast_reports_unchanged_for_an_identical_nan() {
-        // No `UpdateFallback` import here, unlike the `Literal` probe in
-        // `literal_tests`: `Expr0` derives `salsa::Update`, so the inherent
-        // dispatch applies and the fallback is not in play. That asymmetry is
-        // itself the evidence that `Literal` resolves through the `PartialEq`
-        // fallback -- importing the trait is what makes its method visible.
-        use salsa::plumbing::UpdateDispatch;
-
-        let mut slot = parse("1 + nan");
-        let changed = {
-            // SAFETY (test): `&mut slot` is a valid, owned `Expr0` and the new
-            // value is a fresh owned one, matching the `Update::maybe_update`
-            // contract.
-            #[allow(unsafe_code)]
-            unsafe {
-                UpdateDispatch::<Expr0>::maybe_update(&mut slot, parse("1 + nan"))
-            }
-        };
-        assert!(
-            !changed,
-            "an identical NaN-bearing AST must backdate, or every downstream salsa \
-             query re-executes on every revision bump"
-        );
-
-        let changed = {
-            // SAFETY (test): as above.
-            #[allow(unsafe_code)]
-            unsafe {
-                UpdateDispatch::<Expr0>::maybe_update(&mut slot, parse("2 + nan"))
-            }
-        };
-        assert!(
-            changed,
-            "a genuinely edited equation must still report CHANGED -- otherwise \
-             the test above could pass by making salsa blind"
-        );
-        assert_eq!(
-            slot,
-            parse("2 + nan"),
-            "and the new value must have been written"
         );
     }
 
