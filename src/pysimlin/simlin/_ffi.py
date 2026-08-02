@@ -403,6 +403,27 @@ def open_json(json_data: bytes) -> Any:
     return project_ptr
 
 
+def diagram_sync(project_ptr: Any, model_name: str) -> None:
+    """Generate an automatic diagram layout for a model, replacing its views.
+
+    Passes a NULL patch to ``simlin_project_diagram_sync``, which always
+    generates a full layout from scratch (the incremental, patch-aware
+    mode is not exposed here).
+
+    Args:
+        project_ptr: Pointer to a SimlinProject
+        model_name: Name of the model to lay out
+
+    Raises:
+        SimlinRuntimeError: If the model doesn't exist or layout fails
+    """
+    c_name = string_to_c(model_name)
+    err_ptr = ffi.new("SimlinError **")
+
+    lib.simlin_project_diagram_sync(project_ptr, c_name, ffi.NULL, err_ptr)
+    check_out_error(err_ptr, f"Auto-layout for model '{model_name}'")
+
+
 def render_svg(project_ptr: Any, model_name: str) -> bytes:
     """Render a project model's diagram as SVG.
 

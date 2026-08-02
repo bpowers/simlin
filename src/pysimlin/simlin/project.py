@@ -29,6 +29,9 @@ from ._ffi import (
     apply_patch_json as _ffi_apply_patch_json,
 )
 from ._ffi import (
+    diagram_sync as _ffi_diagram_sync,
+)
+from ._ffi import (
     open_json as _ffi_open_json,
 )
 from ._ffi import (
@@ -425,8 +428,33 @@ class Project:
             finally:
                 lib.simlin_free(output_ptr[0])
 
+    def auto_layout(self, model_name: str = "main") -> None:
+        """Generate and persist an automatic diagram layout for a model.
+
+        Computes positions for every variable and replaces the model's
+        diagram views with the result, so the layout survives serialization
+        (:meth:`to_xmile`, :meth:`serialize_json`). Rendering does not
+        require this: :meth:`render_svg` and :meth:`render_png` generate a
+        transient layout automatically when the model has no view. On a
+        model that already has a diagram, the existing layout is discarded
+        and regenerated (only the zoom level is preserved).
+
+        Args:
+            model_name: Name of the model to lay out (default: ``"main"``)
+
+        Raises:
+            SimlinRuntimeError: If the model doesn't exist or layout fails
+        """
+        with self._lock:
+            self._check_alive()
+            _ffi_diagram_sync(self._ptr, model_name)
+
     def render_svg(self, model_name: str = "main") -> bytes:
         """Render a model's stock-and-flow diagram as SVG.
+
+        A model without a diagram view (e.g. one built from scratch through
+        ``Model.edit()``) is rendered with an automatically generated
+        layout; use :meth:`auto_layout` to persist such a layout instead.
 
         Args:
             model_name: Name of the model to render (default: ``"main"``)
@@ -468,6 +496,10 @@ class Project:
         intrinsic dimensions. When only one dimension is non-zero the other
         is derived from the aspect ratio. When both are non-zero, ``width``
         takes precedence.
+
+        A model without a diagram view (e.g. one built from scratch through
+        ``Model.edit()``) is rendered with an automatically generated
+        layout; use :meth:`auto_layout` to persist such a layout instead.
 
         Args:
             model_name: Name of the model to render (default: ``"main"``)

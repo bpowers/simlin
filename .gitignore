@@ -86,6 +86,9 @@ simlin/_clib*
 /src/pysimlin/dist
 /src/pysimlin/simlin.egg-info
 src/pysimlin/simlin/_clib*
+# written by the README Quick Start example when the readme tests run;
+# the checked-in copy lives at src/pysimlin/docs/logistic-growth.svg
+/src/pysimlin/logistic-growth.svg
 
 # Python caches
 __pycache__/

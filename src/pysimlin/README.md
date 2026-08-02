@@ -1,10 +1,6 @@
 # pysimlin
 
-Python bindings for [Simlin](https://simlin.com), a system dynamics
-simulation engine. pysimlin supports opening models in XMILE (Stella), Vensim MDL, and
-Simlin's native formats, editing, simulating, and [Loops That Matter](https://www4.uib.no/en/research/research-projects/loops-that-matter)-based analysis of which feedback loops
-drive behavior over time. Simulation results are pandas DataFrames; model
-structure is plain dataclasses.
+Python bindings for [Simlin](https://simlin.com), a system dynamics simulation engine.
 
 ## Features
 
@@ -16,6 +12,7 @@ structure is plain dataclasses.
 - Inspect model structure: variables, equations, causal links, feedback loops
 - Edit models, or build them from scratch, through a transactional context manager
 - Import Vensim `.vdf` binary output as DataFrames
+- Generate SVG and PNG diagrams of the model's structure
 - Full type hints
 
 ## Installation
@@ -93,6 +90,20 @@ above `carrying_capacity` and the compounding loop acts balancing) keeps
 its structural id while the runtime polarity reports what the run really
 did.
 
+Every model is also a diagram. `render_svg()` draws the stock-and-flow
+structure, computing a layout automatically for a model that doesn't
+already carry one (`render_png()` is the bitmap sibling):
+
+```python
+from pathlib import Path
+
+Path("logistic-growth.svg").write_bytes(project.render_svg())
+```
+
+<img src="https://raw.githubusercontent.com/bpowers/simlin/main/src/pysimlin/docs/logistic-growth.svg"
+     width="431" alt="Stock-and-flow diagram of the logistic growth model">
+
+
 ## Examples
 
 Complete, runnable programs live in
@@ -146,7 +157,8 @@ for link in model.get_links():                 # every causal link, with polarit
 print(model.explain("population"))
 # population is a stock with initial value 50, increased by net_growth, ...
 
-for issue in model.check():                    # structural problems, if any
+# Audit a model you loaded but didn't write: issues, or an empty tuple
+for issue in model.check():
     print(f"{issue.severity}: {issue.message}")
 ```
 
@@ -154,8 +166,17 @@ for issue in model.check():                    # structural problems, if any
 
 `model.edit()` opens a transaction: `current` maps variable names to their
 definitions, and `patch` collects changes. Edits are validated and applied
-together when the `with` block exits; an invalid edit raises a
-`SimlinError` and leaves the model unchanged.
+together when the `with` block exits. An edit that would introduce a
+circular dependency, an invalid equation, or a new unit error raises and
+the model is unchanged, with the message naming the offending variable. A
+completed `edit()` block needs no follow-up `check()` -- an accepted edit
+is a valid model:
+
+<!-- pysimlin-test: expect-error -->
+```python
+with model.edit() as (_, patch):
+    patch.upsert(Aux(name="broken", equation="no_such_var * 2"))
+```
 
 Variables are frozen dataclasses -- the same `Stock`/`Flow`/`Aux` objects
 everywhere, whether you read them or write them. To change one, derive an
@@ -190,9 +211,9 @@ base = model.base_case
 ```
 
 `run()` performs loop analysis by default; pass `analyze_loops=False` to
-skip it when you only need the time series. To change the time range or
-`dt`, update the project's sim specs first
-(`model.project.set_sim_specs()`).
+skip it when you only need the time series. Simulations are deterministic,
+so runs are reproducible and diffable. To change the time range or `dt`,
+update the project's sim specs first (`model.project.set_sim_specs()`).
 
 For step-by-step control -- inspecting state mid-run, or intervening at a
 specific time -- use `model.simulate()`:
@@ -436,35 +457,6 @@ ax.legend()
 plt.show()
 ```
 
-## Using pysimlin from AI Agents
-
-pysimlin is designed to be driven by AI agents as well as people. Every
-analysis surface returns plain data -- strings, dataclasses, DataFrames --
-and simulations are deterministic, so runs are reproducible and diffable.
-Three surfaces matter most for an agent's edit-and-verify loop:
-
-```python
-# Ground yourself: a one-line account of any variable
-print(model.explain("net_growth"))
-
-# Verify after editing: structural problems, or an empty tuple
-issues = model.check()
-```
-
-Edits are transactional, so a bad equation cannot corrupt the model -- it
-raises, the model is unchanged, and the message names the offending
-variable:
-
-<!-- pysimlin-test: expect-error -->
-```python
-with model.edit() as (_, patch):
-    patch.upsert(Aux(name="broken", equation="no_such_var * 2"))
-```
-
-Agents that speak [MCP](https://modelcontextprotocol.io) can use the
-[`@simlin/mcp`](https://www.npmjs.com/package/@simlin/mcp) server instead,
-which exposes the same engine as MCP tools.
-
 ## License
 
 Apache License 2.0
@@ -472,9 +464,4 @@ Apache License 2.0
 ## Development
 
 pysimlin is developed in the
-[Simlin monorepo](https://github.com/bpowers/simlin) (`src/pysimlin`). To
-build from source and run its tests, lints, and examples:
-
-```bash
-./scripts/pysimlin-tests.sh
-```
+[Simlin monorepo](https://github.com/bpowers/simlin) (`src/pysimlin`).

@@ -1,0 +1,214 @@
+<svg style="width: 431; height: 288;" xmlns="http://www.w3.org/2000/svg" viewBox="26 31 431 288" preserveAspectRatio="xMinYMin" class="simlin-canvas"><style>
+
+/* Canvas */
+.simlin-canvas text {
+  fill: #000000;
+  font-size: 12px;
+  font-family: "Roboto Light", "Roboto", "Open Sans", "Arial", sans-serif;
+  font-weight: 300;
+  text-anchor: middle;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+/* Stock */
+.simlin-stock rect {
+  stroke-width: 1px;
+  stroke: #000000;
+  fill: #ffffff;
+}
+
+.simlin-stock.simlin-selected text {
+  fill: #4444dd;
+}
+
+.simlin-stock.simlin-selected rect {
+  stroke: #4444dd;
+}
+
+/* Auxiliary */
+.simlin-aux circle {
+  stroke-width: 1px;
+  stroke: #000000;
+  fill: #ffffff;
+}
+
+.simlin-aux.simlin-selected text {
+  fill: #4444dd;
+}
+
+.simlin-aux.simlin-selected circle {
+  stroke: #4444dd;
+}
+
+/* Flow */
+.simlin-flow .simlin-outer {
+  fill: none;
+  stroke-width: 4px;
+  stroke: #000000;
+}
+
+.simlin-flow .simlin-outer-selected {
+  fill: none;
+  stroke-width: 4px;
+  stroke: #4444dd;
+}
+
+.simlin-flow .simlin-inner {
+  fill: none;
+  stroke-width: 2px;
+  stroke: #ffffff;
+}
+
+.simlin-flow circle {
+  stroke-width: 1px;
+  fill: #ffffff;
+  stroke: #000000;
+}
+
+.simlin-flow.simlin-selected text {
+  fill: #4444dd;
+}
+
+.simlin-flow.simlin-selected circle {
+  stroke: #4444dd;
+}
+
+/* Cloud */
+path.simlin-cloud {
+  stroke-width: 2px;
+  stroke-linejoin: round;
+  stroke-miterlimit: 4px;
+  fill: #ffffff;
+  stroke: #6388dc;
+}
+
+/* Alias */
+.simlin-alias circle {
+  stroke-width: 1px;
+  stroke: #000000;
+  fill: #ffffff;
+}
+
+.simlin-alias.simlin-selected text {
+  fill: #4444dd;
+}
+
+.simlin-alias.simlin-selected circle {
+  stroke: #4444dd;
+}
+
+/* Group (sector / Vensim view-boundary box). Without an explicit rule the
+   rect takes SVG's default fill (opaque black) and hides everything inside. */
+.simlin-group rect {
+  stroke-width: 1px;
+  stroke: #999999;
+  fill: #f5f5f5;
+  fill-opacity: 0.5;
+}
+
+.simlin-group text {
+  font-weight: 500;
+  fill: #666666;
+  text-anchor: start;
+}
+
+/* Module */
+.simlin-module rect {
+  stroke-width: 1px;
+  stroke: #000000;
+  fill: #ffffff;
+}
+
+.simlin-module.simlin-selected text {
+  fill: #4444dd;
+}
+
+.simlin-module.simlin-selected rect {
+  stroke: #4444dd;
+}
+
+/* Connector */
+.simlin-connector {
+  stroke-width: 0.5px;
+  stroke: gray;
+  fill: none;
+}
+
+.simlin-connector-dashed {
+  stroke-width: 0.5px;
+  stroke: gray;
+  stroke-dasharray: 2px;
+  fill: none;
+}
+
+.simlin-connector-selected {
+  stroke-width: 1px;
+  stroke: #4444dd;
+  fill: none;
+}
+
+.simlin-connector-bg {
+  stroke-width: 7px;
+  stroke: white;
+  opacity: 0;
+  fill: none;
+}
+
+/* Arrowhead */
+path.simlin-arrowhead-flow {
+  stroke-width: 1px;
+  stroke-linejoin: round;
+  stroke: #000000;
+  fill: #ffffff;
+}
+
+path.simlin-arrowhead-flow.simlin-selected {
+  stroke: #4444dd;
+  fill: white;
+}
+
+path.simlin-arrowhead-link {
+  stroke-width: 1px;
+  stroke-linejoin: round;
+  stroke: gray;
+  fill: gray;
+}
+
+path.simlin-arrowhead-link.simlin-selected {
+  stroke: #4444dd;
+  fill: #4444dd;
+}
+
+path.simlin-arrowhead-bg {
+  fill: white;
+  opacity: 0;
+}
+
+/* Error indicators */
+.simlin-error-indicator {
+  stroke-width: 0px;
+  fill: rgb(255, 152, 0);
+}
+
+/* Sparkline */
+.simlin-sparkline-line {
+  stroke-width: 0.5px;
+  stroke-linecap: round;
+  stroke: #2299dd;
+  fill: none;
+}
+
+.simlin-sparkline-axis {
+  stroke-width: 0.75px;
+  stroke-linecap: round;
+  stroke: #999;
+  fill: none;
+}
+
+</style>
+<defs>
+<filter id="labelBackground" x="-50%" y="-50%" width="200%" height="200%"><feMorphology operator="dilate" radius="4"></feMorphology><feGaussianBlur stdDeviation="2"></feGaussianBlur><feColorMatrix type="matrix" values="0 0 0 0 1
+                          0 0 0 0 1
+                          0 0 0 0 1
+                          0 0 0 0.85 0"></feColorMatrix><feComposite operator="over" in="SourceGraphic"></feComposite></filter></defs><g><g><path d="M251.577363,58.855427L215.197285,259.369205" class="simlin-connector-bg"></path><path d="M251.577363,58.855427L215.197285,259.369205" class="simlin-connector"></path><g><path d="M219.697285,259.369205L208.447285,263.869205A27,27 0 0,1 208.447285,254.869205z" class="simlin-arrowhead-bg" transform="rotate(100.283554,215.197285,259.369205)"></path><path d="M215.197285,259.369205L209.197285,262.369205A18,18 0 0,1 209.197285,256.369205z" class="simlin-arrowhead-link" transform="rotate(100.283554,215.197285,259.369205)"></path></g></g><g><path d="M402.911124,226.615405L222.38081,266.292705" class="simlin-connector-bg"></path><path d="M402.911124,226.615405L222.38081,266.292705" class="simlin-connector"></path><g><path d="M226.88081,266.292705L215.63081,270.792705A27,27 0 0,1 215.63081,261.792705z" class="simlin-arrowhead-bg" transform="rotate(167.6045,222.38081,266.292705)"></path><path d="M222.38081,266.292705L216.38081,269.292705A18,18 0 0,1 216.38081,263.292705z" class="simlin-arrowhead-link" transform="rotate(167.6045,222.38081,266.292705)"></path></g></g><g><path d="M172.5,141.908649A482.455396,482.455396 0 0,1 213.590607,268.224632" class="simlin-connector-bg"></path><path d="M172.5,141.908649A482.455396,482.455396 0 0,1 213.590607,268.224632" class="simlin-connector"></path><g><path d="M216.428855,259.38057L205.178855,263.88057A27,27 0 0,1 205.178855,254.88057z" class="simlin-arrowhead-bg" transform="rotate(78.824148,211.928855,259.38057)"></path><path d="M211.928855,259.38057L205.928855,262.38057A18,18 0 0,1 205.928855,256.38057z" class="simlin-arrowhead-link" transform="rotate(78.824148,211.928855,259.38057)"></path></g></g><g><path d="M213.590607,268.224632A248.345103,248.345103 0 0,1 100,141.908649" class="simlin-connector-bg"></path><path d="M213.590607,268.224632A248.345103,248.345103 0 0,1 100,141.908649" class="simlin-connector"></path><g><path d="M108.015059,150.189028L96.765059,154.689028A27,27 0 0,1 96.765059,145.689028z" class="simlin-arrowhead-bg" transform="rotate(245.960812,103.515059,150.189028)"></path><path d="M103.515059,150.189028L97.515059,153.189028A18,18 0 0,1 97.515059,147.189028z" class="simlin-arrowhead-link" transform="rotate(245.960812,103.515059,150.189028)"></path></g></g><g><path d="M172.5,141.908649A51.265242,51.265242 0 0,0 100,141.908649" class="simlin-connector-bg"></path><path d="M172.5,141.908649A51.265242,51.265242 0 0,0 100,141.908649" class="simlin-connector"></path><g><path d="M111.314132,136.186579L100.064132,140.686579A27,27 0 0,1 100.064132,131.686579z" class="simlin-arrowhead-bg" transform="rotate(-215.042762,106.814132,136.186579)"></path><path d="M106.814132,136.186579L100.814132,139.186579A18,18 0 0,1 100.814132,133.186579z" class="simlin-arrowhead-link" transform="rotate(-215.042762,106.814132,136.186579)"></path></g></g><g class="simlin-flow"><path d="M50,141.908649L142.5,141.908649" class="simlin-outer"></path><g><path d="M156,141.908649L141,147.908649A36,36 0 0,1 141,135.908649z" class="simlin-arrowhead-bg" transform="rotate(0,150,141.908649)"></path><path d="M150,141.908649L142,145.908649A24,24 0 0,1 142,137.908649z" class="simlin-arrowhead-flow" transform="rotate(0,150,141.908649)"></path></g><path d="M50,141.908649L142.5,141.908649" class="simlin-inner"></path><g><circle cx="100" cy="141.908649" r="9"></circle></g><g><text x="100" y="154.908649" style="fill:#000000;font-size:12px;font-family:&#x27;Roboto Light&#x27;, &#x27;Roboto&#x27;, &#x27;Open Sans&#x27;, &#x27;Arial&#x27;, sans-serif;font-weight:300;white-space:nowrap;text-anchor:middle;filter:url(#labelBackground)" text-rendering="optimizeLegibility"><tspan x="100" dy="1em">net</tspan><tspan x="100" dy="14px">growth</tspan></text></g></g><g class="simlin-stock"><rect x="150" y="124.408649" width="45" height="35"></rect><g><text x="172.5" y="163.408649" style="fill:#000000;font-size:12px;font-family:&#x27;Roboto Light&#x27;, &#x27;Roboto&#x27;, &#x27;Open Sans&#x27;, &#x27;Arial&#x27;, sans-serif;font-weight:300;white-space:nowrap;text-anchor:middle;filter:url(#labelBackground)" text-rendering="optimizeLegibility"><tspan x="172.5" dy="1em">population</tspan></text></g></g><path d="M 25.731189,3.8741489 C 21.525742,3.8741489 18.07553,7.4486396 17.497605,12.06118 C 16.385384,10.910965 14.996889,10.217536 13.45908,10.217535 C 9.8781481,10.217535 6.9473481,13.959873 6.9473482,18.560807 C 6.9473482,19.228828 7.0507906,19.875499 7.166493,20.498196 C 3.850265,21.890233 1.5000346,25.3185 1.5000346,29.310191 C 1.5000346,34.243794 5.1009986,38.27659 9.6710049,38.715902 C 9.6186538,39.029349 9.6083922,39.33212 9.6083922,39.653348 C 9.6083922,45.134228 17.378069,49.59028 26.983444,49.590279 C 36.58882,49.590279 44.389805,45.134229 44.389803,39.653348 C 44.389803,39.35324 44.341646,39.071755 44.295883,38.778399 C 44.369863,38.780301 44.440617,38.778399 44.515029,38.778399 C 49.470875,38.778399 53.499966,34.536825 53.499965,29.310191 C 53.499965,24.377592 49.928977,20.313927 45.360301,19.873232 C 45.432415,19.39158 45.485527,18.91118 45.485527,18.404567 C 45.485527,13.821862 42.394553,10.092543 38.598118,10.092543 C 36.825927,10.092543 35.215888,10.918252 33.996078,12.248669 C 33.491655,7.5434856 29.994502,3.8741489 25.731189,3.8741489 z" class="simlin-cloud" transform="matrix(0.490909, 0, 0, 0.490909, 36.5, 128.408649)"></path><g class="simlin-aux"><circle cx="213.590607" cy="268.224632" r="9"></circle><g><text x="213.590607" y="281.224632" style="fill:#000000;font-size:12px;font-family:&#x27;Roboto Light&#x27;, &#x27;Roboto&#x27;, &#x27;Open Sans&#x27;, &#x27;Arial&#x27;, sans-serif;font-weight:300;white-space:nowrap;text-anchor:middle;filter:url(#labelBackground)" text-rendering="optimizeLegibility"><tspan x="213.590607" dy="1em">fractional</tspan><tspan x="213.590607" dy="14px">growth</tspan></text></g></g><g class="simlin-aux"><circle cx="411.701326" cy="224.683477" r="9"></circle><g><text x="411.701326" y="237.683477" style="fill:#000000;font-size:12px;font-family:&#x27;Roboto Light&#x27;, &#x27;Roboto&#x27;, &#x27;Open Sans&#x27;, &#x27;Arial&#x27;, sans-serif;font-weight:300;white-space:nowrap;text-anchor:middle;filter:url(#labelBackground)" text-rendering="optimizeLegibility"><tspan x="411.701326" dy="1em">max growth</tspan><tspan x="411.701326" dy="14px">rate</tspan></text></g></g><g class="simlin-aux"><circle cx="253.184041" cy="50" r="9"></circle><g><text x="253.184041" y="63" style="fill:#000000;font-size:12px;font-family:&#x27;Roboto Light&#x27;, &#x27;Roboto&#x27;, &#x27;Open Sans&#x27;, &#x27;Arial&#x27;, sans-serif;font-weight:300;white-space:nowrap;text-anchor:middle;filter:url(#labelBackground)" text-rendering="optimizeLegibility"><tspan x="253.184041" dy="1em">carrying</tspan><tspan x="253.184041" dy="14px">capacity</tspan></text></g></g></g></svg>

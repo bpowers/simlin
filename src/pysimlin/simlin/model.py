@@ -947,7 +947,24 @@ class Model:
         raise AssertionError(f"unexpected variable type: {type(var)}")
 
     def edit(self, *, dry_run: bool = False, allow_errors: bool = False) -> _ModelEditContext:
-        """Return a context manager for batching model edits."""
+        """Return a context manager for batching model edits.
+
+        The batched operations are validated and applied atomically when the
+        ``with`` block exits. A patch is rejected -- raising
+        ``SimlinRuntimeError`` and leaving the model unchanged -- if it would
+        introduce any error-severity problem (an invalid or unparseable
+        equation, a reference to an undefined variable, a circular
+        dependency, a model that no longer compiles) or a unit warning in a
+        model that previously had none. A model already carrying unit
+        warnings accepts edits that add more, so fixing units incrementally
+        is possible. Because rejection raises, a ``with`` block that
+        completes means the edit was accepted and the model is valid; there
+        is no need to call ``check()`` afterwards.
+
+        Args:
+            dry_run: Validate the batched operations without applying them.
+            allow_errors: Apply the patch even if validation reports errors.
+        """
         if self._project is None:
             raise SimlinRuntimeError("Model is not attached to a Project")
 

@@ -5,6 +5,18 @@ import struct
 import pytest
 
 import simlin
+from simlin import Aux, Flow, Stock
+
+
+def build_scratch_model() -> simlin.Model:
+    """Build a small model from scratch; it has no diagram view."""
+    project = simlin.Project.new(name="scratch", sim_start=0, sim_stop=10, dt=1)
+    model = project.get_model()
+    with model.edit() as (_, patch):
+        patch.upsert(Stock(name="population", initial_equation="50", inflows=["net_growth"]))
+        patch.upsert(Flow(name="net_growth", equation="population * rate"))
+        patch.upsert(Aux(name="rate", equation="0.08"))
+    return model
 
 
 class TestRenderSvg:
@@ -110,3 +122,62 @@ class TestRenderPng:
         names = model.project.get_model_names()
         png = model.project.render_png(names[0])
         assert png[:8] == self.PNG_SIGNATURE
+
+
+class TestAutoLayout:
+    """Test automatic diagram layout for models without views."""
+
+    def test_scratch_model_renders_without_explicit_layout(self) -> None:
+        """A model built through edit() has no view; rendering generates a
+        transient layout implicitly rather than failing."""
+        model = build_scratch_model()
+        svg = model.project.render_svg()
+        assert b"<svg" in svg
+        assert b"population" in svg
+
+    def test_implicit_render_layout_is_not_persisted(self) -> None:
+        """The implicit render layout is transient: the project's saved
+        views stay empty until auto_layout() persists one."""
+        import json
+
+        model = build_scratch_model()
+        model.project.render_svg()
+        project_dict = json.loads(model.project.serialize_json())
+        views = project_dict["models"][0].get("views", [])
+        assert views == []
+
+        model.project.auto_layout()
+        project_dict = json.loads(model.project.serialize_json())
+        views = project_dict["models"][0].get("views", [])
+        assert views != []
+
+    def test_auto_layout_enables_svg_render(self) -> None:
+        """auto_layout generates a view, after which SVG rendering works."""
+        model = build_scratch_model()
+        model.project.auto_layout()
+        svg = model.project.render_svg()
+        assert b"<svg" in svg
+        # Labels render display names (underscores become spaces, words may
+        # wrap), so assert on single words.
+        assert b"population" in svg
+        assert b"growth" in svg
+
+    def test_auto_layout_enables_png_render(self) -> None:
+        """auto_layout generates a view, after which PNG rendering works."""
+        model = build_scratch_model()
+        model.project.auto_layout()
+        png = model.project.render_png()
+        assert png[:8] == TestRenderPng.PNG_SIGNATURE
+
+    def test_auto_layout_nonexistent_model_raises(self) -> None:
+        """auto_layout should raise for a nonexistent model name."""
+        model = build_scratch_model()
+        with pytest.raises(simlin.SimlinRuntimeError):
+            model.project.auto_layout("nonexistent_model_xyz")
+
+    def test_auto_layout_on_model_with_existing_view(self, xmile_model_path) -> None:
+        """auto_layout replaces an existing view; rendering still works."""
+        model = simlin.load(xmile_model_path)
+        model.project.auto_layout()
+        svg = model.project.render_svg()
+        assert b"<svg" in svg
