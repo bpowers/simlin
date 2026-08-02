@@ -377,11 +377,11 @@ jobs:
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
 
-      # `vite build` only builds the @simlin/serve-web package; it does
-      # NOT build its workspace dependencies. The pnpm `...` filter
+      # `rsbuild build` only builds the @simlin/serve-web package; it
+      # does NOT build its workspace dependencies. The pnpm `...` filter
       # selects serve-web AND its transitive deps (@simlin/core,
       # @simlin/engine, @simlin/diagram) in topological order so each
-      # one's `lib/`/`lib.browser/`/`dist/` output exists before vite
+      # one's `lib/`/`lib.browser/`/`dist/` output exists before rsbuild
       # tries to resolve them. DISABLE_WASM_OPT=1 skips the
       # multi-minute wasm-opt pass on the engine package — release-
       # quality WASM is irrelevant for a smoke test of the serve

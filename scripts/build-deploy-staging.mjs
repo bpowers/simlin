@@ -6,7 +6,7 @@
 // instance from the deployed package.json + lockfile, and offers no vendored-
 // node_modules escape hatch. Deploying the workspace root therefore makes the
 // instance install every workspace package's dependency closure (rspress,
-// vite, slate, radix, @rsbuild/*, ...) -- ~590 MB / 1171 packages -- none of
+// slate, radix, @rsbuild/*, ...) -- ~590 MB / 1171 packages -- none of
 // which the server needs at runtime. This builds a directory whose
 // package.json is exactly the server's prod closure (~80 MB / 230 packages),
 // with @simlin/core and @simlin/engine vendored as file: deps (they aren't

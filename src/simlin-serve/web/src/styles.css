@@ -10,8 +10,8 @@
 
 /* Self-hosted fonts: the diagram's canvas labels and equation editors ask
  * for Roboto / Roboto Mono, and simlin-serve must work with no network
- * access once launched, so the faces are bundled (relative url() so Vite
- * hashes the files and the SPA stays relocatable under any base path).
+ * access once launched, so the faces are bundled (relative url() so the
+ * bundler hashes the files and the SPA stays relocatable under any base path).
  * Same subset files src/app ships. */
 @font-face {
   font-family: 'Roboto';

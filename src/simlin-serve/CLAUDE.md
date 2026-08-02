@@ -53,7 +53,7 @@ A long-lived watcher actor observes the directory tree, classifies events (model
 - `list_projects.rs`, `simulate.rs` -- Tool implementations specific to `simlin-serve` (not reused from `simlin-mcp-core`).
 
 ### SPA (`web/`)
-React 19 + Vite + Jest. Built into a `dist` directory and embedded by `rust-embed` at compile time. Key files (under `web/src/`):
+React 19 + Rsbuild (`web/rsbuild.config.ts`, same bundler as `src/app`) + Rstest. Built into a `dist` directory and embedded by `rust-embed` at compile time. Key files (under `web/src/`):
 - `App.tsx` -- Top-level shell, project list, route to `EditorHost`.
 - `EditorHost.tsx` (in the `components` subdirectory) -- Hosts `@simlin/diagram`'s `<Editor>`. Wires real `onSave` (with sidecar-redirect on 409 conflict), debounced `onSelectionChanged` (150ms), and `projectFocused` on mount/path change.
 - `api.ts` -- HTTP client (list/get/save/create).

@@ -6,7 +6,7 @@
 # Why a separate script from deploy-web.sh:
 # - deploy-web.sh runs `gcloud app deploy` from the repo root, so the GAE
 #   instance's `pnpm install` walks the whole pnpm workspace and installs
-#   EVERY package's dependency closure (rspress, vite, slate, radix,
+#   EVERY package's dependency closure (rspress, slate, radix,
 #   @rsbuild/*, ...): ~590 MB / 1171 packages, none of which the server
 #   needs at runtime. App Engine standard has no vendored-node_modules
 #   escape hatch -- the only lever is which package.json + lockfile the
