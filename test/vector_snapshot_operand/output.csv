@@ -1,0 +1,4 @@
+Time,vals[North],vals[South],vals[West],captured[North],captured[South],captured[West],order[North],order[South],order[West],order_ref[North],order_ref[South],order_ref[West],init_order[North],init_order[South],init_order[West],mapped[North],mapped[South],mapped[West],nested[North],nested[South],nested[West],row_sum[R1],row_sum[R2],picked[R1],picked[R2]
+0,30,10,20,0,0,0,0,1,2,0,1,2,1,2,0,0,0,0,1,2,0,0,0,0,0
+1,5,20,20,30,10,20,1,2,0,1,2,0,1,2,0,10,30,10,1,2,0,6,60,4,20
+2,-20,30,20,5,20,20,0,1,2,0,1,2,1,2,0,5,5,20,1,0,2,7,70,5,20

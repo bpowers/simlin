@@ -33,10 +33,11 @@
 //! to the code in `compiler::array_operand`.
 //!
 //! **Shapes.** The materializer's decision is `is_view`, the negation of
-//! `walk_expr_as_view`'s four accepting arms, plus "an array view can be
-//! derived for it", minus "it contains an array-valued `PREVIOUS`/`INIT`". The
-//! shape axis is therefore the set of *rejected* `compiler::Expr` variants that
-//! can carry an array: `Op2`, `Op1`, `If`, and `App` (an elementwise builtin --
+//! `walk_expr_as_view`'s four storage-view arms, plus "an array view can be
+//! derived for it", minus "it already IS a view over a snapshot buffer"
+//! (`is_snapshot_view`, the C3 shape). The shape axis is therefore the set of
+//! *rejected* `compiler::Expr` variants that can carry an array: `Op2`, `Op1`,
+//! `If`, and `App` (an elementwise builtin --
 //! [`elementwise_builtin_operands_materialize`] covers the two families
 //! `find_expr_array_view` recognises -- or a nested array-producing builtin).
 //!
@@ -69,16 +70,15 @@
 //! element) lands on its own distinct answer. The value each wrong rule would
 //! produce is written next to the assertion.
 //!
-//! `PREVIOUS`/`INIT` of an arrayed reference is Phase C3 and stays broken here
-//! on purpose: a `BeginIter` body cannot emit a per-element `LoadPrev`. Those
-//! rows assert the *attributed* failure (`NotSimulatable` naming the
-//! variable), bare
-//! ([`previous_and_init_operands_still_fail_attributed`]) and nested inside a
-//! computed operand where a sibling could supply the shape
-//! ([`nested_previous_and_init_operands_still_fail_attributed`]) -- so C3 has
-//! red tests waiting rather than silence. The complement is a green row:
+//! `PREVIOUS`/`INIT` of an arrayed reference is Phase C3 (GH #995's option D),
+//! and it is a FIFTH view shape rather than a computed array: the call reads its
+//! argument's view out of one of the VM's snapshot buffers. Its rows live in
+//! their own section below, over a TIME-VARYING fixture -- a constant fixture
+//! cannot tell a previous value from a current one, so every row there asserts
+//! series rather than single arrays. The complement stays a green row:
 //! [`a_scalar_previous_beside_an_array_operand_still_materializes`], without
-//! which the decline could be widened to "contains any `PREVIOUS`" unnoticed.
+//! which "array-valued" could widen to "any `PREVIOUS`" unnoticed and a scalar
+//! `PREVIOUS(s)` would stop broadcasting.
 
 use crate::common::ErrorCode;
 use crate::test_common::TestProject;
@@ -162,6 +162,25 @@ fn assert_fails_attributed(project: TestProject, what: &str) {
     assert!(
         details.contains("out"),
         "{what}: the rejection must name the variable it belongs to, got {details:?}"
+    );
+}
+
+/// A row that must fail for a STATED reason, checked against the per-variable
+/// diagnostic (the surface a user reads) rather than against the aggregate
+/// assembly error, which names only the variable.
+fn assert_declines_because(project: TestProject, variable: &str, reason: &str) {
+    use crate::db::{DiagnosticError, SimlinDb, collect_all_diagnostics, sync_from_datamodel};
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let matched = diags.iter().any(|d| {
+        d.variable.as_deref() == Some(variable)
+            && matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains(reason))
+    });
+    assert!(
+        matched,
+        "expected a diagnostic for '{variable}' containing {reason:?}; got: {diags:?}"
     );
 }
 
@@ -543,6 +562,119 @@ fn deliberately_unmaterialized_positions() {
         &[5.0, 23.0],
         "MEAN of a computed SCALAR stays a scalar mean",
     );
+
+    // The SAME position also refuses a `PREVIOUS`/`INIT` (GH #995 phase C3),
+    // and for the same reason -- see
+    // `a_snapshot_priority_profile_declines_rather_than_allocating_over_one_column`
+    // for the wrong allocation it prevents and the workaround that compiles.
+    for (name, eqn) in [
+        (
+            "unmat_pp_prev",
+            "allocate_available(request[d], PREVIOUS(pp[d,1]), supply)",
+        ),
+        (
+            "unmat_pp_init",
+            "allocate_available(request[d], INIT(pp[d,1]), supply)",
+        ),
+    ] {
+        assert_fails_attributed(
+            TestProject::new(name)
+                .indexed_dimension("d", 3)
+                .indexed_dimension("xp", 4)
+                .array_with_ranges("request[d]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+                .array_const("pp[d,xp]", 1.0)
+                .scalar_const("supply", 35.0)
+                .array_aux("out[d]", eqn),
+            eqn,
+        );
+    }
+}
+
+/// The pp-position decline, with the fixture that shows what it prevents.
+///
+/// `pp` is CONSTANT here, so `PREVIOUS(pp[d,1])` and `pp[d,1]` hold the same
+/// numbers at every step after the first: any difference in the allocation is
+/// therefore a SHAPE defect and nothing else. Without the guard the frozen form
+/// compiled and allocated over a one-column-per-requester profile -- a silently
+/// wrong allocation where HEAD failed loudly, which is the regression this row
+/// exists to keep out.
+///
+/// The workaround is asserted too, so the decline is a redirection rather than a
+/// dead end: capturing the profile into a variable of its own gives the expander
+/// the direct reference it needs, and the allocation then matches the unfrozen
+/// model exactly (`pp` being constant is what makes that the RIGHT answer to
+/// compare against).
+#[test]
+fn a_snapshot_priority_profile_declines_rather_than_allocating_over_one_column() {
+    let fixture = |name: &str| {
+        TestProject::new(name)
+            .with_sim_time(0.0, 2.0, 1.0)
+            .indexed_dimension("d", 3)
+            .indexed_dimension("xp", 4)
+            .array_with_ranges("request[d]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .array_with_ranges(
+                "pp[d,xp]",
+                vec![
+                    ("1,1", "1"),
+                    ("1,2", "3"),
+                    ("1,3", "1"),
+                    ("1,4", "0"),
+                    ("2,1", "1"),
+                    ("2,2", "1"),
+                    ("2,3", "1"),
+                    ("2,4", "0"),
+                    ("3,1", "1"),
+                    ("3,2", "2"),
+                    ("3,3", "1"),
+                    ("3,4", "0"),
+                ],
+            )
+            .scalar_const("supply", 35.0)
+    };
+
+    assert_declines_because(
+        fixture("pp_prev_reject").array_aux(
+            "out[d]",
+            "allocate_available(request[d], PREVIOUS(pp[d,1]), supply)",
+        ),
+        "out",
+        "would allocate over one column",
+    );
+
+    let series = |project: TestProject| -> Vec<Vec<f64>> {
+        project.assert_compiles_incremental();
+        let all = project.run_vm_incremental();
+        (1..=3)
+            .map(|k| all.get(&format!("out[{k}]")).unwrap().clone())
+            .collect()
+    };
+    let unfrozen = series(
+        fixture("pp_unfrozen")
+            .array_aux("out[d]", "allocate_available(request[d], pp[d,1], supply)"),
+    );
+    let captured = series(
+        fixture("pp_captured")
+            .array_aux("frozen[d,xp]", "PREVIOUS(pp[d,xp])")
+            .array_aux(
+                "out[d]",
+                "allocate_available(request[d], frozen[d,1], supply)",
+            ),
+    );
+    // Step 0 differs: the capture reads the PREVIOUS fallback (an all-zero
+    // profile), which is a legitimate allocation over a degenerate profile
+    // rather than a shape defect. From step 1 on the frozen profile IS `pp`,
+    // so the two models must agree element for element.
+    for (k, (a, b)) in captured.iter().zip(unfrozen.iter()).enumerate() {
+        assert_close(
+            &a[1..],
+            &b[1..],
+            &format!(
+                "the per-element capture workaround must allocate exactly as the \
+                 unfrozen model does once the snapshot exists (element {})",
+                k + 1
+            ),
+        );
+    }
 }
 
 // ===========================================================================
@@ -758,134 +890,1012 @@ fn both_apply_to_all_spellings_materialize() {
 }
 
 // ===========================================================================
-// Phase C3's red rows: `PREVIOUS`/`INIT` of an arrayed reference.
+// Phase C3: `PREVIOUS`/`INIT` of an arrayed reference (GH #995, option D).
+//
+// An array-valued `PREVIOUS`/`INIT` is a VIEW over one of the VM's snapshot
+// buffers -- the same `prev_values` / `initial_values` the scalar `LoadPrev` /
+// `LoadInitial` read, addressed with the argument's own geometry. So it is a
+// view position like any other, not a computed array that has to be
+// materialized first.
+//
+// These rows were the red half of Phase C1+C2's decline. Each now asserts VM
+// NUMBERS over a TIME-VARYING fixture, because a constant fixture cannot tell a
+// previous value from a current one.
 // ===========================================================================
 
-/// A `BeginIter` body cannot emit a per-element `LoadPrev` -- that opcode
-/// needs a static slot -- so an array-valued `PREVIOUS`/`INIT` operand is not
-/// materializable and must keep failing loudly until Phase C3 gives it a
-/// snapshot-buffer view. These rows are the issue's own table, and they turn
-/// red the moment C3 lands.
-#[test]
-fn previous_and_init_operands_still_fail_attributed() {
-    let rows = [
-        ("c3_vso_prev", "VECTOR SORT ORDER(PREVIOUS(vals[d]), 1)"),
-        ("c3_vso_init", "VECTOR SORT ORDER(INIT(vals[d]), 1)"),
-        ("c3_rank_prev", "RANK(PREVIOUS(vals[d]), 1)"),
-        (
-            "c3_elm_src_prev",
-            "VECTOR ELM MAP(PREVIOUS(vals[d]), offs[d])",
-        ),
-        (
-            "c3_elm_off_prev",
-            "VECTOR ELM MAP(vals[d], PREVIOUS(offs[d]))",
-        ),
-        (
-            "c3_select_prev",
-            "VECTOR SELECT(PREVIOUS(sel[d]), vals[d], 0, 0, 0) \
-             + SUM(VECTOR SORT ORDER(vals[*], 1))",
-        ),
-    ];
-    for (name, eqn) in rows {
-        assert_fails_attributed(fixture(name).array_aux("out[d]", eqn), eqn);
+/// The time-varying fixture. Everything the C3 rows read moves, so reading
+/// `curr` where `prev` was meant is a different answer at every step but the
+/// first.
+///
+/// Three saved steps (t = 0, 1, 2):
+///
+/// | variable   | t=0            | t=1            | t=2             |
+/// |------------|----------------|----------------|-----------------|
+/// | `vals[d]`  | `[30, 10, 20]` | `[5, 20, 20]`  | `[-20, 30, 20]` |
+/// | `offs[d]`  | `[2, 0, 1]`    | `[1, 0, 1]`    | `[0, 0, 1]`     |
+/// | `sel[d]`   | `[1, 1, 0]`    | `[0, 1, 0]`    | `[0, 1, 0]`     |
+/// | `matrix[1,*]` | `[1, 2, 3]` | `[2, 2, 3]`    | `[3, 2, 3]`     |
+/// | `matrix[2,*]` | `[10,20,30]`| `[10, 20, 40]` | `[10, 20, 50]`  |
+///
+/// `fixed[d] = [30, 10, 20]` is deliberately CONSTANT: it is the second operand
+/// of the nested rows and the source of the `+ SUM(VECTOR SORT ORDER(fixed[*],
+/// 1))` tail, which must contribute the same 3 at every step so the tail does
+/// not smear the value being asserted. (That tail is what forces the lowering
+/// path the `VECTOR SELECT` rows are about -- see the module docs.)
+fn moving_fixture(name: &str) -> TestProject {
+    TestProject::new(name)
+        .with_sim_time(0.0, 2.0, 1.0)
+        .indexed_dimension("d", 3)
+        .indexed_dimension("e", 2)
+        .array_with_ranges(
+            "vals[d]",
+            vec![
+                ("1", "30 - 25 * TIME"),
+                ("2", "10 + 10 * TIME"),
+                ("3", "20"),
+            ],
+        )
+        .array_with_ranges("offs[d]", vec![("1", "2 - TIME"), ("2", "0"), ("3", "1")])
+        .array_with_ranges(
+            "sel[d]",
+            vec![("1", "IF TIME > 0.5 THEN 0 ELSE 1"), ("2", "1"), ("3", "0")],
+        )
+        .array_with_ranges("fixed[d]", vec![("1", "30"), ("2", "10"), ("3", "20")])
+        .array_with_ranges(
+            "matrix[e,d]",
+            vec![
+                ("1,1", "1 + TIME"),
+                ("1,2", "2"),
+                ("1,3", "3"),
+                ("2,1", "10"),
+                ("2,2", "20"),
+                ("2,3", "30 + 10 * TIME"),
+            ],
+        )
+        // A NAMED row dimension, so the qualified `row·r1` spelling exists, and
+        // rows two orders of magnitude apart so reading the WRONG row cannot be
+        // mistaken for reading the wrong step. Row sums: r1 = 6, 7, 8;
+        // r2 = 600, 610, 620.
+        .named_dimension("row", &["r1", "r2"])
+        .array_with_ranges(
+            "wide[row,d]",
+            vec![
+                ("r1,1", "1 + TIME"),
+                ("r1,2", "2"),
+                ("r1,3", "3"),
+                ("r2,1", "100"),
+                ("r2,2", "200"),
+                ("r2,3", "300 + 10 * TIME"),
+            ],
+        )
+}
+
+/// Run `<lhs> = <eqn>` against the moving fixture and return each element's
+/// series, element-major: `series[k]` is `out[k+1]` over t = 0, 1, 2.
+fn moving_series(name: &str, lhs: &str, eqn: &str, n_elements: usize) -> Vec<Vec<f64>> {
+    let project = moving_fixture(name).array_aux(lhs, eqn);
+    project.assert_compiles_incremental();
+    let all = project.run_vm_incremental();
+    (1..=n_elements)
+        .map(|k| {
+            all.get(&format!("out[{k}]"))
+                .unwrap_or_else(|| panic!("out[{k}] missing from {:?}", all.keys()))
+                .clone()
+        })
+        .collect()
+}
+
+fn assert_series(actual: &[Vec<f64>], expected: &[[f64; 3]], what: &str) {
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{what}: element-count mismatch, got {actual:?}"
+    );
+    for (k, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert_close(a, e, &format!("{what}: out[{}] over time", k + 1));
     }
 }
 
-/// The same boundary one level down, and the row this work nearly got wrong:
-/// a `PREVIOUS`/`INIT` of an arrayed reference *nested inside* a computed
-/// operand.
+/// The position axis, bare operand: every `walk_expr_as_view` call site from
+/// the module-doc table, with `PREVIOUS(<arrayed reference>)` in it.
 ///
-/// A bare `PREVIOUS(vals[d])` operand declines because no array view can be
-/// derived for it. Nested, it can borrow a shape from its sibling --
-/// `find_expr_array_view` on an `Op2` takes `lhs.or_else(rhs)` -- and would
-/// materialize into a temp whose body reads `previous(vals@0 + view(dims: [],
-/// offset: k))`, ONE element's previous value broadcast across the whole
-/// array. That is a plausible array of wrong numbers replacing a loud failure
-/// (measured: `[0, 2, 1]` where the correct answer is `[2, 0, 1]`), so
-/// `contains_element_collapsed_prev_or_init` declines the whole operand.
-///
-/// Rows are derived from the same position enumeration as the compiling ones,
-/// so every view position is covered nested as well as bare. Phase C3 flips
-/// these to values; it should not delete them.
+/// The whole point of the fixture moving is that each row's expected series
+/// distinguishes four readings: the correct previous array, the CURRENT array,
+/// one element's previous value broadcast, and the all-zero stub a failed
+/// fragment leaves behind. Each row says which.
 #[test]
-fn nested_previous_and_init_operands_still_fail_attributed() {
-    // Every view position from the module-doc table, with the PREVIOUS/INIT
-    // buried under arithmetic that supplies the shape.
-    let rows = [
-        (
-            "c3n_vso",
-            "VECTOR SORT ORDER(PREVIOUS(vals[d]) + bump[d], 1)",
+fn previous_operands_are_views_over_the_prev_snapshot() {
+    // VECTOR SORT ORDER arg0. prev(vals) is [0,0,0], [30,10,20], [5,20,20];
+    // ascending sort orders are [0,1,2], [1,2,0], [0,1,2]. Reading `vals`
+    // CURRENT would give [1,2,0], [0,1,2], [0,2,1]; broadcasting element 0's
+    // previous value gives [0,1,2] at every step, which differs at t=1.
+    assert_series(
+        &moving_series(
+            "c3_vso",
+            "out[d]",
+            "VECTOR SORT ORDER(PREVIOUS(vals[d]), 1)",
+            3,
         ),
-        // Operand order must not matter: `lhs.or_else(rhs)` finds the shape on
-        // whichever side has one.
-        (
-            "c3n_vso_rhs",
-            "VECTOR SORT ORDER(bump[d] + PREVIOUS(vals[d]), 1)",
-        ),
-        (
-            "c3n_vso_init",
-            "VECTOR SORT ORDER(INIT(vals[d]) + bump[d], 1)",
-        ),
-        ("c3n_rank", "RANK(PREVIOUS(vals[d]) + bump[d], 1)"),
-        (
-            "c3n_elm_src",
-            "VECTOR ELM MAP(PREVIOUS(vals[d]) + bump[d], offs[d])",
-        ),
-        (
-            "c3n_elm_off",
-            "VECTOR ELM MAP(vals[d], PREVIOUS(offs[d]) + shift[d])",
-        ),
-        (
-            "c3n_select_sel",
-            "VECTOR SELECT(PREVIOUS(sel[d]) - mask[d], vals[d], 0, 0, 0) \
-             + SUM(VECTOR SORT ORDER(vals[*], 1))",
-        ),
-        (
-            "c3n_select_val",
-            "VECTOR SELECT(sel[d], PREVIOUS(vals[d]) + bump[d], 0, 0, 0) \
-             + SUM(VECTOR SORT ORDER(vals[*], 1))",
-        ),
-        // The reducer positions reach the SAME wall, but earlier and for a
-        // different reason, so they are listed here to keep the position
-        // enumeration complete rather than to exercise the decline: a reducer
-        // argument is lowered with `with_preserved_wildcards`, which does NOT
-        // promote, so `PREVIOUS(matrix[e,*])` never reaches the materializer
-        // -- `builtins_visitor`'s capture-helper synthesis rejects the array
-        // slice first. The failure names the synthesized helpers, which carry
-        // the consuming variable's name.
-        (
-            "c3n_sum",
-            "SUM(PREVIOUS(matrix[e,*]) + matrix[e,*]) + SUM(VECTOR SORT ORDER(vals[*], 1))",
-        ),
-        (
-            "c3n_mean",
-            "MEAN(PREVIOUS(matrix[e,*]) + matrix[e,*]) + SUM(VECTOR SORT ORDER(vals[*], 1))",
-        ),
-    ];
-    for (name, eqn) in rows {
-        // The reducer rows are shaped over `e`; the vector-builtin rows over
-        // `d`. Pick by which dimension the equation actually ranges on.
-        let project = if eqn.contains("matrix[e,") {
-            fixture(name).array_aux("out[e]", eqn)
-        } else {
-            fixture(name).array_aux("out[d]", eqn)
-        };
-        assert_fails_attributed(project, eqn);
-    }
+        &[[0.0, 1.0, 0.0], [1.0, 2.0, 1.0], [2.0, 0.0, 2.0]],
+        "VECTOR SORT ORDER arg0",
+    );
 
-    // ALLOCATE's two materialized positions, on the allocate fixture.
-    for (name, eqn) in [
+    // RANK arg0, 1-based. [0,0,0] ties to [1,2,3] under the stable sort;
+    // [30,10,20] ranks [3,1,2]; [5,20,20] ranks [1,2,3]. Reading CURRENT would
+    // give [3,1,2], [1,2,3], [1,3,2].
+    assert_series(
+        &moving_series("c3_rank", "out[d]", "RANK(PREVIOUS(vals[d]), 1)", 3),
+        &[[1.0, 3.0, 1.0], [2.0, 1.0, 2.0], [3.0, 2.0, 3.0]],
+        "RANK arg0",
+    );
+
+    // VECTOR ELM MAP arg0 (source). The prev view spans the whole variable, so
+    // it is a full-array source and `result[i] = prev_vals[offs[i]]` with the
+    // CURRENT offsets: [0,0,0] mapped by [2,0,1]; [30,10,20] by [1,0,1] ->
+    // [10,30,10]; [5,20,20] by [0,0,1] -> [5,5,20]. This row is also the one
+    // that pins `full_source_len` looking THROUGH the `PREVIOUS`: bounding the
+    // source at 1 element instead of 3 turns every mapped offset but 0 into
+    // `:NA:` (measured: `[NaN, NaN, 5]` for out[1]).
+    assert_series(
+        &moving_series(
+            "c3_elm_src",
+            "out[d]",
+            "VECTOR ELM MAP(PREVIOUS(vals[d]), offs[d])",
+            3,
+        ),
+        &[[0.0, 10.0, 5.0], [0.0, 30.0, 5.0], [0.0, 10.0, 20.0]],
+        "VECTOR ELM MAP arg0 (source)",
+    );
+
+    // VECTOR ELM MAP arg1 (offsets): `result[i] = vals[prev_offs[i]]` over the
+    // CURRENT vals. prev_offs [0,0,0] over [30,10,20] -> [30,30,30];
+    // [2,0,1] over [5,20,20] -> [20,5,20]; [1,0,1] over [-20,30,20] ->
+    // [30,-20,30]. Reading `offs` current would give [20,30,10], [20,5,20],
+    // [-20,-20,30].
+    assert_series(
+        &moving_series(
+            "c3_elm_off",
+            "out[d]",
+            "VECTOR ELM MAP(vals[d], PREVIOUS(offs[d]))",
+            3,
+        ),
+        &[[30.0, 20.0, 30.0], [30.0, 5.0, -20.0], [30.0, 20.0, 30.0]],
+        "VECTOR ELM MAP arg1 (offsets)",
+    );
+
+    // VECTOR SELECT reduces to a scalar, so every element of `out` holds the
+    // same value; the constant tail adds 3.
+    //
+    // arg0 (selection): prev(sel) [0,0,0] selects nothing -> the max_value
+    // argument 0; [1,1,0] selects vals[0]+vals[1] = 5+20 = 25; [0,1,0] selects
+    // vals[1] = 30. Reading `sel` current would give 43, 23, 33.
+    assert_series(
+        &moving_series(
+            "c3_sel_sel",
+            "out[d]",
+            "VECTOR SELECT(PREVIOUS(sel[d]), vals[d], 0, 0, 0) \
+             + SUM(VECTOR SORT ORDER(fixed[*], 1))",
+            3,
+        ),
+        &[[3.0, 28.0, 33.0], [3.0, 28.0, 33.0], [3.0, 28.0, 33.0]],
+        "VECTOR SELECT arg0 (selection array)",
+    );
+
+    // arg1 (values): the CURRENT sel over prev(vals). [1,1,0] over [0,0,0] -> 0;
+    // [0,1,0] over [30,10,20] -> 10; [0,1,0] over [5,20,20] -> 20. Reading
+    // `vals` current would give 43, 23, 33.
+    assert_series(
+        &moving_series(
+            "c3_sel_val",
+            "out[d]",
+            "VECTOR SELECT(sel[d], PREVIOUS(vals[d]), 0, 0, 0) \
+             + SUM(VECTOR SORT ORDER(fixed[*], 1))",
+            3,
+        ),
+        &[[3.0, 13.0, 23.0], [3.0, 13.0, 23.0], [3.0, 13.0, 23.0]],
+        "VECTOR SELECT arg1 (value array)",
+    );
+}
+
+/// The six `emit_array_reduce` arms plus `MEAN`, over the row slice
+/// `PREVIOUS(matrix[e,*])`.
+///
+/// A reducer's argument is lowered with `with_preserved_wildcards`, which does
+/// NOT promote an active-dimension reference -- so `matrix[e,*]` stays a ROW
+/// slice and the prev view is that row of the snapshot, not the whole matrix.
+/// That is the ELM MAP coherence rule stated positively: a prev view of a strict
+/// slice behaves exactly like the curr view of the same slice.
+///
+/// prev rows are `[0,0,0]`/`[0,0,0]`, then `[1,2,3]`/`[10,20,30]`, then
+/// `[2,2,3]`/`[10,20,40]`. Reading the CURRENT rows would shift each series one
+/// step earlier, which every row below distinguishes except `SIZE` -- whose
+/// point is the count, and whose wrong answer (a collapsed 1-element view) is 1.
+#[test]
+fn previous_reducer_operands_read_the_previous_row() {
+    assert_series(
+        &moving_series("c3_sum", "out[e]", "SUM(PREVIOUS(matrix[e,*]))", 2),
+        &[[0.0, 6.0, 7.0], [0.0, 60.0, 70.0]],
+        "SUM",
+    );
+    assert_series(
+        &moving_series("c3_max", "out[e]", "MAX(PREVIOUS(matrix[e,*]))", 2),
+        &[[0.0, 3.0, 3.0], [0.0, 30.0, 40.0]],
+        "MAX (1-arg)",
+    );
+    assert_series(
+        &moving_series("c3_min", "out[e]", "MIN(PREVIOUS(matrix[e,*]))", 2),
+        &[[0.0, 1.0, 2.0], [0.0, 10.0, 10.0]],
+        "MIN (1-arg)",
+    );
+    // SIZE counts elements of the prev view: 3 always. A collapsed operand
+    // would give 1, which is the failure this row rules out.
+    assert_series(
+        &moving_series("c3_size", "out[e]", "SIZE(PREVIOUS(matrix[e,*]))", 2),
+        &[[3.0, 3.0, 3.0], [3.0, 3.0, 3.0]],
+        "SIZE",
+    );
+    // MEAN's single-argument form is an array reduction, and its codegen arm
+    // enumerates the view shapes rather than pushing a view unconditionally --
+    // so the snapshot view had to be added there too, or an array-valued
+    // PREVIOUS would have fallen through to the scalar walk and failed to
+    // compile (measured before the arm was extended).
+    assert_series(
+        &moving_series("c3_mean", "out[e]", "MEAN(PREVIOUS(matrix[e,*]))", 2),
+        &[[0.0, 2.0, 7.0 / 3.0], [0.0, 20.0, 70.0 / 3.0]],
+        "MEAN (1-arg)",
+    );
+    // STDDEV is the POPULATION deviation (`ArrayStddev` divides by n).
+    let pop_stddev = |xs: [f64; 3]| -> f64 {
+        let mean = (xs[0] + xs[1] + xs[2]) / 3.0;
+        (xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / 3.0).sqrt()
+    };
+    assert_series(
+        &moving_series("c3_stddev", "out[e]", "STDDEV(PREVIOUS(matrix[e,*]))", 2),
+        &[
+            [
+                0.0,
+                pop_stddev([1.0, 2.0, 3.0]),
+                pop_stddev([2.0, 2.0, 3.0]),
+            ],
+            [
+                0.0,
+                pop_stddev([10.0, 20.0, 30.0]),
+                pop_stddev([10.0, 20.0, 40.0]),
+            ],
+        ],
+        "STDDEV",
+    );
+}
+
+/// A prev view of a strict row slice must read THAT ROW of the snapshot.
+///
+/// The reducer rows above pin the LAG (they would catch reading `curr`) but are
+/// weak on the ROW, because their two matrix rows are only an order of magnitude
+/// apart and both are read by the same apply-to-all iteration. `wide`'s rows are
+/// two orders of magnitude apart, so the four readings are unmistakable:
+/// previous r1 is `[0, 6, 7]` and previous r2 is `[0, 600, 610]`, against the
+/// `curr` controls `[6, 7, 8]` and `[600, 610, 620]`. Reading the wrong row
+/// lands on the other row's series; reading the wrong step lands on its own
+/// control.
+///
+/// SPELLING, disclosed rather than assumed. This uses the ACTIVE-DIMENSION
+/// spelling (`wide[row,*]` under `out[row]`), which resolves per element. The
+/// QUALIFIED spelling the LTM wrap generates --
+/// `PREVIOUS(matrix[region·nyc,*])` -- pins the row by NAME instead, and it
+/// reaches this SAME view route from an ordinary APPLY-TO-ALL user equation:
+/// `arg_is_array_shaped` accepts it (the qualified index is static, the `*`
+/// spans), so no capture helper is synthesized and the argument passes through
+/// to lowering. Measured: `out[row] = SUM(PREVIOUS(wide[row·r1,*]))` compiles
+/// with ZERO synthesized helpers and reads r1's previous row at every step,
+/// while with `arg_is_array_shaped` reverted (HEAD's visitor) the same equation
+/// declines through a capture helper. So the qualified spelling is neither
+/// LTM-only nor pre-existing -- C3 is what routes it here.
+///
+/// What IS split is `Ast::Scalar` vs `Ast::ApplyToAll` inside
+/// `builtins_visitor::instantiate_implicit_modules`, not user-vs-LTM: both
+/// `variable.rs` and `db::ltm::parse` pass `Some(dimensions)`. In a SCALAR
+/// equation the qualified index is not accepted as static and
+/// `SUM(PREVIOUS(wide[row·r1,*]))` still declines through a helper; that half is
+/// unchanged by C3 and is a front-end residual, not a view question.
+///
+/// The row property asserted below is the VIEW ARITHMETIC's, which both
+/// spellings share, and the loop pins BOTH: the active-dimension rows read
+/// each iteration's own row, while the qualified rows pin one row by NAME for
+/// every element. The LTM-side witness that the qualified spelling compiles
+/// there too is `db::ltm_char_tests::char_agg_nested_reducer`, whose partial
+/// embeds `previous(matrix[region·boston,*])` -- but that fixture cannot
+/// discriminate a ROW (every element of its `matrix` and `other` is the
+/// constant 1), which is why the numeric row property lives here.
+#[test]
+fn a_prev_view_of_a_row_slice_reads_that_row_of_the_snapshot() {
+    for (name, eqn, expected) in [
         (
-            "c3n_alloc_req",
-            "allocate_available(PREVIOUS(request[d]) + extra[d], pp[d,1], supply)",
+            "c3_row_prev",
+            "SUM(PREVIOUS(wide[row,*]))",
+            [[0.0, 6.0, 7.0], [0.0, 600.0, 610.0]],
+        ),
+        // The `curr` controls, which are what a lost lag would return.
+        (
+            "c3_row_now",
+            "SUM(wide[row,*])",
+            [[6.0, 7.0, 8.0], [600.0, 610.0, 620.0]],
+        ),
+        // The QUALIFIED spelling: one row pinned by name, read for EVERY
+        // element of the iteration. Reading the wrong row lands on r2's
+        // unmistakable series; losing the lag lands on the curr control above.
+        (
+            "c3_row_prev_qual",
+            "SUM(PREVIOUS(wide[row\u{B7}r1,*]))",
+            [[0.0, 6.0, 7.0], [0.0, 6.0, 7.0]],
         ),
         (
-            "c3n_alloc_pri",
-            "allocate_by_priority(request[d], PREVIOUS(priority[d]) + prio_bump[d], 0, width, supply)",
+            "c3_row_prev_qual2",
+            "SUM(PREVIOUS(wide[row\u{B7}r2,*]))",
+            [[0.0, 600.0, 610.0], [0.0, 600.0, 610.0]],
         ),
     ] {
-        assert_fails_attributed(allocate_fixture(name).array_aux("out[d]", eqn), eqn);
+        let project = moving_fixture(name).array_aux("out[row]", eqn);
+        project.assert_compiles_incremental();
+        let all = project.run_vm_incremental();
+        for (elem, want) in ["r1", "r2"].into_iter().zip(expected.iter()) {
+            assert_close(
+                all.get(&format!("out[{elem}]"))
+                    .unwrap_or_else(|| panic!("out[{elem}] missing")),
+                want,
+                &format!("{eqn} at row {elem}"),
+            );
+        }
     }
+}
+
+/// The `INIT` twins. `initial_values` is the post-initials snapshot, so an
+/// `INIT` view is the t=0 array at EVERY step -- including t=0 itself, where
+/// `PREVIOUS` reads its fallback instead.
+///
+/// `INIT(vals)` is `[30, 10, 20]` throughout, so the sort order is `[1, 2, 0]`
+/// at every step. That is distinct from the `PREVIOUS` series above at t=0 and
+/// t=2, and from reading `vals` current at t=1 and t=2.
+#[test]
+fn init_operands_are_views_over_the_initial_snapshot() {
+    assert_series(
+        &moving_series(
+            "c3_init_vso",
+            "out[d]",
+            "VECTOR SORT ORDER(INIT(vals[d]), 1)",
+            3,
+        ),
+        &[[1.0, 1.0, 1.0], [2.0, 2.0, 2.0], [0.0, 0.0, 0.0]],
+        "VECTOR SORT ORDER arg0, INIT",
+    );
+    // A reducer over an INIT row slice: `matrix` row sums at t=0 are 6 and 60,
+    // held for the whole run. The PREVIOUS twin above reads 0, then 6/60, then
+    // 7/70.
+    assert_series(
+        &moving_series("c3_init_sum", "out[e]", "SUM(INIT(matrix[e,*]))", 2),
+        &[[6.0, 6.0, 6.0], [60.0, 60.0, 60.0]],
+        "SUM over an INIT row slice",
+    );
+    // An INIT view in the initials phase reads `curr` rather than the snapshot
+    // (the snapshot does not exist yet), exactly as `Opcode::LoadInitial` does.
+    // An arrayed stock whose INITIAL equation reduces an INIT view is the shape
+    // that exercises it: `SUM(INIT(matrix[e,*]))` at t=0 is 6 and 60, and the
+    // stock never changes, so a broken initials branch (reading an all-zero
+    // snapshot) would leave it at 0.
+    let init_phase = moving_fixture("c3_init_phase").array_stock(
+        "lvl[e]",
+        "SUM(INIT(matrix[e,*]))",
+        &[],
+        &[],
+        None,
+    );
+    init_phase.assert_compiles_incremental();
+    let all = init_phase.run_vm_incremental();
+    assert_close(all.get("lvl[1]").unwrap(), &[6.0, 6.0, 6.0], "lvl[1]");
+    assert_close(all.get("lvl[2]").unwrap(), &[60.0, 60.0, 60.0], "lvl[2]");
+}
+
+/// The nested rows Phase C1+C2 declined: an array-valued `PREVIOUS`/`INIT`
+/// under arithmetic that is itself the operand.
+///
+/// C1+C2 refused these because the argument was lowered element-collapsed, so
+/// materializing would have produced ONE element's previous value broadcast
+/// across the array -- measured `[0, 2, 1]` where the answer was `[2, 0, 1]`.
+/// The argument now keeps its array shape, `find_expr_array_view` gives the call
+/// its argument's shape, and the operand materializes like any other computed
+/// array: the `BeginIter` body reads the snapshot view per element.
+///
+/// `fixed = [30, 10, 20]`, so `prev(vals) + fixed` is `[30,10,20]`, `[60,20,40]`,
+/// `[35,30,40]` and the ascending orders are `[1,2,0]`, `[1,2,0]`, `[1,0,2]`.
+/// Reading `vals` CURRENT would give `[1,2,0]`, `[0,1,2]`, `[0,1,2]`; a
+/// broadcast of element 0's previous value gives `[1,2,0]` at every step.
+#[test]
+fn nested_previous_and_init_operands_materialize() {
+    assert_series(
+        &moving_series(
+            "c3n_vso",
+            "out[d]",
+            "VECTOR SORT ORDER(PREVIOUS(vals[d]) + fixed[d], 1)",
+            3,
+        ),
+        &[[1.0, 1.0, 1.0], [2.0, 2.0, 0.0], [0.0, 0.0, 2.0]],
+        "VECTOR SORT ORDER arg0, nested PREVIOUS",
+    );
+    // Operand order must not matter: `find_expr_array_view` on an `Op2` takes
+    // `lhs.or_else(rhs)`, and both sides now carry the same shape.
+    assert_series(
+        &moving_series(
+            "c3n_vso_rhs",
+            "out[d]",
+            "VECTOR SORT ORDER(fixed[d] + PREVIOUS(vals[d]), 1)",
+            3,
+        ),
+        &[[1.0, 1.0, 1.0], [2.0, 2.0, 0.0], [0.0, 0.0, 2.0]],
+        "VECTOR SORT ORDER arg0, nested PREVIOUS on the right",
+    );
+    // INIT nested: `[30,10,20] + [30,10,20] = [60,20,40]` at every step, so the
+    // order is `[1,2,0]` throughout -- which the PREVIOUS row above differs from
+    // at t=2.
+    assert_series(
+        &moving_series(
+            "c3n_vso_init",
+            "out[d]",
+            "VECTOR SORT ORDER(INIT(vals[d]) + fixed[d], 1)",
+            3,
+        ),
+        &[[1.0, 1.0, 1.0], [2.0, 2.0, 2.0], [0.0, 0.0, 0.0]],
+        "VECTOR SORT ORDER arg0, nested INIT",
+    );
+    // RANK, the sibling arm Phase C1 fixed: ranks of the same three arrays are
+    // [3,1,2], [3,1,2], [2,1,3].
+    assert_series(
+        &moving_series(
+            "c3n_rank",
+            "out[d]",
+            "RANK(PREVIOUS(vals[d]) + fixed[d], 1)",
+            3,
+        ),
+        &[[3.0, 3.0, 2.0], [1.0, 1.0, 1.0], [2.0, 2.0, 3.0]],
+        "RANK arg0, nested PREVIOUS",
+    );
+    // VECTOR ELM MAP, both positions. Source: `prev(vals) + fixed` mapped by the
+    // current `offs` -- and the materialized source is a fresh contiguous temp,
+    // so the mapping is confined to it (`materializing_an_elm_map_source_...`).
+    // [30,10,20] by [2,0,1] -> [20,30,10]; [60,20,40] by [1,0,1] -> [20,60,20];
+    // [35,30,40] by [0,0,1] -> [35,35,30].
+    assert_series(
+        &moving_series(
+            "c3n_elm_src",
+            "out[d]",
+            "VECTOR ELM MAP(PREVIOUS(vals[d]) + fixed[d], offs[d])",
+            3,
+        ),
+        &[[20.0, 20.0, 35.0], [30.0, 60.0, 35.0], [10.0, 20.0, 30.0]],
+        "VECTOR ELM MAP arg0, nested PREVIOUS",
+    );
+    // Offsets: `prev(offs) + 0` -- `fixed` would swamp the index range, so the
+    // nested arithmetic here is `PREVIOUS(offs[d]) * 1`, an `Op2` all the same.
+    // Same values as the bare arg1 row.
+    assert_series(
+        &moving_series(
+            "c3n_elm_off",
+            "out[d]",
+            "VECTOR ELM MAP(vals[d], PREVIOUS(offs[d]) * 1)",
+            3,
+        ),
+        &[[30.0, 20.0, 30.0], [30.0, 5.0, -20.0], [30.0, 20.0, 30.0]],
+        "VECTOR ELM MAP arg1, nested PREVIOUS",
+    );
+    // VECTOR SELECT, both positions. Selection: `prev(sel) * 1` is the same
+    // array, so the values match the bare arg0 row.
+    assert_series(
+        &moving_series(
+            "c3n_sel_sel",
+            "out[d]",
+            "VECTOR SELECT(PREVIOUS(sel[d]) * 1, vals[d], 0, 0, 0) \
+             + SUM(VECTOR SORT ORDER(fixed[*], 1))",
+            3,
+        ),
+        &[[3.0, 28.0, 33.0], [3.0, 28.0, 33.0], [3.0, 28.0, 33.0]],
+        "VECTOR SELECT arg0, nested PREVIOUS",
+    );
+    // Values: current `sel` over `prev(vals) + fixed`. [1,1,0] over [30,10,20]
+    // -> 40; [0,1,0] over [60,20,40] -> 20; [0,1,0] over [35,30,40] -> 30.
+    assert_series(
+        &moving_series(
+            "c3n_sel_val",
+            "out[d]",
+            "VECTOR SELECT(sel[d], PREVIOUS(vals[d]) + fixed[d], 0, 0, 0) \
+             + SUM(VECTOR SORT ORDER(fixed[*], 1))",
+            3,
+        ),
+        &[[43.0, 23.0, 33.0], [43.0, 23.0, 33.0], [43.0, 23.0, 33.0]],
+        "VECTOR SELECT arg1, nested PREVIOUS",
+    );
+    // The reducer positions, which C1+C2 could not even reach: the argument
+    // died in `builtins_visitor`'s capture-helper synthesis before the
+    // materializer saw it. It now passes through, so the operand materializes.
+    // `SUM(prev(matrix[e,*]) + matrix[e,*])` is the previous row's sum plus this
+    // row's. Row 1: 0+6, 6+7, 7+8 -> 6, 13, 15. Row 2: 0+60, 60+70, 70+80 ->
+    // 60, 130, 150. Reading `matrix` current on BOTH sides would double the
+    // current row (12, 14, 16 and 120, 140, 160).
+    assert_series(
+        &moving_series(
+            "c3n_sum",
+            "out[e]",
+            "SUM(PREVIOUS(matrix[e,*]) + matrix[e,*])",
+            2,
+        ),
+        &[[6.0, 13.0, 15.0], [60.0, 130.0, 150.0]],
+        "SUM over a nested PREVIOUS",
+    );
+    assert_series(
+        &moving_series(
+            "c3n_mean",
+            "out[e]",
+            "MEAN(PREVIOUS(matrix[e,*]) + matrix[e,*])",
+            2,
+        ),
+        &[[2.0, 13.0 / 3.0, 5.0], [20.0, 130.0 / 3.0, 50.0]],
+        "MEAN over a nested PREVIOUS",
+    );
+}
+
+/// `ALLOCATE AVAILABLE` / `ALLOCATE BY PRIORITY`, the two positions the
+/// materializer does hoist.
+///
+/// A bisection over allocation curves is not hand-computable the way a sort
+/// order is, so -- exactly as [`allocate_positions`] does for the computed rows
+/// -- each row is pinned against the model that captures the same array into a
+/// variable of its own first. That reference is the PER-ELEMENT `LoadPrev`
+/// route, which is the oracle this whole phase has to agree with, and the row
+/// separately asserts it differs from the unfrozen model so "the previous values
+/// were actually read" is asserted rather than assumed.
+#[test]
+fn allocate_previous_operands_agree_with_the_per_element_capture() {
+    struct Row {
+        what: &'static str,
+        inline: &'static str,
+        helper: (&'static str, &'static str),
+        reference: &'static str,
+        raw: &'static str,
+    }
+    let rows = [
+        Row {
+            what: "allocate_available arg0 (requests)",
+            inline: "allocate_available(PREVIOUS(request[d]), pp[d,1], supply)",
+            helper: ("prev_req[d]", "PREVIOUS(request[d])"),
+            reference: "allocate_available(prev_req[d], pp[d,1], supply)",
+            raw: "allocate_available(request[d], pp[d,1], supply)",
+        },
+        Row {
+            what: "allocate_by_priority arg0 (requests)",
+            inline: "allocate_by_priority(PREVIOUS(request[d]), priority[d], 0, width, supply)",
+            helper: ("prev_req[d]", "PREVIOUS(request[d])"),
+            reference: "allocate_by_priority(prev_req[d], priority[d], 0, width, supply)",
+            raw: "allocate_by_priority(request[d], priority[d], 0, width, supply)",
+        },
+        Row {
+            what: "allocate_by_priority arg1 (priorities)",
+            inline: "allocate_by_priority(request[d], PREVIOUS(priority[d]), 0, width, supply)",
+            helper: ("prev_pri[d]", "PREVIOUS(priority[d])"),
+            reference: "allocate_by_priority(request[d], prev_pri[d], 0, width, supply)",
+            raw: "allocate_by_priority(request[d], priority[d], 0, width, supply)",
+        },
+    ];
+
+    // A moving ALLOCATE fixture: both the requests and the priorities change
+    // every step, so freezing either one changes the allocation.
+    let fixture = |name: &str| {
+        TestProject::new(name)
+            .with_sim_time(0.0, 2.0, 1.0)
+            .indexed_dimension("d", 3)
+            .indexed_dimension("xp", 4)
+            .array_with_ranges(
+                "request[d]",
+                vec![("1", "10 + 10 * TIME"), ("2", "20"), ("3", "30 - 5 * TIME")],
+            )
+            .array_with_ranges(
+                "priority[d]",
+                vec![("1", "3"), ("2", "1 + TIME"), ("3", "2")],
+            )
+            .array_with_ranges(
+                "pp[d,xp]",
+                vec![
+                    ("1,1", "1"),
+                    ("1,2", "3"),
+                    ("1,3", "1"),
+                    ("1,4", "0"),
+                    ("2,1", "1"),
+                    ("2,2", "1"),
+                    ("2,3", "1"),
+                    ("2,4", "0"),
+                    ("3,1", "1"),
+                    ("3,2", "2"),
+                    ("3,3", "1"),
+                    ("3,4", "0"),
+                ],
+            )
+            .scalar_const("supply", 35.0)
+            .scalar_const("width", 1.0)
+    };
+
+    let series = |project: TestProject| -> Vec<Vec<f64>> {
+        project.assert_compiles_incremental();
+        let all = project.run_vm_incremental();
+        (1..=3)
+            .map(|k| all.get(&format!("out[{k}]")).unwrap().clone())
+            .collect()
+    };
+
+    for (i, row) in rows.iter().enumerate() {
+        let inline = series(fixture(&format!("c3_alloc_i{i}")).array_aux("out[d]", row.inline));
+        let reference = series(
+            fixture(&format!("c3_alloc_r{i}"))
+                .array_aux(row.helper.0, row.helper.1)
+                .array_aux("out[d]", row.reference),
+        );
+        let raw = series(fixture(&format!("c3_alloc_w{i}")).array_aux("out[d]", row.raw));
+
+        for (k, (a, e)) in inline.iter().zip(reference.iter()).enumerate() {
+            assert_close(
+                a,
+                e,
+                &format!(
+                    "{}: the inline array PREVIOUS must allocate exactly as the \
+                     per-element capture helper does (element {})",
+                    row.what,
+                    k + 1
+                ),
+            );
+        }
+        assert_ne!(
+            inline, raw,
+            "{}: the fixture must make freezing the operand change the answer, \
+             otherwise this row proves nothing (frozen {inline:?}, raw {raw:?})",
+            row.what
+        );
+    }
+}
+
+/// The equivalence the whole design rests on, asserted directly: an array-valued
+/// `PREVIOUS` reads, element for element and step for step, exactly what a
+/// per-element `LoadPrev` with the same fallback reads.
+///
+/// The reference model captures `PREVIOUS(vals[d])` into an ordinary arrayed aux
+/// -- which compiles to one `LoadPrev` per element, the route that has always
+/// worked -- and then feeds THAT array to the same builtin. The two must agree
+/// at every step, including the first, where the view route reads no buffer at
+/// all and the scalar route returns its fallback.
+///
+/// Rows cover the two snapshot regions and both a whole-array and a strict-slice
+/// argument, since those reach different parts of the view arithmetic.
+#[test]
+fn an_array_snapshot_view_agrees_with_the_per_element_capture() {
+    struct Row {
+        what: &'static str,
+        lhs: &'static str,
+        inline: &'static str,
+        helper: (&'static str, &'static str),
+        reference: &'static str,
+        n: usize,
+    }
+    let rows = [
+        Row {
+            what: "PREVIOUS of a whole array, VECTOR SORT ORDER",
+            lhs: "out[d]",
+            inline: "VECTOR SORT ORDER(PREVIOUS(vals[d]), 1)",
+            helper: ("cap[d]", "PREVIOUS(vals[d])"),
+            reference: "VECTOR SORT ORDER(cap[d], 1)",
+            n: 3,
+        },
+        Row {
+            what: "INIT of a whole array, VECTOR SORT ORDER",
+            lhs: "out[d]",
+            inline: "VECTOR SORT ORDER(INIT(vals[d]), 1)",
+            helper: ("cap[d]", "INIT(vals[d])"),
+            reference: "VECTOR SORT ORDER(cap[d], 1)",
+            n: 3,
+        },
+        Row {
+            what: "PREVIOUS of a row slice, SUM",
+            lhs: "out[e]",
+            inline: "SUM(PREVIOUS(matrix[e,*]))",
+            helper: ("cap[e,d]", "PREVIOUS(matrix[e,d])"),
+            reference: "SUM(cap[e,*])",
+            n: 2,
+        },
+        Row {
+            what: "INIT of a row slice, SUM",
+            lhs: "out[e]",
+            inline: "SUM(INIT(matrix[e,*]))",
+            helper: ("cap[e,d]", "INIT(matrix[e,d])"),
+            reference: "SUM(cap[e,*])",
+            n: 2,
+        },
+    ];
+
+    for (i, row) in rows.iter().enumerate() {
+        let inline = moving_series(&format!("c3_eq_i{i}"), row.lhs, row.inline, row.n);
+        let reference_project = moving_fixture(&format!("c3_eq_r{i}"))
+            .array_aux(row.helper.0, row.helper.1)
+            .array_aux(row.lhs, row.reference);
+        reference_project.assert_compiles_incremental();
+        let all = reference_project.run_vm_incremental();
+        let reference: Vec<Vec<f64>> = (1..=row.n)
+            .map(|k| all.get(&format!("out[{k}]")).unwrap().clone())
+            .collect();
+        for (k, (a, e)) in inline.iter().zip(reference.iter()).enumerate() {
+            assert_close(a, e, &format!("{}: element {}", row.what, k + 1));
+        }
+    }
+}
+
+/// FIRST-STEP SEMANTICS, stated as its own row rather than left implicit in the
+/// series above.
+///
+/// `Opcode::LoadPrev` returns its caller-supplied fallback while
+/// `use_prev_fallback` is set -- i.e. until the first snapshot is taken at the
+/// end of step 0 -- and unary `PREVIOUS(x)` desugars to `PREVIOUS(x, 0)`. The
+/// view route reproduces that by reading the fallback 0 for every element
+/// (`vm::ChunkRegions::backing`'s `None` arm, and the wasm backend's `select` on
+/// the same flag), which is why an array-valued `PREVIOUS` may carry no other
+/// fallback.
+///
+/// `SUM(PREVIOUS(vals[d]))` at t=0 must therefore be 0, not `SUM(vals)` = 60 and
+/// not a NaN from an unwritten buffer. `MIN` and `MAX` are included because they
+/// would surface a stale or uninitialized buffer as an out-of-range extremum
+/// rather than as a plausible zero.
+#[test]
+fn the_first_step_of_an_array_previous_is_the_scalar_fallback() {
+    assert_series(
+        &moving_series("c3_first_sum", "out[d]", "SUM(PREVIOUS(vals[*]))", 3),
+        &[[0.0, 60.0, 45.0], [0.0, 60.0, 45.0], [0.0, 60.0, 45.0]],
+        "SUM of a PREVIOUS view",
+    );
+    assert_series(
+        &moving_series("c3_first_min", "out[d]", "MIN(PREVIOUS(vals[*]))", 3),
+        &[[0.0, 10.0, 5.0], [0.0, 10.0, 5.0], [0.0, 10.0, 5.0]],
+        "MIN of a PREVIOUS view",
+    );
+    assert_series(
+        &moving_series("c3_first_max", "out[d]", "MAX(PREVIOUS(vals[*]))", 3),
+        &[[0.0, 30.0, 20.0], [0.0, 30.0, 20.0], [0.0, 30.0, 20.0]],
+        "MAX of a PREVIOUS view",
+    );
+    // The explicit spelling of the default fallback is the same value and must
+    // stay accepted: `PREVIOUS(x)` desugars to exactly this.
+    assert_series(
+        &moving_series(
+            "c3_first_explicit",
+            "out[d]",
+            "SUM(PREVIOUS(vals[*], 0))",
+            3,
+        ),
+        &[[0.0, 60.0, 45.0], [0.0, 60.0, 45.0], [0.0, 60.0, 45.0]],
+        "SUM of a PREVIOUS view with an explicit 0 fallback",
+    );
+}
+
+/// The VM's half of the first-step semantics across a RESET, which one run
+/// cannot reach: `Vm::reset` clears `prev_values_valid`, and a snapshot view
+/// must go back to reading the fallback rather than the finished run's last
+/// snapshot.
+///
+/// The VM is doubly protected here (it also zero-fills `prev_values` on reset),
+/// which is exactly why this is asserted rather than assumed: the wasm backend
+/// deliberately does NOT clear its snapshot regions and reproduces the semantics
+/// with a `select` instead
+/// (`wasmgen::module_tests::compile_simulation_repeated_run_resets_previous_fallback_for_an_array_view`,
+/// which fails without it). The two backends must agree, so both sides of the
+/// axis carry a row.
+#[test]
+fn a_reset_run_reads_the_fallback_again() {
+    let project = moving_fixture("c3_reset").array_aux("out[d]", "SUM(PREVIOUS(vals[*]))");
+    let compiled = project
+        .compile_incremental()
+        .expect("the fixture should compile");
+    let mut vm = crate::vm::Vm::new(compiled).expect("VM creation should succeed");
+    vm.run_to_end().expect("first run");
+    let first = vm
+        .get_series(&crate::common::Ident::new("out[1]"))
+        .expect("out[1] series");
+    vm.reset();
+    vm.run_to_end().expect("second run");
+    let second = vm
+        .get_series(&crate::common::Ident::new("out[1]"))
+        .expect("out[1] series");
+    assert_close(&first, &[0.0, 60.0, 45.0], "first run");
+    assert_close(&second, &first, "a reset run must reproduce the first run");
+}
+
+/// The pinned decline: a NON-default fallback on an array-valued `PREVIOUS`.
+///
+/// A view carries no per-call-site scalar, so the array route can only reproduce
+/// the fallback the snapshot buffer already reads as before its first snapshot,
+/// which is 0. Approximating -- silently reading 0 where the model asked for 5
+/// -- would be a wrong number on the first step of every run, so the shape is
+/// refused instead. The scalar spelling is unaffected, and the row below shows
+/// the workaround: capture the array into a variable of its own, where each
+/// element's `LoadPrev` carries the fallback.
+#[test]
+fn a_non_default_array_previous_fallback_declines_loudly() {
+    assert_fails_attributed(
+        moving_fixture("c3_fb_reject")
+            .array_aux("out[d]", "VECTOR SORT ORDER(PREVIOUS(vals[d], 5), 1)"),
+        "array PREVIOUS with a non-zero fallback",
+    );
+    // The rejection must name the FALLBACK, not merely fail: this construct is
+    // one the practitioner can fix, and the message says how. Asserted through
+    // the per-variable diagnostic, which is the surface a user reads.
+    assert_declines_because(
+        moving_fixture("c3_fb_reason")
+            .array_aux("out[d]", "VECTOR SORT ORDER(PREVIOUS(vals[d], 5), 1)"),
+        "out",
+        "nowhere to carry a fallback",
+    );
+    // `-0.0` is not the default either, and the check compares BIT PATTERNS so
+    // that it is not. The spelling matters: `-0` is a negation of the literal
+    // `0`, which constant folding turns into `+0.0`, so it is accepted and IS
+    // the default. `0 * -1` folds to a genuine `-0.0` (the shape
+    // `compiler::fold` is documented to produce), and `1 / PREVIOUS(x, 0 * -1)`
+    // is negative infinity where `1 / PREVIOUS(x, 0)` is positive -- a value
+    // comparison would silently accept it and read the wrong sign of infinity
+    // on the first step.
+    assert_fails_attributed(
+        moving_fixture("c3_fb_negzero")
+            .array_aux("out[d]", "VECTOR SORT ORDER(PREVIOUS(vals[d], 0 * -1), 1)"),
+        "array PREVIOUS with a -0.0 fallback",
+    );
+    // `-0` IS accepted, and that is the other half of the bit-pattern claim:
+    // the literal is a negation of `0`, which constant folding turns back into
+    // `+0.0`, so it IS the default and must not be refused. Only the folded
+    // `0 * -1` above produces a genuine `-0.0`. Same series as the bare
+    // `PREVIOUS(vals[d])` row, since the fallback is the default either way.
+    assert_series(
+        &moving_series(
+            "c3_fb_negzero_ok",
+            "out[d]",
+            "VECTOR SORT ORDER(PREVIOUS(vals[d], -0), 1)",
+            3,
+        ),
+        &[[0.0, 1.0, 0.0], [1.0, 2.0, 1.0], [2.0, 0.0, 2.0]],
+        "a `-0` fallback folds to the default and is accepted",
+    );
+
+    // The workaround compiles and is per-element correct: at t=0 every element
+    // reads 5, so the sort order is the identity under stable ties; afterwards
+    // it is the previous array's order, matching the bare row above.
+    let workaround = moving_fixture("c3_fb_helper")
+        .array_aux("cap[d]", "PREVIOUS(vals[d], 5)")
+        .array_aux("out[d]", "VECTOR SORT ORDER(cap[d], 1)");
+    workaround.assert_compiles_incremental();
+    let all = workaround.run_vm_incremental();
+    assert_close(all.get("out[1]").unwrap(), &[0.0, 1.0, 0.0], "out[1]");
+    assert_close(all.get("out[2]").unwrap(), &[1.0, 2.0, 1.0], "out[2]");
+    assert_close(all.get("out[3]").unwrap(), &[2.0, 0.0, 2.0], "out[3]");
+}
+
+/// The three spellings of an arrayed reference, at `VECTOR SORT ORDER` arg0.
+///
+/// They arrive from three different directions and only one of them ever
+/// reached lowering intact before: `vals` (a bare name) already lowered to a
+/// whole-array view; `vals[*]` and `vals[d]` were claimed by
+/// `builtins_visitor`'s capture-helper synthesis, which cannot hold an array
+/// (`vals[*]` in a scalar `Equation::Scalar` helper does not compile) or pinned
+/// them to one element (`substitute_dimension_refs` rewriting `d` to `d·elem`).
+/// All three must now mean the same array.
+#[test]
+fn all_three_arrayed_previous_spellings_agree() {
+    let expected = [[0.0, 1.0, 0.0], [1.0, 2.0, 1.0], [2.0, 0.0, 2.0]];
+    for (name, eqn) in [
+        ("c3_sp_dim", "VECTOR SORT ORDER(PREVIOUS(vals[d]), 1)"),
+        ("c3_sp_star", "VECTOR SORT ORDER(PREVIOUS(vals[*]), 1)"),
+        ("c3_sp_bare", "VECTOR SORT ORDER(PREVIOUS(vals), 1)"),
+    ] {
+        assert_series(
+            &moving_series(name, "out[d]", eqn, 3),
+            &expected,
+            &format!("spelling: {eqn}"),
+        );
+    }
+
+    // The other side of the boundary, unchanged: `PREVIOUS` of a SINGLE element
+    // is still a scalar that broadcasts, not an array. `matrix[e,1]` pins the
+    // trailing index, so the reference collapses to one slot and the operand is
+    // `prev(matrix[e,0]) + matrix[e,*]` per element.
+    //
+    // The scalar is BROADCAST across the three reduced elements, so the sum is
+    // `3 * prev_element + row_sum`. Row 1: prev(matrix[1,1]) is 0, 1, 2 and the
+    // row sums are 6, 7, 8 -> 6, 10, 14. Row 2: prev(matrix[2,1]) is 0, 10, 10
+    // over rows summing 60, 70, 80 -> 60, 100, 110. (Treating the element as an
+    // ARRAY instead would give the row-slice sums 0, 6, 7 added to 6, 7, 8.)
+    assert_series(
+        &moving_series(
+            "c3_sp_element",
+            "out[e]",
+            "SUM(PREVIOUS(matrix[e,1]) + matrix[e,*])",
+            2,
+        ),
+        &[[6.0, 10.0, 14.0], [60.0, 100.0, 110.0]],
+        "PREVIOUS of a fixed element still broadcasts",
+    );
+}
+
+/// The DEGENERATE half of the view-operand rule, pinned so GH #995's "do NOT
+/// simply make everything compile" section can be checked against it.
+///
+/// An element-collapsed `PREVIOUS`/`INIT` in a rank-like position now compiles,
+/// to a one-element view -- a constant `0` sort order, a constant `1` rank. That
+/// is the trap the issue names, and what makes it acceptable here is that it is
+/// EXACTLY what the non-`PREVIOUS` twin already produced: `VECTOR SORT
+/// ORDER(vals[1], 1)` is the same constant 0 at HEAD, and has been. C3 did not
+/// create a degenerate answer; it stopped `PREVIOUS` from being the one operand
+/// that behaved differently from its own argument in the same position.
+///
+/// The half the issue actually warns about -- the LTM ceteris-paribus wrap
+/// pinning a rank-like builtin's ARGUMENT down to one element, turning a loud
+/// drop into a plausible constant-0 score -- is unaffected: `ltm_agg`'s
+/// rank-like decline is independent of compilability, and C-LEARN's five
+/// `rank-like-partial` declines are byte-identical before and after C3.
+#[test]
+fn an_element_collapsed_snapshot_in_a_rank_like_position_matches_its_curr_twin() {
+    for (name, eqn, expected) in [
+        ("c3_degen_vso", "VECTOR SORT ORDER(vals[1], 1)", 0.0),
+        (
+            "c3_degen_vso_prev",
+            "VECTOR SORT ORDER(PREVIOUS(vals[1]), 1)",
+            0.0,
+        ),
+        ("c3_degen_rank", "RANK(vals[1], 1)", 1.0),
+        ("c3_degen_rank_prev", "RANK(PREVIOUS(vals[1]), 1)", 1.0),
+    ] {
+        let series = moving_series(name, "out[d]", eqn, 3);
+        for (k, s) in series.iter().enumerate() {
+            assert_close(
+                s,
+                &[expected; 3],
+                &format!(
+                    "{eqn}: a one-element view is degenerate at element {}",
+                    k + 1
+                ),
+            );
+        }
+    }
+}
+
+/// The shape PR #1001 was written against, verbatim: a per-row `VECTOR SELECT`
+/// over the previous step's matrix rows.
+///
+/// `sel2` selects columns 1 and 3 of row 1 and column 2 of row 2, over
+/// `PREVIOUS(matrix[Row,*])`. The previous rows are `[0,0,0]`/`[0,0,0]`, then
+/// `[1,2,3]`/`[10,20,30]`, then `[2,2,3]`/`[10,20,40]`, so the selected sums are
+/// 0/0, 1+3=4 / 20, and 2+3=5 / 20.
+#[test]
+fn the_gh_1001_user_shape_compiles_and_reads_the_previous_row() {
+    let project = moving_fixture("c3_user_shape")
+        .array_with_ranges(
+            "sel2[e,d]",
+            vec![
+                ("1,1", "1"),
+                ("1,2", "0"),
+                ("1,3", "1"),
+                ("2,1", "0"),
+                ("2,2", "1"),
+                ("2,3", "0"),
+            ],
+        )
+        .array_aux(
+            "picked[e]",
+            "VECTOR SELECT(sel2[e,*], PREVIOUS(matrix[e,*]), 0, 0, 0)",
+        );
+    project.assert_compiles_incremental();
+    let all = project.run_vm_incremental();
+    assert_close(all.get("picked[1]").unwrap(), &[0.0, 4.0, 5.0], "picked[1]");
+    assert_close(
+        all.get("picked[2]").unwrap(),
+        &[0.0, 20.0, 20.0],
+        "picked[2]",
+    );
 }
 
 /// The other side of that boundary: a `PREVIOUS`/`INIT` of a genuinely SCALAR
@@ -945,6 +1955,25 @@ fn a_scalar_previous_beside_an_array_operand_still_materializes() {
         &[12.0, 93.0],
         "a PREVIOUS of a fixed element broadcasts correctly and must not decline",
     );
+
+    // A SCALAR `PREVIOUS`/`INIT` directly in a view position. `SUM(s)` for a
+    // scalar `s` has always compiled -- `walk_expr_as_view`'s `Expr::Var` arm
+    // pushes a one-element view -- while `SUM(PREVIOUS(s))` did not, which was
+    // the same incoherence as the array rows. Both now take the same route, so
+    // the reduce reads one element of the snapshot: `s = 10 + 5 * TIME`, so
+    // `SUM(PREVIOUS(s))` is 0 (the fallback), 10, 15 and `SUM(INIT(s))` is 10
+    // throughout.
+    for (name, eqn, expected) in [
+        ("scalar_view_prev", "SUM(PREVIOUS(s))", [0.0, 10.0, 15.0]),
+        ("scalar_view_init", "SUM(INIT(s))", [10.0, 10.0, 10.0]),
+    ] {
+        let project = moving_fixture(name)
+            .aux("s", "10 + 5 * TIME", None)
+            .array_aux("out[d]", eqn);
+        project.assert_compiles_incremental();
+        let all = project.run_vm_incremental();
+        assert_close(all.get("out[1]").unwrap(), &expected, eqn);
+    }
 }
 
 // ===========================================================================
@@ -1160,4 +2189,145 @@ fn a_nested_array_producing_builtin_inside_arithmetic_is_a_separate_residual() {
     ] {
         assert_fails_attributed(fixture(name).array_aux("out[d]", eqn), eqn);
     }
+}
+
+/// GH #995's own table, re-run. Every row the issue reported as failing now
+/// compiles, and each is checked against the reading it is supposed to have.
+///
+/// Two rows resolve by COHERENCE rather than by gaining an array meaning, and
+/// they are the ones worth stating: a single element stays a single element
+/// under `PREVIOUS`, so in an array-operand position it pushes a ONE-ELEMENT
+/// view -- a legitimate `VECTOR ELM MAP` base (the mapping ranges over the whole
+/// source variable) and a degenerate one-element `VECTOR SELECT`.
+///
+/// The SPELLING decides which route the element takes, and the two are
+/// different: a NUMERIC index (`vals[1]`) reaches the view over the snapshot,
+/// while the bare element NAME the issue's table uses (`vals[e1]`) is not
+/// accepted as a static index on the user-equation parse path, so it is read
+/// through a scalar capture helper of extent one instead. Both are asserted
+/// below, each against its own oracle, rather than one standing in for the
+/// other -- the comments on each `compare` call carry the difference.
+#[test]
+fn every_row_of_the_issue_995_table_compiles() {
+    // The issue's own dimension: element names, so `vals[e1]` is a literal
+    // element rather than an index.
+    let base = |name: &str| {
+        TestProject::new(name)
+            .with_sim_time(0.0, 2.0, 1.0)
+            .named_dimension("d", &["e1", "e2", "e3"])
+            .array_with_ranges(
+                "vals[d]",
+                vec![
+                    ("e1", "30 - 25 * TIME"),
+                    ("e2", "10 + 10 * TIME"),
+                    ("e3", "20"),
+                ],
+            )
+            .array_with_ranges(
+                "offs[d]",
+                vec![("e1", "2 - TIME"), ("e2", "0"), ("e3", "1")],
+            )
+    };
+
+    // Every row of the table, in the issue's order. The first three were
+    // reported as compiling and are the controls; the rest were reported as
+    // failing.
+    let rows = [
+        "VECTOR SORT ORDER(vals[d], 1)",
+        "VECTOR ELM MAP(vals[e1], offs[d])",
+        "RANK(vals[*], 1)",
+        "VECTOR SORT ORDER(PREVIOUS(vals[d]), 1)",
+        "VECTOR ELM MAP(PREVIOUS(vals[e1]), offs[d])",
+        "VECTOR ELM MAP(vals[e1], PREVIOUS(offs[d]))",
+        "VECTOR SORT ORDER(INIT(vals[d]), 1)",
+        "VECTOR SORT ORDER(vals[d] * 2, 1)",
+        "VECTOR SELECT(PREVIOUS(offs[d]), vals[d], 0, 1, 0)",
+        "RANK(vals[*] * 2, 1)",
+    ];
+    for (i, eqn) in rows.iter().enumerate() {
+        base(&format!("t995_{i}"))
+            .array_aux("out[d]", eqn)
+            .assert_compiles_incremental();
+    }
+
+    // The two coherence rows, against the per-element capture. `cap` holds
+    // `PREVIOUS(vals[d])` / `PREVIOUS(offs[d])` element by element -- one
+    // `LoadPrev` per slot -- so substituting it for the inline `PREVIOUS` must
+    // not change a number.
+    let compare = |what: &str, capture: (&str, &str), inline: &str, reference: &str| {
+        let run = |name: &str, project: TestProject| -> Vec<Vec<f64>> {
+            project.assert_compiles_incremental();
+            let all = project.run_vm_incremental();
+            ["e1", "e2", "e3"]
+                .into_iter()
+                .map(|k| {
+                    all.get(&format!("out[{k}]"))
+                        .unwrap_or_else(|| panic!("{name}: out[{k}] missing"))
+                        .clone()
+                })
+                .collect()
+        };
+        let a = run(what, base("t995_i").array_aux("out[d]", inline));
+        let b = run(what, {
+            // The captures are a mix of arrayed and scalar helpers, so pick
+            // the constructor from the name rather than hard-coding one.
+            let p = base("t995_r");
+            let p = if capture.0.contains('[') {
+                p.array_aux(capture.0, capture.1)
+            } else {
+                p.aux(capture.0, capture.1, None)
+            };
+            p.array_aux("out[d]", reference)
+        });
+        for (k, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            // NaN-tolerant: a mapped offset outside the source's extent is a
+            // genuine `:NA:`, and two runs agreeing on WHERE the NaNs fall is
+            // part of what is being checked.
+            assert_eq!(x.len(), y.len(), "{what}: element {} length", k + 1);
+            for (step, (p, q)) in x.iter().zip(y.iter()).enumerate() {
+                assert!(
+                    (p.is_nan() && q.is_nan()) || (p - q).abs() < 1e-9,
+                    "{what}: element {} step {step} -- inline {p}, per-element capture {q} \
+                     (inline {x:?}, reference {y:?})",
+                    k + 1
+                );
+            }
+        }
+    };
+    // A single-element PREVIOUS base for VECTOR ELM MAP, spelled with a NUMERIC
+    // index: the argument reaches lowering as the same collapsed
+    // `StaticSubscript` its `curr` twin does, so the source keeps the whole
+    // variable's extent and the mapping ranges over the previous array.
+    compare(
+        "VECTOR ELM MAP with a single-element PREVIOUS base",
+        ("cap[d]", "PREVIOUS(vals[d])"),
+        "VECTOR ELM MAP(PREVIOUS(vals[1]), offs[d])",
+        "VECTOR ELM MAP(cap[1], offs[d])",
+    );
+    // The SAME element spelled with its bare NAME takes a different route, and
+    // that is the spelling the issue's table uses. `index_is_static` will not
+    // accept an unqualified element name on the user-equation parse path (such a
+    // name can be shadowed by a variable, and the disambiguating check is
+    // deliberately disabled there to stay incremental under renames), so
+    // `builtins_visitor` synthesizes a scalar capture helper and `PREVIOUS`
+    // reads THAT. The source is then the helper -- one slot -- and ELM MAP's
+    // "range over the source variable's full storage" rule applies to it. That
+    // is the same rule a materialized operand follows
+    // (`materializing_an_elm_map_source_confines_the_mapping_to_the_temp`) and
+    // the same answer a practitioner gets by writing the capture out, so it is
+    // self-consistent rather than a second semantics -- but the two spellings DO
+    // mean different things, and only the front end decides which, so both are
+    // pinned rather than one standing in for the other.
+    compare(
+        "VECTOR ELM MAP with a bare-element-name PREVIOUS base",
+        ("h", "PREVIOUS(vals[e1])"),
+        "VECTOR ELM MAP(PREVIOUS(vals[e1]), offs[d])",
+        "VECTOR ELM MAP(h, offs[d])",
+    );
+    compare(
+        "VECTOR SELECT over a single-element PREVIOUS selection",
+        ("cap[d]", "PREVIOUS(offs[d])"),
+        "VECTOR SELECT(PREVIOUS(offs[d]), vals[d], 0, 1, 0)",
+        "VECTOR SELECT(cap[d], vals[d], 0, 1, 0)",
+    );
 }

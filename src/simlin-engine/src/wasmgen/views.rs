@@ -12,7 +12,7 @@
 //! The VM resolves every array access through a runtime stack of [`RuntimeView`]s
 //! built and transformed by the `Push*View` / `View*` opcodes. Because every
 //! static view's geometry (base offset, dims, strides, offset, sparsity,
-//! is_temp) is known at compile time, the wasm emitter maintains a *compile-time*
+//! storage region) is known at compile time, the wasm emitter maintains a *compile-time*
 //! stack of [`ViewDesc`]s instead, mirroring the static parts of `RuntimeView`
 //! field-for-field and reproducing the `RuntimeView::apply_*` transforms in
 //! `apply_*` here. Element addressing then routes through a single source of
@@ -21,7 +21,7 @@
 //!
 //! [`RuntimeView`]: crate::bytecode::RuntimeView
 
-use crate::bytecode::{ByteCodeContext, StaticArrayView};
+use crate::bytecode::{ByteCodeContext, StaticArrayView, ViewStorage};
 
 /// Where a view's base address lives, mirroring how the VM resolves the base of
 /// a `RuntimeView` element read (`reduce_view` in `vm.rs`).
@@ -38,9 +38,35 @@ pub(crate) enum ViewBase {
     /// single-root scope `module_off == 0`, but the distinction is preserved so
     /// Phase 7 can thread a real `module_off` without changing addressing.
     CurrModuleRelative,
-    /// `temp_storage[temp_offsets[base_off] + ..]` (`is_temp`): the base is a
-    /// temp id, resolved against the `temp_storage` region via `temp_offsets`.
+    /// `temp_storage[temp_offsets[base_off] + ..]`: the base is a temp id,
+    /// resolved against the `temp_storage` region via `temp_offsets`.
     Temp,
+    /// `prev_values[base_off + ..]`: the array form of `PREVIOUS` (GH #995),
+    /// reading the same snapshot region the scalar `LoadPrev` does. Like
+    /// `LoadPrev`, the read is gated on `use_prev_fallback`: while it is set the
+    /// element is the fallback `0`, which is the only fallback an array-valued
+    /// `PREVIOUS` may carry (`codegen::is_default_previous_fallback`).
+    PrevAbsolute,
+    /// `initial_values[base_off + ..]`: the array form of `INIT`. Its
+    /// "during the initials phase the snapshot does not exist yet, read `curr`"
+    /// branch is resolved at COMPILE time from `EmitCtx::step_part`, exactly as
+    /// `emit_load_initial` does, so it needs no runtime gate.
+    InitialAbsolute,
+}
+
+/// The byte offsets of the four regions a view's elements can live in, as one
+/// argument so a new region is added in one place rather than at every
+/// addressing call site.
+///
+/// `initial` is already resolved for the program being emitted (`curr_base`
+/// during the initials phase, the snapshot region otherwise) -- see
+/// [`ViewBase::InitialAbsolute`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct RegionBases {
+    pub curr: u32,
+    pub temp_storage: u32,
+    pub prev: u32,
+    pub initial: u32,
 }
 
 /// A single sparse-dimension mapping, mirroring
@@ -90,15 +116,15 @@ impl ViewDesc {
     /// Build a `ViewDesc` from a baked [`StaticArrayView`] (`PushStaticView`).
     ///
     /// `StaticArrayView::to_runtime_view` copies `base_off` verbatim with no
-    /// `module_off`, so the base is [`ViewBase::CurrAbsolute`] for a variable
-    /// view and [`ViewBase::Temp`] when `is_temp`.
+    /// `module_off`, so every region-backed base is the ABSOLUTE variant.
     pub fn from_static(view: &StaticArrayView) -> Self {
         ViewDesc {
             base_off: view.base_off,
-            base: if view.is_temp {
-                ViewBase::Temp
-            } else {
-                ViewBase::CurrAbsolute
+            base: match view.storage {
+                ViewStorage::Curr => ViewBase::CurrAbsolute,
+                ViewStorage::Temp => ViewBase::Temp,
+                ViewStorage::Prev => ViewBase::PrevAbsolute,
+                ViewStorage::Initial => ViewBase::InitialAbsolute,
             },
             dims: view.dims.to_vec(),
             strides: view.strides.to_vec(),
@@ -431,12 +457,11 @@ impl ViewDesc {
     pub fn element_addr(
         &self,
         iter_idx: usize,
-        curr_base: u32,
-        temp_storage_base: u32,
+        bases: RegionBases,
         ctx: &ByteCodeContext,
     ) -> Option<ElementAddr> {
         let flat = self.flat_element_offset(iter_idx);
-        self.element_addr_for_flat(flat, curr_base, temp_storage_base, ctx)
+        self.element_addr_for_flat(flat, bases, ctx)
     }
 
     /// Like [`element_addr`](Self::element_addr) but for an *already-computed*
@@ -448,28 +473,48 @@ impl ViewDesc {
     pub fn element_addr_for_flat(
         &self,
         flat: usize,
-        curr_base: u32,
-        temp_storage_base: u32,
+        bases: RegionBases,
         ctx: &ByteCodeContext,
     ) -> Option<ElementAddr> {
         let flat = flat as u64;
-        let (const_byte_offset, module_relative) = match self.base {
+        let (const_byte_offset, module_relative, prev_fallback_gated) = match self.base {
             ViewBase::CurrAbsolute => (
-                u64::from(curr_base) + (u64::from(self.base_off) + flat) * 8,
+                u64::from(bases.curr) + (u64::from(self.base_off) + flat) * 8,
+                false,
                 false,
             ),
             ViewBase::CurrModuleRelative => (
-                u64::from(curr_base) + (u64::from(self.base_off) + flat) * 8,
+                u64::from(bases.curr) + (u64::from(self.base_off) + flat) * 8,
                 true,
+                false,
             ),
             ViewBase::Temp => {
                 let temp_off = *ctx.temp_offsets.get(self.base_off as usize)? as u64;
-                (u64::from(temp_storage_base) + (temp_off + flat) * 8, false)
+                (
+                    u64::from(bases.temp_storage) + (temp_off + flat) * 8,
+                    false,
+                    false,
+                )
             }
+            // The snapshot regions are `n_slots` wide and share `curr`'s slot
+            // numbering, so only the base changes. `prev` additionally carries
+            // the runtime fallback gate; `initial`'s phase branch was already
+            // resolved into `bases.initial`.
+            ViewBase::PrevAbsolute => (
+                u64::from(bases.prev) + (u64::from(self.base_off) + flat) * 8,
+                false,
+                true,
+            ),
+            ViewBase::InitialAbsolute => (
+                u64::from(bases.initial) + (u64::from(self.base_off) + flat) * 8,
+                false,
+                false,
+            ),
         };
         Some(ElementAddr {
             const_byte_offset,
             module_relative,
+            prev_fallback_gated,
             runtime_off_local: self.runtime_off_local,
             valid_local: self.valid_local,
         })
@@ -490,6 +535,11 @@ impl ViewDesc {
 pub(crate) struct ElementAddr {
     pub const_byte_offset: u64,
     pub module_relative: bool,
+    /// True for a [`ViewBase::PrevAbsolute`] element: the load is wrapped in the
+    /// same `select` on `use_prev_fallback` that the scalar `LoadPrev` emits, so
+    /// the element reads `0` until the first snapshot exists. The VM reaches the
+    /// identical value through `ChunkRegions::backing`'s `None` arm.
+    pub prev_fallback_gated: bool,
     pub runtime_off_local: Option<u32>,
     pub valid_local: Option<u32>,
 }
@@ -506,7 +556,12 @@ mod tests {
     fn to_runtime_view(d: &ViewDesc) -> RuntimeView {
         RuntimeView {
             base_off: d.base_off,
-            is_temp: matches!(d.base, ViewBase::Temp),
+            storage: match d.base {
+                ViewBase::Temp => ViewStorage::Temp,
+                ViewBase::PrevAbsolute => ViewStorage::Prev,
+                ViewBase::InitialAbsolute => ViewStorage::Initial,
+                ViewBase::CurrAbsolute | ViewBase::CurrModuleRelative => ViewStorage::Curr,
+            },
             dims: SmallVec::from_slice(&d.dims),
             strides: SmallVec::from_slice(&d.strides),
             offset: d.offset,
@@ -536,6 +591,18 @@ mod tests {
                 rv.offset_for_iter_index(i),
                 "flat offset mismatch at element {i}"
             );
+        }
+    }
+
+    /// Region bases for the addressing tests: only `curr` and `temp_storage`
+    /// vary here, and the snapshot bases are given distinct sentinel values so a
+    /// misrouted base shows up as an unexpected address rather than as 0.
+    fn bases(curr: u32, temp_storage: u32) -> RegionBases {
+        RegionBases {
+            curr,
+            temp_storage,
+            prev: 900_000,
+            initial: 800_000,
         }
     }
 
@@ -631,7 +698,7 @@ mod tests {
         let d = dense(2, &[3]);
         let ctx = ByteCodeContext::default();
         // element 1 at curr_base=0: (base_off 2 + flat 1) * 8 = 24.
-        let a = d.element_addr(1, 0, 0, &ctx).unwrap();
+        let a = d.element_addr(1, bases(0, 0), &ctx).unwrap();
         assert_eq!(a.const_byte_offset, 24);
         assert!(!a.module_relative);
         // A static view carries no runtime addend or validity gate.
@@ -643,7 +710,7 @@ mod tests {
     fn element_addr_curr_module_relative_flag() {
         let d = ViewDesc::contiguous(2, ViewBase::CurrModuleRelative, vec![3], vec![0]);
         let ctx = ByteCodeContext::default();
-        let a = d.element_addr(1, 0, 0, &ctx).unwrap();
+        let a = d.element_addr(1, bases(0, 0), &ctx).unwrap();
         assert_eq!(a.const_byte_offset, 24);
         assert!(
             a.module_relative,
@@ -657,7 +724,7 @@ mod tests {
         ctx.set_temp_info(vec![0, 4], 8);
         let d = ViewDesc::contiguous(1, ViewBase::Temp, vec![2], vec![0]);
         // temp_storage_base = 1000; temp 1 offset = 4; element 1 -> (4+1)*8 = 40.
-        let a = d.element_addr(1, 0, 1000, &ctx).unwrap();
+        let a = d.element_addr(1, bases(0, 1000), &ctx).unwrap();
         assert_eq!(a.const_byte_offset, 1000 + 40);
         assert!(!a.module_relative);
     }
@@ -670,7 +737,7 @@ mod tests {
         d.runtime_off_local = Some(9);
         d.valid_local = Some(7);
         let ctx = ByteCodeContext::default();
-        let a = d.element_addr(0, 0, 0, &ctx).unwrap();
+        let a = d.element_addr(0, bases(0, 0), &ctx).unwrap();
         // Element 0: const base is just curr_base + base_off*8 = 0; the runtime
         // index offset rides in local 9, the validity in local 7.
         assert_eq!(a.const_byte_offset, 0);

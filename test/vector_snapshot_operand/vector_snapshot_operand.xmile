@@ -1,0 +1,207 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+    <header>
+        <vendor>Test</vendor>
+        <product>Simlin</product>
+    </header>
+    <sim_specs method="Euler" time_units="Time">
+        <start>0</start>
+        <stop>2</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <dimensions>
+        <dim name="Region">
+            <elem name="North"/>
+            <elem name="South"/>
+            <elem name="West"/>
+        </dim>
+        <dim name="Row">
+            <elem name="R1"/>
+            <elem name="R2"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <!--
+                An array-valued PREVIOUS()/INIT() operand (GH #995, phase C3).
+                Both compile to a VIEW over one of the VM's snapshot buffers --
+                the same `prev_values` / `initial_values` the scalar LoadPrev /
+                LoadInitial read -- addressed with the argument's own geometry.
+                Before C3 none of these equations compiled at all, in an
+                ordinary apply-to-all model with LTM disabled.
+
+                Every source array MOVES with time, which is the whole point: a
+                constant model cannot tell a previous value from a current one,
+                so an implementation that read `curr` where `prev` was meant
+                would pass a constant fixture by luck. `expected` values are
+                hand-derived; see output.csv's companion derivation in
+                `array_operand_materialization_tests`.
+            -->
+            <aux name="vals">
+                <doc>[30, 10, 20] at t=0, [5, 20, 20] at t=1, [-20, 30, 20] at t=2</doc>
+                <element subscript="North">
+                    <eqn>30 - 25 * TIME</eqn>
+                </element>
+                <element subscript="South">
+                    <eqn>10 + 10 * TIME</eqn>
+                </element>
+                <element subscript="West">
+                    <eqn>20</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="offs">
+                <doc>[2, 0, 1] at t=0, [1, 0, 1] at t=1, [0, 0, 1] at t=2</doc>
+                <element subscript="North">
+                    <eqn>2 - TIME</eqn>
+                </element>
+                <element subscript="South">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="West">
+                    <eqn>1</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="base">
+                <doc>Constant, so the nested-operand row below is the previous
+                     array plus a fixed offset.</doc>
+                <element subscript="North">
+                    <eqn>30</eqn>
+                </element>
+                <element subscript="South">
+                    <eqn>10</eqn>
+                </element>
+                <element subscript="West">
+                    <eqn>20</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="matrix">
+                <doc>Row R1 is [1+TIME, 2, 3]; row R2 is [10, 20, 30+10*TIME].</doc>
+                <element subscript="R1, North">
+                    <eqn>1 + TIME</eqn>
+                </element>
+                <element subscript="R1, South">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="R1, West">
+                    <eqn>3</eqn>
+                </element>
+                <element subscript="R2, North">
+                    <eqn>10</eqn>
+                </element>
+                <element subscript="R2, South">
+                    <eqn>20</eqn>
+                </element>
+                <element subscript="R2, West">
+                    <eqn>30 + 10 * TIME</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Row"/>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="sel">
+                <doc>Selects columns 1 and 3 of row R1, column 2 of row R2.</doc>
+                <element subscript="R1, North">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="R1, South">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="R1, West">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="R2, North">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="R2, South">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="R2, West">
+                    <eqn>0</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Row"/>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="captured">
+                <doc>The CONTROL, and the oracle this whole feature has to agree
+                     with: the same freeze captured per element, which compiles
+                     to one LoadPrev per slot -- the route that always worked.
+                     `order_ref` below must equal `order`.</doc>
+                <eqn>PREVIOUS(vals[Region])</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="order">
+                <doc>VECTOR SORT ORDER over an array-valued PREVIOUS. 0-based
+                     genuine-Vensim permutation.</doc>
+                <eqn>VECTOR SORT ORDER(PREVIOUS(vals[Region]), 1)</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="order_ref">
+                <doc>Control: the same sort over the per-element capture.</doc>
+                <eqn>VECTOR SORT ORDER(captured[Region], 1)</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="init_order">
+                <doc>The INIT twin: `initial_values` is the post-initials
+                     snapshot, so this is the t=0 array at every step --
+                     including t=0, where PREVIOUS reads its fallback instead.</doc>
+                <eqn>VECTOR SORT ORDER(INIT(vals[Region]), 1)</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="mapped">
+                <doc>VECTOR ELM MAP whose SOURCE is the previous array: element
+                     i is prev_vals[offs[i]] over the source variable's full
+                     storage.</doc>
+                <eqn>VECTOR ELM MAP(PREVIOUS(vals[Region]), offs[Region])</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="nested">
+                <doc>The array-valued PREVIOUS nested inside a COMPUTED operand:
+                     the operand materializes into a temp whose loop body reads
+                     the snapshot view per element.</doc>
+                <eqn>VECTOR SORT ORDER(PREVIOUS(vals[Region]) + base[Region], 1)</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="row_sum">
+                <doc>A reducer over a strict SLICE of the snapshot: a prev view
+                     of `matrix[Row,*]` is that row of the snapshot, exactly as
+                     the curr view of the same slice is that row of curr.</doc>
+                <eqn>SUM(PREVIOUS(matrix[Row,*]))</eqn>
+                <dimensions>
+                    <dim name="Row"/>
+                </dimensions>
+            </aux>
+            <aux name="picked">
+                <doc>The shape GH #1001 was written against: a per-row VECTOR
+                     SELECT over the previous step's matrix rows.</doc>
+                <eqn>VECTOR SELECT(sel[Row,*], PREVIOUS(matrix[Row,*]), 0, 0, 0)</eqn>
+                <dimensions>
+                    <dim name="Row"/>
+                </dimensions>
+            </aux>
+        </variables>
+    </model>
+</xmile>

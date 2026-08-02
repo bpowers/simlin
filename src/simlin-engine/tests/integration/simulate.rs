@@ -1713,6 +1713,19 @@ fn simulates_vector_computed_operand() {
     simulate_path("../../test/vector_computed_operand/vector_computed_operand.xmile");
 }
 
+/// GH #995 phase C3: an array-valued `PREVIOUS()` / `INIT()` operand. Both
+/// compile to a VIEW over one of the VM's snapshot buffers rather than to a
+/// per-element opcode, so this gates the view arithmetic on the snapshot regions
+/// end to end -- VM, protobuf and XMILE round-trips, and wasm-backend parity,
+/// where an `Unsupported` outcome is a hard failure. Every source array moves
+/// with time, so reading `curr` where `prev` was meant is a different answer at
+/// every step but the first; `order_ref` is the control, sorting the same freeze
+/// captured PER ELEMENT (the route that always worked).
+#[test]
+fn simulates_vector_snapshot_operand() {
+    simulate_path("../../test/vector_snapshot_operand/vector_snapshot_operand.xmile");
+}
+
 #[test]
 fn simulates_modules() {
     simulate_path("../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx");
@@ -4280,6 +4293,7 @@ static ALL_INCREMENTALLY_COMPILABLE_MODELS: &[&str] = &[
     "../../test/array_multi_source/array_multi_source.xmile",
     "../../test/array_broadcast/array_broadcast.xmile",
     "../../test/vector_computed_operand/vector_computed_operand.xmile",
+    "../../test/vector_snapshot_operand/vector_snapshot_operand.xmile",
     "../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx",
     "../../test/modules2/modules2.xmile",
     "../../test/circular-dep-1/model.stmx",

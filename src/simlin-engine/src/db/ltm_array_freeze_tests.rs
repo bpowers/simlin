@@ -6,12 +6,15 @@
 //!
 //! A ceteris-paribus partial that must freeze an ARRAY SLICE -- an other-dep
 //! (or, changed-last, the live source) referenced as `arr[pin, *]` or
-//! `arr[pin, *:Sub]` inside a vector builtin -- cannot spell the freeze
-//! inline: `PREVIOUS(<slice>)` has no codegen path (an array-valued operand
+//! `arr[pin, *:Sub]` inside a vector builtin -- did not spell the freeze
+//! inline: `PREVIOUS(<slice>)` had no codegen path (an array-valued operand
 //! must be a view over storage), so the wrap used to either decline the score
 //! loudly (`UnfreezablePartial`, the changed-first/changed-last doom) or emit
 //! a fragment that failed to compile (the per-target-element path, which
-//! never doom-checked).
+//! never doom-checked). GH #995 phase C3 has since given the inline form a
+//! path of its own -- a view over `prev_values` -- so the helper is no longer
+//! the only way to spell the freeze; it is retained for the name-correct row
+//! rule below, and collapsing the two is tracked as follow-on work.
 //!
 //! The fix materializes the freeze as its own synthetic variable: an
 //! `Equation::Arrayed` aux `$⁚ltm⁚freeze⁚…` with one arm per slice row, each

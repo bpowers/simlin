@@ -11,7 +11,7 @@
 use smallvec::SmallVec;
 
 use crate::bytecode::{ByteCodeContext, RuntimeView, TempId};
-use crate::vm::{Vm, increment_indices};
+use crate::vm::{ChunkRegions, Vm, increment_indices};
 
 /// Genuine-Vensim VECTOR SORT ORDER.
 ///
@@ -50,7 +50,7 @@ pub(crate) fn vector_sort_order(
     input_view: &RuntimeView,
     direction: i32,
     write_temp_id: TempId,
-    curr: &[f64],
+    regions: ChunkRegions<'_>,
     temp_storage: &mut [f64],
     context: &ByteCodeContext,
 ) {
@@ -83,7 +83,7 @@ pub(crate) fn vector_sort_order(
         row.clear();
         for local_idx in 0..inner {
             let flat_off = input_view.flat_offset(&indices);
-            let val = Vm::read_view_element(input_view, flat_off, curr, temp_storage, context);
+            let val = Vm::read_view_element(input_view, flat_off, regions, temp_storage, context);
             row.push((val, local_idx));
             increment_indices(&mut indices, &input_view.dims);
         }

@@ -3394,3 +3394,141 @@ fn initials_runlist_is_sorted_topological_order() {
          is not sorting its candidate set before topo_sort_str"
     );
 }
+
+// ── the SNAPSHOT-VIEW arms of the element-graph read classification ─────
+//
+// `symbolic_phase_element_order`'s `PushStaticView` arm classifies a view's
+// base exactly as the scalar read opcodes above it are classified, and GH #995
+// gave `PREVIOUS`/`INIT` array forms that lower to a VIEW instead of to
+// `SymLoadPrev`/`SymLoadInitial`. Three arms, and the two fixtures below cover
+// the two that the scalar tests cannot reach through a view:
+//
+//  * `Var` (a current-value read) -- covered by every existing element-graph
+//    test, since that is what an ordinary array reference lowers to.
+//  * `PrevVar` -- an ordering edge in NEITHER phase.
+//    [`a_prev_view_is_not_a_same_step_element_edge`] exercises the `Dt` half
+//    only (an array `PREVIOUS` in an INITIAL equation reads the fallback, so no
+//    initials fixture can observe an ordering difference); the Initial half
+//    rests on the same argument. This is the view analogue of
+//    [`resolve_dt_sample_if_true_shaped_scc_resolves_despite_previous_self_read`],
+//    which pins the same rule for the scalar `SymLoadPrev`.
+//  * `InitialVar` -- an ordering edge in `SccPhase::Initial` ONLY.
+//    [`an_init_view_is_an_init_phase_element_edge`] covers the Initial half
+//    (where the edge must be present); the Dt half is the same
+//    "an initial-snapshot read is not a current-dt value" argument the scalar
+//    `SymLoadInitial` arm carries, and no fixture here separates it.
+
+/// A `PREVIOUS` VIEW must contribute no element edge, in either phase.
+///
+/// `x` is a per-element forward recurrence whose FIRST element additionally
+/// reads a whole-array `PREVIOUS` of `x` itself. The whole-variable relation
+/// sees `x -> x` through the un-lagged `x[t1]`/`x[t2]` references, so the SCC IS
+/// identified and the element graph is consulted; that graph is the chain
+/// `(x,0) -> (x,1) -> (x,2)`, which is acyclic and resolves.
+///
+/// `SUM(PREVIOUS(x[*]))` lowers to a `PushStaticView` over a `PrevVar` base
+/// spanning EVERY element of `x`, so counting it as a current-value read mints
+/// `(x,e) -> (x,0)` for every `e` -- a `(x,0) -> (x,0)` self-loop among them.
+/// The verdict then flips to unresolved and the model is rejected with a
+/// `CircularDependency` it does not have. Both halves are asserted, so a
+/// mutation that makes the base unconditional reds here rather than passing.
+#[test]
+fn a_prev_view_is_not_a_same_step_element_edge() {
+    use crate::db::SccPhase;
+
+    let project = TestProject::new("prev_view_element_edge")
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .array_with_ranges(
+            "x[t]",
+            vec![
+                ("t1", "1 + SUM(PREVIOUS(x[*]))"),
+                ("t2", "x[t1] + 1"),
+                ("t3", "x[t2] + 1"),
+            ],
+        );
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &datamodel);
+    let model = result.models["main"].source;
+
+    let res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt);
+    assert!(
+        !res.has_unresolved,
+        "the element graph is the acyclic chain (x,0)->(x,1)->(x,2); the only \
+         thing that can make it look cyclic is the whole-array PREVIOUS view in \
+         (x,0)'s segment being counted as a current-value read"
+    );
+    assert_eq!(res.resolved.len(), 1, "exactly one resolved SCC ({{x}})");
+    assert_eq!(res.resolved[0].phase, SccPhase::Dt);
+
+    // The user-visible consequence, so the rule is pinned at both levels: the
+    // model compiles and runs. `x[t1] = 1 + SUM(prev(x))` is 1 at t=0 (the
+    // PREVIOUS fallback makes the sum 0) and 1 + (1+2+3) = 7 at t=1.
+    project.assert_compiles_incremental();
+    let all = project.run_vm_incremental();
+    for (elem, expected) in [("t1", [1.0, 7.0]), ("t2", [2.0, 8.0]), ("t3", [3.0, 9.0])] {
+        let series = all
+            .get(&format!("x[{elem}]"))
+            .unwrap_or_else(|| panic!("x[{elem}] missing"));
+        assert_eq!(series.as_slice(), &expected, "x[{elem}]");
+    }
+}
+
+/// An `INIT` VIEW must contribute an element edge in the INITIAL phase.
+///
+/// This is the direction the `PrevVar` fixture cannot test: an arm that ADDS an
+/// edge can only be caught by a fixture the edge makes CYCLIC, since dropping it
+/// makes graphs resolve more often rather than less.
+///
+/// `s` is an arrayed stock (so its init equation is separate from its dt
+/// equation, and only the init relation is exercised) whose `t2` arm reduces a
+/// whole-array `INIT` of `s` itself. `INIT`-refs are NOT stripped from
+/// `initial_deps`, so the `s -> s` init self-loop is identified; the element
+/// graph then holds `(s,1) -> (s,1)` through that view, which is a genuine
+/// same-element init cycle and must stay UNRESOLVED (loud-safe) and surface as
+/// `CircularDependency`.
+///
+/// Drop the `InitialVar`-in-`Initial` arm and the self-loop disappears: the SCC
+/// "resolves" and the model compiles to a per-element order that reads `s`'s own
+/// initial value before it exists.
+#[test]
+fn an_init_view_is_an_init_phase_element_edge() {
+    use crate::db::SccPhase;
+
+    let datamodel = arrayed_init_recurrence_stock_project(vec![
+        ("t1", "1"),
+        ("t2", "SUM(INIT(s[*]))"),
+        ("t3", "s[t2] + 1"),
+    ]);
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &datamodel);
+    let model = result.models["main"].source;
+
+    let res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Initial);
+    assert!(
+        res.has_unresolved,
+        "(s,1)'s init segment reads a whole-array INIT view of `s`, which is a \
+         genuine same-element init cycle: the SCC must stay unresolved"
+    );
+    assert!(
+        res.resolved.is_empty(),
+        "nothing to resolve -- the element graph is cyclic: {:?}",
+        res.resolved
+    );
+
+    // And the user-visible verdict, which is what the loud-safe posture buys.
+    let diags = crate::db::collect_all_diagnostics(&db, result.project);
+    let circular = diags.iter().any(|d| {
+        d.variable.as_deref() == Some("s")
+            && matches!(
+                &d.error,
+                crate::db::DiagnosticError::Model(e)
+                    if e.code == crate::common::ErrorCode::CircularDependency
+            )
+    });
+    assert!(
+        circular,
+        "the unresolved init SCC must reach the user as a CircularDependency on \
+         's'; got: {diags:?}"
+    );
+}

@@ -161,6 +161,36 @@ impl SubdimensionRelation {
 // Runtime View (for view stack during VM execution)
 // ============================================================================
 
+/// Which of the VM's parallel f64 regions a view's elements are read from.
+///
+/// `curr`, the `PREVIOUS` snapshot and the `INIT` snapshot are three buffers
+/// with **identical slot numbering** (each is an `n_slots` copy of a chunk), so
+/// a view's `base_off`/`strides`/`offset` arithmetic is the same for all three
+/// and only the backing slice changes. `Temp` is the odd one out: its
+/// `base_off` is a temp id, resolved through `ByteCodeContext::temp_offsets`.
+///
+/// This replaces an `is_temp: bool`, so that adding the snapshot regions
+/// (GH #995) made every dereference site a compile error until it said which
+/// region it meant, rather than silently keeping the old two-way split.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ViewStorage {
+    /// `curr[base_off + ..]` -- this timestep's values.
+    Curr,
+    /// `temp_storage[temp_offsets[base_off] + ..]`.
+    Temp,
+    /// `prev_values[base_off + ..]` -- the snapshot taken after the previous
+    /// step's stocks, i.e. what `PREVIOUS()` reads. While no snapshot has been
+    /// taken yet, every element reads the scalar `PREVIOUS` fallback instead;
+    /// see [`Opcode::LoadPrev`] and `vm::ViewRegions::read`.
+    Prev,
+    /// `initial_values[base_off + ..]` -- the snapshot taken after the initials
+    /// phase, i.e. what `INIT()` reads. During the initials phase itself the
+    /// snapshot does not exist yet and the read falls back to `curr`, exactly
+    /// as [`Opcode::LoadInitial`] does.
+    Initial,
+}
+
 /// Sparse mapping for a single dimension in a RuntimeView.
 /// Used when iterating over non-contiguous elements.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -176,10 +206,11 @@ pub struct RuntimeSparseMapping {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
 pub struct RuntimeView {
-    /// Base offset: either variable offset in curr[] or temp_id for temps
+    /// Base offset: a slot offset for the three chunk-shaped regions
+    /// (`Curr`/`Prev`/`Initial`), a temp id for `Temp`
     pub base_off: u32,
-    /// true = base_off is a temp_id, false = base_off is offset in curr[]
-    pub is_temp: bool,
+    /// Which region `base_off` addresses
+    pub storage: ViewStorage,
     /// Dimension sizes for this view
     pub dims: SmallVec<[u16; 4]>,
     /// Strides for each dimension (signed to support transpose)
@@ -208,7 +239,7 @@ impl RuntimeView {
 
         RuntimeView {
             base_off,
-            is_temp: false,
+            storage: ViewStorage::Curr,
             dims,
             strides,
             offset: 0,
@@ -225,7 +256,7 @@ impl RuntimeView {
         dim_ids: SmallVec<[DimId; 4]>,
     ) -> Self {
         let mut view = Self::for_var(temp_id as u32, dims, dim_ids);
-        view.is_temp = true;
+        view.storage = ViewStorage::Temp;
         view
     }
 
@@ -234,7 +265,7 @@ impl RuntimeView {
     pub fn invalid() -> Self {
         RuntimeView {
             base_off: 0,
-            is_temp: false,
+            storage: ViewStorage::Curr,
             dims: SmallVec::new(),
             strides: SmallVec::new(),
             offset: 0,
@@ -1585,10 +1616,11 @@ pub struct ArrayDefinition {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct StaticArrayView {
-    /// Base variable offset in curr[]
+    /// Base variable offset within the region named by `storage` (a temp id
+    /// when that is `ViewStorage::Temp`)
     pub base_off: u32,
-    /// true = base_off is a temp_id, false = base_off is offset in curr[]
-    pub is_temp: bool,
+    /// Which region `base_off` addresses
+    pub storage: ViewStorage,
     /// Dimension sizes
     pub dims: SmallVec<[u16; 4]>,
     /// Strides for each dimension
@@ -1624,7 +1656,7 @@ impl StaticArrayView {
         };
         RuntimeView {
             base_off: self.base_off,
-            is_temp: self.is_temp,
+            storage: self.storage,
             dims: SmallVec::from_slice(&self.dims),
             strides: SmallVec::from_slice(&self.strides),
             offset: self.offset,
@@ -2582,7 +2614,7 @@ mod tests {
         let view = RuntimeView::for_var(100, dims, dim_ids);
 
         assert_eq!(view.base_off, 100);
-        assert!(!view.is_temp);
+        assert_eq!(view.storage, ViewStorage::Curr);
         assert_eq!(view.dims.as_slice(), &[5]);
         assert_eq!(view.strides.as_slice(), &[1]);
         assert_eq!(view.offset, 0);
@@ -2622,7 +2654,7 @@ mod tests {
         let view = RuntimeView::for_temp(3, dims, dim_ids);
 
         assert_eq!(view.base_off, 3);
-        assert!(view.is_temp);
+        assert_eq!(view.storage, ViewStorage::Temp);
     }
 
     #[test]
@@ -3043,7 +3075,7 @@ mod tests {
 
         let view = StaticArrayView {
             base_off: 100,
-            is_temp: false,
+            storage: ViewStorage::Curr,
             dims: smallvec::smallvec![3, 4],
             strides: smallvec::smallvec![4, 1],
             offset: 0,
@@ -3063,7 +3095,7 @@ mod tests {
     fn test_static_view_to_runtime() {
         let static_view = StaticArrayView {
             base_off: 100,
-            is_temp: false,
+            storage: ViewStorage::Curr,
             dims: smallvec::smallvec![3, 4],
             strides: smallvec::smallvec![4, 1],
             offset: 8,
@@ -3074,7 +3106,7 @@ mod tests {
         let runtime = static_view.to_runtime_view();
 
         assert_eq!(runtime.base_off, 100);
-        assert!(!runtime.is_temp);
+        assert_eq!(runtime.storage, ViewStorage::Curr);
         assert_eq!(runtime.dims.as_slice(), &[3, 4]);
         assert_eq!(runtime.strides.as_slice(), &[4, 1]);
         assert_eq!(runtime.offset, 8);
@@ -3216,7 +3248,7 @@ mod tests {
         // 1D array with non-zero offset (sliced view)
         let view = RuntimeView {
             base_off: 0,
-            is_temp: false,
+            storage: ViewStorage::Curr,
             dims: smallvec::smallvec![3],
             strides: smallvec::smallvec![1],
             offset: 5, // Start at element 5
@@ -3239,7 +3271,7 @@ mod tests {
         // 2D array with column-major strides (not contiguous)
         let view = RuntimeView {
             base_off: 0,
-            is_temp: false,
+            storage: ViewStorage::Curr,
             dims: smallvec::smallvec![3, 4],    // 3 rows, 4 cols
             strides: smallvec::smallvec![1, 3], // Column-major: stride[0]=1, stride[1]=3
             offset: 0,
@@ -3264,7 +3296,7 @@ mod tests {
         // 1D sparse array: elements at indices [1, 3, 7] of parent
         let view = RuntimeView {
             base_off: 0,
-            is_temp: false,
+            storage: ViewStorage::Curr,
             dims: smallvec::smallvec![3], // 3 sparse elements
             strides: smallvec::smallvec![1],
             offset: 0,
@@ -3289,7 +3321,7 @@ mod tests {
         // Scalar view (0 dimensions)
         let view = RuntimeView {
             base_off: 10,
-            is_temp: false,
+            storage: ViewStorage::Curr,
             dims: SmallVec::new(),
             strides: SmallVec::new(),
             offset: 5,

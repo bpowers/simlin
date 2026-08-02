@@ -54,11 +54,13 @@
 //! * An operand only materializes if [`super::find_expr_array_view`] can
 //!   derive a shape for it. That function's `App` arm is an exhaustive match
 //!   naming exactly which builtins propagate an array shape; the ones that do
-//!   not (the reducers, `VECTOR SELECT`, the `Lookup` family,
-//!   `PREVIOUS`/`INIT`) are listed there with the reason.
-//! * [`contains_element_collapsed_prev_or_init`] refuses an operand that
-//!   *contains* an array-valued `PREVIOUS`/`INIT`, even when a sibling could
-//!   supply the shape. That is GH #995's Phase C3 boundary, not an oversight.
+//!   not (the reducers, `VECTOR SELECT`, the `Lookup` family) are listed there
+//!   with the reason.
+//! * A BARE array-valued `PREVIOUS`/`INIT` is not materialized because it does
+//!   not need to be: it is already a view, over one of the VM's snapshot
+//!   buffers ([`is_snapshot_view`]). Nested inside a computed operand it
+//!   materializes like anything else, and the `BeginIter` body reads the
+//!   snapshot view per element.
 
 use crate::ast::ArrayView;
 use crate::compiler::expr::{BuiltinFn, Expr, SubscriptIndex};
@@ -281,16 +283,10 @@ fn materialize_view_operands(
 /// that replaces it, or return it unchanged when it is already a view or when
 /// no array shape can be derived for it.
 ///
-/// The "no derivable shape" case is what keeps a BARE `PREVIOUS(vals[D])` /
-/// `INIT(vals[D])` operand failing loudly (GH #995's Phase C3): they lower to
-/// an `App` that [`super::find_expr_array_view`] reports no view for, because a
-/// `BeginIter` body cannot emit the per-element `LoadPrev`/`LoadInitial` those
-/// need -- those opcodes address a static slot. Silently materializing them at
-/// some guessed shape would trade a compile error for a wrong number. That is
-/// NOT sufficient when the `PREVIOUS`/`INIT` is a SUBEXPRESSION of the operand
-/// (a sibling supplies the shape), which is why
-/// [`contains_element_collapsed_prev_or_init`] is checked first -- see its doc
-/// for the wrong number it prevents.
+/// A bare array-valued `PREVIOUS`/`INIT` is left alone for the same reason a
+/// `StaticSubscript` is: it already IS a view, over a snapshot buffer rather
+/// than over `curr` (GH #995, [`is_snapshot_view`]). Materializing it would
+/// spend a temp to copy an array that codegen can address directly.
 fn materialize_view_operand(
     operand: Box<Expr>,
     next_temp_id: &mut u32,
@@ -299,7 +295,7 @@ fn materialize_view_operand(
     if is_view(&operand) {
         return operand;
     }
-    if contains_element_collapsed_prev_or_init(&operand) {
+    if is_snapshot_view(&operand) {
         return operand;
     }
     let Some(source_view) = super::find_expr_array_view(&operand) else {
@@ -326,79 +322,22 @@ fn materialize_view_operand(
     Box::new(Expr::TempArray(temp_id, view, loc))
 }
 
-/// True when `expr` contains a `PREVIOUS`/`INIT` whose argument is not a plain
-/// scalar variable reference.
+/// True when `expr` is an array-valued `PREVIOUS`/`INIT` -- a fifth view shape
+/// `codegen::walk_expr_as_view` accepts, over one of the VM's snapshot buffers
+/// rather than over `curr` (GH #995).
 ///
-/// A bare `PREVIOUS(vals[D])` operand declines on its own, because
-/// [`super::find_expr_array_view`] reports no view for it. But that check is
-/// not enough one level up: an operand's shape is derived from whichever leaf
-/// HAS one (`Op2` takes `lhs.or_else(rhs)`), so
-/// `VECTOR SORT ORDER(PREVIOUS(vals[D]) + bump[D], 1)` would take its shape
-/// from the sibling `bump[D]` and materialize. It must not. `PREVIOUS`'s
-/// argument is lowered element-collapsed -- a `StaticSubscript` with no
-/// dimensions carrying the element's flat offset, `previous(vals@0 + view(dims:
-/// [], offset: 1))` -- so the temp would compute ONE element's previous value
-/// broadcast across the whole array. That is a plausible array of wrong
-/// numbers where the fragment previously failed loudly, which is strictly
-/// worse than not compiling.
-///
-/// A `PREVIOUS`/`INIT` of a genuinely scalar variable lowers to an
-/// `Expr::Var`, carries no per-element identity, and broadcasts correctly, so
-/// it stays materializable: `VECTOR SORT ORDER(vals[D] + PREVIOUS(s), 1)`
-/// compiles and is right.
-///
-/// Declining a collapsed argument costs nothing beyond the status quo: an
-/// operand containing an `App` at all was never one of `is_view`'s four
-/// shapes, so it did not compile before this pass existed either. Phase C3
-/// (GH #995) is where the array-valued forms get a snapshot-buffer view; this
-/// predicate is the boundary it moves.
-fn contains_element_collapsed_prev_or_init(expr: &Expr) -> bool {
-    match expr {
-        Expr::App(builtin, _) => {
-            let collapsed_arg = match builtin {
-                BuiltinFn::Previous(arg, _) | BuiltinFn::Init(arg) => {
-                    !matches!(arg.as_ref(), Expr::Var(_, _))
-                }
-                _ => false,
-            };
-            if collapsed_arg {
-                return true;
-            }
-            let mut found = false;
-            builtin.for_each_expr_ref(|arg| {
-                found = found || contains_element_collapsed_prev_or_init(arg);
-            });
-            found
-        }
-        Expr::Op1(_, inner, _) => contains_element_collapsed_prev_or_init(inner),
-        Expr::Op2(_, lhs, rhs, _) => {
-            contains_element_collapsed_prev_or_init(lhs)
-                || contains_element_collapsed_prev_or_init(rhs)
-        }
-        Expr::If(cond, then_expr, else_expr, _) => {
-            contains_element_collapsed_prev_or_init(cond)
-                || contains_element_collapsed_prev_or_init(then_expr)
-                || contains_element_collapsed_prev_or_init(else_expr)
-        }
-        Expr::Subscript(_, indices, _, _) => indices.iter().any(|idx| match idx {
-            SubscriptIndex::Single(e) => contains_element_collapsed_prev_or_init(e),
-            SubscriptIndex::Range(start, end) => {
-                contains_element_collapsed_prev_or_init(start)
-                    || contains_element_collapsed_prev_or_init(end)
-            }
-        }),
-        Expr::EvalModule(_, _, _, args) => args.iter().any(contains_element_collapsed_prev_or_init),
-        Expr::AssignCurr(_, rhs) | Expr::AssignNext(_, rhs) | Expr::AssignTemp(_, rhs, _) => {
-            contains_element_collapsed_prev_or_init(rhs)
-        }
-        Expr::Const(_, _)
-        | Expr::Var(_, _)
-        | Expr::StaticSubscript(_, _, _)
-        | Expr::TempArray(_, _, _)
-        | Expr::TempArrayElement(_, _, _, _)
-        | Expr::Dt(_)
-        | Expr::ModuleInput(_, _) => false,
-    }
+/// Kept separate from [`is_view`] because the two are decided differently:
+/// `is_view` is a pure shape test on the `Expr` variant, while this one depends
+/// on the ARGUMENT's shape -- `PREVIOUS(vals[D])` is a view and
+/// `PREVIOUS(matrix[E,1])` is a scalar. Both are decided by
+/// [`super::snapshot_view_arg`], shared with codegen, so the pass and the
+/// emitter cannot disagree about which calls take the array route. An argument
+/// codegen cannot express as a snapshot view is a loud rejection THERE, and
+/// declining to materialize here is what keeps it loud: a temp built around a
+/// `PREVIOUS` its `BeginIter` body cannot emit would be a wrong number in place
+/// of a diagnostic.
+fn is_snapshot_view(expr: &Expr) -> bool {
+    matches!(expr, Expr::App(builtin, _) if super::snapshot_view_arg(builtin).is_some())
 }
 
 /// The four expression shapes `codegen::walk_expr_as_view` accepts. Anything

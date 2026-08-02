@@ -771,9 +771,13 @@ fn wrap_non_matching_in_previous(
             // `PREVIOUS(SUM(pop[*]))`, which is `PREVIOUS` of a scalar (the
             // reducer's result, even a partial reduce, is scalar in the
             // enclosing apply-to-all context) and evaluates fine -- rather
-            // than recursing into it and emitting `SUM(PREVIOUS(pop[*]))`,
-            // which is silently `0.0` at every step under an active A2A
-            // dimension because codegen has no LoadPrev-of-array-view path.
+            // than recursing into it and emitting `SUM(PREVIOUS(pop[*]))`.
+            // The wrap is the GH #517 semantics -- freeze the reducer's
+            // RESULT -- and is kept for that reason. Its original
+            // justification is stale: the inner form used to be a stubbed
+            // `0.0` at every step because codegen had no array-`PREVIOUS`
+            // path, and GH #995 phase C3 gave it one (a view over
+            // `prev_values`), so both forms compile now.
             // If the live reference *is* inside this reducer (the now
             // test-only `RefShape::Wildcard` path where `SUM(pop[*])` is the
             // live thing), recurse normally so the live `pop[*]` stays
@@ -991,181 +995,10 @@ fn freeze_lookup_table_indices(
     Expr0::Subscript(ident, indices, loc)
 }
 
-/// A parse failure in a ceteris-paribus partial-equation builder.
-///
-/// The ceteris-paribus PREVIOUS-wrapping transform ([`wrap_non_matching_in_previous`])
-/// can only run on a successfully-parsed `Expr0`. If `Expr0::new` returns
-/// `Err` (genuinely unparseable text) or `Ok(None)` (an empty/whitespace
-/// equation), there is *no* AST to wrap, so the transform cannot be applied.
-///
-/// Why this is an error rather than a silent fallback (GH #311): the prior
-/// code returned the lowercased input text unchanged on parse failure. With
-/// no PREVIOUS() wrapping, that "partial" is identical to the target's full
-/// equation, so the link-score numerator `(partial - PREVIOUS(target))`
-/// equals the denominator `(target - PREVIOUS(target))` and the score
-/// magnitude collapses to a constant `|Δz/Δz| = 1` -- a hidden attribution
-/// error that is *worse* than no score at all, and one that compiles cleanly
-/// so no downstream diagnostic catches it. Returning a structured error lets
-/// the (db-bearing) caller skip emitting the link-score variable and surface
-/// a `Warning` naming the variable and the offending equation text, the
-/// established "loud failure" pattern in this codebase
-/// (cf. `emit_unscoreable_disjoint_edge_warning`).
-///
-/// The text being parsed is itself produced by the engine (`print_eqn` /
-/// `expr2_to_string` over a compiled AST), so `Err` is effectively
-/// unreachable in production; `Ok(None)` is reachable for a target with an
-/// empty equation. Either way the failure is rare and unexpected -- exactly
-/// the case where a silent semantics-changing fallback is most dangerous.
-///
-/// `UnfreezablePartial` (GH #743) is the second loud-failure class: the
-/// equation parsed fine, but neither ceteris-paribus convention can be
-/// rendered as a compilable equation -- the changed-first partial would
-/// freeze an array slice (`PREVIOUS(matrix[d1,*])`, which has no
-/// LoadPrev-of-array-view codegen path: a hard compile error in a user
-/// equation, and a SILENTLY-stubbed-to-0 helper in an LTM fragment, which
-/// poisoned the score into plausible-looking garbage like the constant
-/// `-1/growth-rate`), and the changed-last fallback is unfreezable too (or
-/// has no live occurrence to freeze). The caller skips the score and warns.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PartialEquationErrorKind {
-    /// The equation text failed to parse (or was empty); there is no AST
-    /// to transform.
-    Parse,
-    /// Neither the changed-first nor the changed-last ceteris-paribus
-    /// convention can be rendered as a compilable equation (GH #743).
-    UnfreezablePartial,
-    /// The live source is a BARE reference to an arrayed variable inside an
-    /// array-reducer argument (GH #779): the changed-last partial cannot be
-    /// rendered faithfully for it, and the spelling's own execution
-    /// semantics carry a spurious factor (GH #789). Selects a diagnostic
-    /// that names the shape and the subscripted-spelling workaround.
-    BareReducerFeeder,
-    /// An arrayed dep of the target's equation cannot be projected onto the
-    /// target element this partial is for, so no correct element subscript
-    /// exists for it. `equation_text` carries `dep@element`. Emitting anyway
-    /// leaves the dep's dimension-name subscript in a scalar fragment, which
-    /// becomes a `PREVIOUS`-capture helper that cannot lower WHILE THE PARENT
-    /// STILL COMPILES -- a score that silently reads part of its own equation
-    /// as 0. The reachable cause is a pair with no DECLARED correspondence at
-    /// all -- two dimensions sharing element names, which the simulation
-    /// resolves by name while `allocate_implicit_axes_partial` pairs axes only
-    /// by name or by a declared mapping. (An explicit element map was the
-    /// reachable cause until GH #997 made that spelling projectable.)
-    UnprojectableDep,
-    /// The target's equation applies an ORDER-STATISTIC, array-producing
-    /// builtin (`VECTOR SORT ORDER`, `RANK`, `ALLOCATE AVAILABLE`,
-    /// `ALLOCATE BY PRIORITY`) and this partial is a per-element SCALAR one
-    /// (GH #995 option C): the scalarization pins the builtin's argument down
-    /// to a single element, and an order statistic of one element is
-    /// meaningless (`vm_vector_sort_order` on a 1-element view is rank 0
-    /// always). Today such a fragment also fails codegen loudly
-    /// ("array-producing builtin outside AssignTemp context"); declining at
-    /// generation keeps the drop loud even if a future Pass-1 widening
-    /// (option A) makes the fragment compile -- which would otherwise convert
-    /// it into a silent constant-0 partial. The element pin belongs on the
-    /// RESULT (the A2A-shaped whole-array score, which stays emitted), never
-    /// on a rank-like builtin's argument.
-    RankLikePartial,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PartialEquationError {
-    /// The original (pre-transform) equation text the failure is about. The
-    /// db-bearing caller embeds this in the diagnostic message so the failure
-    /// names the concrete offending equation.
-    pub equation_text: String,
-    /// Which loud-failure class this is; selects the diagnostic wording.
-    pub kind: PartialEquationErrorKind,
-}
-
-impl PartialEquationError {
-    pub(crate) fn new(equation_text: &str) -> Self {
-        PartialEquationError {
-            equation_text: equation_text.to_string(),
-            kind: PartialEquationErrorKind::Parse,
-        }
-    }
-
-    fn unfreezable(equation_text: &str) -> Self {
-        PartialEquationError {
-            equation_text: equation_text.to_string(),
-            kind: PartialEquationErrorKind::UnfreezablePartial,
-        }
-    }
-
-    fn bare_reducer_feeder(equation_text: &str) -> Self {
-        PartialEquationError {
-            equation_text: equation_text.to_string(),
-            kind: PartialEquationErrorKind::BareReducerFeeder,
-        }
-    }
-
-    /// `dep` cannot be projected onto target element `element`.
-    pub(crate) fn unprojectable_dep(dep: &str, element: &str) -> Self {
-        PartialEquationError {
-            equation_text: format!("{dep}@{element}"),
-            kind: PartialEquationErrorKind::UnprojectableDep,
-        }
-    }
-
-    fn rank_like_partial(equation_text: &str) -> Self {
-        PartialEquationError {
-            equation_text: equation_text.to_string(),
-            kind: PartialEquationErrorKind::RankLikePartial,
-        }
-    }
-}
-
-/// Does `expr` apply an ARRAY-PRODUCING builtin -- the set a per-element
-/// SCALAR partial must decline over (GH #995 option C)?
-///
-/// The set is exactly codegen's AssignTemp-required family
-/// (`compiler::codegen`'s `TodoArrayBuiltin` arms): `VECTOR SORT ORDER`,
-/// `RANK`, `ALLOCATE AVAILABLE`, `ALLOCATE BY PRIORITY`, and
-/// `VECTOR ELM MAP` -- every builtin whose RESULT is an array, which a
-/// scalar fragment cannot hold. The order-statistic subset (everything but
-/// ELM MAP) is additionally a semantic trap: pinning its argument to one
-/// element changes the ranking rather than selecting a slot, so those must
-/// stay declined even if a future Pass-1 widening makes the fragment
-/// compile. Deliberately NOT in the set: `VECTOR SELECT`, whose selection
-/// reduces to a scalar (per-element pinning of the non-reduced axes is
-/// exactly right). This is the same result-type distinction
-/// `ltm_agg::reducer_collapses_to_scalar` draws for `RANK` (GH #771/#742),
-/// applied at the partial-generation boundary.
-fn contains_rank_like_builtin(expr: &Expr0) -> bool {
-    let is_rank_like = |name: &str| {
-        matches!(
-            name.to_ascii_lowercase().as_str(),
-            "vector_sort_order"
-                | "rank"
-                | "allocate_available"
-                | "allocate_by_priority"
-                | "vector_elm_map"
-        )
-    };
-    match expr {
-        Expr0::Const(..) | Expr0::Var(..) => false,
-        Expr0::Subscript(_, indices, _) => indices.iter().any(|idx| match idx {
-            IndexExpr0::Expr(e) => contains_rank_like_builtin(e),
-            IndexExpr0::Range(l, r, _) => {
-                contains_rank_like_builtin(l) || contains_rank_like_builtin(r)
-            }
-            IndexExpr0::Wildcard(_)
-            | IndexExpr0::StarRange(_, _)
-            | IndexExpr0::DimPosition(_, _) => false,
-        }),
-        Expr0::App(UntypedBuiltinFn(name, args), _) => {
-            is_rank_like(name) || args.iter().any(contains_rank_like_builtin)
-        }
-        Expr0::Op1(_, inner, _) => contains_rank_like_builtin(inner),
-        Expr0::Op2(_, l, r, _) => contains_rank_like_builtin(l) || contains_rank_like_builtin(r),
-        Expr0::If(c, t, e, _) => {
-            contains_rank_like_builtin(c)
-                || contains_rank_like_builtin(t)
-                || contains_rank_like_builtin(e)
-        }
-    }
-}
+#[path = "ltm_augment_partial_error.rs"]
+mod partial_error;
+use partial_error::contains_rank_like_builtin;
+pub(crate) use partial_error::{PartialEquationError, PartialEquationErrorKind};
 
 /// Build a partial equation for a per-shape link score.
 ///
@@ -1385,12 +1218,21 @@ fn wrap_changed_first_ast(
 /// expression evaluates to an array view, not a scalar.
 ///
 /// Used by [`contains_unfreezable_previous`] to decide whether a `PREVIOUS`
-/// argument can be frozen: `PREVIOUS` of an array view has no codegen path
-/// (no LoadPrev-of-array-view), so `PREVIOUS(matrix[d1,*])` -- or any
-/// expression embedding such a slice outside a reducer -- cannot compile.
-/// A reducer application (`SUM(matrix[d1,*])`) collapses the slice to a
-/// scalar, so a wildcard *inside* a reducer is fine (`PREVIOUS(SUM(arr[*]))`
-/// is the deliberate GH #517 whole-reducer freeze).
+/// argument is one this layer will spell INLINE. A reducer application
+/// (`SUM(matrix[d1,*])`) collapses the slice to a scalar, so a wildcard
+/// *inside* a reducer is fine (`PREVIOUS(SUM(arr[*]))` is the deliberate
+/// GH #517 whole-reducer freeze); a slice that no reducer collapses is routed
+/// to the materialized freeze helper ([`crate::ltm_augment_array_freeze`],
+/// GH #1003) or declined.
+///
+/// The original reason -- "`PREVIOUS` of an array view has no codegen path" --
+/// is stale as of GH #995 phase C3, which gave it one (a view over
+/// `prev_values`). The routing is unchanged because the helper buys something
+/// the inline spelling does not: its arms are qualified with the AXIS
+/// dimension, so a named subdimension that is not a positional prefix of its
+/// parent still reads the name-correct row (PR #1001). Retiring the helper in
+/// favour of the inline form is an open simplification, and would have to
+/// carry that guarantee.
 fn expr_is_array_slice_valued(expr: &Expr0) -> bool {
     match expr {
         Expr0::Const(..) | Expr0::Var(..) => false,
@@ -1428,17 +1270,25 @@ fn expr_is_array_slice_valued(expr: &Expr0) -> bool {
 /// call whose argument is array-slice-valued (see
 /// [`expr_is_array_slice_valued`])?
 ///
-/// Such a partial can never evaluate correctly (GH #743): `PREVIOUS` of an
-/// array view has no codegen path. As a *user* equation it is a hard
-/// `NotSimulatable` compile error; as an LTM link-score fragment the doomed
-/// `PREVIOUS` is routed through a synthesized implicit helper
-/// (`$⁚$⁚ltm⁚…⁚arg0`) whose fragment fails to compile SILENTLY -- it keeps
-/// a layout slot with no bytecode and reads a constant 0 -- so the partial
-/// silently loses the frozen term while the outer score still compiles,
-/// producing plausible-looking garbage (the constant `-1/growth-rate`
-/// scores of GH #743). The partial-equation builders therefore treat this
-/// shape as a routing decision: fall back to the changed-last attribution,
-/// or fail loudly.
+/// GH #743's original reading was that such a partial can never evaluate
+/// correctly, because `PREVIOUS` of an array view had no codegen path: as a
+/// *user* equation it was a hard `NotSimulatable` compile error, and as an LTM
+/// link-score fragment the doomed `PREVIOUS` was routed through a synthesized
+/// implicit helper (`$⁚$⁚ltm⁚…⁚arg0`) whose fragment failed to compile SILENTLY
+/// -- it kept a layout slot with no bytecode and read a constant 0 -- so the
+/// partial silently lost the frozen term while the outer score still compiled,
+/// producing plausible-looking garbage (the constant `-1/growth-rate` scores of
+/// GH #743).
+///
+/// BOTH halves of that premise have moved and the routing is kept on other
+/// grounds. GH #1003 materializes most of these as a `$⁚ltm⁚freeze⁚…` helper
+/// ([`crate::ltm_augment_array_freeze`]) whose arms are qualified against the
+/// AXIS dimension, and GH #995 phase C3 gave the inline spelling a path of its
+/// own (a view over `prev_values`). What this predicate still routes is the
+/// residue neither reaches -- a slice this layer will not spell inline and no
+/// helper can materialize. The partial-equation builders therefore treat this
+/// shape as a routing decision: fall back to the changed-last attribution, or
+/// fail loudly.
 fn contains_unfreezable_previous(expr: &Expr0) -> bool {
     match expr {
         Expr0::Const(..) | Expr0::Var(..) => false,

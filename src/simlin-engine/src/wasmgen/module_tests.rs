@@ -737,6 +737,65 @@ fn compile_simulation_repeated_run_resets_previous_fallback() {
     );
 }
 
+/// The ARRAY twin of the test above, and the one thing the corpus gate cannot
+/// reach (GH #995): an array-valued `PREVIOUS` is a VIEW over `prev_values`, and
+/// a view read is a plain `f64.load` at a constant address -- nothing about it
+/// consults `use_prev_fallback` unless the emitter puts a `select` there.
+///
+/// On a FIRST run that omission is invisible: wasm linear memory starts zeroed,
+/// so the snapshot region reads 0 anyway, which is exactly the fallback. It only
+/// shows up on a second run, because the blob's `reset` deliberately does NOT
+/// clear the snapshot regions (it sets the flag instead, which is all the scalar
+/// `LoadPrev` needs). So the second run's step 0 would read the FIRST run's
+/// final `prev_values` -- a plausible array of stale numbers, no diagnostic.
+///
+/// `SUM(PREVIOUS(x[*]))` is 0 at t=0 and the previous step's total afterwards;
+/// the stale reading is the first run's last total (42), which is what this pins
+/// against.
+#[test]
+fn compile_simulation_repeated_run_resets_previous_fallback_for_an_array_view() {
+    let datamodel = crate::test_common::TestProject::new("prev_array_repeat")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .indexed_dimension("d", 3)
+        .array_stock("x[d]", "10", &["grow"], &[], None)
+        .array_flow("grow[d]", "1", None)
+        .aux("x_prev_sum", "SUM(PREVIOUS(x[*]))", None)
+        .build_datamodel();
+
+    let sim = compile_sim(&datamodel, "main");
+    let artifact = compile_simulation(&sim).expect("wasm codegen");
+
+    let runs = run_artifact_results_repeated(&artifact, 2);
+    let (first, second) = (&runs[0], &runs[1]);
+    assert_eq!(
+        first, second,
+        "second run() diverged from the first -- a PREVIOUS VIEW read the stale \
+         snapshot region instead of the fallback"
+    );
+
+    let off = artifact
+        .layout
+        .var_offsets
+        .iter()
+        .find(|(name, _)| name == "x_prev_sum")
+        .map(|(_, off)| *off)
+        .expect("x_prev_sum in layout");
+    assert_eq!(
+        second[off], 0.0,
+        "SUM(PREVIOUS(x[*])) at t0 on the second run must be the fallback 0, not \
+         the first run's final total (42); got {}",
+        second[off]
+    );
+    // ... and the step after t0 must be the real previous total (3 * 10), so the
+    // fallback is not being returned forever.
+    let n_slots = artifact.layout.n_slots;
+    assert_eq!(
+        second[n_slots + off],
+        30.0,
+        "the step after the fallback must read the real snapshot"
+    );
+}
+
 /// Regression (PR #620 review): a stock at an absolute slot offset >= 65536
 /// must address its real slot under RK integration, not `off & 0xFFFF`. Such
 /// offsets are reachable in a large nested model (each submodel/SMOOTH/DELAY

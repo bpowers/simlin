@@ -7,12 +7,18 @@
 //!
 //! A ceteris-paribus partial freezes every non-live reference at `PREVIOUS`.
 //! When the frozen reference is an ARRAY SLICE (`arr[pin, *]`,
-//! `arr[pin, *:Sub]`), the inline spelling `PREVIOUS(<slice>)` cannot compile:
-//! codegen requires an array-valued operand to be a view over storage, and
-//! there is no LoadPrev-of-a-view. The wrap used to either decline the score
+//! `arr[pin, *:Sub]`), the inline spelling `PREVIOUS(<slice>)` did not compile:
+//! codegen required an array-valued operand to be a view over storage, and
+//! there was no LoadPrev-of-a-view. The wrap used to either decline the score
 //! loudly (`UnfreezablePartial`, GH #743) or -- on the per-target-element
 //! emitter path, which never doom-checked -- emit a fragment that failed
 //! codegen and read a constant 0.
+//!
+//! GH #995 phase C3 has since given the inline form a path of its own (a view
+//! over `prev_values`), so "cannot compile" is no longer why this module
+//! exists. It is retained for the name-correct row rule stated below -- the
+//! arms are qualified against the AXIS dimension, which the inline spelling
+//! does not do -- and collapsing the two is tracked as follow-on work.
 //!
 //! [`materialize_array_freezes`] rewrites each such `PREVIOUS(<slice>)` into a
 //! reference to a synthesized `$⁚ltm⁚freeze⁚…` helper: an `Equation::Arrayed`

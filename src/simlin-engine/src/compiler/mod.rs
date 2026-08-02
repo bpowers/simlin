@@ -1194,6 +1194,49 @@ fn is_array_producing_builtin(expr: &Expr) -> bool {
     )
 }
 
+/// Which snapshot buffer an array-valued `PREVIOUS`/`INIT` reads (GH #995).
+///
+/// Deliberately narrower than [`crate::bytecode::ViewStorage`]: a temp array has
+/// no snapshot, so that pairing cannot be expressed here at all.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SnapshotRegion {
+    Prev,
+    Initial,
+}
+
+/// Classify a `PREVIOUS`/`INIT` call: `Some((argument, region))` when it is
+/// ARRAY-valued, `None` when it is the ordinary scalar form (or not a
+/// `PREVIOUS`/`INIT` at all).
+///
+/// This is the single definition of "this call takes the array route" for every
+/// SCALAR position: `walk_expr` (inside a `BeginIter` body),
+/// `collect_iter_source_views_impl` (which must pre-push exactly the views the
+/// body reads), codegen's one-argument `Mean` arm, and [`array_operand`]'s
+/// materializer, which must NOT move an array-valued `PREVIOUS` into a temp.
+/// Those disagreeing is how a view gets pushed that nothing reads, or read that
+/// nothing pushed. `walk_expr_as_view` deliberately does NOT ask this question
+/// -- an explicit view operand takes ANY `PREVIOUS`/`INIT` that lowered to a
+/// view, single-element included -- so it goes straight to
+/// `Compiler::snapshot_static_view`'s `SnapshotPosition::ViewOperand` arm, whose
+/// rustdoc carries the reason.
+///
+/// Array-valuedness is decided by the ARGUMENT's shape rather than by the call:
+/// `PREVIOUS(vals[D])` inside a vector builtin is the whole array while
+/// `PREVIOUS(matrix[E,1])` is one element, and only lowering knows which. An
+/// argument that carries an array shape but did not lower to a view over storage
+/// still classifies as array-valued -- `snapshot_static_view` then rejects it
+/// loudly, which is the point: silently falling back to the scalar route would
+/// read one element and broadcast it.
+pub(super) fn snapshot_view_arg(builtin: &BuiltinFn) -> Option<(&Expr, SnapshotRegion)> {
+    let (arg, region) = match builtin {
+        BuiltinFn::Previous(arg, _) => (arg.as_ref(), SnapshotRegion::Prev),
+        BuiltinFn::Init(arg) => (arg.as_ref(), SnapshotRegion::Initial),
+        _ => return None,
+    };
+    let is_array = find_expr_array_view(arg).is_some_and(|view| !view.dims.is_empty());
+    is_array.then_some((arg, region))
+}
+
 /// Extract the output ArrayView from an expression.  For array-producing builtins, the
 /// output dimensions come from the builtin's "shaping" argument:
 ///   VectorElmMap(_, offset)    -> offset's view
@@ -1219,8 +1262,16 @@ pub(super) fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
             // (`Sum`/`Size`/`Stddev` and one-argument `Min`/`Max`, also
             // scalar-valued), `VectorSelect` (scalar-valued), the `Lookup`
             // family (`LookupArray`'s shape is the TABLE array's, which this
-            // would have to reach through the gf registry), `Previous`/`Init`
-            // (GH #995 Phase C3: no array form yet), and the 0-arity builtins.
+            // would have to reach through the gf registry), and the 0-arity
+            // builtins.
+            //
+            // `PREVIOUS`/`INIT` DO carry a shape (GH #995): codegen reads an
+            // array-valued one as its argument's view over a snapshot buffer,
+            // so the result has exactly the argument's shape -- and an argument
+            // that collapsed to a single element yields none, which is what
+            // keeps a scalar `PREVIOUS(s)` broadcasting instead of reshaping
+            // the operand around it.
+            BuiltinFn::Previous(a, _) | BuiltinFn::Init(a) => find_expr_array_view(a),
             BuiltinFn::Abs(e)
             | BuiltinFn::Arccos(e)
             | BuiltinFn::Arcsin(e)
@@ -1259,8 +1310,6 @@ pub(super) fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
             | BuiltinFn::Size(_)
             | BuiltinFn::Stddev(_)
             | BuiltinFn::VectorSelect(_, _, _, _, _)
-            | BuiltinFn::Previous(_, _)
-            | BuiltinFn::Init(_)
             | BuiltinFn::IsModuleInput(_, _)
             | BuiltinFn::Inf
             | BuiltinFn::Pi

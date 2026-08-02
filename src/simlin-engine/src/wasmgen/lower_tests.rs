@@ -2215,6 +2215,7 @@ fn load_temp_dynamic_floors_fractional_index() {
 
 use crate::bytecode::{
     DimensionInfo, RuntimeSparseMapping, RuntimeView, StaticArrayView, SubdimensionRelation,
+    ViewStorage,
 };
 use smallvec::SmallVec;
 
@@ -2261,7 +2262,7 @@ fn dense_view(base_off: u32, dims: &[u16]) -> StaticArrayView {
     strides.reverse();
     StaticArrayView {
         base_off,
-        is_temp: false,
+        storage: ViewStorage::Curr,
         dims: dims.iter().copied().collect(),
         strides,
         offset: 0,
@@ -2315,7 +2316,7 @@ fn static_view_sum_transposed_strides_matches_vm() {
     let data = [11.0, 12.0, 13.0, 21.0, 22.0, 23.0];
     let view = StaticArrayView {
         base_off: 0,
-        is_temp: false,
+        storage: ViewStorage::Curr,
         dims: SmallVec::from_slice(&[3, 2]),
         strides: SmallVec::from_slice(&[1, 3]),
         offset: 0,
@@ -2336,7 +2337,7 @@ fn static_view_max_transposed_picks_right_cells() {
     let data = [11.0, 12.0, 99.0, 21.0, 22.0, 23.0];
     let view = StaticArrayView {
         base_off: 0,
-        is_temp: false,
+        storage: ViewStorage::Curr,
         dims: SmallVec::from_slice(&[3, 2]),
         strides: SmallVec::from_slice(&[1, 3]),
         offset: 0,
@@ -2355,7 +2356,7 @@ fn static_view_sum_sparse_matches_vm() {
     let data = [5.0, 6.0, 7.0, 8.0];
     let view = StaticArrayView {
         base_off: 0,
-        is_temp: false,
+        storage: ViewStorage::Curr,
         dims: SmallVec::from_slice(&[2]),
         strides: SmallVec::from_slice(&[1]),
         offset: 0,
@@ -2372,13 +2373,13 @@ fn static_view_sum_sparse_matches_vm() {
 
 #[test]
 fn static_temp_view_sum_reads_temp_storage() {
-    // A contiguous temp view (is_temp) reads temp_storage, not curr. temp_id
+    // A contiguous temp view reads temp_storage, not curr. temp_id
     // 0 lives at temp_offsets[0]=0, so its slot 0 is byte TEMP_BASE.
     let mut context = ByteCodeContext::default();
     context.set_temp_info(vec![0], 3);
     let view = StaticArrayView {
         base_off: 0, // temp_id 0
-        is_temp: true,
+        storage: ViewStorage::Temp,
         dims: SmallVec::from_slice(&[3]),
         strides: SmallVec::from_slice(&[1]),
         offset: 0,
@@ -2408,7 +2409,7 @@ fn static_temp_view_honors_temp_offset() {
     context.set_temp_info(vec![0, 4], 6);
     let view = StaticArrayView {
         base_off: 1, // temp_id 1
-        is_temp: true,
+        storage: ViewStorage::Temp,
         dims: SmallVec::from_slice(&[2]),
         strides: SmallVec::from_slice(&[1]),
         offset: 0,
@@ -2741,7 +2742,7 @@ fn reducer_size_multidim_is_product() {
 fn empty_static_view() -> StaticArrayView {
     StaticArrayView {
         base_off: 0,
-        is_temp: false,
+        storage: ViewStorage::Curr,
         dims: SmallVec::from_slice(&[0]),
         strides: SmallVec::from_slice(&[1]),
         offset: 0,
@@ -2943,7 +2944,7 @@ fn invalid_view_size_is_still_the_size() {
 /// A contiguous temp `StaticArrayView` over `dims` at `temp_id`.
 fn temp_view(temp_id: u32, dims: &[u16]) -> StaticArrayView {
     let mut v = dense_view(temp_id, dims);
-    v.is_temp = true;
+    v.storage = ViewStorage::Temp;
     v
 }
 
@@ -3985,7 +3986,7 @@ fn vm_elm_map_oracle(
         &offset.to_runtime_view(),
         0,
         full_source_len,
-        data,
+        crate::vm::ChunkRegions::curr_only(data),
         &mut temp_storage,
         &context,
     );
@@ -4327,7 +4328,7 @@ fn vm_sort_order_oracle(
         &input.to_runtime_view(),
         direction,
         0,
-        data,
+        crate::vm::ChunkRegions::curr_only(data),
         &mut temp_storage,
         &context,
     );
@@ -4482,7 +4483,7 @@ fn vector_sort_order_transposed_view_matches_vm() {
     // the gather. Cross-checked vs the sibling over every element.
     let view = StaticArrayView {
         base_off: 0,
-        is_temp: false,
+        storage: ViewStorage::Curr,
         dims: SmallVec::from_slice(&[3, 2]),
         strides: SmallVec::from_slice(&[1, 3]),
         offset: 0,
@@ -4931,7 +4932,7 @@ fn lookup_array_strided_view_offsets_match_vm() {
     // are [0, 2, 1, 3].
     let input = StaticArrayView {
         base_off: 0,
-        is_temp: false,
+        storage: ViewStorage::Curr,
         dims: SmallVec::from_slice(&[2, 2]),
         strides: SmallVec::from_slice(&[1, 2]),
         offset: 0,
