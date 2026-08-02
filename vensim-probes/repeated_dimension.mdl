@@ -1,0 +1,36 @@
+{UTF-8}
+DimA: A1, A2, A3 ~~|
+
+sq[A1,A1] = 11 ~~|
+sq[A1,A2] = 12 ~~|
+sq[A1,A3] = 13 ~~|
+sq[A2,A1] = 21 ~~|
+sq[A2,A2] = 22 ~~|
+sq[A2,A3] = 23 ~~|
+sq[A3,A1] = 31 ~~|
+sq[A3,A2] = 32 ~~|
+sq[A3,A3] = 33 ~~|
+
+probe copy[DimA,DimA] = sq[DimA,DimA]
+	~	~	QUESTION 1. Does Vensim ACCEPT a variable declared over the same
+		subscript range twice, and does a plain copy read all nine cells or
+		only a diagonal? |
+
+probe sort[DimA,DimA] = VECTOR SORT ORDER(sq[DimA,DimA], 1)
+	~	~	QUESTION 2. If the declaration is accepted, what does a vector
+		operation over it sort -- each row independently, or something else? |
+
+probe sum = SUM(sq[DimA!,DimA!])
+	~	~	QUESTION 3. Does a reducer over the repeated range sum all nine
+		cells or only the three diagonal ones? |
+
+INITIAL TIME  = 0 ~~|
+FINAL TIME  = 1 ~~|
+TIME STEP  = 1 ~~|
+SAVEPER  = TIME STEP ~~|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$0-0-0,0,|0||0-0-0|0-0-0|0-0-0|0-0-0|0-0-0|0,0,100,0
+///---\\\
