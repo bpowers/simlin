@@ -320,13 +320,21 @@ fn ltm_fragment_with_temps_is_stable_across_fresh_databases() {
 //
 // Both fixes are kept because they close different properties, and either
 // alone would have stopped the reported crash (verified in both directions).
-// Identity makes a helper resolve to itself or to nothing, so no compile
-// outcome depends on any ordering. Order makes the two salsa-cached vectors
-// carrying it (`ParsedVariableResult::implicit_vars`,
-// `VariableDeps::implicit_vars`) equal their own recomputation; without it
-// those values still differ run to run, salsa stops backdating, and the
-// compiled artifact stops being reproducible -- the GH #595 class, invisible in
-// every numeric result and in the compile outcome alike.
+// Identity makes a helper resolve by NAME, so no compile outcome depends on the
+// order of the vector. Order makes the two salsa-cached vectors carrying it
+// (`ParsedVariableResult::implicit_vars`, `VariableDeps::implicit_vars`) equal
+// their own recomputation; without it those values still differ run to run,
+// salsa stops backdating, and the compiled artifact stops being reproducible --
+// the GH #595 class, invisible in every numeric result and in the compile
+// outcome alike.
+//
+// What name-based identity does NOT buy, since an earlier draft of this header
+// claimed it did: it is not "this helper or nothing". A synthesized name embeds
+// the visitor's walk counter, so two parse contexts can attach one name to two
+// different helpers, and `find_in` will return the one in the parse it was
+// handed. `a_cross_context_helper_name_collision_is_confined_to_a_failing_compile`
+// builds that case and pins what actually bounds it -- such a project does not
+// compile. Do not build mutation work on the stronger invariant; it is false.
 
 /// A sub-model whose body makes a stdlib module call over a BOUND input.
 ///
@@ -771,9 +779,11 @@ fn implicit_helper_order_is_stable_across_fresh_databases() {
             first,
             implicit_helper_signatures(&dm, "main", "combo"),
             "parse #{i} on a fresh database reported `combo`'s implicit helpers \
-             in a different order; helper identity is positional, so an unstable \
-             order makes a helper resolve to a different variable depending on \
-             which parse asked (GH #1002)"
+             in a different order. That order rides two salsa-cached values with \
+             derived `PartialEq`, so an unstable one defeats backdating and \
+             makes the compiled artifact irreproducible -- and until identity \
+             stopped being positional it also decided WHICH helper a lookup \
+             resolved to, which is how GH #1002 became seed-dependent"
         );
     }
 }
@@ -1072,15 +1082,18 @@ fn an_implicit_helper_declines_when_the_contexts_synthesize_different_sets() {
     );
     let mut declined = 0usize;
     for (name, meta) in info.iter() {
-        // `None` is the correct answer here: this helper is not in the parse
-        // the instance compiles under. What must never happen is `Some` with
-        // some other helper's ident.
+        // `None` is the correct answer here: this parse holds no helper of that
+        // name. What must never happen is `Some` carrying a DIFFERENT name --
+        // that is the one thing `find_in`'s name check does guarantee. It does
+        // NOT guarantee the helper is the one the metadata meant; a name is not
+        // context-stable, which
+        // `a_cross_context_helper_name_collision_is_confined_to_a_failing_compile`
+        // builds and bounds.
         match compile_implicit_var_fragment(&db, meta, sub, project, dep_graph, inputs.names(&db)) {
             Some(fragment) => assert_eq!(
                 &fragment.fragment.ident, name,
-                "the fragment compiled for helper `{name}` is actually `{}`; a \
-                 helper must resolve to itself or to nothing, never to another \
-                 helper (GH #1002)",
+                "the fragment compiled for helper `{name}` is filed under `{}`; \
+                 a fragment must carry the name it was resolved by (GH #1002)",
                 fragment.fragment.ident
             ),
             None => declined += 1,
