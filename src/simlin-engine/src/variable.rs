@@ -927,6 +927,19 @@ where
     MI: std::fmt::Debug, // TODO: not sure why unwrap_err needs this
     F: Fn(&datamodel::ModuleReference) -> EquationResult<Option<MI>>,
 {
+    // Canonical name -> its index in `implicit_vars`, for the helpers THIS call
+    // contributes. Seeded empty rather than from the caller's vector, which is
+    // deliberate on both counts:
+    //
+    // * only helpers of the SAME parent can collide, since a synthesized name
+    //   embeds its parent's ident (`$⁚{parent}⁚{n}⁚…`) and two parents sharing a
+    //   canonical name is already a `DuplicateVariable` model error (GH #885);
+    // * `model::ModelStage0` passes ONE vector across every variable of a model,
+    //   so seeding from it would make each variable pay for every helper minted
+    //   before it -- quadratic in the model, which is the shape this map exists
+    //   to remove in the first place.
+    let mut implicit_index: HashMap<Ident<Canonical>, usize> = HashMap::new();
+
     // Resolve the default at use (an empty `'static` registry) rather than
     // rebinding here -- unifying a borrowed `Some(&'a _)` with the
     // `&'static` empty default before the parse closure captures it would
@@ -973,10 +986,12 @@ where
                         // error rather than a silent pick.
                         for new_var in new_vars {
                             let ident = Ident::<Canonical>::new(new_var.get_ident());
-                            match implicit_vars
-                                .iter()
-                                .find(|v| Ident::<Canonical>::new(v.get_ident()) == ident)
-                            {
+                            // Indexed, not scanned: an apply-to-all `SMTH1` over
+                            // an N-element dimension mints ~2N helpers on one
+                            // variable, and a scan here is the same O(k^2) shape
+                            // `ImplicitVarMeta::index_hint` exists to remove --
+                            // measured at +30% on N=800 before this map.
+                            match implicit_index.get(&ident).map(|i| &implicit_vars[*i]) {
                                 Some(existing) if *existing == new_var => {}
                                 Some(_) => {
                                     // `DuplicateVariable` rather than the
@@ -991,7 +1006,10 @@ where
                                         code: ErrorCode::DuplicateVariable,
                                     });
                                 }
-                                None => implicit_vars.push(new_var),
+                                None => {
+                                    implicit_index.insert(ident, implicit_vars.len());
+                                    implicit_vars.push(new_var);
+                                }
                             }
                         }
                         Some(ast)

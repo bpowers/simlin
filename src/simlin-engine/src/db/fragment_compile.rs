@@ -390,7 +390,8 @@ pub fn compile_var_fragment<'db>(
 /// This is the *single shared relation* (DRY -- "never re-derive") for
 /// "given an `ImplicitVarMeta`, produce the helper's parsed + lowered
 /// form". It is the exact `model_implicit_var_info`-fed chain
-/// `parent → parsed.implicit_vars[index] → parse_var → lower_variable`
+/// `parent → the parse's helper NAMED by the metadata → parse_var →
+/// lower_variable`
 /// (the non-module branch builds via `lower_variable`; the module branch
 /// constructs a `Variable::Module` directly because `lower_variable` with
 /// an empty models map fails `resolve_module_input`). It is consumed by
@@ -405,7 +406,8 @@ pub fn compile_var_fragment<'db>(
 /// that also need it re-call the salsa-`returns(ref)`-cached
 /// `parse_source_variable_with_module_context` (a cache hit -- a borrow,
 /// zero clone), exactly as the pre-extraction code did. Loud-safe `None`
-/// (never panics): the implicit index is absent, the module branch's
+/// (never panics): this parse synthesized no helper of that name, the
+/// module branch's
 /// datamodel variable is not actually a `Module`, or the implicit var has
 /// equation errors. (`lower_variable` itself is total -- any lowering
 /// error surfaces as a `LoweredVarFragment::Fatal` / `Var::new` error
@@ -662,7 +664,8 @@ pub(crate) fn compile_implicit_var_fragment(
 /// function.
 ///
 /// Loud-safe `None` (never panics): the shared prefix failed (absent
-/// implicit index / equation errors), a graphical-function table failed to
+/// no helper of that name in this parse / equation errors), a
+/// graphical-function table failed to
 /// build, the phase's `Var::new` errored, or codegen failed.
 ///
 /// `why`, when supplied, receives a human-readable reason on failure

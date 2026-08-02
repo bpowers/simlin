@@ -614,42 +614,133 @@ fn a_cross_context_helper_name_collision_is_confined_to_a_failing_compile() {
 /// the synthesized helper name, which changes every implicit helper's identity
 /// and is its own change. A loud error is the same choice `dedup_vars_by_ident`
 /// already makes for the within-one-pass twin of this collision.
+/// The rows are derived from `parse_equation`'s enumeration, not sampled.
+/// It has exactly three arms that can make the initial pass read a DIFFERENT
+/// equation than the dt pass, and therefore exactly three routes into this
+/// collision -- `Scalar` + `active_initial`, `ApplyToAll` + `active_initial`,
+/// and `Arrayed` + a per-element init equation. All three are here. (A fourth
+/// conceivable route, `Arrayed` WITHOUT a per-element init equation, re-parses
+/// the same text and so can only produce byte-identical repeats, which the
+/// merge collapses; that is the `per_element` row of
+/// [`implicit_helper_names_are_unique_within_one_parse`].)
+///
+/// Enumerating rather than sampling was not academic. Measured with the merge
+/// reverted, THREE of these four rows compile and silently drop a helper body:
+/// `scalar_same_dep`, `apply_to_all`, and `arrayed_per_element_init`. An
+/// earlier draft of this test had only the first, and a regression confined to
+/// either of the other two would have left it green.
+///
+/// `scalar_disjoint_dep` is the one row that does NOT gate the merge -- it
+/// fails without it too, because the discarded helper's dependency is missing
+/// from the survivor's dep set and assembly cannot resolve it. It earns its
+/// place by showing the refusal does not depend on the two bodies sharing
+/// dependencies, but it must not be mistaken for one of the three that do the
+/// work.
 #[test]
 fn an_active_initial_that_collides_a_helper_name_is_refused() {
-    for (label, dt_eqn, init_eqn) in [
-        ("same_dep", "SMTH1(driver * 2, 3)", "SMTH1(driver * 100, 7)"),
-        ("disjoint_dep", "SMTH1(driver, 1)", "SMTH1(other, 2)"),
-    ] {
-        let mut dm = TestProject::new("active_initial_helper_collision")
+    // (label, builder) -- each returns a project whose `v` mints one helper
+    // name for two different bodies, by a different one of the three routes.
+    let scalar_case = |dt: &str, init: &str| {
+        let mut dm = TestProject::new("collision_scalar")
             .with_sim_time(0.0, 2.0, 1.0)
             .scalar_aux("driver", "5")
             .scalar_aux("other", "9")
-            .scalar_aux("v", dt_eqn)
+            .scalar_aux("v", dt)
             .build_datamodel();
-        for var in dm.models[0].variables.iter_mut() {
-            if var.get_ident() == "v"
-                && let datamodel::Variable::Aux(a) = var
-            {
-                a.compat.active_initial = Some(init_eqn.to_string());
-            }
-        }
+        set_active_initial(&mut dm, "v", init);
+        dm
+    };
+    let a2a_case = || {
+        let mut dm = TestProject::new("collision_a2a")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .named_dimension("region", &["east", "west"])
+            .array_aux("src[region]", "5")
+            .array_aux("v[region]", "SMTH1(src[region] * 2, 3)")
+            .build_datamodel();
+        set_active_initial(&mut dm, "v", "SMTH1(src[region] * 100, 7)");
+        dm
+    };
+    let arrayed_case = || {
+        let mut dm = TestProject::new("collision_arrayed")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .named_dimension("region", &["east", "west"])
+            .scalar_aux("driver", "5")
+            .build_datamodel();
+        // A per-element equation WITH its own initial equation: the third
+        // element of the `Equation::Arrayed` element tuple.
+        dm.models[0]
+            .variables
+            .push(datamodel::Variable::Aux(datamodel::Aux {
+                ident: "v".to_string(),
+                equation: datamodel::Equation::Arrayed(
+                    vec!["region".to_string()],
+                    vec![
+                        (
+                            "east".to_string(),
+                            "SMTH1(driver * 2, 3)".to_string(),
+                            Some("SMTH1(driver * 100, 7)".to_string()),
+                            None,
+                        ),
+                        ("west".to_string(), "1".to_string(), None, None),
+                    ],
+                    None,
+                    false,
+                ),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }));
+        dm
+    };
 
+    let mut accepted: Vec<&str> = Vec::new();
+    for (label, dm) in [
+        (
+            "scalar_same_dep",
+            scalar_case("SMTH1(driver * 2, 3)", "SMTH1(driver * 100, 7)"),
+        ),
+        (
+            "scalar_disjoint_dep",
+            scalar_case("SMTH1(driver, 1)", "SMTH1(other, 2)"),
+        ),
+        ("apply_to_all", a2a_case()),
+        ("arrayed_per_element_init", arrayed_case()),
+    ] {
         let db = SimlinDb::default();
         let project = sync_from_datamodel(&db, &dm).project;
-        let err = compile_project_incremental(&db, project, "main")
-            .err()
-            .unwrap_or_else(|| {
-                panic!(
-                    "[{label}] a variable whose two phases mint the same helper name \
-                 for different bodies must be refused, not compiled with one of \
-                 them silently dropped"
-                )
-            });
-        assert!(
-            err.to_string().contains('v'),
-            "[{label}] the refusal must name the offending variable; got {err}"
-        );
+        match compile_project_incremental(&db, project, "main") {
+            Ok(_) => accepted.push(label),
+            Err(err) => {
+                assert!(
+                    err.to_string().contains('v'),
+                    "[{label}] the refusal must name the offending variable; got {err}"
+                );
+            }
+        }
     }
+    // Every row reported at once rather than failing at the first: the routes
+    // are independent, so knowing WHICH of them regressed is the useful signal.
+    assert!(
+        accepted.is_empty(),
+        "these routes compiled a variable whose two phases mint one helper name \
+         for different bodies, silently dropping one of them: {accepted:?}"
+    );
+}
+
+/// Give one variable of `dm`'s main model a Vensim `ACTIVE INITIAL` equation.
+fn set_active_initial(dm: &mut datamodel::Project, var: &str, init_eqn: &str) {
+    for v in dm.models[0].variables.iter_mut() {
+        if v.get_ident() == var
+            && let datamodel::Variable::Aux(a) = v
+        {
+            a.compat.active_initial = Some(init_eqn.to_string());
+            return;
+        }
+    }
+    panic!("fixture has no `{var}` to give an ACTIVE INITIAL");
 }
 
 /// A variable's synthesized implicit helpers must be reported in an order that

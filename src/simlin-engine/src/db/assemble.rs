@@ -862,7 +862,7 @@ pub(crate) fn compile_phase_to_per_var_bytecodes_reporting(
 ///
 /// A synthetic helper (`$\u{205A}` prefix, absent from `model.variables`)
 /// that lands in a recurrence SCC is **parent-sourced**: its symbolic
-/// `PerVarBytecodes` is the parent variable's `implicit_vars[index]`
+/// `PerVarBytecodes` is the parent variable's NAMED implicit helper
 /// compiled through the shared per-phase relation
 /// `compile_implicit_var_phase_bytecodes` (the same chain
 /// `compile_implicit_var_fragment` runs), so the element-graph builder
@@ -926,10 +926,10 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
     // (element-cycle Phase 3 Task 2 / AC3.1). A synthetic helper that
     // lands in a recurrence SCC has no `SourceVariable` but DOES resolve
     // in `model_implicit_var_info`; its symbolic `PerVarBytecodes` is the
-    // parent variable's `implicit_vars[index]` compiled through
+    // parent variable's named implicit helper compiled through
     // the SAME shared per-phase relation the production per-variable
     // assembly uses (`compile_implicit_var_phase_bytecodes` -- the exact
-    // `parent → parsed.implicit_vars[i] → parse_var → lower_variable →
+    // `parent → the parse's helper of that name → parse_var → lower_variable →
     // compile` chain `compile_implicit_var_fragment` runs), so
     // the element-graph builder consumes it exactly like a real member
     // (same layout-independent `SymVarRef` form). The element-cycle SCC
