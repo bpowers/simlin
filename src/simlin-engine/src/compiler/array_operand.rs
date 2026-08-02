@@ -63,33 +63,36 @@
 //!   `[e,d]` or `[d,e]`, and the temp's axis order is the axis
 //!   `VECTOR SORT ORDER` sorts along. Declining leaves the loud codegen
 //!   rejection; guessing would leave a plausible array of wrong numbers.
-//! * An operand mixing a REPEATED-dimension view with a different shape
-//!   (`matrix[d,d] + vals[d]`) declines for the same reason, and this one is a
-//!   **change from HEAD**: `[d,d]` and `[d]` have no containment relation
-//!   checkable by name (`super::named_dims` refuses a repeated name, because
-//!   "contains `d` at size 3" cannot say WHICH `d`), so the join has no answer.
-//!   At `b45a0ca1` the first-view rule compiled it, and compiled it to
-//!   order-dependent garbage: measured `[0,0,0,1,1,1,2,2,2]` one way and
-//!   `[1,1,1,0,0,0,2,2,2]` the other, over a fixture whose correct per-row
-//!   orders are `[0,1,2]` throughout. Refusing is the same loud-beats-wrong rule
-//!   the rest of this pass follows, and refusing is all that is claimed:
-//!   a repeated dimension is independently mis-read one layer down, so there is
-//!   no correct answer to fall back to. `super::project_var_index_to_temp`
-//!   matches a temp axis to a variable axis by NAME and takes the FIRST hit, so
-//!   over `out[d,d]` both temp axes take the same coordinate and `out[i,j]`
-//!   reads `temp[i,i]`. The single-shape `matrix[d,d] * 2` -- which still
-//!   compiles, and must, since one view needs no join -- therefore returns
-//!   `[0,0,0,1,1,1,2,2,2]` where its per-row ascending orders are `[0,1,2]`
-//!   throughout. (`codegen::array_view_to_static_temp` keys `DimId`s by name
-//!   too, so the runtime broadcast has the same blind spot; the projection is
-//!   what produces the measured number.) Making the mixed form compile means
-//!   fixing that first, and it is not on this branch's path. Pinned by
-//!   `array_operand_materialization_tests::a_repeated_dimension_operand_declines_rather_than_guessing_which_axis`.
-//! * A BARE array-valued `PREVIOUS`/`INIT` is not materialized because it does
-//!   not need to be: it is already a view, over one of the VM's snapshot
-//!   buffers ([`is_snapshot_view`]). Nested inside a computed operand it
-//!   materializes like anything else, and the `BeginIter` body reads the
-//!   snapshot view per element.
+//! * An operand carrying a REPEATED-dimension view (`matrix[d,d]`) declines --
+//!   mixed with another shape, and as the operand's SOLE shape. `[d,d]` can say
+//!   "contains `d` at size 3" but not WHICH `d`, and every layer that projects
+//!   between an array and a temp matches by name and takes the first hit:
+//!   `super::project_var_index_to_temp` gives both axes the same coordinate, so
+//!   `out[i,j]` would read `temp[i,i]`, and `codegen::array_view_to_static_temp`
+//!   keys `DimId`s the same way. There is no shape to give.
+//!
+//!   The refusal lives HERE and in `codegen::snapshot_static_view` -- the two
+//!   positions that can be loud about it -- and deliberately not inside
+//!   `super::join_array_views`, even though that reads as the tidier home for
+//!   it. `super::find_expr_array_view` has four consumers and the other three
+//!   substitute the VARIABLE's own view for a `None`, silently and at a
+//!   possibly different SIZE: refusing in the join sized the temp of
+//!   `out[d] = SUM(VECTOR SORT ORDER(matrix[d,d], 1))` at `out`'s three slots
+//!   while the sort order still wrote nine, and the VM indexed past the temp.
+//!   That equation returns numbers at the merge base, so the tidier home cost a
+//!   process abort on a shape that worked.
+//!
+//!   This costs nothing that worked: measured at the MERGE BASE `ccf7ed34`,
+//!   `VECTOR SORT ORDER(matrix[d,d] * 2, 1)` does not compile, and neither does
+//!   the `PREVIOUS`/`INIT` spelling `codegen::snapshot_static_view` refuses on
+//!   the same grounds. Both became compilable on this branch, and both compiled
+//!   to first-axis-wins garbage until this refusal. Reading a repeated dimension
+//!   DIRECTLY is a different matter and is untouched: `out[d,d] = matrix[d,d]`
+//!   and `VECTOR SORT ORDER(matrix[d,d], 1)` compile at the merge base, to those
+//!   same wrong numbers, and remain exactly as they were -- a disclosed residual
+//!   pinned by
+//!   `array_operand_materialization_tests::a_repeated_dimension_read_directly_is_a_pre_existing_residual`,
+//!   whose fix belongs in the projection rather than here.
 
 use crate::ast::ArrayView;
 use crate::compiler::expr::{BuiltinFn, Expr, SubscriptIndex};
@@ -218,18 +221,38 @@ fn materialize_view_operands(
             VectorSelect(mat(sel), mat(values), max_val, action, err)
         }
         // Materializing an ELM MAP *source* deliberately changes which storage
-        // the mapping ranges over, and the choice is this: the temp. Genuine
-        // Vensim maps over the source VARIABLE's full row-major storage from
-        // the base arg-1's element reference establishes, and
-        // `vm_vector_elm_map.rs` implements that with a `source_is_full_array`
-        // test -- a strict slice such as `matrix[E,*]` keeps a per-element
-        // base and can read across rows, while a full contiguous source has
-        // `base_i == 0`. A materialized operand is a fresh contiguous temp, so
-        // it is full-array by construction: the mapping is confined to the
-        // computed array. That is the only self-consistent reading (the temp
-        // has no "rest of the variable" to run into) and it agrees with what
-        // the practitioner would get by assigning the expression to a variable
-        // of its own first -- the shape that already compiled. Pinned by
+        // the mapping ranges over, and the choice is this: the temp.
+        //
+        // The rule for a VARIABLE source is DOCUMENTED and ground-truthed. The
+        // Vensim reference page for VECTOR ELM MAP (retrieved 2026-08-02) says
+        // the function "returns the value of the variable that is offset from
+        // vec by the specified amount", and that an offset "outside the range of
+        // the variable" yields `:NA:`; its multi-subscript example spells the
+        // offset as a flat index over the whole variable
+        // (`(sub-1)*ELMCOUNT(tub)*ELMCOUNT(gub) + ...`). Real Vensim output
+        // agrees: in `test/sdeverywhere/models/vector/`,
+        // `f[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], a[DimA])` prints
+        // `1,1,5,5,6,6`, and `f[A2,B1] = 5 = d[A2,B2]` -- the mapping read past
+        // its own `B1` slice into the next row. `vm_vector_elm_map.rs`
+        // implements exactly that with a `source_is_full_array` test: a strict
+        // slice keeps a per-element base and can read across rows, a full
+        // contiguous source has `base_i == 0`.
+        //
+        // The rule for a COMPUTED source is UNVERIFIED. Every example on that
+        // page, and every case in the corpus, spells argument 1 as a variable
+        // reference pinned to an element; the page neither shows an inline
+        // expression there nor says whether one is legal, and its rule is
+        // phrased in terms of "the variable" and "the range of the variable",
+        // which an expression does not have. What is implemented is therefore a
+        // choice, not a match: a materialized operand is a fresh contiguous temp
+        // and so is full-array by construction, which confines the mapping to
+        // the computed array. The argument for it is internal consistency -- the
+        // temp has no "rest of the variable" to run into, and the result equals
+        // the pre-materialized spelling `VECTOR ELM MAP(helper[A1], offs)` where
+        // `helper` holds the computed values, which is the only coherent reading
+        // if Vensim rejects inline expressions outright. `vensim-probes/` holds
+        // a model that settles it; until it is run, treat this as our semantics
+        // rather than Vensim's. Pinned (against ourselves) by
         // `array_operand_materialization_tests::materializing_an_elm_map_source_confines_the_mapping_to_the_temp`.
         VectorElmMap(source, offsets) => VectorElmMap(mat(source), mat(offsets)),
         VectorSortOrder(array, direction) => VectorSortOrder(mat(array), direction),
@@ -336,6 +359,19 @@ fn materialize_view_operand(
     let Some(source_view) = super::find_expr_array_view(&operand) else {
         return operand;
     };
+    // A repeated dimension name is refused as a TEMP's shape even when it is the
+    // operand's sole shape (`super::view_repeats_a_dimension`). The refusal lives
+    // here rather than inside the join because `find_expr_array_view` has four
+    // consumers and only this one is loud: the three hoisters in `super` fall
+    // back to the VARIABLE's own view, so a `None` there silently reshapes a
+    // temp instead of declining -- measured, `out[d] = SUM(VECTOR SORT
+    // ORDER(matrix[d,d], 1))` sized a 9-element sort order's temp at 3 and the
+    // VM indexed past it. Refusing at the one site that produces a diagnostic
+    // keeps the direct spellings byte-identical to the merge base, which is all
+    // this refusal ever claimed.
+    if super::view_repeats_a_dimension(&source_view) {
+        return operand;
+    }
     if source_view.dims.is_empty() {
         return operand;
     }

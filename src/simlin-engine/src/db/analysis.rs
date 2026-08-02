@@ -383,7 +383,16 @@ fn emit_edges_for_reference(
             use crate::ltm_agg::AxisRead;
             let from_dim_element_lists: Vec<Vec<String>> =
                 from_dims.iter().map(dimension_element_names).collect();
-            let rows = crate::db::ltm::read_slice_rows(axes, &from_dim_element_lists, dim_ctx);
+            // The STRUCTURED derivation, not the comma-joined projection: a
+            // canonical element name can itself contain a comma (a quoted XMILE
+            // element `"a,b"` canonicalizes to `a,b`, and such a model compiles
+            // and runs -- measured), so joining the slot coordinates and
+            // re-splitting them here would mis-read one coordinate as two. That
+            // would drop the real edge and mint one to a target element that
+            // does not exist. `emit_agg_routed_edges` below already reads the
+            // structured form; this is the same rule, and neither surface needs
+            // the string.
+            let rows = crate::db::ltm::read_slice_row_parts(axes, &from_dim_element_lists, dim_ctx);
             // Iterated target dims in slot order; every one must name a
             // target dim for the slot projection to be meaningful (true by
             // construction -- the classifier only mints `Iterated` for the
@@ -415,9 +424,17 @@ fn emit_edges_for_reference(
                     .map(|d| iter_dims.iter().position(|id| *id == d.name()))
                     .collect();
                 let target_set: BTreeSet<&String> = target_nodes.iter().collect();
-                for crate::db::ltm::ReadSliceRow { row, slot, .. } in &rows {
-                    let from_node = format!("{from_name}[{row}]");
-                    let slot_parts: Vec<&str> = slot.split(',').collect();
+                for crate::db::ltm::ReadSliceRowParts {
+                    row_parts,
+                    slot_parts,
+                } in &rows
+                {
+                    let row_refs: Vec<&str> = row_parts.iter().map(String::as_str).collect();
+                    let from_node = if row_refs.len() == 1 {
+                        format_element_name(from_name, row_refs[0])
+                    } else {
+                        format_multi_element_name(from_name, &row_refs)
+                    };
                     // Candidate elements per target-dim position: the slot
                     // coordinate where the dim is iterated, every element
                     // where it broadcasts.
@@ -425,7 +442,7 @@ fn emit_edges_for_reference(
                         .iter()
                         .zip(&to_dim_slot_pos)
                         .map(|(d, pos)| match pos {
-                            Some(j) => vec![slot_parts[*j].to_string()],
+                            Some(j) => vec![slot_parts[*j].clone()],
                             None => dimension_element_names(d),
                         })
                         .collect();

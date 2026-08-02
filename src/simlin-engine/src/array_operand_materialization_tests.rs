@@ -765,15 +765,31 @@ fn elementwise_builtin_operands_materialize() {
 
 /// Materializing a `VECTOR ELM MAP` **source** changes which storage the
 /// mapping ranges over, and this pins the choice rather than leaving it
-/// accidental.
+/// accidental. It pins it against OURSELVES: the variable-source half is
+/// documented and ground-truthed, the computed-source half is not.
 ///
-/// Genuine Vensim maps over the source VARIABLE's full row-major storage from
-/// the base arg-1's element reference establishes, and `vm_vector_elm_map.rs`
-/// implements that with a `source_is_full_array` test: a strict slice such as
-/// `matrix[1,*]` keeps a per-element base and CAN read past the end of its own
-/// row into the next one. A materialized operand is a fresh contiguous temp,
-/// so it is full-array by construction and the mapping is confined to the
-/// computed array.
+/// **Documented.** The Vensim reference page for `VECTOR ELM MAP` (retrieved
+/// 2026-08-02) says the function "returns the value of the variable that is
+/// offset from vec by the specified amount", and that an offset "outside the
+/// range of the variable" yields `:NA:`. Real Vensim output agrees: in
+/// `test/sdeverywhere/models/vector/`,
+/// `f[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], a[DimA])` prints `1,1,5,5,6,6`,
+/// and `f[A2,B1] = 5 = d[A2,B2]` -- the mapping read past its own `B1` slice
+/// into the next row of `d`'s storage. `vm_vector_elm_map.rs` implements that
+/// with its `source_is_full_array` test: a strict slice such as `matrix[1,*]`
+/// keeps a per-element base and CAN read across rows.
+///
+/// **UNVERIFIED.** Every example on that page, and every case in the corpus,
+/// spells argument 1 as a variable reference pinned to an element. Whether
+/// Vensim accepts an inline EXPRESSION there at all is not stated, and its rule
+/// is phrased in terms of "the variable" and "the range of the variable", which
+/// an expression does not have. A materialized operand is a fresh contiguous
+/// temp and so is full-array by construction, which confines the mapping to the
+/// computed array -- our choice, defended by internal consistency (it equals the
+/// pre-materialized `VECTOR ELM MAP(helper[A1], offs)` spelling) rather than by
+/// any external source. `vensim-probes/elm_map_computed_source.mdl` is written
+/// to settle it and lists what each candidate rule predicts; until it is run,
+/// the numbers below are Simlin's semantics and not a claim about Vensim's.
 ///
 /// `matrix` is [[1,2,3],[10,20,30]] (flat storage of 6) and `far` is [3,4,5].
 /// Over the row-1 slice those offsets run off the end of row 1 and into row 2;
@@ -2615,27 +2631,23 @@ fn an_array_view_inside_a_module_instance_reads_that_instance() {
     }
 }
 
-/// An operand mixing a REPEATED-dimension view with a different shape declines,
-/// and this row exists because that is a **change from HEAD** rather than a
-/// shape that never worked.
+/// Every operand carrying a REPEATED-dimension view declines -- mixed with
+/// another shape or as the operand's SOLE shape -- and the reason is that this
+/// branch is what made them compilable in the first place.
 ///
-/// `[d,d]` and `[d]` have no containment relation checkable by name
-/// (`compiler::named_dims` refuses a repeated name: `[d,d]` can say "contains
-/// `d` at size 3" but not WHICH `d`), so the join has no answer. At `b45a0ca1`
-/// the first-view rule gave one anyway, and gave a different one per operand
-/// order -- measured `[0,0,0, 1,1,1, 2,2,2]` for `matrix[d,d] + vals[d]` and
-/// `[1,1,1, 0,0,0, 2,2,2]` for the commuted spelling, over a fixture whose
-/// correct per-row ascending orders are `[0,1,2]` in every row. Two answers for
-/// one array, neither right, is the case this pass refuses.
+/// Measured at the MERGE BASE `ccf7ed34`, not at a branch commit: the computed
+/// spelling `VECTOR SORT ORDER(matrix[d,d] * 2, 1)` FAILS to compile there. So
+/// the numbers it produced mid-branch were a regression this work introduced,
+/// not a pre-existing wrong answer inherited from main -- an earlier revision of
+/// this test said the latter, having measured at `b45a0ca1`, which already
+/// carries the materializer that makes it compile.
 ///
-/// The single-shape control is the other half of the statement: one view needs
-/// no join, so `matrix[d,d] * 2` still compiles -- and it returns
-/// `[0,0,0, 1,1,1, 2,2,2]`, still wrong, because a repeated dimension is
-/// mis-read a layer down (`compiler::project_var_index_to_temp` matches a temp
-/// axis to a variable axis by name and takes the first hit, so `out[i,j]` reads
-/// `temp[i,i]`). That is what makes the decline right rather than merely
-/// cautious: there is no correct answer for the mixed form to fall back to, and
-/// nothing here claims to fix the single-shape one.
+/// `[d,d]` names one dimension twice, and every layer that projects between an
+/// array and a temp matches BY NAME and takes the first hit
+/// (`compiler::project_var_index_to_temp` gives both axes the same coordinate,
+/// so `out[i,j]` reads `temp[i,i]`; `codegen::array_view_to_static_temp` keys
+/// `DimId`s the same way). There is no answer to give, so the pass gives none.
+/// What that costs is nothing: at the merge base none of these compiled.
 #[test]
 fn a_repeated_dimension_operand_declines_rather_than_guessing_which_axis() {
     let square = |name: &str| {
@@ -2654,11 +2666,22 @@ fn a_repeated_dimension_operand_declines_rather_than_guessing_which_axis() {
             ],
         )
     };
-    // Both operand orders decline, and they decline the same way -- the point
-    // of the join is that the two spellings are one program.
     for (name, eqn) in [
+        // Mixed with a different shape, both operand orders -- the join has no
+        // containment relation to work with.
         ("sqmix_lhs", "VECTOR SORT ORDER(square[d,d] + vals[d], 1)"),
         ("sqmix_rhs", "VECTOR SORT ORDER(vals[d] + square[d,d], 1)"),
+        // The SOLE shape. A single view needs no join, so nothing about
+        // containment refuses this one; it is refused because the shape itself
+        // cannot be projected into a temp
+        // (`compiler::view_repeats_a_dimension`, checked by the materializer
+        // after the join rather than inside it). Without this row that check
+        // can be deleted with every other row still green.
+        ("sqmix_alone", "VECTOR SORT ORDER(square[d,d] * 2, 1)"),
+        (
+            "sqmix_two",
+            "VECTOR SORT ORDER(square[d,d] + square[d,d], 1)",
+        ),
     ] {
         assert_fails_attributed(square(name).array_aux("out[d,d]", eqn), eqn);
         assert_declines_because(
@@ -2668,21 +2691,105 @@ fn a_repeated_dimension_operand_declines_rather_than_guessing_which_axis() {
         );
     }
 
-    // The single-shape control still compiles: one view is returned unchanged,
-    // so nothing about a repeated dimension is refused on its own. Its answer is
-    // the pre-existing wrong one, asserted so a future fix to the repeated-
-    // dimension projection turns this red and has to restate it.
+    // The array-valued `PREVIOUS`/`INIT` route reaches the same shape by a
+    // different door -- it pushes a view over a snapshot region rather than over
+    // a temp -- and it is equally new here: this did not compile at the merge
+    // base either. `codegen::snapshot_static_view` refuses it, with its own
+    // message rather than the generic view rejection.
+    for (name, eqn) in [
+        ("sqprev", "VECTOR SORT ORDER(PREVIOUS(square[d,d]), 1)"),
+        ("sqinit", "VECTOR SORT ORDER(INIT(square[d,d]), 1)"),
+    ] {
+        assert_fails_attributed(square(name).array_aux("out[d,d]", eqn), eqn);
+        assert_declines_because(
+            square(name).array_aux("out[d,d]", eqn),
+            "out",
+            "names one dimension twice",
+        );
+    }
+}
+
+/// The complement, and the boundary of the refusal above: reading a repeated
+/// dimension DIRECTLY still compiles, and still returns the wrong numbers it
+/// returned at the merge base.
+///
+/// This is a **disclosed pre-existing residual**, pinned in both directions so
+/// it is loud rather than silently rediscovered, and deliberately not fixed
+/// here. Measured at `ccf7ed34` and identical on this branch:
+///
+/// | equation | result | correct |
+/// |---|---|---|
+/// | `out[d,d] = square[d,d]` | `[11,11,11, 22,22,22, 33,33,33]` | the matrix |
+/// | `out[d,d] = VECTOR SORT ORDER(square[d,d], 1)` | `[0,0,0, 1,1,1, 2,2,2]` | `[0,1,2]` per row |
+///
+/// Both are the same first-axis-wins projection: `out[i,j]` reads `[i,i]`. The
+/// fix is to give the projection an axis identity rather than a dimension name
+/// -- the same root cause as `db::analysis::expand_same_element`'s
+/// repeated-target residual, and its own change. What Vensim itself does with a
+/// repeated-dimension subscript is NOT established: a probe model is authored
+/// for it (see the branch's Vensim probe set), and until it is run this test
+/// pins OUR behavior only, with no claim that it is right.
+#[test]
+fn a_repeated_dimension_read_directly_is_a_pre_existing_residual() {
+    let square = |name: &str| {
+        fixture(name).array_with_ranges(
+            "square[d,d]",
+            vec![
+                ("1,1", "11"),
+                ("1,2", "12"),
+                ("1,3", "13"),
+                ("2,1", "21"),
+                ("2,2", "22"),
+                ("2,3", "23"),
+                ("3,1", "31"),
+                ("3,2", "32"),
+                ("3,3", "33"),
+            ],
+        )
+    };
+    let copy = square("sqdirect_copy").array_aux("out[d,d]", "square[d,d]");
+    copy.assert_compiles_incremental();
     assert_close(
-        &{
-            let p = square("sqmix_alone")
-                .array_aux("out[d,d]", "VECTOR SORT ORDER(square[d,d] * 2, 1)");
-            p.assert_compiles_incremental();
-            p.vm_result_incremental("out")
-        },
-        &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0],
-        "single repeated-dimension shape: compiles, and reproduces the \
-         pre-existing per-row misprojection ([0,1,2] per row is correct)",
+        &copy.vm_result_incremental("out"),
+        &[11.0, 11.0, 11.0, 22.0, 22.0, 22.0, 33.0, 33.0, 33.0],
+        "residual: a direct repeated-dimension read projects to [i,i]",
     );
+
+    let sorted = square("sqdirect_sort").array_aux("out[d,d]", "VECTOR SORT ORDER(square[d,d], 1)");
+    sorted.assert_compiles_incremental();
+    assert_close(
+        &sorted.vm_result_incremental("out"),
+        &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0],
+        "residual: the per-row orders are [0,1,2] throughout, not this",
+    );
+
+    // The direct read NESTED IN A REDUCER, which is the row that says WHERE the
+    // refusal above may live. These reach a hoisting site
+    // (`compiler::replace_nested_builtins_for_element` and its two siblings),
+    // which sizes the hoisted temp from `find_expr_array_view` and SUBSTITUTES
+    // the variable's own view when that is `None` -- no diagnostic, and at a
+    // different size. Putting the repeated-dimension refusal inside
+    // `compiler::join_array_views` therefore sized these temps at `out3`'s three
+    // slots while the builtin still wrote nine elements, and the VM indexed past
+    // the temp: a panic, and under `panic = abort` a dead host process. All four
+    // return these numbers at the merge base `ccf7ed34`, so that would have been
+    // a regression, not a newly-refused shape. (The numbers themselves are the
+    // same first-axis-wins residual as above: nine ranks over the whole square,
+    // broadcast to every element of `out3`.)
+    for (name, eqn, expected) in [
+        ("sqred_sum", "SUM(VECTOR SORT ORDER(square[d,d], 1))", 9.0),
+        ("sqred_mean", "MEAN(RANK(square[d,d], 1))", 5.0),
+        ("sqred_max", "MAX(VECTOR SORT ORDER(square[d,d], 1))", 2.0),
+        ("sqred_size", "SIZE(VECTOR SORT ORDER(square[d,d], 1))", 9.0),
+    ] {
+        let p = square(name).array_aux("out3[d]", eqn);
+        p.assert_compiles_incremental();
+        assert_close(
+            &p.vm_result_incremental("out3"),
+            &[expected; 3],
+            "a repeated-dimension read inside a reducer must keep its merge-base value",
+        );
+    }
 }
 
 /// The two-HOP twin: `main` -> `mid` (twice) -> `inner`.

@@ -1254,11 +1254,13 @@ pub(super) fn snapshot_view_arg(builtin: &BuiltinFn) -> Option<(&Expr, SnapshotR
 /// elements and return the sort order of three NaNs, while the commuted
 /// `wide[e,d] + small[d]` -- the same array -- returned the right answer.
 ///
-/// `None` means one of three things: no subexpression carries an array shape;
-/// two of them carry shapes neither of which contains the other; or one of them
-/// REPEATS a dimension name (`matrix[d,d]`), which has no containment relation
-/// checkable by name (see [`named_dims`]) and so can only be an expression's
-/// sole shape.
+/// `None` means one of two things: no subexpression carries an array shape, or
+/// two of them carry shapes neither of which contains the other. A view that
+/// REPEATS a dimension name (`matrix[d,d]`) is NOT one of them -- as an
+/// expression's sole shape it is returned like any other. That shape is refused
+/// as a TEMP's shape, but the refusal lives at the one call site that can be
+/// loud about it ([`array_operand::materialize_view_operand`]) rather than here;
+/// see [`view_repeats_a_dimension`] for why the difference matters.
 ///
 /// The four call sites do NOT all treat `None` the same way, and only one of
 /// them is loud:
@@ -1267,13 +1269,15 @@ pub(super) fn snapshot_view_arg(builtin: &BuiltinFn) -> Option<(&Expr, SnapshotR
 ///   leaves codegen to reject the operand with a diagnostic attributed to the
 ///   variable. This is the loud one.
 /// * the three apply-to-all / arrayed hoisting sites SUBSTITUTE the variable's
-///   own view (`unwrap_or_else(|| var_view.clone())`) with no diagnostic. That
-///   substitution is shadowed today rather than safe on its own terms: those
-///   sites ask about an array-producing builtin call, whose shape is its shaping
-///   argument's, so a `None` there means that same argument is an operand
-///   `array_operand` also declines -- and the fragment fails to compile before
-///   the substituted view can produce a number. Nothing enforces the shadowing;
-///   it is a property of the two sites asking about the same subexpression.
+///   own view (`unwrap_or_else(|| var_view.clone())`) with no diagnostic, and
+///   the substituted view can be a DIFFERENT SIZE from the array the hoisted
+///   builtin writes. That is a live hazard, not a latent one: while this
+///   function refused a sole repeated-dimension view, `out[d] =
+///   SUM(VECTOR SORT ORDER(matrix[d,d], 1))` sized the sort order's temp at
+///   `out`'s three slots and the VM indexed past it -- a panic, which under
+///   `panic = abort` takes the host process with it. Any future `None` this
+///   function learns to return must be checked against these three sites, or
+///   given to them as an `Err` instead.
 /// * [`snapshot_view_arg`] reads only `is_empty()`, so a `None` classifies the
 ///   call as SCALAR and it compiles to `LoadPrev`/`LoadInitial`. Reaching it
 ///   needs a `PREVIOUS`/`INIT` whose argument survived `builtins_visitor`'s
@@ -1315,15 +1319,52 @@ fn join_array_views(views: Vec<ArrayView>) -> Option<ArrayView> {
     Some(views[widest].clone())
 }
 
+/// True when `view` names one dimension more than once (`matrix[d,d]`).
+///
+/// Such a view is a perfectly good ARRAY -- nine well-defined cells -- and this
+/// says nothing about reading it directly. What it cannot be is the shape of a
+/// temp that a computed operand is evaluated into, or of a snapshot region a
+/// `PREVIOUS`/`INIT` view addresses, because every layer that projects between
+/// an array and a temp does so BY DIMENSION NAME and takes the first match:
+/// [`project_var_index_to_temp`] gives both `d` axes the same coordinate (so
+/// `out[i,j]` reads `temp[i,i]`), and `codegen::array_view_to_static_temp` keys
+/// `DimId`s by name, so the runtime broadcast has the same blind spot. Neither
+/// can say WHICH `d` is meant.
+///
+/// It has exactly TWO callers, and both are positions that can refuse LOUDLY:
+/// [`array_operand::materialize_view_operand`] (which leaves codegen to reject
+/// the operand) and `codegen::snapshot_static_view` (which returns an `Err` of
+/// its own). It deliberately does NOT live inside [`join_array_views`], because
+/// [`find_expr_array_view`]'s other three consumers turn a `None` into a silent
+/// substitution of the variable's own view -- and for `out[d] =
+/// SUM(VECTOR SORT ORDER(matrix[d,d], 1))` that substituted a three-slot temp
+/// for a nine-element sort order and the VM indexed past it. Refusing at the
+/// loud sites refuses exactly the same equations and costs no others.
+///
+/// Scope, deliberately: this refuses only what GH #995 newly made compilable.
+/// A repeated dimension read DIRECTLY (`out[d,d] = VECTOR SORT ORDER(matrix[d,d],
+/// 1)`, or even `out[d,d] = matrix[d,d]`) compiles at the merge base and still
+/// does, to the same first-axis-wins numbers -- measured, and pinned as a
+/// disclosed residual by
+/// `array_operand_materialization_tests::a_repeated_dimension_read_directly_is_a_pre_existing_residual`.
+/// Widening the refusal to cover it would be a fix to a pre-existing defect
+/// riding on an unrelated change, and the right fix is to make the projection
+/// axis-identity-aware rather than to refuse the shape.
+pub(super) fn view_repeats_a_dimension(view: &ArrayView) -> bool {
+    (1..view.dim_names.len())
+        .any(|i| !view.dim_names[i].is_empty() && view.dim_names[..i].contains(&view.dim_names[i]))
+}
+
 /// True when an iteration shaped like `outer` can read every element of `inner`.
 ///
-/// The first branch is an IDENTICAL-shape test, and it is what carries the two
-/// families [`named_dims`] refuses: a view REPEATING a dimension name
-/// (`matrix[d,d]`) and a view naming none of them. Neither has a containment
-/// relation checkable by name, but two of the SAME shape need none --
-/// `matrix[d,d] + other[d,d]` is a well-defined elementwise expression and joins
-/// to that shape. Mixing a repeated-name view with a DIFFERENT shape has no
-/// answer and declines; see `array_operand`'s "What still declines".
+/// The first branch is an IDENTICAL-shape test, and it carries both families
+/// [`named_dims`] refuses. An UNNAMED view (a temp's `dim_names` are empty
+/// strings) has no name to compare and needs none against a copy of itself. A
+/// REPEATED name is the same: `square[d,d] + square[d,d]` is a well-defined
+/// elementwise expression and joins to that shape, and the join is the right
+/// answer to give -- it is the MATERIALIZER that then refuses to build a temp of
+/// that shape ([`view_repeats_a_dimension`]), because the refusal is about
+/// projecting into a temp rather than about comparing two views.
 ///
 /// Beyond identity the relation is by dimension NAME and size, because that is
 /// what the runtime broadcast matches on (`vm`'s `LoadIterViewAt` ->
@@ -1350,11 +1391,11 @@ fn view_contains(outer: &ArrayView, inner: &ArrayView) -> bool {
 /// Both refusals are the same point: containment is decided by name, and
 /// neither shape can answer it. An unnamed axis has nothing to match; a
 /// `matrix[d,d]` view can say "contains `d` at size 3" but not WHICH `d`, so
-/// `[d,d] contains [d]` is unanswerable rather than true. Such a view is usable
-/// only as an expression's sole shape, through [`view_contains`]'s identical-
-/// shape branch -- which is why `matrix[d,d] * 2` still compiles while
-/// `matrix[d,d] + vals[d]` declines. See `array_operand`'s "What still
-/// declines" for why declining is right rather than merely conservative.
+/// `[d,d] contains [d]` is unanswerable rather than true. Both families still
+/// reach [`view_contains`]'s identical-shape branch, which needs no name; what
+/// refuses a repeated name as an expression's SOLE shape is
+/// [`view_repeats_a_dimension`], at the materializer. See `array_operand`'s
+/// "What still declines".
 fn named_dims(view: &ArrayView) -> Option<Vec<(&str, usize)>> {
     if view.dim_names.len() != view.dims.len() || view.dim_names.iter().any(|n| n.is_empty()) {
         return None;

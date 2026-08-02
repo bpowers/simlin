@@ -1278,6 +1278,66 @@ fn square_owner_link_score_names() -> Vec<String> {
     names
 }
 
+/// A canonical element name containing a COMMA does not derail the mapped
+/// projection.
+///
+/// The `PerElement` element-edge arm used to take the row derivation's
+/// comma-JOINED slot string and re-split it on `,` to recover the per-axis
+/// coordinates. A canonical element name can itself contain a comma -- a quoted
+/// XMILE element `"a,b"` canonicalizes to `a,b` (measured: `canonicalize("a,b")`
+/// is `a,b`, and a model declaring one compiles and simulates) -- so that
+/// round-trip read one coordinate as two: the real edge was dropped and one to a
+/// target element that does not exist was minted in its place. The arm now reads
+/// `ReadSliceRowParts::slot_parts` directly and never serializes.
+///
+/// `region` deliberately puts the comma element FIRST, so a mis-split shifts
+/// every following coordinate rather than only the last.
+///
+/// WHAT THIS CLOSES, AND WHAT IT DOES NOT. This fix covers the element-EDGE
+/// surface. The link-SCORE surface still round-trips coordinate tuples through
+/// comma-joined strings in several `db::ltm` emitters, and the defect is live
+/// there (measured, pre-existing this branch): carrying the same `a,b` element
+/// into an iterated-projection-feeder agg
+/// (`x[state] = 1 + SUM(matrix[state,*] * frac[state])`) emits the agg->target
+/// half as `$⁚ltm⁚link_score⁚$⁚ltm⁚agg⁚0[a]→x[a,b]` -- the agg's slot subscript
+/// lost the `,b`, so the two halves of one agg name DIFFERENT variables and the
+/// co-source row degrades to the delta-ratio fallback, while the comma-free
+/// `s2` control carries the real partial. The arity guards in
+/// `qualify_element_csv`/`target_elem_by_dim_for` are why the outcome is a
+/// wrong/degraded score rather than a phantom edge. Sweeping the remaining
+/// `split(',')` sites (link_scores.rs x8, loops.rs x1) onto structured parts is
+/// its own change; until then the invariant to hold in NEW code is: never
+/// serialize a coordinate tuple you will re-split.
+#[test]
+fn a_comma_bearing_element_name_survives_the_mapped_projection() {
+    let project = TestProject::new("comma_elem")
+        .named_dimension_with_element_mapping(
+            "state",
+            &["a,b", "s2"],
+            "region",
+            &[("a,b", "r2"), ("s2", "r1")],
+        )
+        .named_dimension("region", &["r1", "r2"])
+        .array_with_ranges("x[region]", vec![("r1", "10"), ("r2", "20")])
+        .array_aux("target[state]", "x[region]");
+
+    // The executed read, so the edges below are checked against behaviour
+    // rather than against the derivation that produces them.
+    let results = project.run_vm().expect("must compile and run");
+    assert_eq!(*results["target[a,b]"].last().expect("series"), 20.0);
+    assert_eq!(*results["target[s2]"].last().expect("series"), 10.0);
+
+    assert_eq!(
+        edges_from(&project, "x["),
+        vec![
+            "x[r1] -> target[s2]".to_string(),
+            "x[r2] -> target[a,b]".to_string(),
+        ],
+        "the comma element must stay ONE coordinate: splitting it drops \
+         x[r2] -> target[a,b] and mints an edge to a target that does not exist"
+    );
+}
+
 /// The two derivations agree, on a model with a LOOP through the shape.
 ///
 /// The link-score NAMES already came out diagonal (they are projected from one

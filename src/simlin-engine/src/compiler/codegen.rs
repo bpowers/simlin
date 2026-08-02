@@ -691,6 +691,28 @@ impl<'module> Compiler<'module> {
         }
 
         match arg {
+            Expr::StaticSubscript(base, view, _) if super::view_repeats_a_dimension(view) => {
+                // A source naming one dimension twice (`matrix[d,d]`) has no
+                // usable projection between the array and the consumer of this
+                // view -- every layer that does it matches by dimension NAME and
+                // takes the first hit, so `out[i,j]` reads element `[i,i]` (see
+                // `compiler::view_repeats_a_dimension`). The array route is new
+                // with GH #995: `VECTOR SORT ORDER(PREVIOUS(matrix[d,d]), 1)`
+                // did not compile at the merge base, and letting it compile here
+                // buys a plausible array of wrong numbers. Refuse it, exactly as
+                // the temp and non-view arms below do. The DIRECT spelling
+                // (`VECTOR SORT ORDER(matrix[d,d], 1)`) is untouched: it
+                // compiles at the merge base, to those same wrong numbers, and
+                // fixing that is a pre-existing defect in the projection rather
+                // than something to bolt onto this route.
+                sim_err!(
+                    NotSimulatable,
+                    "PREVIOUS/INIT of an array that names one dimension twice \
+                     cannot be read as an array: the element-to-temp projection \
+                     matches dimensions by name and cannot tell the two apart"
+                        .to_string()
+                )
+            }
             Expr::StaticSubscript(base, view, _) => {
                 Ok(Some(self.array_view_to_snapshot_static(base, view, region)))
             }
