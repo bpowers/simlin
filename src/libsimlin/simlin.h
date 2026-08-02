@@ -1421,6 +1421,10 @@ void simlin_project_serialize_systems(SimlinProject *project,
 // SVG document (UTF-8 encoded). The output includes embedded CSS styles
 // and is suitable for display or export.
 //
+// A model without a stock-and-flow view (e.g. one built programmatically
+// through the patch API) is rendered with an automatically generated
+// layout; the generated view is transient and not persisted.
+//
 // Caller must free output with `simlin_free`.
 //
 // # Safety
@@ -1442,6 +1446,10 @@ void simlin_project_render_svg(SimlinProject *project,
 // the SVG's intrinsic dimensions. When only one dimension is non-zero the
 // other is derived from the aspect ratio. When both are non-zero, `width`
 // takes precedence and `height` is derived from the aspect ratio.
+//
+// A model without a stock-and-flow view (e.g. one built programmatically
+// through the patch API) is rendered with an automatically generated
+// layout; the generated view is transient and not persisted.
 //
 // Only available with the `png_render` feature (on by default; the browser
 // wasm artifact is built without it to keep the resvg/text-shaping stack

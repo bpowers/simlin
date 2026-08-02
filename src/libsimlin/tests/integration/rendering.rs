@@ -6,6 +6,19 @@ use std::ffi::CString;
 use std::ptr;
 
 use simlin::*;
+use simlin_engine::test_common::TestProject;
+
+use crate::common::open_project_from_datamodel;
+
+/// A small stock-and-flow datamodel with NO views, as produced by
+/// building a model programmatically (e.g. through the patch API).
+fn viewless_datamodel() -> simlin_engine::datamodel::Project {
+    TestProject::new("viewless")
+        .stock("population", "50", &["net_growth"], &[], None)
+        .flow("net_growth", "population * rate", None)
+        .aux("rate", "0.08", None)
+        .build_datamodel()
+}
 
 #[test]
 fn test_render_svg() {
@@ -42,6 +55,60 @@ fn test_render_svg() {
         assert!(svg.contains("</svg>"));
 
         simlin_free(out_buffer);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_render_svg_generates_layout_for_viewless_model() {
+    let datamodel = viewless_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let mut out_buffer: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        let model_name = CString::new("main").unwrap();
+        simlin_project_render_svg(
+            proj,
+            model_name.as_ptr(),
+            &mut out_buffer as *mut *mut u8,
+            &mut out_len as *mut usize,
+            &mut err as *mut *mut SimlinError,
+        );
+        crate::common::expect_no_error(err, "render_svg on viewless model");
+        assert!(!out_buffer.is_null());
+
+        let svg = std::str::from_utf8(std::slice::from_raw_parts(out_buffer, out_len)).unwrap();
+        assert!(svg.starts_with("<svg "));
+        // Labels render display names (underscores become spaces, words may
+        // wrap), so assert on single words.
+        assert!(svg.contains("population"));
+        assert!(svg.contains("growth"));
+        simlin_free(out_buffer);
+
+        // The generated layout is transient: rendering must not mutate
+        // the project's persisted views.
+        let mut ser_err: *mut SimlinError = ptr::null_mut();
+        let mut ser_buf: *mut u8 = ptr::null_mut();
+        let mut ser_len: usize = 0;
+        simlin_project_serialize_protobuf(
+            proj,
+            &mut ser_buf as *mut *mut u8,
+            &mut ser_len as *mut usize,
+            &mut ser_err as *mut *mut SimlinError,
+        );
+        crate::common::expect_no_error(ser_err, "serialize after render");
+        let roundtripped: simlin_engine::project_io::Project =
+            prost::Message::decode(std::slice::from_raw_parts(ser_buf, ser_len)).unwrap();
+        let deserialized = simlin_engine::serde::deserialize(roundtripped);
+        let model = deserialized.get_model("main").unwrap();
+        assert!(
+            model.views.is_empty(),
+            "render_svg must not persist a generated view"
+        );
+        simlin_free(ser_buf);
+
         simlin_project_unref(proj);
     }
 }
@@ -220,6 +287,37 @@ mod png {
                 &mut err as *mut *mut SimlinError,
             );
             assert!(err.is_null(), "render_png with width failed");
+            assert!(!out_buffer.is_null());
+            assert!(out_len > 8);
+
+            let png_data = std::slice::from_raw_parts(out_buffer, out_len);
+            assert_eq!(&png_data[0..8], &PNG_SIGNATURE);
+
+            simlin_free(out_buffer);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_render_png_generates_layout_for_viewless_model() {
+        let datamodel = viewless_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let mut out_buffer: *mut u8 = ptr::null_mut();
+            let mut out_len: usize = 0;
+            let model_name = CString::new("main").unwrap();
+            simlin_project_render_png(
+                proj,
+                model_name.as_ptr(),
+                0,
+                0,
+                &mut out_buffer as *mut *mut u8,
+                &mut out_len as *mut usize,
+                &mut err as *mut *mut SimlinError,
+            );
+            crate::common::expect_no_error(err, "render_png on viewless model");
             assert!(!out_buffer.is_null());
             assert!(out_len > 8);
 

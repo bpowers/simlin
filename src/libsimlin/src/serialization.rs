@@ -374,11 +374,58 @@ pub unsafe extern "C" fn simlin_project_serialize_systems(
     }
 }
 
+/// When the named model has no stock-and-flow view (or only an empty one),
+/// return a clone of the datamodel carrying an automatically generated
+/// layout for it, so a programmatically built model renders without the
+/// caller first creating a view. Returns `Ok(None)` when the existing view
+/// is usable (or the model does not exist -- the renderer reports that
+/// case itself, distinguishing "not found" from layout failures).
+///
+/// The layout is deliberately transient: rendering is a read, so the
+/// generated view is never written back to the project. Callers that want
+/// a persisted view use `simlin_project_diagram_sync`.
+///
+/// Locking: the caller holds the datamodel lock; this takes the db lock,
+/// matching the datamodel-then-db order used project-wide.
+fn datamodel_with_generated_layout(
+    proj: &SimlinProject,
+    datamodel: &engine::datamodel::Project,
+    model_name: &str,
+) -> Result<Option<engine::datamodel::Project>, String> {
+    let Some(model) = datamodel.get_model(model_name) else {
+        return Ok(None);
+    };
+    let has_view = model
+        .views
+        .first()
+        .map(|engine::datamodel::View::StockFlow(sf)| !sf.elements.is_empty())
+        .unwrap_or(false);
+    if has_view {
+        return Ok(None);
+    }
+
+    let mut db_locked = proj.db.lock().unwrap();
+    let db_state = db_locked
+        .current_source_project()
+        .map(|sp| (&mut *db_locked, sp));
+    let layout = engine::layout::generate_best_layout(datamodel, model_name, db_state)?;
+
+    let mut with_layout = datamodel.clone();
+    // get_model above succeeded, so get_model_mut cannot fail here.
+    with_layout.get_model_mut(model_name).unwrap().views =
+        vec![engine::datamodel::View::StockFlow(layout)];
+    Ok(Some(with_layout))
+}
+
 /// Render a project model's diagram as SVG
 ///
 /// Renders the stock-and-flow diagram for the named model to a standalone
 /// SVG document (UTF-8 encoded). The output includes embedded CSS styles
 /// and is suitable for display or export.
+///
+/// A model without a stock-and-flow view (e.g. one built programmatically
+/// through the patch API) is rendered with an automatically generated
+/// layout; the generated view is transient and not persisted.
 ///
 /// Caller must free output with `simlin_free`.
 ///
@@ -440,7 +487,19 @@ pub unsafe extern "C" fn simlin_project_render_svg(
     };
 
     let datamodel_locked = proj.datamodel.lock().unwrap();
-    match simlin_engine::diagram::render_svg(&datamodel_locked, model_name_str) {
+    let laid_out = match datamodel_with_generated_layout(proj, &datamodel_locked, model_name_str) {
+        Ok(l) => l,
+        Err(msg) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("failed to lay out diagram: {msg}")),
+            );
+            return;
+        }
+    };
+    let render_target = laid_out.as_ref().unwrap_or(&datamodel_locked);
+    match simlin_engine::diagram::render_svg(render_target, model_name_str) {
         Ok(svg_str) => {
             let bytes = svg_str.into_bytes();
             let len = bytes.len();
@@ -478,6 +537,10 @@ pub unsafe extern "C" fn simlin_project_render_svg(
 /// the SVG's intrinsic dimensions. When only one dimension is non-zero the
 /// other is derived from the aspect ratio. When both are non-zero, `width`
 /// takes precedence and `height` is derived from the aspect ratio.
+///
+/// A model without a stock-and-flow view (e.g. one built programmatically
+/// through the patch API) is rendered with an automatically generated
+/// layout; the generated view is transient and not persisted.
 ///
 /// Only available with the `png_render` feature (on by default; the browser
 /// wasm artifact is built without it to keep the resvg/text-shaping stack
@@ -551,7 +614,19 @@ pub unsafe extern "C" fn simlin_project_render_png(
     };
 
     let datamodel_locked = proj.datamodel.lock().unwrap();
-    match simlin_engine::diagram::render_png(&datamodel_locked, model_name_str, &opts) {
+    let laid_out = match datamodel_with_generated_layout(proj, &datamodel_locked, model_name_str) {
+        Ok(l) => l,
+        Err(msg) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("failed to lay out diagram: {msg}")),
+            );
+            return;
+        }
+    };
+    let render_target = laid_out.as_ref().unwrap_or(&datamodel_locked);
+    match simlin_engine::diagram::render_png(render_target, model_name_str, &opts) {
         Ok(png_bytes) => {
             let len = png_bytes.len();
 
