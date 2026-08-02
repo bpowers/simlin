@@ -4,6 +4,7 @@ import pytest
 
 from simlin import (
     Aux,
+    Compat,
     DominantPeriod,
     Flow,
     GraphicalFunction,
@@ -148,7 +149,7 @@ class TestStock:
         assert stock.units is None
         assert stock.documentation is None
         assert stock.dimensions == ()
-        assert stock.non_negative is False
+        assert stock.compat is None
 
     def test_stock_with_all_fields(self) -> None:
         """Test Stock with all fields populated."""
@@ -160,7 +161,7 @@ class TestStock:
             units="items",
             documentation="Inventory on hand",
             dimensions=("region",),
-            non_negative=True,
+            compat=Compat(non_negative=True),
         )
 
         assert stock.name == "inventory"
@@ -170,7 +171,7 @@ class TestStock:
         assert stock.units == "items"
         assert stock.documentation == "Inventory on hand"
         assert stock.dimensions == ("region",)
-        assert stock.non_negative is True
+        assert stock.compat == Compat(non_negative=True)
 
     def test_stock_immutable(self) -> None:
         """Test that Stock is immutable."""
@@ -211,7 +212,7 @@ class TestFlow:
         assert flow.units is None
         assert flow.documentation is None
         assert flow.dimensions == ()
-        assert flow.non_negative is False
+        assert flow.compat is None
         assert flow.graphical_function is None
 
     def test_flow_with_graphical_function(self) -> None:
@@ -263,7 +264,7 @@ class TestAux:
 
         assert aux.name == "birth_rate"
         assert aux.equation == "0.03"
-        assert aux.active_initial is None
+        assert aux.compat is None
         assert aux.units is None
         assert aux.documentation is None
         assert aux.dimensions == ()
@@ -274,14 +275,14 @@ class TestAux:
         aux = Aux(
             name="smoothed_value",
             equation="SMOOTH3(input, delay_time)",
-            active_initial="10",
+            compat=Compat(active_initial="10"),
             units="widgets",
             documentation="3rd order exponential smooth",
         )
 
         assert aux.name == "smoothed_value"
         assert aux.equation == "SMOOTH3(input, delay_time)"
-        assert aux.active_initial == "10"
+        assert aux.compat == Compat(active_initial="10")
         assert aux.units == "widgets"
         assert aux.documentation == "3rd order exponential smooth"
 

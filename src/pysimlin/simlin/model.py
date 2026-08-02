@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import threading
 import warnings
-from typing import TYPE_CHECKING, Any, Self, Union
+from typing import TYPE_CHECKING, Any, Self, TypeVar
 
 import numpy as np
 
@@ -31,10 +31,7 @@ from ._ffi import (
 )
 from .analysis import Analysis, Link, LinkPolarity, Loop, LoopPolarity, Partition
 from .errors import ErrorCode, ErrorSeverity, SimlinRuntimeError
-from .json_converter import converter
-from .json_types import (
-    Auxiliary as JsonAuxiliary,
-)
+from .json_converter import converter, structure_variable
 from .json_types import (
     DeleteVariable,
     DeleteView,
@@ -50,26 +47,17 @@ from .json_types import (
     UpsertView,
 )
 from .json_types import (
-    Flow as JsonFlow,
-)
-from .json_types import (
-    Module as JsonModule,
-)
-from .json_types import (
-    Stock as JsonStock,
-)
-from .json_types import (
     View as JsonView,
 )
 from .types import (
     Aux,
     Flow,
-    GraphicalFunction,
-    GraphicalFunctionScale,
     ModelIssue,
+    Module,
     Stock,
     TimeSpec,
     UnitIssue,
+    Variable,
 )
 
 if TYPE_CHECKING:
@@ -87,172 +75,7 @@ VARTYPE_AUX: int = 1 << 2
 VARTYPE_MODULE: int = 1 << 3
 
 
-# Type for variable in the edit context current dict
-JsonVariable = Union[JsonStock, JsonFlow, JsonAuxiliary, JsonModule]
-
-
-def _parse_graphical_function_dict(gf_dict: dict[str, Any]) -> GraphicalFunction:
-    """Parse a graphical function JSON dict into a types dataclass."""
-    points = gf_dict.get("points")
-    if points:
-        x_points: tuple[float, ...] | None = tuple(p[0] for p in points)
-        y_points: tuple[float, ...] = tuple(p[1] for p in points)
-    else:
-        raw_y = gf_dict.get("yPoints", [])
-        x_points = None
-        y_points = tuple(raw_y) if raw_y else ()
-
-    x_scale_dict = gf_dict.get("xScale")
-    y_scale_dict = gf_dict.get("yScale")
-
-    x_scale = GraphicalFunctionScale(
-        min=x_scale_dict["min"] if x_scale_dict else 0.0,
-        max=x_scale_dict["max"]
-        if x_scale_dict
-        else (float(len(y_points) - 1) if y_points else 0.0),
-    )
-    y_scale = GraphicalFunctionScale(
-        min=y_scale_dict["min"] if y_scale_dict else 0.0,
-        max=y_scale_dict["max"] if y_scale_dict else 1.0,
-    )
-
-    return GraphicalFunction(
-        x_points=x_points,
-        y_points=y_points,
-        x_scale=x_scale,
-        y_scale=y_scale,
-        kind=gf_dict.get("kind") or "continuous",
-    )
-
-
-def _parse_arrayed_elements(
-    arrayed: dict[str, Any] | None,
-) -> tuple[tuple[tuple[str, str], ...], str]:
-    """Extract per-element equations from an ``arrayedEquation`` JSON dict.
-
-    Returns ``(element_equations, common_equation)``: the per-element
-    ``(subscript, equation)`` pairs, and -- when every element carries the
-    same equation text (the shape the Vensim importer produces for
-    apply-to-all equations) -- that common text. ``common_equation`` is empty
-    when elements differ or there are no per-element equations.
-    """
-    if not arrayed:
-        return (), ""
-    elements = arrayed.get("elements") or []
-    pairs = tuple((elem.get("subscript", ""), elem.get("equation", "")) for elem in elements)
-    if not pairs:
-        return (), ""
-    first_eq = pairs[0][1]
-    common = first_eq if all(eq == first_eq for _, eq in pairs) else ""
-    return pairs, common
-
-
-def _stock_from_dict(d: dict[str, Any]) -> Stock:
-    """Convert a tagged JSON variable dict (type=stock) to a Stock."""
-    arrayed = d.get("arrayedEquation")
-    element_equations, common_eq = _parse_arrayed_elements(arrayed)
-    initial_eq = d.get("initialEquation", "")
-    if not initial_eq and arrayed:
-        # For stocks, the initial value can come from two arrayed fields:
-        # - initialEquation: JSON-sourced data with an explicit initial field
-        # - equation: XMILE-sourced data (where <eqn> IS the initial value)
-        initial_eq = arrayed.get("initialEquation", "") or arrayed.get("equation", "")
-    if not initial_eq:
-        # Element-by-element stocks: report the common initial when every
-        # element agrees (the Vensim-importer apply-to-all shape).
-        initial_eq = common_eq
-    dimensions: tuple[str, ...] = ()
-    if arrayed:
-        dimensions = tuple(arrayed.get("dimensions", []))
-    compat = d.get("compat") or {}
-    return Stock(
-        name=d["name"],
-        initial_equation=initial_eq,
-        inflows=tuple(d.get("inflows", [])),
-        outflows=tuple(d.get("outflows", [])),
-        units=d.get("units") or None,
-        documentation=d.get("documentation") or None,
-        dimensions=dimensions,
-        non_negative=compat.get("nonNegative", d.get("nonNegative", False)),
-        element_equations=element_equations,
-    )
-
-
-def _flow_from_dict(d: dict[str, Any]) -> Flow:
-    """Convert a tagged JSON variable dict (type=flow) to a Flow."""
-    arrayed = d.get("arrayedEquation")
-    element_equations, common_eq = _parse_arrayed_elements(arrayed)
-    equation = d.get("equation", "")
-    if not equation and arrayed:
-        equation = arrayed.get("equation", "") or common_eq
-    dimensions: tuple[str, ...] = ()
-    if arrayed:
-        dimensions = tuple(arrayed.get("dimensions", []))
-    gf = None
-    gf_dict = d.get("graphicalFunction")
-    if gf_dict:
-        gf = _parse_graphical_function_dict(gf_dict)
-    compat = d.get("compat") or {}
-    return Flow(
-        name=d["name"],
-        equation=equation,
-        units=d.get("units") or None,
-        documentation=d.get("documentation") or None,
-        dimensions=dimensions,
-        non_negative=compat.get("nonNegative", d.get("nonNegative", False)),
-        graphical_function=gf,
-        element_equations=element_equations,
-    )
-
-
-def _aux_from_dict(d: dict[str, Any]) -> Aux:
-    """Convert a tagged JSON variable dict (type=aux) to an Aux."""
-    arrayed = d.get("arrayedEquation")
-    element_equations, common_eq = _parse_arrayed_elements(arrayed)
-    equation = d.get("equation", "")
-    if not equation and arrayed:
-        equation = arrayed.get("equation", "") or common_eq
-    compat = d.get("compat") or {}
-    active_initial = compat.get("activeInitial", "")
-    if not active_initial and arrayed:
-        arrayed_compat = arrayed.get("compat") or {}
-        active_initial = arrayed_compat.get("activeInitial", "")
-    dimensions: tuple[str, ...] = ()
-    if arrayed:
-        dimensions = tuple(arrayed.get("dimensions", []))
-    gf = None
-    gf_dict = d.get("graphicalFunction")
-    if gf_dict:
-        gf = _parse_graphical_function_dict(gf_dict)
-    return Aux(
-        name=d["name"],
-        equation=equation,
-        active_initial=active_initial or None,
-        units=d.get("units") or None,
-        documentation=d.get("documentation") or None,
-        dimensions=dimensions,
-        graphical_function=gf,
-        element_equations=element_equations,
-    )
-
-
-def _var_from_dict(d: dict[str, Any]) -> Stock | Flow | Aux | None:
-    """Convert a tagged JSON variable dict to the appropriate type.
-
-    Returns None for module-type variables since they are not represented
-    in the public Stock/Flow/Aux type hierarchy.
-    """
-    var_type = d.get("type")
-    if var_type == "stock":
-        return _stock_from_dict(d)
-    elif var_type == "flow":
-        return _flow_from_dict(d)
-    elif var_type == "aux":
-        return _aux_from_dict(d)
-    elif var_type == "module":
-        return None
-    else:
-        raise SimlinRuntimeError(f"unknown variable type: {var_type!r}")
+V = TypeVar("V", Stock, Flow, Aux, Module)
 
 
 class ModelPatchBuilder:
@@ -272,21 +95,28 @@ class ModelPatchBuilder:
     def build(self) -> JsonModelPatch:
         return JsonModelPatch(name=self._model_name, ops=list(self._ops))
 
-    def upsert_stock(self, stock: JsonStock) -> JsonStock:
-        self._ops.append(UpsertStock(stock=stock))
-        return stock
+    def upsert(self, var: V) -> V:
+        """Insert or update a variable (Stock, Flow, Aux, or Module).
 
-    def upsert_flow(self, flow: JsonFlow) -> JsonFlow:
-        self._ops.append(UpsertFlow(flow=flow))
-        return flow
+        The variable's type selects the operation; the variable is returned
+        unchanged so calls compose with ``dataclasses.replace``:
 
-    def upsert_aux(self, aux: JsonAuxiliary) -> JsonAuxiliary:
-        self._ops.append(UpsertAux(aux=aux))
-        return aux
-
-    def upsert_module(self, module: JsonModule) -> JsonModule:
-        self._ops.append(UpsertModule(module=module))
-        return module
+            patch.upsert(replace(current["rate"], equation="0.5"))
+        """
+        match var:
+            case Stock():
+                self._ops.append(UpsertStock(stock=var))
+            case Flow():
+                self._ops.append(UpsertFlow(flow=var))
+            case Aux():
+                self._ops.append(UpsertAux(aux=var))
+            case Module():
+                self._ops.append(UpsertModule(module=var))
+            case _:
+                raise TypeError(
+                    f"upsert expects a Stock, Flow, Aux, or Module, got {type(var).__name__}"
+                )
+        return var
 
     def delete_variable(self, ident: str) -> None:
         self._ops.append(DeleteVariable(ident=ident))
@@ -341,10 +171,10 @@ class _ModelEditContext:
         self._model = model
         self._dry_run = dry_run
         self._allow_errors = allow_errors
-        self._current: dict[str, JsonVariable] = {}
+        self._current: dict[str, Variable] = {}
         self._patch = ModelPatchBuilder(model._name or "")
 
-    def __enter__(self) -> tuple[dict[str, JsonVariable], ModelPatchBuilder]:
+    def __enter__(self) -> tuple[dict[str, Variable], ModelPatchBuilder]:
         with self._model._lock:
             self._model._check_alive()
             names = model_get_var_names(self._model._ptr)
@@ -360,16 +190,8 @@ class _ModelEditContext:
             if raw is None:
                 continue
             var_dict = json.loads(raw.decode("utf-8"))
-            var_type = var_dict.get("type")
             display_name = var_dict.get("name", "")
-            if var_type == "stock":
-                self._current[display_name] = converter.structure(var_dict, JsonStock)
-            elif var_type == "flow":
-                self._current[display_name] = converter.structure(var_dict, JsonFlow)
-            elif var_type == "aux":
-                self._current[display_name] = converter.structure(var_dict, JsonAuxiliary)
-            elif var_type == "module":
-                self._current[display_name] = converter.structure(var_dict, JsonModule)
+            self._current[display_name] = structure_variable(var_dict)
 
         return self._current, self._patch
 
@@ -445,16 +267,14 @@ class Model:
         """
         return self._project
 
-    def get_variable(self, name: str) -> Stock | Flow | Aux | None:
+    def get_variable(self, name: str) -> Variable | None:
         """Get a single variable by name, or None if not found.
 
         Args:
             name: The variable name to look up
 
         Returns:
-            A Stock, Flow, or Aux object, or None if not found.
-            Module-type variables also return None since they are not
-            represented in the public type hierarchy.
+            A Stock, Flow, Aux, or Module object, or None if not found.
         """
         with self._lock:
             self._check_alive()
@@ -463,7 +283,7 @@ class Model:
         if raw is None:
             return None
         var_dict = json.loads(raw.decode("utf-8"))
-        return _var_from_dict(var_dict)
+        return structure_variable(var_dict)
 
     def get_incoming_links(self, var_name: str) -> list[str]:
         """Get the dependencies (incoming links) for a given variable.
@@ -595,17 +415,17 @@ class Model:
             return model_get_var_names(self._ptr, type_mask, filter_str)
 
     @property
-    def variables(self) -> tuple[Stock | Flow | Aux, ...]:
-        """All variables in the model (stocks, flows, and auxs).
+    def variables(self) -> tuple[Variable, ...]:
+        """All variables in the model (stocks, flows, auxs, and modules).
 
         Returns:
-            Tuple of all variable objects (Stock, Flow, or Aux)
+            Tuple of all variable objects (Stock, Flow, Aux, or Module)
         """
         with self._lock:
             self._check_alive()
             names = model_get_var_names(self._ptr)
 
-        result: list[Stock | Flow | Aux] = []
+        result: list[Variable] = []
         for name in names:
             var = self.get_variable(name)
             if var is not None:
@@ -1113,12 +933,16 @@ class Model:
             return f"{var.name} is a flow computed as {var.equation}"
 
         if isinstance(var, Aux):
-            if var.active_initial:
+            active_initial = var.compat.active_initial if var.compat else None
+            if active_initial:
                 return (
                     f"{var.name} is an auxiliary variable computed as {var.equation} "
-                    f"with initial value {var.active_initial}"
+                    f"with initial value {active_initial}"
                 )
             return f"{var.name} is an auxiliary variable computed as {var.equation}"
+
+        if isinstance(var, Module):
+            return f"{var.name} is an instance of the '{var.model_name}' model"
 
         raise AssertionError(f"unexpected variable type: {type(var)}")
 

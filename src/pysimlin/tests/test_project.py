@@ -290,7 +290,7 @@ class TestPatchWarningSemantics:
 
     @staticmethod
     def _project_with_unit_warning() -> "simlin.Project":
-        from simlin.json_types import Auxiliary as JsonAuxiliary
+        from simlin.types import Aux
 
         project = Project.new(name="warnish", sim_stop=10.0, time_units="year")
         model = project.get_model()
@@ -298,8 +298,8 @@ class TestPatchWarningSemantics:
         # Warning-severity unit-mismatch diagnostic without making the
         # model unsimulatable.
         with model.edit(allow_errors=True) as (_, patch):
-            patch.upsert_aux(JsonAuxiliary(name="a", equation="1", units="widgets"))
-            patch.upsert_aux(JsonAuxiliary(name="b", equation="a", units="gadgets"))
+            patch.upsert(Aux(name="a", equation="1", units="widgets"))
+            patch.upsert(Aux(name="b", equation="a", units="gadgets"))
         return project
 
     def test_accepted_patch_with_preexisting_warnings_does_not_raise(self) -> None:
@@ -326,7 +326,7 @@ class TestPatchWarningSemantics:
 
     def test_rejected_patch_raises_with_details(self) -> None:
         """A genuinely invalid patch still raises, with details attached."""
-        from simlin.json_types import Auxiliary as JsonAuxiliary
+        from simlin.types import Aux
 
         project = self._project_with_unit_warning()
         model = project.get_model()
@@ -335,7 +335,7 @@ class TestPatchWarningSemantics:
             pytest.raises(simlin.SimlinError) as excinfo,
             model.edit() as (_, patch),
         ):
-            patch.upsert_aux(JsonAuxiliary(name="bad", equation="?? not an equation"))
+            patch.upsert(Aux(name="bad", equation="?? not an equation"))
 
         details = getattr(excinfo.value, "details", [])
         assert details, "rejection should carry the underlying error details"

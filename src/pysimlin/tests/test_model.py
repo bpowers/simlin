@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -12,11 +13,11 @@ from simlin import (
     VARTYPE_AUX,
     VARTYPE_FLOW,
     VARTYPE_STOCK,
+    Aux,
     Model,
     SimlinCompilationError,
     SimlinRuntimeError,
 )
-from simlin.json_types import Auxiliary as JsonAuxiliary
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -206,9 +207,7 @@ class TestModelEditing:
         model = simlin.load(mdl_model_path)
 
         with model.edit(allow_errors=True) as (current, patch):
-            heat_loss = current["heat_loss_to_room"]
-            heat_loss.equation = "0"
-            patch.upsert_flow(heat_loss)
+            patch.upsert(replace(current["heat_loss_to_room"], equation="0"))
 
         # Verify via JSON serialization
         project_json = json.loads(model.project.serialize_json().decode("utf-8"))
@@ -229,9 +228,7 @@ class TestModelEditing:
         original_equation = original_flow.get("equation", "")
 
         with model.edit(dry_run=True, allow_errors=True) as (current, patch):
-            flow = current["heat_loss_to_room"]
-            flow.equation = "0"
-            patch.upsert_flow(flow)
+            patch.upsert(replace(current["heat_loss_to_room"], equation="0"))
 
         # Verify equation unchanged via JSON
         after_json = json.loads(model.project.serialize_json().decode("utf-8"))
@@ -250,8 +247,8 @@ class TestModelEditing:
             pytest.raises((SimlinRuntimeError, SimlinCompilationError)),
             model.edit() as (_, patch),
         ):
-            patch.upsert_aux(
-                JsonAuxiliary(
+            patch.upsert(
+                Aux(
                     name="bad_variable",
                     equation="?? invalid expression",
                 )
@@ -266,11 +263,11 @@ class TestModelEditing:
 
         # This should not raise - errors are collected
         with model.edit(allow_errors=True) as (_, patch):
-            bad_aux = JsonAuxiliary(
+            bad_aux = Aux(
                 name="bad_variable",
                 equation="?? invalid expression",
             )
-            patch.upsert_aux(bad_aux)
+            patch.upsert(bad_aux)
 
         # The variable should be added despite the error
         project_json = json.loads(model.project.serialize_json().decode("utf-8"))
@@ -287,8 +284,8 @@ class TestModelEditing:
             pytest.raises((SimlinRuntimeError, SimlinCompilationError)),
             model.edit(dry_run=True) as (_, patch),
         ):
-            patch.upsert_aux(
-                JsonAuxiliary(
+            patch.upsert(
+                Aux(
                     name="bad_variable",
                     equation="?? invalid expression",
                 )
@@ -306,11 +303,11 @@ class TestModelEditing:
 
         # Should not raise, should not mutate
         with model.edit(dry_run=True, allow_errors=True) as (_, patch):
-            bad_aux = JsonAuxiliary(
+            bad_aux = Aux(
                 name="bad_variable",
                 equation="?? invalid expression",
             )
-            patch.upsert_aux(bad_aux)
+            patch.upsert(bad_aux)
 
         # Project should be unchanged
         after_json = model.project.serialize_json()
@@ -322,9 +319,7 @@ class TestModelEditing:
         model = simlin.load(conveyor_model_path)
 
         with model.edit() as (current, patch):
-            students = current["Students"]
-            students.documentation = "cohort pipeline"
-            patch.upsert_stock(students)
+            patch.upsert(replace(current["Students"], documentation="cohort pipeline"))
 
         # Match on the canonical form so this test is insensitive to display
         # name spelling (patch application preserves it since GH #890).
@@ -352,9 +347,7 @@ class TestModelEditing:
         name = leak_flow["name"]
 
         with model.edit(allow_errors=True) as (current, patch):
-            flow = current[name]
-            flow.documentation = "edited"
-            patch.upsert_flow(flow)
+            patch.upsert(replace(current[name], documentation="edited"))
 
         after = json.loads(model.project.serialize_json().decode("utf-8"))
         flow_after = next(
@@ -378,9 +371,7 @@ class TestModelEditing:
         model = simlin.load(conveyor_model_path)
 
         with model.edit() as (current, patch):
-            students = current["Students"]
-            students.documentation = "x"
-            patch.upsert_stock(students)
+            patch.upsert(replace(current["Students"], documentation="x"))
 
         after = json.loads(model.project.serialize_json().decode("utf-8"))
         names = [s["name"] for s in after["models"][0]["stocks"]]
@@ -393,9 +384,7 @@ class TestModelEditing:
         name = next(f["name"] for f in before["models"][0]["flows"] if "\\n" in f["name"])
 
         with model.edit(allow_errors=True) as (current, patch):
-            flow = current[name]
-            flow.documentation = "edited"
-            patch.upsert_flow(flow)
+            patch.upsert(replace(current[name], documentation="edited"))
 
         after = json.loads(model.project.serialize_json().decode("utf-8"))
         names_after = [f["name"] for f in after["models"][0]["flows"]]
@@ -414,12 +403,12 @@ class TestModelEditing:
 
         from simlin.errors import ErrorCode, ErrorDetail
         from simlin.json_converter import converter
-        from simlin.json_types import Auxiliary, JsonModelPatch, JsonProjectPatch, UpsertAux
+        from simlin.json_types import JsonModelPatch, JsonProjectPatch, UpsertAux
 
         model = simlin.load(xmile_model_path)
 
         # Create a patch with an invalid equation (??? is not valid syntax)
-        bad_aux = Auxiliary(name="broken_var", equation="??? totally invalid")
+        bad_aux = Aux(name="broken_var", equation="??? totally invalid")
         patch = JsonProjectPatch(
             models=[JsonModelPatch(name=model._name or "main", ops=[UpsertAux(aux=bad_aux)])]
         )
@@ -843,7 +832,7 @@ class TestArrayedEquations:
 
         # Subscript keys are canonical (lowercase) names, consistent with the
         # rest of the API; equation text preserves the authored casing.
-        subs = dict(var.element_equations)
+        subs = {e.subscript: e.equation for e in var.element_equations}
         assert set(subs) == {"nyc", "boston"}
         assert "population[NYC]" in subs["nyc"]
         assert "population[Boston]" in subs["boston"]
@@ -859,7 +848,7 @@ class TestArrayedEquations:
         var = model.get_variable("population")
         assert isinstance(var, Stock)
 
-        subs = dict(var.element_equations)
+        subs = {e.subscript: e.equation for e in var.element_equations}
         assert subs == {"nyc": "1000", "boston": "500"}
         assert var.initial_equation == ""
 
@@ -867,7 +856,8 @@ class TestArrayedEquations:
         """When every element carries the same equation text -- the shape the
         Vensim importer produces for apply-to-all equations -- .equation reports
         that common text instead of being empty."""
-        from simlin.model import _aux_from_dict
+        from simlin.json_converter import structure_variable
+        from simlin.types import ElementEquation
 
         d: dict[str, Any] = {
             "type": "aux",
@@ -881,13 +871,13 @@ class TestArrayedEquations:
                 ],
             },
         }
-        aux = _aux_from_dict(d)
-        assert aux is not None
+        aux = structure_variable(d)
+        assert isinstance(aux, Aux)
         assert aux.equation == "C_in_Atmosphere[scenario] * ppm"
         assert aux.element_equations == (
-            ("Deterministic", "C_in_Atmosphere[scenario] * ppm"),
-            ("High", "C_in_Atmosphere[scenario] * ppm"),
-            ("Low", "C_in_Atmosphere[scenario] * ppm"),
+            ElementEquation(subscript="Deterministic", equation="C_in_Atmosphere[scenario] * ppm"),
+            ElementEquation(subscript="High", equation="C_in_Atmosphere[scenario] * ppm"),
+            ElementEquation(subscript="Low", equation="C_in_Atmosphere[scenario] * ppm"),
         )
 
     def test_scalar_variables_have_empty_element_equations(self, teacup_stmx_path: Path) -> None:
@@ -1004,11 +994,11 @@ class TestVartypeConstants:
 
 
 class TestStockFromDict:
-    """Unit tests for _stock_from_dict JSON parsing."""
+    """Unit tests for the stock wire-dict parsing in structure_variable."""
 
     def test_arrayed_stock_equation_as_initial(self) -> None:
         """XMILE-sourced stocks store their initial value in arrayedEquation.equation."""
-        from simlin.model import _stock_from_dict
+        from simlin.json_converter import structure_variable
 
         d: dict[str, Any] = {
             "type": "stock",
@@ -1021,12 +1011,13 @@ class TestStockFromDict:
                 "equation": "100",
             },
         }
-        stock = _stock_from_dict(d)
+        stock = structure_variable(d)
+        assert isinstance(stock, simlin.Stock)
         assert stock.initial_equation == "100"
 
     def test_arrayed_stock_initial_equation_field(self) -> None:
         """JSON-sourced stocks can use arrayedEquation.initialEquation."""
-        from simlin.model import _stock_from_dict
+        from simlin.json_converter import structure_variable
 
         d: dict[str, Any] = {
             "type": "stock",
@@ -1039,12 +1030,13 @@ class TestStockFromDict:
                 "initialEquation": "200",
             },
         }
-        stock = _stock_from_dict(d)
+        stock = structure_variable(d)
+        assert isinstance(stock, simlin.Stock)
         assert stock.initial_equation == "200"
 
     def test_arrayed_stock_initial_equation_preferred_over_equation(self) -> None:
         """When both are present, initialEquation takes precedence over equation."""
-        from simlin.model import _stock_from_dict
+        from simlin.json_converter import structure_variable
 
         d: dict[str, Any] = {
             "type": "stock",
@@ -1058,12 +1050,13 @@ class TestStockFromDict:
                 "initialEquation": "preferred_value",
             },
         }
-        stock = _stock_from_dict(d)
+        stock = structure_variable(d)
+        assert isinstance(stock, simlin.Stock)
         assert stock.initial_equation == "preferred_value"
 
     def test_top_level_initial_equation_takes_precedence(self) -> None:
         """Top-level initialEquation should be used when present."""
-        from simlin.model import _stock_from_dict
+        from simlin.json_converter import structure_variable
 
         d: dict[str, Any] = {
             "type": "stock",
@@ -1072,7 +1065,8 @@ class TestStockFromDict:
             "inflows": [],
             "outflows": [],
         }
-        stock = _stock_from_dict(d)
+        stock = structure_variable(d)
+        assert isinstance(stock, simlin.Stock)
         assert stock.initial_equation == "50"
 
 
@@ -1100,19 +1094,21 @@ class TestTimeSpecDirect:
 
 
 class TestVarFromDict:
-    """Unit tests for _var_from_dict type dispatch."""
+    """Unit tests for structure_variable type dispatch."""
 
-    def test_module_type_returns_none(self) -> None:
-        """Module-type variables should return None (not part of public API)."""
-        from simlin.model import _var_from_dict
+    def test_module_type_returns_module(self) -> None:
+        """Module-type variables are part of the unified public API."""
+        from simlin.json_converter import structure_variable
+        from simlin.types import Module
 
         d: dict[str, Any] = {"type": "module", "name": "sub", "modelName": "sub_model"}
-        assert _var_from_dict(d) is None
+        var = structure_variable(d)
+        assert var == Module(name="sub", model_name="sub_model")
 
     def test_unknown_type_raises(self) -> None:
         """Unknown variable types should raise, not silently return None."""
-        from simlin.model import _var_from_dict
+        from simlin.json_converter import structure_variable
 
         d: dict[str, Any] = {"type": "bogus", "name": "x"}
         with pytest.raises(SimlinRuntimeError, match="unknown variable type"):
-            _var_from_dict(d)
+            structure_variable(d)

@@ -41,15 +41,15 @@ def _smooth_feedback_model() -> simlin.Model:
     project = simlin.Project.new(name="smooth_feedback", sim_start=0.0, sim_stop=10.0, dt=1.0)
     model = project.main_model
     with model.edit() as (_current, patch):
-        from simlin.json_types import Auxiliary, Flow, Stock
+        from simlin.types import Aux, Flow, Stock
 
-        patch.upsert_aux(Auxiliary(name="goal", equation="100"))
-        patch.upsert_stock(
+        patch.upsert(Aux(name="goal", equation="100"))
+        patch.upsert(
             Stock(name="level", initial_equation="50", inflows=["adjustment"], outflows=[])
         )
-        patch.upsert_aux(Auxiliary(name="smoothed_level", equation="SMTH1(level, 3)"))
-        patch.upsert_aux(Auxiliary(name="gap", equation="goal - smoothed_level"))
-        patch.upsert_flow(Flow(name="adjustment", equation="gap / 5"))
+        patch.upsert(Aux(name="smoothed_level", equation="SMTH1(level, 3)"))
+        patch.upsert(Aux(name="gap", equation="goal - smoothed_level"))
+        patch.upsert(Flow(name="adjustment", equation="gap / 5"))
     return model
 
 
@@ -66,13 +66,13 @@ def _large_scc_model(total_nodes: int) -> simlin.Model:
     project = simlin.Project.new(name="large_scc", sim_start=0.0, sim_stop=3.0, dt=1.0)
     model = project.main_model
     with model.edit() as (_current, patch):
-        from simlin.json_types import Auxiliary, Flow, Stock
+        from simlin.types import Aux, Flow, Stock
 
         for i in range(aux_count):
             equation = "cap_stock" if i + 1 == aux_count else f"aux_{i + 1}"
-            patch.upsert_aux(Auxiliary(name=f"aux_{i}", equation=equation))
-        patch.upsert_flow(Flow(name="cap_flow", equation="aux_0"))
-        patch.upsert_stock(
+            patch.upsert(Aux(name=f"aux_{i}", equation=equation))
+        patch.upsert(Flow(name="cap_flow", equation="aux_0"))
+        patch.upsert(
             Stock(name="cap_stock", initial_equation="0", inflows=["cap_flow"], outflows=[])
         )
     return model
@@ -193,9 +193,9 @@ def _predator_prey_model() -> simlin.Model:
     project = simlin.Project.new(name="predator_prey", sim_start=0.0, sim_stop=5.0, dt=1.0)
     model = project.main_model
     with model.edit() as (_current, patch):
-        from simlin.json_types import Flow, Stock
+        from simlin.types import Flow, Stock
 
-        patch.upsert_stock(
+        patch.upsert(
             Stock(
                 name="prey",
                 initial_equation="100",
@@ -203,7 +203,7 @@ def _predator_prey_model() -> simlin.Model:
                 outflows=["deaths"],
             )
         )
-        patch.upsert_stock(
+        patch.upsert(
             Stock(
                 name="pred",
                 initial_equation="20",
@@ -211,10 +211,10 @@ def _predator_prey_model() -> simlin.Model:
                 outflows=["pred_deaths"],
             )
         )
-        patch.upsert_flow(Flow(name="births", equation="prey * 0.5"))
-        patch.upsert_flow(Flow(name="deaths", equation="prey * pred * 0.01"))
-        patch.upsert_flow(Flow(name="pred_births", equation="prey * pred * 0.005"))
-        patch.upsert_flow(Flow(name="pred_deaths", equation="pred * 0.3"))
+        patch.upsert(Flow(name="births", equation="prey * 0.5"))
+        patch.upsert(Flow(name="deaths", equation="prey * pred * 0.01"))
+        patch.upsert(Flow(name="pred_births", equation="prey * pred * 0.005"))
+        patch.upsert(Flow(name="pred_deaths", equation="pred * 0.3"))
     return model
 
 
@@ -575,13 +575,13 @@ def _rk4_feedback_model() -> simlin.Model:
     project.set_sim_specs(sim_method="rk4")
     model = project.main_model
     with model.edit() as (_current, patch):
-        from simlin.json_types import Auxiliary, Flow, Stock
+        from simlin.types import Aux, Flow, Stock
 
-        patch.upsert_aux(Auxiliary(name="birth_rate", equation="0.02"))
-        patch.upsert_stock(
+        patch.upsert(Aux(name="birth_rate", equation="0.02"))
+        patch.upsert(
             Stock(name="population", initial_equation="100", inflows=["births"], outflows=[])
         )
-        patch.upsert_flow(Flow(name="births", equation="population * birth_rate"))
+        patch.upsert(Flow(name="births", equation="population * birth_rate"))
     return model
 
 

@@ -1,5 +1,7 @@
 """Example showing how to edit an existing model's flow equation with pysimlin."""
 
+from dataclasses import replace
+
 import simlin
 
 EXAMPLE_XMILE = b"""<?xml version='1.0' encoding='utf-8'?>
@@ -65,10 +67,12 @@ def main() -> None:
         baseline_final = run_simulation(model)
 
         with model.edit() as (current, patch):
-            flow = current["net_birth_rate"]
-            # Update the equation on the flow and upsert it
-            flow.equation = "fractional_growth_rate * population * 1.5"
-            patch.upsert_flow(flow)
+            # Derive an updated copy of the flow and upsert it
+            flow = replace(
+                current["net_birth_rate"],
+                equation="fractional_growth_rate * population * 1.5",
+            )
+            patch.upsert(flow)
 
         accelerated_final = run_simulation(model)
 

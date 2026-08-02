@@ -3,7 +3,7 @@
 import itertools
 
 import simlin
-from simlin.json_types import Auxiliary, Flow, Stock
+from simlin import Aux, Flow, Stock
 
 
 def build_population_project() -> simlin.Project:
@@ -25,25 +25,25 @@ def build_population_project() -> simlin.Project:
             inflows=["births"],
             outflows=["deaths"],
         )
-        patch.upsert_stock(population)
+        patch.upsert(population)
 
         births = Flow(
             name="births",
             equation="population * birth_rate",
         )
-        patch.upsert_flow(births)
+        patch.upsert(births)
 
         deaths = Flow(
             name="deaths",
             equation="population * birth_rate * (population / 1000)",
         )
-        patch.upsert_flow(deaths)
+        patch.upsert(deaths)
 
-        birth_rate = Auxiliary(
+        birth_rate = Aux(
             name="birth_rate",
             equation="0.08",
         )
-        patch.upsert_aux(birth_rate)
+        patch.upsert(birth_rate)
 
     return project
 
