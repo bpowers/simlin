@@ -132,8 +132,8 @@ def check_out_error(out_error_ptr: Any, operation: str = "operation") -> None:
         operation: Description of the operation that failed (for error message)
 
     Raises:
-        SimlinCompilationError: If compilation errors with details are present
-        SimlinRuntimeError: For other errors
+        SimlinRuntimeError: If an error is present; carries the underlying
+            diagnostics on its ``details`` attribute.
     """
     if out_error_ptr[0] == ffi.NULL:
         return
@@ -146,22 +146,17 @@ def check_out_error(out_error_ptr: Any, operation: str = "operation") -> None:
 
     lib.simlin_error_free(err)
 
-    from .errors import ErrorCode, SimlinCompilationError, SimlinRuntimeError
+    from .errors import ErrorCode, SimlinRuntimeError
 
     try:
         error_code = ErrorCode(code)
     except ValueError:
         error_code = None
 
-    if details and error_code == ErrorCode.VARIABLES_HAVE_ERRORS:
-        raise SimlinCompilationError(f"{operation} failed: {message}", details)
-    else:
-        # The C-side message is the first detail; note how many more there
-        # are so a multi-error failure isn't mistaken for a single issue.
-        suffix = f" (and {len(details) - 1} more issues)" if len(details) > 1 else ""
-        exc = SimlinRuntimeError(f"{operation} failed: {message}{suffix}", error_code)
-        exc.details = details  # type: ignore[attr-defined]
-        raise exc
+    # The C-side message is the first detail; note how many more there
+    # are so a multi-error failure isn't mistaken for a single issue.
+    suffix = f" (and {len(details) - 1} more issues)" if len(details) > 1 else ""
+    raise SimlinRuntimeError(f"{operation} failed: {message}{suffix}", error_code, details)
 
 
 def check_error(result: int, operation: str = "operation") -> None:
@@ -204,7 +199,7 @@ def apply_patch_json(
         List of ErrorDetail objects for collected validation errors
 
     Raises:
-        SimlinRuntimeError or SimlinCompilationError: If operation fails
+        SimlinRuntimeError: If operation fails
     """
     c_patch = ffi.new("uint8_t[]", patch_json)
     out_collected_errors_ptr = ffi.new("SimlinError **")

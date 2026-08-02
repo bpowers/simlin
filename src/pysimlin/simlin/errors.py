@@ -145,18 +145,23 @@ class SimlinError(Exception):
         self.code = code
 
 
-class SimlinCompilationError(SimlinError):
-    """Exception raised when model compilation fails."""
-
-    def __init__(self, message: str, errors: list[ErrorDetail] | None = None):
-        super().__init__(message)
-        self.errors = errors or []
-
-
 class SimlinRuntimeError(SimlinError):
-    """Exception raised during simulation execution."""
+    """Exception raised when the engine rejects an operation.
 
-    pass
+    Covers everything the FFI reports through an out-error: a rejected model
+    edit, a model that fails to compile, and simulation execution failures.
+    ``details`` carries the underlying per-variable diagnostics when the
+    engine provided any.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        code: ErrorCode | None = None,
+        details: list[ErrorDetail] | None = None,
+    ):
+        super().__init__(message, code)
+        self.details = details or []
 
 
 class SimlinImportError(SimlinError):

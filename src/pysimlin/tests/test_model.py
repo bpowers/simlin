@@ -15,7 +15,6 @@ from simlin import (
     VARTYPE_STOCK,
     Aux,
     Model,
-    SimlinCompilationError,
     SimlinRuntimeError,
 )
 
@@ -244,7 +243,7 @@ class TestModelEditing:
         before_json = model.project.serialize_json()
 
         with (
-            pytest.raises((SimlinRuntimeError, SimlinCompilationError)),
+            pytest.raises(SimlinRuntimeError),
             model.edit() as (_, patch),
         ):
             patch.upsert(
@@ -281,7 +280,7 @@ class TestModelEditing:
         before_json = model.project.serialize_json()
 
         with (
-            pytest.raises((SimlinRuntimeError, SimlinCompilationError)),
+            pytest.raises(SimlinRuntimeError),
             model.edit(dry_run=True) as (_, patch),
         ):
             patch.upsert(
@@ -394,7 +393,7 @@ class TestModelEditing:
         """Malformed JSON should raise an error."""
         model = simlin.load(xmile_model_path)
 
-        with pytest.raises((SimlinRuntimeError, SimlinCompilationError)):
+        with pytest.raises(SimlinRuntimeError):
             model.project._apply_patch_json(b"{ not valid json }")
 
     def test_apply_patch_json_returns_errors_when_allowed(self, xmile_model_path) -> None:

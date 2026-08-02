@@ -32,8 +32,7 @@ Full type hints are provided throughout:
 Comprehensive error handling with custom exception hierarchy:
 - `SimlinError`: Base exception
 - `SimlinImportError`: Model loading errors
-- `SimlinRuntimeError`: Simulation execution errors
-- `SimlinCompilationError`: Model compilation errors
+- `SimlinRuntimeError`: Engine-rejected operations (bad edits, compile failures, simulation errors); carries per-variable diagnostics on `details`
 
 Error codes from C are mapped to Python ErrorCode enum.
 

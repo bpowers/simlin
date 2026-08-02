@@ -121,13 +121,11 @@ plt.savefig("sir_results.png")
 ## Error Handling
 
 ```python
-from simlin import SimlinError, SimlinCompilationError
+from simlin import SimlinError
 
 try:
     model = simlin.load("broken_model.stmx")
     run = model.run()
-except SimlinCompilationError as e:
-    print(f"Compilation failed: {e}")
 except SimlinError as e:
     print(f"Error: {e}")
 ```

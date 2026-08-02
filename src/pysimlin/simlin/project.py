@@ -329,9 +329,9 @@ class Project:
             pre-existing warnings on the project)
 
         Raises:
-            SimlinRuntimeError or SimlinCompilationError: If the patch is
-                rejected (or fails to parse/apply); the exception carries the
-                underlying diagnostics on its ``details`` attribute.
+            SimlinRuntimeError: If the patch is rejected (or fails to
+                parse/apply); the exception carries the underlying
+                diagnostics on its ``details`` attribute.
         """
         with self._lock:
             self._check_alive()

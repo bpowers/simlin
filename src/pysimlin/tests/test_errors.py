@@ -3,7 +3,6 @@
 from simlin import (
     ErrorCode,
     ErrorDetail,
-    SimlinCompilationError,
     SimlinError,
     SimlinImportError,
     SimlinRuntimeError,
@@ -16,7 +15,6 @@ class TestErrorTypes:
 
     def test_error_inheritance(self) -> None:
         """Test that error types inherit correctly."""
-        assert issubclass(SimlinCompilationError, SimlinError)
         assert issubclass(SimlinRuntimeError, SimlinError)
         assert issubclass(SimlinImportError, SimlinError)
         assert issubclass(SimlinError, Exception)
@@ -30,8 +28,8 @@ class TestErrorTypes:
         err2 = SimlinError("test error", ErrorCode.BAD_TABLE)
         assert err2.code == ErrorCode.BAD_TABLE
 
-    def test_compilation_error_with_details(self) -> None:
-        """Test compilation error with error details."""
+    def test_runtime_error_with_details(self) -> None:
+        """SimlinRuntimeError carries per-variable diagnostics on ``details``."""
         details = [
             ErrorDetail(
                 code=ErrorCode.CIRCULAR_DEPENDENCY,
@@ -41,9 +39,13 @@ class TestErrorTypes:
             )
         ]
 
-        err = SimlinCompilationError("Compilation failed", details)
-        assert len(err.errors) == 1
-        assert err.errors[0].code == ErrorCode.CIRCULAR_DEPENDENCY
+        err = SimlinRuntimeError("edit rejected", ErrorCode.CIRCULAR_DEPENDENCY, details)
+        assert err.code == ErrorCode.CIRCULAR_DEPENDENCY
+        assert len(err.details) == 1
+        assert err.details[0].code == ErrorCode.CIRCULAR_DEPENDENCY
+
+        bare = SimlinRuntimeError("no details")
+        assert bare.details == []
 
 
 class TestErrorCode:
