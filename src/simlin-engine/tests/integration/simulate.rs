@@ -1701,6 +1701,18 @@ fn simulates_array_broadcast() {
     simulate_path("../../test/array_broadcast/array_broadcast.xmile");
 }
 
+/// GH #995: an array-producing builtin whose array operand is COMPUTED rather
+/// than a plain reference. Codegen consumes such an operand as a view over
+/// storage, so the lowering must evaluate it into a temp first; before #995
+/// these equations did not compile at all, in an ordinary apply-to-all model
+/// with LTM disabled. Gates VECTOR SORT ORDER, RANK and VECTOR ELM MAP against
+/// hand-computed values, plus a control (`order_ref`) that sorts the same
+/// array through a named variable -- the operand shape that always worked.
+#[test]
+fn simulates_vector_computed_operand() {
+    simulate_path("../../test/vector_computed_operand/vector_computed_operand.xmile");
+}
+
 #[test]
 fn simulates_modules() {
     simulate_path("../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx");
@@ -4267,6 +4279,7 @@ static ALL_INCREMENTALLY_COMPILABLE_MODELS: &[&str] = &[
     "../../test/array_sum_expr/array_sum_expr.xmile",
     "../../test/array_multi_source/array_multi_source.xmile",
     "../../test/array_broadcast/array_broadcast.xmile",
+    "../../test/vector_computed_operand/vector_computed_operand.xmile",
     "../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx",
     "../../test/modules2/modules2.xmile",
     "../../test/circular-dep-1/model.stmx",

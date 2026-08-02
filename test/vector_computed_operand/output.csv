@@ -1,0 +1,4 @@
+Time,adjusted[North],adjusted[South],adjusted[West],order[North],order[South],order[West],order_ref[North],order_ref[South],order_ref[West],ranks[North],ranks[South],ranks[West],mapped[North],mapped[South],mapped[West]
+0,30,10,20,1,2,0,1,2,0,3,1,2,20,30,10
+1,30,110,20,2,0,1,2,0,1,2,3,1,20,30,110
+2,30,210,20,2,0,1,2,0,1,2,3,1,20,30,210

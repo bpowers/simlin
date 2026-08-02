@@ -2,6 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+mod array_operand;
 mod codegen;
 pub mod context;
 pub mod dimensions;
@@ -998,6 +999,11 @@ impl Var {
         // and the salsa per-variable fragment path) funnels through -- so both
         // backends (VM and wasmgen) see the folded form.
         let ast: Vec<Expr> = ast.into_iter().map(fold::fold_constants).collect();
+        // Discharge codegen's "an array operand is a view over storage"
+        // contract (GH #995). Runs at the same chokepoint and after folding,
+        // so it sees the final tree both backends consume and never
+        // materializes something folding would have collapsed.
+        let ast = array_operand::materialize_computed_array_operands(ast);
         check_stock_updates_are_emittable(&ast, var.ident())?;
         Ok(Var {
             ident: Ident::new(var.ident()),
@@ -1193,7 +1199,7 @@ fn is_array_producing_builtin(expr: &Expr) -> bool {
 ///   VectorElmMap(_, offset)    -> offset's view
 ///   VectorSortOrder(arr, _)    -> arr's view
 ///   AllocateAvailable(req,_,_) -> req's view
-fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
+pub(super) fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
     match expr {
         Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => Some(view.clone()),
         Expr::App(builtin, _) => match builtin {
@@ -1203,6 +1209,18 @@ fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
             }
             BuiltinFn::AllocateAvailable(req, _, _)
             | BuiltinFn::AllocateByPriority(req, _, _, _, _) => find_expr_array_view(req),
+            // Elementwise scalar builtins: applied per iteration inside a
+            // `BeginIter` body, so their result has the shape of whichever
+            // argument carries one. The multi-argument forms take the first
+            // arg that has a view, matching the `Op2` rule below.
+            //
+            // Deliberately absent: `Mean` (variadic -- its single-argument
+            // form is a REDUCTION to a scalar, not elementwise), the reducers
+            // (`Sum`/`Size`/`Stddev` and one-argument `Min`/`Max`, also
+            // scalar-valued), `VectorSelect` (scalar-valued), the `Lookup`
+            // family (`LookupArray`'s shape is the TABLE array's, which this
+            // would have to reach through the gf registry), `Previous`/`Init`
+            // (GH #995 Phase C3: no array form yet), and the 0-arity builtins.
             BuiltinFn::Abs(e)
             | BuiltinFn::Arccos(e)
             | BuiltinFn::Arcsin(e)
@@ -1212,10 +1230,44 @@ fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
             | BuiltinFn::Int(e)
             | BuiltinFn::Ln(e)
             | BuiltinFn::Log10(e)
+            | BuiltinFn::Sign(e)
             | BuiltinFn::Sin(e)
             | BuiltinFn::Sqrt(e)
             | BuiltinFn::Tan(e) => find_expr_array_view(e),
-            _ => None,
+            // Two-argument MIN/MAX are the scalar (elementwise) forms; the
+            // one-argument forms are array reductions and yield no array.
+            BuiltinFn::Min(a, Some(b)) | BuiltinFn::Max(a, Some(b)) => {
+                find_expr_array_view(a).or_else(|| find_expr_array_view(b))
+            }
+            BuiltinFn::Min(_, None) | BuiltinFn::Max(_, None) => None,
+            BuiltinFn::Quantum(a, b) | BuiltinFn::Step(a, b) => {
+                find_expr_array_view(a).or_else(|| find_expr_array_view(b))
+            }
+            BuiltinFn::Sshape(a, b, c) => find_expr_array_view(a)
+                .or_else(|| find_expr_array_view(b))
+                .or_else(|| find_expr_array_view(c)),
+            BuiltinFn::Pulse(a, b, c) | BuiltinFn::Ramp(a, b, c) | BuiltinFn::SafeDiv(a, b, c) => {
+                find_expr_array_view(a)
+                    .or_else(|| find_expr_array_view(b))
+                    .or_else(|| c.as_ref().and_then(|c| find_expr_array_view(c)))
+            }
+            BuiltinFn::Lookup(_, _, _)
+            | BuiltinFn::LookupForward(_, _, _)
+            | BuiltinFn::LookupBackward(_, _, _)
+            | BuiltinFn::Mean(_)
+            | BuiltinFn::Sum(_)
+            | BuiltinFn::Size(_)
+            | BuiltinFn::Stddev(_)
+            | BuiltinFn::VectorSelect(_, _, _, _, _)
+            | BuiltinFn::Previous(_, _)
+            | BuiltinFn::Init(_)
+            | BuiltinFn::IsModuleInput(_, _)
+            | BuiltinFn::Inf
+            | BuiltinFn::Pi
+            | BuiltinFn::Time
+            | BuiltinFn::TimeStep
+            | BuiltinFn::StartTime
+            | BuiltinFn::FinalTime => None,
         },
         Expr::Op1(_, inner, _) => find_expr_array_view(inner),
         Expr::Op2(_, lhs, rhs, _) => {
@@ -1908,7 +1960,7 @@ fn replace_nested_builtins_for_element(
 /// Find the next available temp ID by scanning existing expressions for
 /// AssignTemp nodes. Uses the existing extract_temp_sizes infrastructure
 /// which already walks the full expression tree.
-fn next_available_temp_id(exprs: &[Expr]) -> u32 {
+pub(super) fn next_available_temp_id(exprs: &[Expr]) -> u32 {
     let mut temp_sizes_map = HashMap::new();
     for expr in exprs {
         extract_temp_sizes(expr, &mut temp_sizes_map);

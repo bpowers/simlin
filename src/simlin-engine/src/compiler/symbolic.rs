@@ -1146,7 +1146,30 @@ pub(crate) fn resolve_static_view(
             })?;
             ((entry.offset + var_ref.element_offset) as u32, false)
         }
-        SymStaticViewBase::Temp(id) => (*id, true),
+        // A view base is the ONE place a temp id is carried as a `u32`. Every
+        // OTHER opcode that names a temp -- `BeginIter` and the
+        // array-producing opcodes' `write_temp_id`, `LoadTempConst`'s
+        // `temp_id` -- carries it as `TempId` (= `u8`), narrowed at emit time
+        // with a plain `as`. So a view over a temp above 255 reads storage
+        // nothing ever wrote: the writer's `as TempId` lands on `id % 256`
+        // while this read lands on `id`, and the program is well-formed either
+        // way -- wrong numbers with no diagnostic. Reject it in the resolution
+        // layer, where the concrete program is produced (#583 is the real fix:
+        // the id namespace is too small for a per-element hoist over a few
+        // hundred elements). The write-side narrowing is deliberately left
+        // unguarded; see the module note on this in the crate's CLAUDE.md.
+        SymStaticViewBase::Temp(id) => {
+            if *id > TempId::MAX as u32 {
+                return Err(format!(
+                    "a view over temp {} exceeds TempId capacity (u8::MAX = {}); \
+                     every writer of a temp narrows its id to u8, so this view \
+                     would read storage no opcode writes",
+                    id,
+                    TempId::MAX
+                ));
+            }
+            (*id, true)
+        }
     };
 
     Ok(StaticArrayView {
