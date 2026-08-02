@@ -154,6 +154,15 @@ impl TestProject {
         self
     }
 
+    /// Add an already-built dimension, for a shape the named constructors do
+    /// not cover -- a test that varies ONE dimension's mapping across fixtures
+    /// while keeping the rest of the model identical builds it directly and
+    /// hands it in here.
+    pub fn with_dimension(mut self, dim: Dimension) -> Self {
+        self.dimensions.push(dim);
+        self
+    }
+
     /// Add a named dimension with a dimension mapping (e.g., DimA -> DimB)
     pub fn named_dimension_with_mapping(
         mut self,

@@ -79,7 +79,11 @@ fn pin_table_with_completeness(
                         .iter()
                         .map(|(dim, elem)| ((*dim).to_string(), (*elem).to_string()))
                         .collect(),
-                    complete,
+                    // The fixture's two spellings read the same row (its axes
+                    // are same-named, so no correspondence is consulted);
+                    // `complete` selects whether a BARE reference is spellable.
+                    bare_row: complete
+                        .then(|| axes.iter().map(|(_, elem)| (*elem).to_string()).collect()),
                 },
             )
         })

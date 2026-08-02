@@ -1046,8 +1046,11 @@ pub(crate) enum PartialEquationErrorKind {
     /// leaves the dep's dimension-name subscript in a scalar fragment, which
     /// becomes a `PREVIOUS`-capture helper that cannot lower WHILE THE PARENT
     /// STILL COMPILES -- a score that silently reads part of its own equation
-    /// as 0. The reachable cause is an explicit element map, which
-    /// `DimensionsContext::mapped_element_correspondence` declines.
+    /// as 0. The reachable cause is a pair with no DECLARED correspondence at
+    /// all -- two dimensions sharing element names, which the simulation
+    /// resolves by name while `allocate_implicit_axes_partial` pairs axes only
+    /// by name or by a declared mapping. (An explicit element map was the
+    /// reachable cause until GH #997 made that spelling projectable.)
     UnprojectableDep,
     /// The target's equation applies an ORDER-STATISTIC, array-producing
     /// builtin (`VECTOR SORT ORDER`, `RANK`, `ALLOCATE AVAILABLE`,
@@ -2274,14 +2277,22 @@ fn pin_iterated_dim_indices(expr: Expr0, dims: &[String], parts: &[String]) -> O
 /// type is just how the answer travels to the rewrite.
 #[derive(Clone)]
 pub(crate) struct DepElementPin {
-    /// The resolved axes, in the dep's declaration order.
+    /// The resolved axes for an already-SUBSCRIPTED reference whose index names
+    /// one of the dep's own dimensions (`dep[Region]`), as
+    /// `(dimension name, element spelling)` in the dep's declaration order. An
+    /// axis that does not project is simply absent, which is all such a
+    /// reference needs -- it spells its other axes itself.
     pub(crate) axes: Vec<(String, String)>,
-    /// Whether `axes` covers EVERY dimension the dep declares. Only a complete
-    /// pin can subscript a BARE reference, which must be spelled at the dep's
-    /// full arity; an incomplete one still substitutes the dimension-name
-    /// indices of an already-subscripted reference, which is all that reference
-    /// needs.
-    pub(crate) complete: bool,
+    /// The full row a BARE reference (`dep`) is spelled with, in the dep's
+    /// declaration order, or `None` when some axis does not project (a bare
+    /// reference must be spelled at the dep's full arity or not at all).
+    ///
+    /// A separate row rather than a `complete` flag over `axes` because the two
+    /// spellings resolve by DIFFERENT rules (GH #997): a bare reference is
+    /// rewritten into the iterated spelling and read positionally, while a
+    /// dimension-name subscript follows the declared element map. See
+    /// `post_transform::dep_element_pins`.
+    pub(crate) bare_row: Option<Vec<String>>,
 }
 
 /// Replace every reference to a pinned dep in `equation_text` with that dep's
@@ -2424,12 +2435,12 @@ fn subscript_idents_in_expr0(
         Expr0::Const(..) => expr,
         Expr0::Var(ref ident, loc) => {
             let canonical = Ident::new(ident.as_str());
-            // Only a COMPLETE pin can spell a bare reference: a subscript
+            // Only a COMPLETE row can spell a bare reference: a subscript
             // covering some of the dep's axes is not a legal reference at all.
-            match pins.get(&canonical).filter(|pin| pin.complete) {
-                Some(pin) => Expr0::Subscript(
+            match pins.get(&canonical).and_then(|pin| pin.bare_row.as_ref()) {
+                Some(row) => Expr0::Subscript(
                     ident.clone(),
-                    pin.axes.iter().map(|(_, elem)| pin_index(elem)).collect(),
+                    row.iter().map(|elem| pin_index(elem)).collect(),
                     loc,
                 ),
                 None => expr,
@@ -2998,9 +3009,10 @@ pub(crate) fn quote_ident(ident: &str) -> String {
 ///   shapes that reach `emit_per_shape_link_scores` are a *whole-RHS*
 ///   variable-backed reducer's argument (`total = SUM(population[*])`), a
 ///   bare dynamic index (`arr[i+1]`), the dynamic-index reducer carve-out
-///   (`SUM(pop[idx, *])`), a mapped sliced reducer the correspondence
-///   declines (element-mapped, the GH #756 positional-only rule;
-///   reverse-declared positional pairs are accepted since GH #757),
+///   (`SUM(pop[idx, *])`), a sliced reducer the correspondence declines (an
+///   UNDECLARED pair, a cardinality mismatch, or a `MappedRead` axis --
+///   GH #997; a DECLARED mapping is accepted in either direction since
+///   GH #757, an explicit element map included since #997),
 ///   or a DE-HOISTED array-valued reducer's wildcard arg
 ///   (`RANK(pop[*], 1)` -- GH #771: RANK is not `reducer_is_hoistable`, so
 ///   its wildcard-subscripted argument stays a `Direct` `Wildcard` site and

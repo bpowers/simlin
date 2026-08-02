@@ -413,6 +413,32 @@ pub(crate) fn read_slice_row_parts(
             AxisRead::Reduced { subset } => {
                 Some((subset.clone().unwrap_or_else(|| elems.clone()), None))
             }
+            // A `MappedRead` axis (GH #997) enumerates the TARGET dimension's
+            // elements rather than the source's, and pairs each with the source
+            // element it reads. That direction is load-bearing: the executed
+            // correspondence need not be injective -- C-LEARN maps three
+            // `Aggregated Regions` elements onto seven `COP` ones -- so
+            // enumerating the SOURCE side would owe several slots to one row,
+            // which the one-slot-per-row shape below cannot express. Walking the
+            // target side keeps (row, slot) a function, at the cost of repeating
+            // a row under different slots, which is exactly what a many-to-one
+            // read is.
+            AxisRead::MappedRead { dim, source_dim } => {
+                let target_dim =
+                    dim_ctx.get(&crate::common::CanonicalDimensionName::from_raw(dim))?;
+                let corr = dim_ctx.executed_read_correspondence(
+                    &crate::common::CanonicalDimensionName::from_raw(dim),
+                    &crate::common::CanonicalDimensionName::from_raw(source_dim),
+                )?;
+                let slots = crate::ltm_augment::dimension_element_names(target_dim);
+                if slots.len() != corr.len() {
+                    return None;
+                }
+                Some((
+                    corr.iter().map(|e| e.as_str().to_string()).collect(),
+                    Some(slots),
+                ))
+            }
         })
         .collect::<Option<Vec<_>>>()?;
     // Cartesian product, accumulating each row's element parts and its slot

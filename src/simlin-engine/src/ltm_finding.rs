@@ -768,13 +768,17 @@ fn parse_link_offsets(
 /// (`scale[a]`, `boost[r,a]`, `x[s]`) that named no real element node, so
 /// every loop through such a feeder dangled and was silently undiscoverable.
 ///
-/// The MAPPED leg is covered only for POSITIONAL mappings: `expand_same_element`
-/// declines element-mapped pairs (the GH #756 positional-only gate). Such a
-/// pair never reaches here anyway -- `link_score_dimensions` declines to
-/// retarget it to the target's dims (no Bare A2A score is emitted; the edge
-/// takes the GH #758 loud skip instead), so there is no dimensioned score for
-/// `parse_link_offsets` to expand. If that upstream gate is ever relaxed, the
-/// projection here inherits the same positional-only correspondence in lockstep.
+/// The MAPPED leg covers every pair whose two reference spellings AGREE, which
+/// since GH #997 includes an explicit element map at unequal cardinality
+/// (C-LEARN's many-to-one). It cannot cover a pair whose spellings DISAGREE,
+/// and does not have to: `expand_same_element` emits the UNION of both
+/// diagonals there, which would put two from-nodes on the one slot this
+/// function assigns per target element -- so `link_score_dimensions` denies
+/// such a pair the arrayed retarget (`db::analysis::mapped_pair_projects_uniquely`)
+/// and it takes the GH #758 loud skip instead, leaving no dimensioned score for
+/// `parse_link_offsets` to expand. That is the whole reason the gate is
+/// STRICTER than the element graph's rule; the lockstep with
+/// `expand_same_element` is what makes the from-node names match either way.
 fn expand_a2a_link_offsets(
     from_var: &str,
     to_var: &str,

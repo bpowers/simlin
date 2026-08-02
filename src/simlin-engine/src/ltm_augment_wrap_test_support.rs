@@ -152,6 +152,32 @@ pub(crate) fn live_source_occurrence_axis(
             }
             return OccurrenceAxis::MismatchedIterated { dim: d };
         }
+        // GH #997: a NON-iterated dimension name execution pairs with one of
+        // the target's iterated dims, resolved name-first then through the
+        // element map. Mirrors `classify_axis_access`'s `Unresolved` arm --
+        // element-of-this-axis first (the literal pass below), then the
+        // partner pairing and the executed correspondence.
+        if let Some(dim_ctx) = dim_ctx
+            && resolve_literal_element_index(idx, i, source_dim_elements).is_none()
+            && i < ic.source_dim_names.len()
+        {
+            let index_dim = crate::common::CanonicalDimensionName::from_raw(&d);
+            let source_dim =
+                crate::common::CanonicalDimensionName::from_raw(ic.source_dim_names[i].as_str());
+            if let Some(partner) = dim_ctx
+                .mapped_read_partner_dim(&index_dim, ic.target_iterated_dims)
+                .filter(|p| {
+                    dim_ctx
+                        .executed_read_correspondence(p, &source_dim)
+                        .is_some()
+                })
+            {
+                return OccurrenceAxis::MappedRead {
+                    dim: partner.as_str().to_string(),
+                    source_dim: ic.source_dim_names[i].clone(),
+                };
+            }
+        }
     }
     match resolve_literal_element_index(idx, i, source_dim_elements) {
         Some(e) => OccurrenceAxis::Pinned(e),
@@ -391,9 +417,9 @@ pub(crate) fn is_live_source_iterated_dim_subscript(
 /// source's `i`-th axis -- by name, or through a usable positional-mapping
 /// remap? The mapped arm consults the SAME
 /// [`crate::ltm_agg::iterated_axis_slot_elements`] /
-/// `mapped_element_correspondence` gate the Expr2 classifier
+/// `positional_correspondence` gate the Expr2 classifier
 /// (`ltm_agg::classify_axis_access`) uses -- BOTH declaration directions
-/// (GH #757), positional mappings only (GH #756) -- so the partial
+/// (GH #757) -- so the partial
 /// builder's live-shape match and the reference-site IR agree by
 /// construction. (No mapping context ⇒ no mapped recognition; the by-name
 /// check still applies.)
@@ -468,6 +494,31 @@ pub(crate) fn classify_expr0_per_element_axes(
                 });
                 continue;
             }
+            // GH #997: an index naming a NON-iterated dimension that execution
+            // pairs with one of the target's iterated dims. Mirrors
+            // `classify_axis_access`'s `Unresolved` arm gate for gate --
+            // element-of-this-axis first (below), then the partner pairing and
+            // the executed correspondence.
+            if let Some(dim_ctx) = dim_ctx
+                && !source_dim_elements[i].iter().any(|e| e == &d)
+            {
+                let index_dim = crate::common::CanonicalDimensionName::from_raw(&d);
+                let source_dim = crate::common::CanonicalDimensionName::from_raw(
+                    ctx.source_dim_names[i].as_str(),
+                );
+                if let Some(partner) =
+                    dim_ctx.mapped_read_partner_dim(&index_dim, ctx.target_iterated_dims)
+                    && dim_ctx
+                        .executed_read_correspondence(&partner, &source_dim)
+                        .is_some()
+                {
+                    axes.push(AxisRead::MappedRead {
+                        dim: partner.as_str().to_string(),
+                        source_dim: ctx.source_dim_names[i].clone(),
+                    });
+                    continue;
+                }
+            }
         }
         // Position-strict literal resolution: the Expr2 classifier resolves
         // each index against ITS axis only, so the any-dimension fallback
@@ -528,7 +579,29 @@ pub(crate) fn other_dep_occurrence_axes(
             };
             let d = canonicalize(name.as_str()).into_owned();
             if !ctx.target_iterated_dims.iter().any(|t| t == &d) {
-                return OccurrenceAxis::Dynamic;
+                // GH #997: a non-iterated dimension name execution pairs with
+                // one of the target's iterated dims is `MappedRead`, not a
+                // dynamic index. Mirrors `classify_axis_access`'s arm; anything
+                // it declines stays `Dynamic`.
+                return match (dep_dims.and_then(|dd| dd.get(i)), dim_ctx) {
+                    (Some(dep_dim), Some(dim_ctx)) if dep_dim.canonical_element(&d).is_none() => {
+                        let index_dim = crate::common::CanonicalDimensionName::from_raw(&d);
+                        match dim_ctx
+                            .mapped_read_partner_dim(&index_dim, ctx.target_iterated_dims)
+                            .filter(|p| {
+                                dim_ctx
+                                    .executed_read_correspondence(p, dep_dim.canonical_name())
+                                    .is_some()
+                            }) {
+                            Some(partner) => OccurrenceAxis::MappedRead {
+                                dim: partner.as_str().to_string(),
+                                source_dim: canonicalize(dep_dim.name()).into_owned(),
+                            },
+                            None => OccurrenceAxis::Dynamic,
+                        }
+                    }
+                    _ => OccurrenceAxis::Dynamic,
+                };
             }
             match dep_dims.and_then(|dd| dd.get(i)) {
                 Some(dep_dim) if other_dep_axis_lines_up(&d, dep_dim, dim_ctx) => {
@@ -552,9 +625,9 @@ pub(crate) fn other_dep_occurrence_axes(
 /// positional-mapping remap? The dep-side sibling of
 /// [`expr0_iterated_axis_lines_up`], consulting the SAME
 /// [`crate::ltm_agg::iterated_axis_slot_elements`] /
-/// `mapped_element_correspondence` gate (both declaration directions,
-/// positional mappings only) so the live-source and other-dep recognizers
-/// can never disagree about which mapped pairs are usable.
+/// `positional_correspondence` gate (both declaration directions) so the
+/// live-source and other-dep recognizers can never disagree about which
+/// mapped pairs are usable.
 #[cfg(test)]
 pub(crate) fn other_dep_axis_lines_up(
     d: &str,
@@ -713,11 +786,17 @@ pub(crate) fn classify_expr0_subscript_shape(
         && let Some(axes) =
             classify_expr0_per_element_axes(indices, source_dim_elements, ctx, dim_ctx)
     {
-        let n_iterated = axes
+        use crate::ltm_agg::AxisRead;
+        let n_projected = axes
             .iter()
-            .filter(|a| matches!(a, crate::ltm_agg::AxisRead::Iterated { .. }))
+            .filter(|a| matches!(a, AxisRead::Iterated { .. } | AxisRead::MappedRead { .. }))
             .count();
-        if n_iterated > 0 && n_iterated < axes.len() {
+        let all_iterated = axes.iter().all(|a| matches!(a, AxisRead::Iterated { .. }));
+        // Mirrors `classify_iterated_dim_shape`: all-`Iterated` is the `Bare`
+        // case handled above, all-`Pinned` falls through to the literal pass,
+        // and everything else -- including an all-`MappedRead` subscript
+        // (GH #997) -- is `PerElement`.
+        if n_projected > 0 && !all_iterated {
             return RefShape::PerElement { axes };
         }
     }

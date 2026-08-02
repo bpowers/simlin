@@ -71,10 +71,11 @@ use super::parse::{ltm_equation_dimensions, retarget_ltm_equation_dims};
 /// iterates it -- so the projection is the identity and no dimension mapping is
 /// consulted. That is a measured property of one corpus, not of the language: a
 /// model reading a table declared over a DIFFERENT axis than the target iterates
-/// needs the mapped element correspondence, which
-/// `DimensionsContext::mapped_element_correspondence` declines for an explicit
-/// element map. Such a reference lands in `dep_element_pins`' incomplete arm and
-/// keeps today's loud drop.
+/// needs a mapped element correspondence, and it gets the one its SPELLING earns
+/// (GH #997) -- `positional_correspondence` for an index naming an iterated
+/// dimension, `executed_read_correspondence` for one naming the holder's own.
+/// A pair with no DECLARED correspondence either way still lands in
+/// `dep_element_pins`' incomplete arm and keeps today's loud drop.
 fn pinnable_arrayed_deps(
     db: &dyn Db,
     source_vars: &HashMap<String, SourceVariable>,
@@ -321,22 +322,44 @@ pub(super) fn link_score_dimensions(
     // the edge having a `Bare`-classified reference site -- the exact
     // condition under which `expand_same_element` emits the mapped DIAGONAL
     // element edges, so "score arrayed over the target's dims" ⟺ "element
-    // edges are the diagonal". Since GH #757 the classifier
-    // (`classify_iterated_dim_shape` via `classify_axis_access`) gates its
-    // mapped arm on the SAME `mapped_element_correspondence` data, BOTH
-    // declaration directions, so a positionally-mapped subscripted
+    // edges are the diagonal". The gate therefore consults
+    // `db::analysis::bare_reference_correspondence`, the same helper
+    // `expand_same_element` does, so the two cannot disagree about which
+    // pairs project; since GH #757 the classifier
+    // (`classify_iterated_dim_shape` via `classify_axis_access`) accepts
+    // BOTH declaration directions, so a positionally-mapped subscripted
     // reference (forward- or reverse-declared) classifies `Bare` and passes
-    // this gate with the diagonal it deserves. The remaining shapes the
-    // gate excludes are the ELEMENT-mapped pairs (declined by the
-    // GH #756 positional-only rule, classified `DynamicIndex`, cross-product
-    // element edges): retargeting such an edge's (Bare-named, since
-    // Wildcard/DynamicIndex collapse onto the Bare name) score to the
-    // target's dims would shape per-slot DIAGONAL partials that the
-    // off-diagonal loop links then read by target-element subscript --
-    // silent wrong-slot values. Denied the retarget, such an edge instead
-    // takes the GH #758 loud skip in `emit_per_shape_link_scores` (no
-    // link-score variable, loop scores through the edge dropped, one
-    // Warning). A mixed edge (a Bare site AND
+    // this gate with the diagonal it deserves.
+    //
+    // Since GH #997 an ELEMENT-mapped pair can project too, but on a STRICTER
+    // condition than the element graph's: `mapped_pair_projects_uniquely`, not
+    // `bare_reference_correspondence(..).is_some()`. The element graph emits
+    // the UNION of the two spellings' diagonals, which is sound there because
+    // an extra edge is the safe direction. A SCORE is one arrayed variable with
+    // one slot per target element, and `ltm_finding::expand_a2a_link_offsets`
+    // maps every union edge for a target element onto that one slot -- so where
+    // the two rules DISAGREE, the phantom from-node reads the real edge's
+    // non-zero score out of the shared slot. A compilable, confidently wrong
+    // number is the outcome this repo treats as worse than none (GH #758), so
+    // the retarget is denied unless every target element's correspondence is a
+    // SINGLETON.
+    //
+    // What that admits: every mapping that projected before GH #997 (the two
+    // rules coincide on a positional mapping between disjointly-named
+    // dimensions) plus C-LEARN's many-to-one element map, where the positional
+    // rule declines outright and leaves the executed rule alone in the union.
+    // What it refuses: an equal-cardinality PERMUTED element map, and a pair
+    // sharing element names in a different order.
+    //
+    // What still does NOT reach here at all is a reference the classifier gave
+    // a non-`Bare` shape -- a genuinely dynamic index, a transposition --
+    // whose element edges stay the conservative cross-product; retargeting one
+    // of those to the target's dims would shape per-slot DIAGONAL partials
+    // that the off-diagonal loop links then read by target-element subscript,
+    // i.e. silent wrong-slot values.
+    // Denied the retarget, such an edge instead takes the GH #758 loud skip
+    // in `emit_per_shape_link_scores` (no link-score variable, loop scores
+    // through the edge dropped, one Warning). A mixed edge (a Bare site AND
     // a DynamicIndex site on the same `(from, to)`) keeps the arrayed score
     // -- the Bare site needs it -- while its cross-product links still read
     // diagonal slots; that is the pre-existing mixed-shape conservatism
@@ -352,9 +375,11 @@ pub(super) fn link_score_dimensions(
         |td: &crate::dimensions::Dimension, fd: &crate::dimensions::Dimension| -> bool {
             td.name() == fd.name()
                 || (edge_has_bare_site
-                    && dim_ctx
-                        .mapped_element_correspondence(td.canonical_name(), fd.canonical_name())
-                        .is_some())
+                    && crate::db::analysis::mapped_pair_projects_uniquely(
+                        dim_ctx,
+                        td.canonical_name(),
+                        fd.canonical_name(),
+                    ))
         };
     let dims_compatible = from_dims == *to_dims
         || to_dims
@@ -2063,8 +2088,10 @@ pub(super) fn emit_unscoreable_conservative_edge_warning(
     use salsa::Accumulator;
     let msg = format!(
         "LTM link score for edge {from} -> {to} could not be computed: both variables \
-         are arrayed but their dimensions do not correspond (e.g. an element-mapped or \
-         unmapped dimension pair), so the conservative score has no compilable shape; \
+         are arrayed but their dimensions do not correspond -- an unmapped pair, or a \
+         mapped one whose two reference spellings read different source elements, which \
+         cannot share one per-target-element score slot -- so the conservative score has \
+         no compilable shape; \
          this edge will have no link-score variable and feedback loops through it will \
          not be scored"
     );
@@ -2380,8 +2407,11 @@ pub(crate) fn ltm_partial_equation_warning_message(
              dropped -- rather than emitted with the dep's dimension-name subscript \
              left in a scalar fragment, which compiles to a helper that reads a \
              constant 0 while the score itself still compiles (a wrong number, not \
-             an absent one). The reachable cause is a dep read across an EXPLICIT \
-             element map, which `mapped_element_correspondence` declines."
+             an absent one). The reachable cause is a dep whose axis has no \
+             DECLARED correspondence to any dimension the target iterates -- two \
+             dimensions sharing element names, which the simulation resolves by \
+             name while the pin's axis allocation needs a name match or a \
+             declared mapping."
         ),
         PartialEquationErrorKind::RankLikePartial => format!(
             "LTM link-score variable '{variable_name}' could not be generated: the \
@@ -2775,9 +2805,14 @@ pub(super) fn emit_per_shape_link_scores(
     // cross-product, so per-slot diagonal partials would be read at wrong
     // slots). Degrade loudly instead: one Warning naming the edge, no
     // link-score variable, and (via `unscoreable_edges`) no loop scores
-    // through it. The declined ELEMENT-mapped sliced reducers (GH #756;
-    // reverse-declared positional pairs are hoisted since GH #757) land
-    // here, as do disjoint-dim ApplyToAll-target references whose sites
+    // through it. Two families land here: the sliced reducers the
+    // correspondence declines (an UNDECLARED pair, a cardinality mismatch, or
+    // a `MappedRead` axis -- GH #997; a DECLARED mapping is hoisted in either
+    // direction since GH #757, an explicit element map included since #997),
+    // and -- also since GH #997 -- a mapped pair whose two spellings DISAGREE,
+    // which `mapped_pair_projects_uniquely` denies the arrayed retarget
+    // because the two would share one score slot. So do disjoint-dim
+    // ApplyToAll-target references whose sites
     // are not all FixedIndex (the GH #769 widening recovers the
     // FixedIndex-only ones) and incompatible-dim dynamic-index reducers --
     // all previously warned zero-stubs.
@@ -3904,7 +3939,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                 .enumerate()
                 .find_map(|(target_pos, target_dim)| {
                     dim_ctx
-                        .mapped_element_correspondence(target_dim.canonical_name(), &result_canon)
+                        .positional_correspondence(target_dim.canonical_name(), &result_canon)
                         .map(|mapped_elements| (target_pos, target_dim, mapped_elements))
                 })
             {
@@ -4002,16 +4037,20 @@ pub(super) fn emit_agg_to_target_link_scores(
                 .map(|axis| axis.result_dim.clone())
                 .collect();
             let qualified = crate::ltm_augment::qualify_element_csv(&slot, &result_dims);
+            let axes: Vec<(String, String)> = result_dims
+                .iter()
+                .zip(qualified.split(','))
+                .map(|(dim, elem)| (dim.name().to_string(), elem.to_string()))
+                .collect();
             Some(DepElementPin {
-                axes: result_dims
-                    .iter()
-                    .zip(qualified.split(','))
-                    .map(|(dim, elem)| (dim.name().to_string(), elem.to_string()))
-                    .collect(),
                 // An agg's slot space IS its `result_dims`, and the projection
                 // either covers all of them or returned `None` above, so a bare
-                // agg reference is always spellable here.
-                complete: true,
+                // agg reference is always spellable here. There is only one
+                // spelling to answer for -- an agg ident carries no declared
+                // dimension a subscript could name -- so the two rows are the
+                // same row.
+                bare_row: Some(axes.iter().map(|(_, elem)| elem.clone()).collect()),
+                axes,
             })
         };
     // Every ARRAYED agg referenced by the substituted equation needs a body

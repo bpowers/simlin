@@ -234,10 +234,11 @@ fn classify_subscript_shape(
 ///
 /// A mapped iterated index (`State[i]` over a source declared with
 /// `Region[i]`) is accepted when `classify_axis_access`'s
-/// `iterated_axis_slot_elements` / `mapped_element_correspondence` gate
+/// `iterated_axis_slot_elements` / `positional_correspondence` gate
 /// yields a usable positional remap -- in EITHER declaration direction
-/// (GH #757; explicit element maps decline per the GH #756 positional-only
-/// gate, keeping the conservative shape). A position-mismatched subscript
+/// (GH #757), an explicit element map included since GH #997 (this spelling
+/// is folded to an ordinal and never reads the map). A position-mismatched
+/// subscript
 /// like `row_sum[D2]` inside `growth[D1,D2]` where `row_sum` is over `D1`
 /// is a *genuine* cross-element reference -- no axis classifies -- so it
 /// returns `None` and keeps its `DynamicIndex` classification.
@@ -271,18 +272,32 @@ fn classify_iterated_dim_shape(
     if axes.iter().any(|a| matches!(a, AxisRead::Reduced { .. })) {
         return None;
     }
-    let n_iterated = axes
+    let n_projected = axes
         .iter()
-        .filter(|a| matches!(a, AxisRead::Iterated { .. }))
+        .filter(|a| matches!(a, AxisRead::Iterated { .. } | AxisRead::MappedRead { .. }))
         .count();
-    if n_iterated == 0 {
+    if n_projected == 0 {
         // All-`Pinned` canonicalizes to `FixedIndex` via the caller's
         // `classify_subscript_shape` fallback (identical resolution rules).
         return None;
     }
-    if n_iterated == axes.len() {
+    let all_iterated = axes.iter().all(|a| matches!(a, AxisRead::Iterated { .. }));
+    if all_iterated {
         return Some(RefShape::Bare);
     }
+    // Everything else -- a mixed `Iterated`+`Pinned` subscript, and since
+    // GH #997 any subscript carrying a `MappedRead` axis -- is `PerElement`.
+    //
+    // A `MappedRead` axis deliberately does NOT collapse to `Bare` even when
+    // every axis is one. `Bare`'s element edges go through
+    // `db::analysis::expand_same_element`, which cannot see the reference site
+    // and so emits the union of both spellings' diagonals; `PerElement`'s go
+    // through the per-axis `read_slice_rows` derivation, which resolves each
+    // axis by ITS OWN rule and lands the exact rows execution reads. The
+    // per-(row, target-element) link scores follow the same derivation, so the
+    // names and the edges agree by construction -- which is the property a
+    // many-to-one element map needs, since several target elements then share
+    // one source row.
     Some(RefShape::PerElement { axes })
 }
 
@@ -1357,6 +1372,11 @@ pub(crate) enum OccurrenceAxis {
     /// Iterated over the target's dimension space, lined up by name or a
     /// positional mapping (`AxisRead::Iterated`).
     Iterated { dim: String, source_dim: String },
+    /// Iterated over the target's dimension space, but spelled with a
+    /// NON-ACTIVE dimension name that execution pairs with a target-iterated
+    /// dimension through a declared mapping and resolves name-first then
+    /// through the element map (`AxisRead::MappedRead`, GH #997).
+    MappedRead { dim: String, source_dim: String },
     /// A reduced axis (`*` / StarRange); present only inside reducer args
     /// (`AxisRead::Reduced`).
     Reduced { subset: Option<Vec<String>> },
@@ -1377,6 +1397,9 @@ impl OccurrenceAxis {
         match ar {
             AxisRead::Pinned(e) => OccurrenceAxis::Pinned(e),
             AxisRead::Iterated { dim, source_dim } => OccurrenceAxis::Iterated { dim, source_dim },
+            AxisRead::MappedRead { dim, source_dim } => {
+                OccurrenceAxis::MappedRead { dim, source_dim }
+            }
             AxisRead::Reduced { subset } => OccurrenceAxis::Reduced { subset },
         }
     }
@@ -1433,7 +1456,10 @@ pub(crate) fn derive_other_dep_verdict(
     // more indices than the target has iterated dims, and every index a bare
     // target-iterated-dim name -- i.e. every axis `Iterated` or
     // `MismatchedIterated` (a `Pinned`/`Reduced`/`Dynamic` axis is a literal,
-    // wildcard, or dynamic index).
+    // wildcard, or dynamic index; a `MappedRead` one spells a NON-iterated
+    // dimension name, and collapsing such a subscript to a bare `Var` would
+    // change its spelling from map-following to positional -- GH #997 -- so it
+    // is `NotIterated` and the subscript is kept and pinned instead).
     if axes.is_empty() || axes.len() > target_iterated_count {
         return OtherDepVerdict::NotIterated;
     }

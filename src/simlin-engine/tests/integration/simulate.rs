@@ -6031,8 +6031,10 @@ fn corpus_clearn_macros_import() {
 ///
 /// Layout impact (the resource this gate protects -- #654's VM limit of 65,536
 /// u16 result slots, NOT `wasmgen::lower`'s unrelated `MAX_UNROLL_UNITS`): the
-/// per-step result-row width is **29,717 slots**, 45% of the ceiling, with
-/// 35,819 free.
+/// per-step result-row width is **29,808 slots**, 45% of the ceiling, with
+/// 35,728 free. Both numbers come from
+/// `examples/ltm_slot_width.rs`, so re-deriving them is a command rather than a
+/// reconstruction.
 ///
 /// It last moved twice in the GH #995 burndown. The array-freeze
 /// materializer took the count 6,800 -> 6,858 (+58 content-named
@@ -6053,7 +6055,26 @@ fn corpus_clearn_macros_import() {
 /// MAP's view-position source argument) compile via 4 whole-dep freeze
 /// helpers, leaving ZERO failing LTM fragments on C-LEARN.
 ///
-/// It last moved UPWARD, 30,416 -> 30,947 (+531), when GH #996 stopped the axis
+/// It last moved with GH #997's spelling-keyed correspondence, 6,757 -> 6,848
+/// (+91) / width 29,717 -> 29,808 (+91, one scalar slot per new variable).
+///
+/// The +91 is arithmetic, not a bare observation: 13 previously-declined edges
+/// x 7 `COP` elements = 91 per-element scalar link scores, one per (edge,
+/// target element). Each is scalar, so the width moves by the same 91. All 91
+/// are the class-D shape #997 recovers: C-LEARN reads five
+/// `X Aggregated[Aggregated Regions]` variables inside `COP`-iterating
+/// equations, a subscript naming the SOURCE's own dimension across a
+/// many-to-one element map. Before #997 one correspondence answered for both
+/// reference spellings and declined that one, so the per-element completeness
+/// guard dropped 13 edges outright (`aggregate_switch -> ff_stop_growth_year`
+/// and siblings) and the five source edges themselves collapsed onto the
+/// conservative cross-product. Now they pin through the declared map and score
+/// per (source row, target element); the element graph LOST 210 phantom edges
+/// (15,826 -> 15,616) in the same change, which is the other half of the same
+/// fix and costs no slots. Measured with `examples/ltm_declined_edges.rs`
+/// (13 unprojectable-dep declines -> 0) and `examples/ltm_edge_coverage.rs`.
+///
+/// It moved UPWARD before that, 30,416 -> 30,947 (+531), when GH #996 stopped the axis
 /// allocator stealing a name-matched slot: 135 link scores that the per-element
 /// completeness guard had been declining now pin their indices and are emitted
 /// again. An earlier note here argued that DOWNWARD was the safe direction, and
@@ -6101,7 +6122,7 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 6757,
+        total, 6848,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"

@@ -367,17 +367,24 @@ pub(crate) fn build_view_from_ops(
                 let dim = &config.dims[i];
 
                 let offset = dim.get_offset(subscript).or_else(|| {
-                    // The subscript from the active dimension doesn't exist in this
-                    // variable's dimension. Try dimension mapping translation.
+                    // The active element's own name is not declared on this
+                    // source axis, so the reference resolves through the
+                    // shared executed rule (GH #997): the declared mapping,
+                    // then a mapped parent of the active subdimension.
+                    // `normalize_subscripts3` already picked the active
+                    // dimension, so this is one call rather than a search.
+                    //
+                    // The mapped-parent step is new here (it was already in
+                    // `get_implicit_subscript_off`, the other executed site).
+                    // Unifying can only resolve a reference that previously
+                    // failed to compile: the shared rule tries name and then
+                    // mapping first, which is exactly what this arm did, and
+                    // reaches the parent step only where both missed.
                     let dims_ctx = config.dimensions_ctx?;
                     let active_dims = config.active_dimension?;
                     let active_dim = &active_dims[*active_idx];
-                    let translated = dims_ctx.translate_via_mapping(
-                        dim.canonical_name(),
-                        active_dim.canonical_name(),
-                        subscript,
-                    )?;
-                    dim.get_offset(&translated)
+                    let resolved = dims_ctx.resolve_mapped_read(dim, active_dim, subscript)?;
+                    dim.get_offset(&resolved)
                 });
 
                 if let Some(offset) = offset {

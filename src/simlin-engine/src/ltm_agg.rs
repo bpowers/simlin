@@ -73,9 +73,13 @@
 //! is per-result-slot constant, the arrayed generalization of the GH #737
 //! scalar feeder). The carve-outs: a reducer over a *dynamic index*
 //! (`SUM(pop[idx,*])`, `idx` non-literal) is not statically describable, a
-//! mapped iterated axis whose mapping is element-mapped (GH #756) or
-//! non-positional is declined (a positional mapping is accepted in EITHER
-//! declaration direction since GH #757), a StarRange
+//! mapped iterated axis with no DECLARED correspondence, or a cardinality
+//! mismatch, is declined (a declared mapping is accepted in EITHER
+//! declaration direction since GH #757, and since GH #997 an explicit
+//! element map too -- this spelling folds to an ordinal, so the map is
+//! honoured as a declaration but never read), a `MappedRead` axis (GH #997:
+//! its executed rule admits a many-to-one correspondence the one-slot-per-row
+//! remap cannot invert), a StarRange
 //! naming a NON-subdimension (a mid-edit inconsistency that must not
 //! silently widen to the full extent) is declined -- `compute_read_slice`
 //! returns `None`, the reducer is not hoisted, and its reference stays on
@@ -403,6 +407,13 @@ pub(crate) fn builtin_routes_through_agg<E>(builtin: &BuiltinFn<E>) -> bool {
 ///   every element of that axis feeds the agg result slot; with
 ///   `subset: Some(elems)` (a StarRange over a PROPER subdimension,
 ///   GH #766) only the subdimension's elements do.
+/// - [`AxisRead::MappedRead`] -- the axis is likewise iterated over the
+///   target's dimension space, but the subscript names a NON-ACTIVE dimension
+///   (`x[Region]` under a `State`-iterating equation), which execution resolves
+///   name-first and then through the declared element map rather than by
+///   ordinal (GH #997). It is a DIRECT-reference verdict only:
+///   [`compute_read_slice`] declines a slice containing one, so no aggregate
+///   node ever carries it.
 ///
 /// `PartialOrd`/`Ord`/`Hash` ride along because `RefShape::PerElement`
 /// (GH #525, T6 of the shape-expressiveness design) embeds an
@@ -440,6 +451,37 @@ pub enum AxisRead {
     /// the axis's elements -- a subdimension covering the whole axis
     /// normalizes to `None` so the full-extent representation is unique.
     Reduced { subset: Option<Vec<String>> },
+    /// This source axis is iterated over the target's dimension space, but the
+    /// subscript spells a dimension the equation does NOT iterate -- typically
+    /// the source's own (`ff_stop_growth_year_aggregated[Aggregated Regions]`
+    /// inside a `COP`-iterating equation, C-LEARN's shape and GH #997's).
+    ///
+    /// Structurally the same pair as [`AxisRead::Iterated`]; the difference is
+    /// the RESOLUTION RULE, which is why it is a separate variant rather than a
+    /// flag. The iterated spelling folds its index to an ordinal
+    /// (`ast::expr3`'s Pass 1) and never consults the declared element map;
+    /// this one survives to `IndexOp::ActiveDimRef` and
+    /// `compiler::subscript::build_view_from_ops` resolves it name-first, then
+    /// through the map -- so the two read DIFFERENT source elements wherever a
+    /// model declares an element map or the two dimensions share element
+    /// names. Every consumer must pick the matching correspondence
+    /// (`executed_read_correspondence` here,
+    /// `positional_correspondence` for `Iterated`), which is what a
+    /// separate variant makes a compile error rather than a silent
+    /// mis-attribution.
+    ///
+    /// Reachable only from the DIRECT-reference classifier: `compute_read_slice`
+    /// declines a reducer slice containing one, so the aggregate machinery's
+    /// slot remaps -- which are the preimage of a BIJECTION -- never meet the
+    /// many-to-one correspondence this variant admits.
+    MappedRead {
+        /// Canonical name of the TARGET equation's iterated dimension this axis
+        /// is paired with, as `DimensionsContext::mapped_read_partner_dim`
+        /// decides.
+        dim: String,
+        /// Canonical name of the SOURCE's declared dimension on this axis.
+        source_dim: String,
+    },
 }
 
 /// The agg result-slot coordinate (an element of the `Iterated` axis's
@@ -449,16 +491,24 @@ pub enum AxisRead {
 /// - Literal case (`target_dim == source_dim`): the identity -- slot
 ///   coordinate == source element.
 /// - Mapped case (GH #534): the PREIMAGE inversion of
-///   [`crate::dimensions::DimensionsContext::mapped_element_correspondence`]
+///   [`crate::dimensions::DimensionsContext::positional_correspondence`]
 ///   `(target_dim, source_dim)` -- that helper is indexed by TARGET element
 ///   position and yields the source element read for it, so the slot for a
 ///   given source element is the target element whose correspondence entry
-///   names it. The helper's positional-only gate (an explicit element map
-///   returns `None` -- GH #756) makes the correspondence a bijection
-///   (index-identity, equal cardinality), so every source element has
-///   exactly one preimage; the inversion is still written generally and
-///   declines (returns `None`) if a source element has zero or multiple
-///   preimages, mirroring `expand_same_element`'s general-shape inversion.
+///   names it.
+///
+///   The POSITIONAL correspondence is the right one here and not merely the
+///   historical one: this helper serves an [`AxisRead::Iterated`] axis, whose
+///   index spells a dimension the equation ITERATES, and `ast::expr3`'s Pass 1
+///   folds that to an ordinal without consulting any declared element map
+///   (GH #997). Being positional it is also a bijection (index-identity, equal
+///   cardinality), so every source element has exactly one preimage; the
+///   inversion is still written generally and declines (returns `None`) if a
+///   source element has zero or multiple preimages, mirroring
+///   `expand_same_element`'s general-shape inversion. That generality is what
+///   keeps the MANY-TO-ONE correspondence out: an `AxisRead::MappedRead` axis,
+///   whose executed rule admits one, never reaches an agg read slice at all
+///   (`compute_read_slice` declines it).
 ///
 /// `None` means "no usable slot remap": `compute_read_slice` then declines
 /// to hoist (classification), and the emitters fall back to their
@@ -476,7 +526,7 @@ pub(crate) fn iterated_axis_slot_elements(
     }
     let t = CanonicalDimensionName::from_raw(target_dim);
     let s = CanonicalDimensionName::from_raw(source_dim);
-    let corr = dim_ctx.mapped_element_correspondence(&t, &s)?;
+    let corr = dim_ctx.positional_correspondence(&t, &s)?;
     let target_named = match dim_ctx.get(&t)? {
         crate::dimensions::Dimension::Named(_, named) => named,
         crate::dimensions::Dimension::Indexed(_, _) => return None,
@@ -1374,6 +1424,11 @@ fn rank_result_dims_from_read_slice(
                     ctx,
                 ));
             }
+            // Unreachable: `compute_read_slice` declines a slice carrying a
+            // `MappedRead` axis, so no agg node holds one (GH #997). Declining
+            // rather than guessing keeps that a conservative fallback if the
+            // hoisting gate ever widens.
+            AxisRead::MappedRead { .. } => return None,
         }
     }
     Some(result_dims)
@@ -1631,13 +1686,27 @@ fn compute_read_slice(arg_expr: &Expr2, ctx: &AggWalkCtx<'_>) -> Option<Vec<Axis
             if indices.len() != dims.len() {
                 return None;
             }
-            indices
+            let slice: Vec<AxisRead> = indices
                 .iter()
                 .zip(dims)
                 .map(|(idx, axis_dim)| {
                     classify_axis_access(idx, axis_dim, ctx.target_iterated_dims, ctx.dim_ctx)
                 })
-                .collect()
+                .collect::<Option<_>>()?;
+            // A `MappedRead` axis (GH #997) is a DIRECT-reference verdict only.
+            // Hoisting one would put a possibly MANY-TO-ONE correspondence into
+            // machinery whose slot remap is the preimage of a bijection
+            // (`iterated_axis_slot_elements`), so such a reducer keeps the
+            // conservative un-hoisted path it had before #997 -- unchanged
+            // behaviour, stated here rather than left to fall out of a missing
+            // arm somewhere downstream.
+            if slice
+                .iter()
+                .any(|ax| matches!(ax, AxisRead::MappedRead { .. }))
+            {
+                return None;
+            }
+            Some(slice)
         }
         _ => None,
     }
@@ -1670,29 +1739,44 @@ fn compute_read_slice(arg_expr: &Expr2, ctx: &AggWalkCtx<'_>) -> Option<Vec<Axis
 ///   the *target equation's* iterated dimensions AND matches the source's
 ///   axis dimension either *by name* or via a usable
 ///   [`iterated_axis_slot_elements`] remap -- which consults
-///   `mapped_element_correspondence` and therefore accepts a positional
-///   dimension MAPPING declared in EITHER direction (GH #757 widened the
-///   former `has_mapping_to(d, src)` forward-declared-only gate; the
-///   correspondence helper already handled both declaration directions and
-///   carries the GH #756 positional-only gate)
+///   `positional_correspondence` and therefore accepts a dimension MAPPING
+///   declared in EITHER direction (GH #757 widened the former
+///   `has_mapping_to(d, src)` forward-declared-only gate), an explicit element
+///   map included, since this spelling is folded to an ordinal and never reads
+///   the map (GH #997)
 ///   ⇒ [`AxisRead::Iterated`] carrying the `(d, src)` pair (GH #534). The
 ///   three `Iterated`-axis consumers (`emit_agg_routed_edges`,
 ///   `read_slice_rows` behind `emit_source_to_agg_link_scores`, and
 ///   `emit_agg_to_target_link_scores` via `result_dims`) remap each source
 ///   row to the slot of its positionally-corresponding target element
 ///   through the same helper. Declined (⇒ `None`, conservative): an
-///   explicit element-mapped pair (execution resolves positionally and
-///   ignores the map -- GH #756), an unmapped position-mismatched pair,
-///   and a non-positional size mismatch.
+///   UNDECLARED pair (GH #527's rule -- the described diagonal follows a
+///   correspondence the model declares, even though execution would read
+///   positionally anyway), a position-mismatched pair, and a cardinality
+///   mismatch. An explicit element map is NOT declined here; per the bullet
+///   above, this spelling folds to an ordinal and never reads it.
 ///   (`classify_iterated_dim_shape` consumes this classifier directly
 ///   since T6, so the direct-reference path and the reducer path accept
 ///   the identical mapped set by construction.)
 /// - `IndexExpr2::Expr(Expr2::Var(elem, ..))` or `Expr2::Const` resolving to
 ///   a literal element / 1-based index of the axis's dimension ⇒
 ///   [`AxisRead::Pinned`] carrying that element's canonical name.
+/// - `IndexExpr2::Expr(Expr2::Var(d, ..))` where `d` names a dimension the
+///   target does NOT iterate -- typically the SOURCE's own
+///   (`x[Region]` under a `State`-iterating equation, GH #997) -- and
+///   execution pairs it with exactly one of the target's iterated dims
+///   through a declared mapping ⇒ [`AxisRead::MappedRead`] carrying the
+///   `(partner, src)` pair. The pairing is
+///   [`crate::dimensions::DimensionsContext::mapped_read_partner_dim`],
+///   mirroring `compiler::subscript::normalize_subscripts3`; the usability
+///   gate is `executed_read_correspondence`, the name-first-then-element-map
+///   rule this spelling gets. Declined (⇒ `None`, conservative): no partner,
+///   an AMBIGUOUS pairing (two viable iterated dims), and an unusable
+///   per-element correspondence. Note this arm is checked LAST, after the
+///   element and iterated-dimension readings, so it can never change what a
+///   colliding name selects.
 /// - anything else (`DimPosition`, `Range`, a non-literal `Expr`, a
-///   `Var`/`Const` that resolves to neither an iterated dim nor a literal
-///   element) ⇒ `None`.
+///   `Var`/`Const` that resolves to none of the above) ⇒ `None`.
 pub(crate) fn classify_axis_access(
     idx: &IndexExpr2,
     axis_dim: &crate::dimensions::Dimension,
@@ -1760,14 +1844,15 @@ pub(crate) fn classify_axis_access(
                         // -- carrying the (target, source) pair so the emitters
                         // remap each row to its slot -- when the slot remap
                         // exists. `iterated_axis_slot_elements` consults
-                        // `mapped_element_correspondence`, which accepts BOTH
+                        // `positional_correspondence`, which accepts BOTH
                         // declaration directions (GH #757 -- the former
                         // `has_mapping_to(d, src)` forward-only pre-gate was
-                        // dropped) and declines explicit element maps (execution
-                        // resolves positionally and ignores the map, the GH #756
-                        // gate). Everything else -- a plain position mismatch,
-                        // an element-mapped pair -- declines, keeping the
-                        // reference on the conservative path.
+                        // dropped) and, since GH #997, an explicit element map
+                        // too: this index spells a dimension the equation
+                        // ITERATES, which execution folds to an ordinal without
+                        // reading the map. A plain position mismatch or an
+                        // undeclared pair still declines, keeping the reference
+                        // on the conservative path.
                         let elems = crate::ltm_augment::dimension_element_names(axis_dim);
                         iterated_axis_slot_elements(name_str, src_dim_name, &elems, dim_ctx).map(
                             |_| AxisRead::Iterated {
@@ -1777,7 +1862,28 @@ pub(crate) fn classify_axis_access(
                         )
                     }
                 }
-                crate::dimensions::AxisIndexName::Unresolved => None,
+                // The index names neither an element of this axis nor a
+                // dimension the equation iterates. It may still be a
+                // NON-ACTIVE dimension execution pairs with one of the
+                // target's iterated dims through a declared mapping
+                // (`x[Region]` under a `State`-iterating equation, GH #997) --
+                // the spelling `compiler::subscript::normalize_subscripts3`
+                // turns into an `IndexOp::ActiveDimRef` and resolves
+                // name-first, then through the element map. `MappedRead` is
+                // that verdict, and it declines when the pairing is absent or
+                // ambiguous, or when the per-element correspondence is not
+                // usable -- in which case the reference keeps the conservative
+                // shape it had before.
+                crate::dimensions::AxisIndexName::Unresolved => {
+                    let index_dim = crate::common::CanonicalDimensionName::from_raw(name_str);
+                    let partner =
+                        dim_ctx.mapped_read_partner_dim(&index_dim, target_iterated_dims)?;
+                    dim_ctx.executed_read_correspondence(&partner, axis_dim.canonical_name())?;
+                    Some(AxisRead::MappedRead {
+                        dim: partner.as_str().to_string(),
+                        source_dim: src_dim_name.to_string(),
+                    })
+                }
             }
         }
         IndexExpr2::Expr(Expr2::Const(..)) => {
@@ -1987,6 +2093,9 @@ fn accept_source_slices(refs: Vec<(String, Vec<AxisRead>)>) -> Option<CombinedRe
                     Some((dim == source_dim).then_some(dim.as_str()))
                 }
                 AxisRead::Pinned(_) | AxisRead::Reduced { .. } => None,
+                // Unreachable in an agg slice (see `compute_read_slice`); the
+                // `Some(None)` declines the whole combination if it ever is.
+                AxisRead::MappedRead { .. } => Some(None),
             })
             .collect()
     }
@@ -2101,7 +2210,10 @@ fn result_dims_from_read_slice(
             // equation, the agg→target projection (GH #528), and the
             // element-graph slot naming all key on.
             AxisRead::Iterated { dim, .. } => Some(canonical_dim_to_datamodel(dim, dm_dims)),
-            AxisRead::Pinned(_) | AxisRead::Reduced { .. } => None,
+            // A `MappedRead` axis cannot reach an agg (`compute_read_slice`
+            // declines it, GH #997); it contributes no result axis, as this
+            // function's return type leaves no way to decline.
+            AxisRead::Pinned(_) | AxisRead::Reduced { .. } | AxisRead::MappedRead { .. } => None,
         })
         .collect()
 }
@@ -2209,6 +2321,8 @@ pub(crate) fn rank_output_slot_parts_for_row(
             AxisRead::Reduced { .. } => {
                 per_output_axis.push(result_axis_elements.next()?.clone());
             }
+            // Unreachable in an agg slice (see `compute_read_slice`).
+            AxisRead::MappedRead { .. } => return None,
         }
     }
     if result_axis_elements.next().is_some() {
@@ -2468,7 +2582,12 @@ pub(crate) fn render_read_slice_for_diagnostic(slice: &[AxisRead]) -> String {
         .iter()
         .map(|ax| match ax {
             AxisRead::Pinned(e) => e.clone(),
-            AxisRead::Iterated { source_dim, .. } => source_dim.clone(),
+            // Both spellings render as the dimension NAME the index carries,
+            // which for a `MappedRead` is the source's own -- the index the
+            // equation actually spells.
+            AxisRead::Iterated { source_dim, .. } | AxisRead::MappedRead { source_dim, .. } => {
+                source_dim.clone()
+            }
             AxisRead::Reduced { subset: None } => "*".to_string(),
             AxisRead::Reduced {
                 subset: Some(elems),

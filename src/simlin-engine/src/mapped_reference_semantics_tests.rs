@@ -6,8 +6,9 @@
 //! reference, pinned cell by cell against the VM (GH #997, and the
 //! execution-side issues #756 / #753 it describes).
 //!
-//! `DimensionsContext::mapped_element_correspondence` carries a prose
-//! account of a fork in executed behavior: which of THREE resolution rules a
+//! `DimensionsContext`'s two spelling-keyed correspondences
+//! (`positional_correspondence` and `executed_read_correspondence`, split out
+//! by GH #997) rest on a fork in executed behavior: which of THREE resolution rules a
 //! mapped reference gets -- by ordinal (POSITIONAL), by the element's own
 //! NAME in the source dimension, or by the declared ELEMENT MAP -- depends on
 //! how the reference is spelled, and the last two are a single name-first
@@ -31,7 +32,7 @@
 //! **Reference spelling** ([`Spelling`], 4 variants). The first three are
 //! GH #997's; the fourth ([`Spelling::StockFlow`]) was found by measuring
 //! during this work, and the same change that added this module added its
-//! bullet to `mapped_element_correspondence`'s rustdoc.
+//! bullet to the correspondence rustdocs.
 //!
 //! **Mapping kind** ([`MappingKind`], 5 variants) plus two no-mapping
 //! controls (`no_mapping_*`), which are what distinguishes "resolves
@@ -837,8 +838,8 @@ fn assert_no_mapping_cases(
 /// The two subscript-less spellings disagree, and this is the single
 /// assertion that says so out loud.
 ///
-/// `mapped_element_correspondence`'s rustdoc splits "bare" into two bullets
-/// for exactly this reason: a bare reference in an EQUATION is positional,
+/// The two correspondences split "bare" between them for exactly this reason:
+/// a bare reference in an EQUATION is positional (`positional_correspondence`),
 /// while a stock's flow reference -- equally subscript-less -- resolves
 /// name-first and, where the names differ, follows the element map. The
 /// difference is entirely the lowering route (module docs), so any refactor
