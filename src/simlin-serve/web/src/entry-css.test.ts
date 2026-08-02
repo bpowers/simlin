@@ -39,8 +39,8 @@ describe('SPA entry loads the stylesheets the diagram needs', () => {
       expect(css).toMatch(new RegExp(`font-family:\\s*'?Roboto'?;[\\s\\S]{0,200}?font-weight:\\s*${weight};`));
     }
     expect(css).toMatch(/font-family:\s*'Roboto Mono';/);
-    // Faces must resolve to bundled files (relative url() lets Vite hash
-    // them and keep the SPA relocatable under any base path).
+    // Faces must resolve to bundled files (relative url() lets the bundler
+    // hash them and keep the SPA relocatable under any base path).
     expect(css).toMatch(/src:\s*url\('\.\/fonts\/[^']+\.woff2'\) format\('woff2'\)/);
   });
 });

@@ -5,7 +5,7 @@
 // the instance from whatever package.json + lockfile we deploy, and there is
 // no vendored-node_modules escape hatch on App Engine standard. Deploying the
 // workspace root therefore makes the instance install every workspace
-// package's deps (rspress, vite, slate, radix, ...). The fix is to deploy a
+// package's deps (rspress, slate, radix, ...). The fix is to deploy a
 // directory whose package.json is just the server's prod closure.
 //
 // The wrinkle these transforms solve: @simlin/core and @simlin/engine are not
