@@ -281,9 +281,64 @@ fn classify_iterated_dim_shape(
         // `classify_subscript_shape` fallback (identical resolution rules).
         return None;
     }
+    // Two projected axes naming the SAME target dimension are resolved from the
+    // one active element of it, so the reference reads that dimension's DIAGONAL
+    // (`target[D] = matrix[D,D]` reads `matrix[d,d]`, and
+    // `target[State] = matrix[State,State]` over a `matrix[Region1,Region2]`
+    // source reads `matrix[map1(s), map2(s)]` -- both measured in
+    // `mapped_reference_semantics_tests`). `Bare` cannot express that, for the
+    // same reason as the `MappedRead` note below: `expand_same_element` sees only
+    // the two variables' dimension lists, so a repeated target dimension either
+    // unions the two axes' candidates (`matrix[D,D]`, 15 edges over a 3x3 source
+    // where 3 are read) or claims the position for the first axis and leaves the
+    // second broadcasting (`matrix[State,State]`, 9 edges). `PerElement`'s
+    // `read_slice_rows` derivation drives axes sharing a target dimension from
+    // one coordinate and lands exactly the executed rows.
+    //
+    // The retarget is narrowed to a dimension the TARGET names ONCE, and the
+    // reason is the SCORE surface, not the edges.
+    //
+    // `RefShape` decides both. A target that repeats the dimension
+    // (`cube[D1,D1] = ... pop[D1,D1] ...`) is one `emit_per_element_link_scores`
+    // refuses outright -- every per-element derivation addresses a target axis by
+    // NAME and there are two coordinates for one name -- so retargeting such a
+    // reference would silently convert an EMITTED `Bare` link score into the loud
+    // per-element skip, on every edge into or out of a repeated-dimension
+    // variable (measured on a three-variable fixture: `pop -> cube` AND
+    // `cube -> grow` both flip, and loops through them stop being scored). That
+    // is a real product decision about a shape this change is not about, and it
+    // is not one to make as a side effect of an edge fix.
+    //
+    // What the narrowing COSTS is stated plainly because it is not zero: on
+    // EDGES the retarget would be better. Over `cube[D1,D1] = pop[D1,D1]` the
+    // simulation makes four reads (both indices resolve to the target's FIRST
+    // `D1` axis, so `cube[r1,r2]` reads `pop[r1,r1]`); `Bare` emits 12 edges
+    // covering 2 of them, and `PerElement` would emit 2 edges covering the SAME
+    // 2 with no phantoms. Both miss the same two real edges, so the retarget
+    // removes phantoms without fixing the missing half -- which is the half that
+    // breaks loop discovery. Fixing that half is `expand_same_element`'s
+    // name-keyed target positions, and doing it there lets the edges and the
+    // scores move together instead of trading one for the other. Pinned, both
+    // directions, by
+    // `mapped_reference_semantics_tests::a_repeated_target_dimension_reads_the_first_axis_on_both_sides`.
     let all_iterated = axes.iter().all(|a| matches!(a, AxisRead::Iterated { .. }));
     if all_iterated {
-        return Some(RefShape::Bare);
+        let mut seen = std::collections::HashSet::new();
+        let repeats_a_singly_named_target_dim = axes
+            .iter()
+            .filter_map(|a| match a {
+                AxisRead::Iterated { dim, .. } => Some(dim.as_str()),
+                // Unreachable: `all_iterated` has just excluded all three.
+                AxisRead::Pinned(_) | AxisRead::Reduced { .. } | AxisRead::MappedRead { .. } => {
+                    None
+                }
+            })
+            .any(|dim| {
+                !seen.insert(dim) && target_iterated_dims.iter().filter(|t| *t == dim).count() == 1
+            });
+        if !repeats_a_singly_named_target_dim {
+            return Some(RefShape::Bare);
+        }
     }
     // Everything else -- a mixed `Iterated`+`Pinned` subscript, and since
     // GH #997 any subscript carrying a `MappedRead` axis -- is `PerElement`.

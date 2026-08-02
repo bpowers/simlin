@@ -1648,14 +1648,25 @@ impl StaticArrayView {
     /// (non-star-range) view -- the overwhelmingly common case -- so we take a
     /// free fresh empty `SmallVec` then and only fall back to a real clone for a
     /// genuinely sparse view.
-    pub fn to_runtime_view(&self) -> RuntimeView {
+    pub fn to_runtime_view(&self, module_off: u32) -> RuntimeView {
         let sparse = if self.sparse.is_empty() {
             SmallVec::new()
         } else {
             self.sparse.clone()
         };
         RuntimeView {
-            base_off: self.base_off,
+            // The three chunk-shaped regions are addressed by the executing
+            // INSTANCE's slot base, exactly as `Opcode::LoadVar` and
+            // `Opcode::LoadPrev` are: a fragment's `base_off` comes from its own
+            // model's layout and is module-relative. A temp id is not -- temp
+            // storage is per-evaluation, shared by whichever instance is running
+            // -- so it is the one base the instance offset must NOT touch.
+            base_off: match self.storage {
+                ViewStorage::Curr | ViewStorage::Prev | ViewStorage::Initial => {
+                    self.base_off + module_off
+                }
+                ViewStorage::Temp => self.base_off,
+            },
             storage: self.storage,
             dims: SmallVec::from_slice(&self.dims),
             strides: SmallVec::from_slice(&self.strides),
@@ -3103,7 +3114,7 @@ mod tests {
             dim_ids: smallvec::smallvec![0, 1],
         };
 
-        let runtime = static_view.to_runtime_view();
+        let runtime = static_view.to_runtime_view(0);
 
         assert_eq!(runtime.base_off, 100);
         assert_eq!(runtime.storage, ViewStorage::Curr);

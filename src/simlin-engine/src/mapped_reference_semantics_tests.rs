@@ -954,3 +954,400 @@ fn the_996_hazard_shape_compiles_and_reads_name_first() {
         assert_ne!(got, wrong, "{cell}: read the axis-swapped element instead");
     }
 }
+
+// ===========================================================================
+// Two axes driven by ONE target dimension, and what LTM describes about them
+// ===========================================================================
+//
+// The matrix above varies ONE source axis. A reference can also spell two axes
+// that resolve from the SAME active target element -- `matrix[Region1, Region2]`
+// under a `State`-iterating equation with both regions mapped to `State`, or its
+// iterated twin `matrix[State, State]`, or the degenerate `matrix[D, D]`. Each
+// index goes through the same resolution the matrix pins for a single axis, and
+// against the same active element, so the read is that dimension's DIAGONAL: N
+// reads over an NxN source, not N^2.
+//
+// LTM has to describe exactly those reads. It derives them twice -- the element
+// GRAPH from `db::ltm::read_slice_row_parts`, the link-score NAMES from
+// `ltm_augment::per_element_row_for_target` -- and the two disagreed: the second
+// projects one target element through each axis and so always produced the
+// diagonal, while the first enumerated each axis independently and crossed them.
+// The cross rows became element edges the simulation never traverses and loop
+// candidates built on them (9 loops over a 3x3 source where there are 3). The
+// assertions below are on one fixture per shape so the VM oracle and the
+// description are the same model, not two models that happen to agree.
+
+/// `matrix[Ra,Rb]` values, 11..33, distinct per cell so the pair of source
+/// elements a target element read is uniquely identified by the number.
+fn diagonal_matrix_cells() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("ra1,rb1", "11"),
+        ("ra1,rb2", "12"),
+        ("ra1,rb3", "13"),
+        ("ra2,rb1", "21"),
+        ("ra2,rb2", "22"),
+        ("ra2,rb3", "23"),
+        ("ra3,rb1", "31"),
+        ("ra3,rb2", "32"),
+        ("ra3,rb3", "33"),
+    ]
+}
+
+/// `State` element-mapped to BOTH `Ra` and `Rb`, by two DIFFERENT rotations, so
+/// the diagonal `matrix[map1(s), map2(s)]` is off the matrix's own diagonal and
+/// no cell can be reached by two different rules.
+///
+/// * `s1 -> ra2, rb3` (23)
+/// * `s2 -> ra3, rb1` (31)
+/// * `s3 -> ra1, rb2` (12)
+fn two_mapped_axes_project(name: &str) -> TestProject {
+    TestProject::new(name)
+        .named_dimension_with_mappings(
+            "State",
+            &["s1", "s2", "s3"],
+            &[
+                ("Ra", &[("s1", "ra2"), ("s2", "ra3"), ("s3", "ra1")]),
+                ("Rb", &[("s1", "rb3"), ("s2", "rb1"), ("s3", "rb2")]),
+            ],
+        )
+        .named_dimension("Ra", &["ra1", "ra2", "ra3"])
+        .named_dimension("Rb", &["rb1", "rb2", "rb3"])
+}
+
+/// Every element edge the model's LTM element graph carries, as
+/// `"from[row] -> to[element]"` strings.
+fn element_edge_pairs(project: &TestProject) -> Vec<String> {
+    use crate::db::{SimlinDb, model_element_causal_edges, sync_from_datamodel};
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let edges = model_element_causal_edges(&db, sync.models["main"].source, sync.project).clone();
+    let mut pairs: Vec<String> = edges
+        .edges
+        .iter()
+        .flat_map(|(from, tos)| tos.iter().map(move |to| format!("{from} -> {to}")))
+        .collect();
+    pairs.sort();
+    pairs
+}
+
+/// The edges out of `from_prefix`, so an assertion can be exhaustive about one
+/// reference without restating the rest of the model's graph.
+fn edges_from(project: &TestProject, from_prefix: &str) -> Vec<String> {
+    element_edge_pairs(project)
+        .into_iter()
+        .filter(|p| p.starts_with(from_prefix))
+        .collect()
+}
+
+/// Both indices of `matrix[Ra,Rb]` resolve against the one active `State`
+/// element, so the read is the diagonal of the two mappings -- three reads over
+/// a 3x3 source.
+#[test]
+fn two_axes_mapped_to_one_target_dimension_read_the_diagonal() {
+    let results = two_mapped_axes_project("two_mapped_exec")
+        .array_with_ranges("matrix[Ra,Rb]", diagonal_matrix_cells())
+        .array_aux("target[State]", "matrix[Ra,Rb]")
+        .run_vm()
+        .expect("the two-mapped-axes shape must compile and run");
+    for (cell, want) in [
+        ("target[s1]", 23.0),
+        ("target[s2]", 31.0),
+        ("target[s3]", 12.0),
+    ] {
+        assert_eq!(
+            *results[cell].last().expect("empty series"),
+            want,
+            "{cell}: each index must resolve through its own map against the \
+             SAME active State element"
+        );
+    }
+}
+
+/// The element graph describes exactly those three reads.
+///
+/// Exhaustive over the reference's own edges rather than a spot check: the
+/// defect was extra rows, and an assertion that only names the three real ones
+/// passes just as well with six phantoms beside them.
+#[test]
+fn two_mapped_axes_emit_only_the_diagonal_element_edges() {
+    let project = two_mapped_axes_project("two_mapped_edges")
+        .array_with_ranges("matrix[Ra,Rb]", diagonal_matrix_cells())
+        .array_aux("target[State]", "matrix[Ra,Rb]");
+    assert_eq!(
+        edges_from(&project, "matrix["),
+        vec![
+            "matrix[ra1,rb2] -> target[s3]".to_string(),
+            "matrix[ra2,rb3] -> target[s1]".to_string(),
+            "matrix[ra3,rb1] -> target[s2]".to_string(),
+        ],
+        "the cross rows (matrix[ra1,rb1] and the five others) are reads the \
+         simulation never makes"
+    );
+}
+
+/// The two `Iterated` spellings of the same shape. Both are older than the
+/// mapped one and both had the same defect, reached through a different
+/// classification: an all-`Iterated` subscript used to be `RefShape::Bare`
+/// unconditionally, and `expand_same_element` -- which sees only the two
+/// variables' dimension lists, never the reference -- cannot express "these two
+/// axes share a coordinate". It unioned the candidates for `matrix[D,D]` (15
+/// edges over a 3x3 source) and claimed the target position for the first axis
+/// alone for `matrix[State,State]` (9 edges).
+#[test]
+fn two_iterated_axes_on_one_target_dimension_read_the_diagonal() {
+    // Positional mappings, so the iterated spelling folds to an ordinal: s_i
+    // reads ra_i and rb_i.
+    let mapped = TestProject::new("two_iterated")
+        .named_dimension_with_mappings("State", &["s1", "s2", "s3"], &[("Ra", &[]), ("Rb", &[])])
+        .named_dimension("Ra", &["ra1", "ra2", "ra3"])
+        .named_dimension("Rb", &["rb1", "rb2", "rb3"])
+        .array_with_ranges("matrix[Ra,Rb]", diagonal_matrix_cells())
+        .array_aux("target[State]", "matrix[State,State]");
+    let results = mapped.run_vm().expect("must compile and run");
+    for (cell, want) in [
+        ("target[s1]", 11.0),
+        ("target[s2]", 22.0),
+        ("target[s3]", 33.0),
+    ] {
+        assert_eq!(*results[cell].last().expect("empty series"), want, "{cell}");
+    }
+    assert_eq!(
+        edges_from(&mapped, "matrix["),
+        vec![
+            "matrix[ra1,rb1] -> target[s1]".to_string(),
+            "matrix[ra2,rb2] -> target[s2]".to_string(),
+            "matrix[ra3,rb3] -> target[s3]".to_string(),
+        ],
+        "matrix[State,State] reads the diagonal"
+    );
+
+    // The degenerate spelling: one dimension, named twice.
+    let same = TestProject::new("same_dim_twice")
+        .named_dimension("D", &["d1", "d2", "d3"])
+        .array_with_ranges(
+            "matrix[D,D]",
+            vec![
+                ("d1,d1", "11"),
+                ("d1,d2", "12"),
+                ("d1,d3", "13"),
+                ("d2,d1", "21"),
+                ("d2,d2", "22"),
+                ("d2,d3", "23"),
+                ("d3,d1", "31"),
+                ("d3,d2", "32"),
+                ("d3,d3", "33"),
+            ],
+        )
+        .array_aux("target[D]", "matrix[D,D]");
+    let results = same.run_vm().expect("must compile and run");
+    for (cell, want) in [
+        ("target[d1]", 11.0),
+        ("target[d2]", 22.0),
+        ("target[d3]", 33.0),
+    ] {
+        assert_eq!(*results[cell].last().expect("empty series"), want, "{cell}");
+    }
+    assert_eq!(
+        edges_from(&same, "matrix["),
+        vec![
+            "matrix[d1,d1] -> target[d1]".to_string(),
+            "matrix[d2,d2] -> target[d2]".to_string(),
+            "matrix[d3,d3] -> target[d3]".to_string(),
+        ],
+        "matrix[D,D] reads the diagonal"
+    );
+}
+
+/// The boundary of the rule above: a TARGET that repeats the dimension.
+///
+/// `cube[D1,D1] = pop[D1,D1]` resolves BOTH of the reference's indices to the
+/// target's FIRST `D1` axis, so `cube[r1,r2]` reads `pop[r1,r1]` -- four reads,
+/// which are NOT a diagonal in the target's own element tuple. Every
+/// per-element derivation addresses a target axis by dimension NAME, and this
+/// target has two coordinates for one name.
+///
+/// **Why the retarget is narrowed to a singly-named target dimension, and what
+/// that costs.** The reason is the SCORE surface, not the edges. `RefShape`
+/// decides both, and `emit_per_element_link_scores` refuses a repeated-dimension
+/// target outright, so retargeting this shape would convert an emitted `Bare`
+/// link score into the loud per-element skip -- on every edge into or out of a
+/// repeated-dimension variable, with the loops through them dropped. That is a
+/// product decision about a shape this change is not about. On EDGES the
+/// retarget would be better, and the assertions below say so rather than hiding
+/// it: `Bare` emits 12 edges covering 2 of the 4 real reads, `PerElement` would
+/// emit exactly those same 2 and no phantoms. Both miss the same two real reads,
+/// so the retarget removes phantoms without fixing the missing half -- the half
+/// that breaks loop discovery.
+///
+/// **Pre-existing residual, pinned rather than fixed.** The missing half is
+/// `db::analysis::expand_same_element` keying target positions by dimension NAME
+/// (`HashMap<&str, usize>`), so a target repeating `D1` records only its LAST
+/// axis and both source axes claim it. Fixing it means teaching that function
+/// about repeated dimensions on either side -- the third instance of "a
+/// dimension name is not an axis identity" here after GH #974 and GH #986 --
+/// which changes the arm every ordinary bare arrayed reference uses plus
+/// `ltm_finding::expand_a2a_link_offsets`. Doing it there lets the edges and the
+/// scores move together instead of trading one for the other.
+#[test]
+fn a_repeated_target_dimension_reads_the_first_axis_on_both_sides() {
+    let project = TestProject::new("square_owner_reads")
+        .named_dimension("D1", &["r1", "r2"])
+        .array_with_ranges(
+            "pop[D1,D1]",
+            vec![
+                ("r1,r1", "11"),
+                ("r1,r2", "12"),
+                ("r2,r1", "21"),
+                ("r2,r2", "22"),
+            ],
+        )
+        .array_aux("cube[D1,D1]", "pop[D1,D1]");
+    let results = project.run_vm().expect("must compile and run");
+    for (cell, want) in [
+        ("cube[r1,r1]", 11.0),
+        ("cube[r1,r2]", 11.0),
+        ("cube[r2,r1]", 22.0),
+        ("cube[r2,r2]", 22.0),
+    ] {
+        assert_eq!(
+            *results[cell].last().expect("empty series"),
+            want,
+            "{cell}: both indices resolve to the target's FIRST D1 axis"
+        );
+    }
+
+    // The DISCRIMINATOR for the narrowing. Both of the above hold under the
+    // retarget too -- `PerElement` drops the same real edge and, being phantom-
+    // free, would satisfy the first line and fail the second only incidentally.
+    // What actually separates the two is that `Bare` keeps this edge SCOREABLE.
+    // Under the retarget `pop -> cube` gets no link-score variable and a loud
+    // per-element skip instead, so this assertion is what the narrowing is for.
+    let scored = square_owner_link_score_names();
+    assert!(
+        scored
+            .iter()
+            .any(|n| n.ends_with("link_score\u{205A}pop\u{2192}cube")),
+        "the narrowing keeps this edge on the Bare emitter, which scores it; \
+         retargeting it to PerElement replaces the score with a loud skip. \
+         got: {scored:?}"
+    );
+
+    // The RESIDUAL's current behaviour, in both its directions. Neither line is
+    // a statement of what should be true: a fix to `expand_same_element` reds
+    // this test and has to restate what became true, which is the point of
+    // pinning a defect rather than leaving it silent.
+    let edges = edges_from(&project, "pop[");
+    assert!(
+        !edges.contains(&"pop[r1,r1] -> cube[r1,r2]".to_string()),
+        "residual (missing): a real read still has no edge; got {edges:?}"
+    );
+    assert!(
+        edges.contains(&"pop[r1,r1] -> cube[r2,r1]".to_string()),
+        "residual (phantom): a read that never happens still has one; got {edges:?}"
+    );
+}
+
+/// The link scores a LOOP-carrying twin of the square-owner shape emits.
+///
+/// Split out because a score only exists for an edge inside a feedback loop, so
+/// the acyclic fixture above cannot ask the question. Same shape: `cube` and
+/// `grow` both repeat `D1`, and the reference `pop[D1,D1]` inside `cube` is the
+/// one whose `RefShape` the narrowing decides.
+fn square_owner_link_score_names() -> Vec<String> {
+    use crate::db::{
+        SimlinDb, model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel_incremental,
+    };
+    let datamodel = TestProject::new("square_owner_scores")
+        .named_dimension("D1", &["r1", "r2"])
+        .array_stock("pop[D1,D1]", "10", &["grow"], &[], None)
+        .array_flow("grow[D1,D1]", "cube[D1,D1] * 0.01", None)
+        .array_aux("cube[D1,D1]", "pop[D1,D1]")
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let mut names: Vec<String> =
+        model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+            .vars
+            .iter()
+            .map(|v| v.name.clone())
+            .filter(|n| n.contains("link_score"))
+            .collect();
+    names.sort();
+    names
+}
+
+/// The two derivations agree, on a model with a LOOP through the shape.
+///
+/// The link-score NAMES already came out diagonal (they are projected from one
+/// target element by `ltm_augment::per_element_row_for_target`), so a test that
+/// only checked them would have been green throughout. The claim worth pinning
+/// is that the element graph now names the same rows -- and the loop count is
+/// how that becomes visible: an element loop is built out of element edges, so
+/// six phantom edges through `matrix` minted six extra circuits, each carrying
+/// a link score that does not exist.
+#[test]
+fn a_loop_through_two_mapped_axes_is_described_once_per_executed_read() {
+    use crate::db::{
+        SimlinDb, model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel_incremental,
+    };
+
+    // `lvl` breaks the algebraic loop: matrix -> target -> fb -> grow -> lvl ->
+    // matrix. At t=0 `lvl` is 0, so `target` still reads the fixture's own
+    // diagonal.
+    let project = two_mapped_axes_project("two_mapped_loop")
+        .array_with_ranges("base[Ra,Rb]", diagonal_matrix_cells())
+        .array_stock("lvl[Ra,Rb]", "0", &["grow"], &[], None)
+        .array_flow("grow[Ra,Rb]", "fb * 0.01", None)
+        .array_aux("matrix[Ra,Rb]", "base[Ra,Rb] + lvl[Ra,Rb]")
+        .array_aux("target[State]", "matrix[Ra,Rb]")
+        .aux("fb", "SUM(target[*])", None);
+
+    #[allow(deprecated)]
+    let circuits = {
+        use crate::db::{model_element_loop_circuits, sync_from_datamodel};
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        model_element_loop_circuits(&db, sync.models["main"].source, sync.project)
+            .circuits
+            .len()
+    };
+    assert_eq!(
+        circuits, 3,
+        "one element loop per executed read; crossing the two axes minted nine"
+    );
+
+    let datamodel = project.build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let mut scores: Vec<&str> = ltm
+        .vars
+        .iter()
+        .map(|v| v.name.as_str())
+        .filter(|n| n.contains("link_score\u{205A}matrix["))
+        .collect();
+    scores.sort_unstable();
+    assert_eq!(
+        scores,
+        [
+            "$\u{205A}ltm\u{205A}link_score\u{205A}matrix[ra1,rb2]\u{2192}target[s3]",
+            "$\u{205A}ltm\u{205A}link_score\u{205A}matrix[ra2,rb3]\u{2192}target[s1]",
+            "$\u{205A}ltm\u{205A}link_score\u{205A}matrix[ra3,rb1]\u{2192}target[s2]",
+        ],
+        "the scores name the same three rows the edges do"
+    );
+
+    // And the loops are scored rather than dropped: every element loop through
+    // the shape has a score variable, which is what an edge with no matching
+    // score would have cost.
+    let loop_scores = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+        .count();
+    assert_eq!(loop_scores, 3, "every executed loop keeps a score");
+}

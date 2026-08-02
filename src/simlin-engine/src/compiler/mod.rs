@@ -1242,20 +1242,165 @@ pub(super) fn snapshot_view_arg(builtin: &BuiltinFn) -> Option<(&Expr, SnapshotR
 ///   VectorElmMap(_, offset)    -> offset's view
 ///   VectorSortOrder(arr, _)    -> arr's view
 ///   AllocateAvailable(req,_,_) -> req's view
+///
+/// Everything else is elementwise, and an elementwise expression's shape is the
+/// JOIN of its subexpressions' shapes -- the narrowest view they all broadcast
+/// into ([`join_array_views`]), not whichever one is written first. Both consumers
+/// need the join and for the same reason: an elementwise expression is evaluated
+/// by codegen's `AssignTemp` -> `BeginIter` loop, which broadcasts each source
+/// view onto the ITERATION by dimension id, so a source dimension the iteration
+/// does not have reads NaN. Taking the first view instead made
+/// `VECTOR SORT ORDER(small[d] + wide[e,d], 1)` iterate over `small`'s three
+/// elements and return the sort order of three NaNs, while the commuted
+/// `wide[e,d] + small[d]` -- the same array -- returned the right answer.
+///
+/// `None` means one of three things: no subexpression carries an array shape;
+/// two of them carry shapes neither of which contains the other; or one of them
+/// REPEATS a dimension name (`matrix[d,d]`), which has no containment relation
+/// checkable by name (see [`named_dims`]) and so can only be an expression's
+/// sole shape.
+///
+/// The four call sites do NOT all treat `None` the same way, and only one of
+/// them is loud:
+///
+/// * [`array_operand::materialize_view_operand`] declines to materialize, which
+///   leaves codegen to reject the operand with a diagnostic attributed to the
+///   variable. This is the loud one.
+/// * the three apply-to-all / arrayed hoisting sites SUBSTITUTE the variable's
+///   own view (`unwrap_or_else(|| var_view.clone())`) with no diagnostic. That
+///   substitution is shadowed today rather than safe on its own terms: those
+///   sites ask about an array-producing builtin call, whose shape is its shaping
+///   argument's, so a `None` there means that same argument is an operand
+///   `array_operand` also declines -- and the fragment fails to compile before
+///   the substituted view can produce a number. Nothing enforces the shadowing;
+///   it is a property of the two sites asking about the same subexpression.
+/// * [`snapshot_view_arg`] reads only `is_empty()`, so a `None` classifies the
+///   call as SCALAR and it compiles to `LoadPrev`/`LoadInitial`. Reaching it
+///   needs a `PREVIOUS`/`INIT` whose argument survived `builtins_visitor`'s
+///   helper rewriting as a multi-shape expression, which the array-shaped
+///   passthrough predicate does not admit.
 pub(super) fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
+    let mut views = Vec::new();
+    collect_expr_array_views(expr, &mut views);
+    join_array_views(views)
+}
+
+/// The narrowest of `views` that every one of them broadcasts into, or `None`
+/// when there is no such view.
+///
+/// A single view is returned unchanged, dimensionless (a subscript collapsed to
+/// one element) included, so this is a no-op wherever the shapes already agreed.
+///
+/// The widest view is CHOSEN rather than accumulated left to right: a fold would
+/// call `[e], [d], [e,d]` incomparable on its second step even though the third
+/// contains both. Two maximal views that disagree on AXIS ORDER (`[e,d]` and
+/// `[d,e]` contain each other) are `None` rather than a coin flip -- the axis
+/// order is the one `VECTOR SORT ORDER` sorts along and the layout every
+/// consumer projects through, so guessing it is exactly the silently-wrong
+/// answer this function exists to stop producing.
+fn join_array_views(views: Vec<ArrayView>) -> Option<ArrayView> {
+    if views.len() <= 1 {
+        return views.into_iter().next();
+    }
+    let maximal: Vec<usize> = (0..views.len())
+        .filter(|&i| views.iter().all(|other| view_contains(&views[i], other)))
+        .collect();
+    let &widest = maximal.first()?;
+    if maximal
+        .iter()
+        .any(|&i| views[i].dim_names != views[widest].dim_names)
+    {
+        return None;
+    }
+    Some(views[widest].clone())
+}
+
+/// True when an iteration shaped like `outer` can read every element of `inner`.
+///
+/// The first branch is an IDENTICAL-shape test, and it is what carries the two
+/// families [`named_dims`] refuses: a view REPEATING a dimension name
+/// (`matrix[d,d]`) and a view naming none of them. Neither has a containment
+/// relation checkable by name, but two of the SAME shape need none --
+/// `matrix[d,d] + other[d,d]` is a well-defined elementwise expression and joins
+/// to that shape. Mixing a repeated-name view with a DIFFERENT shape has no
+/// answer and declines; see `array_operand`'s "What still declines".
+///
+/// Beyond identity the relation is by dimension NAME and size, because that is
+/// what the runtime broadcast matches on (`vm`'s `LoadIterViewAt` ->
+/// [`crate::dimensions::match_dimensions_two_pass`]): a source dimension the
+/// iteration cannot match by id reads NaN, so placing one positionally would be
+/// a guess. A dimensionless view is contained by everything, which is how a
+/// collapsed element such as `vals[1]` broadcasts without constraining the shape
+/// around it.
+fn view_contains(outer: &ArrayView, inner: &ArrayView) -> bool {
+    if outer.dims == inner.dims && outer.dim_names == inner.dim_names {
+        return true;
+    }
+    let (Some(outer), Some(inner)) = (named_dims(outer), named_dims(inner)) else {
+        return false;
+    };
+    inner
+        .iter()
+        .all(|(name, size)| outer.iter().any(|(o, s)| o == name && s == size))
+}
+
+/// A view's `(dimension name, size)` pairs, or `None` when it does not name
+/// every dimension or names one TWICE.
+///
+/// Both refusals are the same point: containment is decided by name, and
+/// neither shape can answer it. An unnamed axis has nothing to match; a
+/// `matrix[d,d]` view can say "contains `d` at size 3" but not WHICH `d`, so
+/// `[d,d] contains [d]` is unanswerable rather than true. Such a view is usable
+/// only as an expression's sole shape, through [`view_contains`]'s identical-
+/// shape branch -- which is why `matrix[d,d] * 2` still compiles while
+/// `matrix[d,d] + vals[d]` declines. See `array_operand`'s "What still
+/// declines" for why declining is right rather than merely conservative.
+fn named_dims(view: &ArrayView) -> Option<Vec<(&str, usize)>> {
+    if view.dim_names.len() != view.dims.len() || view.dim_names.iter().any(|n| n.is_empty()) {
+        return None;
+    }
+    if (1..view.dim_names.len()).any(|i| view.dim_names[..i].contains(&view.dim_names[i])) {
+        return None;
+    }
+    Some(
+        view.dim_names
+            .iter()
+            .map(|n| n.as_str())
+            .zip(view.dims.iter().copied())
+            .collect(),
+    )
+}
+
+/// Every array view the subexpressions of `expr` carry.
+///
+/// Split out from [`find_expr_array_view`] so the enumeration of which
+/// positions carry a shape lives in exactly one place: which arguments an
+/// array-producing builtin takes its shape from, which builtins are elementwise
+/// (and so contribute every argument's shape), and which are scalar-valued and
+/// contribute nothing.
+///
+/// The `If` CONDITION is visited. It contributes nothing to an `IF` whose arms
+/// already agree, but the `BeginIter` body READS it
+/// (`codegen::collect_iter_source_views_impl` pushes its view), so
+/// `IF wide[e,d] > 0 THEN a[d] ELSE b[d]` does vary over `e` and the iteration
+/// evaluating it has to as well.
+///
+/// Written as an exhaustive match with no `_` arm over `BuiltinFn` so a new
+/// builtin is a compile error here rather than a silently unshaped operand.
+fn collect_expr_array_views(expr: &Expr, out: &mut Vec<ArrayView>) {
     match expr {
-        Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => Some(view.clone()),
+        Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => out.push(view.clone()),
         Expr::App(builtin, _) => match builtin {
-            BuiltinFn::VectorElmMap(_, offset) => find_expr_array_view(offset),
+            BuiltinFn::VectorElmMap(_, offset) => collect_expr_array_views(offset, out),
             BuiltinFn::VectorSortOrder(arr, _) | BuiltinFn::Rank(arr, _) => {
-                find_expr_array_view(arr)
+                collect_expr_array_views(arr, out)
             }
             BuiltinFn::AllocateAvailable(req, _, _)
-            | BuiltinFn::AllocateByPriority(req, _, _, _, _) => find_expr_array_view(req),
+            | BuiltinFn::AllocateByPriority(req, _, _, _, _) => collect_expr_array_views(req, out),
             // Elementwise scalar builtins: applied per iteration inside a
             // `BeginIter` body, so their result has the shape of whichever
-            // argument carries one. The multi-argument forms take the first
-            // arg that has a view, matching the `Op2` rule below.
+            // argument carries one -- every one of them, for the join; the
+            // first, for `find_expr_array_view`, matching the `Op2` rule below.
             //
             // Deliberately absent: `Mean` (variadic -- its single-argument
             // form is a REDUCTION to a scalar, not elementwise), the reducers
@@ -1263,7 +1408,11 @@ pub(super) fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
             // scalar-valued), `VectorSelect` (scalar-valued), the `Lookup`
             // family (`LookupArray`'s shape is the TABLE array's, which this
             // would have to reach through the gf registry), and the 0-arity
-            // builtins.
+            // builtins. Their ARGUMENTS are not walked either: a reducer
+            // collapses whatever it reads to one number, so
+            // `vals[d] + SUM(wide[*,*])` is `[d]`-shaped and a walk that let
+            // `wide`'s view through would widen the temp to a shape the
+            // operand does not have.
             //
             // `PREVIOUS`/`INIT` DO carry a shape (GH #995): codegen reads an
             // array-valued one as its argument's view over a snapshot buffer,
@@ -1271,7 +1420,7 @@ pub(super) fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
             // that collapsed to a single element yields none, which is what
             // keeps a scalar `PREVIOUS(s)` broadcasting instead of reshaping
             // the operand around it.
-            BuiltinFn::Previous(a, _) | BuiltinFn::Init(a) => find_expr_array_view(a),
+            BuiltinFn::Previous(a, _) | BuiltinFn::Init(a) => collect_expr_array_views(a, out),
             BuiltinFn::Abs(e)
             | BuiltinFn::Arccos(e)
             | BuiltinFn::Arcsin(e)
@@ -1284,23 +1433,29 @@ pub(super) fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
             | BuiltinFn::Sign(e)
             | BuiltinFn::Sin(e)
             | BuiltinFn::Sqrt(e)
-            | BuiltinFn::Tan(e) => find_expr_array_view(e),
+            | BuiltinFn::Tan(e) => collect_expr_array_views(e, out),
             // Two-argument MIN/MAX are the scalar (elementwise) forms; the
             // one-argument forms are array reductions and yield no array.
             BuiltinFn::Min(a, Some(b)) | BuiltinFn::Max(a, Some(b)) => {
-                find_expr_array_view(a).or_else(|| find_expr_array_view(b))
+                collect_expr_array_views(a, out);
+                collect_expr_array_views(b, out);
             }
-            BuiltinFn::Min(_, None) | BuiltinFn::Max(_, None) => None,
+            BuiltinFn::Min(_, None) | BuiltinFn::Max(_, None) => {}
             BuiltinFn::Quantum(a, b) | BuiltinFn::Step(a, b) => {
-                find_expr_array_view(a).or_else(|| find_expr_array_view(b))
+                collect_expr_array_views(a, out);
+                collect_expr_array_views(b, out);
             }
-            BuiltinFn::Sshape(a, b, c) => find_expr_array_view(a)
-                .or_else(|| find_expr_array_view(b))
-                .or_else(|| find_expr_array_view(c)),
+            BuiltinFn::Sshape(a, b, c) => {
+                collect_expr_array_views(a, out);
+                collect_expr_array_views(b, out);
+                collect_expr_array_views(c, out);
+            }
             BuiltinFn::Pulse(a, b, c) | BuiltinFn::Ramp(a, b, c) | BuiltinFn::SafeDiv(a, b, c) => {
-                find_expr_array_view(a)
-                    .or_else(|| find_expr_array_view(b))
-                    .or_else(|| c.as_ref().and_then(|c| find_expr_array_view(c)))
+                collect_expr_array_views(a, out);
+                collect_expr_array_views(b, out);
+                if let Some(c) = c.as_ref() {
+                    collect_expr_array_views(c, out);
+                }
             }
             BuiltinFn::Lookup(_, _, _)
             | BuiltinFn::LookupForward(_, _, _)
@@ -1316,14 +1471,19 @@ pub(super) fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
             | BuiltinFn::Time
             | BuiltinFn::TimeStep
             | BuiltinFn::StartTime
-            | BuiltinFn::FinalTime => None,
+            | BuiltinFn::FinalTime => {}
         },
-        Expr::Op1(_, inner, _) => find_expr_array_view(inner),
+        Expr::Op1(_, inner, _) => collect_expr_array_views(inner, out),
         Expr::Op2(_, lhs, rhs, _) => {
-            find_expr_array_view(lhs).or_else(|| find_expr_array_view(rhs))
+            collect_expr_array_views(lhs, out);
+            collect_expr_array_views(rhs, out);
         }
-        Expr::If(_, t, f, _) => find_expr_array_view(t).or_else(|| find_expr_array_view(f)),
-        _ => None,
+        Expr::If(cond, t, f, _) => {
+            collect_expr_array_views(t, out);
+            collect_expr_array_views(f, out);
+            collect_expr_array_views(cond, out);
+        }
+        _ => {}
     }
 }
 

@@ -2443,7 +2443,7 @@ impl Vm {
 
                 Opcode::PushStaticView { view_id } => {
                     let static_view = &context.static_views[*view_id as usize];
-                    view_stack.push(static_view.to_runtime_view());
+                    view_stack.push(static_view.to_runtime_view(module_off as u32));
                 }
 
                 Opcode::PushVarViewDirect {

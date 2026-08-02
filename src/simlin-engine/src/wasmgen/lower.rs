@@ -1458,11 +1458,12 @@ fn emit_ops(
                 ));
             }
             // `PushVarViewDirect` builds a contiguous view from raw dim sizes
-            // (dim_ids all 0), the base for a dynamic subscript. It is the only
-            // `CurrModuleRelative` view opcode: the VM folds the runtime `module_off`
-            // into the base, where `PushStaticView` bakes an absolute slot in
-            // and `PushTempView` addresses `temp_storage` with no `module_off`
-            // at all.
+            // (dim_ids all 0), the base for a dynamic subscript. Its base is
+            // module-relative -- the VM folds the runtime `module_off` in -- and
+            // so is `PushStaticView`'s, whose `base_off` comes from the
+            // fragment's own model layout (`StaticArrayView::to_runtime_view`
+            // adds the same addend). `PushTempView` is the only one that
+            // addresses `temp_storage` with no `module_off` at all.
             Opcode::PushVarViewDirect {
                 base_off,
                 dim_list_id,
@@ -1471,7 +1472,7 @@ fn emit_ops(
                 let n = dims.len();
                 state.view_stack.push(ViewDesc::contiguous(
                     u32::from(*base_off),
-                    ViewBase::CurrModuleRelative,
+                    ViewBase::Curr,
                     dims,
                     vec![0u16; n],
                 ));

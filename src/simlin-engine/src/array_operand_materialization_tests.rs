@@ -2331,3 +2331,385 @@ fn every_row_of_the_issue_995_table_compiles() {
         "VECTOR SELECT(cap[d], vals[d], 0, 1, 0)",
     );
 }
+
+// ===========================================================================
+// Shape axis, second dimension: an operand mixing arrays of DIFFERENT shapes.
+// ===========================================================================
+
+/// A wider companion for the shared fixture: `matrix[e,d]` is already there,
+/// and `rowv[e]` is the shape that is incomparable with `vals[d]`.
+///
+/// * `rowv = [5, 50]`
+/// * `matrixt[d,e]` is `matrix` transposed, the shape that ties with
+///   `matrix[e,d]` on containment while disagreeing on axis order.
+fn wide_fixture(name: &str) -> TestProject {
+    fixture(name)
+        .array_with_ranges("rowv[e]", vec![("1", "5"), ("2", "50")])
+        .array_with_ranges(
+            "matrixt[d,e]",
+            vec![
+                ("1,1", "1"),
+                ("1,2", "10"),
+                ("2,1", "2"),
+                ("2,2", "20"),
+                ("3,1", "3"),
+                ("3,2", "30"),
+            ],
+        )
+}
+
+/// Compile `out[e,d] = <eqn>` against the wide fixture and return `out`,
+/// row-major (`[e1d1, e1d2, e1d3, e2d1, e2d2, e2d3]`).
+fn wide_out_of(name: &str, eqn: &str) -> Vec<f64> {
+    let project = wide_fixture(name).array_aux("out[e,d]", eqn);
+    project.assert_compiles_incremental();
+    project.vm_result_incremental("out")
+}
+
+/// Both spellings of a commutative mixed-shape operand must produce the same
+/// array -- the property the first-wins shape rule broke.
+///
+/// A computed operand is evaluated by codegen's `AssignTemp` -> `BeginIter`
+/// loop, which broadcasts each source view onto the ITERATION by dimension id
+/// (`vm`'s `LoadIterViewAt` -> `dimensions::match_dimensions_two_pass`), and a
+/// source dimension the iteration does not have reads NaN. Shaping the temp by
+/// the first array in the operand therefore made
+/// `VECTOR SORT ORDER(vals[d] + matrix[e,d], 1)` iterate over `vals`'s three
+/// elements, read `matrix` as three NaNs and return the sort order of NaNs
+/// (measured `[0,1,2, 0,1,2]`), while the commuted `matrix[e,d] + vals[d]` --
+/// the same array -- returned the right answer. `compiler::join_array_views`
+/// picks the shape by CONTAINMENT instead, which has no left-to-right in it.
+///
+/// The values: `vals = [30,10,20]` and `matrix = [[1,2,3],[10,20,30]]`, so the
+/// sum is `[[31,12,23],[40,30,50]]` and the in-row ascending orders are
+/// `[1,2,0]` and `[1,0,2]`.
+#[test]
+fn a_mixed_shape_operand_agrees_with_its_commuted_spelling() {
+    let expected = [1.0, 2.0, 0.0, 1.0, 0.0, 2.0];
+    // Narrow first -- the spelling that read NaNs.
+    assert_close(
+        &wide_out_of("mix_narrow", "VECTOR SORT ORDER(vals[d] + matrix[e,d], 1)"),
+        &expected,
+        "mixed-shape operand, narrow array first",
+    );
+    // Wide first -- the spelling that happened to work.
+    assert_close(
+        &wide_out_of("mix_wide", "VECTOR SORT ORDER(matrix[e,d] + vals[d], 1)"),
+        &expected,
+        "mixed-shape operand, wide array first",
+    );
+
+    // A DIMENSIONLESS subexpression is the degenerate case of the same rule: a
+    // subscript collapsed to one element carries no dimensions, so it
+    // broadcasts and constrains nothing. Reading the first view blind made the
+    // two orders disagree about whether the equation compiles AT ALL --
+    // `vals[1] + bump[d]` was rejected while `bump[d] + vals[1]` compiled.
+    // `vals[1] + bump = [30, 130, 30]`, ascending with stable ties `[0, 2, 1]`.
+    assert_close(
+        &out_of("mix_elem_lhs", "VECTOR SORT ORDER(vals[1] + bump[d], 1)"),
+        &[0.0, 2.0, 1.0],
+        "collapsed element first",
+    );
+    assert_close(
+        &out_of("mix_elem_rhs", "VECTOR SORT ORDER(bump[d] + vals[1], 1)"),
+        &[0.0, 2.0, 1.0],
+        "collapsed element second",
+    );
+}
+
+/// The join is over ALL the shapes, not just two, and it is order-independent
+/// in the strong sense: no permutation of a three-array operand may change the
+/// answer.
+///
+/// This is what makes the choice a maximum rather than a left-to-right fold. A
+/// fold over `[d], [d], [e,d]` is fine, but a fold over `[e], [d], [e,d]` --
+/// the shape of an operand mixing a row vector, a column vector and the matrix
+/// they broadcast into -- would call the first two incomparable and decline
+/// before ever seeing the third.
+///
+/// `vals + bump = [30,110,20]`, plus `matrix` rows gives `[[31,112,23],
+/// [40,130,50]]`, whose in-row ascending orders are `[2,0,1]` and `[0,2,1]`.
+#[test]
+fn a_three_array_operand_joins_regardless_of_order() {
+    let expected = [2.0, 0.0, 1.0, 0.0, 2.0, 1.0];
+    for (name, eqn) in [
+        (
+            "mix3_a",
+            "VECTOR SORT ORDER(vals[d] + bump[d] + matrix[e,d], 1)",
+        ),
+        (
+            "mix3_b",
+            "VECTOR SORT ORDER(matrix[e,d] + vals[d] + bump[d], 1)",
+        ),
+        (
+            "mix3_c",
+            "VECTOR SORT ORDER(vals[d] + matrix[e,d] + bump[d], 1)",
+        ),
+    ] {
+        assert_close(&wide_out_of(name, eqn), &expected, eqn);
+    }
+    // The row/column/matrix mix a fold would decline on its second step. Only
+    // `matrix` is maximal, so the join is `[e,d]`.
+    // `rowv = [5,50]` broadcast down the rows plus `vals = [30,10,20]` across
+    // them plus `matrix` gives `[[36,17,28],[90,80,100]]`; in-row ascending
+    // orders `[1,2,0]` and `[1,0,2]`.
+    assert_close(
+        &wide_out_of(
+            "mix3_rcm",
+            "VECTOR SORT ORDER(rowv[e] + vals[d] + matrix[e,d], 1)",
+        ),
+        &[1.0, 2.0, 0.0, 1.0, 0.0, 2.0],
+        "row + column + matrix",
+    );
+}
+
+/// Every shape-carrying `Expr` variant reaches the same join, checked at the
+/// one position (`VECTOR SORT ORDER` arg0) the shape axis is exercised at --
+/// the mixed-shape twin of [`computed_operand_shapes`].
+///
+/// The `If` row is the one that is not merely a repeat of the `Op2` rule: the
+/// CONDITION is a fourth operand, and it is read by the `BeginIter` body
+/// (`codegen::collect_iter_source_views_impl` pushes its view) even though it
+/// contributes nothing to an `IF` whose arms already agree. A shape derivation
+/// that skipped it sized the temp from the arms alone and the condition read
+/// NaN, which compares false, so the `IF` silently collapsed to its ELSE arm
+/// for every element (measured `[0,2,1, 0,2,1]`).
+#[test]
+fn every_operand_shape_reaches_the_mixed_shape_join() {
+    // Op2: covered by `a_mixed_shape_operand_agrees_with_its_commuted_spelling`.
+
+    // Op1 (`NOT`, the only one a fragment can carry -- see
+    // `computed_operand_shapes`). `vals < matrix` is [F,F,F] on row 1 and
+    // [F,T,T] on row 2, so `NOT` gives [[1,1,1],[1,0,0]] and the in-row
+    // ascending orders are [0,1,2] and [1,2,0].
+    assert_close(
+        &wide_out_of(
+            "mixs_op1",
+            "VECTOR SORT ORDER(NOT (vals[d] < matrix[e,d]), 1)",
+        ),
+        &[0.0, 1.0, 2.0, 1.0, 2.0, 0.0],
+        "Op1 over a mixed-shape comparison",
+    );
+
+    // If, with the wide array in the CONDITION and both arms narrow.
+    // `matrix > 5` is false across row 1 and true across row 2, so the result
+    // is `bump = [0,100,0]` then `vals = [30,10,20]`; in-row ascending orders
+    // [0,2,1] and [1,2,0].
+    assert_close(
+        &wide_out_of(
+            "mixs_if_cond",
+            "VECTOR SORT ORDER(IF matrix[e,d] > 5 THEN vals[d] ELSE bump[d], 1)",
+        ),
+        &[0.0, 2.0, 1.0, 1.0, 2.0, 0.0],
+        "If with a wider condition than its arms",
+    );
+
+    // App, a multi-argument elementwise builtin: `MAX(vals[d], matrix[e,d])` is
+    // [[30,10,20],[30,20,30]], in-row ascending orders [1,2,0] and [1,0,2].
+    // Both argument orders, since this arm has its own first-wins rule.
+    for (name, eqn) in [
+        (
+            "mixs_max_a",
+            "VECTOR SORT ORDER(MAX(vals[d], matrix[e,d]), 1)",
+        ),
+        (
+            "mixs_max_b",
+            "VECTOR SORT ORDER(MAX(matrix[e,d], vals[d]), 1)",
+        ),
+    ] {
+        assert_close(
+            &wide_out_of(name, eqn),
+            &[1.0, 2.0, 0.0, 1.0, 0.0, 2.0],
+            eqn,
+        );
+    }
+
+    // App, a single-argument elementwise builtin wrapping the mix.
+    // `ABS(vals[d] - matrix[e,d])` is [[29,8,17],[20,10,10]]; in-row ascending
+    // orders [1,2,0] and [1,2,0] (stable tie between the two 10s).
+    assert_close(
+        &wide_out_of(
+            "mixs_abs",
+            "VECTOR SORT ORDER(ABS(vals[d] - matrix[e,d]), 1)",
+        ),
+        &[1.0, 2.0, 0.0, 1.0, 2.0, 0.0],
+        "elementwise builtin over a mixed-shape difference",
+    );
+}
+
+/// Two shapes neither of which contains the other DECLINE, and the decline is
+/// the same loud, variable-attributed codegen rejection the two deliberately
+/// unmaterialized positions produce.
+///
+/// The union `[e] u [d] = [e,d]` would compile, and that is exactly why it is
+/// refused: nothing in `rowv[e] + vals[d]` says whether the result is `[e,d]`
+/// or `[d,e]`, and the temp's axis order is the axis `VECTOR SORT ORDER` sorts
+/// along. Guessing it produces a plausible array of wrong numbers -- which is
+/// what the first-wins rule did, returning the sort order of `[e]`-shaped NaNs
+/// (`[0,0,0, 1,1,1]`) with no diagnostic at all.
+///
+/// The transposed row is the same refusal reached from the other side: `[e,d]`
+/// and `[d,e]` CONTAIN each other, so containment alone leaves two maximal
+/// candidates and picking either would reintroduce the operand-order
+/// dependence in the axis order.
+#[test]
+fn incomparable_operand_shapes_decline_loudly() {
+    for (name, eqn) in [
+        ("incomp_rc", "VECTOR SORT ORDER(rowv[e] + vals[d], 1)"),
+        ("incomp_cr", "VECTOR SORT ORDER(vals[d] + rowv[e], 1)"),
+        (
+            "incomp_transpose",
+            "VECTOR SORT ORDER(matrix[e,d] + matrixt[d,e], 1)",
+        ),
+    ] {
+        assert_fails_attributed(wide_fixture(name).array_aux("out[e,d]", eqn), eqn);
+        assert_declines_because(
+            wide_fixture(name).array_aux("out[e,d]", eqn),
+            "out",
+            "Cannot push view for expression type",
+        );
+    }
+}
+
+// ===========================================================================
+// Module instances: a static view is addressed at the executing INSTANCE's
+// slot base, not the root's.
+// ===========================================================================
+
+/// An array view inside a sub-model instance reads that instance's own slots.
+///
+/// A static view's `base_off` is resolved out of the FRAGMENT'S OWN model
+/// layout (`symbolic::resolve_static_view`), so it is module-relative -- exactly
+/// like the offset `Opcode::LoadVar` reads as `curr[module_off + off]`. The
+/// executing instance's `module_off` has to be added at push time, and it was
+/// not: `StaticArrayView::to_runtime_view` copied `base_off` verbatim, so every
+/// array reduction inside a sub-model read the ROOT's slots. Over this fixture
+/// both instances returned `[1, 2, 3, 4]` -- the sum of the first three global
+/// slots, `time + dt + initial_time` -- instead of their own arrays.
+///
+/// This predates the array-valued `PREVIOUS`/`INIT` route (`ViewStorage::Curr`
+/// has always gone through the same push), so the `out_curr` rows are the
+/// control and the `out_prev`/`out_init` rows are what GH #995 added on top of
+/// it. All three regions are `n_slots` copies of `curr` and share its slot
+/// numbering, which is why one addend serves all three -- and why a fix that
+/// covered only the two new ones would have left the oldest one broken.
+#[test]
+fn an_array_view_inside_a_module_instance_reads_that_instance() {
+    use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+    use crate::vm::Vm;
+
+    let project = crate::test_common::two_instance_arrayed_submodel_project();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main").expect("two-instance compile");
+    let mut vm = Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("run");
+    let results = crate::test_common::collect_results(&vm.into_results());
+
+    for (name, expected) in crate::test_common::two_instance_arrayed_submodel_expected() {
+        let actual = results
+            .get(name)
+            .unwrap_or_else(|| panic!("no series for {name}"));
+        assert_close(actual, &expected, name);
+    }
+}
+
+/// An operand mixing a REPEATED-dimension view with a different shape declines,
+/// and this row exists because that is a **change from HEAD** rather than a
+/// shape that never worked.
+///
+/// `[d,d]` and `[d]` have no containment relation checkable by name
+/// (`compiler::named_dims` refuses a repeated name: `[d,d]` can say "contains
+/// `d` at size 3" but not WHICH `d`), so the join has no answer. At `b45a0ca1`
+/// the first-view rule gave one anyway, and gave a different one per operand
+/// order -- measured `[0,0,0, 1,1,1, 2,2,2]` for `matrix[d,d] + vals[d]` and
+/// `[1,1,1, 0,0,0, 2,2,2]` for the commuted spelling, over a fixture whose
+/// correct per-row ascending orders are `[0,1,2]` in every row. Two answers for
+/// one array, neither right, is the case this pass refuses.
+///
+/// The single-shape control is the other half of the statement: one view needs
+/// no join, so `matrix[d,d] * 2` still compiles -- and it returns
+/// `[0,0,0, 1,1,1, 2,2,2]`, still wrong, because a repeated dimension is
+/// mis-read a layer down (`compiler::project_var_index_to_temp` matches a temp
+/// axis to a variable axis by name and takes the first hit, so `out[i,j]` reads
+/// `temp[i,i]`). That is what makes the decline right rather than merely
+/// cautious: there is no correct answer for the mixed form to fall back to, and
+/// nothing here claims to fix the single-shape one.
+#[test]
+fn a_repeated_dimension_operand_declines_rather_than_guessing_which_axis() {
+    let square = |name: &str| {
+        fixture(name).array_with_ranges(
+            "square[d,d]",
+            vec![
+                ("1,1", "11"),
+                ("1,2", "12"),
+                ("1,3", "13"),
+                ("2,1", "21"),
+                ("2,2", "22"),
+                ("2,3", "23"),
+                ("3,1", "31"),
+                ("3,2", "32"),
+                ("3,3", "33"),
+            ],
+        )
+    };
+    // Both operand orders decline, and they decline the same way -- the point
+    // of the join is that the two spellings are one program.
+    for (name, eqn) in [
+        ("sqmix_lhs", "VECTOR SORT ORDER(square[d,d] + vals[d], 1)"),
+        ("sqmix_rhs", "VECTOR SORT ORDER(vals[d] + square[d,d], 1)"),
+    ] {
+        assert_fails_attributed(square(name).array_aux("out[d,d]", eqn), eqn);
+        assert_declines_because(
+            square(name).array_aux("out[d,d]", eqn),
+            "out",
+            "Cannot push view for expression type",
+        );
+    }
+
+    // The single-shape control still compiles: one view is returned unchanged,
+    // so nothing about a repeated dimension is refused on its own. Its answer is
+    // the pre-existing wrong one, asserted so a future fix to the repeated-
+    // dimension projection turns this red and has to restate it.
+    assert_close(
+        &{
+            let p = square("sqmix_alone")
+                .array_aux("out[d,d]", "VECTOR SORT ORDER(square[d,d] * 2, 1)");
+            p.assert_compiles_incremental();
+            p.vm_result_incremental("out")
+        },
+        &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0],
+        "single repeated-dimension shape: compiles, and reproduces the \
+         pre-existing per-row misprojection ([0,1,2] per row is correct)",
+    );
+}
+
+/// The two-HOP twin: `main` -> `mid` (twice) -> `inner`.
+///
+/// A one-hop fixture cannot distinguish the rule the VM actually uses --
+/// ACCUMULATE `module_off + decl.off` at each `EvalModule` -- from "apply the
+/// last hop only" or "re-base from the root at each hop", because at one hop all
+/// three agree. `mid` carries a scalar ahead of its module declaration so
+/// `inner`'s block does not start at its parent's base, which makes the two
+/// hops' offsets distinct non-zero numbers that have to sum.
+#[test]
+fn an_array_view_inside_a_nested_module_instance_reads_that_instance() {
+    use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+    use crate::vm::Vm;
+
+    let project = crate::test_common::nested_instance_arrayed_submodel_project();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect("nested compile");
+    let mut vm = Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("run");
+    let results = crate::test_common::collect_results(&vm.into_results());
+
+    for (name, expected) in crate::test_common::nested_instance_arrayed_submodel_expected() {
+        let actual = results
+            .get(name)
+            .unwrap_or_else(|| panic!("no series for {name}"));
+        assert_close(actual, &expected, name);
+    }
+}

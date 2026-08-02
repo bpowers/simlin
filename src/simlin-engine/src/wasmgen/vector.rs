@@ -305,12 +305,7 @@ fn view_storage_base(view: &ViewDesc, ctx: &EmitCtx) -> Result<StorageBase, Wasm
     let bases = ctx.region_bases();
     let region = |base: u32| u64::from(base) + u64::from(view.base_off) * u64::from(SLOT_SIZE);
     match view.base {
-        ViewBase::CurrAbsolute => Ok(StorageBase {
-            base_byte: region(bases.curr),
-            module_relative: false,
-            prev_fallback_gated: false,
-        }),
-        ViewBase::CurrModuleRelative => Ok(StorageBase {
+        ViewBase::Curr => Ok(StorageBase {
             base_byte: region(bases.curr),
             module_relative: true,
             prev_fallback_gated: false,
@@ -318,14 +313,14 @@ fn view_storage_base(view: &ViewDesc, ctx: &EmitCtx) -> Result<StorageBase, Wasm
         // The snapshot regions share `curr`'s slot numbering; `prev` carries the
         // `use_prev_fallback` gate, and `initial`'s phase branch is already
         // folded into `bases.initial` (see `views::ViewBase`).
-        ViewBase::PrevAbsolute => Ok(StorageBase {
+        ViewBase::Prev => Ok(StorageBase {
             base_byte: region(bases.prev),
-            module_relative: false,
+            module_relative: true,
             prev_fallback_gated: true,
         }),
-        ViewBase::InitialAbsolute => Ok(StorageBase {
+        ViewBase::Initial => Ok(StorageBase {
             base_byte: region(bases.initial),
-            module_relative: false,
+            module_relative: true,
             prev_fallback_gated: false,
         }),
         ViewBase::Temp => {

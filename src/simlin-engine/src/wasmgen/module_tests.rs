@@ -3844,3 +3844,125 @@ fn set_value_nonconstant_returns_error() {
         "VM must accept the overridable constant"
     );
 }
+
+/// The wasm backend must broadcast a MIXED-SHAPE computed array operand the
+/// way the VM does (GH #995).
+///
+/// The lowering pass that materializes such an operand
+/// (`compiler::array_operand`) shapes its temp by the JOIN of the arrays in it,
+/// so `vals[d] + matrix[e,d]` iterates over the `[e,d]` shape and reads `vals`
+/// broadcast down the rows. Both backends then have to place that narrower
+/// source themselves -- the VM through `Opcode::LoadIterViewAt`'s dimension
+/// matching, wasm through its own unrolled iteration -- and this is the only
+/// row that exercises the disagreement, because the corpus fixture's operands
+/// are all single-shaped. Both operand orders run, since the join is the thing
+/// making them the same program.
+#[test]
+fn compile_simulation_mixed_shape_array_operand_matches_vm() {
+    for (name, eqn) in [
+        (
+            "mix_narrow_first",
+            "VECTOR SORT ORDER(vals[d] + matrix[e,d], 1)",
+        ),
+        (
+            "mix_wide_first",
+            "VECTOR SORT ORDER(matrix[e,d] + vals[d], 1)",
+        ),
+    ] {
+        let datamodel = crate::test_common::TestProject::new(name)
+            .with_sim_time(0.0, 2.0, 1.0)
+            .indexed_dimension("d", 3)
+            .indexed_dimension("e", 2)
+            .array_with_ranges("vals[d]", vec![("1", "30"), ("2", "10"), ("3", "20")])
+            .array_with_ranges(
+                "matrix[e,d]",
+                vec![
+                    ("1,1", "1"),
+                    ("1,2", "2"),
+                    ("1,3", "3"),
+                    ("2,1", "10"),
+                    ("2,2", "20"),
+                    ("2,3", "30"),
+                ],
+            )
+            .array_aux("out[e,d]", eqn)
+            .build_datamodel();
+
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(checked > 0, "{name}: no variables compared");
+    }
+}
+
+/// The wasm twin of
+/// `array_operand_materialization_tests::an_array_view_inside_a_module_instance_reads_that_instance`.
+///
+/// Asserted against ABSOLUTE series rather than through `assert_matches_vm`
+/// alone, because parity is exactly what this defect had: `views::ViewDesc`
+/// mirrors the VM's addressing arm for arm, so when `PushStaticView` dropped the
+/// instance's `module_off` the wasm emitter dropped it too and the two backends
+/// agreed on the same wrong numbers. The parity check runs as well -- it is what
+/// keeps the two addressing implementations from drifting once both are right.
+#[test]
+fn compile_simulation_arrayed_submodel_views_address_their_instance() {
+    let datamodel = crate::test_common::two_instance_arrayed_submodel_project();
+    let sim = compile_sim(&datamodel, "main");
+    let artifact = compile_simulation(&sim).expect("wasm codegen");
+    let data = run_artifact_results(&artifact);
+    let n_slots = artifact.layout.n_slots;
+
+    for (name, expected) in crate::test_common::two_instance_arrayed_submodel_expected() {
+        let off = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, o)| *o)
+            .unwrap_or_else(|| panic!("{name} missing from the wasm layout"));
+        for (c, want) in expected.iter().enumerate() {
+            let got = data[c * n_slots + off];
+            assert!(
+                (got - want).abs() < 1e-9,
+                "{name} at chunk {c}: expected {want}, got {got}"
+            );
+        }
+    }
+
+    assert_matches_vm(sim, &artifact);
+}
+
+/// The wasm twin of
+/// `array_operand_materialization_tests::an_array_view_inside_a_nested_module_instance_reads_that_instance`.
+///
+/// wasm reaches a nested instance by passing `module_off + decl.off` as the
+/// child function's param 0, so the two hops must sum there exactly as they do
+/// in the VM's recursive `eval`. Asserted against absolute series for the same
+/// reason the one-hop wasm pin is.
+#[test]
+fn compile_simulation_nested_arrayed_submodel_views_address_their_instance() {
+    let datamodel = crate::test_common::nested_instance_arrayed_submodel_project();
+    let sim = compile_sim(&datamodel, "main");
+    let artifact = compile_simulation(&sim).expect("wasm codegen");
+    let data = run_artifact_results(&artifact);
+    let n_slots = artifact.layout.n_slots;
+
+    for (name, expected) in crate::test_common::nested_instance_arrayed_submodel_expected() {
+        let off = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, o)| *o)
+            .unwrap_or_else(|| panic!("{name} missing from the wasm layout"));
+        for (c, want) in expected.iter().enumerate() {
+            let got = data[c * n_slots + off];
+            assert!(
+                (got - want).abs() < 1e-9,
+                "{name} at chunk {c}: expected {want}, got {got}"
+            );
+        }
+    }
+
+    assert_matches_vm(sim, &artifact);
+}

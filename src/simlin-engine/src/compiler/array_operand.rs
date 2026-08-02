@@ -48,14 +48,43 @@
 //!
 //! # What still declines
 //!
-//! Two limits are worth knowing before reading a "this shape does not compile"
-//! report as a bug in this pass:
+//! Four limits are worth knowing before reading a "this shape does not
+//! compile" report as a bug in this pass:
 //!
 //! * An operand only materializes if [`super::find_expr_array_view`] can
 //!   derive a shape for it. That function's `App` arm is an exhaustive match
 //!   naming exactly which builtins propagate an array shape; the ones that do
 //!   not (the reducers, `VECTOR SELECT`, the `Lookup` family) are listed there
 //!   with the reason.
+//! * That shape is the JOIN of every array in the operand -- the view they all
+//!   broadcast into -- so an operand mixing INCOMPARABLE shapes (`row[e]` and
+//!   `col[d]`, neither containing the other) has none, and declines. The union
+//!   `[e,d]` would compile, but nothing in the operand says whether it is
+//!   `[e,d]` or `[d,e]`, and the temp's axis order is the axis
+//!   `VECTOR SORT ORDER` sorts along. Declining leaves the loud codegen
+//!   rejection; guessing would leave a plausible array of wrong numbers.
+//! * An operand mixing a REPEATED-dimension view with a different shape
+//!   (`matrix[d,d] + vals[d]`) declines for the same reason, and this one is a
+//!   **change from HEAD**: `[d,d]` and `[d]` have no containment relation
+//!   checkable by name (`super::named_dims` refuses a repeated name, because
+//!   "contains `d` at size 3" cannot say WHICH `d`), so the join has no answer.
+//!   At `b45a0ca1` the first-view rule compiled it, and compiled it to
+//!   order-dependent garbage: measured `[0,0,0,1,1,1,2,2,2]` one way and
+//!   `[1,1,1,0,0,0,2,2,2]` the other, over a fixture whose correct per-row
+//!   orders are `[0,1,2]` throughout. Refusing is the same loud-beats-wrong rule
+//!   the rest of this pass follows, and refusing is all that is claimed:
+//!   a repeated dimension is independently mis-read one layer down, so there is
+//!   no correct answer to fall back to. `super::project_var_index_to_temp`
+//!   matches a temp axis to a variable axis by NAME and takes the FIRST hit, so
+//!   over `out[d,d]` both temp axes take the same coordinate and `out[i,j]`
+//!   reads `temp[i,i]`. The single-shape `matrix[d,d] * 2` -- which still
+//!   compiles, and must, since one view needs no join -- therefore returns
+//!   `[0,0,0,1,1,1,2,2,2]` where its per-row ascending orders are `[0,1,2]`
+//!   throughout. (`codegen::array_view_to_static_temp` keys `DimId`s by name
+//!   too, so the runtime broadcast has the same blind spot; the projection is
+//!   what produces the measured number.) Making the mixed form compile means
+//!   fixing that first, and it is not on this branch's path. Pinned by
+//!   `array_operand_materialization_tests::a_repeated_dimension_operand_declines_rather_than_guessing_which_axis`.
 //! * A BARE array-valued `PREVIOUS`/`INIT` is not materialized because it does
 //!   not need to be: it is already a view, over one of the VM's snapshot
 //!   buffers ([`is_snapshot_view`]). Nested inside a computed operand it
@@ -298,6 +327,12 @@ fn materialize_view_operand(
     if is_snapshot_view(&operand) {
         return operand;
     }
+    // The operand's shape is the JOIN of its subexpressions' shapes, which is
+    // what makes `small[d] + wide[e,d]` and `wide[e,d] + small[d]` the same
+    // array (`super::find_expr_array_view`). `None` covers both "no shape" and
+    // "two shapes neither of which contains the other"; declining leaves the
+    // operand for codegen to reject, exactly as the two deliberately
+    // unmaterialized positions above do, rather than guessing an axis order.
     let Some(source_view) = super::find_expr_array_view(&operand) else {
         return operand;
     };
