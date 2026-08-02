@@ -3064,9 +3064,12 @@ fn runtime_loops_reclassify_sign_flipping_loop() {
 /// ~400 steps) then -0.0001 while an exogenous ramp `d` dominates the
 /// per-step change in `f` (40 negative samples of magnitude ~1e-4..1e-3).
 /// The dominance ratio lands at ~0.9999: above the 0.99 Rux gate, strictly
-/// below 1.0. Structurally the loop is Undetermined (the sign of `g` is not
-/// statically derivable), so Rux through this surface is precisely the label
-/// the issue says was unreachable.
+/// below 1.0. Structurally the loop is Reinforcing (the bare co-factor `g`
+/// is positive by the SD labeling convention -- and is exactly the kind of
+/// quantity the convention can be wrong about, since its value flips sign
+/// mid-run), so Rux through this surface both remains the label the issue
+/// says was unreachable AND demonstrates runtime evidence downgrading a
+/// conventional structural sign.
 #[test]
 fn runtime_loops_report_definite_rux() {
     let test_project = TestProject::new("rux_mixed_sign")
@@ -3094,14 +3097,15 @@ fn runtime_loops_report_definite_rux() {
         simlin_sim_run_to_end(sim, &mut err);
         assert!(err.is_null());
 
-        // Structural baseline: one loop, Undetermined at confidence 0.0.
+        // Structural baseline: one loop, Reinforcing by the bare-co-factor
+        // convention at the binary structural confidence 1.0.
         let structural = simlin_analyze_get_loops(model, &mut err);
         assert!(err.is_null());
         assert!(!structural.is_null());
         assert_eq!((*structural).count, 1, "the fixture has exactly one loop");
         let struct_loop = &std::slice::from_raw_parts((*structural).loops, 1)[0];
-        assert!(struct_loop.polarity == SimlinLoopPolarity::Undetermined);
-        assert_eq!(struct_loop.polarity_confidence, 0.0);
+        assert!(struct_loop.polarity == SimlinLoopPolarity::Reinforcing);
+        assert_eq!(struct_loop.polarity_confidence, 1.0);
 
         // Runtime surface: the same loop reports the definite Rux variant
         // with the real (>= 0.99, < 1.0) dominance ratio.

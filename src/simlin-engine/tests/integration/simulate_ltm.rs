@@ -10486,8 +10486,13 @@ fn exhaustive_never_active_loop_keeps_structural_polarity() {
 ///
 /// The dominance ratio `|r - |b|| / (r + |b|)` lands at ~0.9999 -- above the
 /// 0.99 Rux gate but strictly below 1.0 (both signs are present). The
-/// `s -> f` link polarity is statically Unknown (the sign of `g` is not
-/// derivable), so the structural label is Undetermined/0.0.
+/// `s -> f` link is statically signed Positive by the bare-named-co-factor
+/// convention (`g` is a named quantity, conventionally positive-valued),
+/// so the structural label is Reinforcing/1.0 -- and `g` is exactly the
+/// kind of quantity that convention can be WRONG about, which is what
+/// makes this fixture doubly useful: the runtime reclassification both
+/// upgrades the label to the honest mixed-sign Rux AND demonstrates that
+/// runtime evidence overrides a conventional structural sign.
 fn mixed_sign_dominant_loop_project() -> simlin_engine::datamodel::Project {
     TestProject::new("rux_mixed_sign")
         .with_sim_time(0.0, 110.0, 0.25)
@@ -10520,12 +10525,15 @@ fn exhaustive_mixed_sign_dominant_loop_reclassifies_to_rux() {
     assert_eq!(detected.loops.len(), 1, "the fixture has exactly one loop");
     assert_eq!(
         detected.loops[0].polarity,
-        DetectedLoopPolarity::Undetermined,
-        "the sign of g is not statically derivable, so the structural label is Undetermined"
+        DetectedLoopPolarity::Reinforcing,
+        "the bare co-factor g signs s -> f Positive by convention, so the \
+         structural label is Reinforcing (the convention is fallible here -- \
+         g's value flips sign mid-run -- which is exactly what the runtime \
+         reclassification below corrects)"
     );
     assert_eq!(
-        detected.loops[0].polarity_confidence, 0.0,
-        "structural Undetermined carries the binary 0.0 confidence"
+        detected.loops[0].polarity_confidence, 1.0,
+        "a structurally signed loop carries the binary 1.0 confidence"
     );
 
     let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);

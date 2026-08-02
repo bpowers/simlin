@@ -29,80 +29,120 @@ fn test_flip_polarity() {
 }
 
 #[test]
-fn test_is_positive_constant() {
-    // Test is_positive_constant function (covers lines 1058-1062)
-    use crate::ast::{Expr2, Loc};
+fn test_literal_sign() {
+    use crate::ast::{Expr2, Loc, UnaryOp};
 
-    let pos_const = Expr2::Const(
-        "5".to_string(),
-        crate::ast::Literal::new(5.0),
-        Loc::default(),
-    );
-    assert!(is_positive_constant(&pos_const), "5.0 should be positive");
+    let cnst = |text: &str, v: f64| {
+        Expr2::Const(
+            text.to_string(),
+            crate::ast::Literal::new(v),
+            Loc::default(),
+        )
+    };
+    let neg = |e: Expr2| Expr2::Op1(UnaryOp::Negative, Box::new(e), None, Loc::default());
 
-    let neg_const = Expr2::Const(
-        "-5".to_string(),
-        crate::ast::Literal::new(-5.0),
-        Loc::default(),
-    );
-    assert!(
-        !is_positive_constant(&neg_const),
-        "-5.0 should not be positive"
-    );
-
-    let zero_const = Expr2::Const(
-        "0".to_string(),
-        crate::ast::Literal::new(0.0),
-        Loc::default(),
-    );
-    assert!(
-        !is_positive_constant(&zero_const),
-        "0.0 should not be positive"
+    assert_eq!(literal_sign(&cnst("5", 5.0)), Some(true), "5 is positive");
+    assert_eq!(literal_sign(&cnst("0", 0.0)), None, "0 has no sign");
+    assert_eq!(
+        literal_sign(&Expr2::Var(Ident::new("x"), None, Loc::default())),
+        None,
+        "a variable is not a literal"
     );
 
-    let var_expr = Expr2::Var(Ident::new("x"), None, Loc::default());
-    assert!(
-        !is_positive_constant(&var_expr),
-        "Variable should not be positive constant"
+    // The lexer takes no leading sign, so a model equation `-5` parses as
+    // Op1(Negative, Const(5)) -- the shape a Const-only predicate is blind
+    // to. literal_sign must see through the negation (and chains of it).
+    assert_eq!(
+        literal_sign(&neg(cnst("5", 5.0))),
+        Some(false),
+        "-5 (parsed shape) is negative"
+    );
+    assert_eq!(
+        literal_sign(&neg(neg(cnst("3", 3.0)))),
+        Some(true),
+        "--3 is positive"
+    );
+    assert_eq!(literal_sign(&neg(cnst("0", 0.0))), None, "-0 has no sign");
+
+    // A hand-built Const carrying a negative value directly (the shape
+    // constant folding could one day produce) is negative too.
+    assert_eq!(
+        literal_sign(&cnst("-3", -3.0)),
+        Some(false),
+        "Const(-3) is negative"
     );
 }
 
 #[test]
-fn test_is_negative_constant() {
-    // Test is_negative_constant function (covers lines 1066-1070)
-    use crate::ast::{Expr2, Loc};
+fn test_provable_value_sign() {
+    use crate::ast::{Ast, Expr2, Loc, UnaryOp};
 
-    let neg_const = Expr2::Const(
-        "-3".to_string(),
-        crate::ast::Literal::new(-3.0),
-        Loc::default(),
-    );
-    assert!(is_negative_constant(&neg_const), "-3.0 should be negative");
+    let cnst = |v: f64| Expr2::Const(format!("{v}"), crate::ast::Literal::new(v), Loc::default());
+    let neg = |e: Expr2| Expr2::Op1(UnaryOp::Negative, Box::new(e), None, Loc::default());
+    let var = |n: &str| Expr2::Var(Ident::new(n), None, Loc::default());
+    let scalar_var = |ident: &str, eq: Expr2| Variable::Var {
+        ident: Ident::new(ident),
+        ast: Some(Ast::Scalar(eq)),
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    };
 
-    let pos_const = Expr2::Const(
-        "3".to_string(),
-        crate::ast::Literal::new(3.0),
-        Loc::default(),
-    );
-    assert!(
-        !is_negative_constant(&pos_const),
-        "3.0 should not be negative"
+    // `k_neg = -5` hand-builds the Op1(Negative, Const(5)) equation shape,
+    // which IS the production shape: the lexer takes no leading sign, so a
+    // parsed `-5` is a negation of the literal 5. The end-to-end twin
+    // (`test_mul_negative_constant_valued_cofactor_flips`, which goes
+    // through the real parse) is what pins that correspondence.
+    let mut variables: HashMap<Ident<Canonical>, Variable> = HashMap::new();
+    variables.insert(Ident::new("k_neg"), scalar_var("k_neg", neg(cnst(5.0))));
+    variables.insert(Ident::new("k_pos"), scalar_var("k_pos", cnst(5.0)));
+    variables.insert(
+        Ident::new("k_dyn"),
+        scalar_var(
+            "k_dyn",
+            Expr2::Op2(
+                BinaryOp::Mul,
+                Box::new(var("q")),
+                Box::new(cnst(2.0)),
+                None,
+                Loc::default(),
+            ),
+        ),
     );
 
-    let zero_const = Expr2::Const(
-        "0".to_string(),
-        crate::ast::Literal::new(0.0),
-        Loc::default(),
+    let vars = Some(&variables);
+    assert_eq!(provable_value_sign(&cnst(2.0), vars), Some(true));
+    assert_eq!(provable_value_sign(&var("k_pos"), vars), Some(true));
+    assert_eq!(
+        provable_value_sign(&var("k_neg"), vars),
+        Some(false),
+        "a variable whose equation is -5 is provably negative"
     );
-    assert!(
-        !is_negative_constant(&zero_const),
-        "0.0 should not be negative"
+    assert_eq!(
+        provable_value_sign(&neg(var("k_neg")), vars),
+        Some(true),
+        "-k_neg is provably positive"
     );
-
-    let var_expr = Expr2::Var(Ident::new("y"), None, Loc::default());
-    assert!(
-        !is_negative_constant(&var_expr),
-        "Variable should not be negative constant"
+    assert_eq!(
+        provable_value_sign(&var("k_dyn"), vars),
+        None,
+        "a non-constant equation proves nothing"
+    );
+    assert_eq!(
+        provable_value_sign(&var("missing"), vars),
+        None,
+        "an unknown ident proves nothing"
+    );
+    assert_eq!(
+        provable_value_sign(&var("k_pos"), None),
+        None,
+        "no variables map -> a bare reference proves nothing"
     );
 }
 
@@ -967,5 +1007,254 @@ fn test_lookup_table_polarity_in_links() {
         detected.loops[0].polarity,
         DetectedLoopPolarity::Balancing,
         "Loop with one negative link should be balancing"
+    );
+}
+
+/// Build a project from `(ident, kind)` variables, sync it, and return the
+/// link polarities plus detected loops -- the shared production path
+/// (parse -> lower -> `compute_link_polarities` / `model_detected_loops`)
+/// for the Mul/Div co-factor convention tests below. Using the real parse
+/// matters: a negative literal like `-5` parses as `Op1(Negative, Const(5))`
+/// (the lexer takes no leading sign), a shape hand-built `Const(-5.0)`
+/// fixtures never exercise.
+fn link_polarities_for(
+    variables: Vec<crate::datamodel::Variable>,
+) -> (HashMap<(String, String), LinkPolarity>, Vec<DetectedLoop>) {
+    let model = x_model("main", variables);
+    let sim_specs = sim_specs_with_units("months");
+    let datamodel_project = x_project(sim_specs, &[model]);
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &datamodel_project);
+    let model = result.models["main"].source;
+    let polarities = compute_link_polarities(&db, model, result.project);
+    let detected = model_detected_loops(&db, model, result.project)
+        .loops
+        .clone();
+    (polarities, detected)
+}
+
+fn link(from: &str, to: &str) -> (String, String) {
+    (from.to_string(), to.to_string())
+}
+
+/// The pysimlin README quickstart model: logistic growth with the growth
+/// fraction split into its own aux. The compounding link
+/// `population -> net_growth` has a bare named co-factor
+/// (`fractional_growth`), which the SD positive-value labeling convention
+/// signs Positive -- the same convention the Div one-side arm has always
+/// applied to `share = pop / total`. The compounding loop is therefore
+/// named `r1`, not `u1`.
+#[test]
+fn test_mul_bare_var_cofactor_is_positive_by_convention() {
+    let (polarities, loops) = link_polarities_for(vec![
+        x_stock("population", "50", &["net_growth"], &[], None),
+        x_flow("net_growth", "population * fractional_growth", None),
+        x_aux(
+            "fractional_growth",
+            "max_growth_rate * (1 - population / carrying_capacity)",
+            None,
+        ),
+        x_aux("max_growth_rate", "0.08", None),
+        x_aux("carrying_capacity", "10000", None),
+    ]);
+
+    assert_eq!(
+        polarities[&link("population", "net_growth")],
+        LinkPolarity::Positive,
+        "bare named co-factor (fractional_growth) is positive by convention",
+    );
+    assert_eq!(
+        polarities[&link("fractional_growth", "net_growth")],
+        LinkPolarity::Positive,
+        "bare named co-factor (population) is positive by convention",
+    );
+    assert_eq!(
+        polarities[&link("population", "fractional_growth")],
+        LinkPolarity::Negative,
+        "1 - population/K is provably decreasing in population",
+    );
+    // The co-factor of max_growth_rate is `(1 - population / carrying_capacity)`,
+    // a compound expression whose value sign is derived, not conventional: it
+    // genuinely flips when population crosses the carrying capacity.
+    assert_eq!(
+        polarities[&link("max_growth_rate", "fractional_growth")],
+        LinkPolarity::Unknown,
+        "compound co-factor stays Unknown",
+    );
+
+    assert_eq!(loops.len(), 2, "logistic growth has two loops");
+    let compounding = loops
+        .iter()
+        .find(|l| l.variables.len() == 2)
+        .expect("population <-> net_growth loop");
+    assert_eq!(compounding.id, "r1");
+    assert_eq!(compounding.polarity, DetectedLoopPolarity::Reinforcing);
+    let crowding = loops
+        .iter()
+        .find(|l| l.variables.len() == 3)
+        .expect("crowding loop through fractional_growth");
+    assert_eq!(crowding.id, "b1");
+    assert_eq!(crowding.polarity, DetectedLoopPolarity::Balancing);
+}
+
+/// The dangerous class the convention must NOT touch: a compound co-factor
+/// (`a - b`, `1 - pop/K`, ...) whose value sign is derived rather than
+/// conventional. Both the one-side arm (independent compound co-factor) and
+/// the both-sides arm (single-equation logistic, whose link partial really
+/// does flip sign at K/2) must stay Unknown.
+#[test]
+fn test_mul_compound_cofactor_stays_unknown() {
+    // One-side: co-factor `(a - b)` is independent of x but compound.
+    let (polarities, loops) = link_polarities_for(vec![
+        x_stock("x", "1", &["growth"], &[], None),
+        x_flow("growth", "x * (a - b)", None),
+        x_aux("a", "3", None),
+        x_aux("b", "1", None),
+    ]);
+    assert_eq!(
+        polarities[&link("x", "growth")],
+        LinkPolarity::Unknown,
+        "compound independent co-factor must stay Unknown",
+    );
+    assert_eq!(loops.len(), 1);
+    assert_eq!(loops[0].id, "u1");
+    assert_eq!(loops[0].polarity, DetectedLoopPolarity::Undetermined);
+
+    // Both-sides: single-equation logistic. Its true partial
+    // r*(1 - 2*pop/K) flips sign at K/2, so no value convention rescues it.
+    let (polarities, _) = link_polarities_for(vec![
+        x_stock("population", "50", &["net_growth"], &[], None),
+        x_flow(
+            "net_growth",
+            "population * max_growth_rate * (1 - population / carrying_capacity)",
+            None,
+        ),
+        x_aux("max_growth_rate", "0.08", None),
+        x_aux("carrying_capacity", "10000", None),
+    ]);
+    assert_eq!(
+        polarities[&link("population", "net_growth")],
+        LinkPolarity::Unknown,
+        "single-equation logistic link partial is sign-indefinite",
+    );
+}
+
+/// A co-factor with a PROVABLE sign must beat the positive-value convention:
+/// `y = x * k` with `k = -5` is decreasing in x. The negative literal
+/// parses as `Op1(Negative, Const(5))`, so the constant-sign predicates
+/// must see through unary negation -- a naive convention extension would
+/// confidently mislabel this link Positive.
+#[test]
+fn test_mul_negative_constant_valued_cofactor_flips() {
+    let (polarities, _) = link_polarities_for(vec![
+        x_aux("x", "1", None),
+        x_aux("k", "-5", None),
+        x_aux("y", "x * k", None),
+    ]);
+    assert_eq!(
+        polarities[&link("x", "y")],
+        LinkPolarity::Negative,
+        "provably negative co-factor flips polarity",
+    );
+    assert_eq!(
+        polarities[&link("k", "y")],
+        LinkPolarity::Positive,
+        "co-factor x is positive by convention",
+    );
+}
+
+/// An inline negated bare co-factor is negative by the same convention:
+/// `y = x * (-z)` labels `x -> y` Negative (z positive-by-convention,
+/// negation flips).
+#[test]
+fn test_mul_negated_bare_cofactor_flips() {
+    let (polarities, _) = link_polarities_for(vec![
+        x_aux("x", "1", None),
+        x_aux("q", "1", None),
+        x_aux("z", "q * 2", None),
+        x_aux("y", "x * (-z)", None),
+    ]);
+    assert_eq!(
+        polarities[&link("x", "y")],
+        LinkPolarity::Negative,
+        "negated bare co-factor flips polarity by convention",
+    );
+}
+
+/// A co-factor that references from_var non-monotonically must stay Unknown:
+/// the convention only applies to co-factors INDEPENDENT of the link source.
+#[test]
+fn test_mul_cofactor_referencing_from_var_stays_unknown() {
+    let (polarities, _) =
+        link_polarities_for(vec![x_aux("x", "1", None), x_aux("y", "x * ABS(x)", None)]);
+    assert_eq!(
+        polarities[&link("x", "y")],
+        LinkPolarity::Unknown,
+        "co-factor depending non-monotonically on from_var poisons the product",
+    );
+}
+
+/// A subscripted reference to a named quantity is positive by convention,
+/// exactly like a bare Var (mirroring `operand_positive_by_convention`).
+#[test]
+fn test_mul_subscript_cofactor_is_positive_by_convention() {
+    use crate::datamodel::{self, Dimension, DimensionElements};
+
+    let arr = datamodel::Variable::Aux(datamodel::Aux {
+        ident: "arr".to_string(),
+        equation: datamodel::Equation::ApplyToAll(vec!["dim_d".to_string()], "2".to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    });
+    let model = x_model(
+        "main",
+        vec![x_aux("x", "1", None), arr, x_aux("y", "x * arr[d1]", None)],
+    );
+    let sim_specs = sim_specs_with_units("months");
+    let mut datamodel_project = x_project(sim_specs, &[model]);
+    datamodel_project.dimensions = vec![Dimension {
+        name: "dim_d".to_string(),
+        elements: DimensionElements::Named(vec!["d1".to_string(), "d2".to_string()]),
+        mappings: vec![],
+        parent: None,
+    }];
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &datamodel_project);
+    let model = result.models["main"].source;
+    let polarities = compute_link_polarities(&db, model, result.project);
+    assert_eq!(
+        polarities[&link("x", "y")],
+        LinkPolarity::Positive,
+        "subscripted named co-factor is positive by convention",
+    );
+}
+
+/// The Div arms' provable-sign escape hatch must also see through the
+/// production parse of a negative literal: `k = -5` makes `x / k`
+/// decreasing in x and `k / x` INCREASING in x (d(k/x)/dx = -k/x^2 > 0).
+/// Before the sign predicates handled unary negation both were labeled by
+/// the positive-value convention -- the exact mislabel the Div arm's
+/// comment describes for `-5/y`.
+#[test]
+fn test_div_negative_constant_valued_operand_is_provable() {
+    let (polarities, _) = link_polarities_for(vec![
+        x_aux("x", "1", None),
+        x_aux("k", "-5", None),
+        x_aux("y", "x / k", None),
+        x_aux("y2", "k / x", None),
+    ]);
+    assert_eq!(
+        polarities[&link("x", "y")],
+        LinkPolarity::Negative,
+        "provably negative denominator flips the numerator pass-through",
+    );
+    assert_eq!(
+        polarities[&link("x", "y2")],
+        LinkPolarity::Positive,
+        "provably negative numerator inverts the conventional denominator flip",
     );
 }

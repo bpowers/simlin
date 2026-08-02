@@ -24,7 +24,7 @@ pub(super) fn analyze_link_polarity(
     from_var: &Ident<Canonical>,
     variables: &HashMap<Ident<Canonical>, Variable>,
 ) -> LinkPolarity {
-    analyze_ast_polarity(ast, from_var, variables, /* mul_convention = */ false)
+    analyze_ast_polarity(ast, from_var, variables)
 }
 
 /// Polarity of a hoisted reducer's body with respect to ONE source variable
@@ -37,24 +37,18 @@ pub(super) fn analyze_link_polarity(
 /// "the reducer is monotone in its summands" says nothing about a variable
 /// the summand body negates.
 ///
-/// This is `analyze_link_polarity` with the positive-by-convention Mul rule
-/// enabled (`mul_convention`): a Mul whose source-independent co-factor is a
-/// bare named quantity (`pop[*]` in `SUM(pop[*] * scale)`) passes the
-/// source's derivative sign through, the same SD labeling convention the Div
-/// arm and the both-sides-dependent Mul/Div rules already apply. So
-/// `SUM(pop[*])` and `SUM(pop[*] * scale)` w.r.t. `pop` are Positive,
+/// So `SUM(pop[*])` and `SUM(pop[*] * scale)` w.r.t. `pop` are Positive,
 /// `SUM(pop[*] * scale)` w.r.t. `scale` is Positive,
 /// `SUM(pop[*] * (1 - weight[*]))` w.r.t. `weight` is Negative, and an
 /// indeterminate body (a compound co-factor like `(k - pop[*])`, or a
 /// non-monotone reducer like STDDEV) stays Unknown -- never a confident
 /// wrong label.
 ///
-/// The convention rule is deliberately NOT part of the general analyzer:
-/// applied to arbitrary model equations it would relabel sign-indefinite
-/// links (the logistic-growth class the Mul both-sides comment documents).
-/// An agg's body is the one context where a blanket monotone-Positive
-/// label was previously applied unconditionally, so a convention-scoped
-/// analysis is strictly more accurate there.
+/// This used to be `analyze_link_polarity` with a feeder-hop-only
+/// `mul_convention` flag enabling the positive-by-convention Mul one-side
+/// rule; that rule is now part of the general analyzer (see the Mul arm of
+/// [`analyze_expr_polarity_with_context`]), so the only thing this entry
+/// point adds is accepting a bare `BuiltinFn` instead of a whole equation.
 ///
 /// `reducer` is the reducer call itself (`ltm_agg::AggNode::reducer`), not a
 /// whole equation: an aggregate node's equation IS one reducer application,
@@ -67,43 +61,33 @@ pub(super) fn analyze_source_to_agg_polarity(
     source: &Ident<Canonical>,
     variables: &HashMap<Ident<Canonical>, Variable>,
 ) -> LinkPolarity {
-    analyze_builtin_polarity(
-        reducer,
-        source,
-        LinkPolarity::Positive,
-        Some(variables),
-        /* mul_convention = */ true,
-    )
+    analyze_builtin_polarity(reducer, source, LinkPolarity::Positive, Some(variables))
 }
 
-/// Shared AST-level dispatch for [`analyze_link_polarity`] /
-/// [`analyze_source_to_agg_polarity`]: per-element equations fold like the
-/// `Ast::Arrayed` rule (first concrete polarity wins; a direction
-/// disagreement collapses to Unknown).
+/// AST-level dispatch for [`analyze_link_polarity`]: per-element equations
+/// fold like the `Ast::Arrayed` rule (first concrete polarity wins; a
+/// direction disagreement collapses to Unknown).
 fn analyze_ast_polarity(
     ast: &Ast<Expr2>,
     from_var: &Ident<Canonical>,
     variables: &HashMap<Ident<Canonical>, Variable>,
-    mul_convention: bool,
 ) -> LinkPolarity {
     match ast {
-        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => analyze_expr_polarity_impl(
+        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => analyze_expr_polarity_with_context(
             expr,
             from_var,
             LinkPolarity::Positive,
             Some(variables),
-            mul_convention,
         ),
         Ast::Arrayed(_, elements, default_expr, _) => {
             // For arrayed equations, check all elements
             let mut polarity = LinkPolarity::Unknown;
             for expr in elements.values() {
-                let elem_polarity = analyze_expr_polarity_impl(
+                let elem_polarity = analyze_expr_polarity_with_context(
                     expr,
                     from_var,
                     LinkPolarity::Positive,
                     Some(variables),
-                    mul_convention,
                 );
                 if polarity == LinkPolarity::Unknown {
                     polarity = elem_polarity;
@@ -113,12 +97,11 @@ fn analyze_ast_polarity(
                 }
             }
             if let Some(default_expr) = default_expr {
-                let default_polarity = analyze_expr_polarity_impl(
+                let default_polarity = analyze_expr_polarity_with_context(
                     default_expr,
                     from_var,
                     LinkPolarity::Positive,
                     Some(variables),
-                    mul_convention,
                 );
                 if polarity == LinkPolarity::Unknown {
                     polarity = default_polarity;
@@ -266,26 +249,10 @@ fn substitute_subexpr_in_index(
     }
 }
 
-/// Recursively analyze expression polarity with optional context for looking up tables
-pub(super) fn analyze_expr_polarity_with_context(
-    expr: &Expr2,
-    from_var: &Ident<Canonical>,
-    current_polarity: LinkPolarity,
-    variables: Option<&HashMap<Ident<Canonical>, Variable>>,
-) -> LinkPolarity {
-    analyze_expr_polarity_impl(
-        expr,
-        from_var,
-        current_polarity,
-        variables,
-        /* mul_convention = */ false,
-    )
-}
-
-/// The `Expr2::App` half of [`analyze_expr_polarity_impl`], reachable from a
-/// `BuiltinFn` on its own so that a hoisted reducer's polarity
-/// ([`analyze_source_to_agg_polarity`]) can be analysed without wrapping the
-/// builtin back up in an `Expr2::App` it was taken out of.
+/// The `Expr2::App` half of [`analyze_expr_polarity_with_context`],
+/// reachable from a `BuiltinFn` on its own so that a hoisted reducer's
+/// polarity ([`analyze_source_to_agg_polarity`]) can be analysed without
+/// wrapping the builtin back up in an `Expr2::App` it was taken out of.
 ///
 /// The `App` node's own `ArrayBounds` and `Loc` are not read by any arm, so
 /// nothing is lost by dropping the wrapper.
@@ -294,7 +261,6 @@ fn analyze_builtin_polarity(
     from_var: &Ident<Canonical>,
     current_polarity: LinkPolarity,
     variables: Option<&HashMap<Ident<Canonical>, Variable>>,
-    mul_convention: bool,
 ) -> LinkPolarity {
     match builtin {
         // All three lookup variants share the `(table_expr, index_expr, loc)`
@@ -304,12 +270,11 @@ fn analyze_builtin_polarity(
         BuiltinFn::Lookup(table_expr, index_expr, _)
         | BuiltinFn::LookupForward(table_expr, index_expr, _)
         | BuiltinFn::LookupBackward(table_expr, index_expr, _) => {
-            let arg_polarity = analyze_expr_polarity_impl(
+            let arg_polarity = analyze_expr_polarity_with_context(
                 index_expr,
                 from_var,
                 LinkPolarity::Positive,
                 variables,
-                mul_convention,
             );
 
             if arg_polarity == LinkPolarity::Unknown {
@@ -329,24 +294,14 @@ fn analyze_builtin_polarity(
         | BuiltinFn::Sqrt(inner)
         | BuiltinFn::Arctan(inner)
         | BuiltinFn::Int(inner) => {
-            analyze_expr_polarity_impl(inner, from_var, current_polarity, variables, mul_convention)
+            analyze_expr_polarity_with_context(inner, from_var, current_polarity, variables)
         }
         // Max/Min (scalar two-arg form): non-decreasing in each argument
         BuiltinFn::Max(a, Some(b)) | BuiltinFn::Min(a, Some(b)) => {
-            let pol_a = analyze_expr_polarity_impl(
-                a,
-                from_var,
-                current_polarity,
-                variables,
-                mul_convention,
-            );
-            let pol_b = analyze_expr_polarity_impl(
-                b,
-                from_var,
-                current_polarity,
-                variables,
-                mul_convention,
-            );
+            let pol_a =
+                analyze_expr_polarity_with_context(a, from_var, current_polarity, variables);
+            let pol_b =
+                analyze_expr_polarity_with_context(b, from_var, current_polarity, variables);
             match (pol_a, pol_b) {
                 // When one side returns Unknown, we must check whether it actually
                 // references from_var. Unknown from an independent expression (e.g.
@@ -380,18 +335,13 @@ fn analyze_builtin_polarity(
         // argument, so we combine arg polarities the same way Add does (any
         // disagreement collapses to Unknown).
         BuiltinFn::Sum(arg) => {
-            analyze_expr_polarity_impl(arg, from_var, current_polarity, variables, mul_convention)
+            analyze_expr_polarity_with_context(arg, from_var, current_polarity, variables)
         }
         BuiltinFn::Mean(args) => {
             let mut combined = LinkPolarity::Unknown;
             for arg in args {
-                let arg_pol = analyze_expr_polarity_impl(
-                    arg,
-                    from_var,
-                    current_polarity,
-                    variables,
-                    mul_convention,
-                );
+                let arg_pol =
+                    analyze_expr_polarity_with_context(arg, from_var, current_polarity, variables);
                 // Hoist the self-reference + Unknown short circuit ahead of the
                 // per-arg combiner so that any non-monotone dependence on
                 // from_var (e.g. ABS(x)) collapses the whole mean to Unknown,
@@ -420,7 +370,7 @@ fn analyze_builtin_polarity(
         // Array reducers MAX/MIN (single-arg form): max/min of a monotone family
         // is monotone, so propagate the inner polarity.
         BuiltinFn::Max(a, None) | BuiltinFn::Min(a, None) => {
-            analyze_expr_polarity_impl(a, from_var, current_polarity, variables, mul_convention)
+            analyze_expr_polarity_with_context(a, from_var, current_polarity, variables)
         }
         // STDDEV is non-monotone (variance has no fixed sign w.r.t. inputs).
         // RANK depends on the rest of the array, so its sign w.r.t. one element
@@ -430,16 +380,14 @@ fn analyze_builtin_polarity(
     }
 }
 
-/// The recursive polarity walk. `mul_convention` enables the
-/// positive-by-convention Mul one-side rule (feeder-hop analysis ONLY; see
-/// [`analyze_source_to_agg_polarity`]); `false` reproduces the general
-/// analyzer exactly.
-fn analyze_expr_polarity_impl(
+/// The recursive polarity walk: how does `expr` move when `from_var` moves,
+/// with optional variable context for constant-sign and lookup-table
+/// resolution.
+pub(super) fn analyze_expr_polarity_with_context(
     expr: &Expr2,
     from_var: &Ident<Canonical>,
     current_polarity: LinkPolarity,
     variables: Option<&HashMap<Ident<Canonical>, Variable>>,
-    mul_convention: bool,
 ) -> LinkPolarity {
     match expr {
         Expr2::Const(_, _, _) => LinkPolarity::Unknown,
@@ -493,28 +441,14 @@ fn analyze_expr_polarity_impl(
                 LinkPolarity::Unknown
             }
         }
-        Expr2::App(builtin, _, _) => analyze_builtin_polarity(
-            builtin,
-            from_var,
-            current_polarity,
-            variables,
-            mul_convention,
-        ),
+        Expr2::App(builtin, _, _) => {
+            analyze_builtin_polarity(builtin, from_var, current_polarity, variables)
+        }
         Expr2::Op2(op, left, right, _, _) => {
-            let left_pol = analyze_expr_polarity_impl(
-                left,
-                from_var,
-                current_polarity,
-                variables,
-                mul_convention,
-            );
-            let right_pol = analyze_expr_polarity_impl(
-                right,
-                from_var,
-                current_polarity,
-                variables,
-                mul_convention,
-            );
+            let left_pol =
+                analyze_expr_polarity_with_context(left, from_var, current_polarity, variables);
+            let right_pol =
+                analyze_expr_polarity_with_context(right, from_var, current_polarity, variables);
 
             match op {
                 BinaryOp::Add => match (left_pol, right_pol) {
@@ -554,10 +488,11 @@ fn analyze_expr_polarity_impl(
                     _ => LinkPolarity::Unknown,
                 },
                 BinaryOp::Mul => {
-                    // Multiplication needs the SIGN of the other operand to determine
-                    // polarity, not just whether it's independent of from_var.
-                    // This is why Mul uses is_positive_constant/is_negative_constant
-                    // rather than the expr_references_var pattern used by Add/Sub/Div.
+                    // Multiplication needs the SIGN of the other operand to
+                    // determine polarity, not just whether it's independent of
+                    // from_var. This is why Mul consults `cofactor_value_sign`
+                    // rather than the bare expr_references_var pattern Add/Sub
+                    // use.
                     if left_pol != LinkPolarity::Unknown && right_pol != LinkPolarity::Unknown {
                         // BOTH factors depend on from_var (a non-Unknown
                         // polarity only arises from a from_var reference --
@@ -588,55 +523,43 @@ fn analyze_expr_polarity_impl(
                             LinkPolarity::Unknown
                         }
                     } else if left_pol != LinkPolarity::Unknown {
-                        // Only left has polarity, check if right is a constant or constant-valued variable
-                        if is_positive_constant(right)
-                            || (variables.is_some()
-                                && is_positive_variable(right, variables.unwrap()))
-                        {
-                            left_pol
-                        } else if is_negative_constant(right)
-                            || (variables.is_some()
-                                && is_negative_variable(right, variables.unwrap()))
-                        {
-                            flip_polarity(left_pol)
-                        } else if mul_convention
-                            && !expr_references_var(right, from_var)
-                            && operand_positive_by_convention(right, variables)
-                        {
-                            // Feeder-hop analysis only (see
-                            // `analyze_source_to_agg_polarity`): a bare named
-                            // co-factor independent of `from_var` is positive
-                            // by the SD labeling convention -- the same
-                            // convention the Div arm and the both-sides rules
-                            // already apply -- so the dependent side's
-                            // derivative sign passes through. The
-                            // `expr_references_var` guard keeps a co-factor
-                            // that threads `from_var` through an index
-                            // (`pop[from_var]`) on the Unknown path.
-                            left_pol
-                        } else {
+                        // Only left carries from_var's derivative sign; the
+                        // co-factor scales it by its VALUE sign. A provable
+                        // sign (a numeric literal through any unary
+                        // negations, or a variable whose whole equation is
+                        // one) is used exactly; a bare named quantity is
+                        // positive by the SD labeling convention -- the same
+                        // convention the Div arm and the both-sides rules
+                        // apply, and the reading every CLD gives
+                        // `net_growth = population * fractional_growth`
+                        // (`population -> net_growth` is `+`). A compound
+                        // co-factor (`k - x`, `1 - pop/K`) has a DERIVED
+                        // value sign, not a conventional one -- that is the
+                        // logistic-growth class whose sign genuinely flips
+                        // -- so it stays Unknown. The `expr_references_var`
+                        // guard keeps a co-factor that depends on `from_var`
+                        // non-monotonically (`ABS(x)`, or `pop[from_var]`
+                        // threading it through an index) on the Unknown
+                        // path: such a factor is not a pure scale.
+                        if expr_references_var(right, from_var) {
                             LinkPolarity::Unknown
+                        } else {
+                            match cofactor_value_sign(right, variables) {
+                                Some(true) => left_pol,
+                                Some(false) => flip_polarity(left_pol),
+                                None => LinkPolarity::Unknown,
+                            }
                         }
                     } else if right_pol != LinkPolarity::Unknown {
-                        // Only right has polarity, check if left is a constant or constant-valued variable
-                        if is_positive_constant(left)
-                            || (variables.is_some()
-                                && is_positive_variable(left, variables.unwrap()))
-                        {
-                            right_pol
-                        } else if is_negative_constant(left)
-                            || (variables.is_some()
-                                && is_negative_variable(left, variables.unwrap()))
-                        {
-                            flip_polarity(right_pol)
-                        } else if mul_convention
-                            && !expr_references_var(left, from_var)
-                            && operand_positive_by_convention(left, variables)
-                        {
-                            // Mirror of the left-arm convention rule above.
-                            right_pol
-                        } else {
+                        // Mirror of the left-carries-polarity arm above.
+                        if expr_references_var(left, from_var) {
                             LinkPolarity::Unknown
+                        } else {
+                            match cofactor_value_sign(left, variables) {
+                                Some(true) => right_pol,
+                                Some(false) => flip_polarity(right_pol),
+                                None => LinkPolarity::Unknown,
+                            }
                         }
                     } else {
                         LinkPolarity::Unknown
@@ -648,10 +571,11 @@ fn analyze_expr_polarity_impl(
                     //   d(n/y)/dy = -n/y^2      -- sign is -sign(n)
                     //   d(f/y)/dx = f'(x)/y     -- sign is sign(f')*sign(y)
                     // When the independent operand's sign is PROVABLE (a
-                    // numeric constant, or a variable whose whole equation is
-                    // one), use it -- the pre-fix rules ignored it entirely,
-                    // mislabeling `-5/y` (truly Positive) as Negative and
-                    // `x/-5` (truly Negative) as Positive.
+                    // numeric literal through any unary negations, or a
+                    // variable whose whole equation is one), use it -- the
+                    // pre-fix rules ignored it entirely, mislabeling `-5/y`
+                    // (truly Positive) as Negative and `x/-5` (truly
+                    // Negative) as Positive.
                     //
                     // For a NON-constant independent operand we keep the
                     // conventional SD assumption that quantities are
@@ -664,20 +588,16 @@ fn analyze_expr_polarity_impl(
                     // that crosses zero is already numerically catastrophic,
                     // so real models keep divisor/numerator signs fixed, and
                     // the runtime loop-score SIGN factors (which this label
-                    // never feeds) remain exact regardless.
-                    let value_sign = |e: &Expr2| -> Option<bool> {
-                        if is_positive_constant(e)
-                            || variables.is_some_and(|v| is_positive_variable(e, v))
-                        {
-                            Some(true)
-                        } else if is_negative_constant(e)
-                            || variables.is_some_and(|v| is_negative_variable(e, v))
-                        {
-                            Some(false)
-                        } else {
-                            None
-                        }
-                    };
+                    // never feeds) remain exact regardless. Note the Div
+                    // convention is deliberately BROADER than Mul's: it
+                    // applies to compound independent operands too
+                    // (`(a-b)/y` flips), because the
+                    // divisor-cannot-cross-zero argument covers the whole
+                    // quotient, whereas a compound Mul co-factor crossing
+                    // zero is routine (the logistic-growth class) and stays
+                    // Unknown.
+                    let value_sign =
+                        |e: &Expr2| -> Option<bool> { provable_value_sign(e, variables) };
                     match (left_pol, right_pol) {
                         (LinkPolarity::Unknown, pol) => {
                             if expr_references_var(left, from_var) {
@@ -732,13 +652,8 @@ fn analyze_expr_polarity_impl(
             }
         }
         Expr2::Op1(op, operand, _, _) => {
-            let operand_pol = analyze_expr_polarity_impl(
-                operand,
-                from_var,
-                current_polarity,
-                variables,
-                mul_convention,
-            );
+            let operand_pol =
+                analyze_expr_polarity_with_context(operand, from_var, current_polarity, variables);
             match op {
                 crate::ast::UnaryOp::Not => flip_polarity(operand_pol),
                 crate::ast::UnaryOp::Negative => flip_polarity(operand_pol),
@@ -747,19 +662,17 @@ fn analyze_expr_polarity_impl(
         }
         Expr2::If(_, true_branch, false_branch, _, _) => {
             // For IF-THEN-ELSE, check both branches
-            let true_pol = analyze_expr_polarity_impl(
+            let true_pol = analyze_expr_polarity_with_context(
                 true_branch,
                 from_var,
                 current_polarity,
                 variables,
-                mul_convention,
             );
-            let false_pol = analyze_expr_polarity_impl(
+            let false_pol = analyze_expr_polarity_with_context(
                 false_branch,
                 from_var,
                 current_polarity,
                 variables,
-                mul_convention,
             );
 
             if true_pol == false_pol {
@@ -821,50 +734,85 @@ pub(super) fn expr_references_var(expr: &Expr2, var: &Ident<Canonical>) -> bool 
     }
 }
 
-/// Check if expression is a positive constant
-pub(super) fn is_positive_constant(expr: &Expr2) -> bool {
+/// Sign of a numeric-literal expression, seen through any chain of unary
+/// negations: `Some(true)` for `5` / `--5`, `Some(false)` for `-5`, `None`
+/// for `0` or anything that is not a literal.
+///
+/// Seeing through `Op1(Negative, ..)` is load-bearing, not a nicety: the
+/// lexer takes no leading sign (`lexer::scan_number`), so a model equation
+/// `-5` reaches this analysis as a NEGATION of the literal `5` and a
+/// Const-only predicate is blind to every negative constant a user can
+/// actually write.
+pub(super) fn literal_sign(expr: &Expr2) -> Option<bool> {
     match expr {
-        Expr2::Const(_, n, _) => n.value() > 0.0,
-        _ => false,
+        Expr2::Const(_, n, _) => {
+            let v = n.value();
+            if v > 0.0 {
+                Some(true)
+            } else if v < 0.0 {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        Expr2::Op1(crate::ast::UnaryOp::Negative, inner, _, _) => {
+            literal_sign(inner).map(|sign| !sign)
+        }
+        _ => None,
     }
 }
 
-/// Check if expression is a negative constant
-pub(super) fn is_negative_constant(expr: &Expr2) -> bool {
+/// PROVABLE value sign of an expression: a numeric literal (through unary
+/// negations), or a bare reference to a variable whose whole scalar
+/// equation is one. `None` = not provable. Deliberately does not chase
+/// variable-to-variable chains (`a = b; b = 5`): one level matches the
+/// historical `is_positive_variable` depth and cannot recurse on a cycle.
+pub(super) fn provable_value_sign(
+    expr: &Expr2,
+    variables: Option<&HashMap<Ident<Canonical>, Variable>>,
+) -> Option<bool> {
+    if let Some(sign) = literal_sign(expr) {
+        return Some(sign);
+    }
     match expr {
-        Expr2::Const(_, n, _) => n.value() < 0.0,
-        _ => false,
+        Expr2::Op1(crate::ast::UnaryOp::Negative, inner, _, _) => {
+            provable_value_sign(inner, variables).map(|sign| !sign)
+        }
+        Expr2::Var(ident, _, _) => {
+            let var = variables?.get(ident)?;
+            if let Some(Ast::Scalar(var_expr)) = var.ast() {
+                literal_sign(var_expr)
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
-/// Check if a variable has a positive constant value
-pub(super) fn is_positive_variable(
+/// VALUE sign of a Mul co-factor already known to be independent of
+/// `from_var`: a provable sign when one exists, else positive by the SD
+/// labeling convention for a bare named quantity (`Var` / `Subscript` --
+/// stocks, flows, rates, capacities are conventionally positive-valued,
+/// which is the sign every CLD assigns such a link), propagated through
+/// unary negation (`-z` is negative by the same convention). A COMPOUND
+/// co-factor (`k - x`, `1 - pop/K`) gets `None`: its value sign is derived,
+/// not conventional, and the canonical mid-run polarity flips (logistic
+/// growth) come exactly from such factors.
+fn cofactor_value_sign(
     expr: &Expr2,
-    variables: &HashMap<Ident<Canonical>, Variable>,
-) -> bool {
-    if let Expr2::Var(ident, _, _) = expr
-        && let Some(var) = variables.get(ident)
-        && let Some(Ast::Scalar(var_expr)) = var.ast()
-    {
-        // Recursively check if the variable's equation is a positive constant
-        return is_positive_constant(var_expr);
+    variables: Option<&HashMap<Ident<Canonical>, Variable>>,
+) -> Option<bool> {
+    if let Some(sign) = provable_value_sign(expr, variables) {
+        return Some(sign);
     }
-    false
-}
-
-/// Check if a variable has a negative constant value
-pub(super) fn is_negative_variable(
-    expr: &Expr2,
-    variables: &HashMap<Ident<Canonical>, Variable>,
-) -> bool {
-    if let Expr2::Var(ident, _, _) = expr
-        && let Some(var) = variables.get(ident)
-        && let Some(Ast::Scalar(var_expr)) = var.ast()
-    {
-        // Recursively check if the variable's equation is a negative constant
-        return is_negative_constant(var_expr);
+    match expr {
+        Expr2::Op1(crate::ast::UnaryOp::Negative, inner, _, _) => {
+            cofactor_value_sign(inner, variables).map(|sign| !sign)
+        }
+        Expr2::Var(..) | Expr2::Subscript(..) => Some(true),
+        _ => None,
     }
-    false
 }
 
 /// Whether an operand's runtime VALUE may be assumed positive under the SD
@@ -883,12 +831,10 @@ fn operand_positive_by_convention(
     expr: &Expr2,
     variables: Option<&HashMap<Ident<Canonical>, Variable>>,
 ) -> bool {
-    if is_negative_constant(expr) || variables.is_some_and(|v| is_negative_variable(expr, v)) {
-        return false;
+    match provable_value_sign(expr, variables) {
+        Some(sign) => sign,
+        None => matches!(expr, Expr2::Var(..) | Expr2::Subscript(..)),
     }
-    matches!(expr, Expr2::Var(..) | Expr2::Subscript(..))
-        || is_positive_constant(expr)
-        || variables.is_some_and(|v| is_positive_variable(expr, v))
 }
 
 /// Analyze the polarity of a graphical function/lookup table

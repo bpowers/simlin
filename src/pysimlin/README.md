@@ -72,25 +72,26 @@ Output:
 ```
 final population: 9359
 b1 (B): average importance 0.34
-u1 (R): average importance 0.66
-t=[0, 67] dominated by ('u1',)
+r1 (R): average importance 0.66
+t=[0, 67] dominated by ('r1',)
 t=[67, 100] dominated by ('b1',)
 ```
 
-The model has two feedback loops: the reinforcing compounding loop
+The model has two feedback loops: the reinforcing compounding loop `r1`
 (`population -> net_growth -> population`) and the balancing crowding loop
-through `fractional_growth`. `run()` simulates with loop analysis enabled,
-scoring every loop's contribution to behavior at every timestep. The
-reinforcing loop dominates the first two-thirds of the run; as population
-approaches the carrying capacity, the balancing loop takes over -- the
-handoff at t=67 is the inflection point of the S-curve.
+`b1` through `fractional_growth`. `run()` simulates with loop analysis
+enabled, scoring every loop's contribution to behavior at every timestep.
+The reinforcing loop dominates the first two-thirds of the run; as
+population approaches the carrying capacity, the balancing loop takes over
+-- the handoff at t=67 is the inflection point of the S-curve.
 
-Loop ids (`b1`, `u1`) come from structural analysis and are stable
-identifiers; the polarity reported on a `Run` is classified from runtime
-behavior. Here structural analysis cannot sign the link from `population`
-to `net_growth` (the sign of `fractional_growth` is not known statically),
-so the compounding loop is named `u1` -- but its runtime loop scores are
-uniformly positive, so it reports `R`.
+Loop ids (`r1`, `b1`) are stable identifiers assigned from the model's
+structure; the polarity in parentheses is classified from the run's actual
+behavior. The two usually agree, but they are independent claims: a loop
+whose sign genuinely depends on parameter values (initialize `population`
+above `carrying_capacity` and the compounding loop acts balancing) keeps
+its structural id while the runtime polarity reports what the run really
+did.
 
 ## Examples
 
