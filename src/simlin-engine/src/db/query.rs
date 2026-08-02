@@ -483,23 +483,31 @@ pub struct ImplicitVarMeta {
     /// the `index_in_parent` it replaces, and is what the `#[cfg(test)]`
     /// mutation in `find_in`'s body note pins.
     ///
-    /// One subtlety, because a name is not quite unique: a variable's
-    /// `implicit_vars` can REPEAT a name, since an `Arrayed` equation is parsed
-    /// once per phase and both passes append. The hint points at the LAST
-    /// occurrence (this map is name-keyed and last-wins, matching what
-    /// `index_in_parent` selected before it), while the scan fallback returns
-    /// the first. Those differ only if a repeated name carries different
-    /// content, which
-    /// `db::fragment_determinism_tests::repeated_implicit_helper_names_carry_identical_helpers`
-    /// pins against -- and whose doc records the two pre-existing shapes that
-    /// would break it.
+    /// That "cannot change the answer" rests on a PRECONDITION worth naming,
+    /// because it did not always hold: no two entries of one
+    /// `parsed.implicit_vars` may share a name. Otherwise the hint (which
+    /// points at the LAST occurrence, since this map is name-keyed and
+    /// last-wins) and the scan (which returns the first) could select
+    /// different helpers, and the hint would stop being an optimization.
+    /// `variable::parse_var_with_module_context` establishes it by MERGING
+    /// helpers across the dt and initial passes rather than appending, so a
+    /// byte-identical repeat collapses and a genuine collision is refused;
+    /// `db::fragment_determinism_tests::implicit_helper_names_are_unique_within_one_parse`
+    /// is what says so for every route into the vector. Note this is a
+    /// WITHIN-parse property and is independent of the cross-parse residual on
+    /// [`Self::name`] -- there, one name denotes different helpers in two
+    /// different parses, and hint and scan still agree with each other.
     ///
     /// It exists because the scan alone is O(k) per helper and so O(k^2) per
     /// parent variable, and `k` is not small on ordinary models: an
     /// apply-to-all `SMTH1` over an N-element dimension mints ~2N helpers on
-    /// ONE variable. Measured on `x[Dim] = SMTH1(y[Dim], 3)`, release, timed
-    /// against the parent commit: at N=800 the scan alone took 2.13s where the
-    /// parent took 1.12s, and with this hint it is 1.16s.
+    /// ONE variable. The clock says N=800 costs 2.13s scanning where the parent
+    /// commit costs 1.12s, and 1.16s with the hint; the instruction count says
+    /// it without a timer, by counting entries examined per compile: 17,289,600
+    /// scanning versus 14,400 with the hint, a 1200x reduction, at a 100% hit
+    /// rate on every model tried (C-LEARN, WRLD3, scirev7, and the synthetic at
+    /// both 200 and 800). The hit rate is the load-bearing number -- a miss is
+    /// only possible under the cross-parse divergence, which does not compile.
     pub index_hint: usize,
     pub is_stock: bool,
     pub is_module: bool,
@@ -537,9 +545,10 @@ impl ImplicitVarMeta {
     ) -> Option<&'a datamodel::Variable> {
         let is_mine = |v: &datamodel::Variable| canonicalize(v.get_ident()) == self.name;
         // The hint is right whenever the two parses agree, which is every model
-        // that is not the GH #372 divergence -- so the scan below is the
-        // exceptional path, not the usual one. Verifying the name before
-        // accepting the hint is what keeps this a pure optimization; dropping
+        // that is not the GH #372 divergence -- measured at a 100% hit rate on
+        // every model in the corpus, so the scan below is the exceptional path,
+        // not the usual one. Verifying the name before accepting the hint is
+        // what keeps this a pure optimization; dropping
         // that check restores positional identity and reds
         // `an_implicit_helper_declines_when_the_contexts_synthesize_different_sets`.
         if let Some(hinted) = parsed.implicit_vars.get(self.index_hint)
@@ -555,6 +564,9 @@ impl std::fmt::Debug for ImplicitVarMeta {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImplicitVarMeta")
             .field("name", &self.name)
+            // The hint is not identity, but a WRONG one is exactly what you are
+            // looking at this for, so it is rendered rather than hidden.
+            .field("index_hint", &self.index_hint)
             .field("is_stock", &self.is_stock)
             .field("size", &self.size)
             .field("dimensions", &self.dimensions)

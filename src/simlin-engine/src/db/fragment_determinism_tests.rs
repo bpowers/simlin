@@ -376,14 +376,27 @@ fn instantiation_input_set<'db>(
 }
 
 /// One variable's synthesized implicit helpers, in the order reported, each
-/// rendered as `name = equation`.
+/// rendered as `name = <content>`.
 ///
-/// The equation half is not decoration. Where each slot gets its OWN visitor
-/// the instability shows up in the order of the names; where ONE visitor spans
+/// The content half is not decoration. Where each slot gets its OWN visitor the
+/// instability shows up in the order of the names; where ONE visitor spans
 /// every slot the names are `$⁚v⁚0⁚…`, `$⁚v⁚1⁚…`, … handed out by a
 /// monotonically increasing counter, so the name LIST is stable no matter which
 /// slot is walked first and only the helper's CONTENT moves between the names.
-/// A name-only probe is blind to exactly the call site that has no other test.
+/// A name-only probe is blind to exactly the call site that has no other test:
+/// measured, the shared-visitor mutation survives the whole suite against a
+/// name-only probe and is caught 3 of 3 against this one.
+///
+/// A `Variable::Module` has no equation, so rendering only `get_equation()`
+/// would degenerate to the bare name for precisely the helper kind that carries
+/// the WIRING -- a mutation that re-bound which module instance reads which
+/// argument helper would be invisible. Modules therefore render their
+/// `model_name` and references instead.
+///
+/// Still weaker than comparing the compiled artifact, which differs on 21 of 23
+/// repeats under the same mutation. This is the cheaper probe that happens to
+/// catch the mutations these tests care about; reach for the artifact if that
+/// ever stops being true.
 fn implicit_helper_signatures(dm: &datamodel::Project, model_name: &str, var: &str) -> Vec<String> {
     let db = SimlinDb::default();
     let project = sync_from_datamodel(&db, dm).project;
@@ -396,7 +409,17 @@ fn implicit_helper_signatures(dm: &datamodel::Project, model_name: &str, var: &s
     parse_source_variable_with_module_context(&db, source_var, project, ctx)
         .implicit_vars
         .iter()
-        .map(|v| format!("{} = {:?}", v.get_ident(), v.get_equation()))
+        .map(|v| match v {
+            datamodel::Variable::Module(m) => {
+                let refs: Vec<String> = m
+                    .references
+                    .iter()
+                    .map(|r| format!("{}->{}", r.src, r.dst))
+                    .collect();
+                format!("{} = module {} {:?}", v.get_ident(), m.model_name, refs)
+            }
+            _ => format!("{} = {:?}", v.get_ident(), v.get_equation()),
+        })
         .collect()
 }
 
@@ -571,11 +594,21 @@ fn a_cross_context_helper_name_collision_is_confined_to_a_failing_compile() {
 /// project COMPILED, keeping only the initial pass's helper, so the dt phase
 /// silently smoothed the wrong expression. Now it is refused.
 ///
-/// The fixture deliberately makes both equations reference the SAME variable.
-/// An earlier draft used a different variable in each, and that version failed
-/// to compile even before the fix -- for an unrelated reason (the discarded
-/// helper's dependency was missing from the surviving one's dep set), which
-/// would have made this test pass against the defect it is meant to catch.
+/// Two spellings, and only ONE of them gates the fix -- which is why both are
+/// here and why the doc says which is which.
+///
+/// `same_dep` has both equations reference `driver`, so the surviving helper's
+/// dependency set covers the discarded one and nothing downstream objects:
+/// before the merge this COMPILED and silently smoothed the wrong expression.
+/// That is the arm that reds without the fix.
+///
+/// `disjoint_dep` references a different variable in each equation. It fails
+/// before the fix too, for an unrelated reason -- the discarded helper's
+/// dependency is missing from the survivor's dep set, so assembly cannot
+/// resolve it. Keeping it makes the pair say something the single fixture
+/// cannot: the refusal is not sensitive to whether the two bodies happen to
+/// share dependencies. If only this arm existed the test would pass against
+/// the very defect it names.
 ///
 /// Refusal, not repair: making this shape WORK needs a phase discriminator in
 /// the synthesized helper name, which changes every implicit helper's identity
@@ -583,30 +616,40 @@ fn a_cross_context_helper_name_collision_is_confined_to_a_failing_compile() {
 /// already makes for the within-one-pass twin of this collision.
 #[test]
 fn an_active_initial_that_collides_a_helper_name_is_refused() {
-    let mut dm = TestProject::new("active_initial_helper_collision")
-        .with_sim_time(0.0, 2.0, 1.0)
-        .scalar_aux("driver", "5")
-        .scalar_aux("v", "SMTH1(driver * 2, 3)")
-        .build_datamodel();
-    for var in dm.models[0].variables.iter_mut() {
-        if var.get_ident() == "v"
-            && let datamodel::Variable::Aux(a) = var
-        {
-            a.compat.active_initial = Some("SMTH1(driver * 100, 7)".to_string());
+    for (label, dt_eqn, init_eqn) in [
+        ("same_dep", "SMTH1(driver * 2, 3)", "SMTH1(driver * 100, 7)"),
+        ("disjoint_dep", "SMTH1(driver, 1)", "SMTH1(other, 2)"),
+    ] {
+        let mut dm = TestProject::new("active_initial_helper_collision")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .scalar_aux("driver", "5")
+            .scalar_aux("other", "9")
+            .scalar_aux("v", dt_eqn)
+            .build_datamodel();
+        for var in dm.models[0].variables.iter_mut() {
+            if var.get_ident() == "v"
+                && let datamodel::Variable::Aux(a) = var
+            {
+                a.compat.active_initial = Some(init_eqn.to_string());
+            }
         }
-    }
 
-    let db = SimlinDb::default();
-    let project = sync_from_datamodel(&db, &dm).project;
-    let err = compile_project_incremental(&db, project, "main").expect_err(
-        "a variable whose two phases mint the same helper name for different \
-         bodies must be refused, not compiled with one of them silently dropped",
-    );
-    let msg = err.to_string();
-    assert!(
-        msg.contains('v'),
-        "the refusal must name the offending variable; got {msg}"
-    );
+        let db = SimlinDb::default();
+        let project = sync_from_datamodel(&db, &dm).project;
+        let err = compile_project_incremental(&db, project, "main")
+            .err()
+            .unwrap_or_else(|| {
+                panic!(
+                    "[{label}] a variable whose two phases mint the same helper name \
+                 for different bodies must be refused, not compiled with one of \
+                 them silently dropped"
+                )
+            });
+        assert!(
+            err.to_string().contains('v'),
+            "[{label}] the refusal must name the offending variable; got {err}"
+        );
+    }
 }
 
 /// A variable's synthesized implicit helpers must be reported in an order that
