@@ -255,14 +255,49 @@ impl Context<'_> {
         self.get_submodel_metadata(self.model_name, ident)
     }
 
-    /// The active subscript each of `dims` reads, for a BARE arrayed reference
-    /// inside an apply-to-all body.
+    /// The active subscript each of `dims` reads, for a subscript-less arrayed
+    /// reference inside an apply-to-all body.
     ///
     /// The axis ALLOCATION -- which active axis supplies which of `dims` -- is
     /// `dimensions::allocate_implicit_axes`, shared with the LTM per-element
     /// projection so a link-score pin cannot spell a row this reference does not
     /// read. See that function for the two properties (positional, one-to-one)
     /// that a name-keyed re-derivation gets wrong.
+    ///
+    /// **Which references arrive here** -- worth stating, because the obvious
+    /// guess is wrong and a GH #996 investigation lost time to it. A bare
+    /// arrayed reference in an EQUATION BODY does NOT: [`Self::lower_pass0`]
+    /// rewrites it into an explicit `Expr2::Subscript` before Expr3, so it
+    /// resolves through the subscript path and never reaches `var_ref`'s
+    /// arrayed branch. The invariant, measured by tagging each call with its
+    /// caller and running the whole lib suite: **exactly two production
+    /// callers, and both are wiring rather than expressions.** ZERO calls
+    /// arrive via `lower_from_expr3`, which is the one that would mean an
+    /// ordinary equation reference.
+    ///
+    /// - [`Self::fold_flows`] -- a stock's inflow/outflow references;
+    /// - `compiler::Var::new` -- the stock self-reference inside
+    ///   `build_stock_update_expr`, plus module input wiring.
+    ///
+    /// The counts, since they are only reproducible with the condition
+    /// attached (`cargo test -p simlin-engine --lib -- --nocapture
+    /// --test-threads=1`, which `--nocapture` is required for -- without it
+    /// stderr is captured and the measurement reads zero): 477 + 438 = 915
+    /// production calls on the current tree, or 441 + 402 = 843 when
+    /// `crate::mapped_reference_semantics_tests` is skipped, since that module
+    /// adds calls of its own. One further call in either condition comes from
+    /// `test_get_implicit_subscript_off_translates_through_mapping_parent`,
+    /// which invokes [`Self::get_implicit_subscript_off`] directly.
+    ///
+    /// That split is why the flow reference is the one subscript-less spelling
+    /// that can follow an explicit element map (through the
+    /// `translate_via_mapping` fallback in
+    /// [`Self::get_implicit_subscript_off`], though only when the source
+    /// dimension does not already contain an element of the same NAME) while
+    /// the bare in-equation one is positional; both halves are pinned in
+    /// `crate::mapped_reference_semantics_tests`. It is also why the GH #996
+    /// hazard fixture there is built from a two-axis FLOW under a stock: no
+    /// ordinary expression can reach this allocation at all.
     fn get_implicit_subscripts(&self, dims: &[Dimension], ident: &str) -> Result<Vec<&str>> {
         if self.active_dimension.is_none() {
             return sim_err!(ArrayReferenceNeedsExplicitSubscripts, ident.to_owned());

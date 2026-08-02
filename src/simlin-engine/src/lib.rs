@@ -63,6 +63,8 @@ pub mod ltm_finding;
 pub mod ltm_post;
 #[cfg(test)]
 mod macro_expansion_tests;
+#[cfg(test)]
+mod mapped_reference_semantics_tests;
 pub mod mdl;
 mod model;
 mod module_functions;

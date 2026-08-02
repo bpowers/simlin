@@ -196,6 +196,39 @@ impl TestProject {
         self
     }
 
+    /// Add a named dimension carrying SEVERAL mappings at once, each an
+    /// optional element map (`&[]` means positional correspondence).
+    ///
+    /// A dimension with two mapping targets is the shape the implicit-axis
+    /// allocator's precedence rule is about (GH #996): one target can be
+    /// claimed by an earlier dependency axis while a later axis needs the
+    /// other. `named_dimension_with_mapping` and
+    /// `named_dimension_with_element_mapping` each declare exactly one, so
+    /// neither can express it.
+    pub fn named_dimension_with_mappings(
+        mut self,
+        name: &str,
+        elements: &[&str],
+        mappings: &[(&str, &[(&str, &str)])],
+    ) -> Self {
+        let mut dim = Dimension::named(
+            name.to_string(),
+            elements.iter().map(|s| s.to_string()).collect(),
+        );
+        dim.mappings = mappings
+            .iter()
+            .map(|(target, element_map)| datamodel::DimensionMapping {
+                target: target.to_string(),
+                element_map: element_map
+                    .iter()
+                    .map(|(s, t)| (s.to_string(), t.to_string()))
+                    .collect(),
+            })
+            .collect();
+        self.dimensions.push(dim);
+        self
+    }
+
     /// Add an auxiliary variable
     pub fn aux(mut self, name: &str, equation: &str, units: Option<&str>) -> Self {
         self.variables.push(Variable::Aux(datamodel::Aux {

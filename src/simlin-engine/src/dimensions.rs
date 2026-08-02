@@ -779,26 +779,82 @@ impl DimensionsContext {
     ///   lowering resolves mapped references POSITIONALLY and ignores the
     ///   element map" -- is FALSE AS A UNIVERSAL, and the correction matters
     ///   because it is what made the gate blanket. Execution does both, and
-    ///   which one you get depends on the SPELLING of the reference's
-    ///   subscript, not on the mapping or the direction it was declared in:
+    ///   which one you get depends on how the reference is SPELLED -- and,
+    ///   for the two spellings that carry no subscript at all, on which
+    ///   lowering route the reference takes. It does not depend on the
+    ///   mapping, nor on the direction it was declared in:
     ///
     ///   * a subscript naming a dimension the enclosing equation ITERATES
     ///     (`target[State] = x[State]`, `State` active) is **positional**;
     ///   * a subscript naming a dimension that is NOT active -- typically the
     ///     referenced variable's OWN declared dimension (`target[COP] =
-    ///     x[Region]`) -- **follows the element map**;
-    ///   * a BARE reference (`target[COP] = x`) is **positional**, in either
-    ///     declaration direction, and at unequal cardinality fails to compile
-    ///     like the active-dimension spelling. It has no subscript, so the
-    ///     mechanism below never fires for it -- worth stating because
-    ///     `expand_same_element` names `emit_edges_for_reference`'s `Bare` arm
-    ///     as a primary consumer of this correspondence.
+    ///     x[Region]`) -- resolves **name-first, element map second**: it
+    ///     becomes an `IndexOp::ActiveDimRef`, and `compiler::subscript`'s
+    ///     `build_view_from_ops` looks the ACTIVE element's own name up in the
+    ///     source dimension (`dim.get_offset(subscript)`) and only falls back
+    ///     to [`Self::translate_via_mapping`] when that misses. So the element
+    ///     map governs only where the two dimensions' element names DIFFER;
+    ///     where they share names it is silently not consulted, even if it
+    ///     says something else. See the precedence note below.
+    ///   * a BARE reference IN AN EQUATION BODY (`target[COP] = x`) is
+    ///     **positional**, in either declaration direction, because
+    ///     `compiler::context`'s `lower_pass0` REWRITES it into the
+    ///     iterated-dimension spelling above (`make_dimension_subscripts`
+    ///     spells the matched ACTIVE dimension's name) before anything
+    ///     resolves it. Where that match fails entirely it emits a wildcard
+    ///     instead and the reference becomes a whole-array broadcast, which
+    ///     needs the two extents to agree and is refused when they do not --
+    ///     a third behaviour, distinct from both halves of the fork.
+    ///   * a stock's FLOW reference (`level[COP] = INTEG(x, 0)` with `x`
+    ///     declared over `Region`) is equally subscript-less and resolves
+    ///     **name-first, element map second** like the spelling above, at
+    ///     every cardinality including many-to-one. It is the one spelling
+    ///     that never passes through pass 0: `fold_flows` calls `get_ref`
+    ///     directly, so it resolves through `get_implicit_subscript_off`,
+    ///     whose `dim.get_offset(&element).or_else(...)` has the same
+    ///     precedence and the same [`Self::translate_via_mapping`] fallback.
+    ///     The same route carries a stock's self-reference and module input
+    ///     wiring.
     ///
-    ///   The fork is `ast::expr3`'s `IndexExpr3::Dimension` arm: a name
-    ///   matching an active dimension folds to that dimension's ordinal and
-    ///   indexes the referenced variable's storage raw, never consulting a
-    ///   mapping; a name matching none survives as a dimension reference and
-    ///   reaches `translate_via_mapping`, which honours the map.
+    ///   So "bare" is TWO cases with opposite answers, and the distinction is
+    ///   the lowering route rather than anything about the reference. That
+    ///   matters here because `expand_same_element` names
+    ///   `emit_edges_for_reference`'s `Bare` arm as a primary consumer of this
+    ///   correspondence, and a stock/flow edge is spelled bare.
+    ///
+    ///   **The precedence is NAME > element map, and it is not a corner
+    ///   case.** Both map-following routes above try the active element's own
+    ///   name in the source dimension first. Two dimensions that declare the
+    ///   SAME element names therefore resolve by name identity and ignore a
+    ///   declared element map entirely -- measured with a fixture whose three
+    ///   candidate answers are all distinct (positional, name identity,
+    ///   element map), where both routes return name identity. Vensim's own
+    ///   Example 3 (`PTASKS <-> TASKS`, a full subrange copy) makes shared
+    ///   element names an ordinary modelling idiom rather than an oddity, so
+    ///   anything keyed off "this pair has an element map" needs to know that
+    ///   the map may not be what execution reads.
+    ///
+    ///   The subscripted fork is `ast::expr3`'s `IndexExpr3::Dimension` arm: a
+    ///   name matching an active dimension is folded to that dimension's
+    ///   ordinal by `Pass1Context` and indexes the referenced variable's
+    ///   storage raw, never consulting names or mappings; a name matching none
+    ///   survives pass 1 and is normalized to an `IndexOp::ActiveDimRef` by
+    ///   the free function `compiler::subscript::normalize_subscripts3`, which
+    ///   is what puts it on `build_view_from_ops`'s name-first path. (There is
+    ///   a second, unreached `IndexExpr3::Dimension` arm in
+    ///   `compiler::context` that consults the map without trying the name
+    ///   first; instrumenting both showed every probe resolving in
+    ///   `build_view_from_ops`, so the name-first rule is the executed one.)
+    ///
+    ///   Every row above is MEASURED against the VM, cell by cell, in
+    ///   `crate::mapped_reference_semantics_tests`: 4 spellings x 5 mapping
+    ///   kinds (positional, permuted, many-to-one, reverse-cardinality,
+    ///   shared-element-names) x both declaration directions, plus two
+    ///   no-mapping controls. Read that module's docs before changing any
+    ///   claim here; the two controls are what separate "resolves
+    ///   positionally" from "consults no mapping at all", and the iterated
+    ///   spelling does the latter -- it compiles and produces numbers between
+    ///   two dimensions declared to have NOTHING to do with each other.
     ///
     ///   Map-following is the CORRECT behaviour where it happens, checked
     ///   against real Vensim rather than argued: C-LEARN's
@@ -809,18 +865,77 @@ impl DimensionsContext {
     ///   the declared element map every time (positional would put 9.7654
     ///   where Vensim has 6.7294 for `oecd_eu`). `simulates_clearn` gates it.
     ///
-    ///   The positional half has NO such ground truth and is recorded here as
-    ///   UNVERIFIED. The argument for doubting it: Vensim's documented trigger
-    ///   for subscript mapping is a right-hand-side subscript absent from the
-    ///   left-hand side, which the active-dimension spelling does not have, so
-    ///   it may not be a mapping use in Vensim at all. Note the structure --
-    ///   that Vensim claim is the PREMISE for the doubt, and it is the weaker
-    ///   of the two: it is PARAPHRASED from a summarising fetch of
-    ///   <https://www.vensim.com/documentation/ref_subscript_mapping.html>,
-    ///   not quoted from the page, and nobody here has read the raw text. So
-    ///   treat neither the positional behaviour nor the reason for doubting it
-    ///   as settled; the `Ref.vdf` evidence above is independent of both and
-    ///   is the load-bearing half of this note.
+    ///   The positional half still has no ground truth, but the reason to
+    ///   doubt it is now quoted rather than paraphrased -- and it points the
+    ///   OTHER way from an earlier reading of this note, which is worth
+    ///   stating because that reading was wrong. Vensim's reference page for
+    ///   subscript mapping
+    ///   (<https://www.vensim.com/documentation/ref_subscript_mapping.html>,
+    ///   raw text retrieved 2026-08-01) states the trigger as: "Quite simply a
+    ///   mapping is an indication to Vensim that a Subscript that appears on
+    ///   the right but not the left of an equation has a valid
+    ///   interpretation", and its headline example is `Quality[product] = work
+    ///   quality[worker type]` -- the source's OWN range on the right, i.e.
+    ///   the map-following spelling. It is tempting to conclude from the
+    ///   trigger alone that the iterated spelling is not a mapping use in
+    ///   Vensim at all. **Example 3 refutes that.** It declares `PTASKS <->
+    ///   TASKS` (stated to be the same as `PTASKS : CLEAR,DIG,BUILD ->
+    ///   TASKS`), writes `prereq qual[task,ptask] = quality factors[ptask]`,
+    ///   and says: "This will work even though quality factors is actually
+    ///   defined by task, not by ptask." There the right-hand subscript names
+    ///   `ptask`, a range the LEFT side iterates, while the source is declared
+    ///   over `task` -- structurally the iterated spelling -- and Vensim
+    ///   accepts it and credits the mapping for it.
+    ///
+    ///   So the spelling is legal Vensim; what remains UNVERIFIED is which
+    ///   RULE Vensim applies to it, and Example 3 cannot say, because PTASKS
+    ///   is a full subrange copy of TASKS with identical element names in the
+    ///   same order -- positional, name identity and map-following all
+    ///   coincide there. The residual doubt is therefore that Vensim may MAP
+    ///   on this spelling where we resolve positionally, which is the opposite
+    ///   of "Vensim may reject it". Nothing here is evidence that our
+    ///   positional answer is right.
+    ///
+    ///   Two further things the page settles, and one it does not:
+    ///   * an explicit element map is Vensim's own construct, not a Simlin
+    ///     invention: "The map-to choices consist of the name of the map-to
+    ///     subscript range, followed by a colon : and the elements or
+    ///     subranges in the order the mapping should occur", and its general
+    ///     form includes a deliberately PERMUTED choice (`(lhopposite:lho2,
+    ///     lho1)` against a range declared `lho1,lho2`).
+    ///   * many-to-one is explicitly supported and is not an edge case:
+    ///     Example 5's `class: class1,class2->(metal:class1 metal,class2
+    ///     metal)` with `attractiveness[metal] = class attractivness[class] *
+    ///     ...`, and "while metal has 4 elements class only has two. ... two
+    ///     elements of metal belong to each element of class, but it could
+    ///     also have been 3 and 1." Note the declaration sits on the SMALLER
+    ///     range with one map-to choice per element of it, since "The number
+    ///     of elements or subranges must match the number of elements in the
+    ///     definition for the subscripts."
+    ///   * BOTH declaration directions appear, so neither is a Simlin
+    ///     extension. Examples 1, 4 and 5 declare the mapping on the source
+    ///     variable's own range pointing at the left-hand one, which is the
+    ///     `Rhsub -> Lhsub` form the prose describes; Example 3 declares it on
+    ///     `PTASKS`, a range the LEFT side iterates, pointing at `TASKS`,
+    ///     which is the source's own range. (Example 2 does not bear on this,
+    ///     PROVIDED `aging` is declared over `AGE`: both of its ranges are
+    ///     then subranges of the source's own. The page never states `aging`'s
+    ///     declaration; it is inferable only from its three subscripted uses,
+    ///     which between them cover all five `AGE` cohorts.)
+    ///   * what the page does NOT settle is which rule applies to the iterated
+    ///     spelling, per the paragraph above.
+    ///
+    ///   XMILE 1.0 settles none of it: its §2.5 `<dimensions>` block admits
+    ///   only `<dim name size>` and `<elem name>`, and the spec text contains
+    ///   no dimension-mapping construct at all -- the sole occurrence of
+    ///   "mapping" in its prose is §3.6's discussion of mapping unsupported
+    ///   FUNCTIONS to XMILE macros. Checked by stripping the tags from
+    ///   `docs/reference/xmile-v1.0.html` and searching the prose, which is
+    ///   the method the root `CLAUDE.md` prescribes and the only one that
+    ///   works: the file is non-UTF-8, so plain `grep` treats it as binary and
+    ///   reports no match for ANY query, including ones that are present.
+    ///   Element maps ride a `simlin:mapping` / `simlin:elem` vendor
+    ///   extension.
     ///
     ///   **The gate must nevertheless STAY until the spelling is threaded
     ///   in.** Deleting it is not the fix: with it removed,
@@ -867,11 +982,17 @@ impl DimensionsContext {
     /// - **Cardinality**: equal sizes required, per
     ///   `translate_via_mapping`'s positional path -- a property of THIS
     ///   function, not of the language. GH #753 records that a
-    ///   different-cardinality map "does not compile", and that too holds
-    ///   only for the active-dimension spelling: on the map-following
-    ///   spelling a many-to-one map compiles and runs correctly (C-LEARN's
-    ///   3-element `Aggregated Regions` onto 7-element `COP` is the shipped
-    ///   case, and a 2-onto-4 fixture reproduces it). GH #756 tracks the
+    ///   different-cardinality map "does not compile"; measured, that is
+    ///   narrower than it reads. It holds only for the two POSITIONAL
+    ///   spellings, and among those only when the target's ordinal leaves the
+    ///   source's range: 3 target elements onto 2 source elements is refused
+    ///   (`ErrorCode::Generic`, the static subscript resolution's
+    ///   out-of-bounds report -- an unhelpfully generic diagnostic for a
+    ///   mapping problem, and #753's to improve), while the same map with the
+    ///   cardinalities swapped compiles and silently reads the wrong elements.
+    ///   The map-following spellings compile and run correctly at every
+    ///   cardinality (C-LEARN's 3-element `Aggregated Regions` onto 7-element
+    ///   `COP` is the shipped case). GH #756 tracks the
     ///   positional-vs-element-map execution split itself, which the
     ///   spelling fork above describes.
     /// - **Fallback**: `None` when no direct mapping exists in either

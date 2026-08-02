@@ -42,7 +42,29 @@ use crate::dimensions::{Dimension, DimensionsContext};
 ///   exact identity name matches, and only one reaches the mapping branch at all,
 ///   with a single active axis where no reordering is possible. The shapes that
 ///   could distinguish the orders are barely exercised, so "no disagreement" is
-///   mostly a statement about the corpus.
+///   mostly a statement about the corpus. Re-measuring on the compiler path
+///   alone found the same thing more sharply: over the lib suite every shape
+///   but two is `dims == active_dims` by name and the two exceptions are
+///   single-axis, and on C-LEARN the mapping pass is never consulted at all --
+///   278 calls spanning 4 shapes, ALL identity (`["scenario"]`, `["cop"]`,
+///   `["scenario","layers"]`, `["hfc_type"]`, each against itself). To
+///   reproduce the C-LEARN figure, print `dims`/`active_dims` at the top of
+///   `compiler::context`'s `get_implicit_subscripts` and run
+///   `cargo run --release -p simlin-engine --example ltm_fragment_failures`,
+///   which compiles the model with LTM enabled. (The lib-suite call counts
+///   and the two-caller invariant behind them are recorded on that same
+///   function, with the condition they need to be reproducible.)
+///
+///   The hazard is nevertheless REACHABLE from a real model, which is the part
+///   the corpus does not show:
+///   `mapped_reference_semantics_tests::the_996_hazard_shape_compiles_and_reads_name_first`
+///   is a stock over `[Line, Shift]` fed by a flow over `[Board Type, Line]`,
+///   where `Board Type` maps to both `Line` and `Shift`. Under this flat
+///   staging it compiles and reads the element map; under the per-dimension
+///   staging it does not compile at all. An ordinary expression cannot reach
+///   this function (see `compiler::context`'s `get_implicit_subscripts`), so a
+///   stock's flow is the way in and a fixture built from an aux equation will
+///   silently exercise nothing.
 ///
 /// Both were live silent-wrong-row defects in the LTM per-element projection
 /// (P2-1 / P2-2 of the whole-branch review) precisely because that projection
