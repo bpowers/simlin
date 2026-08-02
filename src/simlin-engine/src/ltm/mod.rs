@@ -15,7 +15,7 @@
 //! - [`polarity`]: static polarity analysis on `Expr2` ASTs --
 //!   `analyze_link_polarity` and the small expression predicates it
 //!   leans on (`flip_polarity`, `expr_references_var`,
-//!   `is_positive_constant`, etc.).
+//!   `literal_sign`, etc.).
 //! - [`indexed`]: compact integer-indexed graph plus the Johnson 1975
 //!   elementary-circuit enumerator and Tarjan SCC. The Tiernan 1970
 //!   enumerator is retained under `cfg(test)` as the equivalence oracle.

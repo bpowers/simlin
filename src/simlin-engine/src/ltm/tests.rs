@@ -7,8 +7,8 @@ use super::indexed::IndexedGraph;
 use super::partitions::CyclePartitions;
 use super::polarity::{
     analyze_expr_polarity_with_context, analyze_graphical_function_polarity, analyze_link_polarity,
-    analyze_source_to_agg_polarity, expr_references_var, flip_polarity, is_negative_constant,
-    is_positive_constant,
+    analyze_source_to_agg_polarity, expr_references_var, flip_polarity, literal_sign,
+    provable_value_sign,
 };
 use super::types::{
     Link, LinkPolarity, Loop, LoopPolarity, POLARITY_CONFIDENCE_THRESHOLD, TruncatedByBudget,
@@ -1234,13 +1234,33 @@ fn test_fishbanks_loops() {
         })
         .expect("Should find loop containing harvest_rate and fish_stock");
 
-    // The loop containing harvest_rate should be Undetermined because some
-    // links have unknown polarity (conservative: if ANY link is unknown,
-    // the whole loop is Undetermined)
+    // The harvest loop's product links (`catch = catch_per_ship *
+    // ships_at_sea`, `catch_per_ship = effect * normal_catch_per_ship`)
+    // sign Positive under the bare-named-co-factor convention, leaving
+    // `harvest_rate -> fish_stock` as the loop's single negative link:
+    // more fish -> more catch -> fewer fish, the classic balancing
+    // harvest loop.
     assert_eq!(
         harvest_loop.polarity,
+        DetectedLoopPolarity::Balancing,
+        "Loop containing harvest_rate should be Balancing (one negative link)"
+    );
+
+    // The regeneration loop reads fish_density through a hump-shaped
+    // (non-monotone) graphical function, which no labeling convention may
+    // sign: it must STAY Undetermined.
+    let regen_loop = detected
+        .loops
+        .iter()
+        .find(|l| {
+            l.variables.contains(&"net_regeneration".to_string())
+                && l.variables.contains(&"fish_stock".to_string())
+        })
+        .expect("Should find loop containing net_regeneration and fish_stock");
+    assert_eq!(
+        regen_loop.polarity,
         DetectedLoopPolarity::Undetermined,
-        "Loop containing harvest_rate should be Undetermined (has unknown-polarity links)"
+        "the non-monotone regeneration GF keeps its loop Undetermined"
     );
 
     // Verify per-link polarity separately: harvest_rate -> fish_stock is
@@ -1286,10 +1306,10 @@ fn test_logistic_growth_loops() {
         .iter()
         .filter(|l| l.polarity == DetectedLoopPolarity::Balancing)
         .count();
-    let undetermined_count = detected
+    let reinforcing_count = detected
         .loops
         .iter()
-        .filter(|l| l.polarity == DetectedLoopPolarity::Undetermined)
+        .filter(|l| l.polarity == DetectedLoopPolarity::Reinforcing)
         .count();
 
     assert_eq!(
@@ -1297,10 +1317,13 @@ fn test_logistic_growth_loops() {
         "Logistic growth model should have exactly 1 balancing loop, found: {}",
         balancing_count
     );
+    // `net_birth_rate = fractional_growth_rate * population`: the bare
+    // named co-factor signs the compounding link Positive by convention,
+    // so the growth loop is Reinforcing (r1) rather than Undetermined.
     assert_eq!(
-        undetermined_count, 1,
-        "Logistic growth model should have exactly 1 undetermined loop, found: {}",
-        undetermined_count
+        reinforcing_count, 1,
+        "Logistic growth model should have exactly 1 reinforcing loop, found: {}",
+        reinforcing_count
     );
 
     // The carrying capacity loop involves fractional_growth_rate and
@@ -5117,17 +5140,18 @@ fn test_source_to_agg_polarity_discriminates_body_sign() {
         "a non-monotone reducer (STDDEV) stays Unknown"
     );
 
-    // The plain analyzer (no convention Mul rule) must be unchanged: the
-    // headline body is Unknown there -- the convention applies ONLY to the
-    // feeder-hop analysis, never to general link polarity.
+    // The general analyzer applies the SAME convention Mul rule (it was
+    // feeder-hop-only until the rule was generalized): the headline body
+    // analyzed as an ordinary equation agrees with the feeder-hop entry
+    // point, so the two surfaces cannot disagree about one expression.
     assert_eq!(
         analyze_link_polarity(
             &Ast::Scalar(Expr2::App(headline, None, loc)),
             &scale,
             &empty_vars
         ),
-        LinkPolarity::Unknown,
-        "the general analyzer must NOT adopt the convention Mul rule"
+        LinkPolarity::Positive,
+        "the general analyzer shares the convention Mul rule"
     );
 }
 

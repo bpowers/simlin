@@ -686,10 +686,18 @@ AST (`Ast<Expr2>`) at compile time. The recursive analysis
 - **Subtraction**: Left operand preserves polarity; right operand flips. Same
   independence check as addition.
 - **Multiplication**: When one operand is independent of `from_var`, its VALUE
-  sign decides: a positive or negative constant (`is_positive_constant` /
-  `is_negative_constant`) or a variable with a constant equation
-  (`is_positive_variable` / `is_negative_variable`) preserves or flips the
-  other operand's polarity. When BOTH operands depend on `from_var`, the
+  sign decides (`cofactor_value_sign`): a PROVABLE sign -- a numeric literal
+  seen through unary negations (`literal_sign`; the lexer takes no leading
+  sign, so a parsed `-5` is `Op1(Negative, Const(5))`), or a variable whose
+  whole equation is one (`provable_value_sign`) -- preserves or flips the
+  other operand's polarity exactly. A bare named quantity (`Var` /
+  `Subscript`) without a provable sign is positive by the SD labeling
+  convention, so `net_growth = population * fractional_growth` labels
+  `population -> net_growth` Positive -- the reading every CLD gives it, and
+  the same convention the Division arm has always applied. A COMPOUND
+  co-factor (`k - x`, `1 - pop/K`) stays `Unknown`: its value sign is
+  derived, not conventional, and that is exactly the class whose sign flips
+  mid-run. When BOTH operands depend on `from_var`, the
   product rule `d(f*g)/dx = f'g + fg'` mixes operand VALUES into the sign,
   so plain sign composition is unsound (it labeled logistic growth
   `pop*(1 - pop/K)` a definite Negative while the true partial flips at
