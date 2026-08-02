@@ -80,8 +80,7 @@ class TestStructureScalar:
             {"type": "flow", "name": "f", "equation": "1", "compat": {"nonNegative": True}}
         )
         assert isinstance(var, Flow)
-        assert var.non_negative is True
-        assert var.compat is None
+        assert var.compat == Compat(non_negative=True)
 
     def test_stock_non_negative_from_legacy_top_level(self) -> None:
         var = structure_variable(
@@ -95,22 +94,31 @@ class TestStructureScalar:
             }
         )
         assert isinstance(var, Stock)
-        assert var.non_negative is True
+        assert var.compat == Compat(non_negative=True)
 
     def test_aux_active_initial_from_compat(self) -> None:
         var = structure_variable(
             {"type": "aux", "name": "a", "equation": "x", "compat": {"activeInitial": "42"}}
         )
         assert isinstance(var, Aux)
-        assert var.active_initial == "42"
-        assert var.compat is None
+        assert var.compat == Compat(active_initial="42")
 
-    def test_flow_active_initial_from_compat(self) -> None:
-        var = structure_variable(
-            {"type": "flow", "name": "f", "equation": "x", "compat": {"activeInitial": "7"}}
-        )
-        assert isinstance(var, Flow)
-        assert var.active_initial == "7"
+    def test_stock_active_initial_preserved(self) -> None:
+        # A stock's compat.activeInitial must survive a round trip: the
+        # engine reads and re-emits it for every variable kind, so dropping
+        # it here would clear stored state on an unrelated edit.
+        wire = {
+            "type": "stock",
+            "name": "s",
+            "initialEquation": "1",
+            "inflows": [],
+            "outflows": [],
+            "compat": {"activeInitial": "9"},
+        }
+        var = structure_variable(wire)
+        assert isinstance(var, Stock)
+        assert var.compat == Compat(active_initial="9")
+        assert unstructure_variable(var)["compat"] == {"activeInitial": "9"}
 
     def test_compat_remainder_is_preserved(self) -> None:
         var = structure_variable(
@@ -124,8 +132,7 @@ class TestStructureScalar:
             }
         )
         assert isinstance(var, Stock)
-        assert var.non_negative is True
-        assert var.compat == Compat(conveyor=Conveyor(transit_time="5"))
+        assert var.compat == Compat(non_negative=True, conveyor=Conveyor(transit_time="5"))
 
     def test_module(self) -> None:
         var = structure_variable(
@@ -238,6 +245,51 @@ class TestStructureArrayed:
         assert isinstance(var, Aux)
         assert var.has_except_default is True
 
+    def test_stored_empty_default_is_not_replaced_by_common_text(self) -> None:
+        # The wire distinguishes a stored-but-empty default (Some("")) from
+        # no default at all: serde skips only Option::is_none, so
+        # {"equation": ""} is a stored default. Reading it must not
+        # substitute the hoisted common element text, and the flag must
+        # survive -- otherwise an unrelated replace-and-upsert corrupts the
+        # stored state (Codex review, PR #1007).
+        wire = {
+            "type": "aux",
+            "name": "frac",
+            "arrayedEquation": {
+                "dimensions": ["region"],
+                "equation": "",
+                "elements": [
+                    {"subscript": "boston", "equation": "0.1"},
+                    {"subscript": "nyc", "equation": "0.1"},
+                ],
+                "hasExceptDefault": False,
+            },
+        }
+        var = structure_variable(wire)
+        assert isinstance(var, Aux)
+        assert var.equation == ""
+        assert var.has_except_default is False
+        assert unstructure_variable(var)["arrayedEquation"] == wire["arrayedEquation"]
+
+    def test_stored_empty_default_without_flag_infers_true(self) -> None:
+        # Engine parity: the legacy inference is Option::is_some (json.rs),
+        # so an explicitly empty stored default with no flag reads as a live
+        # EXCEPT default, not as "no default".
+        var = structure_variable(
+            {
+                "type": "aux",
+                "name": "frac",
+                "arrayedEquation": {
+                    "dimensions": ["region"],
+                    "equation": "",
+                    "elements": [{"subscript": "nyc", "equation": "0.9"}],
+                },
+            }
+        )
+        assert isinstance(var, Aux)
+        assert var.equation == ""
+        assert var.has_except_default is True
+
     def test_dead_default_round_trip_metadata(self) -> None:
         var = structure_variable(
             {
@@ -291,7 +343,7 @@ class TestStructureArrayed:
             }
         )
         assert isinstance(var, Aux)
-        assert var.active_initial == "10"
+        assert var.compat == Compat(active_initial="10")
 
     def test_stock_arrayed_initial(self) -> None:
         var = structure_variable(
@@ -373,22 +425,21 @@ class TestUnstructure:
         ):
             assert "uid" not in unstructure_variable(var)
 
-    def test_non_negative_written_to_compat(self) -> None:
-        d = unstructure_variable(Flow(name="f", equation="1", non_negative=True))
+    def test_compat_written_inside_compat_object(self) -> None:
+        d = unstructure_variable(Flow(name="f", equation="1", compat=Compat(non_negative=True)))
         assert d["compat"] == {"nonNegative": True}
         assert "nonNegative" not in d  # never the legacy top-level spelling
 
     def test_active_initial_written_to_compat(self) -> None:
-        d = unstructure_variable(Aux(name="a", equation="x", active_initial="42"))
+        d = unstructure_variable(Aux(name="a", equation="x", compat=Compat(active_initial="42")))
         assert d["compat"] == {"activeInitial": "42"}
 
-    def test_compat_remainder_merged(self) -> None:
+    def test_full_compat_serialized(self) -> None:
         d = unstructure_variable(
             Stock(
                 name="belt",
                 initial_equation="0",
-                non_negative=True,
-                compat=Compat(conveyor=Conveyor(transit_time="5")),
+                compat=Compat(non_negative=True, conveyor=Conveyor(transit_time="5")),
             )
         )
         assert d["compat"] == {"nonNegative": True, "conveyor": {"transitTime": "5"}}
@@ -515,7 +566,7 @@ class TestWireRoundTrip:
 
     CASES: ClassVar[list[Stock | Flow | Aux | Module]] = [
         Stock(name="s", initial_equation="50", inflows=["in"], outflows=["out"]),
-        Stock(name="s", initial_equation="0", non_negative=True, units="widgets"),
+        Stock(name="s", initial_equation="0", compat=Compat(non_negative=True), units="widgets"),
         Stock(name="s", initial_equation="1", documentation="a doc", units="w"),
         Stock(
             name="belt",
@@ -523,9 +574,9 @@ class TestWireRoundTrip:
             compat=Compat(conveyor=Conveyor(transit_time="5", capacity="10")),
         ),
         Flow(name="f", equation="a * b", documentation="doc"),
-        Flow(name="f", equation="x", non_negative=True, active_initial="3"),
+        Flow(name="f", equation="x", compat=Compat(non_negative=True, active_initial="3")),
         Aux(name="a", equation="1 + 2"),
-        Aux(name="a", equation="x", active_initial="42"),
+        Aux(name="a", equation="x", compat=Compat(active_initial="42")),
         Aux(name="a", equation="base", dimensions=["region"]),
         Aux(
             name="a",

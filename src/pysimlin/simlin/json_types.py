@@ -5,6 +5,15 @@ These types back the JSON patch format understood by the engine
 project structure. Variables themselves are represented by the unified
 public types in ``simlin.types`` (Stock, Flow, Aux, Module); the converter
 in ``json_converter`` maps those to and from the engine's wire shape.
+
+``Model``/``Project`` here are construction envelopes (``Project.new``
+builds its initial empty-project JSON from them) and patch payload carriers
+-- NOT a lossless mirror of ``Project.serialize_json()``. In particular the
+unified variable types deliberately carry no ``uid`` (the engine preserves
+or mints uids on upsert), so structuring a full serialized project through
+these types and unstructuring it back would orphan view-element and
+loop-metadata uid references. For lossless project persistence, keep the
+``serialize_json()`` bytes.
 """
 
 from __future__ import annotations

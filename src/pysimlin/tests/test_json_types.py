@@ -131,12 +131,19 @@ def graphical_function_strategy(draw: Any) -> GraphicalFunction:
 
 @st.composite
 def compat_strategy(draw: Any) -> Compat | None:
-    """Generate the advanced-options remainder (or None)."""
+    """Generate compatibility options (or None)."""
+    active_initial = draw(st.sampled_from([None, "42"]))
+    nn = draw(st.booleans())
     cbmi = draw(st.booleans())
     is_pub = draw(st.booleans())
-    if not (cbmi or is_pub):
+    if not (active_initial or nn or cbmi or is_pub):
         return None
-    return Compat(can_be_module_input=cbmi, is_public=is_pub)
+    return Compat(
+        active_initial=active_initial,
+        non_negative=nn,
+        can_be_module_input=cbmi,
+        is_public=is_pub,
+    )
 
 
 @st.composite
@@ -149,7 +156,6 @@ def stock_strategy(draw: Any) -> Stock:
         outflows=tuple(draw(st.lists(ident_strategy(), min_size=0, max_size=3))),
         units=draw(st.sampled_from([None, "widgets", "people", "dollars"])),
         documentation=draw(st.sampled_from([None, "A stock variable"])),
-        non_negative=draw(st.booleans()),
         compat=draw(compat_strategy()),
     )
 
@@ -165,8 +171,6 @@ def flow_strategy(draw: Any) -> Flow:
         equation=draw(equation_strategy()),
         units=draw(st.sampled_from([None, "widgets/year", "people/month"])),
         documentation=draw(st.sampled_from([None, "A flow variable"])),
-        non_negative=draw(st.booleans()),
-        active_initial=draw(st.sampled_from([None, "42"])),
         graphical_function=gf,
         compat=draw(compat_strategy()),
     )
@@ -181,7 +185,6 @@ def aux_strategy(draw: Any) -> Aux:
     return Aux(
         name=draw(ident_strategy()),
         equation=draw(equation_strategy()),
-        active_initial=draw(st.sampled_from([None, "42"])),
         units=draw(st.sampled_from([None, "dimensionless", "ratio"])),
         documentation=draw(st.sampled_from([None, "An auxiliary variable"])),
         graphical_function=gf,
@@ -642,7 +645,7 @@ class TestOptionalFieldSerialization:
         result_default = unstructure_variable(Flow(name="test", compat=Compat()))
         assert "compat" not in result_default
 
-        result_nn = unstructure_variable(Flow(name="test", non_negative=True))
+        result_nn = unstructure_variable(Flow(name="test", compat=Compat(non_negative=True)))
         assert result_nn.get("compat") == {"nonNegative": True}
 
     def test_empty_graphical_function_not_dropped(self) -> None:
@@ -671,10 +674,11 @@ class TestLegacyCompatMerge:
         }
         stock = structure_variable(stock_json)
         assert isinstance(stock, Stock)
-        assert stock.non_negative is True, "legacy nonNegative lost"
         assert stock.compat is not None
+        assert stock.compat.non_negative is True, "legacy nonNegative lost"
         assert stock.compat.can_be_module_input is True, "legacy canBeModuleInput lost"
         assert stock.compat.is_public is True, "legacy isPublic lost"
+        assert stock.compat.active_initial == "50"
 
     def test_flow_legacy_merge(self) -> None:
         flow_json: dict[str, Any] = {
@@ -687,9 +691,9 @@ class TestLegacyCompatMerge:
         }
         flow = structure_variable(flow_json)
         assert isinstance(flow, Flow)
-        assert flow.non_negative is True
-        assert flow.active_initial == "5"
         assert flow.compat is not None
+        assert flow.compat.non_negative is True
+        assert flow.compat.active_initial == "5"
         assert flow.compat.is_public is True
 
     def test_aux_legacy_merge(self) -> None:
@@ -827,8 +831,8 @@ class TestCompatConveyorWireFormat:
         }
         flow = structure_variable({"type": "flow", **flow_json})
         assert isinstance(flow, Flow)
-        assert flow.non_negative is True
         assert flow.compat is not None
+        assert flow.compat.non_negative is True
         assert flow.compat.leakage == Leakage()
         assert unstructure_variable(flow) == flow_json
 
@@ -921,8 +925,9 @@ class TestCompatConveyorWireFormat:
         stock = Stock(
             name="s",
             initial_equation="50",
-            non_negative=True,
             compat=Compat(
+                active_initial="7",
+                non_negative=True,
                 can_be_module_input=True,
                 is_public=True,
                 data_source=DataSource(
@@ -972,8 +977,8 @@ class TestCompatConveyorWireFormat:
         }
         stock = structure_variable(stock_json)
         assert isinstance(stock, Stock)
-        assert stock.non_negative is True
         assert stock.compat is not None
+        assert stock.compat.non_negative is True
         assert stock.compat.conveyor == Conveyor(transit_time="4")
 
 

@@ -153,17 +153,16 @@ class Queue:
 
 @dataclass(frozen=True)
 class Compat:
-    """Advanced Vensim/XMILE compatibility options for a variable.
+    """Vensim/XMILE compatibility options for a variable.
 
-    This is the escape hatch for features without first-class fields on the
-    variable classes: conveyors and queues (on stocks), leakage/spreadflow/
+    Everything beyond a variable's core name/equation/units surface lives
+    here, mirroring the engine's own ``Compat``: ACTIVE INITIAL, output
+    non-negativity, conveyors and queues (on stocks), leakage/spreadflow/
     overflow (on flows), external data sources, and module-interface flags.
-
-    Note: a stock or flow's non-negativity and an aux or flow's ACTIVE
-    INITIAL are NOT here -- they are first-class fields on the variable
-    classes (``non_negative``, ``active_initial``).
     """
 
+    active_initial: str | None = None
+    non_negative: bool = False
     can_be_module_input: bool = False
     is_public: bool = False
     data_source: DataSource | None = None
@@ -185,7 +184,10 @@ class ElementEquation:
     """The equation for this element."""
 
     active_initial: str | None = None
-    """Element-level ACTIVE INITIAL expression, if any."""
+    """Element-level ACTIVE INITIAL expression, if any. This is deliberately
+    a direct field rather than a nested Compat: ACTIVE INITIAL is the only
+    compatibility option the engine reads at element granularity (every
+    other Compat field is a variable-level concept)."""
 
     graphical_function: GraphicalFunction | None = None
     """Element-level graphical function, if any."""
@@ -239,9 +241,6 @@ class Stock:
     dimensions: tuple[str, ...] = ()
     """Dimension names for arrayed variables (empty if scalar)"""
 
-    non_negative: bool = False
-    """Whether this stock is constrained to be non-negative"""
-
     element_equations: tuple[ElementEquation, ...] = ()
     """Per-element initial expressions for arrayed stocks defined
     element-by-element. Empty for scalar and apply-to-all stocks."""
@@ -254,7 +253,8 @@ class Stock:
     default kept for Vensim round-trip fidelity."""
 
     compat: Compat | None = None
-    """Advanced options (conveyor/queue markers, external data, ...)."""
+    """Compatibility options (non-negativity, conveyor/queue markers,
+    external data, ...)."""
 
     def __post_init__(self) -> None:
         _freeze_sequences(self)
@@ -289,12 +289,6 @@ class Flow:
     dimensions: tuple[str, ...] = ()
     """Dimension names for arrayed variables (empty if scalar)"""
 
-    non_negative: bool = False
-    """Whether this flow is constrained to be non-negative"""
-
-    active_initial: str | None = None
-    """Active initial equation (Vensim ACTIVE INITIAL)"""
-
     graphical_function: GraphicalFunction | None = None
     """Graphical/table function if this uses WITH LOOKUP"""
 
@@ -307,7 +301,8 @@ class Flow:
     set (see Stock.has_except_default)."""
 
     compat: Compat | None = None
-    """Advanced options (leakage/spreadflow/overflow markers, ...)."""
+    """Compatibility options (non-negativity, ACTIVE INITIAL,
+    leakage/spreadflow/overflow markers, ...)."""
 
     def __post_init__(self) -> None:
         _freeze_sequences(self)
@@ -323,7 +318,7 @@ class Aux:
     but are recalculated at each time step.
 
     Some auxiliaries have memory (like those using DELAY or SMOOTH), in which
-    case they have an active_initial that sets their initial state.
+    case ``compat.active_initial`` sets their initial state.
     """
 
     name: str
@@ -336,9 +331,6 @@ class Aux:
     equation when every element shares the same text (or the EXCEPT default
     when has_except_default is set), and empty otherwise (see
     element_equations)."""
-
-    active_initial: str | None = None
-    """Active initial equation (Vensim ACTIVE INITIAL)"""
 
     units: str | None = None
     """Units (if specified)"""
@@ -361,7 +353,8 @@ class Aux:
     set (see Stock.has_except_default)."""
 
     compat: Compat | None = None
-    """Advanced options (external data sources, module-interface flags, ...)."""
+    """Compatibility options (ACTIVE INITIAL, external data sources,
+    module-interface flags, ...)."""
 
     def __post_init__(self) -> None:
         _freeze_sequences(self)
@@ -390,7 +383,7 @@ class Module:
     """Connections between parent-model variables and sub-model variables"""
 
     compat: Compat | None = None
-    """Advanced options (module-interface flags)."""
+    """Compatibility options (module-interface flags)."""
 
     def __post_init__(self) -> None:
         _freeze_sequences(self)

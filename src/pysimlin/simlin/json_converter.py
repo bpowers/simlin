@@ -11,10 +11,10 @@ on purpose:
 
 - ``dimensions`` / ``element_equations`` / ``has_except_default`` fold into
   the wire's nested ``arrayedEquation`` object;
-- ``non_negative`` and ``active_initial`` are first-class fields publicly but
-  live inside the wire ``compat`` object (the engine's own canonical spot);
 - ``units``/``documentation`` are ``None`` when unspecified publicly, empty
   strings on the wire;
+- legacy top-level booleans (``nonNegative`` et al.) and legacy
+  arrayed-level ``activeInitial`` merge into the one public ``Compat``;
 - ``uid`` is never written: the engine preserves an existing variable's uid
   when an upsert payload has none and mints one for new variables
   (src/simlin-engine/src/patch.rs, upsert_variable).
@@ -138,7 +138,7 @@ def _unstructure_gf(gf: GraphicalFunction) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Compat (wire) <-> Compat (public) + hoisted fields
+# Compat (wire) <-> Compat (public)
 # ---------------------------------------------------------------------------
 
 
@@ -150,34 +150,42 @@ def _check_spreadflow(sf_type: str, distribution: str | None) -> None:
         raise ValueError("spreadflow type 'dist' requires a distribution")
 
 
-def _merged_compat_dict(d: dict[str, Any]) -> dict[str, Any]:
-    """A variable's wire compat dict, OR-merged with legacy top-level booleans.
+def _merged_compat_dict(d: dict[str, Any], arrayed: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A variable's wire compat dict, merged with the legacy spellings.
 
     Old JSON carries nonNegative/canBeModuleInput/isPublic at the top level of
     the variable; new JSON carries them inside compat. Both are never
     meaningfully set at once, so OR is safe (mirrors the engine's own legacy
-    handling in json.rs).
+    handling in json.rs). Similarly, old JSON could carry activeInitial on the
+    arrayed equation's compat; the engine only emits it at the variable level
+    (compat_to_json) but ingests both, variable level winning -- mirrored here.
     """
     c = dict(d.get("compat") or {})
     for key in ("nonNegative", "canBeModuleInput", "isPublic"):
         if d.get(key):
             c[key] = True
+    if not c.get("activeInitial"):
+        arrayed_compat = (arrayed or {}).get("compat") or {}
+        if arrayed_compat.get("activeInitial"):
+            c["activeInitial"] = arrayed_compat["activeInitial"]
     return c
 
 
 def _public_compat(c: dict[str, Any]) -> Compat | None:
-    """The public Compat remainder of a wire compat dict.
+    """The public Compat for a (merged) wire compat dict.
 
-    ``activeInitial`` and ``nonNegative`` are deliberately NOT read here --
-    they are hoisted onto the variable itself by the callers. The nested
-    object checks are ``is not None`` rather than truthiness: a marker-only
-    leakage or queue serializes as ``{}`` (falsy) and must not be dropped.
+    The nested object checks are ``is not None`` rather than truthiness: a
+    marker-only leakage or queue serializes as ``{}`` (falsy) and must not
+    be dropped. An empty ``activeInitial`` normalizes to None, matching the
+    engine's own ``.filter(|s| !s.is_empty())`` when it ingests the field.
     """
     ds = c.get("dataSource")
     conveyor = c.get("conveyor")
     leakage = c.get("leakage")
     spreadflow = c.get("spreadflow")
     compat = Compat(
+        active_initial=c.get("activeInitial") or None,
+        non_negative=bool(c.get("nonNegative")),
         can_be_module_input=bool(c.get("canBeModuleInput")),
         is_public=bool(c.get("isPublic")),
         data_source=DataSource(
@@ -227,23 +235,20 @@ def _structure_spreadflow_dict(d: dict[str, Any]) -> SpreadFlow:
     return SpreadFlow(type=sf_type, distribution=distribution if sf_type == "dist" else None)
 
 
-def _unstructure_compat(
-    compat: Compat | None,
-    *,
-    non_negative: bool = False,
-    active_initial: str | None = None,
-) -> dict[str, Any]:
-    """The wire compat dict for a variable: public remainder + hoisted fields.
+def _unstructure_compat(compat: Compat | None) -> dict[str, Any]:
+    """The wire compat dict for a variable's public Compat.
 
-    Returns ``{}`` when nothing is set; callers omit the empty dict.
+    Returns ``{}`` when nothing is set; callers omit the empty dict. The
+    legacy top-level boolean spellings are never written -- everything goes
+    inside the compat object, the engine's canonical location.
     """
     d: dict[str, Any] = {}
-    if active_initial:
-        d["activeInitial"] = active_initial
-    if non_negative:
-        d["nonNegative"] = True
     if compat is None:
         return d
+    if compat.active_initial:
+        d["activeInitial"] = compat.active_initial
+    if compat.non_negative:
+        d["nonNegative"] = True
     if compat.can_be_module_input:
         d["canBeModuleInput"] = True
     if compat.is_public:
@@ -339,37 +344,44 @@ def _resolve_arrayed_read(
     """Fold a wire ``arrayedEquation`` into the unified read shape.
 
     Returns ``(equation, dimensions, element_equations, has_except_default)``.
-    The resolved equation is, in priority order: the flat wire equation, the
-    arrayed default equation (for stocks, also the legacy ``initialEquation``
-    field old Go-produced JSON carried), or -- for element-by-element
-    variables where every element shares the same text -- that common text
-    (the shape the Vensim importer produces for apply-to-all equations).
 
-    ``has_except_default`` mirrors the engine's legacy inference (json.rs): a
-    default equation with no explicit flag is treated as a live EXCEPT
-    default; no default at all is ``None``.
+    ``has_except_default`` mirrors the engine (json.rs): the wire flag when
+    present, else the legacy inference that a *stored* default equation --
+    ``Option::is_some``, so an explicitly empty string counts -- is a live
+    EXCEPT default; ``None`` only when no default is stored at all.
+
+    The resolved equation: with a stored default (``has_except_default`` not
+    ``None``), it is exactly that default, empty included -- substituting
+    anything else would corrupt the stored state on write-back. Otherwise it
+    is the flat wire equation, the legacy stock ``initialEquation`` old
+    Go-produced JSON carried, or -- for element-by-element variables where
+    every element shares the same text -- that common text as a display
+    convenience (the shape the Vensim importer produces for apply-to-all
+    equations).
     """
     dimensions = tuple(arrayed.get("dimensions") or ())
     elements = tuple(_structure_element(e) for e in arrayed.get("elements") or ())
-    default_eq = arrayed.get("equation") or ""
-    if legacy_initial:
-        default_eq = arrayed.get("initialEquation") or default_eq
+    default_eq: str | None = arrayed.get("equation")
+    if legacy_initial and arrayed.get("initialEquation"):
+        default_eq = arrayed.get("initialEquation")
 
     has_except: bool | None = None
     if elements:
         hed_wire = arrayed.get("hasExceptDefault")
         if hed_wire is not None:
             has_except = bool(hed_wire)
-        elif default_eq:
+        elif default_eq is not None:
             has_except = True
 
-    common = ""
-    if elements:
-        first = elements[0].equation
-        if all(e.equation == first for e in elements):
-            common = first
-
-    equation = flat_equation or default_eq or common
+    if has_except is not None:
+        equation = default_eq or ""
+    else:
+        common = ""
+        if elements:
+            first = elements[0].equation
+            if all(e.equation == first for e in elements):
+                common = first
+        equation = flat_equation or default_eq or common
     return equation, dimensions, elements, has_except
 
 
@@ -382,9 +394,11 @@ def _arrayed_dict(
     """The wire ``arrayedEquation`` dict, or None for a scalar variable.
 
     With element equations present, the flat ``equation`` is written as the
-    arrayed default only when ``has_except_default`` says there is one --
-    otherwise it is the hoisted common per-element text, which is
-    display-only and must not become a stored default.
+    arrayed default exactly when ``has_except_default`` says one is stored
+    (empty text included -- the wire distinguishes ``Some("")`` from absent).
+    When it is ``None``, a non-empty ``equation`` is the hoisted common
+    per-element text, which is display-only and must not become a stored
+    default.
     """
     if not dimensions:
         if elements:
@@ -392,7 +406,7 @@ def _arrayed_dict(
         return None
     d: dict[str, Any] = {"dimensions": list(dimensions)}
     if elements:
-        if has_except_default is not None and equation:
+        if has_except_default is not None:
             d["equation"] = equation
             d["hasExceptDefault"] = has_except_default
         d["elements"] = [_unstructure_element(e) for e in elements]
@@ -406,19 +420,11 @@ def _arrayed_dict(
 # ---------------------------------------------------------------------------
 
 
-def _arrayed_active_initial(arrayed: dict[str, Any]) -> str | None:
-    """Legacy arrayed-level ACTIVE INITIAL; the engine only emits it at the
-    variable level (compat_to_json), but old JSON may carry it here."""
-    compat = arrayed.get("compat") or {}
-    return compat.get("activeInitial") or None
-
-
 def _structure_stock(d: dict[str, Any]) -> Stock:
     arrayed = d.get("arrayedEquation") or {}
     equation, dimensions, elements, has_except = _resolve_arrayed_read(
         d.get("initialEquation", ""), arrayed, legacy_initial=True
     )
-    compat = _merged_compat_dict(d)
     return Stock(
         name=d["name"],
         initial_equation=equation,
@@ -427,10 +433,9 @@ def _structure_stock(d: dict[str, Any]) -> Stock:
         units=d.get("units") or None,
         documentation=d.get("documentation") or None,
         dimensions=dimensions,
-        non_negative=bool(compat.get("nonNegative")),
         element_equations=elements,
         has_except_default=has_except,
-        compat=_public_compat(compat),
+        compat=_public_compat(_merged_compat_dict(d, arrayed)),
     )
 
 
@@ -439,7 +444,6 @@ def _structure_flow(d: dict[str, Any]) -> Flow:
     equation, dimensions, elements, has_except = _resolve_arrayed_read(
         d.get("equation", ""), arrayed
     )
-    compat = _merged_compat_dict(d)
     gf = d.get("graphicalFunction")
     return Flow(
         name=d["name"],
@@ -447,12 +451,10 @@ def _structure_flow(d: dict[str, Any]) -> Flow:
         units=d.get("units") or None,
         documentation=d.get("documentation") or None,
         dimensions=dimensions,
-        non_negative=bool(compat.get("nonNegative")),
-        active_initial=compat.get("activeInitial") or _arrayed_active_initial(arrayed),
         graphical_function=_structure_gf(gf) if gf is not None else None,
         element_equations=elements,
         has_except_default=has_except,
-        compat=_public_compat(compat),
+        compat=_public_compat(_merged_compat_dict(d, arrayed)),
     )
 
 
@@ -461,24 +463,21 @@ def _structure_aux(d: dict[str, Any]) -> Aux:
     equation, dimensions, elements, has_except = _resolve_arrayed_read(
         d.get("equation", ""), arrayed
     )
-    compat = _merged_compat_dict(d)
     gf = d.get("graphicalFunction")
     return Aux(
         name=d["name"],
         equation=equation,
-        active_initial=compat.get("activeInitial") or _arrayed_active_initial(arrayed),
         units=d.get("units") or None,
         documentation=d.get("documentation") or None,
         dimensions=dimensions,
         graphical_function=_structure_gf(gf) if gf is not None else None,
         element_equations=elements,
         has_except_default=has_except,
-        compat=_public_compat(compat),
+        compat=_public_compat(_merged_compat_dict(d, arrayed)),
     )
 
 
 def _structure_module(d: dict[str, Any]) -> Module:
-    compat = _merged_compat_dict(d)
     return Module(
         name=d["name"],
         model_name=d["modelName"],
@@ -487,7 +486,7 @@ def _structure_module(d: dict[str, Any]) -> Module:
         references=tuple(
             ModuleReference(src=r["src"], dst=r["dst"]) for r in d.get("references") or ()
         ),
-        compat=_public_compat(compat),
+        compat=_public_compat(_merged_compat_dict(d)),
     )
 
 
@@ -521,7 +520,7 @@ def _unstructure_stock(var: Stock) -> dict[str, Any]:
         d["documentation"] = var.documentation
     if arrayed is not None:
         d["arrayedEquation"] = arrayed
-    compat = _unstructure_compat(var.compat, non_negative=var.non_negative)
+    compat = _unstructure_compat(var.compat)
     if compat:
         d["compat"] = compat
     return d
@@ -542,9 +541,7 @@ def _unstructure_flow(var: Flow) -> dict[str, Any]:
         d["documentation"] = var.documentation
     if arrayed is not None:
         d["arrayedEquation"] = arrayed
-    compat = _unstructure_compat(
-        var.compat, non_negative=var.non_negative, active_initial=var.active_initial
-    )
+    compat = _unstructure_compat(var.compat)
     if compat:
         d["compat"] = compat
     return d
@@ -565,7 +562,7 @@ def _unstructure_aux(var: Aux) -> dict[str, Any]:
         d["documentation"] = var.documentation
     if arrayed is not None:
         d["arrayedEquation"] = arrayed
-    compat = _unstructure_compat(var.compat, active_initial=var.active_initial)
+    compat = _unstructure_compat(var.compat)
     if compat:
         d["compat"] = compat
     return d

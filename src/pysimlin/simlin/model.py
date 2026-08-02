@@ -933,10 +933,11 @@ class Model:
             return f"{var.name} is a flow computed as {var.equation}"
 
         if isinstance(var, Aux):
-            if var.active_initial:
+            active_initial = var.compat.active_initial if var.compat else None
+            if active_initial:
                 return (
                     f"{var.name} is an auxiliary variable computed as {var.equation} "
-                    f"with initial value {var.active_initial}"
+                    f"with initial value {active_initial}"
                 )
             return f"{var.name} is an auxiliary variable computed as {var.equation}"
 
