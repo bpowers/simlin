@@ -32,14 +32,14 @@ impl UnitMap {
     }
 
     pub fn reciprocal(mut self) -> Self {
-        for (_id, exp) in self.map.iter_mut() {
+        for exp in self.map.values_mut() {
             *exp *= -1;
         }
         self
     }
 
     pub fn exp(mut self, exp: i32) -> Self {
-        for (_id, unit) in self.map.iter_mut() {
+        for unit in self.map.values_mut() {
             *unit *= exp;
         }
 

@@ -100,10 +100,7 @@ impl<'input> Parser<'input> {
     fn new(lexer: Lexer<'input>) -> Result<Self, EquationError> {
         let mut tokens = Vec::new();
         for result in lexer {
-            match result {
-                Ok(tok) => tokens.push(tok),
-                Err(e) => return Err(e),
-            }
+            tokens.push(result?);
         }
         Ok(Parser { tokens, pos: 0 })
     }

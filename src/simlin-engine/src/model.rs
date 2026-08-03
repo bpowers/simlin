@@ -358,7 +358,7 @@ where
         code: ErrorCode::NotSimulatable,
         details: Some(format!("model for module '{model_name}' not found")),
     })?;
-    for (_id, v) in model.variables.iter() {
+    for v in model.variables.values() {
         if let Variable::Module {
             model_name, inputs, ..
         } = v

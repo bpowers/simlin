@@ -52,7 +52,7 @@ pub(super) fn find_model_output_ports(
     let empty_inputs = ModuleInputSet::empty(db);
     let mut output_ports: HashSet<Ident<Canonical>> = HashSet::new();
 
-    for (_, other_model) in project_models.iter() {
+    for other_model in project_models.values() {
         if other_model == &model {
             continue;
         }
@@ -73,7 +73,7 @@ pub(super) fn find_model_output_ports(
         // Scan dependencies for module·internal_var references
         let other_vars = other_model.variables(db);
         let module_ctx = model_module_ident_context(db, *other_model, project, vec![]);
-        for (_, source_var) in other_vars.iter() {
+        for source_var in other_vars.values() {
             let deps =
                 variable_direct_dependencies(db, *source_var, project, empty_ctx, empty_inputs);
             for dep in &deps.dt_deps {

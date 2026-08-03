@@ -612,7 +612,7 @@ pub fn model_module_output_ports(
             }
         }
     };
-    for (_, source_var) in model.variables(db).iter() {
+    for source_var in model.variables(db).values() {
         let deps = variable_direct_dependencies(db, *source_var, project, empty_ctx, empty_inputs);
         for dep in deps.dt_deps.iter().chain(deps.initial_deps.iter()) {
             record(dep, &mut ports);

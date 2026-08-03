@@ -1310,10 +1310,9 @@ fn arrayed_gf_apply_view(builtin: &BuiltinFn<Expr3>) -> Option<(Vec<usize>, Opti
             bounds.dims().to_vec(),
             bounds.dim_names().map(|n| n.to_vec()),
         )
-    } else if let Some(view) = table.get_array_view() {
-        (view.dims.clone(), Some(view.dim_names.clone()))
     } else {
-        return None;
+        let view = table.get_array_view()?;
+        (view.dims.clone(), Some(view.dim_names.clone()))
     };
     if dims.iter().product::<usize>() > 1 {
         Some((dims, dim_names))

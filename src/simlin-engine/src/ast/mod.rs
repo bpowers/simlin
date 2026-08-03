@@ -49,7 +49,7 @@ impl Ast<Expr0> {
             Ast::Scalar(expr) => expr.get_var_loc(canonical_ident),
             Ast::ApplyToAll(_, expr) => expr.get_var_loc(canonical_ident),
             Ast::Arrayed(_, subscripts, ..) => {
-                for (_, expr) in subscripts.iter() {
+                for expr in subscripts.values() {
                     if let Some(loc) = expr.get_var_loc(canonical_ident) {
                         return Some(loc);
                     }
@@ -88,7 +88,7 @@ impl Ast<Expr2> {
             Ast::Scalar(expr) => expr.get_var_loc(ident),
             Ast::ApplyToAll(_, expr) => expr.get_var_loc(ident),
             Ast::Arrayed(_, subscripts, default_expr, _) => {
-                for (_, expr) in subscripts.iter() {
+                for expr in subscripts.values() {
                     if let Some(loc) = expr.get_var_loc(ident) {
                         return Some(loc);
                     }

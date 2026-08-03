@@ -1097,9 +1097,8 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
                 .contains_key(from)
             {
                 module_output()?
-            } else if let Some(meta) =
-                crate::db::model_implicit_var_info(db, model, project).get(from)
-            {
+            } else {
+                let meta = crate::db::model_implicit_var_info(db, model, project).get(from)?;
                 // The GH #541 arrayed capture helper is a genuine array, not an
                 // element-bound scalar: it is referenced as `helper[<elem>]` and
                 // the per-element pin belongs on the reference, not here. Pinned
@@ -1109,8 +1108,6 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
                 }
                 source_is_module = false;
                 from.to_string()
-            } else {
-                return None;
             }
         }
     };

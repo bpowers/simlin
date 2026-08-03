@@ -175,7 +175,7 @@ fn wrld3_resource_unit_alias_should_not_conflict() {
             }
             // Combine the Debug representation (catches unit-map keys) with
             // the human-readable details (catches rendered unit strings).
-            let combined = format!("{:?} :: {}", &d.error, diag_details(d));
+            let combined = format!("{:?} :: {}", d.error, diag_details(d));
             contains_token(&combined, "resource_unit")
                 && contains_token(&combined, "resource_units")
         })
