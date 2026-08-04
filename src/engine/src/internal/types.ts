@@ -125,8 +125,9 @@ export interface ErrorDetail {
   unitErrorKind: SimlinUnitErrorKind;
   severity: SimlinErrorSeverity;
   // The bare human-readable reason without the source snippet or the
-  // model/variable summary line that `message` carries (e.g. "computed units
-  // 'people' don't match specified units"). Null when the error has no
+  // model/variable summary line that `message` carries (e.g. "the equation
+  // computes to units 'people', but the variable's specified units are
+  // 'person'"). Null when the error has no
   // separate reason string.
   details: string | null;
 }

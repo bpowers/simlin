@@ -383,8 +383,9 @@ pub struct SimlinErrorDetail {
     pub unit_error_kind: SimlinUnitErrorKind,
     pub severity: SimlinErrorSeverity,
     /// The bare human-readable reason without the source snippet or the
-    /// model/variable summary line that `message` carries (e.g. "computed
-    /// units 'people' don't match specified units"). NULL when the error has
+    /// model/variable summary line that `message` carries (e.g. "the equation
+    /// computes to units 'people', but the variable's specified units are
+    /// 'person'"). NULL when the error has
     /// no separate reason string. Appended additively: existing field offsets
     /// are unchanged.
     pub details: *const c_char,
