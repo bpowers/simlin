@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::result::Result as StdResult;
 
 use crate::ast::{Ast, BinaryOp, Expr2};
@@ -17,6 +17,19 @@ use crate::variable::Variable;
 
 // Type alias to reduce complexity
 type UnitErrorList = Vec<(Ident<Canonical>, UnitError)>;
+
+/// The numeric value of a literal exponent expression, seeing through unary
+/// negation (the lexer takes no leading sign, so `x^-2`'s exponent is
+/// `Op1(Negative, Const(2))`). `None` for anything non-literal.
+/// Shared with `units_infer`, which applies the same `^` unit semantics.
+pub(crate) fn literal_exponent(expr: &Expr2) -> Option<f64> {
+    use crate::ast::UnaryOp;
+    match expr {
+        Expr2::Const(_, lit, _) => Some(lit.value()),
+        Expr2::Op1(UnaryOp::Negative, inner, _, _) => literal_exponent(inner).map(|n| -n),
+        _ => None,
+    }
+}
 
 struct UnitEvaluator<'a> {
     #[allow(dead_code)]
@@ -118,11 +131,27 @@ impl UnitEvaluator<'_> {
                     | BuiltinFn::Log10(a)
                     | BuiltinFn::Sign(a)
                     | BuiltinFn::Sin(a)
-                    | BuiltinFn::Sqrt(a)
                     | BuiltinFn::Tan(a)
                     | BuiltinFn::Size(a)
                     | BuiltinFn::Stddev(a)
                     | BuiltinFn::Sum(a) => self.check(a),
+                    // SQRT halves unit exponents (Vensim fn_sqrt:
+                    // "SQRT(units*units) --> units"); an argument whose units
+                    // are not a perfect square has no representable root.
+                    BuiltinFn::Sqrt(a) => match self.check(a)? {
+                        Units::Constant => Ok(Units::Constant),
+                        Units::Explicit(units) => match crate::units::try_sqrt(&units) {
+                            Some(root) => Ok(Units::Explicit(root)),
+                            None => Err(ConsistencyError(
+                                ErrorCode::UnitMismatch,
+                                a.get_loc(),
+                                Some(format!(
+                                    "the argument to SQRT has units '{units}', which is not a \
+                                     perfect square, so its square root has no valid units"
+                                )),
+                            )),
+                        },
+                    },
                     BuiltinFn::Mean(args) => {
                         let args = args
                             .iter()
@@ -182,6 +211,9 @@ impl UnitEvaluator<'_> {
                                     )),
                                 ));
                             }
+                            // A literal argument is unit-polymorphic:
+                            // `MAX(0, x)` has x's units.
+                            return Ok(a_units.first_explicit(b_units));
                         }
                         Ok(a_units)
                     }
@@ -230,7 +262,8 @@ impl UnitEvaluator<'_> {
                     BuiltinFn::AllocateAvailable(req, _, _)
                     | BuiltinFn::AllocateByPriority(req, _, _, _, _) => self.check(req),
                     // Previous(x, init) preserves the units of x and requires
-                    // the fallback to be compatible with it.
+                    // the fallback to be compatible with it. A literal in
+                    // either position is unit-polymorphic.
                     BuiltinFn::Previous(a, b) => {
                         let units = self.check(a)?;
                         let fallback_units = self.check(b)?;
@@ -245,7 +278,7 @@ impl UnitEvaluator<'_> {
                                 )),
                             ));
                         }
-                        Ok(units)
+                        Ok(units.first_explicit(fallback_units))
                     }
                     BuiltinFn::Init(a) => self.check(a),
                 }
@@ -292,7 +325,37 @@ impl UnitEvaluator<'_> {
                             }
                         }
                     },
-                    BinaryOp::Exp | BinaryOp::Mod => Ok(lunits),
+                    // `x^n` with an integer-literal exponent multiplies x's
+                    // unit exponents (matching repeated multiplication);
+                    // `x^0.5` of a perfect square halves them. Any other
+                    // exponent shape leaves the units undetermined -- treated
+                    // as unit-polymorphic rather than (wrongly) as x's units.
+                    // What Vensim does for a non-literal exponent is
+                    // unverified, so we deliberately do not warn there.
+                    BinaryOp::Exp => match (&lunits, literal_exponent(r)) {
+                        (Units::Constant, _) => Ok(Units::Constant),
+                        (Units::Explicit(base), Some(n)) => {
+                            if n.fract() == 0.0 && n.abs() <= i32::MAX as f64 {
+                                Ok(Units::Explicit(base.clone().exp(n as i32)))
+                            } else if n == 0.5 {
+                                match crate::units::try_sqrt(base) {
+                                    Some(root) => Ok(Units::Explicit(root)),
+                                    None => Err(ConsistencyError(
+                                        ErrorCode::UnitMismatch,
+                                        expr.get_loc(),
+                                        Some(format!(
+                                            "raising units '{base}' to the power 0.5 requires \
+                                             them to be a perfect square"
+                                        )),
+                                    )),
+                                }
+                            } else {
+                                Ok(Units::Constant)
+                            }
+                        }
+                        (Units::Explicit(_), None) => Ok(Units::Constant),
+                    },
+                    BinaryOp::Mod => Ok(lunits),
                     BinaryOp::Mul => match (lunits, runits) {
                         (Units::Constant, Units::Constant) => Ok(Units::Constant),
                         (Units::Explicit(units), Units::Constant)
@@ -340,7 +403,9 @@ impl UnitEvaluator<'_> {
                     ));
                 }
 
-                Ok(lunits)
+                // A literal branch (`IF c THEN 0 ELSE flow`) is
+                // unit-polymorphic: the result has the other branch's units.
+                Ok(lunits.first_explicit(runits))
             }
         }
     }
@@ -590,7 +655,8 @@ pub fn check(
                             ErrorCode::UnitMismatch,
                             Loc::new(loc.start.into(), loc.end.into()),
                             Some(format!(
-                                "computed units '{actual}' don't match specified units"
+                                "the equation computes to units '{actual}', but the \
+                                 variable's specified units are '{expected}'"
                             )),
                         ))
                     }
@@ -629,6 +695,13 @@ pub fn check(
             }
         }
     }
+
+    // An arrayed variable's per-element loops push one error per element, so
+    // a mismatch shared by every element repeated identically (C-LEARN's `ph`
+    // warned 6x; scirev arrays 50x). Identical (variable, message) rows carry
+    // no extra information -- collapse them, preserving first-occurrence order.
+    let mut seen: HashSet<(Ident<Canonical>, String)> = HashSet::new();
+    errors.retain(|(ident, err)| seen.insert((ident.clone(), format!("{err}"))));
 
     // units checking uses the model's equations and variable's
     // unit definitions to calculate the concrete units for each

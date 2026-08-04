@@ -150,7 +150,8 @@ fn known_unit_mismatch_is_still_caught() {
         .iter()
         .filter(|d| {
             let details = diag_details(d);
-            details.contains("computed units 'seconds' don't match specified units")
+            details.contains("computes to units 'seconds'")
+                && details.contains("specified units are 'meters'")
         })
         .collect();
 

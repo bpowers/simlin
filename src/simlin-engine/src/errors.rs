@@ -575,7 +575,7 @@ mod tests {
         // message, so GUI consumers can show it without the snippet/summary.
         let details = error.details.as_ref().expect("details missing");
         assert!(
-            details.starts_with("computed units"),
+            details.starts_with("the equation computes to units"),
             "bare details should be the reason string alone: {details}"
         );
         assert!(!details.contains('~'), "details must not carry the snippet");

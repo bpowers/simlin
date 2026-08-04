@@ -734,6 +734,76 @@ impl TestProject {
 
     // ── Diagnostic helpers (incremental path) ─────────────────────────
 
+    /// The unit-related diagnostics of this project, as
+    /// `(variable, human-readable detail)` pairs, in emission order --
+    /// including the model-level inference umbrella (variable `None`).
+    /// Message-content and dedup tests read this rather than the raw
+    /// `Diagnostic` list so they don't restate the error-variant plumbing.
+    pub fn unit_diagnostic_details(&self) -> Vec<(Option<String>, String)> {
+        self.diagnostics_incremental()
+            .into_iter()
+            .filter_map(|d| {
+                let detail = match &d.error {
+                    DiagnosticError::Unit(UnitError::ConsistencyError(_, _, details)) => {
+                        details.clone().unwrap_or_default()
+                    }
+                    DiagnosticError::Unit(UnitError::DefinitionError(err, details)) => {
+                        match details {
+                            Some(s) => format!("{err} -- {s}"),
+                            None => format!("{err}"),
+                        }
+                    }
+                    DiagnosticError::Unit(UnitError::InferenceError { details, .. }) => {
+                        details.clone().unwrap_or_default()
+                    }
+                    DiagnosticError::Model(e) if e.code == ErrorCode::UnitMismatch => {
+                        e.details.clone().unwrap_or_default()
+                    }
+                    _ => return None,
+                };
+                Some((d.variable.clone(), detail))
+            })
+            .collect()
+    }
+
+    /// Assert the project produces NO unit diagnostics at all (mismatches,
+    /// definition errors, or the model-level inference umbrella). Stronger
+    /// than `assert_compiles_incremental`, which ignores Warning-severity
+    /// unit diagnostics entirely.
+    pub fn assert_no_unit_diagnostics(&self) {
+        let details = self.unit_diagnostic_details();
+        assert!(
+            details.is_empty(),
+            "expected no unit diagnostics, got: {details:#?}"
+        );
+    }
+
+    /// Add an array variable with explicit per-element equations
+    /// (`Equation::Arrayed`, no default) and declared units.
+    pub fn array_elements_with_units(
+        mut self,
+        name_with_dims: &str,
+        elements: Vec<(&str, &str)>,
+        units: Option<&str>,
+    ) -> Self {
+        let (name, dims) = parse_array_declaration(name_with_dims);
+        let arrayed_equations = elements
+            .into_iter()
+            .map(|(elem, eq)| (elem.to_string(), eq.to_string(), None, None))
+            .collect();
+        self.variables.push(Variable::Aux(datamodel::Aux {
+            ident: name,
+            equation: Equation::Arrayed(dims, arrayed_equations, None, false),
+            documentation: String::new(),
+            units: units.map(|s| s.to_string()),
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+        self
+    }
+
     /// Sync the datamodel into a salsa DB and collect all diagnostics.
     fn diagnostics_incremental(&self) -> Vec<crate::db::Diagnostic> {
         let datamodel = self.build_datamodel();

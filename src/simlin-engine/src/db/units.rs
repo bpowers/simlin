@@ -416,7 +416,17 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
         }
     }
 
-    // Run unit checking.
+    // Run unit checking. Dimensional analysis is opt-in by declaring units:
+    // a model that declares NO units on any variable (a purely numeric
+    // model) gets no consistency diagnostics either -- without this gate the
+    // arrayed element-consistency pass still fired off sim_specs'
+    // time_units alone, flooding unit-less fixtures (e.g. the test-models
+    // arithmetics suite) with warnings about equations the modeler never
+    // claimed were dimensional. Mirrors the `has_declared_units` gate on
+    // inference conflicts above.
+    if !has_declared_units {
+        return;
+    }
     match crate::units_check::check(units_ctx, &inferred_units, target_model) {
         Ok(Ok(())) => {}
         Ok(Err(errors)) => {

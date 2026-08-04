@@ -609,11 +609,26 @@ impl UnitInferer<'_> {
                 | BuiltinFn::Log10(a)
                 | BuiltinFn::Sign(a)
                 | BuiltinFn::Sin(a)
-                | BuiltinFn::Sqrt(a)
                 | BuiltinFn::Tan(a)
                 | BuiltinFn::Size(a)
                 | BuiltinFn::Stddev(a)
                 | BuiltinFn::Sum(a) => self.gen_constraints(a, prefix, current_var, constraints),
+                // SQRT halves unit exponents (mirroring `units_check`). The
+                // argument's symbolic map usually carries metavariables with
+                // odd exponents (`@x^1`), which have no representable root in
+                // integer-exponent maps and no solvable squared-metavar
+                // constraint (`single_fv` refuses |exp| != 1), so inference
+                // degrades to Constant there: no constraint is generated and
+                // the concrete check in `units_check` remains the authority.
+                BuiltinFn::Sqrt(a) => {
+                    match self.gen_constraints(a, prefix, current_var, constraints) {
+                        Units::Constant => Units::Constant,
+                        Units::Explicit(units) => match crate::units::try_sqrt(&units) {
+                            Some(root) => Units::Explicit(root),
+                            None => Units::Constant,
+                        },
+                    }
+                }
                 BuiltinFn::Mean(args) => {
                     let args = args
                         .iter()
@@ -653,15 +668,18 @@ impl UnitInferer<'_> {
                         let b_units = self.gen_constraints(b, prefix, current_var, constraints);
 
                         if let Units::Explicit(ref lunits) = a_units
-                            && let Units::Explicit(runits) = b_units
+                            && let Units::Explicit(ref runits) = b_units
                         {
                             let loc = a.get_loc().union(&b.get_loc());
                             constraints.push(LocatedConstraint::new(
-                                combine(UnitOp::Div, lunits.clone(), runits),
+                                combine(UnitOp::Div, lunits.clone(), runits.clone()),
                                 current_var,
                                 Some(loc),
                             ));
                         }
+                        // A literal argument is unit-polymorphic: `MAX(0, x)`
+                        // has x's units (mirroring `units_check`).
+                        return a_units.first_explicit(b_units);
                     }
                     a_units
                 }
@@ -727,16 +745,18 @@ impl UnitInferer<'_> {
                     // Constrain fallback to match the lagged argument's units,
                     // analogous to Max/Min handling.
                     if let Units::Explicit(ref a_map) = a_units
-                        && let Units::Explicit(b_map) = b_units
+                        && let Units::Explicit(ref b_map) = b_units
                     {
                         let loc = a.get_loc().union(&b.get_loc());
                         constraints.push(LocatedConstraint::new(
-                            combine(UnitOp::Div, a_map.clone(), b_map),
+                            combine(UnitOp::Div, a_map.clone(), b_map.clone()),
                             current_var,
                             Some(loc),
                         ));
                     }
-                    a_units
+                    // A literal in either position is unit-polymorphic
+                    // (mirroring `units_check`).
+                    a_units.first_explicit(b_units)
                 }
                 BuiltinFn::Init(a) => self.gen_constraints(a, prefix, current_var, constraints),
             },
@@ -768,7 +788,29 @@ impl UnitInferer<'_> {
                             Units::Explicit(lunits)
                         }
                     },
-                    BinaryOp::Exp | BinaryOp::Mod => lunits,
+                    // `x^n`: an integer-literal exponent multiplies the unit
+                    // exponents -- valid symbolically too (`@x^1` becomes
+                    // `@x^n`). Everything else degrades to Constant rather
+                    // than (wrongly) keeping x's units (mirrors units_check;
+                    // a 0.5 exponent halves only all-even maps, which a
+                    // metavariable-bearing map never is).
+                    BinaryOp::Exp => match (lunits, crate::units_check::literal_exponent(r)) {
+                        (Units::Constant, _) => Units::Constant,
+                        (Units::Explicit(base), Some(n)) => {
+                            if n.fract() == 0.0 && n.abs() <= i32::MAX as f64 {
+                                Units::Explicit(base.exp(n as i32))
+                            } else if n == 0.5 {
+                                match crate::units::try_sqrt(&base) {
+                                    Some(root) => Units::Explicit(root),
+                                    None => Units::Constant,
+                                }
+                            } else {
+                                Units::Constant
+                            }
+                        }
+                        (Units::Explicit(_), None) => Units::Constant,
+                    },
+                    BinaryOp::Mod => lunits,
                     BinaryOp::Mul => match (lunits, runits) {
                         (Units::Constant, Units::Constant) => Units::Constant,
                         (Units::Explicit(units), Units::Constant)
@@ -805,17 +847,19 @@ impl UnitInferer<'_> {
                 let runits = self.gen_constraints(r, prefix, current_var, constraints);
 
                 if let Units::Explicit(ref lunits) = lunits
-                    && let Units::Explicit(runits) = runits
+                    && let Units::Explicit(ref runits) = runits
                 {
                     let loc = l.get_loc().union(&r.get_loc());
                     constraints.push(LocatedConstraint::new(
-                        combine(UnitOp::Div, lunits.clone(), runits),
+                        combine(UnitOp::Div, lunits.clone(), runits.clone()),
                         current_var,
                         Some(loc),
                     ));
                 }
 
-                lunits
+                // A literal branch (`IF c THEN 0 ELSE flow`) is
+                // unit-polymorphic (mirroring `units_check`).
+                lunits.first_explicit(runits)
             }
         }
     }

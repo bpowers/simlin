@@ -994,4 +994,277 @@ mod tests {
             "detail should name the involved variables: {detail}"
         );
     }
+
+    // ── Builtin unit semantics (corpus-driven fixes, 2026-08) ─────────────
+    //
+    // These pin behaviors found wrong by sweeping the test corpus:
+    // WORLD3 (`MAX(0, x)` forced dmnl), Theil_2011 (`SQRT(mse)` kept the
+    // squared units), and general message quality/dedup issues.
+
+    /// The unit-diagnostic details attributed to variables of a project.
+    fn unit_details(project: &TestProject) -> Vec<(Option<String>, String)> {
+        project.unit_diagnostic_details()
+    }
+
+    #[test]
+    fn max_with_literal_arg_preserves_other_args_units() {
+        // WORLD3's `land removal for urban and industrial use` is
+        // `MAX(0, hectare-valued expr) / year`, declared `hectare/year`.
+        // A literal in MAX/MIN is unit-polymorphic: the result units are the
+        // units of the non-constant argument, so this must be clean.
+        TestProject::new("max-literal")
+            .with_time_units("year")
+            .unit("hectare", None)
+            .aux_with_units("required", "9", Some("hectare"))
+            .aux_with_units("current", "5", Some("hectare"))
+            .aux_with_units("dev_time", "10", Some("year"))
+            .aux_with_units(
+                "removal",
+                "MAX(0, required - current) / dev_time",
+                Some("hectare/year"),
+            )
+            .assert_no_unit_diagnostics();
+    }
+
+    #[test]
+    fn min_with_literal_arg_preserves_other_args_units() {
+        TestProject::new("min-literal")
+            .with_time_units("year")
+            .unit("hectare", None)
+            .aux_with_units("supply", "9", Some("hectare"))
+            .aux_with_units("capped", "MIN(100, supply)", Some("hectare"))
+            .assert_no_unit_diagnostics();
+    }
+
+    #[test]
+    fn sqrt_halves_squared_units() {
+        // Vensim (fn_sqrt): "SQRT(units*units) --> units". Theil_2011's
+        // `rmse = SQRT(mse)` with mse in Units*Units and rmse in Units is
+        // dimensionally correct and must not warn.
+        TestProject::new("sqrt-square")
+            .with_time_units("year")
+            .unit("thing", None)
+            .aux_with_units("mse", "9", Some("thing*thing"))
+            .aux_with_units("rmse", "SQRT(mse)", Some("thing"))
+            .assert_no_unit_diagnostics();
+    }
+
+    #[test]
+    fn sqrt_of_non_square_units_warns() {
+        // SQRT of units that are not a perfect square has no representable
+        // units; per Vensim's rule the argument should be a perfect square.
+        let p = TestProject::new("sqrt-nonsquare")
+            .with_time_units("year")
+            .unit("thing", None)
+            .aux_with_units("x", "9", Some("thing"))
+            .aux_with_units("y", "SQRT(x)", Some("thing"));
+        let details = unit_details(&p);
+        assert!(
+            details
+                .iter()
+                .any(|(v, d)| v.as_deref() == Some("y") && d.contains("perfect square")),
+            "expected a perfect-square warning for y, got: {details:?}"
+        );
+    }
+
+    #[test]
+    fn integer_power_multiplies_unit_exponents() {
+        // `x^2` squares x's units (matching multiplication semantics).
+        TestProject::new("power-int")
+            .with_time_units("year")
+            .unit("meter", None)
+            .aux_with_units("length", "3", Some("meter"))
+            .aux_with_units("area", "length^2", Some("meter*meter"))
+            .assert_no_unit_diagnostics();
+    }
+
+    #[test]
+    fn integer_power_mismatch_warns() {
+        let p = TestProject::new("power-int-bad")
+            .with_time_units("year")
+            .unit("meter", None)
+            .aux_with_units("length", "3", Some("meter"))
+            .aux_with_units("area", "length^2", Some("meter"));
+        let details = unit_details(&p);
+        assert!(
+            details
+                .iter()
+                .any(|(v, d)| v.as_deref() == Some("area") && d.contains("meter^2")),
+            "expected a mismatch naming meter^2 for area, got: {details:?}"
+        );
+    }
+
+    #[test]
+    fn mismatch_message_names_both_computed_and_specified_units() {
+        // "computed units 'X' don't match specified units" is not actionable
+        // without saying what the specified units ARE.
+        let p = TestProject::new("msg-both-units")
+            .with_time_units("year")
+            .unit("widget", None)
+            .aux_with_units("rate", "5", Some("widget/year"))
+            .aux_with_units("total", "rate", Some("widget"));
+        let details = unit_details(&p);
+        let msg = details
+            .iter()
+            .find(|(v, _)| v.as_deref() == Some("total"))
+            .map(|(_, d)| d.clone())
+            .unwrap_or_else(|| panic!("expected a mismatch on total, got: {details:?}"));
+        assert!(
+            msg.contains("widget/year") && msg.contains("'widget'"),
+            "message must name both computed and specified units: {msg}"
+        );
+    }
+
+    #[test]
+    fn identical_per_element_mismatches_are_deduped() {
+        // An arrayed variable with per-element equations used to emit one
+        // identical diagnostic per element (C-LEARN's `ph` warned 6x, scirev
+        // 50x). Identical (variable, message) pairs must collapse to one.
+        let p = TestProject::new("arrayed-dedup")
+            .with_time_units("year")
+            .unit("widget", None)
+            .named_dimension("D", &["a", "b", "c"])
+            .aux_with_units("rate", "5", Some("widget/year"))
+            .array_elements_with_units(
+                "arr[D]",
+                vec![("a", "rate"), ("b", "rate"), ("c", "rate")],
+                Some("widget"),
+            );
+        let details = unit_details(&p);
+        let arr_msgs: Vec<_> = details
+            .iter()
+            .filter(|(v, _)| v.as_deref() == Some("arr"))
+            .collect();
+        assert_eq!(
+            arr_msgs.len(),
+            1,
+            "identical per-element mismatches must dedup to one: {arr_msgs:?}"
+        );
+    }
+
+    #[test]
+    fn multiword_unit_names_parse_like_stella() {
+        // XMILE 3.5.1/3.5.2: unit names follow identifier rules -- "stored
+        // with underscores (_) but generally presented to users with spaces".
+        // Stella writes `Degrees Fahrenheit/Minute` (test-models teacup.xmile),
+        // which must parse as `degrees_fahrenheit/minute`, not "extra_token".
+        TestProject::new("multiword-units")
+            .with_time_units("Minute")
+            .aux_with_units("room", "70", Some("Degrees Fahrenheit"))
+            .aux_with_units("temp", "180", Some("Degrees_Fahrenheit"))
+            .aux_with_units("char_time", "10", Some("Minutes"))
+            .aux_with_units(
+                "loss",
+                "(temp - room) / char_time",
+                Some("Degrees Fahrenheit/Minute"),
+            )
+            .assert_no_unit_diagnostics();
+    }
+
+    #[test]
+    fn xmile_builtin_time_unit_abbreviations_are_aliases() {
+        // XMILE 3.5.4's built-in units table: seconds (s, second),
+        // minutes (min, minute), hours (hr, hour), weeks (wk, week),
+        // months (mo, month), quarters (qtr, quarter), years (yr, year).
+        // The abbreviations must resolve to the same unit as the full name.
+        TestProject::new("xmile-abbrevs")
+            .with_time_units("months")
+            .unit("widget", None)
+            .aux_with_units("a", "1", Some("widget/mo"))
+            .aux_with_units("b", "2", Some("widget/month"))
+            .aux_with_units("c", "a + b", Some("widget/mo"))
+            .aux_with_units("d", "3", Some("widget/qtr"))
+            .aux_with_units("e", "4", Some("widget/quarter"))
+            .aux_with_units("f", "d + e", Some("widget/quarters"))
+            .aux_with_units("g", "5", Some("widget/s"))
+            .aux_with_units("h", "6", Some("widget/second"))
+            .aux_with_units("i", "g + h", Some("widget/seconds"))
+            .assert_no_unit_diagnostics();
+    }
+
+    #[test]
+    fn unitless_is_dimensionless() {
+        // XMILE 3.5.4: "both Dimensionless and Dmnl are RECOMMENDED as
+        // built-in aliases" for 1 -- and the table adds Unitless.
+        TestProject::new("unitless-alias")
+            .with_time_units("months")
+            .aux_with_units("a", "0.5", Some("Unitless"))
+            .aux_with_units("b", "0.25", Some("dmnl"))
+            .aux_with_units("c", "a * b", Some("Dimensionless"))
+            .assert_no_unit_diagnostics();
+    }
+
+    #[test]
+    fn per_time_builtin_units_expand() {
+        // XMILE 3.5.4 defines per_second/per_minute/.../per_year as built-in
+        // units with equations (per_week = 1/weeks).
+        TestProject::new("per-units")
+            .with_time_units("weeks")
+            .unit("widget", None)
+            .aux_with_units("rate", "0.1", Some("per_week"))
+            .aux_with_units("stockish", "100", Some("widget"))
+            .aux_with_units("flowish", "stockish * rate", Some("widget/week"))
+            .assert_no_unit_diagnostics();
+    }
+
+    #[test]
+    fn if_with_literal_branch_preserves_other_branchs_units() {
+        // `IF cond THEN 0 ELSE flow` is a ubiquitous idiom (e.g. Homer's
+        // Covid19US `Incoming infections`); the literal branch is
+        // unit-polymorphic, so the expression has the other branch's units.
+        TestProject::new("if-literal-branch")
+            .with_time_units("month")
+            .unit("popn", None)
+            .aux_with_units("peak", "300", Some("popn/month"))
+            .aux_with_units("effect", "0.5", Some("dmnl"))
+            .aux_with_units(
+                "incoming",
+                "effect * (IF TIME < 5 THEN 0 ELSE peak)",
+                Some("popn/month"),
+            )
+            .assert_no_unit_diagnostics();
+    }
+
+    #[test]
+    fn models_without_declared_units_are_not_unit_checked() {
+        // Dimensional analysis is opt-in by declaring units. A model that
+        // declares NO units on any variable (a purely numeric model -- e.g.
+        // the test-models arithmetics fixtures) must produce zero unit
+        // diagnostics, even though sim_specs' time_units gives TIME units
+        // that make `cons - TIME` look inconsistent. The db layer already
+        // gated inference conflicts on `has_declared_units`; consistency
+        // checking must honor the same gate.
+        TestProject::new("no-declared-units")
+            .with_time_units("month")
+            .named_dimension("D", &["a", "b"])
+            .aux("cons", "1.2", None)
+            .array_elements_with_units(
+                "mixed[D]",
+                vec![("a", "cons - TIME"), ("b", "TIME^30")],
+                None,
+            )
+            .assert_no_unit_diagnostics();
+    }
+
+    #[test]
+    fn unit_definition_parse_error_names_the_offending_units() {
+        // A units string that genuinely fails to parse must say WHICH units
+        // string failed, not just report a bare token error.
+        let p = TestProject::new("bad-unit-string")
+            .with_time_units("year")
+            .aux_with_units("x", "1", Some("widgets per year"));
+        // "widgets per year" joins to a single (odd, but legal) identifier, so
+        // use something unambiguous:
+        let p2 = TestProject::new("bad-unit-string2")
+            .with_time_units("year")
+            .aux_with_units("x", "1", Some("widgets//"));
+        drop(p);
+        let details = p2.unit_diagnostic_details();
+        assert!(
+            details
+                .iter()
+                .any(|(v, d)| v.as_deref() == Some("x") && d.contains("widgets//")),
+            "the diagnostic must quote the offending units string: {details:?}"
+        );
+    }
 }

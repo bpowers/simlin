@@ -33,6 +33,19 @@ impl Units {
         }
     }
 
+    /// The units a unit-polymorphic two-argument builtin (MAX, MIN,
+    /// PREVIOUS) produces: the first *explicit* units among its arguments.
+    /// A bare numeric literal is unit-polymorphic -- `MAX(0, x)` has x's
+    /// units -- so returning the first argument's verdict unconditionally
+    /// (as this code used to) collapsed the result to `Constant` and made
+    /// e.g. WORLD3's `MAX(0, land)/time` compute as `1/time`.
+    pub fn first_explicit(self, rhs: Units) -> Units {
+        match self {
+            Units::Explicit(_) => self,
+            Units::Constant => rhs,
+        }
+    }
+
     /// Convert to a UnitMap, treating Constant as dimensionless (empty map)
     pub fn to_unit_map(&self) -> UnitMap {
         match self {
@@ -47,6 +60,72 @@ impl Units {
 pub(crate) enum UnitOp {
     Mul,
     Div,
+}
+
+/// The square root of a unit map: halves every exponent. Returns `None`
+/// when any exponent is odd -- such units are not a perfect square and have
+/// no representable root (Vensim's fn_sqrt: "SQRT(units*units) --> units";
+/// "if argument has units that are a perfect square the result will be the
+/// square root of the units"). A dimensionless (empty) map roots to itself.
+pub(crate) fn try_sqrt(units: &UnitMap) -> Option<UnitMap> {
+    if units.map.values().any(|exp| exp % 2 != 0) {
+        return None;
+    }
+    let mut result = units.clone();
+    for exp in result.map.values_mut() {
+        *exp /= 2;
+    }
+    Some(result)
+}
+
+/// Join whitespace-separated identifier runs in a unit equation into single
+/// underscore-joined unit names: `Degrees Fahrenheit/Minute` becomes
+/// `Degrees_Fahrenheit/Minute`.
+///
+/// XMILE 3.5.1/3.5.2: unit names follow identifier rules and are "stored
+/// with underscores (_) but generally presented to users with spaces" --
+/// and Stella writes the presentation form into `<units>` tags (e.g. the
+/// canonical teacup model's `Degrees Fahrenheit`). Multiplication in a unit
+/// equation is always an explicit `*`, so adjacent bare words can only be
+/// one multi-word name. Whitespace next to an operator or parenthesis is
+/// left untouched.
+pub(crate) fn join_multiword_unit_names(eqn: &str) -> std::borrow::Cow<'_, str> {
+    fn is_word_char(c: char) -> bool {
+        c.is_alphanumeric() || c == '_' || c == '$'
+    }
+
+    let bytes: Vec<char> = eqn.chars().collect();
+    let mut out = String::with_capacity(eqn.len());
+    let mut changed = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c.is_whitespace() {
+            // A whitespace run joins two words only if BOTH neighbors are
+            // word characters.
+            let prev_is_word = out.chars().next_back().is_some_and(is_word_char);
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_whitespace() {
+                j += 1;
+            }
+            let next_is_word = j < bytes.len() && is_word_char(bytes[j]);
+            if prev_is_word && next_is_word {
+                out.push('_');
+                changed = true;
+            } else if j < bytes.len() {
+                out.push(' ');
+            }
+            i = j;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    if changed {
+        std::borrow::Cow::Owned(out)
+    } else {
+        std::borrow::Cow::Borrowed(eqn)
+    }
 }
 
 pub(crate) fn combine(op: UnitOp, l: UnitMap, r: UnitMap) -> UnitMap {
@@ -75,20 +154,37 @@ impl Context {
         units: &[Unit],
         sim_specs: &SimSpecs,
     ) -> (Self, Vec<(String, Vec<EquationError>)>) {
-        // Built-in unit equivalences for common singular/plural variations.
-        // These ensure that "person" and "people" (etc.) are treated as the same unit.
-        // We only add a built-in if the model doesn't already define a unit with that name.
-        let builtin_units: &[(&str, &[&str])] = &[
-            ("$", &["dollar", "dollars", "$s"]),
-            ("person", &["people", "persons"]),
-            ("unit", &["units"]),
-            ("minute", &["minutes"]),
-            ("month", &["months"]),
-            ("year", &["years", "yr", "yrs"]),
-            ("day", &["days"]),
-            ("week", &["weeks"]),
-            ("hour", &["hours"]),
-            ("second", &["seconds"]),
+        // Built-in units: the XMILE 3.5.4 built-in units table (time units
+        // with their abbreviation/singular aliases, and the `per_X = 1/X`
+        // derived units), plus Vensim's default synonym list ($/dollar,
+        // person/people, unit/units -- the `22:` groups Vensim writes into
+        // every mdl). The third tuple field is the unit's equation (only the
+        // per_* units have one). We only add a built-in if the model doesn't
+        // already define a unit with that name.
+        type BuiltinUnit = (&'static str, &'static [&'static str], Option<&'static str>);
+        let builtin_units: &[BuiltinUnit] = &[
+            ("$", &["dollar", "dollars", "$s"], None),
+            ("person", &["people", "persons"], None),
+            ("unit", &["units"], None),
+            ("nanosecond", &["nanoseconds", "ns"], None),
+            ("microsecond", &["microseconds", "us"], None),
+            ("millisecond", &["milliseconds", "ms"], None),
+            ("second", &["seconds", "s"], None),
+            ("minute", &["minutes", "min"], None),
+            ("hour", &["hours", "hr"], None),
+            ("day", &["days"], None),
+            ("week", &["weeks", "wk"], None),
+            ("month", &["months", "mo"], None),
+            ("quarter", &["quarters", "qtr"], None),
+            ("year", &["years", "yr", "yrs"], None),
+            ("per_second", &[], Some("1/second")),
+            ("per_minute", &[], Some("1/minute")),
+            ("per_hour", &[], Some("1/hour")),
+            ("per_day", &[], Some("1/day")),
+            ("per_week", &[], Some("1/week")),
+            ("per_month", &[], Some("1/month")),
+            ("per_quarter", &[], Some("1/quarter")),
+            ("per_year", &[], Some("1/year")),
         ];
 
         // Collect ALL model-defined unit identifiers (primary names AND aliases) into one set.
@@ -106,16 +202,16 @@ impl Context {
         // any model-defined identifier (name or alias).
         let mut combined_units: Vec<Unit> = builtin_units
             .iter()
-            .filter(|(name, aliases)| {
+            .filter(|(name, aliases, _)| {
                 let primary = canonicalize(name).into_owned();
                 !model_unit_identifiers.contains(&primary)
                     && !aliases
                         .iter()
                         .any(|a| model_unit_identifiers.contains(&*canonicalize(a)))
             })
-            .map(|(name, aliases)| Unit {
+            .map(|(name, aliases, equation)| Unit {
                 name: name.to_string(),
-                equation: None,
+                equation: equation.map(|s| s.to_string()),
                 disabled: false,
                 aliases: aliases.iter().map(|s| s.to_string()).collect(),
             })
@@ -210,7 +306,7 @@ impl Context {
                 }
             }
 
-            let eqn = unit.equation.as_ref().unwrap();
+            let eqn = &join_multiword_unit_names(unit.equation.as_ref().unwrap());
 
             let ast = match Expr0::new(eqn, LexerType::Units) {
                 Ok(ast) => ast,
@@ -367,6 +463,7 @@ fn build_unit_components(ctx: &Context, ast: &Expr0) -> EquationResult<UnitMap> 
             if id_str == "dmnl"
                 || id_str == "nil"
                 || id_str == "dimensionless"
+                || id_str == "unitless"
                 || id_str == "fraction"
             {
                 // dimensionless is special
@@ -421,14 +518,19 @@ pub fn parse_units(
     unit_eqn: Option<&str>,
 ) -> StdResult<Option<UnitMap>, Vec<UnitError>> {
     if let Some(unit_eqn) = unit_eqn {
-        if let Some(expr) = Expr0::new(unit_eqn, LexerType::Units).map_err(|errors| {
+        // Carry the offending source text on every definition error: a bare
+        // token-error code ("extra_token") with no context is not actionable
+        // for the modeler.
+        let context = || format!("in units '{unit_eqn}'");
+        let unit_eqn_joined = join_multiword_unit_names(unit_eqn);
+        if let Some(expr) = Expr0::new(&unit_eqn_joined, LexerType::Units).map_err(|errors| {
             errors
                 .into_iter()
-                .map(|err| UnitError::DefinitionError(err, None))
+                .map(|err| UnitError::DefinitionError(err, Some(context())))
                 .collect::<Vec<UnitError>>()
         })? {
             let result = build_unit_components(ctx, &expr)
-                .map_err(|err| vec![UnitError::DefinitionError(err, None)])?;
+                .map_err(|err| vec![UnitError::DefinitionError(err, Some(context()))])?;
             Ok(Some(result))
         } else {
             Ok(None)
