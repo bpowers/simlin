@@ -38,9 +38,21 @@ impl UnitMap {
         self
     }
 
+    /// Raise every unit to the power `exp`. `x^0` is dimensionless, so the
+    /// map is cleared rather than left holding zero exponents (a
+    /// non-normalized `{meter: 0}` compares unequal to the empty map under
+    /// the raw BTreeMap equality `PartialEq` uses, while Display filters
+    /// zeros -- yielding self-contradictory "dmnl doesn't match dmnl"
+    /// diagnostics). The multiply saturates: exponents this large are
+    /// nonsense units, but a model file is untrusted input and an overflow
+    /// panic would abort a `panic=abort` host.
     pub fn exp(mut self, exp: i32) -> Self {
+        if exp == 0 {
+            self.map.clear();
+            return self;
+        }
         for unit in self.map.values_mut() {
-            *unit *= exp;
+            *unit = unit.saturating_mul(exp);
         }
 
         self

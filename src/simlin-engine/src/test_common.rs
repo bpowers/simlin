@@ -778,32 +778,6 @@ impl TestProject {
         );
     }
 
-    /// Add an array variable with explicit per-element equations
-    /// (`Equation::Arrayed`, no default) and declared units.
-    pub fn array_elements_with_units(
-        mut self,
-        name_with_dims: &str,
-        elements: Vec<(&str, &str)>,
-        units: Option<&str>,
-    ) -> Self {
-        let (name, dims) = parse_array_declaration(name_with_dims);
-        let arrayed_equations = elements
-            .into_iter()
-            .map(|(elem, eq)| (elem.to_string(), eq.to_string(), None, None))
-            .collect();
-        self.variables.push(Variable::Aux(datamodel::Aux {
-            ident: name,
-            equation: Equation::Arrayed(dims, arrayed_equations, None, false),
-            documentation: String::new(),
-            units: units.map(|s| s.to_string()),
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: datamodel::Compat::default(),
-        }));
-        self
-    }
-
     /// Sync the datamodel into a salsa DB and collect all diagnostics.
     fn diagnostics_incremental(&self) -> Vec<crate::db::Diagnostic> {
         let datamodel = self.build_datamodel();

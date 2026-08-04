@@ -686,8 +686,25 @@ impl UnitInferer<'_> {
                 BuiltinFn::Quantum(a, _) => {
                     self.gen_constraints(a, prefix, current_var, constraints)
                 }
-                BuiltinFn::Sshape(_, bottom, _) => {
-                    self.gen_constraints(bottom, prefix, current_var, constraints)
+                // SSHAPE(x, bottom, top): bottom and top carry the result
+                // units and must agree; x is visited for its own constraints
+                // but its units are unconstrained (mirroring `units_check`).
+                BuiltinFn::Sshape(x, bottom, top) => {
+                    self.gen_constraints(x, prefix, current_var, constraints);
+                    let bottom_units =
+                        self.gen_constraints(bottom, prefix, current_var, constraints);
+                    let top_units = self.gen_constraints(top, prefix, current_var, constraints);
+                    if let Units::Explicit(ref b_map) = bottom_units
+                        && let Units::Explicit(ref t_map) = top_units
+                    {
+                        let loc = bottom.get_loc().union(&top.get_loc());
+                        constraints.push(LocatedConstraint::new(
+                            combine(UnitOp::Div, b_map.clone(), t_map.clone()),
+                            current_var,
+                            Some(loc),
+                        ));
+                    }
+                    bottom_units.first_explicit(top_units)
                 }
                 BuiltinFn::Pulse(_, _, _) | BuiltinFn::Ramp(_, _, _) | BuiltinFn::Step(_, _) => {
                     Units::Constant
@@ -702,17 +719,23 @@ impl UnitInferer<'_> {
                     );
                     let units = self.gen_constraints(&div, prefix, current_var, constraints);
 
-                    // the optional argument to safediv, if specified, should match the units of a/b
-                    if let Units::Explicit(ref result_units) = units
-                        && let Some(c) = c
-                        && let Units::Explicit(c_units) =
-                            self.gen_constraints(c, prefix, current_var, constraints)
-                    {
-                        constraints.push(LocatedConstraint::new(
-                            combine(UnitOp::Div, c_units, result_units.clone()),
-                            current_var,
-                            Some(c.get_loc()),
-                        ));
+                    // The optional fallback, if specified, must match the
+                    // units of a/b -- and when the quotient is a bare
+                    // literal ratio, the explicit fallback's units carry
+                    // (the MAX/MIN literal-polymorphism rule, mirroring
+                    // `units_check`).
+                    if let Some(c) = c {
+                        let c_units = self.gen_constraints(c, prefix, current_var, constraints);
+                        if let Units::Explicit(ref result_units) = units
+                            && let Units::Explicit(ref c_map) = c_units
+                        {
+                            constraints.push(LocatedConstraint::new(
+                                combine(UnitOp::Div, c_map.clone(), result_units.clone()),
+                                current_var,
+                                Some(c.get_loc()),
+                            ));
+                        }
+                        return units.first_explicit(c_units);
                     }
 
                     units
@@ -788,24 +811,19 @@ impl UnitInferer<'_> {
                             Units::Explicit(lunits)
                         }
                     },
-                    // `x^n`: an integer-literal exponent multiplies the unit
-                    // exponents -- valid symbolically too (`@x^1` becomes
-                    // `@x^n`). Everything else degrades to Constant rather
-                    // than (wrongly) keeping x's units (mirrors units_check;
-                    // a 0.5 exponent halves only all-even maps, which a
-                    // metavariable-bearing map never is).
+                    // `x^n` routes through the shared `units::power_units`
+                    // (see units_check's `^` arm): integer-literal exponents
+                    // are valid symbolically too (`@x^1` becomes `@x^n`); a
+                    // half-integer exponent's non-square case degrades to
+                    // Constant here (the concrete check is the authority),
+                    // as does every non-half-integer or non-literal shape.
                     BinaryOp::Exp => match (lunits, crate::units_check::literal_exponent(r)) {
                         (Units::Constant, _) => Units::Constant,
                         (Units::Explicit(base), Some(n)) => {
-                            if n.fract() == 0.0 && n.abs() <= i32::MAX as f64 {
-                                Units::Explicit(base.exp(n as i32))
-                            } else if n == 0.5 {
-                                match crate::units::try_sqrt(&base) {
-                                    Some(root) => Units::Explicit(root),
-                                    None => Units::Constant,
-                                }
-                            } else {
-                                Units::Constant
+                            match crate::units::power_units(&base, n) {
+                                crate::units::PowerUnits::Explicit(units) => Units::Explicit(units),
+                                crate::units::PowerUnits::NonSquareRoot
+                                | crate::units::PowerUnits::Polymorphic => Units::Constant,
                             }
                         }
                         (Units::Explicit(_), None) => Units::Constant,

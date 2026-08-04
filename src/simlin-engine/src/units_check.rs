@@ -218,7 +218,28 @@ impl UnitEvaluator<'_> {
                         Ok(a_units)
                     }
                     BuiltinFn::Quantum(a, _) => self.check(a),
-                    BuiltinFn::Sshape(_, bottom, _) => self.check(bottom),
+                    // SSHAPE(x, bottom, top) = bottom + (top-bottom)*sigmoid(x)
+                    // (vm.rs), so bottom and top carry the result units and
+                    // must agree; a literal in either position is
+                    // unit-polymorphic. x is visited so errors inside it
+                    // surface, but its units are unconstrained (a 0..1 input).
+                    BuiltinFn::Sshape(x, bottom, top) => {
+                        self.check(x)?;
+                        let bottom_units = self.check(bottom)?;
+                        let top_units = self.check(top)?;
+                        if !bottom_units.equals(&top_units) {
+                            return Err(ConsistencyError(
+                                ErrorCode::UnitMismatch,
+                                bottom.get_loc().union(&top.get_loc()),
+                                Some(format!(
+                                    "SSHAPE bottom has units '{}' but top has units '{}'",
+                                    bottom_units.to_unit_map(),
+                                    top_units.to_unit_map()
+                                )),
+                            ));
+                        }
+                        Ok(bottom_units.first_explicit(top_units))
+                    }
                     BuiltinFn::Pulse(_, _, _)
                     | BuiltinFn::Ramp(_, _, _)
                     | BuiltinFn::Step(_, _) => Ok(Units::Constant),
@@ -245,6 +266,10 @@ impl UnitEvaluator<'_> {
                                     )),
                                 ));
                             }
+                            // A constant-classified quotient (both operands
+                            // literals) takes the explicit fallback's units:
+                            // the same literal-polymorphism rule as MAX/MIN.
+                            return Ok(units.first_explicit(c_units));
                         }
 
                         Ok(units)
@@ -325,32 +350,30 @@ impl UnitEvaluator<'_> {
                             }
                         }
                     },
-                    // `x^n` with an integer-literal exponent multiplies x's
-                    // unit exponents (matching repeated multiplication);
-                    // `x^0.5` of a perfect square halves them. Any other
-                    // exponent shape leaves the units undetermined -- treated
-                    // as unit-polymorphic rather than (wrongly) as x's units.
-                    // What Vensim does for a non-literal exponent is
+                    // `x^n` unit semantics live in `units::power_units`
+                    // (shared with `units_infer`): integer-literal exponents
+                    // multiply the unit exponents, half-integer literals root
+                    // the doubled map, and every other exponent shape --
+                    // non-half-integer literals AND non-literal expressions --
+                    // degrades to unit-polymorphic rather than (wrongly)
+                    // keeping x's units. What Vensim does for those shapes is
                     // unverified, so we deliberately do not warn there.
                     BinaryOp::Exp => match (&lunits, literal_exponent(r)) {
                         (Units::Constant, _) => Ok(Units::Constant),
                         (Units::Explicit(base), Some(n)) => {
-                            if n.fract() == 0.0 && n.abs() <= i32::MAX as f64 {
-                                Ok(Units::Explicit(base.clone().exp(n as i32)))
-                            } else if n == 0.5 {
-                                match crate::units::try_sqrt(base) {
-                                    Some(root) => Ok(Units::Explicit(root)),
-                                    None => Err(ConsistencyError(
-                                        ErrorCode::UnitMismatch,
-                                        expr.get_loc(),
-                                        Some(format!(
-                                            "raising units '{base}' to the power 0.5 requires \
-                                             them to be a perfect square"
-                                        )),
-                                    )),
+                            match crate::units::power_units(base, n) {
+                                crate::units::PowerUnits::Explicit(units) => {
+                                    Ok(Units::Explicit(units))
                                 }
-                            } else {
-                                Ok(Units::Constant)
+                                crate::units::PowerUnits::NonSquareRoot => Err(ConsistencyError(
+                                    ErrorCode::UnitMismatch,
+                                    expr.get_loc(),
+                                    Some(format!(
+                                        "raising units '{base}' to the power {n} requires \
+                                             them to be a perfect square"
+                                    )),
+                                )),
+                                crate::units::PowerUnits::Polymorphic => Ok(Units::Constant),
                             }
                         }
                         (Units::Explicit(_), None) => Ok(Units::Constant),
@@ -699,9 +722,28 @@ pub fn check(
     // An arrayed variable's per-element loops push one error per element, so
     // a mismatch shared by every element repeated identically (C-LEARN's `ph`
     // warned 6x; scirev arrays 50x). Identical (variable, message) rows carry
-    // no extra information -- collapse them, preserving first-occurrence order.
-    let mut seen: HashSet<(Ident<Canonical>, String)> = HashSet::new();
-    errors.retain(|(ident, err)| seen.insert((ident.clone(), format!("{err}"))));
+    // no extra information -- collapse them, preserving first-occurrence
+    // order. The key deliberately EXCLUDES the source location: two elements
+    // with textually-different equations ('rate' vs 'rate*1') produce the
+    // same user-visible message at different offsets, and keying on the
+    // Display form (which embeds the Loc) would let those duplicates
+    // survive. What the user reads is (variable, code, details); that is
+    // what dedups.
+    let dedup_key = |err: &UnitError| -> (u32, String) {
+        match err {
+            ConsistencyError(code, _loc, details) => {
+                (*code as u32, details.clone().unwrap_or_default())
+            }
+            DefinitionError(eq_err, details) => {
+                (eq_err.code as u32, details.clone().unwrap_or_default())
+            }
+            UnitError::InferenceError { code, details, .. } => {
+                (*code as u32, details.clone().unwrap_or_default())
+            }
+        }
+    };
+    let mut seen: HashSet<(Ident<Canonical>, (u32, String))> = HashSet::new();
+    errors.retain(|(ident, err)| seen.insert((ident.clone(), dedup_key(err))));
 
     // units checking uses the model's equations and variable's
     // unit definitions to calculate the concrete units for each

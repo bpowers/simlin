@@ -78,42 +78,89 @@ pub(crate) fn try_sqrt(units: &UnitMap) -> Option<UnitMap> {
     Some(result)
 }
 
+/// The units of `base^n` for a literal exponent `n`.
+///
+/// The single decision shared by `units_check` and `units_infer`, so the two
+/// cannot drift (their `^` arms previously copy-pasted this tree). Integer
+/// exponents multiply the unit exponents (matching repeated multiplication);
+/// half-integer exponents (0.5, -0.5, 1.5, ...) are `sqrt(base^2n)`, which
+/// requires the doubled map to be a perfect square. Any other exponent
+/// (including non-half-integer literals like `x^0.3`) has no representable
+/// units and degrades to `Polymorphic` -- the caller treats it as a
+/// unit-constant rather than (wrongly) keeping the base's units. What Vensim
+/// does for such exponents is unverified, so no warning is emitted for them.
+pub(crate) enum PowerUnits {
+    Explicit(UnitMap),
+    /// A half-integer exponent whose doubled base is not a perfect square:
+    /// `units_check` reports this, `units_infer` degrades to Constant.
+    NonSquareRoot,
+    Polymorphic,
+}
+
+pub(crate) fn power_units(base: &UnitMap, n: f64) -> PowerUnits {
+    let doubled = 2.0 * n;
+    if n.fract() == 0.0 && n.abs() <= i32::MAX as f64 {
+        PowerUnits::Explicit(base.clone().exp(n as i32))
+    } else if doubled.fract() == 0.0 && doubled.abs() <= i32::MAX as f64 {
+        match try_sqrt(&base.clone().exp(doubled as i32)) {
+            Some(root) => PowerUnits::Explicit(root),
+            None => PowerUnits::NonSquareRoot,
+        }
+    } else {
+        PowerUnits::Polymorphic
+    }
+}
+
 /// Join whitespace-separated identifier runs in a unit equation into single
 /// underscore-joined unit names: `Degrees Fahrenheit/Minute` becomes
 /// `Degrees_Fahrenheit/Minute`.
 ///
-/// XMILE 3.5.1/3.5.2: unit names follow identifier rules and are "stored
-/// with underscores (_) but generally presented to users with spaces" --
-/// and Stella writes the presentation form into `<units>` tags (e.g. the
+/// XMILE 3.3.6: unit names follow identifier rules and are "stored with
+/// underscores (_) but generally presented to users with spaces" -- and
+/// Stella writes the presentation form into `<units>` tags (e.g. the
 /// canonical teacup model's `Degrees Fahrenheit`). Multiplication in a unit
 /// equation is always an explicit `*`, so adjacent bare words can only be
 /// one multi-word name. Whitespace next to an operator or parenthesis is
 /// left untouched.
+///
+/// The transformation is BYTE-LENGTH-PRESERVING: each joining space/tab
+/// becomes one `_`, and nothing is collapsed or trimmed. Parse-error byte
+/// offsets computed against the joined string are rendered against the
+/// original by `errors::format_snippet` and carried to GUI consumers as
+/// `FormattedError.start_offset`/`end_offset`, so a length change here
+/// would shift every underline after the first whitespace run. Only ASCII
+/// space and tab participate in joins (1 byte -> 1 byte); other whitespace
+/// is left verbatim for the lexer to reject at its true offset.
 pub(crate) fn join_multiword_unit_names(eqn: &str) -> std::borrow::Cow<'_, str> {
     fn is_word_char(c: char) -> bool {
         c.is_alphanumeric() || c == '_' || c == '$'
     }
+    fn is_joinable_ws(c: char) -> bool {
+        c == ' ' || c == '\t'
+    }
 
-    let bytes: Vec<char> = eqn.chars().collect();
+    let chars: Vec<char> = eqn.chars().collect();
     let mut out = String::with_capacity(eqn.len());
     let mut changed = false;
     let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if c.is_whitespace() {
+    while i < chars.len() {
+        let c = chars[i];
+        if is_joinable_ws(c) {
             // A whitespace run joins two words only if BOTH neighbors are
-            // word characters.
+            // word characters; each joining char maps 1:1 to `_`.
             let prev_is_word = out.chars().next_back().is_some_and(is_word_char);
             let mut j = i;
-            while j < bytes.len() && bytes[j].is_whitespace() {
+            while j < chars.len() && is_joinable_ws(chars[j]) {
                 j += 1;
             }
-            let next_is_word = j < bytes.len() && is_word_char(bytes[j]);
-            if prev_is_word && next_is_word {
-                out.push('_');
-                changed = true;
-            } else if j < bytes.len() {
-                out.push(' ');
+            let next_is_word = j < chars.len() && is_word_char(chars[j]);
+            for run_char in chars.iter().take(j).skip(i) {
+                if prev_is_word && next_is_word {
+                    out.push('_');
+                    changed = true;
+                } else {
+                    out.push(*run_char);
+                }
             }
             i = j;
         } else {
@@ -154,7 +201,7 @@ impl Context {
         units: &[Unit],
         sim_specs: &SimSpecs,
     ) -> (Self, Vec<(String, Vec<EquationError>)>) {
-        // Built-in units: the XMILE 3.5.4 built-in units table (time units
+        // Built-in units: the XMILE 3.3.6 built-in units table (time units
         // with their abbreviation/singular aliases, and the `per_X = 1/X`
         // derived units), plus Vensim's default synonym list ($/dollar,
         // person/people, unit/units -- the `22:` groups Vensim writes into
@@ -200,24 +247,33 @@ impl Context {
         // Only include built-ins that don't conflict with model-defined units.
         // A built-in conflicts if its primary name OR any of its aliases matches
         // any model-defined identifier (name or alias).
-        let mut combined_units: Vec<Unit> = builtin_units
-            .iter()
-            .filter(|(name, aliases, _)| {
-                let primary = canonicalize(name).into_owned();
-                !model_unit_identifiers.contains(&primary)
-                    && !aliases
-                        .iter()
-                        .any(|a| model_unit_identifiers.contains(&*canonicalize(a)))
-            })
-            .map(|(name, aliases, equation)| Unit {
-                name: name.to_string(),
-                equation: equation.map(|s| s.to_string()),
-                disabled: false,
-                aliases: aliases.iter().map(|s| s.to_string()).collect(),
-            })
-            .collect();
-
-        combined_units.append(&mut units.to_vec());
+        // Model-defined units come FIRST. `Self::new`'s second pass parses
+        // equation-bearing units in list order with no fixpoint, so an
+        // equation-bearing builtin (per_week = 1/week) placed before a model
+        // definition of its referent (week = day) would resolve against a
+        // phantom freshly-minted base unit instead of the model's -- making
+        // '1/week' and 'per_week' (identical per XMILE 3.3.6) spuriously
+        // mismatch. The collision filter only drops a builtin whose NAME or
+        // alias the model redefines, not one whose referent it redefines, so
+        // ordering is what keeps the referents right.
+        let mut combined_units: Vec<Unit> = units.to_vec();
+        combined_units.extend(
+            builtin_units
+                .iter()
+                .filter(|(name, aliases, _)| {
+                    let primary = canonicalize(name).into_owned();
+                    !model_unit_identifiers.contains(&primary)
+                        && !aliases
+                            .iter()
+                            .any(|a| model_unit_identifiers.contains(&*canonicalize(a)))
+                })
+                .map(|(name, aliases, equation)| Unit {
+                    name: name.to_string(),
+                    equation: equation.map(|s| s.to_string()),
+                    disabled: false,
+                    aliases: aliases.iter().map(|s| s.to_string()).collect(),
+                }),
+        );
 
         Self::new(&combined_units, sim_specs)
     }
@@ -537,6 +593,32 @@ pub fn parse_units(
         }
     } else {
         Ok(None)
+    }
+}
+
+#[test]
+fn join_multiword_unit_names_preserves_byte_length() {
+    // Parse-error byte offsets are computed against the JOINED string but
+    // rendered against the ORIGINAL (errors::format_snippet and the
+    // FormattedError start/end offsets carried to GUI consumers), so the
+    // join must be byte-length-preserving or every underline after a
+    // whitespace run shifts.
+    let cases = [
+        ("Degrees Fahrenheit/Minute", "Degrees_Fahrenheit/Minute"),
+        ("widgets  //  year", "widgets  //  year"),
+        ("a  b", "a__b"),
+        ("people * meter", "people * meter"),
+        (" leading and trailing ", " leading_and_trailing "),
+        ("a\tb", "a_b"),
+    ];
+    for (input, expected) in cases {
+        let joined = join_multiword_unit_names(input);
+        assert_eq!(joined.as_ref(), expected, "join of {input:?}");
+        assert_eq!(
+            joined.len(),
+            input.len(),
+            "byte length must be preserved for {input:?}"
+        );
     }
 }
 
