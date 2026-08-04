@@ -19,14 +19,16 @@ use crate::variable::Variable;
 type UnitErrorList = Vec<(Ident<Canonical>, UnitError)>;
 
 /// The numeric value of a literal exponent expression, seeing through unary
-/// negation (the lexer takes no leading sign, so `x^-2`'s exponent is
-/// `Op1(Negative, Const(2))`). `None` for anything non-literal.
+/// sign operators (the lexer takes no leading sign, so `x^-2`'s exponent is
+/// `Op1(Negative, Const(2))` and `x^(+2)`'s is `Op1(Positive, Const(2))`).
+/// `None` for anything non-literal.
 /// Shared with `units_infer`, which applies the same `^` unit semantics.
 pub(crate) fn literal_exponent(expr: &Expr2) -> Option<f64> {
     use crate::ast::UnaryOp;
     match expr {
         Expr2::Const(_, lit, _) => Some(lit.value()),
         Expr2::Op1(UnaryOp::Negative, inner, _, _) => literal_exponent(inner).map(|n| -n),
+        Expr2::Op1(UnaryOp::Positive, inner, _, _) => literal_exponent(inner),
         _ => None,
     }
 }

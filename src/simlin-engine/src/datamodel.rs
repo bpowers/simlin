@@ -33,7 +33,9 @@ impl UnitMap {
 
     pub fn reciprocal(mut self) -> Self {
         for exp in self.map.values_mut() {
-            *exp *= -1;
+            // saturating: `-i32::MIN` overflows, and a saturated exponent
+            // (see `exp` below) must stay merely absurd, never a panic.
+            *exp = exp.saturating_neg();
         }
         self
     }
@@ -89,7 +91,9 @@ impl std::ops::Mul for UnitMap {
         for (unit, n) in rhs.map.into_iter() {
             let new_value = match self.map.get(&unit) {
                 None => n,
-                Some(m) => n + *m,
+                // saturating: composing two `exp`-saturated maps (or one
+                // with anything) must not overflow-panic on untrusted input.
+                Some(m) => n.saturating_add(*m),
             };
 
             if new_value == 0 {
@@ -135,8 +139,10 @@ impl Display for UnitMap {
             }
             first = false;
             write!(f, "{unit}")?;
-            if exp.abs() > 1 {
-                write!(f, "^{}", exp.abs())?;
+            // unsigned_abs: `i32::MIN.abs()` overflows, and a saturated
+            // exponent must print rather than panic.
+            if exp.unsigned_abs() > 1 {
+                write!(f, "^{}", exp.unsigned_abs())?;
             }
             written = true;
         }
@@ -152,8 +158,8 @@ impl Display for UnitMap {
             }
             write!(f, "/")?;
             write!(f, "{unit}")?;
-            if exp.abs() > 1 {
-                write!(f, "^{}", exp.abs())?;
+            if exp.unsigned_abs() > 1 {
+                write!(f, "^{}", exp.unsigned_abs())?;
             }
         }
 

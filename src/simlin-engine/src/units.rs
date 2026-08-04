@@ -2,8 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::result::Result as StdResult;
 
 use crate::ast::{BinaryOp, Expr0, UnaryOp};
@@ -247,15 +247,13 @@ impl Context {
         // Only include built-ins that don't conflict with model-defined units.
         // A built-in conflicts if its primary name OR any of its aliases matches
         // any model-defined identifier (name or alias).
-        // Model-defined units come FIRST. `Self::new`'s second pass parses
-        // equation-bearing units in list order with no fixpoint, so an
-        // equation-bearing builtin (per_week = 1/week) placed before a model
-        // definition of its referent (week = day) would resolve against a
-        // phantom freshly-minted base unit instead of the model's -- making
-        // '1/week' and 'per_week' (identical per XMILE 3.3.6) spuriously
-        // mismatch. The collision filter only drops a builtin whose NAME or
-        // alias the model redefines, not one whose referent it redefines, so
-        // ordering is what keeps the referents right.
+        // Model-defined units come first, builtins after. `Self::new`
+        // resolves equation-bearing units dependency-aware, so list order no
+        // longer decides what an equation's referents bind to (a model
+        // `week = day` and the builtin `per_week = 1/week` resolve correctly
+        // in either order, as does a model `hazard = per_year`); order still
+        // decides which declaration wins an alias-registration race, and
+        // there the model's should.
         let mut combined_units: Vec<Unit> = units.to_vec();
         combined_units.extend(
             builtin_units
@@ -345,7 +343,97 @@ impl Context {
             units: parsed_units,
         };
 
-        // step 2: use this base context to parse our units with equations
+        // step 2: use this base context to parse our units with equations.
+        //
+        // Resolution is DEPENDENCY-AWARE, not in-list-order: `build_unit_
+        // components` silently mints a fresh base unit for any name it cannot
+        // look up, so an equation resolved before its referent's equation
+        // binds to a phantom. One-way ordering cannot fix this -- a model
+        // `week = day` must resolve before the builtin `per_week = 1/week`,
+        // while a model `hazard = per_year` must resolve after the builtin
+        // `per_year = 1/year` (XMILE 3.3.6 explicitly supports user-defined
+        // aliases of built-in units). So each pass resolves every unit whose
+        // equation references no still-unresolved equation-bearing unit, and
+        // repeats until done. If a pass makes no progress the definitions are
+        // circular (which XMILE 3.3.6 forbids); we then degrade to the old
+        // in-order behavior -- unresolved references mint base units -- so a
+        // malformed model still yields a usable partial context.
+
+        /// Resolve one equation-bearing unit against the context built so
+        /// far, registering its unit map (or recording errors).
+        fn resolve_equation_unit(
+            ctx: &mut Context,
+            unit_errors: &mut Vec<(String, Vec<EquationError>)>,
+            dup_err: &dyn Fn(&str) -> (String, Vec<EquationError>),
+            unit_name: &str,
+            ast: &Option<Expr0>,
+        ) {
+            let unit_components: UnitMap = match ast {
+                Some(ast) => match build_unit_components(ctx, ast) {
+                    Ok(unit_components) => unit_components,
+                    Err(err) => {
+                        unit_errors.push((
+                            unit_name.to_owned(),
+                            vec![EquationError {
+                                start: 0,
+                                end: 0,
+                                code: err.code,
+                            }],
+                        ));
+                        return;
+                    }
+                },
+                None => [(unit_name.to_owned(), 1)].iter().cloned().collect(),
+            };
+
+            // As in step 1: only an alias of *another* unit is a conflict; a
+            // self-alias is benign and the prime unit must still be registered.
+            if matches!(ctx.aliases.get(unit_name), Some(target) if target != unit_name) {
+                unit_errors.push(dup_err(unit_name));
+            } else {
+                match ctx.units.entry(unit_name.to_owned()) {
+                    Entry::Vacant(e) => {
+                        e.insert(unit_components);
+                    }
+                    Entry::Occupied(e) => {
+                        if e.get() != &unit_components {
+                            unit_errors.push(dup_err(unit_name));
+                        }
+                    }
+                }
+            }
+        }
+
+        /// The canonical unit names an equation AST references. Only the
+        /// shapes `build_unit_components` accepts are walked; the shapes it
+        /// rejects (App/Subscript/If) contribute no dependencies -- they
+        /// error during resolution regardless of order.
+        fn referenced_unit_names(ast: &Expr0, out: &mut Vec<String>) {
+            match ast {
+                Expr0::Var(id, _) => out.push(canonicalize(id.as_str()).into_owned()),
+                Expr0::Op1(_, inner, _) => referenced_unit_names(inner, out),
+                Expr0::Op2(_, l, r, _) => {
+                    referenced_unit_names(l, out);
+                    referenced_unit_names(r, out);
+                }
+                Expr0::Const(_, _, _)
+                | Expr0::App(_, _)
+                | Expr0::Subscript(_, _, _)
+                | Expr0::If(_, _, _, _) => {}
+            }
+        }
+
+        // Phase A: register every equation-bearing unit's aliases and lex its
+        // equation. A unit whose equation fails to lex is reported and drops
+        // out (references to it mint a base unit, as for any unknown name).
+        // Registering ALL aliases before resolving ANY equation is part of
+        // the dependency-awareness: an equation may reference an alias
+        // declared later in the list.
+        struct PendingUnit {
+            name: String,
+            ast: Option<Expr0>,
+        }
+        let mut pending: Vec<PendingUnit> = Vec::new();
         for unit in units.iter().filter(|unit| unit.equation.is_some()) {
             let unit_name = canonicalize(&unit.name).into_owned();
             for alias in unit.aliases.iter() {
@@ -363,49 +451,52 @@ impl Context {
             }
 
             let eqn = &join_multiword_unit_names(unit.equation.as_ref().unwrap());
-
-            let ast = match Expr0::new(eqn, LexerType::Units) {
-                Ok(ast) => ast,
+            match Expr0::new(eqn, LexerType::Units) {
+                Ok(ast) => pending.push(PendingUnit {
+                    name: unit_name,
+                    ast,
+                }),
                 Err(errors) => {
                     unit_errors.push((unit_name.clone(), errors));
-                    continue;
-                }
-            };
-
-            let unit_components = match ast {
-                Some(ref ast) => match build_unit_components(&ctx, ast) {
-                    Ok(unit_components) => unit_components,
-                    Err(err) => {
-                        unit_errors.push((
-                            unit_name.clone(),
-                            vec![EquationError {
-                                start: 0,
-                                end: 0,
-                                code: err.code,
-                            }],
-                        ));
-                        continue;
-                    }
-                },
-                None => [(unit_name.clone(), 1)].iter().cloned().collect(),
-            };
-
-            // As in step 1: only an alias of *another* unit is a conflict; a
-            // self-alias is benign and the prime unit must still be registered.
-            if matches!(ctx.aliases.get(&unit_name), Some(target) if target != &unit_name) {
-                unit_errors.push(dup_err(&unit_name));
-            } else {
-                match ctx.units.entry(unit_name.clone()) {
-                    Entry::Vacant(e) => {
-                        e.insert(unit_components);
-                    }
-                    Entry::Occupied(e) => {
-                        if e.get() != &unit_components {
-                            unit_errors.push(dup_err(&unit_name));
-                        }
-                    }
                 }
             }
+        }
+
+        // Phase B: resolve, deferring any unit blocked on a still-unresolved
+        // equation-bearing unit. Passes are bounded by the dependency-chain
+        // depth (at most the unit count).
+        let mut unresolved: HashSet<String> = pending.iter().map(|p| p.name.clone()).collect();
+        loop {
+            let mut deferred: Vec<PendingUnit> = Vec::new();
+            let mut progressed = false;
+            for p in pending {
+                let blocked = p.ast.as_ref().is_some_and(|ast| {
+                    let mut deps = Vec::new();
+                    referenced_unit_names(ast, &mut deps);
+                    deps.iter().any(|dep| {
+                        let dep = ctx.aliases.get(dep).map(|s| s.as_str()).unwrap_or(dep);
+                        dep != p.name && unresolved.contains(dep)
+                    })
+                });
+                if blocked {
+                    deferred.push(p);
+                    continue;
+                }
+                resolve_equation_unit(&mut ctx, &mut unit_errors, &dup_err, &p.name, &p.ast);
+                unresolved.remove(&p.name);
+                progressed = true;
+            }
+            if deferred.is_empty() {
+                break;
+            }
+            if !progressed {
+                // Circular definitions: degrade to in-order resolution.
+                for p in deferred {
+                    resolve_equation_unit(&mut ctx, &mut unit_errors, &dup_err, &p.name, &p.ast);
+                }
+                break;
+            }
+            pending = deferred;
         }
 
         // Construction is partial: always return the context we built, with any

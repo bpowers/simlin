@@ -1434,4 +1434,84 @@ mod tests {
             "mismatched bottom/top units must warn: {details:?}"
         );
     }
+
+    // ── Codex review follow-ups (PR #1011) ────────────────────────────────
+
+    #[test]
+    fn unary_positive_literal_exponent_is_recognized() {
+        // `x^(+2)` parses as Op1(Positive, Const(2)); it must get the same
+        // unit treatment as `x^2`, not silently degrade to polymorphic
+        // (which let `length^(+2) ~ second` pass unchecked).
+        TestProject::new("power-unary-plus")
+            .with_time_units("year")
+            .unit("meter", None)
+            .aux_with_units("length", "3", Some("meter"))
+            .aux_with_units("area", "length^(+2)", Some("meter*meter"))
+            .assert_no_unit_diagnostics();
+
+        let p = TestProject::new("power-unary-plus-bad")
+            .with_time_units("year")
+            .unit("meter", None)
+            .aux_with_units("length", "3", Some("meter"))
+            .aux_with_units("area", "length^(+2)", Some("meter"));
+        let details = p.unit_diagnostic_details();
+        assert!(
+            details.iter().any(|(v, _)| v.as_deref() == Some("area")),
+            "length^(+2) is meter^2, not meter -- must warn: {details:?}"
+        );
+    }
+
+    #[test]
+    fn model_unit_defined_via_per_builtin_resolves() {
+        // The converse of per_unit_builtin_resolves_against_model_defined_referent:
+        // a model unit defined IN TERMS OF an equation-bearing builtin
+        // (`hazard = per_year`) must resolve to {year: -1}, not to a phantom
+        // base unit minted before the builtin's equation was parsed. One-way
+        // list ordering cannot satisfy both directions; equation resolution
+        // is dependency-aware.
+        TestProject::new("model-unit-via-builtin")
+            .with_time_units("year")
+            .unit("hazard", Some("per_year"))
+            .aux_with_units("h", "0.1", Some("hazard"))
+            .aux_with_units("k", "h", Some("per_year"))
+            .aux_with_units("j", "h", Some("1/year"))
+            .assert_no_unit_diagnostics();
+    }
+
+    #[test]
+    fn circular_unit_definitions_terminate() {
+        // XMILE 3.3.6 says unit definitions MUST NOT be circular; a model
+        // that ships one anyway must degrade the way the old in-order pass
+        // did (unresolvable references mint base units) rather than hang or
+        // panic. `a = b` resolves via `b`'s (later-resolved) equation or a
+        // minted base unit -- either way the project compiles.
+        TestProject::new("circular-units")
+            .with_time_units("year")
+            .unit("aunit", Some("bunit"))
+            .unit("bunit", Some("aunit"))
+            .aux_with_units("x", "1", Some("aunit"))
+            .aux_with_units("y", "x", Some("aunit"))
+            .assert_no_unit_diagnostics();
+    }
+
+    #[test]
+    fn saturated_exponents_survive_multiplication_and_display() {
+        // The user-facing contract for absurd exponents is only "no crash":
+        // `m2^1073741824` saturates to meter^i32::MAX, and both composing it
+        // (`* m2`, exercising UnitMap::mul's addition) and printing it in a
+        // mismatch message (exercising Display on extreme negatives) must
+        // not overflow-panic in debug builds.
+        let p = TestProject::new("power-saturate-compose")
+            .with_time_units("year")
+            .unit("meter", None)
+            .aux_with_units("m2", "1", Some("meter*meter"))
+            .aux_with_units("y", "m2^1073741824 * m2", Some("meter"))
+            .aux_with_units("z", "m2^(-1073741824)", Some("meter"));
+        let details = p.unit_diagnostic_details();
+        assert!(
+            details.iter().any(|(v, _)| v.as_deref() == Some("y"))
+                && details.iter().any(|(v, _)| v.as_deref() == Some("z")),
+            "saturated powers still mismatch 'meter': {details:?}"
+        );
+    }
 }
