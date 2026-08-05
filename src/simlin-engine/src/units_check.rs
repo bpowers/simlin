@@ -447,9 +447,11 @@ impl UnitEvaluator<'_> {
 pub fn model_time_units(ctx: &Context) -> UnitMap {
     let time_units_name =
         canonicalize(ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
-    ctx.lookup(&time_units_name)
-        .cloned()
-        .unwrap_or_else(|| [(time_units_name.clone(), 1)].iter().cloned().collect())
+    // `resolve_name` is the SAME resolution a variable's `<units>` string
+    // gets (aliases, the dimensionless spellings, unknown-name fallback), so
+    // a dimensionless clock (`time_units="Unitless"`) yields the empty map
+    // here exactly as it does there.
+    ctx.resolve_name(&time_units_name)
 }
 
 /// The synthetic `time` variable the `UnitEvaluator` uses to resolve

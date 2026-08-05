@@ -1495,6 +1495,75 @@ mod tests {
     }
 
     #[test]
+    fn model_declared_baseline_primary_keeps_derived_builtins_tied() {
+        // A conforming model may explicitly declare a baseline time unit
+        // under one of the builtin group's spellings (here the plural
+        // `weeks`, the XMILE 3.3.6 primary). The collision filter must not
+        // sever the group: the remaining spellings (`week`, `wk`) must stay
+        // tied to the model's unit so `per_week = 1/week` still equals
+        // `1/weeks`.
+        TestProject::new("model-baseline-primary")
+            .with_time_units("weeks")
+            .unit("weeks", None)
+            .unit("widget", None)
+            .aux_with_units("f", "0.1", Some("1/weeks"))
+            .aux_with_units("g", "f", Some("per_week"))
+            .aux_with_units("h", "5", Some("widget/wk"))
+            .aux_with_units("i", "h", Some("widget/weeks"))
+            .assert_no_unit_diagnostics();
+    }
+
+    #[test]
+    fn sqrt_of_inferred_units_still_constrains_the_result() {
+        // `root = SQRT(source)` where root has NO declared units: inference
+        // cannot represent sqrt of a symbolic map, but degrading the result
+        // to a free constant severed the only relationship between root and
+        // source -- a consumer declaring `root ~ second` then bound root to
+        // 'second' with no complaint anywhere. The sqrt result is now a
+        // fresh metavariable R with the constraint R^2 == source's units, so
+        // a wrong downstream binding surfaces as a concrete contradiction.
+        let p = TestProject::new("sqrt-inferred-bad")
+            .with_time_units("year")
+            .unit("meter", None)
+            .unit("second", None)
+            .aux_with_units("source", "4", Some("meter*meter"))
+            .aux_with_units("root", "SQRT(source)", None)
+            .aux_with_units("consumer", "root", Some("second"));
+        let details = p.unit_diagnostic_details();
+        assert!(
+            !details.is_empty(),
+            "binding SQRT(meter^2) to 'second' must produce a unit conflict"
+        );
+
+        // ...and the correct binding stays clean.
+        TestProject::new("sqrt-inferred-good")
+            .with_time_units("year")
+            .unit("meter", None)
+            .aux_with_units("source", "4", Some("meter*meter"))
+            .aux_with_units("root", "SQRT(source)", None)
+            .aux_with_units("consumer", "root", Some("meter"))
+            .assert_no_unit_diagnostics();
+    }
+
+    #[test]
+    fn dimensionless_time_units_are_consistent() {
+        // sim_specs.time_units may be a dimensionless spelling ('Unitless',
+        // 'dmnl'). The variable side parses those to the empty map, so the
+        // synthetic time variable must resolve the same way -- otherwise
+        // `x = TIME ~ Unitless` mismatches against a fictitious {unitless: 1}
+        // base unit, and every stock/flow expectation is built from it.
+        TestProject::new("unitless-time")
+            .with_time_units("Unitless")
+            .aux_with_units("x", "TIME", Some("Unitless"))
+            .assert_no_unit_diagnostics();
+
+        TestProject::new("dmnl-time")
+            .with_time_units("dmnl")
+            .aux_with_units("x", "TIME", Some("dmnl"))
+            .assert_no_unit_diagnostics();
+    }
+
+    #[test]
     fn saturated_exponents_survive_multiplication_and_display() {
         // The user-facing contract for absurd exponents is only "no crash":
         // `m2^1073741824` saturates to meter^i32::MAX, and both composing it

@@ -545,6 +545,40 @@ fn clarify_macro_conflict(error: UnitError) -> UnitError {
 }
 
 impl UnitInferer<'_> {
+    /// The units of a square root whose argument map has no representable
+    /// root (it carries metavariables, or odd concrete exponents): a FRESH
+    /// metavariable `R` plus the residual constraint `R^2 == square`.
+    ///
+    /// `single_fv` refuses to solve for a metavariable with |exp| != 1, so
+    /// the constraint itself never mis-binds `R`; but once `R` and the
+    /// square's metavariables are bound through OTHER constraints,
+    /// `substitute` scales them in and a wrong binding surfaces as a
+    /// concrete contradiction in `find_constraint_mismatches`. Returning a
+    /// free `Constant` here instead severed the only relationship between a
+    /// SQRT result and its source. The metavariable name embeds the current
+    /// variable and source location so distinct call sites stay distinct;
+    /// the reserved `$⁚` prefix keeps it disjoint from real identifiers.
+    fn sqrt_result_metavar(
+        &self,
+        prefix: &str,
+        current_var: &str,
+        loc: Loc,
+        square: UnitMap,
+        constraints: &mut Vec<LocatedConstraint>,
+    ) -> Units {
+        let fresh_name = format!(
+            "@{prefix}$\u{205a}sqrt\u{205a}{current_var}\u{205a}{}",
+            loc.start
+        );
+        let fresh: UnitMap = [(fresh_name, 1)].iter().cloned().collect();
+        constraints.push(LocatedConstraint::new(
+            combine(UnitOp::Div, fresh.clone().exp(2), square),
+            current_var,
+            Some(loc),
+        ));
+        Units::Explicit(fresh)
+    }
+
     /// gen_constraints generates a set of equality constraints for a given expression,
     /// storing those constraints in the mutable `constraints` argument. This is
     /// right out of Hindley-Milner type inference/Algorithm W, but because we are
@@ -616,16 +650,24 @@ impl UnitInferer<'_> {
                 // SQRT halves unit exponents (mirroring `units_check`). The
                 // argument's symbolic map usually carries metavariables with
                 // odd exponents (`@x^1`), which have no representable root in
-                // integer-exponent maps and no solvable squared-metavar
-                // constraint (`single_fv` refuses |exp| != 1), so inference
-                // degrades to Constant there: no constraint is generated and
-                // the concrete check in `units_check` remains the authority.
+                // integer-exponent maps; the result is then a FRESH
+                // metavariable R with the residual constraint R^2 == arg
+                // (see `sqrt_result_metavar`) rather than a free Constant --
+                // degrading severed the only relationship between a SQRT
+                // result and its source, so a consumer could bind the
+                // (undeclared) result to arbitrary units with no complaint.
                 BuiltinFn::Sqrt(a) => {
                     match self.gen_constraints(a, prefix, current_var, constraints) {
                         Units::Constant => Units::Constant,
                         Units::Explicit(units) => match crate::units::try_sqrt(&units) {
                             Some(root) => Units::Explicit(root),
-                            None => Units::Constant,
+                            None => self.sqrt_result_metavar(
+                                prefix,
+                                current_var,
+                                expr.get_loc(),
+                                units,
+                                constraints,
+                            ),
                         },
                     }
                 }
@@ -814,16 +856,27 @@ impl UnitInferer<'_> {
                     // `x^n` routes through the shared `units::power_units`
                     // (see units_check's `^` arm): integer-literal exponents
                     // are valid symbolically too (`@x^1` becomes `@x^n`); a
-                    // half-integer exponent's non-square case degrades to
-                    // Constant here (the concrete check is the authority),
-                    // as does every non-half-integer or non-literal shape.
+                    // half-integer exponent whose doubled map has no
+                    // representable root gets the same fresh-metavariable
+                    // residual constraint as SQRT (`x^n = sqrt(x^2n)`); only
+                    // a non-half-integer or non-literal exponent degrades to
+                    // Constant (its units are genuinely undetermined).
                     BinaryOp::Exp => match (lunits, crate::units_check::literal_exponent(r)) {
                         (Units::Constant, _) => Units::Constant,
                         (Units::Explicit(base), Some(n)) => {
                             match crate::units::power_units(&base, n) {
                                 crate::units::PowerUnits::Explicit(units) => Units::Explicit(units),
-                                crate::units::PowerUnits::NonSquareRoot
-                                | crate::units::PowerUnits::Polymorphic => Units::Constant,
+                                crate::units::PowerUnits::NonSquareRoot => {
+                                    let doubled = base.exp((2.0 * n) as i32);
+                                    self.sqrt_result_metavar(
+                                        prefix,
+                                        current_var,
+                                        expr.get_loc(),
+                                        doubled,
+                                        constraints,
+                                    )
+                                }
+                                crate::units::PowerUnits::Polymorphic => Units::Constant,
                             }
                         }
                         (Units::Explicit(_), None) => Units::Constant,
@@ -897,17 +950,16 @@ impl UnitInferer<'_> {
     ) {
         let time_units_name =
             canonicalize(self.ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
-        // Resolve the time unit through the units Context's alias map so that
-        // inference uses the same canonical time unit as `units_check::check`.
-        // Without this, a model that declares some units with an aliased time
-        // name (e.g. `yr`) while `time_units` names the primary (`year`)
-        // produces a spurious `year` vs `yr` mismatch on every stock/flow
-        // constraint.
-        let time_units: UnitMap = self
-            .ctx
-            .lookup(&time_units_name)
-            .cloned()
-            .unwrap_or_else(|| [(time_units_name.clone(), 1)].iter().cloned().collect());
+        // Resolve the time unit exactly the way a variable's `<units>` string
+        // is resolved (`Context::resolve_name`: aliases, the dimensionless
+        // spellings, unknown-name fallback) so inference uses the same
+        // canonical time unit as `units_check::check`. Without the alias
+        // step, a model declaring units with an aliased time name (e.g. `yr`)
+        // while `time_units` names the primary (`year`) produced a spurious
+        // `year` vs `yr` mismatch on every stock/flow constraint; without the
+        // dimensionless step, `time_units="Unitless"` minted a fictitious
+        // `{unitless: 1}` base unit.
+        let time_units: UnitMap = self.ctx.resolve_name(&time_units_name);
 
         // Deterministic constraint order: `variables` is a HashMap, and its
         // per-instance iteration order used to reach TWO observables --
@@ -1884,13 +1936,10 @@ pub(crate) fn infer(
 ) -> InferenceResult {
     let time_units_name =
         canonicalize(units_ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
-    // Resolve through the alias map so the synthetic `time` variable's units
-    // match what `units_check::check` uses (see the same resolution in
-    // `gen_all_constraints`).
-    let time_units: UnitMap = units_ctx
-        .lookup(&time_units_name)
-        .cloned()
-        .unwrap_or_else(|| [(time_units_name.clone(), 1)].iter().cloned().collect());
+    // Resolve through `Context::resolve_name` so the synthetic `time`
+    // variable's units match what `units_check::check` uses (see the same
+    // resolution in `gen_all_constraints`).
+    let time_units: UnitMap = units_ctx.resolve_name(&time_units_name);
 
     let units = UnitInferer {
         ctx: units_ctx,

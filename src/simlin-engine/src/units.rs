@@ -244,9 +244,6 @@ impl Context {
             })
             .collect();
 
-        // Only include built-ins that don't conflict with model-defined units.
-        // A built-in conflicts if its primary name OR any of its aliases matches
-        // any model-defined identifier (name or alias).
         // Model-defined units come first, builtins after. `Self::new`
         // resolves equation-bearing units dependency-aware, so list order no
         // longer decides what an equation's referents bind to (a model
@@ -254,24 +251,46 @@ impl Context {
         // in either order, as does a model `hazard = per_year`); order still
         // decides which declaration wins an alias-registration race, and
         // there the model's should.
+        //
+        // A builtin whose name or alias the model declares itself is not
+        // added verbatim -- the model's definition wins (XMILE 3.3.6: on a
+        // name collision "the implementation SHOULD respect the unit
+        // definitions for the model"). But DROPPING the whole group severs
+        // the equivalences: a model declaring the baseline primary `weeks`
+        // would leave `week`/`wk` unregistered, so the surviving builtin
+        // `per_week = 1/week` minted a phantom `week` base and no longer
+        // equaled `1/weeks`. Instead the group's non-colliding spellings are
+        // re-tied to the model's unit as a chained alias (`week = weeks`,
+        // aliases `wk`) -- the alias-by-equation mechanism 3.3.6 describes
+        // for exactly this purpose.
         let mut combined_units: Vec<Unit> = units.to_vec();
-        combined_units.extend(
-            builtin_units
-                .iter()
-                .filter(|(name, aliases, _)| {
-                    let primary = canonicalize(name).into_owned();
-                    !model_unit_identifiers.contains(&primary)
-                        && !aliases
-                            .iter()
-                            .any(|a| model_unit_identifiers.contains(&*canonicalize(a)))
-                })
-                .map(|(name, aliases, equation)| Unit {
+        for (name, aliases, equation) in builtin_units {
+            let collided: Option<String> = std::iter::once(*name)
+                .chain(aliases.iter().copied())
+                .map(|n| canonicalize(n).into_owned())
+                .find(|n| model_unit_identifiers.contains(n));
+            match collided {
+                None => combined_units.push(Unit {
                     name: name.to_string(),
                     equation: equation.map(|s| s.to_string()),
                     disabled: false,
                     aliases: aliases.iter().map(|s| s.to_string()).collect(),
                 }),
-        );
+                Some(model_spelling) => {
+                    let mut leftovers = std::iter::once(*name)
+                        .chain(aliases.iter().copied())
+                        .filter(|n| !model_unit_identifiers.contains(&*canonicalize(n)));
+                    if let Some(primary) = leftovers.next() {
+                        combined_units.push(Unit {
+                            name: primary.to_string(),
+                            equation: Some(model_spelling),
+                            disabled: false,
+                            aliases: leftovers.map(|s| s.to_string()).collect(),
+                        });
+                    }
+                }
+            }
+        }
 
         Self::new(&combined_units, sim_specs)
     }
@@ -509,11 +528,52 @@ impl Context {
         (ctx, unit_errors)
     }
 
+    /// Alias-resolving map lookup WITHOUT `resolve_name`'s dimensionless
+    /// special-case or unknown-name minting. Production resolution goes
+    /// through `resolve_name`; this stays as test introspection (asserting
+    /// that a name is registered/unregistered needs the `Option`).
+    #[cfg(test)]
     pub(crate) fn lookup(&self, ident: &str) -> Option<&UnitMap> {
         // first, see if this identifier is an alias of a better-known unit
         let normalized = self.aliases.get(ident).map(|s| s.as_str()).unwrap_or(ident);
         self.units.get(normalized)
     }
+
+    /// Resolve a single (already-canonicalized) unit NAME exactly the way a
+    /// unit-equation reference does: resolve aliases, treat the
+    /// dimensionless spellings as the empty map, look up known units, and
+    /// mint a fresh base unit for anything unknown.
+    ///
+    /// Shared by `build_unit_components`' identifier arm and
+    /// `units_check::model_time_units` -- the synthetic time variable MUST
+    /// resolve `sim_specs.time_units` identically to a variable's `<units>`
+    /// string, or a dimensionless clock (`time_units="Unitless"`) makes
+    /// `x = TIME ~ Unitless` mismatch against a fictitious `{unitless: 1}`
+    /// base unit.
+    pub(crate) fn resolve_name(&self, canonical_name: &str) -> UnitMap {
+        let name = self
+            .aliases
+            .get(canonical_name)
+            .map(|s| s.as_str())
+            .unwrap_or(canonical_name);
+        if is_dimensionless_unit_name(name) {
+            return UnitMap::new();
+        }
+        self.units
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| [(name.to_owned(), 1)].iter().cloned().collect())
+    }
+}
+
+/// The spellings XMILE 3.3.6 (and Vensim convention) treat as the identity
+/// element for units. Kept in one place so unit-equation resolution and the
+/// synthetic time variable cannot disagree about them.
+pub(crate) fn is_dimensionless_unit_name(name: &str) -> bool {
+    matches!(
+        name,
+        "dmnl" | "nil" | "dimensionless" | "unitless" | "fraction"
+    )
 }
 
 #[allow(dead_code)]
@@ -594,32 +654,11 @@ fn build_unit_components(ctx: &Context, ast: &Expr0) -> EquationResult<UnitMap> 
             }
         }
         Expr0::Var(id, _) => {
-            let id_str = id.as_str();
-            // Canonicalize the unit name (lowercase) for consistent lookup.
-            // This is safe because Context::new() stores all alias keys and values
-            // in canonical form, so alias resolution also returns canonical names.
-            let id_canonical = crate::common::canonicalize(id_str);
-            let id_str = &*id_canonical;
-            // Resolve any alias (e.g., "m" -> "meter"). The result is already canonical
-            // because aliases are stored with canonical values in Context::new().
-            let id_str = ctx
-                .aliases
-                .get(id_str)
-                .map(|s| s.as_str())
-                .unwrap_or(id_str);
-            if id_str == "dmnl"
-                || id_str == "nil"
-                || id_str == "dimensionless"
-                || id_str == "unitless"
-                || id_str == "fraction"
-            {
-                // dimensionless is special
-                UnitMap::new()
-            } else {
-                ctx.lookup(id_str)
-                    .cloned()
-                    .unwrap_or_else(|| [(id_str.to_owned(), 1)].iter().cloned().collect())
-            }
+            // Canonicalize the unit name (lowercase) for consistent lookup;
+            // alias resolution, the dimensionless spellings, and the
+            // unknown-name base-unit fallback all live in `resolve_name`
+            // (shared with the synthetic time variable).
+            ctx.resolve_name(&crate::common::canonicalize(id.as_str()))
         }
         Expr0::App(_, loc) => {
             return eqn_err!(NoAppInUnits, loc.start, loc.end);
