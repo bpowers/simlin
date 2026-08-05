@@ -779,17 +779,19 @@ fn elementwise_builtin_operands_materialize() {
 /// with its `source_is_full_array` test: a strict slice such as `matrix[1,*]`
 /// keeps a per-element base and CAN read across rows.
 ///
-/// **UNVERIFIED.** Every example on that page, and every case in the corpus,
-/// spells argument 1 as a variable reference pinned to an element. Whether
-/// Vensim accepts an inline EXPRESSION there at all is not stated, and its rule
-/// is phrased in terms of "the variable" and "the range of the variable", which
-/// an expression does not have. A materialized operand is a fresh contiguous
-/// temp and so is full-array by construction, which confines the mapping to the
-/// computed array -- our choice, defended by internal consistency (it equals the
-/// pre-materialized `VECTOR ELM MAP(helper[A1], offs)` spelling) rather than by
-/// any external source. `vensim-probes/elm_map_computed_source.mdl` is written
-/// to settle it and lists what each candidate rule predicts; until it is run,
-/// the numbers below are Simlin's semantics and not a claim about Vensim's.
+/// **A DEFINED EXTENSION, not a match.** Vensim rejects a computed source
+/// outright: run in Vensim DSS on 2026-08-04,
+/// `vensim-probes/elm_map_computed_source.mdl` refuses to simulate with
+/// "Argument 1 to function VECTOR ELM MAP must be a normal variable". There is
+/// therefore no Vensim behaviour for these numbers to agree or disagree with,
+/// and the shape is one Simlin accepts and Vensim does not.
+///
+/// What it MEANS is defined by helper-equivalence: an inline expression behaves
+/// exactly as the same values pre-assigned to a named variable -- the spelling
+/// that IS legal Vensim. A materialized operand is a fresh contiguous temp, so
+/// it is full-array by construction and the mapping is confined to the computed
+/// array, which is exactly `VECTOR ELM MAP(helper[A1], offs)` for a `helper`
+/// holding those values. The rows below pin that definition.
 ///
 /// `matrix` is [[1,2,3],[10,20,30]] (flat storage of 6) and `far` is [3,4,5].
 /// Over the row-1 slice those offsets run off the end of row 1 and into row 2;
@@ -2725,10 +2727,23 @@ fn a_repeated_dimension_operand_declines_rather_than_guessing_which_axis() {
 /// Both are the same first-axis-wins projection: `out[i,j]` reads `[i,i]`. The
 /// fix is to give the projection an axis identity rather than a dimension name
 /// -- the same root cause as `db::analysis::expand_same_element`'s
-/// repeated-target residual, and its own change. What Vensim itself does with a
-/// repeated-dimension subscript is NOT established: a probe model is authored
-/// for it (see the branch's Vensim probe set), and until it is run this test
-/// pins OUR behavior only, with no claim that it is right.
+/// repeated-target residual, and its own change.
+///
+/// **Blast radius, measured.** Vensim REJECTS the declaration: run in Vensim DSS
+/// 2026-08-04, `vensim-probes/repeated_dimension.mdl` refuses to simulate with
+/// "DimA appears more than once on LHS". No MDL-imported model can carry the
+/// shape, so this residual is confined to hand-authored XMILE/JSON/protobuf.
+/// It is not illegitimate, though -- the XMILE v1.0 spec exemplifies the
+/// declaration ("A 2D non-apply-to-all array with dimensions X by X, where X is
+/// size 2", verified in `docs/reference/xmile-v1.0.html`) -- so the shape must
+/// keep working and this test still pins OUR behaviour with no claim it is
+/// right. What the spec exemplifies is only the DECLARATION; what a REFERENCE
+/// like `sq[X,X]` means is the open part, and
+/// `vensim-probes/stella_repeated_dimension.stmx` asks Stella. Note the defect
+/// is narrower than "repeated dimensions are broken": on that probe Simlin's
+/// STORAGE is a correct 2-D array (`SUM(sq[X,*])` gives the true row sums
+/// 36/66/96 and `SUM(sq[*,*])` gives 198, both measured); only the subscripted
+/// reference collapses.
 #[test]
 fn a_repeated_dimension_read_directly_is_a_pre_existing_residual() {
     let square = |name: &str| {

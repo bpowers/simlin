@@ -90,7 +90,7 @@
 //!   DIRECTLY is a different matter and is untouched: `out[d,d] = matrix[d,d]`
 //!   and `VECTOR SORT ORDER(matrix[d,d], 1)` compile at the merge base, to those
 //!   same wrong numbers, and remain exactly as they were -- a disclosed residual
-//!   pinned by
+//!   whose blast radius is now MEASURED: Vensim REJECTS the declaration -- run in Vensim DSS 2026-08-04, `vensim-probes/repeated_dimension.mdl` refuses to simulate with "DimA appears more than once on LHS" -- so no MDL-imported model can contain this shape and the residual is confined to hand-authored XMILE/JSON/protobuf. It is NOT illegitimate, though: the XMILE v1.0 spec exemplifies the declaration (`docs/reference/xmile-v1.0.html`, "A 2D non-apply-to-all array with dimensions X by X, where X is size 2", verified in-repo), so a conformant file may carry it and Simlin must keep reading it. The spec exemplifies only the DECLARATION, with per-element equations; it says nothing about what a REFERENCE such as `sq[X,X]` means, which is the part that is wrong here. Pinned by
 //!   `array_operand_materialization_tests::a_repeated_dimension_read_directly_is_a_pre_existing_residual`,
 //!   whose fix belongs in the projection rather than here.
 
@@ -238,21 +238,23 @@ fn materialize_view_operands(
         // slice keeps a per-element base and can read across rows, a full
         // contiguous source has `base_i == 0`.
         //
-        // The rule for a COMPUTED source is UNVERIFIED. Every example on that
-        // page, and every case in the corpus, spells argument 1 as a variable
-        // reference pinned to an element; the page neither shows an inline
-        // expression there nor says whether one is legal, and its rule is
-        // phrased in terms of "the variable" and "the range of the variable",
-        // which an expression does not have. What is implemented is therefore a
-        // choice, not a match: a materialized operand is a fresh contiguous temp
-        // and so is full-array by construction, which confines the mapping to
-        // the computed array. The argument for it is internal consistency -- the
-        // temp has no "rest of the variable" to run into, and the result equals
-        // the pre-materialized spelling `VECTOR ELM MAP(helper[A1], offs)` where
-        // `helper` holds the computed values, which is the only coherent reading
-        // if Vensim rejects inline expressions outright. `vensim-probes/` holds
-        // a model that settles it; until it is run, treat this as our semantics
-        // rather than Vensim's. Pinned (against ourselves) by
+        // A COMPUTED source is a Simlin EXTENSION, and it is now settled that
+        // it is one. Vensim rejects the shape outright -- run in Vensim DSS on
+        // 2026-08-04, `vensim-probes/elm_map_computed_source.mdl` refuses to
+        // simulate with "Argument 1 to function VECTOR ELM MAP must be a normal
+        // variable". So there is no Vensim behaviour to match here, and the
+        // question is not "which rule does Vensim use" but "what shall this mean
+        // in Simlin".
+        //
+        // It means the HELPER-EQUIVALENT thing: an inline expression behaves
+        // exactly as the same values pre-assigned to a named variable, which is
+        // the spelling that IS legal Vensim. A materialized operand is a fresh
+        // contiguous temp and so is full-array by construction, which confines
+        // the mapping to the computed array -- exactly what
+        // `VECTOR ELM MAP(helper[A1], offs)` does when `helper` holds those
+        // values. That definition is deliberate and no longer provisional; the
+        // temp has no "rest of the variable" to run into, so nothing else is
+        // even expressible. Pinned by
         // `array_operand_materialization_tests::materializing_an_elm_map_source_confines_the_mapping_to_the_temp`.
         VectorElmMap(source, offsets) => VectorElmMap(mat(source), mat(offsets)),
         VectorSortOrder(array, direction) => VectorSortOrder(mat(array), direction),

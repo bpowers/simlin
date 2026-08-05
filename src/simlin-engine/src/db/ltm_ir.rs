@@ -321,6 +321,12 @@ fn classify_iterated_dim_shape(
     // scores move together instead of trading one for the other. Pinned, both
     // directions, by
     // `mapped_reference_semantics_tests::a_repeated_target_dimension_reads_the_first_axis_on_both_sides`.
+    //
+    // Blast radius, measured: Vensim rejects a repeated-dimension declaration
+    // ("DimA appears more than once on LHS", `vensim-probes/repeated_dimension.mdl`
+    // in Vensim DSS 2026-08-04), so no MDL-imported model reaches this shape --
+    // it is confined to hand-authored XMILE/JSON/protobuf, which the XMILE v1.0
+    // spec does sanction by example. Bounded, not closed.
     let all_iterated = axes.iter().all(|a| matches!(a, AxisRead::Iterated { .. }));
     if all_iterated {
         let mut seen = std::collections::HashSet::new();

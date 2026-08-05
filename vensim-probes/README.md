@@ -1,112 +1,148 @@
-# Vensim probe models
+# External-tool probe models
 
-Two questions this branch could not settle from documentation or from the
-checked-in ground truth. Each `.mdl` is small, self-contained, and uses values
+Questions this branch could not settle from documentation or from the
+checked-in ground truth. Each model is small, self-contained, and uses values
 chosen so that **every candidate rule produces a different output**.
 
-Please open each in Vensim DSS, run it, and report the values of the `probe *`
-variables (and any error Vensim raises — an error IS an answer here). The
-`ctl *` variables are controls that reproduce output we already have from
-`test/sdeverywhere/models/vector/vector.dat`; if a control disagrees, the sheet
-is mis-set-up and nothing else on it can be read.
+Nothing here is committed to `test/`. Each `.mdl` carries a generated sketch
+(`cargo run -p simlin-engine --example layout_probe_models`) so it opens with a
+visible diagram; that harness splices only the sketch block and leaves the
+equation text byte-identical.
 
-Nothing here is committed to `test/` until we have real output.
+| model | tool | status |
+|---|---|---|
+| `elm_map_computed_source.mdl` | Vensim DSS | **answered 2026-08-04** |
+| `repeated_dimension.mdl` | Vensim DSS | **answered 2026-08-04** |
+| `elm_map_variable_sources.mdl` | Vensim DSS | awaiting a run |
+| `stella_repeated_dimension.stmx` | Stella | awaiting a run |
 
 ---
 
-## 1. `elm_map_computed_source.mdl`
+## 1. `elm_map_computed_source.mdl` — ANSWERED 2026-08-04
 
-**What is already settled.** The Vensim reference page for `VECTOR ELM MAP`
-(retrieved 2026-08-02) says the function "returns the value of **the variable**
-that is offset from vec by the specified amount", and that an offset "outside
-**the range of the variable**" yields `:NA:`. Its multi-subscript example makes
-the addressing explicitly flat over the whole variable:
+**Question:** is an inline expression legal as argument 1 of `VECTOR ELM MAP`,
+and if so what storage does the mapping range over?
 
-```
-v2[sub,tub,gub] = VECTOR ELM MAP(v[s1,t1,g1],
-   (sub-1)*ELMCOUNT(tub)*ELMCOUNT(gub) + (tub-1)*ELMCOUNT(gub) + (gub-1))
-```
+**Result: Rule R.** Vensim refuses to simulate the model:
 
-Our ground truth confirms it: in `vector.mdl`,
-`f[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], a[DimA])` prints `1,1,5,5,6,6`, and
-`f[A2,B1] = 5 = d[A2,B2]` — the mapping read **past its own `B1` slice** into the
-next row of `d`'s storage. Simlin implements exactly this.
+> `Argument 1 to function VECTOR ELM MAP must be a normal variable`
 
-**What is NOT settled.** Every example in the documentation, and every case in
-the corpus, spells argument 1 as a **variable reference pinned to an element**.
-The page never shows an inline expression there and never says whether one is
-legal. An expression has no "variable" and no "range of the variable", so the
-documented rule does not reach it. Simlin currently materializes such an operand
-into a temp and confines the mapping to it; that choice is unverified.
+(raised for `probe elem expr`). Inline expressions are rejected outright. The
+model aborted before producing values, so the `probe helper *` rows went
+unanswered — model 3 re-asks them.
 
-Fixture: `d` is `[DimA,DimB]` with flat storage `[1,4,2,5,3,6]`;
-`off = [0,1,1]`; `helper[DimA] = d[DimA,B1]` = `[1,2,3]`;
-`x = [1,2,3,4,5]` and `three` is its third element.
-
-| variable | equation | Rule **R**: Vensim rejects an expression | Rule **V**: expression transparent, still addresses `d`'s full storage | Rule **T**: expression materialized, mapping confined to it (Simlin today) |
+| variable | equation | **R: rejected** (measured) | V: transparent, full storage | T: confined to the temp (Simlin) |
 |---|---|---|---|---|
-| `ctl slice` | `VECTOR ELM MAP(d[DimA,B1], off[DimA])` | `1,1,5,5,6,6` | `1,1,5,5,6,6` | `1,1,5,5,6,6` |
-| `probe slice expr` | `VECTOR ELM MAP(d[DimA,B1] * 1, off[DimA])` | error | `1,1,5,5,6,6` | `1,1,2,2,2,2` |
-| `ctl elem` | `VECTOR ELM MAP(x[three], DimA - 1)` | `3,4,5` | `3,4,5` | `3,4,5` |
-| `probe elem expr` | `VECTOR ELM MAP(x[three] * 1, DimA - 1)` | error | `3,4,5` | refuses to compile |
+| `ctl slice` | `VECTOR ELM MAP(d[DimA,B1], off[DimA])` | — (aborted) | `1,1,5,5,6,6` | `1,1,5,5,6,6` |
+| `probe slice expr` | `VECTOR ELM MAP(d[DimA,B1] * 1, off[DimA])` | **error** ✅ | `1,1,5,5,6,6` | `1,1,2,2,2,2` |
+| `ctl elem` | `VECTOR ELM MAP(x[three], DimA - 1)` | — (aborted) | `3,4,5` | `3,4,5` |
+| `probe elem expr` | `VECTOR ELM MAP(x[three] * 1, DimA - 1)` | **error** ✅ | `3,4,5` | `3,:NA:,:NA:` |
 
-Note the last cell: `x[three]` collapses to a SINGLE element, so the computed
-operand carries no array shape and Simlin declines to materialize it -- the
-equation does not compile (measured: "Cannot push view for expression type ...
-expected array expression"). Rule T's own arithmetic would give `3,:NA:,:NA:`
-if it did materialize, but it does not, so a Vensim error on this row is
-AGREEMENT with Simlin rather than a change to make.
+**What this settles.** There is no Vensim behaviour to match, because Vensim has
+none: the shape is a syntax error. Simlin accepting it is an **extension**, and
+the extension is *defined* by helper-equivalence — an inline expression means
+exactly what the same values pre-assigned to a named helper variable mean, which
+is the spelling that IS legal Vensim. The temp-confined semantics implement that
+definition and are no longer provisional.
 
-Two further rows test the **equivalence claim** Simlin's choice rests on — that a
-computed source behaves like the same values assigned to a variable first:
-
-| variable | equation | hand-derived from the documented full-storage rule | Simlin today (measured) |
-|---|---|---|---|
-| `probe helper elem` | `VECTOR ELM MAP(helper[A1], off[DimA])` | `1,1,2,2,2,2` | `1,1,2,2,2,2` |
-| `probe helper slice` | `VECTOR ELM MAP(helper[DimA], off[DimA])` | `1,1,3,3,:NA:,:NA:` | `1,1,2,2,2,2` |
-
-`probe helper elem` is what Simlin's Rule T claims to be equivalent to. If
-Vensim accepts `probe slice expr` and prints the same values as
-`probe helper elem`, the claim holds and Rule T is right. If it prints
-`1,1,5,5,6,6` instead, Rule V is right and Simlin is wrong. If it errors, Rule R
-is right and Simlin should refuse the shape rather than define it.
-
-The two columns DISAGREE on `probe helper slice`, and that disagreement is a
-third question rather than a typo. Hand-deriving from the documented rule, the
-base comes from the reference, so `helper[A2]` bases at flat 1 and offset 1
-reads `helper[2] = 3`. Simlin instead treats `helper[DimA]` inside a vector
-builtin as the WHOLE variable, which its `source_is_full_array` test bases at 0
--- giving the same answer as `helper[A1]`. Whichever Vensim prints tells us
-whether the base is taken from the reference's spelling or from the variable's
-extent, and Simlin has to move if it is the former.
-
-## 2. `repeated_dimension.mdl`
+## 2. `repeated_dimension.mdl` — ANSWERED 2026-08-04
 
 **Question:** does Vensim accept a variable declared over the same subscript
 range twice (`sq[DimA,DimA]`), and if so what does reading it mean?
 
-Simlin accepts it and reads a **diagonal**: every projection between an array and
-a temp matches by dimension name and takes the first hit, so `out[i,j]` reads
-`sq[i,i]`. That behaviour predates this branch and is pinned as a disclosed
-residual, not endorsed. If Vensim rejects the declaration, the shape is
-unreachable from imported models and the residual is bounded to hand-authored
-XMILE; if Vensim reads all nine cells, Simlin has a plain bug to fix.
+**Result: Rule A.** Vensim refuses to simulate the model:
 
-Fixture: `sq[A_i,A_j]` = `10*i + j` (so `11,12,13,21,22,23,31,32,33`).
+> `DimA appears more than once on LHS`
 
-| variable | equation | Rule **A**: Vensim rejects the declaration | Rule **D**: diagonal / first-axis-wins (Simlin today) | Rule **F**: a true 2-D array |
+(raised for `probe copy`). The declaration is illegal Vensim.
+
+| variable | equation | **A: declaration rejected** (measured) | D: diagonal (Simlin) | F: true 2-D |
 |---|---|---|---|---|
-| `probe copy` | `sq[DimA,DimA]` | error | `11,11,11,22,22,22,33,33,33` | `11,12,13,21,22,23,31,32,33` |
-| `probe sort` | `VECTOR SORT ORDER(sq[DimA,DimA], 1)` | error | `0,0,0,1,1,1,2,2,2` | `0,1,2,0,1,2,0,1,2` |
-| `probe sum` | `SUM(sq[DimA!,DimA!])` | error | `66` (diagonal only) | `198` (all nine) |
+| `probe copy` | `sq[DimA,DimA]` | **error** ✅ | `11,11,11,22,22,22,33,33,33` | `11,12,13,21,22,23,31,32,33` |
+| `probe sort` | `VECTOR SORT ORDER(sq[DimA,DimA], 1)` | — (aborted) | `0,0,0,1,1,1,2,2,2` | `0,1,2,0,1,2,0,1,2` |
+| `probe sum` | `SUM(sq[DimA!,DimA!])` | — (aborted) | `66` | `198` |
 
-An error on the **declaration** answers all three rows at once; if only some
-rows error, please report which.
+**What this settles, and what it does not.** The shape is **unreachable from MDL
+import**: no Vensim model can declare it, so no imported model can contain it.
+That bounds Simlin's repeated-dimension residual family to hand-authored
+XMILE / JSON / protobuf.
 
-Caveat on `probe sum`, which unlike the two rows above does NOT cleanly separate
-D from F: repeating one `!` range in a single reference is its own Vensim
-question, and a genuinely 2-D `sq` could still sum the diagonal to `66` if
-Vensim binds both occurrences of `DimA!` to one index. So `198` is decisive for
-F, but `66` is not decisive for D. `probe copy` and `probe sort` are the rows to
-read; if you can, also try `SUM(sq[DimA!,DimA2!])` with a second range mapped to
-`DimA`, which asks the all-nine question without the repeated-index confound.
+It does **not** make the shape illegitimate. The XMILE v1.0 spec exemplifies the
+declaration directly — `docs/reference/xmile-v1.0.html` shows "A 2D
+non-apply-to-all array with dimensions X by X, where X is size 2" with
+`<dim name="X"/><dim name="X"/>` (verified in-repo). So a conformant XMILE file
+may contain it and Simlin must keep reading it. Note the spec exemplifies only
+the **declaration**, with per-element equations; it says nothing about what a
+*reference* such as `sq[X,X]` on a right-hand side means, which is exactly the
+part Simlin gets wrong. Model 4 asks Stella.
+
+---
+
+## 3. `elm_map_variable_sources.mdl` — AWAITING A VENSIM RUN
+
+The follow-up model 1 could not answer, with **no expression arguments
+anywhere**, so it simulates. Every argument is a variable reference.
+
+**The one live question.** For the whole-variable spelling
+`VECTOR ELM MAP(helper[DimA], off[DimA])`, Simlin collapses the base to 0 —
+making it identical to `VECTOR ELM MAP(helper[A1], off[DimA])`. Taking the base
+from the reference instead (what the documented rule says, and what `vector.dat`
+shows for the *strict slice* `d[DimA,B1]`) predicts something different,
+including two `:NA:`s. `vector.dat` covers the strict-slice spelling but **not**
+this one.
+
+Fixture: `d` flat storage `[1,4,2,5,3,6]`; `off = [0,1,1]`; `off2 = [0,1,2]`;
+`helper[DimA] = d[DimA,B1]` = `[1,2,3]`; `x = [1,2,3,4,5]`, `three` its third
+element. The Simlin column is **measured**, not predicted.
+
+| variable | equation | Simlin (measured) | base-from-reference predicts | R2: Vensim rejects the spelling |
+|---|---|---|---|---|
+| `ctl slice` | `VECTOR ELM MAP(d[DimA,B1], off[DimA])` | `1,1,5,5,6,6` ✅ matches `vector.dat` | `1,1,5,5,6,6` | — |
+| `ctl elem` | `VECTOR ELM MAP(x[three], (DimA - 1))` | **fails to compile** (MDL import only — see below) | `3,4,5` | — |
+| `ctl elem off` | `VECTOR ELM MAP(x[three], off2[DimA])` | `3,4,5` ✅ | `3,4,5` | — |
+| `probe helper elem` | `VECTOR ELM MAP(helper[A1], off[DimA])` | `1,1,2,2,2,2` | `1,1,2,2,2,2` (base is 0 here by construction) | — |
+| **`probe helper slice`** | **`VECTOR ELM MAP(helper[DimA], off[DimA])`** | **`1,1,2,2,2,2`** | **`1,1,3,3,:NA:,:NA:`** | error |
+
+**How to read the result.**
+
+- Vensim prints `1,1,3,3,:NA:,:NA:` → Simlin has a real **base bug** for the
+  whole-variable source spelling: it should take the base from the reference (as
+  it already does for a strict slice) and does not.
+- Vensim prints `1,1,2,2,2,2` → Simlin matches; the two helper spellings are
+  genuinely one thing.
+- Vensim errors on `helper[DimA]` as argument 1 → Rule R2, also an answer: the
+  legal spelling is element-pinned only, and Simlin accepting the whole-array
+  spelling is another extension to define rather than match.
+
+**Note on `ctl elem`.** It is spelled byte-identically to `vector.mdl`'s `y` and
+should print `3,4,5` in Vensim. Simlin fails it **through MDL import only**: the
+importer turns `y[DimA] = ...` into per-element `Arrayed` slots, where `DimA - 1`
+has no active apply-to-all dimension to resolve against. The same equation via
+XMILE gives `3,4,5` — which is why the corpus, which runs `vector.xmile`, never
+caught it. Separate importer defect, recorded rather than fixed here;
+`ctl elem off` is the control to read.
+
+## 4. `stella_repeated_dimension.stmx` — AWAITING A STELLA RUN
+
+The tiebreaker for model 2: the XMILE spec exemplifies an `X by X` declaration,
+Vensim rejects the equivalent, so Stella decides whether any shipping tool reads
+the shape and how.
+
+`sq[i,j] = 10*i + j`, so every cell is distinct. Simlin column **measured**:
+
+| variable | equation | Simlin (measured) | true 2-D | diagonal |
+|---|---|---|---|---|
+| `probe_copy` | `sq[X, X]` | **`11,11,11, 22,22,22, 33,33,33`** | `11,12,13, 21,22,23, 31,32,33` | same as Simlin |
+| `probe_row` | `SUM(sq[X, *])` | `36, 66, 96` ✅ | `36, 66, 96` | `11, 22, 33` |
+| `probe_sum` | `SUM(sq[*, *])` | `198` ✅ | `198` | `66` |
+
+This sharpens what Simlin's defect actually is. The **storage is a correct 2-D
+array** — the reducers read all nine distinct cells and agree with the true 2-D
+column. Only the subscripted **reference** `sq[X,X]` collapses, because both
+subscripts resolve to the first axis. So the residual is confined to
+reference resolution, not to array construction or reduction, which is a much
+smaller thing to fix than the earlier framing suggested.
+
+If Stella prints the true 2-D row for `probe_copy`, Simlin has a plain bug with
+an external referent. If Stella rejects the declaration, the spec example is a
+dead letter in both major tools and the shape is Simlin-and-spec-only.

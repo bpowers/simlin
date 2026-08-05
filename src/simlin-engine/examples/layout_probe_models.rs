@@ -29,6 +29,7 @@ fn sketch_block(mdl: &str) -> &str {
 fn main() {
     for path in [
         "vensim-probes/elm_map_computed_source.mdl",
+        "vensim-probes/elm_map_variable_sources.mdl",
         "vensim-probes/repeated_dimension.mdl",
     ] {
         let original = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));

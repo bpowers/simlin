@@ -1349,7 +1349,8 @@ fn join_array_views(views: Vec<ArrayView>) -> Option<ArrayView> {
 /// `array_operand_materialization_tests::a_repeated_dimension_read_directly_is_a_pre_existing_residual`.
 /// Widening the refusal to cover it would be a fix to a pre-existing defect
 /// riding on an unrelated change, and the right fix is to make the projection
-/// axis-identity-aware rather than to refuse the shape.
+/// axis-identity-aware rather than to refuse the shape -- the more so because
+/// the shape is legitimate: Vensim REJECTS the declaration -- run in Vensim DSS 2026-08-04, `vensim-probes/repeated_dimension.mdl` refuses to simulate with "DimA appears more than once on LHS" -- so no MDL-imported model can contain this shape and the residual is confined to hand-authored XMILE/JSON/protobuf. It is NOT illegitimate, though: the XMILE v1.0 spec exemplifies the declaration (`docs/reference/xmile-v1.0.html`, "A 2D non-apply-to-all array with dimensions X by X, where X is size 2", verified in-repo), so a conformant file may carry it and Simlin must keep reading it. The spec exemplifies only the DECLARATION, with per-element equations; it says nothing about what a REFERENCE such as `sq[X,X]` means, which is the part that is wrong here.
 pub(super) fn view_repeats_a_dimension(view: &ArrayView) -> bool {
     (1..view.dim_names.len())
         .any(|i| !view.dim_names[i].is_empty() && view.dim_names[..i].contains(&view.dim_names[i]))

@@ -1189,6 +1189,13 @@ fn two_iterated_axes_on_one_target_dimension_read_the_diagonal() {
 /// which changes the arm every ordinary bare arrayed reference uses plus
 /// `ltm_finding::expand_a2a_link_offsets`. Doing it there lets the edges and the
 /// scores move together instead of trading one for the other.
+///
+/// **Blast radius, measured.** Vensim REJECTS a repeated-dimension declaration
+/// ("DimA appears more than once on LHS", `vensim-probes/repeated_dimension.mdl`
+/// in Vensim DSS 2026-08-04), so no MDL-imported model reaches this residual and
+/// it is confined to hand-authored XMILE/JSON/protobuf. The XMILE v1.0 spec does
+/// exemplify the declaration, so the shape stays legitimate and the residual
+/// stays worth fixing -- just not urgent, and not from an importer.
 #[test]
 fn a_repeated_target_dimension_reads_the_first_axis_on_both_sides() {
     let project = TestProject::new("square_owner_reads")
