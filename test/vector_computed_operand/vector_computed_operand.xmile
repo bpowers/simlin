@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+    <header>
+        <vendor>Test</vendor>
+        <product>Simlin</product>
+    </header>
+    <sim_specs method="Euler" time_units="Time">
+        <start>0</start>
+        <stop>2</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <dimensions>
+        <dim name="Region">
+            <elem name="North"/>
+            <elem name="South"/>
+            <elem name="West"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <!--
+                An array-producing builtin whose array operand is COMPUTED
+                rather than a plain reference (GH #995). Codegen reads such an
+                operand as a view over storage, so the lowering has to evaluate
+                `base[Region] + boost[Region]` into a temp first; before #995
+                these three equations did not compile at all.
+
+                `boost` makes the operand vary over time, so the sort order at
+                t = 0 differs from the order at t = 1 and t = 2 -- an
+                implementation that read `base` alone would be visible in the
+                expected output rather than merely equal by luck.
+            -->
+            <aux name="base">
+                <element subscript="North">
+                    <eqn>30</eqn>
+                </element>
+                <element subscript="South">
+                    <eqn>10</eqn>
+                </element>
+                <element subscript="West">
+                    <eqn>20</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="bump">
+                <element subscript="North">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="South">
+                    <eqn>100</eqn>
+                </element>
+                <element subscript="West">
+                    <eqn>0</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="offs">
+                <element subscript="North">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="South">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="West">
+                    <eqn>1</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="boost">
+                <doc>[0, 0, 0] at t=0, [0, 100, 0] at t=1, [0, 200, 0] at t=2</doc>
+                <eqn>bump[Region] * TIME</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="adjusted">
+                <doc>The same array the three builtins below compute inline, as
+                     an ordinary variable. Referencing it is the operand shape
+                     that always compiled, so `order_ref` is the control for
+                     `order`.</doc>
+                <eqn>base[Region] + boost[Region]</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="order">
+                <doc>VECTOR SORT ORDER over a computed operand. 0-based
+                     genuine-Vensim permutation: position j holds the source
+                     index of the j-th smallest element.</doc>
+                <eqn>VECTOR SORT ORDER(base[Region] + boost[Region], 1)</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="order_ref">
+                <doc>Control: the same sort over the pre-materialized array.</doc>
+                <eqn>VECTOR SORT ORDER(adjusted[Region], 1)</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="ranks">
+                <doc>RANK over a computed operand. 1-based.</doc>
+                <eqn>RANK(base[Region] + boost[Region], 1)</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="mapped">
+                <doc>VECTOR ELM MAP whose SOURCE is computed: element i is
+                     source[offs[i]] over the computed array's full storage.</doc>
+                <eqn>VECTOR ELM MAP(base[Region] + boost[Region], offs[Region])</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+        </variables>
+    </model>
+</xmile>

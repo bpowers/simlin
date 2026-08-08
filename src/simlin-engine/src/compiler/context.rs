@@ -255,14 +255,49 @@ impl Context<'_> {
         self.get_submodel_metadata(self.model_name, ident)
     }
 
-    /// The active subscript each of `dims` reads, for a BARE arrayed reference
-    /// inside an apply-to-all body.
+    /// The active subscript each of `dims` reads, for a subscript-less arrayed
+    /// reference inside an apply-to-all body.
     ///
     /// The axis ALLOCATION -- which active axis supplies which of `dims` -- is
     /// `dimensions::allocate_implicit_axes`, shared with the LTM per-element
     /// projection so a link-score pin cannot spell a row this reference does not
     /// read. See that function for the two properties (positional, one-to-one)
     /// that a name-keyed re-derivation gets wrong.
+    ///
+    /// **Which references arrive here** -- worth stating, because the obvious
+    /// guess is wrong and a GH #996 investigation lost time to it. A bare
+    /// arrayed reference in an EQUATION BODY does NOT: [`Self::lower_pass0`]
+    /// rewrites it into an explicit `Expr2::Subscript` before Expr3, so it
+    /// resolves through the subscript path and never reaches `var_ref`'s
+    /// arrayed branch. The invariant, measured by tagging each call with its
+    /// caller and running the whole lib suite: **exactly two production
+    /// callers, and both are wiring rather than expressions.** ZERO calls
+    /// arrive via `lower_from_expr3`, which is the one that would mean an
+    /// ordinary equation reference.
+    ///
+    /// - [`Self::fold_flows`] -- a stock's inflow/outflow references;
+    /// - `compiler::Var::new` -- the stock self-reference inside
+    ///   `build_stock_update_expr`, plus module input wiring.
+    ///
+    /// The counts, since they are only reproducible with the condition
+    /// attached (`cargo test -p simlin-engine --lib -- --nocapture
+    /// --test-threads=1`, which `--nocapture` is required for -- without it
+    /// stderr is captured and the measurement reads zero): 477 + 438 = 915
+    /// production calls on the current tree, or 441 + 402 = 843 when
+    /// `crate::mapped_reference_semantics_tests` is skipped, since that module
+    /// adds calls of its own. One further call in either condition comes from
+    /// `test_get_implicit_subscript_off_translates_through_mapping_parent`,
+    /// which invokes [`Self::get_implicit_subscript_off`] directly.
+    ///
+    /// That split is why the flow reference is the one subscript-less spelling
+    /// that can follow an explicit element map (through the
+    /// `translate_via_mapping` fallback in
+    /// [`Self::get_implicit_subscript_off`], though only when the source
+    /// dimension does not already contain an element of the same NAME) while
+    /// the bare in-equation one is positional; both halves are pinned in
+    /// `crate::mapped_reference_semantics_tests`. It is also why the GH #996
+    /// hazard fixture there is built from a two-axis FLOW under a stock: no
+    /// ordinary expression can reach this allocation at all.
     fn get_implicit_subscripts(&self, dims: &[Dimension], ident: &str) -> Result<Vec<&str>> {
         if self.active_dimension.is_none() {
             return sim_err!(ArrayReferenceNeedsExplicitSubscripts, ident.to_owned());
@@ -287,38 +322,34 @@ impl Context<'_> {
         let mut off = 0_usize;
         for (dim, subscript) in dims.iter().zip(subscripts) {
             let element = CanonicalElementName::from_raw(subscript);
-            let element_off = dim.get_offset(&element).or_else(|| {
-                // The subscript comes from the active dimension but the source dimension
-                // uses different element names. Use dimension mapping to translate.
-                for active_dim in active_dims.iter() {
-                    if active_dim.get_offset(&element).is_some()
-                        && let Some(translated) = self.dimensions_ctx.translate_via_mapping(
-                            dim.canonical_name(),
-                            active_dim.canonical_name(),
-                            &element,
-                        )
-                    {
-                        return dim.get_offset(&translated);
-                    }
-
-                    // If dim maps to a parent of the active subdimension, translate through
-                    // that mapped parent (active subdimension elements are a subset of parent).
-                    if active_dim.get_offset(&element).is_some()
-                        && let Some(parent_dim) = self.dimensions_ctx.find_mapping_parent_of(
-                            dim.canonical_name(),
-                            active_dim.canonical_name(),
-                        )
-                        && let Some(translated) =
-                            self.dimensions_ctx.translate_to_source_via_mapping(
-                                dim.canonical_name(),
-                                parent_dim,
-                                &element,
-                            )
-                    {
-                        return dim.get_offset(&translated);
-                    }
-                }
-                None
+            // The subscript comes from an active dimension; which element of
+            // THIS source axis it selects is
+            // `DimensionsContext::resolve_mapped_read` (GH #997) -- name
+            // first, then the declared mapping, then a mapped parent of the
+            // active subdimension.
+            //
+            // The `get_offset` guard is the SEARCH half and stays here: with
+            // several active dimensions, only the one that owns this element
+            // can supply it, and the shared rule is per (source axis, active
+            // dimension) pair rather than a search over candidates. At least
+            // one active dimension always passes it -- `get_implicit_subscripts`
+            // returns active SUBSCRIPTS, each an element of its own active
+            // dimension -- so the shared rule's name-first arm is reached for
+            // every element, exactly as the un-guarded `dim.get_offset` that
+            // used to precede this loop was.
+            //
+            // One behaviour widened when the loop became a `find_map`: a
+            // translation that resolves to an element this axis does not
+            // declare (a malformed element map) used to abort the whole
+            // resolution, and now falls through to the remaining active
+            // dimensions. That can only resolve a reference that previously
+            // failed to compile.
+            let element_off = active_dims.iter().find_map(|active_dim| {
+                active_dim.get_offset(&element)?;
+                let resolved = self
+                    .dimensions_ctx
+                    .resolve_mapped_read(dim, active_dim, &element)?;
+                dim.get_offset(&resolved)
             });
             let element_off = element_off.ok_or_else(|| {
                 crate::Error::new(
@@ -2667,42 +2698,94 @@ impl Context<'_> {
                 let active_dims = self.active_dimension.as_ref().unwrap();
                 let active_subscripts = self.active_subscript.as_ref().unwrap();
 
-                // Find the matching active dimension (direct name match)
-                for (active_dim, active_subscript) in active_dims.iter().zip(active_subscripts) {
-                    if &*canonicalize(active_dim.name()) == name.as_str() {
-                        if let Some(offset) = dim.get_offset(active_subscript) {
-                            return Ok(SubscriptIndex::Single(Expr::Const(
-                                (offset + 1) as f64,
-                                *dim_loc,
-                            )));
-                        } else if let Ok(idx_val) = active_subscript.as_str().parse::<usize>() {
-                            return Ok(SubscriptIndex::Single(Expr::Const(
-                                idx_val as f64,
-                                *dim_loc,
-                            )));
-                        }
-                    }
-                }
-
-                // No direct match -- check dimension mappings.
-                // The subscript dimension (name) maps to an active dimension, or vice versa.
+                // Find the active dimension this index names, then resolve the
+                // element it selects on THIS source axis. Which active
+                // dimension: by name first, then through a declared mapping in
+                // either direction -- the pairing
+                // `compiler::subscript::normalize_subscripts3` makes on the
+                // static path. Which element: the shared executed rule
+                // (`DimensionsContext::resolve_mapped_read`, GH #997).
+                //
+                // Both halves used to be spelled out here as two separate
+                // loops, and the second one consulted the mapping WITHOUT
+                // trying the active element's own name against this axis
+                // first -- a divergence from the two static sites that would
+                // have read a different element for a mapped pair whose two
+                // dimensions share element names. Instrumenting all three
+                // arms found this one resolving nothing across the lib suite,
+                // but it is reachable -- measured at 8 references in the
+                // integration corpus -- so the divergence was latent rather
+                // than absent. Routing it through the shared rule removes it.
+                //
+                // One behaviour changed for a reference that ALREADY compiled,
+                // and it is a fix rather than a wash: where a source axis's
+                // dimension maps to two active dimensions and the index names
+                // one of them, the old second loop could pair it with the OTHER
+                // (it tested only that a mapping existed, in either direction,
+                // and took the first active dimension that had one). The
+                // candidate order below names the one the index spells first,
+                // matching what `normalize_subscripts3` picks on the static
+                // path for the same reference.
+                // Candidates in `normalize_subscripts3`'s order -- every active
+                // dimension the index NAMES, then every one it reaches through
+                // a declared mapping -- and the first that resolves wins.
+                //
+                // The two used to be separate passes distinguished by a
+                // `Pairing` enum whose only reader was a numeric fallback: for
+                // an INDEXED active dimension whose numeral the source axis did
+                // not declare, the by-name pass emitted the raw 1-based index.
+                // Both are gone. The fallback is measured DEAD -- zero
+                // executions across the lib and integration corpora, where the
+                // by-name candidate is reached 8 times and every one resolves
+                // by name identity -- and its static twin `build_view_from_ops`
+                // has no such fallback at all, so keeping it was the same class
+                // of latent divergence GH #997 removed from the rest of this
+                // arm. Both paths now REFUSE an unresolvable subscript rather
+                // than one of them inventing an index -- the codes still
+                // differ (`MismatchedDimensions` here, `Generic` there), which
+                // is worth tidying but is not what the fallback was about.
+                // (The gate was not structurally vacuous: a NAMED dimension may
+                // declare a mapping toward an indexed one, which puts an
+                // indexed active dimension in the mapping candidates. It is
+                // empirically dead, which is the stronger reason to drop it.)
+                //
+                // The ORDER survives as a chained iterator rather than as a
+                // documented property, because it costs nothing and mirrors
+                // `normalize_subscripts3`. No reference in either corpus has
+                // two candidates: this arm is entered 12 times, 8 with a single
+                // by-name candidate (every one resolving by name identity) and
+                // 4 with none at all (the `no_mapping_*` refusal cells of
+                // `crate::mapped_reference_semantics_tests`). The two-candidate
+                // shape -- a target iterating both a dimension and something
+                // mapped to it -- is nevertheless REACHABLE, and not by the
+                // route one would guess: Pass 1 folds an active dimension's
+                // name to an ordinal only when it runs, and
+                // `lower_preserving_dimensions` skips it, which is exactly how
+                // all 8 corpus references (`LOOKUP` table arguments with an
+                // `@N` sibling) arrive here naming an ACTIVE dimension. A
+                // fixture of that shape reaches this loop with two candidates.
+                // What is unmeasured is whether the two ever resolve to
+                // DIFFERENT elements in a model that compiles; the order is
+                // chosen to match the static path either way.
                 let sub_dim_name = CanonicalDimensionName::from_raw(name.as_str());
-                for (active_dim, active_subscript) in active_dims.iter().zip(active_subscripts) {
-                    let active_dim_name =
-                        CanonicalDimensionName::from_raw(&canonicalize(active_dim.name()));
-                    let has_forward = self
-                        .dimensions_ctx
-                        .has_mapping_to(&sub_dim_name, &active_dim_name);
-                    let has_reverse = self
-                        .dimensions_ctx
-                        .has_mapping_to(&active_dim_name, &sub_dim_name);
-                    if (has_forward || has_reverse)
-                        && let Some(translated) = self.dimensions_ctx.translate_via_mapping(
-                            dim.canonical_name(),
-                            active_dim.canonical_name(),
-                            active_subscript,
-                        )
-                        && let Some(offset) = dim.get_offset(&translated)
+                let by_name = active_dims
+                    .iter()
+                    .zip(active_subscripts)
+                    .filter(|(ad, _)| ad.canonical_name().as_str() == name.as_str());
+                let by_mapping = active_dims
+                    .iter()
+                    .zip(active_subscripts)
+                    .filter(|(ad, _)| ad.canonical_name().as_str() != name.as_str())
+                    .filter(|(ad, _)| {
+                        let adn = ad.canonical_name();
+                        self.dimensions_ctx.has_mapping_to(&sub_dim_name, adn)
+                            || self.dimensions_ctx.has_mapping_to(adn, &sub_dim_name)
+                    });
+                for (active_dim, active_subscript) in by_name.chain(by_mapping) {
+                    if let Some(resolved) =
+                        self.dimensions_ctx
+                            .resolve_mapped_read(dim, active_dim, active_subscript)
+                        && let Some(offset) = dim.get_offset(&resolved)
                     {
                         return Ok(SubscriptIndex::Single(Expr::Const(
                             (offset + 1) as f64,

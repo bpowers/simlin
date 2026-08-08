@@ -1569,11 +1569,32 @@ fn an_unrelated_equation_edit_does_not_regenerate_every_link_score() {
 /// An arrayed dep the per-element pin table cannot cover must make the edge
 /// decline LOUDLY, not produce a score computed around a hole.
 ///
-/// The shape: `target[cop]` reads `aggregated[agg]`, where `agg` maps to `cop`
-/// through an EXPLICIT element map. `mapped_element_correspondence` declines an
-/// explicit map (the execution split is documented there), so
-/// `dep_element_pins` can project no axis of `aggregated` onto a `cop` element
-/// and the dep is absent from the pin table entirely.
+/// The shape: `target[cop]` reads `aggregated[cop]`, where `aggregated` is
+/// declared over `agg` -- a dimension with DISJOINT element names and NO
+/// mapping to `cop`.
+///
+/// It COMPILES because `cop` is the dimension the equation ITERATES, so
+/// `ast::expr3`'s Pass 1 folds the index to that dimension's ordinal and it
+/// indexes `agg`'s storage raw: `target[c1]` reads `agg`'s FIRST element, by
+/// POSITION, consulting neither names nor mappings
+/// (`mapped_reference_semantics_tests`' `no_mapping_equal_cardinality` measures
+/// exactly this -- a cross-dimension read between two dimensions declared to
+/// have nothing to do with each other compiles and produces numbers).
+/// `build_view_from_ops` is never reached. The DESCRIBER declines because
+/// `allocate_implicit_axes_partial` pairs axes by name or by a DECLARED
+/// mapping and this pair has neither, so `dep_element_pins` can project no axis
+/// of `aggregated` and the dep is absent from the pin table entirely.
+///
+/// The element names are deliberately disjoint. An earlier revision used `cop`'s
+/// own names on `agg`, which made the values look name-matched when the read is
+/// positional -- true only by the coincidence that both lists were declared in
+/// the same order, and a fixture that passes by coincidence records a mechanism
+/// that is not the one running.
+///
+/// This fixture used an EXPLICIT element map before GH #997. That shape is now
+/// projectable -- it is exactly the class of dep C-LEARN reads, and
+/// `an_element_mapped_arrayed_dep_is_scored_through_the_map` asserts the score
+/// it gets -- so the guard needed a shape that still cannot project.
 ///
 /// What that produced before this guard: the dimension-name subscript survived
 /// into the scalar partial, `builtins_visitor` hoisted it into a
@@ -1595,19 +1616,14 @@ fn an_uncoverable_arrayed_dep_declines_the_edge_loudly() {
     let project = TestProject::new("unpinnable_dep")
         .with_sim_time(0.0, 3.0, 1.0)
         .named_dimension("cop", &["c1", "c2"])
-        .named_dimension_with_element_mapping(
-            "agg",
-            &["a1", "a2"],
-            "cop",
-            &[("a1", "c2"), ("a2", "c1")],
-        )
+        .named_dimension("agg", &["x", "y"])
         .array_aux("aggregated[agg]", "TIME * 2")
         .aux("switch", "1 + SUM(level[*]) * 0.01", None)
         .array_stock("level[cop]", "1", &["growth"], &[], None)
         .array_flow("growth[cop]", "target[cop] * 0.1", None)
         .array_aux(
             "target[cop]",
-            "if switch > 1.05 then aggregated[agg] else level[cop]",
+            "if switch > 1.05 then aggregated[cop] else level[cop]",
         )
         .build_datamodel();
 
@@ -1616,7 +1632,26 @@ fn an_uncoverable_arrayed_dep_declines_the_edge_loudly() {
     source_project.set_ltm_enabled(&mut db).to(true);
     let source_model = sync_from_datamodel(&db, &project).models["main"].source;
 
+    // Non-vacuity: the MODEL must compile, or "no score emitted" would be
+    // satisfied by a project that never got as far as scoring anything. The
+    // simulation reads `aggregated[cop]` POSITIONALLY (see the fixture note),
+    // which is why an unmapped pair with unrelated element names is legal here.
+    let diags = crate::db::collect_all_diagnostics(&db, source_project);
+    let errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)
+        .map(|d| (&d.variable, &d.error))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "the fixture must compile; got: {errors:?}"
+    );
+
     let ltm = crate::db::model_ltm_variables(&db, source_model, source_project);
+    assert!(
+        !ltm.vars.is_empty(),
+        "the model must emit LTM variables, or the empty assertion below is vacuous"
+    );
     let emitted: Vec<&String> = ltm
         .vars
         .iter()
@@ -1625,14 +1660,13 @@ fn an_uncoverable_arrayed_dep_declines_the_edge_loudly() {
         .collect();
     assert!(
         emitted.is_empty(),
-        "the switch->target edge cannot be scored (its `aggregated[agg]` dep is \
+        "the switch->target edge cannot be scored (its `aggregated[cop]` dep is \
          unpinnable), so NO link score may be emitted for it; got: {emitted:?}"
     );
 
     // The decline must be LOUD, and it must be the only thing left: a helper
     // that fails while its parent compiles is exactly the silent zero this
     // guard exists to remove.
-    let diags = crate::db::collect_all_diagnostics(&db, source_project);
     let silently_degraded: Vec<&String> = diags
         .iter()
         .filter_map(|d| match &d.error {
@@ -1661,6 +1695,180 @@ fn an_uncoverable_arrayed_dep_declines_the_edge_loudly() {
             .iter()
             .map(|d| (&d.variable, &d.error))
             .collect::<Vec<_>>()
+    );
+}
+
+/// GH #997: an arrayed dep read across an EXPLICIT element map IS scored, and
+/// the pin follows the MAP.
+///
+/// This is C-LEARN's shape in miniature, and the class of edge #997 exists to
+/// recover: `target[cop]` reads `aggregated[agg]` -- the source's OWN dimension
+/// name as the subscript -- with `agg` mapping onto `cop` through a declared
+/// element map. `mapped_reference_semantics_tests`' `SourceOwnDim` row measures
+/// that spelling against the VM: it resolves name-first and then through the
+/// map, at every cardinality. Before #997 one correspondence served this
+/// spelling and the positional one alike, declined both, and every such edge
+/// took the loud unprojectable-dep skip -- 13 of them on C-LEARN.
+///
+/// The map here is the reverse permutation (a1 -> c2), so the pinned element is
+/// the discriminator: a positional pin would spell `agg\u{B7}a1` for `c1` where
+/// the map says `agg\u{B7}a2`.
+#[test]
+fn an_element_mapped_arrayed_dep_is_scored_through_the_map() {
+    use salsa::Setter;
+
+    let project = TestProject::new("element_mapped_dep")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("cop", &["c1", "c2"])
+        .named_dimension_with_element_mapping(
+            "agg",
+            &["a1", "a2"],
+            "cop",
+            &[("a1", "c2"), ("a2", "c1")],
+        )
+        .array_aux("aggregated[agg]", "TIME * 2")
+        .aux("switch", "1 + SUM(level[*]) * 0.01", None)
+        .array_stock("level[cop]", "1", &["growth"], &[], None)
+        .array_flow("growth[cop]", "target[cop] * 0.1", None)
+        .array_aux(
+            "target[cop]",
+            "if switch > 1.05 then aggregated[agg] else level[cop]",
+        )
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+    let source_model = sync_from_datamodel(&db, &project).models["main"].source;
+
+    let ltm = crate::db::model_ltm_variables(&db, source_model, source_project);
+    let scored: Vec<&crate::db::LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("link_score\u{205A}switch\u{2192}target"))
+        .collect();
+    assert_eq!(
+        scored.len(),
+        2,
+        "one scalar score per `cop` element; got: {:?}",
+        scored.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+
+    // The `c1` score must pin the dep to the element the MAP names (a2), not
+    // the one an ordinal would (a1).
+    let c1 = scored
+        .iter()
+        .find(|v| v.name.ends_with("target[c1]"))
+        .expect("a score for c1");
+    let text = c1.equation.source_text();
+    assert!(
+        text.contains("aggregated[agg\u{B7}a2]"),
+        "the dep must be pinned to the element the declared map names; got: {text}"
+    );
+    assert!(
+        !text.contains("aggregated[agg\u{B7}a1]"),
+        "a positional pin would read the other element; got: {text}"
+    );
+
+    // And the decline is gone: no unprojectable-dep warning for this edge.
+    let diags = crate::db::collect_all_diagnostics(&db, source_project);
+    let declines: Vec<_> = diags
+        .iter()
+        .filter(|d| match &d.error {
+            crate::db::DiagnosticError::Assembly(m) => {
+                m.contains("cannot be projected onto that target element")
+            }
+            _ => false,
+        })
+        .map(|d| (&d.variable, &d.error))
+        .collect();
+    assert!(declines.is_empty(), "got: {declines:?}");
+}
+
+/// GH #997: the class-D edge itself -- an arrayed SOURCE read through an
+/// element-mapped axis -- is scored per (source row, target element), not with
+/// the conservative cross-product it collapsed to while the reference
+/// classified `DynamicIndex`.
+///
+/// The map is MANY-TO-ONE (C-LEARN's shape at a smaller scale): two `agg`
+/// elements onto four `cop` ones. That is the cardinality the positional rule
+/// cannot describe at all, so every name below is evidence the map-following
+/// rule produced it -- and each source row appears under two different target
+/// elements, which is exactly what a many-to-one read is.
+#[test]
+fn a_many_to_one_mapped_read_is_scored_per_row_and_element() {
+    use salsa::Setter;
+
+    let project = TestProject::new("class_d_scores")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("cop", &["c1", "c2", "c3", "c4"])
+        .named_dimension_with_element_mapping(
+            "agg",
+            &["a1", "a2"],
+            "cop",
+            &[("a1", "c1"), ("a1", "c2"), ("a2", "c3"), ("a2", "c4")],
+        )
+        //  must sit INSIDE a feedback loop: exhaustive mode scores
+        // the edges loops traverse, so a feed-forward source gets no link score
+        // at all and the assertion below would be vacuous.
+        .array_aux("aggregated[agg]", "1 + SUM(level[*]) * 0.01")
+        .array_stock("level[cop]", "1", &["growth"], &[], None)
+        .array_flow("growth[cop]", "target[cop] * 0.1", None)
+        .array_aux("target[cop]", "aggregated[agg] * 2 + level[cop]")
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+    let source_model = sync_from_datamodel(&db, &project).models["main"].source;
+
+    let diags = crate::db::collect_all_diagnostics(&db, source_project);
+    let errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)
+        .map(|d| (&d.variable, &d.error))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "the fixture must compile; got: {errors:?}"
+    );
+
+    let ltm = crate::db::model_ltm_variables(&db, source_model, source_project);
+    let mut scored: Vec<&String> = ltm
+        .vars
+        .iter()
+        .map(|v| &v.name)
+        .filter(|n| n.contains("link_score\u{205A}aggregated[") && n.contains("\u{2192}target["))
+        .collect();
+    scored.sort();
+    let want: Vec<String> = [("a1", "c1"), ("a1", "c2"), ("a2", "c3"), ("a2", "c4")]
+        .iter()
+        .map(|(row, elem)| {
+            format!("$\u{205A}ltm\u{205A}link_score\u{205A}aggregated[{row}]\u{2192}target[{elem}]")
+        })
+        .collect();
+    let want: Vec<&String> = want.iter().collect();
+    assert_eq!(
+        scored, want,
+        "one score per (mapped source row, target element), and no off-map pair"
+    );
+
+    // The equation must READ the row its name claims: `target[c2]` reads
+    // `aggregated[a1]`, and a positional pin has no answer at all here (there
+    // is no fourth `agg` element for `c4`'s ordinal).
+    let c2 = ltm
+        .vars
+        .iter()
+        .find(|v| v.name.ends_with("aggregated[a1]\u{2192}target[c2]"))
+        .expect("the a1 -> c2 score");
+    let text = c2.equation.source_text();
+    assert!(
+        text.contains("aggregated[agg\u{B7}a1]"),
+        "the live source must be read at the mapped row; got: {text}"
+    );
+    assert!(
+        !text.contains("aggregated[agg\u{B7}a2]"),
+        "no other row may appear in this element's partial; got: {text}"
     );
 }
 
@@ -1848,10 +2056,15 @@ fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
 /// This fixture reaches `emit_per_element_link_scores`: `out[region]` reads
 /// `src[region, t1]`, a 2-D source at a pinned column, which is the mixed
 /// iterated+literal `PerElement` shape (GH #525) that routes there. It also
-/// reads `other[agg]` across an EXPLICIT element map, which
-/// `mapped_element_correspondence` declines -- so that dep has no projectable
-/// element and its dimension-name subscript would survive into the scalar
-/// partial. Nothing exotic: a 2-D read and a mapped dep.
+/// reads `other[region]`, where `other` is declared over `agg` -- a dimension
+/// with DISJOINT element names and no declared mapping -- so that dep has no
+/// projectable element and its dimension-name subscript would survive into the
+/// scalar partial. The read itself is POSITIONAL (`region` is the iterated
+/// dimension, folded to an ordinal by Pass 1), which is what makes an unrelated
+/// pair legal; see `an_uncoverable_arrayed_dep_declines_the_edge_loudly` for
+/// the full mechanism and for why this shape rather than an explicit element
+/// map (GH #997 made the latter projectable). Nothing exotic: a 2-D read and an
+/// undeclared-mapping dep.
 #[test]
 fn the_completeness_guard_holds_on_the_per_element_emitter() {
     use salsa::Setter;
@@ -1860,12 +2073,7 @@ fn the_completeness_guard_holds_on_the_per_element_emitter() {
         .with_sim_time(0.0, 3.0, 1.0)
         .named_dimension("region", &["a", "b"])
         .named_dimension("slot", &["t1", "t2"])
-        .named_dimension_with_element_mapping(
-            "agg",
-            &["x", "y"],
-            "region",
-            &[("x", "b"), ("y", "a")],
-        )
+        .named_dimension("agg", &["p", "q"])
         .array_aux("other[agg]", "TIME * 2")
         .array_aux_direct(
             "src",
@@ -1875,7 +2083,7 @@ fn the_completeness_guard_holds_on_the_per_element_emitter() {
         )
         .array_stock("level[region]", "1", &["growth"], &[], None)
         .array_flow("growth[region]", "out[region] * 0.1", None)
-        .array_aux("out[region]", "src[region, t1] * 0.5 + other[agg]")
+        .array_aux("out[region]", "src[region, t1] * 0.5 + other[region]")
         .build_datamodel();
 
     let mut db = SimlinDb::default();
@@ -1883,7 +2091,23 @@ fn the_completeness_guard_holds_on_the_per_element_emitter() {
     source_project.set_ltm_enabled(&mut db).to(true);
     let source_model = sync_from_datamodel(&db, &project).models["main"].source;
 
+    // Non-vacuity: the MODEL must compile (see the sibling guard's note).
+    let diags = crate::db::collect_all_diagnostics(&db, source_project);
+    let errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)
+        .map(|d| (&d.variable, &d.error))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "the fixture must compile; got: {errors:?}"
+    );
+
     let ltm = crate::db::model_ltm_variables(&db, source_model, source_project);
+    assert!(
+        !ltm.vars.is_empty(),
+        "the model must emit LTM variables, or the empty assertion below is vacuous"
+    );
     let emitted: Vec<&String> = ltm
         .vars
         .iter()
@@ -1892,11 +2116,10 @@ fn the_completeness_guard_holds_on_the_per_element_emitter() {
         .collect();
     assert!(
         emitted.is_empty(),
-        "the src->out per-element edge cannot be scored (its `other[agg]` dep is \
+        "the src->out per-element edge cannot be scored (its `other[region]` dep is \
          unprojectable), so NO link score may be emitted; got: {emitted:?}"
     );
 
-    let diags = crate::db::collect_all_diagnostics(&db, source_project);
     let silently_degraded: Vec<&String> = diags
         .iter()
         .filter_map(|d| match &d.error {
@@ -1915,7 +2138,7 @@ fn the_completeness_guard_holds_on_the_per_element_emitter() {
         diags.iter().any(|d| match &d.error {
             crate::db::DiagnosticError::Assembly(m) =>
                 m.contains("cannot be projected onto that target element")
-                    && m.contains("other[agg]"),
+                    && m.contains("other[region]"),
             _ => false,
         }),
         "the decline must carry the unprojectable-dep warning naming the dep; got: {:?}",

@@ -76,7 +76,7 @@ use crate::bytecode::{
 use crate::vm::{StepPart, make_module_key};
 
 use super::WasmGenError;
-use super::views::ElementAddr;
+use super::views::{ElementAddr, RegionBases};
 use super::views::{ViewBase, ViewDesc};
 
 /// Bytes per f64 slot.
@@ -262,6 +262,29 @@ pub(crate) struct EmitCtx<'a> {
     /// with its own context, so an `EvalModule`'s `ctx.modules[id]` and the array
     /// tables refer to the instance whose function is being lowered.
     pub ctx: &'a ByteCodeContext,
+}
+
+impl EmitCtx<'_> {
+    /// The region base addresses a view's element addressing needs.
+    ///
+    /// `initial` resolves the "during initials the snapshot is not taken yet"
+    /// branch HERE, at compile time, exactly as `emit_load_initial` does for the
+    /// scalar opcode -- the emitter knows which program it is lowering, so the
+    /// blob needs no runtime test. The VM makes the same decision at run time
+    /// (`ChunkRegions::backing`) because its one interpreter loop serves every
+    /// phase.
+    pub(crate) fn region_bases(&self) -> RegionBases {
+        RegionBases {
+            curr: self.curr_base,
+            temp_storage: self.temp_storage_base,
+            prev: self.prev_values_base,
+            initial: if self.step_part == StepPart::Initials {
+                self.curr_base
+            } else {
+                self.initial_values_base
+            },
+        }
+    }
 }
 
 // Reserved global slots (absolute, module-independent), mirroring `crate::vm`.
@@ -1435,11 +1458,12 @@ fn emit_ops(
                 ));
             }
             // `PushVarViewDirect` builds a contiguous view from raw dim sizes
-            // (dim_ids all 0), the base for a dynamic subscript. It is the only
-            // `CurrModuleRelative` view opcode: the VM folds the runtime `module_off`
-            // into the base, where `PushStaticView` bakes an absolute slot in
-            // and `PushTempView` addresses `temp_storage` with no `module_off`
-            // at all.
+            // (dim_ids all 0), the base for a dynamic subscript. Its base is
+            // module-relative -- the VM folds the runtime `module_off` in -- and
+            // so is `PushStaticView`'s, whose `base_off` comes from the
+            // fragment's own model layout (`StaticArrayView::to_runtime_view`
+            // adds the same addend). `PushTempView` is the only one that
+            // addresses `temp_storage` with no `module_off` at all.
             Opcode::PushVarViewDirect {
                 base_off,
                 dim_list_id,
@@ -1448,7 +1472,7 @@ fn emit_ops(
                 let n = dims.len();
                 state.view_stack.push(ViewDesc::contiguous(
                     u32::from(*base_off),
-                    ViewBase::CurrModuleRelative,
+                    ViewBase::Curr,
                     dims,
                     vec![0u16; n],
                 ));
@@ -2865,7 +2889,7 @@ pub(crate) fn emit_view_element_load(
     f: &mut Function,
 ) -> Result<(), WasmGenError> {
     let addr = desc
-        .element_addr(iter_idx, ctx.curr_base, ctx.temp_storage_base, ctx.ctx)
+        .element_addr(iter_idx, ctx.region_bases(), ctx.ctx)
         .ok_or_else(bad_temp_view)?;
     emit_addr_load(addr, ctx, f);
     Ok(())
@@ -2881,7 +2905,7 @@ fn emit_view_offset_load(
     f: &mut Function,
 ) -> Result<(), WasmGenError> {
     let addr = desc
-        .element_addr_for_flat(flat, ctx.curr_base, ctx.temp_storage_base, ctx.ctx)
+        .element_addr_for_flat(flat, ctx.region_bases(), ctx.ctx)
         .ok_or_else(bad_temp_view)?;
     emit_addr_load(addr, ctx, f);
     Ok(())
@@ -2919,6 +2943,14 @@ fn emit_addr_load(addr: ElementAddr, ctx: &EmitCtx, f: &mut Function) {
 /// neither is present it is a bare `0`.
 fn emit_addr_load_unguarded(addr: ElementAddr, ctx: &EmitCtx, f: &mut Function) {
     use Instruction as Ins;
+    // A PREVIOUS-region element reads the fallback 0 until the first snapshot
+    // exists. The fallback operand is pushed FIRST because `select` yields its
+    // deeper operand when the condition is non-zero -- the same shape
+    // `emit_load_prev` uses for the scalar opcode, and the value the VM's
+    // `ChunkRegions::backing` `None` arm produces.
+    if addr.prev_fallback_gated {
+        f.instruction(&Ins::F64Const(0.0.into()));
+    }
     let mut pushed = false;
     if addr.module_relative {
         push_module_relative_base(ctx, f);
@@ -2938,6 +2970,10 @@ fn emit_addr_load_unguarded(addr: ElementAddr, ctx: &EmitCtx, f: &mut Function) 
         f.instruction(&Ins::I32Const(0));
     }
     f.instruction(&Ins::F64Load(memarg(addr.const_byte_offset)));
+    if addr.prev_fallback_gated {
+        f.instruction(&Ins::GlobalGet(ctx.use_prev_fallback_global));
+        f.instruction(&Ins::Select);
+    }
 }
 
 /// The `Unsupported` error for a temp-backed view whose `base_off` is not a

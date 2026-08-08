@@ -629,11 +629,14 @@ fn an_arrayed_capture_helpers_scores_compile() {
     // SCOPE, stated rather than implied. This fixture still has failures, and
     // they are two OTHER root causes, both left for separate work:
     //
-    //  * `PREVIOUS` of an array-valued reference has no codegen path (GH #995),
-    //    so the helper's own partial cannot freeze its arrayed argument. Closing
-    //    it means synthesizing an ARRAYED freeze helper (#995's option B) rather
-    //    than declining -- the same contract behind the array-slice declines on
-    //    C-LEARN's remaining loop-carrying edges.
+    //  * an array-valued `PREVIOUS` in a SCALAR operand position. GH #995's
+    //    Phase C3 gave `PREVIOUS` an array form, but only where an array is
+    //    expected: this fixture's capture helper is `h[Region] = PREVIOUS(stock)`
+    //    over a bare arrayed `stock`, whose right-hand side lowers to a
+    //    whole-array view being assigned element by element. Making that work is
+    //    a LOWERING question -- a bare arrayed name in an apply-to-all body
+    //    should resolve per element -- not a view question, so C3 changed the
+    //    message here and not the outcome.
     //  * the loop builder subscripts `{helper}[elem]→growth` as though it were
     //    dimensioned, while the emitter gives it none -- an emitter/consumer
     //    shape disagreement that survives independently of the above.
@@ -643,10 +646,11 @@ fn an_arrayed_capture_helpers_scores_compile() {
     // absorbing a new one.
     for msg in &failures {
         assert!(
-            msg.contains("PREVIOUS requires a variable reference")
-                || msg.contains("expected array variable '$⁚ltm⁚link_score⁚"),
+            msg.contains(
+                "an array-valued PREVIOUS/INIT is only meaningful where an array is expected"
+            ) || msg.contains("expected array variable '$⁚ltm⁚link_score⁚"),
             "unexpected residual failure class -- this test tolerates only the \
-             GH #995 array-freeze class and the loop-builder shape \
+             scalar-position array-PREVIOUS class and the loop-builder shape \
              disagreement:\n{msg}"
         );
     }

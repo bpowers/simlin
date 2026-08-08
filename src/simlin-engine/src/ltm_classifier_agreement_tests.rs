@@ -1302,8 +1302,8 @@ fn agree_mapped_dim_forward_declaration_is_bare() {
 fn agree_mapped_dim_reverse_declaration_is_bare() {
     // GH #757 reverse direction: the mapping is declared `State -> Region`,
     // but the target iterates `Region` and reads a `State`-dimensioned source.
-    // `mapped_element_correspondence` accepts both declaration directions, so
-    // both families classify `speed[Region]` as Bare.
+    // `positional_correspondence` accepts both declaration directions, so both
+    // families classify `speed[Region]` as Bare.
     let tp = TestProject::new("main")
         .with_sim_time(0.0, 3.0, 1.0)
         .named_dimension("Region", &["r1", "r2"])
@@ -1314,10 +1314,12 @@ fn agree_mapped_dim_reverse_declaration_is_bare() {
 }
 
 #[test]
-fn agree_element_mapped_dim_declines_to_dynamic() {
-    // GH #756 positional-only gate: an EXPLICIT element map (not positional) is
-    // declined by `mapped_element_correspondence`, so `pop[State]` keeps the
-    // conservative DynamicIndex on both families (not Bare).
+fn agree_element_mapped_iterated_dim_is_bare() {
+    // An EXPLICIT element map on the ITERATED spelling: `pop[State]` names the
+    // dimension the equation iterates, which execution folds to an ordinal
+    // (GH #997), so `positional_correspondence` answers and both families
+    // classify Bare. This asserted DynamicIndex until GH #997, when one
+    // correspondence served both spellings and answered neither.
     let tp = TestProject::new("main")
         .with_sim_time(0.0, 3.0, 1.0)
         .named_dimension("Region", &["r1", "r2"])
@@ -1330,6 +1332,102 @@ fn agree_element_mapped_dim_declines_to_dynamic() {
         .array_aux("pop[Region]", "100")
         .array_aux("mapped[State]", "pop[State] * 2");
     assert_classifier_families_agree(&tp);
+}
+
+#[test]
+fn agree_element_mapped_source_own_dim_is_per_element() {
+    // GH #997's class-D shape, the OTHER spelling of the fixture above:
+    // `pop[Region]` names the SOURCE's own dimension inside a `State`-iterating
+    // equation, which execution resolves name-first then through the element
+    // map. Both families must classify it `PerElement` with a `MappedRead`
+    // axis -- the Expr0 mirror gains the same arm, so the agreement gate is
+    // what keeps the test-support classifier from drifting.
+    let tp = TestProject::new("main")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension_with_element_mapping(
+            "State",
+            &["s1", "s2"],
+            "Region",
+            &[("s1", "r2"), ("s2", "r1")],
+        )
+        .array_aux("pop[Region]", "100")
+        .array_aux("mapped[State]", "pop[Region] * 2");
+    let compared = assert_classifier_families_agree(&tp);
+    // The name promises a SHAPE, so pin it: agreement alone would be satisfied
+    // by both families calling it `DynamicIndex`, which is what they did before
+    // GH #997.
+    pin_edge(
+        &compared,
+        "pop",
+        "mapped",
+        &[RefShape::PerElement {
+            axes: vec![AxisRead::MappedRead {
+                dim: "state".to_string(),
+                source_dim: "region".to_string(),
+            }],
+        }],
+    );
+}
+
+#[test]
+fn agree_many_to_one_mapped_source_own_dim_is_per_element() {
+    // The cardinality `positional_correspondence` cannot describe at all
+    // (three target elements, two source ones), so this row is reachable only
+    // through the executed rule -- C-LEARN's shape.
+    let tp = TestProject::new("main")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension_with_element_mapping(
+            "State",
+            &["s1", "s2", "s3"],
+            "Region",
+            &[("s1", "r1"), ("s2", "r1"), ("s3", "r2")],
+        )
+        .array_aux("pop[Region]", "100")
+        .array_aux("mapped[State]", "pop[Region] * 2");
+    let compared = assert_classifier_families_agree(&tp);
+    pin_edge(
+        &compared,
+        "pop",
+        "mapped",
+        &[RefShape::PerElement {
+            axes: vec![AxisRead::MappedRead {
+                dim: "state".to_string(),
+                source_dim: "region".to_string(),
+            }],
+        }],
+    );
+}
+
+#[test]
+fn agree_shared_element_names_mapped_source_own_dim_is_per_element() {
+    // Both dimensions declare the same element names in a different order, and
+    // the map is a third permutation: the executed rule stops at NAME identity.
+    // The families must agree on the axis, not merely on the shape.
+    let tp = TestProject::new("main")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Region", &["e2", "e1"])
+        .named_dimension_with_element_mapping(
+            "State",
+            &["e1", "e2"],
+            "Region",
+            &[("e1", "e2"), ("e2", "e1")],
+        )
+        .array_aux("pop[Region]", "100")
+        .array_aux("mapped[State]", "pop[Region] * 2");
+    let compared = assert_classifier_families_agree(&tp);
+    pin_edge(
+        &compared,
+        "pop",
+        "mapped",
+        &[RefShape::PerElement {
+            axes: vec![AxisRead::MappedRead {
+                dim: "state".to_string(),
+                source_dim: "region".to_string(),
+            }],
+        }],
+    );
 }
 
 #[test]

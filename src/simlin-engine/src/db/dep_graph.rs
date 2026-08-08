@@ -685,7 +685,13 @@ pub(crate) fn dt_cycle_sccs_engine_consistent(
 /// addressable-only set, just made explicit in symbolic space.)
 fn static_view_element_offsets(view: &crate::compiler::symbolic::SymbolicStaticView) -> Vec<usize> {
     let base_elem = match &view.base {
-        crate::compiler::symbolic::SymStaticViewBase::Var(v) => v.element_offset,
+        // All three variable-backed regions share `curr`'s slot numbering, so
+        // the element set a view addresses is the same for each; WHETHER that
+        // set counts as an ordering edge is the caller's decision (see the
+        // `PushStaticView` arm of `symbolic_phase_element_order`).
+        crate::compiler::symbolic::SymStaticViewBase::Var(v)
+        | crate::compiler::symbolic::SymStaticViewBase::PrevVar(v)
+        | crate::compiler::symbolic::SymStaticViewBase::InitialVar(v) => v.element_offset,
         // A temp-backed view threads scratch storage, not a current-value
         // recurrence read (the prior `collect_read_slots` likewise did not
         // treat `TempArray*` as a read).
@@ -982,9 +988,28 @@ fn symbolic_phase_element_order(
                     // resolves). An out-of-range `view_id` is a malformed
                     // fragment (loud-safe: unresolved).
                     let view = frag.static_views.get(*view_id as usize)?;
-                    if let crate::compiler::symbolic::SymStaticViewBase::Var(v) = &view.base {
+                    // A view's base carries the SAME lagged/current
+                    // classification as the scalar read opcodes above, and for
+                    // the same reasons (GH #995 gave `PREVIOUS`/`INIT` array
+                    // forms, which lower to a view over the snapshot region
+                    // instead of to `SymLoadPrev`/`SymLoadInitial`): a `curr`
+                    // view is a current-value read; a PREVIOUS view is a
+                    // prior-timestep snapshot and is an ordering edge in
+                    // NEITHER phase; an INIT view is an initial-snapshot read,
+                    // an edge in `SccPhase::Initial` only.
+                    use crate::compiler::symbolic::SymStaticViewBase as ViewBase;
+                    let read_name = match &view.base {
+                        ViewBase::Var(v) => Some(&v.name),
+                        ViewBase::InitialVar(v)
+                            if matches!(phase, crate::db::SccPhase::Initial) =>
+                        {
+                            Some(&v.name)
+                        }
+                        ViewBase::InitialVar(_) | ViewBase::PrevVar(_) | ViewBase::Temp(_) => None,
+                    };
+                    if let Some(name) = read_name {
                         for elem in static_view_element_offsets(view) {
-                            pending_reads.insert((v.name.clone(), elem));
+                            pending_reads.insert((name.clone(), elem));
                         }
                     }
                 }

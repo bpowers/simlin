@@ -140,11 +140,9 @@ fn per_element_pin_descends_into_range_endpoints() {
 ///
 /// - per AXIS, [`dep_axis_elements`](super::post_transform) has three outcomes:
 ///   the target ITERATES the dep's own dimension (identity), the target
-///   iterates a dimension with a usable positional CORRESPONDENCE to it
-///   (`mapped_element_correspondence`), or neither (declined). The declined arm
-///   is reached two ways -- an unrelated dimension, and an explicit ELEMENT map,
-///   which the correspondence refuses because execution resolves positionally
-///   and ignores it (GH #756) -- and both are rows;
+///   iterates a dimension with a usable CORRESPONDENCE to it (which of the two
+///   the spelling picks -- GH #997), or neither (declined). The declined arm is
+///   reached by an unrelated dimension, and is a row;
 /// - per DEP, the axis outcomes combine into three: every axis resolved
 ///   (`complete`, the only kind that may subscript a bare reference), some
 ///   resolved (present but incomplete -- it may still substitute a
@@ -247,7 +245,7 @@ fn dep_element_pins_projection_enumeration() {
                    name: &str|
      -> Option<(Vec<(String, String)>, bool)> {
         pins.get(&Ident::<Canonical>::new(name))
-            .map(|p| (p.axes.clone(), p.complete))
+            .map(|p| (p.axes.clone(), p.bare_row.is_some()))
     };
     let axis = |dim: &str, elem: &str| (dim.to_string(), elem.to_string());
 
@@ -342,15 +340,20 @@ fn dep_element_pins_projection_enumeration() {
     assert_eq!(
         repeated_pins
             .get(&Ident::<Canonical>::new("w"))
-            .map(|p| (p.axes.clone(), p.complete)),
+            .map(|p| (p.axes.clone(), p.bare_row.is_some())),
         Some((vec![axis("region", "region\u{B7}nyc")], true)),
         "a subset dep under a repeated-dimension target reads the FIRST axis; a \
          name-keyed map keeps only the last and would say `boston`"
     );
 
-    // An EXPLICIT element map is declined by `mapped_element_correspondence`
-    // (execution resolves positionally and ignores it, GH #756), so the same
-    // `mapped[State,Age]` dep loses its State axis and becomes incomplete.
+    // An EXPLICIT element map is where the pin's TWO rows part (GH #997). This
+    // block asserted a single declining row until then, on the reasoning that
+    // execution "resolves positionally and ignores the map" -- true of a BARE
+    // reference and false of a `mapped[State, ...]` subscript, and one row could
+    // not say both. The map below sends `west` to `boston`, the REVERSE of the
+    // positional diagonal (`boston` is Region's second, so positionally it reads
+    // State's second, `east`), so the two rows disagree on every element and
+    // neither assertion can pass by accident.
     let element_mapped = build_ctx(vec![
         ("west".to_string(), "boston".to_string()),
         ("east".to_string(), "nyc".to_string()),
@@ -361,11 +364,51 @@ fn dep_element_pins_projection_enumeration() {
         &target_elements,
         &element_mapped,
     );
+    let mapped_pin = pins
+        .get(&Ident::<Canonical>::new("mapped"))
+        .expect("the mapped dep projects on both rows");
     assert_eq!(
-        axes_of(&pins, "mapped"),
-        Some((vec![axis("age", "age\u{B7}young")], false)),
-        "an element-mapped axis must decline: following the map would spell a \
-         read the positionally-resolving simulation never performs"
+        mapped_pin.axes,
+        vec![
+            axis("state", "state\u{B7}west"),
+            axis("age", "age\u{B7}young")
+        ],
+        "a `mapped[State, Age]` subscript FOLLOWS the declared element map: the \
+         index survives to `IndexOp::ActiveDimRef` and `build_view_from_ops` \
+         resolves it name-first, then through the map"
+    );
+    assert_eq!(
+        mapped_pin.bare_row,
+        Some(vec![
+            "state\u{B7}east".to_string(),
+            "age\u{B7}young".to_string()
+        ]),
+        "a BARE `mapped` reference is rewritten into the iterated spelling by \
+         pass 0 and read by ORDINAL, so it reads State's second element -- the \
+         other one"
+    );
+
+    // The same dep under a POSITIONAL mapping: the two rows coincide, which is
+    // why one row sufficed before GH #997 and why nothing about the shipped
+    // positional cases moves.
+    let positional_pins = super::post_transform::dep_element_pins(
+        &pinnable,
+        &target_dims,
+        &target_elements,
+        &positional,
+    );
+    let positional_mapped = positional_pins
+        .get(&Ident::<Canonical>::new("mapped"))
+        .expect("the mapped dep projects");
+    assert_eq!(
+        positional_mapped.bare_row,
+        Some(
+            positional_mapped
+                .axes
+                .iter()
+                .map(|(_, elem)| elem.clone())
+                .collect::<Vec<_>>()
+        )
     );
 }
 
@@ -459,11 +502,11 @@ impl PinFixture {
     ///
     /// `declare_on_state` picks the DECLARATION DIRECTION: `true` declares the
     /// mapping on `State` toward `Region`, `false` on `Region` toward `State`.
-    /// `mapped_element_correspondence` honors both (GH #757), so both must pin.
+    /// Both correspondences honor both directions (GH #757), so both must pin.
     /// A non-empty `element_map` makes the mapping an EXPLICIT element map, which
-    /// the correspondence declines (GH #756: the executed A2A lowering resolves
-    /// positionally and ignores the map, so following it would spell a row the
-    /// simulation never reads).
+    /// changes nothing for the ITERATED spelling these fixtures use: execution
+    /// folds that index to an ordinal and never reads the map (GH #997), so the
+    /// pin is the positional element either way.
     fn mapped(declare_on_state: bool, element_map: Vec<(String, String)>) -> Self {
         use crate::ltm_agg::AxisRead;
         let mut state = datamodel::Dimension::named(
@@ -1496,14 +1539,19 @@ fn per_element_pin_colliding_element_name_verdict_enumeration() {
 /// dropped the whole `pop -> growth` score edge.
 ///
 /// The verdicts are not this rule's opinion. Each row is whatever
-/// `DimensionsContext::mapped_element_correspondence` says, reached through
+/// `DimensionsContext::positional_correspondence` says, reached through
 /// [`super::post_transform::per_element_row_for_target`] -- the SAME derivation the
 /// occurrence-driven pin and the link-score NAME use, and the same one
 /// `ltm_agg::classify_axis_access` gates its `Iterated` arm on (through
 /// `iterated_axis_slot_elements`, the correspondence's preimage inversion). So the
 /// rows below double as an agreement statement: a mapped pair this rule pins is
 /// exactly a mapped pair the classifier calls `Iterated`, in both declaration
-/// directions, and an element-mapped pair declines in both.
+/// directions.
+///
+/// The correspondence is the POSITIONAL one because every index here spells a
+/// dimension the target ITERATES, which `ast::expr3`'s Pass 1 folds to an ordinal
+/// (GH #997). An element-mapped pair therefore pins too -- and pins to the
+/// ORDINAL's element, not the map's.
 ///
 /// Both columns are the SAME for every row here, and that is the point: these are
 /// `Pinned` and `Unspellable` verdicts, neither of which the freeze context can
@@ -1530,26 +1578,33 @@ fn per_element_pin_mapped_axis_verdict_enumeration() {
             Some("pop[region\u{B7}boston, age\u{B7}old]"),
         ),
     ];
-    let declined: [PinIndexCell<'_>; 1] = [(
-        "an element-mapped (non-positional) pair",
+    // GH #997: an element-mapped pair pins POSITIONALLY, so its expected
+    // spelling is the same as the positional rows'. The map below is the reverse
+    // permutation (ma -> nyc), so `region\u{B7}nyc` is what a map-following pin
+    // would produce and its absence is asserted separately below.
+    let element_mapped: [PinIndexCell<'_>; 1] = [(
+        "an element-mapped pair (the ordinal wins)",
         "pop[State, old]",
-        None,
-        None,
+        Some("pop[region\u{B7}boston, age\u{B7}old]"),
+        Some("pop[region\u{B7}boston, age\u{B7}old]"),
     )];
 
-    // Declaration direction must not matter: `mapped_element_correspondence`
-    // honors a mapping declared on either dimension (GH #757), so a reverse-declared
+    // Declaration direction must not matter: `positional_correspondence` honors a
+    // mapping declared on either dimension (GH #757), so a reverse-declared
     // positional pair pins identically. A forward-only gate here would silently drop
     // half the mapped models.
     for declare_on_state in [true, false] {
         let fx = PinFixture::mapped(declare_on_state, vec![]);
         assert_pin_index_verdicts(&fx, "pop[State, young]", &positional);
 
-        // An EXPLICIT element map is declined even though it names a correspondence:
-        // the executed A2A lowering resolves mapped references POSITIONALLY and
-        // ignores the map (GH #756), so pinning the row the map names would spell a
-        // read the simulation never performs -- a compilable, confidently wrong
-        // score, which is the one outcome worse than none.
+        // An EXPLICIT element map does not change the verdict, because this
+        // spelling never reads the map: `pop[State, old]` names the dimension the
+        // equation ITERATES, and `mapped_reference_semantics_tests`' `Permuted`
+        // row measures that spelling folding to an ordinal against the VM. This
+        // block asserted a loud decline until GH #997, on the (correct, but
+        // spelling-specific) reasoning that FOLLOWING the map would spell a read
+        // the simulation never performs -- the fix is to describe the ordinal,
+        // not to describe nothing.
         let fx = PinFixture::mapped(
             declare_on_state,
             vec![
@@ -1557,6 +1612,38 @@ fn per_element_pin_mapped_axis_verdict_enumeration() {
                 ("ma".to_string(), "nyc".to_string()),
             ],
         );
-        assert_pin_index_verdicts(&fx, "pop[State, young]", &declined);
+        assert_pin_index_verdicts(&fx, "pop[State, young]", &element_mapped);
+
+        // GH #997, the OTHER spelling on the SAME fixture: an index naming the
+        // source's own `Region` -- a dimension this target does NOT iterate --
+        // pins through the ELEMENT MAP, so it reads `nyc` where the
+        // iterated-dimension spelling above reads `boston`. One fixture, two
+        // indices, two rules; that is the whole of #997 in one assertion.
+        assert_pin_index_verdicts(
+            &fx,
+            "pop[State, young]",
+            &[(
+                "the source's own dimension name (the map-following spelling)",
+                "pop[Region, old]",
+                Some("pop[region\u{B7}nyc, age\u{B7}old]"),
+                Some("pop[region\u{B7}nyc, age\u{B7}old]"),
+            )],
+        );
+
+        // The discriminator: the declared map sends `ma` to `nyc`, so a
+        // map-following pin would spell `region\u{B7}nyc`. It must not appear.
+        let (ast, deps, occurrences) = fx.parse(
+            "pop[State, young] + LOOKUP(pop[State, old], input)",
+            &["input"],
+        );
+        let slot_occurrences = SlotOccurrences::new(&occurrences);
+        let text = fx
+            .generate(&ast, &deps, &slot_occurrences.for_slot(0))
+            .expect("the element-mapped pair pins positionally");
+        assert!(
+            !text.contains("region\u{B7}nyc"),
+            "the element map's own element must not be pinned for an \
+             iterated-dimension index; got: {text}"
+        );
     }
 }

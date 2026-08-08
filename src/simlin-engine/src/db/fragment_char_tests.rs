@@ -411,6 +411,8 @@ fn render_opcode(op: &SymbolicOpcode, literals: &[f64]) -> String {
 fn render_static_view(idx: usize, sv: &SymbolicStaticView) -> String {
     let base = match &sv.base {
         SymStaticViewBase::Var(v) => render_var_ref(v),
+        SymStaticViewBase::PrevVar(v) => format!("prev({})", render_var_ref(v)),
+        SymStaticViewBase::InitialVar(v) => format!("initial({})", render_var_ref(v)),
         SymStaticViewBase::Temp(id) => format!("temp{id}"),
     };
     let sparse: Vec<String> = sv

@@ -79,7 +79,11 @@ fn pin_table_with_completeness(
                         .iter()
                         .map(|(dim, elem)| ((*dim).to_string(), (*elem).to_string()))
                         .collect(),
-                    complete,
+                    // The fixture's two spellings read the same row (its axes
+                    // are same-named, so no correspondence is consulted);
+                    // `complete` selects whether a BARE reference is spellable.
+                    bare_row: complete
+                        .then(|| axes.iter().map(|(_, elem)| (*elem).to_string()).collect()),
                 },
             )
         })
@@ -1899,8 +1903,11 @@ fn test_partial_equation_share_bare_shape() {
     // is wrapped in PREVIOUS() *as a whole*: `PREVIOUS(sum(population[*]))`,
     // which is PREVIOUS of the scalar total and evaluates fine. The
     // earlier form `sum(PREVIOUS(population[*]))` was the GH #517 bug --
-    // identically `0.0` at every step under an active A2A dimension
-    // because codegen has no LoadPrev-of-array-view path.
+    // identically `0.0` at every step under an active A2A dimension, because
+    // codegen had no array-`PREVIOUS` path and the fragment stubbed. GH #995
+    // phase C3 gave it one, so that form now compiles; the wrap is kept as the
+    // GH #517 semantics (freeze the reducer's RESULT), which is what this row
+    // pins.
     let equation = "population / SUM(population[*])";
     let deps = deps_set(&["population"]);
     let source = Ident::<Canonical>::new("population");
@@ -5166,10 +5173,12 @@ fn wrap_missing_live_source_occurrence_is_loud_not_silent_freeze() {
 //
 // The chooser builds the standard changed-first guard form, but when the
 // changed-first partial would embed `PREVIOUS` of an array slice (a
-// wildcard/star-range-subscripted reference -- no LoadPrev-of-array-view
-// codegen path exists, so the equation can only silently stub or hard-fail),
+// wildcard/star-range-subscripted reference this layer will not spell inline),
 // it falls back to the changed-last attribution (only the live source
-// frozen), and errors loudly when both conventions are unfreezable.
+// frozen), and errors loudly when both conventions are unfreezable. The
+// original reason -- no codegen path for an array `PREVIOUS` -- is stale since
+// GH #995 phase C3; the routing is unchanged, and `ltm_augment_array_freeze`'s
+// module doc carries what the materialized helper still buys.
 
 /// The GH #743 shape: live `frac` (Bare, iterated-dim feeder) inside a
 /// reducer whose co-source is a wildcard slice. Changed-first would freeze

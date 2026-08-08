@@ -936,8 +936,15 @@ impl<'a> Pass1Context<'a> {
                     a_has_a2a || b_has_a2a || c_has_a2a,
                 )
             }
+            // RANK's first argument is an ARRAY the opcode reads as a view,
+            // exactly like VectorSortOrder's -- so it decomposes through
+            // `maybe_decompose_array_arg_inner` like all five of its siblings
+            // below. Recursing with the plain `transform_inner` left
+            // `RANK(vals[*] * 2, 1)` as an un-viewable `Op2` for codegen to
+            // reject, while the identical VECTOR SORT ORDER spelling compiled
+            // (GH #995).
             Rank(e, direction) => {
-                let (new_e, e_has_a2a) = self.transform_inner(*e);
+                let (new_e, e_has_a2a) = self.maybe_decompose_array_arg_inner(*e);
                 let (new_direction, direction_has_a2a) = self.transform_inner(*direction);
                 (
                     Rank(Box::new(new_e), Box::new(new_direction)),

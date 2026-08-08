@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 use crate::alloc::allocate_available;
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, CompiledInitial, CompiledModule, DimId, LookupMode, Op2,
-    Opcode, RuntimeView, STACK_CAPACITY, TempId,
+    Opcode, RuntimeView, STACK_CAPACITY, TempId, ViewStorage,
 };
 use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::dimensions::match_dimensions_two_pass;
@@ -456,6 +456,97 @@ impl Stack {
     #[inline(always)]
     fn clear(&mut self) {
         self.top = 0;
+    }
+}
+
+/// The three chunk-shaped f64 regions a static view can be read from, plus the
+/// two pieces of run state that say what a snapshot read means before its
+/// snapshot exists.
+///
+/// `temp_storage` is deliberately NOT a field: it is the one region an opcode
+/// can also WRITE through while reading views (every array-producing opcode
+/// does), so it stays a separate `&mut` parameter and only the read side is
+/// bundled here. Every field is `Copy`, so a caller mints one for the length of
+/// a read loop and drops it before touching `curr`/`temp_storage` mutably.
+#[derive(Clone, Copy)]
+pub(crate) struct ChunkRegions<'a> {
+    curr: &'a [f64],
+    /// The snapshot taken after the previous step's stocks (`PREVIOUS`).
+    prev: &'a [f64],
+    /// The snapshot taken after the initials phase (`INIT`).
+    initial: &'a [f64],
+    /// Mirrors `EvalState::use_prev_fallback`: true until the first
+    /// `prev_values` snapshot exists.
+    use_prev_fallback: bool,
+    /// Which phase is being evaluated, so an `Initial` view resolves its
+    /// "during initials the snapshot is not taken yet" branch exactly as
+    /// `Opcode::LoadInitial` does.
+    part: StepPart,
+}
+
+impl<'a> ChunkRegions<'a> {
+    /// A bundle over `curr` alone, for test harnesses that build a
+    /// `ViewStorage::Curr` view by hand and address no snapshot region. The
+    /// snapshot slices are deliberately EMPTY rather than aliases of `curr`, so
+    /// a view that mis-routes to one panics instead of quietly returning
+    /// plausible values.
+    #[cfg(test)]
+    pub(crate) fn curr_only(curr: &'a [f64]) -> Self {
+        ChunkRegions {
+            curr,
+            prev: &[],
+            initial: &[],
+            use_prev_fallback: false,
+            part: StepPart::Flows,
+        }
+    }
+
+    /// The slice a view's elements live in and the flat base to add its
+    /// `offset`/`flat_offset` to, or `None` when every element of the view reads
+    /// the `PREVIOUS` fallback instead of a buffer.
+    ///
+    /// The `None` case is the array route's half of the first-step semantics,
+    /// and it is deliberately a BRANCH rather than a reliance on `prev_values`
+    /// being zero-filled: `Opcode::LoadPrev` returns its caller-supplied
+    /// fallback while `use_prev_fallback` is set, and an array-valued
+    /// `PREVIOUS` can only carry the default fallback of 0
+    /// (`codegen::is_default_previous_fallback` rejects any other), so element
+    /// for element the two routes agree by construction. Making it a branch is
+    /// also what keeps the wasm backend -- whose `reset` does not clear the
+    /// snapshot regions -- able to mirror this with the same `select` its
+    /// scalar `LoadPrev` already emits.
+    #[inline]
+    fn backing<'s>(
+        &self,
+        view: &RuntimeView,
+        temp_storage: &'s [f64],
+        context: &ByteCodeContext,
+    ) -> Option<(&'s [f64], usize)>
+    where
+        'a: 's,
+    {
+        match view.storage {
+            ViewStorage::Curr => Some((self.curr, view.base_off as usize)),
+            ViewStorage::Temp => Some((temp_storage, context.temp_offsets[view.base_off as usize])),
+            ViewStorage::Prev => {
+                if self.use_prev_fallback {
+                    None
+                } else {
+                    Some((self.prev, view.base_off as usize))
+                }
+            }
+            // During initials the snapshot has not been captured yet, so read
+            // `curr` -- which IS the initial value being computed. Mirrors
+            // `Opcode::LoadInitial`.
+            ViewStorage::Initial => {
+                let data = if self.part == StepPart::Initials {
+                    self.curr
+                } else {
+                    self.initial
+                };
+                Some((data, view.base_off as usize))
+            }
+        }
     }
 }
 
@@ -1871,6 +1962,22 @@ impl Vm {
         let mut prev_values = &mut *state.prev_values;
         let use_prev_fallback = state.use_prev_fallback;
 
+        // The read-only chunk regions a static view can address. Minted fresh
+        // at each use rather than bound once: `curr` is `&mut` here and several
+        // arms write it (and `temp_storage`) in the same breath as reading a
+        // view, so a long-lived shared reborrow would not typecheck.
+        macro_rules! regions {
+            () => {
+                ChunkRegions {
+                    curr: &*curr,
+                    prev: &*prev_values,
+                    initial: initial_values,
+                    use_prev_fallback,
+                    part,
+                }
+            };
+        }
+
         let mut condition = false;
         let mut subscript_index: SmallVec<[(u16, u16); 4]> = SmallVec::new();
         let mut subscript_index_valid = true;
@@ -2336,7 +2443,7 @@ impl Vm {
 
                 Opcode::PushStaticView { view_id } => {
                     let static_view = &context.static_views[*view_id as usize];
-                    view_stack.push(static_view.to_runtime_view());
+                    view_stack.push(static_view.to_runtime_view(module_off as u32));
                 }
 
                 Opcode::PushVarViewDirect {
@@ -2496,12 +2603,13 @@ impl Vm {
                             view.offset as usize + iter_state.current
                         };
 
-                        let value = if view.is_temp {
-                            let temp_off = context.temp_offsets[view.base_off as usize];
-                            temp_storage[temp_off + flat_off]
-                        } else {
-                            curr[view.base_off as usize + flat_off]
-                        };
+                        let value = Self::read_view_element(
+                            view,
+                            flat_off,
+                            regions!(),
+                            temp_storage,
+                            context,
+                        );
                         stack.push(value);
                     }
                 }
@@ -2619,12 +2727,13 @@ impl Vm {
                         };
 
                         if let Some(flat_off) = result {
-                            let value = if source_view.is_temp {
-                                let temp_off = context.temp_offsets[source_view.base_off as usize];
-                                temp_storage[temp_off + flat_off]
-                            } else {
-                                curr[source_view.base_off as usize + flat_off]
-                            };
+                            let value = Self::read_view_element(
+                                source_view,
+                                flat_off,
+                                regions!(),
+                                temp_storage,
+                                context,
+                            );
                             stack.push(value);
                         } else {
                             // Out of bounds or no matching dimension - return NaN
@@ -2733,12 +2842,13 @@ impl Vm {
                         };
 
                         if let Some(flat_off) = result {
-                            let value = if source_view.is_temp {
-                                let temp_off = context.temp_offsets[source_view.base_off as usize];
-                                temp_storage[temp_off + flat_off]
-                            } else {
-                                curr[source_view.base_off as usize + flat_off]
-                            };
+                            let value = Self::read_view_element(
+                                source_view,
+                                flat_off,
+                                regions!(),
+                                temp_storage,
+                                context,
+                            );
                             stack.push(value);
                         } else {
                             // Out of bounds or no matching dimension - return NaN
@@ -2781,8 +2891,14 @@ impl Vm {
                 // Empty views return 0.0 for SUM (the additive identity)
                 Opcode::ArraySum {} => {
                     let view = view_stack.last().unwrap();
-                    let sum =
-                        Self::reduce_view(temp_storage, view, curr, context, |acc, v| acc + v, 0.0);
+                    let sum = Self::reduce_view(
+                        temp_storage,
+                        view,
+                        regions!(),
+                        context,
+                        |acc, v| acc + v,
+                        0.0,
+                    );
                     stack.push(sum);
                 }
 
@@ -2794,7 +2910,7 @@ impl Vm {
                         let max = Self::reduce_view(
                             temp_storage,
                             view,
-                            curr,
+                            regions!(),
                             context,
                             |acc, v| if v > acc { v } else { acc },
                             f64::NEG_INFINITY,
@@ -2811,7 +2927,7 @@ impl Vm {
                         let min = Self::reduce_view(
                             temp_storage,
                             view,
-                            curr,
+                            regions!(),
                             context,
                             |acc, v| if v < acc { v } else { acc },
                             f64::INFINITY,
@@ -2828,7 +2944,7 @@ impl Vm {
                         let sum = Self::reduce_view(
                             temp_storage,
                             view,
-                            curr,
+                            regions!(),
                             context,
                             |acc, v| acc + v,
                             0.0,
@@ -2847,7 +2963,7 @@ impl Vm {
                         let sum = Self::reduce_view(
                             temp_storage,
                             view,
-                            curr,
+                            regions!(),
                             context,
                             |acc, v| acc + v,
                             0.0,
@@ -2859,7 +2975,7 @@ impl Vm {
                         let variance_sum = Self::reduce_view(
                             temp_storage,
                             view,
-                            curr,
+                            regions!(),
                             context,
                             |acc, v| acc + (v - mean).powf(2.0),
                             0.0,
@@ -2969,12 +3085,13 @@ impl Vm {
 
                         let flat_off = view.flat_offset(&ordered_source_indices);
 
-                        let value = if view.is_temp {
-                            let temp_off = context.temp_offsets[view.base_off as usize];
-                            temp_storage[temp_off + flat_off]
-                        } else {
-                            curr[view.base_off as usize + flat_off]
-                        };
+                        let value = Self::read_view_element(
+                            view,
+                            flat_off,
+                            regions!(),
+                            temp_storage,
+                            context,
+                        );
                         stack.push(value);
                     }
                 }
@@ -3031,7 +3148,7 @@ impl Vm {
                             let sel_val = Self::read_view_element(
                                 sel_view,
                                 sel_off,
-                                curr,
+                                regions!(),
                                 temp_storage,
                                 context,
                             );
@@ -3041,7 +3158,7 @@ impl Vm {
                                 let expr_val = Self::read_view_element(
                                     expr_view,
                                     expr_off,
-                                    curr,
+                                    regions!(),
                                     temp_storage,
                                     context,
                                 );
@@ -3081,7 +3198,7 @@ impl Vm {
                         offset_view,
                         *write_temp_id,
                         *full_source_len,
-                        curr,
+                        regions!(),
                         temp_storage,
                         context,
                     );
@@ -3097,7 +3214,7 @@ impl Vm {
                         input_view,
                         direction,
                         *write_temp_id,
-                        curr,
+                        regions!(),
                         temp_storage,
                         context,
                     );
@@ -3123,7 +3240,7 @@ impl Vm {
                             let val = Self::read_view_element(
                                 input_view,
                                 flat_off,
-                                curr,
+                                regions!(),
                                 temp_storage,
                                 context,
                             );
@@ -3214,7 +3331,7 @@ impl Vm {
                             let val = Self::read_view_element(
                                 requests_view,
                                 flat_off,
-                                curr,
+                                regions!(),
                                 temp_storage,
                                 context,
                             );
@@ -3234,7 +3351,7 @@ impl Vm {
                             let val = Self::read_view_element(
                                 profile_view,
                                 flat_off,
-                                curr,
+                                regions!(),
                                 temp_storage,
                                 context,
                             );
@@ -3308,7 +3425,7 @@ impl Vm {
                             let val = Self::read_view_element(
                                 requests_view,
                                 flat_off,
-                                curr,
+                                regions!(),
                                 temp_storage,
                                 context,
                             );
@@ -3329,7 +3446,7 @@ impl Vm {
                             let val = Self::read_view_element(
                                 priority_view,
                                 flat_off,
-                                curr,
+                                regions!(),
                                 temp_storage,
                                 context,
                             );
@@ -3368,7 +3485,7 @@ impl Vm {
     fn reduce_view<Fold>(
         temp_storage: &[f64],
         view: &RuntimeView,
-        curr: &[f64],
+        regions: ChunkRegions<'_>,
         context: &ByteCodeContext,
         f: Fold,
         init: f64,
@@ -3383,19 +3500,25 @@ impl Vm {
 
         let size = view.size();
 
+        let Some((data, base)) = regions.backing(view, temp_storage, context) else {
+            // A PREVIOUS view before the first snapshot: every element is the
+            // fallback 0, so fold that many zeros rather than reading a buffer.
+            // Same iteration count and same order, so the FP result matches a
+            // zero-filled region exactly.
+            let mut acc = init;
+            for _ in 0..size {
+                acc = f(acc, 0.0);
+            }
+            return acc;
+        };
+
         // Dense linear run (the overwhelmingly common case: whole arrays and
         // leading-dimension slices): fold over the backing slice directly,
-        // skipping the per-element index decompose + stride dot product and
-        // the per-element temp/curr branch. Iteration order is identical to
-        // the general path (row-major == ascending flat offset for a linear
-        // run), so FP reduction results are bit-identical.
+        // skipping the per-element index decompose + stride dot product.
+        // Iteration order is identical to the general path (row-major ==
+        // ascending flat offset for a linear run), so FP reduction results are
+        // bit-identical.
         if let Some(start) = view.dense_linear_start() {
-            let base = if view.is_temp {
-                context.temp_offsets[view.base_off as usize]
-            } else {
-                view.base_off as usize
-            };
-            let data: &[f64] = if view.is_temp { temp_storage } else { curr };
             let mut acc = init;
             for &value in &data[base + start..base + start + size] {
                 acc = f(acc, value);
@@ -3411,15 +3534,7 @@ impl Vm {
 
         for _ in 0..size {
             let flat_off = view.flat_offset(&indices);
-
-            let value = if view.is_temp {
-                let temp_off = context.temp_offsets[view.base_off as usize];
-                temp_storage[temp_off + flat_off]
-            } else {
-                curr[view.base_off as usize + flat_off]
-            };
-
-            acc = f(acc, value);
+            acc = f(acc, data[base + flat_off]);
             increment_indices(&mut indices, dims);
         }
 
@@ -3427,7 +3542,8 @@ impl Vm {
     }
 
     /// Read a single element from a RuntimeView at a pre-computed memory offset.
-    /// Handles both variable views (from curr[]) and temp views (from temp_storage[]).
+    /// Routes through the view's [`ViewStorage`], so a temp view reads
+    /// `temp_storage` and a snapshot view reads `prev_values`/`initial_values`.
     /// The `flat_off` parameter is the actual memory offset within the view's storage,
     /// NOT a sequential iteration index. For contiguous views, flat_off equals the
     /// iteration index. For non-contiguous or sparse views, the caller must compute
@@ -3436,15 +3552,13 @@ impl Vm {
     pub(crate) fn read_view_element(
         view: &RuntimeView,
         flat_off: usize,
-        curr: &[f64],
+        regions: ChunkRegions<'_>,
         temp_storage: &[f64],
         context: &ByteCodeContext,
     ) -> f64 {
-        if view.is_temp {
-            let temp_off = context.temp_offsets[view.base_off as usize];
-            temp_storage[temp_off + flat_off]
-        } else {
-            curr[view.base_off as usize + flat_off]
+        match regions.backing(view, temp_storage, context) {
+            Some((data, base)) => data[base + flat_off],
+            None => 0.0,
         }
     }
 
@@ -4983,6 +5097,115 @@ mod superinstruction_tests {
 #[path = "vm_reset_run_to_and_constants_tests.rs"]
 mod vm_reset_run_to_and_constants_tests;
 
+/// `ChunkRegions::backing` is where a view's storage region is resolved, and it
+/// is the ONE place the VM reproduces the two snapshot semantics the scalar
+/// opcodes carry. It is tested directly because it cannot be reached
+/// end-to-end: `Vm::new` and `Vm::reset` zero-fill `prev_values`, and the only
+/// moments `use_prev_fallback` is set are exactly the moments the buffer is
+/// still zeroed -- so the fallback BRANCH and the buffer AGREE on every run, and
+/// deleting the branch changes no simulation result. (The wasm backend is not so
+/// lucky: its `reset` does not clear the snapshot regions, which is why the
+/// `select` there IS observable and is pinned by
+/// `wasmgen::module_tests::compile_simulation_repeated_run_resets_previous_fallback_for_an_array_view`.)
+/// Keeping the branch anyway is what makes the two backends state the same rule
+/// rather than one relying on an initialization the other does not perform.
+///
+/// Rows are the full cross of the enumeration -- 4 `ViewStorage` arms x
+/// `use_prev_fallback` x `StepPart::Initials`-or-not -- rather than only the
+/// cells that vary, so an arm that starts reading a flag it should ignore is
+/// caught too. `Curr` and `Temp` are inert on both factors; `Prev` varies with
+/// the flag alone; `Initial` with the phase alone.
+#[cfg(test)]
+mod chunk_regions_tests {
+    use super::*;
+    use smallvec::smallvec;
+
+    /// Each region carries a distinct value at slot 0, so the value read
+    /// identifies WHICH region was selected -- a resolver that returned the
+    /// right slice for the wrong reason cannot pass.
+    const CURR: f64 = 1.0;
+    const PREV: f64 = 2.0;
+    const INITIAL: f64 = 3.0;
+    const TEMP: f64 = 4.0;
+
+    fn context() -> ByteCodeContext {
+        let mut ctx = ByteCodeContext::default();
+        ctx.set_temp_info(vec![0], 1);
+        ctx
+    }
+
+    fn view(storage: ViewStorage) -> RuntimeView {
+        let mut v = RuntimeView::for_var(0, smallvec![1], smallvec![0]);
+        v.storage = storage;
+        v
+    }
+
+    /// The value `backing` selects for `storage` under the given run state, or
+    /// `None` when it reports "this view reads the PREVIOUS fallback".
+    fn resolve(storage: ViewStorage, use_prev_fallback: bool, part: StepPart) -> Option<f64> {
+        let curr = [CURR];
+        let prev = [PREV];
+        let initial = [INITIAL];
+        let temp = [TEMP];
+        let regions = ChunkRegions {
+            curr: &curr,
+            prev: &prev,
+            initial: &initial,
+            use_prev_fallback,
+            part,
+        };
+        regions
+            .backing(&view(storage), &temp, &context())
+            .map(|(data, base)| data[base])
+    }
+
+    #[test]
+    fn backing_routes_every_storage_arm_under_every_run_state() {
+        for &part in &[StepPart::Initials, StepPart::Flows, StepPart::Stocks] {
+            for &fallback in &[true, false] {
+                let ctx = format!("part={part:?} use_prev_fallback={fallback}");
+
+                // Curr and Temp read their own region unconditionally.
+                assert_eq!(
+                    resolve(ViewStorage::Curr, fallback, part),
+                    Some(CURR),
+                    "Curr must be inert on both factors ({ctx})"
+                );
+                assert_eq!(
+                    resolve(ViewStorage::Temp, fallback, part),
+                    Some(TEMP),
+                    "Temp must be inert on both factors ({ctx})"
+                );
+
+                // Prev: the fallback while no snapshot exists, the snapshot
+                // after. This mirrors `Opcode::LoadPrev` exactly, and the
+                // fallback an ARRAY-valued PREVIOUS may carry is always 0
+                // (`codegen::is_default_previous_fallback`), which is what
+                // `None` means to every caller.
+                assert_eq!(
+                    resolve(ViewStorage::Prev, fallback, part),
+                    if fallback { None } else { Some(PREV) },
+                    "Prev must follow use_prev_fallback and nothing else ({ctx})"
+                );
+
+                // Initial: `curr` during the initials phase (the snapshot has
+                // not been captured yet -- `curr` IS the initial value being
+                // computed), the snapshot otherwise. Mirrors
+                // `Opcode::LoadInitial`.
+                assert_eq!(
+                    resolve(ViewStorage::Initial, fallback, part),
+                    Some(if part == StepPart::Initials {
+                        CURR
+                    } else {
+                        INITIAL
+                    }),
+                    "Initial must follow the phase and nothing else ({ctx})"
+                );
+            }
+        }
+    }
+}
+
 /// Tests for empty-view behavior in VM array reducer opcodes (AC2).
 ///
 /// Zero-element dimensions cannot currently arise through the model compilation
@@ -5019,7 +5242,14 @@ mod empty_view_reduce_tests {
         let curr: [f64; 0] = [];
         let temp: [f64; 0] = [];
         let ctx = empty_context();
-        let result = Vm::reduce_view(&temp, &view, &curr, &ctx, |acc, v| acc + v, 0.0);
+        let result = Vm::reduce_view(
+            &temp,
+            &view,
+            ChunkRegions::curr_only(&curr),
+            &ctx,
+            |acc, v| acc + v,
+            0.0,
+        );
         assert!(result.is_nan());
     }
 
@@ -5040,12 +5270,19 @@ mod empty_view_reduce_tests {
         assert!(!view.is_contiguous(), "offset slice must not be contiguous");
 
         // elements are curr[2 + 4 .. 2 + 8] = [6, 7, 8, 9]
-        let sum = Vm::reduce_view(&temp, &view, &curr, &ctx, |acc, v| acc + v, 0.0);
+        let sum = Vm::reduce_view(
+            &temp,
+            &view,
+            ChunkRegions::curr_only(&curr),
+            &ctx,
+            |acc, v| acc + v,
+            0.0,
+        );
         assert_eq!(sum, 30.0);
         let max = Vm::reduce_view(
             &temp,
             &view,
-            &curr,
+            ChunkRegions::curr_only(&curr),
             &ctx,
             |acc, v| if v > acc { v } else { acc },
             f64::NEG_INFINITY,
@@ -5068,7 +5305,14 @@ mod empty_view_reduce_tests {
         assert_eq!(view.dense_linear_start(), None);
 
         // elements: 1,2, 5,6, 9,10
-        let sum = Vm::reduce_view(&temp, &view, &curr, &ctx, |acc, v| acc + v, 0.0);
+        let sum = Vm::reduce_view(
+            &temp,
+            &view,
+            ChunkRegions::curr_only(&curr),
+            &ctx,
+            |acc, v| acc + v,
+            0.0,
+        );
         assert_eq!(sum, 33.0);
     }
 
@@ -5079,7 +5323,14 @@ mod empty_view_reduce_tests {
         let curr: [f64; 0] = [];
         let temp: [f64; 0] = [];
         let ctx = empty_context();
-        let result = Vm::reduce_view(&temp, &view, &curr, &ctx, |acc, v| acc + v, 0.0);
+        let result = Vm::reduce_view(
+            &temp,
+            &view,
+            ChunkRegions::curr_only(&curr),
+            &ctx,
+            |acc, v| acc + v,
+            0.0,
+        );
         assert_eq!(result, 0.0);
     }
 
@@ -5101,7 +5352,7 @@ mod empty_view_reduce_tests {
         let result = Vm::reduce_view(
             &temp,
             &view,
-            &curr,
+            ChunkRegions::curr_only(&curr),
             &ctx,
             |acc, v| if v > acc { v } else { acc },
             f64::NEG_INFINITY,
@@ -5122,7 +5373,7 @@ mod empty_view_reduce_tests {
         let result = Vm::reduce_view(
             &temp,
             &view,
-            &curr,
+            ChunkRegions::curr_only(&curr),
             &ctx,
             |acc, v| if v < acc { v } else { acc },
             f64::INFINITY,
@@ -5146,7 +5397,14 @@ mod empty_view_reduce_tests {
         let ctx = empty_context();
         // reduce_view returns the sum init value (0.0) for empty views;
         // the ArrayMean opcode guards view.size()==0 before dividing by count
-        let sum = Vm::reduce_view(&temp, &view, &curr, &ctx, |acc, v| acc + v, 0.0);
+        let sum = Vm::reduce_view(
+            &temp,
+            &view,
+            ChunkRegions::curr_only(&curr),
+            &ctx,
+            |acc, v| acc + v,
+            0.0,
+        );
         assert_eq!(sum, 0.0);
         assert_eq!(view.size(), 0);
         // Without the guard: sum / count = 0.0 / 0.0 = NaN (IEEE); guard makes it explicit
@@ -5169,7 +5427,14 @@ mod empty_view_reduce_tests {
         // reduce_view returns the sum init value (0.0) for empty views;
         // the ArrayStddev opcode guards size==0 before dividing by the
         // population-variance divisor `size`.
-        let sum = Vm::reduce_view(&temp, &view, &curr, &ctx, |acc, v| acc + v, 0.0);
+        let sum = Vm::reduce_view(
+            &temp,
+            &view,
+            ChunkRegions::curr_only(&curr),
+            &ctx,
+            |acc, v| acc + v,
+            0.0,
+        );
         assert_eq!(sum, 0.0);
         assert_eq!(view.size(), 0);
         // Without the guard: `variance_sum / (size as f64)` = `0.0 / 0.0` = NaN.

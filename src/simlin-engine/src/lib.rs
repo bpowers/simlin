@@ -23,6 +23,8 @@ pub mod ai_info;
 mod alloc;
 pub mod analysis;
 #[cfg(test)]
+mod array_operand_materialization_tests;
+#[cfg(test)]
 mod array_tests;
 mod ast;
 pub mod builtins;
@@ -63,6 +65,8 @@ pub mod ltm_finding;
 pub mod ltm_post;
 #[cfg(test)]
 mod macro_expansion_tests;
+#[cfg(test)]
+mod mapped_reference_semantics_tests;
 pub mod mdl;
 mod model;
 mod module_functions;
