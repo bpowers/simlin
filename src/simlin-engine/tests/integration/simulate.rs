@@ -2184,6 +2184,23 @@ fn simulates_vector_xmile_genuine() {
     simulate_path("../../test/sdeverywhere/models/vector/vector.xmile");
 }
 
+/// The MDL twin of `simulates_vector_xmile_genuine`: the SAME model, through
+/// the MDL importer instead of the XMILE reader, against the same real-Vensim
+/// `vector.dat`.
+///
+/// This gate did not exist, and its absence hid a defect for as long as the
+/// fixture has. The importer expanded every subscripted LHS into per-element
+/// slots, so `y[DimA] = VECTOR ELM MAP(x[three], (DimA - 1))` -- legal Vensim,
+/// and correct through the XMILE reader -- became three slots each carrying an
+/// unresolvable `DimA - 1` and failed to compile. Running only the XMILE file
+/// meant the two readers were never compared on a model that uses dimension
+/// arithmetic. `mdl::convert::apply_to_all_tests` pins the mechanism; this pins
+/// it against genuine Vensim output.
+#[test]
+fn simulates_vector_mdl_genuine() {
+    simulate_mdl_path("../../test/sdeverywhere/models/vector/vector.mdl");
+}
+
 #[test]
 fn simulates_lookup_arrayed() {
     simulate_path("../../test/lookup_arrayed/lookup_arrayed.xmile");
@@ -6124,6 +6141,20 @@ fn corpus_clearn_macros_import() {
 /// terms, which is why the emission is accepted; if the margin were tight, the
 /// right move would be to sequence #996 behind #995 instead.
 ///
+/// It moved UPWARD again, 6,848 -> 7,163 (+315) and 29,808 -> 30,123 slots, when
+/// the MDL importer stopped exploding a single apply-to-all equation into N
+/// identical per-element slots (`mdl::convert::apply_to_all_tests`). C-LEARN is
+/// imported from MDL, so its element-mapped aggregation variables
+/// (`annual_reduction_aggregated`, `annual_reduction_semi_agg`, ...) now arrive
+/// as `Ast::ApplyToAll` and reach the per-element mapped-row emitter this branch
+/// fixed, instead of sitting in per-slot equations whose sites contribute only
+/// to their own element. The change is STRICTLY ADDITIVE -- measured by diffing
+/// the emitted name sets with `examples/ltm_var_dump.rs`: 315 added, **0
+/// removed** -- and every added name is a `<source>[<row>] -> <target>[<elem>]`
+/// mapped score, i.e. exactly the GH #997 shape. Declines are unchanged (5,
+/// same names, all rank-like-partial) and the margin is still wide: 35,413 free
+/// against the 65,536-slot ceiling.
+///
 /// The pin below catches emission changes in EITHER direction, and re-deriving
 /// it means re-measuring BOTH numbers, not just the count.
 #[test]
@@ -6149,7 +6180,7 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 6848,
+        total, 7163,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"

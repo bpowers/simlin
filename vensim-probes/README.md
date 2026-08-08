@@ -98,7 +98,7 @@ element. The Simlin column is **measured**, not predicted.
 | variable | equation | Simlin (measured) | base-from-reference predicts | R2: Vensim rejects the spelling |
 |---|---|---|---|---|
 | `ctl slice` | `VECTOR ELM MAP(d[DimA,B1], off[DimA])` | `1,1,5,5,6,6` ✅ matches `vector.dat` | `1,1,5,5,6,6` | — |
-| `ctl elem` | `VECTOR ELM MAP(x[three], (DimA - 1))` | **fails to compile** (MDL import only — see below) | `3,4,5` | — |
+| `ctl elem` | `VECTOR ELM MAP(x[three], (DimA - 1))` | `3,4,5` ✅ | `3,4,5` | — |
 | `ctl elem off` | `VECTOR ELM MAP(x[three], off2[DimA])` | `3,4,5` ✅ | `3,4,5` | — |
 | `probe helper elem` | `VECTOR ELM MAP(helper[A1], off[DimA])` | `1,1,2,2,2,2` | `1,1,2,2,2,2` (base is 0 here by construction) | — |
 | **`probe helper slice`** | **`VECTOR ELM MAP(helper[DimA], off[DimA])`** | **`1,1,2,2,2,2`** | **`1,1,3,3,:NA:,:NA:`** | error |
@@ -114,13 +114,19 @@ element. The Simlin column is **measured**, not predicted.
   legal spelling is element-pinned only, and Simlin accepting the whole-array
   spelling is another extension to define rather than match.
 
-**Note on `ctl elem`.** It is spelled byte-identically to `vector.mdl`'s `y` and
-should print `3,4,5` in Vensim. Simlin fails it **through MDL import only**: the
-importer turns `y[DimA] = ...` into per-element `Arrayed` slots, where `DimA - 1`
-has no active apply-to-all dimension to resolve against. The same equation via
-XMILE gives `3,4,5` — which is why the corpus, which runs `vector.xmile`, never
-caught it. Separate importer defect, recorded rather than fixed here;
-`ctl elem off` is the control to read.
+**Note on `ctl elem`, now fixed.** Building this probe surfaced a real MDL
+importer defect: it is spelled byte-identically to `vector.mdl`'s `y`, and Simlin
+failed it **through MDL import only** (the importer exploded `y[DimA] = ...` into
+per-element `Arrayed` slots, where `DimA - 1` has no active apply-to-all
+dimension to resolve against), while the same equation via XMILE gave `3,4,5`.
+The corpus never caught it because it ran `vector.xmile` and had no MDL twin.
+
+Fixed on this branch: a single apply-to-all MDL equation now imports as one
+`Equation::ApplyToAll` instead of N identical slots
+(`mdl::convert::apply_to_all_tests`), and `simulates_vector_mdl_genuine` is the
+new corpus gate running `vector.mdl` against real-Vensim `vector.dat`. The row
+above is re-measured: `ctl elem` prints `3,4,5`. `ctl elem off` is kept as a
+second control that never depended on the fix.
 
 ## 4. `stella_repeated_dimension.stmx` — AWAITING A STELLA RUN
 

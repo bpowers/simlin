@@ -4609,6 +4609,12 @@ mod tests;
 #[path = "writer_lossiness_tests.rs"]
 mod lossiness_tests;
 
+// Split out of writer_tests.rs for the same per-file line cap; the sketch
+// element/connector/section serialization block.
+#[cfg(test)]
+#[path = "writer_sketch_tests.rs"]
+mod sketch_tests;
+
 // Property-based tests (own file per the per-file line cap; see the module's
 // header for the generator design and fixpoint conventions).
 #[cfg(test)]

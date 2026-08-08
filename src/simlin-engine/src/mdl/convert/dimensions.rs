@@ -675,12 +675,17 @@ x[DimA] = 1
 
         // Should be recognized and processed correctly
         if let Variable::Aux(a) = x {
+            // What this test is about is that the ALIAS resolved to `DimA` --
+            // `expand_subscript` recognized it -- which the dimension list
+            // carries. A single apply-to-all equation is one equation, so the
+            // expansion is no longer visible as element slots (see
+            // `convert::apply_to_all_tests`).
             match &a.equation {
-                crate::datamodel::Equation::Arrayed(dims, elements, _default_eq, _) => {
+                crate::datamodel::Equation::ApplyToAll(dims, eq) => {
                     assert_eq!(dims, &["DimA"]);
-                    assert_eq!(elements.len(), 2);
+                    assert_eq!(eq, "1");
                 }
-                other => panic!("Expected Arrayed (dimension expansion), got {:?}", other),
+                other => panic!("Expected ApplyToAll over the alias, got {:?}", other),
             }
         } else {
             panic!("Expected Aux variable");
