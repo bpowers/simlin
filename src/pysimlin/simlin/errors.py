@@ -114,8 +114,9 @@ class ErrorDetail:
     unit_error_kind: UnitErrorKind = UnitErrorKind.NOT_APPLICABLE
     severity: ErrorSeverity = ErrorSeverity.ERROR
     # The bare human-readable reason without the source snippet or summary
-    # line that `message` carries (e.g. "computed units 'people' don't match
-    # specified units"). None when the error has no separate reason string.
+    # line that `message` carries (e.g. "the equation computes to units
+    # 'people', but the variable's specified units are 'person'"). None when
+    # the error has no separate reason string.
     details: str | None = None
 
     def __str__(self) -> str:

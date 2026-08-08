@@ -231,7 +231,8 @@ export function convertErrorDetails(
         end: err.endOffset ?? 0,
         code: err.code as unknown as ErrorCode,
         kind: convertUnitErrorKind(err.unitErrorKind),
-        // The bare reason ("computed units 'x' don't match specified units"),
+        // The bare reason ("the equation computes to units 'x', but the
+        // variable's specified units are 'y'"),
         // NOT `err.message`: the message is terminal-formatted with a source
         // snippet + `~~~` underline + summary line, which renders as garbage
         // in the details panel.

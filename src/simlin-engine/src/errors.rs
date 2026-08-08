@@ -64,8 +64,9 @@ pub struct FormattedError {
     /// None for non-unit errors.
     pub unit_error_kind: Option<UnitErrorKind>,
     /// The bare human-readable reason, without the source snippet or the
-    /// model/variable summary line that `message` carries (e.g. "computed
-    /// units 'people' don't match specified units"). `message` is formatted
+    /// model/variable summary line that `message` carries (e.g. "the equation
+    /// computes to units 'people', but the variable's specified units are
+    /// 'person'"). `message` is formatted
     /// for terminal output; GUI consumers that already show the variable in
     /// context render this instead. Populated for unit errors (inference
     /// errors always synthesize one via `unit_inference_reason`) and for
@@ -575,7 +576,7 @@ mod tests {
         // message, so GUI consumers can show it without the snippet/summary.
         let details = error.details.as_ref().expect("details missing");
         assert!(
-            details.starts_with("computed units"),
+            details.starts_with("the equation computes to units"),
             "bare details should be the reason string alone: {details}"
         );
         assert!(!details.contains('~'), "details must not carry the snippet");

@@ -734,6 +734,50 @@ impl TestProject {
 
     // ── Diagnostic helpers (incremental path) ─────────────────────────
 
+    /// The unit-related diagnostics of this project, as
+    /// `(variable, human-readable detail)` pairs, in emission order --
+    /// including the model-level inference umbrella (variable `None`).
+    /// Message-content and dedup tests read this rather than the raw
+    /// `Diagnostic` list so they don't restate the error-variant plumbing.
+    pub fn unit_diagnostic_details(&self) -> Vec<(Option<String>, String)> {
+        self.diagnostics_incremental()
+            .into_iter()
+            .filter_map(|d| {
+                let detail = match &d.error {
+                    DiagnosticError::Unit(UnitError::ConsistencyError(_, _, details)) => {
+                        details.clone().unwrap_or_default()
+                    }
+                    DiagnosticError::Unit(UnitError::DefinitionError(err, details)) => {
+                        match details {
+                            Some(s) => format!("{err} -- {s}"),
+                            None => format!("{err}"),
+                        }
+                    }
+                    DiagnosticError::Unit(UnitError::InferenceError { details, .. }) => {
+                        details.clone().unwrap_or_default()
+                    }
+                    DiagnosticError::Model(e) if e.code == ErrorCode::UnitMismatch => {
+                        e.details.clone().unwrap_or_default()
+                    }
+                    _ => return None,
+                };
+                Some((d.variable.clone(), detail))
+            })
+            .collect()
+    }
+
+    /// Assert the project produces NO unit diagnostics at all (mismatches,
+    /// definition errors, or the model-level inference umbrella). Stronger
+    /// than `assert_compiles_incremental`, which ignores Warning-severity
+    /// unit diagnostics entirely.
+    pub fn assert_no_unit_diagnostics(&self) {
+        let details = self.unit_diagnostic_details();
+        assert!(
+            details.is_empty(),
+            "expected no unit diagnostics, got: {details:#?}"
+        );
+    }
+
     /// Sync the datamodel into a salsa DB and collect all diagnostics.
     fn diagnostics_incremental(&self) -> Vec<crate::db::Diagnostic> {
         let datamodel = self.build_datamodel();

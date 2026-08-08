@@ -290,7 +290,7 @@ fn test_error_kind_unit_consistency_error() {
         );
         let details = CStr::from_ptr(consistency.details).to_str().unwrap();
         assert!(
-            details.starts_with("computed units"),
+            details.starts_with("the equation computes to units"),
             "details should be the bare reason: {details}"
         );
         // Match the summary line on the severity-independent "in model" phrase:

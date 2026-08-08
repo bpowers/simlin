@@ -2,8 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::result::Result as StdResult;
 
 use crate::ast::{BinaryOp, Expr0, UnaryOp};
@@ -33,6 +33,19 @@ impl Units {
         }
     }
 
+    /// The units a unit-polymorphic two-argument builtin (MAX, MIN,
+    /// PREVIOUS) produces: the first *explicit* units among its arguments.
+    /// A bare numeric literal is unit-polymorphic -- `MAX(0, x)` has x's
+    /// units -- so returning the first argument's verdict unconditionally
+    /// (as this code used to) collapsed the result to `Constant` and made
+    /// e.g. WORLD3's `MAX(0, land)/time` compute as `1/time`.
+    pub fn first_explicit(self, rhs: Units) -> Units {
+        match self {
+            Units::Explicit(_) => self,
+            Units::Constant => rhs,
+        }
+    }
+
     /// Convert to a UnitMap, treating Constant as dimensionless (empty map)
     pub fn to_unit_map(&self) -> UnitMap {
         match self {
@@ -47,6 +60,120 @@ impl Units {
 pub(crate) enum UnitOp {
     Mul,
     Div,
+}
+
+/// The square root of a unit map: halves every exponent. Returns `None`
+/// when any exponent is odd -- such units are not a perfect square and have
+/// no representable root (Vensim's fn_sqrt: "SQRT(units*units) --> units";
+/// "if argument has units that are a perfect square the result will be the
+/// square root of the units"). A dimensionless (empty) map roots to itself.
+pub(crate) fn try_sqrt(units: &UnitMap) -> Option<UnitMap> {
+    if units.map.values().any(|exp| exp % 2 != 0) {
+        return None;
+    }
+    let mut result = units.clone();
+    for exp in result.map.values_mut() {
+        *exp /= 2;
+    }
+    Some(result)
+}
+
+/// The units of `base^n` for a literal exponent `n`.
+///
+/// The single decision shared by `units_check` and `units_infer`, so the two
+/// cannot drift (their `^` arms previously copy-pasted this tree). Integer
+/// exponents multiply the unit exponents (matching repeated multiplication);
+/// half-integer exponents (0.5, -0.5, 1.5, ...) are `sqrt(base^2n)`, which
+/// requires the doubled map to be a perfect square. Any other exponent
+/// (including non-half-integer literals like `x^0.3`) has no representable
+/// units and degrades to `Polymorphic` -- the caller treats it as a
+/// unit-constant rather than (wrongly) keeping the base's units. What Vensim
+/// does for such exponents is unverified, so no warning is emitted for them.
+pub(crate) enum PowerUnits {
+    Explicit(UnitMap),
+    /// A half-integer exponent whose doubled base is not a perfect square:
+    /// `units_check` reports this, `units_infer` degrades to Constant.
+    NonSquareRoot,
+    Polymorphic,
+}
+
+pub(crate) fn power_units(base: &UnitMap, n: f64) -> PowerUnits {
+    let doubled = 2.0 * n;
+    if n.fract() == 0.0 && n.abs() <= i32::MAX as f64 {
+        PowerUnits::Explicit(base.clone().exp(n as i32))
+    } else if doubled.fract() == 0.0 && doubled.abs() <= i32::MAX as f64 {
+        match try_sqrt(&base.clone().exp(doubled as i32)) {
+            Some(root) => PowerUnits::Explicit(root),
+            None => PowerUnits::NonSquareRoot,
+        }
+    } else {
+        PowerUnits::Polymorphic
+    }
+}
+
+/// Join whitespace-separated identifier runs in a unit equation into single
+/// underscore-joined unit names: `Degrees Fahrenheit/Minute` becomes
+/// `Degrees_Fahrenheit/Minute`.
+///
+/// XMILE 3.3.6: unit names follow identifier rules and are "stored with
+/// underscores (_) but generally presented to users with spaces" -- and
+/// Stella writes the presentation form into `<units>` tags (e.g. the
+/// canonical teacup model's `Degrees Fahrenheit`). Multiplication in a unit
+/// equation is always an explicit `*`, so adjacent bare words can only be
+/// one multi-word name. Whitespace next to an operator or parenthesis is
+/// left untouched.
+///
+/// A joining whitespace RUN collapses to a single `_`, matching how
+/// `canonicalize` collapses whitespace runs in a DECLARED unit name -- the
+/// joined spelling and the declaration must canonicalize identically, or a
+/// unit declared `Widget  Years` (doubled space) silently detaches from a
+/// variable's identical units string. Non-joining whitespace (next to an
+/// operator or parenthesis) is left verbatim, so parse-error byte offsets
+/// (rendered against the ORIGINAL string by `errors::format_snippet`) stay
+/// exact everywhere except after a collapsed multi-whitespace join -- the
+/// pathological case, traded for canonical identity. Only ASCII space and
+/// tab participate in joins; other whitespace is left for the lexer to
+/// reject at its true offset.
+pub(crate) fn join_multiword_unit_names(eqn: &str) -> std::borrow::Cow<'_, str> {
+    fn is_word_char(c: char) -> bool {
+        c.is_alphanumeric() || c == '_' || c == '$'
+    }
+    fn is_joinable_ws(c: char) -> bool {
+        c == ' ' || c == '\t'
+    }
+
+    let chars: Vec<char> = eqn.chars().collect();
+    let mut out = String::with_capacity(eqn.len());
+    let mut changed = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if is_joinable_ws(c) {
+            // A whitespace run joins two words only if BOTH neighbors are
+            // word characters.
+            let prev_is_word = out.chars().next_back().is_some_and(is_word_char);
+            let mut j = i;
+            while j < chars.len() && is_joinable_ws(chars[j]) {
+                j += 1;
+            }
+            let next_is_word = j < chars.len() && is_word_char(chars[j]);
+            if prev_is_word && next_is_word {
+                out.push('_');
+                changed = true;
+            } else {
+                out.extend(chars.iter().take(j).skip(i));
+            }
+            i = j;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    if changed {
+        std::borrow::Cow::Owned(out)
+    } else {
+        std::borrow::Cow::Borrowed(eqn)
+    }
 }
 
 pub(crate) fn combine(op: UnitOp, l: UnitMap, r: UnitMap) -> UnitMap {
@@ -75,20 +202,37 @@ impl Context {
         units: &[Unit],
         sim_specs: &SimSpecs,
     ) -> (Self, Vec<(String, Vec<EquationError>)>) {
-        // Built-in unit equivalences for common singular/plural variations.
-        // These ensure that "person" and "people" (etc.) are treated as the same unit.
-        // We only add a built-in if the model doesn't already define a unit with that name.
-        let builtin_units: &[(&str, &[&str])] = &[
-            ("$", &["dollar", "dollars", "$s"]),
-            ("person", &["people", "persons"]),
-            ("unit", &["units"]),
-            ("minute", &["minutes"]),
-            ("month", &["months"]),
-            ("year", &["years", "yr", "yrs"]),
-            ("day", &["days"]),
-            ("week", &["weeks"]),
-            ("hour", &["hours"]),
-            ("second", &["seconds"]),
+        // Built-in units: the XMILE 3.3.6 built-in units table (time units
+        // with their abbreviation/singular aliases, and the `per_X = 1/X`
+        // derived units), plus Vensim's default synonym list ($/dollar,
+        // person/people, unit/units -- the `22:` groups Vensim writes into
+        // every mdl). The third tuple field is the unit's equation (only the
+        // per_* units have one). We only add a built-in if the model doesn't
+        // already define a unit with that name.
+        type BuiltinUnit = (&'static str, &'static [&'static str], Option<&'static str>);
+        let builtin_units: &[BuiltinUnit] = &[
+            ("$", &["dollar", "dollars", "$s"], None),
+            ("person", &["people", "persons"], None),
+            ("unit", &["units"], None),
+            ("nanosecond", &["nanoseconds", "ns"], None),
+            ("microsecond", &["microseconds", "us"], None),
+            ("millisecond", &["milliseconds", "ms"], None),
+            ("second", &["seconds", "s"], None),
+            ("minute", &["minutes", "min"], None),
+            ("hour", &["hours", "hr"], None),
+            ("day", &["days"], None),
+            ("week", &["weeks", "wk"], None),
+            ("month", &["months", "mo"], None),
+            ("quarter", &["quarters", "qtr"], None),
+            ("year", &["years", "yr", "yrs"], None),
+            ("per_second", &[], Some("1/second")),
+            ("per_minute", &[], Some("1/minute")),
+            ("per_hour", &[], Some("1/hour")),
+            ("per_day", &[], Some("1/day")),
+            ("per_week", &[], Some("1/week")),
+            ("per_month", &[], Some("1/month")),
+            ("per_quarter", &[], Some("1/quarter")),
+            ("per_year", &[], Some("1/year")),
         ];
 
         // Collect ALL model-defined unit identifiers (primary names AND aliases) into one set.
@@ -101,27 +245,73 @@ impl Context {
             })
             .collect();
 
-        // Only include built-ins that don't conflict with model-defined units.
-        // A built-in conflicts if its primary name OR any of its aliases matches
-        // any model-defined identifier (name or alias).
-        let mut combined_units: Vec<Unit> = builtin_units
-            .iter()
-            .filter(|(name, aliases)| {
-                let primary = canonicalize(name).into_owned();
-                !model_unit_identifiers.contains(&primary)
-                    && !aliases
+        // Model-defined units come first, builtins after. `Self::new`
+        // resolves equation-bearing units dependency-aware, so list order no
+        // longer decides what an equation's referents bind to (a model
+        // `week = day` and the builtin `per_week = 1/week` resolve correctly
+        // in either order, as does a model `hazard = per_year`); order still
+        // decides which declaration wins an alias-registration race, and
+        // there the model's should.
+        //
+        // A builtin whose name or alias the model declares itself is not
+        // added verbatim -- the model's definition wins (XMILE 3.3.6: on a
+        // name collision "the implementation SHOULD respect the unit
+        // definitions for the model"). What "wins" means depends on WHICH
+        // spelling the model claimed:
+        //
+        //   - A FULL spelling (`weeks`, `year`, `person`): the model has
+        //     declared the baseline unit itself, so the group's remaining
+        //     spellings are re-tied to the model's unit as a chained alias
+        //     (`week = weeks`, aliases `wk`) -- the alias-by-equation
+        //     mechanism 3.3.6 describes. Dropping the whole group instead
+        //     severed the equivalences: `per_week = 1/week` minted a
+        //     phantom `week` base and no longer equaled `1/weeks`.
+        //
+        //   - Only a short ABBREVIATION (`s`, `min`, `wk`): a model using
+        //     `s` for its own unit almost certainly does NOT mean seconds,
+        //     so the model takes just that name -- the builtin keeps its
+        //     full spellings as an independent unit, minus the claimed
+        //     abbreviation. (`yr`/`yrs` are deliberately NOT abbreviations
+        //     here: they are widespread genuine spellings of year in
+        //     Vensim models, with no plausible other meaning.)
+        const ABBREVIATIONS: &[&str] =
+            &["$s", "ns", "us", "ms", "s", "min", "hr", "wk", "mo", "qtr"];
+        let claimed = |n: &str| -> bool { model_unit_identifiers.contains(&*canonicalize(n)) };
+        let mut combined_units: Vec<Unit> = units.to_vec();
+        for (name, aliases, equation) in builtin_units {
+            let full_collision: Option<String> = std::iter::once(*name)
+                .chain(aliases.iter().copied())
+                .filter(|n| !ABBREVIATIONS.contains(n))
+                .find(|n| claimed(n))
+                .map(|n| canonicalize(n).into_owned());
+            if let Some(model_spelling) = full_collision {
+                let mut leftovers = std::iter::once(*name)
+                    .chain(aliases.iter().copied())
+                    .filter(|n| !claimed(n));
+                if let Some(primary) = leftovers.next() {
+                    combined_units.push(Unit {
+                        name: primary.to_string(),
+                        equation: Some(model_spelling),
+                        disabled: false,
+                        aliases: leftovers.map(|s| s.to_string()).collect(),
+                    });
+                }
+            } else {
+                // No full-spelling collision; keep the builtin, minus any
+                // abbreviation the model claimed for itself. (A builtin
+                // PRIMARY is never an abbreviation, so only aliases filter.)
+                combined_units.push(Unit {
+                    name: name.to_string(),
+                    equation: equation.map(|s| s.to_string()),
+                    disabled: false,
+                    aliases: aliases
                         .iter()
-                        .any(|a| model_unit_identifiers.contains(&*canonicalize(a)))
-            })
-            .map(|(name, aliases)| Unit {
-                name: name.to_string(),
-                equation: None,
-                disabled: false,
-                aliases: aliases.iter().map(|s| s.to_string()).collect(),
-            })
-            .collect();
-
-        combined_units.append(&mut units.to_vec());
+                        .filter(|a| !claimed(a))
+                        .map(|s| s.to_string())
+                        .collect(),
+                });
+            }
+        }
 
         Self::new(&combined_units, sim_specs)
     }
@@ -193,7 +383,97 @@ impl Context {
             units: parsed_units,
         };
 
-        // step 2: use this base context to parse our units with equations
+        // step 2: use this base context to parse our units with equations.
+        //
+        // Resolution is DEPENDENCY-AWARE, not in-list-order: `build_unit_
+        // components` silently mints a fresh base unit for any name it cannot
+        // look up, so an equation resolved before its referent's equation
+        // binds to a phantom. One-way ordering cannot fix this -- a model
+        // `week = day` must resolve before the builtin `per_week = 1/week`,
+        // while a model `hazard = per_year` must resolve after the builtin
+        // `per_year = 1/year` (XMILE 3.3.6 explicitly supports user-defined
+        // aliases of built-in units). So each pass resolves every unit whose
+        // equation references no still-unresolved equation-bearing unit, and
+        // repeats until done. If a pass makes no progress the definitions are
+        // circular (which XMILE 3.3.6 forbids); we then degrade to the old
+        // in-order behavior -- unresolved references mint base units -- so a
+        // malformed model still yields a usable partial context.
+
+        /// Resolve one equation-bearing unit against the context built so
+        /// far, registering its unit map (or recording errors).
+        fn resolve_equation_unit(
+            ctx: &mut Context,
+            unit_errors: &mut Vec<(String, Vec<EquationError>)>,
+            dup_err: &dyn Fn(&str) -> (String, Vec<EquationError>),
+            unit_name: &str,
+            ast: &Option<Expr0>,
+        ) {
+            let unit_components: UnitMap = match ast {
+                Some(ast) => match build_unit_components(ctx, ast) {
+                    Ok(unit_components) => unit_components,
+                    Err(err) => {
+                        unit_errors.push((
+                            unit_name.to_owned(),
+                            vec![EquationError {
+                                start: 0,
+                                end: 0,
+                                code: err.code,
+                            }],
+                        ));
+                        return;
+                    }
+                },
+                None => [(unit_name.to_owned(), 1)].iter().cloned().collect(),
+            };
+
+            // As in step 1: only an alias of *another* unit is a conflict; a
+            // self-alias is benign and the prime unit must still be registered.
+            if matches!(ctx.aliases.get(unit_name), Some(target) if target != unit_name) {
+                unit_errors.push(dup_err(unit_name));
+            } else {
+                match ctx.units.entry(unit_name.to_owned()) {
+                    Entry::Vacant(e) => {
+                        e.insert(unit_components);
+                    }
+                    Entry::Occupied(e) => {
+                        if e.get() != &unit_components {
+                            unit_errors.push(dup_err(unit_name));
+                        }
+                    }
+                }
+            }
+        }
+
+        /// The canonical unit names an equation AST references. Only the
+        /// shapes `build_unit_components` accepts are walked; the shapes it
+        /// rejects (App/Subscript/If) contribute no dependencies -- they
+        /// error during resolution regardless of order.
+        fn referenced_unit_names(ast: &Expr0, out: &mut Vec<String>) {
+            match ast {
+                Expr0::Var(id, _) => out.push(canonicalize(id.as_str()).into_owned()),
+                Expr0::Op1(_, inner, _) => referenced_unit_names(inner, out),
+                Expr0::Op2(_, l, r, _) => {
+                    referenced_unit_names(l, out);
+                    referenced_unit_names(r, out);
+                }
+                Expr0::Const(_, _, _)
+                | Expr0::App(_, _)
+                | Expr0::Subscript(_, _, _)
+                | Expr0::If(_, _, _, _) => {}
+            }
+        }
+
+        // Phase A: register every equation-bearing unit's aliases and lex its
+        // equation. A unit whose equation fails to lex is reported and drops
+        // out (references to it mint a base unit, as for any unknown name).
+        // Registering ALL aliases before resolving ANY equation is part of
+        // the dependency-awareness: an equation may reference an alias
+        // declared later in the list.
+        struct PendingUnit {
+            name: String,
+            ast: Option<Expr0>,
+        }
+        let mut pending: Vec<PendingUnit> = Vec::new();
         for unit in units.iter().filter(|unit| unit.equation.is_some()) {
             let unit_name = canonicalize(&unit.name).into_owned();
             for alias in unit.aliases.iter() {
@@ -210,50 +490,53 @@ impl Context {
                 }
             }
 
-            let eqn = unit.equation.as_ref().unwrap();
-
-            let ast = match Expr0::new(eqn, LexerType::Units) {
-                Ok(ast) => ast,
+            let eqn = &join_multiword_unit_names(unit.equation.as_ref().unwrap());
+            match Expr0::new(eqn, LexerType::Units) {
+                Ok(ast) => pending.push(PendingUnit {
+                    name: unit_name,
+                    ast,
+                }),
                 Err(errors) => {
                     unit_errors.push((unit_name.clone(), errors));
-                    continue;
-                }
-            };
-
-            let unit_components = match ast {
-                Some(ref ast) => match build_unit_components(&ctx, ast) {
-                    Ok(unit_components) => unit_components,
-                    Err(err) => {
-                        unit_errors.push((
-                            unit_name.clone(),
-                            vec![EquationError {
-                                start: 0,
-                                end: 0,
-                                code: err.code,
-                            }],
-                        ));
-                        continue;
-                    }
-                },
-                None => [(unit_name.clone(), 1)].iter().cloned().collect(),
-            };
-
-            // As in step 1: only an alias of *another* unit is a conflict; a
-            // self-alias is benign and the prime unit must still be registered.
-            if matches!(ctx.aliases.get(&unit_name), Some(target) if target != &unit_name) {
-                unit_errors.push(dup_err(&unit_name));
-            } else {
-                match ctx.units.entry(unit_name.clone()) {
-                    Entry::Vacant(e) => {
-                        e.insert(unit_components);
-                    }
-                    Entry::Occupied(e) => {
-                        if e.get() != &unit_components {
-                            unit_errors.push(dup_err(&unit_name));
-                        }
-                    }
                 }
             }
+        }
+
+        // Phase B: resolve, deferring any unit blocked on a still-unresolved
+        // equation-bearing unit. Passes are bounded by the dependency-chain
+        // depth (at most the unit count).
+        let mut unresolved: HashSet<String> = pending.iter().map(|p| p.name.clone()).collect();
+        loop {
+            let mut deferred: Vec<PendingUnit> = Vec::new();
+            let mut progressed = false;
+            for p in pending {
+                let blocked = p.ast.as_ref().is_some_and(|ast| {
+                    let mut deps = Vec::new();
+                    referenced_unit_names(ast, &mut deps);
+                    deps.iter().any(|dep| {
+                        let dep = ctx.aliases.get(dep).map(|s| s.as_str()).unwrap_or(dep);
+                        dep != p.name && unresolved.contains(dep)
+                    })
+                });
+                if blocked {
+                    deferred.push(p);
+                    continue;
+                }
+                resolve_equation_unit(&mut ctx, &mut unit_errors, &dup_err, &p.name, &p.ast);
+                unresolved.remove(&p.name);
+                progressed = true;
+            }
+            if deferred.is_empty() {
+                break;
+            }
+            if !progressed {
+                // Circular definitions: degrade to in-order resolution.
+                for p in deferred {
+                    resolve_equation_unit(&mut ctx, &mut unit_errors, &dup_err, &p.name, &p.ast);
+                }
+                break;
+            }
+            pending = deferred;
         }
 
         // Construction is partial: always return the context we built, with any
@@ -266,11 +549,52 @@ impl Context {
         (ctx, unit_errors)
     }
 
+    /// Alias-resolving map lookup WITHOUT `resolve_name`'s dimensionless
+    /// special-case or unknown-name minting. Production resolution goes
+    /// through `resolve_name`; this stays as test introspection (asserting
+    /// that a name is registered/unregistered needs the `Option`).
+    #[cfg(test)]
     pub(crate) fn lookup(&self, ident: &str) -> Option<&UnitMap> {
         // first, see if this identifier is an alias of a better-known unit
         let normalized = self.aliases.get(ident).map(|s| s.as_str()).unwrap_or(ident);
         self.units.get(normalized)
     }
+
+    /// Resolve a single (already-canonicalized) unit NAME exactly the way a
+    /// unit-equation reference does: resolve aliases, treat the
+    /// dimensionless spellings as the empty map, look up known units, and
+    /// mint a fresh base unit for anything unknown.
+    ///
+    /// Shared by `build_unit_components`' identifier arm and
+    /// `units_check::model_time_units` -- the synthetic time variable MUST
+    /// resolve `sim_specs.time_units` identically to a variable's `<units>`
+    /// string, or a dimensionless clock (`time_units="Unitless"`) makes
+    /// `x = TIME ~ Unitless` mismatch against a fictitious `{unitless: 1}`
+    /// base unit.
+    pub(crate) fn resolve_name(&self, canonical_name: &str) -> UnitMap {
+        let name = self
+            .aliases
+            .get(canonical_name)
+            .map(|s| s.as_str())
+            .unwrap_or(canonical_name);
+        if is_dimensionless_unit_name(name) {
+            return UnitMap::new();
+        }
+        self.units
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| [(name.to_owned(), 1)].iter().cloned().collect())
+    }
+}
+
+/// The spellings XMILE 3.3.6 (and Vensim convention) treat as the identity
+/// element for units. Kept in one place so unit-equation resolution and the
+/// synthetic time variable cannot disagree about them.
+pub(crate) fn is_dimensionless_unit_name(name: &str) -> bool {
+    matches!(
+        name,
+        "dmnl" | "nil" | "dimensionless" | "unitless" | "fraction"
+    )
 }
 
 #[allow(dead_code)]
@@ -351,31 +675,11 @@ fn build_unit_components(ctx: &Context, ast: &Expr0) -> EquationResult<UnitMap> 
             }
         }
         Expr0::Var(id, _) => {
-            let id_str = id.as_str();
-            // Canonicalize the unit name (lowercase) for consistent lookup.
-            // This is safe because Context::new() stores all alias keys and values
-            // in canonical form, so alias resolution also returns canonical names.
-            let id_canonical = crate::common::canonicalize(id_str);
-            let id_str = &*id_canonical;
-            // Resolve any alias (e.g., "m" -> "meter"). The result is already canonical
-            // because aliases are stored with canonical values in Context::new().
-            let id_str = ctx
-                .aliases
-                .get(id_str)
-                .map(|s| s.as_str())
-                .unwrap_or(id_str);
-            if id_str == "dmnl"
-                || id_str == "nil"
-                || id_str == "dimensionless"
-                || id_str == "fraction"
-            {
-                // dimensionless is special
-                UnitMap::new()
-            } else {
-                ctx.lookup(id_str)
-                    .cloned()
-                    .unwrap_or_else(|| [(id_str.to_owned(), 1)].iter().cloned().collect())
-            }
+            // Canonicalize the unit name (lowercase) for consistent lookup;
+            // alias resolution, the dimensionless spellings, and the
+            // unknown-name base-unit fallback all live in `resolve_name`
+            // (shared with the synthetic time variable).
+            ctx.resolve_name(&crate::common::canonicalize(id.as_str()))
         }
         Expr0::App(_, loc) => {
             return eqn_err!(NoAppInUnits, loc.start, loc.end);
@@ -421,20 +725,56 @@ pub fn parse_units(
     unit_eqn: Option<&str>,
 ) -> StdResult<Option<UnitMap>, Vec<UnitError>> {
     if let Some(unit_eqn) = unit_eqn {
-        if let Some(expr) = Expr0::new(unit_eqn, LexerType::Units).map_err(|errors| {
+        // Carry the offending source text on every definition error: a bare
+        // token-error code ("extra_token") with no context is not actionable
+        // for the modeler.
+        let context = || format!("in units '{unit_eqn}'");
+        let unit_eqn_joined = join_multiword_unit_names(unit_eqn);
+        if let Some(expr) = Expr0::new(&unit_eqn_joined, LexerType::Units).map_err(|errors| {
             errors
                 .into_iter()
-                .map(|err| UnitError::DefinitionError(err, None))
+                .map(|err| UnitError::DefinitionError(err, Some(context())))
                 .collect::<Vec<UnitError>>()
         })? {
             let result = build_unit_components(ctx, &expr)
-                .map_err(|err| vec![UnitError::DefinitionError(err, None)])?;
+                .map_err(|err| vec![UnitError::DefinitionError(err, Some(context()))])?;
             Ok(Some(result))
         } else {
             Ok(None)
         }
     } else {
         Ok(None)
+    }
+}
+
+#[test]
+fn join_multiword_unit_names_matches_canonicalize_and_keeps_offsets() {
+    // Two properties, in priority order: (1) a joining whitespace RUN
+    // collapses to one `_`, so the joined spelling canonicalizes exactly
+    // like the same name in a unit DECLARATION (`canonicalize` collapses
+    // runs); (2) everywhere except after such a collapsed run, byte length
+    // is preserved so parse-error offsets (rendered against the original
+    // string) stay exact -- non-joining whitespace is untouched.
+    let cases = [
+        ("Degrees Fahrenheit/Minute", "Degrees_Fahrenheit/Minute"),
+        ("widgets  //  year", "widgets  //  year"),
+        ("a  b", "a_b"),
+        ("people * meter", "people * meter"),
+        (" leading and trailing ", " leading_and_trailing "),
+        ("a\tb", "a_b"),
+        ("Widget  Years", "Widget_Years"),
+    ];
+    for (input, expected) in cases {
+        let joined = join_multiword_unit_names(input);
+        assert_eq!(joined.as_ref(), expected, "join of {input:?}");
+    }
+    // single-space joins and non-joining whitespace preserve byte length
+    for (input, _) in cases.iter().filter(|(i, _)| !i.contains("  ")) {
+        assert_eq!(
+            join_multiword_unit_names(input).len(),
+            input.len(),
+            "byte length preserved for {input:?}"
+        );
     }
 }
 

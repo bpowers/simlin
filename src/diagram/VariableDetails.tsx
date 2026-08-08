@@ -510,9 +510,9 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
     // Unit errors are non-fatal warnings: the variable still simulates and has
     // data. They are rendered beneath the chart (or alongside equation errors)
     // rather than replacing the results.
-    // The bare details string ("computed units 'x' don't match specified
-    // units") already says what went wrong; the code description is the
-    // fallback for errors that carry no details.
+    // The bare details string ("the equation computes to units 'x', but the
+    // variable's specified units are 'y'") already says what went wrong; the
+    // code description is the fallback for errors that carry no details.
     // Each warning/error row carries an id so the field it describes can
     // reference it via aria-describedby: the red/orange highlight alone is
     // color-only and never announced. Unit warnings describe the units field;

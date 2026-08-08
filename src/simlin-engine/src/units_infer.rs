@@ -172,7 +172,9 @@ fn single_fv(units: &UnitMap) -> Option<&str> {
             // Only consider metavariables with exponent ±1.
             // If |exponent| > 1, we can't solve for this variable because it would
             // require fractional exponents (e.g., @x^2 = meters => @x = meters^(1/2)).
-            if exp.abs() != 1 {
+            // unsigned_abs: |i32::MIN| overflows, and a saturated exponent
+            // (reachable from a literal like `(y*y)^-2^30`) must not panic.
+            if exp.unsigned_abs() != 1 {
                 return None;
             }
             if result.is_none() {
@@ -199,7 +201,7 @@ fn solve_for(var: &str, mut lhs: UnitMap) -> UnitMap {
         // Use a regular assert since violating this invariant would produce
         // incorrect results (not just a performance issue).
         assert!(
-            exponent.abs() == 1,
+            exponent.unsigned_abs() == 1,
             "solve_for called with |exponent| != 1; single_fv should prevent this"
         );
         exponent > 0
@@ -280,10 +282,12 @@ impl ConstraintSet {
                 None => continue,
             };
 
-            let scaled_units = if exponent.abs() == 1 {
+            // saturating/unsigned: |i32::MIN| overflows, and an absurd
+            // saturated exponent must scale absurdly rather than panic.
+            let scaled_units = if exponent.unsigned_abs() == 1 {
                 units.clone()
             } else {
-                units.clone().exp(exponent.abs())
+                units.clone().exp(exponent.saturating_abs())
             };
 
             let op = if exponent > 0 {
@@ -545,6 +549,40 @@ fn clarify_macro_conflict(error: UnitError) -> UnitError {
 }
 
 impl UnitInferer<'_> {
+    /// The units of a square root whose argument map has no representable
+    /// root (it carries metavariables, or odd concrete exponents): a FRESH
+    /// metavariable `R` plus the residual constraint `R^2 == square`.
+    ///
+    /// `single_fv` refuses to solve for a metavariable with |exp| != 1, so
+    /// the constraint itself never mis-binds `R`; but once `R` and the
+    /// square's metavariables are bound through OTHER constraints,
+    /// `substitute` scales them in and a wrong binding surfaces as a
+    /// concrete contradiction in `find_constraint_mismatches`. Returning a
+    /// free `Constant` here instead severed the only relationship between a
+    /// SQRT result and its source. The metavariable name embeds the current
+    /// variable and source location so distinct call sites stay distinct;
+    /// the reserved `$⁚` prefix keeps it disjoint from real identifiers.
+    fn sqrt_result_metavar(
+        &self,
+        prefix: &str,
+        current_var: &str,
+        loc: Loc,
+        square: UnitMap,
+        constraints: &mut Vec<LocatedConstraint>,
+    ) -> Units {
+        let fresh_name = format!(
+            "@{prefix}$\u{205a}sqrt\u{205a}{current_var}\u{205a}{}",
+            loc.start
+        );
+        let fresh: UnitMap = [(fresh_name, 1)].iter().cloned().collect();
+        constraints.push(LocatedConstraint::new(
+            combine(UnitOp::Div, fresh.clone().exp(2), square),
+            current_var,
+            Some(loc),
+        ));
+        Units::Explicit(fresh)
+    }
+
     /// gen_constraints generates a set of equality constraints for a given expression,
     /// storing those constraints in the mutable `constraints` argument. This is
     /// right out of Hindley-Milner type inference/Algorithm W, but because we are
@@ -609,11 +647,34 @@ impl UnitInferer<'_> {
                 | BuiltinFn::Log10(a)
                 | BuiltinFn::Sign(a)
                 | BuiltinFn::Sin(a)
-                | BuiltinFn::Sqrt(a)
                 | BuiltinFn::Tan(a)
                 | BuiltinFn::Size(a)
                 | BuiltinFn::Stddev(a)
                 | BuiltinFn::Sum(a) => self.gen_constraints(a, prefix, current_var, constraints),
+                // SQRT halves unit exponents (mirroring `units_check`). The
+                // argument's symbolic map usually carries metavariables with
+                // odd exponents (`@x^1`), which have no representable root in
+                // integer-exponent maps; the result is then a FRESH
+                // metavariable R with the residual constraint R^2 == arg
+                // (see `sqrt_result_metavar`) rather than a free Constant --
+                // degrading severed the only relationship between a SQRT
+                // result and its source, so a consumer could bind the
+                // (undeclared) result to arbitrary units with no complaint.
+                BuiltinFn::Sqrt(a) => {
+                    match self.gen_constraints(a, prefix, current_var, constraints) {
+                        Units::Constant => Units::Constant,
+                        Units::Explicit(units) => match crate::units::try_sqrt(&units) {
+                            Some(root) => Units::Explicit(root),
+                            None => self.sqrt_result_metavar(
+                                prefix,
+                                current_var,
+                                expr.get_loc(),
+                                units,
+                                constraints,
+                            ),
+                        },
+                    }
+                }
                 BuiltinFn::Mean(args) => {
                     let args = args
                         .iter()
@@ -653,23 +714,43 @@ impl UnitInferer<'_> {
                         let b_units = self.gen_constraints(b, prefix, current_var, constraints);
 
                         if let Units::Explicit(ref lunits) = a_units
-                            && let Units::Explicit(runits) = b_units
+                            && let Units::Explicit(ref runits) = b_units
                         {
                             let loc = a.get_loc().union(&b.get_loc());
                             constraints.push(LocatedConstraint::new(
-                                combine(UnitOp::Div, lunits.clone(), runits),
+                                combine(UnitOp::Div, lunits.clone(), runits.clone()),
                                 current_var,
                                 Some(loc),
                             ));
                         }
+                        // A literal argument is unit-polymorphic: `MAX(0, x)`
+                        // has x's units (mirroring `units_check`).
+                        return a_units.first_explicit(b_units);
                     }
                     a_units
                 }
                 BuiltinFn::Quantum(a, _) => {
                     self.gen_constraints(a, prefix, current_var, constraints)
                 }
-                BuiltinFn::Sshape(_, bottom, _) => {
-                    self.gen_constraints(bottom, prefix, current_var, constraints)
+                // SSHAPE(x, bottom, top): bottom and top carry the result
+                // units and must agree; x is visited for its own constraints
+                // but its units are unconstrained (mirroring `units_check`).
+                BuiltinFn::Sshape(x, bottom, top) => {
+                    self.gen_constraints(x, prefix, current_var, constraints);
+                    let bottom_units =
+                        self.gen_constraints(bottom, prefix, current_var, constraints);
+                    let top_units = self.gen_constraints(top, prefix, current_var, constraints);
+                    if let Units::Explicit(ref b_map) = bottom_units
+                        && let Units::Explicit(ref t_map) = top_units
+                    {
+                        let loc = bottom.get_loc().union(&top.get_loc());
+                        constraints.push(LocatedConstraint::new(
+                            combine(UnitOp::Div, b_map.clone(), t_map.clone()),
+                            current_var,
+                            Some(loc),
+                        ));
+                    }
+                    bottom_units.first_explicit(top_units)
                 }
                 BuiltinFn::Pulse(_, _, _) | BuiltinFn::Ramp(_, _, _) | BuiltinFn::Step(_, _) => {
                     Units::Constant
@@ -684,17 +765,23 @@ impl UnitInferer<'_> {
                     );
                     let units = self.gen_constraints(&div, prefix, current_var, constraints);
 
-                    // the optional argument to safediv, if specified, should match the units of a/b
-                    if let Units::Explicit(ref result_units) = units
-                        && let Some(c) = c
-                        && let Units::Explicit(c_units) =
-                            self.gen_constraints(c, prefix, current_var, constraints)
-                    {
-                        constraints.push(LocatedConstraint::new(
-                            combine(UnitOp::Div, c_units, result_units.clone()),
-                            current_var,
-                            Some(c.get_loc()),
-                        ));
+                    // The optional fallback, if specified, must match the
+                    // units of a/b -- and when the quotient is a bare
+                    // literal ratio, the explicit fallback's units carry
+                    // (the MAX/MIN literal-polymorphism rule, mirroring
+                    // `units_check`).
+                    if let Some(c) = c {
+                        let c_units = self.gen_constraints(c, prefix, current_var, constraints);
+                        if let Units::Explicit(ref result_units) = units
+                            && let Units::Explicit(ref c_map) = c_units
+                        {
+                            constraints.push(LocatedConstraint::new(
+                                combine(UnitOp::Div, c_map.clone(), result_units.clone()),
+                                current_var,
+                                Some(c.get_loc()),
+                            ));
+                        }
+                        return units.first_explicit(c_units);
                     }
 
                     units
@@ -727,16 +814,18 @@ impl UnitInferer<'_> {
                     // Constrain fallback to match the lagged argument's units,
                     // analogous to Max/Min handling.
                     if let Units::Explicit(ref a_map) = a_units
-                        && let Units::Explicit(b_map) = b_units
+                        && let Units::Explicit(ref b_map) = b_units
                     {
                         let loc = a.get_loc().union(&b.get_loc());
                         constraints.push(LocatedConstraint::new(
-                            combine(UnitOp::Div, a_map.clone(), b_map),
+                            combine(UnitOp::Div, a_map.clone(), b_map.clone()),
                             current_var,
                             Some(loc),
                         ));
                     }
-                    a_units
+                    // A literal in either position is unit-polymorphic
+                    // (mirroring `units_check`).
+                    a_units.first_explicit(b_units)
                 }
                 BuiltinFn::Init(a) => self.gen_constraints(a, prefix, current_var, constraints),
             },
@@ -768,7 +857,35 @@ impl UnitInferer<'_> {
                             Units::Explicit(lunits)
                         }
                     },
-                    BinaryOp::Exp | BinaryOp::Mod => lunits,
+                    // `x^n` routes through the shared `units::power_units`
+                    // (see units_check's `^` arm): integer-literal exponents
+                    // are valid symbolically too (`@x^1` becomes `@x^n`); a
+                    // half-integer exponent whose doubled map has no
+                    // representable root gets the same fresh-metavariable
+                    // residual constraint as SQRT (`x^n = sqrt(x^2n)`); only
+                    // a non-half-integer or non-literal exponent degrades to
+                    // Constant (its units are genuinely undetermined).
+                    BinaryOp::Exp => match (lunits, crate::units_check::literal_exponent(r)) {
+                        (Units::Constant, _) => Units::Constant,
+                        (Units::Explicit(base), Some(n)) => {
+                            match crate::units::power_units(&base, n) {
+                                crate::units::PowerUnits::Explicit(units) => Units::Explicit(units),
+                                crate::units::PowerUnits::NonSquareRoot => {
+                                    let doubled = base.exp((2.0 * n) as i32);
+                                    self.sqrt_result_metavar(
+                                        prefix,
+                                        current_var,
+                                        expr.get_loc(),
+                                        doubled,
+                                        constraints,
+                                    )
+                                }
+                                crate::units::PowerUnits::Polymorphic => Units::Constant,
+                            }
+                        }
+                        (Units::Explicit(_), None) => Units::Constant,
+                    },
+                    BinaryOp::Mod => lunits,
                     BinaryOp::Mul => match (lunits, runits) {
                         (Units::Constant, Units::Constant) => Units::Constant,
                         (Units::Explicit(units), Units::Constant)
@@ -805,17 +922,19 @@ impl UnitInferer<'_> {
                 let runits = self.gen_constraints(r, prefix, current_var, constraints);
 
                 if let Units::Explicit(ref lunits) = lunits
-                    && let Units::Explicit(runits) = runits
+                    && let Units::Explicit(ref runits) = runits
                 {
                     let loc = l.get_loc().union(&r.get_loc());
                     constraints.push(LocatedConstraint::new(
-                        combine(UnitOp::Div, lunits.clone(), runits),
+                        combine(UnitOp::Div, lunits.clone(), runits.clone()),
                         current_var,
                         Some(loc),
                     ));
                 }
 
-                lunits
+                // A literal branch (`IF c THEN 0 ELSE flow`) is
+                // unit-polymorphic (mirroring `units_check`).
+                lunits.first_explicit(runits)
             }
         }
     }
@@ -835,17 +954,16 @@ impl UnitInferer<'_> {
     ) {
         let time_units_name =
             canonicalize(self.ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
-        // Resolve the time unit through the units Context's alias map so that
-        // inference uses the same canonical time unit as `units_check::check`.
-        // Without this, a model that declares some units with an aliased time
-        // name (e.g. `yr`) while `time_units` names the primary (`year`)
-        // produces a spurious `year` vs `yr` mismatch on every stock/flow
-        // constraint.
-        let time_units: UnitMap = self
-            .ctx
-            .lookup(&time_units_name)
-            .cloned()
-            .unwrap_or_else(|| [(time_units_name.clone(), 1)].iter().cloned().collect());
+        // Resolve the time unit exactly the way a variable's `<units>` string
+        // is resolved (`Context::resolve_name`: aliases, the dimensionless
+        // spellings, unknown-name fallback) so inference uses the same
+        // canonical time unit as `units_check::check`. Without the alias
+        // step, a model declaring units with an aliased time name (e.g. `yr`)
+        // while `time_units` names the primary (`year`) produced a spurious
+        // `year` vs `yr` mismatch on every stock/flow constraint; without the
+        // dimensionless step, `time_units="Unitless"` minted a fictitious
+        // `{unitless: 1}` base unit.
+        let time_units: UnitMap = self.ctx.resolve_name(&time_units_name);
 
         // Deterministic constraint order: `variables` is a HashMap, and its
         // per-instance iteration order used to reach TWO observables --
@@ -1822,13 +1940,10 @@ pub(crate) fn infer(
 ) -> InferenceResult {
     let time_units_name =
         canonicalize(units_ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
-    // Resolve through the alias map so the synthetic `time` variable's units
-    // match what `units_check::check` uses (see the same resolution in
-    // `gen_all_constraints`).
-    let time_units: UnitMap = units_ctx
-        .lookup(&time_units_name)
-        .cloned()
-        .unwrap_or_else(|| [(time_units_name.clone(), 1)].iter().cloned().collect());
+    // Resolve through `Context::resolve_name` so the synthetic `time`
+    // variable's units match what `units_check::check` uses (see the same
+    // resolution in `gen_all_constraints`).
+    let time_units: UnitMap = units_ctx.resolve_name(&time_units_name);
 
     let units = UnitInferer {
         ctx: units_ctx,
