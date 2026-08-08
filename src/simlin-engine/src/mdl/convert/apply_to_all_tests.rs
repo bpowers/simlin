@@ -283,3 +283,76 @@ fn apply_to_all_equations_over_different_subranges_stay_arrayed() {
         vec![7.0, 7.0, 9.0, 9.0, 9.0]
     );
 }
+
+// ===========================================================================
+// Apply-to-all intent is read off the SOURCE SPELLING, not off coverage
+// ===========================================================================
+
+/// A SINGLETON dimension makes coverage arithmetic vacuous: with `DimA: a1`,
+/// an element-specific `x[a1] = 5` produces one slot, which IS the whole
+/// cartesian product. Coverage alone therefore cannot tell it from the
+/// apply-to-all `x[DimA] = 5`, and the collapse silently rewrote the first into
+/// the second.
+///
+/// Two things are lost by that. The writer re-renders it as `x[DimA] = 5`, so
+/// the as-written intent does not survive a round trip; and a later dimension
+/// edit in Simlin (adding `a2`) silently applies the equation to an element the
+/// MDL source never defined.
+///
+/// The gate therefore asks the SOURCE: every LHS subscript must name a
+/// dimension. That is the property "this equation is apply-to-all" actually
+/// means, and unlike coverage it does not depend on how many elements the
+/// dimension happens to have.
+#[test]
+fn an_element_specific_equation_over_a_singleton_dimension_stays_arrayed() {
+    let mdl = "{UTF-8}\nDimA: a1 ~~|\nx[a1] = 5 ~~|\n\
+        INITIAL TIME = 0 ~~|\nFINAL TIME = 1 ~~|\nTIME STEP = 1 ~~|\nSAVEPER = TIME STEP ~~|\n";
+    match equation_of(mdl, "x") {
+        Equation::Arrayed(dims, elements, _, _) => {
+            assert_eq!(dims, vec!["DimA".to_string()]);
+            assert_eq!(
+                elements.len(),
+                1,
+                "the a1 slot must survive: the source named the ELEMENT"
+            );
+            assert_eq!(elements[0].0, "a1");
+        }
+        other => panic!("expected Arrayed (element-specific source), got {other:?}"),
+    }
+}
+
+/// The control that keeps the rule honest: over the SAME one-element dimension,
+/// the apply-to-all spelling must still collapse. If it did not, the fix would
+/// just be "never collapse a singleton", which is a different (and wrong) rule.
+#[test]
+fn an_apply_to_all_equation_over_a_singleton_dimension_still_collapses() {
+    let mdl = "{UTF-8}\nDimA: a1 ~~|\nx[DimA] = 5 ~~|\n\
+        INITIAL TIME = 0 ~~|\nFINAL TIME = 1 ~~|\nTIME STEP = 1 ~~|\nSAVEPER = TIME STEP ~~|\n";
+    match equation_of(mdl, "x") {
+        Equation::ApplyToAll(dims, eq) => {
+            assert_eq!(dims, vec!["DimA".to_string()]);
+            assert_eq!(eq, "5");
+        }
+        other => panic!("expected ApplyToAll (range source), got {other:?}"),
+    }
+}
+
+/// A MIXED spelling: one axis names a dimension, the other pins an element.
+/// The element subscript blocks the collapse BY SPELLING.
+///
+/// Coverage would block this one too (two slots against a 3x2 product), so it
+/// is not on its own evidence for the spelling clause -- the singleton row above
+/// is. It is here because it is the shape a reader expects to find, and because
+/// it pins that the two axes are judged independently rather than by whether
+/// ANY axis is a dimension.
+#[test]
+fn an_element_pinned_axis_blocks_the_collapse_by_spelling() {
+    let mdl = model("y[DimA,B2] = 7 ~~|\n");
+    match equation_of(&mdl, "y") {
+        Equation::Arrayed(_, elements, _, _) => {
+            assert_eq!(elements.len(), 3, "one slot per DimA element, pinned at B2");
+            assert!(elements.iter().all(|(key, _, _, _)| key.ends_with(",B2")));
+        }
+        other => panic!("expected Arrayed (element-pinned axis), got {other:?}"),
+    }
+}

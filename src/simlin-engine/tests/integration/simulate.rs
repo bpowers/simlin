@@ -6075,10 +6075,13 @@ fn corpus_clearn_macros_import() {
 ///
 /// Layout impact (the resource this gate protects -- #654's VM limit of 65,536
 /// u16 result slots, NOT `wasmgen::lower`'s unrelated `MAX_UNROLL_UNITS`): the
-/// per-step result-row width is **29,808 slots**, 45% of the ceiling, with
-/// 35,728 free. Both numbers come from
+/// per-step result-row width is **30,123 slots**, 46% of the ceiling, with
+/// 35,413 free. Both numbers come from
 /// `examples/ltm_slot_width.rs`, so re-deriving them is a command rather than a
-/// reconstruction.
+/// reconstruction -- and they are the CURRENT totals: the transition records
+/// below quote earlier values as the left-hand side of a move, which is what
+/// they are for. This header is the budget statement against the #654 ceiling,
+/// so a stale figure here is the one that misleads.
 ///
 /// It last moved twice in the GH #995 burndown. The array-freeze
 /// materializer took the count 6,800 -> 6,858 (+58 content-named

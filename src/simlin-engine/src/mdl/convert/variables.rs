@@ -302,6 +302,20 @@ impl<'input> ConversionContext<'input> {
     ///
     /// NumberList and TabbedArray equations are excluded - they have special handling
     /// in build_equation that handles their multi-value RHS correctly.
+    /// Does this raw LHS subscript name a subscript RANGE (a dimension or a
+    /// subrange) rather than a single element?
+    ///
+    /// The one place that question is answered, because two answers would
+    /// diverge: the per-element `element_offsets` computation needs it to skip
+    /// pinned axes, and [`Self::build_variable_with_elements`]'s collapse gate
+    /// needs it to read apply-to-all intent off the source spelling. A subrange
+    /// is registered in `dimension_elements` like any other dimension, so both
+    /// qualify.
+    fn subscript_names_a_dimension(&self, subscript: &str) -> bool {
+        self.dimension_elements
+            .contains_key(&canonical_name(subscript))
+    }
+
     /// True when these per-element slots ARE a single apply-to-all equation:
     /// they cover the dimensions' full cartesian product and agree on equation
     /// text, initial text and graphical function.
@@ -563,10 +577,7 @@ impl<'input> ConversionContext<'input> {
                 let element_offsets: Vec<usize> = element_parts
                     .iter()
                     .zip(exp_eq.lhs_subscripts.iter())
-                    .filter(|(_, sub)| {
-                        let canonical = canonical_name(sub);
-                        self.dimension_elements.contains_key(&canonical)
-                    })
+                    .filter(|(_, sub)| self.subscript_names_a_dimension(sub))
                     .map(|(elem, sub)| self.element_index_in_dimension(elem, sub).unwrap_or(0))
                     .collect();
 
@@ -626,9 +637,26 @@ impl<'input> ConversionContext<'input> {
         // `SUM(v[Dim!])` then fails as `CantSubscriptScalar`. Measured on four
         // corpus models (`groupon 1-3`, `get_with_missing_values_xlsx`), which
         // gained failing variables until this test was widened.
+        //
+        // The gate also asks the SOURCE SPELLING, not just the expanded slots:
+        // every LHS subscript must name a subscript RANGE. Coverage arithmetic
+        // cannot substitute for that, because a SINGLETON dimension makes it
+        // vacuous -- with `DimA: a1`, the element-specific `x[a1] = 5` produces
+        // one slot, which is the whole cartesian product, and collapsed to
+        // `ApplyToAll([DimA], "5")`. That loses the source's meaning twice over:
+        // the writer re-renders it as `x[DimA] = 5`, and a later dimension edit
+        // adding `a2` silently extends an equation the MDL never wrote for it.
+        // Asking the spelling is also simply what "apply-to-all" means, so the
+        // other blocks (a pinned axis, mixed spellings) become principled rather
+        // than incidental consequences of counting elements.
         let single_apply_to_all = expanded_eqs.len() == 1
             && !has_except_eq
             && default_equation.is_none()
+            && expanded_eqs.iter().all(|e| {
+                e.lhs_subscripts
+                    .iter()
+                    .all(|sub| self.subscript_names_a_dimension(sub))
+            })
             && !expanded_eqs.iter().any(|e| {
                 let eq_str = match &e.eq.equation {
                     MdlEquation::Regular(_, expr) | MdlEquation::Data(_, Some(expr)) => {
