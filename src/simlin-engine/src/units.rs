@@ -123,14 +123,17 @@ pub(crate) fn power_units(base: &UnitMap, n: f64) -> PowerUnits {
 /// one multi-word name. Whitespace next to an operator or parenthesis is
 /// left untouched.
 ///
-/// The transformation is BYTE-LENGTH-PRESERVING: each joining space/tab
-/// becomes one `_`, and nothing is collapsed or trimmed. Parse-error byte
-/// offsets computed against the joined string are rendered against the
-/// original by `errors::format_snippet` and carried to GUI consumers as
-/// `FormattedError.start_offset`/`end_offset`, so a length change here
-/// would shift every underline after the first whitespace run. Only ASCII
-/// space and tab participate in joins (1 byte -> 1 byte); other whitespace
-/// is left verbatim for the lexer to reject at its true offset.
+/// A joining whitespace RUN collapses to a single `_`, matching how
+/// `canonicalize` collapses whitespace runs in a DECLARED unit name -- the
+/// joined spelling and the declaration must canonicalize identically, or a
+/// unit declared `Widget  Years` (doubled space) silently detaches from a
+/// variable's identical units string. Non-joining whitespace (next to an
+/// operator or parenthesis) is left verbatim, so parse-error byte offsets
+/// (rendered against the ORIGINAL string by `errors::format_snippet`) stay
+/// exact everywhere except after a collapsed multi-whitespace join -- the
+/// pathological case, traded for canonical identity. Only ASCII space and
+/// tab participate in joins; other whitespace is left for the lexer to
+/// reject at its true offset.
 pub(crate) fn join_multiword_unit_names(eqn: &str) -> std::borrow::Cow<'_, str> {
     fn is_word_char(c: char) -> bool {
         c.is_alphanumeric() || c == '_' || c == '$'
@@ -147,20 +150,18 @@ pub(crate) fn join_multiword_unit_names(eqn: &str) -> std::borrow::Cow<'_, str> 
         let c = chars[i];
         if is_joinable_ws(c) {
             // A whitespace run joins two words only if BOTH neighbors are
-            // word characters; each joining char maps 1:1 to `_`.
+            // word characters.
             let prev_is_word = out.chars().next_back().is_some_and(is_word_char);
             let mut j = i;
             while j < chars.len() && is_joinable_ws(chars[j]) {
                 j += 1;
             }
             let next_is_word = j < chars.len() && is_word_char(chars[j]);
-            for run_char in chars.iter().take(j).skip(i) {
-                if prev_is_word && next_is_word {
-                    out.push('_');
-                    changed = true;
-                } else {
-                    out.push(*run_char);
-                }
+            if prev_is_word && next_is_word {
+                out.push('_');
+                changed = true;
+            } else {
+                out.extend(chars.iter().take(j).skip(i));
             }
             i = j;
         } else {
@@ -255,40 +256,60 @@ impl Context {
         // A builtin whose name or alias the model declares itself is not
         // added verbatim -- the model's definition wins (XMILE 3.3.6: on a
         // name collision "the implementation SHOULD respect the unit
-        // definitions for the model"). But DROPPING the whole group severs
-        // the equivalences: a model declaring the baseline primary `weeks`
-        // would leave `week`/`wk` unregistered, so the surviving builtin
-        // `per_week = 1/week` minted a phantom `week` base and no longer
-        // equaled `1/weeks`. Instead the group's non-colliding spellings are
-        // re-tied to the model's unit as a chained alias (`week = weeks`,
-        // aliases `wk`) -- the alias-by-equation mechanism 3.3.6 describes
-        // for exactly this purpose.
+        // definitions for the model"). What "wins" means depends on WHICH
+        // spelling the model claimed:
+        //
+        //   - A FULL spelling (`weeks`, `year`, `person`): the model has
+        //     declared the baseline unit itself, so the group's remaining
+        //     spellings are re-tied to the model's unit as a chained alias
+        //     (`week = weeks`, aliases `wk`) -- the alias-by-equation
+        //     mechanism 3.3.6 describes. Dropping the whole group instead
+        //     severed the equivalences: `per_week = 1/week` minted a
+        //     phantom `week` base and no longer equaled `1/weeks`.
+        //
+        //   - Only a short ABBREVIATION (`s`, `min`, `wk`): a model using
+        //     `s` for its own unit almost certainly does NOT mean seconds,
+        //     so the model takes just that name -- the builtin keeps its
+        //     full spellings as an independent unit, minus the claimed
+        //     abbreviation. (`yr`/`yrs` are deliberately NOT abbreviations
+        //     here: they are widespread genuine spellings of year in
+        //     Vensim models, with no plausible other meaning.)
+        const ABBREVIATIONS: &[&str] =
+            &["$s", "ns", "us", "ms", "s", "min", "hr", "wk", "mo", "qtr"];
+        let claimed = |n: &str| -> bool { model_unit_identifiers.contains(&*canonicalize(n)) };
         let mut combined_units: Vec<Unit> = units.to_vec();
         for (name, aliases, equation) in builtin_units {
-            let collided: Option<String> = std::iter::once(*name)
+            let full_collision: Option<String> = std::iter::once(*name)
                 .chain(aliases.iter().copied())
-                .map(|n| canonicalize(n).into_owned())
-                .find(|n| model_unit_identifiers.contains(n));
-            match collided {
-                None => combined_units.push(Unit {
+                .filter(|n| !ABBREVIATIONS.contains(n))
+                .find(|n| claimed(n))
+                .map(|n| canonicalize(n).into_owned());
+            if let Some(model_spelling) = full_collision {
+                let mut leftovers = std::iter::once(*name)
+                    .chain(aliases.iter().copied())
+                    .filter(|n| !claimed(n));
+                if let Some(primary) = leftovers.next() {
+                    combined_units.push(Unit {
+                        name: primary.to_string(),
+                        equation: Some(model_spelling),
+                        disabled: false,
+                        aliases: leftovers.map(|s| s.to_string()).collect(),
+                    });
+                }
+            } else {
+                // No full-spelling collision; keep the builtin, minus any
+                // abbreviation the model claimed for itself. (A builtin
+                // PRIMARY is never an abbreviation, so only aliases filter.)
+                combined_units.push(Unit {
                     name: name.to_string(),
                     equation: equation.map(|s| s.to_string()),
                     disabled: false,
-                    aliases: aliases.iter().map(|s| s.to_string()).collect(),
-                }),
-                Some(model_spelling) => {
-                    let mut leftovers = std::iter::once(*name)
-                        .chain(aliases.iter().copied())
-                        .filter(|n| !model_unit_identifiers.contains(&*canonicalize(n)));
-                    if let Some(primary) = leftovers.next() {
-                        combined_units.push(Unit {
-                            name: primary.to_string(),
-                            equation: Some(model_spelling),
-                            disabled: false,
-                            aliases: leftovers.map(|s| s.to_string()).collect(),
-                        });
-                    }
-                }
+                    aliases: aliases
+                        .iter()
+                        .filter(|a| !claimed(a))
+                        .map(|s| s.to_string())
+                        .collect(),
+                });
             }
         }
 
@@ -727,27 +748,32 @@ pub fn parse_units(
 }
 
 #[test]
-fn join_multiword_unit_names_preserves_byte_length() {
-    // Parse-error byte offsets are computed against the JOINED string but
-    // rendered against the ORIGINAL (errors::format_snippet and the
-    // FormattedError start/end offsets carried to GUI consumers), so the
-    // join must be byte-length-preserving or every underline after a
-    // whitespace run shifts.
+fn join_multiword_unit_names_matches_canonicalize_and_keeps_offsets() {
+    // Two properties, in priority order: (1) a joining whitespace RUN
+    // collapses to one `_`, so the joined spelling canonicalizes exactly
+    // like the same name in a unit DECLARATION (`canonicalize` collapses
+    // runs); (2) everywhere except after such a collapsed run, byte length
+    // is preserved so parse-error offsets (rendered against the original
+    // string) stay exact -- non-joining whitespace is untouched.
     let cases = [
         ("Degrees Fahrenheit/Minute", "Degrees_Fahrenheit/Minute"),
         ("widgets  //  year", "widgets  //  year"),
-        ("a  b", "a__b"),
+        ("a  b", "a_b"),
         ("people * meter", "people * meter"),
         (" leading and trailing ", " leading_and_trailing "),
         ("a\tb", "a_b"),
+        ("Widget  Years", "Widget_Years"),
     ];
     for (input, expected) in cases {
         let joined = join_multiword_unit_names(input);
         assert_eq!(joined.as_ref(), expected, "join of {input:?}");
+    }
+    // single-space joins and non-joining whitespace preserve byte length
+    for (input, _) in cases.iter().filter(|(i, _)| !i.contains("  ")) {
         assert_eq!(
-            joined.len(),
+            join_multiword_unit_names(input).len(),
             input.len(),
-            "byte length must be preserved for {input:?}"
+            "byte length preserved for {input:?}"
         );
     }
 }

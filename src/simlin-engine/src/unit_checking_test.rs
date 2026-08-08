@@ -1514,6 +1514,68 @@ mod tests {
     }
 
     #[test]
+    fn abbreviation_collision_takes_only_the_abbreviation() {
+        // A model claiming a SHORT abbreviation ('s') for its own unit takes
+        // just that name -- the builtin keeps its full spellings ('second',
+        // 'seconds') as an independent unit, and the model's 's' stays
+        // distinct from 'second'. (Declaring a FULL spelling like 'weeks'
+        // still takes over the whole baseline group -- see
+        // model_declared_baseline_primary_keeps_derived_builtins_tied.)
+        TestProject::new("abbrev-collision-clean")
+            .with_time_units("year")
+            .unit("s", None)
+            .aux_with_units("a", "1", Some("second"))
+            .aux_with_units("b", "a", Some("seconds"))
+            .aux_with_units("c", "2", Some("s"))
+            .aux_with_units("d", "c", Some("s"))
+            .assert_no_unit_diagnostics();
+
+        let p = TestProject::new("abbrev-collision-distinct")
+            .with_time_units("year")
+            .unit("s", None)
+            .aux_with_units("c", "2", Some("s"))
+            .aux_with_units("e", "c", Some("second"));
+        let details = p.unit_diagnostic_details();
+        assert!(
+            details.iter().any(|(v, _)| v.as_deref() == Some("e")),
+            "the model's 's' must stay distinct from the builtin 'second': {details:?}"
+        );
+    }
+
+    #[test]
+    fn multi_space_unit_names_match_their_declaration() {
+        // `canonicalize` collapses a whitespace RUN in a declared unit name
+        // to a single underscore, so the units-string join must collapse the
+        // same way -- a 1:1 byte mapping stored `widget__years` while the
+        // declaration stored `widget_years`, silently detaching the alias
+        // and minting a phantom base unit.
+        TestProject::new("multi-space-units")
+            .with_time_units("year")
+            .unit("widget", None)
+            .unit("Widget  Years", Some("widget*year"))
+            .aux_with_units("a", "1", Some("Widget  Years"))
+            .aux_with_units("b", "a", Some("widget*year"))
+            .assert_no_unit_diagnostics();
+    }
+
+    #[test]
+    fn huge_symbolic_exponents_do_not_panic_inference() {
+        // `(y*y)^-1073741824` builds a symbolic map holding `@y^(i32::MIN)`;
+        // the solver's metavariable scans then take |exponent|, which
+        // overflows on i32::MIN in debug builds. The crash-only contract for
+        // absurd exponents covers the solver too.
+        let p = TestProject::new("huge-symbolic-exponent")
+            .with_time_units("year")
+            .unit("meter", None)
+            .unit("second", None)
+            .aux_with_units("y", "2", Some("meter"))
+            .aux_with_units("z", "3", Some("second"))
+            .aux_with_units("x", "(y*y)^-1073741824 + z", Some("meter"));
+        // any diagnostics are fine; completing without a panic is the point.
+        let _ = p.unit_diagnostic_details();
+    }
+
+    #[test]
     fn sqrt_of_inferred_units_still_constrains_the_result() {
         // `root = SQRT(source)` where root has NO declared units: inference
         // cannot represent sqrt of a symbolic map, but degrading the result

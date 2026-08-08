@@ -172,7 +172,9 @@ fn single_fv(units: &UnitMap) -> Option<&str> {
             // Only consider metavariables with exponent ±1.
             // If |exponent| > 1, we can't solve for this variable because it would
             // require fractional exponents (e.g., @x^2 = meters => @x = meters^(1/2)).
-            if exp.abs() != 1 {
+            // unsigned_abs: |i32::MIN| overflows, and a saturated exponent
+            // (reachable from a literal like `(y*y)^-2^30`) must not panic.
+            if exp.unsigned_abs() != 1 {
                 return None;
             }
             if result.is_none() {
@@ -199,7 +201,7 @@ fn solve_for(var: &str, mut lhs: UnitMap) -> UnitMap {
         // Use a regular assert since violating this invariant would produce
         // incorrect results (not just a performance issue).
         assert!(
-            exponent.abs() == 1,
+            exponent.unsigned_abs() == 1,
             "solve_for called with |exponent| != 1; single_fv should prevent this"
         );
         exponent > 0
@@ -280,10 +282,12 @@ impl ConstraintSet {
                 None => continue,
             };
 
-            let scaled_units = if exponent.abs() == 1 {
+            // saturating/unsigned: |i32::MIN| overflows, and an absurd
+            // saturated exponent must scale absurdly rather than panic.
+            let scaled_units = if exponent.unsigned_abs() == 1 {
                 units.clone()
             } else {
-                units.clone().exp(exponent.abs())
+                units.clone().exp(exponent.saturating_abs())
             };
 
             let op = if exponent > 0 {
