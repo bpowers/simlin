@@ -36,9 +36,15 @@ fi
 
 VERSION_FILE="src/simlin-mcp/pysimlin.version"
 
+# Tag before committing the version-file bump: the pre-commit hook runs
+# simlin-mcp's pysimlin_version_matches_latest_tag test, which requires the
+# pysimlin-v* tag matching pysimlin.version to already exist. The tag lands
+# on the last content commit -- which is also what setuptools-scm derives
+# pysimlin's version from; the bump commit only refreshes MCP instructions.
+git tag "pysimlin-v$VERSION"
+
 printf '%s\n' "$VERSION" > "$VERSION_FILE"
 git add "$VERSION_FILE"
 git commit -m "mcp: update pysimlin version reference to $VERSION"
-git tag "pysimlin-v$VERSION"
 
 echo "Tagged pysimlin-v$VERSION. Push with: git push origin main pysimlin-v$VERSION"
