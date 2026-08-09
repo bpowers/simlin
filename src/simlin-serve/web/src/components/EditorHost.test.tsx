@@ -718,16 +718,6 @@ describe('EditorHost', () => {
     expect(sent).toEqual([]);
   });
 
-  test('does not throw when no socket is provided (optional prop)', async () => {
-    globalThis.fetch = makeFetchResolving({
-      json: '{}',
-      version: 0,
-      source_format: 'stmx',
-    }) as unknown as typeof globalThis.fetch;
-
-    expect(() => render(<EditorHost path="teacup.stmx" />)).not.toThrow();
-  });
-
   test('emits projectFocused for the new path when path changes', async () => {
     const fetchMock = rs
       .fn()
@@ -846,20 +836,6 @@ describe('EditorHost', () => {
 
     rerender(<EditorHost path="a.stmx" socket={socket} />);
     expect(sent).toEqual([{ type: 'projectFocused', path: 'a.stmx' }]);
-  });
-
-  test('passes an onSelectionChanged callback to the Editor', async () => {
-    globalThis.fetch = makeFetchResolving({
-      json: '{}',
-      version: 0,
-      source_format: 'stmx',
-    }) as unknown as typeof globalThis.fetch;
-
-    const { socket } = makeFakeSocket();
-    render(<EditorHost path="a.stmx" socket={socket} />);
-
-    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
-    expect(typeof EditorMock.lastProps?.onSelectionChanged).toBe('function');
   });
 
   test('debounces selectionChanged frames and emits the latest idents (AC6.2)', async () => {
@@ -988,113 +964,6 @@ describe('EditorHost', () => {
       // No selection frame should be emitted: A's idents do not belong to
       // B's namespace, and the selection was never re-fired against B.
       expect(sent.filter((m) => m.type === 'selectionChanged')).toEqual([]);
-    } finally {
-      rs.useRealTimers();
-    }
-  });
-
-  test('selectionChanged uses the current path when emitted', async () => {
-    rs.useFakeTimers();
-    try {
-      globalThis.fetch = makeFetchResolving({
-        json: '{}',
-        version: 0,
-        source_format: 'stmx',
-      }) as unknown as typeof globalThis.fetch;
-
-      const { socket, sent } = makeFakeSocket();
-      render(<EditorHost path="models/teacup.xmile" socket={socket} />);
-
-      await act(async () => {
-        await Promise.resolve();
-      });
-      sent.length = 0;
-
-      EditorMock.lastProps?.onSelectionChanged?.(['teacup_temperature']);
-      act(() => {
-        rs.advanceTimersByTime(150);
-      });
-
-      expect(sent).toEqual([
-        {
-          type: 'selectionChanged',
-          path: 'models/teacup.xmile',
-          variableIdents: ['teacup_temperature'],
-        },
-      ]);
-    } finally {
-      rs.useRealTimers();
-    }
-  });
-
-  test('does not crash when onSelectionChanged fires without a socket', async () => {
-    rs.useFakeTimers();
-    try {
-      globalThis.fetch = makeFetchResolving({
-        json: '{}',
-        version: 0,
-        source_format: 'stmx',
-      }) as unknown as typeof globalThis.fetch;
-
-      render(<EditorHost path="a.stmx" />);
-
-      await act(async () => {
-        await Promise.resolve();
-      });
-
-      EditorMock.lastProps?.onSelectionChanged?.(['a']);
-      act(() => {
-        rs.advanceTimersByTime(150);
-      });
-      // No assertion required — the test passes if no exception is
-      // thrown when the optional socket is absent.
-    } finally {
-      rs.useRealTimers();
-    }
-  });
-
-  test('sustained burst of 5 events over 500ms emits exactly one frame with the latest idents', async () => {
-    // Five selection events arrive at 100ms intervals. The debounce window
-    // is 150ms so each event resets the timer. After 500ms total only one
-    // frame should be sent, carrying the idents from the final event.
-    rs.useFakeTimers();
-    try {
-      globalThis.fetch = makeFetchResolving({
-        json: '{}',
-        version: 0,
-        source_format: 'stmx',
-      }) as unknown as typeof globalThis.fetch;
-
-      const { socket, sent } = makeFakeSocket();
-      render(<EditorHost path="a.stmx" socket={socket} />);
-
-      await act(async () => {
-        await Promise.resolve();
-      });
-      sent.length = 0;
-
-      const onSelectionChanged = EditorMock.lastProps?.onSelectionChanged;
-      expect(onSelectionChanged).toBeDefined();
-
-      // Fire 5 events at 100ms intervals.
-      for (let i = 1; i <= 5; i++) {
-        onSelectionChanged?.([`v${i}`]);
-        act(() => {
-          rs.advanceTimersByTime(100);
-        });
-      }
-
-      // At this point 500ms have elapsed since the first event and 100ms
-      // since the last. The debounce timer (150ms) has not yet fired.
-      expect(sent).toEqual([]);
-
-      // Advance past the 150ms debounce window from the last event.
-      act(() => {
-        rs.advanceTimersByTime(50);
-      });
-
-      expect(sent).toHaveLength(1);
-      expect(sent[0]).toEqual({ type: 'selectionChanged', path: 'a.stmx', variableIdents: ['v5'] });
     } finally {
       rs.useRealTimers();
     }

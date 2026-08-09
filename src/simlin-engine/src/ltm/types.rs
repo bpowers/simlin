@@ -335,21 +335,6 @@ impl LoopPolarity {
 
         Some((polarity, confidence))
     }
-
-    /// Returns the conventional abbreviation for this polarity.
-    ///
-    /// Codes follow the LTM literature: "R", "B", "Rux", "Bux", "U".
-    /// "Rux" / "Bux" denote unknown-but-predominantly-R/B loops -- the
-    /// terminology comes from Schoenberg & Eberlein (2020).
-    pub fn abbreviation(&self) -> &'static str {
-        match self {
-            LoopPolarity::Reinforcing => "R",
-            LoopPolarity::Balancing => "B",
-            LoopPolarity::MostlyReinforcing => "Rux",
-            LoopPolarity::MostlyBalancing => "Bux",
-            LoopPolarity::Undetermined => "U",
-        }
-    }
 }
 
 /// Normalize a module·output reference to just the module node.

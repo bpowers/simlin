@@ -5,9 +5,10 @@
 // pattern: Imperative Shell
 //
 // Disk-write orchestration for the save handler. `resolve_save_target` is
-// the pure dispatcher (format -> target shape); `save_to_disk` does the
-// actual atomic file I/O. Kept together because the dispatcher's output is
-// only useful with the writer that consumes it.
+// the pure dispatcher (format -> target shape), `serialize_project` renders
+// the bytes, and `commit_write` does the atomic file I/O. Kept together
+// because the dispatcher's output is only useful with the writer that
+// consumes it.
 
 //! Format-aware write paths for the save handler.
 //!
@@ -21,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use simlin_engine::datamodel;
 
+use crate::path_resolution::sidecar_for_mdl;
 use crate::registry::ProjectFormat;
 
 /// Where a save should land on disk and how to format the bytes.
@@ -41,8 +43,8 @@ pub enum SaveTarget {
     SdJson(PathBuf),
 }
 
-/// Failure modes for `save_to_disk`. Carries the path that failed so the
-/// handler can attribute the cause when it logs.
+/// Failure modes for `serialize_project` and `commit_write`. Carries the
+/// path that failed so the handler can attribute the cause when it logs.
 #[derive(Debug)]
 pub enum SaveDiskError {
     XmileSerialize(simlin_engine::Error),
@@ -70,8 +72,10 @@ impl std::error::Error for SaveDiskError {}
 /// Pure dispatch from `(absolute_path, source_format)` to the
 /// `SaveTarget` describing where the bytes go and in which format.
 ///
-/// Sole owner of the sidecar-naming convention for `.mdl`; keep the rule
-/// here so `handlers.rs` doesn't grow a duplicate copy.
+/// The `.mdl` sidecar name comes from [`sidecar_for_mdl`] rather than a
+/// local copy of the rule: the write target and the GET handler's
+/// sidecar-preference lookup must agree exactly, or a save would land in
+/// a path the next read wouldn't pick up.
 pub fn resolve_save_target(absolute_path: &Path, source_format: ProjectFormat) -> SaveTarget {
     match source_format {
         ProjectFormat::Stmx | ProjectFormat::Xmile => {
@@ -144,49 +148,6 @@ pub fn commit_write(outcome: &WriteOutcome) -> Result<(), SaveDiskError> {
     atomic_write_to(&outcome.path, &outcome.bytes)
 }
 
-/// Serialize `project` into the format implied by `target`, then write
-/// it atomically. Returns the path that was written and the exact bytes
-/// emitted, so the caller can both stat for registry metadata and
-/// fingerprint for echo suppression in a single pass.
-///
-/// `SidecarJson` writes only the sidecar; the `.mdl` is never modified
-/// (the design's "sidecar becomes the new source of truth once it
-/// exists" rule, codified at the writer layer).
-pub fn save_to_disk(
-    project: &datamodel::Project,
-    target: &SaveTarget,
-) -> Result<WriteOutcome, SaveDiskError> {
-    match target {
-        SaveTarget::InPlaceXmile(path) => {
-            let xmile = simlin_engine::to_xmile(project).map_err(SaveDiskError::XmileSerialize)?;
-            let bytes = xmile.into_bytes();
-            atomic_write_to(path, &bytes)?;
-            Ok(WriteOutcome {
-                path: path.clone(),
-                bytes,
-            })
-        }
-        SaveTarget::SidecarJson { sidecar_path, .. } => {
-            let json_str = render_pretty_json(project)?;
-            let bytes = json_str.into_bytes();
-            atomic_write_to(sidecar_path, &bytes)?;
-            Ok(WriteOutcome {
-                path: sidecar_path.clone(),
-                bytes,
-            })
-        }
-        SaveTarget::SdJson(path) => {
-            let json_str = render_pretty_json(project)?;
-            let bytes = json_str.into_bytes();
-            atomic_write_to(path, &bytes)?;
-            Ok(WriteOutcome {
-                path: path.clone(),
-                bytes,
-            })
-        }
-    }
-}
-
 fn atomic_write_to(path: &Path, bytes: &[u8]) -> Result<(), SaveDiskError> {
     simlin_engine::io::atomic_write(path, bytes).map_err(|source| SaveDiskError::Io {
         path: path.to_path_buf(),
@@ -199,16 +160,6 @@ fn atomic_write_to(path: &Path, bytes: &[u8]) -> Result<(), SaveDiskError> {
 fn render_pretty_json(project: &datamodel::Project) -> Result<String, SaveDiskError> {
     let json_project = simlin_engine::json::Project::from(project);
     serde_json::to_string_pretty(&json_project).map_err(SaveDiskError::JsonSerialize)
-}
-
-/// For `path = "/dir/foo.mdl"`, return `/dir/foo.sd.json`. Mirrors the
-/// rule used by the GET handler when picking up an existing sidecar; the
-/// two must stay in lock-step or a save would land in a path the next
-/// GET wouldn't read from.
-fn sidecar_for_mdl(mdl_path: &Path) -> PathBuf {
-    let parent = mdl_path.parent().unwrap_or_else(|| Path::new(""));
-    let stem = mdl_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    parent.join(format!("{stem}.sd.json"))
 }
 
 #[cfg(test)]
@@ -277,6 +228,20 @@ mod tests {
         assert_eq!(target, SaveTarget::SdJson(PathBuf::from("/tmp/x.sd.json")));
     }
 
+    /// Drive the production two-step (`serialize_project` then
+    /// `commit_write`) the save handler runs. The split exists so the
+    /// handler can fingerprint the bytes before they land on disk; tests
+    /// that only care about the resulting file go through here so they
+    /// exercise the same pair of calls production does.
+    fn write_through_pipeline(
+        project: &datamodel::Project,
+        target: &SaveTarget,
+    ) -> Result<WriteOutcome, SaveDiskError> {
+        let outcome = serialize_project(project, target)?;
+        commit_write(&outcome)?;
+        Ok(outcome)
+    }
+
     #[test]
     fn save_in_place_xmile_writes_serializable_bytes() {
         let dir = TempDir::new().unwrap();
@@ -284,7 +249,7 @@ mod tests {
         let target = SaveTarget::InPlaceXmile(target_path.clone());
         let project = empty_project();
 
-        let outcome = save_to_disk(&project, &target).expect("write succeeds");
+        let outcome = write_through_pipeline(&project, &target).expect("write succeeds");
         assert_eq!(outcome.path, target_path);
 
         let bytes = fs::read(&target_path).expect("file exists");
@@ -304,7 +269,7 @@ mod tests {
         let target = SaveTarget::InPlaceXmile(target_path.clone());
         let project = load_teacup_project();
 
-        save_to_disk(&project, &target).expect("write succeeds");
+        write_through_pipeline(&project, &target).expect("write succeeds");
 
         let bytes = fs::read(&target_path).unwrap();
         let mut reader = Cursor::new(&bytes[..]);
@@ -318,31 +283,13 @@ mod tests {
     }
 
     #[test]
-    fn save_in_place_xmile_is_byte_stable_across_writes() {
-        let dir = TempDir::new().unwrap();
-        let path_a = dir.path().join("a.xmile");
-        let path_b = dir.path().join("b.xmile");
-        let project = load_teacup_project();
-
-        save_to_disk(&project, &SaveTarget::InPlaceXmile(path_a.clone())).unwrap();
-        save_to_disk(&project, &SaveTarget::InPlaceXmile(path_b.clone())).unwrap();
-
-        let bytes_a = fs::read(&path_a).unwrap();
-        let bytes_b = fs::read(&path_b).unwrap();
-        assert_eq!(
-            bytes_a, bytes_b,
-            "XMILE serialization must be byte-stable for the same input"
-        );
-    }
-
-    #[test]
     fn save_in_place_xmile_fails_when_parent_dir_missing() {
         let dir = TempDir::new().unwrap();
         let bogus = dir.path().join("nonexistent").join("out.xmile");
         let target = SaveTarget::InPlaceXmile(bogus.clone());
         let project = empty_project();
 
-        let err = save_to_disk(&project, &target).unwrap_err();
+        let err = write_through_pipeline(&project, &target).unwrap_err();
         match err {
             SaveDiskError::Io { path, .. } => assert_eq!(path, bogus),
             _ => panic!("expected SaveDiskError::Io, got {err:?}"),
@@ -364,7 +311,7 @@ mod tests {
             sidecar_path: sidecar_path.clone(),
         };
         let project = empty_project();
-        let outcome = save_to_disk(&project, &target).expect("write succeeds");
+        let outcome = write_through_pipeline(&project, &target).expect("write succeeds");
         assert_eq!(
             outcome.path, sidecar_path,
             "writer must return the sidecar path"
@@ -402,7 +349,7 @@ mod tests {
             sidecar_path: sidecar_path.clone(),
         };
         let project = empty_project();
-        save_to_disk(&project, &target).unwrap();
+        write_through_pipeline(&project, &target).unwrap();
 
         let bytes = fs::read(&sidecar_path).unwrap();
         let s = std::str::from_utf8(&bytes).unwrap();
@@ -417,7 +364,7 @@ mod tests {
         let target = SaveTarget::SdJson(target_path.clone());
         let project = empty_project();
 
-        let outcome = save_to_disk(&project, &target).expect("write succeeds");
+        let outcome = write_through_pipeline(&project, &target).expect("write succeeds");
         assert_eq!(outcome.path, target_path);
 
         let bytes = fs::read(&target_path).unwrap();
@@ -426,25 +373,5 @@ mod tests {
             serde_json::from_slice(&bytes).expect("sd.json parses back");
         let reparsed: datamodel::Project = json_project.into();
         assert_eq!(reparsed.name, project.name);
-    }
-
-    #[test]
-    fn save_sd_json_overwrites_existing_file_idempotently() {
-        // Saving twice must produce identical bytes (writer is byte-stable
-        // for the same input regardless of prior state).
-        let dir = TempDir::new().unwrap();
-        let target_path = dir.path().join("model.sd.json");
-        // Pre-seed with arbitrary stale bytes to confirm overwrite works.
-        fs::write(&target_path, b"stale").unwrap();
-        let project = empty_project();
-
-        save_to_disk(&project, &SaveTarget::SdJson(target_path.clone())).unwrap();
-        let bytes_first = fs::read(&target_path).unwrap();
-        save_to_disk(&project, &SaveTarget::SdJson(target_path.clone())).unwrap();
-        let bytes_second = fs::read(&target_path).unwrap();
-        assert_eq!(
-            bytes_first, bytes_second,
-            "JSON serialization must be byte-stable for the same input"
-        );
     }
 }

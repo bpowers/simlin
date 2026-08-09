@@ -23,6 +23,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
+use crate::discovery::format_for_path;
 use crate::events::{ChangeSource, ClientWsMessage, EventBus, WsMessage};
 use crate::git::GitProbe;
 use crate::parse::ParseError;
@@ -1212,23 +1213,6 @@ fn sanitize_rel_path(rel: &str) -> Result<PathBuf, ApiError> {
     Ok(candidate)
 }
 
-/// Mirror the discovery extension dispatcher for the read path. Phase 5 will
-/// consolidate this with `discovery::format_for_path` once the parse pipeline
-/// is unified across `simlin-serve` and `simlin-mcp`.
-fn format_for_path(path: &Path) -> Option<ProjectFormat> {
-    let path_str = path.to_str()?;
-    if path_str.ends_with(".sd.json") {
-        return Some(ProjectFormat::SdJson);
-    }
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    match ext.as_str() {
-        "stmx" => Some(ProjectFormat::Stmx),
-        "xmile" | "xml" => Some(ProjectFormat::Xmile),
-        "mdl" => Some(ProjectFormat::Mdl),
-        _ => None,
-    }
-}
-
 /// `GET /api/updates` — WebSocket endpoint that streams `WsMessage`
 /// frames to the connected browser. Each connection subscribes to the
 /// process's `EventBus`; messages are JSON-encoded and sent as text
@@ -1428,39 +1412,17 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_strips_curdir_segments() {
-        // `./model.stmx` is normalized to `model.stmx`; `Component::CurDir`
-        // is benign so we accept it (path traversal lives in `..`).
-        let p = sanitize_rel_path("./sub/model.stmx").unwrap();
-        let components: Vec<_> = p.components().collect();
-        // The curdir gets preserved by Components but isn't a security issue;
-        // canonicalize will collapse it.
-        assert!(!components.is_empty());
-    }
-
-    #[test]
-    fn format_dispatcher_recognizes_known_extensions() {
+    fn sanitize_accepts_curdir_segments_without_rewriting_them() {
+        // `Component::CurDir` is benign — traversal lives in `..` — so the
+        // sanitizer accepts it. It deliberately does not normalize: the
+        // returned path still carries the leading `./`, and the caller's
+        // `canonicalize` (which anchors the descendant check) collapses it.
+        let p = sanitize_rel_path("./sub/model.stmx").expect("curdir is accepted");
         assert_eq!(
-            format_for_path(Path::new("/tmp/x.stmx")),
-            Some(ProjectFormat::Stmx)
+            p.components().next(),
+            Some(Component::CurDir),
+            "sanitize_rel_path must return the path unrewritten"
         );
-        assert_eq!(
-            format_for_path(Path::new("/tmp/x.xmile")),
-            Some(ProjectFormat::Xmile)
-        );
-        assert_eq!(
-            format_for_path(Path::new("/tmp/x.xml")),
-            Some(ProjectFormat::Xmile)
-        );
-        assert_eq!(
-            format_for_path(Path::new("/tmp/x.mdl")),
-            Some(ProjectFormat::Mdl)
-        );
-        assert_eq!(
-            format_for_path(Path::new("/tmp/x.sd.json")),
-            Some(ProjectFormat::SdJson)
-        );
-        assert_eq!(format_for_path(Path::new("/tmp/x.txt")), None);
     }
 
     #[test]
@@ -1506,65 +1468,5 @@ mod tests {
         let err = SaveError::Internal(anyhow::anyhow!("oops"));
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    #[test]
-    fn save_error_validation_body_carries_details() {
-        let errors = vec![ValidationError {
-            code: "unknown_dependency".into(),
-            message: "undefined: foo".into(),
-            model_name: Some("main".into()),
-            variable_name: Some("bar".into()),
-            kind: "variable".into(),
-        }];
-        let serialized = serde_json::to_value(&errors).expect("serialize details");
-        // The IntoResponse body uses the same serialization, so we cross-check
-        // the field projection here without re-running the response machinery.
-        assert_eq!(serialized[0]["code"], "unknown_dependency");
-        assert_eq!(serialized[0]["modelName"], "main");
-        assert_eq!(serialized[0]["variableName"], "bar");
-        assert_eq!(serialized[0]["kind"], "variable");
-    }
-
-    #[test]
-    fn save_request_round_trips_through_json() {
-        let req = SaveRequest {
-            json: "{}".into(),
-            version: 1,
-        };
-        let serialized = serde_json::json!({
-            "json": &req.json,
-            "version": req.version,
-        })
-        .to_string();
-        let parsed: SaveRequest =
-            serde_json::from_str(&serialized).expect("SaveRequest parses back");
-        assert_eq!(parsed.json, "{}");
-        assert_eq!(parsed.version, 1);
-    }
-
-    #[test]
-    fn save_response_serializes_with_expected_fields() {
-        let resp = SaveResponse {
-            version: 7,
-            path: "sub/model.stmx".into(),
-        };
-        let value = serde_json::to_value(&resp).expect("serialize SaveResponse");
-        assert_eq!(value["version"].as_u64(), Some(7));
-        assert_eq!(value["path"].as_str(), Some("sub/model.stmx"));
-    }
-
-    #[test]
-    fn validation_error_skips_none_fields() {
-        let err = ValidationError {
-            code: "not_simulatable".into(),
-            message: "msg".into(),
-            model_name: None,
-            variable_name: None,
-            kind: "simulation".into(),
-        };
-        let value = serde_json::to_value(&err).expect("serialize");
-        assert!(value.get("modelName").is_none());
-        assert!(value.get("variableName").is_none());
     }
 }

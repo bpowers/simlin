@@ -55,7 +55,7 @@ pub fn resolve_model_name<'a>(
 ///
 /// We compute a single high-water-mark across both variable UIDs and view
 /// element UIDs for each model to guarantee uniqueness.
-pub fn ensure_variable_uids(project: &mut simlin_engine::datamodel::Project) {
+fn ensure_variable_uids(project: &mut simlin_engine::datamodel::Project) {
     for model in &mut project.models {
         let max_var_uid = model
             .variables
@@ -306,35 +306,76 @@ mod tests {
         }
     }
 
-    // Existing UIDs in a native JSON file must not be altered by ensure_variable_uids.
-    #[test]
-    fn open_project_native_json_preserves_existing_uids() {
-        let path = std::path::Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../test/logistic-growth.sd.json"
-        ));
-        let contents = std::fs::read_to_string(path).unwrap();
-        let (project, _) = open_project(path, &contents).unwrap();
-
-        // Collect UIDs from a second open for comparison; both must match.
-        let (project2, _) = open_project(path, &contents).unwrap();
-        for (m1, m2) in project.models.iter().zip(project2.models.iter()) {
-            for (v1, v2) in m1.variables.iter().zip(m2.variables.iter()) {
-                let uid1 = match v1 {
-                    simlin_engine::datamodel::Variable::Stock(s) => s.uid,
-                    simlin_engine::datamodel::Variable::Flow(f) => f.uid,
-                    simlin_engine::datamodel::Variable::Aux(a) => a.uid,
-                    simlin_engine::datamodel::Variable::Module(m) => m.uid,
-                };
-                let uid2 = match v2 {
-                    simlin_engine::datamodel::Variable::Stock(s) => s.uid,
-                    simlin_engine::datamodel::Variable::Flow(f) => f.uid,
-                    simlin_engine::datamodel::Variable::Aux(a) => a.uid,
-                    simlin_engine::datamodel::Variable::Module(m) => m.uid,
-                };
-                assert_eq!(uid1, uid2, "UIDs must be stable across repeated opens");
-            }
+    fn variable_uid(var: &simlin_engine::datamodel::Variable) -> Option<i32> {
+        match var {
+            simlin_engine::datamodel::Variable::Stock(s) => s.uid,
+            simlin_engine::datamodel::Variable::Flow(f) => f.uid,
+            simlin_engine::datamodel::Variable::Aux(a) => a.uid,
+            simlin_engine::datamodel::Variable::Module(m) => m.uid,
         }
+    }
+
+    /// `ensure_variable_uids` must leave a UID the file already carries
+    /// alone, and must draw fresh UIDs from a high-water mark that spans
+    /// BOTH the variable UIDs and the view-element UIDs -- a fresh UID that
+    /// collided with a view element would make `loop_metadata` ambiguous.
+    ///
+    /// The fixture is a native-JSON string rather than a hand-built
+    /// `datamodel::Project` so the input arrives through the same parser
+    /// production uses; it deliberately mixes a variable with a UID, one
+    /// without, and a view element numbered ABOVE the explicit variable UID,
+    /// which is what makes the two halves of the high-water mark separable.
+    #[test]
+    fn open_project_preserves_existing_uids_and_fills_above_the_view_high_water_mark() {
+        let contents = r#"{
+            "name": "uids",
+            "simSpecs": {"startTime": 0, "endTime": 10, "dt": "1", "method": "euler"},
+            "models": [{
+                "name": "main",
+                "stocks": [{"uid": 7, "name": "population", "initialEquation": "100",
+                            "inflows": ["births"], "outflows": []}],
+                "flows": [{"name": "births", "equation": "population * 0.1"}],
+                "auxiliaries": [{"name": "rate", "equation": "0.1"}],
+                "views": [{"kind": "stock_flow", "elements": [
+                    {"type": "aux", "uid": 13, "name": "rate", "x": 0, "y": 0}
+                ], "zoom": 1}]
+            }]
+        }"#;
+        let path = std::path::Path::new("uids.sd.json");
+        let (project, format) = open_project(path, contents).unwrap();
+        assert_eq!(format, SourceFormat::NativeJson);
+
+        let model = &project.models[0];
+        let by_name: std::collections::HashMap<&str, Option<i32>> = model
+            .variables
+            .iter()
+            .map(|v| (v.get_ident(), variable_uid(v)))
+            .collect();
+
+        assert_eq!(
+            by_name["population"],
+            Some(7),
+            "a UID present in the file must survive the open unchanged"
+        );
+
+        // The two UID-less variables are assigned above the view-element
+        // high-water mark (13), not above the variable one (7).
+        for name in ["births", "rate"] {
+            let uid = by_name[name].expect("every variable must have a UID after open");
+            assert!(
+                uid > 13,
+                "assigned UID for '{name}' must clear the view-element \
+                 high-water mark of 13, got {uid}"
+            );
+        }
+
+        let uids: Vec<i32> = model.variables.iter().filter_map(variable_uid).collect();
+        let unique: std::collections::HashSet<i32> = uids.iter().copied().collect();
+        assert_eq!(
+            uids.len(),
+            unique.len(),
+            "UIDs must be unique within a model"
+        );
     }
 
     // UIDs assigned on first open of an SD-AI file must survive a

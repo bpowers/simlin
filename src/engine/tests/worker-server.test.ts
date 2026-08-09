@@ -11,11 +11,9 @@ import { WorkerServer } from '../src/worker-server';
 import {
   WorkerRequest,
   WorkerResponse,
-  WorkerState,
   serializeError,
   deserializeError,
   isValidRequest,
-  VALID_REQUEST_TYPES,
 } from '../src/worker-protocol';
 import { configureWasm, ready, resetWasm } from '../src/index';
 
@@ -42,7 +40,6 @@ function loadTestXmile(): Uint8Array {
 function createTestServer(): {
   server: WorkerServer;
   responses: WorkerResponse[];
-  lastResponse: () => WorkerResponse;
   sendAndWait: (request: WorkerRequest) => Promise<WorkerResponse>;
 } {
   const responses: WorkerResponse[] = [];
@@ -57,11 +54,6 @@ function createTestServer(): {
     }
   });
 
-  const lastResponse = () => {
-    if (responses.length === 0) throw new Error('No responses');
-    return responses[responses.length - 1];
-  };
-
   const sendAndWait = (request: WorkerRequest): Promise<WorkerResponse> => {
     return new Promise<WorkerResponse>((resolve) => {
       pendingResolvers.set(request.requestId, resolve);
@@ -74,7 +66,7 @@ function createTestServer(): {
     });
   };
 
-  return { server, responses, lastResponse, sendAndWait };
+  return { server, responses, sendAndWait };
 }
 
 let requestIdCounter = 1;
@@ -91,43 +83,10 @@ describe('WorkerServer', () => {
     requestIdCounter = 1;
   });
 
+  // The state machine is observed through behavior rather than through a
+  // getter that exists only for tests: UNINITIALIZED means operations answer
+  // "not ready", READY means they are served.
   describe('state machine', () => {
-    it('starts in UNINITIALIZED state', () => {
-      const { server } = createTestServer();
-      expect(server.currentState).toBe(WorkerState.UNINITIALIZED);
-    });
-
-    it('transitions to READY after init', async () => {
-      const { server, sendAndWait } = createTestServer();
-
-      const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
-      const wasmBuffer = fs.readFileSync(wasmPath);
-
-      const resp = await sendAndWait({
-        type: 'init',
-        requestId: nextRequestId(),
-        wasmSource: wasmBuffer.buffer.slice(wasmBuffer.byteOffset, wasmBuffer.byteOffset + wasmBuffer.byteLength),
-      });
-
-      expect(resp.type).toBe('success');
-      expect(server.currentState).toBe(WorkerState.READY);
-    });
-
-    it('double-init is idempotent', async () => {
-      const { server, sendAndWait } = createTestServer();
-
-      const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
-      const wasmBuffer = fs.readFileSync(wasmPath);
-      const source = wasmBuffer.buffer.slice(wasmBuffer.byteOffset, wasmBuffer.byteOffset + wasmBuffer.byteLength);
-
-      await sendAndWait({ type: 'init', requestId: nextRequestId(), wasmSource: source });
-      expect(server.currentState).toBe(WorkerState.READY);
-
-      const resp2 = await sendAndWait({ type: 'init', requestId: nextRequestId() });
-      expect(resp2.type).toBe('success');
-      expect(server.currentState).toBe(WorkerState.READY);
-    });
-
     it('rejects operations before init', () => {
       const { server, responses } = createTestServer();
 
@@ -144,8 +103,27 @@ describe('WorkerServer', () => {
       }
     });
 
-    it('reset returns to UNINITIALIZED', async () => {
-      const { server, sendAndWait } = createTestServer();
+    it('double-init is idempotent and leaves the server serving operations', async () => {
+      const { sendAndWait } = createTestServer();
+
+      const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
+      const wasmBuffer = fs.readFileSync(wasmPath);
+      const source = wasmBuffer.buffer.slice(wasmBuffer.byteOffset, wasmBuffer.byteOffset + wasmBuffer.byteLength);
+
+      const resp1 = await sendAndWait({ type: 'init', requestId: nextRequestId(), wasmSource: source });
+      expect(resp1.type).toBe('success');
+
+      // The second init carries no source: it must be a no-op on an already
+      // initialized server rather than tearing the engine down.
+      const resp2 = await sendAndWait({ type: 'init', requestId: nextRequestId() });
+      expect(resp2.type).toBe('success');
+
+      const opResp = await sendAndWait({ type: 'projectOpenXmile', requestId: nextRequestId(), data: loadTestXmile() });
+      expect(opResp.type).toBe('success');
+    });
+
+    it('reset returns the server to the pre-init state', async () => {
+      const { sendAndWait } = createTestServer();
 
       const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
       const wasmBuffer = fs.readFileSync(wasmPath);
@@ -155,20 +133,25 @@ describe('WorkerServer', () => {
         requestId: nextRequestId(),
         wasmSource: wasmBuffer.buffer.slice(wasmBuffer.byteOffset, wasmBuffer.byteOffset + wasmBuffer.byteLength),
       });
-      expect(server.currentState).toBe(WorkerState.READY);
-
       await sendAndWait({ type: 'reset', requestId: nextRequestId() });
-      expect(server.currentState).toBe(WorkerState.UNINITIALIZED);
+
+      const resp = await sendAndWait({ type: 'projectOpenXmile', requestId: nextRequestId(), data: loadTestXmile() });
+      expect(resp.type).toBe('error');
+      if (resp.type === 'error') {
+        expect(resp.error.message).toContain('not ready');
+      }
     });
   });
 
+  // Open/serialize/model-names/simulatable go through this same server one
+  // layer up in worker-backend.test.ts (its WorkerBackend talks to a real
+  // WorkerServer), so only the patch path -- which no backend test drives --
+  // is exercised directly here.
   describe('project operations', () => {
-    let server: ReturnType<typeof createTestServer>['server'];
     let sendAndWait: ReturnType<typeof createTestServer>['sendAndWait'];
 
     beforeEach(async () => {
       const test = createTestServer();
-      server = test.server;
       sendAndWait = test.sendAndWait;
 
       const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
@@ -178,93 +161,6 @@ describe('WorkerServer', () => {
         requestId: nextRequestId(),
         wasmSource: wasmBuffer.buffer.slice(wasmBuffer.byteOffset, wasmBuffer.byteOffset + wasmBuffer.byteLength),
       });
-    });
-
-    it('opens a project and returns a handle', async () => {
-      const xmile = loadTestXmile();
-      const resp = await sendAndWait({
-        type: 'projectOpenXmile',
-        requestId: nextRequestId(),
-        data: xmile,
-      });
-
-      expect(resp.type).toBe('success');
-      if (resp.type === 'success') {
-        expect(typeof resp.result).toBe('number');
-        expect(resp.result).toBeGreaterThan(0);
-      }
-    });
-
-    it('gets model names from a project', async () => {
-      const xmile = loadTestXmile();
-      const openResp = await sendAndWait({
-        type: 'projectOpenXmile',
-        requestId: nextRequestId(),
-        data: xmile,
-      });
-      expect(openResp.type).toBe('success');
-      const projectHandle = (openResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
-
-      const namesResp = await sendAndWait({
-        type: 'projectGetModelNames',
-        requestId: nextRequestId(),
-        handle: projectHandle,
-      });
-      expect(namesResp.type).toBe('success');
-      if (namesResp.type === 'success') {
-        expect(Array.isArray(namesResp.result)).toBe(true);
-        expect((namesResp.result as string[]).length).toBeGreaterThan(0);
-      }
-    });
-
-    it('serializes to protobuf and reopens', async () => {
-      const xmile = loadTestXmile();
-      const openResp = await sendAndWait({
-        type: 'projectOpenXmile',
-        requestId: nextRequestId(),
-        data: xmile,
-      });
-      const projectHandle = (openResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
-
-      const serializeResp = await sendAndWait({
-        type: 'projectSerializeProtobuf',
-        requestId: nextRequestId(),
-        handle: projectHandle,
-      });
-      expect(serializeResp.type).toBe('success');
-      const protobuf = (serializeResp as Extract<WorkerResponse, { type: 'success' }>).result as Uint8Array;
-      expect(protobuf.length).toBeGreaterThan(0);
-
-      // Reopen from protobuf
-      const reopenResp = await sendAndWait({
-        type: 'projectOpenProtobuf',
-        requestId: nextRequestId(),
-        data: protobuf,
-      });
-      expect(reopenResp.type).toBe('success');
-      const newHandle = (reopenResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
-      expect(newHandle).not.toBe(projectHandle);
-    });
-
-    it('checks simulatable status', async () => {
-      const xmile = loadTestXmile();
-      const openResp = await sendAndWait({
-        type: 'projectOpenXmile',
-        requestId: nextRequestId(),
-        data: xmile,
-      });
-      const projectHandle = (openResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
-
-      const simResp = await sendAndWait({
-        type: 'projectIsSimulatable',
-        requestId: nextRequestId(),
-        handle: projectHandle,
-        modelName: null,
-      });
-      expect(simResp.type).toBe('success');
-      if (simResp.type === 'success') {
-        expect(simResp.result).toBe(true);
-      }
     });
 
     it('applies a patch', async () => {
@@ -399,12 +295,10 @@ describe('WorkerServer', () => {
   });
 
   describe('handle disposal', () => {
-    let server: ReturnType<typeof createTestServer>['server'];
     let sendAndWait: ReturnType<typeof createTestServer>['sendAndWait'];
 
     beforeEach(async () => {
       const test = createTestServer();
-      server = test.server;
       sendAndWait = test.sendAndWait;
 
       const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
@@ -505,87 +399,6 @@ describe('WorkerServer', () => {
       }
     });
 
-    it('individual model dispose removes handle from projectChildren', async () => {
-      const xmile = loadTestXmile();
-      const openResp = await sendAndWait({
-        type: 'projectOpenXmile',
-        requestId: nextRequestId(),
-        data: xmile,
-      });
-      const projectHandle = (openResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
-
-      // Get model handle
-      const modelResp = await sendAndWait({
-        type: 'projectGetModel',
-        requestId: nextRequestId(),
-        handle: projectHandle,
-        name: null,
-      });
-      const modelHandle = (modelResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
-
-      // Project should have 1 child
-      expect(server.getProjectChildCount(projectHandle)).toBe(1);
-
-      // Dispose model individually (not via projectDispose)
-      await sendAndWait({
-        type: 'modelDispose',
-        requestId: nextRequestId(),
-        handle: modelHandle,
-      });
-
-      // projectChildren should be updated - stale handle should be removed
-      expect(server.getProjectChildCount(projectHandle)).toBe(0);
-    });
-
-    it('individual sim dispose removes handle from projectChildren', async () => {
-      const xmile = loadTestXmile();
-      const openResp = await sendAndWait({
-        type: 'projectOpenXmile',
-        requestId: nextRequestId(),
-        data: xmile,
-      });
-      const projectHandle = (openResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
-
-      const modelResp = await sendAndWait({
-        type: 'projectGetModel',
-        requestId: nextRequestId(),
-        handle: projectHandle,
-        name: null,
-      });
-      const modelHandle = (modelResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
-
-      const simResp = await sendAndWait({
-        type: 'simNew',
-        requestId: nextRequestId(),
-        modelHandle,
-        enableLtm: false,
-      });
-      const simHandle = (simResp as Extract<WorkerResponse, { type: 'success' }>).result as number;
-
-      // Project should have 2 children (model + sim)
-      expect(server.getProjectChildCount(projectHandle)).toBe(2);
-
-      // Dispose sim individually
-      await sendAndWait({
-        type: 'simDispose',
-        requestId: nextRequestId(),
-        handle: simHandle,
-      });
-
-      // Should have 1 child remaining (model only)
-      expect(server.getProjectChildCount(projectHandle)).toBe(1);
-
-      // Dispose model individually
-      await sendAndWait({
-        type: 'modelDispose',
-        requestId: nextRequestId(),
-        handle: modelHandle,
-      });
-
-      // Should have 0 children
-      expect(server.getProjectChildCount(projectHandle)).toBe(0);
-    });
-
     it('project dispose invalidates child sim handles', async () => {
       const xmile = loadTestXmile();
       const openResp = await sendAndWait({
@@ -683,13 +496,6 @@ describe('WorkerServer', () => {
       expect(isValidRequest({})).toBe(false);
       expect(isValidRequest({ type: 'init' })).toBe(false); // no requestId
       expect(isValidRequest({ type: 'invalidType', requestId: 1 })).toBe(false);
-    });
-
-    it('VALID_REQUEST_TYPES contains all expected types', () => {
-      expect(VALID_REQUEST_TYPES.has('init')).toBe(true);
-      expect(VALID_REQUEST_TYPES.has('projectOpenXmile')).toBe(true);
-      expect(VALID_REQUEST_TYPES.has('simRunToEnd')).toBe(true);
-      expect(VALID_REQUEST_TYPES.has('nonExistent')).toBe(false);
     });
 
     it('server ignores completely invalid messages', () => {

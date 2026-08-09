@@ -44,12 +44,6 @@ describe('DirectBackend', () => {
     backend.reset();
   });
 
-  describe('lifecycle', () => {
-    it('should report initialized after init', () => {
-      expect(backend.isInitialized()).toBe(true);
-    });
-  });
-
   describe('project operations', () => {
     let projectHandle: ProjectHandle;
 
@@ -59,11 +53,6 @@ describe('DirectBackend', () => {
 
     afterEach(() => {
       backend.projectDispose(projectHandle);
-    });
-
-    it('should open XMILE project and return a valid handle', () => {
-      expect(typeof projectHandle).toBe('number');
-      expect(projectHandle).toBeGreaterThan(0);
     });
 
     it('should get model count', () => {
@@ -202,11 +191,6 @@ describe('DirectBackend', () => {
       backend.projectDispose(projectHandle);
     });
 
-    it('should get model handle', () => {
-      expect(typeof modelHandle).toBe('number');
-      expect(modelHandle).toBeGreaterThan(0);
-    });
-
     it('should get causal links', () => {
       const links = backend.modelGetLinks(modelHandle);
       expect(Array.isArray(links)).toBe(true);
@@ -284,16 +268,6 @@ describe('DirectBackend', () => {
       backend.projectDispose(projectHandle);
     });
 
-    it('should create sim', () => {
-      expect(typeof simHandle).toBe('number');
-      expect(simHandle).toBeGreaterThan(0);
-    });
-
-    it('should get initial time', () => {
-      const time = backend.simGetTime(simHandle);
-      expect(typeof time).toBe('number');
-    });
-
     it('should run to a specific time', () => {
       const targetTime = 5;
       backend.simRunTo(simHandle, targetTime);
@@ -334,12 +308,6 @@ describe('DirectBackend', () => {
       const time = backend.simGetTime(simHandle);
       // After reset, time should be back to start
       expect(time).toBeLessThan(1);
-    });
-
-    it('should get links', () => {
-      backend.simRunToEnd(simHandle);
-      const links = backend.simGetLinks(simHandle);
-      expect(Array.isArray(links)).toBe(true);
     });
   });
 

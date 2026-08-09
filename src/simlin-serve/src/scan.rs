@@ -248,12 +248,13 @@ mod tests {
     }
 
     #[test]
-    fn rescan_preserves_version_after_check_and_increment() {
+    fn rescan_preserves_version_after_a_save() {
         // Regression: scan_into_registry must not reset a non-zero version
         // to 0. A client that saved (version 0 -> 1) and then triggers a
         // listing rescan must still get a 409 when retrying with version 0.
         let dir = TempDir::new().unwrap();
-        touch(dir.path(), "model.stmx", b"<root/>");
+        let model = r#"{"name":"m","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
+        touch(dir.path(), "model.sd.json", model.as_bytes());
 
         let canonical = dir.path().canonicalize().unwrap();
         let registry = ProjectRegistry::new(canonical.clone());
@@ -261,11 +262,15 @@ mod tests {
 
         // Initial scan: version is 0.
         scan_into_registry(dir.path(), &registry, &git).unwrap();
-        let abs = canonical.join("model.stmx");
+        let abs = canonical.join("model.sd.json");
         assert_eq!(registry.get(&abs).unwrap().version, 0);
 
-        // Simulate a successful save: version 0 -> 1.
-        registry.check_and_increment(&abs, 0).unwrap();
+        // A save through the registry primitive every write path uses:
+        // version 0 -> 1.
+        let new_json: serde_json::Value = serde_json::from_str(model).unwrap();
+        registry
+            .check_increment_and_merge(&abs, 0, &new_json)
+            .unwrap();
         assert_eq!(registry.get(&abs).unwrap().version, 1);
 
         // Rescan (as triggered by GET /api/projects): version must stay 1.

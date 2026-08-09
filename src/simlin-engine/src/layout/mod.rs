@@ -10,6 +10,7 @@ pub mod config;
 pub mod connector;
 pub mod declutter;
 mod detect_ltm_loops;
+#[cfg(any(test, feature = "layout_eval"))]
 pub mod eval_stats;
 pub mod graph;
 pub mod metadata;

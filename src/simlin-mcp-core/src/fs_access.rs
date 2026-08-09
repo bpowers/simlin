@@ -4,18 +4,26 @@
 
 // pattern: Imperative Shell
 
-//! Stateless filesystem-backed [`ProjectAccess`] for the `simlin-mcp` binary.
+//! Stateless filesystem-backed [`ProjectAccess`], used by the `simlin-mcp`
+//! stdio binary and by this crate's own integration tests.
 //!
 //! Each tool call re-reads the file from disk and writes the result back
 //! verbatim — this preserves the wire-level semantics of the pre-rmcp
 //! `@simlin/mcp` server, where there is no in-memory project cache and
 //! every call sees the file's current bytes.
 //!
+//! It lives here rather than in the binary so the tests and the binary run
+//! the SAME impl. `simlin-mcp-core`'s integration suites previously used a
+//! hand-maintained near-copy (`test_support::TestFileSystemAccess`), which
+//! had drifted at exactly the two points where this file is non-trivial: it
+//! did not reject `.mdl` writes, and it did not regenerate the SD-AI
+//! `relationships` field, so every test that exercised a save was proving
+//! something about a simpler function than the one that ships.
+//!
 //! `expected_version` is ignored on `save` because there is no shared
 //! state to lock against; we always return `0` (the same constant
-//! [`ProjectAccess::open`] supplies).  When `simlin-serve` mounts the
-//! same handler in Phase 6 it provides its own `ProjectAccess` impl that
-//! actually honours the version token.
+//! [`ProjectAccess::open`] supplies).  `simlin-serve` provides its own
+//! registry-backed `ProjectAccess` impl that actually honours the token.
 //!
 //! `.mdl` files are write-rejected here so an LLM gets a single,
 //! actionable error message rather than the engine's deeper "MDL writer
@@ -27,10 +35,11 @@ use std::path::Path;
 
 use simlin_engine::datamodel;
 use simlin_engine::json as ejson;
-use simlin_mcp_core::access::{OpenedProject, ProjectAccess};
-use simlin_mcp_core::errors::AccessError;
-use simlin_mcp_core::open::open_project;
-use simlin_mcp_core::types::SourceFormat;
+
+use crate::access::{OpenedProject, ProjectAccess};
+use crate::errors::AccessError;
+use crate::open::open_project;
+use crate::types::SourceFormat;
 
 /// Stateless filesystem-backed `ProjectAccess`.
 ///
@@ -77,6 +86,12 @@ impl ProjectAccess for FileSystemAccess {
         // path's extension rather than the format because `.mdl` files
         // are parsed as Xmile internally — only the on-disk extension
         // distinguishes a Vensim-source project from an XMILE one here.
+        //
+        // Defense in depth: `tools::edit_model` rejects a `.mdl` path before
+        // it ever calls `save`, so in production this arm is unreachable
+        // through the MCP tool surface. It is kept because `ProjectAccess`
+        // is a public trait -- any other caller reaching `save` directly
+        // must get the same refusal rather than an engine-level failure.
         if has_mdl_extension(abs_path) {
             return Err(AccessError::WriteError(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -133,11 +148,10 @@ fn has_mdl_extension(path: &Path) -> bool {
 /// SdaiJson outputs include a derived `relationships` field computed
 /// from the engine's salsa-backed link-polarity analysis — this matches
 /// the pre-rmcp simlin-mcp behaviour where every save re-derived
-/// relationships rather than trusting whatever was on disk.  The
-/// in-test path used by `simlin-mcp-core/tests/integration/edit_model_e2e.rs` skips
-/// this enrichment because it doesn't exercise SD-AI relationships;
-/// production callers go through this function and must keep
-/// relationships in sync with the post-edit model.
+/// relationships rather than trusting whatever was on disk.  Preserving
+/// stale relationships from the source file would leave the SD-AI
+/// conformance evaluator reading a causal graph that no longer matches
+/// the model's equations.
 fn serialize_project(
     project: &datamodel::Project,
     format: SourceFormat,

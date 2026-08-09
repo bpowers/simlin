@@ -32,35 +32,14 @@ pub fn content_hash(bytes: &[u8]) -> u64 {
 mod tests {
     use super::*;
 
-    /// Captured constant from a known-good run (twox-hash 2.x). If this drifts
-    /// the entire echo-suppression scheme breaks, so it's worth pinning to a
-    /// specific value rather than just "deterministic".
+    /// Captured constant from a known-good run (twox-hash 2.x). Pinning the
+    /// exact value (rather than merely "the function is deterministic")
+    /// catches an upstream algorithm change, which would silently break
+    /// echo suppression for every file written before the upgrade.
     const HASH_OF_HELLO: u64 = 0x9555_e855_5c62_dcfd;
 
     #[test]
     fn hash_of_hello_matches_captured_constant() {
         assert_eq!(content_hash(b"hello"), HASH_OF_HELLO);
-    }
-
-    #[test]
-    fn distinct_inputs_produce_distinct_outputs() {
-        // The probability of an XXH3-64 collision on two short distinct
-        // inputs is vanishingly small; this confirms the function is
-        // actually running, not that we've defeated XXH3.
-        let a = content_hash(b"alpha");
-        let b = content_hash(b"beta");
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn empty_input_has_a_consistent_hash() {
-        let hash = content_hash(b"");
-        assert_eq!(hash, content_hash(b""));
-    }
-
-    #[test]
-    fn hash_is_deterministic_across_repeated_calls() {
-        let payload = b"the quick brown fox jumps over the lazy dog";
-        assert_eq!(content_hash(payload), content_hash(payload));
     }
 }

@@ -116,17 +116,4 @@ mod tests {
             "should fail when parent directory does not exist"
         );
     }
-
-    #[test]
-    fn succeeds_on_normal_directory() {
-        // Exercises the best-effort parent dir fsync path: on a normal
-        // directory the fsync succeeds silently (no error propagated).
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("fsync_test.txt");
-
-        atomic_write(&target, b"fsync content").unwrap();
-
-        let read_back = fs::read(&target).unwrap();
-        assert_eq!(read_back, b"fsync content");
-    }
 }

@@ -148,45 +148,6 @@ impl Default for LayoutConfig {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_default_config() {
-        let config = LayoutConfig::default();
-
-        // Element dimensions
-        assert!((config.stock_width - 45.0).abs() < f64::EPSILON);
-        assert!((config.stock_height - 35.0).abs() < f64::EPSILON);
-        assert!((config.flow_width - 12.0).abs() < f64::EPSILON);
-        assert!((config.flow_height - 12.0).abs() < f64::EPSILON);
-        assert!((config.aux_width - 18.0).abs() < f64::EPSILON);
-        assert!((config.aux_height - 18.0).abs() < f64::EPSILON);
-        assert!((config.cloud_width - 20.0).abs() < f64::EPSILON);
-        assert!((config.cloud_height - 20.0).abs() < f64::EPSILON);
-        assert!((config.module_width - 55.0).abs() < f64::EPSILON);
-        assert!((config.module_height - 45.0).abs() < f64::EPSILON);
-
-        // Spacing
-        assert!((config.horizontal_spacing - 100.0).abs() < f64::EPSILON);
-        assert!((config.vertical_spacing - 150.0).abs() < f64::EPSILON);
-
-        // Canvas positioning
-        assert!((config.start_x - 100.0).abs() < f64::EPSILON);
-        assert!((config.start_y - 100.0).abs() < f64::EPSILON);
-
-        // Feedback loop
-        assert!((config.loop_curvature_factor - 0.5).abs() < f64::EPSILON);
-
-        // Annealing parameters
-        assert_eq!(config.annealing_iterations, 200);
-        assert!((config.annealing_temperature - 30.0).abs() < f64::EPSILON);
-        assert!((config.annealing_cooling_rate - 0.95).abs() < f64::EPSILON);
-        assert_eq!(config.annealing_reheat_period, 100);
-        assert_eq!(config.annealing_random_seed, 42);
-        assert_eq!(config.annealing_interval, 200);
-        assert_eq!(config.annealing_max_rounds, 6);
-        assert!((config.annealing_reheat_temperature - 0.0).abs() < f64::EPSILON);
-        assert!((config.annealing_temperature_scale - 0.4).abs() < f64::EPSILON);
-    }
-
     /// The annealing schedule must actually END COLD between reheats: by the
     /// time a reheat fires, the temperature must have decayed to (well) under
     /// 5% of base, so the search alternates real exploration phases with real

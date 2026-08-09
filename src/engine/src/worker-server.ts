@@ -47,21 +47,6 @@ export class WorkerServer {
   }
 
   /**
-   * Current state of the worker, for testing.
-   */
-  get currentState(): WorkerState {
-    return this.state;
-  }
-
-  /**
-   * Number of child handles tracked for a project, for testing.
-   * Returns undefined if the project handle doesn't exist.
-   */
-  getProjectChildCount(projectHandle: WorkerProjectHandle): number | undefined {
-    return this.projectChildren.get(projectHandle)?.size;
-  }
-
-  /**
    * Handle an incoming message. This is the main entry point called from
    * the worker's onmessage handler.
    */

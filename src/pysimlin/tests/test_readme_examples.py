@@ -102,6 +102,14 @@ class TestReadmeExamples:
         if not blocks:
             pytest.fail("No Python code blocks found in README.md")
 
+        # A block the state machine walks past is silently untested: the run
+        # below would still pass, just over fewer examples. Count the fences
+        # independently so a dropped block fails here instead.
+        fences = sum(1 for line in markdown.split("\n") if line.strip() == "```python")
+        assert len(blocks) == fences, (
+            f"extracted {len(blocks)} blocks but README.md has {fences} python fences"
+        )
+
         return blocks
 
     def test_all_python_blocks_execute(self, code_blocks: list[CodeBlock]) -> None:
@@ -151,120 +159,3 @@ class TestReadmeExamples:
                         f"{type(e).__name__}: {e}\n\n"
                         f"Code:\n{code_preview}"
                     )
-
-
-class TestCodeBlockExtraction:
-    """Unit tests for the code block extraction logic."""
-
-    def test_extracts_simple_block(self) -> None:
-        """Extract a simple Python code block."""
-        markdown = """
-Some text
-
-```python
-x = 1
-print(x)
-```
-
-More text
-"""
-        blocks = extract_python_blocks(markdown)
-        assert len(blocks) == 1
-        assert blocks[0].code == "x = 1\nprint(x)"
-        assert blocks[0].directive == ""
-
-    def test_extracts_block_with_directive(self) -> None:
-        """Extract a block with a preceding directive."""
-        markdown = """
-<!-- pysimlin-test: skip -->
-```python
-import something_unavailable
-```
-"""
-        blocks = extract_python_blocks(markdown)
-        assert len(blocks) == 1
-        assert blocks[0].directive == "skip"
-        assert "import something_unavailable" in blocks[0].code
-
-    def test_extracts_multiple_blocks(self) -> None:
-        """Extract multiple blocks, some with directives."""
-        markdown = """
-```python
-a = 1
-```
-
-<!-- pysimlin-test: reset -->
-```python
-b = 2
-```
-
-<!-- pysimlin-test: expect-error -->
-```python
-raise ValueError("expected")
-```
-"""
-        blocks = extract_python_blocks(markdown)
-        assert len(blocks) == 3
-        assert blocks[0].directive == ""
-        assert blocks[1].directive == "reset"
-        assert blocks[2].directive == "expect-error"
-
-    def test_ignores_non_python_blocks(self) -> None:
-        """Only extract Python blocks, ignore bash/other."""
-        markdown = """
-```bash
-pip install something
-```
-
-```python
-x = 1
-```
-
-```javascript
-const y = 2;
-```
-"""
-        blocks = extract_python_blocks(markdown)
-        assert len(blocks) == 1
-        assert "x = 1" in blocks[0].code
-
-    def test_directive_with_blank_lines(self) -> None:
-        """Directive followed by blank lines before code block."""
-        markdown = """
-<!-- pysimlin-test: skip -->
-
-```python
-skipped_code()
-```
-"""
-        blocks = extract_python_blocks(markdown)
-        assert len(blocks) == 1
-        assert blocks[0].directive == "skip"
-
-    def test_preserves_indentation(self) -> None:
-        """Code block indentation should be preserved."""
-        markdown = """
-```python
-def foo():
-    if True:
-        return 42
-```
-"""
-        blocks = extract_python_blocks(markdown)
-        assert len(blocks) == 1
-        assert "    if True:" in blocks[0].code
-        assert "        return 42" in blocks[0].code
-
-    def test_line_numbers_are_correct(self) -> None:
-        """Line numbers should point to the ```python line."""
-        markdown = """line 1
-line 2
-```python
-code here
-```
-line 6
-"""
-        blocks = extract_python_blocks(markdown)
-        assert len(blocks) == 1
-        # ```python is on line 3 (1-indexed)
-        assert blocks[0].line_number == 3

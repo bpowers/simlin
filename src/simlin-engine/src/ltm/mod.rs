@@ -26,10 +26,6 @@
 //!   polarity surface that callers like `db::analysis` and `ltm_finding`
 //!   consume.
 
-use crate::common::Result;
-use crate::model::ModelStage1;
-use crate::project::Project;
-
 mod graph;
 mod indexed;
 mod partitions;
@@ -194,20 +190,6 @@ impl Drop for LtmCircuitBudgetGuard {
     fn drop(&mut self) {
         LTM_CIRCUIT_BUDGET_OVERRIDE.with(|c| c.set(self.prev));
     }
-}
-
-/// Detect all feedback loops in a single model.
-///
-/// Runs Johnson's enumeration with no per-call circuit budget; the
-/// upstream [`crate::db::model_ltm_variables`] pipeline is responsible
-/// for skipping LTM on models whose element-level SCC exceeds
-/// [`MAX_LTM_SCC_NODES`].  Since `usize::MAX` is passed as the budget,
-/// the `TruncatedByBudget` branch is unreachable.
-pub fn detect_loops(model: &ModelStage1, project: &Project) -> Result<Vec<Loop>> {
-    let graph = CausalGraph::from_model(model, project)?;
-    Ok(graph
-        .find_loops_with_limit(usize::MAX)
-        .expect("usize::MAX budget cannot be exhausted by Johnson's enumeration"))
 }
 
 /// Return the start index of the **canonical cyclic rotation** of `s`.

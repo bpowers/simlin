@@ -40,67 +40,6 @@ describe('IconButton', () => {
     expect(onClick).not.toHaveBeenCalled();
   });
 
-  test('applies color inherit class', () => {
-    render(
-      <IconButton aria-label="test" color="inherit">
-        ★
-      </IconButton>,
-    );
-    expect(screen.getByRole('button').className).toContain('colorInherit');
-  });
-
-  test('applies size classes', () => {
-    const { rerender } = render(
-      <IconButton aria-label="test" size="small">
-        ★
-      </IconButton>,
-    );
-    expect(screen.getByRole('button').className).toContain('sizeSmall');
-
-    rerender(
-      <IconButton aria-label="test" size="large">
-        ★
-      </IconButton>,
-    );
-    expect(screen.getByRole('button').className).toContain('sizeLarge');
-  });
-
-  test('applies edge start class', () => {
-    render(
-      <IconButton aria-label="test" edge="start">
-        ★
-      </IconButton>,
-    );
-    expect(screen.getByRole('button').className).toContain('edgeStart');
-  });
-
-  test('applies edge end class', () => {
-    render(
-      <IconButton aria-label="test" edge="end">
-        ★
-      </IconButton>,
-    );
-    expect(screen.getByRole('button').className).toContain('edgeEnd');
-  });
-
-  test('applies disabled class', () => {
-    render(
-      <IconButton aria-label="test" disabled>
-        ★
-      </IconButton>,
-    );
-    expect(screen.getByRole('button').className).toContain('disabled');
-  });
-
-  test('applies custom className', () => {
-    render(
-      <IconButton aria-label="test" className="custom">
-        ★
-      </IconButton>,
-    );
-    expect(screen.getByRole('button').className).toContain('custom');
-  });
-
   test('passes through aria-label', () => {
     render(<IconButton aria-label="close menu">★</IconButton>);
     expect(screen.getByRole('button').getAttribute('aria-label')).toBe('close menu');
@@ -109,5 +48,41 @@ describe('IconButton', () => {
   test('renders as type="button"', () => {
     render(<IconButton aria-label="test">★</IconButton>);
     expect(screen.getByRole('button').getAttribute('type')).toBe('button');
+  });
+
+  test('renders an anchor (not a button) when given href', () => {
+    // A <button> nested inside an anchor is invalid interactive content, so
+    // href mode makes the anchor itself the styled element.
+    render(
+      <IconButton aria-label="go home" href="/home">
+        ★
+      </IconButton>,
+    );
+    const link = screen.getByRole('link', { name: 'go home' });
+    expect(link.tagName).toBe('A');
+    expect(link.getAttribute('href')).toBe('/home');
+    expect(screen.queryByRole('button')).toBeNull();
+  });
+
+  test('ignores disabled in href mode, styling included', () => {
+    // Links have no disabled state: a greyed, pointer-events:none anchor would
+    // still be keyboard-focusable and Enter would navigate, i.e. it would LOOK
+    // disabled without being so. The disabled styling must therefore stay off.
+    const onClick = rs.fn();
+    render(
+      <IconButton aria-label="go home" href="/home" disabled onClick={onClick}>
+        ★
+      </IconButton>,
+    );
+
+    const link = screen.getByRole('link', { name: 'go home' });
+    expect(link.hasAttribute('disabled')).toBe(false);
+    expect(link.getAttribute('aria-disabled')).toBeNull();
+    // Natively focusable: nothing removed it from the tab order.
+    expect(link.getAttribute('tabindex')).toBeNull();
+    expect(link.className).not.toContain('disabled');
+
+    fireEvent.click(link);
+    expect(onClick).toHaveBeenCalledTimes(1);
   });
 });

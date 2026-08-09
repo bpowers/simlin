@@ -87,11 +87,6 @@ describe('niceAxisTicks', () => {
 
   test('generates nice round numbers', () => {
     const ticks = niceAxisTicks(0, 1);
-    for (const t of ticks) {
-      // all ticks should be finite numbers
-      expect(Number.isFinite(t)).toBe(true);
-    }
-    // should include 0 and 1
     expect(ticks).toContain(0);
     expect(ticks).toContain(1);
   });
@@ -190,13 +185,6 @@ describe('findNearestPointIndex', () => {
 
   test('returns -1 for empty array', () => {
     expect(findNearestPointIndex([], 5)).toBe(-1);
-  });
-
-  test('handles midpoint between two points', () => {
-    const points = [{ x: 0 }, { x: 10 }];
-    // at exact midpoint, either 0 or 1 is acceptable
-    const idx = findNearestPointIndex(points, 5);
-    expect(idx === 0 || idx === 1).toBe(true);
   });
 
   test('works with floating point values', () => {

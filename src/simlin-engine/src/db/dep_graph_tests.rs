@@ -3465,7 +3465,7 @@ fn a_prev_view_is_not_a_same_step_element_edge() {
     // model compiles and runs. `x[t1] = 1 + SUM(prev(x))` is 1 at t=0 (the
     // PREVIOUS fallback makes the sum 0) and 1 + (1+2+3) = 7 at t=1.
     project.assert_compiles_incremental();
-    let all = project.run_vm_incremental();
+    let all = project.run_vm_expecting_success();
     for (elem, expected) in [("t1", [1.0, 7.0]), ("t2", [2.0, 8.0]), ("t3", [3.0, 9.0])] {
         let series = all
             .get(&format!("x[{elem}]"))

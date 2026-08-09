@@ -99,7 +99,7 @@ import { render, fireEvent, screen, waitFor } from '@testing-library/react';
 
 import * as firebaseAuthModule from '@firebase/auth';
 
-import { Login, GoogleIcon } from '../Login';
+import { Login } from '../Login';
 
 // rs.mock replaced the module above, so importing it normally yields the mock.
 // (jest.requireMock had no async equivalent -- rs.importMock returns a promise.)
@@ -724,11 +724,6 @@ describe('Login miscellaneous error paths', () => {
     await waitFor(() => {
       expect(screen.queryByText(/something unknown went wrong/i)).not.toBeNull();
     });
-  });
-
-  test('GoogleIcon renders (it is dropped by the Button startIcon mock in flow tests)', () => {
-    const { container } = render(<GoogleIcon />);
-    expect(container.querySelector('[data-component="SvgIcon"]')).not.toBeNull();
   });
 });
 

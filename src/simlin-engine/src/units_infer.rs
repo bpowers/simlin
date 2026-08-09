@@ -314,11 +314,6 @@ impl ConstraintSet {
         self.constraints.len()
     }
 
-    #[allow(dead_code)]
-    fn is_empty(&self) -> bool {
-        self.constraints.is_empty()
-    }
-
     fn into_vec(self) -> Vec<LocatedConstraint> {
         self.constraints
     }
@@ -2400,33 +2395,6 @@ fn test_previous_constrains_fallback_units() {
             "PREVIOUS(widget, wallop) should fail unit inference"
         );
     }
-}
-
-#[test]
-fn test_constraint_generation_consistency() {
-    use crate::common::canonicalize;
-
-    // Test that constraint generation produces consistent variable names
-    // This simulates what happens when stdlib models are processed
-
-    // In the stdlib XMILE file, the variable might be "Output" (capitalized)
-    let xmile_var_name = "Output";
-
-    // When it becomes an Ident<Canonical> key in the HashMap
-    let map_key = canonicalize(xmile_var_name);
-    assert_eq!(&*map_key, "output", "Map key should be lowercase");
-
-    // When used in constraint generation in line 366/376
-    let constraint_var = format!("@{map_key}");
-    assert_eq!(constraint_var, "@output");
-
-    // But if the AST still references the canonical form...
-    let ast_reference = canonicalize("output");
-    let ast_constraint = format!("@{ast_reference}");
-    assert_eq!(ast_constraint, "@output");
-
-    // They should match!
-    assert_eq!(constraint_var, ast_constraint);
 }
 
 #[test]

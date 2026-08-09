@@ -143,34 +143,4 @@ mod tests {
             "unrelated paths must 404, otherwise the /mcp non-404 assertion is vacuous"
         );
     }
-
-    /// Servers built from the same `Arc<AppState>` must alias the same
-    /// underlying state — a regression guard against a refactor that
-    /// accidentally deep-copies AppState.
-    ///
-    /// Both `Arc::ptr_eq` and the strong-count delta confirm this:
-    /// constructing additional servers from the cloned Arc must bump the
-    /// strong count rather than allocate a fresh AppState.
-    #[tokio::test]
-    async fn factory_shares_app_state_across_sessions() {
-        let temp = TempDir::new().expect("tempdir");
-        let canonical_root = temp.path().canonicalize().expect("canon root");
-        let state = build_state(canonical_root.clone());
-        let baseline = Arc::strong_count(&state);
-
-        let first = SimlinServeMcpServer::<RegistryAccess>::new(state.clone());
-        let second = SimlinServeMcpServer::<RegistryAccess>::new(state.clone());
-
-        // Each constructor captures one `Arc<AppState>` clone, so the
-        // strong count must grow by exactly 2 above the baseline. (One
-        // extra is the local `state` binding kept around for the assert.)
-        let count = Arc::strong_count(&state);
-        assert!(
-            count >= baseline + 2,
-            "expected at least {} strong refs, got {count} (baseline {baseline})",
-            baseline + 2
-        );
-        drop(first);
-        drop(second);
-    }
 }

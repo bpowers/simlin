@@ -312,58 +312,6 @@ impl ProjectRegistry {
         guard.remove(path);
     }
 
-    /// Optimistic-lock primitive: under the write lock, check that
-    /// `expected_version` matches the entry's stored version, then increment
-    /// it and return the new value.
-    ///
-    /// The lock is held across the read+compare+increment sequence so two
-    /// concurrent calls cannot both observe the same `expected_version` and
-    /// both succeed. The lock is released *before* the caller does any file
-    /// I/O — the version is "claimed" optimistically. If the subsequent disk
-    /// write fails, the registry's version is one ahead of disk content;
-    /// this is acceptable for a single-user local tool because a) the
-    /// version monotonically increases (no rollback ambiguity), and b) the
-    /// next successful save will rewrite the file with the post-increment
-    /// version. Phase 3's Loro-doc cache replaces this with a different
-    /// concurrency model.
-    pub fn check_and_increment(
-        &self,
-        abs_path: &Path,
-        expected_version: u64,
-    ) -> Result<u64, RegistryError> {
-        let mut guard = self
-            .inner
-            .write()
-            .expect("registry RwLock poisoned by panic in another thread");
-        let entry = guard.get_mut(abs_path).ok_or(RegistryError::NotFound)?;
-        if entry.version != expected_version {
-            return Err(RegistryError::VersionMismatch {
-                expected: expected_version,
-                actual: entry.version,
-            });
-        }
-        entry.version += 1;
-        Ok(entry.version)
-    }
-
-    /// Update the entry's `mtime` and `size` from a freshly-stat'd
-    /// post-write file. No-op if the path is not in the registry.
-    ///
-    /// Used by the save handler after a successful disk write so a
-    /// subsequent listing reflects both the new modification time and
-    /// the new file size; the SPA's stale-data heuristics rely on
-    /// these to detect external file changes.
-    pub fn refresh_meta(&self, abs_path: &Path, mtime: SystemTime, size: u64) {
-        let mut guard = self
-            .inner
-            .write()
-            .expect("registry RwLock poisoned by panic in another thread");
-        if let Some(entry) = guard.get_mut(abs_path) {
-            entry.mtime = mtime;
-            entry.size = size;
-        }
-    }
-
     /// Store `hash` as the expected next on-disk fingerprint for `abs_path`
     /// *before* the bytes are written to disk. This closes the race window
     /// between `atomic_write` (which fires an OS watcher event) and a
@@ -513,9 +461,13 @@ impl ProjectRegistry {
         Some(entry.version)
     }
 
-    /// Like `refresh_meta`, but also stores the XXH3-64 hash of the bytes
-    /// just written. The hash is the echo-suppression key the Phase 4 file
-    /// watcher uses to recognize its own atomic-write events.
+    /// Refresh the entry's `mtime` and `size` from a freshly-stat'd
+    /// post-write file, and store the XXH3-64 hash of the bytes just
+    /// written. The mtime and size feed the SPA's stale-data heuristics;
+    /// the hash is the echo-suppression key the Phase 4 file watcher uses
+    /// to recognize its own atomic-write events. All three move together
+    /// because a caller that updated only some of them would leave the
+    /// watcher comparing a fresh hash against a stale size.
     ///
     /// No-op if the path is not in the registry. Called by the save handler
     /// after a successful disk write.
@@ -636,11 +588,11 @@ impl ProjectRegistry {
     /// Combined optimistic-lock version check, version increment, and
     /// `apply_canonical_json` merge against the entry's `ProjectDoc`.
     ///
-    /// This is the fused primitive Task 8 introduces: instead of
-    /// `check_and_increment` (registry only) followed by a separate
-    /// disk-write step that left the in-memory doc out of date, the
-    /// save handler now drives every write through here. The single
-    /// registry-write-lock acquisition wraps:
+    /// This is the fused primitive Task 8 introduces: instead of a
+    /// registry-only version bump followed by a separate disk-write step
+    /// that left the in-memory doc out of date, the save handler drives
+    /// every write through here. The single registry-write-lock
+    /// acquisition wraps:
     ///
     /// 1. Look up the entry; return `NotFound` when absent.
     /// 2. Verify `expected_version` matches; return `VersionMismatch`
@@ -1059,53 +1011,6 @@ mod tests {
     }
 
     #[test]
-    fn check_and_increment_returns_not_found_for_unknown_path() {
-        let reg = ProjectRegistry::new(PathBuf::from("/tmp/root"));
-        let err = reg
-            .check_and_increment(Path::new("/tmp/root/missing.stmx"), 0)
-            .unwrap_err();
-        assert_eq!(err, RegistryError::NotFound);
-    }
-
-    #[test]
-    fn check_and_increment_increments_on_match() {
-        let root = PathBuf::from("/tmp/root");
-        let reg = ProjectRegistry::new(root.clone());
-        let abs = root.join("model.stmx");
-        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx);
-        meta.version = 5;
-        reg.upsert(abs.clone(), meta);
-
-        let new_version = reg.check_and_increment(&abs, 5).expect("matches");
-        assert_eq!(new_version, 6);
-        assert_eq!(reg.get(&abs).expect("entry").version, 6);
-    }
-
-    #[test]
-    fn check_and_increment_rejects_stale_version() {
-        let root = PathBuf::from("/tmp/root");
-        let reg = ProjectRegistry::new(root.clone());
-        let abs = root.join("model.stmx");
-        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx);
-        meta.version = 5;
-        reg.upsert(abs.clone(), meta);
-
-        // First call increments 5 -> 6.
-        reg.check_and_increment(&abs, 5).expect("first match");
-        // Second call with the now-stale `5` must fail and report `actual: 6`.
-        let err = reg.check_and_increment(&abs, 5).unwrap_err();
-        assert_eq!(
-            err,
-            RegistryError::VersionMismatch {
-                expected: 5,
-                actual: 6
-            }
-        );
-        // The registry must not have incremented further on the failed attempt.
-        assert_eq!(reg.get(&abs).expect("entry").version, 6);
-    }
-
-    #[test]
     fn redirect_to_sidecar_moves_entry_and_carries_version() {
         let root = PathBuf::from("/tmp/root");
         let reg = ProjectRegistry::new(root.clone());
@@ -1136,35 +1041,6 @@ mod tests {
         let sidecar = PathBuf::from("/tmp/root/missing.sd.json");
         let err = reg.redirect_to_sidecar(&mdl, sidecar).unwrap_err();
         assert_eq!(err, RegistryError::NotFound);
-    }
-
-    #[test]
-    fn refresh_meta_updates_mtime_and_size() {
-        let root = PathBuf::from("/tmp/root");
-        let reg = ProjectRegistry::new(root.clone());
-        let abs = root.join("model.stmx");
-        reg.upsert(
-            abs.clone(),
-            make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx),
-        );
-        let new_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
-        let new_size = 9_999u64;
-        reg.refresh_meta(&abs, new_mtime, new_size);
-        let entry = reg.get(&abs).expect("entry");
-        assert_eq!(entry.mtime, new_mtime);
-        assert_eq!(entry.size, new_size);
-    }
-
-    #[test]
-    fn refresh_meta_is_noop_for_missing_path() {
-        let reg = ProjectRegistry::new(PathBuf::from("/tmp/root"));
-        let nonexistent = PathBuf::from("/tmp/root/missing.stmx");
-        reg.refresh_meta(
-            &nonexistent,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(42),
-            123,
-        );
-        assert!(reg.is_empty());
     }
 
     #[test]
@@ -1267,29 +1143,41 @@ mod tests {
     }
 
     #[test]
-    fn check_and_increment_is_serialized_under_concurrency() {
-        // Two threads both attempting `check_and_increment(_, 5)` must see
-        // exactly one Ok and one VersionMismatch. The Barrier synchronizes
-        // the start so the race is real, not sequential.
+    fn check_increment_and_merge_is_serialized_under_concurrency() {
+        // Two threads both attempting `check_increment_and_merge(_, 5, _)`
+        // must see exactly one Ok and one VersionMismatch: the write lock
+        // spans read+compare+merge+increment, so the loser cannot observe
+        // the pre-increment version. The Barrier synchronizes the start so
+        // the race is real, not sequential.
         use std::sync::Barrier;
         use std::thread;
 
-        let root = PathBuf::from("/tmp/root");
-        let reg = ProjectRegistry::new(root.clone());
-        let abs = root.join("contended.stmx");
-        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx);
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let reg = ProjectRegistry::new(temp.path().to_path_buf());
+        let abs = temp.path().join("contended.sd.json");
+        let initial = r#"{"name":"contended","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
+        std::fs::write(&abs, initial).expect("write");
+        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::SdJson);
         meta.version = 5;
         reg.upsert(abs.clone(), meta);
 
         let barrier = Arc::new(Barrier::new(2));
         let mut handles = Vec::with_capacity(2);
-        for _ in 0..2 {
+        for i in 0..2 {
             let reg = reg.clone();
             let abs = abs.clone();
             let barrier = Arc::clone(&barrier);
+            // Distinct payloads so a merge that lands twice would be
+            // observable in the doc, not just in the version counter.
+            let new_json = serde_json::json!({
+                "name": format!("writer-{i}"),
+                "simSpecs": {"startTime": 0, "endTime": 10, "dt": "1", "method": "euler"},
+                "models": [{"name": "main"}],
+            });
             handles.push(thread::spawn(move || {
                 barrier.wait();
-                reg.check_and_increment(&abs, 5)
+                reg.check_increment_and_merge(&abs, 5, &new_json)
+                    .map(|(version, _doc)| version)
             }));
         }
         let results: Vec<Result<u64, RegistryError>> =
@@ -1307,7 +1195,8 @@ mod tests {
                 actual: 6
             }
         );
-        // Final state: version is exactly 6 (not 7).
+        // Final state: version is exactly 6 (not 7), i.e. the losing
+        // thread's merge never ran.
         assert_eq!(reg.get(&abs).expect("entry").version, 6);
     }
 
@@ -1584,119 +1473,6 @@ mod tests {
         reg.upsert_max_version(abs.clone(), meta);
 
         assert_eq!(reg.get(&abs).expect("entry").version, 3);
-    }
-
-    // The next two tests model the save handler's redirect_to_sidecar success
-    // and failure paths (handlers.rs lines ~408-444).
-
-    #[test]
-    fn handler_redirect_success_path_version_carries_over() {
-        // Simulate: .mdl entry exists at version 5; post-write redirect succeeds.
-        let root = PathBuf::from("/tmp/root");
-        let reg = ProjectRegistry::new(root.clone());
-        let mdl_abs = root.join("model.mdl");
-        let sidecar_abs = root.join("model.sd.json");
-
-        let mut mdl_meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Mdl);
-        mdl_meta.version = 5;
-        reg.upsert(mdl_abs.clone(), mdl_meta);
-
-        let result = reg.redirect_to_sidecar(&mdl_abs, sidecar_abs.clone());
-        assert!(
-            result.is_ok(),
-            "redirect must succeed when .mdl entry exists"
-        );
-
-        assert!(reg.get(&mdl_abs).is_none(), ".mdl entry must be removed");
-        let entry = reg.get(&sidecar_abs).expect("sidecar entry created");
-        assert_eq!(entry.version, 5, "version must carry over from .mdl");
-        assert_eq!(entry.format, ProjectFormat::SdJson);
-    }
-
-    #[test]
-    fn handler_redirect_failure_path_fallback_upsert_max_version() {
-        // Simulate: the .mdl entry was removed by a concurrent scan between the
-        // version-lock release and the post-write redirect call. The handler
-        // catches the NotFound error and falls back to upsert_max_version with
-        // the just-incremented version so the sidecar is tracked.
-        let root = PathBuf::from("/tmp/root");
-        let reg = ProjectRegistry::new(root.clone());
-        let mdl_abs = root.join("model.mdl");
-        let sidecar_abs = root.join("model.sd.json");
-
-        // The .mdl entry is gone by the time redirect_to_sidecar runs.
-        let err = reg
-            .redirect_to_sidecar(&mdl_abs, sidecar_abs.clone())
-            .unwrap_err();
-        assert_eq!(err, RegistryError::NotFound);
-
-        // Handler fallback: upsert_max_version with the new (just-incremented)
-        // version. This must make the sidecar visible in the registry.
-        let new_version = 6u64;
-        reg.upsert_max_version(
-            sidecar_abs.clone(),
-            ProjectMeta {
-                path: PathBuf::new(),
-                format: ProjectFormat::SdJson,
-                mtime: std::time::SystemTime::UNIX_EPOCH,
-                size: 0,
-                git: GitState::Untracked,
-                version: new_version,
-                doc: Default::default(),
-                last_disk_hash: 0,
-                last_diagnostic_keys: BTreeSet::new(),
-            },
-        );
-
-        let entry = reg
-            .get(&sidecar_abs)
-            .expect("sidecar entry must exist after fallback");
-        assert_eq!(entry.version, new_version);
-        assert_eq!(entry.format, ProjectFormat::SdJson);
-    }
-
-    #[test]
-    fn handler_redirect_failure_fallback_preserves_higher_concurrent_version() {
-        // Edge case: redirect_to_sidecar fails (no .mdl), but a concurrent scan
-        // already inserted a sidecar entry with a higher version. The fallback
-        // upsert_max_version must not roll the version backward.
-        let root = PathBuf::from("/tmp/root");
-        let reg = ProjectRegistry::new(root.clone());
-        let mdl_abs = root.join("model.mdl");
-        let sidecar_abs = root.join("model.sd.json");
-
-        // Scanner pre-inserted a sidecar at version 20.
-        let mut sidecar_meta = make_meta(PathBuf::from("ignored"), ProjectFormat::SdJson);
-        sidecar_meta.version = 20;
-        reg.upsert(sidecar_abs.clone(), sidecar_meta);
-
-        // redirect_to_sidecar fails because .mdl is absent.
-        let err = reg
-            .redirect_to_sidecar(&mdl_abs, sidecar_abs.clone())
-            .unwrap_err();
-        assert_eq!(err, RegistryError::NotFound);
-
-        // Fallback: new_version = 7 (the just-incremented value from
-        // check_and_increment), but the existing sidecar is already at 20.
-        let new_version = 7u64;
-        reg.upsert_max_version(
-            sidecar_abs.clone(),
-            ProjectMeta {
-                path: PathBuf::new(),
-                format: ProjectFormat::SdJson,
-                mtime: std::time::SystemTime::UNIX_EPOCH,
-                size: 0,
-                git: GitState::Untracked,
-                version: new_version,
-                doc: Default::default(),
-                last_disk_hash: 0,
-                last_diagnostic_keys: BTreeSet::new(),
-            },
-        );
-
-        // Version must remain 20 (max(7, 20)), not roll back to 7.
-        let entry = reg.get(&sidecar_abs).expect("sidecar entry");
-        assert_eq!(entry.version, 20, "version must not roll backward");
     }
 
     #[test]

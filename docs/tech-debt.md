@@ -97,11 +97,11 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 
 - **Component**: simlin-engine
 - **Severity**: low
-- **Description**: 49 `#[allow(dead_code)]` attributes across 24 files. Heaviest in bytecode.rs (8), expr3.rs (5), dimensions.rs (4), compiler/context.rs (3), test_common.rs (3). Remaining suppressions fall into three categories: (1) ByteCodeContext builder methods unused in production because ByteCodeCompiler builds tables directly, (2) expr3 variants and methods reserved for pass 2, (3) scaffolding types (DimensionRange, DimensionVec, StridedDimension) for future strided array views. The stale Opcode-level suppression and reachable dimensions.rs code were cleaned up in the close-array-gaps work.
+- **Description**: `#[allow(dead_code)]` attributes scattered through simlin-engine. Note the count includes the sixteen `SymbolicOpcode` variants codegen no longer constructs (superseded incremental view-stack/broadcast opcodes whose retirement is sequenced as its own change, see symbolic.rs). Two categories named by earlier revisions of this entry no longer exist: the ByteCodeContext builder methods are split into a production half (get_dim_list/get_static_view are hot in vm.rs and wasmgen) and a `#[cfg(test)]` builder half, and the DimensionRange/DimensionVec/StridedDimension scaffolding types were deleted in the test-suite-diet work.
 - **Measure**: `rg '#\[allow\(dead_code\)\]' --type rust src/simlin-engine/src/ -c`
-- **Count**: 49 occurrences across 24 files (as of 2026-03-12)
+- **Count**: 69 occurrences across 28 files (as of 2026-08-08)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-03-12
+- **Last reviewed**: 2026-08-08
 
 ### 13. Ignored Rust Tests
 
@@ -137,11 +137,11 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 
 - **Component**: simlin-engine, libsimlin
 - **Severity**: low
-- **Description**: 44 `eprintln!` calls in simlin-engine and 6 in libsimlin. In simlin-engine, 26 are in debug-gated functions (`debug_print_runlists` in interpreter.rs, `debug_print_bytecode` in vm.rs). The remaining 18 are runtime warnings in results.rs (unsupported sim methods), model.rs (compilation errors), and variable.rs. These should use proper error types or conditional logging rather than printing to stderr.
+- **Description**: `eprintln!` calls in simlin-engine library code (the debug-gated `debug_print_bytecode` was deleted as dead code in the test-suite-diet work; libsimlin is now clean). The remaining calls are runtime warnings in results.rs (unsupported sim methods), model.rs (compilation errors), and variable.rs. These should use proper error types or conditional logging rather than printing to stderr.
 - **Measure**: `rg 'eprintln!' --type rust src/simlin-engine/src/ src/libsimlin/src/ -c`
-- **Count**: 44 in simlin-engine, 6 in libsimlin (as of 2026-02-15)
+- **Count**: 18 in simlin-engine, 0 in libsimlin (as of 2026-08-08)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-02-15
+- **Last reviewed**: 2026-08-08
 
 ### 17. Embedded Error Fields on Variable/ModelStage Types
 

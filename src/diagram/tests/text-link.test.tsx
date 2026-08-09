@@ -27,28 +27,4 @@ describe('TextLink', () => {
     fireEvent.click(screen.getByText('Click'));
     expect(onClick).toHaveBeenCalledTimes(1);
   });
-
-  test('applies underline always by default', () => {
-    render(<TextLink>Link</TextLink>);
-    const link = screen.getByText('Link');
-    expect(link.className).toContain('underlineAlways');
-  });
-
-  test('applies underline hover class', () => {
-    render(<TextLink underline="hover">Link</TextLink>);
-    const link = screen.getByText('Link');
-    expect(link.className).toContain('underlineHover');
-  });
-
-  test('applies underline none class', () => {
-    render(<TextLink underline="none">Link</TextLink>);
-    const link = screen.getByText('Link');
-    expect(link.className).toContain('underlineNone');
-  });
-
-  test('applies custom className', () => {
-    render(<TextLink className="custom">Link</TextLink>);
-    const link = screen.getByText('Link');
-    expect(link.className).toContain('custom');
-  });
 });

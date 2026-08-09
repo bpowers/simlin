@@ -310,28 +310,29 @@ mod tests {
     }
 
     #[test]
-    fn round_sig_figs_3_basic() {
-        assert_eq!(round_sig_figs_3(2.449215777949112), 2.45);
-    }
-
-    #[test]
-    fn round_sig_figs_3_zero() {
-        assert_eq!(round_sig_figs_3(0.0), 0.0);
-    }
-
-    #[test]
-    fn round_sig_figs_3_very_small() {
-        assert_eq!(round_sig_figs_3(0.000004781283), 4.78e-6);
-    }
-
-    #[test]
-    fn round_sig_figs_3_large() {
-        assert_eq!(round_sig_figs_3(25.189), 25.2);
-    }
-
-    #[test]
-    fn round_sig_figs_3_negative() {
-        assert_eq!(round_sig_figs_3(-3.456), -3.46);
+    fn round_sig_figs_3_covers_each_magnitude_and_sign() {
+        // (input, expected) across the cases the scientific-notation
+        // round trip has to get right: the zero short-circuit, a value
+        // below 1 (negative exponent), one above 1, a negative, and
+        // values already at or below 3 significant figures, which must
+        // come back bit-identical rather than being perturbed.
+        let cases = [
+            (0.0, 0.0),
+            (2.449215777949112, 2.45),
+            (0.000004781283, 4.78e-6),
+            (25.189, 25.2),
+            (-3.456, -3.46),
+            (1.0, 1.0),
+            (100.0, 100.0),
+            (0.5, 0.5),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                round_sig_figs_3(input),
+                expected,
+                "round_sig_figs_3({input})"
+            );
+        }
     }
 
     #[test]
@@ -351,24 +352,6 @@ mod tests {
         assert_eq!(arr[1].as_f64().unwrap(), 0.0);
         assert_eq!(arr[2].as_f64().unwrap(), 4.78e-6);
         assert_eq!(arr[3].as_f64().unwrap(), 25.2);
-    }
-
-    #[test]
-    fn importance_exact_values_unchanged() {
-        let summary = LoopDominanceSummary {
-            loop_id: "L2".into(),
-            name: None,
-            polarity: "negative".into(),
-            variables: vec![],
-            importance: vec![1.0, 100.0, 0.5],
-            polarity_confidence: 1.0,
-            partition: None,
-        };
-        let json = serde_json::to_value(&summary).unwrap();
-        let arr = json["importance"].as_array().unwrap();
-        assert_eq!(arr[0].as_f64().unwrap(), 1.0);
-        assert_eq!(arr[1].as_f64().unwrap(), 100.0);
-        assert_eq!(arr[2].as_f64().unwrap(), 0.5);
     }
 
     #[test]
@@ -458,20 +441,20 @@ mod tests {
         assert_eq!(output.kind, "variable");
     }
 
-    /// Verifies that `ErrorOutput::from` produces the same snake_case code
-    /// strings as `ErrorCode`'s `Display` impl, which is the authoritative
-    /// source shared with pysimlin (via libsimlin's `SimlinErrorCode`).
+    /// Pins the snake_case strings `ErrorOutput::from` puts on the wire, and
+    /// that it sources them from `ErrorCode`'s `Display` impl rather than a
+    /// second table of its own.
     ///
-    /// Both MCP and pysimlin derive their error codes from `ErrorCode`.  MCP
-    /// uses `Display` directly; pysimlin maps through `SimlinErrorCode` integer
-    /// values.  That mapping is one-to-one only for the commonly-encountered
-    /// codes this test covers -- `SimlinErrorCode` is a narrower enum, and the
-    /// codes outside it (the conveyor/queue diagnostics among them) all collapse
-    /// to `Generic = 32` at the C boundary, so pysimlin sees `Generic` where MCP
-    /// still reports the precise snake_case string.  This test locks down that
-    /// string representation, ensuring the MCP `code` field stays aligned.
+    /// The MCP `code` field is the only thing asserted here. pysimlin reaches
+    /// the same codes by a different route (libsimlin's `SimlinErrorCode`
+    /// integer values), and the two surfaces are believed to agree on the
+    /// commonly-encountered codes below -- but nothing in this test measures
+    /// pysimlin, so treat that as background, not as a verified claim. The
+    /// codes outside `SimlinErrorCode` are a documented divergence in any
+    /// case: they collapse to `Generic` at the C boundary while MCP keeps
+    /// reporting the precise string.
     #[test]
-    fn error_code_strings_align_with_pysimlin() {
+    fn error_code_strings_are_the_display_impl() {
         use simlin_engine::common::ErrorCode;
         use simlin_engine::db::DiagnosticSeverity;
         use simlin_engine::errors::{FormattedError, FormattedErrorKind};

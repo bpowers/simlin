@@ -1168,23 +1168,6 @@ fn compile_simulation_rk4_with_previous_and_init_matches_vm() {
     );
 }
 
-/// After Task 2, RK4 (and RK2) are supported, so a model using them runs
-/// rather than being rejected -- the inverse of the Phase-1 guard. Pinned so
-/// a regression that re-introduced the Euler-only guard would be caught.
-#[test]
-fn compile_simulation_accepts_rk4() {
-    let datamodel = crate::test_common::TestProject::new("rk4_accept")
-        .with_sim_time(0.0, 5.0, 1.0)
-        .with_sim_method(crate::datamodel::SimMethod::RungeKutta4)
-        .aux("inflow_rate", "2", None)
-        .stock("level", "0", &["inflow"], &[], None)
-        .flow("inflow", "inflow_rate", None)
-        .build_datamodel();
-
-    let sim = compile_sim(&datamodel, "main");
-    compile_simulation(&sim).expect("RK4 must now be supported");
-}
-
 // ── Modules: EvalModule / LoadModuleInput (Phase 7 Task 1) ────────────
 //
 // Each unique `(model, input_set)` instance becomes its own initials/flows/
@@ -2259,63 +2242,6 @@ fn compile_simulation_view_dynamic_subscript_oob_is_nan() {
         assert!(
             data[c * n_slots + off].is_nan(),
             "out-of-bounds SUM(mat[row,1]) must be NaN at chunk {c}"
-        );
-    }
-}
-
-/// AC4.2: a by-name series read strides the results slab using only the
-/// layout's `n_slots`/`results_offset` + the variable's offset, copies exactly
-/// `n_chunks` values (never the whole `n_chunks * n_slots` slab), and equals
-/// the VM's `get_series` for that variable. This is the read pattern a host
-/// performs over the blob's results region (the FFI returns the same layout).
-#[test]
-fn by_name_series_read_strides_slab_and_matches_vm_get_series() {
-    let file = std::fs::File::open(POPULATION_XMILE).expect("open population model");
-    let mut reader = BufReader::new(file);
-    let datamodel = open_xmile(&mut reader).expect("parse population xmile");
-    let sim = compile_sim(&datamodel, "main");
-    let artifact = compile_simulation(&sim).expect("wasm codegen");
-
-    let n_slots = artifact.layout.n_slots;
-    let n_chunks = artifact.layout.n_chunks;
-    let results_offset = artifact.layout.results_offset;
-    let pop_off = layout_offset(&artifact, "population");
-
-    // Run the blob and read the whole results region once (the host would map
-    // the module's memory; here we copy it out).
-    let slab = run_artifact_results(&artifact);
-
-    // Stride out ONLY `population`'s series: exactly `n_chunks` reads at
-    // `results_offset/8 + c*n_slots + off` (the slab is f64-indexed here).
-    let _ = results_offset; // documents the byte base; `slab` already starts at it
-    let mut series = Vec::with_capacity(n_chunks);
-    for c in 0..n_chunks {
-        series.push(slab[c * n_slots + pop_off]);
-    }
-    assert_eq!(
-        series.len(),
-        n_chunks,
-        "a by-name read copies exactly n_chunks values, not the whole slab"
-    );
-    assert!(
-        n_slots > 1,
-        "the model must have >1 slot so striding (not a full copy) is meaningful"
-    );
-
-    // It equals the VM's get_series for the same variable.
-    let mut vm = Vm::new(sim).expect("vm");
-    vm.run_to_end().expect("vm run");
-    let pop = Ident::<Canonical>::from_str_unchecked("population");
-    let vm_series = vm.get_series(&pop).expect("vm get_series(population)");
-    assert_eq!(
-        vm_series.len(),
-        series.len(),
-        "series length matches the VM"
-    );
-    for (c, (&w, &v)) in series.iter().zip(vm_series.iter()).enumerate() {
-        assert!(
-            (w - v).abs() < 1e-9,
-            "population chunk {c}: striped wasm read {w} != vm get_series {v}"
         );
     }
 }

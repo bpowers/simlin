@@ -143,15 +143,13 @@ describe('race conditions', () => {
     // Fire all patches - they should be applied in order via FIFO
     await Promise.all(patches.map((p) => backend.projectApplyPatch(handle, p, false, true)));
 
-    // All three variables should exist in the project
+    // Every patch must have landed: a dropped or clobbered one leaves its
+    // variable missing from the model.
     const modelHandle = await backend.projectGetModel(handle, null);
-    const varNames = await backend.modelGetIncomingLinks(modelHandle, 'var_a');
-    // var_a has no dependencies, so empty array expected
-    expect(varNames).toEqual([]);
-
-    // Verify by serializing - the serialized project should contain all three vars
-    const protobuf = await backend.projectSerializeProtobuf(handle);
-    expect(protobuf.length).toBeGreaterThan(0);
+    const varNames = await backend.modelGetVarNames(modelHandle);
+    expect(varNames).toContain('var_a');
+    expect(varNames).toContain('var_b');
+    expect(varNames).toContain('var_c');
   });
 
   test('sim operations interleaved with project operations', async () => {

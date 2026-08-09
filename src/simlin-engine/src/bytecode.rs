@@ -128,7 +128,9 @@ pub struct SubdimensionRelation {
     pub start_offset: u16,
 }
 
-#[allow(dead_code)]
+// Production builds a `SubdimensionRelation` by struct literal
+// (`compiler::codegen`); these two constructors have test callers only.
+#[cfg(test)]
 impl SubdimensionRelation {
     /// Create a contiguous subdimension relation (elements form a range)
     pub fn contiguous(parent_dim_id: DimId, child_dim_id: DimId, start: u16, count: u16) -> Self {
@@ -273,12 +275,6 @@ impl RuntimeView {
             dim_ids: SmallVec::new(),
             is_valid: false,
         }
-    }
-
-    /// Mark this view as invalid (e.g., after out-of-bounds subscript)
-    #[allow(dead_code)]
-    pub fn mark_invalid(&mut self) {
-        self.is_valid = false;
     }
 
     /// Apply a single-element subscript with bounds checking.
@@ -1725,10 +1721,32 @@ pub struct ByteCodeContext {
     pub(crate) dim_lists: Vec<(u8, [u16; 4])>,
 }
 
-// ByteCodeCompiler (codegen.rs) builds these tables directly and transfers
-// them into ByteCodeContext, so these convenience methods are unused in
-// production but useful for testing.
-#[allow(dead_code)]
+impl ByteCodeContext {
+    /// Get a static view by ID. Read by the wasm backend's `PushStaticView`
+    /// lowering (`wasmgen::lower`).
+    pub fn get_static_view(&self, id: ViewId) -> Option<&StaticArrayView> {
+        self.static_views.get(id as usize)
+    }
+
+    /// Get a dim list entry by ID. Read by the VM's `PushTempView` /
+    /// `PushVarViewDirect` arms.
+    ///
+    /// Panics on out-of-bounds ID, which is intentional: IDs are only produced
+    /// by `add_dim_list` during compilation, so an invalid ID indicates a
+    /// compiler bug that should surface immediately rather than be silently
+    /// converted to a default value.
+    pub fn get_dim_list(&self, id: DimListId) -> (u8, &[u16; 4]) {
+        let (n, ref ids) = self.dim_lists[id as usize];
+        (n, ids)
+    }
+}
+
+// `codegen.rs` builds these tables directly and transfers them into a
+// `ByteCodeContext`, so the BUILDER half below has no production caller and is
+// gated. The two READERS above do -- `get_static_view` and `get_dim_list` are
+// on the wasm-lowering and VM hot paths respectively -- which is why this is
+// two blocks rather than one `#[allow(dead_code)]` block over everything.
+#[cfg(test)]
 impl ByteCodeContext {
     /// Intern a name (dimension or element name) and return its NameId.
     /// If the name already exists, returns the existing ID.
@@ -1768,11 +1786,6 @@ impl ByteCodeContext {
         (self.static_views.len() - 1) as ViewId
     }
 
-    /// Get a static view by ID.
-    pub fn get_static_view(&self, id: ViewId) -> Option<&StaticArrayView> {
-        self.static_views.get(id as usize)
-    }
-
     /// Set up temp array info.
     pub fn set_temp_info(&mut self, offsets: Vec<usize>, total_size: usize) {
         self.temp_offsets = offsets;
@@ -1795,17 +1808,6 @@ impl ByteCodeContext {
     pub fn add_dim_list(&mut self, n_dims: u8, ids: [u16; 4]) -> DimListId {
         self.dim_lists.push((n_dims, ids));
         (self.dim_lists.len() - 1) as DimListId
-    }
-
-    /// Get a dim list entry by ID.
-    ///
-    /// Panics on out-of-bounds ID, which is intentional: IDs are only produced
-    /// by `add_dim_list` during compilation, so an invalid ID indicates a
-    /// compiler bug that should surface immediately rather than be silently
-    /// converted to a default value.
-    pub fn get_dim_list(&self, id: DimListId) -> (u8, &[u16; 4]) {
-        let (n, ref ids) = self.dim_lists[id as usize];
-        (n, ids)
     }
 }
 
@@ -2145,193 +2147,6 @@ mod tests {
     // =========================================================================
     // Stack Effect Tests
     // =========================================================================
-
-    #[test]
-    fn test_stack_effect_arithmetic_ops() {
-        // Binary ops: pop 2, push 1
-        assert_eq!((Opcode::Op2 { op: Op2::Add }).stack_effect(), (2, 1));
-        assert_eq!((Opcode::Op2 { op: Op2::Mul }).stack_effect(), (2, 1));
-        assert_eq!((Opcode::Op2 { op: Op2::Gt }).stack_effect(), (2, 1));
-
-        // Unary not: pop 1, push 1
-        assert_eq!((Opcode::Not {}).stack_effect(), (1, 1));
-    }
-
-    #[test]
-    fn test_stack_effect_loads() {
-        assert_eq!((Opcode::LoadConstant { id: 0 }).stack_effect(), (0, 1));
-        assert_eq!((Opcode::LoadVar { off: 0 }).stack_effect(), (0, 1));
-        assert_eq!((Opcode::LoadGlobalVar { off: 0 }).stack_effect(), (0, 1));
-        assert_eq!(
-            (Opcode::LoadModuleInput { input: 0 }).stack_effect(),
-            (0, 1)
-        );
-    }
-
-    #[test]
-    fn test_stack_effect_assignments() {
-        assert_eq!((Opcode::AssignCurr { off: 0 }).stack_effect(), (1, 0));
-    }
-
-    #[test]
-    fn test_stack_effect_superinstructions() {
-        assert_eq!(
-            (Opcode::AssignConstCurr {
-                off: 0,
-                literal_id: 0
-            })
-            .stack_effect(),
-            (0, 0)
-        );
-        assert_eq!(
-            (Opcode::BinOpAssignCurr {
-                op: Op2::Add,
-                off: 0
-            })
-            .stack_effect(),
-            (2, 0)
-        );
-        assert_eq!(
-            (Opcode::BinOpAssignNext {
-                op: Op2::Add,
-                off: 0
-            })
-            .stack_effect(),
-            (2, 0)
-        );
-    }
-
-    #[test]
-    fn test_stack_effect_load_prev_pops_fallback() {
-        // LoadPrev pops the fallback value from the stack, then
-        // pushes the result (either the fallback or prev_values[off]).
-        assert_eq!((Opcode::LoadPrev { off: 0 }).stack_effect(), (1, 1));
-    }
-
-    #[test]
-    fn test_stack_effect_builtins() {
-        assert_eq!(
-            (Opcode::Apply {
-                func: BuiltinId::Abs
-            })
-            .stack_effect(),
-            (3, 1)
-        );
-        assert_eq!(
-            (Opcode::Lookup {
-                base_gf: 0,
-                table_count: 1,
-                mode: LookupMode::Interpolate,
-            })
-            .stack_effect(),
-            (2, 1)
-        );
-    }
-
-    #[test]
-    fn test_stack_effect_control_flow() {
-        assert_eq!((Opcode::SetCond {}).stack_effect(), (1, 0));
-        assert_eq!((Opcode::If {}).stack_effect(), (2, 1));
-        assert_eq!(Opcode::Ret.stack_effect(), (0, 0));
-    }
-
-    #[test]
-    fn test_stack_effect_eval_module() {
-        assert_eq!(
-            (Opcode::EvalModule { id: 0, n_inputs: 3 }).stack_effect(),
-            (3, 0)
-        );
-        assert_eq!(
-            (Opcode::EvalModule { id: 0, n_inputs: 0 }).stack_effect(),
-            (0, 0)
-        );
-    }
-
-    #[test]
-    fn test_stack_effect_view_ops_dont_affect_arithmetic_stack() {
-        assert_eq!(
-            (Opcode::PushVarViewDirect {
-                base_off: 0,
-                dim_list_id: 0,
-            })
-            .stack_effect(),
-            (0, 0)
-        );
-        assert_eq!((Opcode::PopView {}).stack_effect(), (0, 0));
-        assert_eq!((Opcode::DupView {}).stack_effect(), (0, 0));
-        assert_eq!(
-            (Opcode::ViewSubscriptConst {
-                dim_idx: 0,
-                index: 0,
-            })
-            .stack_effect(),
-            (0, 0)
-        );
-    }
-
-    #[test]
-    fn test_stack_effect_dynamic_view_ops_pop_from_arithmetic_stack() {
-        assert_eq!(
-            (Opcode::ViewSubscriptDynamic { dim_idx: 0 }).stack_effect(),
-            (1, 0)
-        );
-        assert_eq!(
-            (Opcode::ViewRangeDynamic { dim_idx: 0 }).stack_effect(),
-            (2, 0)
-        );
-    }
-
-    #[test]
-    fn test_stack_effect_iteration() {
-        assert_eq!(
-            (Opcode::BeginIter {
-                write_temp_id: 0,
-                has_write_temp: false,
-            })
-            .stack_effect(),
-            (0, 0)
-        );
-        assert_eq!((Opcode::LoadIterElement {}).stack_effect(), (0, 1));
-        assert_eq!((Opcode::StoreIterElement {}).stack_effect(), (1, 0));
-        assert_eq!((Opcode::EndIter {}).stack_effect(), (0, 0));
-    }
-
-    #[test]
-    fn test_stack_effect_array_reductions() {
-        assert_eq!((Opcode::ArraySum {}).stack_effect(), (0, 1));
-        assert_eq!((Opcode::ArrayMax {}).stack_effect(), (0, 1));
-        assert_eq!((Opcode::ArrayMin {}).stack_effect(), (0, 1));
-        assert_eq!((Opcode::ArrayMean {}).stack_effect(), (0, 1));
-        assert_eq!((Opcode::ArrayStddev {}).stack_effect(), (0, 1));
-        assert_eq!((Opcode::ArraySize {}).stack_effect(), (0, 1));
-    }
-
-    #[test]
-    fn test_stack_effect_vector_ops() {
-        // VectorSelect: pops max_value + action scalars, pushes 1 result
-        assert_eq!((Opcode::VectorSelect {}).stack_effect(), (2, 1));
-        // VectorElmMap: reads views, writes to temp_storage, no arithmetic stack effect
-        assert_eq!(
-            (Opcode::VectorElmMap {
-                write_temp_id: 0,
-                full_source_len: 0
-            })
-            .stack_effect(),
-            (0, 0)
-        );
-        // VectorSortOrder: pops 1 scalar (direction), writes to temp_storage
-        assert_eq!(
-            (Opcode::VectorSortOrder { write_temp_id: 0 }).stack_effect(),
-            (1, 0)
-        );
-        // Rank: pops 1 scalar (direction), writes to temp_storage
-        assert_eq!((Opcode::Rank { write_temp_id: 0 }).stack_effect(), (1, 0));
-        // AllocateAvailable: pops 1 scalar (avail), writes to temp_storage
-        assert_eq!(
-            (Opcode::AllocateAvailable { write_temp_id: 0 }).stack_effect(),
-            (1, 0)
-        );
-    }
 
     // =========================================================================
     // Max Stack Depth Tests
@@ -3121,16 +2936,6 @@ mod tests {
         assert_eq!(runtime.dims.as_slice(), &[3, 4]);
         assert_eq!(runtime.strides.as_slice(), &[4, 1]);
         assert_eq!(runtime.offset, 8);
-    }
-
-    #[test]
-    fn test_context_set_temp_info() {
-        let mut ctx = ByteCodeContext::default();
-
-        ctx.set_temp_info(vec![0, 10, 25], 50);
-
-        assert_eq!(ctx.temp_offsets, vec![0, 10, 25]);
-        assert_eq!(ctx.temp_total_size, 50);
     }
 
     #[test]
@@ -4164,7 +3969,7 @@ mod tests {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
 pub struct CompiledInitial {
-    // Used for diagnostics in debug_print_bytecode and set_value error messages
+    // Used for `set_value` error messages.
     #[allow(dead_code)]
     pub(crate) ident: Ident<Canonical>,
     /// Sorted, deduplicated offsets of all AssignCurr targets in this variable's

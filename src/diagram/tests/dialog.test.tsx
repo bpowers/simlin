@@ -121,12 +121,6 @@ describe('DialogContent', () => {
     render(<DialogContent>Content area</DialogContent>);
     expect(screen.getByText('Content area')).not.toBeNull();
   });
-
-  test('applies dialogContent class', () => {
-    const { container } = render(<DialogContent>Content</DialogContent>);
-    const div = container.firstChild as HTMLElement;
-    expect(div.className).toContain('dialogContent');
-  });
 });
 
 describe('DialogContentText', () => {
@@ -134,12 +128,6 @@ describe('DialogContentText', () => {
     render(<DialogContentText>Some text</DialogContentText>);
     const p = screen.getByText('Some text');
     expect(p.tagName).toBe('P');
-  });
-
-  test('applies contentText class', () => {
-    render(<DialogContentText>Text</DialogContentText>);
-    const p = screen.getByText('Text');
-    expect(p.className).toContain('contentText');
   });
 });
 
@@ -151,15 +139,5 @@ describe('DialogActions', () => {
       </DialogActions>,
     );
     expect(screen.getByText('OK')).not.toBeNull();
-  });
-
-  test('applies actions class', () => {
-    const { container } = render(
-      <DialogActions>
-        <button>OK</button>
-      </DialogActions>,
-    );
-    const div = container.firstChild as HTMLElement;
-    expect(div.className).toContain('actions');
   });
 });

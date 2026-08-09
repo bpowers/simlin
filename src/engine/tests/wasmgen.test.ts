@@ -13,7 +13,7 @@
  * needs a live instance and is covered by the DirectBackend integration tests.
  */
 
-import { describe, it, expect, rs } from '@rstest/core';
+import { describe, it, expect } from '@rstest/core';
 
 import { parseWasmLayout, readStridedSeries, decodeWasmError, WasmLayout } from '../src/internal/wasmgen';
 
@@ -189,24 +189,6 @@ describe('readStridedSeries', () => {
     expect(Array.from(slot1)).toEqual([1, 11, 21, 31, 41]);
   });
 
-  it('returns a Float64Array of length nChunks', () => {
-    const nSlots = 4;
-    const nChunks = 9;
-    const resultsOffset = 24;
-    const buffer = buildResultsBuffer({
-      nSlots,
-      nChunks,
-      resultsOffset,
-      cell: (c, s) => c + s,
-    });
-    const layout = makeLayout(nSlots, nChunks, resultsOffset);
-
-    const series = readStridedSeries(buffer, layout, 0);
-
-    expect(series).toBeInstanceOf(Float64Array);
-    expect(series.length).toBe(nChunks);
-  });
-
   it('reads the first and last slots correctly (column boundaries)', () => {
     const nSlots = 3;
     const nChunks = 4;
@@ -275,41 +257,6 @@ describe('readStridedSeries', () => {
 
     // A count larger than the slab capacity must be clamped, not read out of bounds.
     expect(readStridedSeries(buffer, layout, 0, 99).length).toBe(3);
-  });
-
-  it('allocates exactly one Float64Array of length nChunks and nothing else', () => {
-    const nSlots = 2;
-    const nChunks = 6;
-    const resultsOffset = 8;
-    const buffer = buildResultsBuffer({
-      nSlots,
-      nChunks,
-      resultsOffset,
-      cell: (c) => c,
-    });
-    const layout = makeLayout(nSlots, nChunks, resultsOffset);
-
-    // Spy on the Float64Array constructor to assert a single typed-array
-    // allocation of exactly nChunks elements (no intermediate arrays).
-    const RealFloat64Array = Float64Array;
-    const allocations: Array<number> = [];
-    // rstest's Mock<T> requires T to have a call signature, which
-    // Float64ArrayConstructor (new-only) does not; view the global as the
-    // one-arg factory this test replaces it with. Calling the mock with `new`
-    // still yields the object the implementation returns.
-    const globalWithFloat64Array = global as unknown as { Float64Array: (arg: number) => Float64Array };
-    const spy = rs.spyOn(globalWithFloat64Array, 'Float64Array').mockImplementation((arg: number) => {
-      allocations.push(arg);
-      return new RealFloat64Array(arg);
-    });
-
-    try {
-      const series = readStridedSeries(buffer, layout, 0);
-      expect(allocations).toEqual([nChunks]);
-      expect(Array.from(series)).toEqual([0, 1, 2, 3, 4, 5]);
-    } finally {
-      spy.mockRestore();
-    }
   });
 });
 

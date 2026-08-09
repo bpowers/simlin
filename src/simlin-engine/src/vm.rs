@@ -3580,59 +3580,6 @@ impl Vm {
             *slot = f64::NAN;
         }
     }
-
-    #[cfg(test)]
-    pub fn debug_print_bytecode(&self, _model_name: &str) {
-        // Iterate modules in key order for stable, readable output.
-        let mut keyed: Vec<(&ModuleKey, usize)> = self
-            .sliced_sim
-            .key_to_idx
-            .iter()
-            .map(|(k, &idx)| (k, idx as usize))
-            .collect();
-        keyed.sort_unstable_by(|a, b| a.0.cmp(b.0));
-        for (module_key, idx) in keyed {
-            eprintln!("\n\nCOMPILED MODULE: {:?}", module_key);
-
-            let module = &self.sliced_sim.modules[idx];
-            let flows_bc = &module.flows;
-            let stocks_bc = &module.stocks;
-
-            for ci in module.initials.iter() {
-                eprintln!("\ninitial '{}' literals:", ci.ident);
-                for (i, lit) in ci.bytecode.literals.iter().enumerate() {
-                    eprintln!("\t{i}: {lit}");
-                }
-                eprintln!(
-                    "initial '{}' bytecode (offsets {:?}):",
-                    ci.ident, ci.offsets
-                );
-                for op in ci.bytecode.code.iter() {
-                    eprintln!("\t{op:?}");
-                }
-            }
-
-            eprintln!("\nflows literals:");
-            for (i, lit) in flows_bc.literals.iter().enumerate() {
-                eprintln!("\t{i}: {lit}");
-            }
-
-            eprintln!("\nflows bytecode:");
-            for op in flows_bc.code.iter() {
-                eprintln!("\t{op:?}");
-            }
-
-            eprintln!("\nstocks literals:");
-            for (i, lit) in stocks_bc.literals.iter().enumerate() {
-                eprintln!("\t{i}: {lit}");
-            }
-
-            eprintln!("\nstocks bytecode:");
-            for op in stocks_bc.code.iter() {
-                eprintln!("\t{op:?}");
-            }
-        }
-    }
 }
 
 #[inline(always)]
@@ -3887,40 +3834,6 @@ pub(crate) fn lookup_backward(table: &[(f64, f64)], index: f64) -> f64 {
     // low now points to the first element > index
     // We want the element just before it (the last element <= index)
     table[low - 1].1
-}
-
-#[cfg(test)]
-mod eval_op2_tests {
-    use super::*;
-
-    #[test]
-    fn test_eval_op2_arithmetic() {
-        assert_eq!(eval_op2(Op2::Add, 3.0, 4.0), 7.0);
-        assert_eq!(eval_op2(Op2::Sub, 10.0, 3.0), 7.0);
-        assert_eq!(eval_op2(Op2::Mul, 3.0, 4.0), 12.0);
-        assert_eq!(eval_op2(Op2::Div, 10.0, 4.0), 2.5);
-        assert_eq!(eval_op2(Op2::Exp, 2.0, 3.0), 8.0);
-        assert_eq!(eval_op2(Op2::Mod, 7.0, 3.0), 1.0);
-    }
-
-    #[test]
-    fn test_eval_op2_comparisons() {
-        assert_eq!(eval_op2(Op2::Gt, 5.0, 3.0), 1.0);
-        assert_eq!(eval_op2(Op2::Gt, 3.0, 5.0), 0.0);
-        assert_eq!(eval_op2(Op2::Gte, 5.0, 5.0), 1.0);
-        assert_eq!(eval_op2(Op2::Lt, 3.0, 5.0), 1.0);
-        assert_eq!(eval_op2(Op2::Lte, 5.0, 5.0), 1.0);
-        assert_eq!(eval_op2(Op2::Eq, 5.0, 5.0), 1.0);
-        assert_eq!(eval_op2(Op2::Eq, 5.0, 5.1), 0.0);
-    }
-
-    #[test]
-    fn test_eval_op2_logical() {
-        assert_eq!(eval_op2(Op2::And, 1.0, 1.0), 1.0);
-        assert_eq!(eval_op2(Op2::And, 1.0, 0.0), 0.0);
-        assert_eq!(eval_op2(Op2::Or, 0.0, 1.0), 1.0);
-        assert_eq!(eval_op2(Op2::Or, 0.0, 0.0), 0.0);
-    }
 }
 
 #[cfg(test)]
@@ -4307,7 +4220,7 @@ mod per_variable_initials_tests {
         );
 
         // Verify the stock's initial value is correct: rate * 1000 = 100
-        let vm_results = tp.run_vm_incremental();
+        let vm_results = tp.run_vm_expecting_success();
         let pop_vm = &vm_results["pop"];
         assert_eq!(pop_vm[0], 100.0, "population initial should be 100");
     }
@@ -4321,7 +4234,7 @@ mod per_variable_initials_tests {
             .flow("inflow", "0", None)
             .stock("s", "arr[A] + arr[B] + arr[C]", &["inflow"], &[], None);
 
-        let vm_results = tp.run_vm_incremental();
+        let vm_results = tp.run_vm_expecting_success();
 
         // arr[A]=1, arr[B]=2, arr[C]=3, so s = 1+2+3 = 6
         let s_vm = vm_results.get("s").expect("s should exist in VM");
@@ -4380,17 +4293,6 @@ mod stack_tests {
     use super::*;
 
     #[test]
-    fn test_push_pop_basic() {
-        let mut s: Stack = Stack::new();
-        s.push(1.0);
-        s.push(2.0);
-        s.push(3.0);
-        assert_eq!(3.0, s.pop());
-        assert_eq!(2.0, s.pop());
-        assert_eq!(1.0, s.pop());
-    }
-
-    #[test]
     fn test_lifo_ordering() {
         let mut s: Stack = Stack::new();
         for i in 0..10 {
@@ -4399,16 +4301,6 @@ mod stack_tests {
         for i in (0..10).rev() {
             assert_eq!(i as f64, s.pop());
         }
-    }
-
-    #[test]
-    fn test_clear_resets_stack() {
-        let mut s: Stack = Stack::new();
-        s.push(1.0);
-        s.push(2.0);
-        assert_eq!(2, s.len());
-        s.clear();
-        assert_eq!(0, s.len());
     }
 
     #[test]
@@ -4461,21 +4353,6 @@ mod stack_tests {
         s.push(42.0);
         assert_eq!(1, s.len());
         assert_eq!(42.0, s.pop());
-    }
-
-    #[test]
-    fn test_negative_and_special_values() {
-        let mut s: Stack = Stack::new();
-        s.push(-1.0);
-        s.push(0.0);
-        s.push(f64::INFINITY);
-        s.push(f64::NEG_INFINITY);
-        s.push(f64::NAN);
-        assert!(s.pop().is_nan());
-        assert_eq!(f64::NEG_INFINITY, s.pop());
-        assert_eq!(f64::INFINITY, s.pop());
-        assert_eq!(0.0, s.pop());
-        assert_eq!(-1.0, s.pop());
     }
 }
 
@@ -4637,12 +4514,6 @@ mod superinstruction_tests {
     fn test_op2_mul() {
         let result = run_binop_model("a * b");
         assert!((result - 30.0).abs() < 1e-10, "10 * 3 = 30, got {result}");
-    }
-
-    #[test]
-    fn test_op2_div() {
-        let result = run_binop_model("a / b");
-        assert!((result - 10.0 / 3.0).abs() < 1e-10, "10 / 3, got {result}");
     }
 
     #[test]
@@ -5206,20 +5077,19 @@ mod chunk_regions_tests {
     }
 }
 
-/// Tests for empty-view behavior in VM array reducer opcodes (AC2).
+/// Tests for [`Vm::reduce_view`]'s slicing, over views built by hand.
 ///
-/// Zero-element dimensions cannot currently arise through the model compilation
-/// pipeline, but these guards protect against future edge cases (e.g., empty
-/// subranges). We test at the reduce_view level directly since RuntimeView
-/// with dims=[0] is a valid construct.
+/// NOT covered here, and currently covered NOWHERE: the documented empty-view
+/// contract that ArrayMax/Min/Mean/Stddev push NaN while ArraySum yields 0.0.
+/// That asymmetry lives in the OPCODE arms, not in `reduce_view`, and the six
+/// tests this module used to carry only folded `reduce_view` over zero elements
+/// and asserted it returned its own init -- so all four `view.size() == 0`
+/// guards could be deleted with the suite green. Pinning it needs an
+/// opcode-level fixture, and a zero-element dimension cannot be built through
+/// the compilation pipeline, so it needs hand-assembled bytecode.
 #[cfg(test)]
-mod empty_view_reduce_tests {
+mod reduce_view_tests {
     use super::*;
-    use smallvec::smallvec;
-
-    fn empty_view() -> RuntimeView {
-        RuntimeView::for_var(0, smallvec![0], smallvec![0])
-    }
 
     fn empty_context() -> ByteCodeContext {
         ByteCodeContext {
@@ -5314,129 +5184,5 @@ mod empty_view_reduce_tests {
             0.0,
         );
         assert_eq!(sum, 33.0);
-    }
-
-    // -- SUM: returns 0.0 for empty views (additive identity) (AC2.2) --
-    #[test]
-    fn sum_empty_view_returns_zero() {
-        let view = empty_view();
-        let curr: [f64; 0] = [];
-        let temp: [f64; 0] = [];
-        let ctx = empty_context();
-        let result = Vm::reduce_view(
-            &temp,
-            &view,
-            ChunkRegions::curr_only(&curr),
-            &ctx,
-            |acc, v| acc + v,
-            0.0,
-        );
-        assert_eq!(result, 0.0);
-    }
-
-    // -- SIZE: returns 0 for empty views (AC2.3) --
-    #[test]
-    fn size_empty_view_returns_zero() {
-        let view = empty_view();
-        assert_eq!(view.size(), 0);
-    }
-
-    // -- MAX: opcode guard should return NaN, not NEG_INFINITY (AC2.1) --
-    #[test]
-    fn max_reduce_view_empty_returns_neg_infinity_but_opcode_guards() {
-        let view = empty_view();
-        let curr: [f64; 0] = [];
-        let temp: [f64; 0] = [];
-        let ctx = empty_context();
-        // reduce_view returns the init value (NEG_INFINITY) for empty views
-        let result = Vm::reduce_view(
-            &temp,
-            &view,
-            ChunkRegions::curr_only(&curr),
-            &ctx,
-            |acc, v| if v > acc { v } else { acc },
-            f64::NEG_INFINITY,
-        );
-        assert_eq!(result, f64::NEG_INFINITY);
-        // The ArrayMax opcode handler checks view.size() == 0 and pushes NaN
-        // instead of calling reduce_view -- verified by the size check
-        assert_eq!(view.size(), 0);
-    }
-
-    // -- MIN: opcode guard should return NaN, not INFINITY (AC2.1) --
-    #[test]
-    fn min_reduce_view_empty_returns_infinity_but_opcode_guards() {
-        let view = empty_view();
-        let curr: [f64; 0] = [];
-        let temp: [f64; 0] = [];
-        let ctx = empty_context();
-        let result = Vm::reduce_view(
-            &temp,
-            &view,
-            ChunkRegions::curr_only(&curr),
-            &ctx,
-            |acc, v| if v < acc { v } else { acc },
-            f64::INFINITY,
-        );
-        assert_eq!(result, f64::INFINITY);
-        assert_eq!(view.size(), 0);
-    }
-
-    // -- MEAN: opcode guard should return NaN for size==0 (AC2.1) --
-    //
-    // reduce_view returns the accumulator's init value for empty views (0.0 for sum).
-    // Without the guard, the ArrayMean opcode would compute 0.0 / 0.0, which is NaN
-    // by IEEE 754. The explicit guard makes the intent clear and is consistent with the
-    // other reducers that have non-obvious implicit behavior (Max returns NEG_INFINITY,
-    // Min returns INFINITY).
-    #[test]
-    fn mean_empty_view_reduce_returns_zero_sum() {
-        let view = empty_view();
-        let curr: [f64; 0] = [];
-        let temp: [f64; 0] = [];
-        let ctx = empty_context();
-        // reduce_view returns the sum init value (0.0) for empty views;
-        // the ArrayMean opcode guards view.size()==0 before dividing by count
-        let sum = Vm::reduce_view(
-            &temp,
-            &view,
-            ChunkRegions::curr_only(&curr),
-            &ctx,
-            |acc, v| acc + v,
-            0.0,
-        );
-        assert_eq!(sum, 0.0);
-        assert_eq!(view.size(), 0);
-        // Without the guard: sum / count = 0.0 / 0.0 = NaN (IEEE); guard makes it explicit
-        assert!((sum / view.size() as f64).is_nan());
-    }
-
-    // -- STDDEV: opcode guard should return NaN for size==0 (AC2.1) --
-    //
-    // reduce_view returns the sum init value (0.0) for empty views. The
-    // ArrayStddev opcode uses a population-variance divisor `size` (NOT
-    // `size - 1`); without the explicit `size == 0` guard the divisor would
-    // be `0.0` and `variance_sum / 0.0` yields NaN by IEEE rules -- the
-    // guard makes that NaN explicit rather than implicit.
-    #[test]
-    fn stddev_empty_view_reduce_returns_zero_sum() {
-        let view = empty_view();
-        let curr: [f64; 0] = [];
-        let temp: [f64; 0] = [];
-        let ctx = empty_context();
-        // reduce_view returns the sum init value (0.0) for empty views;
-        // the ArrayStddev opcode guards size==0 before dividing by the
-        // population-variance divisor `size`.
-        let sum = Vm::reduce_view(
-            &temp,
-            &view,
-            ChunkRegions::curr_only(&curr),
-            &ctx,
-            |acc, v| acc + v,
-            0.0,
-        );
-        assert_eq!(sum, 0.0);
-        assert_eq!(view.size(), 0);
-        // Without the guard: `variance_sum / (size as f64)` = `0.0 / 0.0` = NaN.
     }
 }

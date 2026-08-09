@@ -1635,7 +1635,7 @@ mod tests {
             None,
         );
 
-        let x = project.vm_result_incremental("x");
+        let x = project.vm_result("x");
         assert!(
             x.iter().all(|v| (*v - 5.0).abs() < 1e-12),
             "`SMTH1((IF (1 > 0) THEN 10 ELSE 20) / 2, 1)` must be 5: the `/ 2` \

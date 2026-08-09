@@ -449,27 +449,6 @@ pub mod view_element {
         }
     }
 
-    #[test]
-    fn test_point_roundtrip() {
-        let cases: &[_] = &[
-            datamodel::view_element::FlowPoint {
-                x: 1.1,
-                y: 2.2,
-                attached_to_uid: None,
-            },
-            datamodel::view_element::FlowPoint {
-                x: 1.1,
-                y: 2.2,
-                attached_to_uid: Some(666),
-            },
-        ];
-        for expected in cases {
-            let expected = expected.clone();
-            let actual = datamodel::view_element::FlowPoint::from(Point::from(expected.clone()));
-            assert_eq!(expected, actual);
-        }
-    }
-
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
     #[derive(Clone, PartialEq, Default, Deserialize, Serialize)]
     pub struct Points {

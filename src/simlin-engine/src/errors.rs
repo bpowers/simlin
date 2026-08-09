@@ -396,7 +396,12 @@ pub fn format_diagnostic(diag: &db::Diagnostic) -> FormattedError {
         }
         DiagnosticError::Unit(err) => {
             let var_name = diag.variable.as_deref().unwrap_or("<unknown>");
-            format_unit_error(&diag.model, var_name, None, err, severity)
+            let mut formatted = format_unit_error(&diag.model, var_name, None, err, severity);
+            // The `<unknown>` placeholder belongs in the human message only;
+            // the structured field carries the diagnostic's actual (possibly
+            // absent) variable, matching the Equation arm above.
+            formatted.variable_name = diag.variable.clone();
+            formatted
         }
         DiagnosticError::Assembly(msg) => FormattedError {
             code: ErrorCode::NotSimulatable,
@@ -434,11 +439,17 @@ pub fn format_diagnostic_with_datamodel(
     match &diag.error {
         DiagnosticError::Equation(err) => {
             let var_name = diag.variable.as_deref().unwrap_or("<unknown>");
-            format_equation_error(&diag.model, var_name, dm_var, err, diag.severity)
+            let mut formatted =
+                format_equation_error(&diag.model, var_name, dm_var, err, diag.severity);
+            formatted.variable_name = diag.variable.clone();
+            formatted
         }
         DiagnosticError::Unit(err) => {
             let var_name = diag.variable.as_deref().unwrap_or("<unknown>");
-            format_unit_error(&diag.model, var_name, dm_var, err, diag.severity)
+            let mut formatted =
+                format_unit_error(&diag.model, var_name, dm_var, err, diag.severity);
+            formatted.variable_name = diag.variable.clone();
+            formatted
         }
         _ => format_diagnostic(diag),
     }
@@ -934,6 +945,186 @@ mod tests {
                 .expect("message missing")
                 .starts_with("error compiling model 'main'")
         );
+    }
+
+    /// Beyond the severity word, `format_diagnostic` makes three per-arm
+    /// decisions -- the presentation `kind`, the `unit_error_kind`
+    /// refinement, and where the source offsets come from. The rows below
+    /// are the arms of that decision: `DiagnosticError`'s four variants,
+    /// with `Model` split on its `UnitMismatch` test and `Unit` split into
+    /// `UnitError`'s three variants. `diagnostic_arms` above ranges over
+    /// the same space but asserts only the severity wording, so this is
+    /// what holds the mapping itself.
+    #[test]
+    fn format_diagnostic_maps_every_arm() {
+        use crate::common::{Error as CommonError, ErrorKind, UnitError};
+        use crate::db::{Diagnostic, DiagnosticError};
+
+        // (label, error, expected code/kind/unit_error_kind/offsets)
+        type ArmRow = (
+            &'static str,
+            DiagnosticError,
+            ErrorCode,
+            FormattedErrorKind,
+            Option<UnitErrorKind>,
+            (u16, u16),
+        );
+        let rows: Vec<ArmRow> = vec![
+            (
+                "equation",
+                DiagnosticError::Equation(EquationError {
+                    start: 4,
+                    end: 9,
+                    code: ErrorCode::UnknownDependency,
+                }),
+                ErrorCode::UnknownDependency,
+                FormattedErrorKind::Variable,
+                None,
+                (4, 9),
+            ),
+            (
+                "model, non-unit",
+                DiagnosticError::Model(CommonError {
+                    kind: ErrorKind::Model,
+                    code: ErrorCode::CircularDependency,
+                    details: Some("a -> b -> a".to_string()),
+                }),
+                ErrorCode::CircularDependency,
+                FormattedErrorKind::Model,
+                None,
+                (0, 0),
+            ),
+            // A model-level UnitMismatch is the units-inference umbrella
+            // `db/units.rs` raises, so it presents as a unit error even
+            // though it arrives on the Model arm.
+            (
+                "model, unit mismatch",
+                DiagnosticError::Model(CommonError {
+                    kind: ErrorKind::Model,
+                    code: ErrorCode::UnitMismatch,
+                    details: None,
+                }),
+                ErrorCode::UnitMismatch,
+                FormattedErrorKind::Units,
+                Some(UnitErrorKind::Inference),
+                (0, 0),
+            ),
+            (
+                "unit definition",
+                DiagnosticError::Unit(UnitError::DefinitionError(
+                    EquationError {
+                        start: 0,
+                        end: 3,
+                        code: ErrorCode::UnitDefinitionErrors,
+                    },
+                    Some("parse error".to_string()),
+                )),
+                ErrorCode::UnitDefinitionErrors,
+                FormattedErrorKind::Units,
+                Some(UnitErrorKind::Definition),
+                (0, 3),
+            ),
+            (
+                "unit consistency",
+                DiagnosticError::Unit(UnitError::ConsistencyError(
+                    ErrorCode::UnitMismatch,
+                    Loc::new(2, 8),
+                    Some("kg vs m".to_string()),
+                )),
+                ErrorCode::UnitMismatch,
+                FormattedErrorKind::Units,
+                Some(UnitErrorKind::Consistency),
+                (2, 8),
+            ),
+            (
+                "unit inference",
+                DiagnosticError::Unit(UnitError::InferenceError {
+                    code: ErrorCode::UnitMismatch,
+                    sources: vec![("v".to_string(), Some(Loc::new(1, 6)))],
+                    details: None,
+                }),
+                ErrorCode::UnitMismatch,
+                FormattedErrorKind::Units,
+                Some(UnitErrorKind::Inference),
+                (1, 6),
+            ),
+            (
+                "assembly",
+                DiagnosticError::Assembly("could not assemble".to_string()),
+                ErrorCode::NotSimulatable,
+                FormattedErrorKind::Simulation,
+                None,
+                (0, 0),
+            ),
+        ];
+
+        for (label, error, code, kind, unit_error_kind, (start, end)) in rows {
+            let diag = Diagnostic {
+                model: "main".to_string(),
+                variable: Some("v".to_string()),
+                error,
+                severity: DiagnosticSeverity::Error,
+            };
+            let fe = format_diagnostic(&diag);
+            assert_eq!(fe.code, code, "{label}: code");
+            assert_eq!(fe.kind, kind, "{label}: kind");
+            assert_eq!(
+                fe.unit_error_kind, unit_error_kind,
+                "{label}: unit_error_kind"
+            );
+            assert_eq!(fe.start_offset, start, "{label}: start_offset");
+            assert_eq!(fe.end_offset, end, "{label}: end_offset");
+            assert_eq!(
+                fe.model_name.as_deref(),
+                Some("main"),
+                "{label}: model_name"
+            );
+            assert_eq!(fe.variable_name.as_deref(), Some("v"), "{label}: variable");
+        }
+    }
+
+    /// A diagnostic can carry no variable, and the two arms whose summary
+    /// line names one substitute the placeholder `<unknown>` rather than
+    /// dropping the clause and producing `variable ''`.
+    ///
+    /// The placeholder belongs in the human MESSAGE only: on both arms the
+    /// structured `variable_name` field carries `diag.variable` through
+    /// unchanged, so a variable-less diagnostic reports `None` rather than a
+    /// variable literally named `<unknown>` (the Unit arm used to leak the
+    /// placeholder into the field via `format_unit_error`).
+    #[test]
+    fn format_diagnostic_falls_back_to_unknown_variable() {
+        use crate::common::UnitError;
+        use crate::db::{Diagnostic, DiagnosticError};
+
+        let arms = [
+            DiagnosticError::Equation(EquationError {
+                start: 0,
+                end: 5,
+                code: ErrorCode::EmptyEquation,
+            }),
+            DiagnosticError::Unit(UnitError::ConsistencyError(
+                ErrorCode::UnitMismatch,
+                Loc::new(0, 1),
+                None,
+            )),
+        ];
+
+        for error in arms {
+            let diag = Diagnostic {
+                model: "m".to_string(),
+                variable: None,
+                error,
+                severity: DiagnosticSeverity::Error,
+            };
+            let fe = format_diagnostic(&diag);
+            assert_eq!(fe.variable_name, None);
+            let message = fe.message.as_ref().expect("message missing");
+            assert!(
+                message.contains("variable '<unknown>'"),
+                "a variable-less diagnostic must name the variable '<unknown>': {message}"
+            );
+        }
     }
 
     /// GH #919: `has_model_errors` / `has_variable_errors` gate failure-shaped

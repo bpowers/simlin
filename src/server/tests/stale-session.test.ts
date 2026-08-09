@@ -21,7 +21,6 @@ import {
   extractSessionCookie,
   findClearingSetCookie,
   login,
-  makeUser,
   request,
   withServer,
   Harness,
@@ -215,11 +214,5 @@ describe('getUser defense-in-depth envelope', () => {
     const error = (bodies[0] as Record<string, unknown>).error;
     expect(typeof error).toBe('string');
     expect((error as string).length).toBeGreaterThan(0);
-  });
-
-  it('returns the deserialized user when present', () => {
-    const alice = makeUser('alice');
-    const req = { user: alice } as unknown as express.Request;
-    expect(getUser(req, {} as express.Response)).toBe(alice);
   });
 });

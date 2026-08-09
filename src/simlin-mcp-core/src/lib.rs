@@ -14,8 +14,13 @@
 
 pub mod access;
 pub mod errors;
+pub mod fs_access;
 pub mod open;
 pub mod server;
+/// Fixtures for integration tests. Gated behind the `test-support` feature so
+/// it is not compiled into shipped binaries; the crate's own integration
+/// tests reach it through a self dev-dependency that enables the feature.
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_support;
 pub mod tools;
@@ -23,6 +28,7 @@ pub mod types;
 
 pub use access::{OpenedProject, ProjectAccess};
 pub use errors::AccessError;
+pub use fs_access::FileSystemAccess;
 pub use server::{ResourceContent, SimlinMcpServer};
 pub use types::{
     DominantPeriodOutput, ErrorOutput, LoopDominanceSummary, PartitionOutput, SourceFormat,

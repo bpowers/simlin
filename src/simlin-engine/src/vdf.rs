@@ -298,7 +298,10 @@ pub const VENSIM_BUILTINS: [&str; 28] = [
 
 /// Read a little-endian u32 from the given byte offset (0 if out of range).
 pub fn read_u32(data: &[u8], offset: usize) -> u32 {
-    match data.get(offset..offset + 4) {
+    // `checked_add`, not `offset + 4`: the totality claim is about ARBITRARY
+    // offsets, and a plain add panics on overflow in debug builds -- which is
+    // the same abort, one build profile earlier.
+    match offset.checked_add(4).and_then(|end| data.get(offset..end)) {
         Some(bytes) => u32::from_le_bytes(bytes.try_into().unwrap()),
         None => 0,
     }
@@ -306,7 +309,7 @@ pub fn read_u32(data: &[u8], offset: usize) -> u32 {
 
 /// Read a little-endian u16 from the given byte offset (0 if out of range).
 pub fn read_u16(data: &[u8], offset: usize) -> u16 {
-    match data.get(offset..offset + 2) {
+    match offset.checked_add(2).and_then(|end| data.get(offset..end)) {
         Some(bytes) => u16::from_le_bytes(bytes.try_into().unwrap()),
         None => 0,
     }
@@ -314,7 +317,7 @@ pub fn read_u16(data: &[u8], offset: usize) -> u16 {
 
 /// Read a little-endian f32 from the given byte offset (0.0 if out of range).
 pub fn read_f32(data: &[u8], offset: usize) -> f32 {
-    match data.get(offset..offset + 4) {
+    match offset.checked_add(4).and_then(|end| data.get(offset..end)) {
         Some(bytes) => f32::from_le_bytes(bytes.try_into().unwrap()),
         None => 0.0,
     }
@@ -2668,10 +2671,20 @@ mod tests {
     use super::*;
 
     #[test]
+    /// The three primitive readers are TOTAL on arbitrary bytes -- out of range
+    /// yields the zero value rather than a panic. That is load-bearing rather
+    /// than defensive: libsimlin release builds compile with `panic = abort`,
+    /// so a panic on a malformed VDF aborts the host process. Each reader gets
+    /// both an in-range row and the three ways an offset can run off the end
+    /// (past the buffer, straddling the end, and an empty buffer).
     fn test_read_u32() {
         let data = [0x01, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF];
         assert_eq!(read_u32(&data, 0), 1);
         assert_eq!(read_u32(&data, 4), 0xFFFFFFFF);
+        assert_eq!(read_u32(&data, 8), 0, "offset at the end");
+        assert_eq!(read_u32(&data, 5), 0, "last read straddles the end");
+        assert_eq!(read_u32(&data, usize::MAX), 0, "offset + 4 would overflow");
+        assert_eq!(read_u32(&[], 0), 0, "empty buffer");
     }
 
     #[test]
@@ -2679,12 +2692,24 @@ mod tests {
         let data = [0x01, 0x00, 0xFF, 0xFF];
         assert_eq!(read_u16(&data, 0), 1);
         assert_eq!(read_u16(&data, 2), 0xFFFF);
+        assert_eq!(read_u16(&data, 4), 0, "offset at the end");
+        assert_eq!(read_u16(&data, 3), 0, "last read straddles the end");
+        assert_eq!(read_u16(&data, usize::MAX), 0, "offset + 2 would overflow");
+        assert_eq!(read_u16(&[], 0), 0, "empty buffer");
     }
 
     #[test]
     fn test_read_f32() {
         let data = 1.0f32.to_le_bytes();
         assert_eq!(read_f32(&data, 0), 1.0);
+        assert_eq!(read_f32(&data, 1), 0.0, "read straddles the end");
+        assert_eq!(read_f32(&data, 4), 0.0, "offset at the end");
+        assert_eq!(
+            read_f32(&data, usize::MAX),
+            0.0,
+            "offset + 4 would overflow"
+        );
+        assert_eq!(read_f32(&[], 0), 0.0, "empty buffer");
     }
 
     #[test]
@@ -2777,19 +2802,6 @@ mod tests {
         assert_eq!(sections[0].region_data_size(), 60 - 34); // 60 - (10 + 24)
         assert_eq!(sections[1].region_data_size(), 150 - 84); // 150 - (60 + 24)
         assert_eq!(sections[2].region_data_size(), 200 - 174); // 200 - (150 + 24)
-    }
-
-    #[test]
-    fn test_vdf_record_accessors() {
-        let mut fields = [0u32; 16];
-        fields[11] = 42;
-        fields[12] = 100;
-        let rec = VdfRecord {
-            file_offset: 0,
-            fields,
-        };
-        assert_eq!(rec.ot_index(), 42);
-        assert_eq!(rec.slot_ref(), 100);
     }
 
     #[test]

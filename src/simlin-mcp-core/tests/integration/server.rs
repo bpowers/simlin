@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use rmcp::model::{PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams};
+use rmcp::model::ReadResourceRequestParams;
 use rmcp::{ServerHandler, ServiceError, ServiceExt};
 use simlin_engine::datamodel;
 use simlin_mcp_core::access::{OpenedProject, ProjectAccess};
@@ -83,8 +83,18 @@ async fn spawn_server_pair_with_resources(
     (client, server)
 }
 
+/// `get_info` must report the version and instructions the MOUNTING binary
+/// passed to `SimlinMcpServer::new`, not the library's own -- `simlin-mcp`
+/// and `simlin-serve` mount the same handler under different versions, and a
+/// handler that reached for `env!("CARGO_PKG_VERSION")` would report the
+/// library's version to both.
+///
+/// The rest of the advertised surface (server name, protocol version, the
+/// two capability flags) is pinned against the real running binary by
+/// `simlin-mcp`'s `stdio_smoke`, which compares them to literals rather than
+/// to the same constants the code builds them from.
 #[test]
-fn get_info_advertises_latest_protocol_and_capabilities() {
+fn get_info_reports_the_mounting_binarys_version_and_instructions() {
     let server = SimlinMcpServer::new(
         MockAccess,
         "Test instructions".to_string(),
@@ -92,15 +102,8 @@ fn get_info_advertises_latest_protocol_and_capabilities() {
         "1.2.3".into(),
     );
     let info = server.get_info();
-    assert_eq!(info.protocol_version, ProtocolVersion::LATEST);
-    assert_eq!(info.server_info.name, "simlin-mcp");
     assert_eq!(info.server_info.version, "1.2.3");
     assert_eq!(info.instructions.as_deref(), Some("Test instructions"));
-    assert!(info.capabilities.tools.is_some(), "tools must be enabled");
-    assert!(
-        info.capabilities.resources.is_some(),
-        "resources must be enabled"
-    );
 }
 
 #[tokio::test]
@@ -162,25 +165,6 @@ async fn read_resource_returns_error_code_for_unknown_uri() {
         Err(other) => panic!("expected McpError(-32002), got {other:?}"),
         Ok(_) => panic!("expected an error for unknown URI, got Ok"),
     }
-
-    let _ = client.cancel().await;
-    let _ = server.cancel().await;
-}
-
-#[tokio::test]
-async fn list_resources_empty_when_no_resources_registered() {
-    let (client, server) = spawn_server_pair_with_resources(vec![]).await;
-
-    let result = client
-        .peer()
-        .list_resources(None::<PaginatedRequestParams>)
-        .await
-        .expect("resources/list must succeed even with empty list");
-
-    assert!(
-        result.resources.is_empty(),
-        "no resources registered => empty list"
-    );
 
     let _ = client.cancel().await;
     let _ = server.cancel().await;

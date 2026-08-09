@@ -92,6 +92,7 @@ pub mod systems;
 #[cfg(test)]
 #[path = "systems_stdlib_tests.rs"]
 mod systems_stdlib_tests;
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_common;
 #[cfg(all(test, feature = "xmutil"))]
 mod test_open_vensim;
@@ -123,7 +124,7 @@ pub mod wasmgen;
 pub mod xmile;
 
 pub use self::common::{Error, ErrorCode, ErrorKind, Result, canonicalize};
-pub use self::model::{ModelStage1, get_incoming_links, resolve_non_private_dependencies};
+pub use self::model::ModelStage1;
 pub use self::patch::{
     ModelOperation, ModelPatch, ProjectOperation, ProjectPatch, apply_patch, is_view_only_patch,
 };

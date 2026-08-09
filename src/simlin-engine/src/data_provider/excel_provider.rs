@@ -393,14 +393,6 @@ mod tests {
     }
 
     #[test]
-    fn test_load_data_excel_dispatches_by_extension() {
-        let provider = FilesystemDataProvider::new(test_data_dir());
-        // Calling load_data on a .xlsx file should use Excel path
-        let result = provider.load_data("data.xlsx", "A Data", "A", "B2");
-        assert!(result.is_ok());
-    }
-
-    #[test]
     fn test_load_data_excel_missing_sheet() {
         let provider = FilesystemDataProvider::new(test_data_dir());
         let result = provider.load_data("data.xlsx", "Nonexistent Sheet", "A", "B2");

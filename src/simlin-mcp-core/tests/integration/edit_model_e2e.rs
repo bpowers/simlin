@@ -147,39 +147,45 @@ async fn edit_with_compilation_error_surfaces_validation_failure() {
     );
 }
 
+/// The `.mdl` write rejection sits at the top of `edit_model`, ahead of the
+/// `dry_run` read -- both rows must reject, so the guard cannot be moved
+/// below the dry-run branch without one of them turning red. Its message is
+/// rendered verbatim by existing `@simlin/mcp` clients, so it is pinned
+/// exactly (no wrapping prefix).
 #[tokio::test]
-async fn mdl_files_are_rejected() {
+async fn mdl_files_are_rejected_regardless_of_dry_run() {
     let mdl_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../test/sdeverywhere/models/elmcount/elmcount.mdl"
     );
 
-    let input = EditModelInput {
-        project_path: mdl_path.into(),
-        model_name: None,
-        dry_run: None,
-        sim_specs: None,
-        operations: Some(vec![EditOperation::UpsertAuxiliary(UpsertAuxiliaryInput {
-            name: "new_var".into(),
-            equation: "1".into(),
-            units: None,
-            documentation: None,
-            graphical_function: None,
-            arrayed_equation: None,
-        })]),
-    };
+    for dry_run in [None, Some(true)] {
+        let input = EditModelInput {
+            project_path: mdl_path.into(),
+            model_name: None,
+            dry_run,
+            sim_specs: None,
+            operations: Some(vec![EditOperation::UpsertAuxiliary(UpsertAuxiliaryInput {
+                name: "new_var".into(),
+                equation: "1".into(),
+                units: None,
+                documentation: None,
+                graphical_function: None,
+                arrayed_equation: None,
+            })]),
+        };
 
-    let result = edit_model(&TestFileSystemAccess, input).await;
-    let err_msg = match result {
-        Err(e) => e.to_string(),
-        Ok(_) => panic!("expected error rejecting .mdl file, got Ok"),
-    };
-    assert_eq!(
-        err_msg,
-        "Vensim .mdl files are read-only. Use ReadModel to inspect a .mdl file, \
-         then CreateModel to start a new .sd.json file you can edit.",
-        "canonical .mdl rejection message must be exact (no prefix): {err_msg}"
-    );
+        let err_msg = match edit_model(&TestFileSystemAccess, input).await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected error rejecting .mdl file (dry_run={dry_run:?}), got Ok"),
+        };
+        assert_eq!(
+            err_msg,
+            "Vensim .mdl files are read-only. Use ReadModel to inspect a .mdl file, \
+             then CreateModel to start a new .sd.json file you can edit.",
+            "canonical .mdl rejection message must be exact (no prefix), dry_run={dry_run:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -211,43 +217,6 @@ async fn dry_run_does_not_write_to_disk() {
         original_contents, after_contents,
         "dry_run must not modify the file on disk"
     );
-}
-
-#[tokio::test]
-async fn mdl_files_rejected_even_for_dry_run() {
-    let mdl_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../test/sdeverywhere/models/elmcount/elmcount.mdl"
-    );
-
-    let input = EditModelInput {
-        project_path: mdl_path.into(),
-        model_name: None,
-        dry_run: Some(true),
-        sim_specs: None,
-        operations: Some(vec![EditOperation::UpsertAuxiliary(UpsertAuxiliaryInput {
-            name: "new_var".into(),
-            equation: "1".into(),
-            units: None,
-            documentation: None,
-            graphical_function: None,
-            arrayed_equation: None,
-        })]),
-    };
-
-    let result = edit_model(&TestFileSystemAccess, input).await;
-    match result {
-        Err(e) => {
-            let err_msg = e.to_string();
-            assert_eq!(
-                err_msg,
-                "Vensim .mdl files are read-only. Use ReadModel to inspect a .mdl file, \
-                 then CreateModel to start a new .sd.json file you can edit.",
-                "canonical .mdl rejection message must be exact (no prefix): {err_msg}"
-            );
-        }
-        Ok(_) => panic!(".mdl file must be rejected even for dry_run=true, got Ok"),
-    }
 }
 
 #[tokio::test]

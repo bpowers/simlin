@@ -95,16 +95,4 @@ mod tests {
         // bg path has the larger radius
         assert!(svg.contains(&format!("M{}", js_format_number(10.0 + 0.5 * 9.0))));
     }
-
-    #[test]
-    fn test_render_arrowhead_180_degrees() {
-        let svg = render_arrowhead(100.0, 200.0, 180.0, 8.0, ArrowheadType::Flow);
-        assert!(svg.contains("rotate(180,100,200)"));
-    }
-
-    #[test]
-    fn test_render_arrowhead_270_degrees() {
-        let svg = render_arrowhead(100.0, 200.0, 270.0, 8.0, ArrowheadType::Flow);
-        assert!(svg.contains("rotate(270,100,200)"));
-    }
 }

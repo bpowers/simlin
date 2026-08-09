@@ -13,7 +13,10 @@ use super::sfdp::{
 };
 
 /// Prefix for synthetic cloud nodes representing missing flow endpoints.
-pub const CLOUD_NODE_PREFIX: &str = "__cloud__";
+///
+/// Nothing parses these back: a cloud node ident only has to be unique and
+/// disjoint from every variable name, which is what the prefix buys.
+const CLOUD_NODE_PREFIX: &str = "__cloud__";
 /// Prefix for chain-level synthetic cloud nodes in the dependency graph.
 pub const CHAIN_CLOUD_NODE_PREFIX: &str = "__chain_cloud__";
 /// Margin from the diagram origin for element placement.
@@ -22,13 +25,6 @@ pub const DIAGRAM_ORIGIN_MARGIN: f64 = 50.0;
 /// Create a cloud node identifier from a unique integer ID.
 pub fn make_cloud_node_ident(uid: i32) -> String {
     format!("{CLOUD_NODE_PREFIX}{uid}")
-}
-
-/// Parse a cloud node identifier back to its integer ID.
-/// Returns `None` if the string does not have the expected prefix or suffix.
-#[cfg(test)]
-pub fn parse_cloud_node_ident(ident: &str) -> Option<i32> {
-    ident.strip_prefix(CLOUD_NODE_PREFIX)?.parse().ok()
 }
 
 /// Create a chain-level cloud identifier from a chain index and sequence number.
@@ -543,21 +539,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cloud_node_ident_roundtrip() {
-        let ident = make_cloud_node_ident(42);
-        assert_eq!(ident, "__cloud__42");
-        assert_eq!(parse_cloud_node_ident(&ident), Some(42));
-
-        let ident = make_cloud_node_ident(0);
-        assert_eq!(ident, "__cloud__0");
-        assert_eq!(parse_cloud_node_ident(&ident), Some(0));
-
-        let ident = make_cloud_node_ident(-7);
-        assert_eq!(ident, "__cloud__-7");
-        assert_eq!(parse_cloud_node_ident(&ident), Some(-7));
-    }
-
-    #[test]
     fn test_chain_cloud_ident_roundtrip() {
         let ident = make_chain_cloud_ident(1, 3);
         assert_eq!(ident, "__chain_cloud__1_3");
@@ -570,15 +551,6 @@ mod tests {
         let ident = make_chain_cloud_ident(99, 42);
         assert_eq!(ident, "__chain_cloud__99_42");
         assert_eq!(parse_chain_cloud_ident(&ident), Some((99, 42)));
-    }
-
-    #[test]
-    fn test_parse_cloud_node_ident_invalid() {
-        assert_eq!(parse_cloud_node_ident(""), None);
-        assert_eq!(parse_cloud_node_ident("__cloud__"), None);
-        assert_eq!(parse_cloud_node_ident("__cloud__abc"), None);
-        assert_eq!(parse_cloud_node_ident("not_a_cloud"), None);
-        assert_eq!(parse_cloud_node_ident("__chain_cloud__1_2"), None);
     }
 
     #[test]
@@ -825,28 +797,6 @@ mod tests {
         let sources = find_chain_sources("aux", &mut visited, &var_to_chain, &dep_graph);
         assert_eq!(sources.len(), 1);
         assert!(sources.contains(&0));
-    }
-
-    #[test]
-    fn test_build_chain_dependency_graph_with_clouds() {
-        let chains = vec![StockFlowChain {
-            stocks: vec!["population".to_string()],
-            flows: vec!["births".to_string()],
-            all_vars: vec!["population".to_string(), "births".to_string()],
-            importance: 1.0,
-        }];
-        let mut metadata = ComputedMetadata::new_empty();
-        // births has no from_stock -- should generate a cloud node
-        metadata
-            .flow_to_stocks
-            .insert("births".to_string(), (None, Some("population".to_string())));
-
-        let (graph, _var_to_node) = build_chain_dependency_graph(&chains, &metadata);
-
-        // chain_0 + one cloud node
-        assert_eq!(graph.node_count(), 2);
-        assert!(graph.has_node(&"chain_0".to_string()));
-        assert!(graph.has_node(&make_chain_cloud_ident(0, 0)));
     }
 
     #[test]

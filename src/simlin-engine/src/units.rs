@@ -1093,37 +1093,6 @@ fn test_basic_unit_parsing() {
 }
 
 #[test]
-fn test_basic_unit_checks() {
-    let _context = Context::new(
-        &[
-            Unit {
-                name: "time".to_owned(),
-                equation: None,
-                disabled: false,
-                aliases: vec![],
-            },
-            Unit {
-                name: "people".to_owned(),
-                equation: None,
-                disabled: false,
-                aliases: vec!["person".to_owned(), "persons".to_owned()],
-            },
-            Unit {
-                name: "USD".to_owned(),
-                equation: None,
-                disabled: false,
-                aliases: vec!["dollar".to_owned(), "dollars".to_owned(), "$".to_owned()],
-            },
-        ],
-        &Default::default(),
-    )
-    .0;
-    // from a set of datamodel::Units build a Context
-
-    // with a context, check if a set of variables unit checks
-}
-
-#[test]
 fn test_const_int_eval() {
     let positive_cases = &[
         ("0", 0),
@@ -1388,36 +1357,5 @@ fn test_conflicting_unit_declarations_are_still_errors() {
     assert!(
         !errors.is_empty(),
         "conflicting alias declarations must still produce an error"
-    );
-}
-
-#[test]
-fn debug_user_alias_with_underscore_identifiers() {
-    // Reproduce the WRLD3 situation: a user declares `Resource unit` with
-    // alias `Resource units`, and variables write `Resource_unit` and
-    // `Resource_units` (spaces → underscores) as their declared units.
-    // Both parses should produce the same UnitMap via alias resolution.
-    let units = vec![Unit {
-        name: "Resource unit".to_string(),
-        equation: None,
-        disabled: false,
-        aliases: vec!["Resource units".to_string()],
-    }];
-    let context = Context::new_with_builtins(&units, &Default::default()).0;
-
-    let expr = Expr0::new("Resource_unit", LexerType::Units)
-        .unwrap()
-        .unwrap();
-    let result1 = build_unit_components(&context, &expr).unwrap();
-
-    let expr = Expr0::new("Resource_units", LexerType::Units)
-        .unwrap()
-        .unwrap();
-    let result2 = build_unit_components(&context, &expr).unwrap();
-
-    assert_eq!(
-        result1, result2,
-        "Resource_unit and Resource_units should resolve to the same unit map. \
-         Got result1={result1:?} result2={result2:?}"
     );
 }

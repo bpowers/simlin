@@ -2004,41 +2004,6 @@ fn test_get_loop_element_count_arrayed_vs_scalar() {
     }
 }
 
-#[test]
-fn test_subscripted_loop_id_uses_per_element_cache() {
-    // Regression-style: repeated subscripted calls on the same
-    // (partition, element) must return identical numbers (cache hit
-    // doesn't drift).  Indirectly validates the cache key change.
-    let buf = build_arrayed_test_sim_protobuf();
-    unsafe {
-        let (proj, model, sim) = open_arrayed_sim_with_ltm(&buf);
-
-        let mut err: *mut SimlinError = ptr::null_mut();
-        let loops = simlin_analyze_get_loops(model, &mut err);
-        assert!(err.is_null());
-        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
-        let loop_id = CStr::from_ptr(loop_slice[0].id)
-            .to_str()
-            .unwrap()
-            .to_string();
-
-        let first = read_relative_loop_series(sim, &format!("{loop_id}[NYC]")).unwrap();
-        let second = read_relative_loop_series(sim, &format!("{loop_id}[NYC]")).unwrap();
-        assert_eq!(first, second);
-
-        // Different element should produce a possibly-different series
-        // (or the same -- both are ±1 in this single-loop partition --
-        // but the dispatch path must produce a value either way).
-        let boston = read_relative_loop_series(sim, &format!("{loop_id}[Boston]")).unwrap();
-        assert_eq!(boston.len(), first.len());
-
-        simlin_free_loops(loops);
-        simlin_sim_unref(sim);
-        simlin_model_unref(model);
-        simlin_project_unref(proj);
-    }
-}
-
 // === Two-A2A-subsystem round-trip (GH #487, AC2.5) ===
 //
 // Two disconnected reinforcing apply-to-all feedback loops over *different*

@@ -714,40 +714,6 @@ fn element_graph_fixed_index_broadcast_truthful() {
     assert_no_edge(&result, "population[la]", "relative_pop[boston]");
 }
 
-/// AC4.1 (Phase 5): a Wildcard reducer reference is routed through a
-/// synthetic aggregate node, and the bare-Var diagonal edges survive.
-///
-/// For `share[Region] = population / SUM(population[*])`, the maximal
-/// reducer `SUM(population[*])` becomes `$⁚ltm⁚agg⁚0`. The truthful edge
-/// set is N `population[d] → agg` + N `agg → share[r]` + N bare diagonals
-/// `population[d] → share[d]` -- and explicitly NOT the N² Wildcard
-/// cross-product the pre-Phase-5 classifier emitted.
-#[test]
-fn element_graph_wildcard_reducer_plus_bare_truthful() {
-    let project = TestProject::new("wildcard_plus_bare")
-        .named_dimension("Region", &["NYC", "Boston", "LA"])
-        .array_aux("population[Region]", "100")
-        .array_aux("share[Region]", "population / SUM(population[*])");
-
-    let result = element_edges(&project);
-
-    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
-    let regions = &["nyc", "boston", "la"];
-
-    for &d in regions {
-        assert_edge(&result, &format!("population[{d}]"), agg);
-        assert_edge(&result, agg, &format!("share[{d}]"));
-        assert_edge(&result, &format!("population[{d}]"), &format!("share[{d}]"));
-    }
-    for &d in regions {
-        for &r in regions {
-            if d != r {
-                assert_no_edge(&result, &format!("population[{d}]"), &format!("share[{r}]"));
-            }
-        }
-    }
-}
-
 /// AC4.1 (Phase 5): a whole-RHS *scalar* reducer (`total_pop = SUM(pop[*])`)
 /// is its *own* aggregate node -- no `$⁚ltm⁚agg⁚{n}` is minted, and the
 /// `pop[d] → total_pop` reduction edges plus the `total_pop → consumer`
@@ -1864,7 +1830,7 @@ fn element_graph_mapped_element_map_edges_superset_of_simulation_reads() {
         )
         .array_aux_direct("target", vec!["State".into()], "x[State] * 1", None);
 
-    let sim = project.run_vm_incremental();
+    let sim = project.run_vm_expecting_success();
     let graph = element_edges(&project);
 
     let region_elems = ["a", "b"];

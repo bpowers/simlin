@@ -15,7 +15,6 @@ use std::process::Command;
 
 use simlin_serve::git::{GitProbe, enclosing_git_root, strip_git_path_env};
 use simlin_serve::registry::GitState;
-use simlin_serve::test_support::unavailable_git_probe;
 use tempfile::TempDir;
 
 fn git_available() -> bool {
@@ -53,15 +52,6 @@ fn init_repo(dir: &Path) {
     run_git(dir, &["config", "user.name", "test"]);
     run_git(dir, &["config", "user.email", "test@example.com"]);
     run_git(dir, &["config", "commit.gpgsign", "false"]);
-}
-
-#[test]
-fn ac2_5_unavailable_probe_reports_every_file_as_unavailable() {
-    let probe = unavailable_git_probe();
-    let dir = TempDir::new().unwrap();
-    let f = dir.path().join("any.stmx");
-    std::fs::write(&f, "").unwrap();
-    assert_eq!(probe.status_for(&f), GitState::Unavailable);
 }
 
 #[test]
@@ -179,12 +169,29 @@ fn cache_invalidates_on_index_mtime_change() {
     let probe = GitProbe::detect();
     assert_eq!(probe.status_for(&f), GitState::Tracked { dirty: false });
 
-    // Make the file dirty. Sleep at least 1s so the mtime delta is observable
-    // on filesystems with second-resolution mtimes (ext4 default, HFS+ on
-    // macOS). Without the sleep this test is racy on slow CI.
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // Make the file dirty and stage it.
     std::fs::write(&f, "after\n").unwrap();
     run_git(dir.path(), &["add", "flips.stmx"]);
+
+    // The cache keys on the index's mtime, and `git add` may leave it
+    // inside the same tick as the cached value on a filesystem with
+    // coarse mtime granularity (ext4's second resolution, HFS+). Rewriting
+    // the mtime ourselves makes the invalidation deterministic without
+    // sleeping out a whole second. Backwards, not forwards: an index
+    // stamped in the future would make every entry racily-clean and send
+    // git off to re-hash the worktree.
+    let index = dir.path().join(".git").join("index");
+    let stamped = std::fs::metadata(&index)
+        .expect("index exists")
+        .modified()
+        .expect("index mtime")
+        - std::time::Duration::from_secs(2);
+    std::fs::File::options()
+        .write(true)
+        .open(&index)
+        .expect("open index")
+        .set_modified(stamped)
+        .expect("rewind index mtime");
 
     assert_eq!(
         probe.status_for(&f),

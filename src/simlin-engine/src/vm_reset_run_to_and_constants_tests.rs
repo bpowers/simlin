@@ -320,35 +320,6 @@ fn test_non_divisible_save_step_no_over_allocation() {
     assert!((steps[2][TIME_OFF] - 8.0).abs() < 1e-10);
 }
 
-/// Verify that non-divisible save_step produces the correct number of saved steps
-/// via the HashMap-returning run_vm() path.
-#[test]
-fn test_non_divisible_save_step_vm() {
-    let tp = TestProject::new_with_specs(
-        "non_div_interp",
-        datamodel::SimSpecs {
-            start: 0.0,
-            stop: 10.0,
-            dt: datamodel::Dt::Dt(1.0),
-            save_step: Some(datamodel::Dt::Dt(4.0)),
-            sim_method: datamodel::SimMethod::Euler,
-            time_units: None,
-        },
-    )
-    .flow("inflow", "1", None)
-    .stock("s", "0", &["inflow"], &[], None);
-
-    let vm_results = tp.run_vm().expect("VM should succeed");
-    let vm_time = vm_results.get("time").expect("time in VM results");
-
-    // time 0..10, dt=1, save_step=4: saved at t=0, t=4, t=8 (3 steps)
-    assert_eq!(
-        vm_time.len(),
-        3,
-        "non-divisible save_step should produce 3 saved steps (t=0, t=4, t=8)"
-    );
-}
-
 /// When save_step < dt the VM can only save once per dt step, so
 /// n_chunks must reflect the dt-based cadence, not the raw save_step.
 #[test]

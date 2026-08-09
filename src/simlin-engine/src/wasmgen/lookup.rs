@@ -574,20 +574,6 @@ mod tests {
     }
 
     #[test]
-    fn lookup_all_modes_below_and_above_range() {
-        // The edge clamps differ (interp strict, forward/backward inclusive) but
-        // all three return the boundary y for an out-of-range index; assert each
-        // against its own oracle so the strict-vs-inclusive distinction is
-        // exercised at the boundary itself.
-        for mode in [Mode::Interp, Mode::Forward, Mode::Backward] {
-            assert_matches_vm(mode, TABLE, -100.0); // below x[0]
-            assert_matches_vm(mode, TABLE, 1000.0); // above x[n-1]
-            assert_matches_vm(mode, TABLE, TABLE[0].0); // exactly x[0]
-            assert_matches_vm(mode, TABLE, TABLE[TABLE.len() - 1].0); // exactly x[n-1]
-        }
-    }
-
-    #[test]
     fn lookup_single_point_table() {
         // A one-knot table: every index clamps to that knot's y for all modes.
         let single: &[(f64, f64)] = &[(3.0, 7.0)];

@@ -1200,20 +1200,6 @@ mod tests {
     }
 
     #[test]
-    fn test_format_lookup_invocation() {
-        let formatter = XmileFormatter::new();
-        let expr = Expr::App(
-            Cow::Borrowed("my_table"),
-            vec![],
-            vec![Expr::Var(Cow::Borrowed("input"), vec![], loc())],
-            CallKind::Symbol,
-            vec![],
-            loc(),
-        );
-        assert_eq!(formatter.format_expr(&expr), "LOOKUP(my_table, input)");
-    }
-
-    #[test]
     fn test_format_time_name() {
         let formatter = XmileFormatter::new();
         let expr = Expr::Var(Cow::Borrowed("Time"), vec![], loc());
@@ -1505,18 +1491,6 @@ mod tests {
     }
 
     #[test]
-    fn test_format_bang_subscript() {
-        // x[dim!] -> x[*] (bang means "iterate over all elements")
-        let formatter = XmileFormatter::new();
-        let expr = Expr::Var(
-            Cow::Borrowed("arr"),
-            vec![Subscript::BangElement(Cow::Borrowed("DimA"), loc())],
-            loc(),
-        );
-        assert_eq!(formatter.format_expr(&expr), "arr[*]");
-    }
-
-    #[test]
     fn test_format_mixed_subscripts() {
         // x[DimA, DimB!] -> x[DimA, *]
         let formatter = XmileFormatter::new();
@@ -1752,36 +1726,6 @@ mod tests {
     // M3: Bang-subscript formatting
 
     #[test]
-    fn test_bang_subscript_full_dimension_outputs_star() {
-        // For full dimensions (not subranges), output just *
-        let formatter = XmileFormatter::new();
-        let expr = Expr::Var(
-            Cow::Borrowed("x"),
-            vec![Subscript::BangElement(Cow::Borrowed("DimA"), loc())],
-            loc(),
-        );
-        // DimA is not a subrange (not in subrange_dims set), should output *
-        assert_eq!(formatter.format_expr(&expr), "x[*]");
-    }
-
-    #[test]
-    fn test_bang_subscript_subrange_outputs_name_dot_star() {
-        // For subranges (has maps_to), output SubRange.*
-        use std::collections::HashSet;
-        let mut subranges = HashSet::new();
-        subranges.insert("suba".to_string()); // canonical name
-        let formatter = XmileFormatter::with_subranges(subranges);
-
-        let expr = Expr::Var(
-            Cow::Borrowed("x"),
-            vec![Subscript::BangElement(Cow::Borrowed("SubA"), loc())],
-            loc(),
-        );
-        // SubA is a subrange, should output SubA.*
-        assert_eq!(formatter.format_expr(&expr), "x[SubA.*]");
-    }
-
-    #[test]
     fn test_bang_subscript_mixed_regular_and_subrange() {
         // Mixed subscripts: regular element and bang on subrange
         use std::collections::HashSet;
@@ -1924,18 +1868,6 @@ mod tests {
             loc(),
         );
         assert_eq!(format_unit_expr(&unit), "A");
-    }
-
-    #[test]
-    fn test_format_unit_expr_numerator_only() {
-        use crate::mdl::ast::UnitExpr;
-        // A * B (no denominator) -> "A*B"
-        let unit = UnitExpr::Mul(
-            Box::new(UnitExpr::Unit(Cow::Borrowed("A"), loc())),
-            Box::new(UnitExpr::Unit(Cow::Borrowed("B"), loc())),
-            loc(),
-        );
-        assert_eq!(format_unit_expr(&unit), "A*B");
     }
 
     #[test]

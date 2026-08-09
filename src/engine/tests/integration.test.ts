@@ -7,10 +7,10 @@ import { describe, it, expect, beforeAll } from '@rstest/core';
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { init, reset, getMemory, isUrl, isNode } from '@simlin/engine/internal/wasm';
+import { init, reset, getMemory, isUrl } from '@simlin/engine/internal/wasm';
 import { malloc, free } from '../src/internal/memory';
 import { SimlinError, readErrorDetail } from '../src/internal/error';
-import { SimlinErrorCode, SimlinJsonFormat } from '../src/internal/types';
+import { SimlinErrorCode } from '../src/internal/types';
 import { validateStructSizes, getRustStructSizes } from '../src/internal/analysis';
 import {
   simlin_project_unref,
@@ -34,52 +34,9 @@ describe('WASM Integration Tests', () => {
   // Note: These tests require the WASM module to be built first
   // Run `./build.sh` before running tests
 
-  describe('WASM Loading', () => {
-    it('should detect WASM file exists', () => {
-      const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
-      expect(fs.existsSync(wasmPath)).toBe(true);
-    });
-
-    it('should compile WASM module', async () => {
-      const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
-      const wasmBuffer = fs.readFileSync(wasmPath);
-
-      // This should not throw
-      const module = await WebAssembly.compile(wasmBuffer);
-      expect(module).toBeDefined();
-    });
-
-    it('should instantiate WASM module', async () => {
-      const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
-      const wasmBuffer = fs.readFileSync(wasmPath);
-
-      const module = await WebAssembly.compile(wasmBuffer);
-      const instance = await WebAssembly.instantiate(module, {});
-
-      expect(instance).toBeDefined();
-      expect(instance.exports).toBeDefined();
-    });
-
-    it('should export expected functions', async () => {
-      const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
-      const wasmBuffer = fs.readFileSync(wasmPath);
-
-      const module = await WebAssembly.compile(wasmBuffer);
-      const instance = await WebAssembly.instantiate(module, {});
-      const exports = instance.exports;
-
-      // Check for key exported functions
-      expect(typeof exports.simlin_malloc).toBe('function');
-      expect(typeof exports.simlin_free).toBe('function');
-      expect(typeof exports.simlin_free_string).toBe('function');
-      expect(typeof exports.simlin_project_open_protobuf).toBe('function');
-      expect(typeof exports.simlin_project_unref).toBe('function');
-      expect(typeof exports.simlin_project_serialize_protobuf).toBe('function');
-      expect(typeof exports.simlin_sim_new).toBe('function');
-      expect(typeof exports.simlin_sim_run_to_end).toBe('function');
-      expect(typeof exports.simlin_error_str).toBe('function');
-    });
-  });
+  // Loading, compiling, and instantiating the artifact is a precondition of
+  // every suite below (each beforeAll does it), and the export surface itself
+  // is pinned by wasm-artifacts.test.ts plus the direct calls made here.
 
   describe('Memory Operations', () => {
     let instance: WebAssembly.Instance;
@@ -107,32 +64,6 @@ describe('WASM Integration Tests', () => {
       view[1023] = 99;
 
       // Free should not throw
-      free_fn(ptr);
-    });
-
-    it('should handle string round-trip', () => {
-      const malloc_fn = instance.exports.simlin_malloc as (size: number) => number;
-      const free_fn = instance.exports.simlin_free as (ptr: number) => void;
-
-      const testStr = 'Hello, WASM!';
-      const encoder = new TextEncoder();
-      const decoder = new TextDecoder();
-      const bytes = encoder.encode(testStr + '\0');
-
-      const ptr = malloc_fn(bytes.length);
-      const view = new Uint8Array(memory.buffer, ptr, bytes.length);
-      view.set(bytes);
-
-      // Read it back
-      const readView = new Uint8Array(memory.buffer);
-      let end = ptr;
-      while (readView[end] !== 0) end++;
-      const readStr = decoder.decode(readView.slice(ptr, end));
-
-      expect(readStr).toBe(testStr);
-
-      // Note: Use simlin_free for memory allocated with simlin_malloc
-      // simlin_free_string is for strings returned by the API
       free_fn(ptr);
     });
   });
@@ -451,34 +382,6 @@ describe('WASM Integration Tests', () => {
       await init(wasmBuffer);
     });
 
-    it('should correctly read error details from an error with details', () => {
-      // Try to import invalid XMILE data using our TypeScript wrapper
-      const invalidXmile = new TextEncoder().encode('<?xml version="1.0"?><xmile><invalid_model/></xmile>');
-
-      try {
-        simlin_project_open_xmile(new Uint8Array(invalidXmile));
-        // If no error was thrown, the import succeeded (unlikely with invalid data)
-      } catch (e) {
-        if (e instanceof SimlinError) {
-          // Verify we can access error details
-          expect(typeof e.code).toBe('number');
-          expect(typeof e.message).toBe('string');
-          expect(Array.isArray(e.details)).toBe(true);
-
-          // Verify detail structure if there are any
-          for (const detail of e.details) {
-            expect(typeof detail.code).toBe('number');
-            expect(typeof detail.kind).toBe('number');
-            expect(typeof detail.unitErrorKind).toBe('number');
-            expect(typeof detail.startOffset).toBe('number');
-            expect(typeof detail.endOffset).toBe('number');
-          }
-        } else {
-          throw e;
-        }
-      }
-    });
-
     it('should have correct struct field offsets for SimlinErrorDetail', () => {
       // This test verifies the struct layout assumptions documented in error.ts
       // SimlinErrorDetail layout on wasm32:
@@ -532,47 +435,6 @@ describe('WASM Integration Tests', () => {
       // Verify the TypeScript size (36 bytes) matches what Rust reports
       const rustSizes = getRustStructSizes();
       expect(rustSizes.errorDetailSize).toBe(36);
-    });
-
-    it('should read actual error details from Rust-generated errors', () => {
-      // Import invalid XMILE to trigger a real Rust error with details
-      const invalidXmile = new TextEncoder().encode(`<?xml version="1.0" encoding="utf-8"?>
-<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
-  <header><vendor>Test</vendor><product version="1.0">Test</product></header>
-  <sim_specs><start>0</start><stop>10</stop><dt>1</dt></sim_specs>
-  <model>
-    <variables>
-      <aux name="broken_var"><eqn>undefined_var + 1</eqn></aux>
-    </variables>
-  </model>
-</xmile>`);
-
-      try {
-        simlin_project_open_xmile(new Uint8Array(invalidXmile));
-        // If we get here, the import succeeded (model has errors but parsed)
-      } catch (e) {
-        if (e instanceof SimlinError) {
-          // Verify we can access actual Rust-generated error details
-          expect(typeof e.code).toBe('number');
-          expect(typeof e.message).toBe('string');
-          expect(Array.isArray(e.details)).toBe(true);
-
-          // Each detail should have the correct structure from Rust
-          for (const detail of e.details) {
-            expect(typeof detail.code).toBe('number');
-            expect(typeof detail.kind).toBe('number');
-            expect(typeof detail.unitErrorKind).toBe('number');
-            expect(typeof detail.startOffset).toBe('number');
-            expect(typeof detail.endOffset).toBe('number');
-            // These may be null or strings depending on the error
-            expect(detail.message === null || typeof detail.message === 'string').toBe(true);
-            expect(detail.modelName === null || typeof detail.modelName === 'string').toBe(true);
-            expect(detail.variableName === null || typeof detail.variableName === 'string').toBe(true);
-          }
-        } else {
-          throw e;
-        }
-      }
     });
   });
 
@@ -676,75 +538,27 @@ describe('WASM Integration Tests', () => {
     });
   });
 
-  describe('Node.js File Loading Helpers', () => {
-    describe('isUrl', () => {
-      it('should return true for http:// URLs', () => {
-        expect(isUrl('http://example.com/file.wasm')).toBe(true);
-        expect(isUrl('http://localhost:8080/wasm')).toBe(true);
-      });
-
-      it('should return true for https:// URLs', () => {
-        expect(isUrl('https://example.com/file.wasm')).toBe(true);
-        expect(isUrl('https://cdn.example.org/lib.wasm')).toBe(true);
-      });
-
-      it('should return true for file:// URLs', () => {
-        expect(isUrl('file:///path/to/file.wasm')).toBe(true);
-        expect(isUrl('file://localhost/path')).toBe(true);
-      });
-
-      it('should return false for filesystem paths', () => {
-        expect(isUrl('./core/libsimlin.wasm')).toBe(false);
-        expect(isUrl('/absolute/path/to/file.wasm')).toBe(false);
-        expect(isUrl('../parent/file.wasm')).toBe(false);
-        expect(isUrl('relative/path.wasm')).toBe(false);
-      });
+  describe('isUrl', () => {
+    it('should return true for http:// URLs', () => {
+      expect(isUrl('http://example.com/file.wasm')).toBe(true);
+      expect(isUrl('http://localhost:8080/wasm')).toBe(true);
     });
 
-    describe('isNode', () => {
-      it('should return true in Node.js environment', () => {
-        // We're running tests in Node.js, so this should be true
-        expect(isNode()).toBe(true);
-      });
+    it('should return true for https:// URLs', () => {
+      expect(isUrl('https://example.com/file.wasm')).toBe(true);
+      expect(isUrl('https://cdn.example.org/lib.wasm')).toBe(true);
     });
 
-    // Note: loadFileNode uses new Function() to avoid bundler issues with node:fs/promises.
-    // This approach doesn't work in Jest's sandbox due to VM module restrictions.
-    // We test the equivalent functionality by using fs.readFileSync to load the file
-    // and then passing the buffer to init(), which exercises the same code paths.
-    describe('loadFileNode equivalent (via fs.readFileSync)', () => {
-      it('should be able to load WASM file from filesystem and verify it is valid', () => {
-        const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
-        const nodeBuffer = fs.readFileSync(wasmPath);
-        const buffer = nodeBuffer.buffer.slice(nodeBuffer.byteOffset, nodeBuffer.byteOffset + nodeBuffer.byteLength);
-
-        expect(buffer).toBeInstanceOf(ArrayBuffer);
-        expect(buffer.byteLength).toBeGreaterThan(0);
-
-        // Verify it's valid WASM (starts with magic bytes \0asm)
-        const view = new Uint8Array(buffer);
-        expect(view[0]).toBe(0x00);
-        expect(view[1]).toBe(0x61); // 'a'
-        expect(view[2]).toBe(0x73); // 's'
-        expect(view[3]).toBe(0x6d); // 'm'
-      });
-
-      it('should throw for non-existent file', () => {
-        expect(() => fs.readFileSync('/nonexistent/path/to/file.wasm')).toThrow();
-      });
+    it('should return true for file:// URLs', () => {
+      expect(isUrl('file:///path/to/file.wasm')).toBe(true);
+      expect(isUrl('file://localhost/path')).toBe(true);
     });
 
-    describe('init with ArrayBuffer from filesystem', () => {
-      it('should initialize WASM from ArrayBuffer read from filesystem', async () => {
-        reset();
-        const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
-        const wasmBuffer = fs.readFileSync(wasmPath);
-        await init(wasmBuffer);
-
-        // Verify WASM is loaded by checking we can get memory
-        const memory = getMemory();
-        expect(memory).toBeInstanceOf(WebAssembly.Memory);
-      });
+    it('should return false for filesystem paths', () => {
+      expect(isUrl('./core/libsimlin.wasm')).toBe(false);
+      expect(isUrl('/absolute/path/to/file.wasm')).toBe(false);
+      expect(isUrl('../parent/file.wasm')).toBe(false);
+      expect(isUrl('relative/path.wasm')).toBe(false);
     });
   });
 

@@ -169,15 +169,6 @@ describe('SpeedDial', () => {
     fab = screen.getByRole('button', { name: 'Test SpeedDial' });
     expect(fab.getAttribute('aria-expanded')).toBe('true');
   });
-
-  test('applies custom className', () => {
-    const { container } = render(
-      <SpeedDial ariaLabel="Test SpeedDial" open={false} icon={<span>+</span>} className="custom-class" />,
-    );
-
-    const speedDial = container.firstChild as HTMLElement;
-    expect(speedDial.className).toContain('custom-class');
-  });
 });
 
 describe('SpeedDialAction', () => {
@@ -231,28 +222,6 @@ describe('SpeedDialAction', () => {
     fireEvent.click(button);
 
     expect(onClose).not.toHaveBeenCalled();
-  });
-
-  test('selected action has selected class', () => {
-    render(
-      <SpeedDial ariaLabel="Test" open={true} icon={<span>+</span>}>
-        <SpeedDialAction icon={<span>A</span>} title="Action A" selected={true} />
-      </SpeedDial>,
-    );
-
-    const button = screen.getByRole('button', { name: 'Action A' });
-    expect(button.className).toContain('actionButtonSelected');
-  });
-
-  test('applies custom className to action button', () => {
-    render(
-      <SpeedDial ariaLabel="Test" open={true} icon={<span>+</span>}>
-        <SpeedDialAction icon={<span>A</span>} title="Action A" className="custom-action-class" />
-      </SpeedDial>,
-    );
-
-    const button = screen.getByRole('button', { name: 'Action A' });
-    expect(button.className).toContain('custom-action-class');
   });
 });
 

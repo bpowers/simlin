@@ -1720,49 +1720,6 @@ fn test_canonical_ident_with_dots() {
 }
 
 #[test]
-fn test_stdlib_model_name_canonicalization() {
-    // Test canonicalization of stdlib model names
-    let stdlib_name = "stdlib⁚smth1";
-    let canonical = canonicalize(stdlib_name);
-    assert_eq!(&*canonical, "stdlib⁚smth1");
-
-    // Already-canonical stdlib name should borrow, not allocate
-    assert!(matches!(canonical, Cow::Borrowed(_)));
-}
-
-#[test]
-fn test_stdlib_variable_canonicalization() {
-    // Test that stdlib variable names are canonicalized correctly
-    let names = vec!["input", "output", "Output", "delay_time", "initial_value"];
-    for name in names {
-        let canonical = canonicalize(name);
-        let expected = canonicalize(name);
-        assert_eq!(&*canonical, &*expected, "Failed for {name}");
-    }
-
-    // Specifically test Output -> output conversion
-    assert_eq!(&*canonicalize("Output"), "output");
-}
-
-#[test]
-fn test_new_ident_basic_operations() {
-    // Test basic creation and conversion
-    let ident = Ident::new("Hello World");
-    assert_eq!(ident.as_str(), "hello_world");
-
-    // Test source representation conversion
-    let ident2 = Ident::new("a.b");
-    assert_eq!(ident2.as_str(), "a·b");
-    assert_eq!(ident2.to_source_repr(), "a.b");
-
-    // A literal period in a quoted ident canonicalizes to the sentinel
-    // (#559) but still renders back to `.` for source/display output.
-    let ident3 = Ident::new("\"a.b\"");
-    assert_eq!(ident3.as_str(), "a\u{2024}b");
-    assert_eq!(ident3.to_source_repr(), "a.b");
-}
-
-#[test]
 fn test_ident_join_operation() {
     // Test joining two canonical identifiers
     let module = CanonicalStr::from_canonical_unchecked("model");
@@ -1770,42 +1727,6 @@ fn test_ident_join_operation() {
     let joined = Ident::<Canonical>::join(&module, &var);
     assert_eq!(joined.as_str(), "model·variable");
     assert_eq!(joined.to_source_repr(), "model.variable");
-}
-
-#[test]
-fn test_ident_with_subscript() {
-    let ident = Ident::new("my_array");
-    let subscripted = ident.with_subscript("1,2");
-    assert_eq!(subscripted.as_str(), "my_array[1,2]");
-    assert_eq!(subscripted.to_source_repr(), "my_array[1,2]");
-
-    // Test with identifier containing middle dot
-    let ident2 = Ident::new("model.var");
-    let subscripted2 = ident2.with_subscript("i");
-    assert_eq!(subscripted2.as_str(), "model.var[i]");
-    assert_eq!(subscripted2.to_source_repr(), "model.var[i]");
-}
-
-#[test]
-fn test_ident_strip_prefix() {
-    let ident = Ident::new("model.variable");
-
-    // Test successful prefix stripping
-    if let Some(stripped) = ident.strip_prefix("model·") {
-        assert_eq!(stripped.as_str(), "variable");
-    } else {
-        panic!("Expected successful prefix strip");
-    }
-
-    // Test unsuccessful prefix stripping
-    assert!(ident.strip_prefix("other·").is_none());
-
-    // Test stripping empty prefix
-    if let Some(stripped) = ident.strip_prefix("") {
-        assert_eq!(stripped.as_str(), "model·variable");
-    } else {
-        panic!("Expected successful empty prefix strip");
-    }
 }
 
 #[test]
@@ -1856,48 +1777,6 @@ fn test_canonical_str_strip_prefix() {
 }
 
 #[test]
-fn test_ident_ref_operations() {
-    let owned = Ident::new("model.variable");
-    let borrowed = owned.as_ref();
-
-    // Test basic operations
-    assert_eq!(borrowed.as_str(), "model·variable");
-    assert_eq!(borrowed.to_source_repr(), Cow::Borrowed("model.variable"));
-
-    // Test strip_prefix on borrowed
-    if let Some(stripped) = borrowed.strip_prefix("model·") {
-        assert_eq!(stripped.as_str(), "variable");
-
-        // Test that we can convert back to owned
-        let owned_again = stripped.to_owned();
-        assert_eq!(owned_again.as_str(), "variable");
-    } else {
-        panic!("Expected successful prefix strip");
-    }
-}
-
-#[test]
-fn test_ident_ref_zero_copy() {
-    // This test verifies that IdentRef provides zero-copy substring operations
-    let owned = Ident::new("very.long.module.path.to.variable");
-    let borrowed = owned.as_ref();
-
-    // Strip multiple prefixes without allocation
-    let mut current = borrowed;
-    let prefixes = ["very·", "long·", "module·", "path·", "to·"];
-
-    for prefix in &prefixes {
-        if let Some(stripped) = current.strip_prefix(prefix) {
-            current = stripped;
-        } else {
-            panic!("Expected successful strip of {prefix}");
-        }
-    }
-
-    assert_eq!(current.as_str(), "variable");
-}
-
-#[test]
 fn test_canonical_str_utility_methods() {
     let ident = Ident::new("model.variable");
     let canonical_str = ident.as_canonical_str();
@@ -1906,19 +1785,12 @@ fn test_canonical_str_utility_methods() {
     assert!(canonical_str.starts_with("model·"));
     assert!(!canonical_str.starts_with("other·"));
 
-    // Test find
-    // The string is "model·variable" where · is at byte position 5
+    assert_eq!(canonical_str.as_str(), "model·variable");
+
+    // `find` reports BYTE offsets, and the module separator U+00B7 is 2 bytes
+    // in UTF-8: it sits at 5, so the variable half starts at 7, not at 6.
     assert_eq!(canonical_str.find("·"), Some(5));
-
-    // First let's verify what the actual string is
-    let s = canonical_str.as_str();
-    assert_eq!(s, "model·variable");
-
-    // str::find() returns byte positions, and "·" is 3 bytes in UTF-8
-    // "model" = bytes 0-4, "·" = bytes 5-7, "variable" starts at byte 8
-    // But wait - str::find() actually returns the byte index!
-    let var_pos = s.find("var").unwrap();
-    assert_eq!(canonical_str.find("var"), Some(var_pos));
+    assert_eq!(canonical_str.find("variable"), Some(7));
     assert_eq!(canonical_str.find("notfound"), None);
 }
 
@@ -1945,38 +1817,15 @@ fn test_unchecked_constructors() {
     let ident = Ident::<Canonical>::from_unchecked(canonical_string.clone());
     assert_eq!(ident.as_str(), "already_canonical");
 
-    // Test unchecked construction of IdentRef
-    let canonical_str = "also_canonical";
-    let ident_ref = IdentRef::<Canonical>::from_canonical_unchecked(canonical_str);
-    assert_eq!(ident_ref.as_str(), "also_canonical");
-
     // Test unchecked construction of CanonicalStr
     let canonical_slice = CanonicalStr::from_canonical_unchecked("canonical·str");
     assert_eq!(canonical_slice.as_str(), "canonical·str");
 }
 
 #[test]
-fn test_as_ref_implementations() {
-    let ident = Ident::new("test");
-    let _str_ref: &str = <Ident<Canonical> as AsRef<str>>::as_ref(&ident);
-    assert_eq!(_str_ref, "test");
-
-    let ident_ref = ident.as_ref();
-    let _str_ref2: &str = <IdentRef<'_, Canonical> as AsRef<str>>::as_ref(&ident_ref);
-    assert_eq!(_str_ref2, "test");
-
-    let canonical_str = ident.as_canonical_str();
-    let _str_ref3: &str = canonical_str.as_ref();
-    assert_eq!(_str_ref3, "test");
-}
-
-#[test]
 fn test_fmt_display_implementations() {
     let ident = Ident::new("Model.Var");
     assert_eq!(format!("{ident}"), "model·var");
-
-    let ident_ref = ident.as_ref();
-    assert_eq!(format!("{ident_ref}"), "model·var");
 
     let canonical_str = ident.as_canonical_str();
     assert_eq!(format!("{canonical_str}"), "model·var");
@@ -2404,12 +2253,6 @@ impl RawIdent {
 }
 
 impl CanonicalDimensionName {
-    /// Create from an already-canonicalized string (internal use only)
-    #[allow(dead_code)]
-    pub(crate) fn from_canonical_unchecked(s: String) -> Self {
-        CanonicalDimensionName(CanonicalStorage::intern(&s))
-    }
-
     /// Create from a raw string, canonicalizing it
     pub fn from_raw(s: &str) -> Self {
         CanonicalDimensionName(CanonicalStorage::intern(&canonicalize(s)))
@@ -2418,11 +2261,6 @@ impl CanonicalDimensionName {
     /// Get the underlying canonical string
     pub fn as_str(&self) -> &str {
         self.0.as_str()
-    }
-
-    /// Convert to the legacy DimensionName type (for gradual migration)
-    pub fn to_dimension_name(&self) -> DimensionName {
-        self.0.as_str().to_owned()
     }
 }
 
@@ -2444,12 +2282,6 @@ impl RawDimensionName {
 }
 
 impl CanonicalElementName {
-    /// Create from an already-canonicalized string (internal use only)
-    #[allow(dead_code)]
-    pub(crate) fn from_canonical_unchecked(s: String) -> Self {
-        CanonicalElementName(CanonicalStorage::intern(&s))
-    }
-
     /// Create from a raw string, canonicalizing it
     pub fn from_raw(s: &str) -> Self {
         CanonicalElementName(CanonicalStorage::intern(&canonicalize(s)))
@@ -2458,11 +2290,6 @@ impl CanonicalElementName {
     /// Get the underlying canonical string
     pub fn as_str(&self) -> &str {
         self.0.as_str()
-    }
-
-    /// Convert to the legacy ElementName type (for gradual migration)
-    pub fn to_element_name(&self) -> ElementName {
-        self.0.as_str().to_owned()
     }
 }
 
@@ -2588,15 +2415,6 @@ pub struct Ident<State = Canonical> {
     _phantom: PhantomData<State>,
 }
 
-/// A borrowed identifier reference with state tracking
-/// This is the key type that enables zero-copy substring operations
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub struct IdentRef<'a, State = Canonical> {
-    inner: &'a str,
-    _phantom: PhantomData<State>,
-}
-
 /// A borrowed canonical string slice wrapper
 /// This type guarantees the string is in canonical form
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -2689,14 +2507,6 @@ impl Ident<Canonical> {
         }
     }
 
-    /// Get a borrowed reference to this identifier
-    pub fn as_ref(&self) -> IdentRef<'_, Canonical> {
-        IdentRef {
-            inner: self.inner.as_str(),
-            _phantom: PhantomData,
-        }
-    }
-
     /// Get as a CanonicalStr
     pub fn as_canonical_str(&self) -> CanonicalStr<'_> {
         CanonicalStr::from_canonical_unchecked(self.inner.as_str())
@@ -2706,14 +2516,6 @@ impl Ident<Canonical> {
     pub fn join(module: &CanonicalStr, var: &CanonicalStr) -> Self {
         Ident {
             inner: CanonicalStorage::intern(&format!("{}·{}", module.as_str(), var.as_str())),
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Create an identifier with array subscript notation
-    pub fn with_subscript(&self, subscript: &str) -> Self {
-        Ident {
-            inner: CanonicalStorage::intern(&format!("{}[{}]", self.to_source_repr(), subscript)),
             _phantom: PhantomData,
         }
     }
@@ -2742,60 +2544,6 @@ impl Ident<Canonical> {
     /// periods in quoted identifiers.
     pub fn to_source_repr(&self) -> String {
         canonical_to_source(self.inner.as_str()).into_owned()
-    }
-
-    /// Strip a prefix, returning a borrowed view if successful
-    pub fn strip_prefix<'a>(&'a self, prefix: &str) -> Option<IdentRef<'a, Canonical>> {
-        self.inner.as_str().strip_prefix(prefix).map(|s| IdentRef {
-            inner: s,
-            _phantom: PhantomData,
-        })
-    }
-}
-
-impl<'a> IdentRef<'a, Canonical> {
-    /// Create from a string slice known to be canonical
-    ///
-    /// Note: Caller must guarantee the string is already canonical
-    pub fn from_canonical_unchecked(s: &'a str) -> Self {
-        IdentRef {
-            inner: s,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Get the underlying string slice
-    pub fn as_str(&self) -> &'a str {
-        self.inner
-    }
-
-    /// Get as a CanonicalStr
-    pub fn as_canonical_str(&self) -> CanonicalStr<'a> {
-        CanonicalStr::from_canonical_unchecked(self.inner)
-    }
-
-    /// Convert to an owned Ident
-    pub fn to_owned(&self) -> Ident<Canonical> {
-        Ident {
-            inner: CanonicalStorage::intern(self.inner),
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Strip a prefix, maintaining the canonical guarantee
-    pub fn strip_prefix(&self, prefix: &str) -> Option<IdentRef<'a, Canonical>> {
-        self.inner.strip_prefix(prefix).map(|s| IdentRef {
-            inner: s,
-            _phantom: PhantomData,
-        })
-    }
-
-    /// Convert canonical identifier to source code representation.
-    ///
-    /// Replaces middle dots (·) used internally for module hierarchy separators
-    /// back to periods (.) for display in source code or user-facing output.
-    pub fn to_source_repr(&self) -> Cow<'a, str> {
-        canonical_to_source(self.inner)
     }
 }
 
@@ -2868,12 +2616,6 @@ impl std::borrow::Borrow<str> for CanonicalElementName {
     }
 }
 
-impl<'a> AsRef<str> for IdentRef<'a, Canonical> {
-    fn as_ref(&self) -> &str {
-        self.inner
-    }
-}
-
 impl<'a> AsRef<str> for CanonicalStr<'a> {
     fn as_ref(&self) -> &str {
         self.inner
@@ -2884,12 +2626,6 @@ impl<'a> AsRef<str> for CanonicalStr<'a> {
 impl fmt::Display for Ident<Canonical> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.inner.as_str())
-    }
-}
-
-impl<'a> fmt::Display for IdentRef<'a, Canonical> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.inner)
     }
 }
 

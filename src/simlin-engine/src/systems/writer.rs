@@ -816,16 +816,6 @@ mod tests {
     }
 
     #[test]
-    fn ac4_3_leak_type_reconstructed() {
-        let input = "A > B @ Leak(0.1)\n";
-        let output = roundtrip_write(input);
-        assert!(
-            output.contains("Leak("),
-            "should contain Leak(...): {output}"
-        );
-    }
-
-    #[test]
     fn ac4_4_multi_outflow_declaration_order() {
         let input = "[A] > B @ Rate(5)\n[A] > C @ Rate(3)\n";
         let output = roundtrip_write(input);

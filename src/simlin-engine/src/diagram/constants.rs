@@ -10,7 +10,10 @@ pub const MODULE_HEIGHT: f64 = 45.0;
 pub const MODULE_RADIUS: f64 = 5.0;
 pub const ARROWHEAD_RADIUS: f64 = 6.0;
 pub const FLOW_ARROWHEAD_RADIUS: f64 = 8.0;
-pub const CLOUD_RADIUS: f64 = 13.5; // 1.5 * AUX_RADIUS
+// Derived rather than written out as 13.5: the 1.5x relation to the aux
+// circle is the design rule, so it holds by construction instead of needing
+// a test to restate it.
+pub const CLOUD_RADIUS: f64 = 1.5 * AUX_RADIUS;
 pub const CLOUD_WIDTH: f64 = 55.0;
 pub const STRAIGHT_LINE_MAX: f64 = 6.0; // degrees
 pub const LINE_SPACING: f64 = 14.0;
@@ -19,13 +22,3 @@ pub const GROUP_RADIUS: f64 = 8.0;
 pub const GROUP_LABEL_PADDING: f64 = 8.0;
 pub const ARRAYED_OFFSET: f64 = 3.0;
 pub const FLOW_VALVE_RADIUS: f64 = 6.0; // FlowWidth/2, used in flowBounds
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cloud_radius_matches_aux() {
-        assert!((CLOUD_RADIUS - 1.5 * AUX_RADIUS).abs() < f64::EPSILON);
-    }
-}

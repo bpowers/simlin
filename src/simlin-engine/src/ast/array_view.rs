@@ -2,7 +2,10 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// Only `apply_range_subscript` (test-only, below) returns a fallible result.
+#[cfg(test)]
 use crate::common::Result;
+#[cfg(test)]
 use crate::sim_err;
 
 /// Information about a sparse (non-contiguous) dimension in an array view.
@@ -87,8 +90,12 @@ impl ArrayView {
         self.dims.iter().product()
     }
 
-    /// Check if this view represents contiguous data in row-major order
-    #[allow(dead_code)]
+    /// Check if this view represents contiguous data in row-major order.
+    ///
+    /// Test-only: production asks the same question of `RuntimeView` /
+    /// `wasmgen::ViewDesc` / `dimensions::SubdimensionRelation`, never of an
+    /// `ast::ArrayView`.
+    #[cfg(test)]
     pub fn is_contiguous(&self) -> bool {
         if self.offset != 0 || !self.sparse.is_empty() {
             return false;
@@ -104,8 +111,11 @@ impl ArrayView {
         true
     }
 
-    /// Apply a range subscript to create a new view
-    #[allow(dead_code)]
+    /// Apply a range subscript to create a new view.
+    ///
+    /// Test-only: range subscripts are lowered by `compiler::subscript`, which
+    /// does not route through this helper.
+    #[cfg(test)]
     pub fn apply_range_subscript(
         &self,
         dim_index: usize,

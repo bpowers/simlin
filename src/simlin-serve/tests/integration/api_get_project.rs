@@ -81,7 +81,15 @@ async fn ac3_1_reads_stmx_returns_canonical_json() {
     assert_eq!(status, StatusCode::OK);
     let value = parse_body(&body);
 
+    // The full response shape: `{ json, version, source_format }`. Sourcing
+    // reads from the in-memory doc (Task 5) changed where the payload comes
+    // from, not what the wire looks like.
     assert_eq!(value["source_format"].as_str(), Some("stmx"));
+    assert!(
+        value["version"].is_number(),
+        "version must be present and numeric, got {:?}",
+        value.get("version")
+    );
     let json_str = value["json"].as_str().expect("json field is a string");
     assert!(!json_str.is_empty(), "json field should be non-empty");
     let inner: Value = serde_json::from_str(json_str).expect("inner json parses");
@@ -351,29 +359,4 @@ async fn second_get_returns_cached_content_after_external_disk_edit() {
         Some(json1.as_str()),
         "second GET should return the cached doc state, not the disk-edited content"
     );
-}
-
-// Sanity check Task 5's response shape: the wire shape must remain
-// `{ json, version, source_format }` — doc-sourcing changes the source
-// of truth but not the response schema.
-#[tokio::test]
-async fn doc_sourced_response_keeps_phase1_shape() {
-    let dir = TempDir::new().unwrap();
-    copy_fixture("teacup.stmx", dir.path());
-    let canonical = dir.path().canonicalize().unwrap();
-    let state = build_state(canonical);
-
-    let (status, body) = fetch(state, "/api/projects/teacup.stmx").await;
-    assert_eq!(status, StatusCode::OK);
-    let value = parse_body(&body);
-
-    assert!(value.get("json").is_some(), "json field present");
-    assert!(value.get("version").is_some(), "version field present");
-    assert!(
-        value.get("source_format").is_some(),
-        "source_format field present"
-    );
-    assert!(value["json"].is_string(), "json is a string");
-    assert!(value["version"].is_number(), "version is a number");
-    assert_eq!(value["source_format"].as_str(), Some("stmx"));
 }

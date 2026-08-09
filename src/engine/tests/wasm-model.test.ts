@@ -15,7 +15,7 @@ import { describe, it, expect, beforeAll, afterAll } from '@rstest/core';
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { Project, Model, Sim, Run, configureWasm, ready, resetWasm } from '../src';
+import { Project, Run, configureWasm, ready, resetWasm } from '../src';
 
 // Configure the node DirectBackend with the libsimlin wasm singleton. Mirrors
 // api.test.ts; the per-model wasm blob compiled for engine:'wasm' is a separate
@@ -75,21 +75,6 @@ describe('Model/Sim engine selection (public API)', () => {
         expectSeriesClose(await wasmSim.getSeries(name), await vmSim.getSeries(name));
       }
 
-      await vmSim.dispose();
-      await wasmSim.dispose();
-    });
-
-    it('returns a Sim regardless of engine selection', async () => {
-      const model = await project.mainModel();
-      const defaultSim = await model.simulate();
-      const vmSim = await model.simulate({}, { engine: 'vm' });
-      const wasmSim = await model.simulate({}, { engine: 'wasm' });
-
-      expect(defaultSim).toBeInstanceOf(Sim);
-      expect(vmSim).toBeInstanceOf(Sim);
-      expect(wasmSim).toBeInstanceOf(Sim);
-
-      await defaultSim.dispose();
       await vmSim.dispose();
       await wasmSim.dispose();
     });
@@ -160,14 +145,6 @@ describe('Model/Sim engine selection (public API)', () => {
       expect(temp.length).toBeGreaterThan(0);
       expect(temp[0]).toBeGreaterThan(temp[temp.length - 1]);
     });
-
-    it('default simulate() with an override tracks the override (VM behavior)', async () => {
-      const model = await project.mainModel();
-      const sim = await model.simulate({ room_temperature: 30 });
-      expect(sim.overrides).toEqual({ room_temperature: 30 });
-      expect(await sim.getValue('room_temperature')).toBe(30);
-      await sim.dispose();
-    });
   });
 
   describe('Sim.reset() reset+reapply-overrides path on a wasm sim (public API)', () => {
@@ -224,20 +201,13 @@ describe('Model/Sim engine selection (public API)', () => {
     });
   });
 
-  describe('run({engine:wasm}) without analyzeLtm yields a Run with empty links', () => {
-    it('resolves to a Run whose links array is empty', async () => {
-      const model = await project.mainModel();
-      const run = await model.run({}, { engine: 'wasm' });
+  // LTM analysis is opt-in; omitting analyzeLtm must still produce a valid Run
+  // on the wasm engine, with empty links (the LTM-on path is wasm-ltm.test.ts).
+  it('run({engine:wasm}) without analyzeLtm yields a Run with empty links', async () => {
+    const model = await project.mainModel();
+    const run = await model.run({}, { engine: 'wasm' });
 
-      expect(run).toBeInstanceOf(Run);
-      expect(run.links).toEqual([]);
-    });
-
-    it('resolves successfully when analyzeLtm is omitted', async () => {
-      const model = await project.mainModel();
-      // LTM analysis is opt-in; omitting analyzeLtm must produce a valid Run
-      // with empty links on the wasm engine (the LTM-on path is tested in wasm-ltm.test.ts).
-      await expect(model.run({}, { engine: 'wasm' })).resolves.toBeInstanceOf(Run);
-    });
+    expect(run).toBeInstanceOf(Run);
+    expect(run.links).toEqual([]);
   });
 });

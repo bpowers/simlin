@@ -11,7 +11,7 @@ use crate::common::{
     canonicalize,
 };
 use crate::dimensions::DimensionsContext;
-use crate::variable::{ModuleInput, Variable, identifier_set};
+use crate::variable::{ModuleInput, Variable};
 use crate::{datamodel, eqn_err, model_err};
 
 #[cfg(test)]
@@ -820,178 +820,13 @@ impl ModelStage1 {
     /// the roll-up above and by the tests that check it. User-facing reporting
     /// goes through `db::collect_all_diagnostics`, which reports the same
     /// errors with a source location attached.
+    #[cfg(test)]
     pub fn get_variable_errors(&self) -> HashMap<Ident<Canonical>, Vec<EquationError>> {
         self.variables
             .iter()
             .flat_map(|(ident, var)| var.equation_errors().map(|errs| (ident.clone(), errs)))
             .collect()
     }
-}
-
-/// Resolves dependencies to exclude private variables.
-/// Private variables (starting with "$⁚") are internal implementation details that
-/// should not be exposed through public APIs. This function transitively resolves
-/// them to their non-private dependencies.
-pub fn resolve_non_private_dependencies(
-    model: &ModelStage1,
-    deps: HashSet<Ident<Canonical>>,
-) -> HashSet<Ident<Canonical>> {
-    let mut resolved = HashSet::new();
-    let mut visited = HashSet::new();
-    let mut to_process: Vec<_> = deps.into_iter().collect();
-
-    while let Some(dep) = to_process.pop() {
-        if !visited.insert(dep.clone()) {
-            continue;
-        }
-
-        if !dep.as_str().starts_with("$⁚") {
-            // Public variable - include in results
-            resolved.insert(dep);
-            continue;
-        }
-
-        // Private variable - resolve to its dependencies
-        let deps_to_add = if dep.as_str().contains('·') {
-            // Module output reference: "module·output"
-            // Dependencies are the module's input sources
-            let module_name = dep.as_str().split('·').next().unwrap();
-            match model.variables.get(module_name) {
-                Some(Variable::Module { inputs, .. }) => {
-                    inputs.iter().map(|input| input.src.clone()).collect()
-                }
-                _ => vec![],
-            }
-        } else {
-            // Regular private variable - get its direct dependencies
-            match model.variables.get(&dep) {
-                Some(var) => {
-                    let ast = var.ast().or_else(|| var.init_ast());
-                    ast.map(|a| identifier_set(a, &[], None).into_iter().collect())
-                        .unwrap_or_default()
-                }
-                None => vec![],
-            }
-        };
-
-        // Queue dependencies for processing
-        for dep in deps_to_add {
-            if !visited.contains(&dep) {
-                to_process.push(dep);
-            }
-        }
-    }
-
-    resolved
-}
-
-/// Extract the incoming links (dependencies) for a variable using its AST.
-///
-/// Returns `None` if the variable doesn't exist. Returns `Some(empty set)`
-/// for variables with no AST (e.g. per-variable compilation errors).
-/// Private/synthetic dependencies are resolved to their public sources.
-pub fn get_incoming_links(
-    model: &ModelStage1,
-    var_ident: &Ident<Canonical>,
-) -> Option<HashSet<Ident<Canonical>>> {
-    let var = model.variables.get(var_ident)?;
-    let raw_deps = match var {
-        Variable::Stock {
-            init_ast: Some(ast),
-            ..
-        } => identifier_set(ast, &[], None),
-        Variable::Var { ast: Some(ast), .. } => identifier_set(ast, &[], None),
-        Variable::Module { inputs, .. } => inputs.iter().map(|i| i.src.clone()).collect(),
-        _ => return Some(HashSet::new()),
-    };
-    Some(resolve_non_private_dependencies(model, raw_deps))
-}
-
-#[test]
-fn test_module_dependency() {
-    let lynxes_model = x_model(
-        "lynxes",
-        vec![
-            x_aux("init", "5", None),
-            x_stock("lynxes_stock", "100 * init", &["inflow"], &[], None),
-            x_flow("inflow", "1", None),
-        ],
-    );
-    let hares_model = x_model(
-        "hares",
-        vec![
-            x_aux("lynxes", "0", None),
-            x_stock("hares_stock", "100", &[], &["outflow"], None),
-            x_flow("outflow", ".1 * hares_stock", None),
-        ],
-    );
-    let main_model = x_model(
-        "main",
-        vec![
-            x_aux("main_init", "7", None),
-            x_module("lynxes", &[("main_init", "lynxes.init")], None),
-            x_module("hares", &[("lynxes.lynxes", "hares.lynxes")], None),
-        ],
-    );
-
-    let _models: HashMap<String, &datamodel::Model> = vec![
-        ("main".to_string(), &main_model),
-        ("lynxes".to_string(), &lynxes_model),
-        ("hares".to_string(), &hares_model),
-    ]
-    .into_iter()
-    .collect();
-}
-
-#[test]
-fn test_get_incoming_links_basic() {
-    let dm_model = x_model(
-        "test",
-        vec![
-            x_aux("rate", "0.1", None),
-            x_stock("population", "100", &["births"], &[], None),
-            x_flow("births", "population * rate", None),
-        ],
-    );
-    let project = datamodel::Project {
-        name: "test".to_string(),
-        sim_specs: datamodel::SimSpecs::default(),
-        dimensions: vec![],
-        units: vec![],
-        models: vec![dm_model],
-        source: None,
-        ai_information: None,
-    };
-    let db = db::SimlinDb::default();
-    let sync = db::sync_from_datamodel(&db, &project);
-    let source_model = sync.models["test"].source;
-    let edges_result = db::model_causal_edges(&db, source_model, sync.project);
-
-    // "births" depends on "population" and "rate": the causal edges map
-    // records dep -> {dependents}, so "population" and "rate" should each
-    // list "births" as a dependent.
-    assert!(
-        edges_result
-            .edges
-            .get("population")
-            .is_some_and(|s| s.contains("births")),
-        "births should depend on population"
-    );
-    assert!(
-        edges_result
-            .edges
-            .get("rate")
-            .is_some_and(|s| s.contains("births")),
-        "births should depend on rate"
-    );
-
-    // "rate" has no dependencies (constant) -- "rate" should not appear
-    // as a value in any edge set (nothing depends on rate except births,
-    // which we already checked). Verify rate has no outgoing edges of its own.
-    let rate_has_deps = edges_result.edges.values().any(|s| s.contains("rate"));
-    // "rate" appears as a dep key (things depend on rate), but rate itself
-    // should not appear as a dependent of anything.
-    assert!(!rate_has_deps, "rate should have no incoming dependencies");
 }
 
 #[test]

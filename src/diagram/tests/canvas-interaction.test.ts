@@ -26,7 +26,6 @@ import {
   idleState,
   InteractionContext,
   InteractionEffect,
-  InteractionEvent,
   InteractionState,
   isDrag,
   isInDragSelectRect,
@@ -326,27 +325,3 @@ describe('reduceInteraction: label drag start (shell-driven)', () => {
 // lives in Canvas.handleSetSelection (composing decideMouseDownSelection /
 // resolveSelectionForReattachment and building the union variant directly); the
 // reconciler-level gesture suite (canvas-gestures-elements.test.tsx) covers it.
-
-describe('idleState', () => {
-  it('is the idle mode', () => {
-    const s: InteractionState = idleState;
-    expect(s.mode).toBe('idle');
-  });
-});
-
-// Type-only event coverage: exercising the discriminant ensures the union stays
-// exhaustive for the shell's translation layer. (No elementPointerDown: element
-// press resolution lives in the shell, not the reducer.)
-describe('InteractionEvent kinds', () => {
-  it('enumerates the supported kinds', () => {
-    const kinds: InteractionEvent['kind'][] = [
-      'canvasPointerDown',
-      'createToolPointerDown',
-      'flowToolPointerDown',
-      'pinchStart',
-      'pinchEnd',
-      'labelDragStart',
-    ];
-    expect(new Set(kinds).size).toBe(6);
-  });
-});

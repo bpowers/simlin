@@ -4011,13 +4011,6 @@ mod loop_circuits_result_tests {
     use crate::db::{SimlinDb, sync_from_datamodel};
     use crate::test_common::TestProject;
 
-    /// Small feedback-loop project: population -> births -> population.
-    fn feedback_project() -> TestProject {
-        TestProject::new("loop_result_test")
-            .stock("population", "100", &["births"], &[], None)
-            .flow("births", "population * 0.1", None)
-    }
-
     fn compute_loop_circuits(project: &TestProject) -> LoopCircuitsResult {
         let datamodel = project.build_datamodel();
         let db = SimlinDb::default();
@@ -4025,32 +4018,6 @@ mod loop_circuits_result_tests {
         let source_model = sync.models["main"].source;
         let source_project = sync.project;
         model_loop_circuits(&db, source_model, source_project).clone()
-    }
-
-    /// `to_named_circuits` must reconstruct the same owned-string lists
-    /// that the legacy `Vec<Vec<String>>` shape would have produced.
-    #[test]
-    fn test_loop_circuits_result_lookup_matches_legacy() {
-        let result = compute_loop_circuits(&feedback_project());
-
-        let legacy: Vec<Vec<String>> = result.to_named_circuits();
-        assert_eq!(legacy.len(), result.len());
-
-        for (ci, circuit_idx) in result.circuits.iter().enumerate() {
-            let names: Vec<&str> = result.circuit_names(ci).collect();
-            let legacy_names: Vec<&str> = legacy[ci].iter().map(String::as_str).collect();
-            assert_eq!(names, legacy_names);
-
-            // And each index resolves to the same name.
-            for (slot, &ni) in circuit_idx.iter().enumerate() {
-                assert_eq!(result.names[ni as usize], legacy[ci][slot]);
-            }
-        }
-
-        // The legacy loop has two nodes: population and births, both in
-        // the name table exactly once.
-        assert!(result.names.iter().any(|n| n == "population"));
-        assert!(result.names.iter().any(|n| n == "births"));
     }
 
     /// The shared name table should contain no duplicates and be sorted

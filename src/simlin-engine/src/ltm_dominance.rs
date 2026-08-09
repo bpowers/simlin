@@ -342,23 +342,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_causal_chain() {
-        let fl = FeedbackLoop {
-            name: "R1".to_string(),
-            polarity: LoopPolarity::Reinforcing,
-            variables: vec![
-                "population".to_string(),
-                "births".to_string(),
-                "birth_rate".to_string(),
-            ],
-            importance_series: vec![],
-            dominant_period: None,
-            partition: None,
-        };
-        assert_eq!(fl.causal_chain(), &["population", "births", "birth_rate"]);
-    }
-
-    #[test]
     fn test_average_importance() {
         let fl = FeedbackLoop {
             name: "B1".to_string(),

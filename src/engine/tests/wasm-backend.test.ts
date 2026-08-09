@@ -8,7 +8,7 @@
 // every wasm-engine operation is driven identically to the VM path and compared
 // within the engine's existing simulation tolerance.
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from '@rstest/core';
+import { describe, it, expect, beforeAll, afterAll } from '@rstest/core';
 
 import * as fs from 'fs';
 import * as path from 'path';
@@ -86,42 +86,8 @@ describe('DirectBackend wasm engine: sim creation and disposal (Task 3)', () => 
     backend.reset();
   });
 
-  describe('AC1.1: wasm sim creation', () => {
-    let projectHandle: ProjectHandle;
-    let modelHandle: ModelHandle;
-
-    beforeEach(() => {
-      projectHandle = backend.projectOpenXmile(loadTeacupXmile());
-      modelHandle = backend.projectGetModel(projectHandle, null);
-    });
-
-    afterEach(() => {
-      backend.modelDispose(modelHandle);
-      backend.projectDispose(projectHandle);
-    });
-
-    it('creates a wasm-backed sim handle', () => {
-      const sim = backend.simNew(modelHandle, false, 'wasm');
-      expect(typeof sim).toBe('number');
-      expect(sim).toBeGreaterThan(0);
-      backend.simDispose(sim);
-    });
-
-    it('defaults to a vm-backed sim when no engine is passed', () => {
-      const sim = backend.simNew(modelHandle, false);
-      expect(typeof sim).toBe('number');
-      expect(sim).toBeGreaterThan(0);
-      backend.simDispose(sim);
-    });
-
-    it("creates a vm-backed sim when engine is 'vm'", () => {
-      const sim = backend.simNew(modelHandle, false, 'vm');
-      expect(typeof sim).toBe('number');
-      expect(sim).toBeGreaterThan(0);
-      backend.simDispose(sim);
-    });
-  });
-
+  // Sim creation on each engine is exercised (and its result used) by every
+  // parity test below, so there is no separate "returns a handle" case here.
   describe('AC7.1/AC7.2: unsupported model errors on wasm, runs on vm', () => {
     it('throws on wasm with no VM fallback', () => {
       const projectHandle = backend.projectOpenXmile(new TextEncoder().encode(WASM_UNSUPPORTED_XMILE));
@@ -144,61 +110,17 @@ describe('DirectBackend wasm engine: sim creation and disposal (Task 3)', () => 
       backend.modelDispose(modelHandle);
       backend.projectDispose(projectHandle);
     });
-  });
 
-  describe('AC5.4 (creation half): the wasm instance is owned once on the entry', () => {
-    // The handle store is private; reach into it to assert the entry's recorded
-    // wasm state. This is a white-box check of the imperative shell -- the blob
-    // is owned on the entry so it is created exactly once (Task 4 then reuses it
-    // across reset/setValue/re-run with no recompile).
-    type EntryView = {
-      engine?: string;
-      ptr: number;
-      wasmInstance?: WebAssembly.Instance;
-      wasmLayout?: { nChunks: number };
-      wasmStopTime?: number;
-    };
-    function entryOf(sim: SimHandle): EntryView {
-      const handles = (backend as unknown as { _handles: Map<number, EntryView> })._handles;
-      const entry = handles.get(sim as unknown as number);
-      if (!entry) {
-        throw new Error('sim entry not found');
-      }
-      return entry;
-    }
-
-    it('records engine, a live instance, layout, and stop time on the entry', () => {
-      const projectHandle = backend.projectOpenXmile(loadTeacupXmile());
+    // The absent-engine default is 'vm' (src/engine/CLAUDE.md). This model is
+    // the one input that tells the two engines apart, so it is the only way to
+    // assert the default behaviorally: a wasm default would throw here.
+    it('defaults to the vm engine when no engine is passed', () => {
+      const projectHandle = backend.projectOpenXmile(new TextEncoder().encode(WASM_UNSUPPORTED_XMILE));
       const modelHandle = backend.projectGetModel(projectHandle, null);
-      const sim = backend.simNew(modelHandle, false, 'wasm');
-
-      const entry = entryOf(sim);
-      expect(entry.engine).toBe('wasm');
-      expect(entry.ptr).toBe(0); // no native sim pointer
-      expect(entry.wasmInstance).toBeInstanceOf(WebAssembly.Instance);
-      expect(entry.wasmLayout?.nChunks).toBeGreaterThan(0);
-      // teacup: start 0, stop 30.
-      expect(entry.wasmStopTime).toBe(30);
-
+      const sim = backend.simNew(modelHandle, false);
+      backend.simRunToEnd(sim);
+      expect(backend.simGetSeries(sim, 'summed')[0]).toBeCloseTo(6, 9);
       backend.simDispose(sim);
-      backend.modelDispose(modelHandle);
-      backend.projectDispose(projectHandle);
-    });
-
-    it('owns a distinct instance per sim (each created once)', () => {
-      const projectHandle = backend.projectOpenXmile(loadTeacupXmile());
-      const modelHandle = backend.projectGetModel(projectHandle, null);
-      const simA = backend.simNew(modelHandle, false, 'wasm');
-      const simB = backend.simNew(modelHandle, false, 'wasm');
-
-      const instA = entryOf(simA).wasmInstance;
-      const instB = entryOf(simB).wasmInstance;
-      expect(instA).toBeInstanceOf(WebAssembly.Instance);
-      expect(instB).toBeInstanceOf(WebAssembly.Instance);
-      expect(instA).not.toBe(instB);
-
-      backend.simDispose(simA);
-      backend.simDispose(simB);
       backend.modelDispose(modelHandle);
       backend.projectDispose(projectHandle);
     });
@@ -215,15 +137,28 @@ describe('DirectBackend wasm engine: sim creation and disposal (Task 3)', () => 
       backend.projectDispose(projectHandle);
     });
 
-    it('does not call simlin_sim_unref for a wasm sim (no native sim ptr)', () => {
+    it('gives each wasm sim of a model its own independent state', () => {
+      // Two sims compiled from the same model must not share the blob's
+      // memory: an override applied to one may not leak into the other.
       const projectHandle = backend.projectOpenXmile(loadTeacupXmile());
       const modelHandle = backend.projectGetModel(projectHandle, null);
-      const sim = backend.simNew(modelHandle, false, 'wasm');
-      // A wasm entry carries ptr 0; the disposal path must not unref a 0 ptr.
-      // We verify behaviorally: disposing twice never throws and a subsequent
-      // operation reports the handle as disposed (the FFI was never touched).
-      backend.simDispose(sim);
-      expect(() => backend.simRunToEnd(sim)).toThrow(/disposed/);
+      const simA = backend.simNew(modelHandle, false, 'wasm');
+      const simB = backend.simNew(modelHandle, false, 'wasm');
+
+      backend.simSetValue(simA, 'room temperature', 40);
+      backend.simRunToEnd(simA);
+      backend.simRunToEnd(simB);
+
+      expect(backend.simGetSeries(simA, 'room_temperature')[0]).toBeCloseTo(40, 9);
+      // simB keeps the compiled default (70), so the two runs also differ.
+      expect(backend.simGetSeries(simB, 'room_temperature')[0]).toBeCloseTo(70, 9);
+      expect(backend.simGetSeries(simA, 'teacup_temperature')[1]).not.toBeCloseTo(
+        backend.simGetSeries(simB, 'teacup_temperature')[1],
+        9,
+      );
+
+      backend.simDispose(simA);
+      backend.simDispose(simB);
       backend.modelDispose(modelHandle);
       backend.projectDispose(projectHandle);
     });
@@ -610,16 +545,8 @@ describe('DirectBackend wasm engine: per-op vm/wasm parity (Task 4)', () => {
   });
 
   describe('AC4.1/AC4.2/AC4.4: by-name reads parity', () => {
-    it('getSeries for every variable equals the VM', () => {
-      const { vm, wasm, dispose } = openPair();
-      backend.simRunToEnd(vm);
-      backend.simRunToEnd(wasm);
-      for (const name of backend.simGetVarNames(wasm)) {
-        expectSeriesClose(backend.simGetSeries(wasm, name), backend.simGetSeries(vm, name));
-      }
-      dispose();
-    });
-
+    // Whole-series parity for every variable is AC2.1 above; these cover the
+    // rest of the by-name read surface.
     it('getVarNames and getStepCount equal the VM (exact array equality)', () => {
       const { vm, wasm, dispose } = openPair();
       backend.simRunToEnd(vm);
@@ -645,18 +572,6 @@ describe('DirectBackend wasm engine: per-op vm/wasm parity (Task 4)', () => {
       backend.simRunToEnd(wasm);
       expect(() => backend.simGetSeries(vm, 'definitely_not_a_var')).toThrow();
       expect(() => backend.simGetSeries(wasm, 'definitely_not_a_var')).toThrow();
-      dispose();
-    });
-  });
-
-  describe('AC4.3: getSeries returns a single Float64Array of length nChunks', () => {
-    it('returns one Float64Array whose length equals the step count', () => {
-      const { wasm, dispose } = openPair();
-      backend.simRunToEnd(wasm);
-      const stepCount = backend.simGetStepCount(wasm);
-      const series = backend.simGetSeries(wasm, 'teacup_temperature');
-      expect(series).toBeInstanceOf(Float64Array);
-      expect(series.length).toBe(stepCount);
       dispose();
     });
   });

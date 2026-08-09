@@ -1135,6 +1135,15 @@ struct EmitState {
 /// constant-size loop body for the current fully-unrolled form.
 const MAX_UNROLL_UNITS: usize = 65_536;
 
+// The headroom claim above is a compile-time obligation, not a comment: a
+// future narrowing of the cap that drops below a deliberately roomy 10^4
+// would start rejecting legitimate arrayed models, and it fails to build
+// here rather than surfacing as an `Unsupported` on a user's model.
+const _: () = assert!(
+    MAX_UNROLL_UNITS >= 10_000,
+    "the unroll cap must leave ample headroom for realistic arrayed models"
+);
+
 impl EmitState {
     /// Charge `units` against the per-function unroll budget, returning
     /// `Unsupported` (an explicit error to the caller, no silent VM fallback)

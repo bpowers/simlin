@@ -3414,30 +3414,6 @@ fn write_flow_element_with_context(
     .unwrap();
 }
 
-/// Returns true if any pipe connectors were written.
-#[cfg(test)]
-#[allow(dead_code)]
-fn write_flow_pipe_connectors(
-    buf: &mut String,
-    flow: &view_element::Flow,
-    valve_uid: i32,
-    _cloud_uids: &HashSet<i32>,
-    next_connector_uid: &mut i32,
-) -> bool {
-    write_flow_pipe_connectors_with_context(
-        buf,
-        flow,
-        valve_uid,
-        next_connector_uid,
-        FlowConnectorContext {
-            transform: SketchTransform::identity(),
-            elem_positions: &HashMap::new(),
-            stock_uids: &HashSet::new(),
-            uid_remap: None,
-        },
-    )
-}
-
 struct FlowConnectorContext<'a> {
     transform: SketchTransform,
     elem_positions: &'a HashMap<i32, (i32, i32)>,
@@ -4508,25 +4484,6 @@ impl MdlWriter {
         writeln!(self.buf, "25:{}", format_f64(sim_specs.stop)).unwrap();
         writeln!(self.buf, "26:{}", format_f64(sim_specs.stop)).unwrap();
     }
-}
-
-/// Build a map from element UID to (x, y) position for link control point computation.
-///
-/// For flow elements, `write_flow_element` emits a synthetic valve using the
-/// pre-allocated `valve_uids` map. We register that valve UID here so that any
-/// connector whose endpoint is the valve can resolve a position.
-#[cfg(test)]
-#[allow(dead_code)]
-fn build_element_positions(
-    elements: &[ViewElement],
-    valve_uids: &HashMap<i32, i32>,
-) -> HashMap<i32, (i32, i32)> {
-    build_element_positions_with_transform(
-        &elements.iter().collect::<Vec<_>>(),
-        valve_uids,
-        SketchTransform::identity(),
-        &HashSet::new(),
-    )
 }
 
 fn build_element_positions_with_transform(

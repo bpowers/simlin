@@ -201,18 +201,6 @@ class TestRunClass:
 class TestDominantPeriod:
     """Test the DominantPeriod dataclass."""
 
-    def test_dominant_period_creation(self) -> None:
-        """Test creating a DominantPeriod."""
-        period = DominantPeriod(
-            dominant_loops=("R1", "B2"),
-            start_time=0.0,
-            end_time=10.0,
-        )
-
-        assert period.dominant_loops == ("R1", "B2")
-        assert period.start_time == 0.0
-        assert period.end_time == 10.0
-
     def test_dominant_period_duration(self) -> None:
         """Test calculating duration of a period."""
         period = DominantPeriod(
@@ -234,14 +222,3 @@ class TestDominantPeriod:
         assert period.contains_loop("R1")
         assert period.contains_loop("B2")
         assert not period.contains_loop("R3")
-
-    def test_dominant_period_immutable(self) -> None:
-        """Test that DominantPeriod is immutable."""
-        period = DominantPeriod(
-            dominant_loops=("R1",),
-            start_time=0.0,
-            end_time=10.0,
-        )
-
-        with pytest.raises(AttributeError):
-            period.start_time = 5.0

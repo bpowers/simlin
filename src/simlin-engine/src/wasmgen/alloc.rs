@@ -1765,6 +1765,13 @@ mod tests {
         }
     }
 
+    // What is left here are the two argument shapes the OPCODE-level tests in
+    // `lower_tests.rs` cannot express: a negative request (the `r.max(0.0)`
+    // clamp) and a zero-requester call. The supply-nonpositive, rectangular-
+    // bisection and mixed-profile-type cases live there instead, over the same
+    // fixture data but through `Opcode::AllocateAvailable`, so they exercise
+    // this helper plus the view plumbing rather than the helper alone.
+
     #[test]
     fn allocate_available_full_grant_when_supply_exceeds_demand() {
         // avail >= total_demand: each requester gets r.max(0). A negative request
@@ -1778,55 +1785,6 @@ mod tests {
         ];
         // total_demand = 3+2+4 = 9 (the negative request is excluded).
         assert_allocate_matches(&requests, &profiles, 100.0);
-    }
-
-    #[test]
-    fn allocate_available_zeros_when_supply_nonpositive() {
-        // avail <= 0: all zeros.
-        let requests = [3.0, 2.0, 4.0];
-        let profiles = [
-            (1.0, 1.0, 1.0, 0.0),
-            (1.0, 2.0, 1.0, 0.0),
-            (1.0, 3.0, 1.0, 0.0),
-        ];
-        assert_allocate_matches(&requests, &profiles, 0.0);
-        assert_allocate_matches(&requests, &profiles, -5.0);
-    }
-
-    #[test]
-    fn allocate_available_partial_bisection_rectangular() {
-        // The interesting case: 0 < avail < total_demand, so the bisection runs.
-        // Rectangular profiles (ptype 1) with distinct priorities, mirroring the
-        // `allocate.mdl` shape.
-        let requests = [3.0, 2.0, 4.0];
-        let profiles = [
-            (1.0, 1.0, 1.0, 0.0),
-            (1.0, 2.0, 1.0, 0.0),
-            (1.0, 3.0, 1.0, 0.0),
-        ];
-        // total_demand = 9; supply 5 forces a partial allocation.
-        for avail in [1.0, 3.0, 5.0, 7.0, 8.5] {
-            assert_allocate_matches(&requests, &profiles, avail);
-        }
-    }
-
-    #[test]
-    fn allocate_available_partial_bisection_across_profile_types() {
-        // Partial allocation with a mix of profile types, exercising the
-        // search-range `spread` per type and the per-requester curve at the
-        // converged price.
-        let requests = [4.0, 3.0, 5.0, 2.0, 6.0];
-        let profiles = [
-            (0.0, 2.0, 1.0, 0.0), // fixed
-            (2.0, 3.0, 1.5, 0.0), // triangular
-            (3.0, 2.5, 1.0, 0.0), // normal
-            (4.0, 2.0, 1.2, 0.0), // exponential
-            (5.0, 3.0, 1.0, 2.0), // CES
-        ];
-        // total_demand = 20; sweep several partial supplies.
-        for avail in [2.0, 6.0, 10.0, 15.0, 19.0] {
-            assert_allocate_matches(&requests, &profiles, avail);
-        }
     }
 
     #[test]

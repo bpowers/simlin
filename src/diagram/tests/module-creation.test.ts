@@ -6,8 +6,7 @@
 
 import { describe, it, expect } from '@rstest/core';
 
-import type { Variable, ModuleViewElement, Module as ModuleVar, Stock, Aux, Flow } from '@simlin/core/datamodel';
-import { canonicalize } from '@simlin/core/canonicalize';
+import type { Variable, Module as ModuleVar, Stock, Aux, Flow } from '@simlin/core/datamodel';
 
 import { anyModuleHasModelReference } from '../module-warning';
 
@@ -126,60 +125,5 @@ describe('anyModuleHasModelReference', () => {
       ['growth_rate', makeAuxVar('growth_rate')],
     ]);
     expect(anyModuleHasModelReference(variables)).toBe(true);
-  });
-});
-
-// -- Module creation data structure tests --
-
-describe('module creation data structures', () => {
-  it('creates a ModuleViewElement with correct type and position', () => {
-    const x = 150;
-    const y = 250;
-    const name = 'New Module';
-    const element: ModuleViewElement = {
-      type: 'module',
-      uid: 999,
-      var: undefined,
-      x,
-      y,
-      name,
-      ident: canonicalize(name),
-      labelSide: 'bottom',
-      isZeroRadius: false,
-    };
-
-    expect(element.type).toBe('module');
-    expect(element.x).toBe(150);
-    expect(element.y).toBe(250);
-    expect(element.ident).toBe('new_module');
-    expect(element.labelSide).toBe('bottom');
-    expect(element.isZeroRadius).toBe(false);
-  });
-
-  it('produces correct upsertModule payload with empty modelName and references', () => {
-    // This mirrors the exact payload constructed in Editor.handleCreateVariable
-    const name = 'My Module';
-    const op = {
-      type: 'upsertModule' as const,
-      payload: {
-        module: {
-          name,
-          modelName: '',
-          references: [],
-        },
-      },
-    };
-
-    expect(op.type).toBe('upsertModule');
-    expect(op.payload.module.modelName).toBe('');
-    expect(op.payload.module.references).toEqual([]);
-    expect(op.payload.module.name).toBe('My Module');
-  });
-
-  it('selectedTool union accepts module as a valid value', () => {
-    // Compile-time check: this assignment would fail if 'module' is not
-    // in the union. The runtime assertion confirms the value.
-    const tool: 'stock' | 'flow' | 'aux' | 'link' | 'module' | undefined = 'module';
-    expect(tool).toBe('module');
   });
 });

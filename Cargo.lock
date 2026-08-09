@@ -3358,6 +3358,7 @@ dependencies = [
  "serde",
  "serde_json",
  "simlin-engine",
+ "simlin-mcp-core",
  "tempfile",
  "tokio",
 ]
@@ -3386,6 +3387,7 @@ dependencies = [
  "serde_yaml",
  "simlin-engine",
  "simlin-mcp-core",
+ "simlin-serve",
  "tempfile",
  "tokio",
  "tokio-tungstenite",

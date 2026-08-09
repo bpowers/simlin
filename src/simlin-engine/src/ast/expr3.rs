@@ -1335,65 +1335,6 @@ impl Default for Pass1Context<'_> {
 }
 
 #[cfg(test)]
-impl Expr3 {
-    pub fn strip_loc(self) -> Self {
-        let loc = Loc::default();
-        match self {
-            Expr3::Const(s, n, _) => Expr3::Const(s, n, loc),
-            Expr3::Var(id, bounds, _) => Expr3::Var(id, bounds, loc),
-            Expr3::App(builtin, bounds, _) => {
-                let builtin = builtin.map(|e| e.strip_loc());
-                Expr3::App(builtin, bounds, loc)
-            }
-            Expr3::Subscript(id, args, bounds, _) => {
-                let args = args.into_iter().map(|a| a.strip_loc()).collect();
-                Expr3::Subscript(id, args, bounds, loc)
-            }
-            Expr3::Op1(op, inner, bounds, _) => {
-                Expr3::Op1(op, Box::new(inner.strip_loc()), bounds, loc)
-            }
-            Expr3::Op2(op, l, r, bounds, _) => Expr3::Op2(
-                op,
-                Box::new(l.strip_loc()),
-                Box::new(r.strip_loc()),
-                bounds,
-                loc,
-            ),
-            Expr3::If(c, t, f, bounds, _) => Expr3::If(
-                Box::new(c.strip_loc()),
-                Box::new(t.strip_loc()),
-                Box::new(f.strip_loc()),
-                bounds,
-                loc,
-            ),
-            Expr3::StaticSubscript(id, view, off, _) => Expr3::StaticSubscript(id, view, off, loc),
-            Expr3::TempArray(id, view, _) => Expr3::TempArray(id, view, loc),
-            Expr3::TempArrayElement(id, view, idx, _) => {
-                Expr3::TempArrayElement(id, view, idx, loc)
-            }
-            Expr3::AssignTemp(id, expr, view) => {
-                Expr3::AssignTemp(id, Box::new(expr.strip_loc()), view)
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-impl IndexExpr3 {
-    pub fn strip_loc(self) -> Self {
-        let loc = Loc::default();
-        match self {
-            IndexExpr3::StarRange(name, _) => IndexExpr3::StarRange(name, loc),
-            IndexExpr3::Range(l, r, _) => IndexExpr3::Range(l.strip_loc(), r.strip_loc(), loc),
-            IndexExpr3::StaticRange(start, end, _) => IndexExpr3::StaticRange(start, end, loc),
-            IndexExpr3::DimPosition(n, _) => IndexExpr3::DimPosition(n, loc),
-            IndexExpr3::Expr(e) => IndexExpr3::Expr(e.strip_loc()),
-            IndexExpr3::Dimension(name, _) => IndexExpr3::Dimension(name, loc),
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::common::Ident;
@@ -1434,11 +1375,6 @@ mod tests {
         assert!(expr.get_array_bounds().is_none());
         assert!(expr.get_array_view().is_some());
         assert_eq!(expr.get_array_view().unwrap().dims, vec![3, 4]);
-
-        if let Expr3::StaticSubscript(id, _, offset, _) = &expr {
-            assert_eq!(id.as_str(), "matrix");
-            assert_eq!(*offset, 100);
-        }
     }
 
     #[test]
@@ -1447,10 +1383,7 @@ mod tests {
         let expr = Expr3::TempArray(7, view.clone(), Loc::new(0, 4));
 
         assert!(expr.get_array_view().is_some());
-        if let Expr3::TempArray(id, v, _) = &expr {
-            assert_eq!(*id, 7);
-            assert_eq!(v.dims, vec![5]);
-        }
+        assert_eq!(expr.get_array_view().unwrap().dims, vec![5]);
     }
 
     #[test]
@@ -1461,33 +1394,6 @@ mod tests {
 
         assert_eq!(expr.get_loc(), Loc::default());
         assert!(expr.get_array_view().is_some());
-    }
-
-    #[test]
-    fn test_expr3_strip_loc() {
-        let expr = Expr3::Op2(
-            BinaryOp::Add,
-            Box::new(Expr3::Const(
-                "1".to_string(),
-                Literal::new(1.0),
-                Loc::new(0, 1),
-            )),
-            Box::new(Expr3::Const(
-                "2".to_string(),
-                Literal::new(2.0),
-                Loc::new(4, 5),
-            )),
-            None,
-            Loc::new(0, 5),
-        );
-
-        let stripped = expr.strip_loc();
-        assert_eq!(stripped.get_loc(), Loc::default());
-
-        if let Expr3::Op2(_, l, r, _, _) = stripped {
-            assert_eq!(l.get_loc(), Loc::default());
-            assert_eq!(r.get_loc(), Loc::default());
-        }
     }
 
     #[test]

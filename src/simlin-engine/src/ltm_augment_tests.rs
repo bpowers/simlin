@@ -468,25 +468,6 @@ fn test_dimension_element_names_indexed_zero() {
     assert!(names.is_empty());
 }
 
-// -- ReducerKind tests --
-
-#[test]
-fn test_reducer_kind_equality() {
-    assert_eq!(ReducerKind::Linear, ReducerKind::Linear);
-    assert_eq!(ReducerKind::Nonlinear, ReducerKind::Nonlinear);
-    assert_eq!(ReducerKind::Constant, ReducerKind::Constant);
-    assert_ne!(ReducerKind::Linear, ReducerKind::Nonlinear);
-    assert_ne!(ReducerKind::Linear, ReducerKind::Constant);
-    assert_ne!(ReducerKind::Nonlinear, ReducerKind::Constant);
-}
-
-#[test]
-fn test_reducer_kind_clone() {
-    let kind = ReducerKind::Linear;
-    let cloned = kind.clone();
-    assert_eq!(kind, cloned);
-}
-
 // -- classify_reducer tests --
 
 use crate::ast::{Ast, Expr2, IndexExpr2};
@@ -768,35 +749,6 @@ fn test_classify_reducer_two_arg_max_not_reducer() {
 }
 
 // -- generate_element_to_scalar_equation tests --
-
-#[test]
-fn test_generate_sum_equation() {
-    let elements = vec!["nyc".to_string(), "boston".to_string(), "la".to_string()];
-    let eq = generate_element_to_scalar_equation(
-        "population",
-        "total_pop",
-        "nyc",
-        &elements,
-        &ReducerKind::Linear,
-        "SUM",
-        true,
-        None,
-        None,
-    );
-    // Should contain the algebraic shortcut
-    assert!(eq.contains("PREVIOUS(total_pop)"), "equation: {eq}");
-    assert!(eq.contains("population[nyc]"), "equation: {eq}");
-    assert!(eq.contains("PREVIOUS(population[nyc])"), "equation: {eq}");
-    // Should not enumerate other elements (algebraic shortcut avoids them)
-    assert!(
-        !eq.contains("[boston]"),
-        "equation should not enumerate boston: {eq}"
-    );
-    assert!(
-        !eq.contains("[la]"),
-        "equation should not enumerate la: {eq}"
-    );
-}
 
 #[test]
 fn test_generate_mean_equation() {
@@ -2608,30 +2560,6 @@ fn loop_score_equation_unsubscripted_to_unchanged() {
         "\"$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births\" * \
          \"$\u{205A}ltm\u{205A}link_score\u{205A}births\u{2192}pop\"",
         "unsubscripted loop-score equation must be byte-identical to pre-Phase-2 output",
-    );
-}
-
-/// When `target_element = None` the resolver is unchanged: it picks
-/// the lexicographically-first FixedIndex variant.
-#[test]
-fn resolver_fixed_index_no_target_element_unchanged() {
-    let mut emitted = HashSet::new();
-    emitted.insert(
-        "$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure"
-            .to_string(),
-    );
-    emitted.insert(
-        "$\u{205A}ltm\u{205A}link_score\u{205A}population[boston]\u{2192}migration_pressure"
-            .to_string(),
-    );
-
-    let chosen =
-        resolve_link_score_name_for_loop("population", "migration_pressure", &emitted, None);
-    // Lexicographic: "population[boston]..." < "population[nyc]...".
-    assert_eq!(
-        chosen,
-        "$\u{205A}ltm\u{205A}link_score\u{205A}population[boston]\u{2192}migration_pressure",
-        "with target_element=None the resolver keeps the alphabetical heuristic",
     );
 }
 

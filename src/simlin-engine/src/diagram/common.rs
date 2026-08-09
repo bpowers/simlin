@@ -166,10 +166,10 @@ pub fn rad_to_deg(r: f64) -> f64 {
 // `rect_area`/`rect_overlap_area` are consumed there (node-overlap,
 // label-overlap, sprawl, and aspect terms), and `segment_clip_interval_in_rect`
 // is the Liang-Barsky core that `node_connector_overlap` unions across boxes.
-// `rect_contains_point` and `segment_length_in_rect` are primitives kept for
-// completeness and as the single-box reference oracle the metric's tests check
-// the union path against, so each stays `#[allow(dead_code)]` until a non-test
-// caller needs it.
+// `segment_length_in_rect` has no production caller: it is the single-box
+// reference oracle the metric's tests check the union path against
+// (`layout::metrics`'s `union_segment_length_in_rects`), so it stays
+// `#[allow(dead_code)]` until a non-test caller needs it.
 
 /// Width of a rect (right - left). May be negative for a degenerate/inverted rect.
 pub(crate) fn rect_width(r: &Rect) -> f64 {
@@ -191,12 +191,6 @@ pub(crate) fn rect_overlap_area(a: &Rect, b: &Rect) -> f64 {
     let w = a.right.min(b.right) - a.left.max(b.left);
     let h = a.bottom.min(b.bottom) - a.top.max(b.top);
     if w > 0.0 && h > 0.0 { w * h } else { 0.0 }
-}
-
-/// True if `p` lies inside (or on the boundary of) `r`.
-#[allow(dead_code)]
-pub(crate) fn rect_contains_point(r: &Rect, p: &Point) -> bool {
-    p.x >= r.left && p.x <= r.right && p.y >= r.top && p.y <= r.bottom
 }
 
 /// Clipped parameter interval `[t0, t1]` of segment `p0 + t*(p1-p0)` (t in
@@ -548,27 +542,6 @@ mod tests {
             bottom: 10.0,
         };
         assert_eq!(rect_overlap_area(&a, &b), 0.0);
-    }
-
-    #[test]
-    fn test_rect_contains_point() {
-        let r = Rect {
-            top: 0.0,
-            left: 0.0,
-            right: 10.0,
-            bottom: 10.0,
-        };
-        // Strictly inside.
-        assert!(rect_contains_point(&r, &Point { x: 5.0, y: 5.0 }));
-        // On the boundary (inclusive).
-        assert!(rect_contains_point(&r, &Point { x: 0.0, y: 0.0 }));
-        assert!(rect_contains_point(&r, &Point { x: 10.0, y: 10.0 }));
-        assert!(rect_contains_point(&r, &Point { x: 0.0, y: 5.0 }));
-        // Outside on each side.
-        assert!(!rect_contains_point(&r, &Point { x: -1.0, y: 5.0 }));
-        assert!(!rect_contains_point(&r, &Point { x: 11.0, y: 5.0 }));
-        assert!(!rect_contains_point(&r, &Point { x: 5.0, y: -1.0 }));
-        assert!(!rect_contains_point(&r, &Point { x: 5.0, y: 11.0 }));
     }
 
     #[test]

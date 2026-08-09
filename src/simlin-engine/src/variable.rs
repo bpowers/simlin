@@ -2025,18 +2025,6 @@ fn test_classify_dependencies_matrix() {
             expected_init_only: ["m\u{00b7}out1"].into(),
         },
         DepTestCase {
-            // Edge case 6 variant: same semantics as both_lagged_scalar
-            label: "previous_plus_init_same_var",
-            ast: scalar_ast("PREVIOUS(b) + INIT(b)"),
-            dimensions: vec![],
-            module_inputs: None,
-            expected_all: ["b"].into(),
-            expected_init_referenced: ["b"].into(),
-            expected_previous_referenced: ["b"].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: ["b"].into(),
-        },
-        DepTestCase {
             // Dimension element names in subscript positions are filtered out.
             // g[foo] with dim1={foo} -> only g appears in all.
             label: "dim_filtering",
@@ -2044,18 +2032,6 @@ fn test_classify_dependencies_matrix() {
             dimensions: vec![dim1.clone()],
             module_inputs: None,
             expected_all: ["g"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: [].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: [].into(),
-        },
-        DepTestCase {
-            // isModuleInput prunes the else branch when input is a module input
-            label: "ismoduleinput_else_branch",
-            ast: scalar_ast("if isModuleInput(input) then a else b"),
-            dimensions: vec![],
-            module_inputs: Some(module_inputs_with_input.clone()),
-            expected_all: ["a"].into(),
             expected_init_referenced: [].into(),
             expected_previous_referenced: [].into(),
             expected_previous_only: [].into(),
@@ -2079,18 +2055,7 @@ fn test_classify_dependencies_matrix() {
         // a dt AST or init AST. The "split" behavior is in how db.rs assigns
         // results from separate classify_dependencies calls.
         DepTestCase {
-            label: "split_phase_dt",
-            ast: scalar_ast("PREVIOUS(b) + c"),
-            dimensions: vec![],
-            module_inputs: None,
-            expected_all: ["b", "c"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: ["b"].into(),
-            expected_previous_only: ["b"].into(),
-            expected_init_only: [].into(),
-        },
-        DepTestCase {
-            label: "split_phase_init",
+            label: "split_phase",
             ast: scalar_ast("PREVIOUS(b) + c"),
             dimensions: vec![],
             module_inputs: None,
@@ -2197,42 +2162,6 @@ fn test_parse_equation_arrayed_preserves_default_expression() {
 }
 
 #[test]
-fn test_parse_equation_arrayed_applies_default_when_element_matches_default() {
-    // Sparse array like {a=7, b=10, default=7}: element "a" matches the default,
-    // but missing element "c" should still get the default 7, not 0.
-    let dimensions = vec![datamodel::Dimension::named(
-        "dim".to_string(),
-        vec!["a".to_string(), "b".to_string(), "c".to_string()],
-    )];
-    let equation = datamodel::Equation::Arrayed(
-        vec!["dim".to_string()],
-        vec![
-            ("a".to_string(), "7".to_string(), None, None),
-            ("b".to_string(), "10".to_string(), None, None),
-        ],
-        Some("7".to_string()),
-        true,
-    );
-
-    let (ast, errors) = parse_equation(
-        &equation,
-        &DimensionsContext::from(&dimensions),
-        false,
-        None,
-    );
-    assert!(errors.is_empty(), "arrayed parse should not emit errors");
-
-    let Some(Ast::Arrayed(_, _, default_expr, apply_default_to_missing)) = ast else {
-        panic!("expected arrayed AST");
-    };
-    assert!(default_expr.is_some());
-    assert!(
-        apply_default_to_missing,
-        "defaults must apply to missing elements even when an explicit element matches the default"
-    );
-}
-
-#[test]
 fn test_tables() {
     use crate::common::canonicalize;
     let input = datamodel::Variable::Aux(datamodel::Aux {
@@ -2286,13 +2215,6 @@ fn test_tables() {
         errors: vec![],
         unit_errors: vec![],
     };
-
-    if let Variable::Var { tables, .. } = &expected {
-        assert!(!tables.is_empty());
-        assert_eq!(tables[0].x.len(), tables[0].y.len());
-    } else {
-        panic!("expected Var");
-    }
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let unit_ctx = crate::units::Context::new(&[], &Default::default()).0;

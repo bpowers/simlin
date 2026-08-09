@@ -2010,9 +2010,17 @@ mod schema_tests {
     use std::fs;
     use std::path::Path;
 
+    /// `docs/simlin-project.schema.json` must equal what `generate_schema_json`
+    /// produces today -- a DRIFT GUARD, not a generator.
+    ///
+    /// This used to `fs::write` the file on every `cargo test` run and then
+    /// assert only `parsed.is_object()`, so a schema change silently rewrote a
+    /// checked-in doc mid-test-run and nothing ever compared the two. Writing
+    /// is now opt-in through `UPDATE_SCHEMA=1`, mirroring the crate's
+    /// `UPDATE_FRAGMENT_GOLDEN` / `UPDATE_LTM_GOLDEN` convention.
     #[test]
-    fn generate_and_write_schema() {
-        let schema_json = generate_schema_json();
+    fn schema_matches_the_checked_in_file() {
+        let generated = generate_schema_json();
         let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -2020,12 +2028,23 @@ mod schema_tests {
             .unwrap()
             .join("docs/simlin-project.schema.json");
 
-        fs::write(&schema_path, &schema_json).expect("failed to write schema file");
+        if std::env::var_os("UPDATE_SCHEMA").is_some() {
+            fs::write(&schema_path, &generated).expect("failed to write schema file");
+            return;
+        }
 
-        // Verify it's valid JSON and can be used as a schema
-        let parsed: serde_json::Value = serde_json::from_str(&schema_json).unwrap();
-        assert!(parsed.is_object());
-        assert!(parsed.get("$schema").is_some());
+        let checked_in = fs::read_to_string(&schema_path).unwrap_or_else(|e| {
+            panic!(
+                "cannot read {}: {e}; regenerate with \
+                 `UPDATE_SCHEMA=1 cargo test -p simlin-engine schema_matches_the_checked_in_file`",
+                schema_path.display()
+            )
+        });
+        assert_eq!(
+            generated, checked_in,
+            "docs/simlin-project.schema.json is stale; regenerate with \
+             `UPDATE_SCHEMA=1 cargo test -p simlin-engine schema_matches_the_checked_in_file`"
+        );
     }
 
     #[test]

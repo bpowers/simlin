@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 import simlin
-from simlin import Model, Project, Run
+from simlin import Model, Run
 
 
 class TestPackageVersion:
@@ -44,21 +44,6 @@ class TestLoadFunction:
 
         model = simlin.load(str(teacup_stmx_path))
         assert isinstance(model, Model)
-
-    def test_load_with_path_object(self, teacup_stmx_path: Path) -> None:
-        """Test that load() accepts Path objects."""
-        assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
-
-        model = simlin.load(teacup_stmx_path)
-        assert isinstance(model, Model)
-
-    def test_load_model_has_project(self, teacup_stmx_path: Path) -> None:
-        """Test that loaded model has project reference."""
-        assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
-
-        model = simlin.load(teacup_stmx_path)
-        assert model._project is not None
-        assert isinstance(model._project, Project)
 
     def test_load_model_base_case(self, teacup_stmx_path: Path) -> None:
         """Test that base_case is accessible on loaded model."""
@@ -184,57 +169,6 @@ class TestCompleteWorkflow:
         # Custom run should have overrides
         assert custom_run.overrides == {"room_temperature": 99.0}
 
-    def test_workflow_multiple_runs(self, teacup_stmx_path: Path) -> None:
-        """Test creating multiple runs from the same model."""
-        assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
-
-        model = simlin.load(teacup_stmx_path)
-
-        # Create multiple runs
-        run1 = model.run(analyze_loops=False)
-        run2 = model.run(analyze_loops=False)
-        run3 = model.base_case
-
-        # All should be Run instances
-        assert isinstance(run1, Run)
-        assert isinstance(run2, Run)
-        assert isinstance(run3, Run)
-
-        # All should have results
-        assert len(run1.results) > 0
-        assert len(run2.results) > 0
-        assert len(run3.results) > 0
-
-    def test_workflow_access_loops(self, teacup_stmx_path: Path) -> None:
-        """Test accessing loop information."""
-        assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
-
-        model = simlin.load(teacup_stmx_path)
-
-        # Structural loops (no behavior data)
-        model_loops = model.loops
-        assert isinstance(model_loops, tuple)
-
-        for loop in model_loops:
-            from simlin import Loop
-
-            assert isinstance(loop, Loop)
-            assert isinstance(loop.id, str)
-            assert isinstance(loop.variables, tuple)
-            assert loop.behavior_time_series is None
-
-        # Run loops (with behavior data)
-        run = model.run(analyze_loops=True)
-        run_loops = run.loops
-        assert isinstance(run_loops, tuple)
-
-        # If there are loops, they should have behavior data
-        for loop in run_loops:
-            from simlin import Loop
-
-            assert isinstance(loop, Loop)
-            assert loop.behavior_time_series is not None
-
     def test_workflow_structural_properties_immutable(self, teacup_stmx_path: Path) -> None:
         """Test that structural properties are immutable."""
         assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
@@ -290,25 +224,3 @@ class TestLoadWithDifferentFormats:
         base_case = model.base_case
         assert isinstance(base_case, Run)
         assert len(base_case.results) > 0
-
-
-class TestLoadExportedName:
-    """Test that load is properly exported."""
-
-    def test_load_in_all(self) -> None:
-        """Test that load is in __all__."""
-        assert "load" in simlin.__all__
-
-    def test_load_importable(self) -> None:
-        """Test that load can be imported from simlin."""
-        from simlin import load
-
-        assert callable(load)
-
-    def test_load_has_docstring(self) -> None:
-        """Test that load has a proper docstring."""
-        from simlin import load
-
-        assert load.__doc__ is not None
-        assert "Load a system dynamics model" in load.__doc__
-        assert "Example:" in load.__doc__

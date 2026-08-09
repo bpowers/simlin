@@ -119,10 +119,4 @@ describe('pointerStateReset', () => {
     expect(reset.inCreation).toBeUndefined();
     expect(reset.inCreationCloud).toBeUndefined();
   });
-
-  it('returns consistent values across calls', () => {
-    const a = pointerStateReset();
-    const b = pointerStateReset();
-    expect(a).toEqual(b);
-  });
 });

@@ -613,10 +613,7 @@ fn hero_culture_loop_sign_continuity() {
 // The layout resolution bug that caused "variable 'smth1' not found in layout
 // during resolution" is fixed: LTM fragments whose SymVarRef names don't
 // appear in the model's layout are now silently dropped during assembly
-// (graceful degradation).  Most tests below are un-ignored; one remains
-// #[ignore] because its failure has a different root cause:
-//   - test_smooth_model_discovery_mode: discovery mode doesn't yet propagate
-//     loop scores through SMOOTH composite paths
+// (graceful degradation).  Every test below runs -- none is `#[ignore]`d.
 
 use simlin_engine::test_common::TestProject;
 

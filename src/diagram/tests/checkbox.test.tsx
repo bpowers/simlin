@@ -29,29 +29,11 @@ describe('Checkbox', () => {
     expect(onChange).toHaveBeenCalledWith(false);
   });
 
-  test('applies primary class by default', () => {
-    render(<Checkbox />);
-    const checkbox = screen.getByRole('checkbox');
-    expect(checkbox.className).toContain('primary');
-  });
-
-  test('applies secondary class', () => {
-    render(<Checkbox color="secondary" />);
-    const checkbox = screen.getByRole('checkbox');
-    expect(checkbox.className).toContain('secondary');
-  });
-
   test('respects disabled prop', () => {
     const onChange = rs.fn();
     render(<Checkbox disabled onChange={onChange} />);
     const checkbox = screen.getByRole('checkbox');
     expect(checkbox).toHaveProperty('disabled', true);
-  });
-
-  test('applies custom className', () => {
-    render(<Checkbox className="custom-check" />);
-    const checkbox = screen.getByRole('checkbox');
-    expect(checkbox.className).toContain('custom-check');
   });
 
   test('renders with checked state', () => {

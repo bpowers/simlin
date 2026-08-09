@@ -3125,9 +3125,8 @@ fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut Has
 ///
 /// Every field here is one codegen reads; see [`ModuleCtx`], which is exactly
 /// the set of things `Compiler` looks at and which [`Module::compile`] hands
-/// it by reference. `runlist_initials` is the exception -- codegen compiles
-/// initials per variable out of `runlist_initials_by_var`, and the flat list
-/// exists only for the `get_initial_exprs` accessor.
+/// it by reference. Initials are compiled per variable out of
+/// `runlist_initials_by_var`.
 #[cfg(test)]
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 pub struct Module {
@@ -3135,7 +3134,6 @@ pub struct Module {
     pub(crate) inputs: BTreeSet<Ident<Canonical>>,
     pub(crate) temp_sizes: Vec<usize>,
     #[allow(dead_code)]
-    pub(crate) runlist_initials: Vec<Expr>,
     pub(crate) runlist_initials_by_var: Vec<Var>,
     pub(crate) runlist_flows: Vec<Expr>,
     pub(crate) runlist_stocks: Vec<Expr>,
@@ -3521,7 +3519,6 @@ impl Module {
             ident: model_name.clone(),
             inputs: inputs.clone(),
             temp_sizes,
-            runlist_initials,
             runlist_initials_by_var,
             runlist_flows,
             runlist_stocks,
@@ -3541,16 +3538,6 @@ impl Module {
     pub fn get_flow_exprs(&self, var_name: &str) -> Vec<&Expr> {
         let canonical_name = Ident::new(var_name);
         self.runlist_flows
-            .iter()
-            .filter(|expr| matches!(expr, Expr::AssignCurr(dst, _) if dst.name == canonical_name))
-            .collect()
-    }
-
-    /// Get initial expressions for a variable (may be multiple for A2A arrays).
-    /// Returns all AssignCurr expressions in the initials runlist for this variable.
-    pub fn get_initial_exprs(&self, var_name: &str) -> Vec<&Expr> {
-        let canonical_name = Ident::new(var_name);
-        self.runlist_initials
             .iter()
             .filter(|expr| matches!(expr, Expr::AssignCurr(dst, _) if dst.name == canonical_name))
             .collect()

@@ -283,13 +283,12 @@ const EXPECTED_SUPPORTED_LTM_MODELS: &[&str] = &[
 ];
 
 /// Monotonically rising floor on the count of LTM corpus models that lower
-/// to wasm. Equal to `EXPECTED_SUPPORTED_LTM_MODELS.len()` -- the floor and
-/// the per-model `Ok` assertion below now move together, so a regression
-/// that drops any expected-supported model fails the suite (both falls
-/// below the floor and breaks the per-model `Ok` assertion). The value is
-/// only raised, never lowered; if a corpus model unexpectedly stops
-/// lowering, investigate the root cause rather than relax this constant.
-const MIN_LTM_MODELS_LOWERED: usize = EXPECTED_SUPPORTED_LTM_MODELS.len();
+/// to wasm. It is a LITERAL on purpose: deriving it from
+/// `EXPECTED_SUPPORTED_LTM_MODELS.len()` made it inert, because deleting an
+/// entry from the list shrank the floor with it and the gate passed on the
+/// smaller corpus. Raise it when the list grows; never lower it -- if a
+/// corpus model stops lowering, fix the root cause.
+const MIN_LTM_MODELS_LOWERED: usize = 5;
 
 /// End-state floor gate (wasm-ltm.AC4.2): every model in
 /// [`EXPECTED_SUPPORTED_LTM_MODELS`] MUST lower to wasm with LTM enabled.
@@ -298,14 +297,11 @@ const MIN_LTM_MODELS_LOWERED: usize = EXPECTED_SUPPORTED_LTM_MODELS.len();
 /// the suite -- no "rollout skip" leniency; the list now names exactly the
 /// models the wasm backend is expected to handle.
 ///
-/// The `lowered >= MIN_LTM_MODELS_LOWERED` floor check is currently
-/// structurally redundant: because `MIN_LTM_MODELS_LOWERED` is derived
-/// directly from `EXPECTED_SUPPORTED_LTM_MODELS.len()`, removing an entry
-/// from the list also shrinks the const, so the floor would still pass even
-/// after the deletion.  The check is kept as defense-in-depth for the
-/// scenario where the const is later decoupled from the list (e.g. pinned
-/// as a hard numeric literal in a future refactor), at which point it
-/// becomes a real regression net again.
+/// The two assertions cover different regressions and neither subsumes the
+/// other: `failures.is_empty()` catches a model that stops lowering, while
+/// the `MIN_LTM_MODELS_LOWERED` floor catches the corpus being SHRUNK -- a
+/// deletion from `EXPECTED_SUPPORTED_LTM_MODELS`, which the per-model gate
+/// cannot see because it only ranges over what is left.
 ///
 /// Heavy models (`#[ignore]`) are reserved for the discovery / large-model
 /// phases (e.g. C-LEARN, World3); the listed corpus runs well under the

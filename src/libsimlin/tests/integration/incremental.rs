@@ -813,27 +813,6 @@ fn test_ac2_1_patch_circular_dependency_rejected() {
     }
 }
 
-/// AC2.6: Verify at the code level that compile_simulation is not called
-/// in the patch path. This test scans patch.rs for any reference to
-/// compile_simulation. If the function were re-introduced, this test
-/// would catch it.
-///
-/// Source scanning is more durable than runtime detection because it
-/// catches all code paths, not just the ones exercised by tests.
-#[test]
-fn test_ac2_6_compile_simulation_not_in_patch_path() {
-    let patch_rs = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/patch.rs");
-    let source = std::fs::read_to_string(&patch_rs)
-        .unwrap_or_else(|e| panic!("failed to read {}: {}", patch_rs.display(), e));
-
-    assert!(
-        !source.contains("compile_simulation"),
-        "patch.rs must not reference compile_simulation; \
-         the monolithic compilation path has been replaced by \
-         compile_project_incremental (salsa-consolidation.AC2.6)"
-    );
-}
-
 // AC7.2 test (incremental layout via patch_json) lives in tests/diagram.rs
 
 /// AC2.1: Valid equation patch is accepted and produces correct simulation

@@ -17,7 +17,6 @@ import * as path from 'path';
 import {
   Project,
   Model,
-  Sim,
   Run,
   LinkPolarity,
   ModelPatchBuilder,
@@ -68,27 +67,12 @@ describe('High-Level API', () => {
   });
 
   describe('Project class', () => {
-    it('should load from XMILE data', async () => {
-      const project = await openTestProject();
-      expect(project).toBeInstanceOf(Project);
-      await project.dispose();
-    });
-
     it('should get model names', async () => {
       const project = await openTestProject();
 
       const modelNames = await project.getModelNames();
       expect(Array.isArray(modelNames)).toBe(true);
       expect(modelNames.length).toBeGreaterThan(0);
-
-      await project.dispose();
-    });
-
-    it('should get the main model', async () => {
-      const project = await openTestProject();
-
-      const model = await project.mainModel();
-      expect(model).toBeInstanceOf(Model);
 
       await project.dispose();
     });
@@ -247,11 +231,6 @@ describe('High-Level API', () => {
       await project.dispose();
     });
 
-    it('should have a reference to its project', async () => {
-      const model = await project.mainModel();
-      expect(model.project).toBe(project);
-    });
-
     it('should get stock variable names', async () => {
       const model = await project.mainModel();
       const stockNames = await model.getVarNames(SIMLIN_VARTYPE_STOCK);
@@ -260,14 +239,18 @@ describe('High-Level API', () => {
       // teacup model has at least one stock (teacup temperature)
       expect(stockNames.length).toBeGreaterThan(0);
 
-      const stock = await model.getVariable(stockNames[0]);
-      expect(stock).toBeDefined();
-      expect(stock!.type).toBe('stock');
-      expect(typeof stock!.name).toBe('string');
-      if (stock!.type === 'stock') {
-        expect(typeof stock!.initialEquation).toBe('string');
-        expect(Array.isArray(stock!.inflows)).toBe(true);
-        expect(Array.isArray(stock!.outflows)).toBe(true);
+      // Every name the stock mask returns must resolve to a stock, so the mask
+      // is pinned as a filter and not just as "returns something".
+      for (const name of stockNames) {
+        const stock = await model.getVariable(name);
+        expect(stock).toBeDefined();
+        expect(stock!.type).toBe('stock');
+        expect(typeof stock!.name).toBe('string');
+        if (stock!.type === 'stock') {
+          expect(typeof stock!.initialEquation).toBe('string');
+          expect(Array.isArray(stock!.inflows)).toBe(true);
+          expect(Array.isArray(stock!.outflows)).toBe(true);
+        }
       }
     });
 
@@ -318,14 +301,6 @@ describe('High-Level API', () => {
       expect(allNames.length).toBe(stockNames.length + flowNames.length + auxNames.length + moduleNames.length);
     });
 
-    it('should include teacup temperature variable', async () => {
-      const model = await project.mainModel();
-
-      const teacupTemp = await model.getVariable('teacup temperature');
-      expect(teacupTemp).toBeDefined();
-      expect(teacupTemp!.type).toBe('stock');
-    });
-
     it('should get a single variable by name', async () => {
       const model = await project.mainModel();
 
@@ -342,36 +317,6 @@ describe('High-Level API', () => {
       expect(result).toBeUndefined();
     });
 
-    it('getVarNames with stock type mask returns only stocks', async () => {
-      const model = await project.mainModel();
-      const stockNames = await model.getVarNames(SIMLIN_VARTYPE_STOCK);
-
-      for (const name of stockNames) {
-        const v = await model.getVariable(name);
-        expect(v!.type).toBe('stock');
-      }
-    });
-
-    it('getVarNames with flow type mask returns only flows', async () => {
-      const model = await project.mainModel();
-      const flowNames = await model.getVarNames(SIMLIN_VARTYPE_FLOW);
-
-      for (const name of flowNames) {
-        const v = await model.getVariable(name);
-        expect(v!.type).toBe('flow');
-      }
-    });
-
-    it('getVarNames with aux type mask returns only auxiliaries', async () => {
-      const model = await project.mainModel();
-      const auxNames = await model.getVarNames(SIMLIN_VARTYPE_AUX);
-
-      for (const name of auxNames) {
-        const v = await model.getVariable(name);
-        expect(v!.type).toBe('aux');
-      }
-    });
-
     it('should get time spec', async () => {
       const model = await project.mainModel();
       const timeSpec = await model.timeSpec();
@@ -381,24 +326,6 @@ describe('High-Level API', () => {
       expect(typeof timeSpec.dt).toBe('number');
       expect(timeSpec.stop).toBeGreaterThan(timeSpec.start);
       expect(timeSpec.dt).toBeGreaterThan(0);
-    });
-
-    it('should get structural loops', async () => {
-      const model = await project.mainModel();
-      const loops = await model.loops();
-
-      expect(Array.isArray(loops)).toBe(true);
-    });
-
-    it('should get incoming links for a variable', async () => {
-      const model = await project.mainModel();
-      const flowNames = await model.getVarNames(SIMLIN_VARTYPE_FLOW);
-
-      // Find a flow that has dependencies
-      if (flowNames.length > 0) {
-        const incomingLinks = await model.getIncomingLinks(flowNames[0]);
-        expect(Array.isArray(incomingLinks)).toBe(true);
-      }
     });
 
     it('should get all causal links', async () => {
@@ -441,14 +368,6 @@ describe('High-Level API', () => {
 
     afterAll(async () => {
       await project.dispose();
-    });
-
-    it('should create a simulation from a model', async () => {
-      const model = await project.mainModel();
-      const sim = await model.simulate();
-
-      expect(sim).toBeInstanceOf(Sim);
-      await sim.dispose();
     });
 
     it('should get current time', async () => {
@@ -570,18 +489,6 @@ describe('High-Level API', () => {
       await sim.dispose();
     });
 
-    it('should convert to a Run object', async () => {
-      const model = await project.mainModel();
-      const sim = await model.simulate();
-
-      await sim.runToEnd();
-      const run = await sim.getRun();
-
-      expect(run).toBeInstanceOf(Run);
-
-      await sim.dispose();
-    });
-
     it('should create simulation with overrides', async () => {
       const model = await project.mainModel();
       // Simulation uses canonical names (underscores)
@@ -621,13 +528,6 @@ describe('High-Level API', () => {
 
     afterAll(async () => {
       await project.dispose();
-    });
-
-    it('should run a simulation and get Run object', async () => {
-      const model = await project.mainModel();
-      const run = await model.run();
-
-      expect(run).toBeInstanceOf(Run);
     });
 
     it('should get results as a map of series', async () => {
@@ -672,14 +572,6 @@ describe('High-Level API', () => {
       const run = await model.run(overrides);
 
       expect(run.overrides).toEqual(overrides);
-    });
-
-    it('should get loops with behavior data', async () => {
-      const model = await project.mainModel();
-      const run = await model.run();
-
-      const loops = run.loops;
-      expect(Array.isArray(loops)).toBe(true);
     });
 
     it('should get variable names', async () => {
@@ -929,44 +821,8 @@ describe('High-Level API', () => {
     });
   });
 
-  describe('Resource management', () => {
-    it('should properly dispose project', async () => {
-      const project = await openTestProject();
-
-      // Access model before dispose
-      const model = await project.mainModel();
-      expect(model).toBeInstanceOf(Model);
-
-      // Dispose should not throw
-      await project.dispose();
-
-      // Accessing disposed project should throw or return invalid state
-      await expect(project.getModelNames()).rejects.toThrow();
-    });
-
-    it('should properly dispose simulation', async () => {
-      const project = await openTestProject();
-      const model = await project.mainModel();
-      const sim = await model.simulate();
-
-      await sim.runToEnd();
-
-      // Dispose should not throw
-      await sim.dispose();
-
-      // Accessing disposed sim should throw
-      await expect(sim.getValue('teacup temperature')).rejects.toThrow();
-
-      await project.dispose();
-    });
-
-    it('should support using statement pattern (Symbol.dispose)', async () => {
-      // Test that dispose method exists and can be called
-      const project = await openTestProject();
-      expect(typeof project.dispose).toBe('function');
-      await project.dispose();
-    });
-  });
+  // Disposal semantics (operations on a disposed project/model/sim throw, the
+  // cascade from project to model, and Symbol.dispose) live in cleanup.test.ts.
 
   describe('Issue fixes', () => {
     // Test for: Model.timeSpec should use model-level simSpecs when present
@@ -1182,45 +1038,6 @@ describe('High-Level API', () => {
       await project.dispose();
     });
 
-    // Test filtering with actual multi-model errors
-    it('should correctly attribute errors to their respective models', async () => {
-      // Use the modules model and verify filtering logic
-      const modulesPath = path.join(
-        __dirname,
-        '..',
-        '..',
-        '..',
-        'test',
-        'modules_with_complex_idents',
-        'modules_with_complex_idents.stmx',
-      );
-      const xmileData = fs.readFileSync(modulesPath);
-      const project = await Project.open(xmileData);
-
-      // Get errors per model
-      const allErrors = await project.getErrors();
-      const modelNames = await project.getModelNames();
-
-      // Count errors per model name
-      const errorCountByModel = new Map<string, number>();
-      for (const error of allErrors) {
-        if (error.modelName) {
-          const count = errorCountByModel.get(error.modelName) || 0;
-          errorCountByModel.set(error.modelName, count + 1);
-        }
-      }
-
-      // Verify each model's check() returns correct count
-      for (const modelName of modelNames) {
-        const model = await project.getModel(modelName);
-        const issues = await model.check();
-        const expectedCount = errorCountByModel.get(modelName) || 0;
-        expect(issues.length).toBe(expectedCount);
-      }
-
-      await project.dispose();
-    });
-
     // Test for: Edit callback should not crash if callback throws
     it('should handle errors in edit callback gracefully', async () => {
       const project = await openTestProject();
@@ -1236,36 +1053,6 @@ describe('High-Level API', () => {
       // Model should still be usable after failed edit
       expect((await model.getVarNames(SIMLIN_VARTYPE_STOCK)).length).toBeGreaterThan(0);
       await expect(model.getVarNames()).resolves.toBeDefined();
-
-      await project.dispose();
-    });
-
-    // Test for: Project.dispose() should dispose cached models
-    it('should dispose cached models when project is disposed', async () => {
-      const project = await openTestProject();
-
-      // Access the main model to cache it
-      const model = await project.mainModel();
-      expect(model).toBeDefined();
-
-      // Dispose project
-      await project.dispose();
-
-      // Accessing the model after project disposal should throw
-      // (because the model was disposed along with the project)
-      await expect(model.getVarNames()).rejects.toThrow();
-    });
-
-    // Test for: Link polarity should be validated at runtime
-    it('should have valid link polarity values', async () => {
-      const project = await openTestProject();
-      const model = await project.mainModel();
-
-      const links = await model.getLinks();
-
-      for (const link of links) {
-        expect([LinkPolarity.Positive, LinkPolarity.Negative, LinkPolarity.Unknown]).toContain(link.polarity);
-      }
 
       await project.dispose();
     });

@@ -126,19 +126,6 @@ describe('Home.getProjects lifecycle', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('fetches after mount', async () => {
-    rs.useFakeTimers();
-    const fetchMock = mockFetch(okProjects);
-    render(<Home user={user} isNewProject={false} onLogout={() => {}} />);
-
-    expect(fetchMock).not.toHaveBeenCalled();
-    await act(async () => {
-      rs.runAllTimers();
-    });
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
   it('cancels the deferred fetch when unmounted before it fires', () => {
     rs.useFakeTimers();
     const fetchMock = mockFetch(okProjects);

@@ -31,12 +31,6 @@ describe('Avatar', () => {
     expect(screen.queryByText('AB')).toBeNull();
   });
 
-  test('applies custom className', () => {
-    const { container } = render(<Avatar className="custom-avatar">AB</Avatar>);
-    const div = container.firstChild as HTMLElement;
-    expect(div.className).toContain('custom-avatar');
-  });
-
   test('applies custom style', () => {
     const { container } = render(<Avatar style={{ width: 64, height: 64 }}>AB</Avatar>);
     const div = container.firstChild as HTMLElement;

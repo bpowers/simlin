@@ -121,7 +121,7 @@ fn fixture(name: &str) -> TestProject {
 fn out_of(name: &str, eqn: &str) -> Vec<f64> {
     let project = fixture(name).array_aux("out[d]", eqn);
     project.assert_compiles_incremental();
-    project.vm_result_incremental("out")
+    project.vm_result("out")
 }
 
 /// Compile `out[e] = <eqn>` against the shared fixture and return `out`. Used
@@ -129,7 +129,7 @@ fn out_of(name: &str, eqn: &str) -> Vec<f64> {
 fn row_out_of(name: &str, eqn: &str) -> Vec<f64> {
     let project = fixture(name).array_aux("out[e]", eqn);
     project.assert_compiles_incremental();
-    project.vm_result_incremental("out")
+    project.vm_result("out")
 }
 
 fn assert_close(actual: &[f64], expected: &[f64], what: &str) {
@@ -480,17 +480,17 @@ fn allocate_positions() {
     for (i, row) in rows.iter().enumerate() {
         let computed = allocate_fixture(&format!("alloc_c{i}")).array_aux("out[d]", row.computed);
         computed.assert_compiles_incremental();
-        let computed = computed.vm_result_incremental("out");
+        let computed = computed.vm_result("out");
 
         let reference = allocate_fixture(&format!("alloc_r{i}"))
             .array_aux(row.helper.0, row.helper.1)
             .array_aux("out[d]", row.reference);
         reference.assert_compiles_incremental();
-        let reference = reference.vm_result_incremental("out");
+        let reference = reference.vm_result("out");
 
         let raw = allocate_fixture(&format!("alloc_w{i}")).array_aux("out[d]", row.raw);
         raw.assert_compiles_incremental();
-        let raw = raw.vm_result_incremental("out");
+        let raw = raw.vm_result("out");
 
         assert_close(
             &computed,
@@ -643,7 +643,7 @@ fn a_snapshot_priority_profile_declines_rather_than_allocating_over_one_column()
 
     let series = |project: TestProject| -> Vec<Vec<f64>> {
         project.assert_compiles_incremental();
-        let all = project.run_vm_incremental();
+        let all = project.run_vm_expecting_success();
         (1..=3)
             .map(|k| all.get(&format!("out[{k}]")).unwrap().clone())
             .collect()
@@ -806,7 +806,7 @@ fn materializing_an_elm_map_source_confines_the_mapping_to_the_temp() {
     // the contrast, and as a tripwire if that rule ever moves.
     let slice = far().array_aux("out[d]", "VECTOR ELM MAP(matrix[1,*], far[d])");
     slice.assert_compiles_incremental();
-    let slice = slice.vm_result_incremental("out");
+    let slice = slice.vm_result("out");
     assert_eq!(slice.len(), 3);
     assert!(
         (slice[0] - 10.0).abs() < 1e-9 && (slice[1] - 30.0).abs() < 1e-9 && slice[2].is_nan(),
@@ -817,7 +817,7 @@ fn materializing_an_elm_map_source_confines_the_mapping_to_the_temp() {
     // range.
     let computed = far().array_aux("out[d]", "VECTOR ELM MAP(matrix[1,*] * 1, far[d])");
     computed.assert_compiles_incremental();
-    let computed = computed.vm_result_incremental("out");
+    let computed = computed.vm_result("out");
     assert!(
         computed.len() == 3 && computed.iter().all(|v| v.is_nan()),
         "a materialized source confines the mapping to the computed array, got {computed:?}"
@@ -993,7 +993,7 @@ fn moving_fixture(name: &str) -> TestProject {
 fn moving_series(name: &str, lhs: &str, eqn: &str, n_elements: usize) -> Vec<Vec<f64>> {
     let project = moving_fixture(name).array_aux(lhs, eqn);
     project.assert_compiles_incremental();
-    let all = project.run_vm_incremental();
+    let all = project.run_vm_expecting_success();
     (1..=n_elements)
         .map(|k| {
             all.get(&format!("out[{k}]"))
@@ -1254,7 +1254,7 @@ fn a_prev_view_of_a_row_slice_reads_that_row_of_the_snapshot() {
     ] {
         let project = moving_fixture(name).array_aux("out[row]", eqn);
         project.assert_compiles_incremental();
-        let all = project.run_vm_incremental();
+        let all = project.run_vm_expecting_success();
         for (elem, want) in ["r1", "r2"].into_iter().zip(expected.iter()) {
             assert_close(
                 all.get(&format!("out[{elem}]"))
@@ -1307,7 +1307,7 @@ fn init_operands_are_views_over_the_initial_snapshot() {
         None,
     );
     init_phase.assert_compiles_incremental();
-    let all = init_phase.run_vm_incremental();
+    let all = init_phase.run_vm_expecting_success();
     assert_close(all.get("lvl[1]").unwrap(), &[6.0, 6.0, 6.0], "lvl[1]");
     assert_close(all.get("lvl[2]").unwrap(), &[60.0, 60.0, 60.0], "lvl[2]");
 }
@@ -1539,7 +1539,7 @@ fn allocate_previous_operands_agree_with_the_per_element_capture() {
 
     let series = |project: TestProject| -> Vec<Vec<f64>> {
         project.assert_compiles_incremental();
-        let all = project.run_vm_incremental();
+        let all = project.run_vm_expecting_success();
         (1..=3)
             .map(|k| all.get(&format!("out[{k}]")).unwrap().clone())
             .collect()
@@ -1638,7 +1638,7 @@ fn an_array_snapshot_view_agrees_with_the_per_element_capture() {
             .array_aux(row.helper.0, row.helper.1)
             .array_aux(row.lhs, row.reference);
         reference_project.assert_compiles_incremental();
-        let all = reference_project.run_vm_incremental();
+        let all = reference_project.run_vm_expecting_success();
         let reference: Vec<Vec<f64>> = (1..=row.n)
             .map(|k| all.get(&format!("out[{k}]")).unwrap().clone())
             .collect();
@@ -1787,7 +1787,7 @@ fn a_non_default_array_previous_fallback_declines_loudly() {
         .array_aux("cap[d]", "PREVIOUS(vals[d], 5)")
         .array_aux("out[d]", "VECTOR SORT ORDER(cap[d], 1)");
     workaround.assert_compiles_incremental();
-    let all = workaround.run_vm_incremental();
+    let all = workaround.run_vm_expecting_success();
     assert_close(all.get("out[1]").unwrap(), &[0.0, 1.0, 0.0], "out[1]");
     assert_close(all.get("out[2]").unwrap(), &[1.0, 2.0, 1.0], "out[2]");
     assert_close(all.get("out[3]").unwrap(), &[2.0, 0.0, 2.0], "out[3]");
@@ -1907,7 +1907,7 @@ fn the_gh_1001_user_shape_compiles_and_reads_the_previous_row() {
             "VECTOR SELECT(sel2[e,*], PREVIOUS(matrix[e,*]), 0, 0, 0)",
         );
     project.assert_compiles_incremental();
-    let all = project.run_vm_incremental();
+    let all = project.run_vm_expecting_success();
     assert_close(all.get("picked[1]").unwrap(), &[0.0, 4.0, 5.0], "picked[1]");
     assert_close(
         all.get("picked[2]").unwrap(),
@@ -1931,7 +1931,7 @@ fn a_scalar_previous_beside_an_array_operand_still_materializes() {
         .array_aux("out[d]", "VECTOR SORT ORDER(vals[d] + PREVIOUS(s), 1)");
     project.assert_compiles_incremental();
     assert_close(
-        &project.vm_result_incremental("out"),
+        &project.vm_result("out"),
         &[1.0, 2.0, 0.0],
         "a scalar PREVIOUS beside an array operand",
     );
@@ -1941,7 +1941,7 @@ fn a_scalar_previous_beside_an_array_operand_still_materializes() {
         .array_aux("out[d]", "VECTOR SORT ORDER(vals[d] + INIT(s), 1)");
     init.assert_compiles_incremental();
     assert_close(
-        &init.vm_result_incremental("out"),
+        &init.vm_result("out"),
         &[1.0, 2.0, 0.0],
         "a scalar INIT beside an array operand",
     );
@@ -1969,7 +1969,7 @@ fn a_scalar_previous_beside_an_array_operand_still_materializes() {
     );
     fixed_element.assert_compiles_incremental();
     assert_close(
-        &fixed_element.vm_result_incremental("out"),
+        &fixed_element.vm_result("out"),
         &[12.0, 93.0],
         "a PREVIOUS of a fixed element broadcasts correctly and must not decline",
     );
@@ -1989,7 +1989,7 @@ fn a_scalar_previous_beside_an_array_operand_still_materializes() {
             .aux("s", "10 + 5 * TIME", None)
             .array_aux("out[d]", eqn);
         project.assert_compiles_incremental();
-        let all = project.run_vm_incremental();
+        let all = project.run_vm_expecting_success();
         assert_close(all.get("out[1]").unwrap(), &expected, eqn);
     }
 }
@@ -2057,7 +2057,7 @@ fn the_hoisted_assignment_is_emitted_before_its_reader() {
         .with_sim_time(0.0, 2.0, 1.0)
         .array_aux("out[d]", "VECTOR SORT ORDER(vals[d] + bump[d] * TIME, 1)");
     project.assert_compiles_incremental();
-    let all = project.run_vm_incremental();
+    let all = project.run_vm_expecting_success();
     let series = |elem: usize| -> Vec<f64> {
         all.get(&format!("out[{elem}]"))
             .unwrap_or_else(|| panic!("out[{elem}] missing from {:?}", all.keys()))
@@ -2136,7 +2136,7 @@ fn a_per_element_hoist_past_the_temp_namespace_without_a_temp_view_is_correct() 
         .map(|k| if k % 2 == 1 { N - 1 - k } else { k } as f64)
         .collect();
     assert_close(
-        &project.vm_result_incremental("out"),
+        &project.vm_result("out"),
         &expected,
         "300-element per-element hoist, no temp read as a view",
     );
@@ -2275,7 +2275,7 @@ fn every_row_of_the_issue_995_table_compiles() {
     let compare = |what: &str, capture: (&str, &str), inline: &str, reference: &str| {
         let run = |name: &str, project: TestProject| -> Vec<Vec<f64>> {
             project.assert_compiles_incremental();
-            let all = project.run_vm_incremental();
+            let all = project.run_vm_expecting_success();
             ["e1", "e2", "e3"]
                 .into_iter()
                 .map(|k| {
@@ -2381,7 +2381,7 @@ fn wide_fixture(name: &str) -> TestProject {
 fn wide_out_of(name: &str, eqn: &str) -> Vec<f64> {
     let project = wide_fixture(name).array_aux("out[e,d]", eqn);
     project.assert_compiles_incremental();
-    project.vm_result_incremental("out")
+    project.vm_result("out")
 }
 
 /// Both spellings of a commutative mixed-shape operand must produce the same
@@ -2765,7 +2765,7 @@ fn a_repeated_dimension_read_directly_is_a_pre_existing_residual() {
     let copy = square("sqdirect_copy").array_aux("out[d,d]", "square[d,d]");
     copy.assert_compiles_incremental();
     assert_close(
-        &copy.vm_result_incremental("out"),
+        &copy.vm_result("out"),
         &[11.0, 11.0, 11.0, 22.0, 22.0, 22.0, 33.0, 33.0, 33.0],
         "residual: a direct repeated-dimension read projects to [i,i]",
     );
@@ -2773,7 +2773,7 @@ fn a_repeated_dimension_read_directly_is_a_pre_existing_residual() {
     let sorted = square("sqdirect_sort").array_aux("out[d,d]", "VECTOR SORT ORDER(square[d,d], 1)");
     sorted.assert_compiles_incremental();
     assert_close(
-        &sorted.vm_result_incremental("out"),
+        &sorted.vm_result("out"),
         &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0],
         "residual: the per-row orders are [0,1,2] throughout, not this",
     );
@@ -2800,7 +2800,7 @@ fn a_repeated_dimension_read_directly_is_a_pre_existing_residual() {
         let p = square(name).array_aux("out3[d]", eqn);
         p.assert_compiles_incremental();
         assert_close(
-            &p.vm_result_incremental("out3"),
+            &p.vm_result("out3"),
             &[expected; 3],
             "a repeated-dimension read inside a reducer must keep its merge-base value",
         );

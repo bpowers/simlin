@@ -15,7 +15,7 @@ import { describe, it, expect, beforeAll, afterAll } from '@rstest/core';
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { Project, Sim, Run, configureWasm, ready, resetWasm } from '../src';
+import { Project, Run, configureWasm, ready, resetWasm } from '../src';
 import { expectScoresClose, linksByKey } from './ltm-test-helpers';
 
 async function loadWasm(): Promise<void> {
@@ -49,14 +49,6 @@ describe('LTM on the wasm engine (public API)', () => {
 
   afterAll(async () => {
     await project.dispose();
-  });
-
-  it('simulate({engine:wasm, enableLtm}) resolves to a Sim', async () => {
-    const model = await project.mainModel();
-    const sim = await model.simulate({}, { engine: 'wasm', enableLtm: true });
-    expect(sim).toBeInstanceOf(Sim);
-    expect(sim.ltmEnabled).toBe(true);
-    await sim.dispose();
   });
 
   it('wasm getLinks returns scored links', async () => {

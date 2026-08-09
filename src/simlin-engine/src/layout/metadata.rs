@@ -97,18 +97,4 @@ mod tests {
         assert_eq!(from, None);
         assert_eq!(to, None);
     }
-
-    #[test]
-    fn test_new_empty_metadata() {
-        let meta = ComputedMetadata::new_empty();
-        assert!(meta.chains.is_empty());
-        assert!(meta.feedback_loops.is_empty());
-        assert!(meta.dominant_periods.is_empty());
-        assert!(meta.dep_graph.is_empty());
-        assert!(meta.reverse_dep_graph.is_empty());
-        assert!(meta.constants.is_empty());
-        assert!(meta.stock_to_inflows.is_empty());
-        assert!(meta.stock_to_outflows.is_empty());
-        assert!(meta.flow_to_stocks.is_empty());
-    }
 }

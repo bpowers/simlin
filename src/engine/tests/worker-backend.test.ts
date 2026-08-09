@@ -10,7 +10,7 @@ import { join } from 'path';
 import { WorkerBackend } from '../src/worker-backend';
 import { WorkerServer } from '../src/worker-server';
 import type { WorkerRequest, WorkerResponse } from '../src/worker-protocol';
-import type { ProjectHandle, ModelHandle, SimHandle } from '../src/backend';
+import type { ProjectHandle, ModelHandle } from '../src/backend';
 
 const wasmPath = join(__dirname, '..', 'core', 'libsimlin.wasm');
 
@@ -254,13 +254,6 @@ describe('WorkerBackend', () => {
       expect(names.length).toBeGreaterThan(0);
     });
 
-    test('get model handle', async () => {
-      const data = loadTestXmile();
-      const projHandle = await backend.projectOpenXmile(data);
-      const modelHandle = await backend.projectGetModel(projHandle, null);
-      expect(modelHandle).toBeDefined();
-    });
-
     test('isSimulatable returns true for valid model', async () => {
       const data = loadTestXmile();
       const handle = await backend.projectOpenXmile(data);
@@ -268,20 +261,8 @@ describe('WorkerBackend', () => {
       expect(result).toBe(true);
     });
 
-    test('getErrors returns array', async () => {
-      const data = loadTestXmile();
-      const handle = await backend.projectOpenXmile(data);
-      const errors = await backend.projectGetErrors(handle);
-      expect(errors).toBeInstanceOf(Array);
-    });
-
-    test('getLoops returns array', async () => {
-      const data = loadTestXmile();
-      const handle = await backend.projectOpenXmile(data);
-      const modelHandle = await backend.projectGetModel(handle, null);
-      const loops = await backend.modelGetLoops(modelHandle);
-      expect(loops).toBeInstanceOf(Array);
-    });
+    // getErrors and getLoops travel this same backend/server pair in
+    // race.test.ts's concurrent-operations test, which asserts their results.
 
     test('dispose is idempotent', async () => {
       const data = loadTestXmile();
@@ -322,12 +303,6 @@ describe('WorkerBackend', () => {
     test('getIncomingLinks returns array', async () => {
       const links = await backend.modelGetIncomingLinks(modelHandle, 'teacup_temperature');
       expect(links).toBeInstanceOf(Array);
-    });
-
-    test('getLatexEquation returns string or null', async () => {
-      const result = await backend.modelGetLatexEquation(modelHandle, 'teacup_temperature');
-      // May be null or string depending on the model
-      expect(result === null || typeof result === 'string').toBe(true);
     });
 
     test('dispose model is idempotent', async () => {
@@ -406,13 +381,6 @@ describe('WorkerBackend', () => {
       expect(names.length).toBeGreaterThan(0);
     });
 
-    test('getLinks returns array', async () => {
-      const simHandle = await backend.simNew(modelHandle, false);
-      await backend.simRunToEnd(simHandle);
-      const links = await backend.simGetLinks(simHandle);
-      expect(links).toBeInstanceOf(Array);
-    });
-
     test('sim reset restores initial state', async () => {
       const simHandle = await backend.simNew(modelHandle, false);
       await backend.simRunToEnd(simHandle);
@@ -431,28 +399,9 @@ describe('WorkerBackend', () => {
     });
   });
 
-  describe('strict serialization', () => {
-    test('concurrent operations are serialized', async () => {
-      const { backend } = createTestPair();
-      await backend.init(loadWasmSource());
-
-      const data = loadTestXmile();
-      const handle = await backend.projectOpenXmile(data);
-
-      // Fire multiple operations concurrently - they should all complete
-      const [count, names, simulatable, errors] = await Promise.all([
-        backend.projectGetModelCount(handle),
-        backend.projectGetModelNames(handle),
-        backend.projectIsSimulatable(handle, null),
-        backend.projectGetErrors(handle),
-      ]);
-
-      expect(count).toBe(1);
-      expect(names.length).toBeGreaterThan(0);
-      expect(simulatable).toBe(true);
-      expect(errors).toBeInstanceOf(Array);
-    });
-  });
+  // FIFO serialization of concurrent operations is covered by race.test.ts,
+  // whose 'concurrent project operations all complete' fires a superset of
+  // these operations through the same backend/server pair.
 
   describe('error propagation', () => {
     test('operations before init are rejected', async () => {

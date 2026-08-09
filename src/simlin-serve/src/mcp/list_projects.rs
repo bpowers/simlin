@@ -12,13 +12,13 @@
 //! is otherwise identical: one entry per registry snapshot row, with format
 //! and git status surfaced verbatim.
 
-use std::path::{MAIN_SEPARATOR, Path};
 use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::handlers::AppState;
+use crate::path_resolution::to_forward_slash;
 use crate::registry::{GitState, ProjectFormat};
 use crate::scan::scan_into_registry;
 
@@ -101,7 +101,7 @@ pub fn run(state: &Arc<AppState>) -> ListProjectsOutput {
     let projects = snapshot
         .into_iter()
         .map(|meta| ProjectSummary {
-            path: path_to_forward_slash(&meta.path),
+            path: to_forward_slash(&meta.path),
             format: format_to_string(meta.format),
             git: meta.git.into(),
             version: meta.version,
@@ -112,17 +112,6 @@ pub fn run(state: &Arc<AppState>) -> ListProjectsOutput {
         projects,
         git_available: state.git.git_available(),
         root: state.root.display().to_string(),
-    }
-}
-
-/// Render a relative path as forward-slash-separated UTF-8 so the wire
-/// format is platform-agnostic.
-fn path_to_forward_slash(path: &Path) -> String {
-    let display = path.to_string_lossy().into_owned();
-    if MAIN_SEPARATOR == '/' {
-        display
-    } else {
-        display.replace(MAIN_SEPARATOR, "/")
     }
 }
 

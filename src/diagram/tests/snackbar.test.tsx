@@ -9,34 +9,6 @@ import { render, act } from '@testing-library/react';
 import Snackbar, { SnackbarContent } from '../components/Snackbar';
 import { Toast } from '../ErrorToast';
 
-// Controlled wrapper to test open/close transitions. Exposes the same imperative
-// surface the old class component did -- `setOpen` plus a live `state` object --
-// so tests can drive and inspect it through a ref.
-interface ControlledSnackbarHandle {
-  setOpen: (open: boolean) => void;
-  state: { open: boolean; closeCount: number };
-}
-
-const ControlledSnackbar = React.forwardRef<ControlledSnackbarHandle, { autoHideDuration?: number }>(
-  function ControlledSnackbar({ autoHideDuration }, ref) {
-    const [open, setOpen] = React.useState(false);
-    const [closeCount, setCloseCount] = React.useState(0);
-
-    const handleClose = () => {
-      setOpen(false);
-      setCloseCount((prev) => prev + 1);
-    };
-
-    React.useImperativeHandle(ref, () => ({ setOpen, state: { open, closeCount } }), [open, closeCount]);
-
-    return (
-      <Snackbar open={open} autoHideDuration={autoHideDuration}>
-        <Toast message="Test message" onClose={handleClose} variant="info" />
-      </Snackbar>
-    );
-  },
-);
-
 describe('Snackbar', () => {
   beforeEach(() => {
     rs.useFakeTimers();
@@ -69,6 +41,11 @@ describe('Snackbar', () => {
     expect(content).toBeNull();
   });
 
+  // The auto-hide TIMER lives in Toast, and error-toast.test.tsx covers its
+  // mechanics (boundary, unmount cleanup, which re-renders restart it) by
+  // supplying SnackbarDurationContext by hand. That bypasses Snackbar, so these
+  // two rows stay: they are the only coverage of Snackbar publishing
+  // `autoHideDuration` into that context, in both the present and absent arms.
   test('auto-hides when duration is provided', () => {
     const onClose = rs.fn();
     render(
@@ -84,252 +61,6 @@ describe('Snackbar', () => {
     });
 
     expect(onClose).toHaveBeenCalledTimes(1);
-  });
-
-  test('starts auto-hide timer on transition from closed to open', () => {
-    const ref = React.createRef<ControlledSnackbarHandle>();
-    render(<ControlledSnackbar ref={ref} autoHideDuration={3000} />);
-
-    expect(ref.current!.state.closeCount).toBe(0);
-
-    act(() => {
-      ref.current!.setOpen(true);
-    });
-
-    act(() => {
-      rs.advanceTimersByTime(3000);
-    });
-
-    expect(ref.current!.state.closeCount).toBe(1);
-    expect(ref.current!.state.open).toBe(false);
-  });
-
-  test('clears timer when closed before timeout', () => {
-    const ref = React.createRef<ControlledSnackbarHandle>();
-    render(<ControlledSnackbar ref={ref} autoHideDuration={5000} />);
-
-    act(() => {
-      ref.current!.setOpen(true);
-    });
-
-    act(() => {
-      rs.advanceTimersByTime(2000);
-    });
-
-    act(() => {
-      ref.current!.setOpen(false);
-    });
-
-    act(() => {
-      rs.advanceTimersByTime(5000);
-    });
-
-    expect(ref.current!.state.closeCount).toBe(0);
-    expect(ref.current!.state.open).toBe(false);
-  });
-
-  test('handles rapid open/close cycles without race conditions', () => {
-    const ref = React.createRef<ControlledSnackbarHandle>();
-    render(<ControlledSnackbar ref={ref} autoHideDuration={3000} />);
-
-    act(() => {
-      ref.current!.setOpen(true);
-    });
-
-    act(() => {
-      rs.advanceTimersByTime(500);
-    });
-
-    act(() => {
-      ref.current!.setOpen(false);
-    });
-
-    act(() => {
-      ref.current!.setOpen(true);
-    });
-
-    act(() => {
-      rs.advanceTimersByTime(500);
-    });
-
-    act(() => {
-      ref.current!.setOpen(false);
-    });
-
-    act(() => {
-      ref.current!.setOpen(true);
-    });
-
-    act(() => {
-      rs.advanceTimersByTime(3000);
-    });
-
-    expect(ref.current!.state.closeCount).toBe(1);
-  });
-
-  test('does not reset timer on unrelated re-renders', () => {
-    interface ReRenderWrapperHandle {
-      forceRerender: () => void;
-      state: { counter: number; open: boolean; closeCount: number };
-    }
-
-    const ReRenderWrapper = React.forwardRef<ReRenderWrapperHandle, Record<string, never>>(
-      function ReRenderWrapper(_props, ref) {
-        const [counter, setCounter] = React.useState(0);
-        const [open, setOpen] = React.useState(true);
-        const [closeCount, setCloseCount] = React.useState(0);
-
-        const forceRerender = () => {
-          setCounter((prev) => prev + 1);
-        };
-
-        const handleClose = () => {
-          setOpen(false);
-          setCloseCount((prev) => prev + 1);
-        };
-
-        React.useImperativeHandle(ref, () => ({ forceRerender, state: { counter, open, closeCount } }), [
-          counter,
-          open,
-          closeCount,
-        ]);
-
-        return (
-          <Snackbar open={open} autoHideDuration={3000}>
-            <Toast message={`Count: ${counter}`} onClose={handleClose} variant="info" />
-          </Snackbar>
-        );
-      },
-    );
-
-    const ref = React.createRef<ReRenderWrapperHandle>();
-    render(<ReRenderWrapper ref={ref} />);
-
-    act(() => {
-      rs.advanceTimersByTime(1000);
-    });
-
-    act(() => {
-      ref.current!.forceRerender();
-    });
-
-    act(() => {
-      rs.advanceTimersByTime(1000);
-    });
-
-    act(() => {
-      ref.current!.forceRerender();
-    });
-
-    act(() => {
-      rs.advanceTimersByTime(1000);
-    });
-
-    expect(ref.current!.state.closeCount).toBe(1);
-  });
-
-  test('restarts timer when duration changes while open', () => {
-    interface DurationWrapperHandle {
-      setDuration: (duration: number) => void;
-      state: { duration: number; open: boolean; closeCount: number };
-    }
-
-    const DurationWrapper = React.forwardRef<DurationWrapperHandle, Record<string, never>>(
-      function DurationWrapper(_props, ref) {
-        const [duration, setDuration] = React.useState(5000);
-        const [open, setOpen] = React.useState(true);
-        const [closeCount, setCloseCount] = React.useState(0);
-
-        const handleClose = () => {
-          setOpen(false);
-          setCloseCount((prev) => prev + 1);
-        };
-
-        React.useImperativeHandle(ref, () => ({ setDuration, state: { duration, open, closeCount } }), [
-          duration,
-          open,
-          closeCount,
-        ]);
-
-        return (
-          <Snackbar open={open} autoHideDuration={duration}>
-            <Toast message="Test message" onClose={handleClose} variant="info" />
-          </Snackbar>
-        );
-      },
-    );
-
-    const ref = React.createRef<DurationWrapperHandle>();
-    render(<DurationWrapper ref={ref} />);
-
-    act(() => {
-      rs.advanceTimersByTime(1000);
-    });
-
-    act(() => {
-      ref.current!.setDuration(1000);
-    });
-
-    act(() => {
-      rs.advanceTimersByTime(900);
-    });
-
-    expect(ref.current!.state.closeCount).toBe(0);
-
-    act(() => {
-      rs.advanceTimersByTime(200);
-    });
-
-    expect(ref.current!.state.closeCount).toBe(1);
-  });
-
-  test('does not reset timer when message changes', () => {
-    interface MessageWrapperHandle {
-      setMessage: (message: string) => void;
-      state: { message: string; open: boolean; closeCount: number };
-    }
-
-    const MessageWrapper = React.forwardRef<MessageWrapperHandle, Record<string, never>>(
-      function MessageWrapper(_props, ref) {
-        const [message, setMessage] = React.useState('First');
-        const [open, setOpen] = React.useState(true);
-        const [closeCount, setCloseCount] = React.useState(0);
-
-        const handleClose = () => {
-          setOpen(false);
-          setCloseCount((prev) => prev + 1);
-        };
-
-        React.useImperativeHandle(ref, () => ({ setMessage, state: { message, open, closeCount } }), [
-          message,
-          open,
-          closeCount,
-        ]);
-
-        return (
-          <Snackbar open={open} autoHideDuration={3000}>
-            <Toast message={message} onClose={handleClose} variant="info" />
-          </Snackbar>
-        );
-      },
-    );
-
-    const ref = React.createRef<MessageWrapperHandle>();
-    render(<MessageWrapper ref={ref} />);
-
-    act(() => {
-      rs.advanceTimersByTime(1000);
-    });
-
-    act(() => {
-      ref.current!.setMessage('Second');
-    });
-
-    act(() => {
-      rs.advanceTimersByTime(2000);
-    });
-
-    expect(ref.current!.state.closeCount).toBe(1);
   });
 
   test('does not auto-hide when duration is omitted', () => {
@@ -457,12 +188,6 @@ describe('SnackbarContent', () => {
     const button = document.querySelector('[data-testid="action-button"]');
     expect(button).not.toBeNull();
     expect(button!.textContent).toBe('Close');
-  });
-
-  test('applies custom className', () => {
-    render(<SnackbarContent message="Test" className="custom-class" data-testid="content" />);
-    const content = document.querySelector('[data-testid="content"]');
-    expect(content!.className).toContain('custom-class');
   });
 
   test('passes through aria-describedby', () => {

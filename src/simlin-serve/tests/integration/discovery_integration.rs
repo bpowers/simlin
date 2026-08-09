@@ -4,14 +4,13 @@
 
 //! End-to-end discovery tests against real tempdir layouts. These cover the
 //! ACs from the design doc that exercise the walker as a black box: which
-//! files end up in the result set for a given on-disk shape.
+//! files end up in the result set for a given on-disk shape. Per-extension
+//! format mapping is covered by the unit tests in `src/discovery.rs`.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use simlin_serve::discovery::{DiscoveredFile, discover_models};
-use simlin_serve::registry::ProjectFormat;
+use simlin_serve::discovery::discover_models;
 use tempfile::TempDir;
 
 fn write_file(dir: &Path, rel: &str, contents: &str) -> PathBuf {
@@ -21,49 +20,6 @@ fn write_file(dir: &Path, rel: &str, contents: &str) -> PathBuf {
     }
     fs::write(&p, contents).expect("write file");
     p
-}
-
-/// Map from filename -> format for easy assertion. Uses `BTreeMap` for
-/// deterministic iteration order in error messages.
-fn by_filename(found: Vec<DiscoveredFile>) -> BTreeMap<String, ProjectFormat> {
-    found
-        .into_iter()
-        .map(|f| {
-            (
-                f.absolute_path
-                    .file_name()
-                    .expect("file name")
-                    .to_string_lossy()
-                    .into_owned(),
-                f.format,
-            )
-        })
-        .collect()
-}
-
-#[test]
-fn ac1_1_lists_stmx_xmile_and_mdl_files_at_root() {
-    let dir = TempDir::new().unwrap();
-    write_file(dir.path(), "a.stmx", "");
-    write_file(dir.path(), "b.xmile", "");
-    write_file(dir.path(), "c.mdl", "");
-
-    let found = by_filename(discover_models(dir.path()).unwrap());
-    assert_eq!(
-        found.get("a.stmx"),
-        Some(&ProjectFormat::Stmx),
-        "stmx must be found at the root"
-    );
-    assert_eq!(
-        found.get("b.xmile"),
-        Some(&ProjectFormat::Xmile),
-        "xmile must be found at the root"
-    );
-    assert_eq!(
-        found.get("c.mdl"),
-        Some(&ProjectFormat::Mdl),
-        "mdl must be found at the root"
-    );
 }
 
 #[test]

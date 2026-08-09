@@ -21,6 +21,11 @@ pub mod registry;
 pub mod scan;
 pub mod serving;
 pub mod static_assets;
+/// Fixtures for the integration tests. Gated behind the `test-support`
+/// feature so the watcher-probe helpers are not compiled into the shipped
+/// binary; `tests/` reaches them through a self dev-dependency that
+/// enables the feature.
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_support;
 pub mod validation;

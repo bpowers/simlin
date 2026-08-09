@@ -634,25 +634,86 @@ mod tests {
         assert_eq!(convert_arrayed_equation(input).has_except_default, None);
     }
 
+    /// `convert_operation` is a five-way dispatch over `EditOperation`, and
+    /// each arm both selects a `ModelOperation` variant and carries the
+    /// caller's fields across. The rows are derived from `EditOperation`'s
+    /// variant list, not sampled from it: a sixth variant added there needs a
+    /// sixth row here. `ModelOperation` is the wider enum (it also carries
+    /// operations the MCP surface does not expose), so the match keeps a
+    /// catch-all -- reaching it means an arm mapped to the wrong family.
     #[test]
-    fn convert_set_loop_name_operation() {
-        let op = EditOperation::SetLoopName(SetLoopNameInput {
-            variables: vec!["population".into(), "births".into()],
-            name: "Growth Loop".into(),
-            description: Some("reinforcing growth".into()),
-        });
-        let model_op = convert_operation(op);
-        match model_op {
-            simlin_engine::ModelOperation::SetLoopName {
-                variables,
-                name,
-                description,
-            } => {
-                assert_eq!(variables, vec!["population", "births"]);
-                assert_eq!(name, "Growth Loop");
-                assert_eq!(description.as_deref(), Some("reinforcing growth"));
+    fn convert_operation_maps_every_edit_operation() {
+        use simlin_engine::ModelOperation;
+
+        let ops = vec![
+            EditOperation::UpsertStock(UpsertStockInput {
+                name: "population".into(),
+                initial_equation: "100".into(),
+                units: Some("people".into()),
+                inflows: Some(vec!["births".into()]),
+                outflows: Some(vec!["deaths".into()]),
+                documentation: None,
+                arrayed_equation: None,
+            }),
+            EditOperation::UpsertFlow(UpsertFlowInput {
+                name: "births".into(),
+                equation: "population * 0.1".into(),
+                units: Some("people/year".into()),
+                documentation: None,
+                graphical_function: None,
+                arrayed_equation: None,
+            }),
+            EditOperation::UpsertAuxiliary(UpsertAuxiliaryInput {
+                name: "rate".into(),
+                equation: "0.1".into(),
+                units: None,
+                documentation: None,
+                graphical_function: None,
+                arrayed_equation: None,
+            }),
+            EditOperation::RemoveVariable(RemoveVariableInput {
+                name: "deaths".into(),
+            }),
+            EditOperation::SetLoopName(SetLoopNameInput {
+                variables: vec!["population".into(), "births".into()],
+                name: "Growth Loop".into(),
+                description: Some("reinforcing growth".into()),
+            }),
+        ];
+
+        for op in ops {
+            match convert_operation(op) {
+                ModelOperation::UpsertStock(stock) => {
+                    assert_eq!(stock.ident, "population");
+                    assert_eq!(stock.inflows, vec!["births"]);
+                    assert_eq!(stock.outflows, vec!["deaths"]);
+                    assert_eq!(stock.units.as_deref(), Some("people"));
+                }
+                ModelOperation::UpsertFlow(flow) => {
+                    assert_eq!(flow.ident, "births");
+                    assert_eq!(flow.units.as_deref(), Some("people/year"));
+                }
+                ModelOperation::UpsertAux(aux) => {
+                    assert_eq!(aux.ident, "rate");
+                    // An omitted `units` must arrive as absent, not as "".
+                    assert_eq!(aux.units, None);
+                }
+                // The one arm that changes operation FAMILY: a "remove"
+                // request becomes a DeleteVariable, not an upsert.
+                ModelOperation::DeleteVariable { ident } => {
+                    assert_eq!(ident, "deaths");
+                }
+                ModelOperation::SetLoopName {
+                    variables,
+                    name,
+                    description,
+                } => {
+                    assert_eq!(variables, vec!["population", "births"]);
+                    assert_eq!(name, "Growth Loop");
+                    assert_eq!(description.as_deref(), Some("reinforcing growth"));
+                }
+                _ => panic!("an EditOperation mapped to an unexpected ModelOperation family"),
             }
-            _ => panic!("expected SetLoopName variant"),
         }
     }
 }

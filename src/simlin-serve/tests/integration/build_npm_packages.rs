@@ -59,7 +59,7 @@ fn platform_packages_have_correct_fields() {
 
     // The script is self-relative: it derives SCRIPT_DIR from BASH_SOURCE and
     // reads Cargo.toml + writes npm/ next to itself. Copying the script and
-    // Cargo.toml into a tempdir gives us isolation without pollating the
+    // Cargo.toml into a tempdir gives us isolation without polluting the
     // source tree.
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("build-npm-packages.sh");
 

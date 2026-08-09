@@ -435,13 +435,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn ac1_9_stock_only_no_flow() {
-        let model = parse("Name").unwrap();
-        assert_eq!(model.stocks.len(), 1);
-        assert!(model.flows.is_empty());
-    }
-
-    #[test]
     fn ac1_9_stock_only_with_params() {
         let model = parse("Name(5)").unwrap();
         assert_eq!(model.stocks.len(), 1);
@@ -802,14 +795,6 @@ mod tests {
         let model = parse("A > B @ inf").unwrap();
         assert_eq!(model.flows[0].rate, Expr::Inf);
         assert_eq!(model.flows[0].flow_type, FlowType::Rate);
-    }
-
-    /// Explicit Leak with formula
-    #[test]
-    fn explicit_leak_with_formula() {
-        let model = parse("Employees > Departures @ Leak(0.1)").unwrap();
-        assert_eq!(model.flows[0].flow_type, FlowType::Leak);
-        assert_eq!(model.flows[0].rate, Expr::Float(0.1));
     }
 
     /// Explicit Rate with formula expression

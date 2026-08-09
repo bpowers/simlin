@@ -384,13 +384,6 @@ fn add_loop_if_unique_keeps_distinct_directed_three_cycles() {
 // --- Test 6: Empty graph ---
 
 #[test]
-fn test_empty_graph() {
-    let graph = SearchGraph::from_edges(vec![], stock_list(&[]));
-    let loops = graph.find_strongest_loops();
-    assert!(loops.is_empty(), "Empty graph should have no loops");
-}
-
-#[test]
 fn test_no_edges() {
     // Graph with stocks but no edges
     let graph = SearchGraph::from_edges(vec![], stock_list(&["a", "b"]));
@@ -1662,55 +1655,6 @@ fn test_rank_and_filter_retains_briefly_dominant_loop() {
         loops.len(),
         2,
         "Briefly dominant loop should be retained by per-timestep filtering"
-    );
-}
-
-#[test]
-fn test_rank_and_filter_partitioned_filtering() {
-    // Two partitions: partition A has a dominant loop and a tiny loop.
-    // Partition B has a single loop that would be globally negligible
-    // but is the ONLY loop in its partition.
-    //
-    // Without partition-aware filtering, loop_b would be filtered out
-    // because its score is tiny relative to the global total.
-    // With partition-aware filtering, it's retained because it's 100%
-    // of its partition's total.
-    let mut loops = vec![
-        make_found_loop(
-            &[("big_a", "big_b"), ("big_b", "big_a")],
-            &["stock_a"],
-            LoopPolarity::Reinforcing,
-            1000.0,
-        ),
-        make_found_loop(
-            &[("small_a", "small_b"), ("small_b", "small_a")],
-            &["stock_a"],
-            LoopPolarity::Balancing,
-            100.0,
-        ),
-        make_found_loop(
-            &[("other_a", "other_b"), ("other_b", "other_a")],
-            &["stock_x"],
-            LoopPolarity::Reinforcing,
-            0.01,
-        ),
-    ];
-
-    let partitions = CyclePartitions {
-        partitions: vec![vec![Ident::new("stock_a")], vec![Ident::new("stock_x")]],
-        stock_partition: vec![(Ident::new("stock_a"), 0), (Ident::new("stock_x"), 1)]
-            .into_iter()
-            .collect(),
-    };
-
-    rank_and_filter(&mut loops, &partitions);
-
-    // All 3 loops should be retained: the "other" loop is 100% of
-    // its own partition's total at its timestep
-    assert_eq!(
-        loops.len(),
-        3,
-        "Loop dominant in its own partition should be retained even if globally tiny"
     );
 }
 

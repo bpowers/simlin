@@ -210,3 +210,73 @@ async fn save_xmile_to_xmile_extension_works() {
     assert_eq!(opened_again.source_format, SourceFormat::Xmile);
     assert!(!opened_again.project.models.is_empty());
 }
+
+/// Saving an SD-AI project must REGENERATE its `relationships` field from
+/// the post-save model's equation dependencies rather than carrying over
+/// whatever the source file held (`fs_access::serialize_project`'s
+/// `SdaiJson` arm). This is the one branch on the save path with real logic
+/// behind it -- a link-polarity analysis through the salsa db -- and the
+/// fixture below deliberately arrives with NO `relationships` key at all, so
+/// a save that merely copied the input through would write nothing here.
+#[tokio::test]
+async fn save_sdai_json_regenerates_relationships_from_the_equations() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("model.sd.json");
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test/sd-ai-simple.sd.json"
+    );
+    std::fs::copy(fixture, &path).unwrap();
+
+    let on_disk: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(
+        on_disk.get("relationships").is_none(),
+        "fixture must start with no relationships, or this test cannot \
+         distinguish regeneration from passthrough"
+    );
+
+    let access = FileSystemAccess::new();
+    let opened = access.open(&path).await.unwrap();
+    assert_eq!(opened.source_format, SourceFormat::SdaiJson);
+
+    access
+        .save(&path, &opened.project, SourceFormat::SdaiJson, None)
+        .await
+        .unwrap();
+
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let relationships = saved["relationships"]
+        .as_array()
+        .expect("save must write a relationships array for an SD-AI project");
+
+    // `Population * birth_rate` gives births two positive inputs. The
+    // stock-flow structural edge (births -> Population) is deliberately
+    // filtered out by `generate_relationships`, so it must NOT appear.
+    let edges: Vec<(&str, &str, &str)> = relationships
+        .iter()
+        .map(|r| {
+            (
+                r["from"].as_str().unwrap_or(""),
+                r["to"].as_str().unwrap_or(""),
+                r["polarity"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+
+    assert!(
+        edges.contains(&("Population", "births", "+")),
+        "Population -> births must be regenerated as a positive link: {edges:?}"
+    );
+    assert!(
+        edges.contains(&("birth_rate", "births", "+")),
+        "birth_rate -> births must be regenerated as a positive link: {edges:?}"
+    );
+    assert!(
+        !edges
+            .iter()
+            .any(|(from, to, _)| *from == "births" && *to == "Population"),
+        "the stock-flow structural edge must be filtered out: {edges:?}"
+    );
+}

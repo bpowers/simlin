@@ -7,7 +7,7 @@ import { describe, it, expect, rs } from '@rstest/core';
 import { Request, Response } from 'express';
 
 import { createProjectRouteHandler, ProjectRecord, ProjectRouteHandlerDeps } from '../route-handlers';
-import { getAuthenticatedUser, isResourceOwner, AuthenticatedUser } from '../auth-helpers';
+import { getAuthenticatedUser } from '../auth-helpers';
 
 // Mock project factory
 function createMockProject(opts: {
@@ -187,51 +187,10 @@ describe('createProjectRouteHandler', () => {
       expect(next).not.toHaveBeenCalled();
     });
 
-    it('should redirect to / when session.passport is undefined', async () => {
-      const project = createMockProject({
-        id: 'testuser/private',
-        isPublic: false,
-        fileId: 'file123',
-      });
-      const db = createMockDb(project);
-      const handler = createProjectRouteHandler({ db });
-
-      const req = createMockRequest({
-        username: 'testuser',
-        projectName: 'private',
-        session: {},
-      });
-      const { res, getRedirectUrl } = createMockResponse();
-      const next = rs.fn();
-
-      await handler(req as Request, res as Response, next);
-
-      expect(getRedirectUrl()).toBe('/');
-      expect(next).not.toHaveBeenCalled();
-    });
-
-    it('should redirect to / when session.passport.user is undefined', async () => {
-      const project = createMockProject({
-        id: 'testuser/private',
-        isPublic: false,
-        fileId: 'file123',
-      });
-      const db = createMockDb(project);
-      const handler = createProjectRouteHandler({ db });
-
-      const req = createMockRequest({
-        username: 'testuser',
-        projectName: 'private',
-        session: { passport: {} },
-      });
-      const { res, getRedirectUrl } = createMockResponse();
-      const next = rs.fn();
-
-      await handler(req as Request, res as Response, next);
-
-      expect(getRedirectUrl()).toBe('/');
-      expect(next).not.toHaveBeenCalled();
-    });
+    // The half-populated session shapes (passport missing, passport.user
+    // missing) all reduce to "getAuthenticatedUser returns undefined", which
+    // its own unit tests below cover shape by shape; the handler's response to
+    // that is the single redirect asserted above.
 
     it('should redirect to / when req.user is undefined', async () => {
       const project = createMockProject({
@@ -467,18 +426,5 @@ describe('getAuthenticatedUser', () => {
   });
 });
 
-describe('isResourceOwner', () => {
-  it('should return false for undefined authUser', () => {
-    expect(isResourceOwner(undefined, 'owner')).toBe(false);
-  });
-
-  it('should return false when userId does not match ownerId', () => {
-    const authUser: AuthenticatedUser = { userId: 'testuser' };
-    expect(isResourceOwner(authUser, 'otheruser')).toBe(false);
-  });
-
-  it('should return true when userId matches ownerId', () => {
-    const authUser: AuthenticatedUser = { userId: 'testuser' };
-    expect(isResourceOwner(authUser, 'testuser')).toBe(true);
-  });
-});
+// isResourceOwner's three outcomes are each driven through the handler above:
+// no authenticated user and a non-owner both redirect, the owner is served.

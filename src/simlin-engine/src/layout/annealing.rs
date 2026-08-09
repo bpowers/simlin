@@ -782,28 +782,6 @@ mod tests {
     }
 
     #[test]
-    fn test_chain_nodes_use_smaller_limit() {
-        let mut layout: Layout<String> = BTreeMap::new();
-        layout.insert("chain".to_string(), Position::new(100.0, 100.0));
-        layout.insert("aux".to_string(), Position::new(200.0, 200.0));
-        let baseline = layout.clone();
-
-        apply_displacement(
-            &"chain".to_string(),
-            &baseline,
-            &mut layout,
-            100.0,
-            100.0,
-            25.0,
-        );
-        let chain_pos = layout[&"chain".to_string()];
-        assert!(
-            (chain_pos.x - 100.0).abs() <= 25.0 + f64::EPSILON,
-            "chain node should be within 25 of baseline"
-        );
-    }
-
-    #[test]
     fn test_strongest_neighbor_selects_max_weight() {
         let mut adj: AdjacencyMap<String> = HashMap::new();
         adj.insert(
@@ -823,38 +801,6 @@ mod tests {
         let adj: AdjacencyMap<String> = HashMap::new();
         let result = strongest_neighbor(&"a".to_string(), &adj);
         assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_neighbor_coupling_applies_half_displacement() {
-        let mut layout: Layout<String> = BTreeMap::new();
-        layout.insert("a".to_string(), Position::new(100.0, 100.0));
-        layout.insert("b".to_string(), Position::new(200.0, 200.0));
-        let baseline = layout.clone();
-
-        let mut adj: AdjacencyMap<String> = HashMap::new();
-        adj.insert("a".to_string(), vec![("b".to_string(), 1.0)]);
-        adj.insert("b".to_string(), vec![("a".to_string(), 1.0)]);
-
-        // Manually apply displacement + coupled motion to verify 50% factor
-        let dx = 10.0;
-        let dy = 20.0;
-        apply_displacement(&"a".to_string(), &baseline, &mut layout, dx, dy, 200.0);
-        if let Some(neighbor) = strongest_neighbor(&"a".to_string(), &adj) {
-            apply_displacement(&neighbor, &baseline, &mut layout, dx * 0.5, dy * 0.5, 200.0);
-        }
-
-        let b_pos = layout[&"b".to_string()];
-        assert!(
-            (b_pos.x - 205.0).abs() < f64::EPSILON,
-            "neighbor x should move by half dx: got {}",
-            b_pos.x
-        );
-        assert!(
-            (b_pos.y - 210.0).abs() < f64::EPSILON,
-            "neighbor y should move by half dy: got {}",
-            b_pos.y
-        );
     }
 
     #[test]

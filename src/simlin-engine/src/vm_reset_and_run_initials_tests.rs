@@ -50,6 +50,25 @@ fn test_fused_binops_preserve_operand_order() {
         .aux("sc", "(a - b) - 4", None); // BinVarVar then AssignStackConstCurr
 
     let compiled = build_compiled(&tp);
+
+    // Pin the fused shape, so the numeric asserts below cannot pass vacuously
+    // through the un-fused path if fusion were disabled (mirrors the sibling
+    // global/const operand-order test).
+    let fused = &compiled.bytecode_profile().fused_histogram;
+    for name in [
+        "AssignSubVarVarCurr",
+        "AssignDivVarVarCurr",
+        "AssignSubVarConstCurr",
+        "AssignSubConstVarCurr",
+        "AssignStackVarCurr",
+        "AssignStackConstCurr",
+    ] {
+        assert!(
+            fused.get(name).copied().unwrap_or(0) >= 1,
+            "expected at least one {name} in the fused stream; got {fused:?}"
+        );
+    }
+
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
@@ -391,30 +410,6 @@ fn test_init_on_module_backed_var_freezes_initial_value() {
 }
 
 #[test]
-fn test_compiled_simulation_clone_produces_equivalent_vm() {
-    let tp = pop_model();
-    let compiled = build_compiled(&tp);
-    let compiled_clone = compiled.clone();
-
-    let mut vm1 = Vm::new(compiled).unwrap();
-    vm1.run_to_end().unwrap();
-    let results1 = vm1.into_results();
-
-    let mut vm2 = Vm::new(compiled_clone).unwrap();
-    vm2.run_to_end().unwrap();
-    let results2 = vm2.into_results();
-
-    let pop_off = *results1.offsets.get(&*canonicalize("population")).unwrap();
-    for step in 0..results1.step_count {
-        let idx = step * results1.step_size + pop_off;
-        assert!(
-            (results1.data[idx] - results2.data[idx]).abs() < 1e-10,
-            "cloned compiled should produce identical results at step {step}"
-        );
-    }
-}
-
-#[test]
 fn test_run_initials_then_run_to_end_matches_single_call() {
     let tp = pop_model();
     let compiled = build_compiled(&tp);
@@ -442,18 +437,32 @@ fn test_run_initials_then_run_to_end_matches_single_call() {
 
 #[test]
 fn test_run_initials_is_idempotent() {
-    let tp = pop_model();
+    // The value perturbed between the two calls must be one the initials
+    // runlist WRITES, not one it reads: perturbing an input like `rate` proves
+    // nothing, because a re-run would recompute `rate` from its own equation
+    // first and land on the same stock value either way. Overwriting the stock
+    // slot itself is what separates the two behaviors -- a re-run clobbers it.
+    let tp = TestProject::new("initials_idempotent")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .aux("rate", "0.1", None)
+        .flow("inflow", "0", None)
+        .stock("s", "rate * 1000", &["inflow"], &[], None);
+
     let compiled = build_compiled(&tp);
-
     let mut vm = Vm::new(compiled).unwrap();
-    vm.run_initials().unwrap();
-    vm.run_initials().unwrap(); // second call should be no-op
-    vm.run_to_end().unwrap();
-    let results = vm.into_results();
+    let s_off = vm.get_offset(&Ident::new("s")).unwrap();
 
-    let pop_off = *results.offsets.get(&*canonicalize("population")).unwrap();
-    let initial_pop = results.data[pop_off];
-    assert_eq!(initial_pop, 100.0, "population initial should be 100");
+    vm.run_initials().unwrap();
+    assert_eq!(vm.get_value_now(s_off), 100.0, "initial = rate*1000");
+
+    vm.set_value_now(s_off, 999.0);
+    vm.run_initials().unwrap();
+
+    assert_eq!(
+        vm.get_value_now(s_off),
+        999.0,
+        "second run_initials must be a no-op; a re-run would recompute 100"
+    );
 }
 
 #[test]

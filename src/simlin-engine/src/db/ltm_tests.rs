@@ -113,88 +113,6 @@ fn test_ltm_previous_module_var_uses_helper_rewrite() {
     );
 }
 
-/// AC1.1: An LtmSyntheticVar with non-empty dimensions compiles to A2A
-/// bytecodes via compile_ltm_equation_fragment. The fragment should
-/// succeed and produce per-element bytecodes spanning all dimension
-/// elements in the flow bytecodes.
-#[test]
-fn test_a2a_ltm_equation_fragment_compiles() {
-    let project = TestProject::new("a2a_ltm_compile")
-        .with_sim_time(0.0, 10.0, 1.0)
-        .named_dimension("Region", &["NYC", "Boston", "LA"])
-        .array_stock("population[Region]", "100", &["births"], &[], None)
-        .array_flow("births[Region]", "population * 0.1", None)
-        .build_datamodel();
-
-    let db = SimlinDb::default();
-    let sync = sync_from_datamodel(&db, &project);
-    let source_model = sync.models["main"].source;
-
-    // Compile an A2A LTM equation fragment with dimensions
-    let dims = vec!["Region".to_string()];
-    let fragment = compile_ltm_equation_fragment(
-        &db,
-        "$\u{205A}ltm\u{205A}test_a2a_link_score",
-        &crate::db::LtmEquation::apply_to_all(
-            dims.clone(),
-            "PREVIOUS(population) * 0.5".to_string(),
-        ),
-        source_model,
-        sync.project,
-        None,
-    )
-    .expect("A2A LTM equation should compile");
-
-    // Verify flow bytecodes exist (LTM vars are always flow-phase)
-    let flow_bc = fragment
-        .fragment
-        .flow_bytecodes
-        .as_ref()
-        .expect("A2A LTM fragment should have flow bytecodes");
-
-    // Verify A2A expansion produced per-element bytecodes spanning all
-    // 3 dimension elements. The compiler may either unroll the A2A
-    // expansion into per-element BinOpAssignCurr opcodes (each with a
-    // distinct element_offset), or use BeginIter/StoreIterElement loops.
-    // Either pattern confirms A2A expansion occurred correctly.
-    use crate::compiler::symbolic::SymbolicOpcode;
-
-    // Count distinct element_offset values in store/assign opcodes
-    // targeting the LTM variable. This confirms the bytecodes span
-    // product(dim_lengths) = 3 slots.
-    let store_offsets: Vec<usize> = flow_bc
-        .symbolic
-        .code
-        .iter()
-        .filter_map(|op| match op {
-            SymbolicOpcode::BinOpAssignCurr { var, .. }
-                if var.name.as_str().contains("test_a2a_link_score") =>
-            {
-                Some(var.element_offset)
-            }
-            _ => None,
-        })
-        .collect();
-
-    assert_eq!(
-        store_offsets.len(),
-        3,
-        "A2A LTM bytecodes should store to 3 elements (one per region), got: {store_offsets:?}"
-    );
-    assert_eq!(
-        store_offsets,
-        vec![0, 1, 2],
-        "element offsets should be [0, 1, 2] for 3 regions"
-    );
-
-    // Verify PREVIOUS references exist (the equation uses PREVIOUS(population))
-    let prev_names = phase_sym_load_prev_names(&fragment.fragment.flow_bytecodes);
-    assert!(
-        !prev_names.is_empty(),
-        "A2A LTM flow bytecodes should contain SymLoadPrev for PREVIOUS"
-    );
-}
-
 /// AC1.1 (layout): When LTM is enabled on a model with arrayed stocks,
 /// and an LTM variable has non-empty dimensions, compute_layout should
 /// allocate product(dim_lengths) slots for that variable.
@@ -206,8 +124,9 @@ fn test_a2a_ltm_equation_fragment_compiles() {
 /// 1. LTM-enabled layout has more slots than LTM-disabled
 /// 2. The LTM variable entries have size == 1 (scalar, as generated)
 ///
-/// The A2A size computation code path is exercised by Test 1 above
-/// (compile_ltm_equation_fragment with explicit dimensions).
+/// The A2A size computation code path is exercised by
+/// `test_a2a_ltm_previous_per_element` (`compile_ltm_equation_fragment`
+/// with explicit dimensions).
 #[test]
 fn test_a2a_ltm_layout_size() {
     use salsa::Setter;
