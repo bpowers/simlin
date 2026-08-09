@@ -506,11 +506,10 @@ fn effective_slot(n_slots: usize, element_index: usize) -> Option<usize> {
 /// It exists so the libsimlin FFI per-partition cache can amortize across
 /// element-aware queries (cache key `(partition, element_index)`) without
 /// falling back to the non-streaming
-/// [`compute_rel_loop_scores_per_element`]. There used to be a SCALAR twin
-/// pair alongside it whose rustdoc claimed the same FFI consumer; nothing
-/// ever called it (`libsimlin::analysis` reaches for this element-aware
-/// form even for the scalar case, passing `n_slots = 1`), so it was
-/// deleted rather than left carrying a false claim.
+/// [`compute_rel_loop_scores_per_element`]. This element-aware form is the
+/// ONLY streaming entry point: `libsimlin::analysis` reaches for it even in
+/// the scalar case, passing `n_slots = 1`, so a scalar-specialized twin
+/// would have no caller.
 pub fn compute_partition_denominator_for_element<'a, I>(
     results: &Results,
     loop_id_slots: I,

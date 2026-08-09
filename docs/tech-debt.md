@@ -97,7 +97,7 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 
 - **Component**: simlin-engine
 - **Severity**: low
-- **Description**: `#[allow(dead_code)]` attributes scattered through simlin-engine. Note the count includes the sixteen `SymbolicOpcode` variants codegen no longer constructs (superseded incremental view-stack/broadcast opcodes whose retirement is sequenced as its own change, see symbolic.rs). Two categories named by earlier revisions of this entry no longer exist: the ByteCodeContext builder methods are split into a production half (get_dim_list/get_static_view are hot in vm.rs and wasmgen) and a `#[cfg(test)]` builder half, and the DimensionRange/DimensionVec/StridedDimension scaffolding types were deleted in the test-suite-diet work.
+- **Description**: `#[allow(dead_code)]` attributes scattered through simlin-engine. The count is dominated by the sixteen `SymbolicOpcode` variants codegen never constructs (superseded incremental view-stack/broadcast opcodes whose retirement -- together with their `Opcode` twins, VM arms, and wasm arms -- is sequenced as its own change; see symbolic.rs), plus expr3 variants and methods reserved for pass 2.
 - **Measure**: `rg '#\[allow\(dead_code\)\]' --type rust src/simlin-engine/src/ -c`
 - **Count**: 69 occurrences across 28 files (as of 2026-08-08)
 - **Owner**: unassigned
@@ -137,7 +137,7 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 
 - **Component**: simlin-engine, libsimlin
 - **Severity**: low
-- **Description**: `eprintln!` calls in simlin-engine library code (the debug-gated `debug_print_bytecode` was deleted as dead code in the test-suite-diet work; libsimlin is now clean). The remaining calls are runtime warnings in results.rs (unsupported sim methods), model.rs (compilation errors), and variable.rs. These should use proper error types or conditional logging rather than printing to stderr.
+- **Description**: `eprintln!` calls in simlin-engine library code -- runtime warnings in results.rs (unsupported sim methods), model.rs (compilation errors), and variable.rs. These should use proper error types or conditional logging rather than printing to stderr. libsimlin has none.
 - **Measure**: `rg 'eprintln!' --type rust src/simlin-engine/src/ src/libsimlin/src/ -c`
 - **Count**: 18 in simlin-engine, 0 in libsimlin (as of 2026-08-08)
 - **Owner**: unassigned

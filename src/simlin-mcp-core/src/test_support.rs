@@ -10,14 +10,13 @@
 
 /// The filesystem-backed `ProjectAccess` the integration suites run against.
 ///
-/// This is the PRODUCTION impl, not a stand-in. It used to be a
-/// hand-maintained near-copy living in this file, and the copy had drifted
-/// from `fs_access::FileSystemAccess` at exactly the two points where the
-/// real one is non-trivial -- it neither rejected `.mdl` writes nor
-/// regenerated the SD-AI `relationships` field on save -- so every e2e test
-/// that wrote a file was exercising a simpler function than the one that
-/// ships. Keeping the alias (rather than renaming every use site) makes it
-/// explicit at each import that the fixture and production are one thing.
+/// This is the PRODUCTION impl, not a stand-in; the alias makes it explicit
+/// at each import that the fixture and production are one thing. Never
+/// replace it with an independent implementation: a hand-maintained test
+/// double drifts from `fs_access::FileSystemAccess` at exactly the points
+/// where the real one is non-trivial (the `.mdl` write rejection, the SD-AI
+/// `relationships` regeneration on save), leaving every e2e test that writes
+/// a file exercising a simpler function than the one that ships.
 pub use crate::fs_access::FileSystemAccess as TestFileSystemAccess;
 
 /// Build a native-JSON project whose causal graph is a single SCC of

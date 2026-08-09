@@ -2013,11 +2013,11 @@ mod schema_tests {
     /// `docs/simlin-project.schema.json` must equal what `generate_schema_json`
     /// produces today -- a DRIFT GUARD, not a generator.
     ///
-    /// This used to `fs::write` the file on every `cargo test` run and then
-    /// assert only `parsed.is_object()`, so a schema change silently rewrote a
-    /// checked-in doc mid-test-run and nothing ever compared the two. Writing
-    /// is now opt-in through `UPDATE_SCHEMA=1`, mirroring the crate's
-    /// `UPDATE_FRAGMENT_GOLDEN` / `UPDATE_LTM_GOLDEN` convention.
+    /// The test never writes: a test that regenerates the artifact it checks
+    /// can never fail on drift, and silently rewrites a checked-in doc
+    /// mid-test-run. Regeneration is opt-in through `UPDATE_SCHEMA=1`,
+    /// mirroring the crate's `UPDATE_FRAGMENT_GOLDEN` / `UPDATE_LTM_GOLDEN`
+    /// convention.
     #[test]
     fn schema_matches_the_checked_in_file() {
         let generated = generate_schema_json();

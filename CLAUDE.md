@@ -117,6 +117,7 @@ This is the most expensive class of error in this repo, because review does not 
 - Public Rust items and non-trivial internal functions should have concise rustdoc describing purpose, key assumptions, and side effects.
 - When behavior changes, update nearby comments in the same commit so docs and code stay aligned.
 - If you intentionally remove a comment block, replace it with an updated equivalent when the context is still non-obvious.
+- **Documentation is evergreen, NEVER a changelog.** Docs (CLAUDE.md files, `docs/`, rustdoc, docstrings) describe the current state of the code; they never narrate the edit that produced it. "X was removed", "this used to Y", "now does Z", "behaviour is unchanged" are all changelog sentences -- git history is the changelog, and readers dig there when they want it. When you delete or move something, rewrite the surrounding docs as if the code had always been this way. If the old design carried a lesson worth keeping, state it as a standing constraint ("never replace this alias with a second implementation: a hand-maintained copy drifts exactly where the real one is non-trivial"), not as a story about what happened. Citing a GH issue for a load-bearing decision is fine -- an issue number is a pointer, not a narrative.
 - NEVER add a "Last updated" (or "Last verified") line to a `CLAUDE.md`: it is a perpetual rebase/merge-conflict magnet and goes stale immediately. Describe current state in prose; rely on `git log` / `git blame` for history.
 
 ## Development Standards

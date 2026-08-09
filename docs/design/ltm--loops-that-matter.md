@@ -788,10 +788,8 @@ surfaces handle it differently:
   from the engine primitive (bound as `Sim.get_loops_runtime` ->
   `reclassify_loops_from_results`, GH #679/#685, the all-slots Rust source of
   truth) and attaches the per-step relative-score series on top. There is no
-  separate Python slot-0 reclassification path. (Python's own
-  `LoopPolarity.from_runtime_scores` -- a standalone scalar-array port of the
-  Rust classifier that no production path called -- has been removed, so the
-  classification rules exist in exactly one place.)
+  Python-side reclassification: the classification rules live in exactly one
+  place, the Rust engine (`ltm/types.rs`).
 - **libsimlin / WASM / TS `simlin_analyze_get_loops`**: **intentionally
   structural-only**. The FFI takes only a `SimlinModel` (no simulation
   `Results` in hand), folds `MostlyReinforcing`/`MostlyBalancing` to

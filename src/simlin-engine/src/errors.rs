@@ -1090,8 +1090,9 @@ mod tests {
     /// The placeholder belongs in the human MESSAGE only: on both arms the
     /// structured `variable_name` field carries `diag.variable` through
     /// unchanged, so a variable-less diagnostic reports `None` rather than a
-    /// variable literally named `<unknown>` (the Unit arm used to leak the
-    /// placeholder into the field via `format_unit_error`).
+    /// variable literally named `<unknown>` -- the leak to guard against is
+    /// an arm handing `format_unit_error`/`format_equation_error`'s
+    /// substituted name back as the field.
     #[test]
     fn format_diagnostic_falls_back_to_unknown_variable() {
         use crate::common::UnitError;

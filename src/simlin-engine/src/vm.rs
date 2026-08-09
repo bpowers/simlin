@@ -5081,12 +5081,11 @@ mod chunk_regions_tests {
 ///
 /// NOT covered here, and currently covered NOWHERE: the documented empty-view
 /// contract that ArrayMax/Min/Mean/Stddev push NaN while ArraySum yields 0.0.
-/// That asymmetry lives in the OPCODE arms, not in `reduce_view`, and the six
-/// tests this module used to carry only folded `reduce_view` over zero elements
-/// and asserted it returned its own init -- so all four `view.size() == 0`
-/// guards could be deleted with the suite green. Pinning it needs an
-/// opcode-level fixture, and a zero-element dimension cannot be built through
-/// the compilation pipeline, so it needs hand-assembled bytecode.
+/// That asymmetry lives in the OPCODE arms, not in `reduce_view` -- all four
+/// `view.size() == 0` guards can be deleted with the suite green. Pinning it
+/// needs an opcode-level fixture, and a zero-element dimension cannot be
+/// built through the compilation pipeline, so it needs hand-assembled
+/// bytecode.
 #[cfg(test)]
 mod reduce_view_tests {
     use super::*;
