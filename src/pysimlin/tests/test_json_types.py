@@ -459,29 +459,16 @@ class TestPatchRoundtrip:
         assert isinstance(reconstructed_op, UpsertFlow)
         assert reconstructed_op.flow == flow
 
-    @given(ident=ident_strategy())
-    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
-    def test_delete_variable_roundtrip(self, ident: str) -> None:
-        """DeleteVariable operation roundtrips through JSON."""
-        op = DeleteVariable(ident=ident)
-        patch = JsonModelPatch(name="test_model", ops=[op])
-        project_patch = JsonProjectPatch(models=[patch])
-
-        json_dict = converter.unstructure(project_patch)
-        json_str = json.dumps(json_dict)
-        parsed = json.loads(json_str)
-        reconstructed = converter.structure(parsed, JsonProjectPatch)
-
-        assert len(reconstructed.models) == 1
-        assert len(reconstructed.models[0].ops) == 1
-        reconstructed_op = reconstructed.models[0].ops[0]
-        assert isinstance(reconstructed_op, DeleteVariable)
-        assert reconstructed_op.ident == ident
-
     @given(from_ident=ident_strategy(), to_ident=ident_strategy())
     @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_rename_variable_roundtrip(self, from_ident: str, to_ident: str) -> None:
-        """RenameVariable operation roundtrips through JSON."""
+        """RenameVariable roundtrips through JSON, including the from_/"from" rename.
+
+        Kept over the sibling op roundtrips because it is the only coverage of
+        the PARSE direction of the ``from_`` -> ``"from"`` field mapping;
+        TestPatchJsonFormat::test_rename_variable_format pins only the
+        serialize direction.
+        """
         op = RenameVariable(from_=from_ident, to=to_ident)
         patch = JsonModelPatch(name="test_model", ops=[op])
         project_patch = JsonProjectPatch(models=[patch])

@@ -227,16 +227,19 @@ mod tests {
 
     #[test]
     fn test_calc_stock_flow_arc_angle_flow_below_right() {
-        // stock=(0,0), flow=(10,120): dy > dx, vertical branch
-        // base_angle = atan2(120, 10) ≈ 85.24 degrees
-        // dx=10 >= 0, adjustment = +45
-        // result = normalize(85.24 + 45) = 130.24
+        // The only case with dx != 0 inside the |dx| < |dy| branch, so it is
+        // what distinguishes `base_angle + adjustment` from the hardcoded
+        // +/-45 the |dx| >= |dy| branch returns. The expected value is written
+        // out rather than recomputed from `atan2` + `normalize_angle`: doing
+        // that would re-execute the function body and pass for any
+        // implementation.
+        //
+        // stock=(0,0), flow=(10,120): base_angle = atan2(120, 10) = 85.2364
+        // degrees; dx = 10 >= 0 so adjustment = +45; result = 130.2364.
         let stock = Position::new(0.0, 0.0);
         let flow = Position::new(10.0, 120.0);
         let angle = calc_stock_flow_arc_angle(stock, flow);
-        let base = (120.0_f64).atan2(10.0).to_degrees();
-        let expected = normalize_angle(base + 45.0);
-        assert!((angle - expected).abs() < 1e-10);
+        assert!((angle - 130.236_358_309_273_84).abs() < 1e-10);
     }
 
     #[test]
@@ -254,7 +257,9 @@ mod tests {
 
     #[test]
     fn test_calculate_loop_arc_angle_collinear() {
-        // Loop center nearly along the connector direction triggers minimum curve
+        // Loop center nearly along the connector direction triggers minimum
+        // curve. This is the POSITIVE `angle_diff` arm (center above the line);
+        // `..._collinear_negative_diff` below is the mirror.
         let from = Position::new(0.0, 0.0);
         let to = Position::new(100.0, 0.0);
         let center = Position::new(200.0, 1.0);
@@ -277,18 +282,6 @@ mod tests {
         // angle_to_center ~= -0.28 degrees, angle_diff ~= -0.28, |angle_diff| < 15
         // min_curve = -20 (angle_diff < 0), takeoff = 0 - (-20) = 20
         assert!((angle - 20.0).abs() < 1.0);
-    }
-
-    #[test]
-    fn test_calculate_loop_arc_angle_collinear_positive_diff() {
-        // Positive angle_diff case: center slightly above the line
-        let from = Position::new(0.0, 0.0);
-        let to = Position::new(100.0, 0.0);
-        let center = Position::new(200.0, 1.0);
-
-        let angle = calculate_loop_arc_angle(from, to, center, 0.5);
-        // angle_diff ~= +0.28, min_curve = +20, takeoff = 0 - 20 = -20
-        assert!((angle - (-20.0)).abs() < 1.0);
     }
 
     #[test]

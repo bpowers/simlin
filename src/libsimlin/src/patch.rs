@@ -13,7 +13,8 @@ use simlin_engine::common::ErrorCode;
 use simlin_engine::{self as engine};
 use std::ptr;
 
-use crate::errors;
+use simlin_engine::errors;
+
 pub use crate::ffi_error::ErrorDetail as ErrorDetailData;
 use crate::ffi_error::{FfiError, SimlinError};
 use crate::{

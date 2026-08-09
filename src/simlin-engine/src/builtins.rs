@@ -621,19 +621,128 @@ where
     }
 }
 
+/// `name()` and `is_builtin_fn` are two halves of one table, and this pins them
+/// as an ENUMERATION rather than a sample: every `BuiltinFn` variant is built
+/// below, and the `_`-less match makes a newly added variant a COMPILE error
+/// until it is listed. The assertions are properties (a name is non-empty, and
+/// every name `name()` can emit is one `is_builtin_fn` accepts) rather than a
+/// transcription of the match arms, so this cannot rot into a copy of the code
+/// under test.
 #[test]
-fn test_is_builtin_fn() {
-    assert!(is_builtin_fn("lookup"));
-    assert!(!is_builtin_fn("lookupz"));
-    assert!(is_builtin_fn("log10"));
-    assert!(is_builtin_fn("sum"));
-    assert!(is_builtin_fn("rank"));
-    assert!(is_builtin_fn("size"));
-    assert!(is_builtin_fn("stddev"));
-}
+fn every_builtin_variant_names_itself_and_is_recognized() {
+    type Builtin = BuiltinFn<i32>;
+    fn b() -> Box<i32> {
+        Box::new(0)
+    }
 
-#[test]
-fn test_is_0_arity_builtin_fn() {
+    let all: Vec<Builtin> = vec![
+        Builtin::Lookup(b(), b(), Loc::default()),
+        Builtin::LookupForward(b(), b(), Loc::default()),
+        Builtin::LookupBackward(b(), b(), Loc::default()),
+        Builtin::Abs(b()),
+        Builtin::Arccos(b()),
+        Builtin::Arcsin(b()),
+        Builtin::Arctan(b()),
+        Builtin::Cos(b()),
+        Builtin::Exp(b()),
+        Builtin::Inf,
+        Builtin::Int(b()),
+        Builtin::IsModuleInput("x".to_string(), Loc::default()),
+        Builtin::Ln(b()),
+        Builtin::Log10(b()),
+        Builtin::Max(b(), None),
+        Builtin::Mean(vec![]),
+        Builtin::Min(b(), None),
+        Builtin::Pi,
+        Builtin::Pulse(b(), b(), None),
+        Builtin::Quantum(b(), b()),
+        Builtin::Ramp(b(), b(), None),
+        Builtin::SafeDiv(b(), b(), None),
+        Builtin::Sign(b()),
+        Builtin::Sshape(b(), b(), b()),
+        Builtin::Sin(b()),
+        Builtin::Sqrt(b()),
+        Builtin::Step(b(), b()),
+        Builtin::Tan(b()),
+        Builtin::Time,
+        Builtin::TimeStep,
+        Builtin::StartTime,
+        Builtin::FinalTime,
+        Builtin::Rank(b(), b()),
+        Builtin::Size(b()),
+        Builtin::Stddev(b()),
+        Builtin::Sum(b()),
+        Builtin::VectorSelect(b(), b(), b(), b(), b()),
+        Builtin::VectorElmMap(b(), b()),
+        Builtin::VectorSortOrder(b(), b()),
+        Builtin::AllocateAvailable(b(), b(), b()),
+        Builtin::AllocateByPriority(b(), b(), b(), b(), b()),
+        Builtin::Previous(b(), b()),
+        Builtin::Init(b()),
+    ];
+
+    // No `_` arm: this is what turns "every variant is covered" into a property
+    // the compiler checks rather than a claim the row count implies.
+    for v in &all {
+        match v {
+            Builtin::Lookup(..)
+            | Builtin::LookupForward(..)
+            | Builtin::LookupBackward(..)
+            | Builtin::Abs(..)
+            | Builtin::Arccos(..)
+            | Builtin::Arcsin(..)
+            | Builtin::Arctan(..)
+            | Builtin::Cos(..)
+            | Builtin::Exp(..)
+            | Builtin::Inf
+            | Builtin::Int(..)
+            | Builtin::IsModuleInput(..)
+            | Builtin::Ln(..)
+            | Builtin::Log10(..)
+            | Builtin::Max(..)
+            | Builtin::Mean(..)
+            | Builtin::Min(..)
+            | Builtin::Pi
+            | Builtin::Pulse(..)
+            | Builtin::Quantum(..)
+            | Builtin::Ramp(..)
+            | Builtin::SafeDiv(..)
+            | Builtin::Sign(..)
+            | Builtin::Sshape(..)
+            | Builtin::Sin(..)
+            | Builtin::Sqrt(..)
+            | Builtin::Step(..)
+            | Builtin::Tan(..)
+            | Builtin::Time
+            | Builtin::TimeStep
+            | Builtin::StartTime
+            | Builtin::FinalTime
+            | Builtin::Rank(..)
+            | Builtin::Size(..)
+            | Builtin::Stddev(..)
+            | Builtin::Sum(..)
+            | Builtin::VectorSelect(..)
+            | Builtin::VectorElmMap(..)
+            | Builtin::VectorSortOrder(..)
+            | Builtin::AllocateAvailable(..)
+            | Builtin::AllocateByPriority(..)
+            | Builtin::Previous(..)
+            | Builtin::Init(..) => {}
+        }
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    for v in &all {
+        let name = v.name();
+        assert!(!name.is_empty(), "a variant reported an empty name");
+        assert!(
+            is_builtin_fn(name),
+            "name() emits {name:?} but is_builtin_fn rejects it"
+        );
+        assert!(seen.insert(name), "two variants share the name {name:?}");
+    }
+
+    assert!(!is_builtin_fn("lookupz"));
     assert!(!is_0_arity_builtin_fn("lookup"));
     assert!(is_0_arity_builtin_fn("time"));
 }
@@ -684,15 +793,6 @@ fn test_is_0_arity_builtin_fn_ci() {
             "ci/lowercase mismatch for {s}"
         );
     }
-}
-
-#[test]
-fn test_name() {
-    enum TestExpr {}
-    type Builtin = BuiltinFn<TestExpr>;
-
-    assert_eq!("inf", Builtin::Inf.name());
-    assert_eq!("time", Builtin::Time.name());
 }
 
 #[test]

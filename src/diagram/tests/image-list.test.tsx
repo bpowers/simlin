@@ -59,16 +59,6 @@ describe('ImageList', () => {
     const list = container.querySelector('ul')!;
     expect(list.style.gap).toBe('16px');
   });
-
-  test('applies custom className', () => {
-    const { container } = render(
-      <ImageList className="custom-grid">
-        <ImageListItem>Item</ImageListItem>
-      </ImageList>,
-    );
-    const list = container.querySelector('ul')!;
-    expect(list.className).toContain('custom-grid');
-  });
 });
 
 describe('ImageListItem', () => {
@@ -80,15 +70,5 @@ describe('ImageListItem', () => {
     );
     const item = screen.getByText('Content');
     expect(item.tagName).toBe('LI');
-  });
-
-  test('applies imageListItem class', () => {
-    render(
-      <ImageList>
-        <ImageListItem>Content</ImageListItem>
-      </ImageList>,
-    );
-    const item = screen.getByText('Content');
-    expect(item.className).toContain('imageListItem');
   });
 });

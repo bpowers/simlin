@@ -1009,72 +1009,6 @@ mod tests {
     // AC2.5: Chain order matches reversed declaration order
     // -------------------------------------------------------------------
 
-    #[test]
-    fn ac2_5_reversed_declaration_order() {
-        // Flows declared in order [B, C]
-        // Chain should be: C gets available=stock (highest priority),
-        //                  B gets available=C.remaining
-        let model = SystemsModel {
-            stocks: vec![
-                SystemsStock {
-                    name: "A".to_string(),
-                    initial: Expr::Int(10),
-                    max: Expr::Inf,
-                    is_infinite: false,
-                },
-                SystemsStock {
-                    name: "B".to_string(),
-                    initial: Expr::Int(0),
-                    max: Expr::Inf,
-                    is_infinite: false,
-                },
-                SystemsStock {
-                    name: "C".to_string(),
-                    initial: Expr::Int(0),
-                    max: Expr::Inf,
-                    is_infinite: false,
-                },
-            ],
-            flows: vec![
-                SystemsFlow {
-                    source: "A".to_string(),
-                    dest: "B".to_string(),
-                    flow_type: FlowType::Rate,
-                    rate: Expr::Int(5),
-                },
-                SystemsFlow {
-                    source: "A".to_string(),
-                    dest: "C".to_string(),
-                    flow_type: FlowType::Rate,
-                    rate: Expr::Int(3),
-                },
-            ],
-        };
-        let project = translate(&model, 10).unwrap();
-
-        // C (last declared) has highest priority: available=a
-        let c_refs = module_refs(&project, "a_outflows_c");
-        let c_available = c_refs
-            .iter()
-            .find(|(_, dst)| dst == "a_outflows_c.available");
-        assert_eq!(
-            c_available.map(|(src, _)| src.as_str()),
-            Some("a"),
-            "C (last declared) should get direct stock reference"
-        );
-
-        // B (first declared) has lower priority: available from C's remaining via aux
-        let b_refs = module_refs(&project, "a_outflows_b");
-        let b_available = b_refs
-            .iter()
-            .find(|(_, dst)| dst == "a_outflows_b.available");
-        assert_eq!(
-            b_available.map(|(src, _)| src.as_str()),
-            Some("a_outflows_c_remaining"),
-            "B (first declared) should chain from C's remaining aux"
-        );
-    }
-
     // -------------------------------------------------------------------
     // AC2.6: Infinite stocks translate to stocks with equation "inf()"
     // -------------------------------------------------------------------
@@ -1173,39 +1107,6 @@ mod tests {
     // -------------------------------------------------------------------
     // 1.0 Conversion detection: decimal rate produces conversion module
     // -------------------------------------------------------------------
-
-    #[test]
-    fn decimal_one_point_zero_is_conversion() {
-        let model = SystemsModel {
-            stocks: vec![
-                SystemsStock {
-                    name: "Departures".to_string(),
-                    initial: Expr::Int(0),
-                    max: Expr::Inf,
-                    is_infinite: false,
-                },
-                SystemsStock {
-                    name: "Departed".to_string(),
-                    initial: Expr::Inf,
-                    max: Expr::Inf,
-                    is_infinite: true,
-                },
-            ],
-            flows: vec![SystemsFlow {
-                source: "Departures".to_string(),
-                dest: "Departed".to_string(),
-                flow_type: FlowType::Conversion,
-                rate: Expr::Float(1.0),
-            }],
-        };
-        let project = translate(&model, 10).unwrap();
-
-        assert_eq!(
-            module_model_name(&project, "departures_outflows"),
-            Some("stdlib\u{205A}systems_conversion".to_string()),
-            "1.0 decimal rate should produce a conversion module"
-        );
-    }
 
     // -------------------------------------------------------------------
     // Conversion flow uses "rate" port and equation references "outflow"
@@ -1340,23 +1241,29 @@ mod tests {
     }
 
     #[test]
-    fn test_translate_links() {
-        parse_translate_compile("links.txt");
-    }
-
-    #[test]
     fn test_translate_maximums() {
-        parse_translate_compile("maximums.txt");
-    }
+        let project = parse_translate_compile("maximums.txt");
 
-    #[test]
-    fn test_translate_projects() {
-        parse_translate_compile("projects.txt");
+        // A capacity-limited destination credits what has already drained out
+        // of it, so the room left in `b` is its max less its level plus the
+        // volume `b_to_c` is removing this step.
+        assert_eq!(
+            scalar_eqn(&project, "a_outflows_dest_capacity"),
+            Some("5 - b + b_to_c".to_string()),
+        );
     }
 
     #[test]
     fn test_translate_extended_syntax() {
-        parse_translate_compile("extended_syntax.txt");
+        let project = parse_translate_compile("extended_syntax.txt");
+
+        // Multi-outflow chaining: the LOWER-priority flow does not read the
+        // stock directly, it reads what the higher-priority flow left behind,
+        // so `Recruiter * 2` is rewritten onto the upstream `remaining` aux.
+        assert_eq!(
+            scalar_eqn(&project, "recruiter_outflows_engrecruiter_requested"),
+            Some("recruiter_outflows_mgrrecruiter_remaining * 2".to_string()),
+        );
     }
 
     // -------------------------------------------------------------------

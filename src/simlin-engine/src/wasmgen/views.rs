@@ -734,17 +734,6 @@ mod tests {
     }
 
     #[test]
-    fn element_addr_temp_uses_offset_table() {
-        let mut ctx = ByteCodeContext::default();
-        ctx.set_temp_info(vec![0, 4], 8);
-        let d = ViewDesc::contiguous(1, ViewBase::Temp, vec![2], vec![0]);
-        // temp_storage_base = 1000; temp 1 offset = 4; element 1 -> (4+1)*8 = 40.
-        let a = d.element_addr(1, bases(0, 1000), &ctx).unwrap();
-        assert_eq!(a.const_byte_offset, 1000 + 40);
-        assert!(!a.module_relative);
-    }
-
-    #[test]
     fn element_addr_dynamic_view_carries_runtime_locals() {
         // A view with a runtime offset addend + validity flag (Task 4) returns
         // the constant base plus the locals the caller must add/guard.

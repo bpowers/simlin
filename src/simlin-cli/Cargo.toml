@@ -23,4 +23,8 @@ simlin-engine = { version = "0.1", path = "../simlin-engine", features = ["file_
 mimalloc = "0.1"
 
 [dev-dependencies]
+# Second edge onto the engine, adding EXACTLY `test-support` (the `TestProject`
+# model builder `main.rs`'s `#[cfg(test)]` modules use). Dev-only, so the
+# builder is not compiled into the shipped binary.
+simlin-engine = { version = "0.1", path = "../simlin-engine", features = ["test-support"] }
 tempfile = "3"

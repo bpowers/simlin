@@ -2,24 +2,23 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Smoke tests for the file-watcher actor (Phase 4 Task 2).
+//! Lifecycle test for the file-watcher actor (Phase 4 Task 2).
 //!
-//! These tests verify the watcher's plumbing by observing the EventBus:
-//! creating a file under the watched root must produce a `ProjectChanged`
-//! event, proving the debouncer → actor → handler pipeline is wired up end
-//! to end. The merge logic is tested separately in `watcher_merge.rs`.
+//! The debouncer → actor → handler pipeline is covered end to end in
+//! `watcher_merge.rs`, which asserts the registry side effects as well as
+//! the broadcast. What is left here is the half that suite never
+//! exercises: that the actor actually stops when told to.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use simlin_serve::events::{ChangeSource, EventBus, WsMessage};
+use simlin_serve::events::EventBus;
 use simlin_serve::handlers::AppState;
 use simlin_serve::registry::ProjectRegistry;
-use simlin_serve::test_support::{OS_EVENT_TIMEOUT, unavailable_git_probe, wait_for_watcher_ready};
+use simlin_serve::test_support::unavailable_git_probe;
 use simlin_serve::watcher::{ShutdownSignal, spawn_watcher};
 use tempfile::TempDir;
 use tokio::sync::Notify;
-use tokio::sync::broadcast::error::RecvError;
 
 /// Helper: build an `AppState` rooted at `dir`.
 fn build_app_state(dir: &std::path::Path) -> AppState {
@@ -35,69 +34,6 @@ fn build_app_state(dir: &std::path::Path) -> AppState {
         mcp_port: 0,
         strict_origin: true,
     }
-}
-
-/// Wait for any `ProjectChanged { source: Disk }` event on `rx`.
-async fn await_disk_changed(
-    rx: &mut tokio::sync::broadcast::Receiver<WsMessage>,
-    timeout: Duration,
-) -> Option<WsMessage> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return None;
-        }
-        match tokio::time::timeout(remaining, rx.recv()).await {
-            Ok(Ok(
-                msg @ WsMessage::ProjectChanged {
-                    source: ChangeSource::Disk,
-                    ..
-                },
-            )) => return Some(msg),
-            Ok(Ok(_other)) => continue,
-            Ok(Err(RecvError::Lagged(_))) => continue,
-            Ok(Err(RecvError::Closed)) => return None,
-            Err(_) => return None,
-        }
-    }
-}
-
-#[tokio::test]
-async fn watcher_emits_project_changed_for_new_file() {
-    let dir = TempDir::new().expect("tempdir");
-    let state = build_app_state(dir.path());
-    let shutdown: ShutdownSignal = Arc::new(Notify::new());
-
-    let mut rx = state.events.subscribe();
-
-    let handle = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
-    let mut sightings = handle.probe_sightings();
-
-    // Prove the OS-level watch is live, then write immediately. See
-    // `wait_for_watcher_ready` for why a sleep here cannot work.
-    wait_for_watcher_ready(&state.root, &mut sightings)
-        .await
-        .expect("watcher becomes ready");
-
-    // The minimal sd.json the watcher's parse path accepts.
-    let content = r#"{"name":"smoke","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
-    let target = state.root.join("smoke.sd.json");
-    tokio::fs::write(&target, content)
-        .await
-        .expect("write file");
-
-    let event = await_disk_changed(&mut rx, OS_EVENT_TIMEOUT)
-        .await
-        .expect("watcher must emit ProjectChanged{source: Disk} for the new file");
-    match event {
-        WsMessage::ProjectChanged { source, .. } => {
-            assert_eq!(source, ChangeSource::Disk);
-        }
-        other => panic!("expected ProjectChanged, got {other:?}"),
-    }
-
-    shutdown.notify_waiters();
 }
 
 #[tokio::test]

@@ -109,9 +109,6 @@ rs.mock('../NewUser', () => {
 import { describe, it, test, expect, beforeEach, afterEach, rs } from '@rstest/core';
 import type { Mock, MockInstance } from '@rstest/core';
 
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-
 import * as React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { Router } from 'wouter';
@@ -289,51 +286,11 @@ describe('App routing (Switch first-match semantics)', () => {
     setFetchRoutes({});
   });
 
-  // Find the body of the JSX <Switch>...</Switch> in App.tsx, stripping
-  // line comments so accidental references in `// <Switch>` text don't match.
-  function readSwitchBody(): string {
-    const sourceRaw = fs.readFileSync(path.join(__dirname, '..', 'App.tsx'), 'utf8');
-    // Drop // line comments to avoid false matches on prose like "// <Switch>".
-    const source = sourceRaw
-      .split('\n')
-      .map((line) => {
-        const idx = line.indexOf('//');
-        return idx === -1 ? line : line.substring(0, idx);
-      })
-      .join('\n');
-    const switchOpen = source.indexOf('<Switch>');
-    const switchClose = source.indexOf('</Switch>', switchOpen);
-    expect(switchOpen).toBeGreaterThan(-1);
-    expect(switchClose).toBeGreaterThan(switchOpen);
-    return source.substring(switchOpen, switchClose);
-  }
-
-  test('Switch directly contains Route children, not a wrapping div', () => {
-    // Structural assertion: wouter's <Switch> uses flattenChildren which only
-    // descends into Fragments, not divs. A <div> child has no truthy `path`
-    // prop so wouter treats it as a wildcard match: cloneElement(<div>) is
-    // returned and Switch's first-match semantics are silently disabled.
-    // See node_modules/wouter/src/index.js (flattenChildren / Switch / Route).
-    //
-    // The fix is to either remove the div from inside Switch, or wrap routes
-    // in a Fragment. Either way, Switch's body must not contain a <div>.
-    expect(readSwitchBody()).not.toMatch(/<div\b/);
-  });
-
-  test('routes /new before /:username/:projectName so the literal wins', () => {
-    // Once Switch first-match semantics are restored, the dynamic two-segment
-    // route :username/:projectName would shadow any /new variant (well -- it
-    // wouldn't here because /new has only one segment, but more importantly:
-    // any future overlapping literal would silently double-render). Order
-    // routes literal-first as a defensive habit.
-    const switchBody = readSwitchBody();
-    const newIdx = switchBody.indexOf('path="/new"');
-    const dynIdx = switchBody.indexOf('path="/:username/:projectName"');
-    expect(newIdx).toBeGreaterThan(-1);
-    expect(dynIdx).toBeGreaterThan(-1);
-    expect(newIdx).toBeLessThan(dynIdx);
-  });
-
+  // wouter's <Switch> uses flattenChildren, which descends into Fragments but
+  // not divs: a <div> child has no truthy `path` prop, so wouter treats it as
+  // a wildcard match and first-match semantics are silently disabled. That is
+  // observable -- the route below renders the editor and nothing else -- so it
+  // is asserted through rendering rather than by matching App.tsx's source.
   test('renders the editor at /:user/:project (and not Home)', async () => {
     setLocation('/alice/widgets');
     const { hook } = memoryLocation({ path: '/alice/widgets', static: true });

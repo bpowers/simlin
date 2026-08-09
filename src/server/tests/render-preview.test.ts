@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from '@rstest/core';
 
-import { previewDimensions, parseSvgDimensions } from '../render';
+import { previewDimensions, parseSvgDimensions } from '../preview-geometry';
 
 describe('previewDimensions', () => {
   const MAX = 800;
@@ -25,18 +25,6 @@ describe('previewDimensions', () => {
     const dims = previewDimensions(600, 600, MAX);
     expect(dims.width).toBe(800);
     expect(dims.height).toBe(0);
-  });
-
-  it('only one dimension is non-zero for landscape', () => {
-    const dims = previewDimensions(1600, 900, MAX);
-    expect(dims.width).toBe(MAX);
-    expect(dims.height).toBe(0);
-  });
-
-  it('only one dimension is non-zero for portrait', () => {
-    const dims = previewDimensions(300, 1200, MAX);
-    expect(dims.width).toBe(0);
-    expect(dims.height).toBe(MAX);
   });
 
   it('avoids the width-precedence bug for portrait', () => {

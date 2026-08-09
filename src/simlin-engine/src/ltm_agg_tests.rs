@@ -565,32 +565,6 @@ fn two_whole_rhs_reducers_same_text_are_distinct_aggs() {
     assert_eq!(result.aggs.iter().filter(|a| a.is_synthetic).count(), 0);
 }
 
-/// Two *inline* uses of the same reducer text still dedupe to one
-/// synthetic agg (the synthetic dedup-by-key path is preserved).
-#[test]
-fn two_inline_uses_same_text_dedupe_to_one_synthetic() {
-    let project = TestProject::new("two_inline")
-        .named_dimension("Region", &["NYC", "Boston"])
-        .array_aux("pop[Region]", "100")
-        .array_aux("share_a[Region]", "pop / SUM(pop[*])")
-        .array_aux("share_b[Region]", "pop * 2 / SUM(pop[*])");
-
-    let result = agg_nodes(&project);
-
-    let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
-    assert_eq!(
-        synthetic.len(),
-        1,
-        "two inline uses of the same reducer must dedupe to one synthetic agg; got: {:?}",
-        result.aggs
-    );
-    assert_eq!(synthetic[0].name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
-    // Both variables reference the same deduped synthetic agg index.
-    let a_idx = result.by_var.get("share_a").cloned().unwrap_or_default();
-    let b_idx = result.by_var.get("share_b").cloned().unwrap_or_default();
-    assert_eq!(a_idx, b_idx);
-}
-
 /// AC4.4 (nested reducers): `x = SUM(a[*]) / SUM(b[*])` mints two distinct
 /// synthetic agg nodes (`$⁚ltm⁚agg⁚0` for `SUM(a[*])`, `$⁚ltm⁚agg⁚1` for
 /// `SUM(b[*])`). The `/` is not a reducer; neither `SUM` is inside the

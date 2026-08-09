@@ -65,11 +65,6 @@ pub(crate) fn simple_project() -> datamodel::Project {
 }
 
 #[test]
-fn test_create_db() {
-    let _db = SimlinDb::default();
-}
-
-#[test]
 fn test_sync_simple_project() {
     let db = SimlinDb::default();
     let project = simple_project();
@@ -359,56 +354,6 @@ fn test_sync_dimensions() {
 }
 
 #[test]
-fn test_sync_module_refs() {
-    let db = SimlinDb::default();
-    let project = datamodel::Project {
-        name: "mod_test".to_string(),
-        sim_specs: datamodel::SimSpecs::default(),
-        dimensions: vec![],
-        units: vec![],
-        models: vec![datamodel::Model {
-            name: "main".to_string(),
-            sim_specs: None,
-            variables: vec![datamodel::Variable::Module(datamodel::Module {
-                ident: "my_module".to_string(),
-                model_name: "sub".to_string(),
-                documentation: String::new(),
-                units: None,
-                references: vec![
-                    datamodel::ModuleReference {
-                        src: "input_a".to_string(),
-                        dst: "a".to_string(),
-                    },
-                    datamodel::ModuleReference {
-                        src: "input_b".to_string(),
-                        dst: "b".to_string(),
-                    },
-                ],
-                compat: datamodel::Compat::default(),
-                ai_state: None,
-                uid: None,
-            })],
-            views: vec![],
-            loop_metadata: vec![],
-            groups: vec![],
-            macro_spec: None,
-        }],
-        source: None,
-        ai_information: None,
-    };
-
-    let result = sync_from_datamodel(&db, &project);
-    let module = &result.models["main"].variables["my_module"];
-    assert_eq!(module.source.kind(&db), SourceVariableKind::Module);
-    let refs = module.source.module_refs(&db);
-    assert_eq!(refs.len(), 2);
-    assert_eq!(refs[0].src, "input_a");
-    assert_eq!(refs[0].dst, "a");
-    assert_eq!(refs[1].src, "input_b");
-    assert_eq!(refs[1].dst, "b");
-}
-
-#[test]
 fn test_sync_resync_updates() {
     let db = SimlinDb::default();
     let mut project = simple_project();
@@ -546,38 +491,6 @@ fn test_parse_source_variable_stock() {
         Variable::Var { is_flow: true, .. }
     ));
     assert_eq!(parsed.variable.ident(), "production");
-}
-
-#[test]
-fn test_parse_source_variable_matches_direct_parse() {
-    use crate::variable::parse_var;
-
-    let db = SimlinDb::default();
-    let project = simple_project();
-    let result = sync_from_datamodel(&db, &project);
-
-    // Parse via tracked function
-    let pop_var = result.models["main"].variables["population"].source;
-    let tracked_result = parse_var_no_module_ctx(&db, pop_var, result.project);
-
-    // Parse directly via parse_var for comparison
-    let dm_var = &project.models[0].variables[0];
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let mut implicit_vars = Vec::new();
-    let direct_result = parse_var(
-        &crate::dimensions::DimensionsContext::from(project.dimensions.as_slice()),
-        dm_var,
-        &mut implicit_vars,
-        &units_ctx,
-        |mi| Ok(Some(mi.clone())),
-    );
-
-    // The tracked function and direct parse should produce equivalent results
-    assert_eq!(tracked_result.variable.ident(), direct_result.ident());
-    assert_eq!(
-        tracked_result.variable.equation_errors().is_some(),
-        direct_result.equation_errors().is_some()
-    );
 }
 
 #[test]

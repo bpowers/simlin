@@ -1801,30 +1801,7 @@ mod tests {
     /// coupled twin of `conveyor_compile`'s helper of the same name: the #625
     /// resting-curr pass preview must have no side effect on the real FIFO /
     /// belt side tables (no double-advance), or every subsequent row shifts.
-    fn assert_segmented_run_identical(project: &datamodel::Project, rests: &[f64]) {
-        let main = project.models[0].name.clone();
-        let mut seg = build_vm(project, &main).expect("build segmented vm");
-        for &t in rests {
-            seg.run_to(t).expect("segmented run_to");
-        }
-        seg.run_to_end().expect("segmented run_to_end");
-        let mut full = build_vm(project, &main).expect("build full vm");
-        full.run_to_end().expect("full run_to_end");
-
-        for name in full.names_as_strs() {
-            let ident = Ident::new(&name);
-            let a = full.get_series(&ident).expect("full series");
-            let b = seg.get_series(&ident).expect("segmented series");
-            assert_eq!(a.len(), b.len(), "{name}: series length");
-            for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-                assert_eq!(
-                    x.to_bits(),
-                    y.to_bits(),
-                    "{name} step {i}: full {x} != segmented {y}"
-                );
-            }
-        }
-    }
+    use crate::test_common::assert_segmented_run_identical;
 
     #[test]
     fn segmented_run_is_bit_identical_to_uninterrupted() {

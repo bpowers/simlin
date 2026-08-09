@@ -7,10 +7,8 @@ These tests verify that the loop score polarity matches the LTM papers:
 
 import math
 
-import numpy as np
-
 from simlin import Project
-from simlin.analysis import POLARITY_CONFIDENCE_THRESHOLD, LoopPolarity
+from simlin.analysis import LinkPolarity, LoopPolarity
 
 
 class TestLtmReinforcingLoop:
@@ -399,77 +397,33 @@ class TestRuntimeLoopsFfiAgreesWithPython:
         assert arrayed_seen, "expected at least one arrayed (multi-slot) loop"
 
 
-class TestLtmUndeterminedPolarity:
-    """Test the from_runtime_scores classification method."""
+class TestPolarityEnumsMatchFfi:
+    """The Python polarity enums are the C enums, variant for variant.
 
-    def test_from_runtime_scores_undetermined(self) -> None:
-        """Mixed-sign scores below the confidence threshold are UNDETERMINED."""
-        # |6 - 3| / (6 + 3) = 0.333 -> below threshold -> UNDETERMINED.
-        mixed_scores = np.array([float("nan"), 1.0, 2.0, -1.0, -2.0, 3.0])
-        polarity = LoopPolarity.from_runtime_scores(mixed_scores)
-        assert polarity == LoopPolarity.UNDETERMINED
+    Production reconstructs both by calling the Python enum on a raw C
+    integer (``LoopPolarity(c_loop.polarity)`` /
+    ``LinkPolarity(c_link.polarity)``), so a renumbering on either side
+    silently mislabels loops rather than failing. Asserting against
+    ``lib.SIMLIN_*`` -- the values cbindgen emitted from the Rust enums --
+    makes that a cross-language contract instead of a copy of the Python
+    literals. Every variant of both enums is listed.
+    """
 
-    def test_from_runtime_scores_undetermined_symmetric(self) -> None:
-        """Equal-magnitude positive and negative scores are UNDETERMINED."""
-        # |3 - 3| / (3 + 3) = 0.0 -> well below threshold.
-        symmetric_scores = np.array([1.0, 2.0, -1.0, -2.0])
-        polarity = LoopPolarity.from_runtime_scores(symmetric_scores)
-        assert polarity == LoopPolarity.UNDETERMINED
+    def test_loop_polarity_values_match_ffi(self) -> None:
+        from simlin._ffi import lib
 
-    def test_from_runtime_scores_reinforcing(self) -> None:
-        """Test that from_runtime_scores correctly classifies all-positive scores."""
-        positive_scores = np.array([float("nan"), 1.0, 2.0, 3.0, 0.5])
-        polarity = LoopPolarity.from_runtime_scores(positive_scores)
-        assert polarity == LoopPolarity.REINFORCING
+        assert LoopPolarity.REINFORCING == lib.SIMLIN_LOOP_POLARITY_REINFORCING
+        assert LoopPolarity.BALANCING == lib.SIMLIN_LOOP_POLARITY_BALANCING
+        assert LoopPolarity.UNDETERMINED == lib.SIMLIN_LOOP_POLARITY_UNDETERMINED
+        assert LoopPolarity.MOSTLY_REINFORCING == lib.SIMLIN_LOOP_POLARITY_MOSTLY_REINFORCING
+        assert LoopPolarity.MOSTLY_BALANCING == lib.SIMLIN_LOOP_POLARITY_MOSTLY_BALANCING
 
-    def test_from_runtime_scores_balancing(self) -> None:
-        """Test that from_runtime_scores correctly classifies all-negative scores."""
-        negative_scores = np.array([float("nan"), -1.0, -2.0, -3.0, -0.5])
-        polarity = LoopPolarity.from_runtime_scores(negative_scores)
-        assert polarity == LoopPolarity.BALANCING
+    def test_link_polarity_values_match_ffi(self) -> None:
+        from simlin._ffi import lib
 
-    def test_from_runtime_scores_mostly_reinforcing(self) -> None:
-        """Mostly-positive scores with a tiny negative dip cross the threshold."""
-        # |6.5 - 0.02| / (6.5 + 0.02) ~= 0.9939 -> above 0.99 threshold.
-        scores = np.array([1.0, 1.5, 2.0, 0.5, -0.02, 1.5])
-        polarity = LoopPolarity.from_runtime_scores(scores)
-        assert polarity == LoopPolarity.MOSTLY_REINFORCING
-
-    def test_from_runtime_scores_mostly_balancing(self) -> None:
-        """Mostly-negative scores with a tiny positive blip cross the threshold."""
-        # |0.02 - 6.5| / (0.02 + 6.5) ~= 0.9939 -> above 0.99 threshold,
-        # negative dominant -> MOSTLY_BALANCING.
-        scores = np.array([-1.0, -1.5, -2.0, -0.5, 0.02, -1.5])
-        polarity = LoopPolarity.from_runtime_scores(scores)
-        assert polarity == LoopPolarity.MOSTLY_BALANCING
-
-    def test_from_runtime_scores_weakly_dominant_undetermined(self) -> None:
-        """One-side dominance below the threshold stays UNDETERMINED."""
-        # |3 - 1| / (3 + 1) = 0.5 -> below 0.99 threshold despite the
-        # positive sum exceeding the negative sum.
-        scores = np.array([3.0, -1.0])
-        polarity = LoopPolarity.from_runtime_scores(scores)
-        assert polarity == LoopPolarity.UNDETERMINED
-
-    def test_from_runtime_scores_all_nan(self) -> None:
-        """Test that from_runtime_scores returns None for all-NaN scores."""
-        nan_scores = np.array([float("nan"), float("nan"), float("nan")])
-        polarity = LoopPolarity.from_runtime_scores(nan_scores)
-        assert polarity is None
-
-    def test_from_runtime_scores_all_zero(self) -> None:
-        """Test that from_runtime_scores returns None for all-zero scores."""
-        zero_scores = np.array([0.0, 0.0, 0.0])
-        polarity = LoopPolarity.from_runtime_scores(zero_scores)
-        assert polarity is None
-
-    def test_polarity_confidence_threshold_value(self) -> None:
-        """The Python-side threshold must match the Rust constant."""
-        assert POLARITY_CONFIDENCE_THRESHOLD == 0.99
-
-
-class TestLoopPolarityEnum:
-    """Test the LoopPolarity enum."""
+        assert LinkPolarity.POSITIVE == lib.SIMLIN_LINK_POLARITY_POSITIVE
+        assert LinkPolarity.NEGATIVE == lib.SIMLIN_LINK_POLARITY_NEGATIVE
+        assert LinkPolarity.UNKNOWN == lib.SIMLIN_LINK_POLARITY_UNKNOWN
 
     def test_polarity_string_representation(self) -> None:
         """Test that polarity string representation is correct."""
@@ -478,20 +432,6 @@ class TestLoopPolarityEnum:
         assert str(LoopPolarity.UNDETERMINED) == "U"
         assert str(LoopPolarity.MOSTLY_REINFORCING) == "Rux"
         assert str(LoopPolarity.MOSTLY_BALANCING) == "Bux"
-
-    def test_polarity_values(self) -> None:
-        """Test that polarity integer values match the C FFI for all five
-        variants.
-
-        Since GH #495 the FFI surfaces all five `SimlinLoopPolarity` variants
-        1:1 (no coalescing); these integer values mirror it exactly so
-        `LoopPolarity(c_loop.polarity)` round-trips a Rux/Bux loop.
-        """
-        assert LoopPolarity.REINFORCING == 0
-        assert LoopPolarity.BALANCING == 1
-        assert LoopPolarity.UNDETERMINED == 2
-        assert LoopPolarity.MOSTLY_REINFORCING == 3
-        assert LoopPolarity.MOSTLY_BALANCING == 4
 
 
 class TestStructuralPolarityClassification:

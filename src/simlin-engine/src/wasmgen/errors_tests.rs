@@ -216,15 +216,11 @@ fn error_word(code: ErrorCode, belt: usize) -> i64 {
 
 // ── the packing contract ─────────────────────────────────────────────────────
 
-/// `decode_error_word` is the exact inverse of the packing `emit_get_error`
-/// performs, over a code/belt pair large enough to exercise both halves.
-#[test]
-fn error_word_round_trips() {
-    let word = error_word(ErrorCode::ConveyorTransitTooLong, 1234);
-    let decoded = decode_error_word(word).expect("a nonzero code decodes");
-    assert_eq!(decoded.code, ErrorCode::ConveyorTransitTooLong as i32);
-    assert_eq!(decoded.belt, 1234);
-}
+// The round trip against the REAL packing is asserted end to end by the
+// `reconstruct_*` tests below, which read a running blob's `get_error()` and
+// rebuild the VM's message (belt index included) from the decoded word. What is
+// left here is the one thing an emitted blob cannot produce: a word whose code
+// half is zero.
 
 /// A zero CODE means "no error", even when the belt half carries a stale index --
 /// which is why the decoder tests the low word rather than the whole i64.

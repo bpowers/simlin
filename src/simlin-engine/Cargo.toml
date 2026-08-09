@@ -26,6 +26,19 @@ xmutil = ["dep:xmutil"]
 # no /proc/self/status read, env lookup, or eprintln! dead code. Enable with
 # `--features ltm_bench` when running the `ltm_full_bench` example.
 ltm_bench = []
+# Compiles in `test_common` (the `TestProject` model builder) for OTHER crates'
+# test targets. Every neighbour module in `src/lib.rs` is `#[cfg(test)]`, but
+# `test_common` cannot be: libsimlin's and simlin-cli's tests build against this
+# crate as an external dependency, where `cfg(test)` items do not exist. Left
+# un-gated it shipped in every release build (GH #925). Consumers add it through
+# a `[dev-dependencies]` edge, so a normal `cargo build` never sees it.
+test-support = []
+# The layout-quality eval statistics (`layout::eval_stats`). Its only consumer
+# is `examples/layout_eval`, which lists this in its required-features, so the
+# 1,300-line module leaves every wasm/native production build. Its own
+# `#[cfg(test)]` tests keep running under `cargo test` via the self
+# dev-dependency below.
+layout_eval = []
 
 [dependencies]
 unicode-xid = "0.2"
@@ -97,7 +110,7 @@ rayon = "1"
 #     this crate as `crate::`, never `simlin_engine::` -- the latter resolves
 #     to that second copy, whose `#[cfg(test)]` items do not exist and whose
 #     types are distinct from `crate::`'s.
-simlin-engine = { path = ".", default-features = false, features = ["file_io"] }
+simlin-engine = { path = ".", default-features = false, features = ["file_io", "test-support", "layout_eval"] }
 csv = "1"
 rand = "0.9"
 # The VDF parity harness (tests/integration/vdf_parity.rs) requires
@@ -138,7 +151,7 @@ checked = { git = "https://github.com/DLR-FT/wasm-interpreter.git", rev = "64ced
 # entry pinning required-features, that build would fail to compile the example.
 [[example]]
 name = "layout_eval"
-required-features = ["png_render", "file_io"]
+required-features = ["png_render", "file_io", "layout_eval"]
 
 [[bench]]
 name = "array_ops"

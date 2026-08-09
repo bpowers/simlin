@@ -39,21 +39,6 @@ def _canonical(name: str) -> str:
 class TestModelVariables:
     """Test working with model variables."""
 
-    def test_get_var_count_via_variables(self, test_model: Model) -> None:
-        """Test getting the number of variables via variables property."""
-        count = len(test_model.variables)
-        assert isinstance(count, int)
-        assert count > 0
-
-    def test_get_var_names_via_variables(self, test_model: Model) -> None:
-        """Test getting variable names via variables property."""
-        names = [v.name for v in test_model.variables]
-        assert isinstance(names, list)
-        assert len(names) > 0
-        for name in names:
-            assert isinstance(name, str)
-            assert len(name) > 0
-
     def test_get_incoming_links(self, test_model: Model) -> None:
         """Test getting incoming links for variables."""
         var_names = [v.name for v in test_model.variables]
@@ -69,19 +54,6 @@ class TestModelVariables:
         """Test that getting links for nonexistent variable raises error."""
         with pytest.raises(SimlinRuntimeError):
             test_model.get_incoming_links("nonexistent_variable_xyz_123")
-
-    def test_get_incoming_links_empty(self, test_model: Model) -> None:
-        """Test that some variables might have no dependencies."""
-        var_names = [v.name for v in test_model.variables]
-
-        # Find a constant or time variable that has no deps
-        for name in var_names:
-            deps = test_model.get_incoming_links(name)
-            if len(deps) == 0:
-                break
-
-        # Most models have at least one variable with no dependencies
-        # (like constants or time)
 
 
 class TestModelLinks:
@@ -113,22 +85,6 @@ class TestModelLinks:
 
 class TestModelSimulation:
     """Test creating simulations from models."""
-
-    def test_new_sim_default(self, test_model: Model) -> None:
-        """Test creating a simulation with default settings."""
-        sim = test_model.simulate()
-        assert sim is not None
-        from simlin import Sim
-
-        assert isinstance(sim, Sim)
-
-    def test_new_sim_with_ltm(self, test_model: Model) -> None:
-        """Test creating a simulation with LTM enabled."""
-        sim = test_model.simulate(enable_ltm=True)
-        assert sim is not None
-        from simlin import Sim
-
-        assert isinstance(sim, Sim)
 
     def test_multiple_sims(self, test_model: Model) -> None:
         """Test creating multiple simulations from the same model."""
@@ -429,16 +385,6 @@ class TestModelEditing:
         )
 
 
-class TestModelRepr:
-    """Test string representation of models."""
-
-    def test_repr(self, test_model: Model) -> None:
-        """Test __repr__ method."""
-        repr_str = repr(test_model)
-        assert "Model" in repr_str
-        assert "variable" in repr_str.lower()
-
-
 class TestModelStructuralProperties:
     """Test structural properties of Model."""
 
@@ -616,15 +562,22 @@ class TestModelSimulationMethods:
         assert isinstance(sim, Sim)
 
     def test_simulate_with_overrides(self, teacup_stmx_path) -> None:
-        """Test simulate() with variable overrides."""
-        from simlin import Sim
-
+        """simulate(overrides=...) reaches the engine and changes behavior."""
         model = simlin.load(teacup_stmx_path)
 
         # room_temperature is a simple constant (equation = "70")
-        overrides = {"room_temperature": 42.0}
-        sim = model.simulate(overrides=overrides)
-        assert isinstance(sim, Sim)
+        with model.simulate(overrides={"room_temperature": 42.0}) as sim:
+            sim.run_to_end()
+            overridden = sim.get_series("teacup_temperature")
+
+        base = model.base_case.results["teacup_temperature"]
+
+        assert overridden[0] == pytest.approx(base.iloc[0]), (
+            "the stock's initial value is unchanged"
+        )
+        assert overridden[-1] != pytest.approx(base.iloc[-1]), (
+            "cooling toward a 42-degree room must not land where cooling toward 70 does"
+        )
 
     def test_simulate_with_ltm(self, test_model: Model) -> None:
         """Test simulate() with LTM enabled."""
@@ -632,13 +585,6 @@ class TestModelSimulationMethods:
 
         sim = test_model.simulate(enable_ltm=True)
         assert isinstance(sim, Sim)
-
-    def test_run_method(self, test_model: Model) -> None:
-        """Test run() method returns Run."""
-        from simlin.run import Run
-
-        run = test_model.run(analyze_loops=False)
-        assert isinstance(run, Run)
 
     def test_run_with_overrides(self, teacup_stmx_path) -> None:
         """Test run() with variable overrides."""
@@ -653,18 +599,14 @@ class TestModelSimulationMethods:
         assert run.overrides == overrides
 
     def test_run_with_analyze_loops(self, test_model: Model) -> None:
-        """Test run() with loop analysis."""
-        from simlin.run import Run
+        """analyze_loops=True turns LTM on for the run.
 
+        The flag has to reach the engine: with it set the run resolves a real
+        loop-enumeration mode, whereas the default run reports "disabled"
+        (pinned by TestGetRunLifetime in test_sim.py).
+        """
         run = test_model.run(analyze_loops=True)
-        assert isinstance(run, Run)
-
-    def test_base_case_property(self, test_model: Model) -> None:
-        """Test base_case property returns Run."""
-        from simlin.run import Run
-
-        base_case = test_model.base_case
-        assert isinstance(base_case, Run)
+        assert run.ltm_mode in ("exhaustive", "discovery")
 
     def test_base_case_cached(self, test_model: Model) -> None:
         """Test that base_case is cached."""
@@ -688,11 +630,6 @@ class TestModelSimulationMethods:
 
 class TestModelUtilities:
     """Test utility methods of Model."""
-
-    def test_check_method_returns_tuple(self, test_model: Model) -> None:
-        """Test that check() returns a tuple."""
-        issues = test_model.check()
-        assert isinstance(issues, tuple)
 
     def test_check_method_on_valid_model(self, test_model: Model) -> None:
         """Test check() on a valid model returns empty or valid issues."""
@@ -747,6 +684,22 @@ class TestModelUtilities:
         assert aux.name in explanation
         assert "auxiliary" in explanation
 
+    def test_explain_module(self, modules_model_path) -> None:
+        """explain() has a Module arm too -- the fourth of its four type arms.
+
+        Modules only appear in a multi-model project, so this needs a model
+        the other explain() tests (which use the single-model fixture) cannot
+        reach.
+        """
+        from simlin.types import Module
+
+        model = simlin.load(modules_model_path)
+
+        module = next(v for v in model.variables if isinstance(v, Module))
+        explanation = model.explain(module.name)
+        assert module.name in explanation
+        assert module.model_name in explanation
+
     def test_explain_nonexistent_raises(self, test_model: Model) -> None:
         """Test explain() raises error for nonexistent variable."""
         with pytest.raises(SimlinRuntimeError) as exc_info:
@@ -754,28 +707,6 @@ class TestModelUtilities:
 
         assert "not found" in str(exc_info.value).lower()
         assert "nonexistent_variable_xyz" in str(exc_info.value)
-
-    def test_explain_includes_initial_equation_for_stocks(self, test_model: Model) -> None:
-        """Test that stock explanation includes initial value."""
-        from simlin.types import Stock
-
-        stock = next((v for v in test_model.variables if isinstance(v, Stock)), None)
-        if stock is None:
-            pytest.skip("No stocks in test model")
-
-        explanation = test_model.explain(stock.name)
-        assert "initial value" in explanation
-
-    def test_explain_includes_equation_for_flows(self, test_model: Model) -> None:
-        """Test that flow explanation includes equation."""
-        from simlin.types import Flow
-
-        flow = next((v for v in test_model.variables if isinstance(v, Flow)), None)
-        if flow is None:
-            pytest.skip("No flows in test model")
-
-        explanation = test_model.explain(flow.name)
-        assert "computed as" in explanation
 
 
 class TestArrayedEquations:

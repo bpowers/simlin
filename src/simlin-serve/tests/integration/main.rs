@@ -32,7 +32,6 @@ mod discovery_integration;
 mod dual_port_smoke;
 mod e2e_live_update;
 mod e2e_mcp_browser;
-mod e2e_smoke;
 mod git_integration;
 mod healthz;
 mod mcp_registry_access;

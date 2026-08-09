@@ -10,6 +10,13 @@ description = "Local HTTP server for browsing and editing system-dynamics models
 name = "simlin_serve"
 path = "src/lib.rs"
 
+[features]
+# Exposes `test_support` (integration-test fixtures: the watcher-readiness
+# probe helpers and the git-unavailable probe). Off by default so the
+# fixtures are not compiled into the shipped `simlin-serve` binary; the
+# self dev-dependency below turns it on for this crate's own test targets.
+test-support = []
+
 [[bin]]
 name = "simlin-serve"
 path = "src/main.rs"
@@ -39,6 +46,15 @@ twox-hash = { version = "2", default-features = false, features = ["xxhash3_64",
 anyhow = "1"
 
 [dev-dependencies]
+# Self dev-dependency so `tests/` can reach the feature-gated `test_support`
+# module without the feature leaking into a normal build of the library or
+# the binary.
+simlin-serve = { path = ".", features = ["test-support"] }
+# `parity_create` compares this crate's create path against the shared
+# core's, which means reaching for that crate's own gated fixtures.
+simlin-mcp-core = { version = "0.1", path = "../simlin-mcp-core", features = [
+  "test-support",
+] }
 tower = "0.5"
 tempfile = "3"
 serde_yaml = "0.9"

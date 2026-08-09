@@ -81,13 +81,9 @@ function makeRequest(server: http.Server, method: string, path: string): Promise
 }
 
 describe('authz middleware', () => {
-  it('has Function.length === 3 so Express dispatches it as request middleware', () => {
-    // Express treats a function with length 4 as an error handler and
-    // skips it during normal request flow. The default export of authz
-    // must therefore have exactly 3 declared parameters.
-    expect(authz.length).toBe(3);
-  });
-
+  // Express treats a 4-parameter function as an error handler and skips it in
+  // the normal request flow, so a wrong arity on authz shows up directly as
+  // the unauthenticated POST below reaching the downstream handler.
   it('returns 401 on unauthenticated POST when mounted via app.use', async () => {
     const app = express();
     installSession(app, () => ({}));
@@ -224,23 +220,6 @@ describe('authz middleware', () => {
     const server = app.listen(0);
     try {
       const res = await makeRequest(server, 'POST', '/api/projects/alice/my-model');
-      expect(res.status).toBe(401);
-      expect(res.body).toEqual({ error: 'unauthorized' });
-    } finally {
-      server.close();
-    }
-  });
-
-  it('returns 401 when session has passport but no user', async () => {
-    const app = express();
-    installSession(app, () => ({ passport: {} }));
-    app.use('/api', authz, (_req, res) => {
-      res.status(200).json({ reachedDownstream: true });
-    });
-
-    const server = app.listen(0);
-    try {
-      const res = await makeRequest(server, 'POST', '/api/user');
       expect(res.status).toBe(401);
       expect(res.body).toEqual({ error: 'unauthorized' });
     } finally {

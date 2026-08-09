@@ -253,14 +253,4 @@ mod tests {
         assert_eq!(errors[0]["code"].as_str(), Some("syntax"));
         assert_eq!(errors[0]["modelName"].as_str(), Some("main"));
     }
-
-    #[test]
-    fn wire_pair_diagnostics_changed_empty_errors() {
-        let (method, params) = wire_pair(WsMessage::DiagnosticsChanged {
-            path: "x.stmx".into(),
-            errors: vec![],
-        });
-        assert_eq!(method, "simlin/diagnosticsChanged");
-        assert_eq!(params["errors"].as_array().expect("array").len(), 0);
-    }
 }

@@ -1256,12 +1256,6 @@ mod tests {
     }
 
     #[test]
-    fn test_compare_significance_alpha_is_five_percent() {
-        // The exported significance threshold is the conventional 0.05.
-        assert_eq!(SIGNIFICANCE_ALPHA, 0.05);
-    }
-
-    #[test]
     fn test_compare_microscopic_delta_is_not_significant() {
         // Statistical significance is not practical significance: when every
         // candidate sample differs from the baseline by a hair (e.g. a

@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import TypedDict
 
 
 class ErrorCode(IntEnum):
@@ -87,19 +86,6 @@ class ErrorSeverity(IntEnum):
     WARNING = 1
 
 
-class ErrorDetailDict(TypedDict, total=False):
-    """Type definition for error details dictionary."""
-
-    code: ErrorCode
-    message: str
-    model_name: str
-    variable_name: str
-    start_offset: int
-    end_offset: int
-    kind: ErrorKind
-    unit_error_kind: UnitErrorKind
-
-
 @dataclass
 class ErrorDetail:
     """Detailed information about a compilation or validation error."""
@@ -169,12 +155,3 @@ class SimlinImportError(SimlinError):
     """Exception raised when importing a model fails."""
 
     pass
-
-
-def error_code_to_string(code: int) -> str:
-    """Convert an error code to a human-readable string."""
-    try:
-        error = ErrorCode(code)
-        return error.name.replace("_", " ").title()
-    except ValueError:
-        return f"Unknown Error Code ({code})"

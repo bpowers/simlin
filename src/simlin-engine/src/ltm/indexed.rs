@@ -757,6 +757,10 @@ impl IndexedGraph {
 
     /// Convert a circuit of indices back to the caller-facing
     /// `Vec<Ident<Canonical>>` once enumeration and dedup are complete.
+    ///
+    /// Test-only: production consumes circuits in their indexed form (see
+    /// `CausalGraph::find_indexed_circuits_with_limit`).
+    #[cfg(test)]
     pub(super) fn circuit_to_idents(&self, circuit: &[u32]) -> Vec<Ident<Canonical>> {
         circuit
             .iter()

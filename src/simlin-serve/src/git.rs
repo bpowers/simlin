@@ -103,7 +103,10 @@ impl GitProbe {
 
     /// Construct a probe that pretends git is unavailable. Only called from
     /// `test_support::unavailable_git_probe` and from unit tests inside this
-    /// crate; never from production paths.
+    /// crate; never from production paths, hence the same gate as
+    /// [`crate::test_support`] — without it this is dead code in a release
+    /// build.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn new_unavailable() -> Self {
         Self {
             git_available: false,
@@ -394,24 +397,6 @@ mod tests {
     }
 
     #[test]
-    fn enclosing_git_root_returns_none_for_path_outside_any_repo() {
-        // /tmp itself should not have a .git directory in normal CI.
-        // We don't assert against /tmp directly (someone could have a repo
-        // there) but we test a path component the test owns.
-        let dir = tempfile::TempDir::new().unwrap();
-        let nested = dir.path().join("a").join("b");
-        std::fs::create_dir_all(&nested).unwrap();
-        // The tempdir lives under the system tmp; it is *possible* for a
-        // user to have a .git anywhere upstream. We accept whatever the
-        // system reports — the contract is just "Some -> a real .git
-        // exists at that root".
-        let result = enclosing_git_root(&nested.join("c.stmx"));
-        if let Some(root) = result {
-            assert!(root.join(".git").exists());
-        }
-    }
-
-    #[test]
     fn invalidate_repo_cache_removes_cached_entries_for_that_repo() {
         if !git_available() {
             eprintln!("skipping: git binary not available");
@@ -444,13 +429,6 @@ mod tests {
     }
 
     #[test]
-    fn invalidate_repo_cache_is_noop_for_unknown_repo() {
-        let probe = GitProbe::new_unavailable();
-        // No panic, no error; just a quiet no-op.
-        probe.invalidate_repo_cache(Path::new("/nope/not/a/real/repo"));
-    }
-
-    #[test]
     fn enclosing_git_root_finds_marker_at_each_level() {
         let dir = tempfile::TempDir::new().unwrap();
         let nested = dir.path().join("sub").join("deeper");
@@ -470,6 +448,12 @@ mod tests {
     /// `Command::get_envs`, which reports per-command env overrides
     /// (`Some(value)` for sets, `None` for removals) without spawning a
     /// process or mutating the parent's environment.
+    ///
+    /// This is also the guard on [`GIT_PATH_TARGETING_VARS`]'s membership:
+    /// dropping an entry leaves the corresponding `path_targeting` probe
+    /// unstripped, and adding one of the `preserved` names strips a
+    /// variable the caller was meant to inherit. Either way the change is
+    /// caught here rather than in production.
     #[test]
     fn strip_git_path_env_removes_only_path_targeting_vars() {
         use std::ffi::OsStr;
@@ -533,23 +517,5 @@ mod tests {
                 "{name} must survive strip_git_path_env unchanged"
             );
         }
-    }
-
-    /// Catches accidental regression of the documented allowlist itself.
-    /// If someone reorders, adds, or removes entries from
-    /// `GIT_PATH_TARGETING_VARS`, they must update this test deliberately
-    /// and re-read the rationale comment.
-    #[test]
-    fn git_path_targeting_vars_matches_documented_allowlist() {
-        assert_eq!(
-            GIT_PATH_TARGETING_VARS,
-            &[
-                "GIT_DIR",
-                "GIT_WORK_TREE",
-                "GIT_INDEX_FILE",
-                "GIT_OBJECT_DIRECTORY",
-                "GIT_COMMON_DIR",
-            ]
-        );
     }
 }

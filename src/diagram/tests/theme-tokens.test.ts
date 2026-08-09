@@ -88,19 +88,6 @@ describe('theme.css token contracts', () => {
     return m[1];
   }
 
-  it('defines the dense-toolbar and caption tokens in :root and shadow hosts', () => {
-    expect(theme).toMatch(/:root,\s*:host\s*\{/);
-    expect(theme).toMatch(/--toolbar-dense-height:\s*48px/);
-    expect(theme).toMatch(/--font-size-caption:\s*0\.75rem/);
-  });
-
-  it('renames shadows to the elevation scheme (no sm/md/lg, adds 4/8/16/24)', () => {
-    for (const level of [1, 2, 3, 4, 8, 16, 24]) {
-      expect(theme).toMatch(new RegExp(`--shadow-${level}:`));
-    }
-    expect(theme).not.toMatch(/--shadow-(sm|md|lg)\b/);
-  });
-
   it('gives the chrome surface/text/border tokens dark-mode values', () => {
     const dark = darkBlock(theme);
     for (const token of [

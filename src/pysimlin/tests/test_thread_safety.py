@@ -25,7 +25,6 @@ import pytest
 
 import simlin
 from simlin import SimlinRuntimeError
-from simlin._ffi import _finalizer_refs, _refs_lock
 
 
 @pytest.fixture
@@ -265,18 +264,6 @@ class TestFinalizerRegistryThreadSafety:
 
         assert not errors, f"Concurrent creation/GC produced errors: {errors}"
 
-    def test_refs_lock_protects_finalizer_refs(self) -> None:
-        """The _refs_lock must be acquirable and protect _finalizer_refs."""
-        # Verify the lock exists and is a real Lock
-        assert isinstance(_refs_lock, type(threading.Lock()))
-
-        # Verify we can acquire/release it
-        acquired = _refs_lock.acquire(timeout=1)
-        assert acquired
-        # While holding the lock, access should be safe
-        _ = len(_finalizer_refs)
-        _refs_lock.release()
-
 
 class TestGetRunSnapshotAtomicity:
     """get_run() must take its snapshot atomically.
@@ -404,27 +391,3 @@ class TestGetRunSnapshotAtomicity:
         assert set(df.columns) == expected_cols, (
             f"snapshot is missing columns: {expected_cols - set(df.columns)}"
         )
-
-
-class TestPerObjectLockExists:
-    """Verify that wrapper objects carry a threading.Lock."""
-
-    def test_project_has_lock(self, xmile_model_path: Path) -> None:
-        model = simlin.load(xmile_model_path)
-        project = model.project
-        assert project is not None
-        assert hasattr(project, "_lock")
-        assert isinstance(project._lock, type(threading.Lock()))
-
-    def test_model_has_lock(self, xmile_model_path: Path) -> None:
-        model = simlin.load(xmile_model_path)
-        assert hasattr(model, "_lock")
-        assert isinstance(model._lock, type(threading.Lock()))
-
-    def test_sim_has_lock(self, xmile_model_path: Path) -> None:
-        # Sim uses an RLock (not a plain Lock) so get_run() can hold it
-        # across the whole snapshot while re-entering locked accessors.
-        model = simlin.load(xmile_model_path)
-        sim = model.simulate()
-        assert hasattr(sim, "_lock")
-        assert isinstance(sim._lock, type(threading.RLock()))

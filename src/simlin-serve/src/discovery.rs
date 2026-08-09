@@ -82,17 +82,6 @@ pub fn is_excluded_dir(name: &str) -> bool {
     UNIVERSAL_EXCLUDED_DIRS.contains(&name)
 }
 
-/// Map a filesystem path to a `ProjectFormat` purely by extension.
-///
-/// Public so the Phase 4 watcher can reuse the exact dispatch logic as
-/// the discovery walker. The `.sd.json` discriminator is matched on the
-/// literal compound suffix because `Path::extension` only returns the
-/// trailing component (`json`); falling back through `to_ascii_lowercase`
-/// on the trailing extension covers `STMX`, `XMile`, etc.
-pub fn classify_extension(path: &Path) -> Option<ProjectFormat> {
-    format_for_path(path)
-}
-
 /// Walk `root` recursively, returning every file whose extension maps to a
 /// known [`ProjectFormat`]. Order is whatever the underlying walker
 /// produces; callers needing determinism should sort.
@@ -139,10 +128,19 @@ pub fn discover_models(root: &Path) -> Result<Vec<DiscoveredFile>, DiscoveryErro
     Ok(out)
 }
 
-/// Map a filesystem path to a `ProjectFormat` purely by extension. The
-/// `.sd.json` discriminator is matched on the literal compound suffix because
-/// the `Path::extension` API only returns the trailing component (`json`).
-fn format_for_path(path: &Path) -> Option<ProjectFormat> {
+/// Map a filesystem path to a `ProjectFormat` purely by extension.
+///
+/// The single extension dispatcher for the whole crate: the discovery
+/// walker, the watcher's event classifier, and the HTTP read/save
+/// handlers all resolve a path's format through here. Divergent copies
+/// are how a file becomes discoverable but unreadable (or the reverse),
+/// so new consumers must call this rather than re-deriving the mapping.
+///
+/// The `.sd.json` discriminator is matched on the literal compound suffix
+/// because the `Path::extension` API only returns the trailing component
+/// (`json`); lowercasing the trailing extension covers `STMX`, `XMile`,
+/// and friends.
+pub fn format_for_path(path: &Path) -> Option<ProjectFormat> {
     let path_str = path.to_str()?;
     if path_str.ends_with(".sd.json") {
         return Some(ProjectFormat::SdJson);
@@ -207,19 +205,6 @@ mod tests {
             !is_excluded_dir("Node_Modules"),
             "case-sensitive on purpose"
         );
-    }
-
-    #[test]
-    fn classify_extension_matches_internal_dispatcher() {
-        assert_eq!(
-            classify_extension(Path::new("/tmp/a.stmx")),
-            Some(ProjectFormat::Stmx)
-        );
-        assert_eq!(
-            classify_extension(Path::new("/tmp/a.sd.json")),
-            Some(ProjectFormat::SdJson)
-        );
-        assert_eq!(classify_extension(Path::new("/tmp/a.txt")), None);
     }
 
     #[test]

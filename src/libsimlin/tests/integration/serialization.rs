@@ -75,14 +75,35 @@ fn test_project_json_roundtrip_sdai() {
     }
 }
 
+/// Every NULL-able pointer position on `simlin_project_serialize_json`, in
+/// one place: the project handle and the two out-parameters each reject
+/// with `Generic` rather than dereferencing. Mirrors the shape of
+/// `test_project_serialize_null_safety` on the protobuf twin.
 #[test]
-fn test_serialize_json_null_out_buffer() {
+fn test_serialize_json_null_safety() {
     let datamodel = TestProject::new("error_test").build_datamodel();
     let proj = open_project_from_datamodel(&datamodel);
 
     unsafe {
+        let mut out_buffer: *mut u8 = ptr::null_mut();
         let mut out_len: usize = 0;
+
+        // NULL project.
         let mut out_error: *mut SimlinError = ptr::null_mut();
+        simlin_project_serialize_json(
+            ptr::null_mut(),
+            SimlinJsonFormat::Native as u32,
+            false,
+            &mut out_buffer,
+            &mut out_len,
+            &mut out_error,
+        );
+        assert!(!out_error.is_null(), "expected error for NULL project");
+        assert_eq!(simlin_error_get_code(out_error), SimlinErrorCode::Generic);
+        simlin_error_free(out_error);
+
+        // NULL out_buffer.
+        out_error = ptr::null_mut();
         simlin_project_serialize_json(
             proj,
             SimlinJsonFormat::Native as u32,
@@ -91,23 +112,12 @@ fn test_serialize_json_null_out_buffer() {
             &mut out_len,
             &mut out_error,
         );
-
         assert!(!out_error.is_null(), "expected error for NULL out_buffer");
         assert_eq!(simlin_error_get_code(out_error), SimlinErrorCode::Generic);
         simlin_error_free(out_error);
 
-        simlin_project_unref(proj);
-    }
-}
-
-#[test]
-fn test_serialize_json_null_out_len() {
-    let datamodel = TestProject::new("error_test").build_datamodel();
-    let proj = open_project_from_datamodel(&datamodel);
-
-    unsafe {
-        let mut out_buffer: *mut u8 = ptr::null_mut();
-        let mut out_error: *mut SimlinError = ptr::null_mut();
+        // NULL out_len.
+        out_error = ptr::null_mut();
         simlin_project_serialize_json(
             proj,
             SimlinJsonFormat::Native as u32,
@@ -116,76 +126,9 @@ fn test_serialize_json_null_out_len() {
             ptr::null_mut(),
             &mut out_error,
         );
-
         assert!(!out_error.is_null(), "expected error for NULL out_len");
         assert_eq!(simlin_error_get_code(out_error), SimlinErrorCode::Generic);
         simlin_error_free(out_error);
-
-        simlin_project_unref(proj);
-    }
-}
-
-#[test]
-fn test_serialize_json_null_project() {
-    unsafe {
-        let mut out_buffer: *mut u8 = ptr::null_mut();
-        let mut out_len: usize = 0;
-        let mut out_error: *mut SimlinError = ptr::null_mut();
-        simlin_project_serialize_json(
-            ptr::null_mut(),
-            SimlinJsonFormat::Native as u32,
-            false,
-            &mut out_buffer,
-            &mut out_len,
-            &mut out_error,
-        );
-
-        assert!(!out_error.is_null(), "expected error for NULL project");
-        assert_eq!(simlin_error_get_code(out_error), SimlinErrorCode::Generic);
-        simlin_error_free(out_error);
-    }
-}
-
-#[test]
-fn test_serialize_json_both_formats_work() {
-    let datamodel = TestProject::new("format_test").build_datamodel();
-    let proj = open_project_from_datamodel(&datamodel);
-
-    unsafe {
-        // Test Native format
-        let mut out_buffer: *mut u8 = ptr::null_mut();
-        let mut out_len: usize = 0;
-        let mut out_error: *mut SimlinError = ptr::null_mut();
-        simlin_project_serialize_json(
-            proj,
-            SimlinJsonFormat::Native as u32,
-            false,
-            &mut out_buffer,
-            &mut out_len,
-            &mut out_error,
-        );
-
-        assert!(out_error.is_null(), "Native format should succeed");
-        assert!(!out_buffer.is_null());
-        assert!(out_len > 0);
-        simlin_free(out_buffer);
-
-        // Test SDAI format
-        out_buffer = ptr::null_mut();
-        out_len = 0;
-        simlin_project_serialize_json(
-            proj,
-            SimlinJsonFormat::Sdai as u32,
-            false,
-            &mut out_buffer,
-            &mut out_len,
-            &mut out_error,
-        );
-
-        assert!(out_error.is_null(), "SDAI format should succeed");
-        assert!(!out_buffer.is_null());
-        assert!(out_len > 0);
-        simlin_free(out_buffer);
 
         simlin_project_unref(proj);
     }

@@ -38,6 +38,13 @@ anyhow = "1.0"
 mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
+# Second edge onto the engine, adding EXACTLY `test-support` (the `TestProject`
+# model builder its integration tests use as `engine::test_common`). Keeping it
+# in dev-dependencies is what stops that builder from being compiled into the
+# shipped cdylib/staticlib; `default-features = false` mirrors the normal edge
+# above, since feature selection is a union over every edge and a defaults edge
+# here would silently re-enable them for test builds.
+simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false, features = ["test-support"] }
 # Pure-Rust no_std wasm interpreter (the same DLR-FT rev simlin-engine pins),
 # used by the `tests/integration/wasm.rs` integration test to validate and execute the blob
 # `simlin_model_compile_to_wasm` returns and check it against the returned

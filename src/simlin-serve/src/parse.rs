@@ -7,10 +7,12 @@
 //!
 //! Phase 5 will consolidate this with `simlin-mcp`'s `open_project` (which
 //! also handles content-based JSON-shape detection for SD-AI input). For
-//! Phase 1 we keep the surface minimal: a small dispatcher per `ProjectFormat`
-//! plus a canonical-JSON serializer. Note: `.mdl` is parsed via the native
-//! Rust parser (`open_vensim`), not the xmutil C++ path — see Phase 1
-//! note 4 in the implementation plan.
+//! now the surface is minimal: one dispatcher per `ProjectFormat`. The
+//! reverse direction (project -> canonical JSON) belongs to
+//! `ProjectDoc::current_state_as_json_string`, which every read path goes
+//! through so the doc stays the source of truth. Note: `.mdl` is parsed
+//! via the native Rust parser (`open_vensim`), not the xmutil C++ path —
+//! see Phase 1 note 4 in the implementation plan.
 
 use std::io::Cursor;
 
@@ -66,23 +68,12 @@ pub fn parse_to_datamodel(
     }
 }
 
-/// Serialize a `datamodel::Project` to JSON via the canonical `json::Project`
-/// shape. This is *not yet* byte-stable canonical JSON — Phase 3 hardens
-/// that property; for Phase 1 we only need a single-process consistent
-/// representation that the SPA can re-parse.
-pub fn datamodel_to_canonical_json(
-    project: &datamodel::Project,
-) -> Result<String, serde_json::Error> {
-    let json_project: json::Project = project.into();
-    serde_json::to_string(&json_project)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn sd_json_round_trips_through_datamodel() {
+    fn sd_json_parses_into_a_datamodel_project() {
         let input = r#"{"name":"x","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
         let project = parse_to_datamodel(
             std::path::Path::new("x.sd.json"),
@@ -91,10 +82,8 @@ mod tests {
         )
         .expect("parses");
         assert_eq!(project.name, "x");
-        let serialized = datamodel_to_canonical_json(&project).expect("serializes");
-        let value: serde_json::Value =
-            serde_json::from_str(&serialized).expect("re-parses as json");
-        assert_eq!(value["name"].as_str(), Some("x"));
+        assert_eq!(project.models.len(), 1);
+        assert_eq!(project.models[0].name, "main");
     }
 
     #[test]

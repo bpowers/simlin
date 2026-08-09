@@ -645,22 +645,49 @@ mod tests {
         assert!(parts[3] > 0.0);
     }
 
+    /// Extract the four `viewBox` numbers from a rendered SVG.
+    fn view_box_of(svg: &str) -> Vec<f64> {
+        let start = svg.find("viewBox=\"").unwrap() + 9;
+        let end = svg[start..].find('"').unwrap() + start;
+        svg[start..end]
+            .split(' ')
+            .map(|s| s.parse().unwrap())
+            .collect()
+    }
+
     #[test]
     fn test_render_svg_connector_bounds_excluded() {
-        // Connector between two aux elements far apart
-        let elements = vec![
+        // The viewBox is computed from NODE bounds only, so an arced connector
+        // that bows outside them must not widen it. Asserted by rendering the
+        // same two auxes with and without the link and comparing the boxes --
+        // a `contains("simlin-connector")` check would pass no matter what the
+        // viewBox did.
+        let nodes = vec![
             make_aux_ve("a", 1, 50.0, 50.0),
             make_aux_ve("b", 2, 50.0, 100.0),
-            make_link_ve(3, 1, 2),
         ];
         let variables = vec![make_scalar_aux_var("a"), make_scalar_aux_var("b")];
-        let project = make_simple_project(elements, variables);
 
-        let result = render_svg(&project, "main");
-        assert!(result.is_ok());
-        // The connector should render but not affect the viewBox
-        let svg = result.unwrap();
-        assert!(svg.contains("simlin-connector"));
+        let without = render_svg(
+            &make_simple_project(nodes.clone(), variables.clone()),
+            "main",
+        )
+        .expect("render without connector");
+
+        let mut with_link = nodes;
+        with_link.push(make_link_ve(3, 1, 2));
+        let with = render_svg(&make_simple_project(with_link, variables), "main")
+            .expect("render with connector");
+
+        assert!(
+            with.contains("simlin-connector"),
+            "the connector must actually be drawn, or the comparison is vacuous"
+        );
+        assert_eq!(
+            view_box_of(&with),
+            view_box_of(&without),
+            "adding a connector must not change the viewBox"
+        );
     }
 
     #[test]

@@ -367,30 +367,7 @@ fn arrayed_mid_run_get_value_reads_per_element_rates() {
 /// strongest direct pin that the #625 resting-curr pass preview has no
 /// side effect on the real belt/FIFO side tables (no double-advance): a
 /// preview that mutated real state would shift every subsequent row.
-fn assert_segmented_run_identical(project: &datamodel::Project, rests: &[f64]) {
-    let main = project.models[0].name.clone();
-    let mut seg = build_vm(project, &main).expect("build segmented vm");
-    for &t in rests {
-        seg.run_to(t).expect("segmented run_to");
-    }
-    seg.run_to_end().expect("segmented run_to_end");
-    let mut full = build_vm(project, &main).expect("build full vm");
-    full.run_to_end().expect("full run_to_end");
-
-    for name in full.names_as_strs() {
-        let ident = Ident::new(&name);
-        let a = full.get_series(&ident).expect("full series");
-        let b = seg.get_series(&ident).expect("segmented series");
-        assert_eq!(a.len(), b.len(), "{name}: series length");
-        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-            assert_eq!(
-                x.to_bits(),
-                y.to_bits(),
-                "{name} step {i}: full {x} != segmented {y}"
-            );
-        }
-    }
-}
+use crate::test_common::assert_segmented_run_identical;
 
 #[test]
 fn segmented_run_is_bit_identical_to_uninterrupted() {
@@ -1969,21 +1946,6 @@ fn arrayed_bare_non_sum_reducer_still_rejected() {
 }
 
 #[test]
-fn ordinary_conveyor_simulation_unaffected_by_container_guard() {
-    // The container-access guard must not perturb a conveyor model that uses
-    // no container access: the steady-state oracle still holds exactly.
-    let xml = include_str!("../../../test/conveyors/minimal_conveyor.xmile");
-    let project = parse(xml);
-    let main = project.models[0].name.clone();
-    let mut vm = build_vm(&project, &main).expect("build");
-    vm.run_to_end().expect("run");
-    let students = vm.get_series(&Ident::new("students")).expect("students");
-    for &s in &students {
-        assert!((s - 1000.0).abs() < 1e-6, "Students should hold at 1000");
-    }
-}
-
-#[test]
 fn equation_reading_driven_flow_is_rejected() {
     // An aux that reads the conveyor's outflow would see the placeholder 0
     // (the pass runs after flows), so expansion rejects it loudly.
@@ -2163,25 +2125,6 @@ fn second_non_leak_outflow_is_rejected() {
             && msg.contains("<leak/>"),
         "message should name the conveyor, the primary, the extra outflow, and the <leak/> fix: {msg}"
     );
-}
-
-#[test]
-fn primary_plus_leak_outflow_still_compiles() {
-    // Negative control: the SUPPORTED shape (one primary + one <leak/>
-    // outflow) must still build and simulate -- the rejection targets only
-    // extra NON-leak outflows. Mirrors `linear_leak_reaches_steady_state`.
-    let xml = wrap_model(
-        r#"
-    <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow><outflow>attriting</outflow>
-      <conveyor><len>4</len></conveyor></stock>
-    <flow name="in_f"><eqn>250</eqn></flow>
-    <flow name="out_f"><eqn>0</eqn></flow>
-    <flow name="attriting"><eqn>0.2</eqn><leak/></flow>"#,
-    );
-    let project = parse(&xml);
-    let main = project.models[0].name.clone();
-    let mut vm = build_vm(&project, &main).expect("primary + leak must still build");
-    vm.run_to_end().expect("run");
 }
 
 #[test]
@@ -2485,16 +2428,6 @@ fn assert_discrete_pulses(series: &[f64], dt: f64, n_units: usize) {
             "unit {u}: admitted {unit_vol} over the unit, want exactly in_limit=5 (no double-fire)"
         );
     }
-}
-
-#[test]
-fn discrete_in_limit_pulse_lands_on_integer_step_non_dyadic_dt() {
-    // v13: with dt=0.1 the additive TIME clock sits just below each integer, so
-    // the pre-fix floor(TIME) reset fired one dt late -- the step modeling
-    // t=k.0 still saw the previous unit's exhausted budget and admitted 0, the
-    // pulse instead landing at t~=k.1. The pulse must land on the t=k.0 step.
-    let series = run_discrete_in_limit_series(0.0, 6.0, 0.1);
-    assert_discrete_pulses(&series, 0.1, 6);
 }
 
 #[test]

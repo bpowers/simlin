@@ -104,15 +104,10 @@ describe('createRenderLimiter', () => {
     await Promise.all(runs);
   });
 
-  it('releases the slot when a task rejects', async () => {
+  it('releases the slot when a task rejects, and propagates the next task result', async () => {
     const limiter = createRenderLimiter(1);
     await expect(limiter.run(() => Promise.reject(new Error('first fails')))).rejects.toThrow('first fails');
     await expect(limiter.run(() => Promise.resolve('second runs'))).resolves.toBe('second runs');
-  });
-
-  it('propagates task results', async () => {
-    const limiter = createRenderLimiter(1);
-    await expect(limiter.run(() => Promise.resolve(42))).resolves.toBe(42);
   });
 });
 

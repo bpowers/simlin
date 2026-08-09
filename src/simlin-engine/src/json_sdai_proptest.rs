@@ -339,6 +339,7 @@ proptest! {
         let sdai_back: FlowFields = dm.into();
         prop_assert_eq!(flow.name, sdai_back.name);
         prop_assert_eq!(flow.equation, sdai_back.equation);
+        prop_assert_eq!(flow.units, sdai_back.units);
     }
 
     #[test]
@@ -347,6 +348,13 @@ proptest! {
         let sdai_back: AuxiliaryFields = dm.into();
         prop_assert_eq!(aux.name, sdai_back.name);
         prop_assert_eq!(aux.equation, sdai_back.equation);
+        // `datamodel::Aux::documentation` is a plain `String`, so an empty one
+        // comes back as `None` rather than `Some("")`. That normalization is
+        // the contract; anything else must survive verbatim.
+        prop_assert_eq!(
+            aux.documentation.filter(|d| !d.is_empty()),
+            sdai_back.documentation
+        );
     }
 
     #[test]
@@ -405,13 +413,16 @@ mod schema_tests {
     use std::fs;
     use std::path::Path;
 
-    /// This test writes to the file system to regenerate the schema file.
-    /// It is marked #[ignore] to avoid file system writes during normal test runs.
-    /// Run with `cargo test -- --ignored generate_and_write_sdai_schema` when needed.
+    /// `docs/sdai-model.schema.json` must equal what `generate_schema_json`
+    /// produces today -- the twin of `json_proptest`'s drift guard.
+    ///
+    /// This was `#[ignore]`d because it wrote the file unconditionally, which
+    /// made it a generator that never ran and therefore never caught drift
+    /// either. Writing is now opt-in through `UPDATE_SCHEMA=1`, so the test can
+    /// run by default and actually compare.
     #[test]
-    #[ignore]
-    fn generate_and_write_sdai_schema() {
-        let schema_json = generate_schema_json();
+    fn sdai_schema_matches_the_checked_in_file() {
+        let generated = generate_schema_json();
         let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -419,12 +430,23 @@ mod schema_tests {
             .unwrap()
             .join("docs/sdai-model.schema.json");
 
-        fs::write(&schema_path, &schema_json).expect("failed to write schema file");
+        if std::env::var_os("UPDATE_SCHEMA").is_some() {
+            fs::write(&schema_path, &generated).expect("failed to write schema file");
+            return;
+        }
 
-        // Verify it's valid JSON and can be used as a schema
-        let parsed: serde_json::Value = serde_json::from_str(&schema_json).unwrap();
-        assert!(parsed.is_object());
-        assert!(parsed.get("$schema").is_some());
+        let checked_in = fs::read_to_string(&schema_path).unwrap_or_else(|e| {
+            panic!(
+                "cannot read {}: {e}; regenerate with \
+                 `UPDATE_SCHEMA=1 cargo test -p simlin-engine sdai_schema_matches_the_checked_in_file`",
+                schema_path.display()
+            )
+        });
+        assert_eq!(
+            generated, checked_in,
+            "docs/sdai-model.schema.json is stale; regenerate with \
+             `UPDATE_SCHEMA=1 cargo test -p simlin-engine sdai_schema_matches_the_checked_in_file`"
+        );
     }
 
     #[test]

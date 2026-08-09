@@ -111,6 +111,12 @@ def arrayed_population_ltm_path() -> Path:
 
 
 @pytest.fixture
+def modules_model_path() -> Path:
+    """Return path to a multi-model project wired together with modules."""
+    return get_repo_root() / "test" / "modules_hares_and_foxes" / "modules_hares_and_foxes.stmx"
+
+
+@pytest.fixture
 def conveyor_model_path() -> Path:
     """Return path to a minimal XMILE conveyor model."""
     return get_repo_root() / "test" / "conveyors" / "minimal_conveyor.xmile"

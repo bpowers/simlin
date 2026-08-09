@@ -550,9 +550,9 @@ fn to_loop_summary(
     model_name: &str,
     project: &datamodel::Project,
 ) -> LoopSummary {
-    // The five-string surface mirrors `LoopPolarity::abbreviation` (R/B/Rux/
-    // Bux/U) so consumers reading the JSON polarity field see the same
-    // vocabulary the LTM literature uses.  AI-agent docs in
+    // The five-string surface is the spelled-out form of the LTM literature's
+    // R/B/Rux/U vocabulary (Schoenberg & Eberlein 2020), so consumers reading
+    // the JSON polarity field see the same distinctions.  AI-agent docs in
     // simlin-mcp/src/instructions.md and skills/loop-dominance.md are kept
     // in sync; if you add another variant, update those too.
     let polarity = match fl.loop_info.polarity {

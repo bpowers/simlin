@@ -34,8 +34,6 @@ pub(crate) fn literal_exponent(expr: &Expr2) -> Option<f64> {
 }
 
 struct UnitEvaluator<'a> {
-    #[allow(dead_code)]
-    ctx: &'a Context,
     model: &'a ModelStage1,
     inferred_units: &'a HashMap<Ident<Canonical>, UnitMap>,
     // units for module inputs
@@ -497,7 +495,6 @@ pub fn evaluate_expr_units(
     expr: &Expr2,
 ) -> UnitResult<Units> {
     let evaluator = UnitEvaluator {
-        ctx,
         model,
         inferred_units,
         time: time_variable(ctx),
@@ -530,7 +527,6 @@ pub fn check(
     let one_over_time: UnitMap = combine(UnitOp::Div, Default::default(), time_units.clone());
 
     let units = UnitEvaluator {
-        ctx,
         model,
         inferred_units,
         time: time_variable(ctx),

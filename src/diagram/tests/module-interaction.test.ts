@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from '@rstest/core';
 
-import { ModuleViewElement, AuxViewElement, LinkViewElement, ViewElement } from '@simlin/core/datamodel';
+import { ModuleViewElement } from '@simlin/core/datamodel';
 
 import { moduleContains, moduleBounds, ModuleWidth, ModuleHeight } from '../drawing/Module';
 import { StockWidth, StockHeight } from '../drawing/Stock';
@@ -93,135 +93,6 @@ describe('moduleContains matches stockContains pattern for rectangular elements'
     expect(moduleContains(mod, { x: 127, y: 122 })).toBe(true);
     // A point at (128, 123) is outside
     expect(moduleContains(mod, { x: 128, y: 123 })).toBe(false);
-  });
-});
-
-describe('module drag selection', () => {
-  // Mirrors the drag-selection logic in Canvas.tsx for modules
-  function isInSelectionRect(
-    element: { x: number; y: number },
-    left: number,
-    right: number,
-    top: number,
-    bottom: number,
-  ): boolean {
-    return element.x >= left && element.x <= right && element.y >= top && element.y <= bottom;
-  }
-
-  it('should select a module when its center is within the drag rectangle', () => {
-    const mod = makeModule(1, 100, 100);
-    expect(isInSelectionRect(mod, 50, 150, 50, 150)).toBe(true);
-  });
-
-  it('should not select a module when its center is outside the drag rectangle', () => {
-    const mod = makeModule(1, 200, 200);
-    expect(isInSelectionRect(mod, 50, 150, 50, 150)).toBe(false);
-  });
-
-  it('should select modules alongside stocks and auxes', () => {
-    const mod = makeModule(1, 100, 100);
-    const aux: AuxViewElement = {
-      type: 'aux',
-      uid: 2,
-      name: 'Aux2',
-      ident: 'aux_2',
-      var: undefined,
-      x: 120,
-      y: 80,
-      labelSide: 'center',
-      isZeroRadius: false,
-    };
-    const selectedUids: number[] = [];
-    for (const element of [mod, aux]) {
-      if (isInSelectionRect(element, 50, 200, 50, 150)) {
-        selectedUids.push(element.uid);
-      }
-    }
-    expect(selectedUids).toEqual([1, 2]);
-  });
-});
-
-describe('module as link target', () => {
-  // This tests the logic extracted from Canvas.isValidTarget:
-  // modules should be valid link targets (alongside aux and flow)
-
-  function isValidLinkTargetType(element: ViewElement): boolean {
-    return element.type === 'flow' || element.type === 'aux' || element.type === 'module';
-  }
-
-  it('modules are valid link target types', () => {
-    const mod = makeModule(1, 100, 100);
-    expect(isValidLinkTargetType(mod)).toBe(true);
-  });
-
-  it('auxes are still valid link target types', () => {
-    const aux: AuxViewElement = {
-      type: 'aux',
-      uid: 2,
-      name: 'Aux2',
-      ident: 'aux_2',
-      var: undefined,
-      x: 100,
-      y: 100,
-      labelSide: 'center',
-      isZeroRadius: false,
-    };
-    expect(isValidLinkTargetType(aux)).toBe(true);
-  });
-
-  it('moduleContains is used for hit-testing during link drag', () => {
-    const mod = makeModule(1, 100, 100);
-    // Simulates the pointer being over the module during link dragging
-    const pointer = { x: 110, y: 105 };
-    expect(moduleContains(mod, pointer)).toBe(true);
-
-    // Simulates the pointer being away from the module
-    const farPointer = { x: 200, y: 200 };
-    expect(moduleContains(mod, farPointer)).toBe(false);
-  });
-
-  it('prevents self-links (from and to same module)', () => {
-    const mod = makeModule(1, 100, 100);
-    const link: LinkViewElement = {
-      type: 'link',
-      uid: 10,
-      fromUid: 1,
-      toUid: -3,
-      arc: 0,
-      isStraight: false,
-      multiPoint: undefined,
-      polarity: undefined,
-      x: 0,
-      y: 0,
-      isZeroRadius: false,
-      ident: undefined,
-    };
-    // The isValidTarget logic checks: arrow.fromUid === element.uid
-    expect(link.fromUid === mod.uid).toBe(true);
-    // So this module should NOT be a valid target for its own link
-  });
-
-  it('allows links from one module to another', () => {
-    makeModule(1, 100, 100); // source module (referenced by link.fromUid)
-    const modB = makeModule(2, 300, 100);
-    const link: LinkViewElement = {
-      type: 'link',
-      uid: 10,
-      fromUid: 1,
-      toUid: -3,
-      arc: 0,
-      isStraight: false,
-      multiPoint: undefined,
-      polarity: undefined,
-      x: 0,
-      y: 0,
-      isZeroRadius: false,
-      ident: undefined,
-    };
-    // link.fromUid (1) !== modB.uid (2), so modB is a valid target
-    expect(link.fromUid !== modB.uid).toBe(true);
-    // And modB passes the hit-test
-    expect(moduleContains(modB, { x: 300, y: 100 })).toBe(true);
   });
 });
 

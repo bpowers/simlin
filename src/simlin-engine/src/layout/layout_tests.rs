@@ -249,13 +249,6 @@ fn test_viewbox_encompasses_elements() {
 }
 
 #[test]
-fn test_zoom_default() {
-    let project = test_project(simple_model());
-    let result = generate_layout(&project, TEST_MODEL, None).unwrap();
-    assert_eq!(result.zoom, 1.0);
-}
-
-#[test]
 fn test_flow_points_attached() {
     let project = test_project(simple_model());
     let result = generate_layout(&project, TEST_MODEL, None).unwrap();
@@ -526,71 +519,6 @@ fn test_extract_equation_deps_arrayed_uses_all_entries() {
     let mut deps = extract_equation_deps(&var, &idents);
     deps.sort();
     assert_eq!(deps, vec!["bar", "foo"]);
-}
-
-#[test]
-fn test_select_best_layout_lowest_seed_on_tie() {
-    let results = vec![
-        Ok(LayoutResult {
-            view: datamodel::StockFlow {
-                name: None,
-                elements: vec![ViewElement::Aux(view_element::Aux {
-                    name: "from_seed_123".to_string(),
-                    uid: 1,
-                    x: 0.0,
-                    y: 0.0,
-                    label_side: LabelSide::Bottom,
-                    compat: None,
-                })],
-                view_box: Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 100.0,
-                    height: 100.0,
-                },
-                zoom: 1.0,
-                use_lettered_polarity: false,
-                font: None,
-                sketch_compat: None,
-            },
-            weighted_cost: 3.0,
-            seed: 123,
-        }),
-        Ok(LayoutResult {
-            view: datamodel::StockFlow {
-                name: None,
-                elements: vec![ViewElement::Aux(view_element::Aux {
-                    name: "from_seed_42".to_string(),
-                    uid: 2,
-                    x: 0.0,
-                    y: 0.0,
-                    label_side: LabelSide::Bottom,
-                    compat: None,
-                })],
-                view_box: Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 100.0,
-                    height: 100.0,
-                },
-                zoom: 1.0,
-                use_lettered_polarity: false,
-                font: None,
-                sketch_compat: None,
-            },
-            weighted_cost: 3.0,
-            seed: 42,
-        }),
-    ];
-    let best = select_best_layout(results).unwrap();
-    // Equal weighted_cost on both: the lower seed wins the tie-break (still valid
-    // under the Rung-0 weighted_cost selection rule).
-    assert_eq!(best.elements.len(), 1);
-    if let ViewElement::Aux(aux) = &best.elements[0] {
-        assert_eq!(aux.name, "from_seed_42");
-    } else {
-        unreachable!("expected Aux element");
-    }
 }
 
 #[test]

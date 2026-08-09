@@ -819,7 +819,10 @@ mod open_vensim_model_tests {
     /// actual CSV contents, not to zero/NaN.
     #[test]
     fn resolves_get_direct_constants_from_filesystem() {
-        let path = Path::new("../../test/sdeverywhere/models/directconst/directconst.mdl");
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sdeverywhere/models/directconst/directconst.mdl"
+        ));
         let contents = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("failed to read fixture {}: {e}", path.display()));
 
@@ -884,7 +887,10 @@ mod open_vensim_model_tests {
     fn stdin_get_direct_yields_null_provider_error() {
         // Reuse the real `GET DIRECT CONSTANTS` fixture's contents, but feed
         // it through the stdin branch (no path argument).
-        let path = Path::new("../../test/sdeverywhere/models/directconst/directconst.mdl");
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sdeverywhere/models/directconst/directconst.mdl"
+        ));
         let contents = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("failed to read fixture {}: {e}", path.display()));
 

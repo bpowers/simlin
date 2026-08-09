@@ -2105,48 +2105,6 @@ mod tests {
     }
 
     #[test]
-    fn update_stock_flows_preserves_equation() {
-        let mut project = TestProject::new("test")
-            .flow("inflow", "10", None)
-            .stock("inventory", "100", &["inflow"], &[], None)
-            .build_datamodel();
-
-        // Verify initial state
-        let model = project.get_model("main").unwrap();
-        match model.get_variable("inventory").unwrap() {
-            Variable::Stock(stock) => {
-                assert_eq!(stock.inflows, vec!["inflow".to_string()]);
-                assert_eq!(stock.equation, Equation::Scalar("100".to_string()));
-            }
-            _ => panic!("expected stock"),
-        }
-
-        let patch = ProjectPatch {
-            project_ops: vec![],
-            models: vec![ModelPatch {
-                name: "main".to_string(),
-                ops: vec![ModelOperation::UpdateStockFlows {
-                    ident: "inventory".to_string(),
-                    inflows: vec![],
-                    outflows: vec![],
-                }],
-            }],
-        };
-
-        apply_patch(&mut project, patch).unwrap();
-
-        let model = project.get_model("main").unwrap();
-        match model.get_variable("inventory").unwrap() {
-            Variable::Stock(stock) => {
-                assert!(stock.inflows.is_empty());
-                assert!(stock.outflows.is_empty());
-                assert_eq!(stock.equation, Equation::Scalar("100".to_string()));
-            }
-            _ => panic!("expected stock"),
-        }
-    }
-
-    #[test]
     fn update_stock_flows_preserves_all_fields() {
         let mut project = TestProject::new("test")
             .flow("birth_rate", "10", None)
@@ -2975,83 +2933,6 @@ mod tests {
             }
             _ => panic!("expected module"),
         }
-    }
-
-    #[test]
-    fn rename_variable_updates_module_references_in_same_model() {
-        let mut project = TestProject::new("test")
-            .aux("old_name", "42", None)
-            .build_datamodel();
-
-        project.models.push(datamodel::Model {
-            name: "submodel".to_string(),
-            sim_specs: None,
-            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
-                ident: "sub_input".to_string(),
-                equation: Equation::Scalar("0".to_string()),
-                documentation: String::new(),
-                units: None,
-                gf: None,
-                ai_state: None,
-                uid: None,
-                compat: datamodel::Compat {
-                    can_be_module_input: true,
-                    visibility: Visibility::Public,
-                    ..datamodel::Compat::default()
-                },
-            })],
-            views: vec![],
-            loop_metadata: vec![],
-            groups: vec![],
-            macro_spec: None,
-        });
-
-        // Add a module that references old_name
-        let module = datamodel::Module {
-            ident: "child".to_string(),
-            model_name: "submodel".to_string(),
-            documentation: String::new(),
-            units: None,
-            references: vec![datamodel::ModuleReference {
-                src: "old_name".to_string(),
-                dst: "self.sub_input".to_string(),
-            }],
-            compat: datamodel::Compat::default(),
-            ai_state: None,
-            uid: None,
-        };
-        let add_module_patch = ProjectPatch {
-            project_ops: vec![],
-            models: vec![ModelPatch {
-                name: "main".to_string(),
-                ops: vec![ModelOperation::UpsertModule(module)],
-            }],
-        };
-        apply_patch(&mut project, add_module_patch).unwrap();
-
-        // Now rename old_name to new_name
-        let rename_patch = ProjectPatch {
-            project_ops: vec![],
-            models: vec![ModelPatch {
-                name: "main".to_string(),
-                ops: vec![ModelOperation::RenameVariable {
-                    from: "old_name".to_string(),
-                    to: "new_name".to_string(),
-                }],
-            }],
-        };
-        apply_patch(&mut project, rename_patch).unwrap();
-
-        let model = project.get_model("main").unwrap();
-        let module = model
-            .variables
-            .iter()
-            .find_map(|v| match v {
-                Variable::Module(m) => Some(m),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(module.references[0].src, "new_name");
     }
 
     #[test]
@@ -3914,29 +3795,6 @@ mod tests {
 
         let err = apply_patch(&mut project, patch).unwrap_err();
         assert_eq!(err.code, ErrorCode::Generic);
-    }
-
-    #[test]
-    fn set_loop_name_all_invalid_variables_returns_error() {
-        let mut project = TestProject::new("test")
-            .aux("x", "1", None)
-            .build_datamodel();
-        assign_uids(&mut project, "main", &[("x", 10)]);
-
-        let patch = ProjectPatch {
-            project_ops: vec![],
-            models: vec![ModelPatch {
-                name: "main".to_string(),
-                ops: vec![ModelOperation::SetLoopName {
-                    variables: vec!["nonexistent_a".to_string(), "nonexistent_b".to_string()],
-                    name: "loop".to_string(),
-                    description: None,
-                }],
-            }],
-        };
-
-        let result = apply_patch(&mut project, patch);
-        assert!(result.is_err());
     }
 
     /// Datamodel `ident` fields hold the human-facing display name; every

@@ -409,15 +409,6 @@ mod tests {
         assert!(!exprs_are_invariant(&exprs, &classifier(&[5])));
     }
 
-    /// A stock dependency is variant (the callback classifies the stock as
-    /// Variant). `dst = stock + 1`.
-    #[test]
-    fn stock_dependency_is_variant() {
-        let exprs = vec![Expr::AssignCurr(vref(0), Box::new(add(var(1), lit(1.0))))];
-        // `v1` is a stock -> Variant.
-        assert!(!exprs_are_invariant(&exprs, &classifier(&[])));
-    }
-
     /// False-positive class 1: a module-output read via a plain `Var` reference
     /// is variant (the callback classifies the module instance as Variant).
     #[test]

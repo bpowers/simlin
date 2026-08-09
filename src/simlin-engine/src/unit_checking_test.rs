@@ -22,7 +22,8 @@ mod tests {
             .aux_with_units("smoothed", "SMTH1(input, delay_time)", None)
             // This should work because smoothed has units of widgets
             .aux_with_units("output", "smoothed + 10", Some("widgets"))
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -39,7 +40,8 @@ mod tests {
             // SMTH1 with initial value should preserve units
             .aux_with_units("smoothed", "SMTH1(input, delay_time, initial)", None)
             .aux_with_units("output", "smoothed * 2", Some("widgets"))
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -95,7 +97,8 @@ mod tests {
             // DELAY1 should preserve units of input
             .aux_with_units("delayed", "DELAY1(input_flow, delay_time, initial)", None)
             .aux_with_units("total", "delayed + input_flow", Some("people"))
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -122,7 +125,8 @@ mod tests {
                 "growth_rate * 100 * years_value",
                 Some("dimensionless"),
             )
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -140,7 +144,8 @@ mod tests {
             )
             .flow_with_units("production", "100", Some("widgets/Month"))
             .flow_with_units("shipments", "80", Some("widgets/Month"))
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -182,7 +187,8 @@ mod tests {
                 "smoothed_acquisition * revenue_per_customer",
                 Some("dollars/weeks"),
             )
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -203,7 +209,8 @@ mod tests {
                 None,
             )
             .aux_with_units("total_rate", "delayed_rate + 5", Some("items/hours"))
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -233,7 +240,8 @@ mod tests {
                 None,
             )
             .aux_with_units("deviation", "ABS(smooth_signal - noisy_signal)", Some("kg"))
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -256,7 +264,8 @@ mod tests {
                 "position - previous_position",
                 Some("meters"),
             )
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -274,7 +283,8 @@ mod tests {
                 "current_temp - initial_temp",
                 Some("celsius"),
             )
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -297,7 +307,8 @@ mod tests {
             .aux_with_units("delayed", "DELAY1(smoothed, delay_time)", None)
             // Both should have units of "units"
             .aux_with_units("output", "smoothed + delayed", Some("units"))
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -319,7 +330,8 @@ mod tests {
             .aux_with_units("smooth_apples", "SMTH1(total_apples, time_period)", None)
             // This should work because smooth_apples has units of apples
             .aux_with_units("final_apples", "smooth_apples + 5", Some("apples"))
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -344,7 +356,8 @@ mod tests {
             .aux_with_units("time_constant", "5", Some("seconds"))
             .aux_with_units("smoothed_ratio", "SMTH1(ratio, time_constant)", None)
             .aux_with_units("final", "smoothed_ratio * 100", Some("dimensionless"))
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -362,7 +375,8 @@ mod tests {
             .aux_with_units("smooth_time", "2", Some("Month"))
             .aux_with_units("smoothed", "SMTH1(varying_input, smooth_time)", None)
             .aux_with_units("result", "smoothed", Some("widgets"))
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -382,7 +396,8 @@ mod tests {
             .aux_with_units("level2", "SMTH1(level1, slow_smooth)", None)
             // Both should have units of volts
             .aux_with_units("output", "level1 + level2", Some("volts"))
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -625,7 +640,8 @@ mod tests {
             )
             // Use the arrayed variable to verify units propagate
             .aux_with_units("total_rate", "SUM(regional_rate[*])", Some("widgets/days"))
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -647,7 +663,8 @@ mod tests {
             )
             // Use velocity in an expression with declared units to verify inference
             .aux_with_units("total_velocity", "SUM(velocity[*])", Some("meters/seconds"))
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -709,7 +726,8 @@ mod tests {
                 Some("widgets/days"),
             )
             .aux_with_units("total", "SUM(values[*])", Some("widgets/days"))
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -748,7 +766,8 @@ mod tests {
                 "IF condition > 0 THEN rate_a ELSE rate_b",
                 Some("widgets/days"),
             )
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]
@@ -787,7 +806,8 @@ mod tests {
                 "SAFEDIV(numerator, denominator, fallback)",
                 Some("widgets/days"),
             )
-            .assert_compiles_incremental();
+            .assert_compiles_incremental()
+            .assert_no_unit_diagnostics();
     }
 
     #[test]

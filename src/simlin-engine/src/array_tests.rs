@@ -1302,7 +1302,7 @@ mod range_tests {
             .array_aux("slice[Periods]", "source[1:3]");
 
         project.assert_compiles_incremental();
-        let result = project.vm_result_incremental("slice");
+        let result = project.vm_result("slice");
         assert_eq!(result[0], 1.0);
         assert_eq!(result[1], 2.0);
         assert_eq!(result[2], 3.0);
@@ -1332,7 +1332,7 @@ mod range_tests {
             .array_aux("slice[Index]", "data[start:end]");
 
         project.assert_compiles_incremental();
-        let result = project.vm_result_incremental("slice");
+        let result = project.vm_result("slice");
         for (i, &val) in result.iter().enumerate().take(4) {
             assert_eq!(val, 1.0, "Element {} should be 1.0, got {}", i, val);
         }
@@ -1419,31 +1419,6 @@ mod combined_operations_tests {
             .array_aux("profit[Period,Product]", "sales[*,*] - costs[*,*]")
             .array_aux("total_profit[Period]", "SUM(profit[*, Product.*])")
             .assert_compiles_incremental();
-    }
-}
-
-#[cfg(test)]
-mod error_handling_tests {
-    #[test]
-    fn dimension_mismatch() {
-        // Test that dimension mismatches are caught
-        // TestProject::new("dim_mismatch")
-        //     .indexed_dimension("X", 3)
-        //     .indexed_dimension("Y", 4)
-        //     .array_const("arr1[X]", 1.0)
-        //     .array_const("arr2[Y]", 2.0)
-        //     .array_aux("result[X]", "arr1[*] + arr2[*]")  // Should fail - different dimensions
-        //     .assert_compile_error(ErrorCode::ArrayDimensionMismatch);
-    }
-
-    #[test]
-    fn out_of_bounds_index() {
-        // Test out of bounds access
-        // TestProject::new("out_of_bounds")
-        //     .indexed_dimension("Small", 3)
-        //     .array_const("arr[Small]", 10.0)
-        //     .scalar_aux("bad_access", "arr[5]")  // Index 5 out of bounds for size 3
-        //     .assert_compile_error(ErrorCode::ArrayIndexOutOfBounds);
     }
 }
 
@@ -1586,21 +1561,6 @@ mod implicit_transpose_tests {
             .array_aux("b[Col, Row]", "(Col + 1) * 3 + Row")
             .array_aux("lt_result[Row, Col]", "if a < b then 1 else 0")
             .assert_vm_result("lt_result", &[1.0, 1.0, 1.0, 1.0]);
-    }
-
-    #[test]
-    fn dimension_mismatch_error() {
-        // Test that incompatible dimensions cause an error
-        // This test should verify that the simulation fails to build
-        // when dimensions cannot be reordered to match
-
-        // TestProject::new("dim_mismatch")
-        //     .indexed_dimension("A", 2)
-        //     .indexed_dimension("B", 3)
-        //     .indexed_dimension("C", 2)
-        //     .array_aux("source[A, B]", "1")
-        //     .array_aux("target[B, C]", "source") // Different dimensions - should fail
-        //     .assert_compile_error(ErrorCode::ArrayDimensionMismatch);
     }
 }
 
@@ -2124,7 +2084,7 @@ mod structural_lowering_tests {
         // Correct: each DimA row gets [10,20,30,40,50], total = 3*150 = 450
         // Bug (using DimA position): rows get [10,10,10,10,10],[20,...],[30,...],
         // total = 5*60 = 300
-        let vals = project.vm_result_incremental("total");
+        let vals = project.vm_result("total");
         assert_eq!(vals.len(), 1);
         assert!(
             (vals[0] - 450.0).abs() < 1e-6,
@@ -2449,7 +2409,7 @@ mod indexed_dimension_tests {
             .array_aux("slice[Size5]", "source[1:3]"); // [10, 20, 30, NaN, NaN]
 
         project.assert_compiles_incremental();
-        let result = project.vm_result_incremental("slice");
+        let result = project.vm_result("slice");
         assert_eq!(result[0], 10.0);
         assert_eq!(result[1], 20.0);
         assert_eq!(result[2], 30.0);
@@ -2567,7 +2527,7 @@ mod indexed_dimension_tests {
             .array_aux("expanded[LargeDim]", "small[1:3]"); // [5, 10, 15, NaN, NaN]
 
         project.assert_compiles_incremental();
-        let result = project.vm_result_incremental("expanded");
+        let result = project.vm_result("expanded");
         assert_eq!(result[0], 5.0);
         assert_eq!(result[1], 10.0);
         assert_eq!(result[2], 15.0);
@@ -2784,7 +2744,7 @@ mod indexed_dimension_tests {
         // Verify a few values: offset is 100, arr values are:
         // arr[1,1,1,1] = 1+2+4+8 = 15, so result = 115
         // arr[2,2,2,2] = 2+4+8+16 = 30, so result = 130
-        let result = project.vm_result_incremental("result");
+        let result = project.vm_result("result");
         assert_eq!(result[0], 115.0); // [1,1,1,1]
         assert_eq!(result[15], 130.0); // [2,2,2,2] - last element
     }
@@ -3291,7 +3251,6 @@ mod cross_dimension_reduction_tests {
 
         project.assert_compiles_incremental();
         project.assert_vm_result("result", &[198.0, 198.0]);
-        project.assert_vm_result_incremental("result", &[198.0, 198.0]);
     }
 
     /// Test that nested reductions work correctly in the VM.
@@ -3309,26 +3268,12 @@ mod cross_dimension_reduction_tests {
 
         project.assert_compiles_incremental();
         project.assert_vm_result("result", &[344.0, 344.0]);
-        project.assert_vm_result_incremental("result", &[344.0, 344.0]);
     }
 }
 
 #[cfg(test)]
 mod sum_of_conditional_tests {
     use crate::test_common::TestProject;
-
-    #[test]
-    fn sum_if_monolithic() {
-        // SUM(IF a[*] > 2 THEN a[*] ELSE 0) should sum only elements > 2
-        // a = [1, 3, 5], so only 3 and 5 pass => sum = 8
-        let project = TestProject::new("sum_if")
-            .indexed_dimension("D", 3)
-            .array_with_ranges("values[D]", vec![("1", "1"), ("2", "3"), ("3", "5")])
-            .scalar_aux("result", "SUM(IF values[*] > 2 THEN values[*] ELSE 0)");
-
-        project.assert_compiles_incremental();
-        project.assert_vm_result("result", &[8.0, 8.0]);
-    }
 
     #[test]
     fn sum_if_vm() {
@@ -3339,20 +3284,7 @@ mod sum_of_conditional_tests {
             .scalar_aux("result", "SUM(IF values[*] > 2 THEN values[*] ELSE 0)");
 
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("result", &[8.0, 8.0]);
-    }
-
-    #[test]
-    fn sum_if_count_monolithic() {
-        // SUM(IF a[*] > 2 THEN 1 ELSE 0) counts elements > 2
-        // a = [1, 3, 5], so 2 elements pass => sum = 2
-        let project = TestProject::new("sum_if_count")
-            .indexed_dimension("D", 3)
-            .array_with_ranges("values[D]", vec![("1", "1"), ("2", "3"), ("3", "5")])
-            .scalar_aux("result", "SUM(IF values[*] > 2 THEN 1 ELSE 0)");
-
-        project.assert_compiles_incremental();
-        project.assert_vm_result("result", &[2.0, 2.0]);
+        project.assert_vm_result("result", &[8.0, 8.0]);
     }
 
     #[test]
@@ -3363,7 +3295,7 @@ mod sum_of_conditional_tests {
             .scalar_aux("result", "SUM(IF values[*] > 2 THEN 1 ELSE 0)");
 
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("result", &[2.0, 2.0]);
+        project.assert_vm_result("result", &[2.0, 2.0]);
     }
 }
 
@@ -3384,7 +3316,7 @@ mod compiler_limit_tests {
 
         project.assert_compiles_incremental();
         // SUM((1+2+3) + (1+2+3) + (1+2+3)) = SUM(6,6,6) = 18
-        project.assert_vm_result_incremental("result", &[18.0, 18.0]);
+        project.assert_vm_result("result", &[18.0, 18.0]);
     }
 
     /// Test that reductions with multiple array sources work correctly.
@@ -3402,7 +3334,7 @@ mod compiler_limit_tests {
 
         project.assert_compiles_incremental();
         // SUM((1+2+3+4+5) * 3 elements) = SUM(15,15,15) = 45
-        project.assert_vm_result_incremental("result", &[45.0, 45.0]);
+        project.assert_vm_result("result", &[45.0, 45.0]);
     }
 }
 
@@ -3429,31 +3361,31 @@ mod vector_select_action_tests {
     }
 
     #[test]
-    fn vssum_monolithic() {
+    fn vssum() {
         let project = make_project("vssum", 0);
         project.assert_vm_result("result", &[8.0, 8.0]);
     }
 
     #[test]
-    fn vsmin_monolithic() {
+    fn vsmin() {
         let project = make_project("vsmin", 1);
         project.assert_vm_result("result", &[2.0, 2.0]);
     }
 
     #[test]
-    fn vsmean_monolithic() {
+    fn vsmean() {
         let project = make_project("vsmean", 2);
         project.assert_vm_result("result", &[4.0, 4.0]);
     }
 
     #[test]
-    fn vsmax_monolithic() {
+    fn vsmax() {
         let project = make_project("vsmax", 3);
         project.assert_vm_result("result", &[6.0, 6.0]);
     }
 
     #[test]
-    fn vsprod_monolithic() {
+    fn vsprod() {
         let project = make_project("vsprod", 4);
         project.assert_vm_result("result", &[12.0, 12.0]);
     }
@@ -3509,12 +3441,6 @@ mod vector_elm_map_tests {
     #[test]
     fn scalar_source_dim_offset_vm() {
         let project = make_scalar_source_dim_offset_project("vem_scalar_src_vm");
-        project.assert_vm_result_incremental("y", &[3.0, 4.0, 5.0]);
-    }
-
-    #[test]
-    fn scalar_source_dim_offset_monolithic() {
-        let project = make_scalar_source_dim_offset_project("vem_scalar_src_mono");
         project.assert_vm_result("y", &[3.0, 4.0, 5.0]);
     }
 
@@ -3537,7 +3463,7 @@ mod vector_elm_map_tests {
                 ],
             )
             .array_aux("z[DimA]", "10 + vector_elm_map(x[three], (DimA - 1))");
-        project.assert_vm_result_incremental("z", &[13.0, 14.0, 15.0]);
+        project.assert_vm_result("z", &[13.0, 14.0, 15.0]);
     }
 
     // GH #578 out-of-range: a scalar source whose base + per-element offset
@@ -3563,7 +3489,7 @@ mod vector_elm_map_tests {
                 ],
             )
             .array_aux("y2[DimA]", "vector_elm_map(x[four], (DimA - 1))");
-        let vals = project.vm_result_incremental("y2");
+        let vals = project.vm_result("y2");
         assert_eq!(vals.len(), 3);
         assert!((vals[0] - 4.0).abs() < 1e-9, "y2[A1]: {}", vals[0]);
         assert!((vals[1] - 5.0).abs() < 1e-9, "y2[A2]: {}", vals[1]);
@@ -3585,38 +3511,9 @@ mod vector_elm_map_tests {
     }
 
     #[test]
-    fn in_bounds_elements_map_correctly_monolithic() {
-        let project = make_oob_project("vem_inbounds_mono");
-        let vals = project.vm_result_incremental("result");
-        assert_eq!(vals.len(), 3, "expected 3 elements");
-        assert!(
-            (vals[0] - 10.0).abs() < 1e-9,
-            "element 0 (offset 0): expected 10, got {}",
-            vals[0]
-        );
-        assert!(
-            (vals[1] - 30.0).abs() < 1e-9,
-            "element 1 (offset 2): expected 30, got {}",
-            vals[1]
-        );
-    }
-
-    #[test]
-    fn out_of_bounds_element_returns_nan_monolithic() {
-        let project = make_oob_project("vem_oob_mono");
-        let vals = project.vm_result_incremental("result");
-        assert_eq!(vals.len(), 3, "expected 3 elements");
-        assert!(
-            vals[2].is_nan(),
-            "element 2 (offset 5, source len 3): expected NaN, got {}",
-            vals[2]
-        );
-    }
-
-    #[test]
     fn in_bounds_elements_map_correctly_vm() {
         let project = make_oob_project("vem_inbounds_vm");
-        let vals = project.vm_result_incremental("result");
+        let vals = project.vm_result("result");
         assert_eq!(vals.len(), 3, "expected 3 elements");
         assert!(
             (vals[0] - 10.0).abs() < 1e-9,
@@ -3633,34 +3530,12 @@ mod vector_elm_map_tests {
     #[test]
     fn out_of_bounds_element_returns_nan_vm() {
         let project = make_oob_project("vem_oob_vm");
-        let vals = project.vm_result_incremental("result");
+        let vals = project.vm_result("result");
         assert_eq!(vals.len(), 3, "expected 3 elements");
         assert!(
             vals[2].is_nan(),
             "element 2 (offset 5, source len 3): expected NaN, got {}",
             vals[2]
-        );
-    }
-
-    #[test]
-    fn negative_offset_returns_nan_monolithic() {
-        // A negative offset value (stored as a float like -1.0) should also produce NaN.
-        let project = TestProject::new("vem_neg_mono")
-            .indexed_dimension("D", 2)
-            .array_with_ranges("source[D]", vec![("1", "100"), ("2", "200")])
-            .array_with_ranges("offsets[D]", vec![("1", "-1"), ("2", "0")])
-            .array_aux("result[D]", "vector_elm_map(source[*], offsets[*])");
-        let vals = project.vm_result_incremental("result");
-        assert_eq!(vals.len(), 2, "expected 2 elements");
-        assert!(
-            vals[0].is_nan(),
-            "element 0 (offset -1): expected NaN, got {}",
-            vals[0]
-        );
-        assert!(
-            (vals[1] - 100.0).abs() < 1e-9,
-            "element 1 (offset 0): expected 100, got {}",
-            vals[1]
         );
     }
 
@@ -3671,7 +3546,7 @@ mod vector_elm_map_tests {
             .array_with_ranges("source[D]", vec![("1", "100"), ("2", "200")])
             .array_with_ranges("offsets[D]", vec![("1", "-1"), ("2", "0")])
             .array_aux("result[D]", "vector_elm_map(source[*], offsets[*])");
-        let vals = project.vm_result_incremental("result");
+        let vals = project.vm_result("result");
         assert_eq!(vals.len(), 2, "expected 2 elements");
         assert!(
             vals[0].is_nan(),
@@ -3730,7 +3605,7 @@ mod vector_elm_map_tests {
                 ],
             )
             .array_aux("f[DimA,DimB]", "vector_elm_map(d[DimA,B1], a[DimA])");
-        let vals = project.vm_result_incremental("f");
+        let vals = project.vm_result("f");
         assert_eq!(vals.len(), 6, "expected 6 elements (DimA x DimB)");
         // f is row-major [DimA,DimB]: [f(A1,B1), f(A1,B2), f(A2,B1), f(A2,B2),
         // f(A3,B1), f(A3,B2)] = [1,1,5,5,6,6] (f broadcast across DimB).
@@ -3807,12 +3682,6 @@ mod vector_elm_map_tests {
     #[test]
     fn strict_slice_source_oob_returns_nan_vm() {
         let project = make_strict_slice_oob_project("vem_slice_oob_vm");
-        assert_strict_slice_oob(&project.vm_result_incremental("f"));
-    }
-
-    #[test]
-    fn strict_slice_source_oob_returns_nan_monolithic() {
-        let project = make_strict_slice_oob_project("vem_slice_oob_mono");
         assert_strict_slice_oob(&project.vm_result("f"));
     }
 
@@ -3835,11 +3704,9 @@ mod vector_elm_map_tests {
                 vec![("1", "3"), ("2", "1"), ("3", "0"), ("4", "2")],
             )
             .array_aux("result[D]", "vector_elm_map(source[*], offsets[*])");
-        let vals = project.vm_result_incremental("result");
         // base=0 for every element: result[i] = source[offsets[i]]
         // = [source[3], source[1], source[0], source[2]] = [40,20,10,30].
         project.assert_vm_result("result", &[40.0, 20.0, 10.0, 30.0]);
-        assert_eq!(vals.len(), 4);
     }
 }
 
@@ -3866,7 +3733,7 @@ mod arrayed_except_hoisting_tests {
     #[test]
     fn arrayed_except_preserves_override_vm() {
         let project = make_except_project("arrayed_except_vm");
-        let vals = project.vm_result_incremental("result");
+        let vals = project.vm_result("result");
         assert_eq!(vals.len(), 3, "expected 3 elements");
         assert!(
             (vals[0] - 30.0).abs() < 1e-9,
@@ -3917,31 +3784,9 @@ mod first_element_override_hoisting_tests {
     }
 
     #[test]
-    fn first_override_rest_default_monolithic() {
-        let project = make_project("first_override_mono");
-        let vals = project.vm_result_incremental("result");
-        assert_eq!(vals.len(), 3);
-        assert!(
-            (vals[0] - 99.0).abs() < 1e-9,
-            "element 0 (override): expected 99, got {}",
-            vals[0]
-        );
-        assert!(
-            (vals[1] - 10.0).abs() < 1e-9,
-            "element 1 (default, offset 0): expected 10, got {}",
-            vals[1]
-        );
-        assert!(
-            (vals[2] - 20.0).abs() < 1e-9,
-            "element 2 (default, offset 1): expected 20, got {}",
-            vals[2]
-        );
-    }
-
-    #[test]
     fn first_override_rest_default_vm() {
         let project = make_project("first_override_vm");
-        let vals = project.vm_result_incremental("result");
+        let vals = project.vm_result("result");
         assert_eq!(vals.len(), 3);
         assert!(
             (vals[0] - 99.0).abs() < 1e-9,
@@ -3984,31 +3829,9 @@ mod mixed_element_hoisting_tests {
     }
 
     #[test]
-    fn mixed_elements_monolithic() {
-        let project = make_project("mixed_elements_mono");
-        let vals = project.vm_result_incremental("result");
-        assert_eq!(vals.len(), 3);
-        assert!(
-            (vals[0] - 30.0).abs() < 1e-9,
-            "element 0 (builtin, offset 2): expected 30, got {}",
-            vals[0]
-        );
-        assert!(
-            (vals[1] - 10.0).abs() < 1e-9,
-            "element 1 (builtin, offset 0): expected 10, got {}",
-            vals[1]
-        );
-        assert!(
-            (vals[2] - 42.0).abs() < 1e-9,
-            "element 2 (constant): expected 42, got {}",
-            vals[2]
-        );
-    }
-
-    #[test]
     fn mixed_elements_vm() {
         let project = make_project("mixed_elements_vm");
-        let vals = project.vm_result_incremental("result");
+        let vals = project.vm_result("result");
         assert_eq!(vals.len(), 3);
         assert!(
             (vals[0] - 30.0).abs() < 1e-9,
@@ -4051,31 +3874,9 @@ mod nested_hoisting_first_override_tests {
     }
 
     #[test]
-    fn nested_first_override_monolithic() {
-        let project = make_project("nested_first_override_mono");
-        let vals = project.vm_result_incremental("result");
-        assert_eq!(vals.len(), 3);
-        assert!(
-            (vals[0] - 99.0).abs() < 1e-9,
-            "element 0 (override): expected 99, got {}",
-            vals[0]
-        );
-        assert!(
-            (vals[1] - 20.0).abs() < 1e-9,
-            "element 1 (default, 10+VEM[1]): expected 20, got {}",
-            vals[1]
-        );
-        assert!(
-            (vals[2] - 30.0).abs() < 1e-9,
-            "element 2 (default, 10+VEM[2]): expected 30, got {}",
-            vals[2]
-        );
-    }
-
-    #[test]
     fn nested_first_override_vm() {
         let project = make_project("nested_first_override_vm");
-        let vals = project.vm_result_incremental("result");
+        let vals = project.vm_result("result");
         assert_eq!(vals.len(), 3);
         assert!(
             (vals[0] - 99.0).abs() < 1e-9,
@@ -4118,31 +3919,9 @@ mod nested_override_different_wrapping_tests {
     }
 
     #[test]
-    fn nested_different_wrapping_monolithic() {
-        let project = make_project("nested_diff_wrap_mono");
-        let vals = project.vm_result_incremental("result");
-        assert_eq!(vals.len(), 3);
-        assert!(
-            (vals[0] - 130.0).abs() < 1e-9,
-            "element 0 (override, 100+VEM[0]): expected 130, got {}",
-            vals[0]
-        );
-        assert!(
-            (vals[1] - 20.0).abs() < 1e-9,
-            "element 1 (default, 10+VEM[1]): expected 20, got {}",
-            vals[1]
-        );
-        assert!(
-            (vals[2] - 30.0).abs() < 1e-9,
-            "element 2 (default, 10+VEM[2]): expected 30, got {}",
-            vals[2]
-        );
-    }
-
-    #[test]
     fn nested_different_wrapping_vm() {
         let project = make_project("nested_diff_wrap_vm");
-        let vals = project.vm_result_incremental("result");
+        let vals = project.vm_result("result");
         assert_eq!(vals.len(), 3);
         assert!(
             (vals[0] - 130.0).abs() < 1e-9,
@@ -4183,31 +3962,9 @@ mod toplevel_default_nested_override_tests {
     }
 
     #[test]
-    fn toplevel_default_nested_override_monolithic() {
-        let project = make_project("toplevel_nested_mono");
-        let vals = project.vm_result_incremental("result");
-        assert_eq!(vals.len(), 3);
-        assert!(
-            (vals[0] - 30.0).abs() < 1e-9,
-            "element 0 (default VEM[0]): expected 30, got {}",
-            vals[0]
-        );
-        assert!(
-            (vals[1] - 10.0).abs() < 1e-9,
-            "element 1 (default VEM[1]): expected 10, got {}",
-            vals[1]
-        );
-        assert!(
-            (vals[2] - 120.0).abs() < 1e-9,
-            "element 2 (override VEM[2]+100): expected 120, got {}",
-            vals[2]
-        );
-    }
-
-    #[test]
     fn toplevel_default_nested_override_vm() {
         let project = make_project("toplevel_nested_vm");
-        let vals = project.vm_result_incremental("result");
+        let vals = project.vm_result("result");
         assert_eq!(vals.len(), 3);
         assert!(
             (vals[0] - 30.0).abs() < 1e-9,
@@ -4250,31 +4007,9 @@ mod different_builtin_override_tests {
     }
 
     #[test]
-    fn different_builtin_override_monolithic() {
-        let project = make_project("diff_builtin_mono");
-        let vals = project.vm_result_incremental("result");
-        assert_eq!(vals.len(), 3);
-        assert!(
-            (vals[0] - 30.0).abs() < 1e-9,
-            "element 0 (default VEM[0]): expected 30, got {}",
-            vals[0]
-        );
-        assert!(
-            (vals[1] - 10.0).abs() < 1e-9,
-            "element 1 (default VEM[1]): expected 10, got {}",
-            vals[1]
-        );
-        assert!(
-            (vals[2] - 2.0).abs() < 1e-9,
-            "element 2 (override VSO[2]): expected 2, got {}",
-            vals[2]
-        );
-    }
-
-    #[test]
     fn different_builtin_override_vm() {
         let project = make_project("diff_builtin_vm");
-        let vals = project.vm_result_incremental("result");
+        let vals = project.vm_result("result");
         assert_eq!(vals.len(), 3);
         assert!(
             (vals[0] - 30.0).abs() < 1e-9,
@@ -4344,37 +4079,6 @@ mod vector_op_invalid_view_tests {
 mod flag_split_tests {
     use crate::test_common::TestProject;
 
-    /// Reducer builtins (SUM, MEAN, etc.) should NOT promote ActiveDimRef to
-    /// Wildcard.  When `row_sum[DimA] = SUM(matrix[DimA, *])`, the `DimA`
-    /// subscript is an ActiveDimRef that should resolve to a concrete element
-    /// offset so SUM iterates only over DimB for each row, NOT over the
-    /// entire matrix.
-    #[test]
-    fn reducer_does_not_promote_active_dim_ref_monolithic() {
-        // matrix is 2x3:
-        //   row 1: [1, 2, 3]  -> row_sum[1] = 6
-        //   row 2: [10, 20, 30] -> row_sum[2] = 60
-        let project = TestProject::new("reducer_no_promote_mono")
-            .indexed_dimension("DimA", 2)
-            .indexed_dimension("DimB", 3)
-            .array_with_ranges(
-                "matrix[DimA,DimB]",
-                vec![
-                    ("1,1", "1"),
-                    ("1,2", "2"),
-                    ("1,3", "3"),
-                    ("2,1", "10"),
-                    ("2,2", "20"),
-                    ("2,3", "30"),
-                ],
-            )
-            .array_aux("row_sum[DimA]", "SUM(matrix[DimA, *])");
-
-        project.assert_compiles_incremental();
-        // Each row_sum should be the sum of that row, not the entire matrix
-        project.assert_vm_result("row_sum", &[6.0, 60.0]);
-    }
-
     #[test]
     fn reducer_does_not_promote_active_dim_ref_vm() {
         let project = TestProject::new("reducer_no_promote_vm")
@@ -4394,25 +4098,7 @@ mod flag_split_tests {
             .array_aux("row_sum[DimA]", "SUM(matrix[DimA, *])");
 
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("row_sum", &[6.0, 60.0]);
-    }
-
-    /// Vector builtins (VECTOR SORT ORDER, etc.) should promote ActiveDimRef
-    /// to Wildcard so the full array view is available.  This is a focused
-    /// unit test documenting the intent (also covered by compiler_vector.rs).
-    #[test]
-    fn vector_builtin_promotes_active_dim_ref_monolithic() {
-        // vals = [30, 10, 20]
-        // VECTOR SORT ORDER ascending yields the genuine-Vensim 0-based
-        // permutation [1, 2, 0]: position i holds the source index of the
-        // i-th smallest element (10@1, 20@2, 30@0).
-        let project = TestProject::new("vector_promotes_mono")
-            .indexed_dimension("DimA", 3)
-            .array_with_ranges("vals[DimA]", vec![("1", "30"), ("2", "10"), ("3", "20")])
-            .array_aux("result[DimA]", "VECTOR SORT ORDER(vals[DimA], 1)");
-
-        project.assert_compiles_incremental();
-        project.assert_vm_result("result", &[1.0, 2.0, 0.0]);
+        project.assert_vm_result("row_sum", &[6.0, 60.0]);
     }
 
     #[test]
@@ -4423,32 +4109,7 @@ mod flag_split_tests {
             .array_aux("result[DimA]", "VECTOR SORT ORDER(vals[DimA], 1)");
 
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("result", &[1.0, 2.0, 0.0]);
-    }
-
-    /// Partial MEAN should reduce over one dimension while the other iterates.
-    #[test]
-    fn mean_partial_reduction_monolithic() {
-        let project = TestProject::new("mean_partial_mono")
-            .indexed_dimension("DimA", 2)
-            .indexed_dimension("DimB", 3)
-            .array_with_ranges(
-                "matrix[DimA,DimB]",
-                vec![
-                    ("1,1", "3"),
-                    ("1,2", "6"),
-                    ("1,3", "9"),
-                    ("2,1", "10"),
-                    ("2,2", "20"),
-                    ("2,3", "30"),
-                ],
-            )
-            .array_aux("row_mean[DimA]", "MEAN(matrix[DimA, *])");
-
-        project.assert_compiles_incremental();
-        // row 1 mean: (3+6+9)/3 = 6.0
-        // row 2 mean: (10+20+30)/3 = 20.0
-        project.assert_vm_result("row_mean", &[6.0, 20.0]);
+        project.assert_vm_result("result", &[1.0, 2.0, 0.0]);
     }
 
     #[test]
@@ -4470,7 +4131,7 @@ mod flag_split_tests {
             .array_aux("row_mean[DimA]", "MEAN(matrix[DimA, *])");
 
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("row_mean", &[6.0, 20.0]);
+        project.assert_vm_result("row_mean", &[6.0, 20.0]);
     }
 }
 
@@ -4519,14 +4180,7 @@ mod dimension_dependent_scalar_arg_tests {
     fn vso_direction_varies_by_dimension_vm() {
         let project = make_vso_dim_dep_project("vso_dim_dep_vm");
         project.assert_compiles_incremental();
-        assert_vso_dim_dep_results(&project.vm_result_incremental("result"));
-    }
-
-    #[test]
-    fn vso_direction_varies_by_dimension_monolithic() {
-        let project = make_vso_dim_dep_project("vso_dim_dep_mono");
-        project.assert_compiles_incremental();
-        assert_vso_dim_dep_results(&project.vm_result_incremental("result"));
+        assert_vso_dim_dep_results(&project.vm_result("result"));
     }
 
     #[test]
@@ -4541,7 +4195,7 @@ mod dimension_dependent_scalar_arg_tests {
             .array_aux("result[D]", "10 + vector_sort_order(vals[*], dir[D])");
 
         project.assert_compiles_incremental();
-        let vals = project.vm_result_incremental("result");
+        let vals = project.vm_result("result");
         assert_eq!(vals.len(), 3);
         assert!(
             (vals[0] - 11.0).abs() < 1e-9,
@@ -4578,7 +4232,7 @@ mod dimension_dependent_scalar_arg_tests {
             );
 
         project.assert_compiles_incremental();
-        let vals = project.vm_result_incremental("result");
+        let vals = project.vm_result("result");
         assert_eq!(vals.len(), 3);
         // Element 0 (dir=-1, desc): sort_order = [1, 2, 0] -> result[0] = 1
         assert!(
@@ -4624,96 +4278,51 @@ mod array_reducer_tests {
     // -- SUM --
 
     #[test]
-    fn sum_monolithic() {
-        let project = make_reducer_project("sum_mono", "SUM");
-        project.assert_vm_result("result", &[100.0]);
-    }
-
-    #[test]
     fn sum_vm() {
         let project = make_reducer_project("sum_vm", "SUM");
-        project.assert_vm_result_incremental("result", &[100.0]);
+        project.assert_vm_result("result", &[100.0]);
     }
 
     // -- SIZE --
 
     #[test]
-    fn size_monolithic() {
-        let project = make_reducer_project("size_mono", "SIZE");
-        project.assert_vm_result("result", &[4.0]);
-    }
-
-    #[test]
     fn size_vm() {
         let project = make_reducer_project("size_vm", "SIZE");
-        project.assert_vm_result_incremental("result", &[4.0]);
+        project.assert_vm_result("result", &[4.0]);
     }
 
     // -- MEAN --
 
     #[test]
-    fn mean_monolithic() {
-        let project = make_reducer_project("mean_mono", "MEAN");
-        project.assert_vm_result("result", &[25.0]);
-    }
-
-    #[test]
     fn mean_vm() {
         let project = make_reducer_project("mean_vm", "MEAN");
-        project.assert_vm_result_incremental("result", &[25.0]);
+        project.assert_vm_result("result", &[25.0]);
     }
 
     // -- MIN --
 
     #[test]
-    fn min_monolithic() {
-        let project = make_reducer_project("min_mono", "MIN");
-        project.assert_vm_result("result", &[10.0]);
-    }
-
-    #[test]
     fn min_vm() {
         let project = make_reducer_project("min_vm", "MIN");
-        project.assert_vm_result_incremental("result", &[10.0]);
+        project.assert_vm_result("result", &[10.0]);
     }
 
     // -- MAX --
 
     #[test]
-    fn max_monolithic() {
-        let project = make_reducer_project("max_mono", "MAX");
+    fn max_vm() {
+        let project = make_reducer_project("max_vm", "MAX");
         project.assert_vm_result("result", &[40.0]);
     }
 
-    #[test]
-    fn max_vm() {
-        let project = make_reducer_project("max_vm", "MAX");
-        project.assert_vm_result_incremental("result", &[40.0]);
-    }
-
     // -- STDDEV --
-
-    #[test]
-    fn stddev_monolithic() {
-        // Vensim VSSTDEV uses population stddev (N divisor):
-        // mean = 25, sum_sq_diff = 500, stddev = sqrt(500/4) = sqrt(125)
-        let project = make_reducer_project("stddev_mono", "STDDEV");
-        let vals = project.vm_result_incremental("result");
-        assert_eq!(vals.len(), 1);
-        let expected = (500.0_f64 / 4.0).sqrt();
-        assert!(
-            (vals[0] - expected).abs() < 1e-6,
-            "STDDEV should be ~{expected}, got {}",
-            vals[0]
-        );
-    }
 
     #[test]
     fn stddev_vm() {
         // Vensim VSSTDEV uses population stddev (N divisor):
         // mean = 25, sum_sq_diff = 500, stddev = sqrt(500/4) = sqrt(125)
         let project = make_reducer_project("stddev_vm", "STDDEV");
-        let vals = project.vm_result_incremental("result");
+        let vals = project.vm_result("result");
         assert_eq!(vals.len(), 1);
         let expected = (500.0_f64 / 4.0).sqrt();
         assert!(
@@ -4726,25 +4335,13 @@ mod array_reducer_tests {
     // -- Single-element arrays: verify reducers handle size==1 correctly --
 
     #[test]
-    fn stddev_single_element_monolithic() {
-        let project = TestProject::new("stddev_single_mono")
-            .with_sim_time(0.0, 0.0, 1.0)
-            .indexed_dimension("D", 1)
-            .array_with_ranges("vals[D]", vec![("1", "42")])
-            .scalar_aux("result", "STDDEV(vals[*])");
-        let vals = project.vm_result_incremental("result");
-        assert_eq!(vals.len(), 1);
-        assert_eq!(vals[0], 0.0, "STDDEV of single element should be 0.0");
-    }
-
-    #[test]
     fn stddev_single_element_vm() {
         let project = TestProject::new("stddev_single_vm")
             .with_sim_time(0.0, 0.0, 1.0)
             .indexed_dimension("D", 1)
             .array_with_ranges("vals[D]", vec![("1", "42")])
             .scalar_aux("result", "STDDEV(vals[*])");
-        let vals = project.vm_result_incremental("result");
+        let vals = project.vm_result("result");
         assert_eq!(vals.len(), 1);
         assert_eq!(vals[0], 0.0, "STDDEV of single element should be 0.0");
     }
@@ -4799,17 +4396,10 @@ mod rank_tests {
     }
 
     #[test]
-    fn rank_ascending_monolithic() {
-        let project = make_rank_ascending("rank_asc_mono");
-        project.assert_compiles_incremental();
-        project.assert_vm_result("result", &[3.0, 1.0, 2.0]);
-    }
-
-    #[test]
     fn rank_ascending_vm() {
         let project = make_rank_ascending("rank_asc_vm");
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("result", &[3.0, 1.0, 2.0]);
+        project.assert_vm_result("result", &[3.0, 1.0, 2.0]);
     }
 
     // -- 2-arg descending: RANK(A, 0) --
@@ -4826,17 +4416,10 @@ mod rank_tests {
     }
 
     #[test]
-    fn rank_descending_monolithic() {
-        let project = make_rank_descending("rank_desc_mono");
-        project.assert_compiles_incremental();
-        project.assert_vm_result("result", &[1.0, 3.0, 2.0]);
-    }
-
-    #[test]
     fn rank_descending_vm() {
         let project = make_rank_descending("rank_desc_vm");
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("result", &[1.0, 3.0, 2.0]);
+        project.assert_vm_result("result", &[1.0, 3.0, 2.0]);
     }
 
     // -- Ascending and descending are inverse: rank_asc + rank_desc = N+1 --
@@ -4860,8 +4443,8 @@ mod rank_tests {
             .array_aux("desc[D]", "RANK(source[D], 0)");
 
         project.assert_compiles_incremental();
-        let asc = project.vm_result_incremental("asc");
-        let desc = project.vm_result_incremental("desc");
+        let asc = project.vm_result("asc");
+        let desc = project.vm_result("desc");
         assert_eq!(asc.len(), 5);
         for i in 0..5 {
             assert_eq!(
@@ -4873,29 +4456,6 @@ mod rank_tests {
     }
 
     // -- 5-element test with named dimensions --
-
-    #[test]
-    fn rank_named_dimension_monolithic() {
-        let project = TestProject::new("rank_named_mono")
-            .with_sim_time(0.0, 0.0, 1.0)
-            .named_dimension("Company", &["A", "B", "C", "D", "E"])
-            .array_with_ranges(
-                "revenue[Company]",
-                vec![
-                    ("A", "500"),
-                    ("B", "100"),
-                    ("C", "300"),
-                    ("D", "200"),
-                    ("E", "400"),
-                ],
-            )
-            .array_aux("ranking[Company]", "RANK(revenue[Company], 1)");
-
-        project.assert_compiles_incremental();
-        // Sorted ascending: 100(B), 200(D), 300(C), 400(E), 500(A)
-        // Ranks: A->5, B->1, C->3, D->2, E->4
-        project.assert_vm_result("ranking", &[5.0, 1.0, 3.0, 2.0, 4.0]);
-    }
 
     #[test]
     fn rank_named_dimension_vm() {
@@ -4915,13 +4475,13 @@ mod rank_tests {
             .array_aux("ranking[Company]", "RANK(revenue[Company], 1)");
 
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("ranking", &[5.0, 1.0, 3.0, 2.0, 4.0]);
+        project.assert_vm_result("ranking", &[5.0, 1.0, 3.0, 2.0, 4.0]);
     }
 
     // -- Already sorted input --
 
     #[test]
-    fn rank_already_sorted_monolithic() {
+    fn rank_already_sorted() {
         let project = TestProject::new("rank_sorted_mono")
             .with_sim_time(0.0, 0.0, 1.0)
             .indexed_dimension("D", 4)
@@ -4938,7 +4498,7 @@ mod rank_tests {
     // -- Reverse sorted input --
 
     #[test]
-    fn rank_reverse_sorted_monolithic() {
+    fn rank_reverse_sorted() {
         let project = TestProject::new("rank_rev_sorted_mono")
             .with_sim_time(0.0, 0.0, 1.0)
             .indexed_dimension("D", 4)
@@ -4964,24 +4524,9 @@ mod rank_tests {
 
         project.assert_compiles_incremental();
         project.assert_vm_result("result", &[1.0]);
-        project.assert_vm_result_incremental("result", &[1.0]);
     }
 
     // -- Equal values (ties) --
-
-    #[test]
-    fn rank_equal_values_monolithic() {
-        // All equal: ranks are assigned by sort stability (position order)
-        let project = TestProject::new("rank_equal_mono")
-            .with_sim_time(0.0, 0.0, 1.0)
-            .indexed_dimension("D", 3)
-            .array_with_ranges("vals[D]", vec![("1", "10"), ("2", "10"), ("3", "10")])
-            .array_aux("result[D]", "RANK(vals[D], 1)");
-
-        project.assert_compiles_incremental();
-        // Stable sort assigns consecutive ranks in original order
-        project.assert_vm_result("result", &[1.0, 2.0, 3.0]);
-    }
 
     #[test]
     fn rank_equal_values_vm() {
@@ -4992,7 +4537,7 @@ mod rank_tests {
             .array_aux("result[D]", "RANK(vals[D], 1)");
 
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("result", &[1.0, 2.0, 3.0]);
+        project.assert_vm_result("result", &[1.0, 2.0, 3.0]);
     }
 
     // -- Partial ties --
@@ -5010,13 +4555,12 @@ mod rank_tests {
 
         project.assert_compiles_incremental();
         project.assert_vm_result("result", &[1.0, 2.0, 3.0]);
-        project.assert_vm_result_incremental("result", &[1.0, 2.0, 3.0]);
     }
 
-    // -- Monolithic and incremental VM agreement on a larger example --
+    // -- RANK over a larger, unsorted example --
 
     #[test]
-    fn rank_monolithic_vm_agreement() {
+    fn rank_unsorted_five_elements() {
         let project = TestProject::new("rank_agreement")
             .with_sim_time(0.0, 0.0, 1.0)
             .indexed_dimension("D", 5)
@@ -5035,7 +4579,7 @@ mod rank_tests {
         project.assert_compiles_incremental();
         // Sorted ascending: 10(idx1), 20(idx3), 30(idx4), 40(idx2), 50(idx0)
         // Ranks: idx0->5, idx1->1, idx2->4, idx3->2, idx4->3
-        let result = project.vm_result_incremental("result");
+        let result = project.vm_result("result");
         assert_eq!(result, vec![5.0, 1.0, 4.0, 2.0, 3.0]);
     }
 
@@ -5403,13 +4947,6 @@ mod arrayed_vector_sort_order_per_slice_tests {
     fn multi_row_vso_ranks_within_each_row_vm() {
         let project = make_multi_row_vso_project("multi_row_vso_vm");
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("order", &[1.0, 2.0, 0.0, 2.0, 0.0, 1.0]);
-    }
-
-    #[test]
-    fn multi_row_vso_ranks_within_each_row_monolithic() {
-        let project = make_multi_row_vso_project("multi_row_vso_mono");
-        project.assert_compiles_incremental();
         project.assert_vm_result("order", &[1.0, 2.0, 0.0, 2.0, 0.0, 1.0]);
     }
 
@@ -5435,7 +4972,7 @@ mod arrayed_vector_sort_order_per_slice_tests {
             )
             .array_aux("order[D1,D2]", "VECTOR SORT ORDER(vals[D1,D2], -1)");
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("order", &[0.0, 2.0, 1.0, 1.0, 0.0, 2.0]);
+        project.assert_vm_result("order", &[0.0, 2.0, 1.0, 1.0, 0.0, 2.0]);
     }
 
     /// C-LEARN downstream shape (GH #585): a 2-D VECTOR SORT ORDER result fed
@@ -5477,7 +5014,7 @@ mod arrayed_vector_sort_order_per_slice_tests {
             .array_aux("order[D1,D2]", "VECTOR SORT ORDER(vals[D1,D2], 1)")
             .array_aux("sorted[D1,D2]", "VECTOR ELM MAP(vals[D1,1], order[D1,D2])");
         project.assert_compiles_incremental();
-        let vals = project.vm_result_incremental("sorted");
+        let vals = project.vm_result("sorted");
         assert_eq!(vals.len(), 6, "expected 6 elements (D1 x D2)");
         for (i, &got) in vals.iter().enumerate() {
             assert!(
@@ -5485,7 +5022,7 @@ mod arrayed_vector_sort_order_per_slice_tests {
                 "sorted[{i}] must be finite (no OOB->NaN from a per-row 0-based VSO offset); got {got} (full: {vals:?})"
             );
         }
-        project.assert_vm_result_incremental("sorted", &[10.0, 20.0, 30.0, 1.0, 5.0, 15.0]);
+        project.assert_vm_result("sorted", &[10.0, 20.0, 30.0, 1.0, 5.0, 15.0]);
     }
 
     /// A VECTOR ELM MAP whose source is subscripted by a *variable* index
@@ -5517,7 +5054,7 @@ mod arrayed_vector_sort_order_per_slice_tests {
             .scalar_aux("idx", "2")
             .array_aux("picked[E]", "VECTOR ELM MAP(vals[idx], offs[E])");
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("picked", &[20.0, 30.0, 40.0]);
+        project.assert_vm_result("picked", &[20.0, 30.0, 40.0]);
     }
 }
 
@@ -5707,7 +5244,7 @@ mod cross_module_array_reference_tests {
     fn elm_map_cross_module_dynamic_source_uses_the_submodel_variable_extent() {
         let project = xmod_project("VECTOR ELM MAP(sub.avals[idx], offs[E])", "0");
         project.assert_compiles_incremental();
-        let got = project.vm_result_incremental("picked");
+        let got = project.vm_result("picked");
         assert_eq!(got[0], 40.0, "in range: avals[3]");
         assert!(
             got[1].is_nan() && got[2].is_nan(),
@@ -5732,7 +5269,7 @@ mod cross_module_array_reference_tests {
     fn elm_map_cross_module_source_below_the_instance_base_uses_its_own_extent() {
         let project = xmod_project("VECTOR ELM MAP(sub.bvals[2], offs[E])", "0");
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("picked", &[200.0, 300.0, 400.0]);
+        project.assert_vm_result("picked", &[200.0, 300.0, 400.0]);
     }
 
     /// The lowering-side twin: a collapsed literal element source with a
@@ -5751,7 +5288,7 @@ mod cross_module_array_reference_tests {
     fn elm_map_cross_module_constant_offset_fold_uses_the_submodel_variable_extent() {
         let project = xmod_project("VECTOR ELM MAP(sub.avals[4], E - 1)", "0");
         project.assert_compiles_incremental();
-        let got = project.vm_result_incremental("picked");
+        let got = project.vm_result("picked");
         assert_eq!(got[0], 40.0, "in range: avals[3]");
         assert!(
             got[1].is_nan() && got[2].is_nan(),
@@ -5774,7 +5311,7 @@ mod cross_module_array_reference_tests {
     fn a_wildcard_subscript_on_a_cross_module_array_compiles_and_reduces() {
         let project = xmod_project("0", "SUM(sub.avals[*])");
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("probe", &[100.0, 100.0]);
+        project.assert_vm_result("probe", &[100.0, 100.0]);
     }
 
     /// ...and the wildcard also works as a whole-array ELM MAP source, where the
@@ -5783,7 +5320,7 @@ mod cross_module_array_reference_tests {
     fn elm_map_over_a_whole_cross_module_array_matches_the_in_model_shape() {
         let project = xmod_project("VECTOR ELM MAP(sub.avals[*], offs[E])", "0");
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("picked", &[10.0, 20.0, 30.0]);
+        project.assert_vm_result("picked", &[10.0, 20.0, 30.0]);
     }
 
     // ────────────────────────────────────────────────────────────────────
@@ -5804,7 +5341,7 @@ mod cross_module_array_reference_tests {
     fn elm_map_through_two_module_hops_uses_the_leaf_variables_extent() {
         let project = nested_xmod_project("VECTOR ELM MAP(m.inr.avals[4], offs[E])", "0");
         project.assert_compiles_incremental();
-        let got = project.vm_result_incremental("picked");
+        let got = project.vm_result("picked");
         assert_eq!(got[0], 40.0, "in range: avals[3]");
         assert!(
             got[1].is_nan() && got[2].is_nan(),
@@ -5819,7 +5356,7 @@ mod cross_module_array_reference_tests {
     fn elm_map_through_two_module_hops_below_the_inner_base_uses_its_own_extent() {
         let project = nested_xmod_project("VECTOR ELM MAP(m.inr.bvals[2], offs[E])", "0");
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("picked", &[200.0, 300.0, 400.0]);
+        project.assert_vm_result("picked", &[200.0, 300.0, 400.0]);
     }
 
     /// The whole-array form through two hops. This one is a COMPILES-AT-ALL
@@ -5832,6 +5369,6 @@ mod cross_module_array_reference_tests {
     fn a_whole_array_source_two_module_hops_away_still_compiles() {
         let project = nested_xmod_project("VECTOR ELM MAP(m.inr.avals[*], offs[E])", "0");
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("picked", &[10.0, 20.0, 30.0]);
+        project.assert_vm_result("picked", &[10.0, 20.0, 30.0]);
     }
 }

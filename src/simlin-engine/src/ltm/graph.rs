@@ -296,14 +296,21 @@ impl CausalGraph {
         })
     }
 
-    /// Find all elementary circuits (feedback loops).
+    /// Find all elementary circuits (feedback loops) as materialized
+    /// [`Loop`]s -- links, stocks, polarity, and deterministic ids.
     ///
-    /// The caller supplies the enumeration budget as `max_circuits`.
-    /// Production paths pass `usize::MAX` (no truncation); stress tests
-    /// and diagnostic harnesses pass smaller budgets and check for the
-    /// [`TruncatedByBudget`] signal.  The downstream LTM pipeline is
-    /// gated separately by [`super::MAX_LTM_SCC_NODES`] at
-    /// [`crate::db::model_ltm_variables`].
+    /// Test-only.  Production materializes loops from the *tiered*
+    /// enumerator (`db::ltm::loops`) and from `ltm_finding`'s discovery
+    /// DFS, both of which call the same `circuit_to_links` /
+    /// `find_stocks_in_loop` / `calculate_polarity` / `assign_loop_ids`
+    /// pieces this composes; what is test-only is the whole-graph
+    /// composition, which the `johnson_*` tests use as the direct
+    /// enumerator oracle.
+    ///
+    /// The caller supplies the enumeration budget as `max_circuits`;
+    /// `Err(TruncatedByBudget)` says the DFS would enumerate more than
+    /// that many elementary circuits.
+    #[cfg(test)]
     pub fn find_loops_with_limit(
         &self,
         max_circuits: usize,
@@ -351,7 +358,7 @@ impl CausalGraph {
         );
 
         // Assign deterministic IDs based on sorted loop content
-        self.assign_deterministic_loop_ids(&mut loops);
+        assign_loop_ids(&mut loops);
 
         Ok(loops)
     }
@@ -425,13 +432,16 @@ impl CausalGraph {
     /// Find all elementary circuits as deduplicated node lists.
     /// Only needs edges -- does not compute polarity or assign IDs.
     ///
-    /// Budget semantics match [`Self::find_loops_with_limit`]: the
-    /// caller supplies `max_circuits` and receives
+    /// Test-only: production reads circuits through the indexed form
+    /// (`find_indexed_circuits_with_limit`, whose trimmed name table is
+    /// what keeps the salsa `LoopCircuitsResult` cache stable).  This is
+    /// the named view the enumerator tests assert on.
+    ///
+    /// Budget semantics match [`Self::find_indexed_circuits_with_limit`]:
+    /// the caller supplies `max_circuits` and receives
     /// `Err(TruncatedByBudget)` when the DFS would enumerate more than
-    /// that many elementary circuits.  Production paths pass
-    /// `usize::MAX`; callers that need the bounded variant pass a
-    /// smaller budget and interpret the error as "too many loops to
-    /// enumerate".
+    /// that many elementary circuits.
+    #[cfg(test)]
     pub fn find_circuit_node_lists_with_limit(
         &self,
         max_circuits: usize,
@@ -460,7 +470,7 @@ impl CausalGraph {
     /// loop structure is unchanged.  `names` is empty when `circuits`
     /// is empty (pure DAG / truncated budget).
     ///
-    /// Same budget semantics as [`Self::find_circuit_node_lists_with_limit`];
+    /// Same budget semantics as the other enumeration entry points;
     /// returns `Err(TruncatedByBudget)` when the enumeration would
     /// exceed `max_circuits`.
     pub fn find_indexed_circuits_with_limit(
@@ -1082,7 +1092,7 @@ impl CausalGraph {
     /// Build a fully-annotated [`Loop`] from an ordered cycle, assigning the
     /// supplied stable `id`.
     ///
-    /// This mirrors the per-circuit body of [`Self::find_loops_with_limit`]
+    /// This mirrors the per-circuit body of `find_loops_with_limit`
     /// (links + polarity + stock enrichment) but keeps the caller-chosen id
     /// instead of the `r{n}`/`b{n}`/`u{n}` auto-numbering, so a pinned loop
     /// gets a `pin{n}` id that never collides with an enumerated loop's.
@@ -1339,11 +1349,6 @@ impl CausalGraph {
             LoopPolarity::Balancing
         }
     }
-
-    /// Assign deterministic IDs to loops based on their content
-    pub(super) fn assign_deterministic_loop_ids(&self, loops: &mut [Loop]) {
-        assign_loop_ids(loops);
-    }
 }
 
 /// Collect stocks from a set of internal pathways, namespaced with the
@@ -1495,6 +1500,7 @@ pub(crate) fn assign_loop_ids(loops: &mut [Loop]) {
 /// and are correctly retained as distinct loops -- this check fires
 /// only on accidental re-emission of the same directed cycle.  Release
 /// builds compile the call out via `debug_assert!`'s no-op expansion.
+#[cfg(test)]
 fn loops_have_unique_canonical_rotations(loops: &[Loop]) -> bool {
     let mut seen: HashSet<Vec<&str>> = HashSet::with_capacity(loops.len());
     for loop_item in loops {

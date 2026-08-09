@@ -157,7 +157,7 @@ fn qualified_index_edge_is_positional_not_by_name() {
         .array_aux("out[Region]", "SMTH1(stock[Region], 1)");
 
     // Oracle first: what does the simulation actually read?
-    let run = project.run_vm_incremental();
+    let run = project.run_vm_expecting_success();
     let north_helper = run
         .get("$⁚out⁚0⁚arg0⁚north")
         .expect("the north slot's capture helper should exist");
@@ -373,7 +373,7 @@ fn numeric_literal_index_is_positional_in_a_named_dimension() {
         .aux("picked", "pop[2]", None);
 
     assert_eq!(
-        project.run_vm_incremental()["picked"].last().copied(),
+        project.run_vm_expecting_success()["picked"].last().copied(),
         Some(22.0),
         "`pop[2]` must read Region's SECOND element (boston == 22)"
     );
@@ -409,7 +409,7 @@ fn a_constant_index_resolves_against_the_axis_at_its_own_position() {
         .aux("picked", "matrix[1,3]", None);
 
     assert_eq!(
-        project.run_vm_incremental()["picked"].last().copied(),
+        project.run_vm_expecting_success()["picked"].last().copied(),
         Some(13.0),
         "`matrix[1,3]` must read Narrow's 1st and Wide's 3rd element"
     );
@@ -449,7 +449,7 @@ fn a_constant_pinned_reducer_axis_narrows_the_read_slice() {
         .aux("total", "SUM(matrix[2,*])", None);
 
     assert_eq!(
-        project.run_vm_incremental()["total"].last().copied(),
+        project.run_vm_expecting_success()["total"].last().copied(),
         Some(30.0),
         "`SUM(matrix[2,*])` sums Row's SECOND element (b): 10 + 20"
     );

@@ -51,7 +51,6 @@ use simlin_engine::serde as engine_serde;
 use std::ffi::CStr;
 
 // ── internal modules ───────────────────────────────────────────────────
-pub mod errors;
 mod ffi;
 mod ffi_error;
 
@@ -416,7 +415,7 @@ pub struct SimlinProject {
     /// lockstep with the db lock; the actual flag toggle in `get_errors`
     /// happens under the db lock, same as `simlin_sim_new`'s toggle, so the
     /// two serialize and never interleave a partial LTM state.
-    pub ltm_requested: AtomicBool,
+    pub(crate) ltm_requested: AtomicBool,
     pub ref_count: AtomicUsize,
 }
 

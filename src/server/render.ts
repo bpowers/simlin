@@ -9,11 +9,6 @@ import { Worker } from 'worker_threads';
 import { File } from './schemas/file_pb';
 import type { RenderWorkerData, RenderWorkerResult } from './render-worker';
 
-// Re-exported so existing consumers (and their tests) keep a single import
-// surface; the implementations live in preview-geometry.ts so the render
-// worker can use them without loading this module.
-export { previewDimensions, parseSvgDimensions } from './preview-geometry';
-
 /**
  * TOTAL wall-clock budget for one preview request, measured from the
  * renderToPNG call -- it covers time queued for a render slot plus the render

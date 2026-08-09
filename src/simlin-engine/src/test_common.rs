@@ -677,7 +677,11 @@ impl TestProject {
             .clone()
     }
 
-    /// Run the VM via the incremental compilation path and get results.
+    /// Compile and run the project, returning every variable's series.
+    ///
+    /// There is only ONE compile path (`compile_incremental`);
+    /// `run_vm_expecting_success` differs only in panicking instead of
+    /// returning `Result`, and delegates here so the path cannot fork.
     pub fn run_vm(&self) -> Result<HashMap<String, Vec<f64>>, String> {
         let compiled = self
             .compile_incremental()
@@ -723,55 +727,22 @@ impl TestProject {
         compile_project_incremental(&db, sync.project, "main")
     }
 
-    /// Run the VM via the incremental compilation path and collect results.
-    pub fn run_vm_incremental(&self) -> HashMap<String, Vec<f64>> {
-        let compiled = self
-            .compile_incremental()
-            .expect("incremental compilation should succeed");
-        let mut vm = Vm::new(compiled).expect("VM creation should succeed");
-        vm.run_to_end().expect("VM run should succeed");
-        let results = vm.into_results();
-        collect_results(&results)
+    /// [`TestProject::run_vm`], panicking instead of returning an error.
+    pub fn run_vm_expecting_success(&self) -> HashMap<String, Vec<f64>> {
+        self.run_vm().expect("VM should run successfully")
     }
 
-    /// Assert that incremental compilation succeeds.
-    pub fn assert_compiles_incremental(&self) {
+    /// Assert that compilation succeeds.
+    ///
+    /// Returns `&Self` so a caller can chain a second assertion onto the same
+    /// builder expression -- notably [`TestProject::assert_no_unit_diagnostics`],
+    /// which this one CANNOT stand in for: unit diagnostics are Warning
+    /// severity, so compilation succeeds whether or not unit checking works.
+    pub fn assert_compiles_incremental(&self) -> &Self {
         if let Err(e) = self.compile_incremental() {
             panic!("Incremental compilation failed: {e:?}");
         }
-    }
-
-    /// Get a single variable's results from an incremental VM run.
-    pub fn vm_result_incremental(&self, var_name: &str) -> Vec<f64> {
-        let results = self.run_vm_incremental();
-        results
-            .get(var_name)
-            .unwrap_or_else(|| panic!("Variable {var_name} not found in incremental VM results"))
-            .clone()
-    }
-
-    /// Assert that a variable's incremental VM results match expected values.
-    pub fn assert_vm_result_incremental(&self, var_name: &str, expected: &[f64]) {
-        let results = self.run_vm_incremental();
-
-        let actual = results
-            .get(var_name)
-            .unwrap_or_else(|| panic!("Variable {var_name} not found in incremental VM results"));
-
-        assert_eq!(
-            actual.len(),
-            expected.len(),
-            "Incremental VM result length mismatch for {var_name}: expected {}, got {}",
-            expected.len(),
-            actual.len()
-        );
-
-        for (i, (actual_val, expected_val)) in actual.iter().zip(expected.iter()).enumerate() {
-            assert!(
-                (actual_val - expected_val).abs() < 1e-6,
-                "Incremental VM value mismatch for {var_name} at index {i}: expected {expected_val}, got {actual_val}"
-            );
-        }
+        self
     }
 
     // ── Diagnostic helpers (incremental path) ─────────────────────────
@@ -1311,6 +1282,37 @@ pub fn two_instance_arrayed_submodel_expected() -> Vec<(&'static str, Vec<f64>)>
         ("sub_a\u{b7}out_init", vec![70.0; 4]),
         ("sub_b\u{b7}out_init", vec![7000.0; 4]),
     ]
+}
+
+/// Run `project` twice -- once straight to the end, once resting at each of
+/// `rests` via `run_to` -- and assert every variable's saved series is
+/// BIT-identical between the two runs. This is the special-stock (conveyor /
+/// queue) mid-run-preview soundness gate: a rest runs the side-table pass as
+/// a preview on cloned state, so any observable difference means the preview
+/// leaked into the real belt/FIFO.
+pub fn assert_segmented_run_identical(project: &datamodel::Project, rests: &[f64]) {
+    let main = project.models[0].name.clone();
+    let mut seg = crate::queue_compile::build_vm(project, &main).expect("build segmented vm");
+    for &t in rests {
+        seg.run_to(t).expect("segmented run_to");
+    }
+    seg.run_to_end().expect("segmented run_to_end");
+    let mut full = crate::queue_compile::build_vm(project, &main).expect("build full vm");
+    full.run_to_end().expect("full run_to_end");
+
+    for name in full.names_as_strs() {
+        let ident = Ident::new(&name);
+        let a = full.get_series(&ident).expect("full series");
+        let b = seg.get_series(&ident).expect("segmented series");
+        assert_eq!(a.len(), b.len(), "{name}: series length");
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "{name} step {i}: full {x} != segmented {y}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

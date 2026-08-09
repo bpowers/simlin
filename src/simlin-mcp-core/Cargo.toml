@@ -6,6 +6,12 @@ license = "Apache-2.0"
 edition = "2024"
 description = "Transport-agnostic core library for the Simlin MCP server"
 
+[features]
+# Exposes `test_support` (integration-test fixtures). Off by default so the
+# fixtures are not compiled into shipped binaries; the self dev-dependency
+# below turns it on for this crate's own test targets.
+test-support = []
+
 [dependencies]
 simlin-engine = { version = "0.1", path = "../simlin-engine", features = ["schema"] }
 rmcp = { version = "1", features = ["server", "macros", "schemars"] }
@@ -16,6 +22,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
 anyhow = "1"
 
 [dev-dependencies]
+# Self dev-dependency so `tests/` can reach the feature-gated `test_support`
+# module without the feature leaking into a normal build of the library.
+simlin-mcp-core = { path = ".", features = ["test-support"] }
 tempfile = "3"
 rmcp = { version = "1", features = ["server", "macros", "client", "transport-async-rw"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "fs"] }

@@ -4,3 +4,4 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
+cc 9f9cbf7cdff69b1ba4720c53509ae9b6aa524985af565ae7d39e5d4f7a6efdeb # shrinks to aux = AuxiliaryFields { name: "a", equation: None, documentation: Some(""), units: None, graphical_function: None, uid: None }

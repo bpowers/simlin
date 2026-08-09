@@ -46,7 +46,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::discovery::{classify_extension, is_excluded_dir};
+use crate::discovery::{format_for_path, is_excluded_dir};
 use crate::events::{ChangeSource, WsMessage};
 use crate::handlers::AppState;
 use crate::hashing::content_hash;
@@ -190,12 +190,12 @@ pub fn classify(event: &DebouncedEvent) -> ClassifiedEvent {
         let from_format = if from_excluded {
             None
         } else {
-            classify_extension(&from)
+            format_for_path(&from)
         };
         let to_format = if to_excluded {
             None
         } else {
-            classify_extension(&to)
+            format_for_path(&to)
         };
         return match (from_format, to_format) {
             (Some(_), Some(to_fmt)) => ClassifiedEvent::Renamed {
@@ -224,7 +224,7 @@ pub fn classify(event: &DebouncedEvent) -> ClassifiedEvent {
         return ClassifiedEvent::Ignored;
     }
 
-    let Some(format) = classify_extension(&path) else {
+    let Some(format) = format_for_path(&path) else {
         return ClassifiedEvent::Ignored;
     };
 
@@ -1536,6 +1536,21 @@ mod tests {
     }
 
     #[test]
+    fn classify_head_whose_parent_is_not_dot_git_is_ignored() {
+        // `git_internal_repo_root` matches on the *filename* first, so a
+        // path ending in HEAD only qualifies when `.git` is its immediate
+        // parent. Remote-tracking heads (`.git/refs/remotes/origin/HEAD`)
+        // are rewritten on every fetch; treating them as the git-status
+        // signal would re-probe the whole repo far more often than the
+        // index/HEAD pair warrants.
+        let event = make_debounced(
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            vec![PathBuf::from("/work/repo/.git/refs/remotes/origin/HEAD")],
+        );
+        assert_eq!(classify(&event), ClassifiedEvent::Ignored);
+    }
+
+    #[test]
     fn classify_event_with_no_paths_is_ignored() {
         let event = make_debounced(
             EventKind::Modify(ModifyKind::Data(DataChange::Content)),
@@ -1651,49 +1666,6 @@ mod tests {
             vec![PathBuf::from("/repo/notes.md")],
         );
         assert_eq!(classify(&event), ClassifiedEvent::Ignored);
-    }
-
-    #[tokio::test]
-    async fn handle_batch_dispatches_each_classified_variant_without_panic() {
-        // The handlers are stubs in Subcomponent A; this test verifies
-        // that the dispatch wiring runs to completion for each variant
-        // (no panics, no awaiters left dangling). When Subcomponent B
-        // replaces the stubs with real handlers, this test will need to
-        // be expanded to assert their observable side effects -- but
-        // the dispatch shape itself stays the same.
-        let dir = TempDir::new().expect("tempdir");
-        let state = build_app_state(dir.path());
-
-        let events = vec![
-            // ModelFile / Modified
-            make_debounced(
-                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
-                vec![PathBuf::from("/repo/models/x.stmx")],
-            ),
-            // ModelFile / Created
-            make_debounced(
-                EventKind::Create(CreateKind::File),
-                vec![PathBuf::from("/repo/models/y.stmx")],
-            ),
-            // Removed
-            make_debounced(
-                EventKind::Remove(RemoveKind::File),
-                vec![PathBuf::from("/repo/models/z.stmx")],
-            ),
-            // GitInternal
-            make_debounced(
-                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
-                vec![PathBuf::from("/repo/.git/HEAD")],
-            ),
-            // Ignored
-            make_debounced(
-                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
-                vec![PathBuf::from("/repo/notes.md")],
-            ),
-        ];
-        let result: DebounceEventResult = Ok(events);
-        let (tx, _rx) = watch::channel(0u64);
-        WatcherActor::handle_batch(&state, &tx, result).await;
     }
 
     #[tokio::test]

@@ -50,6 +50,11 @@ fn parse(xml: &str) -> crate::datamodel::Project {
 /// Lower a conveyor model through the PUBLIC datamodel entry point. Since GH #924
 /// there is no separate `#[cfg(test)]` seam: the entry every production wasm caller
 /// uses is the entry these parity tests exercise.
+/// `compile_datamodel_to_artifact` is the PUBLIC entry -- the one
+/// `libsimlin`'s `simlin_model_compile_to_wasm` calls -- so every test in this
+/// file lowers a conveyor model through exactly the path production does. That
+/// is what replaced the up-front conveyor reject GH #924 removed; there is no
+/// `#[cfg(test)]` seam below it.
 fn lower(project: &crate::datamodel::Project) -> Result<WasmArtifact, WasmGenError> {
     let main = project.models[0].name.clone();
     compile_datamodel_to_artifact(project, &main, false, false)
@@ -3768,6 +3773,15 @@ const ALL_CONTAINERS: &str = r#"
 /// that silently returned the belt total (or the exit slat) would be caught. A uniform
 /// belt would make this test vacuous.
 ///
+/// This is also what keeps GH #923's deletion of the container-access reject
+/// deleted: `reject_unsupported` no longer refuses a belt read through
+/// `SUM`/`conv[j]`, and a re-added reject would fail here at `artifact_for`
+/// rather than merely producing wrong numbers. The `belt[j]` accesses drive GH
+/// #948 too -- they lower and simulate correctly on both backends while the
+/// diagnostic pass still emits a spurious Error for the subscript; wasm
+/// lowering never reads diagnostics, so this test stays green either way and
+/// the shape is pinned here for whoever fixes #948.
+///
 /// The §7.2 per-slat init list `1, 2, 3, 4` puts slat `j` (0 = exit) at volume `j + 1`;
 /// with no inflow the belt then discharges one slat per DT, so the run also walks the
 /// belt down to all-zero contents -- the reachable analogue of an "empty" container
@@ -4517,38 +4531,6 @@ fn set_value_rejects_container_slots() {
 
 // ── what still rejects ───────────────────────────────────────────────────────
 
-/// `reject_unsupported` now refuses exactly TWO things, and container access is no
-/// longer one of them: a belt read through `SUM`/`conv[j]` must LOWER (and be pinned
-/// by the parity tests above), never be refused. GH #923 deleted that arm, and this
-/// test is what keeps it deleted -- a re-added reject would make every container
-/// consumer silently unlowerable rather than merely wrong.
-///
-/// The two survivors have their own tests: `spreadflow_placements_are_rejected` (the
-/// §8 feature gap, GH #946) and the `i32::MAX` slat-bound soundness guard, which no
-/// test can reach without a bound above `i32::MAX` -- `SlatBoundGuard` takes a `usize`
-/// and the guard is a `>` comparison, so a test would have to allocate that ring.
-/// The `belt[j]` slat access exercised here also drives GH #948: it lowers and
-/// simulates correctly on both backends, but the diagnostic pass still emits a
-/// spurious Error for the subscript. `lower` never reads diagnostics, so this test
-/// stays green either way; the shape is pinned here for whoever fixes #948.
-#[test]
-fn container_access_is_no_longer_rejected() {
-    let project = parse(&container_belt_xmile(
-        BeltXmile {
-            dt: "0.5",
-            stop: "2",
-            initial: "0",
-            len: "2",
-            inflow: "10",
-            conv_attrs: "",
-            conv_extra: "",
-        },
-        r#"<aux name="tot"><eqn>SUM(belt)</eqn></aux>
-           <aux name="slat"><eqn>belt[1]</eqn></aux>"#,
-    ));
-    lower(&project).expect("a container-reading belt must lower, not reject");
-}
-
 /// A `isee:spreadflow` inflow placement other than the default `beginning` is
 /// rejected: `even`/`dest` need a per-slat spread and `dist`/`source` a per-step
 /// weight vector, none of which this step lowers.
@@ -4659,18 +4641,4 @@ fn sir_fixture_is_blocked_by_the_submodel_rule() {
         "../../../../test/conveyors/sir_social_distancing_mixnot.stmx"
     ));
     assert_shared_dispatch_refusal(&project, ErrorCode::ConveyorInSubmodelUnsupported);
-}
-
-/// The inverse of the reject this suite used to pin (GH #924): the PUBLIC entry point
-/// -- the one `libsimlin`'s `simlin_model_compile_to_wasm` calls -- lowers a conveyor
-/// model, and the resulting blob reproduces the VM. Every other test in this file goes
-/// through the same entry via [`lower`]; this one names it explicitly so the contract
-/// is greppable from the reject it replaced.
-#[test]
-fn public_entry_lowers_conveyor_models() {
-    let project = parse(&one_belt_xmile("0.5", "2", "0", "1", "10", ""));
-    let main = project.models[0].name.clone();
-    let artifact = crate::wasmgen::compile_datamodel_to_artifact(&project, &main, false, false)
-        .expect("the public entry must lower a conveyor model");
-    assert!(assert_slab_matches_vm(&project, &artifact) > 0);
 }

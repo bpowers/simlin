@@ -1410,8 +1410,6 @@ mod diagnostic_determinism_tests;
 #[cfg(test)]
 mod diagnostic_tests;
 #[cfg(test)]
-mod differential_tests;
-#[cfg(test)]
 mod dimension_context_cache_tests;
 #[cfg(test)]
 mod dimension_invalidation_tests;

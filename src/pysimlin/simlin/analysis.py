@@ -63,15 +63,6 @@ class LtmMode(IntEnum):
         return self.name.lower()
 
 
-# Threshold above which a loop with mixed-sign runtime scores is classified
-# as MOSTLY_REINFORCING / MOSTLY_BALANCING (Rux / Bux) instead of UNDETERMINED.
-# Mirrors `POLARITY_CONFIDENCE_THRESHOLD` in `src/simlin-engine/src/ltm.rs`;
-# both implementations use the `>= 0.99` form of the cutoff described in
-# Schoenberg & Eberlein (2020) "Seamlessly Integrating LTM" / Schoenberg
-# (2020) thesis section 7.6 (the cited papers describe it as "above 0.99").
-POLARITY_CONFIDENCE_THRESHOLD: float = 0.99
-
-
 class LoopPolarity(IntEnum):
     """Polarity of a feedback loop.
 
@@ -79,11 +70,18 @@ class LoopPolarity(IntEnum):
     - REINFORCING (R): Loop amplifies changes (positive loop score)
     - BALANCING (B): Loop counteracts changes (negative loop score)
     - MOSTLY_REINFORCING (Rux): Mixed-sign runtime scores but predominantly
-      reinforcing (confidence at or above POLARITY_CONFIDENCE_THRESHOLD)
+      reinforcing (polarity confidence at or above the engine's cutoff)
     - MOSTLY_BALANCING (Bux): Mixed-sign runtime scores but predominantly
-      balancing (confidence at or above POLARITY_CONFIDENCE_THRESHOLD)
+      balancing (polarity confidence at or above the engine's cutoff)
     - UNDETERMINED (U): Loop polarity cannot be determined; mixed-sign
       runtime scores with neither polarity dominant
+
+    Classification of a runtime score series -- including the confidence
+    cutoff separating Rux/Bux from U -- happens engine-side in
+    `LoopPolarity::from_runtime_scores` / `POLARITY_CONFIDENCE_THRESHOLD`
+    (`src/simlin-engine/src/ltm/types.rs`); Python only carries the label
+    and the confidence the engine computed, so there is no second
+    implementation to drift.
 
     All five integer values mirror the C FFI `SimlinLoopPolarity` 1:1
     (GH #495): the FFI no longer coalesces MOSTLY_* down to R/B, and carries
@@ -110,70 +108,6 @@ class LoopPolarity(IntEnum):
             return "Bux"
         else:
             return "U"
-
-    @classmethod
-    def from_runtime_scores(cls, scores: NDArray[np.float64]) -> LoopPolarity | None:
-        """Classify loop polarity based on actual runtime loop score values.
-
-        This is a standalone convenience utility that mirrors
-        `LoopPolarity::from_runtime_scores` in `src/simlin-engine/src/ltm.rs`,
-        operating on an arbitrary score array.  It is NOT the path
-        :attr:`Run.loops` uses to reclassify polarity -- that surface sources
-        polarity from the engine primitive
-        (:meth:`Sim.get_loops_runtime`) so the classification is the Rust
-        source of truth over all element slots.  The polarity confidence
-        ``|r - |b|| / (r + |b|)`` (Schoenberg & Eberlein, 2020) drives
-        the classification:
-
-        - All valid (non-NaN, non-zero) scores positive -> REINFORCING
-        - All valid scores negative -> BALANCING
-        - Mixed signs and confidence at or above
-          POLARITY_CONFIDENCE_THRESHOLD -> MOSTLY_REINFORCING /
-          MOSTLY_BALANCING based on which side dominates the magnitude
-          tally
-        - Mixed signs and confidence below the threshold -> UNDETERMINED
-        - No valid scores -> returns None
-
-        Args:
-            scores: Array of loop score values from simulation
-
-        Returns:
-            The runtime polarity classification, or None if no valid scores
-        """
-        # Filter out NaN and zero values
-        valid_scores = scores[~np.isnan(scores) & (scores != 0.0)]
-
-        if len(valid_scores) == 0:
-            return None
-
-        positive_sum = float(valid_scores[valid_scores > 0].sum())
-        negative_sum_abs = float(-valid_scores[valid_scores < 0].sum())
-
-        denom = positive_sum + negative_sum_abs
-        if denom <= 0.0:
-            # Mathematically unreachable: at least one filtered-in score
-            # is non-zero, so the magnitude sum is strictly positive.
-            # Guard anyway so a hostile array of subnormals can't surface
-            # a divide-by-zero NaN.
-            return None
-
-        confidence = abs(positive_sum - negative_sum_abs) / denom
-
-        has_positive = positive_sum > 0.0
-        has_negative = negative_sum_abs > 0.0
-
-        if has_positive and not has_negative:
-            return cls.REINFORCING
-        if has_negative and not has_positive:
-            return cls.BALANCING
-        if confidence >= POLARITY_CONFIDENCE_THRESHOLD:
-            # Equal-magnitude r and |b| would yield confidence 0, which
-            # cannot pass the threshold check for any threshold > 0, so
-            # the dominant side is always strictly larger here.
-            if positive_sum > negative_sum_abs:
-                return cls.MOSTLY_REINFORCING
-            return cls.MOSTLY_BALANCING
-        return cls.UNDETERMINED
 
 
 @dataclass

@@ -4,14 +4,13 @@
 
 // pattern: Imperative Shell
 //
-// `compute_diagnostic_set` and `diagnostics_set_changed` are pure
-// (Functional Core) helpers, but `maybe_emit_diagnostics_changed`
-// orchestrates the registry write lock and EventBus broadcast and so
-// classifies the whole module as Shell. The module stays small enough
-// to keep both surfaces co-located rather than splitting along
-// pure/impure lines.
+// `compute_diagnostic_set` is a pure (Functional Core) helper, but
+// `maybe_emit_diagnostics_changed` orchestrates the registry write lock
+// and EventBus broadcast and so classifies the whole module as Shell.
+// The module stays small enough to keep both surfaces co-located rather
+// than splitting along pure/impure lines.
 
-//! Diagnostic-set computation, change detection, and broadcast helper.
+//! Diagnostic-set computation and the merge-path broadcast helper.
 //!
 //! `compute_diagnostic_set` runs the engine's salsa-based diagnostic
 //! pipeline once and returns both:
@@ -20,19 +19,18 @@
 //! - a `Vec<ValidationError>` — the formatted error list ready to ship as
 //!   the payload of `WsMessage::DiagnosticsChanged`.
 //!
-//! `diagnostics_set_changed` compares a `ProjectMeta`'s cached
-//! `last_diagnostic_keys` against a freshly computed set; the call sites
-//! emit a `DiagnosticsChanged` notification only when the two differ.
-//!
 //! `maybe_emit_diagnostics_changed` is the merge-path helper invoked
 //! from each of the four surfaces that produce a successful merge (the
 //! HTTP save handler, the MCP `RegistryAccess::save` and `::create`
 //! paths, and the file watcher). It computes the new set, drives the
-//! atomic compare-and-update on the registry, and publishes the
-//! notification when the set actually differs.
+//! atomic compare-and-update on the registry
+//! (`ProjectRegistry::update_diagnostic_keys_if_changed`, which owns the
+//! "did the set actually change?" decision so the comparison and the
+//! cache write observe the same snapshot), and publishes the
+//! notification when the set differs.
 
 use std::collections::BTreeSet;
-use std::path::{MAIN_SEPARATOR, Path};
+use std::path::Path;
 
 use simlin_engine::datamodel;
 use simlin_engine::db::{
@@ -42,7 +40,7 @@ use simlin_engine::errors::{FormattedErrorKind, collect_formatted_errors};
 
 use crate::events::{ValidationError, WsMessage};
 use crate::handlers::AppState;
-use crate::registry::ProjectMeta;
+use crate::path_resolution::to_forward_slash;
 
 /// Canonical ordered key for one validation diagnostic. Pair of (error
 /// code, optional variable name). Used as the comparison key for
@@ -108,14 +106,6 @@ pub fn compute_diagnostic_set(
     (keys, errors)
 }
 
-/// True iff `new_keys` differs from `meta.last_diagnostic_keys`. The
-/// helper is a one-line `BTreeSet` equality, but exists so call sites
-/// can read at a glance and so a future replacement (e.g. excluding
-/// transient warning codes) lives in one place.
-pub fn diagnostics_set_changed(meta: &ProjectMeta, new_keys: &BTreeSet<DiagnosticKey>) -> bool {
-    meta.last_diagnostic_keys != *new_keys
-}
-
 /// Recompute diagnostics for `project`, atomically swap the cached set
 /// on the registry entry keyed by `abs_path`, and (only when the set
 /// actually changed) broadcast `WsMessage::DiagnosticsChanged` on the
@@ -142,9 +132,12 @@ pub fn diagnostics_set_changed(meta: &ProjectMeta, new_keys: &BTreeSet<Diagnosti
 ///
 /// `abs_path` is the canonical absolute path used as the registry key.
 /// The wire `path` field is computed by stripping the registry root
-/// prefix and converting to forward slashes (`MAIN_SEPARATOR -> '/'`)
-/// so the wire shape matches what `ProjectChanged` would publish for
-/// the same operation.
+/// prefix and rendering through [`to_forward_slash`] so the wire shape
+/// matches what `ProjectChanged` would publish for the same operation.
+/// The fallback when the prefix doesn't apply is the absolute path,
+/// which would be a programming error the caller should surface
+/// elsewhere; it exists so the notification still carries *something*
+/// useful for debugging.
 pub fn maybe_emit_diagnostics_changed(
     state: &AppState,
     abs_path: &Path,
@@ -159,38 +152,21 @@ pub fn maybe_emit_diagnostics_changed(
         return;
     }
 
-    let display_path = relative_display_path(state.root.as_ref(), abs_path);
+    let rel = abs_path
+        .strip_prefix(state.root.as_ref())
+        .unwrap_or(abs_path);
 
     state.events.publish(WsMessage::DiagnosticsChanged {
-        path: display_path,
+        path: to_forward_slash(rel),
         errors: formatted,
     });
-}
-
-/// Strip the registry-root prefix from `abs_path` and render with
-/// forward slashes so the wire path matches the `ProjectChanged`
-/// envelope for the same operation. Falls back to the absolute path
-/// when the prefix doesn't apply (which would be a programming error
-/// the caller should surface elsewhere; the fallback exists so the
-/// notification still carries *something* useful for debugging).
-fn relative_display_path(root: &Path, abs_path: &Path) -> String {
-    let rel = abs_path.strip_prefix(root).unwrap_or(abs_path);
-    let display = rel.to_string_lossy().into_owned();
-    if MAIN_SEPARATOR == '/' {
-        display
-    } else {
-        display.replace(MAIN_SEPARATOR, "/")
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use crate::registry::{GitState, ProjectFormat, ProjectMeta};
     use simlin_engine::json;
-    use std::path::PathBuf;
-    use std::time::SystemTime;
 
     /// Minimal valid project: one model, no variables. Should produce no
     /// error diagnostics.
@@ -217,20 +193,6 @@ mod tests {
     fn project_from_json(body: &str) -> datamodel::Project {
         let json_project: json::Project = serde_json::from_str(body).expect("test fixture parses");
         json_project.into()
-    }
-
-    fn meta_with_keys(keys: BTreeSet<DiagnosticKey>) -> ProjectMeta {
-        ProjectMeta {
-            path: PathBuf::new(),
-            format: ProjectFormat::SdJson,
-            mtime: SystemTime::UNIX_EPOCH,
-            size: 0,
-            git: GitState::Untracked,
-            version: 0,
-            doc: Default::default(),
-            last_disk_hash: 0,
-            last_diagnostic_keys: keys,
-        }
     }
 
     #[test]
@@ -292,78 +254,5 @@ mod tests {
             errors.len(),
             "key set and error list should have matching cardinality for unique keys"
         );
-    }
-
-    #[test]
-    fn diagnostics_set_changed_returns_false_for_equal_sets() {
-        let mut keys = BTreeSet::new();
-        keys.insert(("syntax".to_string(), Some("x".to_string())));
-        let meta = meta_with_keys(keys.clone());
-        assert!(
-            !diagnostics_set_changed(&meta, &keys),
-            "equal sets must report unchanged"
-        );
-    }
-
-    #[test]
-    fn diagnostics_set_changed_returns_true_when_new_key_appears() {
-        let baseline = BTreeSet::new();
-        let meta = meta_with_keys(baseline);
-
-        let mut after_edit = BTreeSet::new();
-        after_edit.insert(("unknown_dependency".to_string(), Some("bad".to_string())));
-        assert!(
-            diagnostics_set_changed(&meta, &after_edit),
-            "introducing a new error must report changed"
-        );
-    }
-
-    #[test]
-    fn diagnostics_set_changed_returns_true_when_keys_disappear() {
-        // The "fixed all errors" path: meta has cached error keys, the
-        // recomputed set is empty.
-        let mut cached = BTreeSet::new();
-        cached.insert(("syntax".to_string(), Some("x".to_string())));
-        let meta = meta_with_keys(cached);
-
-        let after_fix: BTreeSet<DiagnosticKey> = BTreeSet::new();
-        assert!(
-            diagnostics_set_changed(&meta, &after_fix),
-            "transitioning to no errors must report changed"
-        );
-    }
-
-    #[test]
-    fn diagnostics_set_changed_returns_true_when_variable_differs() {
-        // Same code, different variable name: still a different set
-        // entry. Catches a regression where the comparison drops the
-        // variable and only inspects the code.
-        let mut cached = BTreeSet::new();
-        cached.insert(("syntax".to_string(), Some("x".to_string())));
-        let meta = meta_with_keys(cached);
-
-        let mut after_edit = BTreeSet::new();
-        after_edit.insert(("syntax".to_string(), Some("y".to_string())));
-        assert!(
-            diagnostics_set_changed(&meta, &after_edit),
-            "different variable_name must produce a changed set"
-        );
-    }
-
-    #[test]
-    fn introducing_an_error_is_observable_through_full_pipeline() {
-        // Wire-level integration: clean project → empty set → a meta with
-        // empty keys reports unchanged. Then a fresh compute on a broken
-        // project produces a non-empty set; the same meta reports
-        // changed. This is the exact sequence the save handler and
-        // watcher invoke.
-        let clean = project_from_json(EMPTY_VALID);
-        let (clean_keys, _) = compute_diagnostic_set(&clean);
-        let meta = meta_with_keys(clean_keys.clone());
-        assert!(!diagnostics_set_changed(&meta, &clean_keys));
-
-        let broken = project_from_json(HAS_UNDEFINED_REF);
-        let (broken_keys, _) = compute_diagnostic_set(&broken);
-        assert!(diagnostics_set_changed(&meta, &broken_keys));
     }
 }

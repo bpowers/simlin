@@ -9,8 +9,7 @@ import * as path from 'path';
 
 import { Project as EngineProject } from '@simlin/engine';
 import { renderProjectToPng } from '../render-worker';
-
-const MAX_PREVIEW_SIZE = 800;
+import { MAX_PREVIEW_SIZE } from '../preview-geometry';
 
 function loadDefaultProject(name: string): string {
   const modelPath = path.join(__dirname, '..', '..', '..', 'default_projects', name, 'model.xmile');

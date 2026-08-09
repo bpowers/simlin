@@ -20,7 +20,7 @@
 //! Verifies: macros.AC1.1, macros.AC1.6, macros.AC1.7.
 
 use crate::datamodel::{Equation, Model, Project, Variable};
-use crate::mdl::ReaderError;
+use crate::mdl::reader::ReaderError;
 
 use super::{ConvertError, convert_mdl};
 

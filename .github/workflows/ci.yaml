@@ -26,6 +26,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # simlin-mcp's pysimlin_version_matches_latest_tag needs the
+          # pysimlin-v* tags (setuptools-scm makes the tag the version's
+          # source of truth); without them the guard skips on every run.
+          fetch-tags: true
 
       - name: Install Rust toolchain
         run: rustup show

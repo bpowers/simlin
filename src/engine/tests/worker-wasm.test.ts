@@ -21,7 +21,7 @@ import { WorkerBackend } from '../src/worker-backend';
 import { WorkerServer } from '../src/worker-server';
 import { DirectBackend } from '../src/direct-backend';
 import type { WorkerRequest, WorkerResponse } from '../src/worker-protocol';
-import type { ModelHandle } from '../src/backend';
+import { VALID_REQUEST_TYPES } from '../src/worker-protocol';
 import { expectScoresClose, linksByKey } from './ltm-test-helpers';
 
 const wasmPath = join(__dirname, '..', 'core', 'libsimlin.wasm');
@@ -162,37 +162,6 @@ describe('WorkerBackend wasm engine parity (Phase 3)', () => {
   }
 
   describe('AC8.1: worker wasm series match the node DirectBackend (and the VM)', () => {
-    it('teacup_temperature via the worker wasm path equals DirectBackend wasm exactly and the VM within tolerance', async () => {
-      const { backend } = createWorkerWasmPair();
-      await backend.init(loadWasmSource());
-      const projHandle = await backend.projectOpenXmile(loadTeacupXmile());
-      const modelHandle = await backend.projectGetModel(projHandle, null);
-      const simHandle = await backend.simNew(modelHandle, false, 'wasm');
-      await backend.simRunToEnd(simHandle);
-      const workerSeries = await backend.simGetSeries(simHandle, 'teacup_temperature');
-
-      // Oracle: the same model, on the node DirectBackend, on both engines.
-      const oracleProject = oracle.projectOpenXmile(loadTeacupXmile());
-      const oracleModel = oracle.projectGetModel(oracleProject, null);
-      const wasmSim = oracle.simNew(oracleModel, false, 'wasm');
-      const vmSim = oracle.simNew(oracleModel, false, 'vm');
-      oracle.simRunToEnd(wasmSim);
-      oracle.simRunToEnd(vmSim);
-      const directWasmSeries = oracle.simGetSeries(wasmSim, 'teacup_temperature');
-      const directVmSeries = oracle.simGetSeries(vmSim, 'teacup_temperature');
-
-      // Worker wasm vs DirectBackend wasm: same compiled simulation -> exact.
-      expect(workerSeries).toBeInstanceOf(Float64Array);
-      expect(Array.from(workerSeries)).toEqual(Array.from(directWasmSeries));
-      // Worker wasm vs the VM oracle: within the engine's parity tolerance.
-      expectSeriesClose(workerSeries, directVmSeries);
-
-      oracle.simDispose(wasmSim);
-      oracle.simDispose(vmSim);
-      oracle.modelDispose(oracleModel);
-      oracle.projectDispose(oracleProject);
-    });
-
     it('every variable via the worker wasm path matches DirectBackend wasm exactly and the VM within tolerance', async () => {
       const { backend } = createWorkerWasmPair();
       await backend.init(loadWasmSource());
@@ -265,53 +234,12 @@ describe('WorkerBackend wasm engine parity (Phase 3)', () => {
       expect(simNew.engine).toBe('wasm');
       expect(simNew.enableLtm).toBe(false);
 
-      // The protocol delta is purely additive: only the pre-existing request
-      // type strings appear on the wire (no new discriminant was introduced).
-      const KNOWN_TYPES = new Set([
-        'init',
-        'isInitialized',
-        'reset',
-        'configureWasm',
-        'projectOpenXmile',
-        'projectOpenProtobuf',
-        'projectOpenJson',
-        'projectOpenVensim',
-        'projectDispose',
-        'projectGetModelCount',
-        'projectGetModelNames',
-        'projectGetModel',
-        'projectIsSimulatable',
-        'projectSerializeProtobuf',
-        'projectSerializeJson',
-        'projectSerializeXmile',
-        'projectRenderSvg',
-        'projectRenderPng',
-        'projectGetErrors',
-        'projectApplyPatch',
-        'modelGetName',
-        'modelDispose',
-        'modelGetIncomingLinks',
-        'modelGetLinks',
-        'modelGetLoops',
-        'modelGetLatexEquation',
-        'modelGetVarJson',
-        'modelGetVarNames',
-        'modelGetSimSpecsJson',
-        'simNew',
-        'simDispose',
-        'simRunTo',
-        'simRunToEnd',
-        'simReset',
-        'simGetTime',
-        'simGetStepCount',
-        'simGetValue',
-        'simSetValue',
-        'simGetSeries',
-        'simGetVarNames',
-        'simGetLinks',
-      ]);
+      // The protocol delta is purely additive: every request on the wire is a
+      // type the protocol already validates (no new discriminant was
+      // introduced). Read from the protocol module rather than a hand-copied
+      // list, which drifts silently.
       for (const req of requests) {
-        expect(KNOWN_TYPES.has(req.type)).toBe(true);
+        expect(VALID_REQUEST_TYPES.has(req.type)).toBe(true);
       }
     });
 
@@ -351,15 +279,9 @@ describe('WorkerBackend wasm engine parity (Phase 3)', () => {
       expect(series[0]).toBeCloseTo(6, 9);
     });
 
-    it('the wasm-unsupported model also rejects on the node DirectBackend (oracle agreement)', () => {
-      // Pin the no-fallback contract at the oracle layer too: the worker
-      // rejection above mirrors the DirectBackend, not worker-only behavior.
-      const oracleProject = oracle.projectOpenXmile(new TextEncoder().encode(WASM_UNSUPPORTED_XMILE));
-      const oracleModel: ModelHandle = oracle.projectGetModel(oracleProject, null);
-      expect(() => oracle.simNew(oracleModel, false, 'wasm')).toThrow();
-      oracle.modelDispose(oracleModel);
-      oracle.projectDispose(oracleProject);
-    });
+    // The same no-fallback contract at the DirectBackend layer (the oracle this
+    // suite compares against) is pinned by wasm-backend.test.ts's
+    // "AC7.1/AC7.2: unsupported model errors on wasm, runs on vm".
   });
 });
 

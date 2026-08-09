@@ -497,13 +497,15 @@ mod tests {
 
     #[test]
     fn test_render_png_has_white_background() {
-        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
-            <rect x="0" y="0" width="10" height="10" fill="white"/>
-        </svg>"#;
-        let png = svg_to_png(svg, &PngRenderOpts::default()).expect("white bg SVG should render");
+        // The SVG paints NOTHING, so every pixel comes from `svg_to_png`'s own
+        // `pixmap.fill(Color::WHITE)`. An input that painted a white rect of
+        // its own would pass with the fill deleted -- the pixmap would just be
+        // transparent underneath the rect.
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>"#;
+        let png = svg_to_png(svg, &PngRenderOpts::default()).expect("empty SVG should render");
         let pixmap = tiny_skia::Pixmap::decode_png(&png).expect("PNG should decode");
 
-        // Check corner pixel is white (255, 255, 255, 255)
+        // Opaque white, not transparent black: the canvas fill, not the SVG.
         let pixel = pixmap.pixels()[0];
         assert_eq!(pixel.red(), 255);
         assert_eq!(pixel.green(), 255);

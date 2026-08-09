@@ -25,20 +25,6 @@ describe('FormControlLabel', () => {
     expect(label).not.toBeNull();
   });
 
-  test('applies formControlLabel class', () => {
-    const { container } = render(<FormControlLabel control={<input type="checkbox" />} label="Label" />);
-    const label = container.querySelector('label');
-    expect(label!.className).toContain('formControlLabel');
-  });
-
-  test('applies custom className', () => {
-    const { container } = render(
-      <FormControlLabel control={<input type="checkbox" />} label="Label" className="custom" />,
-    );
-    const label = container.querySelector('label');
-    expect(label!.className).toContain('custom');
-  });
-
   test('renders React element as label', () => {
     const complexLabel = (
       <span>

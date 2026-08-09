@@ -16,7 +16,6 @@ const coreSrc = path.resolve(here, '../core');
 // a jsdom global would silently let a DOM dependency creep back in unnoticed.
 const NODE_ENV_TESTS = [
   'tests/editor-applyPatch.test.ts',
-  'tests/editor-input.test.ts',
   'tests/hosted-web-editor-delete.test.ts',
   'tests/hosted-web-editor-load-errors.test.ts',
   'tests/hosted-web-editor-save.test.ts',

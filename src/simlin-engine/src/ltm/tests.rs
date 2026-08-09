@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use super::graph::{CausalGraph, assign_loop_ids, get_variable_dependencies};
+use super::graph::{CausalGraph, assign_loop_ids};
 use super::indexed::IndexedGraph;
 use super::partitions::CyclePartitions;
 use super::polarity::{
@@ -229,60 +229,6 @@ fn test_balancing_loop() {
         .iter()
         .any(|l| l.polarity == DetectedLoopPolarity::Balancing);
     assert!(has_balancing, "Should have detected a balancing loop");
-}
-
-#[test]
-fn test_module_loops() {
-    // Test loop detection with modules
-    use crate::testutils::x_module;
-
-    // Create a model that uses a module (like SMOOTH)
-    // This simulates a model with a module that might create a feedback loop
-    let main_model = x_model(
-        "main",
-        vec![
-            x_stock("inventory", "100", &["production"], &["sales"], None),
-            x_flow("production", "desired_production", None),
-            x_aux(
-                "desired_production",
-                "smooth_inventory_gap * adjustment_rate",
-                None,
-            ),
-            x_aux("inventory_gap", "target_inventory - inventory", None),
-            x_module(
-                "smooth_inventory_gap",
-                &[("inventory_gap", "smooth_inventory_gap\u{00B7}input")],
-                None,
-            ),
-            x_aux("target_inventory", "100", None),
-            x_aux("adjustment_rate", "0.1", None),
-            x_flow("sales", "10", None),
-        ],
-    );
-
-    // Create the SMOOTH module model (simplified version)
-    let smooth_model = x_model(
-        "smooth_inventory_gap",
-        vec![
-            x_aux("input", "0", None),
-            x_stock("smoothed", "0", &["change_in_smooth"], &[], None),
-            x_flow("change_in_smooth", "(input - smoothed) / smooth_time", None),
-            x_aux("smooth_time", "3", None),
-            x_aux("output", "smoothed", None),
-        ],
-    );
-
-    let sim_specs = sim_specs_with_units("years");
-    let datamodel_project = x_project(sim_specs, &[main_model, smooth_model]);
-    let db = SimlinDb::default();
-    let result = sync_from_datamodel(&db, &datamodel_project);
-    let model = result.models["main"].source;
-    let detected = model_detected_loops(&db, model, result.project);
-
-    assert!(
-        !detected.loops.is_empty(),
-        "Should find at least one loop through the module"
-    );
 }
 
 #[test]
@@ -598,68 +544,6 @@ fn test_format_path_empty_loop() {
     let path = loop_item.format_path();
     assert_eq!(path, "", "Empty loop should return empty string");
     assert!(path.is_empty(), "Path must be empty for loop with no links");
-}
-
-#[test]
-fn test_get_variable_dependencies_module() {
-    // Test get_variable_dependencies for Module type (covers lines 70-72)
-    use crate::variable::ModuleInput;
-
-    let input_var = Ident::new("input_signal");
-    let module = Variable::Module {
-        ident: Ident::new("processor"),
-        model_name: Ident::new("process_model"),
-        units: None,
-        inputs: vec![
-            ModuleInput {
-                src: input_var.clone(),
-                dst: Ident::new("input"),
-            },
-            ModuleInput {
-                src: Ident::new("control"),
-                dst: Ident::new("param"),
-            },
-        ],
-        errors: vec![],
-        unit_errors: vec![],
-    };
-
-    let deps = get_variable_dependencies(&module);
-    assert_eq!(deps.len(), 2, "Module should have 2 dependencies");
-    assert!(deps.contains(&input_var), "Should contain input_signal");
-    assert!(
-        deps.contains(&Ident::new("control")),
-        "Should contain control"
-    );
-}
-
-#[test]
-fn test_get_variable_dependencies_no_ast() {
-    // Test get_variable_dependencies when AST is None (covers line 83)
-    let var = Variable::Var {
-        ident: Ident::new("empty_var"),
-        ast: None,
-        init_ast: None,
-        eqn: None,
-        units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
-        errors: vec![],
-        unit_errors: vec![],
-    };
-
-    let deps = get_variable_dependencies(&var);
-    assert_eq!(
-        deps.len(),
-        0,
-        "Variable with no AST should have no dependencies"
-    );
-    assert!(
-        deps.is_empty(),
-        "Dependencies must be empty for variable without AST"
-    );
 }
 
 /// A continuous graphical function over x = [0, 1, 2, ...] with the given
@@ -1507,15 +1391,6 @@ fn test_loop_polarity_from_runtime_scores_neg_inf_with_finite_balancing() {
 }
 
 #[test]
-fn test_loop_polarity_abbreviation() {
-    assert_eq!(LoopPolarity::Reinforcing.abbreviation(), "R");
-    assert_eq!(LoopPolarity::Balancing.abbreviation(), "B");
-    assert_eq!(LoopPolarity::MostlyReinforcing.abbreviation(), "Rux");
-    assert_eq!(LoopPolarity::MostlyBalancing.abbreviation(), "Bux");
-    assert_eq!(LoopPolarity::Undetermined.abbreviation(), "U");
-}
-
-#[test]
 fn test_calculate_polarity_all_unknown_links() {
     // When all links have Unknown polarity, the loop should be Undetermined
     let graph = CausalGraph {
@@ -1681,13 +1556,6 @@ fn test_calculate_polarity_all_known_links() {
 #[test]
 fn test_loop_id_assignment_undetermined_polarity() {
     // Loops with Undetermined structural polarity should get "u" prefix
-    let graph = CausalGraph {
-        edges: HashMap::new(),
-        stocks: HashSet::new(),
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    };
-
     let mut loops = vec![
         Loop {
             id: String::new(),
@@ -1729,7 +1597,7 @@ fn test_loop_id_assignment_undetermined_polarity() {
         },
     ];
 
-    graph.assign_deterministic_loop_ids(&mut loops);
+    assign_loop_ids(&mut loops);
 
     // Find the undetermined loop (contains "a" and "b")
     let undetermined_loop = loops
@@ -3641,17 +3509,6 @@ fn tiny_cycle_graph() -> CausalGraph {
 }
 
 #[test]
-fn find_circuit_node_lists_bails_out_past_budget() {
-    let graph = tiny_cycle_graph();
-    // Budget of zero: the very first circuit push should trip the
-    // bail-out and return TruncatedByBudget.
-    let err = graph
-        .find_circuit_node_lists_with_limit(0)
-        .expect_err("budget of 0 must bail");
-    assert_eq!(err, TruncatedByBudget);
-}
-
-#[test]
 fn find_circuit_node_lists_succeeds_within_budget() {
     let graph = tiny_cycle_graph();
     let circuits = graph
@@ -3680,10 +3537,12 @@ fn find_loops_bails_out_past_budget() {
 // --- IndexedGraph + SCC-restricted enumeration tests ---
 //
 // These validate the refactor from `HashSet<Ident>` to integer-indexed
-// DFS.  The goal is to pin down the invariants the public contract
-// depends on so later optimization passes can't silently break them:
-// (1) the node-ordering round-trip, (2) SCC decomposition behavior,
-// (3) self-loop exclusion at length 1, and (4) budget semantics.
+// DFS, at the level the `johnson_*` block below cannot reach: (1) the
+// node-ordering round-trip and (2) SCC decomposition behavior, asserted
+// on `IndexedGraph`/`tarjan_scc` directly.  The circuit-level invariants
+// -- self-loop exclusion at length 1 and budget semantics -- are pinned
+// once, in the `johnson_*` block, over the same public
+// `find_circuit_node_lists_with_limit` entry point.
 
 fn build_causal_graph(edges: &[(&str, &[&str])]) -> CausalGraph {
     let mut map: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
@@ -3761,59 +3620,6 @@ fn indexed_graph_two_node_back_edge() {
 }
 
 #[test]
-fn indexed_graph_three_node_cycle() {
-    // A -> B -> C -> A: exactly one elementary circuit.
-    let cg = build_causal_graph(&[("a", &["b"]), ("b", &["c"]), ("c", &["a"])]);
-    let circuits = cg
-        .find_circuit_node_lists_with_limit(usize::MAX)
-        .expect("tiny cycle must not exhaust budget");
-    assert_eq!(
-        circuits_as_sorted_name_sets(&circuits),
-        vec![vec!["a".to_string(), "b".to_string(), "c".to_string()]]
-    );
-}
-
-#[test]
-fn indexed_graph_two_disjoint_three_cycles() {
-    // Two completely disjoint cycles: {a,b,c} and {x,y,z}.
-    // Each forms its own SCC so we must find exactly two circuits.
-    let cg = build_causal_graph(&[
-        ("a", &["b"]),
-        ("b", &["c"]),
-        ("c", &["a"]),
-        ("x", &["y"]),
-        ("y", &["z"]),
-        ("z", &["x"]),
-    ]);
-    let circuits = cg
-        .find_circuit_node_lists_with_limit(usize::MAX)
-        .expect("small disjoint graphs must not exhaust budget");
-    let sorted = circuits_as_sorted_name_sets(&circuits);
-    assert_eq!(
-        sorted,
-        vec![
-            vec!["a".to_string(), "b".to_string(), "c".to_string()],
-            vec!["x".to_string(), "y".to_string(), "z".to_string()],
-        ]
-    );
-}
-
-#[test]
-fn indexed_graph_two_cycle_and_self_loop_node() {
-    // A <-> B (one 2-cycle), and separately S -> S (self-loop).
-    // Pure self-loops are intentionally excluded (circuit.len() > 1),
-    // so only the A<->B cycle is returned.
-    let cg = build_causal_graph(&[("a", &["b"]), ("b", &["a"]), ("s", &["s"])]);
-    let circuits = cg
-        .find_circuit_node_lists_with_limit(usize::MAX)
-        .expect("small graph must not exhaust budget");
-    assert_eq!(
-        circuits_as_sorted_name_sets(&circuits),
-        vec![vec!["a".to_string(), "b".to_string()]]
-    );
-}
-
-#[test]
 fn indexed_graph_scc_pure_dag() {
     // Pure DAG: a -> b -> c, no cycles.  Tarjan must return only
     // trivial (size-1, no self-loop) SCCs.
@@ -3879,41 +3685,6 @@ fn indexed_graph_scc_figure_eight_single_scc() {
         .collect();
     assert_eq!(non_trivial.len(), 1, "figure-8 shares a node -> single SCC");
     assert_eq!(non_trivial[0].len(), 5);
-}
-
-#[test]
-fn indexed_graph_self_loop_only_yields_no_circuit() {
-    // Graph with just A -> A must yield zero circuits because pure
-    // self-loops (circuit.len() == 1) are intentionally excluded.
-    let cg = build_causal_graph(&[("a", &["a"])]);
-    let circuits = cg
-        .find_circuit_node_lists_with_limit(usize::MAX)
-        .expect("tiny graph must not exhaust budget");
-    assert!(
-        circuits.is_empty(),
-        "pure self-loop must NOT produce a circuit"
-    );
-}
-
-#[test]
-fn indexed_graph_zero_budget_nonempty_graph_truncates() {
-    // Non-empty cycle + zero budget -> immediate TruncatedByBudget.
-    let cg = build_causal_graph(&[("a", &["b"]), ("b", &["a"])]);
-    let err = cg
-        .find_circuit_node_lists_with_limit(0)
-        .expect_err("zero budget on a cycle must truncate");
-    assert_eq!(err, TruncatedByBudget);
-}
-
-#[test]
-fn indexed_graph_tiny_in_budget_succeeds() {
-    // Matching positive control for the budget test: same cycle but
-    // with an ample budget must succeed and return exactly one circuit.
-    let cg = build_causal_graph(&[("a", &["b"]), ("b", &["a"])]);
-    let circuits = cg
-        .find_circuit_node_lists_with_limit(usize::MAX)
-        .expect("ample budget must succeed");
-    assert_eq!(circuits.len(), 1);
 }
 
 // ------------------------------------------------------------------

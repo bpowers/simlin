@@ -41,17 +41,6 @@ describe('Static file configuration', () => {
       expect(dir).toBe('public');
     });
 
-    it('should return build in development if build/index.html exists', () => {
-      const buildExists = fs.existsSync('build/index.html');
-      const dir = getStaticDirectory('development');
-
-      if (buildExists) {
-        expect(dir).toBe('build');
-      } else {
-        expect(dir).toBe('public');
-      }
-    });
-
     it('should fall back to public in development if build/index.html is missing', () => {
       existsSyncMock.mockImplementation((p: fs.PathLike) => {
         if (String(p) === 'build/index.html') return false;
@@ -70,14 +59,16 @@ describe('Static file configuration', () => {
       expect(dir).toBe('build');
     });
 
-    it('should use process.env.NODE_ENV when no argument is passed', () => {
-      const env = process.env.NODE_ENV;
-      const dir = getStaticDirectory();
-      if (env === 'production') {
-        expect(dir).toBe('public');
-      } else {
-        // In non-production (or undefined), behavior depends on whether build/index.html exists
-        expect(['build', 'public']).toContain(dir);
+    it('falls back to process.env.NODE_ENV when no argument is passed', () => {
+      // The no-argument call is the production one (server-init.ts), so pin the
+      // default explicitly instead of accepting whichever branch the ambient
+      // NODE_ENV happens to take.
+      const saved = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'production';
+      try {
+        expect(getStaticDirectory()).toBe('public');
+      } finally {
+        process.env.NODE_ENV = saved;
       }
     });
   });

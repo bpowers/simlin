@@ -124,33 +124,6 @@ fn test_compute_layout_simple() {
 }
 
 #[test]
-fn test_compile_var_fragment_produces_result() {
-    let db = SimlinDb::default();
-    let project = two_var_project();
-    let sync = sync_from_datamodel(&db, &project);
-
-    let model = sync.models["main"].source;
-    let alpha_var = sync.models["main"].variables["alpha"].source;
-
-    let result = compile_var_fragment(
-        &db,
-        alpha_var,
-        model,
-        sync.project,
-        ModuleInputSet::empty(&db),
-    );
-    assert!(result.is_some(), "alpha should compile successfully");
-
-    let frag = &result.as_ref().unwrap().fragment;
-    assert_eq!(frag.ident, "alpha");
-    // Alpha is an aux, should have flow_bytecodes (in the flows runlist)
-    assert!(
-        frag.flow_bytecodes.is_some() || frag.initial_bytecodes.is_some(),
-        "alpha should produce bytecodes in at least one phase"
-    );
-}
-
-#[test]
 fn test_assemble_simulation_simple() {
     let db = SimlinDb::default();
     let project = two_var_project();

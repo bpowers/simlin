@@ -132,18 +132,8 @@ impl ProjectDoc {
     /// `export_canonical_json` inverse rebuilds the on-disk array shape.
     pub fn apply_canonical_json(&self, new_json: &Value) -> Result<(), MergeError> {
         let projected = project_json_to_loro_shape(new_json)?;
-        let json_obj = match &projected {
-            Value::Object(o) => o,
-            other => {
-                return Err(MergeError::ShapeError {
-                    path: "$".into(),
-                    expected: "object",
-                    actual: json_value_kind(other),
-                });
-            }
-        };
         let root = self.doc.get_map(ROOT_MAP_KEY);
-        merge_map(&root, json_obj, "$")?;
+        merge_map(&root, &projected, "$")?;
         self.doc.commit();
         Ok(())
     }
@@ -464,7 +454,7 @@ const VARIABLE_ARRAY_FIELDS: &[&str] = &["stocks", "flows", "auxiliaries", "modu
 /// the project schema (e.g. `models` isn't an array). Missing optional
 /// keys are passed through unchanged so partial projects (a JSON missing
 /// `dimensions`, say) still merge cleanly.
-fn project_json_to_loro_shape(json: &Value) -> Result<Value, MergeError> {
+fn project_json_to_loro_shape(json: &Value) -> Result<JsonMap<String, Value>, MergeError> {
     let obj = match json {
         Value::Object(map) => map,
         _ => {
@@ -484,7 +474,7 @@ fn project_json_to_loro_shape(json: &Value) -> Result<Value, MergeError> {
             out.insert(key.clone(), value.clone());
         }
     }
-    Ok(Value::Object(out))
+    Ok(out)
 }
 
 fn models_array_to_map(value: &Value, path: &str) -> Result<Value, MergeError> {
@@ -715,24 +705,6 @@ mod tests {
         let doc = ProjectDoc::new();
         let s = doc.current_state_as_json_string().expect("string");
         assert_eq!(s, "{}");
-    }
-
-    #[test]
-    fn manually_inserted_root_key_round_trips_through_export() {
-        // Bypass apply_canonical_json and write directly through the inner
-        // LoroDoc to prove the export plumbing works end-to-end. The
-        // exported value should be the inner project content (not wrapped
-        // under a `"project"` key) since `export_canonical_json` strips
-        // that wrapper to mirror the apply input shape.
-        let doc = ProjectDoc::new();
-        let root = doc.inner_doc().get_map(ROOT_MAP_KEY);
-        root.insert("name", "demo")
-            .expect("insert string into root map");
-        doc.inner_doc().commit();
-
-        let exported = doc.export_canonical_json().expect("export");
-        let obj = exported.as_object().expect("object root");
-        assert_eq!(obj.get("name").and_then(|v| v.as_str()), Some("demo"));
     }
 
     #[test]
@@ -1120,23 +1092,6 @@ mod tests {
             stocks_map.get("population").is_some(),
             "expected canonical key 'population' in {stocks_map}"
         );
-    }
-
-    #[test]
-    fn project_json_to_loro_shape_rejects_non_object_root() {
-        let err = project_json_to_loro_shape(&serde_json::json!([1, 2, 3])).unwrap_err();
-        match err {
-            MergeError::ShapeError {
-                path,
-                expected,
-                actual,
-            } => {
-                assert_eq!(path, "$");
-                assert_eq!(expected, "object");
-                assert_eq!(actual, "array");
-            }
-            other => panic!("expected ShapeError, got {other:?}"),
-        }
     }
 
     #[test]

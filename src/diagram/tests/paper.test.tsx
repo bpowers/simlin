@@ -14,6 +14,10 @@ describe('Paper', () => {
     expect(screen.getByText('Paper content')).not.toBeNull();
   });
 
+  // These assert class names, which is normally just restating the source. Here
+  // the class IS the only observable of a real decision: Paper buckets an
+  // arbitrary numeric elevation into three shadow levels at a `<= 4` threshold.
+  // The rows below cover each arm of that bucketing plus the default.
   test('applies elevation1 class by default', () => {
     const { container } = render(<Paper>Content</Paper>);
     const paper = container.firstChild as HTMLElement;
@@ -36,12 +40,6 @@ describe('Paper', () => {
     const { container } = render(<Paper elevation={8}>Content</Paper>);
     const paper = container.firstChild as HTMLElement;
     expect(paper.className).toContain('elevation2');
-  });
-
-  test('applies custom className', () => {
-    const { container } = render(<Paper className="custom">Content</Paper>);
-    const paper = container.firstChild as HTMLElement;
-    expect(paper.className).toContain('custom');
   });
 
   test('applies custom style', () => {

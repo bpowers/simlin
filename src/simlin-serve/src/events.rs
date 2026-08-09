@@ -247,16 +247,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_with_no_subscribers_is_silently_dropped() {
-        let bus = EventBus::new();
-        bus.publish(WsMessage::ProjectChanged {
-            path: "x".into(),
-            version: 1,
-            source: ChangeSource::User,
-        });
-    }
-
-    #[tokio::test]
     async fn lagged_receiver_sees_lagged_error_then_resumes() {
         // Capacity is 64. We publish 100 messages without reading once;
         // the channel keeps the most recent 64 and the next recv() yields
@@ -336,7 +326,9 @@ mod tests {
     async fn subscribe_after_publish_does_not_replay() {
         // Late subscribers see only messages sent after they subscribe.
         // Messages published before `subscribe()` are not buffered for them
-        // — broadcast channels do not replay history.
+        // — broadcast channels do not replay history. The first publish also
+        // covers the no-subscriber case: `publish` swallows the resulting
+        // `SendError` because "nobody is listening" is not a failure.
         let bus = EventBus::new();
         bus.publish(WsMessage::ProjectChanged {
             path: "early".into(),
@@ -380,21 +372,6 @@ mod tests {
         assert_eq!(value["type"].as_str(), Some("projectRenamed"));
         assert_eq!(value["from"].as_str(), Some("old/path.stmx"));
         assert_eq!(value["to"].as_str(), Some("new/path.stmx"));
-    }
-
-    #[tokio::test]
-    async fn project_renamed_round_trips_through_eventbus() {
-        let bus = EventBus::new();
-        let mut rx = bus.subscribe();
-
-        let msg = WsMessage::ProjectRenamed {
-            from: "a.stmx".into(),
-            to: "b.stmx".into(),
-        };
-        bus.publish(msg.clone());
-
-        let got = rx.recv().await.expect("recv");
-        assert_eq!(got, msg);
     }
 
     #[test]
@@ -447,56 +424,6 @@ mod tests {
         assert_eq!(value["errors"].as_array().expect("errors array").len(), 0);
     }
 
-    #[tokio::test]
-    async fn project_focused_round_trips_through_eventbus() {
-        let bus = EventBus::new();
-        let mut rx = bus.subscribe();
-
-        let msg = WsMessage::ProjectFocused {
-            path: "demo.stmx".into(),
-        };
-        bus.publish(msg.clone());
-
-        let got = rx.recv().await.expect("recv");
-        assert_eq!(got, msg);
-    }
-
-    #[tokio::test]
-    async fn selection_changed_round_trips_through_eventbus() {
-        let bus = EventBus::new();
-        let mut rx = bus.subscribe();
-
-        let msg = WsMessage::SelectionChanged {
-            path: "demo.stmx".into(),
-            variable_idents: vec!["a".into(), "b".into()],
-        };
-        bus.publish(msg.clone());
-
-        let got = rx.recv().await.expect("recv");
-        assert_eq!(got, msg);
-    }
-
-    #[tokio::test]
-    async fn diagnostics_changed_round_trips_through_eventbus() {
-        let bus = EventBus::new();
-        let mut rx = bus.subscribe();
-
-        let msg = WsMessage::DiagnosticsChanged {
-            path: "demo.stmx".into(),
-            errors: vec![ValidationError {
-                code: "syntax".into(),
-                message: "bad equation".into(),
-                model_name: None,
-                variable_name: Some("y".into()),
-                kind: "variable".into(),
-            }],
-        };
-        bus.publish(msg.clone());
-
-        let got = rx.recv().await.expect("recv");
-        assert_eq!(got, msg);
-    }
-
     #[test]
     fn client_ws_message_parses_project_focused() {
         let json = r#"{"type":"projectFocused","path":"models/teacup.xmile"}"#;
@@ -531,12 +458,6 @@ mod tests {
             result.is_err(),
             "diagnosticsChanged must not be accepted as an inbound frame"
         );
-    }
-
-    #[test]
-    fn client_ws_message_rejects_malformed_json() {
-        let result: Result<ClientWsMessage, _> = serde_json::from_str("not json");
-        assert!(result.is_err());
     }
 
     #[test]

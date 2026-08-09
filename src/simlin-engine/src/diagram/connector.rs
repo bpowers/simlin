@@ -133,25 +133,6 @@ pub(crate) fn get_visual_center(
     (cx - offset, cy - offset)
 }
 
-#[cfg(test)]
-fn circle_from_points(p1: Point, p2: Point, p3: Point) -> Result<Circle, &'static str> {
-    let off = square(p2.x) + square(p2.y);
-    let bc = (square(p1.x) + square(p1.y) - off) / 2.0;
-    let cd = (off - square(p3.x) - square(p3.y)) / 2.0;
-    let det = (p1.x - p2.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p2.y);
-
-    if is_zero(det) {
-        return Err("zero determinant");
-    }
-
-    let idet = 1.0 / det;
-    let cx = (bc * (p2.y - p3.y) - cd * (p1.y - p2.y)) * idet;
-    let cy = (cd * (p1.x - p2.x) - bc * (p2.x - p3.x)) * idet;
-    let r = (square(p2.x - cx) + square(p2.y - cy)).sqrt();
-
-    Ok(Circle { x: cx, y: cy, r })
-}
-
 pub(crate) fn opposite_theta(theta: f64) -> f64 {
     let mut t = theta + PI;
     if t > PI {
@@ -623,25 +604,6 @@ mod tests {
 
     fn not_arrayed(_name: &str) -> bool {
         false
-    }
-
-    #[test]
-    fn test_circle_from_points() {
-        let p1 = Point { x: 0.0, y: 1.0 };
-        let p2 = Point { x: 1.0, y: 0.0 };
-        let p3 = Point { x: -1.0, y: 0.0 };
-        let c = circle_from_points(p1, p2, p3).unwrap();
-        assert!((c.x - 0.0).abs() < 1e-6);
-        assert!((c.y - 0.0).abs() < 1e-6);
-        assert!((c.r - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_circle_from_collinear_points() {
-        let p1 = Point { x: 0.0, y: 0.0 };
-        let p2 = Point { x: 1.0, y: 1.0 };
-        let p3 = Point { x: 2.0, y: 2.0 };
-        assert!(circle_from_points(p1, p2, p3).is_err());
     }
 
     #[test]

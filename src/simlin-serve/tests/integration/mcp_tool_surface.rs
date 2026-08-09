@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime};
 use rmcp::model::{CallToolRequestParams, CustomNotification};
 use rmcp::service::NotificationContext;
 use rmcp::{ClientHandler, RoleClient, ServiceExt};
-use simlin_serve::events::{ChangeSource, EventBus, ValidationError, WsMessage};
+use simlin_serve::events::{ChangeSource, EventBus, WsMessage};
 use simlin_serve::handlers::AppState;
 use simlin_serve::mcp::{RegistryAccess, SimlinServeMcpServer};
 use simlin_serve::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry};
@@ -101,14 +101,19 @@ async fn tools_list_advertises_pascal_case_names() {
         .expect("tools/list must succeed");
 
     let names: Vec<&str> = result.tools.iter().map(|t| t.name.as_ref()).collect();
-    let mut sorted = names.clone();
-    sorted.sort_unstable();
-    // Subcomponent B's full surface is the three delegated tools plus
-    // ListProjects and Simulate (added in Tasks 5/6); for Task 4 we
-    // just assert the three delegated names are present.
-    for required in ["CreateModel", "EditModel", "ReadModel"] {
+    // The whole advertised surface: the three tools delegated to
+    // simlin-mcp-core, plus the two this crate adds. A tool that exists
+    // but never reaches `tools/list` is invisible to every MCP client, so
+    // the assertion covers each name rather than a representative one.
+    for required in [
+        "CreateModel",
+        "EditModel",
+        "ReadModel",
+        "ListProjects",
+        "Simulate",
+    ] {
         assert!(
-            sorted.contains(&required),
+            names.contains(&required),
             "tools/list must advertise {required}; got: {names:?}"
         );
     }
@@ -244,29 +249,6 @@ async fn list_projects_returns_registry_snapshot() {
 }
 
 #[tokio::test]
-async fn list_projects_advertised_in_tools_list() {
-    let temp = TempDir::new().expect("tempdir");
-    let canonical_root = temp.path().canonicalize().expect("canon root");
-    let state = build_state(canonical_root);
-
-    let (client, server) = spawn_server_pair(state).await;
-
-    let result = client
-        .peer()
-        .list_tools(None)
-        .await
-        .expect("tools/list must succeed");
-    let names: Vec<&str> = result.tools.iter().map(|t| t.name.as_ref()).collect();
-    assert!(
-        names.contains(&"ListProjects"),
-        "tools/list must advertise ListProjects; got: {names:?}"
-    );
-
-    let _ = client.cancel().await;
-    let _ = server.cancel().await;
-}
-
-#[tokio::test]
 async fn simulate_returns_time_series_for_teacup_fixture() {
     let temp = TempDir::new().expect("tempdir");
     let canonical_root = temp.path().canonicalize().expect("canon root");
@@ -332,69 +314,6 @@ async fn simulate_returns_time_series_for_teacup_fixture() {
     assert!(
         initial > final_val,
         "teacup cools toward room temperature: initial={initial}, final={final_val}"
-    );
-
-    let _ = client.cancel().await;
-    let _ = server.cancel().await;
-}
-
-#[tokio::test]
-async fn simulate_filters_variables_when_requested() {
-    let temp = TempDir::new().expect("tempdir");
-    let canonical_root = temp.path().canonicalize().expect("canon root");
-    let abs = copy_fixture("teacup.xmile", &canonical_root);
-    let state = build_state(canonical_root);
-    seed_registry(&state, &abs, ProjectFormat::Xmile);
-
-    let (client, server) = spawn_server_pair(state).await;
-
-    let arguments = serde_json::json!({
-        "projectPath": abs.to_str().unwrap(),
-        "variables": ["teacup_temperature"],
-    });
-    let arguments_obj = match arguments {
-        serde_json::Value::Object(map) => Some(map),
-        _ => unreachable!("arguments is constructed as an object literal"),
-    };
-    let mut params = CallToolRequestParams::new("Simulate");
-    if let Some(args) = arguments_obj {
-        params = params.with_arguments(args);
-    }
-
-    let result = client
-        .peer()
-        .call_tool(params)
-        .await
-        .expect("Simulate call succeeds");
-    let structured = result.structured_content.expect("structured content");
-    let variables = structured
-        .get("variables")
-        .and_then(|v| v.as_object())
-        .expect("variables map");
-    assert_eq!(variables.len(), 1, "filter narrows the response to one var");
-    assert!(variables.contains_key("teacup_temperature"));
-
-    let _ = client.cancel().await;
-    let _ = server.cancel().await;
-}
-
-#[tokio::test]
-async fn simulate_advertised_in_tools_list() {
-    let temp = TempDir::new().expect("tempdir");
-    let canonical_root = temp.path().canonicalize().expect("canon root");
-    let state = build_state(canonical_root);
-
-    let (client, server) = spawn_server_pair(state).await;
-
-    let result = client
-        .peer()
-        .list_tools(None)
-        .await
-        .expect("tools/list must succeed");
-    let names: Vec<&str> = result.tools.iter().map(|t| t.name.as_ref()).collect();
-    assert!(
-        names.contains(&"Simulate"),
-        "tools/list must advertise Simulate; got: {names:?}"
     );
 
     let _ = client.cancel().await;
@@ -503,28 +422,6 @@ async fn simulate_missing_path_returns_is_error_true_with_structured_content() {
     let _ = server.cancel().await;
 }
 
-#[tokio::test]
-async fn get_info_includes_workspace_dir_in_instructions() {
-    let temp = TempDir::new().expect("tempdir");
-    let canonical_root = temp.path().canonicalize().expect("canon root");
-    let state = build_state(canonical_root.clone());
-
-    let server = SimlinServeMcpServer::<RegistryAccess>::new(state);
-    use rmcp::ServerHandler;
-    let info = server.get_info();
-
-    assert!(
-        info.instructions.is_some(),
-        "instructions must be set so AI clients see the workspace dir"
-    );
-    let instructions = info.instructions.unwrap();
-    let display = canonical_root.display().to_string();
-    assert!(
-        instructions.contains(&display),
-        "instructions must contain the workspace dir; got: {instructions:?}"
-    );
-}
-
 /// One captured custom notification: (method, params).
 type CapturedEvent = (String, Option<serde_json::Value>);
 
@@ -597,6 +494,12 @@ where
     }
 }
 
+/// The one end-to-end proof that a bus event reaches an MCP peer as a
+/// `simlin/*` notification. `forward_events_to_peer` has no per-variant
+/// branching -- it hands every message to `wire_pair` and sends the result
+/// -- so the remaining variants are covered by the `wire_pair_*` unit
+/// tests in `src/mcp/notifications.rs` rather than by five more duplex
+/// sessions.
 #[tokio::test]
 async fn project_changed_event_arrives_as_simlin_project_changed_notification() {
     let temp = TempDir::new().expect("tempdir");
@@ -627,155 +530,6 @@ async fn project_changed_event_arrives_as_simlin_project_changed_notification() 
     assert_eq!(params["path"].as_str(), Some("models/teacup.xmile"));
     assert_eq!(params["version"].as_u64(), Some(3));
     assert_eq!(params["source"].as_str(), Some("user"));
-    drop(events);
-
-    let _ = client.cancel().await;
-    let _ = server.cancel().await;
-}
-
-#[tokio::test]
-async fn project_focused_event_arrives_as_simlin_project_focused_notification() {
-    let temp = TempDir::new().expect("tempdir");
-    let canonical_root = temp.path().canonicalize().expect("canon root");
-    let state = build_state(canonical_root);
-
-    let (client, server, capture) = spawn_server_pair_with_capture(state.clone()).await;
-
-    state.events.publish(WsMessage::ProjectFocused {
-        path: "a.stmx".into(),
-    });
-
-    wait_for_events(&capture, Duration::from_secs(2), |events| {
-        events
-            .iter()
-            .any(|(method, _)| method == "simlin/projectFocused")
-    })
-    .await;
-
-    let events = capture.events.lock().await;
-    let entry = events
-        .iter()
-        .find(|(method, _)| method == "simlin/projectFocused")
-        .expect("projectFocused notification recorded");
-    let params = entry.1.as_ref().expect("params present");
-    assert_eq!(params["path"].as_str(), Some("a.stmx"));
-    drop(events);
-
-    let _ = client.cancel().await;
-    let _ = server.cancel().await;
-}
-
-#[tokio::test]
-async fn selection_changed_event_arrives_with_camel_case_idents() {
-    let temp = TempDir::new().expect("tempdir");
-    let canonical_root = temp.path().canonicalize().expect("canon root");
-    let state = build_state(canonical_root);
-
-    let (client, server, capture) = spawn_server_pair_with_capture(state.clone()).await;
-
-    state.events.publish(WsMessage::SelectionChanged {
-        path: "x.stmx".into(),
-        variable_idents: vec!["alpha".into(), "beta".into()],
-    });
-
-    wait_for_events(&capture, Duration::from_secs(2), |events| {
-        events
-            .iter()
-            .any(|(method, _)| method == "simlin/selectionChanged")
-    })
-    .await;
-
-    let events = capture.events.lock().await;
-    let entry = events
-        .iter()
-        .find(|(method, _)| method == "simlin/selectionChanged")
-        .expect("selectionChanged notification recorded");
-    let params = entry.1.as_ref().expect("params present");
-    assert_eq!(params["path"].as_str(), Some("x.stmx"));
-    let idents = params["variableIdents"]
-        .as_array()
-        .expect("variableIdents is an array");
-    assert_eq!(idents.len(), 2);
-    assert_eq!(idents[0].as_str(), Some("alpha"));
-    assert_eq!(idents[1].as_str(), Some("beta"));
-    drop(events);
-
-    let _ = client.cancel().await;
-    let _ = server.cancel().await;
-}
-
-#[tokio::test]
-async fn diagnostics_changed_event_arrives_with_error_list() {
-    let temp = TempDir::new().expect("tempdir");
-    let canonical_root = temp.path().canonicalize().expect("canon root");
-    let state = build_state(canonical_root);
-
-    let (client, server, capture) = spawn_server_pair_with_capture(state.clone()).await;
-
-    state.events.publish(WsMessage::DiagnosticsChanged {
-        path: "models/teacup.xmile".into(),
-        errors: vec![ValidationError {
-            code: "syntax".into(),
-            message: "bad equation".into(),
-            model_name: Some("main".into()),
-            variable_name: Some("y".into()),
-            kind: "variable".into(),
-        }],
-    });
-
-    wait_for_events(&capture, Duration::from_secs(2), |events| {
-        events
-            .iter()
-            .any(|(method, _)| method == "simlin/diagnosticsChanged")
-    })
-    .await;
-
-    let events = capture.events.lock().await;
-    let entry = events
-        .iter()
-        .find(|(method, _)| method == "simlin/diagnosticsChanged")
-        .expect("diagnosticsChanged notification recorded");
-    let params = entry.1.as_ref().expect("params present");
-    assert_eq!(params["path"].as_str(), Some("models/teacup.xmile"));
-    let errors = params["errors"].as_array().expect("errors is an array");
-    assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0]["code"].as_str(), Some("syntax"));
-    assert_eq!(errors[0]["modelName"].as_str(), Some("main"));
-    drop(events);
-
-    let _ = client.cancel().await;
-    let _ = server.cancel().await;
-}
-
-#[tokio::test]
-async fn project_removed_event_arrives_as_simlin_project_removed_notification() {
-    // Phase 4's ProjectRemoved variant flows through the same forwarder
-    // path. Asserts the wire_pair coverage stays exhaustive across all
-    // five WsMessage variants.
-    let temp = TempDir::new().expect("tempdir");
-    let canonical_root = temp.path().canonicalize().expect("canon root");
-    let state = build_state(canonical_root);
-
-    let (client, server, capture) = spawn_server_pair_with_capture(state.clone()).await;
-
-    state.events.publish(WsMessage::ProjectRemoved {
-        path: "deleted.stmx".into(),
-    });
-
-    wait_for_events(&capture, Duration::from_secs(2), |events| {
-        events
-            .iter()
-            .any(|(method, _)| method == "simlin/projectRemoved")
-    })
-    .await;
-
-    let events = capture.events.lock().await;
-    let entry = events
-        .iter()
-        .find(|(method, _)| method == "simlin/projectRemoved")
-        .expect("projectRemoved notification recorded");
-    let params = entry.1.as_ref().expect("params present");
-    assert_eq!(params["path"].as_str(), Some("deleted.stmx"));
     drop(events);
 
     let _ = client.cancel().await;

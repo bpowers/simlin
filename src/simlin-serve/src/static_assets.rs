@@ -121,15 +121,13 @@ fn not_found() -> Response {
     (StatusCode::NOT_FOUND, "not found").into_response()
 }
 
+// The embed-dependent arms of `resolve_asset` (`Hit` and `SpaFallback`)
+// are covered end-to-end in `tests/integration/static_assets.rs`, which
+// drives them through the router against the real `web/dist` build. Unit
+// tests here only cover what holds with an empty embed.
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn web_dist_present() -> bool {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("web/dist/index.html")
-            .is_file()
-    }
 
     #[test]
     fn content_type_covers_every_extension_in_the_bundle() {
@@ -168,30 +166,6 @@ mod tests {
         match resolve_asset("foo/missing.js") {
             AssetLookup::Missing => {}
             _ => panic!("expected Missing for asset-shaped path"),
-        }
-    }
-
-    #[test]
-    fn extensionless_unknown_path_uses_spa_fallback_when_index_present() {
-        if !web_dist_present() {
-            eprintln!("web/dist not built; skipping spa-fallback unit test");
-            return;
-        }
-        match resolve_asset("some/route") {
-            AssetLookup::SpaFallback { .. } => {}
-            _ => panic!("expected SpaFallback when index.html is embedded"),
-        }
-    }
-
-    #[test]
-    fn index_html_resolves_to_hit_when_present() {
-        if !web_dist_present() {
-            eprintln!("web/dist not built; skipping index-hit unit test");
-            return;
-        }
-        match resolve_asset("index.html") {
-            AssetLookup::Hit { path, .. } => assert_eq!(path, "index.html"),
-            _ => panic!("expected Hit for index.html"),
         }
     }
 }

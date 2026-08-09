@@ -42,7 +42,12 @@ pub enum ArrayBounds {
 }
 
 impl ArrayBounds {
-    /// Returns the total number of elements in the array
+    /// Returns the total number of elements in the array.
+    ///
+    /// Test-only: no production caller reads an `ArrayBounds`' extent (codegen
+    /// goes through `ArrayView`/`VarSizes` instead), so this is gated rather
+    /// than shipped.
+    #[cfg(test)]
     pub fn size(&self) -> usize {
         match self {
             ArrayBounds::Named { dims, .. } | ArrayBounds::Temp { dims, .. } => {
@@ -1119,79 +1124,9 @@ impl Expr2 {
     }
 }
 
-/// Evaluate a constant expression to an integer value.
-/// This is used for array subscripts which must be integer constants.
-#[cfg(test)]
-fn const_int_eval(ast: &Expr2) -> EquationResult<i32> {
-    use crate::float::approx_eq;
-    match ast {
-        Expr2::Const(_, n, loc) => {
-            let n = n.value();
-            if approx_eq(n, n.round()) {
-                Ok(n.round() as i32)
-            } else {
-                eqn_err!(ExpectedInteger, loc.start, loc.end)
-            }
-        }
-        Expr2::Var(_, _, loc) => {
-            eqn_err!(ExpectedInteger, loc.start, loc.end)
-        }
-        Expr2::App(_, _, loc) => {
-            eqn_err!(ExpectedInteger, loc.start, loc.end)
-        }
-        Expr2::Subscript(_, _, _, loc) => {
-            eqn_err!(ExpectedInteger, loc.start, loc.end)
-        }
-        Expr2::Op1(op, expr, _, loc) => {
-            let expr = const_int_eval(expr)?;
-            let result = match op {
-                UnaryOp::Positive => expr,
-                UnaryOp::Negative => -expr,
-                UnaryOp::Not => i32::from(expr == 0),
-                UnaryOp::Transpose => {
-                    // Transpose doesn't make sense for integer evaluation
-                    return eqn_err!(ExpectedInteger, loc.start, loc.end);
-                }
-            };
-            Ok(result)
-        }
-        Expr2::Op2(op, l, r, _, _) => {
-            let l = const_int_eval(l)?;
-            let r = const_int_eval(r)?;
-            let result = match op {
-                BinaryOp::Add => l + r,
-                BinaryOp::Sub => l - r,
-                BinaryOp::Exp => l.pow(r as u32),
-                BinaryOp::Mul => l * r,
-                BinaryOp::Div => {
-                    if r == 0 {
-                        0
-                    } else {
-                        l / r
-                    }
-                }
-                BinaryOp::Mod => l % r,
-                BinaryOp::Gt => (l > r) as i32,
-                BinaryOp::Lt => (l < r) as i32,
-                BinaryOp::Gte => (l >= r) as i32,
-                BinaryOp::Lte => (l <= r) as i32,
-                BinaryOp::Eq => (l == r) as i32,
-                BinaryOp::Neq => (l != r) as i32,
-                BinaryOp::And => ((l != 0) && (r != 0)) as i32,
-                BinaryOp::Or => ((l != 0) || (r != 0)) as i32,
-            };
-            Ok(result)
-        }
-        Expr2::If(_, _, _, _, loc) => {
-            eqn_err!(ExpectedInteger, loc.start, loc.end)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Ident;
     use std::collections::HashMap;
     use std::iter::Iterator;
 
@@ -1265,13 +1200,6 @@ mod tests {
             dims: vec![3, 4],
             dim_names: None,
         };
-        match &named_bounds {
-            ArrayBounds::Named { name, dims, .. } => {
-                assert_eq!(name, "array_var");
-                assert_eq!(dims, &vec![3, 4]);
-            }
-            _ => panic!("Expected Named variant"),
-        }
         assert_eq!(named_bounds.dims(), &[3, 4]);
         assert_eq!(named_bounds.size(), 12); // 3 * 4 = 12
 
@@ -1281,13 +1209,6 @@ mod tests {
             dims: vec![2, 3],
             dim_names: None,
         };
-        match &temp_bounds {
-            ArrayBounds::Temp { id, dims, .. } => {
-                assert_eq!(*id, 5);
-                assert_eq!(dims, &vec![2, 3]);
-            }
-            _ => panic!("Expected Temp variant"),
-        }
         assert_eq!(temp_bounds.dims(), &[2, 3]);
         assert_eq!(temp_bounds.size(), 6); // 2 * 3 = 6
 
@@ -1314,155 +1235,6 @@ mod tests {
             dim_names: None,
         };
         assert_eq!(bounds_3d.size(), 24); // 2 * 3 * 4 = 24
-    }
-
-    #[test]
-    fn test_const_int_eval() {
-        // Helper to create const expression
-        fn const_expr(val: f64) -> Expr2 {
-            Expr2::Const(val.to_string(), Literal::new(val), Loc::default())
-        }
-
-        // Test basic constants
-        let const_cases = vec![
-            (0.0, 0),
-            (1.0, 1),
-            (-1.0, -1),
-            (42.0, 42),
-            (3.0, 3), // Tests rounding
-        ];
-
-        for (val, expected) in const_cases {
-            assert_eq!(expected, const_int_eval(&const_expr(val)).unwrap());
-        }
-
-        // Test error case
-        assert!(const_int_eval(&const_expr(3.5)).is_err());
-        assert!(const_int_eval(&Expr2::Var(Ident::new("foo"), None, Loc::default())).is_err());
-
-        // Test unary operations
-        let unary_cases = vec![
-            (UnaryOp::Negative, 5, -5),
-            (UnaryOp::Positive, 5, 5),
-            (UnaryOp::Not, 0, 1),
-            (UnaryOp::Not, 5, 0),
-        ];
-
-        for (op, input, expected) in unary_cases {
-            let expr = Expr2::Op1(op, Box::new(const_expr(input as f64)), None, Loc::default());
-            assert_eq!(expected, const_int_eval(&expr).unwrap());
-        }
-
-        // Test binary operations
-        struct BinaryTestCase {
-            op: BinaryOp,
-            left: i32,
-            right: i32,
-            expected: i32,
-        }
-
-        let binary_cases = vec![
-            BinaryTestCase {
-                op: BinaryOp::Add,
-                left: 2,
-                right: 3,
-                expected: 5,
-            },
-            BinaryTestCase {
-                op: BinaryOp::Sub,
-                left: 4,
-                right: 1,
-                expected: 3,
-            },
-            BinaryTestCase {
-                op: BinaryOp::Mul,
-                left: 3,
-                right: 4,
-                expected: 12,
-            },
-            BinaryTestCase {
-                op: BinaryOp::Div,
-                left: 7,
-                right: 3,
-                expected: 2,
-            },
-            BinaryTestCase {
-                op: BinaryOp::Div,
-                left: 7,
-                right: 0,
-                expected: 0,
-            }, // div by zero
-            BinaryTestCase {
-                op: BinaryOp::Mod,
-                left: 15,
-                right: 7,
-                expected: 1,
-            },
-            BinaryTestCase {
-                op: BinaryOp::Exp,
-                left: 3,
-                right: 3,
-                expected: 27,
-            },
-            BinaryTestCase {
-                op: BinaryOp::Gt,
-                left: 4,
-                right: 2,
-                expected: 1,
-            },
-            BinaryTestCase {
-                op: BinaryOp::Lt,
-                left: 2,
-                right: 4,
-                expected: 1,
-            },
-            BinaryTestCase {
-                op: BinaryOp::Eq,
-                left: 3,
-                right: 3,
-                expected: 1,
-            },
-            BinaryTestCase {
-                op: BinaryOp::Neq,
-                left: 3,
-                right: 4,
-                expected: 1,
-            },
-        ];
-
-        for tc in binary_cases {
-            let expr = Expr2::Op2(
-                tc.op,
-                Box::new(const_expr(tc.left as f64)),
-                Box::new(const_expr(tc.right as f64)),
-                None,
-                Loc::default(),
-            );
-            assert_eq!(
-                tc.expected,
-                const_int_eval(&expr).unwrap(),
-                "Failed for {:?} {} {}",
-                tc.op,
-                tc.left,
-                tc.right
-            );
-        }
-
-        // Test complex expression: (2 * 3) + 1 = 7
-        let complex = Expr2::Op2(
-            BinaryOp::Add,
-            Box::new(Expr2::Op2(
-                BinaryOp::Mul,
-                Box::new(const_expr(2.0)),
-                Box::new(const_expr(3.0)),
-                None,
-                Loc::default(),
-            )),
-            Box::new(const_expr(1.0)),
-            None,
-            Loc::default(),
-        );
-        assert_eq!(7, const_int_eval(&complex).unwrap());
     }
 
     #[test]

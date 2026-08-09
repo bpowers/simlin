@@ -23,9 +23,7 @@ use simlin_serve::build_router;
 use simlin_serve::events::{ChangeSource, EventBus, WsMessage};
 use simlin_serve::handlers::AppState;
 use simlin_serve::hashing::content_hash;
-use simlin_serve::registry::{
-    GitState, ProjectFormat, ProjectMeta, ProjectRegistry, RegistryError,
-};
+use simlin_serve::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry};
 use simlin_serve::test_support::{
     OS_EVENT_TIMEOUT, unavailable_git_probe, wait_for_watcher_ready, watcher_barrier,
 };
@@ -45,8 +43,9 @@ const TEST_MCP_PORT: u16 = 12346;
 /// preceded it, so anything the trigger produced is queued on `rx` by now; this
 /// only absorbs the scheduler hop between the actor's `publish` and a broadcast
 /// receiver observing it. It is deliberately *not* the thing that makes the
-/// absence assertion sound -- the barrier is.
-const POST_BARRIER_SETTLE: Duration = Duration::from_millis(200);
+/// absence assertion sound -- the barrier is, which is why this can be a
+/// scheduler-hop's worth of time rather than a guess at how slow the OS is.
+const POST_BARRIER_SETTLE: Duration = Duration::from_millis(50);
 
 /// Helper: build an `AppState` rooted at `dir` with a fresh registry, no
 /// git visibility, and an `EventBus`.
@@ -636,20 +635,6 @@ async fn remove_of_untracked_path_is_silent() {
     }
 
     shutdown.notify_waiters();
-}
-
-/// Invariant: `merge_disk_change` is the registry primitive the watcher
-/// uses; it must reject paths the registry doesn't yet know about with
-/// NotFound.
-#[test]
-fn merge_disk_change_returns_not_found_when_registry_has_no_entry() {
-    let dir = TempDir::new().expect("tempdir");
-    let canonical = dir.path().canonicalize().expect("canonicalize");
-    let registry = ProjectRegistry::new(canonical.clone());
-    let err = registry
-        .merge_disk_change(&canonical.join("not-tracked.stmx"), &serde_json::json!({}))
-        .unwrap_err();
-    assert_eq!(err, RegistryError::NotFound);
 }
 
 /// AC4.4 (save path): a POST /api/projects save must NOT produce a

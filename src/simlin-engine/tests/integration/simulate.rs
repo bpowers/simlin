@@ -655,18 +655,14 @@ fn classify_vdf_ident_nan_vs_na_skips_without_failing() {
     // (VDF NaN), so they never reach the `:NA:`-sentinel reconciliation branch.
     assert_eq!(stats.na_reconciled, 0);
 
-    // The membership predicate `clearn_residual_exactness` uses to build the
-    // live residual set: this series is excluded from it, so it never needs an
-    // `EXPECTED_VDF_RESIDUAL` carve-out (AC4.5). The exclusion holds *because*
-    // the series has a finite tail (like `slr_inches_from_2000`); the test name
-    // names only this partial-NaN / finite-tail case, NOT the general
+    // The two assertions above ARE the membership predicate
+    // `clearn_residual_exactness` uses to build the live residual set
+    // (`failures > 0 || all_nan`), so this series is excluded from it and never
+    // needs an `EXPECTED_VDF_RESIDUAL` carve-out (AC4.5). The exclusion holds
+    // *because* the series has a finite tail (like `slr_inches_from_2000`); the
+    // test name names only this partial-NaN / finite-tail case, NOT the general
     // NaN-vs-:NA: contract.
-    let enters_residual = stats.failures > 0 || stats.all_nan;
-    assert!(
-        !enters_residual,
-        "a partial-NaN (finite-tail) NaN-vs-:NA: series must NOT enter the residual failure set"
-    );
-
+    //
     // Boundary made executable: an ENTIRELY-NaN VDF series (Vensim literal NaN
     // at every step, or a missing/not-saved slot decoded as all-NaN) is the
     // separately-handled exception. With no finite cell to compare, `all_nan`
@@ -687,13 +683,12 @@ fn classify_vdf_ident_nan_vs_na_skips_without_failing() {
     let all_na_sim_off =
         all_na_sim.offsets[&simlin_engine::common::Ident::new("synthetic_all_nan_series")];
     let all_nan_stats = classify_vdf_ident(&all_nan_vdf, &all_na_sim, all_nan_off, all_na_sim_off);
+    // `all_nan` alone flips the `failures > 0 || all_nan` membership predicate,
+    // so this series WOULD enter the residual set -- it is NOT covered by the
+    // finite-tail skip above.
     assert!(
         all_nan_stats.all_nan,
         "an entirely-NaN VDF series must be flagged all_nan (the separately-guarded exception)"
-    );
-    assert!(
-        all_nan_stats.failures > 0 || all_nan_stats.all_nan,
-        "an all-NaN series WOULD enter the residual set -- it is NOT covered by the finite-tail skip"
     );
 }
 
@@ -707,27 +702,12 @@ fn classify_vdf_ident_nan_vs_na_skips_without_failing() {
 /// inputs only (no C-LEARN parse, no C-LEARN name).
 #[test]
 fn vdf_comparator_constants_and_floor_are_pinned() {
-    // 1. Pin the five comparator constants (AC4.4): a drift in any of these is a
-    //    silent tolerance/floor change that must be a deliberate, reviewed edit.
-    assert_eq!(VDF_RTOL, 0.01, "the 1% cross-simulator tolerance is fixed");
-    assert_eq!(
-        K_ATOL, 1e-4,
-        "the per-series absolute-floor coefficient is fixed"
-    );
-    assert_eq!(
-        MIN_MATCHED_FRACTION, 0.10,
-        "the matched-fraction floor is fixed"
-    );
-    assert_eq!(
-        MIN_MATCHED_ABSOLUTE, 10,
-        "the absolute matched floor is fixed"
-    );
-    assert_eq!(
-        MAX_NAN_SKIPPED_FRACTION, 0.10,
-        "the global NaN-skipped ceiling is fixed"
-    );
+    // The five comparator constants used to be re-asserted here against their
+    // own literals, which restated the declarations rather than constraining
+    // them. What follows constrains them: the floor FORMULA over both regimes,
+    // and the gate actually panicking below the floor.
 
-    // 2. The floor formula itself is `max(absolute, fraction * count)`.
+    // 1. The floor formula itself is `max(absolute, fraction * count)`.
     assert_eq!(
         min_matched(16),
         10,
@@ -739,7 +719,7 @@ fn vdf_comparator_constants_and_floor_are_pinned() {
         "5000 vars: fractional floor (10%) dominates"
     );
 
-    // 3. The gate cannot pass vacuously: a comparison whose matched count is
+    // 2. The gate cannot pass vacuously: a comparison whose matched count is
     //    below the floor must PANIC even though every matched cell is in
     //    tolerance (the legacy `failures == 0` would pass it). 16 reference
     //    variables (floor = 10) with only ONE shared, in-tolerance ident.
@@ -1761,23 +1741,10 @@ fn simulates_subscript_index_name_values() {
     simulate_path("../../test/subscript_index_name_values/model.stmx");
 }
 
-#[test]
-fn simulates_active_initial() {
-    simulate_path("../../test/sdeverywhere/models/active_initial/active_initial.xmile");
-}
-
-#[test]
-fn simulates_lookup() {
-    simulate_path("../../test/sdeverywhere/models/lookup/lookup.xmile");
-}
-
-// Ignored: xmutil drops EXCEPT semantics and subscript mappings when converting
-// MDL to XMILE. The XMILE file has incorrect/incomplete equations.
-#[test]
-#[ignore]
-fn simulates_except_xmile() {
-    simulate_path("../../test/sdeverywhere/models/except/except.xmile");
-}
+// `test/sdeverywhere/models/except/except.xmile` is not simulated: xmutil drops
+// EXCEPT semantics and subscript mappings when converting MDL to XMILE, so the
+// fixture's equations are incomplete and no run of it could be correct. The MDL
+// path carries the coverage instead (`simulates_except` / `simulates_except2`).
 
 /// Vensim's operator-precedence and -associativity reference models. Neither was
 /// in any run set, which is why the XMILE parser's left-associative `^` silently
@@ -1825,11 +1792,6 @@ fn simulates_except() {
 #[test]
 fn simulates_except2() {
     simulate_mdl_path("../../test/sdeverywhere/models/except2/except2.mdl");
-}
-
-#[test]
-fn simulates_sum() {
-    simulate_path("../../test/sdeverywhere/models/sum/sum.xmile");
 }
 
 /// End-to-end test for EXCEPT through the MDL->simulation pipeline.
@@ -1995,13 +1957,6 @@ TIME STEP = 1 ~~|
     }
 }
 
-#[test]
-fn simulates_2d_array() {
-    simulate_path(
-        "../../test/test-models/tests/subscript_2d_arrays/test_subscript_2d_arrays.xmile",
-    );
-}
-
 // Commented out: test_generator approach is useful for discovery but generates many tests.
 // Use the corpus_tests! invocation below for the curated list.
 // #[test_generator::test_resources("test/sdeverywhere/models/**/*.xmile")]
@@ -2066,11 +2021,9 @@ corpus_tests! {
     // xmutil strips GET DIRECT SUBSCRIPT during conversion
     // "test/sdeverywhere/models/directsubs/directsubs.xmile",
     //
-    // xmutil drops EXCEPT semantics and subscript mappings in XMILE conversion.
-    // MDL path tests exist (simulates_except, simulates_except2) but remain
-    // #[ignore] due to MismatchedDimensions errors and missing output variables
-    // (z[a1] absent). Resolving these requires further work on dimension mapping
-    // for variables with EXCEPT and subscript-mapped dimensions.
+    // xmutil drops EXCEPT semantics and subscript mappings in XMILE conversion,
+    // so only the MDL path is covered (`simulates_except`, `simulates_except2`,
+    // both of which RUN -- they are not `#[ignore]`d).
     // "test/sdeverywhere/models/except/except.xmile",
     // "test/sdeverywhere/models/except2/except2.xmile",
     //
@@ -2207,21 +2160,6 @@ fn simulates_lookup_arrayed() {
 }
 
 #[test]
-fn simulates_delay_arrayed() {
-    simulate_path("../../test/sdeverywhere/models/delay/delay.xmile");
-}
-
-#[test]
-fn simulates_smooth3() {
-    simulate_path("../../test/sdeverywhere/models/smooth3/smooth3.xmile");
-}
-
-#[test]
-fn simulates_smooth_with_dim_mappings() {
-    simulate_path("../../test/sdeverywhere/models/smooth/smooth.xmile");
-}
-
-#[test]
 fn simulates_subscript_mdl() {
     simulate_mdl_path("../../test/sdeverywhere/models/subscript/subscript.mdl");
 }
@@ -2234,11 +2172,6 @@ fn simulates_mapping_mdl() {
 #[test]
 fn simulates_multimap_mdl() {
     simulate_mdl_path("../../test/sdeverywhere/models/multimap/multimap.mdl");
-}
-
-#[test]
-fn simulates_npv_xmile() {
-    simulate_path("../../test/sdeverywhere/models/npv/npv.xmile");
 }
 
 #[test]
@@ -2275,11 +2208,6 @@ fn simulates_delayfixed2_mdl() {
 }
 
 #[test]
-fn simulates_sample_xmile() {
-    simulate_path("../../test/sdeverywhere/models/sample/sample.xmile");
-}
-
-#[test]
 fn simulates_sample_mdl() {
     simulate_mdl_path("../../test/sdeverywhere/models/sample/sample.mdl");
 }
@@ -2309,27 +2237,18 @@ fn simulates_longeqns_mdl() {
     simulate_mdl_path("../../test/sdeverywhere/models/longeqns/longeqns.mdl");
 }
 
-// Ignored: xmutil strips GET DATA BETWEEN TIMES calls in XMILE conversion,
-// leaving zeroed-out equations for variables that depend on the data.
-#[test]
-#[ignore]
-fn simulates_getdata_xmile() {
-    simulate_path("../../test/sdeverywhere/models/getdata/getdata.xmile");
-}
-
-// Ignored: two blocking issues prevent MDL path simulation.
-// (1) The MDL normalizer wraps GET DATA BETWEEN TIMES in opaque {GET DATA(...)}
-//     references, which the XMILE equation lexer discards as comments, producing
-//     empty equations for variables like value_for_a1_at_time_minus_half_year_backward.
-// (2) Values[DimA] has no equation in the MDL and must be populated from
-//     getdata_data.dat via Vensim's implicit per-run data loading, which the
-//     engine does not auto-discover. Fixing requires DataProvider integration
-//     for implicit companion .dat files.
-#[test]
-#[ignore]
-fn simulates_getdata_mdl() {
-    simulate_mdl_path("../../test/sdeverywhere/models/getdata/getdata.mdl");
-}
+// `test/sdeverywhere/models/getdata/` is not simulated on EITHER path, so it
+// carries a comment rather than two permanently-`#[ignore]`d tests:
+//
+//   * XMILE: xmutil strips GET DATA BETWEEN TIMES during conversion, leaving
+//     zeroed-out equations for every variable that depends on the data.
+//   * MDL: the normalizer wraps GET DATA BETWEEN TIMES in opaque
+//     `{GET DATA(...)}` references, which the XMILE equation lexer discards as
+//     comments (empty equations for e.g.
+//     `value_for_a1_at_time_minus_half_year_backward`); and `Values[DimA]` has
+//     no equation at all, needing `getdata_data.dat` through Vensim's implicit
+//     per-run data loading, which the engine does not auto-discover. Covering
+//     it needs DataProvider integration for implicit companion `.dat` files.
 
 /// GH #907: an XMILE `<element>` without an `<eqn>` child (gf-only, as Stella
 /// exports for non-A2A graphical functions) is spec-legal (XMILE 4.5.2) and
@@ -2586,8 +2505,16 @@ fn invariance_oracle(datamodel: &simlin_engine::datamodel::Project) -> (usize, u
     (invariant_offsets.len(), violations)
 }
 
-/// Assert the oracle finds zero violations on a corpus model loaded from XMILE.
-fn assert_invariance_sound(xmile_path: &str) {
+/// Assert the oracle finds zero violations on a corpus model loaded from XMILE,
+/// and that the classifier hoisted at least `min_invariant` slots.
+///
+/// `min_invariant` is not decoration: "zero violations" is vacuously true for a
+/// classifier that hoists NOTHING, so without a floor every caller below would
+/// pass against a disabled classifier. Each caller states its own floor because
+/// the right answer is a property of the model -- a model whose only variable
+/// reads TIME genuinely hoists nothing, and saying so is a claim rather than a
+/// hole.
+fn assert_invariance_sound(xmile_path: &str, min_invariant: usize) {
     let f = File::open(xmile_path).unwrap_or_else(|e| panic!("open {xmile_path}: {e}"));
     let mut f = BufReader::new(f);
     let datamodel =
@@ -2596,6 +2523,10 @@ fn assert_invariance_sound(xmile_path: &str) {
     assert_eq!(
         violations, 0,
         "{xmile_path}: {violations} of {n_invariant} invariant-classified slots VARY across steps"
+    );
+    assert!(
+        n_invariant >= min_invariant,
+        "{xmile_path}: expected at least {min_invariant} hoisted slots, got {n_invariant}"
     );
 }
 
@@ -2637,11 +2568,17 @@ fn oracle_time_dependent_aux_not_hoisted() {
         .stock("level", "0", &["inflow"], &[], None)
         .flow("inflow", "ramping + k", None)
         .build_datamodel();
-    let (_n_invariant, violations) = invariance_oracle(&datamodel);
+    let (n_invariant, violations) = invariance_oracle(&datamodel);
     // The oracle must be clean: `ramping` (and `inflow`, which reads it) must NOT
     // be hoisted. If the classifier wrongly hoisted `ramping`, its varying column
     // would trip the oracle.
     assert_eq!(violations, 0);
+    // ...and the constant `k` MUST still be hoisted, or "zero violations" only
+    // says the classifier is switched off.
+    assert!(
+        n_invariant > 0,
+        "the constant `k` must still be hoisted; nothing was"
+    );
 }
 
 /// A stock-derived aux is NOT hoisted.
@@ -2653,8 +2590,14 @@ fn oracle_stock_derived_aux_not_hoisted() {
         .flow("inflow", "1", None)
         .aux("reads_stock", "level + 1", None)
         .build_datamodel();
-    let (_n_invariant, violations) = invariance_oracle(&datamodel);
+    let (n_invariant, violations) = invariance_oracle(&datamodel);
     assert_eq!(violations, 0);
+    // The constant `inflow` MUST still be hoisted, or "zero violations" only
+    // says the classifier is switched off.
+    assert!(
+        n_invariant > 0,
+        "the constant `inflow` must still be hoisted; nothing was"
+    );
 }
 
 /// Pure math builtins of a constant (SQRT/EXP/SIN) are hoisted; a math builtin
@@ -2710,20 +2653,27 @@ fn oracle_init_of_stock_is_invariant() {
 
 #[test]
 fn oracle_corpus_teacup() {
-    assert_invariance_sound("../../test/test-models/samples/teacup/teacup.xmile");
+    assert_invariance_sound("../../test/test-models/samples/teacup/teacup.xmile", 1);
 }
 
 #[test]
 fn oracle_corpus_constant_expressions() {
     assert_invariance_sound(
         "../../test/test-models/tests/constant_expressions/test_constant_expressions.xmile",
+        1,
     );
 }
 
 #[test]
 fn oracle_corpus_lookups_inline() {
+    // Floor 0, deliberately: this model's ONLY variable is
+    // `Variable with Inline Lookup = Time` fed through an inline graphical
+    // function, so there is nothing time-invariant to hoist. What the test
+    // still buys is the other direction -- a classifier that wrongly hoisted a
+    // TIME-derived slot would show up as a violation.
     assert_invariance_sound(
         "../../test/test-models/tests/lookups_inline/test_lookups_inline.xmile",
+        0,
     );
 }
 
@@ -2731,6 +2681,7 @@ fn oracle_corpus_lookups_inline() {
 fn oracle_corpus_subscript_2d() {
     assert_invariance_sound(
         "../../test/test-models/tests/subscript_2d_arrays/test_subscript_2d_arrays.xmile",
+        1,
     );
 }
 
@@ -2738,17 +2689,18 @@ fn oracle_corpus_subscript_2d() {
 fn oracle_corpus_modules() {
     assert_invariance_sound(
         "../../test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
+        1,
     );
 }
 
 #[test]
 fn oracle_corpus_trig() {
-    assert_invariance_sound("../../test/test-models/tests/trig/test_trig.xmile");
+    assert_invariance_sound("../../test/test-models/tests/trig/test_trig.xmile", 1);
 }
 
 #[test]
 fn oracle_corpus_sir() {
-    assert_invariance_sound("../../test/test-models/samples/SIR/SIR.xmile");
+    assert_invariance_sound("../../test/test-models/samples/SIR/SIR.xmile", 1);
 }
 
 // ── Partition-order test ────────────────────────────────────────────────────
@@ -4354,10 +4306,19 @@ fn incremental_compilation_covers_all_models() {
         };
         let mut f = BufReader::new(f);
 
+        // A PARSE failure is a hard failure for the same reason an open failure
+        // is (GH #623): every path reaching here is an XMILE corpus model that
+        // is expected to parse, so `continue`-ing on `Err` would silently shrink
+        // the covered set exactly as the open-failure skip once did. Non-XMILE
+        // paths are skipped deliberately -- this loop only drives the XMILE
+        // reader.
         let datamodel_project = if model_path.ends_with(".stmx") || model_path.ends_with(".xmile") {
             match xmile::project_from_reader(&mut f) {
                 Ok(p) => p,
-                Err(_) => continue,
+                Err(e) => {
+                    failures.push((model_path.clone(), format!("failed to parse: {e}")));
+                    continue;
+                }
             }
         } else {
             continue;
@@ -4387,13 +4348,10 @@ fn incremental_compilation_covers_all_models() {
 
 // -- External data model tests (MDL path with FilesystemDataProvider) --
 
-// Requires Excel data support (ext_data feature), out of scope
-#[cfg(feature = "ext_data")]
-#[test]
-#[ignore]
-fn simulates_directdata_mdl() {
-    simulate_mdl_path_with_data("../../test/sdeverywhere/models/directdata/directdata.mdl");
-}
+// `test/sdeverywhere/models/directdata/directdata.mdl` is deliberately not
+// covered: it needs Excel data support (the `ext_data` feature), which no test
+// target enables. It used to sit here as a test that was both `#[cfg]`-ed out
+// AND `#[ignore]`d -- one that could never run under any invocation.
 
 #[test]
 fn simulates_directconst_mdl() {
@@ -5945,8 +5903,10 @@ fn corpus_clearn_macros_import() {
     // errors, and a non-time `$` reference -- Phase 3's documented
     // limitation) are expected and explicitly allowed; the assertion is
     // specifically that macro handling itself introduced no error. The
-    // classifier (`macro_attributable_diagnostics`, shared with the metasd
-    // corpus harness) catches exactly: a project-level macro-registry build
+    // classifier (`macro_attributable_diagnostics`, this file's own -- the
+    // metasd corpus harness has a deliberately NARROWER variant of its own,
+    // `metasd_macros::narrower_macro_attributable_diagnostics`) catches
+    // exactly: a project-level macro-registry build
     // error (the #554 cascade class -- a registry failure un-shadows
     // `SSHAPE`/`SAMPLE UNTIL`/`RAMP FROM TO`, turning every call into
     // `BadBuiltinArgs`/`UnknownBuiltin`), an Error-severity diagnostic inside

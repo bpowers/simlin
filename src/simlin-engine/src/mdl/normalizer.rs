@@ -91,8 +91,6 @@ pub enum NormalizerErrorCode {
     UnclosedGetXls,
     /// Lexer error passed through
     LexError(LexErrorCode),
-    /// Semantic error during parsing (e.g., mixed expression list)
-    SemanticError(String),
 }
 
 /// Error from the normalizer.
@@ -120,9 +118,6 @@ impl std::fmt::Display for NormalizerErrorCode {
             }
             NormalizerErrorCode::LexError(code) => {
                 write!(f, "{}", code)
-            }
-            NormalizerErrorCode::SemanticError(msg) => {
-                write!(f, "{}", msg)
             }
         }
     }
@@ -181,6 +176,9 @@ pub struct TokenNormalizer<'input> {
 }
 
 impl<'input> TokenNormalizer<'input> {
+    /// Test-only: production always enters through
+    /// [`TokenNormalizer::with_offset`], since a reader resumes mid-source.
+    #[cfg(test)]
     pub fn new(input: &'input str) -> Self {
         Self::with_offset(input, 0)
     }
@@ -969,13 +967,6 @@ mod tests {
                 NormalizerErrorCode::LexError(LexErrorCode::UnrecognizedToken)
             ),
             "unrecognized token"
-        );
-        assert_eq!(
-            format!(
-                "{}",
-                NormalizerErrorCode::SemanticError("bad stuff".to_string())
-            ),
-            "bad stuff"
         );
     }
 

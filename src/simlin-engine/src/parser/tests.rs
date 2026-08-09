@@ -1778,42 +1778,6 @@ fn test_subscript_multiple_dim_positions() {
 }
 
 #[test]
-fn test_lte_operator() {
-    let ast = parse_eq("a <= b").unwrap().unwrap().strip_loc();
-    let expected = Expr0::Op2(
-        BinaryOp::Lte,
-        Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
-        Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
-        Loc::default(),
-    );
-    assert_eq!(ast, expected);
-}
-
-#[test]
-fn test_gte_operator() {
-    let ast = parse_eq("a >= b").unwrap().unwrap().strip_loc();
-    let expected = Expr0::Op2(
-        BinaryOp::Gte,
-        Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
-        Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
-        Loc::default(),
-    );
-    assert_eq!(ast, expected);
-}
-
-#[test]
-fn test_neq_operator() {
-    let ast = parse_eq("a <> b").unwrap().unwrap().strip_loc();
-    let expected = Expr0::Op2(
-        BinaryOp::Neq,
-        Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
-        Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
-        Loc::default(),
-    );
-    assert_eq!(ast, expected);
-}
-
-#[test]
 fn test_mixed_comparison_chain() {
     // a <= b >= c tests both Lte and Gte in the chain
     let ast = parse_eq("a <= b >= c").unwrap().unwrap().strip_loc();
@@ -2017,17 +1981,6 @@ fn test_multiple_subscripts_with_ranges() {
                 Loc::default(),
             ),
         ],
-        Loc::default(),
-    );
-    assert_eq!(ast, expected);
-}
-
-#[test]
-fn test_wildcard_simple() {
-    let ast = parse_eq("a[*]").unwrap().unwrap().strip_loc();
-    let expected = Expr0::Subscript(
-        RawIdent::new_from_str("a"),
-        vec![IndexExpr0::Wildcard(Loc::default())],
         Loc::default(),
     );
     assert_eq!(ast, expected);

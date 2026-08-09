@@ -1117,82 +1117,6 @@ impl DimensionsContext {
     }
 }
 
-#[allow(dead_code)]
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
-pub struct DimensionRange {
-    dim: Option<Dimension>,
-    start: u32,
-    end: u32,
-}
-
-#[allow(dead_code)]
-impl DimensionRange {
-    pub fn new(dim: Dimension, start: u32, end: u32) -> Self {
-        DimensionRange {
-            dim: Some(dim),
-            start,
-            end,
-        }
-    }
-
-    pub fn len(&self) -> u32 {
-        self.end.saturating_sub(self.start)
-    }
-}
-
-/// DimensionInfo represents the array dimensions of an expression.
-/// It uses the existing Dimension enum which already encapsulates
-/// both name and size together.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
-pub struct DimensionVec {
-    dims: Vec<DimensionRange>,
-}
-
-#[allow(dead_code)]
-impl DimensionVec {
-    /// Create dimension info from a vector of dimensions
-    pub fn new(dims: Vec<DimensionRange>) -> Self {
-        DimensionVec { dims }
-    }
-}
-
-/// Dimension information for non-contiguous array views
-///
-/// `StridedDimension` is used only in `ArrayView::Strided` for views where
-/// elements are not stored consecutively in memory (e.g., after transpose,
-/// column/row selection, or slicing operations). For normal contiguous arrays,
-/// `ArrayView::Contiguous` is used instead, which only needs dimension sizes
-/// since strides can be computed implicitly assuming row-major order.
-///
-/// A `StridedDimension` describes how to iterate through one dimension of a
-/// strided array view. The key insight is that `dimension.len()` represents
-/// the number of elements in this dimension of the *view*, not the underlying
-/// storage.
-///
-/// For example, if you have a 3x4 matrix and select column 1, you get a view
-/// with shape [3]. The `StridedDimension` would be:
-/// - `dimension`: a Dimension with length 3 (the view has 3 elements)
-/// - `stride`: 4 (skip 4 elements in storage to get to the next row)
-///
-/// The stride tells you how many elements to skip in the underlying flat
-/// storage to move by 1 in this dimension. For a contiguous row-major array,
-/// the rightmost dimension has stride 1, and each dimension to the left has
-/// a stride equal to the product of all dimension sizes to its right.
-///
-/// Example: A 2x3x4 array in row-major order has strides [12, 4, 1]:
-/// - To move by 1 in the first dimension: skip 12 elements (3*4)
-/// - To move by 1 in the second dimension: skip 4 elements (4)
-/// - To move by 1 in the third dimension: skip 1 element
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone)]
-#[allow(dead_code)]
-pub struct StridedDimension {
-    pub dimension: Dimension,
-    pub stride: isize,
-}
-
 // ============================================================================
 // Dimension Matching Algorithm
 // ============================================================================
@@ -1366,36 +1290,6 @@ mod tests {
 
         // DimB should not have a mapping
         assert_eq!(ctx.get_maps_to(&dim_b_name), None);
-    }
-
-    #[test]
-    fn test_get_maps_to_no_mapping() {
-        use crate::common::CanonicalDimensionName;
-
-        // Dimension without mapping
-        let dim = datamodel::Dimension::named(
-            "Region".to_string(),
-            vec!["North".to_string(), "South".to_string()],
-        );
-
-        let ctx = DimensionsContext::from(&[dim]);
-        let region_name = CanonicalDimensionName::from_raw("Region");
-
-        assert_eq!(ctx.get_maps_to(&region_name), None);
-    }
-
-    #[test]
-    fn test_get_maps_to_indexed_dimension_returns_none() {
-        use crate::common::CanonicalDimensionName;
-
-        // Indexed dimensions don't support maps_to
-        let dim = datamodel::Dimension::indexed("Index".to_string(), 5);
-
-        let ctx = DimensionsContext::from(&[dim]);
-        let index_name = CanonicalDimensionName::from_raw("Index");
-
-        // Indexed dimensions should return None for get_maps_to
-        assert_eq!(ctx.get_maps_to(&index_name), None);
     }
 
     #[test]
@@ -2345,36 +2239,6 @@ mod tests {
     }
 
     #[test]
-    fn test_subdimension_relation_contiguous() {
-        // Contiguous offsets: A2, A3 (indices 1, 2) from A1, A2, A3
-        let relation = super::SubdimensionRelation {
-            parent_offsets: vec![1, 2],
-        };
-        assert!(relation.is_contiguous());
-        assert_eq!(relation.start_offset(), 1);
-    }
-
-    #[test]
-    fn test_subdimension_relation_non_contiguous() {
-        // Non-contiguous offsets: A1, A3 (indices 0, 2) from A1, A2, A3
-        let relation = super::SubdimensionRelation {
-            parent_offsets: vec![0, 2],
-        };
-        assert!(!relation.is_contiguous());
-        assert_eq!(relation.start_offset(), 0);
-    }
-
-    #[test]
-    fn test_subdimension_relation_single_element() {
-        // Single element is always contiguous
-        let relation = super::SubdimensionRelation {
-            parent_offsets: vec![1],
-        };
-        assert!(relation.is_contiguous());
-        assert_eq!(relation.start_offset(), 1);
-    }
-
-    #[test]
     fn test_subdimension_relation_empty() {
         // Empty is contiguous by definition
         let relation = super::SubdimensionRelation {
@@ -2400,55 +2264,6 @@ mod tests {
             parent_offsets: vec![0, 1, 4],
         };
         assert!(!relation.is_contiguous());
-    }
-
-    #[test]
-    fn test_relationship_cache_basic() {
-        use crate::common::CanonicalDimensionName;
-
-        let cache = super::RelationshipCache::default();
-
-        let parent = CanonicalDimensionName::from_raw("DimA");
-        let child = CanonicalDimensionName::from_raw("SubA");
-
-        // Initially cache is empty
-        assert!(cache.cache.lock().unwrap().is_empty());
-
-        // Insert a subdimension relation
-        let relation = super::SubdimensionRelation {
-            parent_offsets: vec![1, 2],
-        };
-        cache
-            .cache
-            .lock()
-            .unwrap()
-            .insert((child.clone(), parent.clone()), Some(relation.clone()));
-
-        // Verify we can retrieve it
-        let retrieved = cache
-            .cache
-            .lock()
-            .unwrap()
-            .get(&(child.clone(), parent.clone()))
-            .cloned();
-        assert_eq!(retrieved, Some(Some(relation)));
-
-        // Insert a negative result (not a subdimension)
-        let other_child = CanonicalDimensionName::from_raw("NotSubA");
-        cache
-            .cache
-            .lock()
-            .unwrap()
-            .insert((other_child.clone(), parent.clone()), None);
-
-        // Verify negative result is cached
-        let retrieved = cache
-            .cache
-            .lock()
-            .unwrap()
-            .get(&(other_child.clone(), parent.clone()))
-            .cloned();
-        assert_eq!(retrieved, Some(None));
     }
 
     #[test]
@@ -2559,6 +2374,7 @@ mod tests {
         let relation = ctx.get_subdimension_relation(&sub_a, &dim_a).unwrap();
         assert_eq!(relation.parent_offsets, vec![1]);
         assert!(relation.is_contiguous());
+        assert_eq!(relation.start_offset(), 1);
     }
 
     #[test]

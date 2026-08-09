@@ -22,11 +22,10 @@ pub mod view;
 pub mod writer;
 mod xmile_compat;
 
-// Public re-exports
-pub use lexer::{LexError, LexErrorCode, RawLexer, RawToken, Spanned};
-pub use normalizer::{NormalizerError, NormalizerErrorCode, Token, TokenNormalizer};
-pub use reader::{EquationReader, ReaderError};
-pub use writer::{ExportWarning, WriterContext, expr0_to_mdl, expr0_to_mdl_ctx};
+// Public re-exports. Everything else in this module is reached through its
+// own submodule path (`crate::mdl::reader::...`), so only the names with an
+// out-of-module consumer are re-exported here.
+pub use writer::ExportWarning;
 
 use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::datamodel::{Project, Variable};

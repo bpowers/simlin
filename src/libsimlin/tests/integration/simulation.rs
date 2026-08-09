@@ -15,113 +15,11 @@ use simlin_engine::{self as engine};
 
 use crate::common::{expect_error_code, expect_no_error, open_project_from_datamodel};
 
-/// Interactive set/get against a live VM: run part-way, override a simple
-/// constant, and read the new value back.
-///
-/// Historically this targeted the `infectious` stock, from an era when
-/// `set_value` wrote any variable's current value; today `set_value` is a
-/// constants-only override (BadOverride otherwise), so it targets the
-/// `contact_infectivity` constant and additionally pins the stock rejection.
-#[test]
-fn test_interactive_set_get() {
-    // Load the SIR project fixture. This must be a hard failure, not a skip:
-    // a prior revision pointed at a nonexistent path and silently returned,
-    // so the test passed while exercising nothing.
-    let pb_path = std::path::Path::new("testdata/SIR_project.pb");
-    let data = std::fs::read(pb_path).expect("SIR_project.pb fixture must exist");
-
-    unsafe {
-        let mut err: *mut SimlinError = ptr::null_mut();
-        let proj = simlin_project_open_protobuf(
-            data.as_ptr(),
-            data.len(),
-            &mut err as *mut *mut SimlinError,
-        );
-        expect_no_error(err, "project open");
-        assert!(!proj.is_null());
-
-        err = ptr::null_mut();
-        let model =
-            simlin_project_get_model(proj, std::ptr::null(), &mut err as *mut *mut SimlinError);
-        expect_no_error(err, "get_model");
-        assert!(!model.is_null());
-
-        err = ptr::null_mut();
-        let sim = simlin_sim_new(model, false, &mut err as *mut *mut SimlinError);
-        expect_no_error(err, "sim_new");
-        assert!(!sim.is_null());
-
-        err = ptr::null_mut();
-        simlin_sim_run_to(sim, 0.125, &mut err as *mut *mut SimlinError);
-        expect_no_error(err, "run_to(0.125)");
-
-        // The var-name listing must contain the constant we are about to set.
-        err = ptr::null_mut();
-        let mut count: usize = 0;
-        simlin_sim_get_var_count(
-            sim,
-            &mut count as *mut usize,
-            &mut err as *mut *mut SimlinError,
-        );
-        expect_no_error(err, "get_var_count");
-        assert!(count > 0, "expected varcount > 0");
-
-        let mut name_ptrs: Vec<*mut c_char> = vec![std::ptr::null_mut(); count];
-        err = ptr::null_mut();
-        simlin_sim_get_var_names(
-            sim,
-            name_ptrs.as_mut_ptr(),
-            name_ptrs.len(),
-            &mut count as *mut usize,
-            &mut err as *mut *mut SimlinError,
-        );
-        expect_no_error(err, "get_var_names");
-
-        let mut names: Vec<String> = Vec::with_capacity(count);
-        for &p in name_ptrs.iter().take(count) {
-            assert!(!p.is_null());
-            names.push(CStr::from_ptr(p).to_string_lossy().into_owned());
-            simlin_free_string(p);
-        }
-        assert!(
-            names.iter().any(|n| n == "contact_infectivity"),
-            "contact_infectivity not in {names:?}"
-        );
-
-        // Override the constant on the live VM and read it back.
-        let c_const = CString::new("contact_infectivity").unwrap();
-        err = ptr::null_mut();
-        simlin_sim_set_value(
-            sim,
-            c_const.as_ptr(),
-            0.9,
-            &mut err as *mut *mut SimlinError,
-        );
-        expect_no_error(err, "set_value(contact_infectivity)");
-        assert_sim_value(sim, "contact_infectivity", 0.9, 1e-9);
-
-        // A stock is not a simple constant: the live-VM path must reject it.
-        let c_stock = CString::new("infectious").unwrap();
-        err = ptr::null_mut();
-        simlin_sim_set_value(
-            sim,
-            c_stock.as_ptr(),
-            42.0,
-            &mut err as *mut *mut SimlinError,
-        );
-        expect_error_code(err, SimlinErrorCode::BadOverride, "set_value(infectious)");
-
-        // Cleanup
-        simlin_sim_unref(sim);
-        simlin_model_unref(model);
-        simlin_project_unref(proj);
-    }
-}
-
 /// Pins `simlin_sim_set_value` semantics across the sim lifecycle:
 ///
 /// 1. Before any run: overrides a simple constant on the live VM.
-/// 2. Mid-run (after a partial `run_to`): same.
+/// 2. Mid-run (after a partial `run_to`): same, plus the live VM's own
+///    rejection of a non-constant.
 /// 3. After `run_to_end` (the VM has been consumed into results): a constant
 ///    override is ACCEPTED and staged -- it does not alter the saved results,
 ///    but applies to the VM recreated by the next `simlin_sim_reset` (the
@@ -130,13 +28,19 @@ fn test_interactive_set_get() {
 ///    DoesNotExist on that no-VM path.
 /// 4. After reset + rerun the staged override is visible in the new results.
 ///
+/// Phases 2 and 3 are the two branches of `simlin_sim_set_value`: with a live
+/// VM it delegates to `vm.set_value`, and without one it re-derives the same
+/// verdicts from `CompiledSimulation::is_constant_offset`. Both are covered
+/// here so the pair cannot drift apart.
+///
 /// An earlier revision asserted phase 3 fails with NotSimulatable; that
 /// reflected a long-gone API and never actually ran (the fixture path was
 /// stale, so the whole test silently skipped).
 #[test]
 fn test_set_value_phases() {
-    // Load the SIR project fixture (hard failure, not a skip -- see
-    // test_interactive_set_get).
+    // Load the SIR project fixture. This must be a hard failure, not a skip:
+    // a prior revision pointed at a nonexistent path and silently returned,
+    // so the test passed while exercising nothing.
     let pb_path = std::path::Path::new("testdata/SIR_project.pb");
     let data = std::fs::read(pb_path).expect("SIR_project.pb fixture must exist");
 
@@ -193,6 +97,22 @@ fn test_set_value_phases() {
         );
         expect_no_error(err, "set_value during run");
         assert_sim_value(sim, "contact_infectivity", 0.15, 1e-9);
+
+        // Still on the live VM: a stock is not a simple constant, and the
+        // rejection is `vm.set_value`'s own -- a different branch from the
+        // no-VM `compiled.is_constant_offset` gate phase 3 exercises.
+        err = ptr::null_mut();
+        simlin_sim_set_value(
+            sim,
+            c_stock.as_ptr(),
+            42.0,
+            &mut err as *mut *mut SimlinError,
+        );
+        expect_error_code(
+            err,
+            SimlinErrorCode::BadOverride,
+            "set_value(stock) on the live VM",
+        );
 
         // Phase 3: run_to_end consumes the VM into results. A constant
         // override is still accepted -- staged for the next reset -- and the
@@ -897,56 +817,6 @@ fn test_libsimlin_clear_values_restores_defaults() {
                 b,
             );
         }
-
-        simlin_sim_unref(sim);
-        simlin_model_unref(model);
-        simlin_project_unref(proj);
-    }
-}
-
-#[test]
-fn test_libsimlin_set_value_validates_without_vm() {
-    let dm = build_population_datamodel();
-    unsafe {
-        let (proj, model, sim) = create_test_sim(&dm);
-
-        // Consume the VM so we exercise the no-VM validation path
-        run_to_end(sim);
-
-        // Setting a non-constant variable (flow) by name should fail
-        let c_births = CString::new("births").unwrap();
-        let mut err: *mut SimlinError = ptr::null_mut();
-        simlin_sim_set_value(
-            sim,
-            c_births.as_ptr(),
-            42.0,
-            &mut err as *mut *mut SimlinError,
-        );
-        assert!(
-            !err.is_null(),
-            "non-constant variable should fail even without a VM"
-        );
-        assert_eq!(simlin_error_get_code(err), SimlinErrorCode::BadOverride);
-        simlin_error_free(err);
-
-        // Setting a nonexistent variable should fail
-        let c_nonexistent = CString::new("nonexistent_var").unwrap();
-        err = ptr::null_mut();
-        simlin_sim_set_value(
-            sim,
-            c_nonexistent.as_ptr(),
-            42.0,
-            &mut err as *mut *mut SimlinError,
-        );
-        assert!(!err.is_null(), "nonexistent variable should fail");
-        assert_eq!(simlin_error_get_code(err), SimlinErrorCode::DoesNotExist);
-        simlin_error_free(err);
-
-        // Setting a constant variable (birth_rate) should succeed
-        let c_rate = CString::new("birth_rate").unwrap();
-        err = ptr::null_mut();
-        simlin_sim_set_value(sim, c_rate.as_ptr(), 0.5, &mut err as *mut *mut SimlinError);
-        assert!(err.is_null(), "constant variable should succeed without VM");
 
         simlin_sim_unref(sim);
         simlin_model_unref(model);

@@ -749,11 +749,23 @@ fn scalar_feeder_scalar_target_loop_compiles_and_is_well_formed() {
     // synthetic aggregate node (the precondition for the ThroughAgg routing
     // #533 fixes at the element-graph level).
     let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg = ltm_vars
+        .iter()
+        .find(|v| v.name == agg_name)
+        .unwrap_or_else(|| {
+            panic!(
+                "LTM must hoist the inlined SUM(pop[*] * scale) reducer into a synthetic \
+                 {agg_name} node; synthetic vars: {:?}",
+                ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            )
+        });
+    // A whole-extent reducer collapses to a scalar, so its agg carries no
+    // dimensions -- what makes the scalar agg-half link scores below the right
+    // emitters (an arrayed agg would take the subscripted `[<slot>]` forms).
     assert!(
-        ltm_vars.iter().any(|v| v.name == agg_name),
-        "LTM must hoist the inlined SUM(pop[*] * scale) reducer into a synthetic {agg_name} \
-         node; synthetic vars: {:?}",
-        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        agg.dimensions.is_empty(),
+        "the whole-extent reducer's agg must be scalar; got dims {:?}",
+        agg.dimensions
     );
 
     // GH #738 (gap #1, fixed): the agg's own fragment compiles, so its series
@@ -861,62 +873,6 @@ fn scalar_feeder_scalar_target_loop_compiles_and_is_well_formed() {
                 );
             }
         }
-    }
-}
-
-/// GH #738, focused regression: the synthetic agg hoisted for an inlined
-/// reducer over an array *expression* with a *scalar* target --
-/// `grow = 1 + SUM(pop[*] * scale)` -- compiles and its runtime series
-/// equals the inlined reducer's value at every step (non-zero, since `pop`
-/// starts at 100/300 and `scale` is strictly positive).
-///
-/// Root cause of the prior failure: `compile_ltm_equation_fragment` lowered
-/// the agg's equation with an empty `ScopeStage0.models`, so `pop`'s
-/// dimensions could not be resolved during Expr2 lowering, the
-/// `pop[*] * scale` Op2 carried no `ArrayBounds`, and Pass-1 temp
-/// decomposition (which gates on those bounds) never hoisted the array
-/// expression out of the reducer -- codegen then rejected the fragment and
-/// the agg silently read a constant 0. The fix threads the equation's
-/// dependencies into the lowering scope, mirroring `lower_var_fragment`.
-#[test]
-fn scalar_target_agg_value_matches_inlined_reducer() {
-    let project = TestProject::new("scalar_target_agg_value")
-        .with_sim_time(0.0, 6.0, 1.0)
-        .named_dimension("region", &["north", "south"])
-        // Heterogeneous initial stock values so SUM(pop[*] * scale) is
-        // exercised non-trivially.
-        .array_with_ranges("pop0[region]", vec![("north", "100"), ("south", "300")])
-        .array_stock("pop[region]", "pop0[region]", &["pgrow"], &[], None)
-        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
-        .scalar_aux("scale", "0.001 * total + 0.01")
-        .stock("total", "100", &["grow"], &[], None)
-        .flow("grow", "1 + SUM(pop[*] * scale)", None)
-        .build_datamodel();
-
-    let (results, ltm_vars) = run_ltm(&project);
-    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
-    let agg = ltm_var(&ltm_vars, agg_name);
-    assert!(
-        agg.dimensions.is_empty(),
-        "the whole-extent reducer's agg must be scalar; got dims {:?}",
-        agg.dimensions
-    );
-
-    let agg_series = series_at(&results, offset_of(&results, agg_name));
-    let pop_n = series_at(&results, offset_of(&results, "pop[north]"));
-    let pop_s = series_at(&results, offset_of(&results, "pop[south]"));
-    let scale = series_at(&results, offset_of(&results, "scale"));
-    assert!(results.step_count > STARTUP_STEPS);
-    for (step, &agg_val) in agg_series.iter().enumerate() {
-        let expected = (pop_n[step] + pop_s[step]) * scale[step];
-        assert!(
-            expected.abs() > 0.0,
-            "fixture defect: SUM(pop[*] * scale) must be non-zero at step {step}"
-        );
-        assert!(
-            (agg_val - expected).abs() <= 1e-9 * expected.abs(),
-            "step {step}: {agg_name} = {agg_val}, expected SUM(pop[*] * scale) = {expected}"
-        );
     }
 }
 

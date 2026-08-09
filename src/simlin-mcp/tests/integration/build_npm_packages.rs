@@ -213,3 +213,40 @@ fn ac4_4_wrapper_package_json_has_publish_config() {
         "repository.url should reference simlin"
     );
 }
+
+/// The wrapper `package.json` is hand-maintained (unlike the platform
+/// packages, which `build-npm-packages.sh` generates from Cargo.toml), so
+/// its own `version` and every `optionalDependencies` pin can drift from the
+/// crate version on a release bump. Publishing a wrapper whose optional
+/// dependencies name a version that was never published leaves `npx
+/// @simlin/mcp` unable to resolve a binary at all, so this is what the file
+/// most needs held down.
+#[test]
+fn wrapper_package_json_versions_track_the_crate_version() {
+    let pkg_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("package.json");
+    let contents = std::fs::read_to_string(&pkg_path).expect("read package.json");
+    let pkg: serde_json::Value = serde_json::from_str(&contents).expect("valid JSON");
+    let expected = cargo_version();
+
+    assert_eq!(
+        pkg["version"].as_str().unwrap_or(""),
+        expected,
+        "wrapper package.json version must match Cargo.toml"
+    );
+
+    let optional_deps = pkg["optionalDependencies"]
+        .as_object()
+        .expect("wrapper package.json must declare optionalDependencies");
+    assert_eq!(
+        optional_deps.len(),
+        PLATFORMS.len(),
+        "wrapper must list one optional dependency per platform package"
+    );
+    for (name, version) in optional_deps {
+        assert_eq!(
+            version.as_str().unwrap_or(""),
+            expected,
+            "optionalDependencies['{name}'] must pin the crate version"
+        );
+    }
+}

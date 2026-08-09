@@ -285,16 +285,22 @@ mod tests {
 
     #[test]
     fn test_flow_bounds_uses_valve_radius() {
-        let flow = make_flow(
-            150.0,
-            100.0,
-            "f",
-            vec![(100.0, 100.0, Some(1)), (200.0, 100.0, Some(2))],
+        // A POINT-LESS flow, so the valve circle is the whole shape and the
+        // radius is what the bounds are made of. With a pipe attached the
+        // endpoints dominate the horizontal extent and 6 vs 9 is invisible --
+        // which is why this fixture has none. The label-free
+        // `flow_shape_bounds` is the right entry point: `flow_bounds` merges
+        // the label box, which can also outgrow the circle.
+        let flow = make_flow(150.0, 100.0, "f", vec![]);
+        let bounds = flow_shape_bounds(&flow);
+        assert_eq!(bounds.left, 150.0 - FLOW_VALVE_RADIUS);
+        assert_eq!(bounds.right, 150.0 + FLOW_VALVE_RADIUS);
+        assert_eq!(bounds.top, 100.0 - FLOW_VALVE_RADIUS);
+        assert_eq!(bounds.bottom, 100.0 + FLOW_VALVE_RADIUS);
+        assert_ne!(
+            FLOW_VALVE_RADIUS, AUX_RADIUS,
+            "the two radii must differ, or this test cannot tell them apart"
         );
-        let bounds = flow_bounds(&flow);
-        // Bounds should use FLOW_VALVE_RADIUS (6), not AUX_RADIUS (9)
-        assert!(bounds.left <= 100.0);
-        assert!(bounds.right >= 200.0);
     }
 
     #[test]

@@ -748,66 +748,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_basic_stock_roundtrip() {
-        let sdai_stock = StockFields {
-            name: "inventory".to_string(),
-            equation: Some("100".to_string()),
-            documentation: Some("Current inventory".to_string()),
-            units: Some("widgets".to_string()),
-            inflows: Some(vec!["production".to_string()]),
-            outflows: Some(vec!["sales".to_string()]),
-            graphical_function: None,
-            uid: None,
-        };
-
-        let dm_stock: datamodel::Stock = sdai_stock.clone().into();
-        let sdai_stock2: StockFields = dm_stock.into();
-
-        assert_eq!(sdai_stock.name, sdai_stock2.name);
-        assert_eq!(sdai_stock.equation, sdai_stock2.equation);
-        assert_eq!(sdai_stock.inflows, sdai_stock2.inflows);
-        assert_eq!(sdai_stock.outflows, sdai_stock2.outflows);
-    }
-
-    #[test]
-    fn test_basic_flow_roundtrip() {
-        let sdai_flow = FlowFields {
-            name: "production".to_string(),
-            equation: Some("10".to_string()),
-            documentation: None,
-            units: Some("widgets/month".to_string()),
-            graphical_function: None,
-            uid: None,
-        };
-
-        let dm_flow: datamodel::Flow = sdai_flow.clone().into();
-        let sdai_flow2: FlowFields = dm_flow.into();
-
-        assert_eq!(sdai_flow.name, sdai_flow2.name);
-        assert_eq!(sdai_flow.equation, sdai_flow2.equation);
-        assert_eq!(sdai_flow.units, sdai_flow2.units);
-    }
-
-    #[test]
-    fn test_basic_auxiliary_roundtrip() {
-        let sdai_aux = AuxiliaryFields {
-            name: "target".to_string(),
-            equation: Some("200".to_string()),
-            documentation: Some("Target level".to_string()),
-            units: None,
-            graphical_function: None,
-            uid: None,
-        };
-
-        let dm_aux: datamodel::Aux = sdai_aux.clone().into();
-        let sdai_aux2: AuxiliaryFields = dm_aux.into();
-
-        assert_eq!(sdai_aux.name, sdai_aux2.name);
-        assert_eq!(sdai_aux.equation, sdai_aux2.equation);
-        assert_eq!(sdai_aux.documentation, sdai_aux2.documentation);
-    }
-
-    #[test]
     fn test_graphical_function_roundtrip() {
         let sdai_gf = GraphicalFunction {
             points: vec![

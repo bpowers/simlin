@@ -449,87 +449,6 @@ pub fn compute_rel_loop_scores_per_element(
     out
 }
 
-/// Compute the cycle-partition denominator series:
-/// `denominator[t] = Σ_{j in partition, loop_score[j, t] not NaN} |loop_score[j, t]|`.
-///
-/// Loops in `loop_ids` whose `loop_score` variable is absent from
-/// `results` (e.g. LTM disabled for that loop, discovery-mode
-/// compilation, or model truncation) are omitted from the sum --
-/// the same semantics [`compute_rel_loop_scores`] uses.  `NaN`
-/// summands are excluded and `Inf` retained (via [`denom_summand`],
-/// GH #542), so this streaming denominator stays bit-for-bit
-/// identical to the full-sweep [`compute_rel_loop_scores`] sum.
-/// Returns a length-`results.step_count` `Vec`, zero-filled when the
-/// partition is empty.
-///
-/// Exposed separately from [`compute_rel_loop_scores`] so that
-/// FFI callers that query one loop at a time (e.g.
-/// `simlin_analyze_get_relative_loop_score` iterated over a
-/// project's loops) can cache the per-partition denominator on
-/// the sim state and avoid recomputing it on every call.  Paired
-/// with [`compute_rel_loop_score_for_id`].
-///
-/// Element-0 scalar semantics: for arrayed loops whose
-/// `loop_score` variable occupies multiple slots, this reads only
-/// the first slot.  See [`compute_rel_loop_scores`] for the
-/// pre-PR-FFI rationale, and
-/// [`compute_rel_loop_scores_per_element`] for a dimension-aware
-/// alternative.
-pub fn compute_partition_denominator<'a, I>(results: &Results, loop_ids: I) -> Vec<f64>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    let offsets: Vec<usize> = loop_ids
-        .into_iter()
-        .filter_map(|id| results.offsets.get(&loop_score_ident(id)).copied())
-        .collect();
-
-    let mut denom = vec![0.0_f64; results.step_count];
-    for (t, row) in results.iter().enumerate() {
-        denom[t] = offsets.iter().map(|&off| denom_summand(row[off])).sum();
-    }
-    denom
-}
-
-/// Compute a single loop's relative-loop-score series, given a
-/// pre-computed partition denominator from
-/// [`compute_partition_denominator`].
-///
-/// Returns `None` when the loop's `loop_score` variable is absent
-/// from `results` (matching [`compute_rel_loop_scores`], which
-/// simply omits those loops from its output map).  SAFEDIV-0
-/// semantics: `denominator[t] == 0` yields `0`, not `NaN`.  This
-/// loop's *own* numerator propagates through normal IEEE-754
-/// arithmetic: a `NaN` numerator yields a `NaN` relative score
-/// (the honest per-loop "undefined here" signal), and an `Inf`
-/// numerator over a finite denom yields `Inf`.  The cross-loop
-/// `NaN`-poisoning fix lives in the denominator
-/// ([`compute_partition_denominator`] excludes `NaN` summands, GH
-/// #542), not here.
-///
-/// The caller is responsible for ensuring `denominator` covers the
-/// same partition the loop belongs to, and that its length matches
-/// `results.step_count`.
-///
-/// Element-0 scalar semantics: for arrayed loops whose
-/// `loop_score` variable occupies multiple slots, this reads only
-/// the first slot.  See [`compute_rel_loop_scores_per_element`]
-/// for dimension-aware output.
-pub fn compute_rel_loop_score_for_id(
-    results: &Results,
-    loop_id: &str,
-    denominator: &[f64],
-) -> Option<Vec<f64>> {
-    let off = results.offsets.get(&loop_score_ident(loop_id)).copied()?;
-    let mut out = Vec::with_capacity(results.step_count);
-    for (t, row) in results.iter().enumerate() {
-        let num = row[off];
-        let denom = denominator[t];
-        out.push(if denom == 0.0 { 0.0 } else { num / denom });
-    }
-    Some(out)
-}
-
 /// Resolve the slot offset to read for a loop with `n_slots` slots when
 /// the partition is being queried at `element_index`.
 ///
@@ -558,7 +477,8 @@ fn effective_slot(n_slots: usize, element_index: usize) -> Option<usize> {
     }
 }
 
-/// Per-element streaming variant of [`compute_partition_denominator`].
+/// Streaming per-element partition denominator: the amortized path the
+/// libsimlin FFI's per-partition cache uses.
 ///
 /// For each `(loop_id, n_slots)` in the iterator whose `loop_score`
 /// variable is present in `results`, contributes
@@ -583,10 +503,13 @@ fn effective_slot(n_slots: usize, element_index: usize) -> Option<usize> {
 /// must be a strictly cheaper path to the same numbers, not an
 /// approximation.
 ///
-/// Exposed alongside [`compute_partition_denominator`] so the libsimlin
-/// FFI per-partition cache can amortize across element-aware queries
-/// (cache key `(partition, element_index)`) without falling back to the
-/// non-streaming [`compute_rel_loop_scores_per_element`].
+/// It exists so the libsimlin FFI per-partition cache can amortize across
+/// element-aware queries (cache key `(partition, element_index)`) without
+/// falling back to the non-streaming
+/// [`compute_rel_loop_scores_per_element`]. This element-aware form is the
+/// ONLY streaming entry point: `libsimlin::analysis` reaches for it even in
+/// the scalar case, passing `n_slots = 1`, so a scalar-specialized twin
+/// would have no caller.
 pub fn compute_partition_denominator_for_element<'a, I>(
     results: &Results,
     loop_id_slots: I,
@@ -614,7 +537,8 @@ where
     denom
 }
 
-/// Per-element streaming variant of [`compute_rel_loop_score_for_id`].
+/// One loop's relative-score series at element `k`, given a pre-computed
+/// per-element partition denominator.
 ///
 /// Reads `row[off + slot]` as the numerator at each step, where `slot`
 /// is determined by [`effective_slot`]:
@@ -954,7 +878,7 @@ pub fn aggregate_per_element_argmax_abs(
 /// member loops and `element_index = k`).
 ///
 /// Scalar (`n_slots == 1`) reduces to identity: the aggregator returns
-/// the same series as [`compute_rel_loop_score_for_id`] would.  Used
+/// the single slot's series unchanged.  Used
 /// by both the layout single-line importance metric and the FFI
 /// dispatch when callers pass a bare arrayed loop ID without a
 /// subscript.
@@ -1876,87 +1800,6 @@ mod tests {
         assert!((b[1] - 1.0).abs() < 1e-12, "got {}", b[1]);
     }
 
-    /// The streaming `compute_partition_denominator` +
-    /// `compute_rel_loop_score_for_id` pair must produce the same
-    /// per-loop series as the full-sweep `compute_rel_loop_scores`
-    /// -- that is the contract the libsimlin FFI cache relies on.
-    #[test]
-    fn per_id_helpers_match_full_sweep() {
-        let series_a = &[1.0, 2.0, -4.0, 0.0][..];
-        let series_b = &[3.0, -4.0, 0.0, 7.0][..];
-        let series_c = &[0.5, 0.5, 0.5, 0.5][..];
-        let results = make_results_for_loops(&[("A", series_a), ("B", series_b), ("C", series_c)]);
-        let partitions = mapping(&[("A", Some(0)), ("B", Some(0)), ("C", Some(1))]);
-
-        let full = compute_rel_loop_scores(&results, &partitions);
-
-        // Partition 0 contains A and B.
-        let denom_0 = compute_partition_denominator(&results, ["A", "B"]);
-        let rel_a = compute_rel_loop_score_for_id(&results, "A", &denom_0).unwrap();
-        let rel_b = compute_rel_loop_score_for_id(&results, "B", &denom_0).unwrap();
-
-        // Partition 1 contains only C.
-        let denom_1 = compute_partition_denominator(&results, ["C"]);
-        let rel_c = compute_rel_loop_score_for_id(&results, "C", &denom_1).unwrap();
-
-        for (id, streamed) in [("A", &rel_a), ("B", &rel_b), ("C", &rel_c)] {
-            let expected = full.get(id).expect("full-sweep must have this loop");
-            assert_eq!(
-                streamed.len(),
-                expected.len(),
-                "series length mismatch for {id}"
-            );
-            for t in 0..expected.len() {
-                // Bit-for-bit: the two paths multiply and divide the
-                // same floats in the same order, so rounding must match.
-                assert_eq!(
-                    streamed[t], expected[t],
-                    "loop {id} t={t}: streamed {} vs full {}",
-                    streamed[t], expected[t]
-                );
-            }
-        }
-    }
-
-    /// A loop whose `loop_score` variable is absent must return
-    /// `None`, matching the "omit absent loops" contract of the
-    /// full-sweep API.
-    #[test]
-    fn per_id_helper_returns_none_for_absent_loop() {
-        let results = make_results_for_loops(&[("A", &[1.0, 2.0][..])]);
-        let denom = compute_partition_denominator(&results, ["A"]);
-        assert!(compute_rel_loop_score_for_id(&results, "missing", &denom).is_none());
-    }
-
-    /// The scalar streaming denominator (`compute_partition_denominator`)
-    /// excludes `NaN` and keeps `Inf`, so the FFI's amortized scalar path
-    /// isolates a NaN loop the same way the full-sweep helper does
-    /// (GH #542).
-    #[test]
-    fn per_id_streaming_denominator_excludes_nan_keeps_inf() {
-        // t0: A = NaN, B = 1 -> denom = 1 (NaN dropped).
-        // t1: A = Inf, B = 1 -> denom = Inf (Inf kept).
-        let series_a = &[f64::NAN, f64::INFINITY][..];
-        let series_b = &[1.0, 1.0][..];
-        let results = make_results_for_loops(&[("A", series_a), ("B", series_b)]);
-
-        let denom = compute_partition_denominator(&results, ["A", "B"]);
-        assert_eq!(denom, vec![1.0, f64::INFINITY]);
-
-        // Healthy B: 1/1 = 1 at t0 (not poisoned), 1/Inf = 0 at t1.
-        let rel_b = compute_rel_loop_score_for_id(&results, "B", &denom).unwrap();
-        assert!(
-            (rel_b[0] - 1.0).abs() < 1e-12,
-            "healthy B not poisoned: {}",
-            rel_b[0]
-        );
-        assert_eq!(rel_b[1], 0.0, "B dominated by +Inf sibling -> 0");
-        // The bad loop A keeps its own NaN at t0; at t1 Inf/Inf = NaN.
-        let rel_a = compute_rel_loop_score_for_id(&results, "A", &denom).unwrap();
-        assert!(rel_a[0].is_nan());
-        assert!(rel_a[1].is_nan());
-    }
-
     /// Per-element variant: two A2A loops over an element-wise-coupled
     /// dimension (every slot in partition 0), each with 3 element slots.
     /// At every element k both loops' slot k lands in bucket `(0, k)`, so
@@ -2761,7 +2604,7 @@ mod tests {
     }
 
     /// An absent loop_score variable returns `None`, matching the
-    /// `compute_rel_loop_score_for_id` contract.
+    /// "omit absent loops" contract of the full-sweep API.
     #[test]
     fn per_element_streaming_absent_loop_returns_none() {
         let results = make_arrayed_results(&["A"], &[2], &[vec![vec![1.0, 2.0], vec![3.0, 4.0]]]);
@@ -2795,7 +2638,7 @@ mod tests {
     }
 
     /// Scalar (n_slots == 1) reduces to identity: the aggregator returns
-    /// the same series as `compute_rel_loop_score_for_id` would.
+    /// the single slot's series unchanged.
     #[test]
     fn argmax_abs_scalar_reduces_to_identity() {
         let loop_data = vec![vec![vec![3.0], vec![-7.0]]];

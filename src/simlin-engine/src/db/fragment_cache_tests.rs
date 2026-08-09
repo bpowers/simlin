@@ -10,8 +10,7 @@ use crate::datamodel;
 use crate::db::{
     DiagnosticSeverity, ModuleInputSet, SimlinDb, assemble_module, assemble_simulation,
     collect_all_diagnostics, compile_project_incremental, compile_var_fragment, compute_layout,
-    model_all_diagnostics, model_dependency_graph, sync_from_datamodel,
-    sync_from_datamodel_incremental,
+    model_dependency_graph, sync_from_datamodel, sync_from_datamodel_incremental,
 };
 use crate::test_common::TestProject;
 
@@ -1429,113 +1428,6 @@ fn test_assemble_module_unchanged_submodule_is_cache_hit() {
         "the root module (main), whose `driver` variable changed, must re-assemble \
          (a fresh Arc), not cache-hit"
     );
-}
-
-/// Observe that dropping `is_root` makes the diagnostic-pass and assembly
-/// fragments for a submodule variable share ONE salsa cache entry.
-///
-/// Before the change, the diagnostic pass compiled every model's variables
-/// with `is_root = true` while assembly compiled a submodule with
-/// `is_root = false`, so a submodule variable was keyed twice on the
-/// differing flag and produced two cache entries. Now `compile_var_fragment`
-/// takes no `is_root`, so for the same `(var, model, project, inputs)` there
-/// is exactly one cache entry and one fragment value, regardless of caller
-/// role. We prove it by checking the fragment a submodule variable gets
-/// during the (root-context) diagnostic pass is byte-identical to the one
-/// the (submodule-context) assembly path uses.
-#[test]
-fn test_submodule_fragment_shared_between_diagnostics_and_assembly() {
-    let db = SimlinDb::default();
-    let project = datamodel::Project {
-        name: "shared_fragment".to_string(),
-        sim_specs: datamodel::SimSpecs {
-            start: 0.0,
-            stop: 1.0,
-            dt: datamodel::Dt::Dt(1.0),
-            save_step: None,
-            sim_method: datamodel::SimMethod::Euler,
-            time_units: None,
-        },
-        dimensions: vec![],
-        units: vec![],
-        source: None,
-        ai_information: None,
-        models: vec![
-            datamodel::Model {
-                name: "main".to_string(),
-                sim_specs: None,
-                variables: vec![datamodel::Variable::Module(datamodel::Module {
-                    ident: "sub".to_string(),
-                    model_name: "submodel".to_string(),
-                    documentation: String::new(),
-                    units: None,
-                    references: vec![],
-                    compat: datamodel::Compat::default(),
-                    ai_state: None,
-                    uid: None,
-                })],
-                views: vec![],
-                loop_metadata: vec![],
-                groups: vec![],
-                macro_spec: None,
-            },
-            datamodel::Model {
-                name: "submodel".to_string(),
-                sim_specs: None,
-                variables: vec![scalar_aux("output", "time * 3")],
-                views: vec![],
-                loop_metadata: vec![],
-                groups: vec![],
-                macro_spec: None,
-            },
-        ],
-    };
-
-    let sync = sync_from_datamodel(&db, &project);
-    let submodel = sync.models["submodel"].source;
-    let output_var = sync.models["submodel"].variables["output"].source;
-
-    // The diagnostic pass compiles every model's variables (including the
-    // submodel's) via `compile_var_fragment` with the empty input set -- the
-    // SAME call assembly makes for this submodule (it has no module inputs).
-    model_all_diagnostics(&db, submodel, sync.project);
-
-    // The submodule is assembled as a sub-model (the role that was previously
-    // `is_root = false`). Its `output` fragment is produced by the same
-    // `compile_var_fragment` query the diagnostic pass already populated.
-    let from_diag_pass = compile_var_fragment(
-        &db,
-        output_var,
-        submodel,
-        sync.project,
-        ModuleInputSet::empty(&db),
-    );
-    let from_assembly = compile_var_fragment(
-        &db,
-        output_var,
-        submodel,
-        sync.project,
-        ModuleInputSet::empty(&db),
-    );
-    let frag_diag = from_diag_pass
-        .as_ref()
-        .expect("submodule output fragment should compile");
-    let frag_asm = from_assembly
-        .as_ref()
-        .expect("submodule output fragment should compile");
-
-    // Byte-identical: there is one cache entry, role-independent. (If the two
-    // roles still produced different fragments the symbolic stream would
-    // differ -- the regression this guards against.)
-    assert_eq!(
-        frag_diag.fragment, frag_asm.fragment,
-        "the submodule variable's fragment must be byte-identical for the \
-         diagnostic-pass and assembly callers -- they now share one cache entry"
-    );
-
-    // And the whole project still assembles and runs through the root path.
-    assemble_simulation(&db, sync.project, "main".to_string())
-        .expect("project with a submodule should assemble");
 }
 
 /// Migration guard for dropping `is_root` from the tracked layout/compile

@@ -1570,21 +1570,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_node_overlap_shapes_overlap_is_positive() {
-        // Two stocks (45x35) whose centers are 20px apart horizontally and at
-        // the same y -- their bare SHAPE boxes overlap, so node_overlap > 0.
-        let view = make_view(vec![
-            stock(1, "a", 100.0, 100.0),
-            stock(2, "b", 120.0, 100.0),
-        ]);
-        let m = compute_layout_metrics(&view, &cfg());
-        assert!(
-            m.node_overlap > 0.0,
-            "overlapping node shapes must produce positive node_overlap"
-        );
-    }
-
     // --- AC1.3: node_connector_overlap ---
 
     #[test]

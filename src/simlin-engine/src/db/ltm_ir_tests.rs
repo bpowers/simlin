@@ -73,26 +73,6 @@ mod collect_reference_sites_tests {
     }
 
     #[test]
-    fn ref_site_fixed_index() {
-        // relative_pop[Region] = population / population[NYC]
-        // Two occurrences: a bare `population` (numerator) and a
-        // FixedIndex `population[NYC]` (denominator).
-        let project = TestProject::new("fixed")
-            .named_dimension("Region", &["NYC", "Boston"])
-            .array_aux("population[Region]", "100")
-            .array_aux("relative_pop[Region]", "population / population[NYC]");
-
-        let sites = collect(&project, "relative_pop", "population");
-        assert_eq!(sites.len(), 2, "sites: {sites:?}");
-        // AST-walk order: numerator first (bare), denominator second (FixedIndex).
-        assert_eq!(sites[0].shape, RefShape::Bare);
-        assert_eq!(
-            sites[1].shape,
-            RefShape::FixedIndex(vec!["nyc".to_string()])
-        );
-    }
-
-    #[test]
     fn ref_site_wildcard_reducer() {
         // total = SUM(population[*])
         // The wildcard subscript inside the reducer produces one Wildcard
@@ -1380,7 +1360,7 @@ mod occurrence_ir_tests {
             .scalar_aux("nyc", "2")
             .scalar_aux("pick", "population[nyc]");
         assert_eq!(
-            project.vm_result_incremental("pick")[0],
+            project.vm_result("pick")[0],
             100.0,
             "execution reads the element population[nyc]=100, not variable nyc"
         );
@@ -1671,9 +1651,7 @@ mod occurrence_ir_tests {
 // accept half cannot pass vacuously.
 mod front_door_tests {
     use super::*;
-    use crate::db::ltm_ir::{
-        MAX_SITE_CHILDREN, SiteChildrenLimitGuard, SiteWidthAxis, model_ltm_reference_sites,
-    };
+    use crate::db::ltm_ir::{SiteChildrenLimitGuard, SiteWidthAxis, model_ltm_reference_sites};
 
     /// Sync `project` onto a FRESH db and hand `model_ltm_reference_sites`' full
     /// result for `main` to `body`. A fresh db per call is required: the query is
@@ -2051,14 +2029,6 @@ mod front_door_tests {
             );
             assert_eq!(rejection.axis, SiteWidthAxis::BuiltinContents);
         });
-    }
-
-    /// The production limit is the whole `u16` range: with no value reserved as
-    /// a sentinel, child `u16::MAX` is an ordinary, addressable child.
-    #[test]
-    fn the_production_limit_is_the_whole_u16_range() {
-        assert_eq!(MAX_SITE_CHILDREN, u16::MAX as usize + 1);
-        assert_eq!(u16::try_from(MAX_SITE_CHILDREN - 1), Ok(u16::MAX));
     }
 
     /// A refusal must reach the user AND stop LTM generation for the model: the

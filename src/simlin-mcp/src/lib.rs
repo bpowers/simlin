@@ -6,8 +6,15 @@
 //!
 //! The binary entry point lives in `main.rs` and is intentionally thin —
 //! it composes resources, builds a `SimlinMcpServer<FileSystemAccess>`,
-//! and hands it to rmcp's stdio transport.  Everything reusable (the
-//! `FileSystemAccess` impl in particular) lives here so integration
-//! tests can exercise it directly without spawning the binary.
+//! and hands it to rmcp's stdio transport.
+//!
+//! `FileSystemAccess` itself lives in `simlin-mcp-core` and is re-exported
+//! here under its historical path. It moved so that `simlin-mcp-core`'s own
+//! integration suites run against the shipping impl rather than a
+//! hand-maintained copy of it (see `simlin_mcp_core::fs_access`); the
+//! re-export keeps every existing `simlin_mcp::access::FileSystemAccess`
+//! import working.
 
-pub mod access;
+pub mod access {
+    pub use simlin_mcp_core::fs_access::FileSystemAccess;
+}

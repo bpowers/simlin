@@ -13,7 +13,6 @@ import { describe, it, expect, rs } from '@rstest/core';
 import type http from 'http';
 
 import type { File } from '../schemas/file_pb';
-import type { Project } from '../schemas/project_pb';
 import { createHarness, login, request, withServer, Harness } from './wire-harness';
 
 const PB_CONTENTS = Buffer.from('serialized project bytes').toString('base64');
@@ -330,87 +329,6 @@ describe('POST /api/projects/:username/:projectName', () => {
 
       expect(fileIds(harness)).toEqual(['file-1', 'file-2']);
     });
-  });
-});
-
-// State-injection variants of the two-guard interleaving tests above:
-// instead of nesting a real second request, they inject the winner's
-// committed state directly between the loser's steps. Minimal machinery,
-// same guard pinned -- kept alongside the full interleavings, which
-// additionally prove these states are reachable end-to-end.
-describe('two-guard cleanup interleavings (state injection)', () => {
-  it('row re-read guard: a same-id winner committing mid-request keeps the shared File', async () => {
-    const harness = createHarness();
-
-    // Freeze Date so identical contents deterministically share a file id.
-    rs.useFakeTimers({ toFake: ['Date'], now: new Date() });
-    try {
-      // Interleave AFTER this request created its File: a concurrent save of
-      // IDENTICAL content in the same millisecond carries the SAME file id,
-      // wins the conditional update, and points the row at that shared id.
-      const originalCreate = harness.db.file.create.bind(harness.db.file);
-      harness.db.file.create = async (id: string, file: File): Promise<void> => {
-        await originalCreate(id, file);
-        const stored = harness.projects.get('alice/secret');
-        stored?.setVersion(2);
-        stored?.setFileId(id);
-      };
-
-      await withServer(harness.app, async (server) => {
-        const cookie = await login(server, 'alice');
-        const res = await save(server, cookie, 'alice/secret', { currVersion: 1, projectPB: PB_CONTENTS });
-        expect(res.status).toBe(409);
-
-        // The winner's row references the shared file id; the loser's cleanup
-        // must NOT have deleted it out from under the row.
-        const winnerFileId = harness.projects.get('alice/secret')?.getFileId() ?? '';
-        expect(winnerFileId).not.toBe('file-2');
-        expect(harness.files.has(winnerFileId)).toBe(true);
-      });
-    } finally {
-      rs.useRealTimers();
-    }
-  });
-
-  it("createdFile guard: a reusing loser must not delete another request's history File", async () => {
-    const harness = createHarness();
-
-    rs.useFakeTimers({ toFake: ['Date'], now: new Date() });
-    try {
-      await withServer(harness.app, async (server) => {
-        const cookie = await login(server, 'alice');
-
-        // R0: a successful save persists file F (version 1 -> 2, row -> F).
-        const r0 = await save(server, cookie, 'alice/secret', { currVersion: 1, projectPB: PB_CONTENTS });
-        expect(r0.status).toBe(200);
-        const sharedFileId = harness.projects.get('alice/secret')?.getFileId() ?? '';
-        expect(sharedFileId).not.toBe('');
-
-        // R1 saves IDENTICAL content in the same frozen millisecond (same file
-        // id -> reuse, createdFile=false), but a DIFFERENT-content competitor
-        // wins the version race before R1's conditional update commits.
-        const originalUpdate = harness.db.project.update.bind(harness.db.project);
-        harness.db.project.update = async (
-          id: string,
-          cond: Record<string, unknown>,
-          pb: Project,
-        ): Promise<Project | null> => {
-          const stored = harness.projects.get('alice/secret');
-          stored?.setVersion(3);
-          stored?.setFileId('competitor-file');
-          return originalUpdate(id, cond, pb);
-        };
-
-        const r1 = await save(server, cookie, 'alice/secret', { currVersion: 2, projectPB: PB_CONTENTS });
-        expect(r1.status).toBe(409);
-
-        // F is R0's version-history File; R1 did not create it and must not
-        // reap it, even though the row no longer references it.
-        expect(harness.files.has(sharedFileId)).toBe(true);
-      });
-    } finally {
-      rs.useRealTimers();
-    }
   });
 });
 

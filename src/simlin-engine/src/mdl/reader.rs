@@ -559,30 +559,6 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_expression_addition() {
-        let input = "x = a + b ~ ~ |";
-        let mut reader = EquationReader::new(input);
-        let item = reader.next_item();
-        assert!(
-            matches!(item, Some(Ok(MdlItem::Equation(_)))),
-            "Expected equation, got {:?}",
-            item
-        );
-    }
-
-    #[test]
-    fn test_expression_multiplication() {
-        let input = "x = a * b + c ~ ~ |";
-        let mut reader = EquationReader::new(input);
-        let item = reader.next_item();
-        assert!(
-            matches!(item, Some(Ok(MdlItem::Equation(_)))),
-            "Expected equation, got {:?}",
-            item
-        );
-    }
-
-    #[test]
     fn test_expression_exponentiation() {
         let input = "x = a ^ 2 ~ ~ |";
         let mut reader = EquationReader::new(input);
@@ -609,18 +585,6 @@ mod tests {
     #[test]
     fn test_expression_comparison() {
         let input = "x = IF THEN ELSE(a > b, 1, 0) ~ ~ |";
-        let mut reader = EquationReader::new(input);
-        let item = reader.next_item();
-        assert!(
-            matches!(item, Some(Ok(MdlItem::Equation(_)))),
-            "Expected equation, got {:?}",
-            item
-        );
-    }
-
-    #[test]
-    fn test_expression_logical_operators() {
-        let input = "x = a :AND: b :OR: c ~ ~ |";
         let mut reader = EquationReader::new(input);
         let item = reader.next_item();
         assert!(

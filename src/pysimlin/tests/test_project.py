@@ -11,24 +11,6 @@ from simlin import Project, SimlinImportError
 class TestProjectModels:
     """Test working with models in a project."""
 
-    def test_get_model_count(self, xmile_model_path) -> None:
-        """Test getting the number of models through names."""
-        model = simlin.load(xmile_model_path)
-        project = model.project
-        names = project.get_model_names()
-        assert len(names) >= 1
-        assert isinstance(len(names), int)
-
-    def test_get_model_names(self, xmile_model_path) -> None:
-        """Test getting model names."""
-        model = simlin.load(xmile_model_path)
-        project = model.project
-        names = project.get_model_names()
-        assert isinstance(names, list)
-        # Names list has been validated above
-        for name in names:
-            assert isinstance(name, str)
-
     def test_get_default_model(self, xmile_model_path) -> None:
         """Test getting the default model."""
         model = simlin.load(xmile_model_path)
@@ -39,14 +21,22 @@ class TestProjectModels:
 
         assert isinstance(model, Model)
 
-    def test_get_named_model(self, xmile_model_path) -> None:
-        """Test getting a model by name."""
-        model = simlin.load(xmile_model_path)
-        project = model.project
-        names = project.get_model_names()
-        if names:
-            model = project.get_model(names[0])
-            assert model is not None
+    def test_get_named_model(self, modules_model_path) -> None:
+        """get_model(name) resolves the named sub-model, not the default one.
+
+        Uses a multi-model project so the lookup has something to get wrong:
+        the hares sub-model carries variables (birth_fraction, hare_density)
+        that the main model does not.
+        """
+        project = simlin.load(modules_model_path).project
+
+        assert project.get_model_names() == ["main", "hares", "lynxes"]
+
+        hares_vars = set(project.get_model("hares").get_var_names())
+        main_vars = set(project.get_model().get_var_names())
+
+        assert {"birth_fraction", "hare_density"} <= hares_vars
+        assert hares_vars != main_vars
 
     def test_new_project_creates_blank_model(self) -> None:
         """Project.new() should create a blank project with a single empty model."""
@@ -182,16 +172,6 @@ class TestProjectContextManager:
 
         # Even with exception, cleanup should occur
         assert project._ptr == ffi.NULL
-
-    def test_non_context_manager_usage_still_works(self, xmile_model_path) -> None:
-        """Test that objects still work without context manager."""
-        # Should work exactly as before without using 'with'
-        model = simlin.load(xmile_model_path)
-        project = model.project
-        assert len(project.get_model_names()) > 0
-        model = project.get_model()
-        assert model is not None
-        # Cleanup will still happen through finalizer
 
 
 class TestProjectEditing:
@@ -339,15 +319,3 @@ class TestPatchWarningSemantics:
 
         details = getattr(excinfo.value, "details", [])
         assert details, "rejection should carry the underlying error details"
-
-
-class TestProjectRepr:
-    """Test string representation of projects."""
-
-    def test_repr(self, xmile_model_path) -> None:
-        """Test __repr__ method."""
-        model = simlin.load(xmile_model_path)
-        project = model.project
-        repr_str = repr(project)
-        assert "Project" in repr_str
-        assert "model" in repr_str.lower()

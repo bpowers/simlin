@@ -167,6 +167,16 @@ where
     }
 }
 
+/// Grace window for the absence assertions below.
+///
+/// Every caller has already observed the `ProjectChanged` that precedes
+/// the `DiagnosticsChanged` publish in the same task, so a genuine emit is
+/// on the channel before we start looking; the watcher-path caller adds a
+/// `watcher_barrier` on top. This window therefore only absorbs the
+/// scheduler hop to the broadcast receiver -- it is not what makes the
+/// assertion sound, so it does not need to be generous.
+const POST_SETTLE_MS: u64 = 50;
+
 /// Drain pending events for a brief window; assert nothing matching
 /// `predicate` arrives. Used to enforce the "no `DiagnosticsChanged`"
 /// branch of scenario 3.
@@ -350,14 +360,14 @@ async fn http_save_does_not_emit_diagnostics_changed_when_set_unchanged() {
         _ => unreachable!(),
     }
 
-    // Within a 200ms window after ProjectChanged, no DiagnosticsChanged
-    // event should arrive. The helper is synchronous so any genuine
+    // No DiagnosticsChanged may follow. `maybe_emit_diagnostics_changed`
+    // runs synchronously after the ProjectChanged publish, so a genuine
     // emit would already be in the channel by the time we observe
     // ProjectChanged.
     assert_no_event_for(
         &mut rx,
         |msg| matches!(msg, WsMessage::DiagnosticsChanged { .. }),
-        200,
+        POST_SETTLE_MS,
     )
     .await;
 }
@@ -504,7 +514,7 @@ async fn mcp_create_does_not_emit_diagnostics_changed_for_clean_project() {
     assert_no_event_for(
         &mut rx,
         |msg| matches!(msg, WsMessage::DiagnosticsChanged { .. }),
-        200,
+        POST_SETTLE_MS,
     )
     .await;
 }
@@ -596,7 +606,7 @@ async fn watcher_merge_does_not_emit_diagnostics_changed_when_both_states_clean(
     assert_no_event_for(
         &mut rx,
         |msg| matches!(msg, WsMessage::DiagnosticsChanged { .. }),
-        200,
+        POST_SETTLE_MS,
     )
     .await;
 

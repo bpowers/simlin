@@ -1118,21 +1118,31 @@ fn test_model_functions() {
     }
 }
 
+/// Every model-query entry point must reject a NULL handle with an error
+/// rather than dereferencing it, and must leave its out-parameters untouched
+/// so a caller that ignores the error code does not read a stale count as
+/// real data. `simlin_model_ref`/`unref` are the two that take NULL as a
+/// documented no-op.
 #[test]
 fn test_model_null_safety() {
     unsafe {
-        // Test null project
-        let mut count: usize = 0;
+        // Sentinel values the FFI must not overwrite on the error path.
+        const SENTINEL: usize = 0xDEAD;
+
+        let mut count: usize = SENTINEL;
         let mut err: *mut SimlinError = ptr::null_mut();
         simlin_project_get_model_count(
             ptr::null_mut(),
             &mut count as *mut usize,
             &mut err as *mut *mut SimlinError,
         );
-        // Should handle null gracefully
+        assert!(!err.is_null(), "get_model_count(NULL project) must error");
+        assert_eq!(simlin_error_get_code(err), SimlinErrorCode::Generic);
+        assert_eq!(count, SENTINEL, "out_count must be left untouched on error");
+        simlin_error_free(err);
 
         let mut names: [*mut c_char; 2] = [ptr::null_mut(); 2];
-        let _written: usize = 0;
+        count = SENTINEL;
         err = ptr::null_mut();
         simlin_project_get_model_names(
             ptr::null_mut(),
@@ -1141,7 +1151,14 @@ fn test_model_null_safety() {
             &mut count as *mut usize,
             &mut err as *mut *mut SimlinError,
         );
-        // Should handle null gracefully
+        assert!(!err.is_null(), "get_model_names(NULL project) must error");
+        assert_eq!(simlin_error_get_code(err), SimlinErrorCode::Generic);
+        assert_eq!(count, SENTINEL, "out_written must be left untouched");
+        assert!(
+            names.iter().all(|n| n.is_null()),
+            "no name must be written on the error path"
+        );
+        simlin_error_free(err);
 
         err = ptr::null_mut();
         let model = simlin_project_get_model(
@@ -1150,13 +1167,15 @@ fn test_model_null_safety() {
             &mut err as *mut *mut SimlinError,
         );
         assert!(model.is_null());
-        // err might be set for null input
+        assert!(!err.is_null(), "get_model(NULL project) must error");
+        assert_eq!(simlin_error_get_code(err), SimlinErrorCode::Generic);
+        simlin_error_free(err);
 
-        // Test null model
+        // Refcount operations take NULL as a no-op (no error channel).
         simlin_model_ref(ptr::null_mut());
         simlin_model_unref(ptr::null_mut());
 
-        count = 0;
+        count = SENTINEL;
         err = ptr::null_mut();
         simlin_model_get_var_count(
             ptr::null_mut(),
@@ -1165,9 +1184,13 @@ fn test_model_null_safety() {
             &mut count as *mut usize,
             &mut err as *mut *mut SimlinError,
         );
-        // Should handle null gracefully
+        assert!(!err.is_null(), "get_var_count(NULL model) must error");
+        assert_eq!(simlin_error_get_code(err), SimlinErrorCode::Generic);
+        assert_eq!(count, SENTINEL, "out_count must be left untouched");
+        simlin_error_free(err);
 
         let mut var_names: [*mut c_char; 2] = [ptr::null_mut(); 2];
+        count = SENTINEL;
         err = ptr::null_mut();
         simlin_model_get_var_names(
             ptr::null_mut(),
@@ -1178,17 +1201,27 @@ fn test_model_null_safety() {
             &mut count as *mut usize,
             &mut err as *mut *mut SimlinError,
         );
-        // Should handle null gracefully
+        assert!(!err.is_null(), "get_var_names(NULL model) must error");
+        assert_eq!(simlin_error_get_code(err), SimlinErrorCode::Generic);
+        assert_eq!(count, SENTINEL, "out_written must be left untouched");
+        assert!(
+            var_names.iter().all(|n| n.is_null()),
+            "no name must be written on the error path"
+        );
+        simlin_error_free(err);
 
         err = ptr::null_mut();
         let links = simlin_model_get_links(ptr::null_mut(), &mut err as *mut *mut SimlinError);
         assert!(links.is_null());
+        assert!(!err.is_null(), "get_links(NULL model) must error");
+        assert_eq!(simlin_error_get_code(err), SimlinErrorCode::Generic);
+        simlin_error_free(err);
 
-        // Test null sim creation - should return error for NULL model
         err = ptr::null_mut();
         let sim = simlin_sim_new(ptr::null_mut(), false, &mut err as *mut *mut SimlinError);
-        assert!(!err.is_null(), "Expected error for NULL model");
+        assert!(!err.is_null(), "sim_new(NULL model) must error");
         assert!(sim.is_null());
+        assert_eq!(simlin_error_get_code(err), SimlinErrorCode::Generic);
         simlin_error_free(err);
     }
 }

@@ -294,14 +294,6 @@ fn op2(op: Op2) -> Opcode {
 // ── LoadConstant ──────────────────────────────────────────────────────
 
 #[test]
-fn lowers_load_constant() {
-    assert_eq!(
-        value(vec![Opcode::LoadConstant { id: 0 }], vec![3.5], &[]),
-        3.5
-    );
-}
-
-#[test]
 fn lowers_load_constant_selects_right_literal() {
     let code = vec![Opcode::LoadConstant { id: 2 }];
     assert_eq!(value(code, vec![1.0, 2.0, 42.0], &[]), 42.0);
@@ -758,38 +750,6 @@ fn div_by_zero_matches_vm_ieee() {
     assert!(nan.is_nan());
 }
 
-// ── AC1.4: unsupported opcodes return a clean error, never a panic ────
-
-#[test]
-fn op2_eq_lowers_without_error() {
-    // Eq is now supported (routed through the approx_eq helper), so lowering
-    // must succeed where Phase 1 returned Unsupported. Numeric parity is
-    // covered by the dedicated approx_eq / Op2::Eq tests below.
-    let mut func = Function::new([]);
-    let program = bc(vec![1.0, 2.0], vec![op2(Op2::Eq)]);
-    let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
-    assert!(result.is_ok(), "Op2::Eq should lower without error");
-}
-
-#[test]
-fn op2_mod_lowers_without_error() {
-    // Mod is now supported (rem_euclid via the mod_euclid helper); lowering
-    // must succeed where Phase 1 returned Unsupported.
-    let mut func = Function::new([]);
-    let program = bc(vec![], vec![op2(Op2::Mod)]);
-    let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
-    assert!(result.is_ok(), "Op2::Mod should lower without error");
-}
-
-#[test]
-fn op2_exp_lowers_without_error() {
-    // Exp is now supported (powf via the pow helper).
-    let mut func = Function::new([]);
-    let program = bc(vec![], vec![op2(Op2::Exp)]);
-    let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
-    assert!(result.is_ok(), "Op2::Exp should lower without error");
-}
-
 // ── Op2::Exp (pow) / Op2::Mod (rem_euclid) numeric parity ─────────────
 
 /// Evaluate `l Op2::Exp r` (push l, push r, Op2::Exp) -> f64.
@@ -894,44 +854,6 @@ fn bin_op_assign_curr_mod_stores_rem_euclid() {
         },
     ];
     assert_eq!(stored(code, vec![-7.0, 3.0], &[], 40), 2.0);
-}
-
-#[test]
-fn apply_lowers_without_error() {
-    // Apply is supported as of Phase 2 Task 4; lowering must succeed where
-    // Phase 1 returned Unsupported. (Numeric parity is covered by the
-    // dedicated per-builtin tests below.)
-    let mut func = Function::new([]);
-    let program = bc(
-        vec![],
-        vec![Opcode::Apply {
-            func: BuiltinId::Abs,
-        }],
-    );
-    let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
-    assert!(result.is_ok(), "Apply should lower without error");
-}
-
-#[test]
-fn lookup_lowers_without_error() {
-    // Lookup is supported as of Phase 3; lowering must succeed where Phase 2
-    // returned Unsupported. (Numeric parity is covered by the seeded-table
-    // tests below and the end-to-end GF model tests in module.rs.)
-    let mut func = Function::new(opcode_fn_locals(0, 0, 0));
-    let program = bc(
-        vec![0.0, 1.0],
-        vec![
-            Opcode::LoadConstant { id: 0 }, // element_offset
-            Opcode::LoadConstant { id: 1 }, // index
-            Opcode::Lookup {
-                base_gf: 0,
-                table_count: 1,
-                mode: LookupMode::Interpolate,
-            },
-        ],
-    );
-    let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
-    assert!(result.is_ok(), "Lookup should lower without error");
 }
 
 #[test]
@@ -3687,33 +3609,6 @@ fn array_size_over_huge_view_is_free() {
     assert!(
         lower_only(&bc(vec![], code), &ctx).is_ok(),
         "ArraySize does no element reads and must not be capped"
-    );
-}
-
-#[test]
-fn reducer_just_under_cap_compiles_and_matches_vm() {
-    // A view sized just under the cap still lowers and runs to VM parity. We
-    // keep the fixture small/fast (a 64-element view) but assert the budget
-    // accounting admits it: 64 << MAX_UNROLL_UNITS. (The full corpus of small
-    // arrayed reducer tests above is the broad just-under-cap parity check;
-    // this pins the boundary intent.)
-    let data: Vec<f64> = (0..64).map(|i| (i as f64) * 0.5).collect();
-    let view = dense_view(0, &[64]);
-    assert!(view.to_runtime_view(0).size() <= MAX_UNROLL_UNITS);
-    let got = run_static_reduce(view.clone(), Opcode::ArraySum {}, &data);
-    assert_eq!(got, vm_sum(&view, &data));
-}
-
-#[test]
-fn unroll_cap_has_headroom_over_realistic_arrays() {
-    // The cap must be generous enough for real SD models. The test corpus's
-    // largest single dimension is 9; even a region x sector x cohort nest is
-    // ~10^3 elements. A compile-time assert pins that the cap clears a
-    // deliberately roomy 10^4 with margin, documenting that legitimate models
-    // never trip it.
-    const _: () = assert!(
-        MAX_UNROLL_UNITS >= 10_000,
-        "the unroll cap must leave ample headroom for realistic arrayed models"
     );
 }
 

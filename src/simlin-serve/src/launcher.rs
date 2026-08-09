@@ -66,6 +66,12 @@ fn spawn_quiet(cmd: &mut std::process::Command) -> bool {
         .unwrap_or(false)
 }
 
+// `open_browser` and `spawn_quiet` are deliberately untested: every
+// observable outcome is a property of the host's `xdg-open` / `open` /
+// `start`, not of our three lines around it, and exercising them spawns a
+// real browser launch during `cargo test` on any developer machine with a
+// display. The tests that used to live here either asserted nothing or
+// skipped themselves on every host where the launcher succeeds.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,69 +80,5 @@ mod tests {
     fn build_launch_url_includes_host_and_port() {
         let url = build_launch_url(54321);
         assert_eq!(url, "http://127.0.0.1:54321/");
-    }
-
-    #[test]
-    fn build_launch_url_uses_loopback_host() {
-        let url = build_launch_url(8080);
-        assert!(
-            url.starts_with("http://127.0.0.1:"),
-            "expected loopback host, got {url:?}"
-        );
-    }
-
-    /// Smoke-test that `open_browser` does not panic when the platform's
-    /// launcher fails or quietly succeeds. The point is to keep the
-    /// server running for the user regardless of what `xdg-open` /
-    /// `open` / `start` return. The boolean result is not load-bearing:
-    ///
-    /// - Linux without `$DISPLAY`: `xdg-open` reports I/O failure and we
-    ///   get `false`. Asserting `false` here is the historical case.
-    /// - macOS: the system `open` command happily hands the URL to
-    ///   Launch Services even on a CI runner without a logged-in GUI
-    ///   session, so the call typically succeeds (returns `true`).
-    /// - Windows: the launcher's behaviour on headless runners is also
-    ///   non-deterministic.
-    ///
-    /// Rather than try to predict the boolean outcome on every host, we
-    /// just exercise the call path and assert it returns *some* bool
-    /// without panicking. The Linux-headless `false` arm is still the
-    /// case the implementation cares about; we keep that assertion
-    /// gated on `target_os = "linux"` and the absence of `$DISPLAY`,
-    /// where it is genuinely deterministic.
-    #[test]
-    fn open_browser_does_not_panic() {
-        let _ = open_browser("http://127.0.0.1:1/never-opens");
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn open_browser_returns_false_in_linux_headless() {
-        // `xdg-open` exits non-zero when no display is available; we
-        // map that to `false`. On a developer machine with `$DISPLAY`
-        // set we cannot predict the outcome, so skip the assertion.
-        let has_display = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
-        if has_display {
-            return;
-        }
-        // Some Linux distributions ship an `xdg-open` that returns 0
-        // even without `$DISPLAY` (Fedora's Asahi spin is one such
-        // host). Probe the launcher directly: if it succeeds, the
-        // strict assertion is false-positive here, and the relaxed
-        // `open_browser_does_not_panic` test above already covers the
-        // bool-flow contract. Skip in that case.
-        let probe = std::process::Command::new("xdg-open")
-            .arg("http://127.0.0.1:1/probe")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        if matches!(probe, Ok(status) if status.success()) {
-            return;
-        }
-        let result = open_browser("http://127.0.0.1:1/never-opens");
-        assert!(
-            !result,
-            "expected open_browser to fall through to false in headless Linux"
-        );
     }
 }

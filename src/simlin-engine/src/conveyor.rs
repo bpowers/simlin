@@ -320,7 +320,8 @@ impl ConveyorState {
         }
     }
 
-    /// The time step this conveyor integrates under.
+    /// The time step this conveyor integrates under. Test-only accessor.
+    #[cfg(test)]
     pub fn dt(&self) -> f64 {
         self.dt
     }
@@ -356,6 +357,7 @@ impl ConveyorState {
     /// access (§10) reads the whole belt via [`Self::slat_contents`] +
     /// `container_value_from_slice`; this single-slat accessor remains for
     /// tests probing individual slats.
+    #[cfg(test)]
     pub fn slat_content(&self, j: usize) -> Option<f64> {
         self.slats.get(j).map(|s| s.content)
     }
@@ -648,6 +650,7 @@ impl ConveyorState {
     /// Initialize so that a steady entry cohort equals `inflow_rate * dt` -- the
     /// prototype's `init_from_inflow`, used by the leak scenarios (S3/S4/S9/etc.)
     /// to start the belt already at its `inflow`-driven equilibrium.
+    #[cfg(test)]
     pub fn init_from_inflow(&mut self, transit: f64, inflow_rate: f64, initial_fractions: &[f64]) {
         self.init_steady(transit, 1.0, initial_fractions);
         let entry = self.slats.back().map(|s| s.content).unwrap_or(0.0);

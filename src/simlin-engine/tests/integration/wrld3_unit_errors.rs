@@ -80,32 +80,6 @@ fn load_wrld3() -> simlin_engine::datamodel::Project {
     open_vensim(&mdl_content).expect("open_vensim should parse wrld3-03.mdl without I/O errors")
 }
 
-/// Temporary debug: print the parsed unit strings and the unit equivalences.
-#[test]
-#[ignore]
-fn debug_wrld3_parsed_units() {
-    let project = load_wrld3();
-    for model in &project.models {
-        for var in &model.variables {
-            let (ident, units) = match var {
-                simlin_engine::datamodel::Variable::Aux(a) => (a.ident.clone(), a.units.clone()),
-                simlin_engine::datamodel::Variable::Flow(f) => (f.ident.clone(), f.units.clone()),
-                simlin_engine::datamodel::Variable::Stock(s) => (s.ident.clone(), s.units.clone()),
-                _ => continue,
-            };
-            if let Some(ref u) = units
-                && u.to_lowercase().contains("resource")
-            {
-                println!("{}: units={:?}", ident, u);
-            }
-        }
-    }
-    println!("units equivalences:");
-    for u in &project.units {
-        println!("  name={:?} aliases={:?}", u.name, u.aliases);
-    }
-}
-
 /// Verify that World3 loads without parse-level errors (the model is valid MDL).
 #[test]
 fn wrld3_parses_without_hard_errors() {

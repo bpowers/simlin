@@ -3263,8 +3263,8 @@ fn reducer_bare_cosource_uses_active_slot_once() {
         .array_aux("solo[D1]", "SUM(frac)")
         .array_aux("growth[D1]", "SUM(matrix[D1,*] * frac)");
 
-    project.assert_vm_result_incremental("solo", &[10.0, 20.0]);
-    project.assert_vm_result_incremental("growth", &[30.0, 120.0]);
+    project.assert_vm_result("solo", &[10.0, 20.0]);
+    project.assert_vm_result("growth", &[30.0, 120.0]);
 }
 
 #[test]
@@ -3287,5 +3287,5 @@ fn rank_sliced_view_inside_reducer_in_arrayed_equation_runs() {
             None,
         );
 
-    project.assert_vm_result_incremental("share", &[3.0, 3.0]);
+    project.assert_vm_result("share", &[3.0, 3.0]);
 }
