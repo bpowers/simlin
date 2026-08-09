@@ -1067,13 +1067,17 @@ hoisted too: the `Iterated` axis carries the (target, source) dimension
 pair, the agg is arrayed over the TARGET dim (`State`), and each source row
 is remapped to the slot of its positionally-corresponding target element
 (`iterated_axis_slot_elements` -- the preimage of
-`mapped_element_correspondence`, so the element-map/positional gate is
-inherited). The only reducers *not* hoisted are the dynamic-index carve-out
-(`SUM(pop[idx, *])`, `idx` non-literal -- not statically describable,
-reclassified `DynamicIndex`) and the mapped sliced reducers the
-correspondence declines -- an explicit element-mapped pair (execution
-resolves positionally, GH #756) or a reverse-declared mapping (GH #757) --
-which keep the conservative cross-product; a bare non-literal index
+`positional_correspondence`, which is the right rule here because
+`matrix[State, *]` names the dimension the equation ITERATES and execution
+folds that to an ordinal; an explicit element map is therefore honoured as a
+DECLARED correspondence but not READ, GH #997). The only reducers *not*
+hoisted are the dynamic-index carve-out (`SUM(pop[idx, *])`, `idx`
+non-literal -- not statically describable, reclassified `DynamicIndex`), a
+pair with no declared correspondence at all, and a `MappedRead` axis
+(`SUM(matrix[Region, *])` naming a NON-iterated dimension, GH #997: its
+executed rule admits a many-to-one correspondence that the one-slot-per-row
+remap cannot express, so `compute_read_slice` declines it) -- all of which
+keep the conservative cross-product; a bare non-literal index
 (`arr[i+1]`) is a dynamic reference, not a reducer, so it stays conservative.
 Variable-backed aggs (`total_population = SUM(population[*])`) are already
 real nodes -- their edges come from the normal arrayed→scalar /
@@ -1173,13 +1177,14 @@ slot per `D1` element); `SUM(matrix3d[D1, NYC, *])` over an A2A-`D1` body ⇒
 `result_dims = [State]` -- the agg is arrayed over the TARGET's iterated
 dim, and the emitters remap each source row to the slot of its
 positionally-corresponding target element (`iterated_axis_slot_elements`,
-the preimage inversion of `mapped_element_correspondence`, so the
-positional-only gate is inherited). The carve-outs (tracked tech debt;
+the preimage inversion of `positional_correspondence`, the rule the ITERATED
+spelling gets). The carve-outs (tracked tech debt;
 the conservative cross-product / coarse link score stays in place) are: a
 reducer over a *dynamic index* (`SUM(pop[idx, *])`, `idx` non-literal -- the
 IR reclassifies its reference to `DynamicIndex`); a mapped sliced reducer
-the correspondence declines -- an explicit element-mapped pair (execution
-resolves positionally and ignores the map, GH #756) or a mapping declared
+the correspondence declines -- a pair with no declared correspondence, or a
+`MappedRead` axis whose executed rule the slot remap cannot invert
+(GH #997) -- or a mapping declared
 only in the reverse direction (on the source's dimension; GH #757 tracks
 that direction's classification); and a multi-source reducer whose arrayed
 args read incompatible slices (`combined_read_slice` returns `None` on

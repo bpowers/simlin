@@ -543,6 +543,61 @@ impl<'a> BuiltinVisitor<'a> {
         }
     }
 
+    /// Does this subscript index leave a whole dimension standing, rather than
+    /// selecting one element of it?
+    ///
+    /// True for a wildcard or star-range, and for a bare reference to one of the
+    /// ACTIVE apply-to-all dimensions -- the spelling `context.rs` resolves per
+    /// element in scalar position and promotes to the whole array inside a
+    /// vector builtin's array-operand position
+    /// (`with_vector_builtin_wildcards`). A mapped or otherwise foreign
+    /// dimension name is deliberately NOT included: those need
+    /// `substitute_dimension_refs`' positional translation, which is only
+    /// available here.
+    fn index_spans_a_dimension(&self, idx: &IndexExpr0) -> bool {
+        match idx {
+            IndexExpr0::Wildcard(_) | IndexExpr0::StarRange(_, _) => true,
+            IndexExpr0::Expr(Expr0::Var(ident, _)) => {
+                let canonical = CanonicalDimensionName::from_raw(ident.as_str());
+                self.dimension_names.iter().any(|d| d == &canonical)
+            }
+            _ => false,
+        }
+    }
+
+    /// Is `arg` a subscripted reference that is ARRAY-shaped -- one whose
+    /// indices leave at least one dimension standing, and where every index is
+    /// either that or statically resolvable (GH #995)?
+    ///
+    /// Such an argument is passed through to lowering untouched: no per-element
+    /// substitution, and no synthesized capture helper. That is what lets an
+    /// array-valued `PREVIOUS`/`INIT` exist at all, and it puts the decision in
+    /// the one place that can make it. `PREVIOUS(vals[d])` means the element in
+    /// `y[d] = PREVIOUS(vals[d])` and the whole array in
+    /// `y[d] = VECTOR SORT ORDER(PREVIOUS(vals[d]), 1)`, exactly as bare
+    /// `vals[d]` does -- and only `compiler::context` knows which position it
+    /// is in. Substituting here would pin it to one element before that context
+    /// exists; the helper path cannot hold it either, since a scalar
+    /// `Equation::Scalar` helper holding `vals[*]` does not compile.
+    ///
+    /// The scalar routing is unchanged for every other shape: an all-static
+    /// subscript still substitutes and compiles to `LoadPrev`/`LoadInitial`
+    /// against a fixed slot, and anything with a dynamic index still gets its
+    /// capture helper (which is also what gives a dynamic index the correct
+    /// lagged semantics).
+    fn arg_is_array_shaped(&self, arg: &Expr0) -> bool {
+        match arg {
+            Expr0::Subscript(id, indices, _) => {
+                !self.is_module_backed_ident(id)
+                    && indices.iter().any(|i| self.index_spans_a_dimension(i))
+                    && indices
+                        .iter()
+                        .all(|i| self.index_is_static(i) || self.index_spans_a_dimension(i))
+            }
+            _ => false,
+        }
+    }
+
     /// Substitute dimension references in the expression with concrete element names.
     /// For example, if we're processing element "A2" of dimension "SubA",
     /// transform `input[SubA]` to `input[A2]`.
@@ -1162,18 +1217,30 @@ impl<'a> BuiltinVisitor<'a> {
                     // makes their indices statically resolvable); other shapes
                     // keep their original form so behavior is unchanged for
                     // them (`make_temp_arg` substitutes internally, and the
-                    // substitution is idempotent).
+                    // substitution is idempotent). An ARRAY-shaped subscript is
+                    // the exception: substituting would pin it to one element
+                    // before lowering can tell whether the position wants the
+                    // element or the whole array (`arg_is_array_shaped`).
                     let arg0 = match arg0 {
-                        Subscript(_, _, _) if self.active_subscript.is_some() => {
+                        Subscript(_, _, _)
+                            if self.active_subscript.is_some()
+                                && !self.arg_is_array_shaped(&arg0) =>
+                        {
                             self.substitute_dimension_refs(arg0)
                         }
                         other => other,
                     };
+                    // An index that leaves a dimension standing needs no
+                    // helper either: it resolves statically too, just to a VIEW
+                    // over the argument's storage rather than to a single slot
+                    // (codegen's `snapshot_static_view`).
                     let needs_temp_arg = match &arg0 {
                         Var(ident, _) => self.is_module_backed_ident(ident),
                         Subscript(id, indices, _) => {
                             self.is_module_backed_ident(id)
-                                || !indices.iter().all(|idx| self.index_is_static(idx))
+                                || !indices.iter().all(|idx| {
+                                    self.index_is_static(idx) || self.index_spans_a_dimension(idx)
+                                })
                         }
                         _ => true,
                     };

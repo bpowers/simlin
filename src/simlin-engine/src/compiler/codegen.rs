@@ -80,6 +80,96 @@ impl<'a> ModuleCtx<'a> {
     }
 }
 
+/// Where a `PREVIOUS`/`INIT` call sits, which decides how permissive the
+/// snapshot-view route is (`Compiler::snapshot_static_view`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SnapshotPosition {
+    /// The array operand of a builtin: `walk_expr_as_view` is emitting a view
+    /// here, so a view is what the call must produce.
+    ViewOperand,
+    /// A per-element read inside a `BeginIter` body: a scalar position, where
+    /// only an array-valued call needs the view route.
+    IterationBody,
+}
+
+/// The single slot a `LoadPrev`/`LoadInitial` can address, if `arg` resolved to
+/// one: a scalar variable (`Expr::Var`), or an array reference whose subscripts
+/// collapsed the view to one element (`arr[Dim.elem]`, `arr[2]`).
+///
+/// This is the ARRAY route's negation as well as the scalar route's predicate
+/// (`Compiler::snapshot_static_view`), so the two partition the argument shapes.
+fn static_slot(arg: &Expr) -> Option<VarRef> {
+    match arg {
+        Expr::Var(var, _) => Some(var.clone()),
+        Expr::StaticSubscript(base, view, _) if view.dims.is_empty() => {
+            Some(base.offset_by(view.offset))
+        }
+        _ => None,
+    }
+}
+
+/// `ALLOCATE AVAILABLE`'s priority-profile position refuses a `PREVIOUS`/`INIT`
+/// (GH #995 phase C3), for the same reason it refuses a computed profile.
+///
+/// The allocator reads ALL of a requester's XPriority columns, but the Vensim
+/// convention writes the argument collapsed (`pp[D,1]` -- "the priority vector
+/// starting at column 1"). `context::expand_pp_view_for_allocate` is what
+/// re-expands that back to the variable's full requester x XPriority array, and
+/// it only understands a direct variable reference: everything else falls
+/// through its `_ => Ok(lowered)` arm untouched. Before C3 that was harmless,
+/// because a `PREVIOUS` of an array did not compile at all and the position's
+/// only reachable non-reference shape (a computed profile) was rejected by
+/// `walk_expr_as_view`. Once `PREVIOUS(pp[D,1])` became a legal view, it started
+/// compiling to a ONE-COLUMN-per-requester profile and the allocator bisected
+/// over it -- a silently wrong allocation where HEAD had a loud failure, which
+/// is strictly worse. Rejected here instead.
+///
+/// Declining rather than fixing is the proportionate move: it restores exactly
+/// what HEAD did for this position. Making it CORRECT is option (b) -- teach
+/// `expand_pp_view_for_allocate` to look through a `PREVIOUS`/`INIT`, rebuild
+/// the full-variable view underneath it, and re-wrap -- which is a lowering
+/// change with its own allocator-semantics question (whether a frozen profile
+/// should freeze the whole array or only the referenced column) and belongs
+/// with a fixture that can tell the two apart. The workaround needs no engine
+/// change at all: capture the profile into a variable of its own
+/// (`frozen[D,XP] = PREVIOUS(pp[D,XP])`) and pass `frozen[D,1]`, which is a
+/// direct reference the expander does understand.
+fn reject_snapshot_priority_profile(profile: &Expr) -> Result<()> {
+    let is_snapshot = matches!(
+        profile,
+        Expr::App(BuiltinFn::Previous(_, _) | BuiltinFn::Init(_), _)
+    );
+    if is_snapshot {
+        return sim_err!(
+            NotSimulatable,
+            "ALLOCATE AVAILABLE reads every priority column, and its profile \
+             argument is re-expanded to the whole array from a direct variable \
+             reference -- a PREVIOUS/INIT there would allocate over one column. \
+             Capture the frozen profile in a variable of its own and pass that."
+                .to_string()
+        );
+    }
+    Ok(())
+}
+
+/// Is this `PREVIOUS` fallback the default the unary spelling desugars to?
+///
+/// `builtins_visitor` rewrites `PREVIOUS(x)` to `PREVIOUS(x, 0)`, and the array
+/// route can only reproduce that one value (see
+/// `Compiler::snapshot_static_view`).
+///
+/// Compared by BIT PATTERN, which is not a formality here: `1 / PREVIOUS(x, 0)`
+/// and `1 / PREVIOUS(x, -0)` differ in the sign of the infinity they yield on
+/// the first step, and a `-0.0` fallback IS reachable -- not as the literal
+/// `-0`, which is a negation of `0` that constant folding turns back into
+/// `+0.0`, but as `0 * -1`, the shape `compiler::fold` is documented to produce.
+/// See the float-equality position on [`crate::ast::Literal`]; both spellings
+/// are pinned by
+/// `array_operand_materialization_tests::a_non_default_array_previous_fallback_declines_loudly`.
+fn is_default_previous_fallback(fallback: &Expr) -> bool {
+    matches!(fallback, Expr::Const(value, _) if value.to_bits() == 0.0f64.to_bits())
+}
+
 pub(super) struct Compiler<'module> {
     module: ModuleCtx<'module>,
     module_decls: Vec<SymbolicModuleDecl>,
@@ -332,6 +422,15 @@ impl<'module> Compiler<'module> {
             }
             Expr::Var(base, _) => (Some(base), 1usize),
             Expr::TempArray(_, view, _) => (None, view.dims.iter().product::<usize>().max(1)),
+            // An array-valued `PREVIOUS`/`INIT` source (GH #995) is a view over
+            // the SAME variable's storage in a snapshot buffer, so its full
+            // extent is its argument's -- the snapshot regions are `n_slots`
+            // copies of a chunk. Without this arm the source fell to the `_`
+            // case and reported an extent of 1, and every mapped offset but 0
+            // was reported out of range (`:NA:`).
+            Expr::App(BuiltinFn::Previous(arg, _), _) | Expr::App(BuiltinFn::Init(arg), _) => {
+                return self.full_source_len(arg);
+            }
             _ => (None, 1usize),
         };
 
@@ -343,8 +442,34 @@ impl<'module> Compiler<'module> {
         view_len as u32
     }
 
-    /// Convert an ArrayView to a SymbolicStaticView for a variable
+    /// Convert an ArrayView to a SymbolicStaticView reading a variable out of
+    /// `curr`.
     fn array_view_to_static(&mut self, base: &VarRef, view: &ArrayView) -> SymbolicStaticView {
+        self.array_view_to_static_in(SymStaticViewBase::Var(base.clone()), view)
+    }
+
+    /// The same view geometry over one of the snapshot regions (GH #995): an
+    /// array-valued `PREVIOUS`/`INIT` is the argument's view read out of
+    /// `prev_values` / `initial_values`, which share `curr`'s slot numbering,
+    /// so only the base tag changes.
+    fn array_view_to_snapshot_static(
+        &mut self,
+        base: &VarRef,
+        view: &ArrayView,
+        storage: super::SnapshotRegion,
+    ) -> SymbolicStaticView {
+        let base = match storage {
+            super::SnapshotRegion::Prev => SymStaticViewBase::PrevVar(base.clone()),
+            super::SnapshotRegion::Initial => SymStaticViewBase::InitialVar(base.clone()),
+        };
+        self.array_view_to_static_in(base, view)
+    }
+
+    fn array_view_to_static_in(
+        &mut self,
+        base: SymStaticViewBase,
+        view: &ArrayView,
+    ) -> SymbolicStaticView {
         // Convert sparse info
         let sparse: SmallVec<[RuntimeSparseMapping; 2]> = view
             .sparse
@@ -371,7 +496,7 @@ impl<'module> Compiler<'module> {
             .collect();
 
         SymbolicStaticView {
-            base: SymStaticViewBase::Var(base.clone()),
+            base,
             dims: view.dims.iter().map(|&d| d as u16).collect(),
             strides: view.strides.iter().map(|&s| s as i32).collect(),
             offset: view.offset as u32,
@@ -479,9 +604,164 @@ impl<'module> Compiler<'module> {
         Ok((base_gf, table_count))
     }
 
+    /// Build the snapshot-region static view for an **array-valued**
+    /// `PREVIOUS`/`INIT` (GH #995), or `Ok(None)` when `builtin` is not one, or
+    /// is the ordinary scalar form that compiles to `LoadPrev`/`LoadInitial`
+    /// against a single slot.
+    ///
+    /// This is the single place the array route is decided, so the three
+    /// consumers -- `walk_expr_as_view` (bare operand), `walk_expr` (inside a
+    /// `BeginIter` body) and `collect_iter_source_views_impl` (which must
+    /// pre-push exactly the views the body reads) -- cannot disagree about
+    /// which shapes take it.
+    ///
+    /// A shape the region view cannot express is a loud `Err`, never a silent
+    /// fall-through to the scalar route: reading one element's snapshot and
+    /// broadcasting it where an array was written is a plausible array of wrong
+    /// numbers, which is strictly worse than not compiling.
+    fn snapshot_static_view(
+        &mut self,
+        builtin: &BuiltinFn,
+        position: SnapshotPosition,
+    ) -> Result<Option<SymbolicStaticView>> {
+        let (arg, region) = match position {
+            // The caller has already said an array is required here, so every
+            // argument that lowered to a view takes the snapshot route --
+            // including one that collapsed to a SINGLE element. That is what
+            // makes `VECTOR ELM MAP(PREVIOUS(vals[1]), offs)` behave exactly as
+            // `VECTOR ELM MAP(vals[1], offs)` does: the element establishes the
+            // base and the mapping ranges over the whole source variable. A
+            // `PREVIOUS` that behaved differently from its own argument in the
+            // same position would be the anomaly, degenerate answers included --
+            // and degenerate is what a one-element view means in a RANK-LIKE
+            // position: `VECTOR SORT ORDER(PREVIOUS(vals[1]), 1)` is a constant
+            // 0 sort order and `RANK(...)` a constant 1, exactly what
+            // `VECTOR SORT ORDER(vals[1], 1)` already produced at HEAD. GH #995
+            // warns against making that shape compile, and the warning is about
+            // the LTM wrap pinning a rank-like builtin's ARGUMENT to one element
+            // (a loud drop becoming a plausible constant-0 score); that half is
+            // untouched -- `ltm_agg`'s rank-like decline does not key on
+            // compilability, and C-LEARN's five `rank-like-partial` declines are
+            // byte-identical across this change. Pinned by
+            // `array_operand_materialization_tests::an_element_collapsed_snapshot_in_a_rank_like_position_matches_its_curr_twin`.
+            //
+            // The NUMERIC index is what the sentence above is about. The same
+            // element spelled with its bare NAME (`vals[e1]`) never reaches here:
+            // `builtins_visitor::index_is_static` will not accept an unqualified
+            // element name on the user-equation parse path, so `PREVIOUS` reads a
+            // scalar capture helper whose extent is ONE and the mapping is
+            // confined to it -- measured, and pinned by
+            // `array_operand_materialization_tests::every_row_of_the_issue_995_table_compiles`.
+            SnapshotPosition::ViewOperand => match builtin {
+                BuiltinFn::Previous(arg, _) => (arg.as_ref(), super::SnapshotRegion::Prev),
+                BuiltinFn::Init(arg) => (arg.as_ref(), super::SnapshotRegion::Initial),
+                _ => return Ok(None),
+            },
+            // A SCALAR position (a `BeginIter` body element read): only an
+            // array-valued call takes the view route. A single-element argument
+            // is a slot and keeps compiling to `LoadPrev`/`LoadInitial`, which
+            // is what lets `PREVIOUS(matrix[E,1])` go on broadcasting.
+            SnapshotPosition::IterationBody => match super::snapshot_view_arg(builtin) {
+                Some(pair) => pair,
+                None => return Ok(None),
+            },
+        };
+        let fallback = match builtin {
+            BuiltinFn::Previous(_, fallback) => Some(fallback.as_ref()),
+            _ => None,
+        };
+
+        // A `PREVIOUS` fallback is per-call-site scalar state and a view carries
+        // none. Before the first snapshot exists, a snapshot view yields 0 for
+        // every element (`vm::ChunkRegions::backing`, and the wasm backend's
+        // `select` on the same flag) -- which IS the default fallback the unary
+        // spelling desugars to, so that case needs nothing. Any other fallback
+        // would be silently ignored on the first step of every run, so reject it
+        // rather than approximate it.
+        if let Some(fallback) = fallback
+            && !is_default_previous_fallback(fallback)
+        {
+            return sim_err!(
+                NotSimulatable,
+                "an array-valued PREVIOUS has nowhere to carry a fallback, so it \
+                 can only take the default of 0; give the fallback to a scalar \
+                 PREVIOUS, or capture the array in a variable of its own first"
+                    .to_string()
+            );
+        }
+
+        match arg {
+            Expr::StaticSubscript(base, view, _) if super::view_repeats_a_dimension(view) => {
+                // A source naming one dimension twice (`matrix[d,d]`) has no
+                // usable projection between the array and the consumer of this
+                // view -- every layer that does it matches by dimension NAME and
+                // takes the first hit, so `out[i,j]` reads element `[i,i]` (see
+                // `compiler::view_repeats_a_dimension`). The array route is new
+                // with GH #995: `VECTOR SORT ORDER(PREVIOUS(matrix[d,d]), 1)`
+                // did not compile at the merge base, and letting it compile here
+                // buys a plausible array of wrong numbers. Refuse it, exactly as
+                // the temp and non-view arms below do. The DIRECT spelling
+                // (`VECTOR SORT ORDER(matrix[d,d], 1)`) is untouched: it
+                // compiles at the merge base, to those same wrong numbers, and
+                // fixing that is a pre-existing defect in the projection rather
+                // than something to bolt onto this route.
+                sim_err!(
+                    NotSimulatable,
+                    "PREVIOUS/INIT of an array that names one dimension twice \
+                     cannot be read as an array: the element-to-temp projection \
+                     matches dimensions by name and cannot tell the two apart"
+                        .to_string()
+                )
+            }
+            Expr::StaticSubscript(base, view, _) => {
+                Ok(Some(self.array_view_to_snapshot_static(base, view, region)))
+            }
+            // A bare variable reference in a view position, mirroring
+            // `walk_expr_as_view`'s own `Expr::Var` arm: a one-element view.
+            // Unreachable from `IterationBody`, whose classifier calls it scalar.
+            Expr::Var(base, _) => {
+                let view = ArrayView::contiguous(vec![1]);
+                Ok(Some(
+                    self.array_view_to_snapshot_static(base, &view, region),
+                ))
+            }
+            // A temp has no snapshot: nothing copies `temp_storage` into
+            // `prev_values`, so a computed array's previous value is simply not
+            // recorded anywhere. Everything else here is an expression that
+            // `find_expr_array_view` gave a shape but that did not lower to a
+            // view over storage -- there is no snapshot of an expression either.
+            // Both are loud rather than approximated.
+            Expr::TempArray(_, _, _) => sim_err!(
+                NotSimulatable,
+                "PREVIOUS/INIT of a computed array has no snapshot to read: only \
+                 a stored variable's values are captured each step"
+                    .to_string()
+            ),
+            other => sim_err!(
+                NotSimulatable,
+                format!(
+                    "PREVIOUS/INIT used where an array is required needs a \
+                     statically resolvable array reference, got {:?}",
+                    std::mem::discriminant(other)
+                )
+            ),
+        }
+    }
+
     /// Emit bytecode to push an expression's view onto the view stack.
     /// This is used for array operations that need to iterate over arrays.
     fn walk_expr_as_view(&mut self, expr: &Expr) -> Result<()> {
+        // An array-valued `PREVIOUS`/`INIT` is its argument's view read out of
+        // a snapshot region (GH #995), so it is a view position like any other
+        // rather than a computed array that must be materialized first.
+        if let Expr::App(builtin, _) = expr
+            && let Some(static_view) =
+                self.snapshot_static_view(builtin, SnapshotPosition::ViewOperand)?
+        {
+            let view_id = self.add_static_view(static_view);
+            self.push(SymbolicOpcode::PushStaticView { view_id });
+            return Ok(());
+        }
         match expr {
             Expr::StaticSubscript(base, view, _) => {
                 // Create a static view and push it
@@ -919,18 +1199,35 @@ impl<'module> Compiler<'module> {
                 // scalar -- e.g. `arr[Dim.elem]` or `arr[2]`). The latter is
                 // what the builtins-visitor lets through instead of
                 // synthesizing a helper aux when every subscript index is a
-                // compile-time constant. Anything else (dynamic indices,
-                // expressions) was rewritten through a helper aux at parse
-                // time, so reaching here with one is a compiler bug.
-                let static_slot = |arg: &Expr| -> Option<VarRef> {
-                    match arg {
-                        Expr::Var(var, _) => Some(var.clone()),
-                        Expr::StaticSubscript(base, view, _) if view.dims.is_empty() => {
-                            Some(base.offset_by(view.offset))
-                        }
-                        _ => None,
+                // compile-time constant (`static_slot`).
+                //
+                // An ARRAY-valued argument takes the other route (GH #995):
+                // `snapshot_static_view` turns it into a view over the same
+                // snapshot buffer the opcodes read, which inside a `BeginIter`
+                // body is one of the pre-pushed source views and is loaded per
+                // element like any other array operand. Outside an iteration
+                // there is no per-element context to load into, so that shape is
+                // reachable only through `walk_expr_as_view`.
+                if let Some(static_view) =
+                    self.snapshot_static_view(builtin, SnapshotPosition::IterationBody)?
+                {
+                    if !self.in_iteration {
+                        return sim_err!(
+                            NotSimulatable,
+                            "an array-valued PREVIOUS/INIT is only meaningful where an \
+                             array is expected, not as a scalar operand"
+                                .to_string()
+                        );
                     }
-                };
+                    let offset = self.find_iter_view_offset(&static_view).unwrap_or_else(|| {
+                        unreachable!(
+                            "snapshot view not found in pre-pushed set - \
+                             collect_iter_source_views_impl and walk_expr should visit same nodes"
+                        )
+                    });
+                    self.push(SymbolicOpcode::LoadIterViewAt { offset });
+                    return Ok(Some(()));
+                }
                 match builtin {
                     BuiltinFn::Previous(arg, fallback) => {
                         self.walk_expr(fallback)?.unwrap();
@@ -1105,19 +1402,24 @@ impl<'module> Compiler<'module> {
                             // builtins which take Box<Expr>. Single-arg MEAN can receive
                             // scalar expressions (Op2, etc.) that walk_expr_as_view
                             // can't handle, so we match on expression type first.
-                            match &args[0] {
+                            // The five shapes `walk_expr_as_view` accepts: the
+                            // four storage views, plus an array-valued
+                            // `PREVIOUS`/`INIT` (a view over a snapshot buffer,
+                            // GH #995). Anything else is a genuine scalar
+                            // expression and averages as one.
+                            let is_view = matches!(
+                                &args[0],
                                 Expr::StaticSubscript(..)
-                                | Expr::TempArray(..)
-                                | Expr::Var(..)
-                                | Expr::Subscript(..) => {
-                                    return self
-                                        .emit_array_reduce(&args[0], SymbolicOpcode::ArrayMean {});
-                                }
-                                _ => {
-                                    self.walk_expr(&args[0])?.unwrap();
-                                    return Ok(Some(()));
-                                }
+                                    | Expr::TempArray(..)
+                                    | Expr::Var(..)
+                                    | Expr::Subscript(..)
+                            ) || matches!(&args[0], Expr::App(b, _) if super::snapshot_view_arg(b).is_some());
+                            if is_view {
+                                return self
+                                    .emit_array_reduce(&args[0], SymbolicOpcode::ArrayMean {});
                             }
+                            self.walk_expr(&args[0])?.unwrap();
+                            return Ok(Some(()));
                         }
 
                         // Multi-argument scalar mean: (arg1 + arg2 + ... + argN) / N
@@ -1424,6 +1726,7 @@ impl<'module> Compiler<'module> {
                             return Ok(None);
                         }
                         BuiltinFn::AllocateAvailable(requests, profile, avail) => {
+                            reject_snapshot_priority_profile(profile)?;
                             self.walk_expr_as_view(requests)?;
                             self.walk_expr_as_view(profile)?;
                             self.walk_expr(avail)?.unwrap();
@@ -1600,8 +1903,22 @@ impl<'module> Compiler<'module> {
                 self.collect_iter_source_views_impl(else_expr, views, seen);
             }
             Expr::App(builtin, _) => {
-                // Recurse into all arguments of the builtin function
-                self.collect_builtin_views(builtin, views, seen);
+                // An array-valued `PREVIOUS`/`INIT` reads its argument's view
+                // out of a snapshot region rather than out of `curr`, so it
+                // contributes THAT view and its argument is not walked -- the
+                // `curr` view of the same reference is a different source and
+                // would be pushed for nothing. A shape the region view cannot
+                // express contributes nothing here and surfaces as the
+                // propagated `Err` when `walk_expr` reaches the same node.
+                match self.snapshot_static_view(builtin, SnapshotPosition::IterationBody) {
+                    Ok(Some(static_view)) => {
+                        if seen.insert(static_view.clone()) {
+                            views.push(static_view);
+                        }
+                    }
+                    Ok(None) => self.collect_builtin_views(builtin, views, seen),
+                    Err(_) => {}
+                }
             }
             // Leaf expressions that don't contain views
             Expr::Const(_, _)

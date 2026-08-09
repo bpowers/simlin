@@ -1400,12 +1400,16 @@ fn char_agg_to_scalar_target() {
 // clean-compiling structural zero (the frozen partial equals the frozen anchor).
 // HEAD instead recurses into the outer reducer, holds the agg live, and freezes
 // the co-source array slices: `sum(previous(matrix[region·<r>, *]) *
-// previous(other[region·nyc, *]) * "$⁚ltm⁚agg⁚0") * 0.001` -- which fails to
-// compile (no LoadPrev-of-array-view path) and surfaces as a LOUD warned zero.
-// The finding-2 gate teaches the GH #517 freeze about `live_reducer_text` so the
-// enclosing reducer recurses, restoring HEAD's text (and its loud degradation --
-// a loud failure is strictly better than a silent structural zero). Byte-
-// identical to HEAD `f057ef38`.
+// previous(other[region·nyc, *]) * "$⁚ltm⁚agg⁚0") * 0.001`. The finding-2 gate
+// teaches the GH #517 freeze about `live_reducer_text` so the enclosing reducer
+// recurses, restoring HEAD's text; the golden below is byte-identical to HEAD
+// `f057ef38`.
+//
+// That text used to have no codegen path (an array-valued `PREVIOUS`) and
+// surfaced as a LOUD warned zero, which `b7898692` deliberately preserved over
+// a silent structural zero. GH #995 phase C3 gave it one, so the equation is
+// unchanged and now COMPILES -- see
+// `agg_nested_reducer_partial_scores_full_attribution` for the number.
 // ---------------------------------------------------------------------------
 
 fn agg_nested_reducer_model() -> datamodel::Project {
@@ -1429,39 +1433,32 @@ fn char_agg_nested_reducer() {
         "agg_nested_reducer",
         agg_nested_reducer_model(),
         "link_score",
-        FragmentExpectation::ExpectedFailures {
-            // The GH #517 nested-live-reducer degradation this fixture exists to
-            // pin: the hoisted `SUM(pop[*])` held live sits inside a DECLINED
-            // outer reducer, so the `agg -> growth[e]` partial embeds `PREVIOUS`
-            // of a wildcard slice, which has no LoadPrev-of-array-view codegen
-            // path. It surfaces as an Assembly warning -- the LOUD warned-zero
-            // `b7898692` deliberately PRESERVES rather than fixes. Each of the
-            // two target elements contributes its score plus the two
-            // PREVIOUS-capture helpers its partial synthesizes.
-            why: "GH #517 live-agg-inside-a-declined-outer-reducer: the partial \
-                  freezes a wildcard slice, which cannot compile; preserved as a \
-                  loud warned zero, not fixed",
-            vars: &[
-                "$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}growth[boston]",
-                "$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}growth[nyc]",
-                "$\u{205A}$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}growth[boston]\u{205A}0\u{205A}arg0",
-                "$\u{205A}$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}growth[boston]\u{205A}1\u{205A}arg0",
-                "$\u{205A}$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}growth[nyc]\u{205A}0\u{205A}arg0",
-                "$\u{205A}$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}growth[nyc]\u{205A}1\u{205A}arg0",
-            ],
-        },
+        // GH #995 Phase C3 closed the degradation this fixture was written to
+        // pin. The hoisted `SUM(pop[*])` held live sits inside a DECLINED outer
+        // reducer, so the `agg -> growth[e]` partial embeds `PREVIOUS` of a
+        // wildcard slice (visible in the golden). That used to have no codegen
+        // path and surfaced as a warned zero -- six Assembly warnings: the two
+        // scores plus the four `PREVIOUS`-capture helper auxes their partials
+        // synthesized. An array-valued `PREVIOUS` is now a view over
+        // `prev_values`, so the partial compiles and the capture helpers are no
+        // longer synthesized at all (the argument is array-shaped, so
+        // `builtins_visitor` passes it through). The GOLDEN TEXT is byte-
+        // identical across that change: what moved is compilability, not the
+        // emitted equation. `agg_nested_reducer_partial_scores_full_attribution`
+        // pins the resulting NUMBER.
+        FragmentExpectation::AllCompile,
     );
 }
 
-// Finding 2 materiality guard: unlike every other guard in this file (which
-// asserts fragments MUST compile), the byte-parity contract here is to REPRODUCE
-// HEAD's LOUD failure. HEAD emits the live-agg-inside-a-frozen-array-slice
-// partial that cannot compile (six `Assembly` "failed to compile" warnings: the
-// two `agg⁚0->growth[e]` scores plus their four `PREVIOUS`-capture helper auxes),
-// producing a warned zero. The pre-fix transform-first freeze produced a SILENT
-// clean-compiling zero (zero warnings) -- the worst failure class. This guard
-// pins that the loud warnings ARE present: a regression that silently zeroes the
-// score would drop them. `pop` is a stock so the edge is causally live.
+// Finding 2 materiality guard, in its post-GH-#995 form. The pre-fix
+// transform-first freeze produced a SILENT clean-compiling zero (zero warnings)
+// -- the worst failure class -- and the guard originally pinned the LOUD
+// warned zero that replaced it (six `Assembly` "failed to compile" warnings: the
+// two `agg⁚0->growth[e]` scores plus their four `PREVIOUS`-capture helper auxes).
+// Phase C3 gave an array-valued `PREVIOUS` a snapshot-buffer view, so that
+// partial now compiles and the guard pins the NUMBER instead: a warned zero and
+// a silent zero are both ruled out by asserting the score's hand-derived value.
+// `pop` is a stock so the edge is causally live.
 fn agg_nested_reducer_feedback_model() -> datamodel::Project {
     TestProject::new("nested_reducer_feedback")
         .with_sim_time(0.0, 3.0, 1.0)
@@ -1478,7 +1475,7 @@ fn agg_nested_reducer_feedback_model() -> datamodel::Project {
 }
 
 #[test]
-fn agg_nested_reducer_preserves_loud_failure_not_silent_zero() {
+fn agg_nested_reducer_partial_scores_full_attribution() {
     use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
     use salsa::Setter;
 
@@ -1503,18 +1500,76 @@ fn agg_nested_reducer_preserves_loud_failure_not_silent_zero() {
         })
         .map(|d| d.variable.clone().unwrap_or_default())
         .collect();
-    // The loud degradation must be present: the two agg⁚0->growth[e] scores must
-    // each fail to compile (the live-agg-inside-a-frozen-array-slice partial),
-    // matching HEAD. A silent-zero regression would report NO such failure.
-    let agg_growth_failures: Vec<&String> = frag_failures
-        .iter()
-        .filter(|v| v.contains("agg\u{205A}0\u{2192}growth"))
-        .collect();
     assert!(
-        agg_growth_failures.len() >= 2,
-        "the nested-reducer agg->growth partial must LOUDLY fail to compile \
-         (HEAD's warned zero), not silently zero; failed fragments: {frag_failures:?}"
+        frag_failures.is_empty(),
+        "every fragment must compile now that an array-valued PREVIOUS has a \
+         view; a warned zero would show up here: {frag_failures:?}"
     );
+
+    // The number, derived by hand from the fixture rather than recorded from a
+    // run. `matrix` and `other` are constant 1 and Region has two elements, so
+    //
+    //   growth[e] = SUM(matrix[e,*] * other[nyc,*] * agg) * 0.001
+    //             = (1*1*agg + 1*1*agg) * 0.001 = 0.002 * agg
+    //
+    // and the ceteris-paribus partial for `agg -> growth[e]` -- which freezes
+    // the two co-source slices at their PREVIOUS values and holds `agg` live --
+    // is `SUM(PREV(matrix[e,*]) * PREV(other[nyc,*]) * agg) * 0.001`. The frozen
+    // slices are the same constant 1, so the partial equals `growth[e]`
+    // EXACTLY. The score is then
+    //
+    //   SAFEDIV(partial - PREV(growth[e]), ABS(growth[e] - PREV(growth[e])))
+    //     * SIGN(agg - PREV(agg))
+    //   = SIGN(growth[e] - PREV(growth[e])) * SIGN(agg - PREV(agg))
+    //   = 1
+    //
+    // because `pop` is a stock fed by `growth > 0`, so both `agg` and `growth`
+    // increase every step. 1.0 is full attribution, which is the right answer:
+    // `agg` is the only changing driver of `growth`. The first saved step is 0
+    // by the score's own `TIME = INITIAL_TIME` guard.
+    //
+    // Every wrong reading lands somewhere else: a failed or stubbed fragment
+    // reads a constant 0, and freezing the whole declined outer reducer (the
+    // GH #517 arm) makes the partial equal the frozen anchor, i.e. also 0.
+    //
+    // TWO readings this fixture CANNOT tell apart, disclosed rather than left to
+    // be discovered, both because `matrix` and `other` are the constant 1:
+    // reading them at their CURRENT rather than their PREVIOUS values, and
+    // reading the WRONG ROW of the snapshot for a `region·<r>` pin. Neither is
+    // uncovered -- `array_operand_materialization_tests`'
+    // `previous_operands_are_views_over_the_prev_snapshot` carries the lag over
+    // time-varying arrays and `a_prev_view_of_a_row_slice_reads_that_row_of_the_snapshot`
+    // carries the row over rows two orders of magnitude apart -- but they are
+    // covered THERE, over the view arithmetic, not here. What this fixture is
+    // for is the attribution value, which is the thing the LTM wrap decides.
+    let compiled = crate::db::compile_project_incremental(&db, source_project, "main")
+        .expect("the LTM-enabled fixture should compile");
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+    for elem in ["nyc", "boston"] {
+        let score = format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}growth[{elem}]"
+        );
+        let offset = *compiled
+            .offsets
+            .get(score.as_str())
+            .unwrap_or_else(|| panic!("{score} has no results offset"));
+        let series: Vec<f64> = (0..results.step_count)
+            .map(|step| results.data[step * results.step_size + offset])
+            .collect();
+        assert_eq!(
+            series[0], 0.0,
+            "{score}: the first step is guarded to 0 by the score equation"
+        );
+        for (step, value) in series.iter().enumerate().skip(1) {
+            assert!(
+                (value - 1.0).abs() < 1e-12,
+                "{score}: step {step} must be full attribution (1.0), got {value}; \
+                 whole series {series:?}"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1623,9 +1678,13 @@ fn char_arrayed_target_slot_scores() {
 // `PREVIOUS(SUM(w[from, *])) + from` -- because `expr0_contains_live_match`'s
 // Subscript arm matches only a subscript whose HEAD is the live source, never
 // an index-nested occurrence (`ltm_augment.rs`). Recursing into the reducer
-// instead would emit `SUM(PREVIOUS(w[from, *]))` (a PREVIOUS of an array view,
-// which has no LoadPrev path -- a loud compile failure and a silently-zeroed
-// score, GH #517).
+// instead would emit `SUM(PREVIOUS(w[from, *]))`, which was a loud compile
+// failure and a silently-zeroed score when written (GH #517: a PREVIOUS of an
+// array view had no codegen path). GH #995 phase C3 gave it one, so that form
+// compiles now -- but the SELECTION rule this golden pins is unchanged and is
+// not about compilability: the changed-first partial freezes the whole reducer
+// because the live occurrence is index-nested, and recursing would change which
+// occurrence is held live.
 //
 // This pins the exact Fig. 2 Q4 selection semantics the stage-2 occurrence
 // switch must reproduce via `occ.index_nested`: an index-nested occurrence is

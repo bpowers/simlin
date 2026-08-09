@@ -34,7 +34,7 @@ use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, CompiledInitial, CompiledModule, DimId, DimListId,
     GraphicalFunctionId, LiteralId, LookupMode, ModuleDeclaration, ModuleId, ModuleInputOffset,
     Op2, Opcode, PcOffset, RuntimeSparseMapping, STACK_CAPACITY, StaticArrayView, TempId,
-    VariableOffset, ViewId,
+    VariableOffset, ViewId, ViewStorage,
 };
 use crate::common::{Canonical, Ident};
 
@@ -319,11 +319,23 @@ pub(crate) struct SymbolicStaticView {
     pub dim_ids: SmallVec<[DimId; 4]>,
 }
 
+/// Where a symbolic static view's elements live, before layout assignment.
+///
+/// The three variable-backed arms differ ONLY in which of the VM's parallel
+/// chunk-shaped regions they read; they share `curr`'s slot numbering, so all
+/// three resolve a `SymVarRef` through the same layout lookup. Splitting them
+/// into distinct variants rather than pairing one `Var` with a storage field
+/// keeps `Temp` + a snapshot region -- a temp has no snapshot -- unrepresentable
+/// (GH #995).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum SymStaticViewBase {
-    /// Model variable reference (replaces base_off when is_temp=false)
+    /// Model variable reference, read from `curr`
     Var(SymVarRef),
-    /// Temp array ID (kept as-is when is_temp=true)
+    /// Model variable reference, read from the `PREVIOUS` snapshot
+    PrevVar(SymVarRef),
+    /// Model variable reference, read from the `INIT` snapshot
+    InitialVar(SymVarRef),
+    /// Temp array ID
     Temp(u32),
 }
 
@@ -1136,22 +1148,51 @@ pub(crate) fn resolve_static_view(
     sv: &SymbolicStaticView,
     layout: &VariableLayout,
 ) -> Result<StaticArrayView, String> {
-    let (base_off, is_temp) = match &sv.base {
-        SymStaticViewBase::Var(var_ref) => {
-            let entry = layout.get(var_ref.name.as_str()).ok_or_else(|| {
-                format!(
-                    "variable '{}' not found in layout during static view resolution",
-                    var_ref.name
-                )
-            })?;
-            ((entry.offset + var_ref.element_offset) as u32, false)
+    // The three chunk-shaped regions share `curr`'s slot numbering (each is an
+    // `n_slots` snapshot of it), so one layout lookup serves all three and only
+    // the region tag differs.
+    let resolve_var = |var_ref: &SymVarRef| -> Result<u32, String> {
+        let entry = layout.get(var_ref.name.as_str()).ok_or_else(|| {
+            format!(
+                "variable '{}' not found in layout during static view resolution",
+                var_ref.name
+            )
+        })?;
+        Ok((entry.offset + var_ref.element_offset) as u32)
+    };
+    let (base_off, storage) = match &sv.base {
+        SymStaticViewBase::Var(var_ref) => (resolve_var(var_ref)?, ViewStorage::Curr),
+        SymStaticViewBase::PrevVar(var_ref) => (resolve_var(var_ref)?, ViewStorage::Prev),
+        SymStaticViewBase::InitialVar(var_ref) => (resolve_var(var_ref)?, ViewStorage::Initial),
+        // A view base is the ONE place a temp id is carried as a `u32`. Every
+        // OTHER opcode that names a temp -- `BeginIter` and the
+        // array-producing opcodes' `write_temp_id`, `LoadTempConst`'s
+        // `temp_id` -- carries it as `TempId` (= `u8`), narrowed at emit time
+        // with a plain `as`. So a view over a temp above 255 reads storage
+        // nothing ever wrote: the writer's `as TempId` lands on `id % 256`
+        // while this read lands on `id`, and the program is well-formed either
+        // way -- wrong numbers with no diagnostic. Reject it in the resolution
+        // layer, where the concrete program is produced (#583 is the real fix:
+        // the id namespace is too small for a per-element hoist over a few
+        // hundred elements). The write-side narrowing is deliberately left
+        // unguarded; see the module note on this in the crate's CLAUDE.md.
+        SymStaticViewBase::Temp(id) => {
+            if *id > TempId::MAX as u32 {
+                return Err(format!(
+                    "a view over temp {} exceeds TempId capacity (u8::MAX = {}); \
+                     every writer of a temp narrows its id to u8, so this view \
+                     would read storage no opcode writes",
+                    id,
+                    TempId::MAX
+                ));
+            }
+            (*id, ViewStorage::Temp)
         }
-        SymStaticViewBase::Temp(id) => (*id, true),
     };
 
     Ok(StaticArrayView {
         base_off,
-        is_temp,
+        storage,
         dims: sv.dims.clone(),
         strides: sv.strides.clone(),
         offset: sv.offset,
@@ -2007,7 +2048,13 @@ impl FragmentMerger {
         self.merged_views.extend(frag.static_views.iter().map(|sv| {
             let base = match &sv.base {
                 SymStaticViewBase::Temp(id) => SymStaticViewBase::Temp(*id + temp_offset),
-                other => other.clone(),
+                // Variable-backed bases -- `curr` and both snapshot regions --
+                // name a variable, not a merged resource, so they carry across
+                // untouched. Written out rather than caught by `_` so a future
+                // base variant has to state which side of M1 it falls on.
+                base @ (SymStaticViewBase::Var(_)
+                | SymStaticViewBase::PrevVar(_)
+                | SymStaticViewBase::InitialVar(_)) => base.clone(),
             };
             SymbolicStaticView { base, ..sv.clone() }
         }));
@@ -2924,7 +2971,7 @@ mod tests {
 
         let resolved = resolve_static_view(&sym, &layout).unwrap();
         assert_eq!(resolved.base_off, 5);
-        assert!(!resolved.is_temp);
+        assert_eq!(resolved.storage, ViewStorage::Curr);
         assert_eq!(resolved.dims, sym.dims);
         assert_eq!(resolved.offset, 0);
     }
@@ -2944,7 +2991,7 @@ mod tests {
 
         let resolved = resolve_static_view(&sym, &layout).unwrap();
         assert_eq!(resolved.base_off, 7);
-        assert!(resolved.is_temp);
+        assert_eq!(resolved.storage, ViewStorage::Temp);
     }
 
     #[test]
@@ -3128,7 +3175,14 @@ mod tests {
             );
         }
         for sv in compiled.context.static_views.iter() {
-            if !sv.is_temp {
+            // The three chunk-shaped regions are all `n_slots` wide and share
+            // `curr`'s numbering, so the owned-slot check applies to each; only
+            // a temp base indexes something else.
+            let addresses_a_slot = match sv.storage {
+                ViewStorage::Curr | ViewStorage::Prev | ViewStorage::Initial => true,
+                ViewStorage::Temp => false,
+            };
+            if addresses_a_slot {
                 assert!(
                     (sv.base_off as usize) < layout.n_slots && owned[sv.base_off as usize],
                     "static view base {} is not an owned slot",
@@ -3294,7 +3348,7 @@ mod tests {
 
         let resolved = resolve_static_view(&sym, &layout).unwrap();
         assert_eq!(resolved.base_off, large_off as u32);
-        assert!(!resolved.is_temp);
+        assert_eq!(resolved.storage, ViewStorage::Curr);
     }
 
     #[test]

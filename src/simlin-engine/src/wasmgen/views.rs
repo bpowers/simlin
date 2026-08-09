@@ -12,7 +12,7 @@
 //! The VM resolves every array access through a runtime stack of [`RuntimeView`]s
 //! built and transformed by the `Push*View` / `View*` opcodes. Because every
 //! static view's geometry (base offset, dims, strides, offset, sparsity,
-//! is_temp) is known at compile time, the wasm emitter maintains a *compile-time*
+//! storage region) is known at compile time, the wasm emitter maintains a *compile-time*
 //! stack of [`ViewDesc`]s instead, mirroring the static parts of `RuntimeView`
 //! field-for-field and reproducing the `RuntimeView::apply_*` transforms in
 //! `apply_*` here. Element addressing then routes through a single source of
@@ -21,26 +21,53 @@
 //!
 //! [`RuntimeView`]: crate::bytecode::RuntimeView
 
-use crate::bytecode::{ByteCodeContext, StaticArrayView};
+use crate::bytecode::{ByteCodeContext, StaticArrayView, ViewStorage};
 
 /// Where a view's base address lives, mirroring how the VM resolves the base of
 /// a `RuntimeView` element read (`reduce_view` in `vm.rs`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ViewBase {
-    /// `curr[base_off + ..]` at an *absolute* slot base. This is what
-    /// `PushStaticView` produces: `StaticArrayView::to_runtime_view` copies
-    /// `base_off` verbatim (no `module_off` added), so the byte address is
-    /// `curr_base + (base_off + flat) * 8` with no runtime addend.
-    CurrAbsolute,
-    /// `curr[module_off + base_off + ..]`. `PushVarViewDirect` folds the
-    /// runtime `module_off` into the base (`vm.rs`'s `PushVarViewDirect` arm),
-    /// so a read adds `module_off * 8` to the constant address. In the current
-    /// single-root scope `module_off == 0`, but the distinction is preserved so
-    /// Phase 7 can thread a real `module_off` without changing addressing.
-    CurrModuleRelative,
-    /// `temp_storage[temp_offsets[base_off] + ..]` (`is_temp`): the base is a
-    /// temp id, resolved against the `temp_storage` region via `temp_offsets`.
+    /// `curr[module_off + base_off + ..]`. Both view opcodes land here:
+    /// `PushVarViewDirect` builds the base from the variable's own slot offset,
+    /// and `PushStaticView` carries one baked by `resolve_static_view` out of the
+    /// FRAGMENT'S OWN model layout. Either way the offset is module-relative --
+    /// the same offset `LoadVar` reads as `curr[module_off + off]` -- so the read
+    /// adds `module_off * 8` to the constant address. `module_off` is 0 for the
+    /// root instance and each sub-model instance's own slot base otherwise.
+    Curr,
+    /// `temp_storage[temp_offsets[base_off] + ..]`: the base is a temp id,
+    /// resolved against the `temp_storage` region via `temp_offsets`. The ONE
+    /// base `module_off` must not touch: temp storage is per-evaluation, not a
+    /// slab region, and every instance shares it while it runs.
     Temp,
+    /// `prev_values[module_off + base_off + ..]`: the array form of `PREVIOUS`
+    /// (GH #995), reading the same snapshot region the scalar `LoadPrev` does --
+    /// at the same instance-relative address, since the region is an `n_slots`
+    /// copy of `curr`. Like `LoadPrev`, the read is gated on `use_prev_fallback`:
+    /// while it is set the element is the fallback `0`, which is the only
+    /// fallback an array-valued `PREVIOUS` may carry
+    /// (`codegen::is_default_previous_fallback`).
+    Prev,
+    /// `initial_values[module_off + base_off + ..]`: the array form of `INIT`.
+    /// Its "during the initials phase the snapshot does not exist yet, read
+    /// `curr`" branch is resolved at COMPILE time from `EmitCtx::step_part`,
+    /// exactly as `emit_load_initial` does, so it needs no runtime gate.
+    Initial,
+}
+
+/// The byte offsets of the four regions a view's elements can live in, as one
+/// argument so a new region is added in one place rather than at every
+/// addressing call site.
+///
+/// `initial` is already resolved for the program being emitted (`curr_base`
+/// during the initials phase, the snapshot region otherwise) -- see
+/// [`ViewBase::Initial`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct RegionBases {
+    pub curr: u32,
+    pub temp_storage: u32,
+    pub prev: u32,
+    pub initial: u32,
 }
 
 /// A single sparse-dimension mapping, mirroring
@@ -89,16 +116,19 @@ pub(crate) struct ViewDesc {
 impl ViewDesc {
     /// Build a `ViewDesc` from a baked [`StaticArrayView`] (`PushStaticView`).
     ///
-    /// `StaticArrayView::to_runtime_view` copies `base_off` verbatim with no
-    /// `module_off`, so the base is [`ViewBase::CurrAbsolute`] for a variable
-    /// view and [`ViewBase::Temp`] when `is_temp`.
+    /// A static view's `base_off` is module-relative (`resolve_static_view`
+    /// reads it out of the fragment's own model layout), and
+    /// `StaticArrayView::to_runtime_view` adds the executing instance's
+    /// `module_off` to it for the three chunk-shaped regions. The wasm bases
+    /// mirror that, region for region.
     pub fn from_static(view: &StaticArrayView) -> Self {
         ViewDesc {
             base_off: view.base_off,
-            base: if view.is_temp {
-                ViewBase::Temp
-            } else {
-                ViewBase::CurrAbsolute
+            base: match view.storage {
+                ViewStorage::Curr => ViewBase::Curr,
+                ViewStorage::Temp => ViewBase::Temp,
+                ViewStorage::Prev => ViewBase::Prev,
+                ViewStorage::Initial => ViewBase::Initial,
             },
             dims: view.dims.to_vec(),
             strides: view.strides.to_vec(),
@@ -415,15 +445,12 @@ impl ViewDesc {
     /// addressing -- the unrolled reducer (Task 2), the iteration loop (Task 3),
     /// and Phase 6 all route through it.
     ///
-    /// - `CurrAbsolute`: `const = curr_base + (base_off + flat) * 8`,
-    ///   `module_relative = false` (static views bake `module_off` in already).
-    /// - `Temp`: `const = temp_storage_base + (temp_offsets[base_off] + flat)*8`,
-    ///   `module_relative = false`.
-    /// - `CurrModuleRelative`: `const = curr_base + (base_off + flat) * 8`,
+    /// - `Curr`/`Prev`/`Initial`: `const = <region base> + (base_off + flat) * 8`,
     ///   `module_relative = true` (the caller adds `module_off * 8`). The VM
-    ///   folds `module_off` into the base at `PushVarViewDirect` time;
-    ///   in the single-root scope `module_off == 0`, so the read is the same as
-    ///   `CurrAbsolute` today, but the flag keeps Phase 7 correct.
+    ///   folds the same addend into the base at push time
+    ///   (`StaticArrayView::to_runtime_view`, `PushVarViewDirect`).
+    /// - `Temp`: `const = temp_storage_base + (temp_offsets[base_off] + flat)*8`,
+    ///   `module_relative = false` -- a temp id is not a slab slot.
     ///
     /// A dynamically-subscripted view (`runtime_off_local` set, Task 4) carries
     /// the runtime addend + validity flag in the returned [`ElementAddr`]; static
@@ -431,12 +458,11 @@ impl ViewDesc {
     pub fn element_addr(
         &self,
         iter_idx: usize,
-        curr_base: u32,
-        temp_storage_base: u32,
+        bases: RegionBases,
         ctx: &ByteCodeContext,
     ) -> Option<ElementAddr> {
         let flat = self.flat_element_offset(iter_idx);
-        self.element_addr_for_flat(flat, curr_base, temp_storage_base, ctx)
+        self.element_addr_for_flat(flat, bases, ctx)
     }
 
     /// Like [`element_addr`](Self::element_addr) but for an *already-computed*
@@ -448,28 +474,43 @@ impl ViewDesc {
     pub fn element_addr_for_flat(
         &self,
         flat: usize,
-        curr_base: u32,
-        temp_storage_base: u32,
+        bases: RegionBases,
         ctx: &ByteCodeContext,
     ) -> Option<ElementAddr> {
         let flat = flat as u64;
-        let (const_byte_offset, module_relative) = match self.base {
-            ViewBase::CurrAbsolute => (
-                u64::from(curr_base) + (u64::from(self.base_off) + flat) * 8,
-                false,
-            ),
-            ViewBase::CurrModuleRelative => (
-                u64::from(curr_base) + (u64::from(self.base_off) + flat) * 8,
+        let (const_byte_offset, module_relative, prev_fallback_gated) = match self.base {
+            ViewBase::Curr => (
+                u64::from(bases.curr) + (u64::from(self.base_off) + flat) * 8,
                 true,
+                false,
             ),
             ViewBase::Temp => {
                 let temp_off = *ctx.temp_offsets.get(self.base_off as usize)? as u64;
-                (u64::from(temp_storage_base) + (temp_off + flat) * 8, false)
+                (
+                    u64::from(bases.temp_storage) + (temp_off + flat) * 8,
+                    false,
+                    false,
+                )
             }
+            // The snapshot regions are `n_slots` wide and share `curr`'s slot
+            // numbering, so only the base changes. `prev` additionally carries
+            // the runtime fallback gate; `initial`'s phase branch was already
+            // resolved into `bases.initial`.
+            ViewBase::Prev => (
+                u64::from(bases.prev) + (u64::from(self.base_off) + flat) * 8,
+                true,
+                true,
+            ),
+            ViewBase::Initial => (
+                u64::from(bases.initial) + (u64::from(self.base_off) + flat) * 8,
+                true,
+                false,
+            ),
         };
         Some(ElementAddr {
             const_byte_offset,
             module_relative,
+            prev_fallback_gated,
             runtime_off_local: self.runtime_off_local,
             valid_local: self.valid_local,
         })
@@ -490,6 +531,11 @@ impl ViewDesc {
 pub(crate) struct ElementAddr {
     pub const_byte_offset: u64,
     pub module_relative: bool,
+    /// True for a [`ViewBase::Prev`] element: the load is wrapped in the
+    /// same `select` on `use_prev_fallback` that the scalar `LoadPrev` emits, so
+    /// the element reads `0` until the first snapshot exists. The VM reaches the
+    /// identical value through `ChunkRegions::backing`'s `None` arm.
+    pub prev_fallback_gated: bool,
     pub runtime_off_local: Option<u32>,
     pub valid_local: Option<u32>,
 }
@@ -506,7 +552,12 @@ mod tests {
     fn to_runtime_view(d: &ViewDesc) -> RuntimeView {
         RuntimeView {
             base_off: d.base_off,
-            is_temp: matches!(d.base, ViewBase::Temp),
+            storage: match d.base {
+                ViewBase::Temp => ViewStorage::Temp,
+                ViewBase::Prev => ViewStorage::Prev,
+                ViewBase::Initial => ViewStorage::Initial,
+                ViewBase::Curr => ViewStorage::Curr,
+            },
             dims: SmallVec::from_slice(&d.dims),
             strides: SmallVec::from_slice(&d.strides),
             offset: d.offset,
@@ -539,10 +590,22 @@ mod tests {
         }
     }
 
+    /// Region bases for the addressing tests: only `curr` and `temp_storage`
+    /// vary here, and the snapshot bases are given distinct sentinel values so a
+    /// misrouted base shows up as an unexpected address rather than as 0.
+    fn bases(curr: u32, temp_storage: u32) -> RegionBases {
+        RegionBases {
+            curr,
+            temp_storage,
+            prev: 900_000,
+            initial: 800_000,
+        }
+    }
+
     fn dense(base_off: u32, dims: &[u16]) -> ViewDesc {
         ViewDesc::contiguous(
             base_off,
-            ViewBase::CurrAbsolute,
+            ViewBase::Curr,
             dims.to_vec(),
             vec![0u16; dims.len()],
         )
@@ -626,29 +689,48 @@ mod tests {
         assert_flat_matches_vm(&d);
     }
 
+    /// Every [`ViewBase`] arm's region, its `module_off` verdict, and its
+    /// `PREVIOUS`-fallback gate -- one row per variant, derived from the enum
+    /// rather than from the arms that happened to have tests.
+    ///
+    /// The `module_relative` column is the whole of the GH #995 module-instance
+    /// fix on this side: the three chunk-shaped regions are addressed by the
+    /// executing instance's slot base (the VM adds the same addend in
+    /// `StaticArrayView::to_runtime_view`), and `Temp` is not, because a temp id
+    /// is not a slab slot.
     #[test]
-    fn element_addr_curr_absolute_const() {
-        let d = dense(2, &[3]);
-        let ctx = ByteCodeContext::default();
-        // element 1 at curr_base=0: (base_off 2 + flat 1) * 8 = 24.
-        let a = d.element_addr(1, 0, 0, &ctx).unwrap();
-        assert_eq!(a.const_byte_offset, 24);
-        assert!(!a.module_relative);
-        // A static view carries no runtime addend or validity gate.
-        assert_eq!(a.runtime_off_local, None);
-        assert_eq!(a.valid_local, None);
-    }
-
-    #[test]
-    fn element_addr_curr_module_relative_flag() {
-        let d = ViewDesc::contiguous(2, ViewBase::CurrModuleRelative, vec![3], vec![0]);
-        let ctx = ByteCodeContext::default();
-        let a = d.element_addr(1, 0, 0, &ctx).unwrap();
-        assert_eq!(a.const_byte_offset, 24);
-        assert!(
-            a.module_relative,
-            "var views carry a runtime module_off addend"
-        );
+    fn element_addr_covers_every_view_base() {
+        let mut ctx = ByteCodeContext::default();
+        ctx.set_temp_info(vec![0, 4], 8);
+        // element 1 of a 3-element view based at slot 2: flat 3 slots = 24 bytes
+        // past the region base.
+        for (base, region_base, module_relative, gated) in [
+            (ViewBase::Curr, 0u64, true, false),
+            (ViewBase::Prev, 900_000, true, true),
+            (ViewBase::Initial, 800_000, true, false),
+            // A temp base is a temp ID, so its region offset comes from
+            // `temp_offsets[2]`... which only has two entries here; use id 1
+            // (offset 4) and expect `(4 + 1) * 8` past the temp region.
+            (ViewBase::Temp, 0, false, false),
+        ] {
+            let base_off = if base == ViewBase::Temp { 1 } else { 2 };
+            let d = ViewDesc::contiguous(base_off, base, vec![3], vec![0]);
+            let a = d.element_addr(1, bases(0, 500_000), &ctx).unwrap();
+            let expect = if base == ViewBase::Temp {
+                500_000 + (4 + 1) * 8
+            } else {
+                region_base + 24
+            };
+            assert_eq!(a.const_byte_offset, expect, "{base:?}: region + offset");
+            assert_eq!(a.module_relative, module_relative, "{base:?}: module_off");
+            assert_eq!(
+                a.prev_fallback_gated, gated,
+                "{base:?}: PREVIOUS fallback gate"
+            );
+            // A static view carries no runtime addend or validity gate.
+            assert_eq!(a.runtime_off_local, None, "{base:?}");
+            assert_eq!(a.valid_local, None, "{base:?}");
+        }
     }
 
     #[test]
@@ -657,7 +739,7 @@ mod tests {
         ctx.set_temp_info(vec![0, 4], 8);
         let d = ViewDesc::contiguous(1, ViewBase::Temp, vec![2], vec![0]);
         // temp_storage_base = 1000; temp 1 offset = 4; element 1 -> (4+1)*8 = 40.
-        let a = d.element_addr(1, 0, 1000, &ctx).unwrap();
+        let a = d.element_addr(1, bases(0, 1000), &ctx).unwrap();
         assert_eq!(a.const_byte_offset, 1000 + 40);
         assert!(!a.module_relative);
     }
@@ -670,7 +752,7 @@ mod tests {
         d.runtime_off_local = Some(9);
         d.valid_local = Some(7);
         let ctx = ByteCodeContext::default();
-        let a = d.element_addr(0, 0, 0, &ctx).unwrap();
+        let a = d.element_addr(0, bases(0, 0), &ctx).unwrap();
         // Element 0: const base is just curr_base + base_off*8 = 0; the runtime
         // index offset rides in local 9, the validity in local 7.
         assert_eq!(a.const_byte_offset, 0);
@@ -694,7 +776,7 @@ mod tests {
 
     /// Build a `ViewDesc` with explicit dims/dim_ids (row-major contiguous).
     fn view_with_dim_ids(dims: &[u16], dim_ids: &[u16]) -> ViewDesc {
-        ViewDesc::contiguous(0, ViewBase::CurrAbsolute, dims.to_vec(), dim_ids.to_vec())
+        ViewDesc::contiguous(0, ViewBase::Curr, dims.to_vec(), dim_ids.to_vec())
     }
 
     #[test]

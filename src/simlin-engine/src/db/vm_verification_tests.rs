@@ -630,7 +630,7 @@ fn test_ltm_mapped_dimension_loop_scores_diagonal_and_nonzero() {
 
     // The mapped Bare edges' link scores carry the TARGET's dimensions
     // (the mapped pair counts as corresponding -- `link_score_dimensions`
-    // consults `mapped_element_correspondence`), so the per-slot
+    // consults `db::analysis::bare_reference_correspondence`), so the per-slot
     // references in the loop-score equations resolve.
     let ltm_vars = crate::db::model_ltm_variables(&db, source_model, source_project);
     let dims_of = |name: &str| -> &[String] {
@@ -711,7 +711,7 @@ fn test_ltm_mapped_dimension_loop_scores_diagonal_and_nonzero() {
 /// x[State] * 0.1` over `x[Region]` with the mapping declared in the
 /// REVERSE direction (on `Region` toward `State`) now classifies `Bare` --
 /// `classify_iterated_dim_shape` gates its mapped arm on the same
-/// `mapped_element_correspondence` data `expand_same_element` consults
+/// correspondence data `expand_same_element` consults
 /// (both declaration directions), matching the compiler's
 /// `translate_via_mapping`. The element graph emits the mapping DIAGONAL,
 /// `link_score_dimensions`' Bare-site gate passes, so the `x→inflow` score

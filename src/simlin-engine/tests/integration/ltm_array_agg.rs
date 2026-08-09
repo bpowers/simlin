@@ -4532,33 +4532,47 @@ fn whole_rhs_bare_reducer_stays_scored() {
 }
 
 // ---------------------------------------------------------------------------
-// GH #758: declined element-mapped sliced reducer -> loud unscoreable edge
+// GH #758: a declined sliced reducer -> loud unscoreable edge
 // ---------------------------------------------------------------------------
 
-/// The GH #758 fixture: an inline sliced reducer over an ELEMENT-mapped
-/// dimension pair -- `growth[State] = 1 + SUM(matrix[State,*])` where
-/// `matrix` is declared over `Region` and `State` carries an explicit
-/// element map to `Region` (not a positional correspondence).
-/// `mapped_element_correspondence` declines it (the GH #756
-/// positional-only gate), so the reducer is NOT hoisted and the
-/// `matrix → growth` reference stays on the conservative path. The
-/// feedback loops close through `pop → matrix → growth → SUM(growth[*])
-/// → inflow → pop`, so every enumerated loop traverses the declined edge.
+/// The GH #758 fixture: an inline sliced reducer over a dimension pair with NO
+/// declared correspondence -- `growth[State] = 1 + SUM(matrix[State,*])` where
+/// `matrix` is declared over `Region`, and `State` has DISJOINT element names
+/// and no mapping to it.
+///
+/// The model COMPILES because `State` is the dimension the equation ITERATES,
+/// so `ast::expr3`'s Pass 1 folds the index to that dimension's ordinal and it
+/// indexes `Region`'s storage raw -- a POSITIONAL read consulting neither names
+/// nor mappings, and the shape
+/// `mapped_reference_semantics_tests::no_mapping_equal_cardinality` measures.
+/// `build_view_from_ops` is never reached. `positional_correspondence`
+/// nonetheless declines, because GH #527's rule is that the DESCRIBED diagonal
+/// follows a correspondence the MODEL declares; the reducer is therefore NOT
+/// hoisted and the `matrix → growth` reference stays on the conservative path.
+/// The feedback loops close through
+/// `pop → matrix → growth → SUM(growth[*]) → inflow → pop`, so every enumerated
+/// loop traverses the declined edge.
+///
+/// The element names are deliberately disjoint from `Region`'s. An earlier
+/// revision reused `Region`'s names, which made the read look name-matched when
+/// it is positional -- true only by the coincidence that both lists were
+/// declared in the same order.
+///
+/// This fixture used an explicit ELEMENT MAP until GH #997. That pair is no
+/// longer declined -- the same ordinal fold applies, so it hoists with
+/// positional slots (`element_mapped_sliced_reducer_hoists_and_scores_its_loops`
+/// asserts the recovery). The undeclared pair keeps the decline, so the GH #758
+/// contract is pinned by a shape that still reaches it.
 ///
 /// With `with_drain`, a second, independent loop `pop → drain → pop`
 /// (A2A over Region, not traversing the declined edge) is added so tests
 /// can pin that the degradation is surgical.
-fn gh758_element_mapped_fixture(with_drain: bool) -> datamodel::Project {
-    let mut p = TestProject::new("gh758_element_mapped")
+fn gh758_declined_slice_fixture(with_drain: bool) -> datamodel::Project {
+    let mut p = TestProject::new("gh758_declined_slice")
         .with_sim_time(0.0, 8.0, 1.0)
         .named_dimension("Region", &["west", "east"])
         .named_dimension("D2", &["x", "y"])
-        .named_dimension_with_element_mapping(
-            "State",
-            &["CA", "NY"],
-            "Region",
-            &[("CA", "east"), ("NY", "west")],
-        )
+        .named_dimension("State", &["ca", "ny"])
         .array_aux_direct(
             "matrix",
             vec!["Region".into(), "D2".into()],
@@ -4591,7 +4605,7 @@ fn assembly_warnings(
         .collect()
 }
 
-/// GH #758: the declined element-mapped sliced-reducer edge must degrade
+/// GH #758: the declined sliced-reducer edge must degrade
 /// LOUDLY -- one Warning naming the edge, NO link-score variable, and NO
 /// loop scores through it -- instead of emitting a broken-by-construction
 /// scalar link score (a scalar equation referencing the arrayed `matrix` /
@@ -4599,8 +4613,8 @@ fn assembly_warnings(
 /// score through the edge into a warned 0-stub (17 Assembly warnings on
 /// this fixture before the fix).
 #[test]
-fn declined_element_mapped_reducer_edge_skips_loudly() {
-    let project = gh758_element_mapped_fixture(false);
+fn declined_sliced_reducer_edge_skips_loudly() {
+    let project = gh758_declined_slice_fixture(false);
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
@@ -4677,13 +4691,249 @@ fn declined_element_mapped_reducer_edge_skips_loudly() {
     }
 }
 
+/// GH #997: the shape the GH #758 fixture USED to be -- the same sliced reducer
+/// over an EXPLICIT element-mapped pair -- now hoists, and every loop through it
+/// scores.
+///
+/// `SUM(matrix[State,*])` names the dimension the equation ITERATES, which
+/// `ast::expr3`'s Pass 1 folds to an ordinal
+/// (`mapped_reference_semantics_tests`' `(Permuted, IteratedDim)` cell, measured
+/// against the VM), so the slots are POSITIONAL and the declared map is not
+/// consulted. The map here is the reverse permutation (CA -> east), so the
+/// element-graph assertions below distinguish the two rules rather than passing
+/// on either.
+#[test]
+fn element_mapped_sliced_reducer_hoists_and_scores_its_loops() {
+    let project = TestProject::new("gh997_element_mapped")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["west", "east"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension_with_element_mapping(
+            "State",
+            &["CA", "NY"],
+            "Region",
+            &[("CA", "east"), ("NY", "west")],
+        )
+        .array_aux_direct(
+            "matrix",
+            vec!["Region".into(), "D2".into()],
+            "pop[Region] * 0.05",
+            None,
+        )
+        .array_aux("growth[State]", "1 + SUM(matrix[State, *])")
+        .array_flow("inflow[Region]", "SUM(growth[*]) * 0.01", None)
+        .array_stock("pop[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
+
+    // The reducer is hoisted, and the source rows land on the POSITIONAL slot:
+    // `west` is Region's first element, `ca` is State's first. The declared map
+    // says the opposite, so these two names are the discriminator.
+    for (row, slot) in [("west", "ca"), ("east", "ny")] {
+        for d2 in ["x", "y"] {
+            let want = format!(
+                "{LINK_SCORE_PREFIX}matrix[{row},{d2}]\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0[{slot}]"
+            );
+            assert!(
+                names.contains(&want.as_str()),
+                "expected {want:?}; got: {names:?}"
+            );
+        }
+    }
+
+    // No decline: the GH #758 warning is gone and the loops score.
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(warnings.is_empty(), "got: {warnings:?}");
+    assert!(
+        names.iter().any(|n| n.starts_with(LOOP_SCORE_PREFIX)),
+        "loops through the hoisted reducer must score; got: {names:?}"
+    );
+
+    // And the scores are real numbers, not stubs.
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end().expect("VM simulation should run");
+    let results = vm.into_results();
+    for name in ltm_score_var_names(&results) {
+        let var = ltm_var(&ltm.vars, &name);
+        let base = offset_of(&results, &name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            assert!(
+                series.iter().all(|v| v.is_finite()),
+                "score {name} slot {slot} must stay finite; got {series:?}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GH #997 blocker 1: EDGES may be a union, SCORES may not
+// ---------------------------------------------------------------------------
+
+/// The `x[State] -> target[State]` loop fixture used by the two tests below,
+/// with the `State`/`Region` correspondence supplied by the caller.
+///
+/// `target[State] = x[State] * 1.02` reads the ITERATED spelling (positional);
+/// `x[Region] = level[Region] * 0.5` and a stock close the loop, so every
+/// element edge of the mapped pair sits on a cycle and would carry a loop score
+/// if the edge were scored.
+fn gh997_mapped_loop_fixture(state: datamodel::Dimension) -> datamodel::Project {
+    TestProject::new("gh997_mapped_loop")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("Region", &["a", "b"])
+        .with_dimension(state)
+        .array_aux_direct("x", vec!["Region".into()], "level[Region] * 0.5", None)
+        .array_aux_direct("target", vec!["State".into()], "x[State] * 1.02", None)
+        .array_flow("inflow[Region]", "SUM(target[*]) * 0.01", None)
+        .array_stock("level[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel()
+}
+
+/// A mapped pair whose two spellings DISAGREE must NOT get an arrayed link
+/// score, even though its element edges are the union of both diagonals.
+///
+/// The permuted element map (s1↦b, s2↦a) is one-to-one, so the union carries
+/// TWO source elements per target element: the positional diagonal (s1→a) and
+/// the map's (s1→b). A Bare A2A score has ONE slot per target element and
+/// `ltm_finding::expand_a2a_link_offsets` maps both union edges onto it, so the
+/// phantom from-node would read the real edge's non-zero score -- a compilable,
+/// confidently wrong number, which GH #758 treats as worse than none.
+///
+/// `db::analysis::mapped_pair_projects_uniquely` is the gate. Before it, this
+/// fixture emitted one arrayed score and ZERO warnings where the pre-GH #997
+/// tree emitted none and two; it now takes the same loud skip the pre-#997 tree
+/// did, for a reason stated in terms of the score's slot rather than of the
+/// correspondence's existence.
+#[test]
+fn a_disagreeing_mapped_pair_is_denied_the_arrayed_score() {
+    let mut state = datamodel::Dimension::named(
+        "State".to_string(),
+        vec!["s1".to_string(), "s2".to_string()],
+    );
+    state.mappings = vec![datamodel::DimensionMapping {
+        target: "Region".to_string(),
+        element_map: vec![
+            ("s1".to_string(), "b".to_string()),
+            ("s2".to_string(), "a".to_string()),
+        ],
+    }];
+    let project = gh997_mapped_loop_fixture(state);
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
+
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.contains("link_score\u{205A}x\u{2192}target")),
+        "a disagreeing mapped pair must emit NO x->target link score; got: {names:?}"
+    );
+    // The decline must be LOUD, and the assertion must name the EDGE rather
+    // than two substrings a dozen unrelated messages contain.
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.iter().any(|w| match &w.error {
+            DiagnosticError::Assembly(m) =>
+                m.contains("LTM link score for edge x -> target could not be computed"),
+            _ => false,
+        }),
+        "the decline must be LOUD -- one warning naming the edge; got: {warnings:?}"
+    );
+
+    // And the consequence the gate exists for: the loop through the denied edge
+    // must drop, not score. Without the gate this fixture emits six loop scores
+    // whose attribution runs through a phantom from-node reading the real
+    // edge's series out of the shared slot.
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}")),
+        "no loop score may survive through the denied edge; got: {names:?}"
+    );
+
+    // The never-fewer-edges direction is untouched: the element graph still
+    // emits BOTH diagonals. The gate withholds the score, not the edges.
+    let edges = model_element_causal_edges(&db, sync.models["main"].source_model, sync.project);
+    for (src, tgt) in [("a", "s1"), ("b", "s1"), ("a", "s2"), ("b", "s2")] {
+        assert!(
+            edges
+                .edges
+                .get(&format!("x[{src}]"))
+                .is_some_and(|t| t.contains(&format!("target[{tgt}]"))),
+            "element edge x[{src}] -> target[{tgt}] must survive the score gate; \
+             got: {:?}",
+            edges.edges.get(&format!("x[{src}]"))
+        );
+    }
+}
+
+/// The companion: a pair whose two spellings AGREE keeps the arrayed score.
+///
+/// A plain positional `maps_to` is the shape every pre-GH #997 mapped edge had,
+/// so this is what the singleton gate must not cost. The union is a singleton
+/// per target element, the retarget fires, and the score is arrayed over
+/// `State` with the diagonal element edges.
+#[test]
+fn an_agreeing_mapped_pair_keeps_the_arrayed_score() {
+    let mut state = datamodel::Dimension::named(
+        "State".to_string(),
+        vec!["s1".to_string(), "s2".to_string()],
+    );
+    state.set_maps_to("Region".to_string());
+    let project = gh997_mapped_loop_fixture(state);
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    let score = ltm
+        .vars
+        .iter()
+        .find(|v| v.name.contains("link_score\u{205A}x\u{2192}target"))
+        .unwrap_or_else(|| {
+            panic!(
+                "an agreeing mapped pair must keep its arrayed score; got: {:?}",
+                ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        score.dimensions,
+        vec!["State".to_string()],
+        "the score is retargeted to the TARGET's dimensions"
+    );
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(warnings.is_empty(), "got: {warnings:?}");
+
+    // And the edges are the single diagonal, not a union.
+    let edges = model_element_causal_edges(&db, sync.models["main"].source_model, sync.project);
+    assert_eq!(
+        edges.edges.get("x[a]").map(|t| t.contains("target[s1]")),
+        Some(true)
+    );
+    assert_eq!(
+        edges.edges.get("x[a]").map(|t| t.contains("target[s2]")),
+        Some(false)
+    );
+}
+
 /// GH #758 (surgical degradation): a second feedback loop that does NOT
 /// traverse the unscoreable edge keeps its real loop score while the
 /// doomed loops are dropped -- the skip is per-loop, not a blanket
 /// collapse of LTM output.
 #[test]
-fn declined_element_mapped_reducer_keeps_unaffected_loops() {
-    let project = gh758_element_mapped_fixture(true);
+fn declined_sliced_reducer_keeps_unaffected_loops() {
+    let project = gh758_declined_slice_fixture(true);
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
@@ -5974,9 +6224,9 @@ fn per_element_source_read_as_a_lookup_table_by_constant_expr_keeps_its_scores()
 /// dropped: exactly the same silent-zero outcome the un-mapped twin regressed into,
 /// reached by a different route.
 ///
-/// The fix is that the pin asks `per_element_row_for_target` -- hence
-/// `DimensionsContext::mapped_element_correspondence` -- which source element an
-/// axis reads, instead of comparing names. That is the same derivation the score's
+/// The fix is that the pin asks `per_element_row_for_target` -- hence the
+/// spelling-keyed correspondence on `DimensionsContext` -- which source element
+/// an axis reads, instead of comparing names. That is the same derivation the score's
 /// NAME comes from, which is why the assertions below can pair `s1` with `a` and
 /// `s2` with `b` and expect the name and the pinned row to agree.
 #[test]
@@ -6849,7 +7099,8 @@ fn per_element_body_with_iterated_other_dep_scores() {
 /// GH #525 (T6 review corner pin): a MAPPED `PerElement` reference --
 /// `mid[State] = pop[State, young] * 0.05` over `pop[Region, Age]` with a
 /// positional `State→Region` mapping -- exercises
-/// `per_element_row_for_target`'s `mapped_element_correspondence` arm: the
+/// `per_element_row_for_target`'s `AxisRead::Iterated` arm, hence
+/// `positional_correspondence`: the
 /// row's Region element is the positional preimage of the target's State
 /// element (s1↔r1, s2↔r2), so the emitted names carry the SOURCE-dim row
 /// and the diagonal only.
@@ -11234,9 +11485,12 @@ fn gh754_lower_dim_feeder_loop_discoverable_in_discovery_mode() {
 /// `pop[<mapped source elem>]` (e.g. `pop[r1]`) in lockstep with the element
 /// graph, so the mapped loop is discoverable.
 ///
-/// (Only POSITIONAL mappings reach here: an element-mapped pair is declined
-/// upstream by `link_score_dimensions` -- no Bare A2A score is emitted, the
-/// GH #756 positional-only gate -- so no phantom can be minted for it.)
+/// (Only pairs whose two reference spellings AGREE reach here -- every
+/// positional mapping, and since GH #997 a many-to-one element map too. A pair
+/// whose spellings DISAGREE is declined upstream by `link_score_dimensions`
+/// via `db::analysis::mapped_pair_projects_uniquely`, precisely because
+/// `expand_same_element`'s union would put two from-nodes on one score slot,
+/// so no phantom can be minted for it either.)
 #[test]
 fn gh754_mapped_feeder_loop_discoverable_in_discovery_mode() {
     let project = TestProject::new("gh754_mapped_feeder")

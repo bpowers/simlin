@@ -230,10 +230,21 @@ fn build_fragment(spec: &FragSpec) -> PerVarBytecodes {
     let on_temps = spec.views_on_temps && !spec.temp_sizes.is_empty();
     let static_views: Vec<SymbolicStaticView> = (0..spec.n_views)
         .map(|i| SymbolicStaticView {
+            // Cycle the three VARIABLE-backed bases (GH #995 added the two
+            // snapshot regions): all three name a variable rather than a merged
+            // resource, so M1 (referential integrity) and M5 (temp
+            // non-aliasing) must hold for each, and only `Temp` is renumbered.
+            // Generating just `Var` would leave the two new arms free to be
+            // renumbered like a temp with nothing to notice.
             base: if on_temps {
                 SymStaticViewBase::Temp((i % spec.temp_sizes.len()) as u32)
             } else {
-                SymStaticViewBase::Var(SymVarRef::new(name.clone(), i))
+                let var = SymVarRef::new(name.clone(), i);
+                match i % 3 {
+                    0 => SymStaticViewBase::Var(var),
+                    1 => SymStaticViewBase::PrevVar(var),
+                    _ => SymStaticViewBase::InitialVar(var),
+                }
             },
             dims: smallvec::smallvec![(spec.tag * 10 + i) as u16],
             strides: smallvec::smallvec![1],
@@ -1085,7 +1096,11 @@ fn temp_uses(code: &[SymbolicOpcode], views: &[SymbolicStaticView]) -> Vec<(usiz
                     });
                     match &view.base {
                         SymStaticViewBase::Temp(id) => *id,
-                        SymStaticViewBase::Var(_) => return None,
+                        // Variable-backed bases -- `curr` and the two snapshot
+                        // regions -- name no temp channel.
+                        SymStaticViewBase::Var(_)
+                        | SymStaticViewBase::PrevVar(_)
+                        | SymStaticViewBase::InitialVar(_) => return None,
                     }
                 }
                 _ => return None,

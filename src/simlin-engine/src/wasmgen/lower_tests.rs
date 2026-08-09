@@ -2215,6 +2215,7 @@ fn load_temp_dynamic_floors_fractional_index() {
 
 use crate::bytecode::{
     DimensionInfo, RuntimeSparseMapping, RuntimeView, StaticArrayView, SubdimensionRelation,
+    ViewStorage,
 };
 use smallvec::SmallVec;
 
@@ -2227,10 +2228,10 @@ fn seed_run(base_byte: u64, values: &[f64]) -> Vec<(u64, f64)> {
 }
 
 /// Read element `iter_idx` of `view` from a flat slab `data` indexed by slot,
-/// using the VM's own addressing (`to_runtime_view().flat_offset`). The
+/// using the VM's own addressing (`to_runtime_view(0).flat_offset`). The
 /// addressing oracle for every reducer parity check.
 fn vm_view_element(view: &StaticArrayView, data: &[f64], iter_idx: usize) -> f64 {
-    let rv = view.to_runtime_view();
+    let rv = view.to_runtime_view(0);
     let n = rv.dims.len();
     let mut indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; n];
     let mut remaining = iter_idx;
@@ -2245,7 +2246,7 @@ fn vm_view_element(view: &StaticArrayView, data: &[f64], iter_idx: usize) -> f64
 
 /// The VM's expected `ArraySum` over `view`'s elements drawn from `data`.
 fn vm_sum(view: &StaticArrayView, data: &[f64]) -> f64 {
-    (0..view.to_runtime_view().size())
+    (0..view.to_runtime_view(0).size())
         .map(|i| vm_view_element(view, data, i))
         .sum()
 }
@@ -2261,7 +2262,7 @@ fn dense_view(base_off: u32, dims: &[u16]) -> StaticArrayView {
     strides.reverse();
     StaticArrayView {
         base_off,
-        is_temp: false,
+        storage: ViewStorage::Curr,
         dims: dims.iter().copied().collect(),
         strides,
         offset: 0,
@@ -2315,14 +2316,14 @@ fn static_view_sum_transposed_strides_matches_vm() {
     let data = [11.0, 12.0, 13.0, 21.0, 22.0, 23.0];
     let view = StaticArrayView {
         base_off: 0,
-        is_temp: false,
+        storage: ViewStorage::Curr,
         dims: SmallVec::from_slice(&[3, 2]),
         strides: SmallVec::from_slice(&[1, 3]),
         offset: 0,
         sparse: SmallVec::new(),
         dim_ids: SmallVec::from_slice(&[0, 0]),
     };
-    assert!(!view.to_runtime_view().is_contiguous());
+    assert!(!view.to_runtime_view(0).is_contiguous());
     let got = run_static_reduce(view.clone(), Opcode::ArraySum {}, &data);
     // Sum is order-independent and covers all six cells regardless.
     assert_eq!(got, vm_sum(&view, &data));
@@ -2336,7 +2337,7 @@ fn static_view_max_transposed_picks_right_cells() {
     let data = [11.0, 12.0, 99.0, 21.0, 22.0, 23.0];
     let view = StaticArrayView {
         base_off: 0,
-        is_temp: false,
+        storage: ViewStorage::Curr,
         dims: SmallVec::from_slice(&[3, 2]),
         strides: SmallVec::from_slice(&[1, 3]),
         offset: 0,
@@ -2355,7 +2356,7 @@ fn static_view_sum_sparse_matches_vm() {
     let data = [5.0, 6.0, 7.0, 8.0];
     let view = StaticArrayView {
         base_off: 0,
-        is_temp: false,
+        storage: ViewStorage::Curr,
         dims: SmallVec::from_slice(&[2]),
         strides: SmallVec::from_slice(&[1]),
         offset: 0,
@@ -2372,13 +2373,13 @@ fn static_view_sum_sparse_matches_vm() {
 
 #[test]
 fn static_temp_view_sum_reads_temp_storage() {
-    // A contiguous temp view (is_temp) reads temp_storage, not curr. temp_id
+    // A contiguous temp view reads temp_storage, not curr. temp_id
     // 0 lives at temp_offsets[0]=0, so its slot 0 is byte TEMP_BASE.
     let mut context = ByteCodeContext::default();
     context.set_temp_info(vec![0], 3);
     let view = StaticArrayView {
         base_off: 0, // temp_id 0
-        is_temp: true,
+        storage: ViewStorage::Temp,
         dims: SmallVec::from_slice(&[3]),
         strides: SmallVec::from_slice(&[1]),
         offset: 0,
@@ -2408,7 +2409,7 @@ fn static_temp_view_honors_temp_offset() {
     context.set_temp_info(vec![0, 4], 6);
     let view = StaticArrayView {
         base_off: 1, // temp_id 1
-        is_temp: true,
+        storage: ViewStorage::Temp,
         dims: SmallVec::from_slice(&[2]),
         strides: SmallVec::from_slice(&[1]),
         offset: 0,
@@ -2741,7 +2742,7 @@ fn reducer_size_multidim_is_product() {
 fn empty_static_view() -> StaticArrayView {
     StaticArrayView {
         base_off: 0,
-        is_temp: false,
+        storage: ViewStorage::Curr,
         dims: SmallVec::from_slice(&[0]),
         strides: SmallVec::from_slice(&[1]),
         offset: 0,
@@ -2943,7 +2944,7 @@ fn invalid_view_size_is_still_the_size() {
 /// A contiguous temp `StaticArrayView` over `dims` at `temp_id`.
 fn temp_view(temp_id: u32, dims: &[u16]) -> StaticArrayView {
     let mut v = dense_view(temp_id, dims);
-    v.is_temp = true;
+    v.storage = ViewStorage::Temp;
     v
 }
 
@@ -3621,7 +3622,7 @@ fn reducer_over_view_exceeding_cap_is_unsupported() {
     // than emit a multi-megabyte function.
     let mut context = ByteCodeContext::default();
     let view_id = context.add_static_view(dense_view(0, &[300, 300]));
-    assert!(dense_view(0, &[300, 300]).to_runtime_view().size() > MAX_UNROLL_UNITS);
+    assert!(dense_view(0, &[300, 300]).to_runtime_view(0).size() > MAX_UNROLL_UNITS);
     let ctx = ctx_with_arrays(&context);
     let code = vec![
         Opcode::PushStaticView { view_id },
@@ -3698,7 +3699,7 @@ fn reducer_just_under_cap_compiles_and_matches_vm() {
     // this pins the boundary intent.)
     let data: Vec<f64> = (0..64).map(|i| (i as f64) * 0.5).collect();
     let view = dense_view(0, &[64]);
-    assert!(view.to_runtime_view().size() <= MAX_UNROLL_UNITS);
+    assert!(view.to_runtime_view(0).size() <= MAX_UNROLL_UNITS);
     let got = run_static_reduce(view.clone(), Opcode::ArraySum {}, &data);
     assert_eq!(got, vm_sum(&view, &data));
 }
@@ -3739,8 +3740,8 @@ fn vm_vector_select_oracle(
     max_value: f64,
     action: i32,
 ) -> f64 {
-    let sel_rv = sel_view.to_runtime_view();
-    let expr_rv = expr_view.to_runtime_view();
+    let sel_rv = sel_view.to_runtime_view(0);
+    let expr_rv = expr_view.to_runtime_view(0);
     let size = sel_rv.size().min(expr_rv.size());
     let mut selected: Vec<f64> = Vec::new();
     let mut sel_idx: SmallVec<[u16; 4]> = smallvec::smallvec![0; sel_rv.dims.len()];
@@ -3981,11 +3982,11 @@ fn vm_elm_map_oracle(
     context.set_temp_info(vec![0], temp_slots);
     let mut temp_storage = vec![0.0f64; temp_slots];
     crate::vm_vector_elm_map::vector_elm_map(
-        &source.to_runtime_view(),
-        &offset.to_runtime_view(),
+        &source.to_runtime_view(0),
+        &offset.to_runtime_view(0),
         0,
         full_source_len,
-        data,
+        crate::vm::ChunkRegions::curr_only(data),
         &mut temp_storage,
         &context,
     );
@@ -4324,10 +4325,10 @@ fn vm_sort_order_oracle(
     context.set_temp_info(vec![0], temp_slots);
     let mut temp_storage = vec![0.0f64; temp_slots];
     crate::vm_vector_sort_order::vector_sort_order(
-        &input.to_runtime_view(),
+        &input.to_runtime_view(0),
         direction,
         0,
-        data,
+        crate::vm::ChunkRegions::curr_only(data),
         &mut temp_storage,
         &context,
     );
@@ -4343,7 +4344,7 @@ fn vm_rank_oracle(
     data: &[f64],
     temp_slots: usize,
 ) -> Vec<f64> {
-    let rv = input.to_runtime_view();
+    let rv = input.to_runtime_view(0);
     let size = rv.size();
     let mut indexed: Vec<(f64, usize)> = Vec::with_capacity(size);
     let mut idx: SmallVec<[u16; 4]> = smallvec::smallvec![0; rv.dims.len()];
@@ -4482,14 +4483,14 @@ fn vector_sort_order_transposed_view_matches_vm() {
     // the gather. Cross-checked vs the sibling over every element.
     let view = StaticArrayView {
         base_off: 0,
-        is_temp: false,
+        storage: ViewStorage::Curr,
         dims: SmallVec::from_slice(&[3, 2]),
         strides: SmallVec::from_slice(&[1, 3]),
         offset: 0,
         sparse: SmallVec::new(),
         dim_ids: SmallVec::from_slice(&[0, 0]),
     };
-    assert!(!view.to_runtime_view().is_contiguous());
+    assert!(!view.to_runtime_view(0).is_contiguous());
     let data = [11.0, 12.0, 13.0, 21.0, 22.0, 23.0];
     assert_sort_order_matches(&view, 1.0, &data, 6);
     assert_sort_order_matches(&view, 0.0, &data, 6);
@@ -4737,7 +4738,7 @@ fn vm_lookup_array_oracle(
     tables: &[&[(f64, f64)]],
     temp_slots: usize,
 ) -> Vec<f64> {
-    let rv = input.to_runtime_view();
+    let rv = input.to_runtime_view(0);
     let size = rv.size();
     let mut idx: SmallVec<[u16; 4]> = smallvec::smallvec![0; rv.dims.len()];
     let mut temp = vec![0.0f64; temp_slots];
@@ -4931,7 +4932,7 @@ fn lookup_array_strided_view_offsets_match_vm() {
     // are [0, 2, 1, 3].
     let input = StaticArrayView {
         base_off: 0,
-        is_temp: false,
+        storage: ViewStorage::Curr,
         dims: SmallVec::from_slice(&[2, 2]),
         strides: SmallVec::from_slice(&[1, 2]),
         offset: 0,
@@ -5104,11 +5105,11 @@ fn vm_allocate_available_oracle(
     avail: f64,
     data: &[f64],
 ) -> Vec<f64> {
-    let requests: Vec<f64> = (0..requests_view.to_runtime_view().size())
+    let requests: Vec<f64> = (0..requests_view.to_runtime_view(0).size())
         .map(|i| vm_view_element(requests_view, data, i))
         .collect();
     let n = requests.len();
-    let pp_size = profile_view.to_runtime_view().size();
+    let pp_size = profile_view.to_runtime_view(0).size();
     let pp_values: Vec<f64> = (0..pp_size)
         .map(|i| vm_view_element(profile_view, data, i))
         .collect();
@@ -5137,11 +5138,11 @@ fn vm_allocate_by_priority_oracle(
     supply: f64,
     data: &[f64],
 ) -> Vec<f64> {
-    let requests: Vec<f64> = (0..requests_view.to_runtime_view().size())
+    let requests: Vec<f64> = (0..requests_view.to_runtime_view(0).size())
         .map(|i| vm_view_element(requests_view, data, i))
         .collect();
     let n = requests.len();
-    let priorities: Vec<f64> = (0..priority_view.to_runtime_view().size())
+    let priorities: Vec<f64> = (0..priority_view.to_runtime_view(0).size())
         .map(|i| vm_view_element(priority_view, data, i))
         .collect();
     let profiles: Vec<(f64, f64, f64, f64)> = (0..n)

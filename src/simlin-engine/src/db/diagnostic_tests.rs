@@ -3043,13 +3043,20 @@ fn variable_error_fields_are_the_lowering_channel() {
 /// variable and carrying codegen's reason.
 ///
 /// The shape: an array-valued operand of an array builtin must be a *view*
-/// over storage (`codegen::walk_expr_as_view` accepts only
-/// `StaticSubscript | TempArray | Var | Subscript`). `PREVIOUS(vals[d])` is an
-/// `Expr::App`, so `VECTOR SORT ORDER(PREVIOUS(vals[d]), 1)` reaches codegen
-/// intact and is rejected with `Cannot push view for expression type
-/// Discriminant(7)`. Nothing about this equation involves LTM -- it is the
-/// same defect 244 LTM fragments on C-LEARN hit, reached from a model a user
-/// can type.
+/// over storage (`codegen::walk_expr_as_view`). `ALLOCATE AVAILABLE`'s
+/// priority-profile argument is the one view position `compiler::array_operand`
+/// deliberately declines to materialize -- its view is re-expanded by
+/// `context::expand_pp_view_for_allocate`, which only understands a direct
+/// variable reference -- so a computed profile lowers cleanly and is rejected by
+/// codegen with `Cannot push view for expression type`. Nothing about this
+/// equation involves LTM; it is reached from a model a user can type.
+///
+/// (The shape this test was originally written against,
+/// `VECTOR SORT ORDER(PREVIOUS(vals[d]), 1)`, compiles since GH #995's Phase C3
+/// gave `PREVIOUS` a snapshot-buffer view. What this test is ABOUT is
+/// attribution, not that particular construct, so it moved to a construct that
+/// is still refused -- and `array_operand_materialization_tests::
+/// deliberately_unmaterialized_positions` pins the refusal itself.)
 ///
 /// Before this was wired up the failure was INVISIBLE: `compile_phase` is
 /// `compile_phase_to_per_var_bytecodes(..)`, which is `.ok()` over the
@@ -3068,8 +3075,15 @@ fn variable_error_fields_are_the_lowering_channel() {
 fn codegen_rejection_of_an_ordinary_variable_names_the_variable_and_its_reason() {
     let project = crate::test_common::TestProject::new("codegen_reject")
         .named_dimension("d", &["e1", "e2", "e3"])
-        .array_aux("vals[d]", "10")
-        .array_aux("out[d]", "VECTOR SORT ORDER(PREVIOUS(vals[d]), 1)")
+        .indexed_dimension("xp", 4)
+        .array_const("request[d]", 10.0)
+        .array_const("pp[d,xp]", 1.0)
+        .array_const("pp_bump[d,xp]", 0.0)
+        .scalar_const("supply", 35.0)
+        .array_aux(
+            "out[d]",
+            "allocate_available(request[d], pp[d,1] + pp_bump[d,1], supply)",
+        )
         .build_datamodel();
 
     let db = SimlinDb::default();
@@ -3159,9 +3173,9 @@ fn a_model_that_compiles_gains_no_codegen_diagnostic() {
 ///
 /// `compile_var_fragment` calls `compile_phase` at three sites -- initials,
 /// flows, stocks -- and each discards its codegen `Err` independently, so one
-/// wired-up site says nothing about the others. The test above covers flows
-/// (the phase all 244 C-LEARN LTM fragments take); this one covers initials
-/// via an arrayed stock whose INITIAL equation carries the same refused shape.
+/// wired-up site says nothing about the others. The test above covers flows;
+/// this one covers initials via an arrayed stock whose INITIAL equation carries
+/// the same refused shape.
 ///
 /// The stocks phase is deliberately NOT covered, and its call site admits TWO
 /// kinds of variable -- `(is_stock || is_module) && membership.stocks` -- so
@@ -3193,10 +3207,14 @@ fn a_model_that_compiles_gains_no_codegen_diagnostic() {
 fn codegen_rejection_in_the_initials_phase_is_attributable_too() {
     let project = crate::test_common::TestProject::new("codegen_reject_init")
         .named_dimension("d", &["e1", "e2", "e3"])
-        .array_aux("vals[d]", "10")
+        .indexed_dimension("xp", 4)
+        .array_const("request[d]", 10.0)
+        .array_const("pp[d,xp]", 1.0)
+        .array_const("pp_bump[d,xp]", 0.0)
+        .scalar_const("supply", 35.0)
         .array_stock(
             "lvl[d]",
-            "VECTOR SORT ORDER(PREVIOUS(vals[d]), 1)",
+            "allocate_available(request[d], pp[d,1] + pp_bump[d,1], supply)",
             &[],
             &[],
             None,

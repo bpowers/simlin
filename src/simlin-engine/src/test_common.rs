@@ -154,6 +154,15 @@ impl TestProject {
         self
     }
 
+    /// Add an already-built dimension, for a shape the named constructors do
+    /// not cover -- a test that varies ONE dimension's mapping across fixtures
+    /// while keeping the rest of the model identical builds it directly and
+    /// hands it in here.
+    pub fn with_dimension(mut self, dim: Dimension) -> Self {
+        self.dimensions.push(dim);
+        self
+    }
+
     /// Add a named dimension with a dimension mapping (e.g., DimA -> DimB)
     pub fn named_dimension_with_mapping(
         mut self,
@@ -192,6 +201,39 @@ impl TestProject {
                 .map(|(s, t)| (s.to_string(), t.to_string()))
                 .collect(),
         }];
+        self.dimensions.push(dim);
+        self
+    }
+
+    /// Add a named dimension carrying SEVERAL mappings at once, each an
+    /// optional element map (`&[]` means positional correspondence).
+    ///
+    /// A dimension with two mapping targets is the shape the implicit-axis
+    /// allocator's precedence rule is about (GH #996): one target can be
+    /// claimed by an earlier dependency axis while a later axis needs the
+    /// other. `named_dimension_with_mapping` and
+    /// `named_dimension_with_element_mapping` each declare exactly one, so
+    /// neither can express it.
+    pub fn named_dimension_with_mappings(
+        mut self,
+        name: &str,
+        elements: &[&str],
+        mappings: &[(&str, &[(&str, &str)])],
+    ) -> Self {
+        let mut dim = Dimension::named(
+            name.to_string(),
+            elements.iter().map(|s| s.to_string()).collect(),
+        );
+        dim.mappings = mappings
+            .iter()
+            .map(|(target, element_map)| datamodel::DimensionMapping {
+                target: target.to_string(),
+                element_map: element_map
+                    .iter()
+                    .map(|(s, t)| (s.to_string(), t.to_string()))
+                    .collect(),
+            })
+            .collect();
         self.dimensions.push(dim);
         self
     }
@@ -932,6 +974,343 @@ pub fn parse_array_declaration(decl: &str) -> (String, Vec<String>) {
     } else {
         (decl.to_string(), vec![])
     }
+}
+
+/// A `main` model that instantiates ONE arrayed sub-model TWICE, with a
+/// different input wired into each instance.
+///
+/// The sub-model reduces an array three ways -- `SUM(arr[*])`, an array-valued
+/// `SUM(PREVIOUS(arr[*]))` and `SUM(INIT(arr[*]))` (GH #995) -- so all three
+/// chunk-shaped view regions (`Curr`, `Prev`, `Initial`) are exercised on the
+/// same fixture. Every reduction is pushed as a STATIC VIEW, whose `base_off`
+/// comes from the sub-model's own layout and is therefore module-relative; a
+/// backend that fails to add the executing instance's `module_off` reads the
+/// ROOT's slots instead, and both instances then return the same wrong series.
+///
+/// Three separate slips are distinguishable in the numbers:
+///
+/// * `arr[D] = in * w[D]` with `w = [1, 2, 4]`, so `SUM(arr[*]) = 7 * in` and a
+///   base offset that is wrong WITHIN the instance lands on a different weight.
+/// * the two instances' inputs differ by 100x, so cross-instance aliasing shows
+///   up as one instance's series appearing in the other.
+/// * both inputs vary with TIME, so `PREVIOUS` and `INIT` are distinguishable
+///   from `curr` and from each other.
+///
+/// Note what was NOT broken, so the fixture's shape reads as necessary rather
+/// than belt-and-braces: a cross-module read taken FROM THE ROOT was always
+/// correct, because the root's `module_off` is 0 and the dropped addend is
+/// invisible there (`array_tests::cross_module_array_reference_tests` passed
+/// throughout). Only a view pushed while EXECUTING INSIDE an instance was wrong,
+/// which is why this drives two instances rather than reading into one. The
+/// two-HOP twin ([`nested_instance_arrayed_submodel_project`]) covers the other
+/// axis a single hop cannot separate.
+///
+/// Shared by the VM pin
+/// (`array_operand_materialization_tests::an_array_view_inside_a_module_instance_reads_that_instance`)
+/// and the wasm pin
+/// (`wasmgen::module::tests::compile_simulation_arrayed_submodel_views_address_their_instance`),
+/// because the two backends agreeing proves nothing here: the wasm view emitter
+/// mirrors the VM opcode for opcode, so it mirrored this defect too. Both assert
+/// the absolute series.
+pub fn two_instance_arrayed_submodel_project() -> Project {
+    let aux = |ident: &str, eqn: &str, compat: datamodel::Compat| {
+        Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: Equation::Scalar(eqn.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat,
+        })
+    };
+    let instance = |ident: &str, src: &str| {
+        Variable::Module(datamodel::Module {
+            references: vec![datamodel::ModuleReference {
+                src: src.to_string(),
+                dst: format!("{ident}.in"),
+            }],
+            ident: ident.to_string(),
+            model_name: "submodel".to_string(),
+            documentation: String::new(),
+            units: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        })
+    };
+    let arrayed = |ident: &str, eqn: Equation| {
+        Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: eqn,
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })
+    };
+
+    Project {
+        name: "two_instance_arrayed_submodel".to_string(),
+        sim_specs: SimSpecs {
+            start: 0.0,
+            stop: 3.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![Dimension::named(
+            "D".to_string(),
+            vec!["e1".to_string(), "e2".to_string(), "e3".to_string()],
+        )],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    aux("a_in", "10 * (1 + TIME)", datamodel::Compat::default()),
+                    aux("b_in", "1000 * (1 + TIME)", datamodel::Compat::default()),
+                    instance("sub_a", "a_in"),
+                    instance("sub_b", "b_in"),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: None,
+            },
+            datamodel::Model {
+                name: "submodel".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    aux(
+                        "in",
+                        "0",
+                        datamodel::Compat {
+                            can_be_module_input: true,
+                            ..datamodel::Compat::default()
+                        },
+                    ),
+                    arrayed(
+                        "w",
+                        Equation::Arrayed(
+                            vec!["D".to_string()],
+                            vec![
+                                ("e1".to_string(), "1".to_string(), None, None),
+                                ("e2".to_string(), "2".to_string(), None, None),
+                                ("e3".to_string(), "4".to_string(), None, None),
+                            ],
+                            None,
+                            false,
+                        ),
+                    ),
+                    arrayed(
+                        "arr",
+                        Equation::ApplyToAll(vec!["D".to_string()], "in * w[D]".to_string()),
+                    ),
+                    aux("out_curr", "SUM(arr[*])", datamodel::Compat::default()),
+                    aux(
+                        "out_prev",
+                        "SUM(PREVIOUS(arr[*]))",
+                        datamodel::Compat::default(),
+                    ),
+                    aux(
+                        "out_init",
+                        "SUM(INIT(arr[*]))",
+                        datamodel::Compat::default(),
+                    ),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: None,
+            },
+        ],
+        source: Default::default(),
+        ai_information: None,
+    }
+}
+
+/// The TWO-HOP twin of [`two_instance_arrayed_submodel_project`]: `main`
+/// instantiates `mid` twice, and each `mid` instantiates `inner` once.
+///
+/// A one-hop fixture cannot separate two different addressing rules. The VM
+/// reaches a nested instance by ACCUMULATING (`module_off + decl.off` at each
+/// `EvalModule`), so a backend that applied only the LAST hop's offset -- or that
+/// re-based from the root at each hop -- still gets a one-hop model right and
+/// this one wrong. `mid` therefore carries a scalar of its own AHEAD of the
+/// module declaration, so `inner`'s block does not start at its parent's base and
+/// the two hops' offsets are distinct non-zero numbers that must sum.
+///
+/// Same arithmetic as the one-hop fixture (`SUM(arr[*]) = 7 * in`, inputs 100x
+/// apart, both time-varying), so
+/// [`two_instance_arrayed_submodel_expected`]'s reasoning carries over; only the
+/// variable prefixes differ.
+pub fn nested_instance_arrayed_submodel_project() -> Project {
+    let aux = |ident: &str, eqn: &str, compat: datamodel::Compat| {
+        Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: Equation::Scalar(eqn.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat,
+        })
+    };
+    let instance = |ident: &str, model: &str, src: &str| {
+        Variable::Module(datamodel::Module {
+            references: vec![datamodel::ModuleReference {
+                src: src.to_string(),
+                dst: format!("{ident}.in"),
+            }],
+            ident: ident.to_string(),
+            model_name: model.to_string(),
+            documentation: String::new(),
+            units: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        })
+    };
+    let input = || datamodel::Compat {
+        can_be_module_input: true,
+        ..datamodel::Compat::default()
+    };
+    let arrayed = |ident: &str, eqn: Equation| {
+        Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: eqn,
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })
+    };
+    let model = |name: &str, variables: Vec<Variable>| datamodel::Model {
+        name: name.to_string(),
+        sim_specs: None,
+        variables,
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    };
+
+    Project {
+        name: "nested_instance_arrayed_submodel".to_string(),
+        sim_specs: SimSpecs {
+            start: 0.0,
+            stop: 3.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![Dimension::named(
+            "D".to_string(),
+            vec!["e1".to_string(), "e2".to_string(), "e3".to_string()],
+        )],
+        units: vec![],
+        models: vec![
+            model(
+                "main",
+                vec![
+                    aux("a_in", "10 * (1 + TIME)", datamodel::Compat::default()),
+                    aux("b_in", "1000 * (1 + TIME)", datamodel::Compat::default()),
+                    instance("m_a", "mid", "a_in"),
+                    instance("m_b", "mid", "b_in"),
+                ],
+            ),
+            model(
+                "mid",
+                vec![
+                    aux("in", "0", input()),
+                    // Occupies mid's slot 0, so `inr`'s block starts past its
+                    // parent's base and the two hops' offsets are both non-zero.
+                    aux("pad", "in * 0", datamodel::Compat::default()),
+                    instance("inr", "inner", "in"),
+                ],
+            ),
+            model(
+                "inner",
+                vec![
+                    aux("in", "0", input()),
+                    arrayed(
+                        "w",
+                        Equation::Arrayed(
+                            vec!["D".to_string()],
+                            vec![
+                                ("e1".to_string(), "1".to_string(), None, None),
+                                ("e2".to_string(), "2".to_string(), None, None),
+                                ("e3".to_string(), "4".to_string(), None, None),
+                            ],
+                            None,
+                            false,
+                        ),
+                    ),
+                    arrayed(
+                        "arr",
+                        Equation::ApplyToAll(vec!["D".to_string()], "in * w[D]".to_string()),
+                    ),
+                    aux("out_curr", "SUM(arr[*])", datamodel::Compat::default()),
+                    aux(
+                        "out_prev",
+                        "SUM(PREVIOUS(arr[*]))",
+                        datamodel::Compat::default(),
+                    ),
+                    aux(
+                        "out_init",
+                        "SUM(INIT(arr[*]))",
+                        datamodel::Compat::default(),
+                    ),
+                ],
+            ),
+        ],
+        source: Default::default(),
+        ai_information: None,
+    }
+}
+
+/// The series [`nested_instance_arrayed_submodel_project`] must produce.
+pub fn nested_instance_arrayed_submodel_expected() -> Vec<(&'static str, Vec<f64>)> {
+    let p = |instance: &str, var: &str| -> &'static str {
+        Box::leak(format!("m_{instance}\u{b7}inr\u{b7}{var}").into_boxed_str())
+    };
+    vec![
+        (p("a", "out_curr"), vec![70.0, 140.0, 210.0, 280.0]),
+        (p("b", "out_curr"), vec![7000.0, 14000.0, 21000.0, 28000.0]),
+        (p("a", "out_prev"), vec![0.0, 70.0, 140.0, 210.0]),
+        (p("b", "out_prev"), vec![0.0, 7000.0, 14000.0, 21000.0]),
+        (p("a", "out_init"), vec![70.0; 4]),
+        (p("b", "out_init"), vec![7000.0; 4]),
+    ]
+}
+
+/// The series [`two_instance_arrayed_submodel_project`] must produce, as
+/// `(variable, values)` pairs. `in` is `10*(1+TIME)` for `sub_a` and 100x that
+/// for `sub_b`, and `SUM(arr[*]) = 7 * in`.
+pub fn two_instance_arrayed_submodel_expected() -> Vec<(&'static str, Vec<f64>)> {
+    vec![
+        ("sub_a\u{b7}out_curr", vec![70.0, 140.0, 210.0, 280.0]),
+        (
+            "sub_b\u{b7}out_curr",
+            vec![7000.0, 14000.0, 21000.0, 28000.0],
+        ),
+        // The first step has no snapshot yet, so an array PREVIOUS reads its
+        // only permitted fallback, 0.
+        ("sub_a\u{b7}out_prev", vec![0.0, 70.0, 140.0, 210.0]),
+        ("sub_b\u{b7}out_prev", vec![0.0, 7000.0, 14000.0, 21000.0]),
+        ("sub_a\u{b7}out_init", vec![70.0; 4]),
+        ("sub_b\u{b7}out_init", vec![7000.0; 4]),
+    ]
 }
 
 #[cfg(test)]

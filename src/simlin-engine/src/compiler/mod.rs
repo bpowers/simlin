@@ -2,6 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+mod array_operand;
 mod codegen;
 pub mod context;
 pub mod dimensions;
@@ -998,6 +999,11 @@ impl Var {
         // and the salsa per-variable fragment path) funnels through -- so both
         // backends (VM and wasmgen) see the folded form.
         let ast: Vec<Expr> = ast.into_iter().map(fold::fold_constants).collect();
+        // Discharge codegen's "an array operand is a view over storage"
+        // contract (GH #995). Runs at the same chokepoint and after folding,
+        // so it sees the final tree both backends consume and never
+        // materializes something folding would have collapsed.
+        let ast = array_operand::materialize_computed_array_operands(ast);
         check_stock_updates_are_emittable(&ast, var.ident())?;
         Ok(Var {
             ident: Ident::new(var.ident()),
@@ -1188,21 +1194,275 @@ fn is_array_producing_builtin(expr: &Expr) -> bool {
     )
 }
 
+/// Which snapshot buffer an array-valued `PREVIOUS`/`INIT` reads (GH #995).
+///
+/// Deliberately narrower than [`crate::bytecode::ViewStorage`]: a temp array has
+/// no snapshot, so that pairing cannot be expressed here at all.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SnapshotRegion {
+    Prev,
+    Initial,
+}
+
+/// Classify a `PREVIOUS`/`INIT` call: `Some((argument, region))` when it is
+/// ARRAY-valued, `None` when it is the ordinary scalar form (or not a
+/// `PREVIOUS`/`INIT` at all).
+///
+/// This is the single definition of "this call takes the array route" for every
+/// SCALAR position: `walk_expr` (inside a `BeginIter` body),
+/// `collect_iter_source_views_impl` (which must pre-push exactly the views the
+/// body reads), codegen's one-argument `Mean` arm, and [`array_operand`]'s
+/// materializer, which must NOT move an array-valued `PREVIOUS` into a temp.
+/// Those disagreeing is how a view gets pushed that nothing reads, or read that
+/// nothing pushed. `walk_expr_as_view` deliberately does NOT ask this question
+/// -- an explicit view operand takes ANY `PREVIOUS`/`INIT` that lowered to a
+/// view, single-element included -- so it goes straight to
+/// `Compiler::snapshot_static_view`'s `SnapshotPosition::ViewOperand` arm, whose
+/// rustdoc carries the reason.
+///
+/// Array-valuedness is decided by the ARGUMENT's shape rather than by the call:
+/// `PREVIOUS(vals[D])` inside a vector builtin is the whole array while
+/// `PREVIOUS(matrix[E,1])` is one element, and only lowering knows which. An
+/// argument that carries an array shape but did not lower to a view over storage
+/// still classifies as array-valued -- `snapshot_static_view` then rejects it
+/// loudly, which is the point: silently falling back to the scalar route would
+/// read one element and broadcast it.
+pub(super) fn snapshot_view_arg(builtin: &BuiltinFn) -> Option<(&Expr, SnapshotRegion)> {
+    let (arg, region) = match builtin {
+        BuiltinFn::Previous(arg, _) => (arg.as_ref(), SnapshotRegion::Prev),
+        BuiltinFn::Init(arg) => (arg.as_ref(), SnapshotRegion::Initial),
+        _ => return None,
+    };
+    let is_array = find_expr_array_view(arg).is_some_and(|view| !view.dims.is_empty());
+    is_array.then_some((arg, region))
+}
+
 /// Extract the output ArrayView from an expression.  For array-producing builtins, the
 /// output dimensions come from the builtin's "shaping" argument:
 ///   VectorElmMap(_, offset)    -> offset's view
 ///   VectorSortOrder(arr, _)    -> arr's view
 ///   AllocateAvailable(req,_,_) -> req's view
-fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
+///
+/// Everything else is elementwise, and an elementwise expression's shape is the
+/// JOIN of its subexpressions' shapes -- the narrowest view they all broadcast
+/// into ([`join_array_views`]), not whichever one is written first. Both consumers
+/// need the join and for the same reason: an elementwise expression is evaluated
+/// by codegen's `AssignTemp` -> `BeginIter` loop, which broadcasts each source
+/// view onto the ITERATION by dimension id, so a source dimension the iteration
+/// does not have reads NaN. Taking the first view instead made
+/// `VECTOR SORT ORDER(small[d] + wide[e,d], 1)` iterate over `small`'s three
+/// elements and return the sort order of three NaNs, while the commuted
+/// `wide[e,d] + small[d]` -- the same array -- returned the right answer.
+///
+/// `None` means one of two things: no subexpression carries an array shape, or
+/// two of them carry shapes neither of which contains the other. A view that
+/// REPEATS a dimension name (`matrix[d,d]`) is NOT one of them -- as an
+/// expression's sole shape it is returned like any other. That shape is refused
+/// as a TEMP's shape, but the refusal lives at the one call site that can be
+/// loud about it ([`array_operand::materialize_view_operand`]) rather than here;
+/// see [`view_repeats_a_dimension`] for why the difference matters.
+///
+/// The four call sites do NOT all treat `None` the same way, and only one of
+/// them is loud:
+///
+/// * [`array_operand::materialize_view_operand`] declines to materialize, which
+///   leaves codegen to reject the operand with a diagnostic attributed to the
+///   variable. This is the loud one.
+/// * the three apply-to-all / arrayed hoisting sites SUBSTITUTE the variable's
+///   own view (`unwrap_or_else(|| var_view.clone())`) with no diagnostic, and
+///   the substituted view can be a DIFFERENT SIZE from the array the hoisted
+///   builtin writes. That is a live hazard, not a latent one: while this
+///   function refused a sole repeated-dimension view, `out[d] =
+///   SUM(VECTOR SORT ORDER(matrix[d,d], 1))` sized the sort order's temp at
+///   `out`'s three slots and the VM indexed past it -- a panic, which under
+///   `panic = abort` takes the host process with it. Any future `None` this
+///   function learns to return must be checked against these three sites, or
+///   given to them as an `Err` instead.
+/// * [`snapshot_view_arg`] reads only `is_empty()`, so a `None` classifies the
+///   call as SCALAR and it compiles to `LoadPrev`/`LoadInitial`. Reaching it
+///   needs a `PREVIOUS`/`INIT` whose argument survived `builtins_visitor`'s
+///   helper rewriting as a multi-shape expression, which the array-shaped
+///   passthrough predicate does not admit.
+pub(super) fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
+    let mut views = Vec::new();
+    collect_expr_array_views(expr, &mut views);
+    join_array_views(views)
+}
+
+/// The narrowest of `views` that every one of them broadcasts into, or `None`
+/// when there is no such view.
+///
+/// A single view is returned unchanged, dimensionless (a subscript collapsed to
+/// one element) included, so this is a no-op wherever the shapes already agreed.
+///
+/// The widest view is CHOSEN rather than accumulated left to right: a fold would
+/// call `[e], [d], [e,d]` incomparable on its second step even though the third
+/// contains both. Two maximal views that disagree on AXIS ORDER (`[e,d]` and
+/// `[d,e]` contain each other) are `None` rather than a coin flip -- the axis
+/// order is the one `VECTOR SORT ORDER` sorts along and the layout every
+/// consumer projects through, so guessing it is exactly the silently-wrong
+/// answer this function exists to stop producing.
+fn join_array_views(views: Vec<ArrayView>) -> Option<ArrayView> {
+    if views.len() <= 1 {
+        return views.into_iter().next();
+    }
+    let maximal: Vec<usize> = (0..views.len())
+        .filter(|&i| views.iter().all(|other| view_contains(&views[i], other)))
+        .collect();
+    let &widest = maximal.first()?;
+    if maximal
+        .iter()
+        .any(|&i| views[i].dim_names != views[widest].dim_names)
+    {
+        return None;
+    }
+    Some(views[widest].clone())
+}
+
+/// True when `view` names one dimension more than once (`matrix[d,d]`).
+///
+/// Such a view is a perfectly good ARRAY -- nine well-defined cells -- and this
+/// says nothing about reading it directly. What it cannot be is the shape of a
+/// temp that a computed operand is evaluated into, or of a snapshot region a
+/// `PREVIOUS`/`INIT` view addresses, because every layer that projects between
+/// an array and a temp does so BY DIMENSION NAME and takes the first match:
+/// [`project_var_index_to_temp`] gives both `d` axes the same coordinate (so
+/// `out[i,j]` reads `temp[i,i]`), and `codegen::array_view_to_static_temp` keys
+/// `DimId`s by name, so the runtime broadcast has the same blind spot. Neither
+/// can say WHICH `d` is meant.
+///
+/// It has exactly TWO callers, and both are positions that can refuse LOUDLY:
+/// [`array_operand::materialize_view_operand`] (which leaves codegen to reject
+/// the operand) and `codegen::snapshot_static_view` (which returns an `Err` of
+/// its own). It deliberately does NOT live inside [`join_array_views`], because
+/// [`find_expr_array_view`]'s other three consumers turn a `None` into a silent
+/// substitution of the variable's own view -- and for `out[d] =
+/// SUM(VECTOR SORT ORDER(matrix[d,d], 1))` that substituted a three-slot temp
+/// for a nine-element sort order and the VM indexed past it. Refusing at the
+/// loud sites refuses exactly the same equations and costs no others.
+///
+/// Scope, deliberately: this refuses only what GH #995 newly made compilable.
+/// A repeated dimension read DIRECTLY (`out[d,d] = VECTOR SORT ORDER(matrix[d,d],
+/// 1)`, or even `out[d,d] = matrix[d,d]`) compiles at the merge base and still
+/// does, to the same first-axis-wins numbers -- measured, and pinned as a
+/// disclosed residual by
+/// `array_operand_materialization_tests::a_repeated_dimension_read_directly_is_a_pre_existing_residual`.
+/// Widening the refusal to cover it would be a fix to a pre-existing defect
+/// riding on an unrelated change, and the right fix is to make the projection
+/// axis-identity-aware rather than to refuse the shape -- the more so because
+/// the shape is legitimate: Vensim REJECTS the declaration -- run in Vensim DSS 2026-08-04, `vensim-probes/repeated_dimension.mdl` refuses to simulate with "DimA appears more than once on LHS" -- so no MDL-imported model can contain this shape and the residual is confined to hand-authored XMILE/JSON/protobuf. It is NOT illegitimate, though: the XMILE v1.0 spec exemplifies the declaration (`docs/reference/xmile-v1.0.html`, "A 2D non-apply-to-all array with dimensions X by X, where X is size 2", verified in-repo), so a conformant file may carry it and Simlin must keep reading it. The spec exemplifies only the DECLARATION, with per-element equations; it says nothing about what a REFERENCE such as `sq[X,X]` means, which is the part that is wrong here.
+pub(super) fn view_repeats_a_dimension(view: &ArrayView) -> bool {
+    (1..view.dim_names.len())
+        .any(|i| !view.dim_names[i].is_empty() && view.dim_names[..i].contains(&view.dim_names[i]))
+}
+
+/// True when an iteration shaped like `outer` can read every element of `inner`.
+///
+/// The first branch is an IDENTICAL-shape test, and it carries both families
+/// [`named_dims`] refuses. An UNNAMED view (a temp's `dim_names` are empty
+/// strings) has no name to compare and needs none against a copy of itself. A
+/// REPEATED name is the same: `square[d,d] + square[d,d]` is a well-defined
+/// elementwise expression and joins to that shape, and the join is the right
+/// answer to give -- it is the MATERIALIZER that then refuses to build a temp of
+/// that shape ([`view_repeats_a_dimension`]), because the refusal is about
+/// projecting into a temp rather than about comparing two views.
+///
+/// Beyond identity the relation is by dimension NAME and size, because that is
+/// what the runtime broadcast matches on (`vm`'s `LoadIterViewAt` ->
+/// [`crate::dimensions::match_dimensions_two_pass`]): a source dimension the
+/// iteration cannot match by id reads NaN, so placing one positionally would be
+/// a guess. A dimensionless view is contained by everything, which is how a
+/// collapsed element such as `vals[1]` broadcasts without constraining the shape
+/// around it.
+fn view_contains(outer: &ArrayView, inner: &ArrayView) -> bool {
+    if outer.dims == inner.dims && outer.dim_names == inner.dim_names {
+        return true;
+    }
+    let (Some(outer), Some(inner)) = (named_dims(outer), named_dims(inner)) else {
+        return false;
+    };
+    inner
+        .iter()
+        .all(|(name, size)| outer.iter().any(|(o, s)| o == name && s == size))
+}
+
+/// A view's `(dimension name, size)` pairs, or `None` when it does not name
+/// every dimension or names one TWICE.
+///
+/// Both refusals are the same point: containment is decided by name, and
+/// neither shape can answer it. An unnamed axis has nothing to match; a
+/// `matrix[d,d]` view can say "contains `d` at size 3" but not WHICH `d`, so
+/// `[d,d] contains [d]` is unanswerable rather than true. Both families still
+/// reach [`view_contains`]'s identical-shape branch, which needs no name; what
+/// refuses a repeated name as an expression's SOLE shape is
+/// [`view_repeats_a_dimension`], at the materializer. See `array_operand`'s
+/// "What still declines".
+fn named_dims(view: &ArrayView) -> Option<Vec<(&str, usize)>> {
+    if view.dim_names.len() != view.dims.len() || view.dim_names.iter().any(|n| n.is_empty()) {
+        return None;
+    }
+    if (1..view.dim_names.len()).any(|i| view.dim_names[..i].contains(&view.dim_names[i])) {
+        return None;
+    }
+    Some(
+        view.dim_names
+            .iter()
+            .map(|n| n.as_str())
+            .zip(view.dims.iter().copied())
+            .collect(),
+    )
+}
+
+/// Every array view the subexpressions of `expr` carry.
+///
+/// Split out from [`find_expr_array_view`] so the enumeration of which
+/// positions carry a shape lives in exactly one place: which arguments an
+/// array-producing builtin takes its shape from, which builtins are elementwise
+/// (and so contribute every argument's shape), and which are scalar-valued and
+/// contribute nothing.
+///
+/// The `If` CONDITION is visited. It contributes nothing to an `IF` whose arms
+/// already agree, but the `BeginIter` body READS it
+/// (`codegen::collect_iter_source_views_impl` pushes its view), so
+/// `IF wide[e,d] > 0 THEN a[d] ELSE b[d]` does vary over `e` and the iteration
+/// evaluating it has to as well.
+///
+/// Written as an exhaustive match with no `_` arm over `BuiltinFn` so a new
+/// builtin is a compile error here rather than a silently unshaped operand.
+fn collect_expr_array_views(expr: &Expr, out: &mut Vec<ArrayView>) {
     match expr {
-        Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => Some(view.clone()),
+        Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => out.push(view.clone()),
         Expr::App(builtin, _) => match builtin {
-            BuiltinFn::VectorElmMap(_, offset) => find_expr_array_view(offset),
+            BuiltinFn::VectorElmMap(_, offset) => collect_expr_array_views(offset, out),
             BuiltinFn::VectorSortOrder(arr, _) | BuiltinFn::Rank(arr, _) => {
-                find_expr_array_view(arr)
+                collect_expr_array_views(arr, out)
             }
             BuiltinFn::AllocateAvailable(req, _, _)
-            | BuiltinFn::AllocateByPriority(req, _, _, _, _) => find_expr_array_view(req),
+            | BuiltinFn::AllocateByPriority(req, _, _, _, _) => collect_expr_array_views(req, out),
+            // Elementwise scalar builtins: applied per iteration inside a
+            // `BeginIter` body, so their result has the shape of whichever
+            // argument carries one -- every one of them, for the join; the
+            // first, for `find_expr_array_view`, matching the `Op2` rule below.
+            //
+            // Deliberately absent: `Mean` (variadic -- its single-argument
+            // form is a REDUCTION to a scalar, not elementwise), the reducers
+            // (`Sum`/`Size`/`Stddev` and one-argument `Min`/`Max`, also
+            // scalar-valued), `VectorSelect` (scalar-valued), the `Lookup`
+            // family (`LookupArray`'s shape is the TABLE array's, which this
+            // would have to reach through the gf registry), and the 0-arity
+            // builtins. Their ARGUMENTS are not walked either: a reducer
+            // collapses whatever it reads to one number, so
+            // `vals[d] + SUM(wide[*,*])` is `[d]`-shaped and a walk that let
+            // `wide`'s view through would widen the temp to a shape the
+            // operand does not have.
+            //
+            // `PREVIOUS`/`INIT` DO carry a shape (GH #995): codegen reads an
+            // array-valued one as its argument's view over a snapshot buffer,
+            // so the result has exactly the argument's shape -- and an argument
+            // that collapsed to a single element yields none, which is what
+            // keeps a scalar `PREVIOUS(s)` broadcasting instead of reshaping
+            // the operand around it.
+            BuiltinFn::Previous(a, _) | BuiltinFn::Init(a) => collect_expr_array_views(a, out),
             BuiltinFn::Abs(e)
             | BuiltinFn::Arccos(e)
             | BuiltinFn::Arcsin(e)
@@ -1212,17 +1472,60 @@ fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
             | BuiltinFn::Int(e)
             | BuiltinFn::Ln(e)
             | BuiltinFn::Log10(e)
+            | BuiltinFn::Sign(e)
             | BuiltinFn::Sin(e)
             | BuiltinFn::Sqrt(e)
-            | BuiltinFn::Tan(e) => find_expr_array_view(e),
-            _ => None,
+            | BuiltinFn::Tan(e) => collect_expr_array_views(e, out),
+            // Two-argument MIN/MAX are the scalar (elementwise) forms; the
+            // one-argument forms are array reductions and yield no array.
+            BuiltinFn::Min(a, Some(b)) | BuiltinFn::Max(a, Some(b)) => {
+                collect_expr_array_views(a, out);
+                collect_expr_array_views(b, out);
+            }
+            BuiltinFn::Min(_, None) | BuiltinFn::Max(_, None) => {}
+            BuiltinFn::Quantum(a, b) | BuiltinFn::Step(a, b) => {
+                collect_expr_array_views(a, out);
+                collect_expr_array_views(b, out);
+            }
+            BuiltinFn::Sshape(a, b, c) => {
+                collect_expr_array_views(a, out);
+                collect_expr_array_views(b, out);
+                collect_expr_array_views(c, out);
+            }
+            BuiltinFn::Pulse(a, b, c) | BuiltinFn::Ramp(a, b, c) | BuiltinFn::SafeDiv(a, b, c) => {
+                collect_expr_array_views(a, out);
+                collect_expr_array_views(b, out);
+                if let Some(c) = c.as_ref() {
+                    collect_expr_array_views(c, out);
+                }
+            }
+            BuiltinFn::Lookup(_, _, _)
+            | BuiltinFn::LookupForward(_, _, _)
+            | BuiltinFn::LookupBackward(_, _, _)
+            | BuiltinFn::Mean(_)
+            | BuiltinFn::Sum(_)
+            | BuiltinFn::Size(_)
+            | BuiltinFn::Stddev(_)
+            | BuiltinFn::VectorSelect(_, _, _, _, _)
+            | BuiltinFn::IsModuleInput(_, _)
+            | BuiltinFn::Inf
+            | BuiltinFn::Pi
+            | BuiltinFn::Time
+            | BuiltinFn::TimeStep
+            | BuiltinFn::StartTime
+            | BuiltinFn::FinalTime => {}
         },
-        Expr::Op1(_, inner, _) => find_expr_array_view(inner),
+        Expr::Op1(_, inner, _) => collect_expr_array_views(inner, out),
         Expr::Op2(_, lhs, rhs, _) => {
-            find_expr_array_view(lhs).or_else(|| find_expr_array_view(rhs))
+            collect_expr_array_views(lhs, out);
+            collect_expr_array_views(rhs, out);
         }
-        Expr::If(_, t, f, _) => find_expr_array_view(t).or_else(|| find_expr_array_view(f)),
-        _ => None,
+        Expr::If(cond, t, f, _) => {
+            collect_expr_array_views(t, out);
+            collect_expr_array_views(f, out);
+            collect_expr_array_views(cond, out);
+        }
+        _ => {}
     }
 }
 
@@ -1908,7 +2211,7 @@ fn replace_nested_builtins_for_element(
 /// Find the next available temp ID by scanning existing expressions for
 /// AssignTemp nodes. Uses the existing extract_temp_sizes infrastructure
 /// which already walks the full expression tree.
-fn next_available_temp_id(exprs: &[Expr]) -> u32 {
+pub(super) fn next_available_temp_id(exprs: &[Expr]) -> u32 {
     let mut temp_sizes_map = HashMap::new();
     for expr in exprs {
         extract_temp_sizes(expr, &mut temp_sizes_map);

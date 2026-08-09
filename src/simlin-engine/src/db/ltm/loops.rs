@@ -413,33 +413,156 @@ pub(crate) fn read_slice_row_parts(
             AxisRead::Reduced { subset } => {
                 Some((subset.clone().unwrap_or_else(|| elems.clone()), None))
             }
+            // A `MappedRead` axis (GH #997) enumerates the TARGET dimension's
+            // elements rather than the source's, and pairs each with the source
+            // element it reads. That direction is load-bearing: the executed
+            // correspondence need not be injective -- C-LEARN maps three
+            // `Aggregated Regions` elements onto seven `COP` ones -- so
+            // enumerating the SOURCE side would owe several slots to one row,
+            // which the one-slot-per-row shape below cannot express. Walking the
+            // target side keeps (row, slot) a function, at the cost of repeating
+            // a row under different slots, which is exactly what a many-to-one
+            // read is.
+            AxisRead::MappedRead { dim, source_dim } => {
+                let target_dim =
+                    dim_ctx.get(&crate::common::CanonicalDimensionName::from_raw(dim))?;
+                let corr = dim_ctx.executed_read_correspondence(
+                    &crate::common::CanonicalDimensionName::from_raw(dim),
+                    &crate::common::CanonicalDimensionName::from_raw(source_dim),
+                )?;
+                let slots = crate::ltm_augment::dimension_element_names(target_dim);
+                if slots.len() != corr.len() {
+                    return None;
+                }
+                Some((
+                    corr.iter().map(|e| e.as_str().to_string()).collect(),
+                    Some(slots),
+                ))
+            }
         })
         .collect::<Option<Vec<_>>>()?;
-    // Cartesian product, accumulating each row's element parts and its slot
-    // coordinate parts.
-    let mut rows: Vec<ReadSliceRowParts> = vec![ReadSliceRowParts {
-        row_parts: Vec::new(),
-        slot_parts: Vec::new(),
-    }];
-    for (elems, slot_elems) in &per_axis {
-        let mut next: Vec<ReadSliceRowParts> = Vec::with_capacity(rows.len() * elems.len());
-        for partial in &rows {
-            for (ei, e) in elems.iter().enumerate() {
-                let mut row_parts = partial.row_parts.clone();
-                row_parts.push(e.clone());
-                let mut slot_parts = partial.slot_parts.clone();
-                if let Some(slots) = slot_elems {
-                    slot_parts.push(slots[ei].clone());
+    // How many coordinates advance INDEPENDENTLY. A `Pinned` or `Reduced` axis
+    // is one of its own; every PROJECTED axis (`Iterated` or `MappedRead`) is
+    // driven by the target dimension it names, and two axes naming the SAME one
+    // are driven together. That is what execution does: both indices of
+    // `target[State] = matrix[Region1, Region2]` resolve against the one active
+    // `State` element, so the read is the DIAGONAL
+    // `matrix[map1(s), map2(s)]` -- three reads over a 3x3 source, measured in
+    // `mapped_reference_semantics_tests::two_axes_mapped_to_one_target_dimension_read_the_diagonal`.
+    // Crossing them instead emitted every off-diagonal pair as an element edge
+    // and a loop candidate the simulation never traverses (9 loops where there
+    // are 3), and it disagreed with `ltm_augment::per_element_row_for_target`,
+    // which projects one target element through each axis and therefore always
+    // produced the diagonal -- so the link-score NAMES and the element EDGES
+    // described different graphs.
+    //
+    // The groups are ordered by first member, so a slice with no repeated target
+    // dimension produces exactly the per-axis nesting (and therefore the exact
+    // row order) this was before the grouping existed.
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut group_of_dim: HashMap<&str, usize> = HashMap::new();
+    for (i, axis) in read_slice.iter().enumerate() {
+        let driver = match axis {
+            AxisRead::Iterated { dim, .. } | AxisRead::MappedRead { dim, .. } => Some(dim.as_str()),
+            AxisRead::Pinned(_) | AxisRead::Reduced { .. } => None,
+        };
+        match driver.and_then(|d| group_of_dim.get(d).copied()) {
+            Some(g) => groups[g].push(i),
+            None => {
+                if let Some(d) = driver {
+                    group_of_dim.insert(d, groups.len());
                 }
-                next.push(ReadSliceRowParts {
-                    row_parts,
-                    slot_parts,
-                });
+                groups.push(vec![i]);
+            }
+        }
+    }
+
+    // Cartesian product over the DRIVERS, accumulating each row's element parts
+    // and its slot coordinate parts. Parts are placed by axis index rather than
+    // pushed, because a shared driver fills several (possibly non-adjacent)
+    // axes at once; flattening at the end restores axis order.
+    let n_axes = read_slice.len();
+    let mut rows: Vec<(Vec<String>, Vec<Option<String>>)> =
+        vec![(vec![String::new(); n_axes], vec![None; n_axes])];
+    for group in &groups {
+        let alternatives = driver_alternatives(group, &per_axis, read_slice, dim_ctx)?;
+        let mut next = Vec::with_capacity(rows.len() * alternatives.len());
+        for partial in &rows {
+            for alternative in &alternatives {
+                let mut row = partial.clone();
+                for (axis, elem, slot) in alternative {
+                    row.0[*axis] = elem.clone();
+                    row.1[*axis] = slot.clone();
+                }
+                next.push(row);
             }
         }
         rows = next;
     }
-    Some(rows)
+    Some(
+        rows.into_iter()
+            .map(|(row_parts, slot_parts)| ReadSliceRowParts {
+                row_parts,
+                slot_parts: slot_parts.into_iter().flatten().collect(),
+            })
+            .collect(),
+    )
+}
+
+/// The alternatives one driver of [`read_slice_row_parts`] advances through:
+/// per alternative, the `(axis, source element, slot coordinate)` triple for
+/// every axis that driver fills.
+///
+/// A single-axis driver walks that axis's own element list, which is what every
+/// slice without a repeated target dimension is made of and is byte-for-byte
+/// what this function replaced.
+///
+/// A SHARED driver -- two or more projected axes naming one target dimension --
+/// walks the TARGET dimension's elements instead, and asks each member axis
+/// which source element it reads for that coordinate. Its own slot list answers
+/// that: an axis's `slots[k]` is the target element its `elems[k]` feeds, so the
+/// source element for target element `t` is the `elems` entry whose slot is `t`.
+/// Both projected kinds cover the target dimension exactly once (`Iterated`
+/// inverts a bijection, `MappedRead` enumerates the target side directly), so
+/// the lookup is total; a miss means a stale correspondence, and declining
+/// degrades to the caller's conservative fallback rather than dropping rows.
+#[allow(clippy::type_complexity)]
+fn driver_alternatives(
+    group: &[usize],
+    per_axis: &[(Vec<String>, Option<Vec<String>>)],
+    read_slice: &[crate::ltm_agg::AxisRead],
+    dim_ctx: &crate::dimensions::DimensionsContext,
+) -> Option<Vec<Vec<(usize, String, Option<String>)>>> {
+    use crate::ltm_agg::AxisRead;
+    if let [axis] = group {
+        let (elems, slots) = &per_axis[*axis];
+        return Some(
+            elems
+                .iter()
+                .enumerate()
+                .map(|(k, e)| vec![(*axis, e.clone(), slots.as_ref().map(|s| s[k].clone()))])
+                .collect(),
+        );
+    }
+    let dim = match &read_slice[group[0]] {
+        AxisRead::Iterated { dim, .. } | AxisRead::MappedRead { dim, .. } => dim,
+        // Only a projected axis is ever grouped with another.
+        AxisRead::Pinned(_) | AxisRead::Reduced { .. } => return None,
+    };
+    let target_dim = dim_ctx.get(&crate::common::CanonicalDimensionName::from_raw(dim))?;
+    crate::ltm_augment::dimension_element_names(target_dim)
+        .into_iter()
+        .map(|target_elem| {
+            group
+                .iter()
+                .map(|&axis| {
+                    let (elems, slots) = &per_axis[axis];
+                    let k = slots.as_ref()?.iter().position(|s| *s == target_elem)?;
+                    Some((axis, elems[k].clone(), Some(target_elem.clone())))
+                })
+                .collect::<Option<Vec<_>>>()
+        })
+        .collect()
 }
 
 /// One source row a hoisted reducer reads, paired with the agg result slot it

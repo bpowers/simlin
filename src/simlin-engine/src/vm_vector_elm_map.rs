@@ -11,7 +11,7 @@
 use smallvec::SmallVec;
 
 use crate::bytecode::{ByteCodeContext, RuntimeView, TempId};
-use crate::vm::{Vm, increment_indices};
+use crate::vm::{ChunkRegions, Vm, increment_indices};
 
 /// Genuine-Vensim VECTOR ELM MAP: result element `i` =
 /// `source[base_i + round(offset[i])]` over the source variable's FULL
@@ -35,7 +35,7 @@ pub(crate) fn vector_elm_map(
     offset_view: &RuntimeView,
     write_temp_id: TempId,
     full_source_len: u32,
-    curr: &[f64],
+    regions: ChunkRegions<'_>,
     temp_storage: &mut [f64],
     context: &ByteCodeContext,
 ) {
@@ -93,7 +93,8 @@ pub(crate) fn vector_elm_map(
             Some(start) => start + i,
             None => offset_view.flat_offset(&off_indices),
         };
-        let offset_val = Vm::read_view_element(offset_view, off_flat, curr, temp_storage, context);
+        let offset_val =
+            Vm::read_view_element(offset_view, off_flat, regions, temp_storage, context);
 
         // base_i: 0 for a full-array source; else the sliced view's flat
         // offset at this element's carried-dim projection.
@@ -119,7 +120,7 @@ pub(crate) fn vector_elm_map(
             if flat_i < 0 || flat_i >= full_len as i64 {
                 f64::NAN
             } else {
-                Vm::read_view_element(source_view, flat_i as usize, curr, temp_storage, context)
+                Vm::read_view_element(source_view, flat_i as usize, regions, temp_storage, context)
             }
         };
         temp_storage[temp_off + i] = elem;

@@ -1701,6 +1701,31 @@ fn simulates_array_broadcast() {
     simulate_path("../../test/array_broadcast/array_broadcast.xmile");
 }
 
+/// GH #995: an array-producing builtin whose array operand is COMPUTED rather
+/// than a plain reference. Codegen consumes such an operand as a view over
+/// storage, so the lowering must evaluate it into a temp first; before #995
+/// these equations did not compile at all, in an ordinary apply-to-all model
+/// with LTM disabled. Gates VECTOR SORT ORDER, RANK and VECTOR ELM MAP against
+/// hand-computed values, plus a control (`order_ref`) that sorts the same
+/// array through a named variable -- the operand shape that always worked.
+#[test]
+fn simulates_vector_computed_operand() {
+    simulate_path("../../test/vector_computed_operand/vector_computed_operand.xmile");
+}
+
+/// GH #995 phase C3: an array-valued `PREVIOUS()` / `INIT()` operand. Both
+/// compile to a VIEW over one of the VM's snapshot buffers rather than to a
+/// per-element opcode, so this gates the view arithmetic on the snapshot regions
+/// end to end -- VM, protobuf and XMILE round-trips, and wasm-backend parity,
+/// where an `Unsupported` outcome is a hard failure. Every source array moves
+/// with time, so reading `curr` where `prev` was meant is a different answer at
+/// every step but the first; `order_ref` is the control, sorting the same freeze
+/// captured PER ELEMENT (the route that always worked).
+#[test]
+fn simulates_vector_snapshot_operand() {
+    simulate_path("../../test/vector_snapshot_operand/vector_snapshot_operand.xmile");
+}
+
 #[test]
 fn simulates_modules() {
     simulate_path("../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx");
@@ -2157,6 +2182,23 @@ corpus_tests! {
 #[test]
 fn simulates_vector_xmile_genuine() {
     simulate_path("../../test/sdeverywhere/models/vector/vector.xmile");
+}
+
+/// The MDL twin of `simulates_vector_xmile_genuine`: the SAME model, through
+/// the MDL importer instead of the XMILE reader, against the same real-Vensim
+/// `vector.dat`.
+///
+/// This gate did not exist, and its absence hid a defect for as long as the
+/// fixture has. The importer expanded every subscripted LHS into per-element
+/// slots, so `y[DimA] = VECTOR ELM MAP(x[three], (DimA - 1))` -- legal Vensim,
+/// and correct through the XMILE reader -- became three slots each carrying an
+/// unresolvable `DimA - 1` and failed to compile. Running only the XMILE file
+/// meant the two readers were never compared on a model that uses dimension
+/// arithmetic. `mdl::convert::apply_to_all_tests` pins the mechanism; this pins
+/// it against genuine Vensim output.
+#[test]
+fn simulates_vector_mdl_genuine() {
+    simulate_mdl_path("../../test/sdeverywhere/models/vector/vector.mdl");
 }
 
 #[test]
@@ -4267,6 +4309,8 @@ static ALL_INCREMENTALLY_COMPILABLE_MODELS: &[&str] = &[
     "../../test/array_sum_expr/array_sum_expr.xmile",
     "../../test/array_multi_source/array_multi_source.xmile",
     "../../test/array_broadcast/array_broadcast.xmile",
+    "../../test/vector_computed_operand/vector_computed_operand.xmile",
+    "../../test/vector_snapshot_operand/vector_snapshot_operand.xmile",
     "../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx",
     "../../test/modules2/modules2.xmile",
     "../../test/circular-dep-1/model.stmx",
@@ -6031,8 +6075,13 @@ fn corpus_clearn_macros_import() {
 ///
 /// Layout impact (the resource this gate protects -- #654's VM limit of 65,536
 /// u16 result slots, NOT `wasmgen::lower`'s unrelated `MAX_UNROLL_UNITS`): the
-/// per-step result-row width is **29,717 slots**, 45% of the ceiling, with
-/// 35,819 free.
+/// per-step result-row width is **30,123 slots**, 46% of the ceiling, with
+/// 35,413 free. Both numbers come from
+/// `examples/ltm_slot_width.rs`, so re-deriving them is a command rather than a
+/// reconstruction -- and they are the CURRENT totals: the transition records
+/// below quote earlier values as the left-hand side of a move, which is what
+/// they are for. This header is the budget statement against the #654 ceiling,
+/// so a stale figure here is the one that misleads.
 ///
 /// It last moved twice in the GH #995 burndown. The array-freeze
 /// materializer took the count 6,800 -> 6,858 (+58 content-named
@@ -6053,7 +6102,26 @@ fn corpus_clearn_macros_import() {
 /// MAP's view-position source argument) compile via 4 whole-dep freeze
 /// helpers, leaving ZERO failing LTM fragments on C-LEARN.
 ///
-/// It last moved UPWARD, 30,416 -> 30,947 (+531), when GH #996 stopped the axis
+/// It last moved with GH #997's spelling-keyed correspondence, 6,757 -> 6,848
+/// (+91) / width 29,717 -> 29,808 (+91, one scalar slot per new variable).
+///
+/// The +91 is arithmetic, not a bare observation: 13 previously-declined edges
+/// x 7 `COP` elements = 91 per-element scalar link scores, one per (edge,
+/// target element). Each is scalar, so the width moves by the same 91. All 91
+/// are the class-D shape #997 recovers: C-LEARN reads five
+/// `X Aggregated[Aggregated Regions]` variables inside `COP`-iterating
+/// equations, a subscript naming the SOURCE's own dimension across a
+/// many-to-one element map. Before #997 one correspondence answered for both
+/// reference spellings and declined that one, so the per-element completeness
+/// guard dropped 13 edges outright (`aggregate_switch -> ff_stop_growth_year`
+/// and siblings) and the five source edges themselves collapsed onto the
+/// conservative cross-product. Now they pin through the declared map and score
+/// per (source row, target element); the element graph LOST 210 phantom edges
+/// (15,826 -> 15,616) in the same change, which is the other half of the same
+/// fix and costs no slots. Measured with `examples/ltm_declined_edges.rs`
+/// (13 unprojectable-dep declines -> 0) and `examples/ltm_edge_coverage.rs`.
+///
+/// It moved UPWARD before that, 30,416 -> 30,947 (+531), when GH #996 stopped the axis
 /// allocator stealing a name-matched slot: 135 link scores that the per-element
 /// completeness guard had been declining now pin their indices and are emitted
 /// again. An earlier note here argued that DOWNWARD was the safe direction, and
@@ -6075,6 +6143,20 @@ fn corpus_clearn_macros_import() {
 /// slots are cheap at this margin and the allocator fix is correct on its own
 /// terms, which is why the emission is accepted; if the margin were tight, the
 /// right move would be to sequence #996 behind #995 instead.
+///
+/// It moved UPWARD again, 6,848 -> 7,163 (+315) and 29,808 -> 30,123 slots, when
+/// the MDL importer stopped exploding a single apply-to-all equation into N
+/// identical per-element slots (`mdl::convert::apply_to_all_tests`). C-LEARN is
+/// imported from MDL, so its element-mapped aggregation variables
+/// (`annual_reduction_aggregated`, `annual_reduction_semi_agg`, ...) now arrive
+/// as `Ast::ApplyToAll` and reach the per-element mapped-row emitter this branch
+/// fixed, instead of sitting in per-slot equations whose sites contribute only
+/// to their own element. The change is STRICTLY ADDITIVE -- measured by diffing
+/// the emitted name sets with `examples/ltm_var_dump.rs`: 315 added, **0
+/// removed** -- and every added name is a `<source>[<row>] -> <target>[<elem>]`
+/// mapped score, i.e. exactly the GH #997 shape. Declines are unchanged (5,
+/// same names, all rank-like-partial) and the margin is still wide: 35,413 free
+/// against the 65,536-slot ceiling.
 ///
 /// The pin below catches emission changes in EITHER direction, and re-deriving
 /// it means re-measuring BOTH numbers, not just the count.
@@ -6101,7 +6183,7 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 6757,
+        total, 7163,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"

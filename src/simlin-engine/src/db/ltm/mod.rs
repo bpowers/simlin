@@ -59,13 +59,19 @@ pub(crate) use link_scores::emit_ltm_partial_equation_warning;
 pub(crate) use link_scores::ltm_partial_equation_warning_message;
 pub(crate) use loops::build_loops_from_tiered;
 // The single row/slot derivation (invariant I4 of the shape-expressiveness
-// design), re-exported so every consumer derives rows from one function:
-// `read_slice_row_parts` is the structured (per-axis parts) core that
-// `db::analysis::emit_agg_routed_edges` reads directly (GH #783); the joined
-// `read_slice_rows`/`ReadSliceRow` projection feeds
-// `db::analysis::emit_edges_for_reference`'s `PerElement` arm (GH #525) and
-// the link-score emitters.
-pub(crate) use loops::{ReadSliceRow, ReadSliceRowParts, read_slice_row_parts, read_slice_rows};
+// design), re-exported so every consumer derives rows from one function. Only
+// the STRUCTURED form crosses this boundary: both `db::analysis` consumers --
+// `emit_agg_routed_edges` (GH #783) and `emit_edges_for_reference`'s
+// `PerElement` arm (GH #525) -- read the per-axis parts, because a canonical
+// element name can contain a comma and a joined-then-split round-trip would
+// mis-read one coordinate as two.
+pub(crate) use loops::{ReadSliceRowParts, read_slice_row_parts};
+// The joined projection crosses this boundary for TESTS only -- and only to
+// build expected node NAMES (`db::element_graph_proptest`), never to be split
+// back apart. Production's remaining users are the link-score emitters inside
+// `db::ltm`, which reach `loops` directly and likewise want a name.
+#[cfg(test)]
+pub(crate) use loops::read_slice_rows;
 // The cross-element-through-aggregate petal-stitching core, shared by the
 // exhaustive recovery (`recover_cross_agg_loops`) and discovery
 // (`ltm_finding`, GH #696) so both enumerate exactly the same cross-agg loops.

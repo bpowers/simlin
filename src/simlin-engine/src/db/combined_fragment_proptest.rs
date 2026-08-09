@@ -133,10 +133,19 @@ fn build_member(spec: &MemberSpec) -> PerVarBytecodes {
         .collect();
     let static_views: Vec<SymbolicStaticView> = (0..spec.n_views)
         .map(|i| SymbolicStaticView {
+            // Cycle the three VARIABLE-backed bases (GH #995 added the two
+            // snapshot regions): all three name a variable rather than a merged
+            // resource, so only `Temp` is renumbered and the interleaved merge
+            // must carry each of the others across untouched.
             base: if spec.n_temps > 0 && i % 2 == 0 {
                 SymStaticViewBase::Temp((i % spec.n_temps) as u32)
             } else {
-                SymStaticViewBase::Var(vref(&name, i))
+                let var = vref(&name, i);
+                match i % 3 {
+                    0 => SymStaticViewBase::Var(var),
+                    1 => SymStaticViewBase::PrevVar(var),
+                    _ => SymStaticViewBase::InitialVar(var),
+                }
             },
             dims: smallvec::smallvec![(tag * 10 + i) as u16],
             strides: smallvec::smallvec![1],
@@ -300,7 +309,11 @@ fn temp_uses(code: &[SymbolicOpcode], views: &[SymbolicStaticView]) -> Vec<(usiz
                     });
                     match &view.base {
                         SymStaticViewBase::Temp(id) => *id,
-                        SymStaticViewBase::Var(_) => return None,
+                        // Variable-backed bases -- `curr` and the two snapshot
+                        // regions -- name no temp channel.
+                        SymStaticViewBase::Var(_)
+                        | SymStaticViewBase::PrevVar(_)
+                        | SymStaticViewBase::InitialVar(_) => return None,
                     }
                 }
                 _ => return None,

@@ -302,6 +302,66 @@ impl<'input> ConversionContext<'input> {
     ///
     /// NumberList and TabbedArray equations are excluded - they have special handling
     /// in build_equation that handles their multi-value RHS correctly.
+    /// Does this raw LHS subscript name a subscript RANGE (a dimension or a
+    /// subrange) rather than a single element?
+    ///
+    /// The one place that question is answered, because two answers would
+    /// diverge: the per-element `element_offsets` computation needs it to skip
+    /// pinned axes, and [`Self::build_variable_with_elements`]'s collapse gate
+    /// needs it to read apply-to-all intent off the source spelling. A subrange
+    /// is registered in `dimension_elements` like any other dimension, so both
+    /// qualify.
+    fn subscript_names_a_dimension(&self, subscript: &str) -> bool {
+        self.dimension_elements
+            .contains_key(&canonical_name(subscript))
+    }
+
+    /// True when these per-element slots ARE a single apply-to-all equation:
+    /// they cover the dimensions' full cartesian product and agree on equation
+    /// text, initial text and graphical function.
+    ///
+    /// Both halves are load-bearing. Agreement is what makes the collapse
+    /// lossless -- slots that differ carry per-element information (a numeric
+    /// list, `:EXCEPT:` overrides, or the per-element row/col offsets
+    /// `external_data::adjust_call_for_element` bakes into an arrayed
+    /// `GET DIRECT`, which is why those keep their slots). Full coverage is what
+    /// makes it faithful: a partial cover (some elements of the dimension having
+    /// no equation at all) is not an apply-to-all, and turning it into one would
+    /// invent equations for the missing elements.
+    fn slots_are_one_apply_to_all(
+        &self,
+        dims: &[String],
+        elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
+    ) -> bool {
+        let Some((_, first_eq, first_initial, _)) = elements.first() else {
+            return false;
+        };
+        // `Equation::ApplyToAll` is `(dims, equation)` and has nowhere to put an
+        // INITIAL equation or a graphical function -- an `Arrayed` slot carries
+        // both. So agreement is not enough: a variable whose slots share a
+        // non-`None` initial (an arrayed `ACTIVE INITIAL`) must keep its slots,
+        // or the collapse silently drops the initial and the variable starts the
+        // run from its active equation instead.
+        if first_initial.is_some() {
+            return false;
+        }
+        let agree = elements
+            .iter()
+            .all(|(_, eq, initial, gf)| eq == first_eq && initial.is_none() && gf.is_none());
+        if !agree {
+            return false;
+        }
+        let expected: usize = dims
+            .iter()
+            .map(|d| {
+                self.dimension_elements
+                    .get(&canonical_name(d))
+                    .map_or(0, |elems| elems.len())
+            })
+            .product();
+        expected > 0 && elements.len() == expected
+    }
+
     fn build_variable_with_elements(
         &self,
         name: &str,
@@ -517,10 +577,7 @@ impl<'input> ConversionContext<'input> {
                 let element_offsets: Vec<usize> = element_parts
                     .iter()
                     .zip(exp_eq.lhs_subscripts.iter())
-                    .filter(|(_, sub)| {
-                        let canonical = canonical_name(sub);
-                        self.dimension_elements.contains_key(&canonical)
-                    })
+                    .filter(|(_, sub)| self.subscript_names_a_dimension(sub))
                     .map(|(elem, sub)| self.element_index_in_dimension(elem, sub).unwrap_or(0))
                     .collect();
 
@@ -560,12 +617,84 @@ impl<'input> ConversionContext<'input> {
         // When EXCEPT is the sole source of elements, excepted elements should
         // remain at 0 (undefined) rather than receiving the default.
         let has_except_default = has_except_eq && has_non_except_eq;
-        let equation = Equation::Arrayed(
-            formatted_dims.clone(),
-            elements,
-            default_equation,
-            has_except_default,
-        );
+        // Was the MDL source a SINGLE apply-to-all equation? That -- not
+        // whether the expanded slots happen to agree -- is what licenses
+        // collapsing, and the difference is not academic: an arrayed
+        // `GET DIRECT CONSTANTS` reads its per-element values from a file, so
+        // its slots agreeing is a property of the DATA, and collapsing on that
+        // basis would make the imported structure change when the spreadsheet
+        // does. Those keep their slots, as do EXCEPT equations and
+        // element-specific overrides.
+        //
+        // The external-data test is the WHOLE opaque-placeholder family
+        // (`is_external_data_placeholder`), not just the `GET DIRECT` calls this
+        // module can resolve. An UNRESOLVABLE one -- `GET XLS DATA` with no
+        // `DataProvider`, the commonest shape in the checked-in corpus -- leaves
+        // an empty equation in every slot, and collapsing that yields
+        // `ApplyToAll(dims, "")`, which is an `EmptyEquation` error where the
+        // `Arrayed` form imported cleanly. It costs the readers too: a variable
+        // with no parseable equation has no dimensions, so a consumer's
+        // `SUM(v[Dim!])` then fails as `CantSubscriptScalar`. Measured on four
+        // corpus models (`groupon 1-3`, `get_with_missing_values_xlsx`), which
+        // gained failing variables until this test was widened.
+        //
+        // The gate also asks the SOURCE SPELLING, not just the expanded slots:
+        // every LHS subscript must name a subscript RANGE. Coverage arithmetic
+        // cannot substitute for that, because a SINGLETON dimension makes it
+        // vacuous -- with `DimA: a1`, the element-specific `x[a1] = 5` produces
+        // one slot, which is the whole cartesian product, and collapsed to
+        // `ApplyToAll([DimA], "5")`. That loses the source's meaning twice over:
+        // the writer re-renders it as `x[DimA] = 5`, and a later dimension edit
+        // adding `a2` silently extends an equation the MDL never wrote for it.
+        // Asking the spelling is also simply what "apply-to-all" means, so the
+        // other blocks (a pinned axis, mixed spellings) become principled rather
+        // than incidental consequences of counting elements.
+        let single_apply_to_all = expanded_eqs.len() == 1
+            && !has_except_eq
+            && default_equation.is_none()
+            && expanded_eqs.iter().all(|e| {
+                e.lhs_subscripts
+                    .iter()
+                    .all(|sub| self.subscript_names_a_dimension(sub))
+            })
+            && !expanded_eqs.iter().any(|e| {
+                let eq_str = match &e.eq.equation {
+                    MdlEquation::Regular(_, expr) | MdlEquation::Data(_, Some(expr)) => {
+                        self.formatter.format_expr(expr)
+                    }
+                    // A `Data` equation with no expression is Vensim's
+                    // implicit-data form: opaque for the same reason.
+                    MdlEquation::Data(_, None) => return true,
+                    _ => return false,
+                };
+                super::external_data::is_external_data_placeholder(&eq_str)
+            });
+        let equation =
+            if single_apply_to_all && self.slots_are_one_apply_to_all(&formatted_dims, &elements) {
+                // One MDL apply-to-all equation is ONE equation. Every subscripted
+                // LHS is expanded to the cartesian product of its subscripts above,
+                // so `y[DimA] = <rhs>` arrived here as N slots all carrying the same
+                // `<rhs>`; that is the same equation written N times, and writing it
+                // once is both the faithful translation and the only form a
+                // dimension reference survives. Vensim's `DimA` in an expression is
+                // the element's 1-based POSITION, and a per-element slot has no
+                // active apply-to-all dimension for it to resolve against -- so
+                // `y[DimA] = VECTOR ELM MAP(x[three], (DimA - 1))`, legal Vensim and
+                // correct through our XMILE reader, failed to compile through this
+                // one. Collapsing loses nothing by construction (see
+                // `slots_are_one_apply_to_all` for the two things `ApplyToAll`
+                // cannot carry), and it is the rule the MDL equivalence harness
+                // already applies to compare us with xmutil, which emits
+                // apply-to-all here.
+                Equation::ApplyToAll(formatted_dims.clone(), elements[0].1.clone())
+            } else {
+                Equation::Arrayed(
+                    formatted_dims.clone(),
+                    elements,
+                    default_equation,
+                    has_except_default,
+                )
+            };
 
         // Build the variable
         let ident = quoted_space_to_underbar(name);
@@ -1604,7 +1733,7 @@ V300\n\
     }
 
     #[test]
-    fn test_subscripted_equation_expands_to_arrayed() {
+    fn test_subscripted_apply_to_all_equation_stays_one_equation() {
         // Subscripted equations with dimension subscripts are expanded to Arrayed
         // so that element-specific overrides can be properly merged.
         let mdl = "DimA: a1, a2, a3
@@ -1626,17 +1755,17 @@ x[DimA] = 5
         assert!(x.is_some(), "Should have x variable");
 
         if let Some(Variable::Aux(a)) = x {
+            // One apply-to-all MDL equation is ONE equation: `x[DimA] = 5`
+            // used to arrive here as three identical `"5"` slots, which is the
+            // same equation written three times and is the form in which a
+            // dimension reference in the RHS cannot resolve (see
+            // `apply_to_all_tests`).
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                Equation::ApplyToAll(dims, eq) => {
                     assert_eq!(dims, &["DimA"]);
-                    assert_eq!(elements.len(), 3);
-                    // All elements have the same equation "5"
-                    for (key, eq, _, _) in elements {
-                        assert!(["a1", "a2", "a3"].contains(&key.as_str()));
-                        assert_eq!(eq, "5");
-                    }
+                    assert_eq!(eq, "5");
                 }
-                other => panic!("Expected Arrayed equation, got {:?}", other),
+                other => panic!("Expected ApplyToAll equation, got {:?}", other),
             }
         } else {
             panic!("Expected Aux variable");
@@ -2588,17 +2717,14 @@ x[DimA] = y[DimA] * 2
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                Equation::ApplyToAll(dims, eq) => {
                     assert_eq!(dims, &["DimA"]);
-                    assert_eq!(elements.len(), 2);
-                    for (_, eq, _, _) in elements {
-                        assert_eq!(
-                            eq, "y[DimA] * 2",
-                            "Apply-to-all should preserve dimension names"
-                        );
-                    }
+                    assert_eq!(
+                        eq, "y[DimA] * 2",
+                        "Apply-to-all should preserve dimension names"
+                    );
                 }
-                other => panic!("Expected Arrayed equation, got {:?}", other),
+                other => panic!("Expected ApplyToAll equation, got {:?}", other),
             }
         } else {
             panic!("Expected Aux variable");

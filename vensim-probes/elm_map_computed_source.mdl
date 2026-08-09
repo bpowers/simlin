@@ -1,0 +1,77 @@
+{UTF-8}
+DimA: A1, A2, A3 ~~|
+DimB: B1, B2 ~~|
+DimX: one, two, three, four, five ~~|
+
+d[A1,B1] = 1 ~~|
+d[A1,B2] = 4 ~~|
+d[A2,B1] = 2 ~~|
+d[A2,B2] = 5 ~~|
+d[A3,B1] = 3 ~~|
+d[A3,B2] = 6 ~~|
+
+off[DimA] = 0, 1, 1 ~~|
+
+x[DimX] = 1, 2, 3, 4, 5 ~~|
+
+ctl slice[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], off[DimA])
+	~	~	CONTROL. Reproduces the checked-in ground truth (vector.mdl's f):
+		expected 1,1,5,5,6,6. If this is not what Vensim prints, the whole
+		sheet is mis-set-up and nothing below can be read. |
+
+probe slice expr[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1] * 1, off[DimA])
+	~	~	QUESTION 1. Same as the control except arg 1 is an EXPRESSION
+		rather than a variable element reference. Does Vensim accept it at
+		all, and if so does the mapping still range over d's full storage? |
+
+helper[DimA] = d[DimA,B1]
+	~	~	The same slice, pre-assigned to a variable of its own. |
+
+probe helper elem[DimA,DimB] = VECTOR ELM MAP(helper[A1], off[DimA])
+	~	~	QUESTION 2. The pre-materialized spelling our implementation
+		claims a computed source is equivalent to: a fresh variable holding
+		exactly the computed values, addressed from its FIRST element. |
+
+probe helper slice[DimA,DimB] = VECTOR ELM MAP(helper[DimA], off[DimA])
+	~	~	QUESTION 3. The same helper addressed per element instead. |
+
+ctl elem[DimA] = VECTOR ELM MAP(x[three], DimA - 1)
+	~	~	CONTROL. Reproduces vector.mdl's y: expected 3,4,5. |
+
+probe elem expr[DimA] = VECTOR ELM MAP(x[three] * 1, DimA - 1)
+	~	~	QUESTION 4. The single-element base, computed. |
+
+INITIAL TIME  = 0 ~~|
+FINAL TIME  = 1 ~~|
+TIME STEP  = 1 ~~|
+SAVEPER  = TIME STEP ~~|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,ctl elem,401,140,40,22,8,3,0,0,-1,0,0,0
+10,2,ctl slice,342,188,40,22,8,3,0,0,-1,0,0,0
+10,3,d,127,284,40,20,8,3,0,0,-1,0,0,0
+10,4,helper,180,233,40,20,8,3,0,0,-1,0,0,0
+10,5,off,144,188,40,20,8,3,0,0,-1,0,0,0
+10,6,probe elem expr,428,246,40,22,8,3,0,0,-1,0,0,0
+10,7,probe helper elem,121,241,44,22,8,3,0,0,-1,0,0,0
+10,8,probe helper slice,228,124,48,22,8,3,0,0,-1,0,0,0
+10,9,probe slice expr,50,268,40,22,8,3,0,0,-1,0,0,0
+10,10,x,512,50,40,20,8,3,0,0,-1,0,0,0
+10,11,d,279,216,40,20,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,12,off,273,188,40,20,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,13,x,455,183,40,20,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,14,10,1,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+1,15,11,2,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+1,16,12,2,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+1,17,3,4,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+1,18,13,6,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+1,19,4,7,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+1,20,5,7,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+1,21,4,8,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+1,22,5,8,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+1,23,3,9,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+1,24,5,9,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|
+///---\\\

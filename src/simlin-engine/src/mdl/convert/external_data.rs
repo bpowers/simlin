@@ -450,6 +450,43 @@ pub(super) fn is_get_direct_ref(expr_str: &str) -> bool {
     trimmed.starts_with("{GET DIRECT")
 }
 
+/// Check if an expression string is any EXTERNAL-DATA placeholder the normalizer
+/// wrapped in braces -- the `GET DIRECT` family plus `GET XLS` / `GET VDF` /
+/// `GET DATA` / `GET 123`.
+///
+/// Deliberately broader than [`is_get_direct_ref`], which means "this is a call
+/// this module can RESOLVE through a `DataProvider`" and must stay narrow (its
+/// own test asserts `{GET XLS(...)}` is not one). This one means "this is an
+/// opaque placeholder, not an equation", which is the question the apply-to-all
+/// collapse has to ask: such a placeholder carries per-element data whether or
+/// not we can read it today, and one that cannot be resolved leaves an EMPTY
+/// equation behind. Collapsing that to `ApplyToAll(dims, "")` turns a variable
+/// that imported cleanly into an `EmptyEquation` error -- and takes its readers
+/// with it, since a variable with no parseable equation has no dimensions to
+/// offer and `SUM(v[Dim!])` then fails as `CantSubscriptScalar`. Measured on
+/// `v[DimA] := GET XLS DATA(...)` with no provider configured: clean import
+/// before, two errors after.
+///
+/// The family list mirrors `mdl::writer::is_data_equation`, which makes the same
+/// opaque-placeholder distinction on the way out.
+pub(super) fn is_external_data_placeholder(expr_str: &str) -> bool {
+    let s = expr_str.trim().trim_start_matches('{');
+    [
+        "GET DIRECT",
+        "GET XLS",
+        "GET VDF",
+        "GET DATA",
+        "GET 123",
+        "GET_DIRECT",
+        "GET_XLS",
+        "GET_VDF",
+        "GET_DATA",
+        "GET_123",
+    ]
+    .iter()
+    .any(|p| s.starts_with(p))
+}
+
 /// Try to resolve a GET DIRECT reference from an expression string.
 /// Returns None if the string isn't a GET DIRECT reference or if no DataProvider
 /// is configured.

@@ -675,7 +675,7 @@ mod model_ltm_reference_sites_tests {
     /// GH #757 (T6 flip): a mapped iterated-dim subscript whose POSITIONAL
     /// mapping is declared only in the REVERSE direction (on the source's
     /// `Region` toward `State`) now classifies `Bare` too -- the mapped arm
-    /// gates on `mapped_element_correspondence` (both declaration
+    /// gates on `positional_correspondence` (both declaration
     /// directions, via `classify_axis_access`'s
     /// `iterated_axis_slot_elements`), matching the compiler's
     /// `translate_via_mapping`.

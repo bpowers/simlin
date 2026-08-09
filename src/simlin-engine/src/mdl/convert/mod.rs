@@ -7,6 +7,8 @@
 //! This module converts parsed MDL AST items directly to `datamodel::Project`,
 //! bypassing the XMILE intermediate format.
 
+#[cfg(test)]
+mod apply_to_all_tests;
 mod dimensions;
 mod external_data;
 mod helpers;

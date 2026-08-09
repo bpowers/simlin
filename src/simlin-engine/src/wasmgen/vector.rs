@@ -301,16 +301,28 @@ fn push_all_valid(views: &[&ViewDesc], f: &mut Function) {
 /// view's `base_off`, NOT folding in its `offset`, which the caller already folds
 /// into the flat index). For a module-relative var view the runtime `module_off`
 /// addend is signalled via the returned `bool`.
-fn view_storage_base(view: &ViewDesc, ctx: &EmitCtx) -> Result<(u64, bool), WasmGenError> {
+fn view_storage_base(view: &ViewDesc, ctx: &EmitCtx) -> Result<StorageBase, WasmGenError> {
+    let bases = ctx.region_bases();
+    let region = |base: u32| u64::from(base) + u64::from(view.base_off) * u64::from(SLOT_SIZE);
     match view.base {
-        ViewBase::CurrAbsolute => Ok((
-            u64::from(ctx.curr_base) + u64::from(view.base_off) * u64::from(SLOT_SIZE),
-            false,
-        )),
-        ViewBase::CurrModuleRelative => Ok((
-            u64::from(ctx.curr_base) + u64::from(view.base_off) * u64::from(SLOT_SIZE),
-            true,
-        )),
+        ViewBase::Curr => Ok(StorageBase {
+            base_byte: region(bases.curr),
+            module_relative: true,
+            prev_fallback_gated: false,
+        }),
+        // The snapshot regions share `curr`'s slot numbering; `prev` carries the
+        // `use_prev_fallback` gate, and `initial`'s phase branch is already
+        // folded into `bases.initial` (see `views::ViewBase`).
+        ViewBase::Prev => Ok(StorageBase {
+            base_byte: region(bases.prev),
+            module_relative: true,
+            prev_fallback_gated: true,
+        }),
+        ViewBase::Initial => Ok(StorageBase {
+            base_byte: region(bases.initial),
+            module_relative: true,
+            prev_fallback_gated: false,
+        }),
         ViewBase::Temp => {
             let temp_off = *ctx
                 .ctx
@@ -321,12 +333,22 @@ fn view_storage_base(view: &ViewDesc, ctx: &EmitCtx) -> Result<(u64, bool), Wasm
                         "wasmgen: vector-op source references an out-of-range temp id".to_string(),
                     )
                 })? as u64;
-            Ok((
-                u64::from(ctx.temp_storage_base) + temp_off * u64::from(SLOT_SIZE),
-                false,
-            ))
+            Ok(StorageBase {
+                base_byte: u64::from(bases.temp_storage) + temp_off * u64::from(SLOT_SIZE),
+                module_relative: false,
+                prev_fallback_gated: false,
+            })
         }
     }
+}
+
+/// The result of [`view_storage_base`]: where a view's storage element 0 lives
+/// and which runtime addends/gates a read of it needs.
+#[derive(Clone, Copy)]
+struct StorageBase {
+    base_byte: u64,
+    module_relative: bool,
+    prev_fallback_gated: bool,
 }
 
 // ── VectorSelect (vm.rs:2444-2502) ──────────────────────────────────────────
@@ -663,7 +685,7 @@ fn emit_vector_elm_map_body(
         .map(|sd| offset_view.dim_ids.iter().position(|od| od == sd))
         .collect();
 
-    let (src_base_byte, src_module_relative) = view_storage_base(source_view, ctx)?;
+    let src_storage = view_storage_base(source_view, ctx)?;
 
     let offset_val = ctx.vector_f64_locals[0];
     let flat_i = ctx.vector_i32_locals[0];
@@ -728,7 +750,7 @@ fn emit_vector_elm_map_body(
         f.instruction(&f64_const(f64::NAN));
         f.instruction(&Ins::Else);
         // source[flat_i]: base byte + flat_i*8 (+ module_off*8 if module-relative)
-        emit_storage_indexed_load(src_base_byte, src_module_relative, flat_i, ctx, f);
+        emit_storage_indexed_load(src_storage, flat_i, ctx, f);
         f.instruction(&Ins::End);
 
         f.instruction(&Ins::F64Store(memarg(temp_addr)));
@@ -740,14 +762,22 @@ fn emit_vector_elm_map_body(
 /// constant `base_byte` and `flat_i` (an i32 local) is the runtime slot index:
 /// `f64.load[base_byte + (module_off? )*8 + flat_i*8]`. The constant `base_byte`
 /// rides in the `memarg.offset`; the runtime part is `(module_off + flat_i) * 8`
-/// for a module-relative view, else `flat_i * 8`.
-fn emit_storage_indexed_load(
-    base_byte: u64,
-    module_relative: bool,
-    flat_i: u32,
-    ctx: &EmitCtx,
-    f: &mut Function,
-) {
+/// for a module-relative view, else `flat_i * 8`. A PREVIOUS-region source
+/// additionally gets the `use_prev_fallback` select.
+fn emit_storage_indexed_load(storage: StorageBase, flat_i: u32, ctx: &EmitCtx, f: &mut Function) {
+    let StorageBase {
+        base_byte,
+        module_relative,
+        prev_fallback_gated,
+    } = storage;
+    // A PREVIOUS source reads the fallback 0 for every element until the first
+    // snapshot exists; the fallback operand goes on first so `select` (which
+    // yields its DEEPER operand when the condition is non-zero) picks it while
+    // the flag is set -- the same shape `emit_load_prev` uses for the scalar
+    // opcode, and the VM's `ChunkRegions::backing` `None` arm.
+    if prev_fallback_gated {
+        f.instruction(&Ins::F64Const(0.0.into()));
+    }
     if module_relative {
         push_module_relative_base(ctx, f); // module_off * 8
         f.instruction(&Ins::LocalGet(flat_i));
@@ -760,6 +790,10 @@ fn emit_storage_indexed_load(
         f.instruction(&Ins::I32Mul);
     }
     f.instruction(&Ins::F64Load(memarg(base_byte)));
+    if prev_fallback_gated {
+        f.instruction(&Ins::GlobalGet(ctx.use_prev_fallback_global));
+        f.instruction(&Ins::Select);
+    }
 }
 
 // ── VectorSortOrder (vm_vector_sort_order.rs:49-101) ─────────────────────────
