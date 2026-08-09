@@ -2837,17 +2837,17 @@ fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop
 /// (model-only) surface. The structural FFI takes no `Results` and reports R/B
 /// at confidence 1.0 / U at 0.0; the runtime FFI builds the same exhaustive
 /// loop set and calls this helper over the completed sim's `loop_score`
-/// series, so the exhaustive surface can finally report `Mostly*` (Rux/Bux) or
-/// a runtime sign flip. (Now that GH #495 surfaces all five polarity variants
-/// along with the confidence verbatim across the FFI, there is no longer a
-/// coalescing/confidence-drop at the boundary.) The pysimlin `Run.loops`
-/// surface still reclassifies via its own Python `LoopPolarity.from_runtime_scores`
-/// mirror (slot-0 only -- see the A2A note below); pysimlin exposes the
-/// all-slots engine path separately as `Run.loops_runtime`. The engine
+/// series, so the exhaustive surface can report `Mostly*` (Rux/Bux) or a
+/// runtime sign flip. (GH #495 surfaces all five polarity variants along with
+/// the confidence verbatim across the FFI, so there is no
+/// coalescing/confidence-drop at the boundary.) pysimlin's `Run.loops` rides
+/// this same helper -- bound as `Sim.get_loops_runtime` -- so Python performs
+/// no reclassification of its own and the classification rules live only in
+/// [`crate::ltm::LoopPolarity::from_runtime_scores`]. The engine
 /// `analyze_model` / MCP surface is discovery-based and reclassifies through
 /// the `FoundLoop` path.
 ///
-/// # A2A semantics differ across the three reclassification sites
+/// # A2A semantics differ between the two reclassification sites
 ///
 /// `loop_partitions` is the per-loop slot->partition map carried on
 /// `LtmVariablesResult::loop_partitions`; its slot-vector length is the
@@ -2855,24 +2855,16 @@ fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop
 /// **concatenates every element slot's series into one sample set** and
 /// classifies the mixed result: if any element of the loop is balancing while
 /// another is reinforcing the loop classifies `Undetermined` (a deliberate
-/// "the loop's sign is not uniform across the array" reading). This is NOT the
-/// same input construction the other two sites use, so do not claim they
-/// agree:
-/// - **pysimlin `Run.loops`** reads `get_series("$⁚ltm⁚loop_score⁚{id}")`,
-///   which resolves to **slot 0 only** (the dominant/first element), so an
-///   A2A loop is classified from a single element's series.
-/// - **discovery** (`ltm_finding`) classifies each `FoundLoop` from its own
-///   single strongest-path scalar score series.
+/// "the loop's sign is not uniform across the array" reading). This is NOT
+/// the input construction discovery uses, so do not claim they agree:
+/// **discovery** (`ltm_finding`) classifies each `FoundLoop` from its own
+/// single strongest-path scalar score series.
 ///
-/// All three share the *scalar* semantics (`from_runtime_scores`'s NaN/zero
+/// Both sites share the *scalar* semantics (`from_runtime_scores`'s NaN/zero
 /// filter; all-positive -> Reinforcing, all-negative -> Balancing, mixed
-/// dominant >= threshold -> Mostly*, otherwise Undetermined) and agree exactly
-/// on a scalar loop; they diverge only in how an A2A loop's multiple element
-/// slots are reduced to one classification. The sim-bearing FFI consumer
-/// (`simlin_analyze_get_loops_runtime`, GH #679) deliberately exposes THIS
-/// all-slots reading -- pysimlin surfaces it as `Run.loops_runtime`, keeping
-/// the slot-0 `Run.loops` path unchanged -- so the two A2A readings now coexist
-/// rather than one being reconciled into the other.
+/// dominant >= threshold -> Mostly*, otherwise Undetermined) and agree
+/// exactly on a scalar loop; they diverge only in how an A2A loop's multiple
+/// element slots are reduced to one classification.
 pub fn reclassify_loops_from_results(
     loops: &mut [DetectedLoop],
     results: &crate::Results,

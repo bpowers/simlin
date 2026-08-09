@@ -135,12 +135,11 @@ mod tests {
     // setuptools-scm derives it from the `pysimlin-v*` tag itself (see
     // `tag_regex` in src/pysimlin/pyproject.toml) -- so the tag is the only
     // thing this can be checked against, and the check needs the tags to be
-    // present locally. CI checks out with `actions/checkout@v4` and no
-    // `fetch-depth`, i.e. a shallow clone with no tags, so this guard runs
-    // only on a developer's full clone and is a no-op in CI. That is a
-    // deliberate limitation, not an oversight: making it fail on an empty tag
-    // list would break every CI run. The skip is announced rather than silent
-    // so a run that unexpectedly finds no tags is attributable.
+    // present locally. CI's Build-job checkout sets `fetch-tags: true`
+    // specifically so this guard runs there. A clone without the tags (e.g. a
+    // developer's fresh shallow clone) skips rather than fails -- announced
+    // rather than silent, so a run that unexpectedly finds no tags is
+    // attributable.
     #[test]
     fn pysimlin_version_matches_latest_tag() {
         let output = std::process::Command::new("git")
@@ -151,8 +150,9 @@ mod tests {
         if !output.status.success() || tags.trim().is_empty() {
             eprintln!(
                 "SKIPPING pysimlin_version_matches_latest_tag: no pysimlin-v* tags are \
-                 visible (a shallow clone, as CI produces, fetches no tags). Run \
-                 `git fetch --tags --unshallow` to exercise this guard."
+                 visible. CI fetches tags (fetch-tags: true in ci.yaml), so this skip is \
+                 expected only on a local clone without them; run `git fetch --tags` to \
+                 exercise this guard."
             );
             return;
         }
