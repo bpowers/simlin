@@ -1525,7 +1525,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.0.0" },
-    { name = "cattrs", specifier = ">=24.1.0" },
+    { name = "cattrs", specifier = ">=23" },
     { name = "cffi", specifier = ">=1.15.0" },
     { name = "hypothesis", marker = "extra == 'test'", specifier = ">=6.100.0" },
     { name = "ipykernel", marker = "extra == 'notebooks'", specifier = ">=6.29" },
