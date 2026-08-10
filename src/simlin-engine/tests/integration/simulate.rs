@@ -6493,6 +6493,60 @@ fn assert_poisoned_next_matches(xmile_path: &str) {
     }
 }
 
+// -- Fusion must never raise a program's peak stack depth ------------------
+//
+// `compiler::symbolic::resolve_bytecode` proves the compiled stream fits
+// `STACK_CAPACITY`, and `vm::Stack` uses unchecked access on the strength of
+// that proof -- but the proof is computed on the PRE-fusion stream, while the
+// Vm executes the fused one. So `fuse_three_address` carries a standing
+// obligation: a fused opcode's `stack_effect` must account for every operand
+// the sequence it replaces consumed, and the peak may fall but never rise.
+//
+// Neither the hero models nor a results fingerprint covers this, which is why
+// it gets its own test. The deepest stack any corpus model reaches is 8-12
+// against a `STACK_CAPACITY` of 64, so a wrong stack effect has >5x of headroom
+// to hide in: it would not overflow, the arithmetic would still be right, and
+// every saved value would match. Comparing the two depths is what detects it.
+// A stack-effect that underflows shows up as the `Err` arm, which means the
+// metadata is wrong rather than the program.
+//
+// Scope: every corpus model, both executed phases, all modules. Initials are
+// excluded because `Vm::new` leaves them unfused.
+#[test]
+fn fusion_never_raises_peak_stack_depth() {
+    let mut checked = 0usize;
+    for path in TEST_MODELS.iter() {
+        let path = format!("../../{path}");
+        let Ok(f) = File::open(&path) else { continue };
+        let mut f = BufReader::new(f);
+        let Ok(datamodel_project) = xmile::project_from_reader(&mut f) else {
+            continue;
+        };
+        for check in compile_vm(&datamodel_project).fusion_depth_audit() {
+            let (module, phase) = (&check.module, check.phase);
+            let pre = check
+                .pre_depth
+                .unwrap_or_else(|e| panic!("{path}: {module}/{phase}: pre-fusion {e}"));
+            let post = check
+                .post_depth
+                .unwrap_or_else(|e| panic!("{path}: {module}/{phase}: post-fusion {e}"));
+            assert!(
+                post <= pre,
+                "{path}: {module}/{phase}: fusion RAISED peak stack depth {pre} -> {post} \
+                 ({} -> {} opcodes). `resolve_bytecode`'s capacity proof is computed on the \
+                 pre-fusion stream, so it no longer covers what the Vm executes.",
+                check.pre_opcodes,
+                check.post_opcodes,
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked > 100,
+        "expected a real corpus sweep, checked {checked}"
+    );
+}
+
 #[test]
 fn only_documented_classes_carry_across_a_step() {
     for path in TEST_MODELS.iter() {
