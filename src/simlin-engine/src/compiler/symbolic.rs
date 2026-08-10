@@ -1823,6 +1823,109 @@ fn gf_block_key(tables: &[Vec<(f64, f64)>]) -> GfBlockKey {
     key
 }
 
+impl SymbolicOpcode {
+    /// The graphical-function BLOCK this opcode references, as
+    /// `(base_gf, table_count)` -- i.e. the run `[base_gf, base_gf + table_count)`
+    /// in the fragment's own `graphical_functions`.
+    ///
+    /// This is the SINGLE place that decides whether an opcode carries a
+    /// graphical function, and the match is exhaustive with no `_` arm on
+    /// purpose: a new variant cannot be added without answering the question
+    /// here, which is a compile error rather than a silent omission.
+    ///
+    /// That matters because the consumer, `gf_blocks_of_fragment`, reconstructs
+    /// a fragment's GF block layout by scanning for these runs, and a lookup
+    /// opcode it does not recognise is not an error -- the block simply stops
+    /// being seen as referenced, collapses into a maximal un-referenced GAP,
+    /// and the de-duplicated table layout comes out wrong with no diagnostic
+    /// anywhere. Wrong numbers, not a failure. A test cannot close that hole
+    /// either: a fixture exercising one lookup opcode passes unchanged when a
+    /// second is added and ignored, which is the "a test that pins one arm of
+    /// an N-way decision reads exactly like a test that pins the decision"
+    /// hazard. Only the compiler covers every arm.
+    ///
+    /// The same reasoning, and the same shape, as `BuiltinId::arity`.
+    pub(crate) fn gf_run(&self) -> Option<(usize, usize)> {
+        match self {
+            SymbolicOpcode::Lookup {
+                base_gf,
+                table_count,
+                ..
+            }
+            | SymbolicOpcode::LookupDirect {
+                base_gf,
+                table_count,
+                ..
+            }
+            | SymbolicOpcode::LookupArray {
+                base_gf,
+                table_count,
+                ..
+            } => Some((*base_gf as usize, *table_count as usize)),
+            // Every remaining variant, spelled out rather than wildcarded --
+            // that is what makes a new one a compile error here.
+            SymbolicOpcode::Op2 { .. }
+            | SymbolicOpcode::Not { .. }
+            | SymbolicOpcode::LoadConstant { .. }
+            | SymbolicOpcode::LoadVar { .. }
+            | SymbolicOpcode::SymLoadPrev { .. }
+            | SymbolicOpcode::SymLoadInitial { .. }
+            | SymbolicOpcode::LoadGlobalVar { .. }
+            | SymbolicOpcode::PushSubscriptIndex { .. }
+            | SymbolicOpcode::LoadSubscript { .. }
+            | SymbolicOpcode::SetCond { .. }
+            | SymbolicOpcode::If { .. }
+            | SymbolicOpcode::Ret
+            | SymbolicOpcode::LoadModuleInput { .. }
+            | SymbolicOpcode::EvalModule { .. }
+            | SymbolicOpcode::AssignCurr { .. }
+            | SymbolicOpcode::Apply { .. }
+            | SymbolicOpcode::AssignConstCurr { .. }
+            | SymbolicOpcode::BinOpAssignCurr { .. }
+            | SymbolicOpcode::BinOpAssignNext { .. }
+            | SymbolicOpcode::PushTempView { .. }
+            | SymbolicOpcode::PushStaticView { .. }
+            | SymbolicOpcode::PushVarViewDirect { .. }
+            | SymbolicOpcode::ViewSubscriptConst { .. }
+            | SymbolicOpcode::ViewSubscriptDynamic { .. }
+            | SymbolicOpcode::ViewRange { .. }
+            | SymbolicOpcode::ViewRangeDynamic { .. }
+            | SymbolicOpcode::ViewStarRange { .. }
+            | SymbolicOpcode::ViewWildcard { .. }
+            | SymbolicOpcode::ViewTranspose { .. }
+            | SymbolicOpcode::PopView { .. }
+            | SymbolicOpcode::DupView { .. }
+            | SymbolicOpcode::LoadTempConst { .. }
+            | SymbolicOpcode::LoadTempDynamic { .. }
+            | SymbolicOpcode::BeginIter { .. }
+            | SymbolicOpcode::LoadIterElement { .. }
+            | SymbolicOpcode::LoadIterTempElement { .. }
+            | SymbolicOpcode::LoadIterViewTop { .. }
+            | SymbolicOpcode::LoadIterViewAt { .. }
+            | SymbolicOpcode::StoreIterElement { .. }
+            | SymbolicOpcode::NextIterOrJump { .. }
+            | SymbolicOpcode::EndIter { .. }
+            | SymbolicOpcode::ArraySum { .. }
+            | SymbolicOpcode::ArrayMax { .. }
+            | SymbolicOpcode::ArrayMin { .. }
+            | SymbolicOpcode::ArrayMean { .. }
+            | SymbolicOpcode::ArrayStddev { .. }
+            | SymbolicOpcode::ArraySize { .. }
+            | SymbolicOpcode::VectorSelect { .. }
+            | SymbolicOpcode::VectorElmMap { .. }
+            | SymbolicOpcode::VectorSortOrder { .. }
+            | SymbolicOpcode::Rank { .. }
+            | SymbolicOpcode::AllocateAvailable { .. }
+            | SymbolicOpcode::AllocateByPriority { .. }
+            | SymbolicOpcode::BeginBroadcastIter { .. }
+            | SymbolicOpcode::LoadBroadcastElement { .. }
+            | SymbolicOpcode::StoreBroadcastElement { .. }
+            | SymbolicOpcode::NextBroadcastOrJump { .. }
+            | SymbolicOpcode::EndBroadcastIter { .. } => None,
+        }
+    }
+}
+
 /// Reconstruct the GF *block* layout of a single fragment as a list of
 /// `(start, len)` blocks covering `[0, gf_len)` exactly, sorted by `start`
 /// (#582).
@@ -1860,29 +1963,8 @@ fn gf_blocks_of_fragment(frag: &PerVarBytecodes) -> Result<Vec<(usize, usize)>, 
     // Collect the distinct opcode runs.
     let mut runs: Vec<(usize, usize)> = Vec::new();
     for op in &frag.symbolic.code {
-        let (base, count) = match op {
-            SymbolicOpcode::Lookup {
-                base_gf,
-                table_count,
-                ..
-            }
-            | SymbolicOpcode::LookupArray {
-                base_gf,
-                table_count,
-                ..
-            }
-            | SymbolicOpcode::LookupDirect {
-                base_gf,
-                table_count,
-                ..
-            } => (*base_gf as usize, *table_count as usize),
-            // OBLIGATION: every lookup-family opcode that carries a `base_gf`
-            // MUST be listed above. This arm is silent -- an unlisted one is
-            // skipped with no diagnostic, its block collapses into an
-            // un-referenced gap, and the de-duplicated table layout is wrong
-            // with no error anywhere. `test_gf_block_scan_sees_lookup_direct_runs`
-            // is the tripwire; extend it when adding a lookup opcode.
-            _ => continue,
+        let Some((base, count)) = op.gf_run() else {
+            continue;
         };
         if count == 0 {
             continue;
@@ -4557,6 +4639,50 @@ mod tests {
             static_views: vec![],
             temp_sizes: vec![],
             dim_lists: vec![],
+        }
+    }
+
+    /// Every opcode that carries a `base_gf`, with the run it reports.
+    ///
+    /// Derived from the enum rather than sampled: `gf_run`'s match is
+    /// exhaustive with no `_`, so the compiler is what guarantees a new variant
+    /// answers the question, and this pins the answer for the three that do
+    /// carry one. A representative non-carrier of each shape (unit and struct)
+    /// is included so the `None` side is exercised too.
+    #[test]
+    fn gf_run_reports_every_lookup_family_opcode() {
+        let rows: Vec<(SymbolicOpcode, Option<(usize, usize)>)> = vec![
+            (
+                SymbolicOpcode::Lookup {
+                    base_gf: 3,
+                    table_count: 2,
+                    mode: LookupMode::Interpolate,
+                },
+                Some((3, 2)),
+            ),
+            (
+                SymbolicOpcode::LookupDirect {
+                    base_gf: 5,
+                    table_count: 4,
+                    elem: 1,
+                    mode: LookupMode::Interpolate,
+                },
+                Some((5, 4)),
+            ),
+            (
+                SymbolicOpcode::LookupArray {
+                    base_gf: 7,
+                    table_count: 6,
+                    mode: LookupMode::Interpolate,
+                    write_temp_id: 0,
+                },
+                Some((7, 6)),
+            ),
+            (SymbolicOpcode::Ret, None),
+            (SymbolicOpcode::SetCond {}, None),
+        ];
+        for (op, want) in rows {
+            assert_eq!(op.gf_run(), want, "gf_run of {op:?}");
         }
     }
 
