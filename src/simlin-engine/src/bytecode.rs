@@ -759,6 +759,26 @@ pub(crate) enum Opcode {
         off: VariableOffset,
     },
 
+    // === CONDITIONAL SELECT (R3) ===
+    // `compiler::codegen`'s `Expr::If` arm emits `SetCond` and `If` in one
+    // breath and is the SOLE producer of either, so the pair is adjacent BY
+    // CONSTRUCTION -- measured on C-LEARN as exactly equal executed counts
+    // (1,874,169 each, 6.38% of dispatches apiece). Neither `peephole_optimize`
+    // nor `fuse_three_address` can separate them: both only ever REPLACE an
+    // adjacent run, and `SetCond` is neither a leaf load nor a combiner, so no
+    // fusion window can absorb it.
+    //
+    // Folding the pair removes a dispatch AND the `condition` round trip; the
+    // trailing `AssignCurr` (which follows ~91% of executed `If`s) folds in too.
+    // Created only by the late `fuse_three_address` pass, like the 3-address
+    // forms below -- they never enter the symbolic/incremental layer.
+    /// Pop `cond`, `f`, `t`; push `t` if `cond` is truthy else `f`.
+    SelectIf {},
+    /// Pop `cond`, `f`, `t`; `curr[module_off + off] = if cond { t } else { f }`.
+    SelectIfAssignCurr {
+        off: VariableOffset,
+    },
+
     // === 3-ADDRESS BINARY OPS (R2) ===
     // Fold the leaf operand load(s) of a binary op into the op itself, so a
     // subexpression `a op b` dispatches once instead of 3 (two loads + Op2) or
@@ -1361,6 +1381,13 @@ impl Opcode {
             Opcode::BinOpAssignCurr { .. } => (2, 0), // pops 2, assigns directly
             Opcode::BinOpAssignNext { .. } => (2, 0), // pops 2, assigns directly
 
+            // Conditional select: the fusions of `SetCond`(1,0)+`If`(2,1) and of
+            // that pair plus `AssignCurr`(1,0). Net effect is identical to the
+            // sequence they replace, which is what keeps the fixed-stack safety
+            // proof in `resolve_bytecode` valid across the pass.
+            Opcode::SelectIf {} => (3, 1), // pops cond+false+true, pushes result
+            Opcode::SelectIfAssignCurr { .. } => (3, 0), // same, assigns directly
+
             // 3-address binops: the *Var/*Const forms read both operands from
             // curr/literals and push (0 pops, 1 push); the Stack* forms pop the
             // lhs and push the result (1 pop, 1 push).
@@ -1515,6 +1542,8 @@ impl Opcode {
             Opcode::BinConstConst { .. } => "BinConstConst",
             Opcode::BinOpAssignCurr { .. } => "BinOpAssignCurr",
             Opcode::BinOpAssignNext { .. } => "BinOpAssignNext",
+            Opcode::SelectIf {} => "SelectIf",
+            Opcode::SelectIfAssignCurr { .. } => "SelectIfAssignCurr",
             Opcode::AssignAddVarVarCurr { .. } => "AssignAddVarVarCurr",
             Opcode::AssignSubVarVarCurr { .. } => "AssignSubVarVarCurr",
             Opcode::AssignMulVarVarCurr { .. } => "AssignMulVarVarCurr",
@@ -1973,6 +2002,44 @@ impl ByteCode {
         let mut i = 0;
         while i < self.code.len() {
             let new_pc = optimized.len();
+
+            // Conditional select: `SetCond; If[; AssignCurr]`. Tried before the
+            // leaf windows because `SetCond` matches none of them (it is neither
+            // a leaf load nor a combiner), so the two rule sets are disjoint and
+            // the order is a readability choice, not a precedence one. The
+            // 3-window is tried first for the same reason the leaf-assign forms
+            // are: it collapses the store too (3->1 rather than 2->1 plus a
+            // separate store), and ~91% of executed `If`s are followed by one.
+            if matches!(self.code[i], Opcode::SetCond {}) {
+                let if_at = i + 1;
+                let pair_ok = if_at < self.code.len()
+                    && matches!(self.code[if_at], Opcode::If {})
+                    && !jump_targets[if_at];
+                if pair_ok {
+                    let assign_at = i + 2;
+                    let fused_assign = if assign_at < self.code.len() && !jump_targets[assign_at] {
+                        match &self.code[assign_at] {
+                            Opcode::AssignCurr { off } => Some(*off),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(off) = fused_assign {
+                        optimized.push(Opcode::SelectIfAssignCurr { off });
+                        pc_map.push(new_pc); // old i
+                        pc_map.push(new_pc); // old i+1
+                        pc_map.push(new_pc); // old i+2
+                        i += 3;
+                        continue;
+                    }
+                    optimized.push(Opcode::SelectIf {});
+                    pc_map.push(new_pc); // old i
+                    pc_map.push(new_pc); // old i+1
+                    i += 2;
+                    continue;
+                }
+            }
 
             // 3-window: [leaf load, leaf load, <combiner>] where the combiner is
             // either an `Op2` (a pushing subexpression) or a `BinOpAssign{Curr|
@@ -3693,6 +3760,121 @@ mod tests {
             bc.code[3],
             Opcode::NextIterOrJump { jump_back: -1 }
         ));
+    }
+
+    // === Conditional-select fusion (SetCond;If[;AssignCurr]) ===
+    //
+    // `compiler::codegen`'s `Expr::If` arm is the SOLE producer of both opcodes
+    // and pushes them in one breath, so the pair is adjacent BY CONSTRUCTION --
+    // measured on C-LEARN as exactly equal executed counts (1,874,169 each).
+    // Neither `peephole_optimize` nor this pass can separate them: both only
+    // ever REPLACE an adjacent run, and `SetCond` is neither a leaf load nor a
+    // combiner, so no window can absorb it. These tests pin the fusion, both
+    // jump-target guards, and the stack-depth effect.
+
+    #[test]
+    fn test_fuse_setcond_if_pair() {
+        // `IF c THEN t ELSE f` as a pushing subexpression: codegen emits
+        // t; f; c; SetCond; If. The trailing pair collapses to one dispatch.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 }, // t
+                Opcode::LoadVar { off: 1 }, // f
+                Opcode::LoadVar { off: 2 }, // c
+                Opcode::SetCond {},
+                Opcode::If {},
+            ],
+        };
+        bc.fuse_three_address();
+        // The leading loads are not a fusible window (no combiner follows the
+        // pair), so only the SetCond;If tail collapses: 5 -> 4.
+        assert_eq!(bc.code.len(), 4);
+        assert!(matches!(bc.code[3], Opcode::SelectIf {}));
+    }
+
+    #[test]
+    fn test_fuse_setcond_if_assign_triple() {
+        // `x = IF c THEN t ELSE f`: the whole tail is one dispatch. This is the
+        // dominant shape -- ~91% of executed `If`s are followed by `AssignCurr`.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::LoadVar { off: 2 },
+                Opcode::SetCond {},
+                Opcode::If {},
+                Opcode::AssignCurr { off: 9 },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 4);
+        assert!(matches!(bc.code[3], Opcode::SelectIfAssignCurr { off: 9 }));
+    }
+
+    #[test]
+    fn test_fuse_setcond_if_blocked_when_if_is_jump_target() {
+        // A jump landing on the `If` means the pair is not a unit: fusing would
+        // make the jump land mid-fusion. Leave both alone.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::SetCond {},                       // [0]
+                Opcode::If {},                            // [1] <- jump target
+                Opcode::NextIterOrJump { jump_back: -1 }, // [2] -> [1]
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 3);
+        assert!(matches!(bc.code[0], Opcode::SetCond {}));
+        assert!(matches!(bc.code[1], Opcode::If {}));
+    }
+
+    #[test]
+    fn test_fuse_setcond_if_assign_falls_back_to_pair_when_assign_is_jump_target() {
+        // The 3-window is blocked because a jump targets the AssignCurr, but the
+        // SetCond;If pair is still a unit and must still fuse.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::SetCond {},                       // [0]
+                Opcode::If {},                            // [1]
+                Opcode::AssignCurr { off: 3 },            // [2] <- jump target
+                Opcode::NextIterOrJump { jump_back: -1 }, // [3] -> [2]
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 3);
+        assert!(matches!(bc.code[0], Opcode::SelectIf {}));
+        assert!(matches!(bc.code[1], Opcode::AssignCurr { off: 3 }));
+        // The jump must have been retargeted onto the AssignCurr's new pc.
+        assert!(matches!(
+            bc.code[2],
+            Opcode::NextIterOrJump { jump_back: -1 }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_setcond_if_preserves_max_stack_depth() {
+        // `SetCond` is (1,0) and `If` is (2,1); the fused `SelectIf` is (3,1) and
+        // `SelectIfAssignCurr` is (3,0). Net effect and peak must be unchanged --
+        // the VM's fixed-stack safety proof is discharged against these numbers.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::LoadVar { off: 2 },
+                Opcode::SetCond {},
+                Opcode::If {},
+                Opcode::AssignCurr { off: 9 },
+            ],
+        };
+        let before = bc.max_stack_depth().unwrap();
+        assert_eq!(before, 3);
+        bc.fuse_three_address();
+        assert_eq!(bc.max_stack_depth().unwrap(), 3);
     }
 
     // === 3-address fusion with GLOBAL operands and two-constant operands ===

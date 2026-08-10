@@ -2157,6 +2157,26 @@ impl Vm {
                     next[module_off + *off as usize] = eval_op2(*op, l, r);
                     debug_assert_eq!(0, stack.len());
                 }
+                // === CONDITIONAL SELECT (R3) ===
+                // The fused `SetCond; If[; AssignCurr]`. Codegen pushes the true
+                // arm, then the false arm, then the condition, so these pop in
+                // the order cond, false, true -- exactly the order the three
+                // separate arms performed them in. Selecting between two
+                // already-evaluated operands is what `If` did; nothing about
+                // branch evaluation changes here.
+                Opcode::SelectIf {} => {
+                    let cond = stack.pop();
+                    let f = stack.pop();
+                    let t = stack.pop();
+                    stack.push(if is_truthy(cond) { t } else { f });
+                }
+                Opcode::SelectIfAssignCurr { off } => {
+                    let cond = stack.pop();
+                    let f = stack.pop();
+                    let t = stack.pop();
+                    curr[module_off + *off as usize] = if is_truthy(cond) { t } else { f };
+                    debug_assert_eq!(0, stack.len());
+                }
                 // === 3-ADDRESS BINARY OPS (R2) ===
                 // Operands are read straight from curr[]/literals; the *Stack*
                 // forms take the lhs from the arithmetic stack. Each pushes the
