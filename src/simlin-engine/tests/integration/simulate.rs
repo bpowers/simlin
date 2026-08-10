@@ -58,6 +58,11 @@ macro_rules! corpus_tests {
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", b','), ("output.tab", b'\t')];
 
+// The simulation corpus. `array:` makes the macro emit the backing
+// `static TEST_MODELS` as well as the per-model tests. This is the LARGER of
+// the two corpus lists -- `roundtrip.rs` keeps its own, narrower one as
+// `ROUNDTRIP_TEST_MODELS`; sweep against that one and you get a clean pass over
+// a corpus you never touched.
 corpus_tests! {
     array: TEST_MODELS;
     module: corpus;
