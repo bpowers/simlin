@@ -1041,31 +1041,28 @@ fn collect_agg_petals_groups_single_agg_circuits() {
 // which still compiles and reads a different slot than the anchor did.
 // ---------------------------------------------------------------------------
 
-/// `share[boston]` reads `q`/`gtab` at the runtime index `ctr`, and its only
-/// dependence on `pop[nyc]` is the zero-coefficient term `0 * pop[nyc]`.
+/// `share[boston]` reads `q`/`gtab` at the runtime index `ctr`, and has no
+/// causal dependence on `pop[nyc]` whatsoever.
 ///
 /// `declare_bucket` adds a dimension **no equation references**, whose first
 /// element is named `ctr` -- the same canonical name as the model variable. It
 /// changes nothing about the simulation; before the fix it changed the emitted
 /// link score.
 ///
-/// **The `0 * pop[nyc]` term is load-bearing for the TEST, not for the model**,
-/// and it is the same idiom the neighbouring `0 * ctr` already uses. Its job is
-/// to give the `boston` arm a live reference to the link's SOURCE, which is what
-/// makes the arm materialize at all: since GH #977 a slot whose transformed
-/// partial is provably `PREVIOUS(target)` is omitted from the `Arrayed` element
-/// map and lowered to a constant zero, and without this term every occurrence in
-/// this arm is frozen, so the arm this test reads would not exist. Its
-/// coefficient is zero, so it changes no value the test asserts on: the residual
-/// series below is bit-identical with and without it.
+/// The `boston` arm survives the GH #977 omission on its own merits, and WHY it
+/// survives is the whole distinction between this fixture and the control below.
+/// Freezing the runtime index inside an already-frozen head yields
+/// `PREVIOUS(q[PREVIOUS(ctr, ctr)])` -- `q` read at `t-1` indexed at `t-2`,
+/// where the `PREVIOUS(share)` anchor indexed at `t-1`. That is not
+/// `PREVIOUS(target)`, so the lag-alignment check rejects it and the arm is
+/// materialized. The control below has a genuinely STATIC selector, so its arm
+/// really is a structural zero and really is omitted.
 ///
-/// That materialization matters because "the slot is absent under both variants"
-/// would NOT be an adequate stand-in for the assertions below. Both readings of
-/// `ctr` -- frozen (`PREVIOUS(ctr, ctr)`, correct) and qualified onto the
-/// unrelated dimension (`bucket·ctr`, the defect) -- leave the arm provably
-/// `PREVIOUS(target)`, so an omission-based assertion passes on the defect too.
-/// The sibling control below demonstrates exactly that: a genuinely static
-/// `q[slot·s1]` selector produces an omitted arm as well.
+/// That also settles what "the slot is absent under both variants" would be
+/// worth as a stand-in for the assertions below: nothing. Both readings of `ctr`
+/// -- frozen (`PREVIOUS(ctr, ctr)`, correct) and qualified onto the unrelated
+/// dimension (`bucket·ctr`, the defect) -- leave the arm looking entirely
+/// frozen, so an omission-based assertion cannot tell a selector from a freeze.
 ///
 /// `indexed_name` only varies the subscripted variable's NAME. Both iterations
 /// exercise the SAME path -- an ordinary arrayed variable subscripted directly --
@@ -1109,10 +1106,7 @@ fn colliding_index_name_model(declare_bucket: bool, second_name: bool) -> datamo
             "share[Region]",
             vec![
                 ("nyc", "pop[nyc] * 0.01"),
-                (
-                    "boston",
-                    &format!("{indexed}[ctr] * 0.002 + 0 * ctr + 0 * pop[nyc]"),
-                ),
+                ("boston", &format!("{indexed}[ctr] * 0.002 + 0 * ctr")),
                 ("la", "pop[la] * 0.03"),
             ],
         )
@@ -1218,10 +1212,9 @@ fn a_colliding_index_name_is_resolved_against_the_axis_it_indexes() {
 /// The simulated `boston` slot of the `pop[nyc] -> share` link score.
 ///
 /// NOTE what this deliberately does NOT assert: that the series is ZERO.
-/// `share[boston]`'s only dependence on `pop[nyc]` carries a zero coefficient,
-/// so a fully ceteris-paribus partial would be identically zero -- and it is
-/// not; it runs -1.06 / +0.73 / -1.03 / +0.82 on this fixture, bit-identically
-/// with and without that term. That residual is a SEPARATE
+/// `share[boston]` has no causal dependence on `pop[nyc]`, so a fully
+/// ceteris-paribus partial would be identically zero -- and it is not; it runs
+/// -1.06 / +0.73 / -1.03 / +0.82 on this fixture. That residual is a SEPARATE
 /// defect from the one above and predates this branch: an index frozen inside an
 /// already-frozen head is DOUBLE-lagged (the partial reads `q` at `t-1` indexed
 /// by `ctr` at `t-2`, where the anchor `PREVIOUS(share)` used `ctr` at `t-1`).
@@ -1241,6 +1234,14 @@ fn a_colliding_index_name_is_resolved_against_the_axis_it_indexes() {
 /// (`if frozen { return index; }`, which disables the entire index pass, not just
 /// the re-freeze) takes this fixture to exactly 0 and reds 5 tests; that is an
 /// UPPER BOUND on the cost of the narrow change, not a measurement of it.
+///
+/// It is ALSO a soundness input, and THAT half is settled. These numbers are the
+/// measurement that an arm can look entirely frozen and still be worth -1.06, so
+/// the GH #977 omission must not claim it as a structural zero. They sat here
+/// framed only as a semantics question until a code review found the same class
+/// from the other direction; `pinned_double_lag_residual_is_not_a_structural_zero`
+/// below pins them as VALUES, so the next reader inherits the number rather than
+/// the framing.
 fn colliding_index_boston_series(project: &datamodel::Project) -> Vec<u64> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, project);
@@ -1270,20 +1271,78 @@ fn colliding_index_boston_series(project: &datamodel::Project) -> Vec<u64> {
         .collect()
 }
 
+/// The double-lag residual, pinned as VALUES rather than described in prose.
+///
+/// `colliding_index_boston_series`' rustdoc has recorded -1.06 / +0.73 / -1.03 /
+/// +0.82 for this slot for some time, framed as an unadjudicated semantics
+/// question about what ceteris paribus means for an index read under a freeze.
+/// It is that. It is ALSO the measurement showing this arm is not a structural
+/// zero -- every occurrence in it is frozen, it looks entirely inert, and it is
+/// worth -1.06 -- which is the soundness input the GH #977 omission needs and
+/// which nobody connected until a code review found the same class from the
+/// other direction.
+///
+/// Prose in a rustdoc does not fail. This does: a change that lets the omission
+/// claim this arm reds here on the first value, and a change that alters the
+/// residual reds on the specific numbers rather than on a vague "it moved".
+///
+/// The lag-alignment check in `ltm_augment_zero_slot` is what keeps the arm
+/// alive; `db::ltm_value_gate_tests::a_nested_freeze_arm_is_not_a_structural_zero`
+/// pins the same mechanism on a minimal fixture. This row exists because THESE
+/// numbers are the ones that were already on disk and read past.
+#[test]
+fn pinned_double_lag_residual_is_not_a_structural_zero() {
+    let series: Vec<f64> = colliding_index_boston_series(&colliding_index_name_model(true, false))
+        .into_iter()
+        .map(f64::from_bits)
+        .collect();
+
+    // The first two steps are the guard form's own warm-up (TIME = INITIAL_TIME,
+    // then the first live step), so the residual starts at index 2.
+    assert!(
+        series.len() >= 6,
+        "fixture must run long enough to show the residual; got {series:?}"
+    );
+    assert_eq!(
+        (series[0], series[1]),
+        (0.0, 0.0),
+        "the guard form's warm-up steps; got {series:?}"
+    );
+    for (i, expected) in [
+        (2usize, -1.0588235294117647f64),
+        (3, 0.7297297297297297),
+        (4, -1.0285714285714287),
+        (5, 0.8181818181818182),
+    ] {
+        assert_eq!(
+            series[i], expected,
+            "step {i} of the documented double-lag residual moved; full series {series:?}"
+        );
+    }
+    // The load-bearing half, stated on its own so a future reader cannot miss
+    // which property is the soundness one: this arm is NOT zero.
+    assert!(
+        series[2].abs() > 1.0,
+        "an arm whose every occurrence is frozen is still worth {}; it must never \
+         be omitted as a structural zero",
+        series[2]
+    );
+}
+
 #[test]
 fn an_index_naming_the_axis_own_element_stays_a_static_selector() {
     // The control that keeps the fix from being "freeze every bare index":
     // `s1` IS an element of `gtab`'s own `Slot` axis, so it is a selector and
     // must stay unwrapped (and qualified onto its own dimension).
     //
-    // `0 * pop[nyc]` plays the same role it does in `colliding_index_name_model`
-    // and for the same reason: a `boston` arm holding only frozen reads is
-    // provably `PREVIOUS(target)` and GH #977 omits it, and an omitted arm has
-    // no text to inspect. This control is also the direct evidence that
-    // omission cannot substitute for the assertions here -- WITHOUT the term
-    // this correctly-qualified static selector produces an omitted arm, exactly
-    // as the frozen runtime index does, so "absent under both variants" cannot
-    // tell a selector from a freeze.
+    // `0 * pop[nyc]` gives this arm a live source reference so there is text to
+    // inspect. It is needed HERE and not in `colliding_index_name_model`, and
+    // that asymmetry IS the point: `s1` is a static selector, so
+    // `PREVIOUS(q[slot·s1])` reads `q` at `t-1` at a fixed slot and really
+    // does equal `PREVIOUS(share)` -- a genuine structural zero, correctly
+    // omitted. The sibling's runtime index is double-lagged and is not.
+    // Removing this term reds this test and leaves the sibling green, which is
+    // the sharpest statement of what the lag-alignment check distinguishes.
     let project = TestProject::new("axis_element_index")
         .named_dimension("Region", &["nyc", "boston", "la"])
         .named_dimension("Slot", &["s1", "s2"])
