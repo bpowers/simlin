@@ -1,7 +1,8 @@
 # Engine performance: profile and optimization opportunities
 
-Status: analysis + two rounds of wins landed. Round 1 2026-05-19; round 2
-(constant folding + linear-run fast paths, below) 2026-06-03.
+Status: analysis + three rounds of wins landed. Round 1 2026-05-19; round 2
+(constant folding + linear-run fast paths) 2026-06-03; compile round 3 (the
+salsa pipeline's own redundancy) 2026-08-10.
 
 This documents an empirical CPU/memory profile of **compiling and simulating the
 C-LEARN hero model** (the largest model we have: ~53k MDL lines / 1.4 MB, 934
@@ -356,6 +357,17 @@ changes**. The following are second-order and worth it only if compile latency
 remains a UX problem after the build levers (it matters for the salsa
 *incremental* edit loop more than cold compile).
 
+### C1. Arena-allocate the transient parse AST — NOT the dominant allocator
+
+Re-measured after compile round 3: the parser is no longer where the
+allocations are. Per cold C-LEARN compile, `Expr0::clone` accounts for 212,184
+allocations (3.4% of compile instructions) and the `Expr0`/`Expr2`/`Expr3` drop
+glue for ~7% — so an arena is worth ~10% for a large, medium-risk change, and
+the top allocation site is not the parser at all but `Compiler::intern_name`
+(320,650 allocations per compile, ~10% of all 3.24M; see C5). The original
+figure below (3.86M transient allocations) predates the salsa pipeline and no
+longer describes the code.
+
 ### C1. Arena-allocate the transient parse AST
 
 The equation parser builds `Expr0` with `Box` children + `Vec` args — 3.86M+
@@ -370,6 +382,15 @@ only if profiling after B still shows the parser as a hotspot.
 - Effort: large (thread an arena through the parser; verify nothing cached
   retains an arena reference). Risk: medium.
 
+### C2. Halve `reconstruct_variable` — MOOT
+
+`reconstruct_variable` is now the salsa-cached `reconstruct_model_variables`,
+and every caller is on the LTM / analysis / patch path; it does not appear in
+an ordinary compile profile at all. The 2x duplication that WAS real, and is
+fixed, was a different function: `variable_dimensions` demanded the per-variable
+parse under an empty `ModuleIdentContext`, a cache key nothing else used, so
+every variable was parsed twice per compile.
+
 ### C2. Halve `reconstruct_variable` (6.4% of compile)
 
 `reconstruct_variable` rebuilds a full `datamodel::Variable` (ident/equation/
@@ -381,6 +402,31 @@ avoid ~half the full reconstructions (and their clones).
 
 - Effort: medium. Risk: low–medium (changes the `collect_module_idents` input
   type; behavior must stay identical).
+
+### C3. `canonicalize` — the lever is call elimination, not a faster slow path
+
+`canonicalize` is still the largest non-allocator cost of a cold compile, but
+neither half of the proposal below is the way to reduce it, and the reason is
+worth keeping because the profile invites the wrong conclusion.
+
+**(b) interning is done.** `Ident<Canonical>` is a 64-shard-interned `Arc`
+(`common.rs`): `Clone` is a refcount bump and `PartialEq` is pointer equality.
+
+**(a) an ASCII fast path exists and already carries almost all traffic.**
+`is_canonical_needing_no_trim` is a single-pass byte-table scan returning
+`Cow::Borrowed`, measured at ~90 instructions per call at the hottest site.
+Only **4.6% of calls allocate** (99,322 of 2,146,745 per compile), so making
+the slow path cheaper cannot reach the other 95.4% — while rewriting it puts
+the GH #559 idempotence proptests, which guard the Unicode arm (titlecase,
+U+00A0, quoted sections, backslash unescaping), at risk for that 4.6%.
+
+**What works is not calling it.** Half of all calls came from one predicate
+re-canonicalizing names that are canonical by construction; deleting that inner
+call, which touches `canonicalize` not at all, measured −5.0% of a cold compile.
+The residual worth having is narrower still: `changes_when_lowercased` is asked
+about the separators the engine itself mints (`·` in every `submodel·var`
+ident), which is answered from a three-character list rather than the Unicode
+case tables.
 
 ### C3. `canonicalize` ASCII fast-path + ident interning
 
@@ -394,6 +440,109 @@ re-derivation. (b) is broader but touches many call sites.
 
 - Effort: (a) small/careful, (b) medium–large. Risk: (a) medium (correctness-
   critical function), (b) medium.
+
+### Compile round 3 (2026-08-10): the salsa pipeline's own redundancy
+
+Cold C-LEARN compile 2.119G -> 1.602G retired instructions, **−24.4%**, and a
+warm single-equation edit **−47%** (median wall 38 ms -> 4.3 ms). Every change
+is artifact-identical: 5215 slots, 58291 opcodes (31525 flow + 1477 stock +
+25289 initial), same literal / GF / temp / dimension / view / name / module
+counts. Measured as retired instructions throughout, because the machine was
+contended and the cycles channel cannot resolve effects this size there.
+
+What the round found, stated as the standing shape of the problem rather than
+as five fixes: **the cold compile's redundancy was in the salsa layer's own
+keying, not in the compiler.** Four of the five were a query being asked a
+question it had already answered, under a key that did not say so.
+
+| what | mechanism | share of cold compile |
+|---|---|---|
+| `is_dimension_name` | re-canonicalized every declared dimension name per call | −5.0% |
+| `variable_dimensions` | demanded the parse under an empty `ModuleIdentContext` -> every variable parsed twice | −3.5% |
+| `compile_implicit_var_fragment` | not tracked: every SMOOTH/DELAY/TREND helper recompiled per assembly | −12% cold, **−28% of a warm edit** |
+| `var_phase_symbolic_fragment_prod` | not tracked: cycle gate built 135 fragments per compile for 57 distinct keys | −14.3% |
+| topo-sort probe maps, `changes_when_lowercased` | SipHash and Unicode tables on the engine's own idents | −1.8%, −2.4% |
+
+Two constraints follow, and both are cheap to violate:
+
+- **A per-variable helper needs a per-variable key.** The two biggest wins were
+  functions whose comment said salsa already cached them, because their *parse*
+  was cached. Lowering and codegen are the expensive half and were not. When
+  adding a per-variable compiler, the question is not "is something upstream
+  memoized" but "does this function have a key of its own".
+- **A projection is what keeps a per-variable query per-variable.** Both new
+  queries read a three-bit `RunlistMembership` rather than the whole
+  `ModelDepGraphResult`; taking the whole result would re-execute every
+  fragment whenever any variable's dependencies moved, silently restoring the
+  coarseness the key was introduced to remove.
+
+### C4. Parallel fan-out of per-variable fragment compilation — designed and measured, NOT implemented
+
+The compile is **exactly serial** (`task-clock` / `elapsed` = 1.000 over two
+independent measurements). A prototype fan-out was built and measured on
+C-LEARN before round 3 landed; it is not in the tree, and these are the facts
+whoever implements it needs so they are not rediscovered.
+
+**Achievable, and bounded well below the core count.** Staged prewarm (parse +
+dependency memos, then per-variable fragments) reached **2.23x achieved
+parallelism but only 1.34x wall speedup** (132.7 -> 99.3 ms), at +12% retired
+instructions. The ceiling is a property of the query decomposition: at the time
+of measurement `model_dependency_graph` (35.5% of compile) was one query per
+`(model, input-set)` and could not be split by variable, `compile_implicit_var_fragment`
+(12.2%) had no key to prewarm, and symbolic->concrete resolution (~20%) is
+inherently sequential. Amdahl over that ~68% serial floor predicts 1.44x; the
+measurement was 1.34x. Round 3 has since moved the middle two rows into keyed
+queries, so the floor is lower and the ceiling correspondingly higher — but it
+is still a decomposition question, not a thread-count one.
+
+**The fan-out cannot live inside the salsa query graph.** `salsa::Database` is
+`Send` but **not `Sync`**, so `&dyn Db` cannot cross a rayon boundary and
+neither `assemble_module` nor `assemble_simulation` can fan out from within.
+It has to run from `compile_project_incremental`, which holds a concrete
+`&SimlinDb`. `Storage<Db>: Clone` clones the shared `Arc<Zalsa>` and mints a
+fresh per-thread `ZalsaLocal`, so each worker takes its own **moved** handle
+(`SimlinDb` is `Send`, not `Sync` — a handle may be given to a thread, never
+shared with one). Every handle must drop before the next `db.sync`: `zalsa_mut`
+cancels and blocks on outstanding handles, so a leaked one deadlocks the next
+edit.
+
+**Two hazards found by measurement, not by reasoning.** Both are silent.
+
+1. **The prewarm must run AFTER the module-cycle gate, never before.**
+   `compile_var_fragment` demands the recursive `model_module_map`, which salsa
+   turns into a dependency-graph cycle panic — a process abort under
+   `panic = abort` (GH #806). A prewarm placed ahead of
+   `assemble_simulation`'s `project_module_graph(..).cycle_error_from(..)`
+   check reopened exactly that hole: the lib suite went from its baseline to
+   two extra failures, both module-cycle regression tests, and repeating the
+   gate ahead of the prewarm restored the baseline exactly.
+2. **The fan-out must be gated on cold-ness.** Unconditionally prewarming
+   regressed the fully-cached recompile from 0.85–1.32 ms to 3.29–3.42 ms — a
+   2.5–4x regression on the path that matters most for interactive editing —
+   because it builds a work list over every variable and spins up workers to
+   re-verify memos that are already valid.
+
+Determinism is **not** a hazard here, and that is a measured result rather than
+an assumption: the 12-repeat byte-identical determinism suites
+(`fragment_determinism_tests`, `diagnostic_determinism_tests`) pass with the
+prewarm active. Salsa's accumulator drain is a dependency DFS, not an execution
+order.
+
+### C5. `Compiler::intern_name` — the top allocation site, blocked on artifact identity
+
+320,650 allocations per cold C-LEARN compile, ~10% of all 3.24M, from two
+independent causes: `intern_name` calls `name.to_string()` twice per new name
+(once for `names`, once for the `name_ids` key), and `Compiler::new` re-interns
+every project dimension and element name for each of ~1,600 per-variable
+fragments.
+
+The second is the real cost and cannot be hoisted naively: `NameId` assignment
+order is baked into the compiled artifact (`base_gf`, `DimId`, and every
+`name_id` operand), and the ids are assigned per fragment from 0 and merged by
+`FragmentMerger`. Sharing a project-global prefix changes those ids. Any
+attempt here must either preserve the assignment exactly or accept an artifact
+change and re-baseline the goldens deliberately — which is why round 3 stopped
+short of it rather than taking a ~2-3%.
 
 ## Suggested ordering
 
@@ -415,7 +564,15 @@ re-derivation. (b) is broader but touches many call sites.
    cache is the next idea there — and see the round-2 negative result before
    attempting it).
 5. **R3 superinstructions** — incremental dispatch wins, low risk.
-6. **C2 / C3** — only if incremental-compile latency still bites after A+B.
+6. ~~**C2 / C3**~~ — answered, and not as proposed: C2 is moot (the function
+   is salsa-cached and off the ordinary compile path) and C3's two halves are
+   already done or the wrong lever. The compile round 3 section above records
+   what the profile actually pointed at, and what it cost.
+7. **C4 (parallel fan-out)** — the largest remaining compile lever and the only
+   one that needs a design rather than a fix. Read its two hazards before
+   starting; both are silent, and one is a process abort.
+8. **C5 (`Compiler::intern_name`)** — the top allocation site, blocked on
+   `NameId` assignment order being part of the compiled artifact.
 
 Larger run-side swings identified during round 2 — all three were taken to
 a data verdict in round 3 (2026-06-04):
