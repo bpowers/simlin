@@ -118,6 +118,26 @@ pub(crate) enum SymbolicOpcode {
         table_count: u16,
         mode: LookupMode,
     },
+    /// `Lookup` with the element offset resolved at COMPILE time.
+    ///
+    /// `compiler::codegen` pushes a `LoadConstant` for a lookup's element
+    /// offset before the index expression, and for a scalar table that
+    /// constant is always 0 -- 429k dispatches per C-LEARN run and 5.1% of
+    /// WORLD3's, spent pushing a zero the VM immediately pops and range-checks.
+    /// The push is not adjacent to the `Lookup` (the index expression sits
+    /// between), so no peephole can remove it; it has to not be emitted.
+    ///
+    /// `base_gf`/`table_count` still describe the variable's WHOLE table block,
+    /// exactly as on `Lookup`, because `gf_blocks_of_fragment` reads block
+    /// extents off these two fields. `elem` is the resolved offset WITHIN that
+    /// block, bounds-checked at emit time (codegen only emits this form when
+    /// `elem < table_count`), so the VM needs no runtime range check.
+    LookupDirect {
+        base_gf: GraphicalFunctionId,
+        table_count: u16,
+        elem: u8,
+        mode: LookupMode,
+    },
 
     // === SUPERINSTRUCTIONS ===
     AssignConstCurr {
@@ -947,6 +967,16 @@ pub(crate) fn resolve_opcode(
         } => Ok(Opcode::Lookup {
             base_gf: *base_gf,
             table_count: *table_count,
+            mode: *mode,
+        }),
+        SymbolicOpcode::LookupDirect {
+            base_gf,
+            elem,
+            mode,
+            ..
+        } => Ok(Opcode::LookupDirect {
+            base_gf: *base_gf,
+            elem: *elem,
             mode: *mode,
         }),
         SymbolicOpcode::PushTempView {
@@ -1840,7 +1870,18 @@ fn gf_blocks_of_fragment(frag: &PerVarBytecodes) -> Result<Vec<(usize, usize)>, 
                 base_gf,
                 table_count,
                 ..
+            }
+            | SymbolicOpcode::LookupDirect {
+                base_gf,
+                table_count,
+                ..
             } => (*base_gf as usize, *table_count as usize),
+            // OBLIGATION: every lookup-family opcode that carries a `base_gf`
+            // MUST be listed above. This arm is silent -- an unlisted one is
+            // skipped with no diagnostic, its block collapses into an
+            // un-referenced gap, and the de-duplicated table layout is wrong
+            // with no error anywhere. `test_gf_block_scan_sees_lookup_direct_runs`
+            // is the tripwire; extend it when adding a lookup opcode.
             _ => continue,
         };
         if count == 0 {
@@ -2514,6 +2555,17 @@ pub(crate) fn renumber_opcode(
         } => SymbolicOpcode::Lookup {
             base_gf: remap_gf(*base_gf, gf_remap)?,
             table_count: *table_count,
+            mode: *mode,
+        },
+        SymbolicOpcode::LookupDirect {
+            base_gf,
+            table_count,
+            elem,
+            mode,
+        } => SymbolicOpcode::LookupDirect {
+            base_gf: remap_gf(*base_gf, gf_remap)?,
+            table_count: *table_count,
+            elem: *elem,
             mode: *mode,
         },
         SymbolicOpcode::EvalModule { id, n_inputs } => SymbolicOpcode::EvalModule {
@@ -4505,6 +4557,86 @@ mod tests {
             static_views: vec![],
             temp_sizes: vec![],
             dim_lists: vec![],
+        }
+    }
+
+    /// Two SEPARATE single-table GF blocks in one fragment, each read by a
+    /// `LookupDirect`, merged with a fragment holding only the second table's
+    /// content.
+    ///
+    /// This is the pin on `gf_blocks_of_fragment`'s opcode scan, and it is
+    /// built to FAIL if a lookup-family opcode is added without teaching that
+    /// scan about it. The scan ends in a `_ => continue`, so an unknown
+    /// lookup opcode is skipped SILENTLY -- the two referenced runs stop being
+    /// seen as runs and collapse into one maximal un-referenced GAP block
+    /// `[0, 2)`. A gap block is keyed for de-duplication by its whole content,
+    /// so the shared second table no longer matches the other fragment's copy
+    /// and the merge yields three tables instead of two, with the interior
+    /// `base_gf` remapped off the wrong block base.
+    ///
+    /// Asserting the deduped COUNT is what makes the test discriminating: a
+    /// fixture with a single block would dedup identically whether or not the
+    /// opcode were known, and would pin nothing.
+    #[test]
+    fn test_gf_block_scan_sees_lookup_direct_runs() {
+        let table_a = vec![(0.0, 1.0), (1.0, 2.0)];
+        let table_b = vec![(0.0, 5.0), (1.0, 6.0)];
+
+        // One fragment, two distinct single-table blocks, both read through
+        // the constant-element-offset form.
+        let two_blocks = PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![],
+                code: vec![
+                    SymbolicOpcode::LookupDirect {
+                        base_gf: 0,
+                        table_count: 1,
+                        elem: 0,
+                        mode: LookupMode::Interpolate,
+                    },
+                    SymbolicOpcode::LookupDirect {
+                        base_gf: 1,
+                        table_count: 1,
+                        elem: 0,
+                        mode: LookupMode::Interpolate,
+                    },
+                    SymbolicOpcode::Ret,
+                ],
+            },
+            graphical_functions: vec![table_a.clone(), table_b.clone()],
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![],
+            dim_lists: vec![],
+        };
+        // A second fragment holding ONLY table_b, so a correct scan lets the
+        // two copies of table_b dedup to one slot.
+        let shares_b = gf_lookup_frag(table_b.clone());
+
+        let no_base = ContextResourceCounts::default();
+        let merged = concatenate_fragments(&[&two_blocks, &shares_b], &no_base).unwrap();
+
+        assert_eq!(
+            merged.graphical_functions.len(),
+            2,
+            "the two LookupDirect runs must be seen as separate blocks so the \
+             shared table de-duplicates; 3 means `gf_blocks_of_fragment` did \
+             not recognise LookupDirect and collapsed them into one gap block"
+        );
+        assert!(merged.graphical_functions.contains(&table_a));
+        assert!(merged.graphical_functions.contains(&table_b));
+
+        // And every emitted lookup must still address a real table.
+        for op in &merged.bytecode.code {
+            let base = match op {
+                SymbolicOpcode::LookupDirect { base_gf, .. }
+                | SymbolicOpcode::Lookup { base_gf, .. } => *base_gf as usize,
+                _ => continue,
+            };
+            assert!(
+                base < merged.graphical_functions.len(),
+                "remapped base_gf {base} is past the merged table list"
+            );
         }
     }
 

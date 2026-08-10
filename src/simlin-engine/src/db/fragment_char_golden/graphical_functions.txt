@@ -9,7 +9,7 @@
 == main::curve [explicit] : flow ==
   initial: <no fragment>
   flow:
-    literals: [0.0]
+    literals: []
     temp_sizes: []
     dim_lists: []
     graphical_functions:
@@ -17,11 +17,10 @@
     module_decls: []
     static_views: []
     code:
-      0000  LoadConstant #0 (=0.0)
-      0001  LoadVar drive@0
-      0002  Lookup base_gf=0 table_count=1 mode=Interpolate
-      0003  AssignCurr curve@0
-      0004  Ret
+      0000  LoadVar drive@0
+      0001  LookupDirect base_gf=0 table_count=1 elem=0 mode=Interpolate
+      0002  AssignCurr curve@0
+      0003  Ret
   stock: <no fragment>
 == main::drive [explicit] : flow ==
   initial: <no fragment>
@@ -40,7 +39,7 @@
 == main::g [explicit] : flow ==
   initial: <no fragment>
   flow:
-    literals: [0.0, 1.0]
+    literals: []
     temp_sizes: []
     dim_lists: []
     graphical_functions:
@@ -49,15 +48,13 @@
     module_decls: []
     static_views: []
     code:
-      0000  LoadConstant #0 (=0.0)
-      0001  LoadGlobalVar off=0 (time)
-      0002  Lookup base_gf=0 table_count=2 mode=Interpolate
-      0003  AssignCurr g@0
-      0004  LoadConstant #1 (=1.0)
-      0005  LoadGlobalVar off=0 (time)
-      0006  Lookup base_gf=0 table_count=2 mode=Interpolate
-      0007  AssignCurr g@1
-      0008  Ret
+      0000  LoadGlobalVar off=0 (time)
+      0001  LookupDirect base_gf=0 table_count=2 elem=0 mode=Interpolate
+      0002  AssignCurr g@0
+      0003  LoadGlobalVar off=0 (time)
+      0004  LookupDirect base_gf=0 table_count=2 elem=1 mode=Interpolate
+      0005  AssignCurr g@1
+      0006  Ret
   stock: <no fragment>
 == main::gtotal [explicit] : flow ==
   initial: <no fragment>
@@ -86,7 +83,7 @@
 == main::out [explicit] : flow ==
   initial: <no fragment>
   flow:
-    literals: [0.0, 1.0]
+    literals: []
     temp_sizes: []
     dim_lists: []
     graphical_functions:
@@ -95,15 +92,13 @@
     module_decls: []
     static_views: []
     code:
-      0000  LoadConstant #0 (=0.0)
-      0001  LoadGlobalVar off=0 (time)
-      0002  Lookup base_gf=0 table_count=2 mode=Interpolate
-      0003  AssignCurr out@0
-      0004  LoadConstant #1 (=1.0)
-      0005  LoadGlobalVar off=0 (time)
-      0006  Lookup base_gf=0 table_count=2 mode=Interpolate
-      0007  AssignCurr out@1
-      0008  Ret
+      0000  LoadGlobalVar off=0 (time)
+      0001  LookupDirect base_gf=0 table_count=2 elem=0 mode=Interpolate
+      0002  AssignCurr out@0
+      0003  LoadGlobalVar off=0 (time)
+      0004  LookupDirect base_gf=0 table_count=2 elem=1 mode=Interpolate
+      0005  AssignCurr out@1
+      0006  Ret
   stock: <no fragment>
 ########## runtime ##########
   step 0:

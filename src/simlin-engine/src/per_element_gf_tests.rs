@@ -397,6 +397,14 @@ fn per_element_gf_reorder_is_compile_time_with_nameless_opcode() {
                 mode: _,
                 write_temp_id: _,
             } => Some(*base_gf),
+            // The constant-element form belongs to the same family and makes
+            // this claim stronger, not weaker: it resolves the element offset
+            // at COMPILE time, so the hot path does not even push it.
+            Opcode::LookupDirect {
+                base_gf,
+                elem: _,
+                mode: _,
+            } => Some(*base_gf),
             _ => None,
         })
         .collect();

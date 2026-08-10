@@ -503,6 +503,17 @@ fn blank_resource_ids(op: &SymbolicOpcode) -> SymbolicOpcode {
             table_count: *table_count,
             mode: *mode,
         },
+        SymbolicOpcode::LookupDirect {
+            table_count,
+            elem,
+            mode,
+            ..
+        } => SymbolicOpcode::LookupDirect {
+            base_gf: 0,
+            table_count: *table_count,
+            elem: *elem,
+            mode: *mode,
+        },
         SymbolicOpcode::LookupArray {
             table_count, mode, ..
         } => SymbolicOpcode::LookupArray {

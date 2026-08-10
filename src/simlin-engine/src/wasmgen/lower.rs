@@ -1427,6 +1427,27 @@ fn emit_ops(
                 table_count,
                 mode,
             } => emit_lookup(*base_gf, *table_count, *mode, ctx, f),
+            // The constant element offset is not on the wasm stack (codegen
+            // never emitted a push for it), so splice it in beneath the index
+            // and reuse the one lowering rather than growing a second copy of
+            // the directory-read + helper-call sequence.
+            //
+            // `table_count` is passed as `elem + 1`, which makes
+            // `emit_lookup`'s range check vacuously true. That is sound rather
+            // than a fudge: `compiler::codegen::const_element_offset` only
+            // emits this opcode when `elem < table_count`, so the check it
+            // replaces was already discharged at emit time -- which is the
+            // whole point of the opcode.
+            Opcode::LookupDirect {
+                base_gf,
+                elem,
+                mode,
+            } => {
+                f.instruction(&Instruction::LocalSet(ctx.scratch_local));
+                f.instruction(&f64_const(*elem as f64));
+                f.instruction(&Instruction::LocalGet(ctx.scratch_local));
+                emit_lookup(*base_gf, *elem as u16 + 1, *mode, ctx, f)
+            }
             // `LoadPrev` mirrors the VM (`vm.rs:1320-1328`): a fallback is
             // already on the stack (codegen pushes it just before this opcode);
             // yield it while `use_prev_fallback` is set, otherwise read

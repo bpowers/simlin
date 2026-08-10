@@ -776,6 +776,22 @@ pub(crate) enum Opcode {
         mode: LookupMode,
     },
 
+    /// `Lookup` whose element offset was resolved at COMPILE time, so it pops
+    /// only the index. Codegen emits this whenever a lookup's element-offset
+    /// expression is a constant in range -- which is every scalar table, where
+    /// the offset is a literal 0. The bounds check `Lookup` performs at runtime
+    /// is discharged at emit time (`elem < table_count`), so the table index is
+    /// `base_gf + elem` unconditionally.
+    ///
+    /// `table_count` is deliberately absent: it exists on `Lookup` for the
+    /// runtime range check and on the SYMBOLIC twin for GF block extents, and
+    /// neither applies once the element is fixed.
+    LookupDirect {
+        base_gf: GraphicalFunctionId,
+        elem: u8,
+        mode: LookupMode,
+    },
+
     // === SUPERINSTRUCTIONS (fused opcodes for common patterns) ===
     /// Fused LoadConstant + AssignCurr.
     /// curr[module_off + off] = literals[literal_id]; stack unchanged.
@@ -1466,6 +1482,9 @@ impl Opcode {
             Opcode::Apply { func } => (func.arity(), 1),
             // Lookup pops element_offset and lookup_index, pushes result
             Opcode::Lookup { .. } => (2, 1),
+            // LookupDirect's element offset is baked into the opcode, so only
+            // the index is popped.
+            Opcode::LookupDirect { .. } => (1, 1),
 
             // Superinstructions
             Opcode::AssignConstCurr { .. } => (0, 0), // reads literal directly
@@ -1627,6 +1646,7 @@ impl Opcode {
             Opcode::AssignCurr { .. } => "AssignCurr",
             Opcode::Apply { .. } => "Apply",
             Opcode::Lookup { .. } => "Lookup",
+            Opcode::LookupDirect { .. } => "LookupDirect",
             Opcode::AssignConstCurr { .. } => "AssignConstCurr",
             Opcode::BinVarVar { .. } => "BinVarVar",
             Opcode::BinVarConst { .. } => "BinVarConst",

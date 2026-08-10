@@ -2481,6 +2481,24 @@ impl Vm {
                         stack.push(result);
                     }
                 }
+                // The element offset was resolved and bounds-checked at emit
+                // time, so this reads `graphical_functions[base_gf + elem]`
+                // with no pop and no range check -- the two things the general
+                // `Lookup` arm above spends its extra dispatch on.
+                Opcode::LookupDirect {
+                    base_gf,
+                    elem,
+                    mode,
+                } => {
+                    let lookup_index = stack.pop();
+                    let gf = &context.graphical_functions[*base_gf as usize + *elem as usize];
+                    let result = match mode {
+                        LookupMode::Interpolate => lookup(gf, lookup_index),
+                        LookupMode::Forward => lookup_forward(gf, lookup_index),
+                        LookupMode::Backward => lookup_backward(gf, lookup_index),
+                    };
+                    stack.push(result);
+                }
                 Opcode::Ret => {
                     break;
                 }
