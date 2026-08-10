@@ -2476,6 +2476,17 @@ fn emit_apply(func: BuiltinId, ctx: &EmitCtx, f: &mut Function) {
     // positions this builtin does not read keep whatever a previous `Apply`
     // left in them and are never read back: each `match` arm below touches only
     // the locals its own arity covers.
+    //
+    // OBLIGATION when adding a builtin: an arm must read only the locals its
+    // arity covers. `BuiltinId::arity()`'s exhaustive match forces a new
+    // builtin to DECLARE an arity; nothing forces its arm here to respect it,
+    // and the natural way to add one is to copy an adjacent arm -- so copying a
+    // 3-arity arm for a 1-arity builtin reads two stale locals left by an
+    // earlier `Apply`. Operand padding used to make that safe by accident
+    // (`b`/`c` were always freshly-zeroed pads); with the padding gone the
+    // guarantee moved from the data into the `apply_*` tests in
+    // `lower_tests.rs`, which execute every builtin against the VM. They are
+    // the enforcement -- extend them when adding one.
     let arity = func.arity();
     if arity >= 3 {
         f.instruction(&Ins::LocalSet(c));
