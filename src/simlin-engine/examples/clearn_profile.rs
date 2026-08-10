@@ -44,8 +44,11 @@ use simlin_engine::{CompiledSimulation, Vm, open_vensim};
 // --- Counting allocator -----------------------------------------------------
 //
 // Tracks cumulative allocation calls/bytes plus live bytes and a high-water
-// mark. compile_project_incremental can fan out across rayon threads, so all
-// counters are atomic and the peak is maintained with a CAS loop. The default
+// mark. A `GlobalAlloc` must be `Sync` and serves every thread in the process,
+// so the counters are atomic and the peak is maintained with a CAS loop. That
+// is a requirement of the allocator position, not of the workload:
+// compile_project_incremental runs on one thread today (measured at 0.9996 CPUs
+// utilized). The default
 // GlobalAlloc::realloc routes through our alloc/dealloc, so realloc is counted
 // without an explicit override.
 
