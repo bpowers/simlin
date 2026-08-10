@@ -1633,7 +1633,8 @@ fn test_builtin_polarity_monotone_increasing() {
     let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
     let empty_vars = HashMap::new();
 
-    // Exp(x), Ln(x), Log10(x), Sqrt(x), Arctan(x), Int(x) all propagate polarity
+    // Every arm of polarity.rs's non-decreasing single-arg builtin group:
+    // Exp, Ln, Log10, Sqrt, Arctan, Int, and Round all propagate polarity.
     let monotone_fns: Vec<(&str, BuiltinFn<Expr2>)> = vec![
         ("Exp", BuiltinFn::Exp(x_expr())),
         ("Ln", BuiltinFn::Ln(x_expr())),
@@ -1641,6 +1642,7 @@ fn test_builtin_polarity_monotone_increasing() {
         ("Sqrt", BuiltinFn::Sqrt(x_expr())),
         ("Arctan", BuiltinFn::Arctan(x_expr())),
         ("Int", BuiltinFn::Int(x_expr())),
+        ("Round", BuiltinFn::Round(x_expr())),
     ];
 
     for (name, builtin) in monotone_fns {

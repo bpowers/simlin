@@ -80,14 +80,18 @@ pub enum BuiltinFn<Expr> {
     Ramp(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     // ROUND(x): nearest integer, exact .5 ties to the EVEN neighbor
     // (Python round() / IEEE roundTiesToEven). The XMILE v1.0 spec defines no
-    // ROUND builtin, so ties-to-even is Simlin's choice -- but Stella DOES
-    // define ROUND ("rounds expression to its nearest integer value", isee
-    // Stella docs, tie rule unspecified), so a Stella-authored model calling
-    // ROUND now imports and simulates instead of failing with UnknownBuiltin.
-    // Whether Stella agrees at exact .5 ties is UNVERIFIED; if it rounds ties
-    // away from zero (the Excel/C convention), an imported model that hits an
-    // exact tie diverges by 1 there. Vensim defines no ROUND at all, and the
-    // MDL writer records an ExportWarning for it (mdl/writer.rs).
+    // ROUND builtin (its function catalog stops at INT, which footnote 7
+    // mandates as floor). Python's semantics are the REQUIREMENT here, a
+    // product decision -- ties-to-even regardless of what other tools do.
+    // Disclosure, not a caveat to revisit: Stella also defines ROUND ("rounds
+    // expression to its nearest integer value", isee Stella docs, tie rule
+    // unspecified), so a Stella-authored model calling ROUND imports and
+    // simulates under these semantics instead of failing with UnknownBuiltin;
+    // whether Stella agrees at exact .5 ties is unverified, and matching
+    // Stella is explicitly a non-goal (if that ever changes, verify its tie
+    // rule against ground-truth output first). Vensim defines no ROUND at
+    // all, and the MDL writer records an ExportWarning for it
+    // (mdl/writer.rs).
     Round(Box<Expr>),
     SafeDiv(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     Sign(Box<Expr>),

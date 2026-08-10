@@ -1380,13 +1380,23 @@ fn transpose_warning(name: &str, xmile_eqn: &str) -> ExportWarning {
 /// a Simlin extension: Vensim defines no ROUND function (it is absent from
 /// `mdl/builtins.rs`' own recognition table, and vensim.com has no fn_round
 /// page), so the catch-all rename emits a `ROUND(...)` call Vensim rejects.
-/// There is no Vensim-expressible equivalent of round-half-to-even, so the
-/// writer emits the call as-is and says so rather than degrade silently --
-/// the same contract as the transpose operator above.
+///
+/// The writer deliberately does NOT lower the call to Vensim primitives.
+/// Round-half-to-even IS arithmetically composable for finite values from
+/// IF THEN ELSE / INTEGER / MODULO, but such a lowering would (a) duplicate
+/// the argument expression several times, which is wrong outright for a
+/// stochastic argument (RANDOM UNIFORM etc. would be re-drawn per copy) and
+/// bloats every exported equation; and (b) rest on Vensim edge semantics
+/// this repo has not verified or knows to diverge -- INTEGER truncates
+/// where our INT floors and MODULO disagrees with our MOD (GH #610), and
+/// Vensim's `=` behavior at an exact .5 comparison is unverified -- so a
+/// subtly-wrong silent lowering is strictly worse than a loud warning.
+/// Emitting the call as-is and saying so is the transpose operator's exact
+/// contract (see above).
 fn round_warning(name: &str, xmile_eqn: &str) -> ExportWarning {
     ExportWarning::new(format!(
         "the equation for '{name}' uses ROUND ({xmile_eqn:?}), a Simlin extension \
-         with no Vensim equivalent; it was written through as ROUND(...), which \
+         that Vensim does not define; it was written through as ROUND(...), which \
          Vensim will not recognize"
     ))
 }

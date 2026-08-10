@@ -5,12 +5,15 @@
 //! End-to-end contract for the `ROUND(x)` builtin.
 //!
 //! ROUND is a Simlin extension: the XMILE v1.0 spec defines no ROUND function
-//! (verified against `docs/reference/xmile-v1.0.html`, which contains zero
-//! occurrences of the word). Simlin defines it as Python's `round()` /
-//! IEEE 754 roundTiesToEven: round to the nearest integer, with an exact .5
-//! tie going to the EVEN neighbor. That is `f64::round_ties_even` in the VM
-//! and the single `f64.nearest` instruction in the wasm backend, so the two
-//! backends agree bit for bit by construction.
+//! (verified against `docs/reference/xmile-v1.0.html`: its builtin catalog
+//! and footnotes name `INT` -- footnote 7 mandates floor -- but contain no
+//! `ROUND(` function form; the word "round" appears only in prose about
+//! display precision, "rounded rectangle" shapes, and "background"). Simlin
+//! defines it as Python's `round()` / IEEE 754 roundTiesToEven: round to the
+//! nearest integer, with an exact .5 tie going to the EVEN neighbor. That is
+//! `f64::round_ties_even` in the VM and the single `f64.nearest` instruction
+//! in the wasm backend, so the two backends agree bit for bit by
+//! construction.
 //!
 //! One external-tool caveat (see the `BuiltinFn::Round` comment): Stella also
 //! defines a ROUND builtin with an unspecified tie rule, so a Stella-authored
