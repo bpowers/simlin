@@ -1933,8 +1933,13 @@ pub(crate) fn compile_ltm_synthetic_fragment(
 /// An out-of-range index yields `None`, which is also what a variable whose
 /// fragment failed to compile yields; callers treat both as "no fragment",
 /// exactly as they treated a `None` from the direct path.
+///
+/// PRIVATE on purpose: [`compile_ltm_fragment_for`] is the only way in, so the
+/// index-to-variable coupling is checked at every call site rather than relied
+/// on. Widening this back to `pub(crate)` re-opens the hole that wrapper exists
+/// to close.
 #[salsa::tracked(returns(ref))]
-pub(crate) fn compile_ltm_fragment_at(
+fn compile_ltm_fragment_at(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
@@ -1943,6 +1948,45 @@ pub(crate) fn compile_ltm_fragment_at(
     let ltm_vars = model_ltm_variables(db, model, project);
     let ltm_var = ltm_vars.vars.get(index)?;
     compile_ltm_synthetic_fragment(db, ltm_var, model, project)
+}
+
+/// [`compile_ltm_fragment_at`] plus a debug-only check that `index` still names
+/// the variable the caller believes it does.
+///
+/// The index IS the identity, deliberately: a name argument would join the
+/// salsa cache key and defeat the firewall the query's rustdoc describes. But
+/// nothing in the signature or the types ties a caller's `index` to the
+/// `LtmSyntheticVar` it walked it out of, so a third caller -- or any
+/// reordering of `LtmVariablesResult::vars` between the walk and the call --
+/// would file a fragment under the wrong name, and both consumers treat a
+/// mismatch as an ordinary "no fragment" rather than as an error. Nothing would
+/// report it.
+///
+/// Both callers already hold the variable, so they can pay a debug-only
+/// assertion and make the coupling CHECKABLE rather than conventional. The
+/// check costs nothing in release, and the query keeps its index-only key.
+pub(crate) fn compile_ltm_fragment_for<'db>(
+    db: &'db dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    index: usize,
+    expected: &LtmSyntheticVar,
+) -> &'db Option<VarFragmentResult> {
+    #[cfg(debug_assertions)]
+    {
+        let resolved = model_ltm_variables(db, model, project)
+            .vars
+            .get(index)
+            .map(|v| v.name.as_str());
+        debug_assert_eq!(
+            resolved,
+            Some(expected.name.as_str()),
+            "compile_ltm_fragment_at is keyed by index alone, so a caller's \
+             index and its LtmSyntheticVar must come from the same walk of the \
+             same `vars` vector; index {index} resolves to {resolved:?}"
+        );
+    }
+    compile_ltm_fragment_at(db, model, project, index)
 }
 
 #[cfg(test)]
@@ -2037,7 +2081,7 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
     for (index, ltm_var) in ltm_vars.vars.iter().enumerate() {
         // Through the memoized per-index query, so this pass READS assembly's
         // fragments rather than compiling its own copies.
-        let fragment = compile_ltm_fragment_at(db, model, project, index);
+        let fragment = compile_ltm_fragment_for(db, model, project, index, ltm_var);
         // A fragment is usable only if it compiled *and* produced
         // flow-phase bytecodes. `compile_ltm_equation_fragment` returns
         // `Some(_)` with `flow_bytecodes: None` when the synthetic

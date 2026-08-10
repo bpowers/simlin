@@ -1530,7 +1530,8 @@ pub fn assemble_module<'db>(
             // drop. Both walkers reach it through the memoized per-index query,
             // so the diagnostic pass reuses these fragments instead of
             // recompiling the ones the direct path does not otherwise cache.
-            let fragment_result = compile_ltm_fragment_at(db, model, project, ltm_index).clone();
+            let fragment_result =
+                compile_ltm_fragment_for(db, model, project, ltm_index, ltm_var).clone();
 
             if let Some(result) = fragment_result {
                 // Drop LTM fragments whose symbolic variable references can't
