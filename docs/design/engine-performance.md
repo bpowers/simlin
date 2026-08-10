@@ -852,6 +852,19 @@ short of it rather than taking a ~2-3%.
     its own row in `db::ltm_value_gate_tests`, and rejecting them costs zero arms
     on C-LEARN — the win above is measured with both checks in place.
 
+    One disclosed **value** change remains, on a model that produces non-finite
+    values: a materialized arm over a `NaN` (or infinite) target computes
+    `NaN - NaN` and evaluates to `NaN`, where an omitted slot is `+0.0`. It is
+    reproduced both ways by
+    `db::ltm_value_gate_tests::a_nonfinite_target_arm_is_omitted_to_zero_not_nan`.
+    Whether `0` is the better answer is **open** and tracked as #1022:
+    `src/float.rs` argues an
+    engine-manufactured NaN is noise, while GH #542 built the `denom_summand`
+    exclusion specifically to preserve a `NaN` score as a per-loop "undefined
+    here" signal. The signal survives on the target's own series and on every
+    live arm, so what changes is confined to arms with no causal dependence on
+    their source.
+
 Larger run-side swings identified during round 2 — all three were taken to
 a data verdict in round 3 (2026-06-04):
 
