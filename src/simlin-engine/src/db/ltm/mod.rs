@@ -843,6 +843,32 @@ pub struct LtmImplicitVarMeta {
 /// caching the results. Both `compute_layout` and `assemble_module` read
 /// this to allocate slots and compile fragments for those implicit vars
 /// within LTM equations.
+///
+/// **The parse here is DELIBERATELY duplicated** with the one
+/// `compile_ltm_equation_fragment` performs, and that is a measured space-time
+/// trade rather than an oversight. It looks like pure waste: on C-LEARN this
+/// parses ~7,125 equations to harvest 738 implicit helpers, and every one is
+/// parsed again when its fragment is compiled -- about 6.7% of a compile
+/// (GH #655 finding 3).
+///
+/// Publishing these parses for the fragment compile to consume is the only
+/// non-cycling shape, since the fragment compile already reads this query and
+/// the reverse direction cycles. It was built and measured on C-LEARN:
+/// **allocations 41.37M -> 38.33M (-7.3%), peak live bytes during
+/// `compile_project_incremental` 353.2 -> 435.4 MiB (+82.2 MiB, +23.3%)**. The
+/// retention is what costs -- a transient parse becomes a permanent salsa memo,
+/// held for every LTM variable rather than for the 738 whose helpers survive --
+/// and it gives back substantially all of GH #977's peak reduction to buy a
+/// -7.3% allocation count, on a compile that is allocation-bound rather than
+/// peak-bound.
+///
+/// Publishing only the helper-bearing parses scales both sides by the same
+/// ~738/7,125: this pass must parse everything to discover WHICH variables
+/// synthesize helpers and can only choose what to RETAIN, so it is the same
+/// trade an order of magnitude smaller, not a better one.
+///
+/// What would change the answer is the retention -- a smaller parsed
+/// representation, or salsa memo eviction -- not the call graph.
 #[salsa::tracked(returns(ref))]
 pub fn model_ltm_implicit_var_info(
     db: &dyn Db,
