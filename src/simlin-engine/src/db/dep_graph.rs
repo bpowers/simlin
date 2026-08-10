@@ -1733,11 +1733,41 @@ pub fn var_runlist_membership<'db>(
     module_inputs: ModuleInputSet<'db>,
 ) -> RunlistMembership {
     let dep_graph = model_dependency_graph(db, model, project, module_inputs);
-    let name = canonicalize(var.ident(db)).into_owned();
+    membership_in(dep_graph, &canonicalize(var.ident(db)))
+}
+
+/// The same projection for a variable that has no `SourceVariable` handle: an
+/// implicit SMOOTH/DELAY/TREND/PREVIOUS helper, which exists only inside its
+/// parent's parse and is filed in the runlists under its canonical synthesized
+/// name.
+///
+/// Keyed on that name because it is the only identity such a helper has -- the
+/// same key `model_implicit_var_by_name` uses. `compile_implicit_var_fragment`
+/// reads this instead of the whole `ModelDepGraphResult` for the identical
+/// reason the explicit twin does: a helper's fragment must not re-execute
+/// because some unrelated variable's dependencies moved.
+#[salsa::tracked(returns(clone))]
+pub fn implicit_var_runlist_membership<'db>(
+    db: &'db dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    name: String,
+    module_inputs: ModuleInputSet<'db>,
+) -> RunlistMembership {
+    let dep_graph = model_dependency_graph(db, model, project, module_inputs);
+    membership_in(dep_graph, &name)
+}
+
+/// The projection itself, stated once so the two keyed entry points above
+/// cannot answer the same question differently.
+fn membership_in(dep_graph: &ModelDepGraphResult, name: &str) -> RunlistMembership {
+    // The runlists are ordered `Vec`s (the topological emission order), so each
+    // of these is the same linear scan `Vec::contains` performed before; going
+    // through `iter().any` only lets the key stay a `&str`.
     RunlistMembership {
-        initials: dep_graph.runlist_initials.contains(&name),
-        flows: dep_graph.runlist_flows.contains(&name),
-        stocks: dep_graph.runlist_stocks.contains(&name),
+        initials: dep_graph.runlist_initials.iter().any(|n| n == name),
+        flows: dep_graph.runlist_flows.iter().any(|n| n == name),
+        stocks: dep_graph.runlist_stocks.iter().any(|n| n == name),
     }
 }
 

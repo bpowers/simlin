@@ -1448,11 +1448,11 @@ pub fn assemble_module<'db>(
         }
     }
 
-    for (name, meta) in implicit_info.iter() {
+    for name in implicit_info.keys() {
         if let Some(result) =
-            compile_implicit_var_fragment(db, meta, model, project, dep_graph, module_input_names)
+            compile_implicit_var_fragment(db, model, project, name.clone(), module_inputs)
         {
-            all_fragments.insert(name.clone(), result);
+            all_fragments.insert(name.clone(), result.clone());
         }
     }
 

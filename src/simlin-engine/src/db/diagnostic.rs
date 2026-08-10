@@ -220,12 +220,16 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // nothing.
     {
         let implicit_info = crate::db::model_implicit_var_info(db, model, project);
-        let dep_graph = crate::db::model_dependency_graph(db, model, project, empty_inputs);
-        let mut sorted_implicit: Vec<_> = implicit_info.iter().collect();
-        sorted_implicit.sort_unstable_by_key(|(name, _)| name.as_str());
-        for (_name, meta) in sorted_implicit {
-            let _ =
-                crate::db::compile_implicit_var_fragment(db, meta, model, project, dep_graph, &[]);
+        let mut sorted_implicit: Vec<&String> = implicit_info.keys().collect();
+        sorted_implicit.sort_unstable_by_key(|name| name.as_str());
+        for name in sorted_implicit {
+            let _ = crate::db::compile_implicit_var_fragment(
+                db,
+                model,
+                project,
+                name.clone(),
+                empty_inputs,
+            );
         }
     }
 
