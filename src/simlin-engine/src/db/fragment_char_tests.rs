@@ -290,6 +290,14 @@ fn render_opcode(op: &SymbolicOpcode, literals: &[f64]) -> String {
             format!("PushSubscriptIndex bounds={bounds}")
         }
         SymbolicOpcode::LoadSubscript { var } => format!("LoadSubscript {}", render_var_ref(var)),
+        SymbolicOpcode::LookupDirect {
+            base_gf,
+            table_count,
+            elem,
+            mode,
+        } => format!(
+            "LookupDirect base_gf={base_gf} table_count={table_count} elem={elem} mode={mode:?}"
+        ),
         SymbolicOpcode::SetCond {} => "SetCond".to_string(),
         SymbolicOpcode::If {} => "If".to_string(),
         SymbolicOpcode::Ret => "Ret".to_string(),

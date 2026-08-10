@@ -116,21 +116,19 @@
       0017  Op2 Sub
       0018  LoadConstant #0 (=0.0)
       0019  Apply SafeDiv
-      0020  LoadConstant #0 (=0.0)
-      0021  LoadConstant #0 (=0.0)
-      0022  Apply Abs
-      0023  LoadGlobalVar off=0 (time)
+      0020  Apply Abs
+      0021  LoadGlobalVar off=0 (time)
+      0022  LoadGlobalVar off=2 (initial_time)
+      0023  Op2 Eq
       0024  LoadGlobalVar off=2 (initial_time)
-      0025  Op2 Eq
+      0025  LoadPrev $⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0@0
       0026  LoadGlobalVar off=2 (initial_time)
-      0027  LoadPrev $⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0@0
-      0028  LoadGlobalVar off=2 (initial_time)
-      0029  Op2 Eq
-      0030  Op2 Or
-      0031  SetCond
-      0032  If
-      0033  AssignCurr $⁚ltm⁚link_score⁚growth→level@0
-      0034  Ret
+      0027  Op2 Eq
+      0028  Op2 Or
+      0029  SetCond
+      0030  If
+      0031  AssignCurr $⁚ltm⁚link_score⁚growth→level@0
+      0032  Ret
   stock: <no fragment>
 == main::$⁚ltm⁚link_score⁚level→growth [ltm-synthetic] : flow ==
   initial: <no fragment>
@@ -155,41 +153,37 @@
       0010  LoadConstant #0 (=0.0)
       0011  LoadPrev growth@0
       0012  Op2 Sub
-      0013  LoadConstant #0 (=0.0)
+      0013  Apply Abs
       0014  LoadConstant #0 (=0.0)
-      0015  Apply Abs
-      0016  LoadConstant #0 (=0.0)
-      0017  Apply SafeDiv
-      0018  LoadVar level@0
-      0019  LoadConstant #0 (=0.0)
-      0020  LoadPrev level@0
-      0021  Op2 Sub
-      0022  LoadConstant #0 (=0.0)
+      0015  Apply SafeDiv
+      0016  LoadVar level@0
+      0017  LoadConstant #0 (=0.0)
+      0018  LoadPrev level@0
+      0019  Op2 Sub
+      0020  Apply Sign
+      0021  Op2 Mul
+      0022  LoadVar growth@0
       0023  LoadConstant #0 (=0.0)
-      0024  Apply Sign
-      0025  Op2 Mul
-      0026  LoadVar growth@0
-      0027  LoadConstant #0 (=0.0)
-      0028  LoadPrev growth@0
-      0029  Op2 Sub
-      0030  LoadConstant #0 (=0.0)
-      0031  Op2 Eq
-      0032  LoadVar level@0
-      0033  LoadConstant #0 (=0.0)
-      0034  LoadPrev level@0
-      0035  Op2 Sub
-      0036  LoadConstant #0 (=0.0)
-      0037  Op2 Eq
-      0038  Op2 Or
-      0039  SetCond
-      0040  If
-      0041  LoadGlobalVar off=0 (time)
-      0042  LoadGlobalVar off=2 (initial_time)
-      0043  Op2 Eq
-      0044  SetCond
-      0045  If
-      0046  AssignCurr $⁚ltm⁚link_score⁚level→growth@0
-      0047  Ret
+      0024  LoadPrev growth@0
+      0025  Op2 Sub
+      0026  LoadConstant #0 (=0.0)
+      0027  Op2 Eq
+      0028  LoadVar level@0
+      0029  LoadConstant #0 (=0.0)
+      0030  LoadPrev level@0
+      0031  Op2 Sub
+      0032  LoadConstant #0 (=0.0)
+      0033  Op2 Eq
+      0034  Op2 Or
+      0035  SetCond
+      0036  If
+      0037  LoadGlobalVar off=0 (time)
+      0038  LoadGlobalVar off=2 (initial_time)
+      0039  Op2 Eq
+      0040  SetCond
+      0041  If
+      0042  AssignCurr $⁚ltm⁚link_score⁚level→growth@0
+      0043  Ret
   stock: <no fragment>
 == main::$⁚ltm⁚link_score⁚rate→growth [ltm-synthetic] : flow ==
   initial: <no fragment>
@@ -214,41 +208,37 @@
       0010  LoadConstant #0 (=0.0)
       0011  LoadPrev growth@0
       0012  Op2 Sub
-      0013  LoadConstant #0 (=0.0)
+      0013  Apply Abs
       0014  LoadConstant #0 (=0.0)
-      0015  Apply Abs
-      0016  LoadConstant #0 (=0.0)
-      0017  Apply SafeDiv
-      0018  LoadVar rate@0
-      0019  LoadConstant #0 (=0.0)
-      0020  LoadPrev rate@0
-      0021  Op2 Sub
-      0022  LoadConstant #0 (=0.0)
+      0015  Apply SafeDiv
+      0016  LoadVar rate@0
+      0017  LoadConstant #0 (=0.0)
+      0018  LoadPrev rate@0
+      0019  Op2 Sub
+      0020  Apply Sign
+      0021  Op2 Mul
+      0022  LoadVar growth@0
       0023  LoadConstant #0 (=0.0)
-      0024  Apply Sign
-      0025  Op2 Mul
-      0026  LoadVar growth@0
-      0027  LoadConstant #0 (=0.0)
-      0028  LoadPrev growth@0
-      0029  Op2 Sub
-      0030  LoadConstant #0 (=0.0)
-      0031  Op2 Eq
-      0032  LoadVar rate@0
-      0033  LoadConstant #0 (=0.0)
-      0034  LoadPrev rate@0
-      0035  Op2 Sub
-      0036  LoadConstant #0 (=0.0)
-      0037  Op2 Eq
-      0038  Op2 Or
-      0039  SetCond
-      0040  If
-      0041  LoadGlobalVar off=0 (time)
-      0042  LoadGlobalVar off=2 (initial_time)
-      0043  Op2 Eq
-      0044  SetCond
-      0045  If
-      0046  AssignCurr $⁚ltm⁚link_score⁚rate→growth@0
-      0047  Ret
+      0024  LoadPrev growth@0
+      0025  Op2 Sub
+      0026  LoadConstant #0 (=0.0)
+      0027  Op2 Eq
+      0028  LoadVar rate@0
+      0029  LoadConstant #0 (=0.0)
+      0030  LoadPrev rate@0
+      0031  Op2 Sub
+      0032  LoadConstant #0 (=0.0)
+      0033  Op2 Eq
+      0034  Op2 Or
+      0035  SetCond
+      0036  If
+      0037  LoadGlobalVar off=0 (time)
+      0038  LoadGlobalVar off=2 (initial_time)
+      0039  Op2 Eq
+      0040  SetCond
+      0041  If
+      0042  AssignCurr $⁚ltm⁚link_score⁚rate→growth@0
+      0043  Ret
   stock: <no fragment>
 == main::growth [explicit] : flow ==
   initial: <no fragment>

@@ -365,6 +365,9 @@ pub struct Vm {
     // returns the fallback during the initial timestep even when
     // RK stages advance TIME away from INITIAL_TIME.
     prev_values_valid: bool,
+    // Test-only: fill the `next` chunk with a sentinel at the top of every
+    // Euler step. See `poison_next_chunk_for_test`.
+    poison_next: bool,
     // Conveyor support (docs/design/conveyors.md §9.3). Empty for every
     // non-conveyor model, and all conveyor logic is guarded on a non-empty
     // plan list -- so an ordinary simulation runs with zero overhead and
@@ -783,6 +786,12 @@ pub(crate) fn increment_indices(indices: &mut [u16], dims: &[u16]) {
     }
 }
 
+/// Sentinel written into the `next` chunk by `poison_next_chunk_for_test`. A
+/// distinctive finite value rather than NaN, so a slot that carries forward is
+/// distinguishable from a model's own NaN.
+#[doc(hidden)]
+pub const POISON_SENTINEL: f64 = -1.234567e123;
+
 impl Vm {
     pub fn new(sim: CompiledSimulation) -> Result<Vm> {
         if sim.specs.stop < sim.specs.start {
@@ -847,6 +856,7 @@ impl Vm {
             stock_offsets,
             rk_scratch,
             prev_values_valid: false,
+            poison_next: false,
             conveyor_plans: Vec::new(),
             conveyors: Vec::new(),
             conveyor_last_unit: i64::MIN,
@@ -903,6 +913,20 @@ impl Vm {
         // the two plan sets are attached in.
         self.coupling =
             crate::queue_compile::CouplingTable::build(&self.conveyor_plans, &self.queue_plans);
+    }
+
+    /// Test-support: fill the `next` chunk PAST the implicit-global prefix with
+    /// a sentinel at the top of every Euler step, before the Flows phase runs.
+    ///
+    /// Exposes which slots carry information across a step: anything not
+    /// rewritten by the Flows or Stocks phase surfaces as the sentinel in the
+    /// saved results. The prefix is deliberately preserved -- `Expr::Dt` lowers
+    /// to a `curr[DT_OFF]` read inside every stock update, so poisoning it
+    /// corrupts every stock and hides the property under test. See
+    /// `only_documented_classes_carry_across_a_step`.
+    #[doc(hidden)] // test-support: used by tests/integration/simulate.rs
+    pub fn poison_next_chunk_for_test(&mut self) {
+        self.poison_next = true;
     }
 
     pub fn run_to_end(&mut self) -> Result<()> {
@@ -994,11 +1018,16 @@ impl Vm {
             }};
         }
 
+        let poison_next = self.poison_next;
+
         match self.specs.method {
             Method::Euler => loop {
                 let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
                 if curr[TIME_OFF] > end {
                     break;
+                }
+                if poison_next {
+                    next[IMPLICIT_VAR_COUNT..].fill(POISON_SENTINEL);
                 }
 
                 if self.conveyor_plans.is_empty() && self.queue_plans.is_empty() {
@@ -2012,6 +2041,42 @@ impl Vm {
                 // sole mechanism -- it replaces the old TIME == INITIAL_TIME
                 // check, which broke when RK stages advanced TIME to trial
                 // points before prev_values was initialized.
+                Opcode::SubVarPrev { l, r, lit } => {
+                    let lhs = curr[module_off + *l as usize];
+                    let rhs = if use_prev_fallback {
+                        bytecode.literals[*lit as usize]
+                    } else {
+                        prev_values[module_off + *r as usize]
+                    };
+                    // Through `eval_op2` so the fused form is bit-identical to
+                    // the sequence by construction, not by inspection.
+                    stack.push(eval_op2(Op2::Sub, lhs, rhs));
+                }
+                Opcode::BinStackPrev { r, lit, op } => {
+                    let rhs = if use_prev_fallback {
+                        bytecode.literals[*lit as usize]
+                    } else {
+                        prev_values[module_off + *r as usize]
+                    };
+                    let lhs = stack.pop();
+                    stack.push(eval_op2(*op, lhs, rhs));
+                }
+                Opcode::LoadPrevConst { off, lit } => {
+                    let value = if use_prev_fallback {
+                        bytecode.literals[*lit as usize]
+                    } else {
+                        prev_values[module_off + *off as usize]
+                    };
+                    stack.push(value);
+                }
+                Opcode::ApplyTerConst { func, lit } => {
+                    let time = curr[TIME_OFF];
+                    let dt = curr[DT_OFF];
+                    let c = bytecode.literals[*lit as usize];
+                    let b = stack.pop();
+                    let a = stack.pop();
+                    stack.push(apply(*func, time, dt, a, b, c));
+                }
                 Opcode::LoadPrev { off } => {
                     let fallback = stack.pop();
                     let value = if use_prev_fallback {
@@ -2155,6 +2220,61 @@ impl Vm {
                     let r = stack.pop();
                     let l = stack.pop();
                     next[module_off + *off as usize] = eval_op2(*op, l, r);
+                    debug_assert_eq!(0, stack.len());
+                }
+                // === CONDITIONAL SELECT (R3) ===
+                // The fused `SetCond; If[; AssignCurr]`. Codegen pushes the true
+                // arm, then the false arm, then the condition, so these pop in
+                // the order cond, false, true -- exactly the order the three
+                // separate arms performed them in. Selecting between two
+                // already-evaluated operands is what `If` did; nothing about
+                // branch evaluation changes here.
+                Opcode::SelectIf {} => {
+                    let cond = stack.pop();
+                    let f = stack.pop();
+                    let t = stack.pop();
+                    stack.push(if is_truthy(cond) { t } else { f });
+                }
+                Opcode::SelectIfAssignCurr { off } => {
+                    let cond = stack.pop();
+                    let f = stack.pop();
+                    let t = stack.pop();
+                    curr[module_off + *off as usize] = if is_truthy(cond) { t } else { f };
+                    debug_assert_eq!(0, stack.len());
+                }
+                // === LEAF STORES AND MODULE-INPUT OPERANDS (R3) ===
+                // Each reads its leaf from the region `LoadVar` / `LoadInitial`
+                // / `LoadModuleInput` would have read and writes `curr`
+                // directly, touching the arithmetic stack not at all.
+                Opcode::AssignVarCurr { src, dst } => {
+                    curr[module_off + *dst as usize] = curr[module_off + *src as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignInitialCurr { src, dst } => {
+                    // Mirrors `LoadInitial`: during the initials phase the
+                    // snapshot does not exist yet, so read the row being built.
+                    let abs_src = module_off + *src as usize;
+                    let value = if part == StepPart::Initials {
+                        curr[abs_src]
+                    } else {
+                        initial_values[abs_src]
+                    };
+                    curr[module_off + *dst as usize] = value;
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignModInputCurr { input, dst } => {
+                    curr[module_off + *dst as usize] = module_inputs[*input as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::BinStackModInput { r_input, op } => {
+                    let lv = stack.pop();
+                    let rv = module_inputs[*r_input as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::AssignStackModInputCurr { dst, b_input, op } => {
+                    let lhs = stack.pop();
+                    let rhs = module_inputs[*b_input as usize];
+                    curr[module_off + *dst as usize] = eval_op2(*op, lhs, rhs);
                     debug_assert_eq!(0, stack.len());
                 }
                 // === 3-ADDRESS BINARY OPS (R2) ===
@@ -2392,9 +2512,15 @@ impl Vm {
                 Opcode::Apply { func } => {
                     let time = curr[TIME_OFF];
                     let dt = curr[DT_OFF];
-                    let c = stack.pop();
-                    let b = stack.pop();
-                    let a = stack.pop();
+                    // Pop exactly the operands this builtin reads. Codegen
+                    // pushes `BuiltinId::arity()` of them and no padding, so an
+                    // unread operand is never on the stack to begin with; the
+                    // value handed to `apply` for an unread position is
+                    // arbitrary, and 0.0 keeps it deterministic.
+                    let arity = func.arity();
+                    let c = if arity >= 3 { stack.pop() } else { 0.0 };
+                    let b = if arity >= 2 { stack.pop() } else { 0.0 };
+                    let a = if arity >= 1 { stack.pop() } else { 0.0 };
 
                     stack.push(apply(*func, time, dt, a, b, c));
                 }
@@ -2419,6 +2545,24 @@ impl Vm {
                         };
                         stack.push(result);
                     }
+                }
+                // The element offset was resolved and bounds-checked at emit
+                // time, so this reads `graphical_functions[base_gf + elem]`
+                // with no pop and no range check -- the two things the general
+                // `Lookup` arm above spends its extra dispatch on.
+                Opcode::LookupDirect {
+                    base_gf,
+                    elem,
+                    mode,
+                } => {
+                    let lookup_index = stack.pop();
+                    let gf = &context.graphical_functions[*base_gf as usize + *elem as usize];
+                    let result = match mode {
+                        LookupMode::Interpolate => lookup(gf, lookup_index),
+                        LookupMode::Forward => lookup_forward(gf, lookup_index),
+                        LookupMode::Backward => lookup_backward(gf, lookup_index),
+                    };
+                    stack.push(result);
                 }
                 Opcode::Ret => {
                     break;

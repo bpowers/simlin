@@ -1427,6 +1427,27 @@ fn emit_ops(
                 table_count,
                 mode,
             } => emit_lookup(*base_gf, *table_count, *mode, ctx, f),
+            // The constant element offset is not on the wasm stack (codegen
+            // never emitted a push for it), so splice it in beneath the index
+            // and reuse the one lowering rather than growing a second copy of
+            // the directory-read + helper-call sequence.
+            //
+            // `table_count` is passed as `elem + 1`, which makes
+            // `emit_lookup`'s range check vacuously true. That is sound rather
+            // than a fudge: `compiler::codegen::const_element_offset` only
+            // emits this opcode when `elem < table_count`, so the check it
+            // replaces was already discharged at emit time -- which is the
+            // whole point of the opcode.
+            Opcode::LookupDirect {
+                base_gf,
+                elem,
+                mode,
+            } => {
+                f.instruction(&Instruction::LocalSet(ctx.scratch_local));
+                f.instruction(&f64_const(*elem as f64));
+                f.instruction(&Instruction::LocalGet(ctx.scratch_local));
+                emit_lookup(*base_gf, *elem as u16 + 1, *mode, ctx, f)
+            }
             // `LoadPrev` mirrors the VM (`vm.rs:1320-1328`): a fallback is
             // already on the stack (codegen pushes it just before this opcode);
             // yield it while `use_prev_fallback` is set, otherwise read
@@ -2448,11 +2469,34 @@ fn emit_apply(func: BuiltinId, ctx: &EmitCtx, f: &mut Function) {
     use Instruction as Ins;
     let [a, b, c] = ctx.apply_locals;
 
-    // Pop the three padded operands. The stack top is `c`, so set c, then b,
-    // then a (the VM pops in the same order).
-    f.instruction(&Ins::LocalSet(c));
-    f.instruction(&Ins::LocalSet(b));
-    f.instruction(&Ins::LocalSet(a));
+    // Pop exactly `BuiltinId::arity()` operands -- the same count codegen
+    // pushes and the same count the VM's `Apply` arm pops, all three reading
+    // the one shared table so they cannot disagree. The wasm stack top is `c`,
+    // so set c, then b, then a (the VM pops in the same order). Locals for
+    // positions this builtin does not read keep whatever a previous `Apply`
+    // left in them and are never read back: each `match` arm below touches only
+    // the locals its own arity covers.
+    //
+    // OBLIGATION when adding a builtin: an arm must read only the locals its
+    // arity covers. `BuiltinId::arity()`'s exhaustive match forces a new
+    // builtin to DECLARE an arity; nothing forces its arm here to respect it,
+    // and the natural way to add one is to copy an adjacent arm -- so copying a
+    // 3-arity arm for a 1-arity builtin reads two stale locals left by an
+    // earlier `Apply`. Operand padding used to make that safe by accident
+    // (`b`/`c` were always freshly-zeroed pads); with the padding gone the
+    // guarantee moved from the data into the `apply_*` tests in
+    // `lower_tests.rs`, which execute every builtin against the VM. They are
+    // the enforcement -- extend them when adding one.
+    let arity = func.arity();
+    if arity >= 3 {
+        f.instruction(&Ins::LocalSet(c));
+    }
+    if arity >= 2 {
+        f.instruction(&Ins::LocalSet(b));
+    }
+    if arity >= 1 {
+        f.instruction(&Ins::LocalSet(a));
+    }
 
     let get = |f: &mut Function, l: u32| {
         f.instruction(&Ins::LocalGet(l));

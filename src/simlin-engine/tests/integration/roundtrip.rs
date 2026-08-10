@@ -10,7 +10,15 @@ use simlin_engine::db::{
 };
 use simlin_engine::xmile;
 
-static TEST_MODELS: &[&str] = &[
+/// The models this file round-trips through XMILE serialization.
+///
+/// A NARROWER list than `simulate.rs`'s same-shaped corpus, which its
+/// `corpus_tests!` macro generates under the name `TEST_MODELS` from its own
+/// (larger) set. The two are private to their own modules, so nothing stops
+/// them sharing a name -- and a sweep run against the wrong one looks like a
+/// clean pass over a corpus it never touched. Named apart so that cannot
+/// happen silently.
+static ROUNDTRIP_TEST_MODELS: &[&str] = &[
     "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
     "test/test-models/tests/logicals/test_logicals.xmile",
     "test/test-models/samples/SIR/SIR.xmile",
@@ -51,7 +59,7 @@ static TEST_MODELS: &[&str] = &[
 
 #[test]
 fn roundtrips_model() {
-    for &path in TEST_MODELS {
+    for &path in ROUNDTRIP_TEST_MODELS {
         let file_path = format!("../../{path}");
 
         eprintln!("model: {path}");

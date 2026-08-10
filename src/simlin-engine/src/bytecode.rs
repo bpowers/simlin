@@ -619,6 +619,52 @@ pub(crate) enum BuiltinId {
     Tan,
 }
 
+impl BuiltinId {
+    /// How many operands `vm::apply` actually READS for this builtin.
+    ///
+    /// This is the single statement of that fact, and its three consumers --
+    /// `compiler::codegen` (how many operands to push), `Opcode::stack_effect`
+    /// (how many the fused opcode pops), and the `Opcode::Apply` arms in
+    /// `vm.rs` and `wasmgen::lower` -- all read it, so they cannot disagree.
+    /// Before it existed, `Apply` unconditionally popped 3 and codegen padded
+    /// every shorter call with `LoadConstant(0.0)` pushes that `apply` then
+    /// discarded: 0.73 wasted pads per executed `Apply` on C-LEARN (583k
+    /// dispatches/run, 2.0% of all dispatches).
+    ///
+    /// The arms are derived from `vm::apply`'s body -- which operands each match
+    /// arm names -- and the match is exhaustive with no `_`, so a new builtin
+    /// cannot be added without deciding its arity here.
+    ///
+    /// `Inf`/`Pi` are 0: codegen returns early for both (they lower to a
+    /// `LoadConstant`), so no `Apply` opcode carrying them is ever emitted.
+    /// The three genuinely-3-operand builtins whose LAST operand is optional in
+    /// the source language stay 3, because codegen substitutes a real value
+    /// rather than a pad: `PULSE`'s third defaults to `0` and `apply` reads it,
+    /// `SAFEDIV`'s third IS the divide-by-zero result, and `RAMP`'s third
+    /// defaults to `final_time` via `LoadGlobalVar`.
+    pub(crate) fn arity(self) -> u8 {
+        match self {
+            BuiltinId::Abs
+            | BuiltinId::Arccos
+            | BuiltinId::Arcsin
+            | BuiltinId::Arctan
+            | BuiltinId::Cos
+            | BuiltinId::Exp
+            | BuiltinId::Int
+            | BuiltinId::Ln
+            | BuiltinId::Log10
+            | BuiltinId::Round
+            | BuiltinId::Sign
+            | BuiltinId::Sin
+            | BuiltinId::Sqrt
+            | BuiltinId::Tan => 1,
+            BuiltinId::Max | BuiltinId::Min | BuiltinId::Quantum | BuiltinId::Step => 2,
+            BuiltinId::Pulse | BuiltinId::Ramp | BuiltinId::SafeDiv | BuiltinId::Sshape => 3,
+            BuiltinId::Inf | BuiltinId::Pi => 0,
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Op2 {
     Add,
@@ -679,6 +725,44 @@ pub(crate) enum Opcode {
     LoadPrev {
         off: VariableOffset,
     },
+    /// Fused `LoadConstant lit; LoadPrev off`.
+    ///
+    /// `LoadPrev` pops its `PREVIOUS()` fallback off the arithmetic stack, so
+    /// codegen emits a `LoadConstant` immediately before every one. Reading the
+    /// fallback from the literal table instead folds the pair into one dispatch.
+    LoadPrevConst {
+        off: VariableOffset,
+        lit: LiteralId,
+    },
+    /// Fused `LoadVar l; LoadConstant lit; LoadPrev r; Op2 Sub` -- the delta
+    /// `v - PREVIOUS(v)`, four dispatches in one.
+    ///
+    /// The operator lives in the variant tag (only `Sub` occurs) so the payload
+    /// stays 3xu16 = 6 bytes and `size_of::<Opcode>()` stays at 8, the same
+    /// trick the `Assign{Add,Sub,Mul,Div}VarVar*` family uses.
+    SubVarPrev {
+        l: VariableOffset,
+        r: VariableOffset,
+        lit: LiteralId,
+    },
+    /// Fused `LoadConstant lit; LoadPrev r; Op2 op` with the lhs already on the
+    /// arithmetic stack.
+    BinStackPrev {
+        r: VariableOffset,
+        lit: LiteralId,
+        op: Op2,
+    },
+    /// Fused `LoadConstant lit; Apply` for a 3-arity builtin whose trailing
+    /// argument is a literal.
+    ///
+    /// This is NOT the operand padding `Apply` once carried: the arity is a
+    /// property of the builtin and no pads are emitted. A 3-arity builtin's
+    /// third operand is a value it reads -- for `SAFEDIV` it is the
+    /// divide-by-zero result -- so the load survives and is worth folding.
+    ApplyTerConst {
+        func: BuiltinId,
+        lit: LiteralId,
+    },
     /// Load the initial (t=0) value of a variable from the initial-value buffer.
     /// Pushes `initial_values[module_off + off]` onto the stack.
     LoadInitial {
@@ -730,6 +814,22 @@ pub(crate) enum Opcode {
         mode: LookupMode,
     },
 
+    /// `Lookup` whose element offset was resolved at COMPILE time, so it pops
+    /// only the index. Codegen emits this whenever a lookup's element-offset
+    /// expression is a constant in range -- which is every scalar table, where
+    /// the offset is a literal 0. The bounds check `Lookup` performs at runtime
+    /// is discharged at emit time (`elem < table_count`), so the table index is
+    /// `base_gf + elem` unconditionally.
+    ///
+    /// `table_count` is deliberately absent: it exists on `Lookup` for the
+    /// runtime range check and on the SYMBOLIC twin for GF block extents, and
+    /// neither applies once the element is fixed.
+    LookupDirect {
+        base_gf: GraphicalFunctionId,
+        elem: u8,
+        mode: LookupMode,
+    },
+
     // === SUPERINSTRUCTIONS (fused opcodes for common patterns) ===
     /// Fused LoadConstant + AssignCurr.
     /// curr[module_off + off] = literals[literal_id]; stack unchanged.
@@ -757,6 +857,69 @@ pub(crate) enum Opcode {
     BinOpAssignNext {
         op: Op2,
         off: VariableOffset,
+    },
+
+    // === CONDITIONAL SELECT (R3) ===
+    // `compiler::codegen`'s `Expr::If` arm emits `SetCond` and `If` in one
+    // breath and is the SOLE producer of either, so the pair is adjacent BY
+    // CONSTRUCTION -- measured on C-LEARN as exactly equal executed counts
+    // (1,874,169 each, 6.38% of dispatches apiece). Neither `peephole_optimize`
+    // nor `fuse_three_address` can separate them: both only ever REPLACE an
+    // adjacent run, and `SetCond` is neither a leaf load nor a combiner, so no
+    // fusion window can absorb it.
+    //
+    // Folding the pair removes a dispatch AND the `condition` round trip; the
+    // trailing `AssignCurr` (which follows ~91% of executed `If`s) folds in too.
+    // Created only by the late `fuse_three_address` pass, like the 3-address
+    // forms below -- they never enter the symbolic/incremental layer.
+    /// Pop `cond`, `f`, `t`; push `t` if `cond` is truthy else `f`.
+    SelectIf {},
+    /// Pop `cond`, `f`, `t`; `curr[module_off + off] = if cond { t } else { f }`.
+    SelectIfAssignCurr {
+        off: VariableOffset,
+    },
+
+    // === LEAF STORES AND MODULE-INPUT OPERANDS (R3) ===
+    // `AssignCurr` is 10.68% of executed dispatches on C-LEARN, and the measured
+    // bigrams account for essentially all of it. The conditional-select forms
+    // above take the `If` share; these take the three leaf loads that feed a
+    // store directly. `Apply; AssignCurr` is deliberately left unfused -- the
+    // `Apply` arm inlines every builtin body, so duplicating it to fold a store
+    // would be the largest code growth in the hot function for the smallest
+    // member of the set.
+    //
+    // `LoadConstant; AssignCurr` is absent because it never reaches this pass:
+    // the symbolic `peephole_optimize` already folds it into `AssignConstCurr`.
+    /// `curr[module_off + dst] = curr[module_off + src]` -- a slot-to-slot copy
+    /// (alias / pass-through variables).
+    AssignVarCurr {
+        src: VariableOffset,
+        dst: VariableOffset,
+    },
+    /// `curr[module_off + dst] = <initial value of src>`. Reads `curr` during
+    /// the initials phase and `initial_values` afterwards, exactly as
+    /// `LoadInitial` does.
+    AssignInitialCurr {
+        src: VariableOffset,
+        dst: VariableOffset,
+    },
+    /// `curr[module_off + dst] = module_inputs[input]`.
+    AssignModInputCurr {
+        input: ModuleInputOffset,
+        dst: VariableOffset,
+    },
+    /// Pop `lhs`; push `lhs op module_inputs[r_input]`. `LoadModuleInput` was
+    /// not a fusible leaf at all before this, despite being 4.68% of C-LEARN
+    /// dispatches and 5.8% of WORLD3's.
+    BinStackModInput {
+        r_input: ModuleInputOffset,
+        op: Op2,
+    },
+    /// Pop `lhs`; `curr[module_off + dst] = lhs op module_inputs[b_input]`.
+    AssignStackModInputCurr {
+        dst: VariableOffset,
+        b_input: ModuleInputOffset,
+        op: Op2,
     },
 
     // === 3-ADDRESS BINARY OPS (R2) ===
@@ -1326,6 +1489,14 @@ impl Opcode {
             // LoadPrev pops the caller-provided fallback, then pushes
             // either the fallback (at t=INITIAL_TIME) or prev_values[off].
             Opcode::LoadPrev { .. } => (1, 1),
+            // The fused `LoadConstant; LoadPrev` pair: the fallback comes from
+            // the literal table, so nothing is popped.
+            Opcode::LoadPrevConst { .. } => (0, 1),
+            Opcode::SubVarPrev { .. } => (0, 1),
+            Opcode::BinStackPrev { .. } => (1, 1),
+            // The fused `LoadConstant; Apply` pair for a 3-arity builtin: two
+            // operands still come off the stack, the third from the literals.
+            Opcode::ApplyTerConst { .. } => (2, 1),
 
             // Legacy subscript: PushSubscriptIndex pops an index from the
             // arithmetic stack and appends it to a separate subscript_index
@@ -1352,14 +1523,35 @@ impl Opcode {
             Opcode::AssignCurr { .. } => (1, 0),
 
             // Builtins always take 3 args (actual + padding), push 1 result
-            Opcode::Apply { .. } => (3, 1),
+            // Builtins pop exactly the operands `vm::apply` reads (see
+            // `BuiltinId::arity`), not a fixed 3 with discarded padding.
+            Opcode::Apply { func } => (func.arity(), 1),
             // Lookup pops element_offset and lookup_index, pushes result
             Opcode::Lookup { .. } => (2, 1),
+            // LookupDirect's element offset is baked into the opcode, so only
+            // the index is popped.
+            Opcode::LookupDirect { .. } => (1, 1),
 
             // Superinstructions
             Opcode::AssignConstCurr { .. } => (0, 0), // reads literal directly
             Opcode::BinOpAssignCurr { .. } => (2, 0), // pops 2, assigns directly
             Opcode::BinOpAssignNext { .. } => (2, 0), // pops 2, assigns directly
+
+            // Conditional select: the fusions of `SetCond`(1,0)+`If`(2,1) and of
+            // that pair plus `AssignCurr`(1,0). Net effect is identical to the
+            // sequence they replace, which is what keeps the fixed-stack safety
+            // proof in `resolve_bytecode` valid across the pass.
+            Opcode::SelectIf {} => (3, 1), // pops cond+false+true, pushes result
+            Opcode::SelectIfAssignCurr { .. } => (3, 0), // same, assigns directly
+
+            // Leaf stores: exactly the net of the `LoadX`(0,1) + `AssignCurr`(1,0)
+            // they replace, so a program's peak depth cannot move.
+            Opcode::AssignVarCurr { .. }
+            | Opcode::AssignInitialCurr { .. }
+            | Opcode::AssignModInputCurr { .. } => (0, 0),
+            // Module-input operand forms mirror their var/const twins.
+            Opcode::BinStackModInput { .. } => (1, 1),
+            Opcode::AssignStackModInputCurr { .. } => (1, 0),
 
             // 3-address binops: the *Var/*Const forms read both operands from
             // curr/literals and push (0 pops, 1 push); the Stack* forms pop the
@@ -1489,6 +1681,10 @@ impl Opcode {
             Opcode::LoadVar { .. } => "LoadVar",
             Opcode::LoadGlobalVar { .. } => "LoadGlobalVar",
             Opcode::LoadPrev { .. } => "LoadPrev",
+            Opcode::LoadPrevConst { .. } => "LoadPrevConst",
+            Opcode::SubVarPrev { .. } => "SubVarPrev",
+            Opcode::BinStackPrev { .. } => "BinStackPrev",
+            Opcode::ApplyTerConst { .. } => "ApplyTerConst",
             Opcode::LoadInitial { .. } => "LoadInitial",
             Opcode::PushSubscriptIndex { .. } => "PushSubscriptIndex",
             Opcode::LoadSubscript { .. } => "LoadSubscript",
@@ -1500,6 +1696,7 @@ impl Opcode {
             Opcode::AssignCurr { .. } => "AssignCurr",
             Opcode::Apply { .. } => "Apply",
             Opcode::Lookup { .. } => "Lookup",
+            Opcode::LookupDirect { .. } => "LookupDirect",
             Opcode::AssignConstCurr { .. } => "AssignConstCurr",
             Opcode::BinVarVar { .. } => "BinVarVar",
             Opcode::BinVarConst { .. } => "BinVarConst",
@@ -1515,6 +1712,13 @@ impl Opcode {
             Opcode::BinConstConst { .. } => "BinConstConst",
             Opcode::BinOpAssignCurr { .. } => "BinOpAssignCurr",
             Opcode::BinOpAssignNext { .. } => "BinOpAssignNext",
+            Opcode::SelectIf {} => "SelectIf",
+            Opcode::SelectIfAssignCurr { .. } => "SelectIfAssignCurr",
+            Opcode::AssignVarCurr { .. } => "AssignVarCurr",
+            Opcode::AssignInitialCurr { .. } => "AssignInitialCurr",
+            Opcode::AssignModInputCurr { .. } => "AssignModInputCurr",
+            Opcode::BinStackModInput { .. } => "BinStackModInput",
+            Opcode::AssignStackModInputCurr { .. } => "AssignStackModInputCurr",
             Opcode::AssignAddVarVarCurr { .. } => "AssignAddVarVarCurr",
             Opcode::AssignSubVarVarCurr { .. } => "AssignSubVarVarCurr",
             Opcode::AssignMulVarVarCurr { .. } => "AssignMulVarVarCurr",
@@ -1974,6 +2178,72 @@ impl ByteCode {
         while i < self.code.len() {
             let new_pc = optimized.len();
 
+            // Conditional select: `SetCond; If[; AssignCurr]`. Tried before the
+            // leaf windows because `SetCond` matches none of them (it is neither
+            // a leaf load nor a combiner), so the two rule sets are disjoint and
+            // the order is a readability choice, not a precedence one. The
+            // 3-window is tried first for the same reason the leaf-assign forms
+            // are: it collapses the store too (3->1 rather than 2->1 plus a
+            // separate store), and ~91% of executed `If`s are followed by one.
+            if matches!(self.code[i], Opcode::SetCond {}) {
+                let if_at = i + 1;
+                let pair_ok = if_at < self.code.len()
+                    && matches!(self.code[if_at], Opcode::If {})
+                    && !jump_targets[if_at];
+                if pair_ok {
+                    let assign_at = i + 2;
+                    let fused_assign = if assign_at < self.code.len() && !jump_targets[assign_at] {
+                        match &self.code[assign_at] {
+                            Opcode::AssignCurr { off } => Some(*off),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(off) = fused_assign {
+                        optimized.push(Opcode::SelectIfAssignCurr { off });
+                        pc_map.push(new_pc); // old i
+                        pc_map.push(new_pc); // old i+1
+                        pc_map.push(new_pc); // old i+2
+                        i += 3;
+                        continue;
+                    }
+                    optimized.push(Opcode::SelectIf {});
+                    pc_map.push(new_pc); // old i
+                    pc_map.push(new_pc); // old i+1
+                    i += 2;
+                    continue;
+                }
+            }
+
+            // Leaf store: `LoadX; AssignCurr` -> one register-style store, for
+            // the three leaf loads the measured bigrams show feeding a store.
+            // Tried before the leaf windows for the same reason as the select
+            // above: `AssignCurr` is not a combiner in either of them, so the
+            // rule sets are disjoint.
+            if i + 1 < self.code.len()
+                && !jump_targets[i + 1]
+                && let Opcode::AssignCurr { off: dst } = self.code[i + 1]
+            {
+                let fused_store = match self.code[i] {
+                    Opcode::LoadVar { off: src } => Some(Opcode::AssignVarCurr { src, dst }),
+                    Opcode::LoadInitial { off: src } => {
+                        Some(Opcode::AssignInitialCurr { src, dst })
+                    }
+                    Opcode::LoadModuleInput { input } => {
+                        Some(Opcode::AssignModInputCurr { input, dst })
+                    }
+                    _ => None,
+                };
+                if let Some(op) = fused_store {
+                    optimized.push(op);
+                    pc_map.push(new_pc); // old i
+                    pc_map.push(new_pc); // old i+1
+                    i += 2;
+                    continue;
+                }
+            }
+
             // 3-window: [leaf load, leaf load, <combiner>] where the combiner is
             // either an `Op2` (a pushing subexpression) or a `BinOpAssign{Curr|
             // Next}` (a leaf assignment, post-peephole). Both absorbed
@@ -1984,78 +2254,123 @@ impl ByteCode {
             // op (3->1) rather than `Bin*` (3->1 pushing) + a separate store.
             // Only {Add,Sub,Mul,Div} have dedicated leaf-assign opcodes; any
             // other operator falls through and keeps the existing form.
+            // 4-window: `LoadVar l; LoadConstant lit; LoadPrev r; Op2 Sub` --
+            // the `v - PREVIOUS(v)` delta. Matched on the ORIGINAL stream: this
+            // is a single greedy left-to-right pass, so when the window at `i`
+            // is tested nothing at `i+1` has been rewritten yet. That is why
+            // this does not depend on `LoadPrevConst` having run first, and why
+            // the two are independent of each other.
+            let four = i + 3 < self.code.len()
+                && !jump_targets[i + 1]
+                && !jump_targets[i + 2]
+                && !jump_targets[i + 3];
+            if four
+                && let (
+                    Opcode::LoadVar { off: l },
+                    Opcode::LoadConstant { id: lit },
+                    Opcode::LoadPrev { off: r },
+                    Opcode::Op2 { op: Op2::Sub },
+                ) = (
+                    &self.code[i],
+                    &self.code[i + 1],
+                    &self.code[i + 2],
+                    &self.code[i + 3],
+                )
+            {
+                optimized.push(Opcode::SubVarPrev {
+                    l: *l,
+                    r: *r,
+                    lit: *lit,
+                });
+                pc_map.push(new_pc); // old i
+                pc_map.push(new_pc); // old i+1
+                pc_map.push(new_pc); // old i+2
+                pc_map.push(new_pc); // old i+3
+                i += 4;
+                continue;
+            }
+
             let three = i + 2 < self.code.len() && !jump_targets[i + 1] && !jump_targets[i + 2];
-            let fused3 = if three {
-                // Decode the combiner once into two mutually-exclusive options:
-                // `assign3 = (op, dst, is_next)` for a leaf-assign, or
-                // `push3 = op` for a pushing Op2.
-                let (assign3, push3) = match &self.code[i + 2] {
-                    Opcode::BinOpAssignCurr { op, off } => (Some((*op, *off, false)), None),
-                    Opcode::BinOpAssignNext { op, off } => (Some((*op, *off, true)), None),
-                    Opcode::Op2 { op } => (None, Some(*op)),
-                    _ => (None, None),
+            let fused3 =
+                if three {
+                    // Decode the combiner once into two mutually-exclusive options:
+                    // `assign3 = (op, dst, is_next)` for a leaf-assign, or
+                    // `push3 = op` for a pushing Op2.
+                    let (assign3, push3) = match &self.code[i + 2] {
+                        Opcode::BinOpAssignCurr { op, off } => (Some((*op, *off, false)), None),
+                        Opcode::BinOpAssignNext { op, off } => (Some((*op, *off, true)), None),
+                        Opcode::Op2 { op } => (None, Some(*op)),
+                        _ => (None, None),
+                    };
+                    match (&self.code[i], &self.code[i + 1]) {
+                        // Leaf assignment `dst = a op b` -> one fused op (3->1).
+                        (Opcode::LoadVar { off: l }, Opcode::LoadVar { off: r }) => assign3
+                            .and_then(|(op, dst, n)| fused_leaf_var_var(op, n, *l, *r, dst))
+                            .or_else(|| push3.map(|op| Opcode::BinVarVar { l: *l, r: *r, op })),
+                        (Opcode::LoadVar { off: l }, Opcode::LoadConstant { id: r }) => assign3
+                            .and_then(|(op, dst, n)| fused_leaf_var_const(op, n, *l, *r, dst))
+                            .or_else(|| push3.map(|op| Opcode::BinVarConst { l: *l, r: *r, op })),
+                        (Opcode::LoadConstant { id: l }, Opcode::LoadVar { off: r }) => assign3
+                            .and_then(|(op, dst, n)| fused_leaf_const_var(op, n, *l, *r, dst))
+                            .or_else(|| push3.map(|op| Opcode::BinConstVar { l: *l, r: *r, op })),
+                        // Two constant leaves: no leaf-assign form, so this only fuses
+                        // a pushing `Op2`. Computes `literals[l] op literals[r]` at run
+                        // time (NOT compile-time folding -- the operands are two
+                        // distinct interned literals).
+                        // `LoadConstant lit; LoadPrev r; Op2` with the lhs already
+                        // on the stack. Same reason as the 4-window above: matched
+                        // against the original `LoadPrev`, not a rewritten form.
+                        (Opcode::LoadConstant { id: lit }, Opcode::LoadPrev { off: r }) => push3
+                            .map(|op| Opcode::BinStackPrev {
+                                r: *r,
+                                lit: *lit,
+                                op,
+                            }),
+                        (Opcode::LoadConstant { id: l }, Opcode::LoadConstant { id: r }) => {
+                            push3.map(|op| Opcode::BinConstConst { l: *l, r: *r, op })
+                        }
+                        // Global-operand leaf pairs. A global has no dedicated
+                        // leaf-assign opcode, so these fuse only a pushing `Op2`; a
+                        // `BinOpAssign` combiner (push3 == None) falls through to the
+                        // 2-window, which folds the rhs+store and leaves the global
+                        // load as a standalone push. `l_global`/`r_global` index
+                        // `curr[g]` (absolute), the var operand `curr[module_off + v]`.
+                        (Opcode::LoadGlobalVar { off: l }, Opcode::LoadVar { off: r }) => push3
+                            .map(|op| Opcode::BinGlobalVar {
+                                l_global: *l,
+                                r: *r,
+                                op,
+                            }),
+                        (Opcode::LoadVar { off: l }, Opcode::LoadGlobalVar { off: r }) => push3
+                            .map(|op| Opcode::BinVarGlobal {
+                                l: *l,
+                                r_global: *r,
+                                op,
+                            }),
+                        (Opcode::LoadGlobalVar { off: l }, Opcode::LoadConstant { id: r }) => push3
+                            .map(|op| Opcode::BinGlobalConst {
+                                l_global: *l,
+                                r: *r,
+                                op,
+                            }),
+                        (Opcode::LoadConstant { id: l }, Opcode::LoadGlobalVar { off: r }) => push3
+                            .map(|op| Opcode::BinConstGlobal {
+                                l: *l,
+                                r_global: *r,
+                                op,
+                            }),
+                        (Opcode::LoadGlobalVar { off: l }, Opcode::LoadGlobalVar { off: r }) => {
+                            push3.map(|op| Opcode::BinGlobalGlobal {
+                                l_global: *l,
+                                r_global: *r,
+                                op,
+                            })
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
                 };
-                match (&self.code[i], &self.code[i + 1]) {
-                    // Leaf assignment `dst = a op b` -> one fused op (3->1).
-                    (Opcode::LoadVar { off: l }, Opcode::LoadVar { off: r }) => assign3
-                        .and_then(|(op, dst, n)| fused_leaf_var_var(op, n, *l, *r, dst))
-                        .or_else(|| push3.map(|op| Opcode::BinVarVar { l: *l, r: *r, op })),
-                    (Opcode::LoadVar { off: l }, Opcode::LoadConstant { id: r }) => assign3
-                        .and_then(|(op, dst, n)| fused_leaf_var_const(op, n, *l, *r, dst))
-                        .or_else(|| push3.map(|op| Opcode::BinVarConst { l: *l, r: *r, op })),
-                    (Opcode::LoadConstant { id: l }, Opcode::LoadVar { off: r }) => assign3
-                        .and_then(|(op, dst, n)| fused_leaf_const_var(op, n, *l, *r, dst))
-                        .or_else(|| push3.map(|op| Opcode::BinConstVar { l: *l, r: *r, op })),
-                    // Two constant leaves: no leaf-assign form, so this only fuses
-                    // a pushing `Op2`. Computes `literals[l] op literals[r]` at run
-                    // time (NOT compile-time folding -- the operands are two
-                    // distinct interned literals).
-                    (Opcode::LoadConstant { id: l }, Opcode::LoadConstant { id: r }) => {
-                        push3.map(|op| Opcode::BinConstConst { l: *l, r: *r, op })
-                    }
-                    // Global-operand leaf pairs. A global has no dedicated
-                    // leaf-assign opcode, so these fuse only a pushing `Op2`; a
-                    // `BinOpAssign` combiner (push3 == None) falls through to the
-                    // 2-window, which folds the rhs+store and leaves the global
-                    // load as a standalone push. `l_global`/`r_global` index
-                    // `curr[g]` (absolute), the var operand `curr[module_off + v]`.
-                    (Opcode::LoadGlobalVar { off: l }, Opcode::LoadVar { off: r }) => {
-                        push3.map(|op| Opcode::BinGlobalVar {
-                            l_global: *l,
-                            r: *r,
-                            op,
-                        })
-                    }
-                    (Opcode::LoadVar { off: l }, Opcode::LoadGlobalVar { off: r }) => {
-                        push3.map(|op| Opcode::BinVarGlobal {
-                            l: *l,
-                            r_global: *r,
-                            op,
-                        })
-                    }
-                    (Opcode::LoadGlobalVar { off: l }, Opcode::LoadConstant { id: r }) => push3
-                        .map(|op| Opcode::BinGlobalConst {
-                            l_global: *l,
-                            r: *r,
-                            op,
-                        }),
-                    (Opcode::LoadConstant { id: l }, Opcode::LoadGlobalVar { off: r }) => push3
-                        .map(|op| Opcode::BinConstGlobal {
-                            l: *l,
-                            r_global: *r,
-                            op,
-                        }),
-                    (Opcode::LoadGlobalVar { off: l }, Opcode::LoadGlobalVar { off: r }) => push3
-                        .map(|op| Opcode::BinGlobalGlobal {
-                            l_global: *l,
-                            r_global: *r,
-                            op,
-                        }),
-                    _ => None,
-                }
-            } else {
-                None
-            };
             if let Some(op) = fused3 {
                 optimized.push(op);
                 pc_map.push(new_pc); // old i
@@ -2097,7 +2412,22 @@ impl ByteCode {
                                 Opcode::AssignStackConstCurr { dst, b: *b, op }
                             }
                         })
-                        .or_else(|| push2.map(|op| Opcode::BinStackConst { r: *b, op })),
+                        .or_else(|| push2.map(|op| Opcode::BinStackConst { r: *b, op }))
+                        // A trailing constant that is not a binop operand: the
+                        // `PREVIOUS()` fallback `LoadPrev` pops, or the third
+                        // operand of a 3-arity builtin.
+                        .or_else(|| match &self.code[i + 1] {
+                            Opcode::LoadPrev { off } => {
+                                Some(Opcode::LoadPrevConst { off: *off, lit: *b })
+                            }
+                            Opcode::Apply { func } if func.arity() == 3 => {
+                                Some(Opcode::ApplyTerConst {
+                                    func: *func,
+                                    lit: *b,
+                                })
+                            }
+                            _ => None,
+                        }),
                     // `(lhs on stack) op global`. No global stack-leaf-assign
                     // opcode exists (the global ops are pushing-only), so a
                     // `BinOpAssign` combiner (push2 == None) is left unfused: the
@@ -2105,6 +2435,22 @@ impl ByteCode {
                     Opcode::LoadGlobalVar { off: b } => {
                         push2.map(|op| Opcode::BinStackGlobal { r_global: *b, op })
                     }
+                    // `(lhs on stack) op module_input`. Both combiners are
+                    // handled, mirroring the var/const leaves above. Module
+                    // inputs are 2-window only: giving them 3-window leaf forms
+                    // would need one opcode per (leaf x leaf) pairing for a
+                    // measured minority of the bigrams.
+                    Opcode::LoadModuleInput { input: b } => assign2
+                        .and_then(|(op, dst, n)| {
+                            // No `next[]` module-input store form: a stock update
+                            // never reads a module input as its trailing leaf.
+                            (!n).then_some(Opcode::AssignStackModInputCurr {
+                                dst,
+                                b_input: *b,
+                                op,
+                            })
+                        })
+                        .or_else(|| push2.map(|op| Opcode::BinStackModInput { r_input: *b, op })),
                     _ => None,
                 }
             } else {
@@ -3693,6 +4039,538 @@ mod tests {
             bc.code[3],
             Opcode::NextIterOrJump { jump_back: -1 }
         ));
+    }
+
+    // === Builtin arity (P2) ===
+
+    /// Every `BuiltinId`, with the arity `vm::apply` actually reads. Derived
+    /// from `apply`'s body arm by arm rather than sampled, so a builtin whose
+    /// operand use changes without its arity being revisited fails here. The
+    /// list is exhaustive over the enum: adding a variant without adding a row
+    /// makes `BuiltinId::arity`'s no-`_` match a compile error, and omitting the
+    /// row here makes the count assertion fail.
+    #[test]
+    fn builtin_arity_matches_what_apply_reads() {
+        let rows: &[(BuiltinId, u8)] = &[
+            (BuiltinId::Abs, 1),
+            (BuiltinId::Arccos, 1),
+            (BuiltinId::Arcsin, 1),
+            (BuiltinId::Arctan, 1),
+            (BuiltinId::Cos, 1),
+            (BuiltinId::Exp, 1),
+            (BuiltinId::Int, 1),
+            (BuiltinId::Ln, 1),
+            (BuiltinId::Log10, 1),
+            (BuiltinId::Round, 1),
+            (BuiltinId::Sign, 1),
+            (BuiltinId::Sin, 1),
+            (BuiltinId::Sqrt, 1),
+            (BuiltinId::Tan, 1),
+            (BuiltinId::Max, 2),
+            (BuiltinId::Min, 2),
+            (BuiltinId::Quantum, 2),
+            (BuiltinId::Step, 2),
+            (BuiltinId::Pulse, 3),
+            (BuiltinId::Ramp, 3),
+            (BuiltinId::SafeDiv, 3),
+            (BuiltinId::Sshape, 3),
+            (BuiltinId::Inf, 0),
+            (BuiltinId::Pi, 0),
+        ];
+        // 24 = every variant of BuiltinId. A new builtin must add a row.
+        assert_eq!(rows.len(), 24);
+        for (id, want) in rows {
+            assert_eq!(id.arity(), *want, "arity of {id:?}");
+        }
+    }
+
+    /// `Apply`'s stack effect must be its arity, not a fixed 3 -- this is what
+    /// keeps `max_stack_depth` (and so `resolve_bytecode`'s fixed-stack safety
+    /// proof) in step with what codegen actually pushes.
+    #[test]
+    fn apply_stack_effect_follows_arity() {
+        for (id, want) in [
+            (BuiltinId::Abs, 1u8),
+            (BuiltinId::Max, 2),
+            (BuiltinId::Pulse, 3),
+        ] {
+            let op = Opcode::Apply { func: id };
+            assert_eq!(op.stack_effect(), (want, 1), "stack effect of {id:?}");
+        }
+    }
+
+    // === Conditional-select fusion (SetCond;If[;AssignCurr]) ===
+    //
+    // `compiler::codegen`'s `Expr::If` arm is the SOLE producer of both opcodes
+    // and pushes them in one breath, so the pair is adjacent BY CONSTRUCTION --
+    // measured on C-LEARN as exactly equal executed counts (1,874,169 each).
+    // Neither `peephole_optimize` nor this pass can separate them: both only
+    // ever REPLACE an adjacent run, and `SetCond` is neither a leaf load nor a
+    // combiner, so no window can absorb it. These tests pin the fusion, both
+    // jump-target guards, and the stack-depth effect.
+
+    #[test]
+    fn test_fuse_setcond_if_pair() {
+        // `IF c THEN t ELSE f` as a pushing subexpression: codegen emits
+        // t; f; c; SetCond; If. The trailing pair collapses to one dispatch.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 }, // t
+                Opcode::LoadVar { off: 1 }, // f
+                Opcode::LoadVar { off: 2 }, // c
+                Opcode::SetCond {},
+                Opcode::If {},
+            ],
+        };
+        bc.fuse_three_address();
+        // The leading loads are not a fusible window (no combiner follows the
+        // pair), so only the SetCond;If tail collapses: 5 -> 4.
+        assert_eq!(bc.code.len(), 4);
+        assert!(matches!(bc.code[3], Opcode::SelectIf {}));
+    }
+
+    #[test]
+    fn test_fuse_setcond_if_assign_triple() {
+        // `x = IF c THEN t ELSE f`: the whole tail is one dispatch. This is the
+        // dominant shape -- ~91% of executed `If`s are followed by `AssignCurr`.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::LoadVar { off: 2 },
+                Opcode::SetCond {},
+                Opcode::If {},
+                Opcode::AssignCurr { off: 9 },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 4);
+        assert!(matches!(bc.code[3], Opcode::SelectIfAssignCurr { off: 9 }));
+    }
+
+    #[test]
+    fn test_fuse_setcond_if_blocked_when_if_is_jump_target() {
+        // A jump landing on the `If` means the pair is not a unit: fusing would
+        // make the jump land mid-fusion. Leave both alone.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::SetCond {},                       // [0]
+                Opcode::If {},                            // [1] <- jump target
+                Opcode::NextIterOrJump { jump_back: -1 }, // [2] -> [1]
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 3);
+        assert!(matches!(bc.code[0], Opcode::SetCond {}));
+        assert!(matches!(bc.code[1], Opcode::If {}));
+    }
+
+    #[test]
+    fn test_fuse_setcond_if_assign_falls_back_to_pair_when_assign_is_jump_target() {
+        // The 3-window is blocked because a jump targets the AssignCurr, but the
+        // SetCond;If pair is still a unit and must still fuse.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::SetCond {},                       // [0]
+                Opcode::If {},                            // [1]
+                Opcode::AssignCurr { off: 3 },            // [2] <- jump target
+                Opcode::NextIterOrJump { jump_back: -1 }, // [3] -> [2]
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 3);
+        assert!(matches!(bc.code[0], Opcode::SelectIf {}));
+        assert!(matches!(bc.code[1], Opcode::AssignCurr { off: 3 }));
+        // The jump must have been retargeted onto the AssignCurr's new pc.
+        assert!(matches!(
+            bc.code[2],
+            Opcode::NextIterOrJump { jump_back: -1 }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_setcond_if_preserves_max_stack_depth() {
+        // `SetCond` is (1,0) and `If` is (2,1); the fused `SelectIf` is (3,1) and
+        // `SelectIfAssignCurr` is (3,0). Net effect and peak must be unchanged --
+        // the VM's fixed-stack safety proof is discharged against these numbers.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::LoadVar { off: 2 },
+                Opcode::SetCond {},
+                Opcode::If {},
+                Opcode::AssignCurr { off: 9 },
+            ],
+        };
+        let before = bc.max_stack_depth().unwrap();
+        assert_eq!(before, 3);
+        bc.fuse_three_address();
+        assert_eq!(bc.max_stack_depth().unwrap(), 3);
+    }
+
+    // === Leaf-store and module-input fusion (P5) ===
+    //
+    // `AssignCurr` is 10.68% of executed dispatches on C-LEARN and the measured
+    // bigrams account for essentially all of it: `If` 5.64% (taken by the
+    // conditional-select fusion above), `LoadModuleInput` 1.48%, `LoadVar`
+    // 1.41%, `LoadInitial` 1.34%, `Apply` 0.85%. The first three get a fused
+    // store here. `Apply;AssignCurr` is deliberately NOT fused: the `Apply` arm
+    // inlines every builtin body, so duplicating it for a store would be the
+    // largest code growth in the hot function for the smallest member of the
+    // set.
+    //
+    // `LoadModuleInput` was additionally not a fusible LEAF at all, though it is
+    // 4.68% of C-LEARN dispatches and 5.8% of WORLD3's, so it joins the 2-window
+    // alongside LoadVar/LoadConstant/LoadGlobalVar.
+    //
+    // `LoadConstant; AssignCurr` never reaches this pass -- the symbolic
+    // `peephole_optimize` already folds it into `AssignConstCurr`.
+
+    #[test]
+    fn test_fuse_load_var_assign_is_a_slot_copy() {
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![Opcode::LoadVar { off: 5 }, Opcode::AssignCurr { off: 9 }],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::AssignVarCurr { src: 5, dst: 9 }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_load_initial_assign() {
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadInitial { off: 2 },
+                Opcode::AssignCurr { off: 7 },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::AssignInitialCurr { src: 2, dst: 7 }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_load_module_input_assign() {
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadModuleInput { input: 3 },
+                Opcode::AssignCurr { off: 4 },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::AssignModInputCurr { input: 3, dst: 4 }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_module_input_as_binop_rhs_preserves_operand_order() {
+        // `(lhs on stack) - module_input[2]`. Sub is non-commutative, so a
+        // swapped encoding would be a silent miscompile.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 1 },
+                Opcode::LoadModuleInput { input: 2 },
+                Opcode::Op2 { op: Op2::Sub },
+            ],
+        };
+        bc.fuse_three_address();
+        // LoadVar;LoadModuleInput is not a 3-window leaf pair (module inputs are
+        // 2-window only), so the LoadVar stays and the rhs+op fuse.
+        assert_eq!(bc.code.len(), 2);
+        assert!(matches!(bc.code[0], Opcode::LoadVar { off: 1 }));
+        assert!(matches!(
+            bc.code[1],
+            Opcode::BinStackModInput {
+                r_input: 2,
+                op: Op2::Sub
+            }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_module_input_stack_leaf_assign_preserves_operand_order() {
+        // `dst = (lhs on stack) / module_input[6]`, post-peephole.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 1 },
+                Opcode::LoadModuleInput { input: 6 },
+                Opcode::BinOpAssignCurr {
+                    op: Op2::Div,
+                    off: 8,
+                },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 2);
+        assert!(matches!(bc.code[0], Opcode::LoadVar { off: 1 }));
+        assert!(matches!(
+            bc.code[1],
+            Opcode::AssignStackModInputCurr {
+                dst: 8,
+                b_input: 6,
+                op: Op2::Div
+            }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_leaf_store_blocked_by_jump_target() {
+        // A jump targets the AssignCurr the pair would absorb.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },               // [0]
+                Opcode::AssignCurr { off: 1 },            // [1] <- jump target
+                Opcode::NextIterOrJump { jump_back: -1 }, // [2] -> [1]
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 3);
+        assert!(matches!(bc.code[0], Opcode::LoadVar { off: 0 }));
+        assert!(matches!(bc.code[1], Opcode::AssignCurr { off: 1 }));
+    }
+
+    #[test]
+    fn test_fuse_leaf_store_preserves_max_stack_depth() {
+        // Each fused store is (0,0), exactly the net of the `LoadX`(0,1) +
+        // `AssignCurr`(1,0) it replaces, so the program's peak cannot move.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::AssignCurr { off: 1 },
+                Opcode::LoadInitial { off: 2 },
+                Opcode::AssignCurr { off: 3 },
+                Opcode::LoadModuleInput { input: 0 },
+                Opcode::AssignCurr { off: 4 },
+            ],
+        };
+        let before = bc.max_stack_depth().unwrap();
+        assert_eq!(before, 1);
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 3);
+        assert_eq!(bc.max_stack_depth().unwrap(), 0);
+    }
+
+    // === Trailing-constant fusion (PREVIOUS fallback, 3-arity builtin) ===
+    //
+    // Neither pattern is a binop, so no existing window can reach either: the
+    // 3- and 2-window combiners are `Op2`/`BinOpAssign`, and `LoadPrev`/`Apply`
+    // are neither. Both absorbed instructions are guarded against jump targets
+    // like every other fusion in the pass.
+
+    #[test]
+    fn test_fuse_previous_fallback_into_load() {
+        // `PREVIOUS(v)` compiles to `LoadConstant <fallback>; LoadPrev v`.
+        let mut bc = ByteCode {
+            literals: vec![0.0],
+            code: vec![Opcode::LoadConstant { id: 0 }, Opcode::LoadPrev { off: 7 }],
+        };
+        let before = bc.max_stack_depth().unwrap();
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::LoadPrevConst { off: 7, lit: 0 }
+        ));
+        // The fused form pushes the same single value the pair did.
+        assert_eq!(bc.max_stack_depth().unwrap(), before);
+    }
+
+    #[test]
+    fn test_fuse_previous_fallback_blocked_by_jump_target() {
+        // A jump landing on the `LoadPrev` means the pair is not a unit.
+        let mut bc = ByteCode {
+            literals: vec![0.0],
+            code: vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadPrev { off: 7 },
+                Opcode::NextIterOrJump { jump_back: -1 },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 3);
+        assert!(matches!(bc.code[0], Opcode::LoadConstant { .. }));
+        assert!(matches!(bc.code[1], Opcode::LoadPrev { .. }));
+    }
+
+    #[test]
+    fn test_fuse_third_operand_of_three_arity_builtin() {
+        // `SAFEDIV(a, b, 0)` -- the trailing literal IS the divide-by-zero
+        // result, an operand `apply` reads, not padding.
+        let mut bc = ByteCode {
+            literals: vec![0.0],
+            code: vec![
+                Opcode::LoadVar { off: 1 },
+                Opcode::LoadVar { off: 2 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::Apply {
+                    func: BuiltinId::SafeDiv,
+                },
+            ],
+        };
+        let before = bc.max_stack_depth().unwrap();
+        bc.fuse_three_address();
+        assert!(
+            bc.code.iter().any(|op| matches!(
+                op,
+                Opcode::ApplyTerConst {
+                    func: BuiltinId::SafeDiv,
+                    lit: 0
+                }
+            )),
+            "got {:?}",
+            bc.code.iter().map(|o| o.name()).collect::<Vec<_>>()
+        );
+        // The third operand no longer transits the stack, so the peak DROPS.
+        // Never rising is what keeps `resolve_bytecode`'s fixed-stack proof --
+        // computed on the pre-fusion stream -- valid for what the Vm executes.
+        assert!(bc.max_stack_depth().unwrap() <= before);
+    }
+
+    #[test]
+    fn test_trailing_constant_not_fused_into_lower_arity_builtin() {
+        // The guard is `arity() == 3`, and it is load-bearing: for a 1- or
+        // 2-arity builtin the preceding `LoadConstant` is one of the operands
+        // the builtin actually reads, so folding it as a "third operand" would
+        // consume a real argument and leave the stack short.
+        for func in [BuiltinId::Abs, BuiltinId::Max] {
+            let mut bc = ByteCode {
+                literals: vec![3.0],
+                code: vec![
+                    Opcode::LoadVar { off: 1 },
+                    Opcode::LoadConstant { id: 0 },
+                    Opcode::Apply { func },
+                ],
+            };
+            bc.fuse_three_address();
+            assert!(
+                !bc.code
+                    .iter()
+                    .any(|op| matches!(op, Opcode::ApplyTerConst { .. })),
+                "{func:?} (arity {}) must not take the ApplyTerConst form",
+                func.arity()
+            );
+        }
+    }
+
+    // === PREVIOUS-delta fusion (SubVarPrev / BinStackPrev) ===
+
+    #[test]
+    fn test_fuse_previous_delta_four_window() {
+        // `v - PREVIOUS(v)`, the shape the LTM link-score guard emits four
+        // times per link.
+        let mut bc = ByteCode {
+            literals: vec![0.0],
+            code: vec![
+                Opcode::LoadVar { off: 5 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadPrev { off: 5 },
+                Opcode::Op2 { op: Op2::Sub },
+            ],
+        };
+        let before = bc.max_stack_depth().unwrap();
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::SubVarPrev { l: 5, r: 5, lit: 0 }
+        ));
+        assert!(bc.max_stack_depth().unwrap() <= before);
+    }
+
+    #[test]
+    fn test_previous_delta_only_fuses_subtraction() {
+        // The operator is in the variant tag, so only `Sub` has a fused form.
+        // Any other operator must fall through to the shorter windows rather
+        // than be silently encoded as a subtraction.
+        let mut bc = ByteCode {
+            literals: vec![0.0],
+            code: vec![
+                Opcode::LoadVar { off: 5 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadPrev { off: 5 },
+                Opcode::Op2 { op: Op2::Add },
+            ],
+        };
+        bc.fuse_three_address();
+        assert!(
+            !bc.code
+                .iter()
+                .any(|op| matches!(op, Opcode::SubVarPrev { .. }))
+        );
+    }
+
+    #[test]
+    fn test_fuse_previous_delta_blocked_by_jump_target() {
+        // A jump into the middle of the window means it is not a unit.
+        let mut bc = ByteCode {
+            literals: vec![0.0],
+            code: vec![
+                Opcode::LoadVar { off: 5 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadPrev { off: 5 },
+                Opcode::Op2 { op: Op2::Sub },
+                Opcode::NextIterOrJump { jump_back: -2 },
+            ],
+        };
+        bc.fuse_three_address();
+        assert!(
+            !bc.code
+                .iter()
+                .any(|op| matches!(op, Opcode::SubVarPrev { .. }))
+        );
+    }
+
+    #[test]
+    fn test_fuse_previous_as_binop_rhs_on_stack() {
+        // lhs already on the stack: `<expr>; LoadConstant; LoadPrev; Op2`.
+        // Div is used because it is non-commutative, so a swapped operand
+        // encoding fails loudly rather than silently.
+        let mut bc = ByteCode {
+            literals: vec![0.0],
+            code: vec![
+                Opcode::LoadVar { off: 1 },
+                Opcode::LoadVar { off: 2 },
+                Opcode::Op2 { op: Op2::Mul },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadPrev { off: 9 },
+                Opcode::Op2 { op: Op2::Div },
+            ],
+        };
+        bc.fuse_three_address();
+        assert!(
+            bc.code.iter().any(|op| matches!(
+                op,
+                Opcode::BinStackPrev {
+                    r: 9,
+                    lit: 0,
+                    op: Op2::Div
+                }
+            )),
+            "got {:?}",
+            bc.code.iter().map(|o| o.name()).collect::<Vec<_>>()
+        );
     }
 
     // === 3-address fusion with GLOBAL operands and two-constant operands ===

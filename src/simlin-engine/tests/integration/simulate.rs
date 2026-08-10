@@ -58,6 +58,11 @@ macro_rules! corpus_tests {
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", b','), ("output.tab", b'\t')];
 
+// The simulation corpus. `array:` makes the macro emit the backing
+// `static TEST_MODELS` as well as the per-model tests. This is the LARGER of
+// the two corpus lists -- `roundtrip.rs` keeps its own, narrower one as
+// `ROUNDTRIP_TEST_MODELS`; sweep against that one and you get a clean pass over
+// a corpus you never touched.
 corpus_tests! {
     array: TEST_MODELS;
     module: corpus;
@@ -6411,5 +6416,150 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,1
                  {series:?}"
             );
         }
+    }
+}
+
+// -- What carries across a step -------------------------------------------
+//
+// Between one Euler step and the next, the ONLY slots that carry information
+// forward are:
+//
+//   1. The `IMPLICIT_VAR_COUNT` implicit globals. `run_initials` pre-fills
+//      `DT_OFF`/`INITIAL_TIME_OFF`/`FINAL_TIME_OFF` across EVERY chunk of the
+//      slab once (`vm.rs`, the `curr[DT_OFF] = dt` block), after which `run_to`
+//      advances only `TIME`. They are a run-initialization invariant, not a
+//      per-step one.
+//   2. Stocks, which the Stocks phase writes into `next` and which reach the
+//      following step's `curr` through the chunk ring.
+//   3. Standalone lookup-only table holders (#606). These are excluded from
+//      every runlist AND from the saved output, and a `LOOKUP` reaches their
+//      data through `base_gf` into `graphical_functions`, never through the
+//      slot -- so the slot is storage no consumer can observe.
+//
+// Everything else is rewritten by the Flows or Stocks phase before it is read.
+//
+// This test pins that by filling `next` -- PAST the implicit prefix -- with a
+// sentinel at the top of every Euler step, so any slot that silently carries a
+// value forward surfaces as the sentinel in the saved results. It compares the
+// slots reachable through `Results::offsets`, which is precisely the set a
+// consumer can name.
+//
+// Why the prefix must be preserved rather than poisoned and then ignored:
+// `Context::build_stock_update_expr` emits `stock + (inflows - outflows) *
+// Expr::Dt`, and `Expr::Dt` lowers to a `LoadGlobalVar { off: DT_OFF }` read of
+// `curr[DT_OFF]`. Poisoning `dt` therefore corrupts every stock in the model,
+// which looks like widespread staleness and is really one slot.
+//
+// The invariant is load-bearing for any change that stops carrying a chunk's
+// contents forward -- swapping the chunk indices instead of copying, hoisting
+// run-invariant work out of the step, or partially evaluating a step. Such a
+// change must carry classes 1-3 explicitly.
+//
+// Scope: Euler, which is what the corpus exercises. An RK model runs unpoisoned
+// and passes trivially.
+fn assert_poisoned_next_matches(xmile_path: &str) {
+    let f = File::open(xmile_path).unwrap();
+    let mut f = BufReader::new(f);
+    let Ok(datamodel_project) = xmile::project_from_reader(&mut f) else {
+        return; // not a loadable model; the corpus tests already gate that
+    };
+    let compiled = compile_vm(&datamodel_project);
+
+    let mut clean = Vm::new(compiled.clone()).unwrap();
+    clean.run_to_end().unwrap();
+    let clean = clean.into_results();
+
+    let mut poisoned = Vm::new(compiled).unwrap();
+    poisoned.poison_next_chunk_for_test();
+    poisoned.run_to_end().unwrap();
+    let poisoned = poisoned.into_results();
+
+    assert_eq!(
+        clean.step_size, poisoned.step_size,
+        "{xmile_path}: step_size"
+    );
+    assert_eq!(
+        clean.step_count, poisoned.step_count,
+        "{xmile_path}: step_count"
+    );
+
+    let mut named: Vec<(usize, &str)> = clean
+        .offsets
+        .iter()
+        .map(|(k, v)| (*v, k.as_str()))
+        .collect();
+    named.sort();
+    for (step, (a, b)) in clean.iter().zip(poisoned.iter()).enumerate() {
+        for (slot, name) in &named {
+            let (x, y) = (a[*slot], b[*slot]);
+            assert!(
+                x == y || (x.is_nan() && y.is_nan()),
+                "{xmile_path}: step {step} slot {slot} ({name}) changed when the \
+                 `next` chunk was poisoned: clean {x} vs poisoned {y}. That slot \
+                 carried a value across a step without being rewritten, which is \
+                 outside the three classes documented above."
+            );
+        }
+    }
+}
+
+// -- Fusion must never raise a program's peak stack depth ------------------
+//
+// `compiler::symbolic::resolve_bytecode` proves the compiled stream fits
+// `STACK_CAPACITY`, and `vm::Stack` uses unchecked access on the strength of
+// that proof -- but the proof is computed on the PRE-fusion stream, while the
+// Vm executes the fused one. So `fuse_three_address` carries a standing
+// obligation: a fused opcode's `stack_effect` must account for every operand
+// the sequence it replaces consumed, and the peak may fall but never rise.
+//
+// Neither the hero models nor a results fingerprint covers this, which is why
+// it gets its own test. The deepest stack any corpus model reaches is 8-12
+// against a `STACK_CAPACITY` of 64, so a wrong stack effect has >5x of headroom
+// to hide in: it would not overflow, the arithmetic would still be right, and
+// every saved value would match. Comparing the two depths is what detects it.
+// A stack-effect that underflows shows up as the `Err` arm, which means the
+// metadata is wrong rather than the program.
+//
+// Scope: every corpus model, both executed phases, all modules. Initials are
+// excluded because `Vm::new` leaves them unfused.
+#[test]
+fn fusion_never_raises_peak_stack_depth() {
+    let mut checked = 0usize;
+    for path in TEST_MODELS.iter() {
+        let path = format!("../../{path}");
+        let Ok(f) = File::open(&path) else { continue };
+        let mut f = BufReader::new(f);
+        let Ok(datamodel_project) = xmile::project_from_reader(&mut f) else {
+            continue;
+        };
+        for check in compile_vm(&datamodel_project).fusion_depth_audit() {
+            let (module, phase) = (&check.module, check.phase);
+            let pre = check
+                .pre_depth
+                .unwrap_or_else(|e| panic!("{path}: {module}/{phase}: pre-fusion {e}"));
+            let post = check
+                .post_depth
+                .unwrap_or_else(|e| panic!("{path}: {module}/{phase}: post-fusion {e}"));
+            assert!(
+                post <= pre,
+                "{path}: {module}/{phase}: fusion RAISED peak stack depth {pre} -> {post} \
+                 ({} -> {} opcodes). `resolve_bytecode`'s capacity proof is computed on the \
+                 pre-fusion stream, so it no longer covers what the Vm executes.",
+                check.pre_opcodes,
+                check.post_opcodes,
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked > 100,
+        "expected a real corpus sweep, checked {checked}"
+    );
+}
+
+#[test]
+fn only_documented_classes_carry_across_a_step() {
+    for path in TEST_MODELS.iter() {
+        assert_poisoned_next_matches(&format!("../../{path}"));
     }
 }

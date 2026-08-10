@@ -1129,6 +1129,19 @@ impl<'module> Compiler<'module> {
                         .map(|tables| tables.len() as u16)
                         .unwrap_or(1);
 
+                    // A constant, in-range element offset is resolved here so
+                    // no `LoadConstant` push is emitted for it (every scalar
+                    // table takes this path, its offset being a literal 0).
+                    if let Some(elem) = const_element_offset(&element_offset_expr, table_count) {
+                        self.walk_expr(index)?.unwrap();
+                        self.push(SymbolicOpcode::LookupDirect {
+                            base_gf,
+                            table_count,
+                            elem,
+                            mode: LookupMode::Interpolate,
+                        });
+                        return Ok(Some(()));
+                    }
                     // Emit: push element_offset, push lookup_index, Lookup { base_gf, table_count, mode }
                     self.walk_expr(&element_offset_expr)?.unwrap();
                     self.walk_expr(index)?.unwrap();
@@ -1166,6 +1179,16 @@ impl<'module> Compiler<'module> {
                         .map(|tables| tables.len() as u16)
                         .unwrap_or(1);
 
+                    if let Some(elem) = const_element_offset(&element_offset_expr, table_count) {
+                        self.walk_expr(index)?.unwrap();
+                        self.push(SymbolicOpcode::LookupDirect {
+                            base_gf,
+                            table_count,
+                            elem,
+                            mode,
+                        });
+                        return Ok(Some(()));
+                    }
                     self.walk_expr(&element_offset_expr)?.unwrap();
                     self.walk_expr(index)?.unwrap();
                     self.push(SymbolicOpcode::Lookup {
@@ -1304,23 +1327,18 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::Sin(a)
                     | BuiltinFn::Sqrt(a)
                     | BuiltinFn::Tan(a) => {
+                        // No operand padding: `Apply` pops exactly
+                        // `BuiltinId::arity()`, which for this family is 1.
                         self.walk_expr(a)?.unwrap();
-                        let id = self.curr_code.intern_literal(0.0);
-                        self.push(SymbolicOpcode::LoadConstant { id });
-                        self.push(SymbolicOpcode::LoadConstant { id });
                     }
                     BuiltinFn::Step(a, b) => {
                         self.walk_expr(a)?.unwrap();
                         self.walk_expr(b)?.unwrap();
-                        let id = self.curr_code.intern_literal(0.0);
-                        self.push(SymbolicOpcode::LoadConstant { id });
                     }
                     BuiltinFn::Max(a, b) => {
                         if let Some(b) = b {
                             self.walk_expr(a)?.unwrap();
                             self.walk_expr(b)?.unwrap();
-                            let id = self.curr_code.intern_literal(0.0);
-                            self.push(SymbolicOpcode::LoadConstant { id });
                         } else {
                             return self.emit_array_reduce(a, SymbolicOpcode::ArrayMax {});
                         }
@@ -1329,8 +1347,6 @@ impl<'module> Compiler<'module> {
                         if let Some(b) = b {
                             self.walk_expr(a)?.unwrap();
                             self.walk_expr(b)?.unwrap();
-                            let id = self.curr_code.intern_literal(0.0);
-                            self.push(SymbolicOpcode::LoadConstant { id });
                         } else {
                             return self.emit_array_reduce(a, SymbolicOpcode::ArrayMin {});
                         }
@@ -1338,8 +1354,6 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Quantum(a, b) => {
                         self.walk_expr(a)?.unwrap();
                         self.walk_expr(b)?.unwrap();
-                        let id = self.curr_code.intern_literal(0.0);
-                        self.push(SymbolicOpcode::LoadConstant { id });
                     }
                     BuiltinFn::Pulse(a, b, c) => {
                         self.walk_expr(a)?.unwrap();
@@ -2097,6 +2111,38 @@ impl<'module> Compiler<'module> {
             flows_invariant_opcode_len: 0,
         })
     }
+}
+
+/// Resolve a lookup's element-offset expression to a constant slot within the
+/// variable's table block, or `None` if it must stay a runtime push.
+///
+/// Accepts only a non-negative integral constant strictly inside
+/// `[0, table_count)` that also fits `u8`. Each condition is load-bearing:
+///
+/// - INTEGRAL and NON-NEGATIVE, because the VM's runtime path truncates with
+///   `element_offset as usize` after rejecting negatives, and a fractional or
+///   negative constant would fold to a different table than the runtime rule
+///   picks. Those spellings keep the general `Lookup`.
+/// - IN RANGE, because `LookupDirect` carries no `table_count` and performs no
+///   runtime check; an out-of-range constant must keep the general form so the
+///   VM still yields its documented NaN.
+/// - FITS `u8`, because that is the field width the 8-byte `Opcode` budget
+///   leaves. An arrayed GF with 256+ elements simply keeps the runtime push.
+fn const_element_offset(expr: &Expr, table_count: u16) -> Option<u8> {
+    let Expr::Const(value, _) = expr else {
+        return None;
+    };
+    let value = *value;
+    // `is_finite` rejects NaN and the infinities explicitly rather than leaning
+    // on the `floor` comparison to catch them incidentally.
+    if !value.is_finite() || value < 0.0 || value.floor() != value {
+        return None;
+    }
+    let elem = value as usize;
+    if elem >= table_count as usize {
+        return None;
+    }
+    u8::try_from(elem).ok()
 }
 
 #[cfg(test)]
