@@ -2339,38 +2339,38 @@ pub(crate) fn model_dependency_graph_impl(
     // `Dt`-phase aux SCC's members carry the SAME recurrence in their init
     // equations AND an `Initial`-phase SCC obviously recurs, so BOTH
     // phases are grouped for the initials runlist.
-    let build_scc_grouping = |only_dt: bool| -> (HashMap<&str, usize>, HashMap<usize, Vec<&str>>) {
-        let mut scc_of: HashMap<&str, usize> = HashMap::new();
-        let mut scc_members: HashMap<usize, Vec<&str>> = HashMap::new();
-        for (idx, scc) in resolved_sccs.iter().enumerate() {
-            if only_dt && scc.phase != SccPhase::Dt {
-                continue;
+    let build_scc_grouping =
+        |only_dt: bool| -> (FxHashMap<&str, usize>, FxHashMap<usize, Vec<&str>>) {
+            let mut scc_of: FxHashMap<&str, usize> = FxHashMap::default();
+            let mut scc_members: FxHashMap<usize, Vec<&str>> = FxHashMap::default();
+            for (idx, scc) in resolved_sccs.iter().enumerate() {
+                if only_dt && scc.phase != SccPhase::Dt {
+                    continue;
+                }
+                // `scc.members` is a BTreeSet, so this member list is sorted
+                // and byte-stable.
+                let members: Vec<&str> = scc.members.iter().map(|m| m.as_str()).collect();
+                for m in &members {
+                    scc_of.insert(*m, idx);
+                }
+                scc_members.insert(idx, members);
             }
-            // `scc.members` is a BTreeSet, so this member list is sorted
-            // and byte-stable.
-            let members: Vec<&str> = scc.members.iter().map(|m| m.as_str()).collect();
-            for m in &members {
-                scc_of.insert(*m, idx);
-            }
-            scc_members.insert(idx, members);
-        }
-        (scc_of, scc_members)
-    };
+            (scc_of, scc_members)
+        };
     let (flows_scc_of, flows_scc_members) = build_scc_grouping(true);
     let (init_scc_of, init_scc_members) = build_scc_grouping(false);
 
     let topo_sort_str = |names: Vec<&String>,
                          deps: &HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
-                         scc_of: &HashMap<&str, usize>,
-                         scc_members: &HashMap<usize, Vec<&str>>|
+                         scc_of: &FxHashMap<&str, usize>,
+                         scc_members: &FxHashMap<usize, Vec<&str>>|
      -> Vec<String> {
-        use std::collections::HashSet;
         // Build the allowed set: only variables in the filtered input list
         // should appear in the output. Dependencies are used solely for
         // ordering, not for expanding the set.
-        let allowed: HashSet<&str> = names.iter().map(|n| n.as_str()).collect();
+        let allowed: FxHashSet<&str> = names.iter().map(|n| n.as_str()).collect();
         let mut result: Vec<String> = Vec::new();
-        let mut used: HashSet<String> = HashSet::new();
+        let mut used: FxHashSet<String> = FxHashSet::default();
 
         // `deps` is now interned-keyed, but this sort still works in `&str`
         // space: probes go through `Borrow<str>` and each dep-set iteration
@@ -2379,11 +2379,11 @@ pub(crate) fn model_dependency_graph_impl(
         // `names`, same `BTreeSet` dep order).
         fn add(
             deps: &HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
-            allowed: &HashSet<&str>,
-            scc_of: &HashMap<&str, usize>,
-            scc_members: &HashMap<usize, Vec<&str>>,
+            allowed: &FxHashSet<&str>,
+            scc_of: &FxHashMap<&str, usize>,
+            scc_members: &FxHashMap<usize, Vec<&str>>,
             result: &mut Vec<String>,
-            used: &mut HashSet<String>,
+            used: &mut FxHashSet<String>,
             name: &str,
         ) {
             if used.contains(name) {
