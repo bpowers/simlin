@@ -528,6 +528,71 @@ an assumption: the 12-repeat byte-identical determinism suites
 prewarm active. Salsa's accumulator drain is a dependency DFS, not an execution
 order.
 
+### C6. Warm-edit latency: what a single-equation edit costs, and what still does not scale
+
+Interactive edit latency, not cold compile, is what a modeller experiences, and
+it is measured with an out-of-tree probe that drives `SimlinDb::sync` +
+`compile_project_incremental` over real edits to a real model. Two facts about
+the measurement itself come first, because both were got wrong on the way to
+the numbers and either one silently misreports the result by an order of
+magnitude.
+
+**An "equation edit" is not one workload.** Appending a term to an equation can
+change the DEPENDENCY STRUCTURE rather than just the text -- turning a bare
+`INITIAL(x)` into an expression containing an `INITIAL(x)` is the case that bit
+here, and C-LEARN has 177 `INITIAL(` equations. A probe that edits each variable
+once measures the structural cost for every one of them. Pre-applying one edit
+so that later edits only change digits is what separates the two, and it moves
+the reported p90 by a factor of twelve.
+
+**Consumer count does not predict cost.** The obvious explanation for an
+expensive edit -- a constant read by many variables, each recompiling under the
+one-hop rule -- is false and was measured false: the slowest variable
+(`2x CO2 forcing`) has 3 references in the model and a fast one (`c uptake`) has
+47. Do not spend a day on fan-out.
+
+**Structure-preserving single-equation edit, C-LEARN** (40 edits, paired over
+the same variables, before = the first two round-3 commits, after = all six):
+
+| | before | after |
+|---|---:|---:|
+| median | 2.8 ms | 2.8 ms |
+| **p90** | **36.0 ms** | **3.0 ms** |
+| max | 73.9 ms | **6.7 ms** |
+| retired instructions | 11.03G | **5.27G** |
+
+The median was already fine; **the tail was the problem and the tail is gone.**
+That tail was the per-assembly recompile of every implicit helper and the cycle
+gate's un-memoized fragment probe -- the two changes keyed in round 3. A cheap
+edit now costs 40.6M instructions and its profile is almost entirely salsa's
+own `maybe_changed_after` verification plus the lexer re-reading the one edited
+equation, which is what proportional looks like.
+
+**What still costs a full recompile: an edit that changes the dependency
+structure.** Measured at 1.798G instructions -- 85% of a cold compile -- and it
+decomposes as:
+
+| | calls | Ir | share |
+|---|---:|---:|---:|
+| `compile_var_fragment` | **911** of ~955 | 402M | 22% |
+| `model_dependency_graph` | 1 | 565M | 31% |
+| ...of which `resolve_recurrence_sccs` | 2 | 245M | 14% |
+| `compile_implicit_var_fragment` | **651** (all) | 233M | 13% |
+
+Nearly every fragment in the model recompiles, which the per-variable keys
+should have prevented. The reason is already written down one level away, on
+`model_implicit_var_by_name`: a structural edit can change the model's implicit
+helper set, `model_module_ident_context` is an INTERNED handle whose id changes
+when that set grows, and a new key cannot backdate at all -- so every variable's
+parse is re-keyed and every fragment behind it recompiles. The bound is pinned
+by `implicit_helper_add_is_tight_but_module_helper_add_is_not`, which asserts
+exactly this asymmetry.
+
+So the next lever for interactive latency is **not** the dependency graph and
+not the fragment compilers: it is the granularity of the module-ident context's
+interning, which is GH #372's context-stable naming. Anything else attacks the
+22% and 13% rows while leaving the mechanism that produced them in place.
+
 ### C5. `Compiler::intern_name` — the top allocation site, blocked on artifact identity
 
 320,650 allocations per cold C-LEARN compile, ~10% of all 3.24M, from two
@@ -573,6 +638,10 @@ short of it rather than taking a ~2-3%.
    starting; both are silent, and one is a process abort.
 8. **C5 (`Compiler::intern_name`)** — the top allocation site, blocked on
    `NameId` assignment order being part of the compiled artifact.
+9. **C6's residual** — the remaining interactive lever, and it is GH #372's
+   context-stable helper naming rather than anything in the compile path: a
+   structural edit re-keys `model_module_ident_context`, and a new interned key
+   cannot backdate, so every fragment behind it recompiles.
 
 Larger run-side swings identified during round 2 — all three were taken to
 a data verdict in round 3 (2026-06-04):
