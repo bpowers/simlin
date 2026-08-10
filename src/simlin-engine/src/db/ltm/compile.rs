@@ -979,6 +979,9 @@ pub(crate) fn compile_ltm_equation_fragment(
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
 
+    #[cfg(test)]
+    crate::db::note_fragment_execution(crate::db::FragmentExecKind::LtmBody, var_name);
+
     // Project-global dims (datamodel form, used to resolve the equation's
     // dimension names) plus the canonicalized context + converted dims, all
     // from the salsa-cached queries rather than rebuilt per LTM fragment.
@@ -1906,6 +1909,42 @@ pub(crate) fn compile_ltm_synthetic_fragment(
     }
 }
 
+/// The salsa-memoized entry point for one LTM synthetic variable's fragment,
+/// keyed by its INDEX into `model_ltm_variables(..).vars`.
+///
+/// [`compile_ltm_synthetic_fragment`] routes only the scalar `Bare` `from->to`
+/// score through a memoized query ([`compile_ltm_var_fragment`], keyed by the
+/// link); every element-pinned, aggregate-touching, A2A or loop score takes the
+/// plain-function `compile_direct` path. Both walkers over the variable list --
+/// `assemble_module`'s pass 3 and [`model_ltm_fragment_diagnostics`] -- then
+/// compiled those from scratch, independently. On C-LEARN that is 5,985 of
+/// 7,125 variables, roughly half of a full compile stage, paid a second time on
+/// every `simlin_project_get_errors` / MCP `read_model`, and twice more on every
+/// MCP `edit_model` (which runs a pre- and a post-edit diagnostic pass).
+///
+/// Keyed by INDEX rather than by name because the index is what both walkers
+/// already have, and because it keeps this a salsa FIREWALL: the query reads
+/// the whole-model `model_ltm_variables`, so it re-executes on any edit, but its
+/// VALUE is one fragment -- so salsa backdates it whenever that variable's
+/// fragment is unchanged and `assemble_module` is not re-run. Same shape, and
+/// the same reason, as `reconstruct_named_variable` over
+/// `reconstruct_model_variables`.
+///
+/// An out-of-range index yields `None`, which is also what a variable whose
+/// fragment failed to compile yields; callers treat both as "no fragment",
+/// exactly as they treated a `None` from the direct path.
+#[salsa::tracked(returns(ref))]
+pub(crate) fn compile_ltm_fragment_at(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    index: usize,
+) -> Option<VarFragmentResult> {
+    let ltm_vars = model_ltm_variables(db, model, project);
+    let ltm_var = ltm_vars.vars.get(index)?;
+    compile_ltm_synthetic_fragment(db, ltm_var, model, project)
+}
+
 #[cfg(test)]
 thread_local! {
     /// Test-only forced-failure pattern for
@@ -1995,8 +2034,10 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
     use crate::db::{CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity};
 
     let ltm_vars = model_ltm_variables(db, model, project);
-    for ltm_var in &ltm_vars.vars {
-        let fragment = compile_ltm_synthetic_fragment(db, ltm_var, model, project);
+    for (index, ltm_var) in ltm_vars.vars.iter().enumerate() {
+        // Through the memoized per-index query, so this pass READS assembly's
+        // fragments rather than compiling its own copies.
+        let fragment = compile_ltm_fragment_at(db, model, project, index);
         // A fragment is usable only if it compiled *and* produced
         // flow-phase bytecodes. `compile_ltm_equation_fragment` returns
         // `Some(_)` with `flow_bytecodes: None` when the synthetic

@@ -2067,3 +2067,108 @@ fn the_completeness_guard_holds_on_the_per_element_emitter() {
             .collect::<Vec<_>>()
     );
 }
+
+/// A `Wide`-dimensioned per-element link-score fixture: a per-element flow
+/// whose element `e` reads only `pop[e]`, so the emitted scores are the
+/// element-pinned and A2A shapes that `compile_ltm_synthetic_fragment` routes
+/// down its uncached `compile_direct` path -- which is what makes it a fixture
+/// for the fragment-reuse tests below.
+fn per_element_zero_slot_project(n: usize) -> datamodel::Project {
+    let elems: Vec<String> = (0..n).map(|i| format!("e{i}")).collect();
+    let elem_refs: Vec<&str> = elems.iter().map(String::as_str).collect();
+    let eqns: Vec<(String, String)> = elems
+        .iter()
+        .map(|e| (e.clone(), format!("pop[{e}] * rate * 0.01")))
+        .collect();
+    let eqn_refs: Vec<(&str, &str)> = eqns.iter().map(|(e, q)| (e.as_str(), q.as_str())).collect();
+
+    TestProject::new("per_element_zero_slots")
+        .named_dimension("Wide", &elem_refs)
+        .aux("rate", "1", None)
+        .array_flow_with_ranges("growth[Wide]", eqn_refs)
+        .array_stock("pop[Wide]", "10", &["growth"], &[], None)
+        .build_datamodel()
+}
+
+/// The diagnostic pass must REUSE assembly's compiled LTM fragments, not
+/// recompile them.
+///
+/// `assemble_module` and `model_ltm_fragment_diagnostics` each walk every LTM
+/// synthetic variable and ask for its fragment. Only the scalar `Bare`
+/// `from->to` score went through a salsa-memoized query; every element-pinned,
+/// aggregate-touching or A2A score took a plain-function path, so the second
+/// walk recompiled it from scratch. On C-LEARN that is 5,985 of 7,125 variables
+/// -- about half a full compile stage -- paid again on every
+/// `simlin_project_get_errors`, every MCP `read_model`, and twice more on every
+/// MCP `edit_model`.
+///
+/// The measurement is a body-entry count, not a timing: `LtmBody` is recorded
+/// inside `compile_ltm_equation_fragment`, which every LTM path funnels
+/// through, so a cache hit is invisible to it and a real compile is not.
+#[test]
+fn the_ltm_diagnostic_pass_does_not_recompile_assembly_fragments() {
+    let project = per_element_zero_slot_project(4);
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    use salsa::Setter;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    // Assembly first: this is the walk that legitimately compiles every
+    // fragment. Priming it here is what makes the measured region below a
+    // second walk rather than a first one.
+    let compiled = crate::db::compile_project_incremental(&db, source_project, "main");
+    assert!(
+        compiled.is_ok(),
+        "the fixture must compile with LTM enabled: {:?}",
+        compiled.err()
+    );
+
+    // Control: the recorder is armed and the fixture really does generate LTM
+    // fragments, so a zero below cannot be an empty model or a dead counter.
+    crate::db::reset_fragment_executions();
+    let _ = crate::db::ltm::model_ltm_fragment_diagnostics(&db, model, source_project);
+    let after_first = crate::db::fragment_executions();
+    let ltm_bodies: Vec<&str> = after_first
+        .iter()
+        .filter(|(kind, _)| *kind == crate::db::FragmentExecKind::LtmBody)
+        .map(|(_, name)| name.as_str())
+        .collect();
+
+    assert!(
+        ltm_bodies.is_empty(),
+        "the diagnostic pass recompiled {} LTM fragment(s) that assembly had \
+         already compiled: {ltm_bodies:?}",
+        ltm_bodies.len()
+    );
+}
+
+/// The control for the test above: the recorder DOES see LTM fragment compiles
+/// when they genuinely happen, so an empty log there is evidence of reuse
+/// rather than of a counter that never fires.
+#[test]
+fn the_ltm_fragment_body_counter_observes_a_cold_compile() {
+    let project = per_element_zero_slot_project(4);
+    let mut db = SimlinDb::default();
+    let source_project = {
+        let sync = sync_from_datamodel(&db, &project);
+        sync.project
+    };
+    use salsa::Setter;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    crate::db::reset_fragment_executions();
+    let _ = crate::db::compile_project_incremental(&db, source_project, "main");
+    let execs = crate::db::fragment_executions();
+    let n_ltm = execs
+        .iter()
+        .filter(|(kind, _)| *kind == crate::db::FragmentExecKind::LtmBody)
+        .count();
+    assert!(
+        n_ltm > 0,
+        "a cold LTM compile must record LtmBody entries, or the reuse assertion \
+         in the sibling test proves nothing; got: {execs:?}"
+    );
+}
