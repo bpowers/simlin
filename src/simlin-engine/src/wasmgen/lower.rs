@@ -1415,9 +1415,12 @@ fn emit_ops(
                 emit_op2(*op, ctx, f)?;
                 emit_assign(ctx.next_base, *off, ctx, f);
             }
-            // `Apply` always pops exactly three operands (codegen pads short
-            // builtins with `LoadConstant 0.0` / `LoadGlobalVar{FINAL_TIME}`),
-            // mirroring the VM (`vm.rs:1701`). See [`emit_apply`].
+            // `Apply` pops `func.arity()` operands, not a fixed three: codegen,
+            // the VM and this backend all read that one table, so a builtin's
+            // operand count is decided in exactly one place. Codegen emits no
+            // padding, which means locals above the arity hold whatever the
+            // PREVIOUS `Apply` left in them -- do not read them. See
+            // [`emit_apply`], whose own comment names the tests that enforce it.
             Opcode::Apply { func } => emit_apply(*func, ctx, f),
             // `Lookup` pops `index` then `element_offset`, bounds-checks the
             // offset, and dispatches to the mode's helper over the table at

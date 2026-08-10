@@ -24,6 +24,20 @@ ignore = [
     # entry, purely a maintenance-status advisory -- no code-execution or
     # memory-safety risk.
     "RUSTSEC-2026-0206",
+    # bitmaps, im and sized-chunks are unmaintained -- one author's cluster,
+    # all three declared at once, all reached through the same single edge:
+    # simlin-serve -> loro -> loro-internal -> im -> {bitmaps, sized-chunks}.
+    # Each advisory states "No safe upgrade is available"; im's own
+    # announcement points at the imbl fork, which is loro's migration to make,
+    # not ours. Purely maintenance-status advisories -- no code-execution or
+    # memory-safety claim in any of the three.
+    #
+    # Revisit when loro drops im (watch loro-internal's dependency on it): all
+    # three go together, because bitmaps and sized-chunks are only here as im's
+    # dependencies.
+    "RUSTSEC-2026-0247",
+    "RUSTSEC-2026-0248",
+    "RUSTSEC-2026-0251",
 ]
 
 [licenses]
