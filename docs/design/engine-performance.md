@@ -1,8 +1,10 @@
 # Engine performance: profile and optimization opportunities
 
-Status: analysis + three rounds of wins landed. Round 1 2026-05-19; round 2
-(constant folding + linear-run fast paths) 2026-06-03; compile round 3 (the
-salsa pipeline's own redundancy) 2026-08-10.
+Status: analysis + four rounds of wins landed. Round 1 2026-05-19; round 2
+(constant folding + linear-run fast paths) 2026-06-03; round 3 2026-08-10 —
+the salsa pipeline's own redundancy on the compile side, a superinstruction
+family on the run side, and the LTM link-score arms that were being
+materialized only to evaluate to zero.
 
 This documents an empirical CPU/memory profile of **compiling and simulating the
 C-LEARN hero model** (the largest model we have: ~53k MDL lines / 1.4 MB, 934
@@ -334,13 +336,49 @@ jump table (one indirect branch whose target is data-dependent → BTB-unfriendl
 Classic threaded dispatch (computed-goto / guaranteed tail calls) would spread the
 indirect branch across handlers for better prediction, but **stable Rust offers
 neither computed-goto nor guaranteed TCO** (the `become` keyword is unstable).
-Portable options:
+Superinstructions are the portable lever, and the family below is implemented.
+Each removes a dispatch **and the operand work behind it**, which is why a
+removed dispatch costs ~25.9 instructions rather than the ~10 a bare dispatch
+costs — size proposals in this family against 25.9 or they read ~3x cheaper
+than they are. Both figures were measured by injecting an empty `ProbeNop`
+opcode at controlled rates and taking the instruction slope, validated by
+bit-identical results at every rate and an exactly linear dispatch count.
 
-- **More superinstructions** for the top opcode bigrams/trigrams (e.g.
-  `LoadVar; LoadVar; Op2`, `LoadConstant; Op2`). Each fused opcode removes a
-  dispatch; incremental and low-risk. This is the portable lever today.
-- Revisit explicit tail-call dispatch if/when `become` stabilizes.
-- R2 (register VM) reduces dispatch count more than any dispatch-mechanism change.
+Landed, all created by `ByteCode::fuse_three_address` on the Vm's private
+execution copy unless noted:
+
+| form | fuses |
+|---|---|
+| `SelectIf` / `SelectIfAssignCurr` | `SetCond; If[; AssignCurr]` |
+| `AssignVarCurr` / `AssignInitialCurr` / `AssignModInputCurr` | a leaf load + its store |
+| `BinStackModInput` / `AssignStackModInputCurr` | module inputs as a fusible leaf |
+| `LoadPrevConst` | `LoadConstant; LoadPrev` (the `PREVIOUS` fallback) |
+| `ApplyTerConst` | a 3-arity builtin's literal trailing operand |
+| `SubVarPrev` / `BinStackPrev` | the `v - PREVIOUS(v)` delta, 4->1 and 3->1 |
+| `LookupDirect` (codegen, so it reaches wasmgen) | a lookup's constant element offset |
+
+`SetCond; If` is safe to fuse because codegen is the sole producer of both and
+emits them together, so the pair is adjacent by construction rather than by
+luck.
+
+Two rules this family established. **A fusion may live in the symbolic layer
+iff the fused opcode has a `SymbolicOpcode` form**, because `CompiledSimulation`
+must stay the pure resolution of the cached symbolic fragments; the rest are
+Vm-local and never reach wasmgen. And **score a helper-variable idea against
+the post-fusion stream**: hoisting a repeated subexpression into a shared aux
+replaces each use with a `LoadVar` — one dispatch, exactly what a fused opcode
+costs — so the hoist is worth zero wherever a superinstruction can match the
+pattern, while still paying for a store and a slot.
+
+What this family cannot reach: **mispredicts**. The dispatches superinstructions
+remove best are the perfectly-predicted ones — `SetCond` always jumps to `If`'s
+arm — so fusing them removes instructions and branches but not branch misses.
+Measured: branches −6.3% against branch-misses −2.6%. The mispredict cost lives
+in the genuinely-unpredictable dispatches, which is where #604's hypothesis
+would have to be tested if anyone retries it.
+
+Remaining: revisit explicit tail-call dispatch if/when `become` stabilizes; a
+register VM reduces dispatch count more than any dispatch-mechanism change.
 
 ### Round 2 wins (2026-06-03, measured on Apple M-series / Asahi)
 
@@ -773,7 +811,11 @@ short of it rather than taking a ~2-3%.
    decompose path for shape-equal non-linear views (a per-loop access-plan
    cache is the next idea there — and see the round-2 negative result before
    attempting it).
-5. **R3 superinstructions** — incremental dispatch wins, low risk.
+5. ~~**R3 superinstructions**~~ — DONE; the family and its two rules are in the
+   R3 section above. Cumulative on the LTM-augmented run, which is where the
+   `PREVIOUS`-heavy forms pay most: post-fusion flow opcodes −44.3%, retired
+   instructions −28.3% on C-LEARN and −33.6% on WORLD3-03. An instruction/branch
+   win, not a predictor win.
 6. ~~**C2 / C3**~~ — answered, and not as proposed: C2 is moot (the function
    is salsa-cached and off the ordinary compile path) and C3's two halves are
    already done or the wrong lever. The compile round 3 section above records
@@ -787,6 +829,17 @@ short of it rather than taking a ~2-3%.
    context-stable helper naming rather than anything in the compile path: a
    structural edit re-keys `model_module_ident_context`, and a new interned key
    cannot backdate, so every fragment behind it recompiles.
+10. **LTM link-score arms** — the dominant cost of an LTM-enabled run on an
+    arrayed model, and mostly a generation question rather than a VM one. An
+    arm whose ceteris-paribus partial is *provably* `PREVIOUS(target)` is
+    omitted and lowers to a single zero-store; on C-LEARN that is 4,335 arms
+    and −19.2% of the flow program. The residual is gated on a semantics
+    question, not on engineering: ~5,000 further arms are blocked solely by a
+    live `time()`, because TIME is excluded from the freeze (GH #1016), and
+    resolving that would roughly double the win. Do **not** substitute the
+    cheaper negative test ("the link's source stayed frozen") — it asks a
+    different question and silently rewrites 187 result slots. GH #977 carries
+    the decomposition and the standing constraints.
 
 Larger run-side swings identified during round 2 — all three were taken to
 a data verdict in round 3 (2026-06-04):
