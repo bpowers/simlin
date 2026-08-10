@@ -32,7 +32,8 @@
 //! LTM enumeration algorithm without having to reason about the full
 //! salsa pipeline.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use mimalloc::MiMalloc as Backing;
+use std::alloc::{GlobalAlloc, Layout};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -61,10 +62,10 @@ unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
-        unsafe { System.alloc(layout) }
+        unsafe { Backing.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
+        unsafe { Backing.dealloc(ptr, layout) }
     }
 }
 

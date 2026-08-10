@@ -1965,6 +1965,10 @@ fn compile_ltm_fragment_at(
 /// Both callers already hold the variable, so they can pay a debug-only
 /// assertion and make the coupling CHECKABLE rather than conventional. The
 /// check costs nothing in release, and the query keeps its index-only key.
+// `expected` is read only by the debug assertion below, so a release build
+// sees it as unused. Keep it in the signature regardless: it is what forces a
+// caller to have the variable in hand, which is the coupling being checked.
+#[cfg_attr(not(debug_assertions), allow(unused_variables))]
 pub(crate) fn compile_ltm_fragment_for<'db>(
     db: &'db dyn Db,
     model: SourceModel,

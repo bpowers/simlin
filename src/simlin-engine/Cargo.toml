@@ -171,13 +171,22 @@ harness = false
 
 # Every native binary that embeds this engine (simlin-cli, simlin-serve,
 # simlin-mcp, and libsimlin's `mimalloc` feature, which pysimlin's build turns
-# on) installs mimalloc as its global allocator. The profiling examples and
-# criterion benches therefore back their allocator with mimalloc too: the
-# compile path is allocation-bound, so a harness on system malloc measures an
-# allocator no shipped native build actually runs, and over-credits any change
-# that only moves malloc traffic. Allocation *counts* stay the
-# allocator-independent metric (and the one that carries over to the wasm
-# bundle, which links neither mimalloc nor this dependency).
+# on) installs mimalloc as its global allocator. The compile path is
+# allocation-bound, so a harness on system malloc measures an allocator no
+# shipped native build actually runs, and over-credits any change that only
+# moves malloc traffic.
+#
+# A dev-dependency does NOT select an allocator -- each harness has to install
+# one -- so every harness that reports a timing or a memory figure does:
+# `examples/clearn_profile.rs`, `examples/backend_bench.rs` and
+# `examples/ltm_mem_bench.rs` back their counting allocators with it, and all
+# four benches declare it directly. Adding a harness here means adding the
+# `#[global_allocator]` too, or its numbers describe a different allocator than
+# the rest.
+#
+# Allocation *counts* stay the allocator-independent metric, and the one that
+# carries over to the wasm bundle, which links neither mimalloc nor this
+# dependency.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 mimalloc = "0.1"
 

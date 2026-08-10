@@ -31,7 +31,16 @@ if [ -z "$CFFI_SO" ] || [ "$LIBSIMLIN_A" -nt "$CFFI_SO" ] || [ "$SIMLIN_H" -nt "
   rm -rf build/
   uv sync --extra dev
   uv pip install setuptools
-  uv run python setup.py build_ext --inplace 2>/dev/null || true
+  # Pin the archive rather than letting `_ffi_build.py::_get_library_path`
+  # search: its candidate list covers the workspace and crate-local `target/`
+  # directories only, so under CARGO_TARGET_DIR it would either link a stale
+  # default-target archive or fail -- and its own docs say guessing wrong here
+  # silently links a stale engine into the extension (GH #682). This is the
+  # same archive the freshness check above compared against.
+  #
+  # Failures are NOT suppressed: a build error here leaves no extension for the
+  # suite to import, and the import error that follows says nothing about why.
+  SIMLIN_STATIC_LIB="$LIBSIMLIN_A" uv run python setup.py build_ext --inplace
 else
   # Ensure deps are up to date (uv fast-paths when nothing changed)
   uv sync --extra dev

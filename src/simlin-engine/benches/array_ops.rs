@@ -16,6 +16,13 @@ use simlin_engine::datamodel::{
 };
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 
+// Back this harness with mimalloc, the allocator every native binary that
+// embeds the engine installs. The compile path is allocation-bound, so timing
+// it against the system allocator measures one no shipped build runs and
+// over-credits any change that only moves malloc traffic.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Create a project with a single large 1D array and a sum reduction
 fn create_sum_project(array_size: u32) -> Project {
     let dim_name = "Idx";

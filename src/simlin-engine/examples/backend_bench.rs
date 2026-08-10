@@ -40,7 +40,8 @@
 //! slow case (a large model under a non-JIT wasm interpreter); the adaptive
 //! budget falls back to a single iteration for any phase that exceeds it.
 
-use std::alloc::{GlobalAlloc, Layout, System as Backing};
+use mimalloc::MiMalloc as Backing;
+use std::alloc::{GlobalAlloc, Layout};
 use std::hint::black_box;
 use std::io::BufReader;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

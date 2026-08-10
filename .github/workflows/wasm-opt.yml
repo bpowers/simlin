@@ -44,6 +44,11 @@ name: WASM optimized-bundle check
       - 'Cargo.lock'
       - 'Cargo.toml'
       - '.cargo/config.toml'
+      # The compiler selects what WASM gets emitted, and with it whether
+      # binaryen can still read it -- and the ordinary frontend lane runs with
+      # DISABLE_WASM_OPT=1, so a toolchain bump would otherwise reach a release
+      # without either blob having been optimized once.
+      - 'rust-toolchain.toml'
       - '.github/workflows/wasm-opt.yml'
   pull_request:
     branches:
@@ -55,6 +60,11 @@ name: WASM optimized-bundle check
       - 'Cargo.lock'
       - 'Cargo.toml'
       - '.cargo/config.toml'
+      # The compiler selects what WASM gets emitted, and with it whether
+      # binaryen can still read it -- and the ordinary frontend lane runs with
+      # DISABLE_WASM_OPT=1, so a toolchain bump would otherwise reach a release
+      # without either blob having been optimized once.
+      - 'rust-toolchain.toml'
       - '.github/workflows/wasm-opt.yml'
 
 env:
