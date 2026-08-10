@@ -915,10 +915,35 @@ pub(crate) type IdentMap<K, V> = std::collections::HashMap<K, V, rustc_hash::FxB
 /// Spelled as two `next()` calls rather than `c.to_lowercase().ne(once(c))`:
 /// the iterator-comparison form goes through the generic `Iterator::eq_by`,
 /// which does not collapse, and this predicate is on the identifier fast path.
+///
+/// The separators the ENGINE ITSELF mints are answered without consulting the
+/// Unicode case tables. They are the reason this predicate is hot at all:
+/// [`is_canonical_needing_no_trim`] decodes every non-ASCII byte and asks here,
+/// and the module separator `·` appears in every `submodel·var` ident, so on
+/// C-LEARN this was 342,138 `unicode_data::conversions::lookup` calls per
+/// compile (~1.9% of it) to re-derive that a middle dot is not an uppercase
+/// letter. Each listed character is verified against the table by
+/// `engine_separators_are_lowercase_invariant`, so the shortcut is checked
+/// rather than asserted, and anything not listed still takes the general path.
 #[inline]
 fn changes_when_lowercased(c: char) -> bool {
+    if is_engine_separator(c) {
+        return false;
+    }
     let mut lower = c.to_lowercase();
     lower.next() != Some(c) || lower.next().is_some()
+}
+
+/// The non-ASCII characters the engine writes into identifiers itself: the
+/// module-hierarchy separator, and the two LTM synthetic-name separators.
+///
+/// Listed here only as a fast path for [`changes_when_lowercased`]; membership
+/// carries no meaning beyond "the case tables say this character is unchanged
+/// by lowercasing, and it is common enough in our identifiers to be worth not
+/// asking them".
+#[inline]
+fn is_engine_separator(c: char) -> bool {
+    matches!(c, '\u{00B7}' | '\u{205A}' | '\u{2192}')
 }
 
 /// Per-byte "this byte alone cannot make a name non-canonical" table, the
@@ -1590,6 +1615,39 @@ mod canonicalize_invariant_tests {
                 "{name:?} is canonical and must not be re-built"
             );
             assert_eq!(&*canonicalize(name), &*canonicalize_slow_path(name));
+        }
+    }
+
+    /// `changes_when_lowercased` short-circuits the characters the engine
+    /// mints into identifiers itself. The shortcut is only sound because the
+    /// Unicode case tables agree, so ask them here rather than asserting it:
+    /// this is the test that reds if a future separator is added to
+    /// `is_engine_separator` that lowercasing DOES change.
+    ///
+    /// Checked against the general path (`c.to_lowercase()`) rather than
+    /// against a hardcoded `false`, which would restate the shortcut instead
+    /// of verifying it.
+    #[test]
+    fn engine_separators_are_lowercase_invariant() {
+        for c in ['\u{00B7}', '\u{205A}', '\u{2192}'] {
+            assert!(
+                is_engine_separator(c),
+                "{c:?} must be on the fast path for this test to be checking it"
+            );
+            let mut lower = c.to_lowercase();
+            assert_eq!(
+                lower.next(),
+                Some(c),
+                "{c:?} lowercases to something else; the fast path in \
+                 changes_when_lowercased is unsound for it"
+            );
+            assert_eq!(
+                lower.next(),
+                None,
+                "{c:?} lowercases to more than one character; the fast path in \
+                 changes_when_lowercased is unsound for it"
+            );
+            assert!(!changes_when_lowercased(c));
         }
     }
 
