@@ -170,6 +170,17 @@ fn build_member(spec: &MemberSpec) -> PerVarBytecodes {
                 table_count: 1,
                 mode: crate::bytecode::LookupMode::Interpolate,
             });
+            // The constant-element lookup form belongs in the stream too. This
+            // file asserts no GF-run property -- its obligations are 1:1 opcode
+            // conservation, element order and temp non-sharing -- but those
+            // apply to every opcode, and an opcode the generator never emits is
+            // outside all of them.
+            code.push(SymbolicOpcode::LookupDirect {
+                base_gf: e as u8,
+                table_count: 1,
+                elem: 0,
+                mode: crate::bytecode::LookupMode::Interpolate,
+            });
         }
         if e < module_decls.len() {
             code.push(SymbolicOpcode::EvalModule {
