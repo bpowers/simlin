@@ -2172,3 +2172,74 @@ fn the_ltm_fragment_body_counter_observes_a_cold_compile() {
          in the sibling test proves nothing; got: {execs:?}"
     );
 }
+
+/// The first arm's shared AST of an LTM equation, whatever its shape.
+fn first_arm_expr(eq: &crate::db::LtmEquation) -> &std::sync::Arc<crate::ast::Expr0> {
+    use crate::db::LtmEquation;
+    let arm = match eq {
+        LtmEquation::Scalar(arm) | LtmEquation::ApplyToAll(_, arm) => arm,
+        LtmEquation::Arrayed { elements, .. } => {
+            &elements
+                .first()
+                .expect("an arrayed equation must have an arm")
+                .1
+        }
+    };
+    arm.expr.as_ref().expect("the fixture's arm must parse")
+}
+
+/// `model_ltm_variables` must SHARE each emitted score's parsed AST with the
+/// `link_score_equation_text_shaped` memo it came from, not deep-copy it.
+///
+/// The emission loop clones the shaped result out of the memo for every score,
+/// so before the ASTs were shared each equation was retained twice for the life
+/// of the database. On C-LEARN the generation stage retains +273 MiB for 12.78 MB
+/// of equation text, and roughly half of that is the second copy.
+///
+/// Pointer identity is the only way to see this: both copies compare EQUAL by
+/// value either way -- which they must, since salsa backdates on value equality
+/// and that is what lets an unrelated edit reuse the expensive downstream
+/// fragment (GH #981). A value assertion here would pass on a deep copy.
+#[test]
+fn an_emitted_link_score_shares_its_ast_with_the_shaped_memo() {
+    let project = per_element_zero_slot_project(4);
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    use salsa::Setter;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let ltm = crate::db::model_ltm_variables(&db, model, source_project);
+    let emitted = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == "$\u{205A}ltm\u{205A}link_score\u{205A}growth\u{2192}pop")
+        .unwrap_or_else(|| {
+            panic!(
+                "fixture must emit the growth->pop link score; got: {:?}",
+                ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+            )
+        });
+
+    let link_id = LtmLinkId::new(&db, "growth".to_string(), "pop".to_string());
+    let shaped =
+        link_score_equation_text_shaped(&db, link_id, RefShape::Bare, model, source_project);
+    let ShapedLinkScore::Scored { var: memo_var, .. } = shaped else {
+        panic!("the growth->pop edge must be scored; got: {shaped:?}");
+    };
+
+    let memo_expr = first_arm_expr(&memo_var.equation);
+    let emitted_expr = first_arm_expr(&emitted.equation);
+
+    // The control: they must still be EQUAL, or salsa backdating breaks.
+    assert_eq!(
+        memo_expr, emitted_expr,
+        "the emitted score and the memo must compare equal by value"
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(memo_expr, emitted_expr),
+        "the emitted score must SHARE the memo's AST, not hold a deep copy"
+    );
+}

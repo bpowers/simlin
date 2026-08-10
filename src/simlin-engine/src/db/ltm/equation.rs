@@ -24,6 +24,8 @@
 
 use std::collections::HashMap;
 
+use std::sync::Arc;
+
 use crate::ast::{Ast, Expr0};
 use crate::common::{CanonicalElementName, EquationError};
 use crate::lexer::LexerType;
@@ -51,7 +53,20 @@ pub struct LtmArm {
     /// diagnostics; never re-parsed to compile.
     pub text: String,
     /// The authoritative compiled AST (`Expr0::new(text)`).
-    pub expr: Option<Expr0>,
+    ///
+    /// Behind an `Arc` because every emitted link score is cloned out of the
+    /// `link_score_equation_text_shaped` memo (`db/ltm/link_scores.rs`) into
+    /// `model_ltm_variables`' own list, so the tree would otherwise be retained
+    /// TWICE for the whole life of the database -- on C-LEARN, two copies of
+    /// 12.78 MB of equations, whose ASTs dominate that query's ~273 MiB. Sharing
+    /// makes that clone a refcount bump and retains one copy.
+    ///
+    /// `Arc<Expr0>` still compares BY VALUE, which is load-bearing: salsa
+    /// backdates a re-executed query whose value compares equal, and that is
+    /// what lets an unrelated edit reuse the expensive downstream fragment (GH
+    /// #981). Pointer equality would be an optimization on top, never a
+    /// substitute.
+    pub expr: Option<Arc<Expr0>>,
     /// `Some` iff `text` FAILED to parse -- never merely because it was empty.
     /// Preserved (rather than discarded at construction) so the arm that failed
     /// can reject its whole equation; see the type docs.
@@ -88,7 +103,7 @@ impl LtmArm {
         // strictly worse than a diagnostic, and libsimlin release builds are
         // panic=abort.
         let (expr, parse_error) = match Expr0::new(&text, LexerType::Equation) {
-            Ok(expr) => (expr, None),
+            Ok(expr) => (expr.map(Arc::new), None),
             // `Expr0::new` reports every position it found; keep the first as
             // the failure's provenance (see the field docs).
             Err(errs) => (None, errs.into_iter().next()),
@@ -314,12 +329,20 @@ impl LtmEquation {
         if !parse_errors.is_empty() {
             return (None, parse_errors);
         }
+        // The arms' ASTs are shared (`Arc`), but `Ast<Expr0>` owns its tree, so
+        // building one unshares. That is the right trade: the result is consumed
+        // by the fragment compile and dropped, whereas the arm itself is retained
+        // for the life of the database -- so the sharing is what bounds RETENTION,
+        // not what avoids this transient copy.
         match self {
-            LtmEquation::Scalar(arm) => (arm.expr.clone().map(Ast::Scalar), vec![]),
+            LtmEquation::Scalar(arm) => (arm.expr.as_deref().cloned().map(Ast::Scalar), vec![]),
             LtmEquation::ApplyToAll(dims, arm) => {
                 match crate::variable::get_dimensions(dimensions, dims) {
                     Ok(resolved) => (
-                        arm.expr.clone().map(|e| Ast::ApplyToAll(resolved, e)),
+                        arm.expr
+                            .as_deref()
+                            .cloned()
+                            .map(|e| Ast::ApplyToAll(resolved, e)),
                         vec![],
                     ),
                     Err(err) => (None, vec![err]),
@@ -338,11 +361,12 @@ impl LtmEquation {
                     .iter()
                     .filter_map(|(subscript, arm)| {
                         arm.expr
-                            .clone()
+                            .as_deref()
+                            .cloned()
                             .map(|e| (CanonicalElementName::from_raw(subscript), e))
                     })
                     .collect();
-                let default_expr = default.as_ref().and_then(|a| a.expr.clone());
+                let default_expr = default.as_ref().and_then(|a| a.expr.as_deref().cloned());
                 match crate::variable::get_dimensions(dimensions, dims) {
                     Ok(resolved) => (
                         Some(Ast::Arrayed(
