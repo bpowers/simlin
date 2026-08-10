@@ -41,6 +41,13 @@ strip = false
 #     `perf`, with the un-inlined `u8::max` inside it alone at ~35%). Pinning
 #     the stack takes those 16 tests from 2.52s to 0.33s and drops the engine's
 #     lib-test binary below its previous one-test parallel floor.
+#   - salsa/hashbrown/indexmap: the incremental compilation substrate. Every
+#     model any test compiles goes through salsa's query engine and its
+#     indexmap-backed dependency edges, so this is the one pin that is spread
+#     across the whole suite rather than concentrated in a few tests: it cuts
+#     ~17% of BOTH engine test binaries' CPU. Note this `hashbrown` is the
+#     standalone crate behind indexmap and salsa, not the copy vendored into
+#     std, so `std::collections::HashMap` is unaffected.
 #
 # The asymmetry that makes these worth it: a dependency is not recompiled by an
 # edit to a workspace crate, so a pin costs one rebuild of that dependency (and
@@ -82,4 +89,13 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.svgtypes]
+opt-level = 3
+
+[profile.dev.package.salsa]
+opt-level = 3
+
+[profile.dev.package.hashbrown]
+opt-level = 3
+
+[profile.dev.package.indexmap]
 opt-level = 3
