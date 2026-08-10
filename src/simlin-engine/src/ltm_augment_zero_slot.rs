@@ -46,6 +46,28 @@ pub(crate) enum ZeroSlotPolicy {
     /// row in `db::ltm_value_gate_tests`; skipping either omits an arm worth
     /// close to the canonical +/-1 attribution.
     ///
+    /// Bit-exactness has ONE disclosed exception, and it is a value change
+    /// rather than a representation one: when the target slot is NON-FINITE.
+    /// A materialized arm computes `NaN - NaN` (or `inf - inf`), the zero
+    /// guards do not fire because `NaN = 0` is false, `SAFEDIV`'s fallback is
+    /// for a zero denominator rather than a `NaN` one, and the arm evaluates to
+    /// `NaN`; an omitted slot is `+0.0`. Measured, not argued:
+    /// `db::ltm_value_gate_tests::a_nonfinite_target_arm_is_omitted_to_zero_not_nan`
+    /// reproduces both sides.
+    ///
+    /// That trade is NOT adjudicated -- it is tracked as GH #1022 -- and the two
+    /// relevant positions disagree.
+    /// `crate::float`'s module docs hold that an engine-manufactured NaN is
+    /// noise in a channel practitioners debug by hand, and this NaN is
+    /// engine-made -- the guard form's own subtraction -- on an arm with no
+    /// causal dependence on its source, so `0` is the structurally known answer.
+    /// GH #542 points the other way: `ltm_post::denom_summand` excludes a `NaN`
+    /// score from its partition denominator precisely so the bad entry's own
+    /// numerator can stay `NaN` as "the honest per-loop 'undefined here'
+    /// signal". Replacing some of those with `0` partially undoes that.
+    /// Confined to models already producing non-finite values, and the signal
+    /// survives on the target's own series and on every live arm.
+    ///
     /// The tempting negative test -- "the link's source
     /// stayed frozen" -- says nothing about what else the arm reads, and
     /// collapsing on it changes 187 C-LEARN result slots across 35 link-score

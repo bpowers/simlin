@@ -401,3 +401,95 @@ fn a_nested_freeze_arm_is_not_a_structural_zero() {
          it must not be omitted as a structural zero; got {boston:?}"
     );
 }
+
+/// Mechanism 5, and the one place the omission is NOT value-neutral: a frozen
+/// arm whose TARGET is non-finite.
+///
+/// Every other row here pins that the omission preserves a value. This one pins
+/// that it CHANGES one, deliberately, and it exists so the change is executable
+/// rather than a sentence in a PR body.
+///
+/// When `growth[boston]` is `NaN`, the materialized guard form computes
+/// `partial - PREVIOUS(growth)` = `NaN - NaN` = `NaN`. The zero guards do not
+/// rescue it, because `NaN = 0` is false, and `SAFEDIV(NaN, ABS(NaN), 0)` is
+/// `NaN` rather than the fallback (the fallback fires on a zero denominator, not
+/// a `NaN` one). So the arm evaluates to `NaN`. An omitted slot is
+/// `AssignCurr(off, Const(0.0))`, so it is `+0.0`.
+///
+/// Measured on this fixture: materialized gives `[0, NaN, NaN, NaN, NaN, NaN]`,
+/// omitted gives all zeros. An infinite target collapses to the same case, since
+/// `inf - inf` is also `NaN`.
+///
+/// **This is a semantics decision that has not been adjudicated. It is tracked
+/// as GH #1022**, and the arguments do not point the same way:
+///
+/// * `src/float.rs` holds that a NaN the ENGINE manufactures is noise in a
+///   channel practitioners already debug by hand. This NaN is engine-made -- it
+///   comes from the guard form's own `NaN - NaN`, not from the modeller's
+///   equation -- and the arm has no causal dependence on the source at all, so
+///   `0` is the structurally known answer rather than a guess.
+/// * GH #542 points the other way. `ltm_post::denom_summand` excludes a `NaN`
+///   summand from its partition denominator specifically so that one undefined
+///   score does not poison its siblings, while the bad loop's OWN numerator
+///   stays `NaN` -- described there as "the honest per-loop 'undefined here'
+///   signal". That is a deliberate decision that NaN scores carry meaning, and
+///   replacing some of them with `0` partially undoes it.
+///
+/// What is NOT at stake: the NaN signal does not disappear from the model. The
+/// target's own series is still `NaN`, and any LIVE arm reading it still scores
+/// `NaN` -- only arms with no causal dependence on their source change.
+///
+/// Blast radius is confined to models that already produce non-finite values.
+/// This row's job is to make the current answer fail if it changes, so whoever
+/// adjudicates GH #1022 does so on purpose rather than by re-pinning.
+fn nonfinite_target_project() -> datamodel::Project {
+    TestProject::new("nonfinite_target")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston", "la"])
+        // A stock with no flows holds 0 and is not constant-foldable, so
+        // `zed / zed` really is evaluated as 0/0 at runtime.
+        .stock("zed", "0", &[], &[], None)
+        .aux("nan_src", "zed / zed", None)
+        .array_flow_with_ranges(
+            "growth[Region]",
+            vec![
+                ("nyc", "pop[nyc] * 0.01"),
+                ("boston", "nan_src * 0.02"),
+                ("la", "0.03"),
+            ],
+        )
+        .array_stock("pop[Region]", "10", &["growth"], &[], None)
+        .build_datamodel()
+}
+
+#[test]
+fn a_nonfinite_target_arm_is_omitted_to_zero_not_nan() {
+    let series = ltm_slot_series(&nonfinite_target_project());
+
+    // The premise: the target element really is NaN. Without this the row
+    // could pass on a fixture that never went non-finite at all.
+    let stock_to_flow = slot(&series, "link_score\u{205A}growth\u{2192}pop", 1);
+    assert!(
+        stock_to_flow.iter().any(|v| v.is_nan()),
+        "fixture premise: `growth[boston]` must be NaN, so the NaN signal is \
+         present in the model at all; got {stock_to_flow:?}"
+    );
+
+    // The omitted arm. Region declaration order: nyc=0, boston=1, la=2.
+    let boston = slot(&series, "link_score\u{205A}pop[nyc]\u{2192}growth", 1);
+    assert!(
+        boston.iter().all(|v| *v == 0.0),
+        "the omitted structural-zero arm reports 0 where a materialized one \
+         reports NaN -- the one disclosed value change in the GH #977 \
+         omission. If this is being changed, adjudicate it rather than \
+         re-pinning; got {boston:?}"
+    );
+
+    // The counterweight: the NaN signal is NOT erased from the model. A live
+    // arm over the same NaN target still scores NaN, so what changed is
+    // confined to arms with no causal dependence on their source.
+    assert!(
+        stock_to_flow.iter().any(|v| v.is_nan()),
+        "a live arm over the NaN target must still carry NaN"
+    );
+}
