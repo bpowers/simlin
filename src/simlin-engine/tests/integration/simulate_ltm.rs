@@ -11185,3 +11185,134 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
         }
     }
 }
+
+/// The C-LEARN half of the value-level LTM gate: a digest over every LTM slot's
+/// per-step maximum magnitude.
+///
+/// The sub-second half is `db::ltm_value_gate_tests`, which pins exact values on
+/// a three-arm fixture built around the known ways an arm-level change zeroes a
+/// score. It cannot show that the same change leaves 7,000 real variables alone,
+/// and C-LEARN is the only model in the repo at that scale. Hence this: same
+/// property, real model, `#[ignore]`d purely for runtime (~25 s release, against
+/// the 3-minute debug-build cap in `docs/dev/rust.md`).
+///
+/// The digest is deliberately NOT a checked-in series slab -- 30k slots x 251
+/// steps is 60 MB of golden nobody would read. It is three numbers that move
+/// under exactly the failure this gate exists for:
+///
+/// * `nonzero_slots` -- how many LTM slots are ever non-zero. Rewriting live
+///   arms to zero moves this DOWN, which is the GH #977 failure (a change that
+///   zeroed 149 C-LEARN LTM slots passed every named C-LEARN gate); wrongly
+///   materializing structural zeros as small residuals moves it UP.
+/// * `finite_slots` -- how many are finite throughout, so a regression that
+///   replaces values with NaN cannot hide behind an unchanged non-zero count.
+/// * `magnitude_digest` -- an order-independent sum over each slot's maximum
+///   magnitude, quantized to 1e-9 relative. Two slots swapping values keeps the
+///   first two numbers and moves this.
+///
+/// Quantizing is what makes the pin usable rather than a per-run coin flip: raw
+/// f64 maxima carry last-bit noise across allocator and layout changes, and a
+/// digest that reds on that is a digest people learn to re-capture without
+/// reading. A real zeroing moves it far outside the quantum.
+///
+/// **"It passes" and "it constrains the code" are different claims, so both
+/// were measured.** Three runs of this digest, same binary, differing only in
+/// `ltm_augment_zero_slot`:
+///
+/// * predicate as shipped -- `(1369, 7000, 10_248_673_492_482_445_132_733_301)`
+/// * `ZeroSlotPolicy::Materialize` forced everywhere, i.e. GH #977's omission
+///   disabled -- **identical in all three numbers**. That is this gate's other
+///   job: it is the reproducible, checked-in form of the whole-slab differential
+///   that established the omission's value-neutrality on C-LEARN, which
+///   previously existed only as a throwaway probe nobody could re-run.
+/// * `partial_is_provably_previous_target` forced to `true`, so every arm is
+///   omitted whether or not it is a structural zero -- `(1287, 7000,
+///   10_248_673_492_258_319_975_585_940)`. 82 slots that carry real scores go to
+///   zero and the digest reds.
+///
+/// The third run is what makes the second meaningful. Without it, "unchanged
+/// when the omission is disabled" would be equally consistent with a digest that
+/// cannot see the omission at all.
+///
+/// Run with:
+///   cargo test -p simlin-engine --release --test integration -- --ignored \
+///     clearn_ltm_slot_maxima_digest
+#[test]
+#[ignore]
+fn clearn_ltm_slot_maxima_digest() {
+    use simlin_engine::open_vensim;
+
+    let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+    let project =
+        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).expect("vm");
+    vm.run_to_end()
+        .expect("C-LEARN must simulate with LTM enabled");
+    let results = vm.into_results();
+
+    // Which result slots belong to LTM, taken from the run's own offset map
+    // rather than from a name list, so a renamed synthetic prefix fails loudly
+    // here instead of quietly shrinking the gate's scope.
+    let ltm_offsets: Vec<usize> = results
+        .offsets
+        .iter()
+        .filter(|(name, _)| name.as_str().starts_with("$\u{205A}ltm\u{205A}"))
+        .map(|(_, &off)| off)
+        .collect();
+    assert!(
+        !ltm_offsets.is_empty(),
+        "no LTM slots found in the results; the gate would pass vacuously"
+    );
+
+    let mut nonzero_slots = 0usize;
+    let mut finite_slots = 0usize;
+    let mut magnitude_digest: i128 = 0;
+    for &off in &ltm_offsets {
+        let mut max_mag = 0.0f64;
+        let mut all_finite = true;
+        let mut ever_nonzero = false;
+        for step in 0..results.step_count {
+            let v = results.data[step * results.step_size + off];
+            if !v.is_finite() {
+                all_finite = false;
+                continue;
+            }
+            if v != 0.0 {
+                ever_nonzero = true;
+            }
+            if v.abs() > max_mag {
+                max_mag = v.abs();
+            }
+        }
+        if ever_nonzero {
+            nonzero_slots += 1;
+        }
+        if all_finite {
+            finite_slots += 1;
+        }
+        // Nine significant digits: far finer than any real zeroing, far coarser
+        // than last-bit drift.
+        magnitude_digest += (max_mag * 1e9).round() as i128;
+    }
+
+    assert_eq!(
+        (nonzero_slots, finite_slots, magnitude_digest),
+        (
+            CLEARN_LTM_NONZERO_SLOTS,
+            CLEARN_LTM_FINITE_SLOTS,
+            CLEARN_LTM_MAGNITUDE_DIGEST
+        ),
+        "C-LEARN's LTM slot values moved. A DROP in nonzero_slots is the \
+         silent-zeroing regression this gate exists for; re-derive before \
+         re-pinning, and say in the commit which arms changed and why"
+    );
+}
+
+/// Pinned by `clearn_ltm_slot_maxima_digest`; see its rustdoc before changing.
+const CLEARN_LTM_NONZERO_SLOTS: usize = 1369;
+const CLEARN_LTM_FINITE_SLOTS: usize = 7000;
+const CLEARN_LTM_MAGNITUDE_DIGEST: i128 = 10_248_673_492_482_445_132_733_301;
