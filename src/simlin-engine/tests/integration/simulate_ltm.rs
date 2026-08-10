@@ -11206,14 +11206,23 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
 ///   materializing structural zeros as small residuals moves it UP.
 /// * `finite_slots` -- how many are finite throughout, so a regression that
 ///   replaces values with NaN cannot hide behind an unchanged non-zero count.
-/// * `magnitude_digest` -- an order-independent sum over each slot's maximum
-///   magnitude, quantized to 1e-9 relative. Two slots swapping values keeps the
-///   first two numbers and moves this.
+/// * `mantissa_digest` / `exponent_digest` -- an order-independent sum over each
+///   slot's maximum magnitude, split into a 9-significant-digit mantissa and its
+///   decimal exponent (`nine_significant_digits`). Two slots swapping values
+///   keeps the first two numbers and moves these.
 ///
 /// Quantizing is what makes the pin usable rather than a per-run coin flip: raw
 /// f64 maxima carry last-bit noise across allocator and layout changes, and a
 /// digest that reds on that is a digest people learn to re-capture without
 /// reading. A real zeroing moves it far outside the quantum.
+///
+/// The quantization is RELATIVE, and it has to be: this model's largest LTM slot
+/// peaks at 1.53e15 and 30 slots sit above 1e12, so a fixed `* 1e9` scale
+/// quantizes at 1e-9 in VALUE units and one ULP of the top slot moves the sum by
+/// 2.5e8 -- the pin would red on exactly the benign changes the paragraph above
+/// says it tolerates. Splitting mantissa from exponent also gives every slot
+/// equal weight, so the 743 slots whose maxima sit near 1.0 are visible at all;
+/// under a raw magnitude sum the three 1e15 slots drown them.
 ///
 /// **"It passes" and "it constrains the code" are different claims, so both
 /// were measured.** Three runs of this digest, same binary, differing only in
@@ -11270,7 +11279,8 @@ fn clearn_ltm_slot_maxima_digest() {
 
     let mut nonzero_slots = 0usize;
     let mut finite_slots = 0usize;
-    let mut magnitude_digest: i128 = 0;
+    let mut mantissa_digest: i64 = 0;
+    let mut exponent_digest: i64 = 0;
     for &off in &ltm_offsets {
         let mut max_mag = 0.0f64;
         let mut all_finite = true;
@@ -11294,17 +11304,23 @@ fn clearn_ltm_slot_maxima_digest() {
         if all_finite {
             finite_slots += 1;
         }
-        // Nine significant digits: far finer than any real zeroing, far coarser
-        // than last-bit drift.
-        magnitude_digest += (max_mag * 1e9).round() as i128;
+        let (mantissa, exponent) = nine_significant_digits(max_mag);
+        mantissa_digest += mantissa;
+        exponent_digest += exponent;
     }
 
     assert_eq!(
-        (nonzero_slots, finite_slots, magnitude_digest),
+        (
+            nonzero_slots,
+            finite_slots,
+            mantissa_digest,
+            exponent_digest
+        ),
         (
             CLEARN_LTM_NONZERO_SLOTS,
             CLEARN_LTM_FINITE_SLOTS,
-            CLEARN_LTM_MAGNITUDE_DIGEST
+            CLEARN_LTM_MANTISSA_DIGEST,
+            CLEARN_LTM_EXPONENT_DIGEST
         ),
         "C-LEARN's LTM slot values moved. A DROP in nonzero_slots is the \
          silent-zeroing regression this gate exists for; re-derive before \
@@ -11312,7 +11328,52 @@ fn clearn_ltm_slot_maxima_digest() {
     );
 }
 
+/// Split `x` into a 9-significant-digit decimal mantissa and its exponent:
+/// `x ~= mantissa * 10^(exponent - 8)`, with `mantissa` in `[1e8, 1e9)`.
+/// Zero maps to `(0, 0)`.
+///
+/// RELATIVE quantization, which is the whole point. Scaling by a fixed `1e9`
+/// and rounding -- the obvious spelling -- quantizes ABSOLUTELY, and on this
+/// model that is not a tolerance at all: the largest LTM slot peaks at
+/// 1.53e15, where one ULP is 0.25, so a single last-bit difference moves such a
+/// digest by 2.5e8 and any benign allocator, layout or FP-association change
+/// reds the pin. A gate that reds on nothing is a gate people re-capture
+/// without reading, which is exactly what this digest's rustdoc promises to
+/// avoid.
+///
+/// Splitting the mantissa from the exponent also fixes a SENSITIVITY problem
+/// that the absolute form had in the other direction. Summing raw magnitudes
+/// lets the three 1e15 slots dominate: the 743 slots whose maxima sit near 1.0
+/// contribute ~15 orders of magnitude less, so a change to any of them is far
+/// below the aggregate's own resolution. Here every non-zero slot contributes a
+/// mantissa in `[1e8, 1e9)` regardless of scale, so a small slot is exactly as
+/// visible as a large one, and the exponent sum catches the order-of-magnitude
+/// moves the mantissa alone would miss.
+///
+/// It removes the overflow hazard by construction rather than by clamping: at
+/// 7,000 slots the sums are bounded by 7e12 and ~2.2e6, both far inside `i64`,
+/// where the absolute form fed a saturating `f64 -> i128` cast that would have
+/// failed silently.
+fn nine_significant_digits(x: f64) -> (i64, i64) {
+    if x == 0.0 || !x.is_finite() {
+        return (0, 0);
+    }
+    let exponent = x.abs().log10().floor();
+    let mantissa = x.abs() / 10f64.powf(exponent);
+    // `log10`/`powf` are not exact, so the quotient can land a hair outside
+    // [1, 10). Renormalise rather than trusting it: a mantissa that rounded to
+    // 1e9 is 10 significant digits and belongs in the next decade.
+    let mut mantissa = (mantissa * 1e8).round() as i64;
+    let mut exponent = exponent as i64;
+    if mantissa >= 1_000_000_000 {
+        mantissa /= 10;
+        exponent += 1;
+    }
+    (mantissa, exponent)
+}
+
 /// Pinned by `clearn_ltm_slot_maxima_digest`; see its rustdoc before changing.
 const CLEARN_LTM_NONZERO_SLOTS: usize = 1369;
 const CLEARN_LTM_FINITE_SLOTS: usize = 7000;
-const CLEARN_LTM_MAGNITUDE_DIGEST: i128 = 10_248_673_492_482_445_132_733_301;
+const CLEARN_LTM_MANTISSA_DIGEST: i64 = 371_710_864_477;
+const CLEARN_LTM_EXPONENT_DIGEST: i64 = 1019;
