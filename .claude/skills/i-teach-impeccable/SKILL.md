@@ -46,24 +46,6 @@ Skip questions where the answer is already clear from the codebase exploration.
 
 ## Step 3: Write Design Context
 
-Synthesize your findings and the user's answers into a `## Design Context` section:
-
-```markdown
-## Design Context
-
-### Users
-[Who they are, their context, the job to be done]
-
-### Brand Personality
-[Voice, tone, 3-word personality, emotional goals]
-
-### Aesthetic Direction
-[Visual tone, references, anti-references, theme]
-
-### Design Principles
-[3-5 principles derived from the conversation that should guide all design decisions]
-```
-
-Write this section to CLAUDE.md in the project root. If the file exists, append or update the Design Context section.
+Synthesize your findings and the user's answers, then update `docs/dev/design.md` -- this repo's canonical home for product design context, routed from the root CLAUDE.md's Development Standards list. Update the relevant existing sections in place (`## Users`, `## Brand Personality`, `## Aesthetic Direction`, `## Design Principles`), preserving the file's `# Product Design Context` structure and leaving sections you did not gather new answers for (such as `## Design Tokens Reference` and `## Accessibility`) intact. Do not append a duplicate section or write design context anywhere else.
 
 Confirm completion and summarize the key design principles that will now guide all future work.

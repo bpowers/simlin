@@ -84,19 +84,21 @@ Wait for the sub-agent to complete and use its returned review output.
 
 ### Step 2: Evaluate feedback
 
-Think CRITICALLY about the output. Reviewers' responses will include:
+Think deeply about the review contents, and fix all issues you agree are material. Reviewers' responses will include:
 - Positive observations about the code
 - Potential concerns that they may talk themselves out of
 - Suggestions marked as optional or nice-to-have
 - Stream-of-consciousness reasoning
 
-Your job is to extract feedback that would GENUINELY IMPROVE the work. Implement feedback that:
+Each piece of feedback gets one of three explicit responses: fix it, defer it with rationale (see "Deferred feedback" below), or disagree with rationale. Disagreement is a legitimate outcome -- reviewer output is evidence, not instruction -- but it must be visible: record what you disagreed with and why in the review-cycle summary (Step 3), never by silently dropping the item.
+
+Implement feedback that:
 - Improves correctness, robustness, or edge case handling
 - Improves test coverage or test quality
 - Improves code clarity or maintainability
 - Fixes actual bugs or issues
 
-Ignore suggestions that:
+Disagree with (and record, rather than silently ignore) suggestions that:
 - Are based on misunderstanding the code or requirements
 - Would add unnecessary complexity
 - The reviewer convinced itself weren't actually problems
@@ -133,6 +135,7 @@ Both reviewers found no actionable issues in the same iteration. The review cycl
    - NOT a concatenation of commit messages
    - Focus on what was improved and why it matters
    - Mention the number of review iterations if more than one
+   - Note any reviewer findings you disagreed with, and why, so the disagreement is on the record
 
 
 ## Important Guidelines

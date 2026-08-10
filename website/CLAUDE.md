@@ -4,6 +4,7 @@ Rspress-based documentation and website for simlin.com. Publishes the marketing 
 
 For global development standards, see the root [CLAUDE.md](/CLAUDE.md).
 For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
+For product design context (users, brand, design principles; the website has its own brand palette -- see the tokens note there), see [docs/dev/design.md](/docs/dev/design.md).
 
 ## Key Files
 

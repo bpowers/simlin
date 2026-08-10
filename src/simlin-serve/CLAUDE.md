@@ -2,7 +2,7 @@
 
 Local-first HTTP server + React SPA + in-process MCP server. Distributed as the `@simlin/serve` npm package; running it opens any directory containing SD models in a browser tab and an AI client.
 
-<!-- Last reviewed: 2026-04-26 -->
+For product design context (users, brand, design principles, tokens), see [docs/dev/design.md](/docs/dev/design.md).
 
 ## Architecture
 
