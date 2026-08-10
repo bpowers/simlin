@@ -779,20 +779,71 @@ pub fn variable_relevant_dimensions(db: &dyn Db, var: SourceVariable) -> BTreeSe
     }
 }
 
+/// A variable's DECLARED dimensions, resolved against the project.
+///
+/// Derived straight from `var.equation(db)`'s dimension-name list rather than
+/// from a parse, and that is the whole point: the parse is keyed on a
+/// `ModuleIdentContext`, so asking for one here under the empty context --
+/// which is the only context this query could name, since it takes no `model`
+/// -- minted a SECOND full parse of every variable under a key nothing else
+/// uses. On C-LEARN that was 1,910 executions of
+/// `parse_source_variable_with_module_context` for 934 variables (~2.05x), and
+/// removing it measures -3.5% of a cold compile there and -6.7% on WORLD3.
+///
+/// The derivation mirrors `parse_source_variable_impl`'s own narrowed
+/// dimension context exactly -- `variable_relevant_dimensions` widened by
+/// `expand_maps_to_chains` and filtered out of `project_datamodel_dims` -- so
+/// a name resolves here iff it resolves there. Keeping the narrowing (rather
+/// than reading the whole-project `project_dimensions_context`) is what
+/// preserves dimension-granularity invalidation: a scalar variable takes the
+/// early return and never depends on the project's dimensions at all
+/// (`db::dimension_invalidation_tests`).
+///
+/// **One arm differs from the parse, deliberately.** The parse builds
+/// `Ast::ApplyToAll` as `ast.map(|ast| Ast::ApplyToAll(dims, ast))`, so an A2A
+/// variable whose EQUATION does not parse yields no `Ast` and therefore
+/// reported no dimensions; this reports its declared ones. Both the
+/// unresolvable-dimension-name arm (`[]` on either path) and the `Arrayed` arm
+/// (which the parse builds unconditionally once its dims resolve, however many
+/// element equations failed) are unchanged. The divergence is confined to a
+/// project that already fails to assemble -- the parse error still reaches
+/// `compile_var_fragment`, which drops the fragment and accumulates the
+/// diagnostic -- and it moves the reported size from a wrong 1 toward the
+/// declared extent, so nothing that compiled before reads a different slot.
+/// Every arm is enumerated in `db::variable_dimensions_tests`.
 #[salsa::tracked(returns(ref))]
 pub fn variable_dimensions(
     db: &dyn Db,
     var: SourceVariable,
     project: SourceProject,
 ) -> Vec<crate::dimensions::Dimension> {
-    // Module context doesn't affect dimension extraction, so an empty
-    // context is correct here.
-    let empty_context = ModuleIdentContext::new(db, vec![]);
-    let parsed = parse_source_variable_with_module_context(db, var, project, empty_context);
-    match parsed.variable.get_dimensions() {
-        Some(dims) => dims.to_vec(),
-        None => Vec::new(),
+    let dimension_names: &[String] = match var.equation(db) {
+        datamodel::Equation::Scalar(_) => return Vec::new(),
+        datamodel::Equation::ApplyToAll(dim_names, _) => dim_names,
+        datamodel::Equation::Arrayed(dim_names, _, _, _) => dim_names,
+    };
+    // A module variable carries a synthesized equation but has no array shape
+    // of its own (the parse's `Variable::Module` has no `ast` for
+    // `get_dimensions` to read), so it must report none.
+    if var.kind(db) == SourceVariableKind::Module {
+        return Vec::new();
     }
+    if dimension_names.is_empty() {
+        return Vec::new();
+    }
+    let expanded = expand_maps_to_chains(
+        variable_relevant_dimensions(db, var),
+        project.dimensions(db),
+    );
+    let dims: Vec<datamodel::Dimension> = project_datamodel_dims(db, project)
+        .iter()
+        .filter(|d| expanded.contains(&d.name))
+        .cloned()
+        .collect();
+    let dim_ctx = crate::dimensions::DimensionsContext::from(&dims);
+    // `Err` is an unresolvable dimension name, which the parse also turns into
+    // "no dimensions" (it pushes a `BadDimensionName` and drops the `Ast`).
+    crate::variable::get_dimensions(&dim_ctx, dimension_names).unwrap_or_default()
 }
 
 #[salsa::tracked(returns(clone))]
