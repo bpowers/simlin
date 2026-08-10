@@ -19,9 +19,9 @@
     "yaml": "^2.4.2"
   },
   "scripts": {
-    "js-needs-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?)/' | xargs prettier -l",
+    "js-needs-format": "find src -name '*.ts' -o -name '*.tsx' | grep -E -v '/(lib(\\.(browser|module))?)/' | xargs prettier -l --cache --cache-strategy content",
     "rust-needs-format": "cargo fmt -- --check",
-    "js-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?)/' | xargs prettier --write",
+    "js-format": "find src -name '*.ts' -o -name '*.tsx' | grep -E -v '/(lib(\\.(browser|module))?)/' | xargs prettier --write --cache --cache-strategy content",
     "rust-format": "cargo fmt",
     "format": "cargo fmt && pnpm js-format",
     "precommit": "pnpm js-needs-format && pnpm rust-needs-format && pnpm lint",

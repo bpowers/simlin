@@ -1188,8 +1188,18 @@ fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: 
     let expected = load_expected_results(xmile_path).unwrap();
     ensure_results_excluding(&expected, &results, excluded);
 
-    // serialize our project through protobufs and ensure we don't see problems
-    let results_proto = {
+    // Protobuf round-trip: the decoded project must equal the original. That
+    // equality is the whole claim -- re-compiling and re-simulating the decoded
+    // copy would be asking whether compilation is a function of the datamodel,
+    // which is a different property, owned by `db::fragment_determinism_tests`
+    // and asserted there far more directly (byte-identical output from
+    // independent fresh databases). Here it would only re-derive, once per
+    // corpus model, an answer the `assert_eq!` already gives.
+    //
+    // The XMILE round-trip below deliberately still simulates: it asserts NO
+    // datamodel equality (the reader legitimately normalizes), so simulating
+    // the re-read project is the only thing that pins its behaviour.
+    {
         use simlin_engine::prost::Message;
 
         let pb_project_inner = serialize(&datamodel_project).unwrap();
@@ -1199,12 +1209,7 @@ fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: 
 
         let datamodel_project2 = deserialize(project_io::Project::decode(&*buf).unwrap());
         assert_eq!(datamodel_project, datamodel_project2);
-        let compiled_sim = compile(&datamodel_project2);
-        let mut vm = Vm::new(compiled_sim).unwrap();
-        vm.run_to_end().unwrap();
-        vm.into_results()
-    };
-    ensure_results_excluding(&expected, &results_proto, excluded);
+    }
 
     // serialize our project back to XMILE
     let serialized_xmile = xmile::project_to_xmile(&datamodel_project).unwrap();

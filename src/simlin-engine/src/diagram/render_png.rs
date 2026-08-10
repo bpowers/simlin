@@ -9,6 +9,8 @@
 //! the SVG with resvg. The Roboto Light font is embedded into the binary
 //! so that text renders identically across all platforms and environments.
 
+use std::sync::{Arc, OnceLock};
+
 use resvg::tiny_skia;
 use resvg::usvg;
 
@@ -16,6 +18,23 @@ use crate::datamodel;
 
 /// Roboto Light font data, embedded at compile time.
 static ROBOTO_LIGHT: &[u8] = include_bytes!("fonts/Roboto-Light.ttf");
+
+/// The font database every render shares.
+///
+/// It holds exactly one face and never changes, but building it parses the
+/// embedded TTF, so doing it per call made font parsing a fixed tax on every
+/// render rather than a startup cost paid once. `usvg::Options::fontdb` is an
+/// `Arc` already, so sharing costs a refcount bump and callers cannot observe
+/// the difference.
+fn roboto_light_db() -> Arc<usvg::fontdb::Database> {
+    static DB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+    DB.get_or_init(|| {
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_font_data(ROBOTO_LIGHT.to_vec());
+        Arc::new(fontdb)
+    })
+    .clone()
+}
 
 /// Options controlling PNG rendering output.
 #[derive(Default)]
@@ -48,12 +67,9 @@ pub fn render_png(
 /// Exposed separately so callers that already have an SVG string (e.g.
 /// from a different rendering path) can convert it directly.
 pub fn svg_to_png(svg_str: &str, opts: &PngRenderOpts) -> Result<Vec<u8>, String> {
-    let mut fontdb = usvg::fontdb::Database::new();
-    fontdb.load_font_data(ROBOTO_LIGHT.to_vec());
-
     let usvg_opts = usvg::Options {
         font_family: "Roboto Light".to_string(),
-        fontdb: std::sync::Arc::new(fontdb),
+        fontdb: roboto_light_db(),
         ..usvg::Options::default()
     };
 
