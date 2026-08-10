@@ -366,7 +366,9 @@ pub struct Vm {
     // RK stages advance TIME away from INITIAL_TIME.
     prev_values_valid: bool,
     // Test-only: fill the `next` chunk with a sentinel at the top of every
-    // Euler step. See `poison_next_chunk_for_test`.
+    // Euler step. See `poison_next_chunk_for_test`. Gated with its setter so a
+    // production build carries neither the flag nor the branch that reads it.
+    #[cfg(any(test, feature = "test-support"))]
     poison_next: bool,
     // Conveyor support (docs/design/conveyors.md §9.3). Empty for every
     // non-conveyor model, and all conveyor logic is guarded on a non-empty
@@ -789,6 +791,7 @@ pub(crate) fn increment_indices(indices: &mut [u16], dims: &[u16]) {
 /// Sentinel written into the `next` chunk by `poison_next_chunk_for_test`. A
 /// distinctive finite value rather than NaN, so a slot that carries forward is
 /// distinguishable from a model's own NaN.
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub const POISON_SENTINEL: f64 = -1.234567e123;
 
@@ -856,6 +859,7 @@ impl Vm {
             stock_offsets,
             rk_scratch,
             prev_values_valid: false,
+            #[cfg(any(test, feature = "test-support"))]
             poison_next: false,
             conveyor_plans: Vec::new(),
             conveyors: Vec::new(),
@@ -924,6 +928,7 @@ impl Vm {
     /// to a `curr[DT_OFF]` read inside every stock update, so poisoning it
     /// corrupts every stock and hides the property under test. See
     /// `only_documented_classes_carry_across_a_step`.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)] // test-support: used by tests/integration/simulate.rs
     pub fn poison_next_chunk_for_test(&mut self) {
         self.poison_next = true;
@@ -1018,6 +1023,7 @@ impl Vm {
             }};
         }
 
+        #[cfg(any(test, feature = "test-support"))]
         let poison_next = self.poison_next;
 
         match self.specs.method {
@@ -1026,6 +1032,7 @@ impl Vm {
                 if curr[TIME_OFF] > end {
                     break;
                 }
+                #[cfg(any(test, feature = "test-support"))]
                 if poison_next {
                     next[IMPLICIT_VAR_COUNT..].fill(POISON_SENTINEL);
                 }
