@@ -72,7 +72,9 @@ echo "==> Staging app build into public/ (pnpm --filter @simlin/app run deploy:a
 pnpm --filter @simlin/app run deploy:assemble
 
 echo "==> Verifying assembled build artifacts (scripts/verify-deploy-build.sh)"
-bash "$REPO_ROOT/scripts/verify-deploy-build.sh"
+# REQUIRE_WASM_OPT=1: this is a deploy, so the WASM must be wasm-opt'd. CI runs
+# the same script after a deliberately unoptimized build and does not set it.
+REQUIRE_WASM_OPT=1 bash "$REPO_ROOT/scripts/verify-deploy-build.sh"
 
 echo "==> Assembling self-contained server staging dir (scripts/build-deploy-staging.mjs)"
 node "$REPO_ROOT/scripts/build-deploy-staging.mjs" "$STAGING_DIR" "$REPO_ROOT/.app.prod.yaml"

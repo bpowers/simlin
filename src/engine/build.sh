@@ -37,17 +37,38 @@ build_wasm() {
   # cargo build is idempotent and no-ops when nothing has changed.
   cargo build -p simlin --lib --release --target wasm32-unknown-unknown "$@"
 
-  # Copy WASM only if the raw cargo output changed (avoids re-running
-  # wasm-opt and invalidating downstream TypeScript builds when Rust source
-  # is unchanged). We compare against a stashed copy of the pre-optimization
-  # WASM because wasm-opt transforms core/$out_name in-place, making it
-  # differ from the raw cargo output even when nothing changed.
-  if [ ! -f "core/$out_name" ] || ! cmp -s "$WASM_SRC" "core/$out_name.raw"; then
+  # Whether this invocation will optimize. Decided BEFORE the cache check
+  # because it is part of the cache key -- see below.
+  local want_mode="opt"
+  if ! command -v wasm-opt &> /dev/null || [ "1" = "${DISABLE_WASM_OPT-0}" ]; then
+    want_mode="raw"
+  fi
+  local have_mode=""
+  [ -f "core/$out_name.mode" ] && have_mode="$(cat "core/$out_name.mode")"
+
+  # Copy WASM only if the staged artifact is stale (avoids re-running wasm-opt
+  # and invalidating downstream TypeScript builds when Rust source is
+  # unchanged). Staleness has TWO inputs, and both are in the key:
+  #
+  #   1. the raw cargo output changed -- compared against a stashed copy of the
+  #      pre-optimization WASM, because wasm-opt transforms core/$out_name
+  #      in-place and it therefore differs from the cargo output even when
+  #      nothing changed; and
+  #   2. the staged artifact was produced in the OTHER mode.
+  #
+  # Without (2) the key described the input but not the artifact, and a
+  # DISABLE_WASM_OPT=1 build (`scripts/pre-commit`) staged an unoptimized blob
+  # whose .raw then satisfied the next optimizing build's check -- so a
+  # subsequent `pnpm build` on an unchanged tree kept the unoptimized blob and
+  # never ran wasm-opt again. Both deploy scripts happen to `pnpm clean` first,
+  # which deletes core/ and hid this; nothing about the cache made it safe.
+  if [ ! -f "core/$out_name" ] \
+      || [ "$have_mode" != "$want_mode" ] \
+      || ! cmp -s "$WASM_SRC" "core/$out_name.raw"; then
     cp "$WASM_SRC" "core/$out_name"
     cp "$WASM_SRC" "core/$out_name.raw"
 
-    # Optimize WASM if wasm-opt is available
-    if command -v wasm-opt &> /dev/null && [ "1" != "${DISABLE_WASM_OPT-0}" ]; then
+    if [ "$want_mode" = "opt" ]; then
       echo "Running wasm-opt on $out_name..."
       wasm-opt "core/$out_name" -o "core/$out_name-opt" -O3 \
         --enable-mutable-globals \
@@ -58,6 +79,10 @@ build_wasm() {
     else
       echo "Skipping wasm-opt (not installed or disabled)"
     fi
+
+    # Written LAST so an interrupted build leaves no stamp and the next run
+    # redoes the work rather than trusting a half-staged artifact.
+    printf '%s\n' "$want_mode" > "core/$out_name.mode"
   fi
 }
 
