@@ -23,6 +23,91 @@ set of larger proposals grounded in the measured data.
   unless noted. Profile builds add `CARGO_PROFILE_RELEASE_DEBUG=1
   CARGO_PROFILE_RELEASE_STRIP=false`.
 
+### Measuring a change
+
+Three channels, each answering a different question. **None substitutes for
+another**, and a change is not established until the question you are actually
+asking has been answered by the channel that can answer it.
+
+| channel | question it answers | tool |
+|---|---|---|
+| exact instruction attribution | *did the intended work disappear?* | `valgrind --tool=callgrind` |
+| retired instructions / branches | *how much work disappeared?* | `perf stat` |
+| cycles / wall clock | *did it get faster?* | `perf stat`, interleaved A/B |
+
+**Callgrind is deterministic** and immune to both binary layout and machine
+load. It is the right first measurement for any change with a mechanism: it
+says whether the work you meant to remove is gone, per function and per source
+line, with no statistics. A change whose per-call cost is unchanged did not
+fire, whatever the end-to-end counters say.
+
+**Retired instructions and branches are properties of the program**; cycles are
+a property of the machine executing it. That distinction sets the noise floors,
+and they are three orders of magnitude apart. Measured on the C-LEARN run
+across six independent build+run pairs of identical source:
+
+| channel | sd across builds | a 2.7% effect is |
+|---|---|---|
+| instructions | **0.026%** | ~104 sigma |
+| branches | **0.028%** | ~96 sigma |
+| cycles, quiet machine | 1.65% | 1.7 sigma |
+| cycles, machine under load | 9.9%–11% | 0.24 sigma |
+
+So a few-percent effect is resolved by one build pair on the instruction
+channel and is **not** resolvable on the cycles channel without a deliberate
+protocol. Reaching for multi-build A/Bs to establish an instruction-count
+reduction wastes hours the instruction channel settles in one pair; quoting a
+cycles delta from one pair asserts something the measurement cannot support.
+
+**Every cycles claim needs a null control from the same session.** Run the
+identical binary as both sides of the A/B, interleaved, alongside the real
+comparison. The apparent delta it produces is that session's floor. A measured
+example, taken at load average 4–9:
+
+```
+identical binary, both sides, 5 interleaved rounds, medians:
+  instructions   -0.003%
+  branches       -0.004%
+  cycles         -1.540%     <- a "win" from nothing
+```
+
+A cycles delta that does not clearly exceed the session's own null delta is
+**unresolved, and must be reported as unresolved rather than as a small win**.
+Use the session's null, never a floor recorded here or anywhere else: machine
+conditions vary hour to hour, and taking a historical figure for the current
+one is what turns noise into a reported result.
+
+**Contention is a reason to wait, not to average harder.** Resolving 3% at the
+quiet-machine sd of 1.65% needs about 5 builds per side; at a contended 9.9% it
+needs about 175. The second is not a measurement plan. Check the load average
+before starting, pin with `taskset`, interleave A/B/A/B so drift is shared, take
+medians, and reject outliers explicitly rather than letting them widen the
+spread.
+
+**Prefer a structural check to a statistical one where the change admits it.**
+When a change is confined to a function that is `#[inline(never)]` and keeps its
+signature, the callers' machine code should be *byte-identical*; disassemble
+both binaries and diff the caller modulo addresses. That is a binary answer
+rather than a sample, and it directly detects the failure mode that has bitten
+this file's eval-loop work repeatedly: a change leaking into `eval_bytecode` and
+perturbing the register allocation of a very large function. Treat a single
+differing instruction as a hard stop and explain it before quoting any number.
+
+**Decide what would falsify the change before measuring it.** Write down the
+predicted delta per channel, and the signatures that would mean it did not work:
+end-to-end instructions falling while the callgrind per-call cost is unchanged
+means something other than the intended mechanism moved; instructions falling
+while the branch count holds means a branchy inner loop was not actually
+replaced. Stating these in advance is what makes the eventual number a result
+instead of a reading.
+
+**State which channel a recorded number came from.** A verdict written as "only
+~1.5%" invites the next reader to compare it against whatever floor they happen
+to have in mind, and the floors differ by three orders of magnitude between
+channels. Write "1.5% of retired instructions" or "1.5% of cycles"; a
+percentage with no channel attached is how a cycles floor ends up being applied
+to an instruction measurement.
+
 ## Measured baseline (before this work)
 
 | Phase | Wall (per iter) | Allocations | Dominant costs |
@@ -325,10 +410,11 @@ parity, zero-alloc all hold -- but did not clear the keep bar:
 - Branch-misses fell 8.4%, so a mispredict-bound core (the round-1 Ryzen)
   might see a real win -- that is the retry condition recorded on GH #712.
 
-Methodology consequence for future rounds: for effects under ~3%, either
-compare layout-stable counters (instructions/branch-misses via `perf stat`)
-or A/B multiple independent builds per side; a single worktree build pair is
-only conclusive for effects that exceed ~4%.
+Methodology consequence for future rounds: the ~4% figure above bounds a
+WALL-CLOCK/CYCLES claim from a single build pair, and nothing else. Retired
+instructions and branches have an sd of ~0.026% across builds, so the same
+effect is resolved there by one pair; see "Measuring a change" above for the
+per-channel floors and the null-control rule.
 
 ### R4. `RuntimeView` allocation + `flat_offset` (~20% of post-win run)
 
