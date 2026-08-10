@@ -2041,6 +2041,26 @@ impl Vm {
                 // sole mechanism -- it replaces the old TIME == INITIAL_TIME
                 // check, which broke when RK stages advanced TIME to trial
                 // points before prev_values was initialized.
+                Opcode::SubVarPrev { l, r, lit } => {
+                    let lhs = curr[module_off + *l as usize];
+                    let rhs = if use_prev_fallback {
+                        bytecode.literals[*lit as usize]
+                    } else {
+                        prev_values[module_off + *r as usize]
+                    };
+                    // Through `eval_op2` so the fused form is bit-identical to
+                    // the sequence by construction, not by inspection.
+                    stack.push(eval_op2(Op2::Sub, lhs, rhs));
+                }
+                Opcode::BinStackPrev { r, lit, op } => {
+                    let rhs = if use_prev_fallback {
+                        bytecode.literals[*lit as usize]
+                    } else {
+                        prev_values[module_off + *r as usize]
+                    };
+                    let lhs = stack.pop();
+                    stack.push(eval_op2(*op, lhs, rhs));
+                }
                 Opcode::LoadPrevConst { off, lit } => {
                     let value = if use_prev_fallback {
                         bytecode.literals[*lit as usize]

@@ -734,6 +734,24 @@ pub(crate) enum Opcode {
         off: VariableOffset,
         lit: LiteralId,
     },
+    /// Fused `LoadVar l; LoadConstant lit; LoadPrev r; Op2 Sub` -- the delta
+    /// `v - PREVIOUS(v)`, four dispatches in one.
+    ///
+    /// The operator lives in the variant tag (only `Sub` occurs) so the payload
+    /// stays 3xu16 = 6 bytes and `size_of::<Opcode>()` stays at 8, the same
+    /// trick the `Assign{Add,Sub,Mul,Div}VarVar*` family uses.
+    SubVarPrev {
+        l: VariableOffset,
+        r: VariableOffset,
+        lit: LiteralId,
+    },
+    /// Fused `LoadConstant lit; LoadPrev r; Op2 op` with the lhs already on the
+    /// arithmetic stack.
+    BinStackPrev {
+        r: VariableOffset,
+        lit: LiteralId,
+        op: Op2,
+    },
     /// Fused `LoadConstant lit; Apply` for a 3-arity builtin whose trailing
     /// argument is a literal.
     ///
@@ -1474,6 +1492,8 @@ impl Opcode {
             // The fused `LoadConstant; LoadPrev` pair: the fallback comes from
             // the literal table, so nothing is popped.
             Opcode::LoadPrevConst { .. } => (0, 1),
+            Opcode::SubVarPrev { .. } => (0, 1),
+            Opcode::BinStackPrev { .. } => (1, 1),
             // The fused `LoadConstant; Apply` pair for a 3-arity builtin: two
             // operands still come off the stack, the third from the literals.
             Opcode::ApplyTerConst { .. } => (2, 1),
@@ -1662,6 +1682,8 @@ impl Opcode {
             Opcode::LoadGlobalVar { .. } => "LoadGlobalVar",
             Opcode::LoadPrev { .. } => "LoadPrev",
             Opcode::LoadPrevConst { .. } => "LoadPrevConst",
+            Opcode::SubVarPrev { .. } => "SubVarPrev",
+            Opcode::BinStackPrev { .. } => "BinStackPrev",
             Opcode::ApplyTerConst { .. } => "ApplyTerConst",
             Opcode::LoadInitial { .. } => "LoadInitial",
             Opcode::PushSubscriptIndex { .. } => "PushSubscriptIndex",
@@ -2232,78 +2254,123 @@ impl ByteCode {
             // op (3->1) rather than `Bin*` (3->1 pushing) + a separate store.
             // Only {Add,Sub,Mul,Div} have dedicated leaf-assign opcodes; any
             // other operator falls through and keeps the existing form.
+            // 4-window: `LoadVar l; LoadConstant lit; LoadPrev r; Op2 Sub` --
+            // the `v - PREVIOUS(v)` delta. Matched on the ORIGINAL stream: this
+            // is a single greedy left-to-right pass, so when the window at `i`
+            // is tested nothing at `i+1` has been rewritten yet. That is why
+            // this does not depend on `LoadPrevConst` having run first, and why
+            // the two are independent of each other.
+            let four = i + 3 < self.code.len()
+                && !jump_targets[i + 1]
+                && !jump_targets[i + 2]
+                && !jump_targets[i + 3];
+            if four
+                && let (
+                    Opcode::LoadVar { off: l },
+                    Opcode::LoadConstant { id: lit },
+                    Opcode::LoadPrev { off: r },
+                    Opcode::Op2 { op: Op2::Sub },
+                ) = (
+                    &self.code[i],
+                    &self.code[i + 1],
+                    &self.code[i + 2],
+                    &self.code[i + 3],
+                )
+            {
+                optimized.push(Opcode::SubVarPrev {
+                    l: *l,
+                    r: *r,
+                    lit: *lit,
+                });
+                pc_map.push(new_pc); // old i
+                pc_map.push(new_pc); // old i+1
+                pc_map.push(new_pc); // old i+2
+                pc_map.push(new_pc); // old i+3
+                i += 4;
+                continue;
+            }
+
             let three = i + 2 < self.code.len() && !jump_targets[i + 1] && !jump_targets[i + 2];
-            let fused3 = if three {
-                // Decode the combiner once into two mutually-exclusive options:
-                // `assign3 = (op, dst, is_next)` for a leaf-assign, or
-                // `push3 = op` for a pushing Op2.
-                let (assign3, push3) = match &self.code[i + 2] {
-                    Opcode::BinOpAssignCurr { op, off } => (Some((*op, *off, false)), None),
-                    Opcode::BinOpAssignNext { op, off } => (Some((*op, *off, true)), None),
-                    Opcode::Op2 { op } => (None, Some(*op)),
-                    _ => (None, None),
+            let fused3 =
+                if three {
+                    // Decode the combiner once into two mutually-exclusive options:
+                    // `assign3 = (op, dst, is_next)` for a leaf-assign, or
+                    // `push3 = op` for a pushing Op2.
+                    let (assign3, push3) = match &self.code[i + 2] {
+                        Opcode::BinOpAssignCurr { op, off } => (Some((*op, *off, false)), None),
+                        Opcode::BinOpAssignNext { op, off } => (Some((*op, *off, true)), None),
+                        Opcode::Op2 { op } => (None, Some(*op)),
+                        _ => (None, None),
+                    };
+                    match (&self.code[i], &self.code[i + 1]) {
+                        // Leaf assignment `dst = a op b` -> one fused op (3->1).
+                        (Opcode::LoadVar { off: l }, Opcode::LoadVar { off: r }) => assign3
+                            .and_then(|(op, dst, n)| fused_leaf_var_var(op, n, *l, *r, dst))
+                            .or_else(|| push3.map(|op| Opcode::BinVarVar { l: *l, r: *r, op })),
+                        (Opcode::LoadVar { off: l }, Opcode::LoadConstant { id: r }) => assign3
+                            .and_then(|(op, dst, n)| fused_leaf_var_const(op, n, *l, *r, dst))
+                            .or_else(|| push3.map(|op| Opcode::BinVarConst { l: *l, r: *r, op })),
+                        (Opcode::LoadConstant { id: l }, Opcode::LoadVar { off: r }) => assign3
+                            .and_then(|(op, dst, n)| fused_leaf_const_var(op, n, *l, *r, dst))
+                            .or_else(|| push3.map(|op| Opcode::BinConstVar { l: *l, r: *r, op })),
+                        // Two constant leaves: no leaf-assign form, so this only fuses
+                        // a pushing `Op2`. Computes `literals[l] op literals[r]` at run
+                        // time (NOT compile-time folding -- the operands are two
+                        // distinct interned literals).
+                        // `LoadConstant lit; LoadPrev r; Op2` with the lhs already
+                        // on the stack. Same reason as the 4-window above: matched
+                        // against the original `LoadPrev`, not a rewritten form.
+                        (Opcode::LoadConstant { id: lit }, Opcode::LoadPrev { off: r }) => push3
+                            .map(|op| Opcode::BinStackPrev {
+                                r: *r,
+                                lit: *lit,
+                                op,
+                            }),
+                        (Opcode::LoadConstant { id: l }, Opcode::LoadConstant { id: r }) => {
+                            push3.map(|op| Opcode::BinConstConst { l: *l, r: *r, op })
+                        }
+                        // Global-operand leaf pairs. A global has no dedicated
+                        // leaf-assign opcode, so these fuse only a pushing `Op2`; a
+                        // `BinOpAssign` combiner (push3 == None) falls through to the
+                        // 2-window, which folds the rhs+store and leaves the global
+                        // load as a standalone push. `l_global`/`r_global` index
+                        // `curr[g]` (absolute), the var operand `curr[module_off + v]`.
+                        (Opcode::LoadGlobalVar { off: l }, Opcode::LoadVar { off: r }) => push3
+                            .map(|op| Opcode::BinGlobalVar {
+                                l_global: *l,
+                                r: *r,
+                                op,
+                            }),
+                        (Opcode::LoadVar { off: l }, Opcode::LoadGlobalVar { off: r }) => push3
+                            .map(|op| Opcode::BinVarGlobal {
+                                l: *l,
+                                r_global: *r,
+                                op,
+                            }),
+                        (Opcode::LoadGlobalVar { off: l }, Opcode::LoadConstant { id: r }) => push3
+                            .map(|op| Opcode::BinGlobalConst {
+                                l_global: *l,
+                                r: *r,
+                                op,
+                            }),
+                        (Opcode::LoadConstant { id: l }, Opcode::LoadGlobalVar { off: r }) => push3
+                            .map(|op| Opcode::BinConstGlobal {
+                                l: *l,
+                                r_global: *r,
+                                op,
+                            }),
+                        (Opcode::LoadGlobalVar { off: l }, Opcode::LoadGlobalVar { off: r }) => {
+                            push3.map(|op| Opcode::BinGlobalGlobal {
+                                l_global: *l,
+                                r_global: *r,
+                                op,
+                            })
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
                 };
-                match (&self.code[i], &self.code[i + 1]) {
-                    // Leaf assignment `dst = a op b` -> one fused op (3->1).
-                    (Opcode::LoadVar { off: l }, Opcode::LoadVar { off: r }) => assign3
-                        .and_then(|(op, dst, n)| fused_leaf_var_var(op, n, *l, *r, dst))
-                        .or_else(|| push3.map(|op| Opcode::BinVarVar { l: *l, r: *r, op })),
-                    (Opcode::LoadVar { off: l }, Opcode::LoadConstant { id: r }) => assign3
-                        .and_then(|(op, dst, n)| fused_leaf_var_const(op, n, *l, *r, dst))
-                        .or_else(|| push3.map(|op| Opcode::BinVarConst { l: *l, r: *r, op })),
-                    (Opcode::LoadConstant { id: l }, Opcode::LoadVar { off: r }) => assign3
-                        .and_then(|(op, dst, n)| fused_leaf_const_var(op, n, *l, *r, dst))
-                        .or_else(|| push3.map(|op| Opcode::BinConstVar { l: *l, r: *r, op })),
-                    // Two constant leaves: no leaf-assign form, so this only fuses
-                    // a pushing `Op2`. Computes `literals[l] op literals[r]` at run
-                    // time (NOT compile-time folding -- the operands are two
-                    // distinct interned literals).
-                    (Opcode::LoadConstant { id: l }, Opcode::LoadConstant { id: r }) => {
-                        push3.map(|op| Opcode::BinConstConst { l: *l, r: *r, op })
-                    }
-                    // Global-operand leaf pairs. A global has no dedicated
-                    // leaf-assign opcode, so these fuse only a pushing `Op2`; a
-                    // `BinOpAssign` combiner (push3 == None) falls through to the
-                    // 2-window, which folds the rhs+store and leaves the global
-                    // load as a standalone push. `l_global`/`r_global` index
-                    // `curr[g]` (absolute), the var operand `curr[module_off + v]`.
-                    (Opcode::LoadGlobalVar { off: l }, Opcode::LoadVar { off: r }) => {
-                        push3.map(|op| Opcode::BinGlobalVar {
-                            l_global: *l,
-                            r: *r,
-                            op,
-                        })
-                    }
-                    (Opcode::LoadVar { off: l }, Opcode::LoadGlobalVar { off: r }) => {
-                        push3.map(|op| Opcode::BinVarGlobal {
-                            l: *l,
-                            r_global: *r,
-                            op,
-                        })
-                    }
-                    (Opcode::LoadGlobalVar { off: l }, Opcode::LoadConstant { id: r }) => push3
-                        .map(|op| Opcode::BinGlobalConst {
-                            l_global: *l,
-                            r: *r,
-                            op,
-                        }),
-                    (Opcode::LoadConstant { id: l }, Opcode::LoadGlobalVar { off: r }) => push3
-                        .map(|op| Opcode::BinConstGlobal {
-                            l: *l,
-                            r_global: *r,
-                            op,
-                        }),
-                    (Opcode::LoadGlobalVar { off: l }, Opcode::LoadGlobalVar { off: r }) => push3
-                        .map(|op| Opcode::BinGlobalGlobal {
-                            l_global: *l,
-                            r_global: *r,
-                            op,
-                        }),
-                    _ => None,
-                }
-            } else {
-                None
-            };
             if let Some(op) = fused3 {
                 optimized.push(op);
                 pc_map.push(new_pc); // old i
@@ -4405,6 +4472,105 @@ mod tests {
                 func.arity()
             );
         }
+    }
+
+    // === PREVIOUS-delta fusion (SubVarPrev / BinStackPrev) ===
+
+    #[test]
+    fn test_fuse_previous_delta_four_window() {
+        // `v - PREVIOUS(v)`, the shape the LTM link-score guard emits four
+        // times per link.
+        let mut bc = ByteCode {
+            literals: vec![0.0],
+            code: vec![
+                Opcode::LoadVar { off: 5 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadPrev { off: 5 },
+                Opcode::Op2 { op: Op2::Sub },
+            ],
+        };
+        let before = bc.max_stack_depth().unwrap();
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::SubVarPrev { l: 5, r: 5, lit: 0 }
+        ));
+        assert!(bc.max_stack_depth().unwrap() <= before);
+    }
+
+    #[test]
+    fn test_previous_delta_only_fuses_subtraction() {
+        // The operator is in the variant tag, so only `Sub` has a fused form.
+        // Any other operator must fall through to the shorter windows rather
+        // than be silently encoded as a subtraction.
+        let mut bc = ByteCode {
+            literals: vec![0.0],
+            code: vec![
+                Opcode::LoadVar { off: 5 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadPrev { off: 5 },
+                Opcode::Op2 { op: Op2::Add },
+            ],
+        };
+        bc.fuse_three_address();
+        assert!(
+            !bc.code
+                .iter()
+                .any(|op| matches!(op, Opcode::SubVarPrev { .. }))
+        );
+    }
+
+    #[test]
+    fn test_fuse_previous_delta_blocked_by_jump_target() {
+        // A jump into the middle of the window means it is not a unit.
+        let mut bc = ByteCode {
+            literals: vec![0.0],
+            code: vec![
+                Opcode::LoadVar { off: 5 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadPrev { off: 5 },
+                Opcode::Op2 { op: Op2::Sub },
+                Opcode::NextIterOrJump { jump_back: -2 },
+            ],
+        };
+        bc.fuse_three_address();
+        assert!(
+            !bc.code
+                .iter()
+                .any(|op| matches!(op, Opcode::SubVarPrev { .. }))
+        );
+    }
+
+    #[test]
+    fn test_fuse_previous_as_binop_rhs_on_stack() {
+        // lhs already on the stack: `<expr>; LoadConstant; LoadPrev; Op2`.
+        // Div is used because it is non-commutative, so a swapped operand
+        // encoding fails loudly rather than silently.
+        let mut bc = ByteCode {
+            literals: vec![0.0],
+            code: vec![
+                Opcode::LoadVar { off: 1 },
+                Opcode::LoadVar { off: 2 },
+                Opcode::Op2 { op: Op2::Mul },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadPrev { off: 9 },
+                Opcode::Op2 { op: Op2::Div },
+            ],
+        };
+        bc.fuse_three_address();
+        assert!(
+            bc.code.iter().any(|op| matches!(
+                op,
+                Opcode::BinStackPrev {
+                    r: 9,
+                    lit: 0,
+                    op: Op2::Div
+                }
+            )),
+            "got {:?}",
+            bc.code.iter().map(|o| o.name()).collect::<Vec<_>>()
+        );
     }
 
     // === 3-address fusion with GLOBAL operands and two-constant operands ===
