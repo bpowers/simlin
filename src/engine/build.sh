@@ -22,7 +22,13 @@ mkdir -p core
 # so we stage into core/ immediately after each build.
 #
 # The xmutil feature is always off here (C++ dependency, not wasm-buildable).
-WASM_SRC="../../target/wasm32-unknown-unknown/release/simlin.wasm"
+#
+# The target directory is RESOLVED, not assumed: `CARGO_TARGET_DIR` and a cargo
+# config's `build.target-dir` both move it, and a hardcoded `../../target` turns
+# that into a `cp: cannot stat` below -- which reads as a broken wasm build
+# rather than as a path mismatch.
+TARGET_DIR="$("$DIR/../../scripts/cargo-target-dir.sh")"
+WASM_SRC="$TARGET_DIR/wasm32-unknown-unknown/release/simlin.wasm"
 
 build_wasm() {
   local out_name="$1"
