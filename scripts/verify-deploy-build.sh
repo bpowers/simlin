@@ -176,6 +176,33 @@ else
     fi
 fi
 
+# 7b. On a DEPLOY, the WASM must additionally be wasm-opt'd. Opt-in via
+#     REQUIRE_WASM_OPT=1 rather than always-on, because CI's frontend job runs
+#     this same script after a deliberate `DISABLE_WASM_OPT=1 pnpm build` --
+#     its subject is the deploy ASSEMBLY, not the artifact's optimization.
+#     Only the deploy scripts set it.
+#
+#     This exists because the failure it catches is silent and user-facing: an
+#     unoptimized browser bundle is ~24% larger (5.0MB -> 6.2MB) and nothing
+#     else on the deploy path would notice. It is the backstop for the
+#     src/engine/build.sh cache-key bug -- a pre-commit build staging an
+#     unoptimized blob that then satisfied the next optimizing build's cache
+#     check -- which is fixed at the source but is worth a tripwire here too,
+#     since the deploy is a local command with no CI gate.
+if [ "1" = "${REQUIRE_WASM_OPT-0}" ]; then
+    for wasm in src/engine/core/libsimlin.wasm src/engine/core/libsimlin-browser.wasm; do
+        if [ ! -f "$wasm" ]; then
+            fail "$wasm missing (REQUIRE_WASM_OPT=1 but the engine WASM build did not run)"
+        elif [ ! -f "$wasm.mode" ]; then
+            fail "$wasm.mode missing -- src/engine/build.sh did not stage $wasm, or predates the mode stamp"
+        elif [ "opt" != "$(cat "$wasm.mode")" ]; then
+            fail "$wasm was built WITHOUT wasm-opt (mode: $(cat "$wasm.mode")). Deploying it would ship a ~24% larger bundle. Is wasm-opt installed, and is DISABLE_WASM_OPT unset?"
+        else
+            pass "$wasm is wasm-opt'd ($(wc -c < "$wasm") bytes)"
+        fi
+    done
+fi
+
 # 8. The compiled server bundle exists. GAE runs `node src/server/lib`
 #    on the instance; an empty lib/ would crash-loop without a useful
 #    error.
