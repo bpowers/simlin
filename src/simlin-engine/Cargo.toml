@@ -169,4 +169,16 @@ harness = false
 name = "rapidhash_bench"
 harness = false
 
+# Every native binary that embeds this engine (simlin-cli, simlin-serve,
+# simlin-mcp, and libsimlin's `mimalloc` feature, which pysimlin's build turns
+# on) installs mimalloc as its global allocator. The profiling examples and
+# criterion benches therefore back their allocator with mimalloc too: the
+# compile path is allocation-bound, so a harness on system malloc measures an
+# allocator no shipped native build actually runs, and over-credits any change
+# that only moves malloc traffic. Allocation *counts* stay the
+# allocator-independent metric (and the one that carries over to the wasm
+# bundle, which links neither mimalloc nor this dependency).
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+mimalloc = "0.1"
+
 [build-dependencies]

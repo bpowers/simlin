@@ -3311,6 +3311,7 @@ dependencies = [
  "ed25519-dalek",
  "indexmap",
  "jsonschema",
+ "mimalloc",
  "proptest",
  "prost",
  "quick-xml 0.41.0",
