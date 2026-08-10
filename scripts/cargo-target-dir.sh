@@ -13,6 +13,23 @@
 # the single copy: a second, hand-maintained resolution drifts exactly where the
 # real one is non-trivial.
 #
+# The JSON is parsed with python3, NOT jq, and that is deliberate. This script
+# is on the primary build path -- `src/engine/build.sh` and
+# `scripts/pysimlin-tests.sh` both call it, so it runs on every `pnpm build`
+# and so on every pre-commit and in CI. jq is otherwise used only by release
+# and CI-support scripts, no workflow installs it (the GitHub runner images
+# happen to ship it), and `scripts/dev-init.sh` does not check for it.
+# Depending on it here would turn a missing jq into `jq: command not found`
+# under `set -e` -- trading the `cp: cannot stat` this script exists to
+# prevent for an equally opaque failure one step earlier. python3 adds
+# nothing: `scripts/pre-commit` already shells to it in phase 1, before any
+# build runs, and `scripts/pysimlin-tests.sh` is python by definition.
+#
+# There is deliberately NO fallback to `<repo>/target` when the lookup fails.
+# A fallback would be silent and wrong in exactly the case this script exists
+# for -- a genuinely moved target directory -- reintroducing the original
+# `cp: cannot stat` for the only callers who need the resolution at all.
+#
 # Usage:  TARGET_DIR="$(scripts/cargo-target-dir.sh)"
 set -euo pipefail
 
@@ -20,4 +37,4 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)"
 
 cargo metadata --format-version 1 --no-deps \
   --manifest-path "$REPO_ROOT/Cargo.toml" \
-  | jq -r '.target_directory'
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
