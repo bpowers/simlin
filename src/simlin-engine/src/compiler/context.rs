@@ -1127,11 +1127,20 @@ impl Expr3LowerContext for Context<'_> {
         var_metadata.var.get_dimensions()
     }
 
+    /// Only `ident` needs canonicalizing: a `Dimension`'s name is a
+    /// `CanonicalDimensionName`, canonical by construction at every site that
+    /// builds one (`dimensions::dimension_name_is_canonical_for_every_constructor`
+    /// pins that), so canonicalizing it again could not change it -- and
+    /// `canonicalize` still scans the whole string to decide that.
+    ///
+    /// This runs once per bare-identifier subscript per reference
+    /// (`ast::expr3::IndexExpr3::from_index_expr2`), so the redundant scan was
+    /// paid once per DECLARED DIMENSION per subscript. On a model with 126
+    /// dimensions it was half of every `canonicalize` call the compiler made
+    /// and ~5% of a whole compile.
     fn is_dimension_name(&self, ident: &str) -> bool {
         let canonical = canonicalize(ident);
-        self.dimensions
-            .iter()
-            .any(|dim| *canonicalize(dim.name()) == *canonical)
+        self.dimensions.iter().any(|dim| dim.name() == &*canonical)
     }
 }
 
