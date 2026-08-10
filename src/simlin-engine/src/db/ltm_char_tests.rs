@@ -1666,6 +1666,55 @@ fn char_arrayed_target_slot_scores() {
 }
 
 // ---------------------------------------------------------------------------
+// Model E2: the same `Ast::Arrayed` target WITHOUT an EXCEPT default -- the GH
+// #977 omission path.
+//
+// Model E's `mp` carries an EXCEPT default, and a target with one is pinned to
+// `ZeroSlotPolicy::Materialize`: an absent slot there takes the DEFAULT
+// equation, not zero, so no arm may be dropped. Model E is the only arrayed
+// target in this file, which is why the omission reached ZERO characterization
+// coverage when it landed -- this fixture is that coverage.
+//
+// `mp[la]` reads no `pop` at all, so for either `pop[e] -> mp` edge every
+// occurrence in the `la` arm is frozen by the ceteris-paribus wrap and the arm
+// is provably `PREVIOUS(mp)`. It is omitted from the element map, which
+// `compiler::expand_arrayed_with_hoisting` lowers to a single constant-zero
+// assign. What the golden shows is the slot being ABSENT -- deliberately
+// distinct from an arm that is present holding a `"0"` partial, which is what a
+// generator that gave up would emit.
+// ---------------------------------------------------------------------------
+
+fn arrayed_target_no_default_model() -> datamodel::Project {
+    let mut p = TestProject::new("arrayed_target_no_default_char")
+        .named_dimension("Region", &["nyc", "boston", "la"])
+        .aux("drift", "1", None)
+        .array_aux("pop[Region]", "10");
+    // `array_with_ranges` builds an `Equation::Arrayed` with no default, so
+    // `apply_default_to_missing` is false and omission is sound.
+    p = p.array_with_ranges(
+        "mp[Region]",
+        vec![
+            ("nyc", "(pop[nyc] - pop[boston]) * 0.01"),
+            ("boston", "(pop[boston] - pop[nyc]) * 0.01"),
+            ("la", "drift * 0.01"),
+        ],
+    );
+    p.array_stock("stock[Region]", "0", &["mpflow"], &[], None)
+        .array_flow("mpflow[Region]", "mp", None)
+        .build_datamodel()
+}
+
+#[test]
+fn char_arrayed_target_no_default_slot_scores() {
+    assert_char_fixture(
+        "arrayed_target_no_default_slot_scores",
+        arrayed_target_no_default_model(),
+        "link_score\u{205A}pop",
+        FragmentExpectation::AllCompile,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Model F (Track A3 stage 2, review finding 2): the GH #517 whole-reducer
 // freeze over an INDEX-NESTED live-source occurrence (Fig. 2 Q4).
 //
