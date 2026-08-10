@@ -619,6 +619,52 @@ pub(crate) enum BuiltinId {
     Tan,
 }
 
+impl BuiltinId {
+    /// How many operands `vm::apply` actually READS for this builtin.
+    ///
+    /// This is the single statement of that fact, and its three consumers --
+    /// `compiler::codegen` (how many operands to push), `Opcode::stack_effect`
+    /// (how many the fused opcode pops), and the `Opcode::Apply` arms in
+    /// `vm.rs` and `wasmgen::lower` -- all read it, so they cannot disagree.
+    /// Before it existed, `Apply` unconditionally popped 3 and codegen padded
+    /// every shorter call with `LoadConstant(0.0)` pushes that `apply` then
+    /// discarded: 0.73 wasted pads per executed `Apply` on C-LEARN (583k
+    /// dispatches/run, 2.0% of all dispatches).
+    ///
+    /// The arms are derived from `vm::apply`'s body -- which operands each match
+    /// arm names -- and the match is exhaustive with no `_`, so a new builtin
+    /// cannot be added without deciding its arity here.
+    ///
+    /// `Inf`/`Pi` are 0: codegen returns early for both (they lower to a
+    /// `LoadConstant`), so no `Apply` opcode carrying them is ever emitted.
+    /// The three genuinely-3-operand builtins whose LAST operand is optional in
+    /// the source language stay 3, because codegen substitutes a real value
+    /// rather than a pad: `PULSE`'s third defaults to `0` and `apply` reads it,
+    /// `SAFEDIV`'s third IS the divide-by-zero result, and `RAMP`'s third
+    /// defaults to `final_time` via `LoadGlobalVar`.
+    pub(crate) fn arity(self) -> u8 {
+        match self {
+            BuiltinId::Abs
+            | BuiltinId::Arccos
+            | BuiltinId::Arcsin
+            | BuiltinId::Arctan
+            | BuiltinId::Cos
+            | BuiltinId::Exp
+            | BuiltinId::Int
+            | BuiltinId::Ln
+            | BuiltinId::Log10
+            | BuiltinId::Round
+            | BuiltinId::Sign
+            | BuiltinId::Sin
+            | BuiltinId::Sqrt
+            | BuiltinId::Tan => 1,
+            BuiltinId::Max | BuiltinId::Min | BuiltinId::Quantum | BuiltinId::Step => 2,
+            BuiltinId::Pulse | BuiltinId::Ramp | BuiltinId::SafeDiv | BuiltinId::Sshape => 3,
+            BuiltinId::Inf | BuiltinId::Pi => 0,
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Op2 {
     Add,
@@ -1372,7 +1418,9 @@ impl Opcode {
             Opcode::AssignCurr { .. } => (1, 0),
 
             // Builtins always take 3 args (actual + padding), push 1 result
-            Opcode::Apply { .. } => (3, 1),
+            // Builtins pop exactly the operands `vm::apply` reads (see
+            // `BuiltinId::arity`), not a fixed 3 with discarded padding.
+            Opcode::Apply { func } => (func.arity(), 1),
             // Lookup pops element_offset and lookup_index, pushes result
             Opcode::Lookup { .. } => (2, 1),
 
@@ -3760,6 +3808,64 @@ mod tests {
             bc.code[3],
             Opcode::NextIterOrJump { jump_back: -1 }
         ));
+    }
+
+    // === Builtin arity (P2) ===
+
+    /// Every `BuiltinId`, with the arity `vm::apply` actually reads. Derived
+    /// from `apply`'s body arm by arm rather than sampled, so a builtin whose
+    /// operand use changes without its arity being revisited fails here. The
+    /// list is exhaustive over the enum: adding a variant without adding a row
+    /// makes `BuiltinId::arity`'s no-`_` match a compile error, and omitting the
+    /// row here makes the count assertion fail.
+    #[test]
+    fn builtin_arity_matches_what_apply_reads() {
+        let rows: &[(BuiltinId, u8)] = &[
+            (BuiltinId::Abs, 1),
+            (BuiltinId::Arccos, 1),
+            (BuiltinId::Arcsin, 1),
+            (BuiltinId::Arctan, 1),
+            (BuiltinId::Cos, 1),
+            (BuiltinId::Exp, 1),
+            (BuiltinId::Int, 1),
+            (BuiltinId::Ln, 1),
+            (BuiltinId::Log10, 1),
+            (BuiltinId::Round, 1),
+            (BuiltinId::Sign, 1),
+            (BuiltinId::Sin, 1),
+            (BuiltinId::Sqrt, 1),
+            (BuiltinId::Tan, 1),
+            (BuiltinId::Max, 2),
+            (BuiltinId::Min, 2),
+            (BuiltinId::Quantum, 2),
+            (BuiltinId::Step, 2),
+            (BuiltinId::Pulse, 3),
+            (BuiltinId::Ramp, 3),
+            (BuiltinId::SafeDiv, 3),
+            (BuiltinId::Sshape, 3),
+            (BuiltinId::Inf, 0),
+            (BuiltinId::Pi, 0),
+        ];
+        // 24 = every variant of BuiltinId. A new builtin must add a row.
+        assert_eq!(rows.len(), 24);
+        for (id, want) in rows {
+            assert_eq!(id.arity(), *want, "arity of {id:?}");
+        }
+    }
+
+    /// `Apply`'s stack effect must be its arity, not a fixed 3 -- this is what
+    /// keeps `max_stack_depth` (and so `resolve_bytecode`'s fixed-stack safety
+    /// proof) in step with what codegen actually pushes.
+    #[test]
+    fn apply_stack_effect_follows_arity() {
+        for (id, want) in [
+            (BuiltinId::Abs, 1u8),
+            (BuiltinId::Max, 2),
+            (BuiltinId::Pulse, 3),
+        ] {
+            let op = Opcode::Apply { func: id };
+            assert_eq!(op.stack_effect(), (want, 1), "stack effect of {id:?}");
+        }
     }
 
     // === Conditional-select fusion (SetCond;If[;AssignCurr]) ===

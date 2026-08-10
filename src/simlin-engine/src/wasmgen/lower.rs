@@ -2448,11 +2448,23 @@ fn emit_apply(func: BuiltinId, ctx: &EmitCtx, f: &mut Function) {
     use Instruction as Ins;
     let [a, b, c] = ctx.apply_locals;
 
-    // Pop the three padded operands. The stack top is `c`, so set c, then b,
-    // then a (the VM pops in the same order).
-    f.instruction(&Ins::LocalSet(c));
-    f.instruction(&Ins::LocalSet(b));
-    f.instruction(&Ins::LocalSet(a));
+    // Pop exactly `BuiltinId::arity()` operands -- the same count codegen
+    // pushes and the same count the VM's `Apply` arm pops, all three reading
+    // the one shared table so they cannot disagree. The wasm stack top is `c`,
+    // so set c, then b, then a (the VM pops in the same order). Locals for
+    // positions this builtin does not read keep whatever a previous `Apply`
+    // left in them and are never read back: each `match` arm below touches only
+    // the locals its own arity covers.
+    let arity = func.arity();
+    if arity >= 3 {
+        f.instruction(&Ins::LocalSet(c));
+    }
+    if arity >= 2 {
+        f.instruction(&Ins::LocalSet(b));
+    }
+    if arity >= 1 {
+        f.instruction(&Ins::LocalSet(a));
+    }
 
     let get = |f: &mut Function, l: u32| {
         f.instruction(&Ins::LocalGet(l));

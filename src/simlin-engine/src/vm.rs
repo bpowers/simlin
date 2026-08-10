@@ -2412,9 +2412,15 @@ impl Vm {
                 Opcode::Apply { func } => {
                     let time = curr[TIME_OFF];
                     let dt = curr[DT_OFF];
-                    let c = stack.pop();
-                    let b = stack.pop();
-                    let a = stack.pop();
+                    // Pop exactly the operands this builtin reads. Codegen
+                    // pushes `BuiltinId::arity()` of them and no padding, so an
+                    // unread operand is never on the stack to begin with; the
+                    // value handed to `apply` for an unread position is
+                    // arbitrary, and 0.0 keeps it deterministic.
+                    let arity = func.arity();
+                    let c = if arity >= 3 { stack.pop() } else { 0.0 };
+                    let b = if arity >= 2 { stack.pop() } else { 0.0 };
+                    let a = if arity >= 1 { stack.pop() } else { 0.0 };
 
                     stack.push(apply(*func, time, dt, a, b, c));
                 }

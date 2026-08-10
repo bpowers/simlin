@@ -1304,23 +1304,18 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::Sin(a)
                     | BuiltinFn::Sqrt(a)
                     | BuiltinFn::Tan(a) => {
+                        // No operand padding: `Apply` pops exactly
+                        // `BuiltinId::arity()`, which for this family is 1.
                         self.walk_expr(a)?.unwrap();
-                        let id = self.curr_code.intern_literal(0.0);
-                        self.push(SymbolicOpcode::LoadConstant { id });
-                        self.push(SymbolicOpcode::LoadConstant { id });
                     }
                     BuiltinFn::Step(a, b) => {
                         self.walk_expr(a)?.unwrap();
                         self.walk_expr(b)?.unwrap();
-                        let id = self.curr_code.intern_literal(0.0);
-                        self.push(SymbolicOpcode::LoadConstant { id });
                     }
                     BuiltinFn::Max(a, b) => {
                         if let Some(b) = b {
                             self.walk_expr(a)?.unwrap();
                             self.walk_expr(b)?.unwrap();
-                            let id = self.curr_code.intern_literal(0.0);
-                            self.push(SymbolicOpcode::LoadConstant { id });
                         } else {
                             return self.emit_array_reduce(a, SymbolicOpcode::ArrayMax {});
                         }
@@ -1329,8 +1324,6 @@ impl<'module> Compiler<'module> {
                         if let Some(b) = b {
                             self.walk_expr(a)?.unwrap();
                             self.walk_expr(b)?.unwrap();
-                            let id = self.curr_code.intern_literal(0.0);
-                            self.push(SymbolicOpcode::LoadConstant { id });
                         } else {
                             return self.emit_array_reduce(a, SymbolicOpcode::ArrayMin {});
                         }
@@ -1338,8 +1331,6 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Quantum(a, b) => {
                         self.walk_expr(a)?.unwrap();
                         self.walk_expr(b)?.unwrap();
-                        let id = self.curr_code.intern_literal(0.0);
-                        self.push(SymbolicOpcode::LoadConstant { id });
                     }
                     BuiltinFn::Pulse(a, b, c) => {
                         self.walk_expr(a)?.unwrap();
