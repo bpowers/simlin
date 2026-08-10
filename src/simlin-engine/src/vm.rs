@@ -2177,6 +2177,41 @@ impl Vm {
                     curr[module_off + *off as usize] = if is_truthy(cond) { t } else { f };
                     debug_assert_eq!(0, stack.len());
                 }
+                // === LEAF STORES AND MODULE-INPUT OPERANDS (R3) ===
+                // Each reads its leaf from the region `LoadVar` / `LoadInitial`
+                // / `LoadModuleInput` would have read and writes `curr`
+                // directly, touching the arithmetic stack not at all.
+                Opcode::AssignVarCurr { src, dst } => {
+                    curr[module_off + *dst as usize] = curr[module_off + *src as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignInitialCurr { src, dst } => {
+                    // Mirrors `LoadInitial`: during the initials phase the
+                    // snapshot does not exist yet, so read the row being built.
+                    let abs_src = module_off + *src as usize;
+                    let value = if part == StepPart::Initials {
+                        curr[abs_src]
+                    } else {
+                        initial_values[abs_src]
+                    };
+                    curr[module_off + *dst as usize] = value;
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignModInputCurr { input, dst } => {
+                    curr[module_off + *dst as usize] = module_inputs[*input as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::BinStackModInput { r_input, op } => {
+                    let lv = stack.pop();
+                    let rv = module_inputs[*r_input as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::AssignStackModInputCurr { dst, b_input, op } => {
+                    let lhs = stack.pop();
+                    let rhs = module_inputs[*b_input as usize];
+                    curr[module_off + *dst as usize] = eval_op2(*op, lhs, rhs);
+                    debug_assert_eq!(0, stack.len());
+                }
                 // === 3-ADDRESS BINARY OPS (R2) ===
                 // Operands are read straight from curr[]/literals; the *Stack*
                 // forms take the lhs from the arithmetic stack. Each pushes the

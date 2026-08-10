@@ -825,6 +825,49 @@ pub(crate) enum Opcode {
         off: VariableOffset,
     },
 
+    // === LEAF STORES AND MODULE-INPUT OPERANDS (R3) ===
+    // `AssignCurr` is 10.68% of executed dispatches on C-LEARN, and the measured
+    // bigrams account for essentially all of it. The conditional-select forms
+    // above take the `If` share; these take the three leaf loads that feed a
+    // store directly. `Apply; AssignCurr` is deliberately left unfused -- the
+    // `Apply` arm inlines every builtin body, so duplicating it to fold a store
+    // would be the largest code growth in the hot function for the smallest
+    // member of the set.
+    //
+    // `LoadConstant; AssignCurr` is absent because it never reaches this pass:
+    // the symbolic `peephole_optimize` already folds it into `AssignConstCurr`.
+    /// `curr[module_off + dst] = curr[module_off + src]` -- a slot-to-slot copy
+    /// (alias / pass-through variables).
+    AssignVarCurr {
+        src: VariableOffset,
+        dst: VariableOffset,
+    },
+    /// `curr[module_off + dst] = <initial value of src>`. Reads `curr` during
+    /// the initials phase and `initial_values` afterwards, exactly as
+    /// `LoadInitial` does.
+    AssignInitialCurr {
+        src: VariableOffset,
+        dst: VariableOffset,
+    },
+    /// `curr[module_off + dst] = module_inputs[input]`.
+    AssignModInputCurr {
+        input: ModuleInputOffset,
+        dst: VariableOffset,
+    },
+    /// Pop `lhs`; push `lhs op module_inputs[r_input]`. `LoadModuleInput` was
+    /// not a fusible leaf at all before this, despite being 4.68% of C-LEARN
+    /// dispatches and 5.8% of WORLD3's.
+    BinStackModInput {
+        r_input: ModuleInputOffset,
+        op: Op2,
+    },
+    /// Pop `lhs`; `curr[module_off + dst] = lhs op module_inputs[b_input]`.
+    AssignStackModInputCurr {
+        dst: VariableOffset,
+        b_input: ModuleInputOffset,
+        op: Op2,
+    },
+
     // === 3-ADDRESS BINARY OPS (R2) ===
     // Fold the leaf operand load(s) of a binary op into the op itself, so a
     // subexpression `a op b` dispatches once instead of 3 (two loads + Op2) or
@@ -1436,6 +1479,15 @@ impl Opcode {
             Opcode::SelectIf {} => (3, 1), // pops cond+false+true, pushes result
             Opcode::SelectIfAssignCurr { .. } => (3, 0), // same, assigns directly
 
+            // Leaf stores: exactly the net of the `LoadX`(0,1) + `AssignCurr`(1,0)
+            // they replace, so a program's peak depth cannot move.
+            Opcode::AssignVarCurr { .. }
+            | Opcode::AssignInitialCurr { .. }
+            | Opcode::AssignModInputCurr { .. } => (0, 0),
+            // Module-input operand forms mirror their var/const twins.
+            Opcode::BinStackModInput { .. } => (1, 1),
+            Opcode::AssignStackModInputCurr { .. } => (1, 0),
+
             // 3-address binops: the *Var/*Const forms read both operands from
             // curr/literals and push (0 pops, 1 push); the Stack* forms pop the
             // lhs and push the result (1 pop, 1 push).
@@ -1592,6 +1644,11 @@ impl Opcode {
             Opcode::BinOpAssignNext { .. } => "BinOpAssignNext",
             Opcode::SelectIf {} => "SelectIf",
             Opcode::SelectIfAssignCurr { .. } => "SelectIfAssignCurr",
+            Opcode::AssignVarCurr { .. } => "AssignVarCurr",
+            Opcode::AssignInitialCurr { .. } => "AssignInitialCurr",
+            Opcode::AssignModInputCurr { .. } => "AssignModInputCurr",
+            Opcode::BinStackModInput { .. } => "BinStackModInput",
+            Opcode::AssignStackModInputCurr { .. } => "AssignStackModInputCurr",
             Opcode::AssignAddVarVarCurr { .. } => "AssignAddVarVarCurr",
             Opcode::AssignSubVarVarCurr { .. } => "AssignSubVarVarCurr",
             Opcode::AssignMulVarVarCurr { .. } => "AssignMulVarVarCurr",
@@ -2089,6 +2146,34 @@ impl ByteCode {
                 }
             }
 
+            // Leaf store: `LoadX; AssignCurr` -> one register-style store, for
+            // the three leaf loads the measured bigrams show feeding a store.
+            // Tried before the leaf windows for the same reason as the select
+            // above: `AssignCurr` is not a combiner in either of them, so the
+            // rule sets are disjoint.
+            if i + 1 < self.code.len()
+                && !jump_targets[i + 1]
+                && let Opcode::AssignCurr { off: dst } = self.code[i + 1]
+            {
+                let fused_store = match self.code[i] {
+                    Opcode::LoadVar { off: src } => Some(Opcode::AssignVarCurr { src, dst }),
+                    Opcode::LoadInitial { off: src } => {
+                        Some(Opcode::AssignInitialCurr { src, dst })
+                    }
+                    Opcode::LoadModuleInput { input } => {
+                        Some(Opcode::AssignModInputCurr { input, dst })
+                    }
+                    _ => None,
+                };
+                if let Some(op) = fused_store {
+                    optimized.push(op);
+                    pc_map.push(new_pc); // old i
+                    pc_map.push(new_pc); // old i+1
+                    i += 2;
+                    continue;
+                }
+            }
+
             // 3-window: [leaf load, leaf load, <combiner>] where the combiner is
             // either an `Op2` (a pushing subexpression) or a `BinOpAssign{Curr|
             // Next}` (a leaf assignment, post-peephole). Both absorbed
@@ -2220,6 +2305,22 @@ impl ByteCode {
                     Opcode::LoadGlobalVar { off: b } => {
                         push2.map(|op| Opcode::BinStackGlobal { r_global: *b, op })
                     }
+                    // `(lhs on stack) op module_input`. Both combiners are
+                    // handled, mirroring the var/const leaves above. Module
+                    // inputs are 2-window only: giving them 3-window leaf forms
+                    // would need one opcode per (leaf x leaf) pairing for a
+                    // measured minority of the bigrams.
+                    Opcode::LoadModuleInput { input: b } => assign2
+                        .and_then(|(op, dst, n)| {
+                            // No `next[]` module-input store form: a stock update
+                            // never reads a module input as its trailing leaf.
+                            (!n).then_some(Opcode::AssignStackModInputCurr {
+                                dst,
+                                b_input: *b,
+                                op,
+                            })
+                        })
+                        .or_else(|| push2.map(|op| Opcode::BinStackModInput { r_input: *b, op })),
                     _ => None,
                 }
             } else {
@@ -3981,6 +4082,164 @@ mod tests {
         assert_eq!(before, 3);
         bc.fuse_three_address();
         assert_eq!(bc.max_stack_depth().unwrap(), 3);
+    }
+
+    // === Leaf-store and module-input fusion (P5) ===
+    //
+    // `AssignCurr` is 10.68% of executed dispatches on C-LEARN and the measured
+    // bigrams account for essentially all of it: `If` 5.64% (taken by the
+    // conditional-select fusion above), `LoadModuleInput` 1.48%, `LoadVar`
+    // 1.41%, `LoadInitial` 1.34%, `Apply` 0.85%. The first three get a fused
+    // store here. `Apply;AssignCurr` is deliberately NOT fused: the `Apply` arm
+    // inlines every builtin body, so duplicating it for a store would be the
+    // largest code growth in the hot function for the smallest member of the
+    // set.
+    //
+    // `LoadModuleInput` was additionally not a fusible LEAF at all, though it is
+    // 4.68% of C-LEARN dispatches and 5.8% of WORLD3's, so it joins the 2-window
+    // alongside LoadVar/LoadConstant/LoadGlobalVar.
+    //
+    // `LoadConstant; AssignCurr` never reaches this pass -- the symbolic
+    // `peephole_optimize` already folds it into `AssignConstCurr`.
+
+    #[test]
+    fn test_fuse_load_var_assign_is_a_slot_copy() {
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![Opcode::LoadVar { off: 5 }, Opcode::AssignCurr { off: 9 }],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::AssignVarCurr { src: 5, dst: 9 }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_load_initial_assign() {
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadInitial { off: 2 },
+                Opcode::AssignCurr { off: 7 },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::AssignInitialCurr { src: 2, dst: 7 }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_load_module_input_assign() {
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadModuleInput { input: 3 },
+                Opcode::AssignCurr { off: 4 },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::AssignModInputCurr { input: 3, dst: 4 }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_module_input_as_binop_rhs_preserves_operand_order() {
+        // `(lhs on stack) - module_input[2]`. Sub is non-commutative, so a
+        // swapped encoding would be a silent miscompile.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 1 },
+                Opcode::LoadModuleInput { input: 2 },
+                Opcode::Op2 { op: Op2::Sub },
+            ],
+        };
+        bc.fuse_three_address();
+        // LoadVar;LoadModuleInput is not a 3-window leaf pair (module inputs are
+        // 2-window only), so the LoadVar stays and the rhs+op fuse.
+        assert_eq!(bc.code.len(), 2);
+        assert!(matches!(bc.code[0], Opcode::LoadVar { off: 1 }));
+        assert!(matches!(
+            bc.code[1],
+            Opcode::BinStackModInput {
+                r_input: 2,
+                op: Op2::Sub
+            }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_module_input_stack_leaf_assign_preserves_operand_order() {
+        // `dst = (lhs on stack) / module_input[6]`, post-peephole.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 1 },
+                Opcode::LoadModuleInput { input: 6 },
+                Opcode::BinOpAssignCurr {
+                    op: Op2::Div,
+                    off: 8,
+                },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 2);
+        assert!(matches!(bc.code[0], Opcode::LoadVar { off: 1 }));
+        assert!(matches!(
+            bc.code[1],
+            Opcode::AssignStackModInputCurr {
+                dst: 8,
+                b_input: 6,
+                op: Op2::Div
+            }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_leaf_store_blocked_by_jump_target() {
+        // A jump targets the AssignCurr the pair would absorb.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },               // [0]
+                Opcode::AssignCurr { off: 1 },            // [1] <- jump target
+                Opcode::NextIterOrJump { jump_back: -1 }, // [2] -> [1]
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 3);
+        assert!(matches!(bc.code[0], Opcode::LoadVar { off: 0 }));
+        assert!(matches!(bc.code[1], Opcode::AssignCurr { off: 1 }));
+    }
+
+    #[test]
+    fn test_fuse_leaf_store_preserves_max_stack_depth() {
+        // Each fused store is (0,0), exactly the net of the `LoadX`(0,1) +
+        // `AssignCurr`(1,0) it replaces, so the program's peak cannot move.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::AssignCurr { off: 1 },
+                Opcode::LoadInitial { off: 2 },
+                Opcode::AssignCurr { off: 3 },
+                Opcode::LoadModuleInput { input: 0 },
+                Opcode::AssignCurr { off: 4 },
+            ],
+        };
+        let before = bc.max_stack_depth().unwrap();
+        assert_eq!(before, 1);
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 3);
+        assert_eq!(bc.max_stack_depth().unwrap(), 0);
     }
 
     // === 3-address fusion with GLOBAL operands and two-constant operands ===
