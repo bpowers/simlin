@@ -180,7 +180,19 @@ fi
 #     REQUIRE_WASM_OPT=1 rather than always-on, because CI's frontend job runs
 #     this same script after a deliberate `DISABLE_WASM_OPT=1 pnpm build` --
 #     its subject is the deploy ASSEMBLY, not the artifact's optimization.
-#     Only the deploy scripts set it.
+#     `scripts/deploy-web-staged.sh` is the only caller that sets it.
+#
+#     WHAT THIS DOES NOT COVER: `scripts/deploy-web.sh` -- the production
+#     deploy the root CLAUDE.md documents as `pnpm deploy:web` -- does not
+#     invoke this script at all, so neither this check nor any other assembly
+#     check runs on it. GH #1020 tracks closing that; until it does, the
+#     production path is verified by nothing.
+#
+#     That path is nonetheless safe from the specific bug below, but only
+#     incidentally: it runs `pnpm clean` before `pnpm build`, and
+#     src/engine's clean removes `core/`, so the staging cache cannot be
+#     consulted at all. Do not read that as protection -- it is two callers
+#     happening to clean first for unrelated reasons.
 #
 #     This exists because the failure it catches is silent and user-facing: an
 #     unoptimized browser bundle is ~24% larger (5.0MB -> 6.2MB) and nothing
@@ -188,7 +200,7 @@ fi
 #     src/engine/build.sh cache-key bug -- a pre-commit build staging an
 #     unoptimized blob that then satisfied the next optimizing build's cache
 #     check -- which is fixed at the source but is worth a tripwire here too,
-#     since the deploy is a local command with no CI gate.
+#     since a deploy is a local command with no CI gate.
 if [ "1" = "${REQUIRE_WASM_OPT-0}" ]; then
     for wasm in src/engine/core/libsimlin.wasm src/engine/core/libsimlin-browser.wasm; do
         if [ ! -f "$wasm" ]; then
