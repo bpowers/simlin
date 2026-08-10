@@ -86,12 +86,28 @@ spread.
 
 **Prefer a structural check to a statistical one where the change admits it.**
 When a change is confined to a function that is `#[inline(never)]` and keeps its
-signature, the callers' machine code should be *byte-identical*; disassemble
-both binaries and diff the caller modulo addresses. That is a binary answer
-rather than a sample, and it directly detects the failure mode that has bitten
-this file's eval-loop work repeatedly: a change leaking into `eval_bytecode` and
-perturbing the register allocation of a very large function. Treat a single
-differing instruction as a hard stop and explain it before quoting any number.
+signature, its callers' machine code should be unchanged. Verify it by
+disassembling both binaries and diffing the caller.
+
+The claim to check is *instruction-sequence-identical modulo relocation*, not
+byte-identical: adding code anywhere shifts the text section, so absolute branch
+targets and every rip-relative displacement move even when nothing about the
+caller changed. Normalise those, then require the same instruction count, the
+same mnemonics and operands, and the same in-function branch offsets.
+
+That is a binary answer rather than a sample, and it directly detects the
+failure mode that has bitten this file's eval-loop work repeatedly: a change
+leaking into `eval_bytecode` and perturbing the register allocation of a very
+large function. Treat a single differing instruction as a hard stop and explain
+it before quoting any number.
+
+**Size a fast path by the work it replaces, not by how often it applies.** How
+many inputs are *eligible* for a shortcut and how many *benefit* from it are
+different questions, and only the second predicts the outcome. A shortcut has
+its own fixed cost, so it wins only where the work it displaces exceeds that
+cost -- which usually means a size threshold, and a fallback that is now paid on
+every input below it. Cost both sides before predicting, and gate on the
+threshold rather than on eligibility.
 
 **Decide what would falsify the change before measuring it.** Write down the
 predicted delta per channel, and the signatures that would mean it did not work:
@@ -409,6 +425,49 @@ parity, zero-alloc all hold -- but did not clear the keep bar:
   resolved by one build pair. World3 trended slightly negative both times.
 - Branch-misses fell 8.4%, so a mispredict-bound core (the round-1 Ryzen)
   might see a real win -- that is the retry condition recorded on GH #712.
+
+**Negative result #4: the uniform-grid lookup index (implemented, not
+landed).** Graphical-function x-axes are overwhelmingly uniform -- 86.6% of
+corpus tables exactly, another 4.7% to within an ulp -- so `lookup`'s binary
+search can be replaced by an O(1) position computed from the table's endpoints
+and then verified, falling back to the search when the check fails. It is exact
+on any sorted axis (the check `x[k-1] < index <= x[k]` identifies the same
+position the search returns) and needs no stored metadata, so nothing is
+threaded through the dispatch arm -- the property whose absence sank #602.
+
+Measured, against predictions registered before implementing:
+
+| | predicted | measured |
+|---|---|---|
+| C-LEARN instructions | -2.7% | **-0.63%** |
+| WORLD3 instructions | -3.1% | **+0.59%** |
+| C-LEARN `vm::lookup` Ir | -60% | **-34.8%** |
+| WORLD3 `vm::lookup` Ir | -35% | **+7.7%** |
+
+The guess costs ~50 instructions (two divisions, a saturating float-to-int
+cast, two bounds-checked loads for the check) against ~12 per search probe, so
+it pays only above about four probes. C-LEARN's tables have a median of 251
+points -- an eight-probe search -- and win; WORLD3's median is 7, a three-probe
+search, and lose. Gating on a 32-point minimum recovered C-LEARN and left
+WORLD3 still 7.7% worse in `lookup`, because the restructured fallback is paid
+by every table below the gate, which is most of the corpus. Forcing the helper
+inline changed nothing (it was already inlined).
+
+**Why this one is worth reading before designing an experiment**: unlike the
+three above, where the effect was merely small, here the aggregate and the
+mechanism DISAGREED. End-to-end C-LEARN alone reads as a -0.63% win and a
+plausible cycles figure could have been quoted to match it. Only the per-call
+mechanism channel showed WORLD3's `lookup` getting 7.7% worse underneath that
+aggregate, and only a pre-registered per-model prediction made the sign flip
+impossible to read as "smaller than hoped". A single-model, single-channel
+measurement ships this change.
+
+The standing lesson is the sizing rule under "Measuring a change": a census
+established that ~100% of both hero models' tables were ELIGIBLE, which is not
+the same as benefiting, and the prediction costed the search being removed
+without costing the guess replacing it. The patch is recoverable from the
+round's scratch artifacts (`p9_option_c.patch`) if a cheaper guess ever makes
+the break-even worth revisiting.
 
 Methodology consequence for future rounds: the ~4% figure above bounds a
 WALL-CLOCK/CYCLES claim from a single build pair, and nothing else. Retired
