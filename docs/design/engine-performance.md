@@ -513,9 +513,19 @@ a data verdict in round 3 (2026-06-04):
   stack-effect branch-span reconstruction over the fused stream) measured
   C-LEARN at exactly **30,524 executed dispatches/step**, of which lazy-If
   would skip 4,859 (**15.9%**) — but 93% of the skipped opcodes are cheap
-  scalar loads/binops, so the *instruction* share is only **~1.5%** (~35k of
-  ~2.4M instr/step): below the ~4% layout-noise measurement floor, at the
-  highest complexity of the three candidates. WORLD3: 3.25% dispatch share.
+  scalar loads/binops, so the share of RETIRED INSTRUCTIONS is only **~1.5%**
+  (~35k of ~2.4M instr/step). That is measurable (the instruction channel's sd
+  is ~0.026%; see "Measuring a change"), so the verdict does not rest on it
+  being unresolvable — it rests on ~1.5% of instructions being a small return
+  for the highest design cost of the three candidates. WORLD3: 3.25% dispatch
+  share.
+  The cheap part of the win has since been taken WITHOUT that machinery:
+  fusing `SetCond;If[;AssignCurr]` into conditional-select opcodes removes
+  **12.0% of executed dispatches** against this item's projected 15.9%, resting
+  on the pair being adjacent by construction (`compiler::codegen`'s `Expr::If`
+  arm is the sole producer of both and emits them together; executed counts are
+  exactly equal at 1,874,169 each). What remains here is the residual after
+  that fusion, against the full forward-jump cost.
   Notably **69.8% of the skippable dispatches sit behind constant
   conditions** (1,300 of 1,679 flow `If` sites take the same branch for the
   whole run) — a compile-time / #712-family observation, not a runtime-jump
