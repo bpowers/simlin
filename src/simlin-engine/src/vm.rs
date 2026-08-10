@@ -365,6 +365,9 @@ pub struct Vm {
     // returns the fallback during the initial timestep even when
     // RK stages advance TIME away from INITIAL_TIME.
     prev_values_valid: bool,
+    // Test-only: fill the `next` chunk with a sentinel at the top of every
+    // Euler step. See `poison_next_chunk_for_test`.
+    poison_next: bool,
     // Conveyor support (docs/design/conveyors.md §9.3). Empty for every
     // non-conveyor model, and all conveyor logic is guarded on a non-empty
     // plan list -- so an ordinary simulation runs with zero overhead and
@@ -783,6 +786,12 @@ pub(crate) fn increment_indices(indices: &mut [u16], dims: &[u16]) {
     }
 }
 
+/// Sentinel written into the `next` chunk by `poison_next_chunk_for_test`. A
+/// distinctive finite value rather than NaN, so a slot that carries forward is
+/// distinguishable from a model's own NaN.
+#[doc(hidden)]
+pub const POISON_SENTINEL: f64 = -1.234567e123;
+
 impl Vm {
     pub fn new(sim: CompiledSimulation) -> Result<Vm> {
         if sim.specs.stop < sim.specs.start {
@@ -847,6 +856,7 @@ impl Vm {
             stock_offsets,
             rk_scratch,
             prev_values_valid: false,
+            poison_next: false,
             conveyor_plans: Vec::new(),
             conveyors: Vec::new(),
             conveyor_last_unit: i64::MIN,
@@ -903,6 +913,20 @@ impl Vm {
         // the two plan sets are attached in.
         self.coupling =
             crate::queue_compile::CouplingTable::build(&self.conveyor_plans, &self.queue_plans);
+    }
+
+    /// Test-support: fill the `next` chunk PAST the implicit-global prefix with
+    /// a sentinel at the top of every Euler step, before the Flows phase runs.
+    ///
+    /// Exposes which slots carry information across a step: anything not
+    /// rewritten by the Flows or Stocks phase surfaces as the sentinel in the
+    /// saved results. The prefix is deliberately preserved -- `Expr::Dt` lowers
+    /// to a `curr[DT_OFF]` read inside every stock update, so poisoning it
+    /// corrupts every stock and hides the property under test. See
+    /// `only_documented_classes_carry_across_a_step`.
+    #[doc(hidden)] // test-support: used by tests/integration/simulate.rs
+    pub fn poison_next_chunk_for_test(&mut self) {
+        self.poison_next = true;
     }
 
     pub fn run_to_end(&mut self) -> Result<()> {
@@ -994,11 +1018,16 @@ impl Vm {
             }};
         }
 
+        let poison_next = self.poison_next;
+
         match self.specs.method {
             Method::Euler => loop {
                 let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
                 if curr[TIME_OFF] > end {
                     break;
+                }
+                if poison_next {
+                    next[IMPLICIT_VAR_COUNT..].fill(POISON_SENTINEL);
                 }
 
                 if self.conveyor_plans.is_empty() && self.queue_plans.is_empty() {
