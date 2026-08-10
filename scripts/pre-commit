@@ -204,8 +204,24 @@ PIPELINE_PIDS+=($PID_A)
     pnpm -r --parallel run lint
 
     # 3. Build WASM and TS packages (needed for .d.ts files)
+    #
+    # DISABLE_WASM_OPT=1 skips the wasm-opt -O3 pass, mirroring
+    # .github/workflows/ci.yaml's two build steps.  On an engine change that
+    # alters emitted code it is ~170s of the ~190s this step takes, and the
+    # hook needs an artifact that builds and passes the TypeScript tests, not
+    # a size-optimized one: the engine suite runs 1.26s against the
+    # unoptimized blob and 1.40s against the optimized one.  See GH #1019 for
+    # the coverage this gives up.
+    #
+    # The variable belongs HERE and not in src/engine/build.sh or
+    # package.json.  Six callers run `pnpm build`; the four that are not CI
+    # (scripts/deploy-web.sh, scripts/deploy-web-staged.sh, and the release
+    # workflows) must keep the optimized artifact, because the browser bundle
+    # is download-size-dominated -- the same reason .cargo/config.toml forces
+    # opt-level=z on wasm32.  Flipping the default would route through all of
+    # them and ship a 24% larger bundle (5.00MB -> 6.20MB) to every user.
     echo "[ts] Building..."
-    pnpm build
+    DISABLE_WASM_OPT=1 pnpm build
 
     # 4. Type check and tests in parallel
     echo "[ts] Running type check and tests..."
