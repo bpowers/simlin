@@ -801,18 +801,28 @@ pub fn variable_relevant_dimensions(db: &dyn Db, var: SourceVariable) -> BTreeSe
 /// early return and never depends on the project's dimensions at all
 /// (`db::dimension_invalidation_tests`).
 ///
-/// **One arm differs from the parse, deliberately.** The parse builds
-/// `Ast::ApplyToAll` as `ast.map(|ast| Ast::ApplyToAll(dims, ast))`, so an A2A
-/// variable whose EQUATION does not parse yields no `Ast` and therefore
-/// reported no dimensions; this reports its declared ones. Both the
-/// unresolvable-dimension-name arm (`[]` on either path) and the `Arrayed` arm
-/// (which the parse builds unconditionally once its dims resolve, however many
-/// element equations failed) are unchanged. The divergence is confined to a
-/// project that already fails to assemble -- the parse error still reaches
+/// **`Ast::ApplyToAll` is built as `ast.map(|ast| ApplyToAll(dims, ast))`**, so
+/// an A2A equation that yields no `Ast` yields no dimensions -- and `parse`
+/// answers `Ok(None)` for exactly one reason, an input with no tokens. That is
+/// reachable on VALID, COMPILING models: a standalone lookup-only table (an
+/// empty A2A equation plus a `<gf>`, issue #606) and a module input port whose
+/// own equation is dead are both empty-equation A2A variables, and reporting
+/// their declared extent would widen `variable_size` from 1 and shift every
+/// later variable's layout offset. The A2A arm therefore gates on
+/// `parser::is_token_free`, which is a LEX rather than a parse.
+///
+/// **One arm still differs from the parse, deliberately.** An A2A equation that
+/// is not token-free but does not PARSE (`Err`, not `Ok(None)`) reported no
+/// dimensions and now reports its declared ones. That divergence is confined to
+/// a project which already fails to assemble -- the parse error still reaches
 /// `compile_var_fragment`, which drops the fragment and accumulates the
 /// diagnostic -- and it moves the reported size from a wrong 1 toward the
-/// declared extent, so nothing that compiled before reads a different slot.
-/// Every arm is enumerated in `db::variable_dimensions_tests`.
+/// declaration, so nothing that compiled before reads a different slot. The
+/// unresolvable-dimension-name arm (`[]` on either path) and the `Arrayed` arm
+/// (built unconditionally once its dims resolve, however many element equations
+/// failed) are unchanged. Every arm is enumerated in
+/// `db::variable_dimensions_tests`, asserted against the previous
+/// implementation as an oracle rather than against hand-written expectations.
 #[salsa::tracked(returns(ref))]
 pub fn variable_dimensions(
     db: &dyn Db,
@@ -821,7 +831,27 @@ pub fn variable_dimensions(
 ) -> Vec<crate::dimensions::Dimension> {
     let dimension_names: &[String] = match var.equation(db) {
         datamodel::Equation::Scalar(_) => return Vec::new(),
-        datamodel::Equation::ApplyToAll(dim_names, _) => dim_names,
+        datamodel::Equation::ApplyToAll(dim_names, eqn) => {
+            // `parse_equation`'s A2A arm is `ast.map(|ast| ApplyToAll(dims, ast))`,
+            // so an equation that produces no `Ast` produces no dimensions --
+            // and `parse` returns `Ok(None)` for exactly one reason: the input
+            // contains no tokens. That is the case for a STANDALONE LOOKUP-ONLY
+            // table (an empty `ApplyToAll` equation plus a `<gf>`) and for a
+            // module input port whose dead equation is empty, both of which are
+            // VALID and both of which compile -- so answering with the declared
+            // dimensions here would widen their `variable_size` from 1 and shift
+            // every later variable's layout offset on a working model.
+            //
+            // `is_token_free` is a lex, not a parse: it neither builds an AST
+            // nor resolves anything, so this keeps the whole point of deriving
+            // the dimensions instead of demanding `parse_source_variable_*`.
+            if crate::parser::is_token_free(eqn, crate::lexer::LexerType::Equation) {
+                return Vec::new();
+            }
+            dim_names
+        }
+        // `Arrayed` needs no such check: the parse builds its `Ast` whenever the
+        // dimension names resolve, however many element equations failed.
         datamodel::Equation::Arrayed(dim_names, _, _, _) => dim_names,
     };
     // A module variable carries a synthesized equation but has no array shape

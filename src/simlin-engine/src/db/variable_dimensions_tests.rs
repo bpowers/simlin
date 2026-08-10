@@ -167,6 +167,109 @@ fn variable_dimensions_matches_the_parse_on_every_agreeing_arm() {
     );
 }
 
+/// The two VALID shapes whose A2A equation is empty, which is the whole reason
+/// the derivation gates on the equation having tokens.
+///
+/// Both are legal and both COMPILE, so a divergence here is not confined to
+/// broken projects the way the unparseable arm below is -- it would widen
+/// `variable_size` from 1 to the declared extent and shift every later
+/// variable's layout offset on a working model. `parse_equation` builds an A2A
+/// as `ast.map(|ast| ApplyToAll(dims, ast))` and `parser::parse` answers
+/// `Ok(None)` for a token-free input, so the parse reports no dimensions for
+/// them; the derivation must agree, and is asserted against the oracle rather
+/// than against a hand-written expectation.
+///
+/// Enumerated from that MECHANISM rather than from the two shapes: any
+/// `Equation::ApplyToAll` with a token-free equation reaches it. These two are
+/// the ones `variable.rs`'s empty-equation suppression makes valid -- a
+/// standalone lookup-only table (issue #606) and a module input port whose own
+/// equation is dead -- but a third would be covered by the same gate.
+#[test]
+fn an_empty_a2a_equation_reports_no_dimensions_on_both_paths() {
+    let lookup_only = datamodel::Variable::Aux(datamodel::Aux {
+        ident: "a2a_table".to_string(),
+        equation: a2a(&["DimA"], ""),
+        documentation: String::new(),
+        units: None,
+        gf: Some(datamodel::GraphicalFunction {
+            kind: datamodel::GraphicalFunctionKind::Continuous,
+            x_points: None,
+            y_points: vec![0.0, 1.0],
+            x_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+            y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+        }),
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    });
+    let mut port_aux = datamodel::Aux {
+        ident: "a2a_port".to_string(),
+        // Comment-only, not merely blank: `parse`'s own contract says
+        // `Ok(None)` covers "empty or comment-only input", and the lexer skips
+        // a `{...}` comment rather than emitting a token for it. A gate written
+        // as `eqn.trim().is_empty()` would answer differently here, which is
+        // why the predicate is a lex.
+        equation: a2a(&["DimA"], "{just a comment}"),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    };
+    port_aux.compat.can_be_module_input = true;
+
+    let mut db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "empty_a2a".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: dims(),
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![lookup_only, datamodel::Variable::Aux(port_aux)],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    };
+    let state = sync_from_datamodel_incremental(&mut db, &project, None);
+    let sync = state.to_sync_result();
+    for name in ["a2a_table", "a2a_port"] {
+        let sv = sync.models["main"].variables[name].source;
+        let derived: Vec<String> = crate::db::query::variable_dimensions(&db, sv, sync.project)
+            .iter()
+            .map(|d| d.name().to_string())
+            .collect();
+        assert_eq!(
+            derived,
+            oracle_dimension_names(&db, sv, sync.project),
+            "{name}: the derivation must agree with the parse on an empty A2A equation"
+        );
+        assert_eq!(
+            derived,
+            Vec::<String>::new(),
+            "{name}: an empty A2A equation yields no Ast and hence no dimensions"
+        );
+        assert_eq!(
+            crate::db::query::variable_size(&db, sv, sync.project),
+            1,
+            "{name}: reporting the declared extent here would shift every later \
+             variable's layout offset"
+        );
+    }
+    // The layout is the thing the divergence was observable in, so pin it too.
+    assert_eq!(
+        crate::db::compute_layout(&db, sync.models["main"].source, sync.project).n_slots,
+        2,
+        "two size-1 variables occupy two slots; the pre-gate derivation made this 6"
+    );
+}
+
 /// The ONE arm that changed, pinned in the direction it changed to.
 ///
 /// The parse builds `Ast::ApplyToAll` as `ast.map(|ast| ApplyToAll(dims, ast))`,

@@ -791,6 +791,21 @@ impl<'input> Parser<'input> {
     }
 }
 
+/// Whether `input` contains no tokens at all.
+///
+/// This is exactly the condition on which [`parse`] returns `Ok(None)` rather
+/// than an expression -- `parse_equation`'s `is_at_end()` early return -- and
+/// it lives here so the two cannot drift apart. It is a LEX, not a parse: no
+/// AST is built and nothing is resolved.
+///
+/// A caller uses it to answer "would this equation have produced an `Ast`?"
+/// without paying for one. Note the asymmetry it deliberately keeps: an input
+/// whose first token is a lexical ERROR is reported as having tokens, because
+/// `parse` answers `Err` for it and not `Ok(None)`.
+pub(crate) fn is_token_free(input: &str, lexer_type: LexerType) -> bool {
+    Lexer::new(input, lexer_type).next().is_none()
+}
+
 /// Parse an equation string into an AST.
 ///
 /// Returns:
