@@ -4,6 +4,7 @@ React components for model visualization and editing. Designed as a general-purp
 
 For global development standards, see the root [CLAUDE.md](/CLAUDE.md).
 For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
+For product design context (users, brand, design principles, tokens), see [docs/dev/design.md](/docs/dev/design.md).
 
 ## Hosting Requirements (CSS and fonts)
 

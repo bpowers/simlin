@@ -64,6 +64,6 @@ Synthesize your findings and the user's answers into a `## Design Context` secti
 [3-5 principles derived from the conversation that should guide all design decisions]
 ```
 
-Write this section to CLAUDE.md in the project root. If the file exists, append or update the Design Context section.
+Write this section to `docs/dev/design.md` (this repo's canonical home for product design context, routed from the root CLAUDE.md's Development Standards list). If the file exists, update it in place rather than appending a duplicate section.
 
 Confirm completion and summarize the key design principles that will now guide all future work.

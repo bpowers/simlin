@@ -10,6 +10,10 @@
 - Do NOT write one-off Rust files compiled with `rustc` to test hypotheses. Write unit tests close to the source of the problem instead -- they serve as both verification and documentation.
 - Tests should err on the side of brittleness: if a required test file is missing, fail loudly rather than skipping.
 
+### Reading test output
+
+Do NOT preemptively pipe `cargo test` (or `cargo build`) through `head` or `tail` to bound the output. `head` closes the pipe and can kill the test process mid-run via SIGPIPE, so the run you think you observed never completed; `tail` discards the earlier output that a late failure often depends on; and without explicit pipeline-status handling, either filter hides the real exit status. Run the full command once, let it finish, and read the failures from the complete output -- rerun a single failing test with a name filter (`cargo test -p <crate> <name>`) when you need a tight loop, rather than truncating the evidence from the broad run.
+
 ### One integration-test harness per crate
 
 Add new integration tests as a `mod` in the crate's `tests/integration/main.rs`, NOT as a new top-level `tests/*.rs` file. Cargo builds every top-level `tests/*.rs` file as its own binary that statically links the crate's full dependency graph (~40-110MB each in debug). Beyond the link time and disk cost, macOS imposes a first-exec security scan on every freshly built binary -- roughly 1-3s per binary, proportional to size, and serialized system-wide -- so per-file test binaries made fresh `cargo test` runs pay minutes of scan wait and blew the pre-commit cap (GH #706; consolidating 80 binaries down to ~11 cut a fresh-link workspace test run from ~290s to ~85s on macOS).
