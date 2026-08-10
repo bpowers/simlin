@@ -12,12 +12,17 @@ fi
 
 echo "Building libsimlin (release)..."
 cargo build --release --manifest-path src/libsimlin/Cargo.toml
+CARGO_TARGET_DIR_RESOLVED="$("$REPO_ROOT/scripts/cargo-target-dir.sh")"
 
 cd src/pysimlin
 
 # Only rebuild the CFFI extension if the static library, header, or build
 # script is newer than the .so (or the .so doesn't exist yet).
-LIBSIMLIN_A="$REPO_ROOT/target/release/libsimlin.a"
+# Resolved rather than assumed -- see scripts/cargo-target-dir.sh. A stale path
+# here is quieter than the wasm one: the staleness check below simply never
+# fires, so the CFFI extension is silently not rebuilt against a changed
+# library.
+LIBSIMLIN_A="$CARGO_TARGET_DIR_RESOLVED/release/libsimlin.a"
 SIMLIN_H="$REPO_ROOT/src/libsimlin/simlin.h"
 CFFI_SO=$(find simlin -maxdepth 1 -name '_clib*.so' -print -quit 2>/dev/null || true)
 if [ -z "$CFFI_SO" ] || [ "$LIBSIMLIN_A" -nt "$CFFI_SO" ] || [ "$SIMLIN_H" -nt "$CFFI_SO" ] || [ simlin/_ffi_build.py -nt "$CFFI_SO" ]; then

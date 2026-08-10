@@ -3264,6 +3264,18 @@ fn arrayed_slot<'a>(equation: &'a crate::db::LtmEquation, element: &str) -> &'a 
     }
 }
 
+/// The elements an `Equation::Arrayed` score actually carries an arm for, in
+/// emission order. A slot the GH #977 predicate omitted is simply absent, which
+/// is the marker that keeps an intended zero distinguishable from a generator
+/// that gave up and emitted a `"0"` arm.
+fn arrayed_slot_names(equation: &crate::db::LtmEquation) -> Vec<String> {
+    use crate::db::LtmEquation;
+    match equation {
+        LtmEquation::Arrayed { elements, .. } => elements.iter().map(|(e, _)| e.clone()).collect(),
+        other => panic!("expected LtmEquation::Arrayed, got: {other:?}"),
+    }
+}
+
 fn region_dm_dimension() -> crate::datamodel::Dimension {
     crate::datamodel::Dimension::named(
         "Region".to_string(),
@@ -3784,11 +3796,35 @@ fn test_arrayed_link_score_population_to_migration_pressure_fixed_boston() {
     );
 }
 
+/// ltm-503-cross-element-agg.AC1.3 (unit-level): a stock-to-flow link score into
+/// a per-element-equation arrayed flow must never report a slot by GIVING UP --
+/// emitting a literal `"0"` partial where it could not build a real one.
+///
+/// The instrument changed with GH #977 and the guarded property did not. A slot
+/// whose transformed partial is provably `PREVIOUS(target)` is now OMITTED from
+/// the element map (`compiler::expand_arrayed_with_hoisting` lowers an absent
+/// slot to one constant-zero assign), so "every slot references the flow's
+/// equation contents" can no longer be asked of `boston` and `la` -- those arms
+/// are gone by design. Asking it anyway would pin materialization, not
+/// non-degradation.
+///
+/// So this asserts the two things that still distinguish the failure from the
+/// intent, over the DERIVED slot set rather than over named slots:
+///
+/// * exactly the slots with a live source reference are present -- `nyc` here,
+///   since the FixedIndex(nyc) shape matches only that arm -- and the rest are
+///   ABSENT, which is the distinct omission marker #977 requires. An arm that is
+///   present but empty, or present holding `"0"`, is a generator bug and stays
+///   distinguishable from an intended zero slot precisely because the intended
+///   one is not in the map at all.
+/// * every PRESENT arm is a real partial: non-empty, and never the `((0) - ...)`
+///   give-up form.
+///
+/// What this does NOT guard: that the omitted slots are numerically zero. That
+/// is the predicate's own claim and is gated by the whole-slab differential and
+/// the char goldens, not here.
 #[test]
 fn test_arrayed_link_score_stock_to_flow_per_element_partials() {
-    // ltm-503-cross-element-agg.AC1.3 (unit-level): a stock-to-flow link
-    // score into a per-element-equation arrayed flow yields per-element
-    // partials referencing the flow's actual equation contents.
     let dims = vec![crate::datamodel::Dimension::named(
         "Region".to_string(),
         vec!["NYC".to_string(), "Boston".to_string(), "LA".to_string()],
@@ -3829,23 +3865,32 @@ fn test_arrayed_link_score_stock_to_flow_per_element_partials() {
     )
     .unwrap();
 
+    let present = arrayed_slot_names(&equation);
+    // Derived from the flow's own element list and the link's shape: `nyc` is
+    // the only arm referencing `population[nyc]`, so it is the only arm with a
+    // live source and the only one that may survive.
+    assert_eq!(
+        present,
+        vec!["nyc".to_string()],
+        "exactly the live-source arms may be present; got {present:?} from {equation:?}"
+    );
+
     let nyc_slot = arrayed_slot(&equation, "nyc");
-    let boston_slot = arrayed_slot(&equation, "boston");
-    // The NYC slot keeps population[nyc] live (shape match); the other
-    // slots freeze their population refs but still reference
-    // `population` -- never a bare `(0)` partial.
     assert!(
         nyc_slot.contains("population[nyc] * 0.03"),
         "nyc slot partial should keep population[nyc] live; got: {nyc_slot}"
     );
-    assert!(
-        boston_slot.contains("population"),
-        "boston slot should reference population; got: {boston_slot}"
-    );
-    assert!(
-        !nyc_slot.contains("((0) -") && !boston_slot.contains("((0) -"),
-        "no slot may use a '0' partial; nyc={nyc_slot} boston={boston_slot}"
-    );
+    for name in &present {
+        let slot = arrayed_slot(&equation, name);
+        assert!(
+            !slot.trim().is_empty(),
+            "a present slot must carry a real partial, never empty text; slot {name}"
+        );
+        assert!(
+            !slot.contains("((0) -"),
+            "no present slot may use a '0' partial; {name}={slot}"
+        );
+    }
 }
 
 #[test]
@@ -5016,8 +5061,14 @@ fn sgft(
         target_ref,
         gf_table_ref,
         &occ,
+        // These tests exercise the wrap and guard-form construction for a whole
+        // variable's equation, which is what `Materialize` models; the slot
+        // omission is covered at the `model_ltm_variables` level in
+        // `db/ltm_tests.rs`.
+        ZeroSlotPolicy::Materialize,
         &mut Vec::new(),
     )
+    .map(|text| text.expect("ZeroSlotPolicy::Materialize never omits an arm"))
 }
 
 /// Finding 1 (loud-degradation, not silent-zero): a live-source subscript node
@@ -5089,6 +5140,10 @@ fn wrap_missing_live_source_occurrence_is_loud_not_silent_freeze() {
         "combined",
         None,
         &occ,
+        // The desync must be loud under EITHER policy; `OmitStructuralZero` is
+        // the interesting one, since it is the policy that has a non-Err way to
+        // decline an arm and so is the one that could swallow this.
+        ZeroSlotPolicy::OmitStructuralZero,
         &mut Vec::new(),
     );
     assert!(

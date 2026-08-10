@@ -136,10 +136,12 @@ pub fn project_datamodel_dims(db: &dyn Db, project: SourceProject) -> Vec<datamo
 /// reading `project_datamodel_dims`, which depends solely on the project's
 /// dimensions input -- so it recomputes exactly when the dimensions change, the
 /// SAME dependency granularity the inline rebuild took. The shared context's
-/// only interior mutability is its `relationship_cache` `Mutex`, so it is safe
-/// to share across the rayon-parallel variable compilations (and the
-/// subdimension-relationship memo is now computed once and reused rather than
-/// discarded per variable).
+/// only interior mutability is its `relationship_cache` `Mutex`, which is what
+/// makes the memo `Sync` and therefore shareable at all: one context serves
+/// every variable's compilation instead of one being rebuilt per variable, and
+/// the subdimension-relationship memo is computed once and reused rather than
+/// discarded per variable. Those compilations are sequential today; the `Mutex`
+/// is what keeps the sharing sound rather than evidence that they are not.
 #[salsa::tracked(returns(ref))]
 pub fn project_dimensions_context(
     db: &dyn Db,

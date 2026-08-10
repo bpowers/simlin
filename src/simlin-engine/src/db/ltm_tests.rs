@@ -1041,13 +1041,31 @@ fn collect_agg_petals_groups_single_agg_circuits() {
 // which still compiles and reads a different slot than the anchor did.
 // ---------------------------------------------------------------------------
 
-/// `share[boston]` reads `q`/`gtab` at the runtime index `ctr`, and has no
-/// causal dependence on `pop[nyc]` whatsoever.
+/// `share[boston]` reads `q`/`gtab` at the runtime index `ctr`, and its only
+/// dependence on `pop[nyc]` is the zero-coefficient term `0 * pop[nyc]`.
 ///
 /// `declare_bucket` adds a dimension **no equation references**, whose first
 /// element is named `ctr` -- the same canonical name as the model variable. It
 /// changes nothing about the simulation; before the fix it changed the emitted
 /// link score.
+///
+/// **The `0 * pop[nyc]` term is load-bearing for the TEST, not for the model**,
+/// and it is the same idiom the neighbouring `0 * ctr` already uses. Its job is
+/// to give the `boston` arm a live reference to the link's SOURCE, which is what
+/// makes the arm materialize at all: since GH #977 a slot whose transformed
+/// partial is provably `PREVIOUS(target)` is omitted from the `Arrayed` element
+/// map and lowered to a constant zero, and without this term every occurrence in
+/// this arm is frozen, so the arm this test reads would not exist. Its
+/// coefficient is zero, so it changes no value the test asserts on: the residual
+/// series below is bit-identical with and without it.
+///
+/// That materialization matters because "the slot is absent under both variants"
+/// would NOT be an adequate stand-in for the assertions below. Both readings of
+/// `ctr` -- frozen (`PREVIOUS(ctr, ctr)`, correct) and qualified onto the
+/// unrelated dimension (`bucket·ctr`, the defect) -- leave the arm provably
+/// `PREVIOUS(target)`, so an omission-based assertion passes on the defect too.
+/// The sibling control below demonstrates exactly that: a genuinely static
+/// `q[slot·s1]` selector produces an omitted arm as well.
 ///
 /// `indexed_name` only varies the subscripted variable's NAME. Both iterations
 /// exercise the SAME path -- an ordinary arrayed variable subscripted directly --
@@ -1091,7 +1109,10 @@ fn colliding_index_name_model(declare_bucket: bool, second_name: bool) -> datamo
             "share[Region]",
             vec![
                 ("nyc", "pop[nyc] * 0.01"),
-                ("boston", &format!("{indexed}[ctr] * 0.002 + 0 * ctr")),
+                (
+                    "boston",
+                    &format!("{indexed}[ctr] * 0.002 + 0 * ctr + 0 * pop[nyc]"),
+                ),
                 ("la", "pop[la] * 0.03"),
             ],
         )
@@ -1128,6 +1149,10 @@ fn colliding_index_boston_arm(project: &datamodel::Project) -> (String, usize) {
                 .iter()
                 .find(|(e, _)| e == "boston")
                 .map(|(_, arm)| arm.text.clone())
+                // A missing arm here means the GH #977 omission claimed the
+                // slot, which would gut every assertion downstream rather than
+                // fail it -- see `colliding_index_name_model`'s note on the
+                // zero-coefficient term that keeps this arm materialized.
                 .unwrap_or_else(|| panic!("no boston arm in {:?}", elements)),
             other => panic!("expected an arrayed score, got {other:?}"),
         })
@@ -1193,9 +1218,10 @@ fn a_colliding_index_name_is_resolved_against_the_axis_it_indexes() {
 /// The simulated `boston` slot of the `pop[nyc] -> share` link score.
 ///
 /// NOTE what this deliberately does NOT assert: that the series is ZERO.
-/// `share[boston]` has no causal dependence on `pop[nyc]`, so a fully
-/// ceteris-paribus partial would be identically zero -- and it is not; it runs
-/// -1.06 / +0.73 / -1.03 / +0.82 on this fixture. That residual is a SEPARATE
+/// `share[boston]`'s only dependence on `pop[nyc]` carries a zero coefficient,
+/// so a fully ceteris-paribus partial would be identically zero -- and it is
+/// not; it runs -1.06 / +0.73 / -1.03 / +0.82 on this fixture, bit-identically
+/// with and without that term. That residual is a SEPARATE
 /// defect from the one above and predates this branch: an index frozen inside an
 /// already-frozen head is DOUBLE-lagged (the partial reads `q` at `t-1` indexed
 /// by `ctr` at `t-2`, where the anchor `PREVIOUS(share)` used `ctr` at `t-1`).
@@ -1249,6 +1275,15 @@ fn an_index_naming_the_axis_own_element_stays_a_static_selector() {
     // The control that keeps the fix from being "freeze every bare index":
     // `s1` IS an element of `gtab`'s own `Slot` axis, so it is a selector and
     // must stay unwrapped (and qualified onto its own dimension).
+    //
+    // `0 * pop[nyc]` plays the same role it does in `colliding_index_name_model`
+    // and for the same reason: a `boston` arm holding only frozen reads is
+    // provably `PREVIOUS(target)` and GH #977 omits it, and an omitted arm has
+    // no text to inspect. This control is also the direct evidence that
+    // omission cannot substitute for the assertions here -- WITHOUT the term
+    // this correctly-qualified static selector produces an omitted arm, exactly
+    // as the frozen runtime index does, so "absent under both variants" cannot
+    // tell a selector from a freeze.
     let project = TestProject::new("axis_element_index")
         .named_dimension("Region", &["nyc", "boston", "la"])
         .named_dimension("Slot", &["s1", "s2"])
@@ -1260,7 +1295,7 @@ fn an_index_naming_the_axis_own_element_stays_a_static_selector() {
             "share[Region]",
             vec![
                 ("nyc", "pop[nyc] * 0.01"),
-                ("boston", "q[s1] * 0.002"),
+                ("boston", "q[s1] * 0.002 + 0 * pop[nyc]"),
                 ("la", "pop[la] * 0.03"),
             ],
         )
@@ -2065,5 +2100,181 @@ fn the_completeness_guard_holds_on_the_per_element_emitter() {
             .iter()
             .map(|d| (&d.variable, &d.error))
             .collect::<Vec<_>>()
+    );
+}
+
+/// A `Wide`-dimensioned per-element link-score fixture: a per-element flow
+/// whose element `e` reads only `pop[e]`, so the emitted scores are the
+/// element-pinned and A2A shapes that `compile_ltm_synthetic_fragment` routes
+/// down its uncached `compile_direct` path -- which is what makes it a fixture
+/// for the fragment-reuse tests below.
+fn per_element_zero_slot_project(n: usize) -> datamodel::Project {
+    let elems: Vec<String> = (0..n).map(|i| format!("e{i}")).collect();
+    let elem_refs: Vec<&str> = elems.iter().map(String::as_str).collect();
+    let eqns: Vec<(String, String)> = elems
+        .iter()
+        .map(|e| (e.clone(), format!("pop[{e}] * rate * 0.01")))
+        .collect();
+    let eqn_refs: Vec<(&str, &str)> = eqns.iter().map(|(e, q)| (e.as_str(), q.as_str())).collect();
+
+    TestProject::new("per_element_zero_slots")
+        .named_dimension("Wide", &elem_refs)
+        .aux("rate", "1", None)
+        .array_flow_with_ranges("growth[Wide]", eqn_refs)
+        .array_stock("pop[Wide]", "10", &["growth"], &[], None)
+        .build_datamodel()
+}
+
+/// The diagnostic pass must REUSE assembly's compiled LTM fragments, not
+/// recompile them.
+///
+/// `assemble_module` and `model_ltm_fragment_diagnostics` each walk every LTM
+/// synthetic variable and ask for its fragment. Only the scalar `Bare`
+/// `from->to` score went through a salsa-memoized query; every element-pinned,
+/// aggregate-touching or A2A score took a plain-function path, so the second
+/// walk recompiled it from scratch. On C-LEARN that is 5,985 of 7,125 variables
+/// -- about half a full compile stage -- paid again on every
+/// `simlin_project_get_errors`, every MCP `read_model`, and twice more on every
+/// MCP `edit_model`.
+///
+/// The measurement is a body-entry count, not a timing: `LtmBody` is recorded
+/// inside `compile_ltm_equation_fragment`, which every LTM path funnels
+/// through, so a cache hit is invisible to it and a real compile is not.
+#[test]
+fn the_ltm_diagnostic_pass_does_not_recompile_assembly_fragments() {
+    let project = per_element_zero_slot_project(4);
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    use salsa::Setter;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    // Assembly first: this is the walk that legitimately compiles every
+    // fragment. Priming it here is what makes the measured region below a
+    // second walk rather than a first one.
+    let compiled = crate::db::compile_project_incremental(&db, source_project, "main");
+    assert!(
+        compiled.is_ok(),
+        "the fixture must compile with LTM enabled: {:?}",
+        compiled.err()
+    );
+
+    // Control: the recorder is armed and the fixture really does generate LTM
+    // fragments, so a zero below cannot be an empty model or a dead counter.
+    crate::db::reset_fragment_executions();
+    let _ = crate::db::ltm::model_ltm_fragment_diagnostics(&db, model, source_project);
+    let after_first = crate::db::fragment_executions();
+    let ltm_bodies: Vec<&str> = after_first
+        .iter()
+        .filter(|(kind, _)| *kind == crate::db::FragmentExecKind::LtmBody)
+        .map(|(_, name)| name.as_str())
+        .collect();
+
+    assert!(
+        ltm_bodies.is_empty(),
+        "the diagnostic pass recompiled {} LTM fragment(s) that assembly had \
+         already compiled: {ltm_bodies:?}",
+        ltm_bodies.len()
+    );
+}
+
+/// The control for the test above: the recorder DOES see LTM fragment compiles
+/// when they genuinely happen, so an empty log there is evidence of reuse
+/// rather than of a counter that never fires.
+#[test]
+fn the_ltm_fragment_body_counter_observes_a_cold_compile() {
+    let project = per_element_zero_slot_project(4);
+    let mut db = SimlinDb::default();
+    let source_project = {
+        let sync = sync_from_datamodel(&db, &project);
+        sync.project
+    };
+    use salsa::Setter;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    crate::db::reset_fragment_executions();
+    let _ = crate::db::compile_project_incremental(&db, source_project, "main");
+    let execs = crate::db::fragment_executions();
+    let n_ltm = execs
+        .iter()
+        .filter(|(kind, _)| *kind == crate::db::FragmentExecKind::LtmBody)
+        .count();
+    assert!(
+        n_ltm > 0,
+        "a cold LTM compile must record LtmBody entries, or the reuse assertion \
+         in the sibling test proves nothing; got: {execs:?}"
+    );
+}
+
+/// The first arm's shared AST of an LTM equation, whatever its shape.
+fn first_arm_expr(eq: &crate::db::LtmEquation) -> &std::sync::Arc<crate::ast::Expr0> {
+    use crate::db::LtmEquation;
+    let arm = match eq {
+        LtmEquation::Scalar(arm) | LtmEquation::ApplyToAll(_, arm) => arm,
+        LtmEquation::Arrayed { elements, .. } => {
+            &elements
+                .first()
+                .expect("an arrayed equation must have an arm")
+                .1
+        }
+    };
+    arm.expr.as_ref().expect("the fixture's arm must parse")
+}
+
+/// `model_ltm_variables` must SHARE each emitted score's parsed AST with the
+/// `link_score_equation_text_shaped` memo it came from, not deep-copy it.
+///
+/// The emission loop clones the shaped result out of the memo for every score,
+/// so before the ASTs were shared each equation was retained twice for the life
+/// of the database. On C-LEARN the generation stage retains +273 MiB for 12.78 MB
+/// of equation text, and roughly half of that is the second copy.
+///
+/// Pointer identity is the only way to see this: both copies compare EQUAL by
+/// value either way -- which they must, since salsa backdates on value equality
+/// and that is what lets an unrelated edit reuse the expensive downstream
+/// fragment (GH #981). A value assertion here would pass on a deep copy.
+#[test]
+fn an_emitted_link_score_shares_its_ast_with_the_shaped_memo() {
+    let project = per_element_zero_slot_project(4);
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    use salsa::Setter;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let ltm = crate::db::model_ltm_variables(&db, model, source_project);
+    let emitted = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == "$\u{205A}ltm\u{205A}link_score\u{205A}growth\u{2192}pop")
+        .unwrap_or_else(|| {
+            panic!(
+                "fixture must emit the growth->pop link score; got: {:?}",
+                ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+            )
+        });
+
+    let link_id = LtmLinkId::new(&db, "growth".to_string(), "pop".to_string());
+    let shaped =
+        link_score_equation_text_shaped(&db, link_id, RefShape::Bare, model, source_project);
+    let ShapedLinkScore::Scored { var: memo_var, .. } = shaped else {
+        panic!("the growth->pop edge must be scored; got: {shaped:?}");
+    };
+
+    let memo_expr = first_arm_expr(&memo_var.equation);
+    let emitted_expr = first_arm_expr(&emitted.equation);
+
+    // The control: they must still be EQUAL, or salsa backdating breaks.
+    assert_eq!(
+        memo_expr, emitted_expr,
+        "the emitted score and the memo must compare equal by value"
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(memo_expr, emitted_expr),
+        "the emitted score must SHARE the memo's AST, not hold a deep copy"
     );
 }

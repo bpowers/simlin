@@ -7266,9 +7266,20 @@ fn build_disjoint_dim_unscoreable_model(name: &str) -> simlin_engine::datamodel:
 /// `Equation::Arrayed` over `target`'s dims (`["D1","D2"]`); the `[a,x]` slot
 /// of the `source[m]→target` var holds `source[m]` live (its partial differs
 /// from `PREVIOUS`-evaluated) and the `[a,y]` slot (references `source[n]`,
-/// not `m`) is the trivial-zero guard form; and running the VM, the
+/// not `m`) scores a structural zero; and running the VM, the
 /// `source[m]→target` link score is non-zero at the `[a,x]` slot at some step
-/// >= 2 and ~0 at `[a,y]` at every step >= 2.
+/// >= 2 and zero at `[a,y]` at every step >= 2.
+///
+/// The `[a,y]` slot's INSTRUMENT moved with GH #977 and its claim did not. It
+/// used to be a materialized guard form whose ratio evaluated to a trivial
+/// zero; that partial is provably `PREVIOUS(target)`, so the slot is now
+/// OMITTED from the element map and `compiler::expand_arrayed_with_hoisting`
+/// lowers it to a single constant-zero assign. The VM assertion below is
+/// therefore tightened from "~0" to exactly zero -- what the omission promises,
+/// and the check that would catch it dropping a slot that was not a structural
+/// zero. `[b,y]` stays materialized on the same variable, which is what keeps
+/// this from degenerating into "every non-`[a,x]` slot vanishes": its equation
+/// multiplies a frozen `source[n]` by a LIVE `source[m]`.
 #[test]
 fn test_disjoint_dim_arrayed_target_per_source_element_link_scores() {
     let project = build_disjoint_dim_arrayed_target_model("disjoint_dim_arrayed");
@@ -7327,20 +7338,30 @@ fn test_disjoint_dim_arrayed_target_per_source_element_link_scores() {
                     .unwrap_or_else(|| panic!("slot {elem:?} not found in {elements:?}"))
             };
             let ax = slot("a,x");
-            let ay = slot("a,y");
             assert!(
                 ax.contains("source[m]"),
                 "the [a,x] slot of source[m]→target should reference source[m] live; got: {ax}"
             );
-            // The [a,y] slot's partial: every source reference is `source[n]`,
-            // which for the `source[m]` link score is "other content" and gets
-            // PREVIOUS-frozen, so the partial equals PREVIOUS(target[a,y]) and
-            // the guarded ratio is the trivial-zero form. (We don't pin the
-            // exact text -- the VM check below is the substantive one -- but it
-            // must not hold `source[m]` live.)
+            // The [a,y] slot's every source reference is `source[n]`, which for
+            // the `source[m]` link score is "other content" and gets
+            // PREVIOUS-frozen -- so the partial IS `PREVIOUS(target[a,y])` and
+            // the slot is omitted rather than materialized (GH #977). Absence
+            // is the distinct omission marker; an arm present holding a `"0"`
+            // partial would be a generator giving up, and the two must stay
+            // distinguishable.
             assert!(
-                !ax.contains("source[n]") || ay.contains("PREVIOUS(source[n]"),
-                "sanity: [a,y] slot freezes source[n] for the source[m] link score; got: {ay}"
+                !elements.iter().any(|(e, _)| e == "a,y"),
+                "the [a,y] slot scores a structural zero and must be OMITTED, \
+                 not materialized; got slots {:?}",
+                elements.iter().map(|(e, _)| e.as_str()).collect::<Vec<_>>()
+            );
+            // The counterweight: `[b,y]` multiplies a frozen `source[n]` by a
+            // LIVE `source[m]`, so it must survive. Without this, "every slot
+            // but [a,x] disappeared" would pass.
+            let by = slot("b,y");
+            assert!(
+                by.contains("PREVIOUS(source[d3\u{B7}n]"),
+                "[b,y] freezes source[n] for the source[m] link score; got: {by}"
             );
         }
         other => panic!("expected Equation::Arrayed for source[m]→target, got {other:?}"),
@@ -7373,9 +7394,13 @@ fn test_disjoint_dim_arrayed_target_per_source_element_link_scores() {
         if ax_val.abs() > 1e-9 && ax_val.is_finite() {
             saw_ax_nonzero = true;
         }
-        assert!(
-            ay_val.abs() < 1e-6,
-            "step {step}: source[m]→target [a,y] slot should be ~0 (it references source[n], not m); got {ay_val}"
+        // Exactly zero, not merely small: the omitted slot lowers to a single
+        // `AssignCurr(off, Const(0.0))`, so any nonzero here means the omission
+        // claimed a slot that was not a structural zero.
+        assert_eq!(
+            ay_val, 0.0,
+            "step {step}: source[m]→target [a,y] slot is an omitted structural \
+             zero (it references source[n], not m); got {ay_val}"
         );
         checked += 1;
     }
@@ -11160,3 +11185,134 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
         }
     }
 }
+
+/// The C-LEARN half of the value-level LTM gate: a digest over every LTM slot's
+/// per-step maximum magnitude.
+///
+/// The sub-second half is `db::ltm_value_gate_tests`, which pins exact values on
+/// a three-arm fixture built around the known ways an arm-level change zeroes a
+/// score. It cannot show that the same change leaves 7,000 real variables alone,
+/// and C-LEARN is the only model in the repo at that scale. Hence this: same
+/// property, real model, `#[ignore]`d purely for runtime (~25 s release, against
+/// the 3-minute debug-build cap in `docs/dev/rust.md`).
+///
+/// The digest is deliberately NOT a checked-in series slab -- 30k slots x 251
+/// steps is 60 MB of golden nobody would read. It is three numbers that move
+/// under exactly the failure this gate exists for:
+///
+/// * `nonzero_slots` -- how many LTM slots are ever non-zero. Rewriting live
+///   arms to zero moves this DOWN, which is the GH #977 failure (a change that
+///   zeroed 149 C-LEARN LTM slots passed every named C-LEARN gate); wrongly
+///   materializing structural zeros as small residuals moves it UP.
+/// * `finite_slots` -- how many are finite throughout, so a regression that
+///   replaces values with NaN cannot hide behind an unchanged non-zero count.
+/// * `magnitude_digest` -- an order-independent sum over each slot's maximum
+///   magnitude, quantized to 1e-9 relative. Two slots swapping values keeps the
+///   first two numbers and moves this.
+///
+/// Quantizing is what makes the pin usable rather than a per-run coin flip: raw
+/// f64 maxima carry last-bit noise across allocator and layout changes, and a
+/// digest that reds on that is a digest people learn to re-capture without
+/// reading. A real zeroing moves it far outside the quantum.
+///
+/// **"It passes" and "it constrains the code" are different claims, so both
+/// were measured.** Three runs of this digest, same binary, differing only in
+/// `ltm_augment_zero_slot`:
+///
+/// * predicate as shipped -- `(1369, 7000, 10_248_673_492_482_445_132_733_301)`
+/// * `ZeroSlotPolicy::Materialize` forced everywhere, i.e. GH #977's omission
+///   disabled -- **identical in all three numbers**. That is this gate's other
+///   job: it is the reproducible, checked-in form of the whole-slab differential
+///   that established the omission's value-neutrality on C-LEARN, which
+///   previously existed only as a throwaway probe nobody could re-run.
+/// * `partial_is_provably_previous_target` forced to `true`, so every arm is
+///   omitted whether or not it is a structural zero -- `(1287, 7000,
+///   10_248_673_492_258_319_975_585_940)`. 82 slots that carry real scores go to
+///   zero and the digest reds.
+///
+/// The third run is what makes the second meaningful. Without it, "unchanged
+/// when the omission is disabled" would be equally consistent with a digest that
+/// cannot see the omission at all.
+///
+/// Run with:
+///   cargo test -p simlin-engine --release --test integration -- --ignored \
+///     clearn_ltm_slot_maxima_digest
+#[test]
+#[ignore]
+fn clearn_ltm_slot_maxima_digest() {
+    use simlin_engine::open_vensim;
+
+    let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+    let project =
+        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).expect("vm");
+    vm.run_to_end()
+        .expect("C-LEARN must simulate with LTM enabled");
+    let results = vm.into_results();
+
+    // Which result slots belong to LTM, taken from the run's own offset map
+    // rather than from a name list, so a renamed synthetic prefix fails loudly
+    // here instead of quietly shrinking the gate's scope.
+    let ltm_offsets: Vec<usize> = results
+        .offsets
+        .iter()
+        .filter(|(name, _)| name.as_str().starts_with("$\u{205A}ltm\u{205A}"))
+        .map(|(_, &off)| off)
+        .collect();
+    assert!(
+        !ltm_offsets.is_empty(),
+        "no LTM slots found in the results; the gate would pass vacuously"
+    );
+
+    let mut nonzero_slots = 0usize;
+    let mut finite_slots = 0usize;
+    let mut magnitude_digest: i128 = 0;
+    for &off in &ltm_offsets {
+        let mut max_mag = 0.0f64;
+        let mut all_finite = true;
+        let mut ever_nonzero = false;
+        for step in 0..results.step_count {
+            let v = results.data[step * results.step_size + off];
+            if !v.is_finite() {
+                all_finite = false;
+                continue;
+            }
+            if v != 0.0 {
+                ever_nonzero = true;
+            }
+            if v.abs() > max_mag {
+                max_mag = v.abs();
+            }
+        }
+        if ever_nonzero {
+            nonzero_slots += 1;
+        }
+        if all_finite {
+            finite_slots += 1;
+        }
+        // Nine significant digits: far finer than any real zeroing, far coarser
+        // than last-bit drift.
+        magnitude_digest += (max_mag * 1e9).round() as i128;
+    }
+
+    assert_eq!(
+        (nonzero_slots, finite_slots, magnitude_digest),
+        (
+            CLEARN_LTM_NONZERO_SLOTS,
+            CLEARN_LTM_FINITE_SLOTS,
+            CLEARN_LTM_MAGNITUDE_DIGEST
+        ),
+        "C-LEARN's LTM slot values moved. A DROP in nonzero_slots is the \
+         silent-zeroing regression this gate exists for; re-derive before \
+         re-pinning, and say in the commit which arms changed and why"
+    );
+}
+
+/// Pinned by `clearn_ltm_slot_maxima_digest`; see its rustdoc before changing.
+const CLEARN_LTM_NONZERO_SLOTS: usize = 1369;
+const CLEARN_LTM_FINITE_SLOTS: usize = 7000;
+const CLEARN_LTM_MAGNITUDE_DIGEST: i128 = 10_248_673_492_482_445_132_733_301;

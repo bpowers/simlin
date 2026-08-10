@@ -43,8 +43,14 @@ struct Interned {
 }
 
 /// Number of shards. A power of two so the shard index is a cheap mask of the
-/// hash. Compilation fans out across rayon threads, so sharding keeps lock
-/// contention low without a concurrent-map dependency.
+/// hash. The interner is a process-global (`GLOBAL` below) reachable from any
+/// thread, so sharding bounds lock contention without pulling in a
+/// concurrent-map dependency.
+///
+/// The concurrency it bounds is NOT compilation, which runs on one thread today
+/// (measured at 0.9996 CPUs utilized). It is `layout::generate_best_layout`'s
+/// best-of-k seed fan-out -- the engine's only rayon call site -- plus any host
+/// driving several `SimlinDb`s at once.
 const INTERNER_SHARDS: usize = 64;
 
 /// One shard: a content-keyed map from string -> weak handle. A `Weak`

@@ -1519,16 +1519,18 @@ pub fn assemble_module<'db>(
         // `assemble_simulation`.
         let ltm_vars = model_ltm_variables(db, model, project);
 
-        for ltm_var in &ltm_vars.vars {
+        for (ltm_index, ltm_var) in ltm_vars.vars.iter().enumerate() {
             let ltm_var_canonical = canonicalize(&ltm_var.name).into_owned();
 
-            // Select and compile this LTM var's fragment. The
-            // selection logic (salsa-cached `(from, to)` path vs.
-            // direct compilation of the prepared equation) lives in
-            // `compile_ltm_synthetic_fragment` so the diagnostic pass
-            // (`model_ltm_fragment_diagnostics`) detects the exact same
-            // compile failures this assembly pass would silently drop.
-            let fragment_result = compile_ltm_synthetic_fragment(db, ltm_var, model, project);
+            // Select and compile this LTM var's fragment. The selection logic
+            // (salsa-cached `(from, to)` path vs. direct compilation of the
+            // prepared equation) lives in `compile_ltm_synthetic_fragment` so
+            // the diagnostic pass (`model_ltm_fragment_diagnostics`) detects the
+            // exact same compile failures this assembly pass would silently
+            // drop. Both walkers reach it through the memoized per-index query,
+            // so the diagnostic pass reuses these fragments instead of
+            // recompiling the ones the direct path does not otherwise cache.
+            let fragment_result = compile_ltm_fragment_at(db, model, project, ltm_index).clone();
 
             if let Some(result) = fragment_result {
                 // Drop LTM fragments whose symbolic variable references can't

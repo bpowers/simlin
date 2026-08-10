@@ -57,6 +57,12 @@ pub(crate) enum FragmentExecKind {
     Implicit,
     /// `compile_ltm_var_fragment` -- salsa-tracked, keyed by `(from, to)` link.
     Ltm,
+    /// `compile_ltm_equation_fragment` -- the LTM fragment-compile BODY,
+    /// recorded wherever it runs. Every LTM path funnels through it (the
+    /// `(from, to)`-keyed one and the per-index `compile_ltm_fragment_at` one),
+    /// so this counts real compiles rather than cache lookups -- which is what
+    /// makes "the diagnostic pass reuses assembly's work" measurable at all.
+    LtmBody,
 }
 
 #[cfg(test)]

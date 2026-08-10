@@ -56,7 +56,9 @@ use wasm::validate;
 // ── Counting allocator ──────────────────────────────────────────────────────
 //
 // Mirrors `examples/clearn_profile.rs`: cumulative alloc calls/bytes plus live
-// bytes and a high-water peak, all atomic (compile fans out across rayon). The
+// bytes and a high-water peak, all atomic because a `GlobalAlloc` must be
+// `Sync` and serves every thread in the process -- not because compilation is
+// parallel, which it is not today. The
 // time pass leaves counting OFF so the per-allocation atomics don't distort
 // wall-clock; the memory pass turns it ON. The default `GlobalAlloc::realloc`
 // routes through alloc/dealloc, so realloc is counted without an override.
