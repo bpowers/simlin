@@ -6,6 +6,9 @@ Checks:
     (indicating an actual file path, not just a filename mention).
   - Markdown link targets [text](path) in CLAUDE.md and docs/ files
     where the target is a local path (not a URL).
+  - "Last reviewed/updated/verified" stamp comments in CLAUDE.md files,
+    which the root CLAUDE.md's comment standards ban (they go stale
+    immediately and are rebase-conflict magnets).
 
 Paths are resolved relative to the file's directory first, then repo root.
 
@@ -95,6 +98,22 @@ def check_file(file_path: Path, repo_root: Path) -> list[str]:
             line_num = content_links[:match.start()].count("\n") + 1
             errors.append(f"{rel_path}:{line_num}: broken link target '{target}'")
 
+    # Reject "Last reviewed/updated/verified" stamps in CLAUDE.md files.
+    # Matched narrowly (comment form, or a stamp starting its own line) so the
+    # root CLAUDE.md's prose *describing* the ban doesn't trip the check.
+    if file_path.name == "CLAUDE.md":
+        stamp_re = re.compile(
+            r'(<!--\s*Last\s+(?:reviewed|updated|verified)'
+            r'|^\s*Last\s+(?:reviewed|updated|verified)\s*:)',
+            re.IGNORECASE | re.MULTILINE,
+        )
+        for match in stamp_re.finditer(raw_content):
+            line_num = raw_content[:match.start()].count("\n") + 1
+            errors.append(
+                f"{rel_path}:{line_num}: 'Last reviewed/updated/verified' stamp "
+                "(banned by root CLAUDE.md comment standards -- rely on git history)"
+            )
+
     # Check backtick-quoted paths in CLAUDE.md files only
     # Only check tokens that contain `/` (actual paths, not bare filenames)
     if file_path.name == "CLAUDE.md":
@@ -147,6 +166,11 @@ def main() -> int:
         if any(p in ("node_modules", "target", "build", "lib", "lib.browser", "lib.module",
                      "third_party", ".claude-scratch")
                for p in parts):
+            continue
+        # `.claude/worktrees` holds git-worktree checkouts -- complete copies of
+        # the repo at other branches -- so their CLAUDE.md files reflect other
+        # revisions, not this tree.
+        if parts[:2] == (".claude", "worktrees"):
             continue
         files_to_check.append(claude_md)
 

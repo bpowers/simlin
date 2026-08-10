@@ -1,6 +1,6 @@
 # Improving the Harness
 
-The harness is everything around the model that shapes what an agent produces here: routed context (the root `CLAUDE.md`, per-package `CLAUDE.md` files, `docs/`), executable checks (`scripts/pre-commit`, CI, guard tests, repo lints), tools and scripts, skills in `.claude/skills/`, and the review loop. A harness change alters every future trajectory, so it gets the same rigor as a code change: identify the real gap, make the smallest fix at the owning boundary, and verify the fix actually fires.
+The harness is everything around the model that shapes what an agent produces here: routed context (the root `CLAUDE.md`, per-package `CLAUDE.md` files, `docs/`), executable checks (`scripts/pre-commit`, CI, guard tests, repo lints), tools and scripts, skills (`.claude/skills/`, with a sibling tree for other agents in `.agents/skills/` -- a sweep that touches one must cover both), and the review loop. A harness change alters every future trajectory, so it gets the same rigor as a code change: identify the real gap, make the smallest fix at the owning boundary, and verify the fix actually fires.
 
 This document owns two procedures: how an observed failure becomes a durable harness change, and how existing harness machinery justifies its carrying cost.
 

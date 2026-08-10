@@ -12,7 +12,7 @@
 
 ### Reading test output
 
-Do NOT preemptively pipe `cargo test` (or `cargo build`) through `head` or `tail` to bound the output. `head` closes the pipe and can kill the test process mid-run via SIGPIPE, so the run you think you observed never completed; `tail` discards the earlier output that a late failure often depends on; and without explicit pipeline-status handling, either filter hides the real exit status. Run the full command once, let it finish, and read the failures from the complete output -- rerun a single failing test with a name filter (`cargo test -p <crate> <name>`) when you need a tight loop, rather than truncating the evidence from the broad run.
+Do NOT preemptively pipe `cargo test` (or `cargo build`) through `head` or `tail` to bound the output. `head` closes the pipe once it has its lines; Rust tooling ignores SIGPIPE, so the producer sees EPIPE and can stop early while still exiting 0 (checked in this repo: `cargo tree -e all --workspace | head -2` drops ~178KB of output and `PIPESTATUS` is `0 0`), which makes a truncated run indistinguishable from a clean one. `tail` lets the run finish but discards the earlier output a late failure often depends on. Either way you lose the evidence, and the exit status will not warn you. Run the full command once, let it finish, and read the failures from the complete output -- rerun a single failing test with a name filter (`cargo test -p <crate> <name>`) when you need a tight loop, rather than truncating the evidence from the broad run.
 
 ### One integration-test harness per crate
 

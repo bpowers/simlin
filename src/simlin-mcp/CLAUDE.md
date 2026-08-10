@@ -2,8 +2,6 @@
 
 MCP (Model Context Protocol) server exposing the Simlin simulation engine as tools for AI assistants.
 
-<!-- Last reviewed: 2026-04-26 -->
-
 ## Architecture
 
 This crate is a thin binary wrapper around `simlin-mcp-core`, which owns the entire MCP tool surface (tool implementations, output types, the rmcp `ServerHandler` impl). The binary contributes:

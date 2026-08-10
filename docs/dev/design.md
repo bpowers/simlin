@@ -28,6 +28,8 @@ The existing Material Design-inspired component library provides a solid foundat
 
 ## Design Tokens Reference
 
+These tokens govern the surfaces that load `src/diagram/theme.css`: the editor packages (`src/diagram`, `src/app`, and `simlin-serve`'s web UI). The website does not consume `theme.css` -- it carries its own brand palette (Simlin red, `--rp-c-brand: #c83639`, defined in `website/src/css/custom.css`) -- but the users, brand personality, and design principles above apply there too.
+
 - **Primary**: #1976d2 | **Secondary**: #dc004e | **Selected**: #4444dd
 - **Error**: #c62828 | **Success**: #2e7d32 | **Warning**: #f57f17
 - **Font**: Roboto, Helvetica, Arial, sans-serif
