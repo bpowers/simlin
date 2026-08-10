@@ -100,15 +100,18 @@ def check_file(file_path: Path, repo_root: Path) -> list[str]:
 
     # Reject "Last reviewed/updated/verified" stamps in CLAUDE.md files.
     # Matched narrowly (comment form, or a stamp starting its own line) so the
-    # root CLAUDE.md's prose *describing* the ban doesn't trip the check.
+    # root CLAUDE.md's prose *describing* the ban doesn't trip the check, and
+    # scanned on content_links (fenced blocks stripped, inline code spans
+    # blanked -- both line-number-preserving) so an example of the banned form
+    # in a code block or backticks isn't rejected as a real stamp.
     if file_path.name == "CLAUDE.md":
         stamp_re = re.compile(
             r'(<!--\s*Last\s+(?:reviewed|updated|verified)'
             r'|^\s*Last\s+(?:reviewed|updated|verified)\s*:)',
             re.IGNORECASE | re.MULTILINE,
         )
-        for match in stamp_re.finditer(raw_content):
-            line_num = raw_content[:match.start()].count("\n") + 1
+        for match in stamp_re.finditer(content_links):
+            line_num = content_links[:match.start()].count("\n") + 1
             errors.append(
                 f"{rel_path}:{line_num}: 'Last reviewed/updated/verified' stamp "
                 "(banned by root CLAUDE.md comment standards -- rely on git history)"
