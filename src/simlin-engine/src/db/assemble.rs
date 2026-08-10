@@ -904,8 +904,6 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
     var_name: &str,
     phase: SccPhase,
 ) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
-    use crate::db::var_fragment::{LoweredVarFragment, lower_var_fragment};
-
     // `#[cfg(test)]` only: an active `UnsourceableVarsGuard` forces this
     // node to take the loud-safe `None` arm, so the AC3.2 regression test
     // can exercise the genuinely-unsourceable in-SCC path through the
@@ -915,11 +913,51 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
     // trigger). It returns the SAME `None` a real no-`SourceVariable`
     // node returns, so the test observes the real loud-safe behavior, not
     // a shim. No effect in non-test builds.
+    //
+    // It sits OUTSIDE the memo deliberately. Inside the tracked body its
+    // verdict would be cached against a key the guard is not part of, so a
+    // guard toggled between two calls on one `db` would be ignored by the
+    // second -- silently, and in the direction that makes the AC3.2 test pass
+    // for the wrong reason. Short-circuiting here keeps the override exactly
+    // as immediate as it was when this whole function was a plain call.
     #[cfg(test)]
     if crate::db::dep_graph::var_is_forced_unsourceable(var_name) {
         return None;
     }
 
+    var_phase_symbolic_fragment_memo(db, model, project, var_name.to_string(), phase).clone()
+}
+
+/// The memoized body of [`var_phase_symbolic_fragment_prod`].
+///
+/// Salsa-tracked because this is the engine's own per-variable lowering plus
+/// codegen -- the same work `compile_var_fragment` does, under the
+/// no-module-input wiring -- run once per SCC member per phase by the cycle
+/// gate's element-order probe, and it was a plain function. Instrumented on
+/// C-LEARN the probe called it **135 times per cold compile for 57 distinct
+/// `(variable, phase)` keys**: the dt refinement verifies BOTH phases as a
+/// precondition and the init refinement then re-derives the init order, so a
+/// 2.4x duplication was structural rather than incidental. It is ~16% of a
+/// cold compile, and the whole of it recurs on every recompile of the same
+/// unchanged model.
+///
+/// The key is `(model, project, var_name, phase)` -- the arguments the body
+/// already varied over. `var_name` is a `String` rather than a `&str` because
+/// a salsa key must be owned; the wrapper above does that one allocation on
+/// the caller's behalf and clones the memo out, which is what keeps every
+/// existing call site's ownership unchanged. Both are trivial next to the
+/// lowering they replace.
+#[salsa::tracked(returns(ref))]
+fn var_phase_symbolic_fragment_memo(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    var_name: String,
+    phase: SccPhase,
+) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
+    use crate::db::var_fragment::{LoweredVarFragment, lower_var_fragment};
+
+    let var_name = var_name.as_str();
     let source_vars = model.variables(db);
     // No `SourceVariable` (a synthetic INIT/PREVIOUS/SMOOTH/macro-expansion
     // helper, `$\u{205A}` prefix, absent from `model.variables`): before

@@ -1628,7 +1628,7 @@ mod dep_graph_tests;
 ///
 /// Derives the same trait set as `ModelDepGraphResult` (it is reachable
 /// from a salsa return value, so it must participate in salsa equality).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SccPhase {
     Dt,
     Initial,
