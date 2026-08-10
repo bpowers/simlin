@@ -35,6 +35,19 @@ strip = false
 #     --extract-json payload (with float_roundtrip) on every `cargo test`.
 #   - wasm-interpreter/checked: every wasmgen parity test executes an emitted
 #     blob under this pure-Rust interpreter.
+#   - the resvg rasterization stack: the `diagram::render_png` tests rasterize
+#     a diagram through resvg, and unoptimized SVG filter code dominates them
+#     (~80% of the slowest one is `resvg::filter::morphology::apply`, per
+#     `perf`, with the un-inlined `u8::max` inside it alone at ~35%). Pinning
+#     the stack takes those 16 tests from 2.52s to 0.33s and drops the engine's
+#     lib-test binary below its previous one-test parallel floor.
+#
+# The asymmetry that makes these worth it: a dependency is not recompiled by an
+# edit to a workspace crate, so a pin costs one rebuild of that dependency (and
+# whatever sits above it) and then nothing at all on the edit-compile-test loop.
+# Measured on the render stack: no change to a cold `cargo test -p simlin-engine
+# --no-run` (61.3s vs 58.7s, inside run-to-run noise). Pinning a WORKSPACE crate
+# is a different trade and is deliberately not done here.
 [profile.dev.package.serde_json]
 opt-level = 3
 
@@ -42,4 +55,31 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.checked]
+opt-level = 3
+
+[profile.dev.package.resvg]
+opt-level = 3
+
+[profile.dev.package.usvg]
+opt-level = 3
+
+[profile.dev.package.tiny-skia]
+opt-level = 3
+
+[profile.dev.package.tiny-skia-path]
+opt-level = 3
+
+[profile.dev.package.png]
+opt-level = 3
+
+[profile.dev.package.rustybuzz]
+opt-level = 3
+
+[profile.dev.package.ttf-parser]
+opt-level = 3
+
+[profile.dev.package.fontdb]
+opt-level = 3
+
+[profile.dev.package.svgtypes]
 opt-level = 3
