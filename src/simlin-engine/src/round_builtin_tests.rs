@@ -6,73 +6,47 @@
 //!
 //! ROUND is a Simlin extension: the XMILE v1.0 spec defines no ROUND function
 //! (verified against `docs/reference/xmile-v1.0.html`, which contains zero
-//! occurrences of the word). Its semantics are therefore ours to define, and
-//! they are Python's `round()` / IEEE 754 roundTiesToEven: round to the
-//! nearest integer, with an exact .5 tie going to the EVEN neighbor. That is
-//! `f64::round_ties_even` in the VM and the single `f64.nearest` instruction
-//! in the wasm backend, so the two backends agree bit for bit by construction.
+//! occurrences of the word). Simlin defines it as Python's `round()` /
+//! IEEE 754 roundTiesToEven: round to the nearest integer, with an exact .5
+//! tie going to the EVEN neighbor. That is `f64::round_ties_even` in the VM
+//! and the single `f64.nearest` instruction in the wasm backend, so the two
+//! backends agree bit for bit by construction.
+//!
+//! One external-tool caveat (see the `BuiltinFn::Round` comment): Stella also
+//! defines a ROUND builtin with an unspecified tie rule, so a Stella-authored
+//! .stmx calling ROUND now imports under these semantics; whether Stella
+//! agrees at exact ties is unverified.
 //!
 //! The tie-to-even cases are the whole point of the contract -- `f64::round`
 //! (ties away from zero) agrees with `round_ties_even` on every non-tie input,
 //! so a test suite without exact .5 ties would pass with the wrong function.
 
-use crate::test_common::TestProject;
-
-/// `(input literal, expected)` rows for scalar ROUND, exercised through the
-/// full parse -> lower -> compile -> VM pipeline.
-///
-/// Expected values are Python 3 `round()` outputs (spot-checked directly
-/// against CPython): ties go to the even neighbor, non-ties to the nearest
-/// integer.
-const ROUND_CASES: &[(&str, f64)] = &[
-    // Exact .5 ties -> even neighbor (the cases that distinguish
-    // round-half-even from round-half-away-from-zero).
-    ("0.5", 0.0),
-    ("1.5", 2.0),
-    ("2.5", 2.0),
-    ("3.5", 4.0),
-    // IEEE roundTiesToEven preserves the sign of zero, so round(-0.5) is
-    // NEGATIVE zero -- the same value Python's float rounding produces
-    // (`round(-0.5, 0) == -0.0`; the bare `round(-0.5) == 0` only because
-    // Python ints have no signed zero). Numerically equal to 0 everywhere.
-    ("-0.5", -0.0),
-    ("-1.5", -2.0),
-    ("-2.5", -2.0),
-    ("-3.5", -4.0),
-    // Non-ties round to nearest.
-    ("2.4", 2.0),
-    ("2.6", 3.0),
-    ("-2.4", -2.0),
-    ("-2.6", -3.0),
-    ("0.4999", 0.0),
-    ("7", 7.0),
-    ("-7", -7.0),
-    ("0", 0.0),
-    // The double closest to but below 0.5: rounds to 0, and would expose an
-    // implementation that rounded the DECIMAL spelling instead of the binary
-    // value.
-    ("0.49999999999999994", 0.0),
-    // At 2^52 every double is already an integer; ROUND must be the identity
-    // there rather than losing precision.
-    ("4503599627370496", 4503599627370496.0),
-    // The largest representable x.5 tie below 2^52: 2^52 - 0.5 rounds to the
-    // even 2^52.
-    ("4503599627370495.5", 4503599627370496.0),
-];
+use crate::test_common::{ROUND_TIES_TO_EVEN_CASES, TestProject, assert_round_case};
 
 #[test]
 fn round_scalar_ties_to_even_through_the_vm() {
-    for (input, expected) in ROUND_CASES {
+    // Drive the SHARED case table (the same rows the VM apply() and wasm
+    // parity tests assert) through the full parse -> lower -> compile -> VM
+    // pipeline, spelling each input as an equation literal.
+    for &(input, expected) in ROUND_TIES_TO_EVEN_CASES {
+        // The equation language cannot spell NEGATIVE ZERO as an input:
+        // unary minus lowers to `0 - x`, and 0 - 0 is +0.0. The VM/wasm
+        // apply-level tests cover that row; skip it here.
+        if input == 0.0 && input.is_sign_negative() {
+            continue;
+        }
+        // `nan` is the keyword spelling; every other value's shortest
+        // round-trip Debug form (incl. `inf`/`-inf`) is valid equation text.
+        let literal = if input.is_nan() {
+            "nan".to_string()
+        } else {
+            format!("{input:?}")
+        };
         let got = TestProject::new("round_scalar")
             .with_sim_time(0.0, 1.0, 1.0)
-            .aux("y", &format!("round({input})"), None)
+            .aux("y", &format!("round({literal})"), None)
             .vm_result("y");
-        assert_eq!(
-            got[0].to_bits(),
-            expected.to_bits(),
-            "round({input}): got {}, expected {expected}",
-            got[0]
-        );
+        assert_round_case(input, got[0], expected, "vm-e2e");
     }
 }
 

@@ -79,8 +79,15 @@ pub enum BuiltinFn<Expr> {
     Quantum(Box<Expr>, Box<Expr>),
     Ramp(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     // ROUND(x): nearest integer, exact .5 ties to the EVEN neighbor
-    // (Python round() / IEEE roundTiesToEven). A Simlin extension: the XMILE
-    // v1.0 spec defines no ROUND builtin.
+    // (Python round() / IEEE roundTiesToEven). The XMILE v1.0 spec defines no
+    // ROUND builtin, so ties-to-even is Simlin's choice -- but Stella DOES
+    // define ROUND ("rounds expression to its nearest integer value", isee
+    // Stella docs, tie rule unspecified), so a Stella-authored model calling
+    // ROUND now imports and simulates instead of failing with UnknownBuiltin.
+    // Whether Stella agrees at exact .5 ties is UNVERIFIED; if it rounds ties
+    // away from zero (the Excel/C convention), an imported model that hits an
+    // exact tie diverges by 1 there. Vensim defines no ROUND at all, and the
+    // MDL writer records an ExportWarning for it (mdl/writer.rs).
     Round(Box<Expr>),
     SafeDiv(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     Sign(Box<Expr>),

@@ -1839,46 +1839,18 @@ fn apply_min_max() {
 
 /// `Round` lowers to the single `f64.nearest` instruction, which the wasm
 /// spec defines as IEEE roundTiesToEven -- exactly the VM's
-/// `f64::round_ties_even`. The exact .5 ties are the load-bearing rows: a
-/// round-half-away implementation (`f64.trunc`-based, or `floor(x + 0.5)`)
-/// agrees everywhere else.
+/// `f64::round_ties_even`. Driven by the SHARED case table in `test_common`
+/// (the same rows the VM's `apply_round_ties_to_even` and the end-to-end
+/// pipeline test assert), so a wasm-side regression cannot hide on a row
+/// only the VM test carries. The table's comparison contract compares by
+/// bit pattern, so the signed-zero ties pin `f64.nearest(-0.5)` as NEGATIVE
+/// zero, matching `round_ties_even`.
 #[test]
 fn apply_round() {
-    // Ties go to the even neighbor.
-    assert_apply_exact(BuiltinId::Round, 0.5, 0.0, 0.0, 0.0, 1.0, 0.0);
-    assert_apply_exact(BuiltinId::Round, 1.5, 0.0, 0.0, 0.0, 1.0, 2.0);
-    assert_apply_exact(BuiltinId::Round, 2.5, 0.0, 0.0, 0.0, 1.0, 2.0);
-    assert_apply_exact(BuiltinId::Round, 3.5, 0.0, 0.0, 0.0, 1.0, 4.0);
-    assert_apply_exact(BuiltinId::Round, -1.5, 0.0, 0.0, 0.0, 1.0, -2.0);
-    assert_apply_exact(BuiltinId::Round, -2.5, 0.0, 0.0, 0.0, 1.0, -2.0);
-    // Non-ties round to nearest.
-    assert_apply_exact(BuiltinId::Round, 2.4, 0.0, 0.0, 0.0, 1.0, 2.0);
-    assert_apply_exact(BuiltinId::Round, 2.6, 0.0, 0.0, 0.0, 1.0, 3.0);
-    assert_apply_exact(BuiltinId::Round, -2.6, 0.0, 0.0, 0.0, 1.0, -3.0);
-    // Bit-parity with the VM on the signed-zero tie: f64.nearest(-0.5) must
-    // be NEGATIVE zero, matching round_ties_even.
-    let got = apply_eval(BuiltinId::Round, -0.5, 0.0, 0.0, 0.0, 1.0);
-    assert_eq!(got.to_bits(), (-0.0f64).to_bits());
-    // The largest tie below 2^52, and NaN/infinity pass-through.
-    assert_apply_exact(
-        BuiltinId::Round,
-        4_503_599_627_370_495.5,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-        4_503_599_627_370_496.0,
-    );
-    assert_apply_exact(BuiltinId::Round, f64::NAN, 0.0, 0.0, 0.0, 1.0, f64::NAN);
-    assert_apply_exact(
-        BuiltinId::Round,
-        f64::INFINITY,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-        f64::INFINITY,
-    );
+    for &(input, expected) in crate::test_common::ROUND_TIES_TO_EVEN_CASES {
+        let got = apply_eval(BuiltinId::Round, input, 0.0, 0.0, 0.0, 1.0);
+        crate::test_common::assert_round_case(input, got, expected, "wasm-apply");
+    }
 }
 
 #[test]

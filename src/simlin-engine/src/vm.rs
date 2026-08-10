@@ -4015,36 +4015,15 @@ mod apply_tests {
     }
 
     /// ROUND sends exact .5 ties to the even neighbor (Python round() /
-    /// IEEE roundTiesToEven). The tie rows are the contract: `f64::round`
-    /// (ties away from zero) agrees on every non-tie input, so without them
-    /// the wrong function would pass.
+    /// IEEE roundTiesToEven). Driven by the SHARED case table in
+    /// `test_common` -- the same rows the wasm parity test and the
+    /// end-to-end pipeline test assert -- so the backends cannot drift.
     #[test]
     fn apply_round_ties_to_even() {
-        let round = |x: f64| apply(BuiltinId::Round, 0.0, 1.0, x, 0.0, 0.0);
-        // Ties -> even.
-        assert_eq!(0.0, round(0.5));
-        assert_eq!(2.0, round(1.5));
-        assert_eq!(2.0, round(2.5));
-        assert_eq!(4.0, round(3.5));
-        assert_eq!(-2.0, round(-1.5));
-        assert_eq!(-2.0, round(-2.5));
-        // roundTiesToEven preserves the sign of zero: round(-0.5) is -0.0.
-        assert_eq!((-0.0f64).to_bits(), round(-0.5).to_bits());
-        // Non-ties -> nearest.
-        assert_eq!(2.0, round(2.4));
-        assert_eq!(3.0, round(2.6));
-        assert_eq!(-2.0, round(-2.4));
-        assert_eq!(-3.0, round(-2.6));
-        // The double just below 0.5 rounds down, distinguishing binary-value
-        // rounding from decimal-spelling rounding.
-        assert_eq!(0.0, round(0.499_999_999_999_999_94));
-        // At and beyond 2^52 every double is an integer: identity.
-        assert_eq!(4_503_599_627_370_496.0, round(4_503_599_627_370_496.0));
-        assert_eq!(4_503_599_627_370_496.0, round(4_503_599_627_370_495.5));
-        // Specials pass through.
-        assert!(round(f64::NAN).is_nan());
-        assert_eq!(f64::INFINITY, round(f64::INFINITY));
-        assert_eq!(f64::NEG_INFINITY, round(f64::NEG_INFINITY));
+        for &(input, expected) in crate::test_common::ROUND_TIES_TO_EVEN_CASES {
+            let got = apply(BuiltinId::Round, 0.0, 1.0, input, 0.0, 0.0);
+            crate::test_common::assert_round_case(input, got, expected, "vm-apply");
+        }
     }
 
     #[test]
