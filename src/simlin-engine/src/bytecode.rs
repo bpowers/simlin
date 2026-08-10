@@ -609,6 +609,7 @@ pub(crate) enum BuiltinId {
     Pulse,
     Quantum,
     Ramp,
+    Round,
     SafeDiv,
     Sign,
     Sin,

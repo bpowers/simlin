@@ -701,6 +701,7 @@ impl Expr2 {
                         loc,
                     ),
                     Abs(e) => Abs(Box::new(Expr2::from(*e, ctx)?)),
+                    Round(e) => Round(Box::new(Expr2::from(*e, ctx)?)),
                     Arccos(e) => Arccos(Box::new(Expr2::from(*e, ctx)?)),
                     Arcsin(e) => Arcsin(Box::new(Expr2::from(*e, ctx)?)),
                     Arctan(e) => Arctan(Box::new(Expr2::from(*e, ctx)?)),

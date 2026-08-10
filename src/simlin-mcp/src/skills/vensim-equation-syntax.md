@@ -42,7 +42,7 @@ The complete mapping from Vensim MDL function names to XMILE (Simlin) equivalent
 | `VMIN(a, b)` | `MIN(a, b)` | |
 | `LOG(x)` (1 arg) | `LOG10(x)` | Vensim LOG is base-10 |
 | `LOG(x, base)` (2 args) | `(LN(x) / LN(base))` | Arbitrary base |
-| `INTEGER(x)` | `INT(x)` | Truncate to integer |
+| `INTEGER(x)` | `INT(x)` | Integer part (floor: rounds toward negative infinity) |
 | `MODULO(a, b)` | `(a) MOD (b)` | Infix operator in XMILE |
 | `:AND:` | `AND` / `and` | Logical operator |
 | `:OR:` | `OR` / `or` | Logical operator |

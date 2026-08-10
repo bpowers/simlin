@@ -308,6 +308,7 @@ fn materialize_view_operands(
         | Arctan(_)
         | Cos(_)
         | Exp(_)
+        | Round(_)
         | Inf
         | Int(_)
         | IsModuleInput(_, _)

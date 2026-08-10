@@ -684,6 +684,7 @@ fn expr_contains_pass1_decomposition_site(expr: &crate::ast::Expr2) -> bool {
                 | BuiltinFn::Pulse(_, _, _)
                 | BuiltinFn::Quantum(_, _)
                 | BuiltinFn::Ramp(_, _, _)
+                | BuiltinFn::Round(_)
                 | BuiltinFn::SafeDiv(_, _, _)
                 | BuiltinFn::Sign(_)
                 | BuiltinFn::Sshape(_, _, _)

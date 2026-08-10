@@ -2474,6 +2474,15 @@ fn emit_apply(func: BuiltinId, ctx: &EmitCtx, f: &mut Function) {
             get(f, a);
             f.instruction(&Ins::F64Floor);
         }
+        // `Round = a.round_ties_even()`: wasm's `f64.nearest` IS
+        // round-ties-to-even (the wasm spec's fnearest is IEEE
+        // roundToIntegralTiesToEven), so the single native instruction matches
+        // the VM bit for bit. NOT `f64::round`, which sends .5 ties away from
+        // zero and would diverge at every exact tie.
+        BuiltinId::Round => {
+            get(f, a);
+            f.instruction(&Ins::F64Nearest);
+        }
         // `Max`/`Min` use the wasm instructions per AC7.3. These differ from the
         // VM's compare form (`if a>b {a} else {b}`) only on NaN/±0; if a corpus
         // model ever surfaces such a divergence, switch the offending op to the

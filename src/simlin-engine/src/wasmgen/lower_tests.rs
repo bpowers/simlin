@@ -1837,6 +1837,50 @@ fn apply_min_max() {
     assert_apply_exact(BuiltinId::Min, -1.0, -5.0, 0.0, 0.0, 1.0, -5.0);
 }
 
+/// `Round` lowers to the single `f64.nearest` instruction, which the wasm
+/// spec defines as IEEE roundTiesToEven -- exactly the VM's
+/// `f64::round_ties_even`. The exact .5 ties are the load-bearing rows: a
+/// round-half-away implementation (`f64.trunc`-based, or `floor(x + 0.5)`)
+/// agrees everywhere else.
+#[test]
+fn apply_round() {
+    // Ties go to the even neighbor.
+    assert_apply_exact(BuiltinId::Round, 0.5, 0.0, 0.0, 0.0, 1.0, 0.0);
+    assert_apply_exact(BuiltinId::Round, 1.5, 0.0, 0.0, 0.0, 1.0, 2.0);
+    assert_apply_exact(BuiltinId::Round, 2.5, 0.0, 0.0, 0.0, 1.0, 2.0);
+    assert_apply_exact(BuiltinId::Round, 3.5, 0.0, 0.0, 0.0, 1.0, 4.0);
+    assert_apply_exact(BuiltinId::Round, -1.5, 0.0, 0.0, 0.0, 1.0, -2.0);
+    assert_apply_exact(BuiltinId::Round, -2.5, 0.0, 0.0, 0.0, 1.0, -2.0);
+    // Non-ties round to nearest.
+    assert_apply_exact(BuiltinId::Round, 2.4, 0.0, 0.0, 0.0, 1.0, 2.0);
+    assert_apply_exact(BuiltinId::Round, 2.6, 0.0, 0.0, 0.0, 1.0, 3.0);
+    assert_apply_exact(BuiltinId::Round, -2.6, 0.0, 0.0, 0.0, 1.0, -3.0);
+    // Bit-parity with the VM on the signed-zero tie: f64.nearest(-0.5) must
+    // be NEGATIVE zero, matching round_ties_even.
+    let got = apply_eval(BuiltinId::Round, -0.5, 0.0, 0.0, 0.0, 1.0);
+    assert_eq!(got.to_bits(), (-0.0f64).to_bits());
+    // The largest tie below 2^52, and NaN/infinity pass-through.
+    assert_apply_exact(
+        BuiltinId::Round,
+        4_503_599_627_370_495.5,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        4_503_599_627_370_496.0,
+    );
+    assert_apply_exact(BuiltinId::Round, f64::NAN, 0.0, 0.0, 0.0, 1.0, f64::NAN);
+    assert_apply_exact(
+        BuiltinId::Round,
+        f64::INFINITY,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        f64::INFINITY,
+    );
+}
+
 #[test]
 fn apply_sign() {
     assert_apply_exact(BuiltinId::Sign, 5.0, 0.0, 0.0, 0.0, 1.0, 1.0);

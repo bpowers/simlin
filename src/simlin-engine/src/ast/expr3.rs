@@ -188,6 +188,7 @@ impl Expr3 {
                     | Int(e)
                     | Ln(e)
                     | Log10(e)
+                    | Round(e)
                     | Sign(e)
                     | Sin(e)
                     | Sqrt(e)
@@ -841,6 +842,10 @@ impl<'a> Pass1Context<'a> {
             Int(e) => {
                 let (new_e, has_a2a) = self.transform_inner(*e);
                 (Int(Box::new(new_e)), has_a2a)
+            }
+            Round(e) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (Round(Box::new(new_e)), has_a2a)
             }
             Ln(e) => {
                 let (new_e, has_a2a) = self.transform_inner(*e);

@@ -3627,6 +3627,11 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
             let end_time = c;
             ramp(time, slope, start_time, Some(end_time))
         }
+        // ROUND is Python round() / IEEE roundTiesToEven: nearest integer,
+        // exact .5 ties to the even neighbor. `round_ties_even` is also what
+        // wasm's single `f64.nearest` instruction computes, so the wasm
+        // backend mirrors this bit for bit (see `wasmgen/lower.rs`).
+        BuiltinId::Round => a.round_ties_even(),
         BuiltinId::SafeDiv => {
             // Use exact zero comparison, not approx_eq: a denominator that
             // is very small but non-zero (e.g. subnormal) should still
@@ -4007,6 +4012,39 @@ mod apply_tests {
     fn apply_int_floors() {
         assert_eq!(3.0, apply(BuiltinId::Int, 0.0, 1.0, 3.7, 0.0, 0.0));
         assert_eq!(-4.0, apply(BuiltinId::Int, 0.0, 1.0, -3.2, 0.0, 0.0));
+    }
+
+    /// ROUND sends exact .5 ties to the even neighbor (Python round() /
+    /// IEEE roundTiesToEven). The tie rows are the contract: `f64::round`
+    /// (ties away from zero) agrees on every non-tie input, so without them
+    /// the wrong function would pass.
+    #[test]
+    fn apply_round_ties_to_even() {
+        let round = |x: f64| apply(BuiltinId::Round, 0.0, 1.0, x, 0.0, 0.0);
+        // Ties -> even.
+        assert_eq!(0.0, round(0.5));
+        assert_eq!(2.0, round(1.5));
+        assert_eq!(2.0, round(2.5));
+        assert_eq!(4.0, round(3.5));
+        assert_eq!(-2.0, round(-1.5));
+        assert_eq!(-2.0, round(-2.5));
+        // roundTiesToEven preserves the sign of zero: round(-0.5) is -0.0.
+        assert_eq!((-0.0f64).to_bits(), round(-0.5).to_bits());
+        // Non-ties -> nearest.
+        assert_eq!(2.0, round(2.4));
+        assert_eq!(3.0, round(2.6));
+        assert_eq!(-2.0, round(-2.4));
+        assert_eq!(-3.0, round(-2.6));
+        // The double just below 0.5 rounds down, distinguishing binary-value
+        // rounding from decimal-spelling rounding.
+        assert_eq!(0.0, round(0.499_999_999_999_999_94));
+        // At and beyond 2^52 every double is an integer: identity.
+        assert_eq!(4_503_599_627_370_496.0, round(4_503_599_627_370_496.0));
+        assert_eq!(4_503_599_627_370_496.0, round(4_503_599_627_370_495.5));
+        // Specials pass through.
+        assert!(round(f64::NAN).is_nan());
+        assert_eq!(f64::INFINITY, round(f64::INFINITY));
+        assert_eq!(f64::NEG_INFINITY, round(f64::NEG_INFINITY));
     }
 
     #[test]

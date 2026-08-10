@@ -58,7 +58,8 @@ Variables use XMILE equation syntax. Key functions and their behavior:
 | `MIN(a, b)`, `MAX(a, b)` | Minimum / maximum |
 | `ABS(x)`, `EXP(x)`, `LN(x)`, `LOG10(x)` | Math functions |
 | `SIN(x)`, `COS(x)`, `ARCTAN(x)` | Trigonometric functions |
-| `INT(x)` | Truncate to integer |
+| `INT(x)` | Integer part (floor: rounds toward negative infinity) |
+| `ROUND(x)` | Round to nearest integer; exact .5 ties go to the even neighbor (like Python's `round()`) |
 | `MODULO(a, b)` | Modulo (a MOD b) |
 | `SIZE(dimension)` | Number of elements in a dimension |
 | `SUM(array)`, `MEAN(array)` | Array aggregation |

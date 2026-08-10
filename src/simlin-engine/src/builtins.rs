@@ -78,6 +78,10 @@ pub enum BuiltinFn<Expr> {
     Pulse(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     Quantum(Box<Expr>, Box<Expr>),
     Ramp(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
+    // ROUND(x): nearest integer, exact .5 ties to the EVEN neighbor
+    // (Python round() / IEEE roundTiesToEven). A Simlin extension: the XMILE
+    // v1.0 spec defines no ROUND builtin.
+    Round(Box<Expr>),
     SafeDiv(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     Sign(Box<Expr>),
     Sshape(Box<Expr>, Box<Expr>, Box<Expr>),
@@ -136,6 +140,7 @@ impl<Expr> BuiltinFn<Expr> {
             Pulse(_, _, _) => "pulse",
             Quantum(_, _) => "quantum",
             Ramp(_, _, _) => "ramp",
+            Round(_) => "round",
             SafeDiv(_, _, _) => "safediv",
             Sign(_) => "sign",
             Sshape(_, _, _) => "sshape",
@@ -216,6 +221,7 @@ impl<Expr> BuiltinFn<Expr> {
                 Box::new(f(*b)?),
                 c.map(|c| f(*c)).transpose()?.map(Box::new),
             ),
+            Round(a) => Round(Box::new(f(*a)?)),
             SafeDiv(a, b, c) => SafeDiv(
                 Box::new(f(*a)?),
                 Box::new(f(*b)?),
@@ -303,6 +309,7 @@ impl<Expr> BuiltinFn<Expr> {
             | Pulse(_, _, _)
             | Quantum(_, _)
             | Ramp(_, _, _)
+            | Round(_)
             | SafeDiv(_, _, _)
             | Sign(_)
             | Sshape(_, _, _)
@@ -341,8 +348,8 @@ impl<Expr> BuiltinFn<Expr> {
                 f(b);
             }
             Abs(a) | Arccos(a) | Arcsin(a) | Arctan(a) | Cos(a) | Exp(a) | Int(a) | Ln(a)
-            | Log10(a) | Sign(a) | Sin(a) | Sqrt(a) | Tan(a) | Size(a) | Stddev(a) | Sum(a)
-            | Init(a) => f(a),
+            | Log10(a) | Round(a) | Sign(a) | Sin(a) | Sqrt(a) | Tan(a) | Size(a) | Stddev(a)
+            | Sum(a) | Init(a) => f(a),
             Previous(a, b) => {
                 f(a);
                 f(b);
@@ -486,6 +493,7 @@ pub fn is_builtin_fn(name: &str) -> bool {
         | "pulse"
         | "quantum"
         | "ramp"
+        | "round"
         | "safediv"
         | "sign"
         | "sin"
@@ -550,6 +558,7 @@ where
         | BuiltinFn::Int(a)
         | BuiltinFn::Ln(a)
         | BuiltinFn::Log10(a)
+        | BuiltinFn::Round(a)
         | BuiltinFn::Sign(a)
         | BuiltinFn::Sin(a)
         | BuiltinFn::Sqrt(a)
@@ -657,6 +666,7 @@ fn every_builtin_variant_names_itself_and_is_recognized() {
         Builtin::Pulse(b(), b(), None),
         Builtin::Quantum(b(), b()),
         Builtin::Ramp(b(), b(), None),
+        Builtin::Round(b()),
         Builtin::SafeDiv(b(), b(), None),
         Builtin::Sign(b()),
         Builtin::Sshape(b(), b(), b()),
@@ -706,6 +716,7 @@ fn every_builtin_variant_names_itself_and_is_recognized() {
             | Builtin::Pulse(..)
             | Builtin::Quantum(..)
             | Builtin::Ramp(..)
+            | Builtin::Round(..)
             | Builtin::SafeDiv(..)
             | Builtin::Sign(..)
             | Builtin::Sshape(..)

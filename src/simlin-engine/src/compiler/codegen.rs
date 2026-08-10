@@ -1299,6 +1299,7 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::Int(a)
                     | BuiltinFn::Ln(a)
                     | BuiltinFn::Log10(a)
+                    | BuiltinFn::Round(a)
                     | BuiltinFn::Sign(a)
                     | BuiltinFn::Sin(a)
                     | BuiltinFn::Sqrt(a)
@@ -1491,6 +1492,7 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Exp(_) => BuiltinId::Exp,
                     BuiltinFn::Inf => BuiltinId::Inf,
                     BuiltinFn::Int(_) => BuiltinId::Int,
+                    BuiltinFn::Round(_) => BuiltinId::Round,
                     BuiltinFn::IsModuleInput(_, _) => unreachable!(),
                     BuiltinFn::Ln(_) => BuiltinId::Ln,
                     BuiltinFn::Log10(_) => BuiltinId::Log10,
@@ -1948,7 +1950,7 @@ impl<'module> Compiler<'module> {
                 self.collect_iter_source_views_impl(b, views, seen);
             }
             Abs(a) | Arccos(a) | Arcsin(a) | Arctan(a) | Cos(a) | Exp(a) | Int(a) | Ln(a)
-            | Log10(a) | Sign(a) | Sin(a) | Sqrt(a) | Tan(a) => {
+            | Log10(a) | Round(a) | Sign(a) | Sin(a) | Sqrt(a) | Tan(a) => {
                 self.collect_iter_source_views_impl(a, views, seen);
             }
             Max(a, opt_b) | Min(a, opt_b) => {
