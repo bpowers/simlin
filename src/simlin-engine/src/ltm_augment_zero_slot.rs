@@ -7,7 +7,7 @@
 //! the project line-count lint. Mounted into `ltm_augment`, so callers keep
 //! naming these items `crate::ltm_augment::*`.
 
-use crate::ast::Expr0;
+use crate::ast::{Expr0, IndexExpr0};
 use crate::builtins::UntypedBuiltinFn;
 
 /// Whether the caller's result is a whole VARIABLE's equation or one slot of an
@@ -34,7 +34,19 @@ pub(crate) enum ZeroSlotPolicy {
     /// caller that knows the target's flag.
     ///
     /// This is a BIT-EXACT transformation, and that is the whole point of the
-    /// positive predicate. The tempting negative test -- "the link's source
+    /// positive predicate. Bit-exactness rests on a LAG-ALIGNMENT requirement
+    /// that is easy to state and easy to miss: the partial equals
+    /// `PREVIOUS(target)` only if every read in it is lagged by EXACTLY one
+    /// step. Two shapes look entirely frozen and are not aligned -- an ORIGINAL
+    /// `PREVIOUS(z)` from the target's own equation, which the wrap
+    /// deliberately leaves untouched (so the partial reads `z(t-1)` where the
+    /// anchor read `z(t-2)`), and a synthesized `PREVIOUS` nested inside
+    /// another, which the subscript-index freeze produces. Both are rejected by
+    /// [`partial_is_provably_previous_target`], and each is pinned by its own
+    /// row in `db::ltm_value_gate_tests`; skipping either omits an arm worth
+    /// close to the canonical +/-1 attribution.
+    ///
+    /// The tempting negative test -- "the link's source
     /// stayed frozen" -- says nothing about what else the arm reads, and
     /// collapsing on it changes 187 C-LEARN result slots across 35 link-score
     /// variables (151 by >= 1.0, worst 8,086.97 -> 0), because the wrap does not
@@ -82,9 +94,16 @@ impl Reach {
 /// case is a named variant decided at the match below rather than a fall-through.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BuiltinReach {
-    /// The call's contents are read at the PREVIOUS step, so the subtree is
-    /// frozen whatever it contains and the walk must NOT descend into it.
-    FrozenSubtree,
+    /// `PREVIOUS(..)`: its contents are read ONE step back. That is what the
+    /// wrap's synthesized freezes do, and it is what makes the partial
+    /// reproduce the target's previous value -- but only if the lag is exactly
+    /// one. A `PREVIOUS` nested inside this one reads two steps back, so the
+    /// walk MUST descend far enough to rule that out.
+    LagsOneStep,
+    /// `INIT(..)`: its value is the run's initial value, identical at every
+    /// step, so it is genuinely step-invariant whatever it contains and the
+    /// walk need not descend.
+    StepInvariant,
     /// Deterministic in its arguments and independent of the step, so the
     /// verdict is the fold over its arguments.
     PureInArgs,
@@ -105,7 +124,8 @@ fn classify_builtin_reach(name: &str) -> BuiltinReach {
     // caller with raw source spelling cannot silently fall into `Varying`.
     let lowered = name.to_ascii_lowercase();
     match lowered.as_str() {
-        "previous" | "init" => BuiltinReach::FrozenSubtree,
+        "previous" => BuiltinReach::LagsOneStep,
+        "init" => BuiltinReach::StepInvariant,
         "abs" | "arccos" | "arcsin" | "arctan" | "cos" | "exp" | "inf" | "int" | "ln" | "log10"
         | "max" | "min" | "pi" | "safediv" | "sign" | "sin" | "sqrt" | "tan" => {
             BuiltinReach::PureInArgs
@@ -131,12 +151,54 @@ fn classify_builtin_reach(name: &str) -> BuiltinReach {
 /// negative form asks a different question, one that says nothing about the rest
 /// of the arm; see [`ZeroSlotPolicy::OmitStructuralZero`] for what that costs.
 ///
+/// "Frozen" is not enough on its own: the partial reproduces `target(t-1)` only
+/// if every read is lagged by EXACTLY one step, so this takes the ORIGINAL
+/// element expression as well as the emitted partial. An original `PREVIOUS(z)`
+/// has to be found in the original, because in the emitted tree it is the same
+/// node as a synthesized freeze and nothing distinguishes them; a NESTED
+/// `PREVIOUS` is found in the partial, because the wrap is what introduces it.
+/// Neither check subsumes the other -- reverting either one alone leaves the
+/// other case wrongly omitted, measured row by row in
+/// `db::ltm_value_gate_tests`.
+///
 /// A `Var` or `Subscript` reached outside a frozen subtree is a live read and
 /// ends the walk, which is why subscript INDICES are never descended into: the
 /// whole reference is already `NotEstablished`, so `IndexExpr0` needs no arm
 /// here and a new index variant cannot change any verdict.
-pub(super) fn partial_is_provably_previous_target(partial: &Expr0) -> bool {
-    reach_of(partial) == Reach::Established
+pub(super) fn partial_is_provably_previous_target(original: &Expr0, partial: &Expr0) -> bool {
+    !contains_previous_call(original) && reach_of(partial) == Reach::Established
+}
+
+/// Does `expr` call `PREVIOUS` outside every `INIT(..)` subtree?
+///
+/// Asked of the ORIGINAL element equation, never of the partial, because in the
+/// emitted tree an original `PREVIOUS(z)` and a synthesized freeze
+/// `PREVIOUS(x)` are the same node and nothing distinguishes them. `INIT`
+/// subtrees are skipped: `INIT(PREVIOUS(z))` is the run's initial value, a
+/// constant, so it aligns at every step.
+fn contains_previous_call(expr: &Expr0) -> bool {
+    match expr {
+        Expr0::Const(..) | Expr0::Var(..) => false,
+        Expr0::Subscript(_, indices, _) => indices.iter().any(|idx| match idx {
+            IndexExpr0::Expr(e) => contains_previous_call(e),
+            IndexExpr0::Range(l, r, _) => contains_previous_call(l) || contains_previous_call(r),
+            IndexExpr0::Wildcard(_)
+            | IndexExpr0::StarRange(_, _)
+            | IndexExpr0::DimPosition(_, _) => false,
+        }),
+        Expr0::Op1(_, inner, _) => contains_previous_call(inner),
+        Expr0::Op2(_, lhs, rhs, _) => contains_previous_call(lhs) || contains_previous_call(rhs),
+        Expr0::If(c, t, f, _) => {
+            contains_previous_call(c) || contains_previous_call(t) || contains_previous_call(f)
+        }
+        Expr0::App(UntypedBuiltinFn(name, args), _) => match classify_builtin_reach(name) {
+            BuiltinReach::LagsOneStep => true,
+            BuiltinReach::StepInvariant => false,
+            BuiltinReach::PureInArgs | BuiltinReach::Varying => {
+                args.iter().any(contains_previous_call)
+            }
+        },
+    }
 }
 
 fn reach_of(expr: &Expr0) -> Reach {
@@ -150,9 +212,18 @@ fn reach_of(expr: &Expr0) -> Reach {
         Expr0::Op2(_, lhs, rhs, _) => reach_of(lhs).and(reach_of(rhs)),
         Expr0::If(cond, then, other, _) => reach_of(cond).and(reach_of(then)).and(reach_of(other)),
         Expr0::App(UntypedBuiltinFn(name, args), _) => match classify_builtin_reach(name) {
-            // Do NOT descend: the contents are read at the previous step, so
-            // whatever they reference is frozen by construction.
-            BuiltinReach::FrozenSubtree => Reach::Established,
+            // Read one step back -- the lag the anchor expects -- but ONLY if
+            // nothing inside lags again. `PREVIOUS(q[PREVIOUS(ctr, ctr)])` reads
+            // `q` at `t-1` indexed by `ctr` at `t-2`, where the anchor indexed
+            // at `t-1`, so it is not `PREVIOUS(target)`.
+            BuiltinReach::LagsOneStep => {
+                if args.iter().any(contains_previous_call) {
+                    Reach::NotEstablished
+                } else {
+                    Reach::Established
+                }
+            }
+            BuiltinReach::StepInvariant => Reach::Established,
             BuiltinReach::PureInArgs => args
                 .iter()
                 .fold(Reach::Established, |acc, arg| acc.and(reach_of(arg))),

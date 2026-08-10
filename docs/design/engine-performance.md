@@ -841,6 +841,17 @@ short of it rather than taking a ~2-3%.
     different question and silently rewrites 187 result slots. GH #977 carries
     the decomposition and the standing constraints.
 
+    "Provably" carries a LAG-ALIGNMENT requirement that a walk stopping at the
+    first `PREVIOUS` will miss: the partial equals `PREVIOUS(target)` only if
+    every read is lagged by exactly one step. An ORIGINAL `PREVIOUS(z)` in the
+    target's equation (which the wrap deliberately leaves untouched, so the
+    partial reads `z(t-1)` where the anchor read `z(t-2)`) and a synthesized
+    `PREVIOUS` nested inside another (which the subscript-index freeze produces)
+    both look entirely frozen and are not aligned. Either one omits an arm worth
+    close to the canonical ±1 attribution. Both are rejected, each is pinned by
+    its own row in `db::ltm_value_gate_tests`, and rejecting them costs zero arms
+    on C-LEARN — the win above is measured with both checks in place.
+
 Larger run-side swings identified during round 2 — all three were taken to
 a data verdict in round 3 (2026-06-04):
 

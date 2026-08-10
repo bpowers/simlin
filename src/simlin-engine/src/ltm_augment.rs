@@ -1741,7 +1741,7 @@ fn shaped_guard_form_text(
         // have referenced those freeze helpers is gone, so appending them would
         // mint variables no equation reads.
         if zero_slot_policy == ZeroSlotPolicy::OmitStructuralZero
-            && partial_is_provably_previous_target(&changed_first)
+            && partial_is_provably_previous_target(target_expr, &changed_first)
         {
             return Ok(None);
         }

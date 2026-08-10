@@ -292,3 +292,112 @@ fn a_structural_zero_arm_is_exactly_zero() {
         }
     }
 }
+
+/// Mechanism 4: an arm whose lag is MISALIGNED with the anchor must not be
+/// claimed as a structural zero, even though every leaf sits under a
+/// `PREVIOUS`.
+///
+/// The omission's soundness condition is `partial(t) == target(t-1)`, which
+/// needs every read lagged by exactly ONE step. Two things break that while
+/// leaving the emitted tree looking entirely frozen:
+///
+/// * an ORIGINAL `PREVIOUS(z)` from the target's own equation, which
+///   `wrap_non_matching_in_previous` deliberately leaves untouched -- so the
+///   partial reads `z(t-1)` where `target(t-1)` read `z(t-2)`;
+/// * a synthesized `PREVIOUS` nested inside another, which the subscript-index
+///   freeze produces (`PREVIOUS(q[PREVIOUS(ctr, ctr)])` reads `q` at `t-1`
+///   indexed at `t-2`).
+///
+/// This fixture is the first. `growth[boston] = PREVIOUS(z) * 0.02 + pop[la] *
+/// 0.001` has no live `pop[nyc]` reference, so the shape match records none and
+/// every occurrence is frozen -- yet the arm is worth ~0.985, near the
+/// canonical +/-1 single-input attribution. Omitting it rewrites a real score
+/// to zero, which is exactly the failure GH #977 rejected the negative
+/// criterion for, reached by a different route.
+///
+/// `INIT` is deliberately NOT in this class and is not tested here as a
+/// failure: `INIT(x)` is the run's initial value, identical at `t` and `t-1`,
+/// so it aligns at every step.
+fn lag_misalignment_project() -> datamodel::Project {
+    TestProject::new("lag_misalignment")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston", "la"])
+        .aux("z", "1 + TIME", None)
+        .array_flow_with_ranges(
+            "growth[Region]",
+            vec![
+                ("nyc", "pop[nyc] * 0.01"),
+                ("boston", "PREVIOUS(z) * 0.02 + pop[la] * 0.001"),
+                ("la", "pop[la] * 0.03"),
+            ],
+        )
+        .array_stock("pop[Region]", "10", &["growth"], &[], None)
+        .build_datamodel()
+}
+
+#[test]
+fn an_original_previous_arm_is_not_a_structural_zero() {
+    let series = ltm_slot_series(&lag_misalignment_project());
+    // Region declaration order: nyc=0, boston=1, la=2.
+    let boston = slot(&series, "link_score\u{205A}pop[nyc]\u{2192}growth", 1);
+    assert!(
+        boston.iter().any(|v| v.abs() > 0.5 && v.is_finite()),
+        "the `boston` arm carries an ORIGINAL PREVIOUS, so its partial reads \
+         z(t-1) where the PREVIOUS(target) anchor read z(t-2); the arm is worth \
+         ~0.985 and must not be omitted as a structural zero; got {boston:?}"
+    );
+}
+
+/// Mechanism 4, second clause: a synthesized `PREVIOUS` NESTED inside another.
+///
+/// `growth[boston] = q[ctr] * 0.002` has no original `PREVIOUS` at all, so the
+/// clause above cannot see it. The subscript-index freeze produces
+/// `PREVIOUS(q[PREVIOUS(ctr, ctr)])` -- `q` read at `t-1` indexed by `ctr` at
+/// `t-2`, where the `PREVIOUS(growth)` anchor indexed at `t-1`. Every leaf is
+/// under a `PREVIOUS`, so a walk that stops at the first one calls this a
+/// structural zero; it is not.
+///
+/// The two clauses need separate rows because either one alone leaves the other
+/// case omitted: reverting only the `contains_previous_call(original)` check
+/// keeps this row green, and reverting only the nested-`PREVIOUS` descent keeps
+/// the row above green. Both were measured that way.
+///
+/// This is the shape `db::ltm_tests::colliding_index_boston_series` documents a
+/// -1.06/+0.73/-1.03/+0.82 residual for, under the heading of an unadjudicated
+/// double-lag. That residual is not only a semantics question: it is also the
+/// measurement showing such an arm is not a structural zero, which is what this
+/// row pins.
+fn nested_freeze_project() -> datamodel::Project {
+    TestProject::new("nested_freeze")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston", "la"])
+        .named_dimension("Slot", &["s1", "s2"])
+        .aux("tick", "1", None)
+        .stock("counter", "0", &["tick"], &[], None)
+        .aux("drive", "1 + counter", None)
+        // 1, 2, 1, 2, ... -- a genuine runtime index.
+        .aux("ctr", "1 + (INT(counter) MOD 2)", None)
+        .array_with_ranges("q[Slot]", vec![("s1", "1 * drive"), ("s2", "10 * drive")])
+        .array_flow_with_ranges(
+            "growth[Region]",
+            vec![
+                ("nyc", "pop[nyc] * 0.01"),
+                ("boston", "q[ctr] * 0.002"),
+                ("la", "pop[la] * 0.03"),
+            ],
+        )
+        .array_stock("pop[Region]", "10", &["growth"], &[], None)
+        .build_datamodel()
+}
+
+#[test]
+fn a_nested_freeze_arm_is_not_a_structural_zero() {
+    let series = ltm_slot_series(&nested_freeze_project());
+    let boston = slot(&series, "link_score\u{205A}pop[nyc]\u{2192}growth", 1);
+    assert!(
+        boston.iter().any(|v| v.abs() > 0.5 && v.is_finite()),
+        "the `boston` arm freezes a runtime subscript INDEX inside an already \
+         frozen head, so it reads two steps back and is not PREVIOUS(target); \
+         it must not be omitted as a structural zero; got {boston:?}"
+    );
+}
