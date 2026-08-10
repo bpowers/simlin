@@ -39,17 +39,40 @@ macro_rules! corpus_tests {
         $($name:ident => $path:literal),* $(,)?
     ) => {
         static $arr: &[&str] = &[$($path),*];
-        corpus_tests! { module: $module; $($name => $path),* }
+        corpus_tests! { module: $module; fn: simulate_path; $($name => $path),* }
+        // The whole-corpus checks that are not simulation comparisons get one
+        // test per (check, model) here rather than a `#[test]` looping the
+        // corpus: the failing model lands in the test NAME, and one bad model
+        // fails alone instead of taking the entire sweep with it.
+        //
+        // They are named here rather than passed in at the invocation because
+        // an `$extra:ident`-style parameter ahead of the path list is a local
+        // ambiguity for `macro_rules!` -- both alternatives start with an
+        // ident -- and this arm has a single caller, the main corpus.
+        corpus_tests! {
+            module: carry_across_a_step; fn: assert_poisoned_next_matches;
+            $($name => $path),*
+        }
+        corpus_tests! {
+            module: fusion_depth; fn: assert_fusion_depth_never_rises;
+            $($name => $path),*
+        }
     };
     (
         module: $module:ident;
+        $($name:ident => $path:literal),* $(,)?
+    ) => {
+        corpus_tests! { module: $module; fn: simulate_path; $($name => $path),* }
+    };
+    (
+        module: $module:ident; fn: $check:ident;
         $($name:ident => $path:literal),* $(,)?
     ) => {
         mod $module {
             $(
                 #[test]
                 fn $name() {
-                    super::simulate_path(concat!("../../", $path));
+                    super::$check(concat!("../../", $path));
                 }
             )*
         }
@@ -6522,16 +6545,13 @@ fn assert_poisoned_next_matches(xmile_path: &str) {
 //
 // Scope: every corpus model, both executed phases, all modules. Initials are
 // excluded because `Vm::new` leaves them unfused.
-#[test]
-fn fusion_never_raises_peak_stack_depth() {
+fn assert_fusion_depth_never_rises(path: &str) {
     let mut checked = 0usize;
-    for path in TEST_MODELS.iter() {
-        let path = format!("../../{path}");
-        let Ok(f) = File::open(&path) else { continue };
+    {
+        let f = File::open(path).unwrap_or_else(|e| panic!("{path}: {e}"));
         let mut f = BufReader::new(f);
-        let Ok(datamodel_project) = xmile::project_from_reader(&mut f) else {
-            continue;
-        };
+        let datamodel_project =
+            xmile::project_from_reader(&mut f).unwrap_or_else(|e| panic!("{path}: {e}"));
         for check in compile_vm(&datamodel_project).fusion_depth_audit() {
             let (module, phase) = (&check.module, check.phase);
             let pre = check
@@ -6551,15 +6571,13 @@ fn fusion_never_raises_peak_stack_depth() {
             checked += 1;
         }
     }
+    // Per-model rather than a corpus-wide count. The aggregate this replaces
+    // (`checked > 100` over the whole sweep) could stay satisfied while an
+    // individual model silently stopped contributing any check at all; here a
+    // model that produces none fails by name.
     assert!(
-        checked > 100,
-        "expected a real corpus sweep, checked {checked}"
+        checked > 0,
+        "{path}: compiled but produced no fusion-depth checks -- the audit \
+         found no fused phase, so this model verifies nothing"
     );
-}
-
-#[test]
-fn only_documented_classes_carry_across_a_step() {
-    for path in TEST_MODELS.iter() {
-        assert_poisoned_next_matches(&format!("../../{path}"));
-    }
 }
