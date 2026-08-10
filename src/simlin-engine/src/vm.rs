@@ -3627,6 +3627,11 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
             let end_time = c;
             ramp(time, slope, start_time, Some(end_time))
         }
+        // ROUND is Python round() / IEEE roundTiesToEven: nearest integer,
+        // exact .5 ties to the even neighbor. `round_ties_even` is also what
+        // wasm's single `f64.nearest` instruction computes, so the wasm
+        // backend mirrors this bit for bit (see `wasmgen/lower.rs`).
+        BuiltinId::Round => a.round_ties_even(),
         BuiltinId::SafeDiv => {
             // Use exact zero comparison, not approx_eq: a denominator that
             // is very small but non-zero (e.g. subnormal) should still
@@ -4007,6 +4012,18 @@ mod apply_tests {
     fn apply_int_floors() {
         assert_eq!(3.0, apply(BuiltinId::Int, 0.0, 1.0, 3.7, 0.0, 0.0));
         assert_eq!(-4.0, apply(BuiltinId::Int, 0.0, 1.0, -3.2, 0.0, 0.0));
+    }
+
+    /// ROUND sends exact .5 ties to the even neighbor (Python round() /
+    /// IEEE roundTiesToEven). Driven by the SHARED case table in
+    /// `test_common` -- the same rows the wasm parity test and the
+    /// end-to-end pipeline test assert -- so the backends cannot drift.
+    #[test]
+    fn apply_round_ties_to_even() {
+        for &(input, expected) in crate::test_common::ROUND_TIES_TO_EVEN_CASES {
+            let got = apply(BuiltinId::Round, 0.0, 1.0, input, 0.0, 0.0);
+            crate::test_common::assert_round_case(input, got, expected, "vm-apply");
+        }
     }
 
     #[test]

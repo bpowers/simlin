@@ -85,6 +85,8 @@ pub mod rapidhash;
 mod results;
 #[cfg(test)]
 mod rk_integration_tests;
+#[cfg(test)]
+mod round_builtin_tests;
 pub mod serde;
 #[path = "stdlib.gen.rs"]
 mod stdlib;

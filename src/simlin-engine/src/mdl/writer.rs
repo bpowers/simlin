@@ -1342,6 +1342,9 @@ fn equation_to_mdl(
             if expr0_contains_transpose(&ast) {
                 warnings.push(transpose_warning(name, xmile_eqn));
             }
+            if expr0_contains_round(&ast) {
+                warnings.push(round_warning(name, xmile_eqn));
+            }
             expr0_to_mdl_ctx(&ast, ctx)
         }
         // A non-empty equation that lexes to NOTHING (whitespace, or a bare
@@ -1371,6 +1374,58 @@ fn transpose_warning(name: &str, xmile_eqn: &str) -> ExportWarning {
          Vensim has no equivalent for; the `'` was written through as-is and will not \
          re-import"
     ))
+}
+
+/// The [`ExportWarning`] for an equation calling the ROUND builtin. ROUND is
+/// a Simlin extension: Vensim defines no ROUND function (it is absent from
+/// `mdl/builtins.rs`' own recognition table, and vensim.com has no fn_round
+/// page), so the catch-all rename emits a `ROUND(...)` call Vensim rejects.
+///
+/// The writer deliberately does NOT lower the call to Vensim primitives.
+/// Round-half-to-even IS arithmetically composable for finite values from
+/// IF THEN ELSE / INTEGER / MODULO, but such a lowering would (a) duplicate
+/// the argument expression several times, which is wrong outright for a
+/// stochastic argument (RANDOM UNIFORM etc. would be re-drawn per copy) and
+/// bloats every exported equation; and (b) rest on Vensim edge semantics
+/// this repo has not verified or knows to diverge -- INTEGER truncates
+/// where our INT floors and MODULO disagrees with our MOD (GH #610), and
+/// Vensim's `=` behavior at an exact .5 comparison is unverified -- so a
+/// subtly-wrong silent lowering is strictly worse than a loud warning.
+/// Emitting the call as-is and saying so is the transpose operator's exact
+/// contract (see above).
+fn round_warning(name: &str, xmile_eqn: &str) -> ExportWarning {
+    ExportWarning::new(format!(
+        "the equation for '{name}' uses ROUND ({xmile_eqn:?}), a Simlin extension \
+         that Vensim does not define; it was written through as ROUND(...), which \
+         Vensim will not recognize"
+    ))
+}
+
+/// Does this AST call the ROUND builtin anywhere? Mirrors
+/// [`expr0_contains_transpose`]; the parser stores builtin call names
+/// lowercased, so the comparison is against `"round"`.
+fn expr0_contains_round(expr: &Expr0) -> bool {
+    fn index_has(idx: &IndexExpr0) -> bool {
+        match idx {
+            IndexExpr0::Wildcard(_)
+            | IndexExpr0::StarRange(_, _)
+            | IndexExpr0::DimPosition(_, _) => false,
+            IndexExpr0::Range(l, r, _) => expr0_contains_round(l) || expr0_contains_round(r),
+            IndexExpr0::Expr(e) => expr0_contains_round(e),
+        }
+    }
+    match expr {
+        Expr0::Const(_, _, _) | Expr0::Var(_, _) => false,
+        Expr0::App(UntypedBuiltinFn(func, args), _) => {
+            func == "round" || args.iter().any(expr0_contains_round)
+        }
+        Expr0::Subscript(_, indices, _) => indices.iter().any(index_has),
+        Expr0::Op1(_, l, _) => expr0_contains_round(l),
+        Expr0::Op2(_, l, r, _) => expr0_contains_round(l) || expr0_contains_round(r),
+        Expr0::If(c, t, f, _) => {
+            expr0_contains_round(c) || expr0_contains_round(t) || expr0_contains_round(f)
+        }
+    }
 }
 
 /// Does this AST contain a transpose anywhere?

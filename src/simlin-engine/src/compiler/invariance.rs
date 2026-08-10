@@ -187,7 +187,7 @@ where
 
         // Pure scalar builtins of invariant arguments.
         Abs(a) | Arccos(a) | Arcsin(a) | Arctan(a) | Cos(a) | Exp(a) | Int(a) | Ln(a)
-        | Log10(a) | Sign(a) | Sin(a) | Sqrt(a) | Tan(a) => all(&[a]),
+        | Log10(a) | Round(a) | Sign(a) | Sin(a) | Sqrt(a) | Tan(a) => all(&[a]),
         Max(a, b) | Min(a, b) => {
             expr_is_invariant(a, classify_ref)
                 && b.as_ref()

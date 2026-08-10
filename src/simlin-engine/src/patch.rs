@@ -884,6 +884,9 @@ fn rename_builtin(
         BuiltinFn::Exp(expr) => BuiltinFn::Exp(Box::new(rename_expr(expr, old_ident, new_ident))),
         BuiltinFn::Inf => BuiltinFn::Inf,
         BuiltinFn::Int(expr) => BuiltinFn::Int(Box::new(rename_expr(expr, old_ident, new_ident))),
+        BuiltinFn::Round(expr) => {
+            BuiltinFn::Round(Box::new(rename_expr(expr, old_ident, new_ident)))
+        }
         BuiltinFn::Ln(expr) => BuiltinFn::Ln(Box::new(rename_expr(expr, old_ident, new_ident))),
         BuiltinFn::Log10(expr) => {
             BuiltinFn::Log10(Box::new(rename_expr(expr, old_ident, new_ident)))
@@ -1087,6 +1090,7 @@ pub(crate) fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn
         BuiltinFn::Exp(expr) => UntypedBuiltinFn("exp".to_string(), vec![expr2_to_expr0(expr)]),
         BuiltinFn::Inf => UntypedBuiltinFn("inf".to_string(), vec![]),
         BuiltinFn::Int(expr) => UntypedBuiltinFn("int".to_string(), vec![expr2_to_expr0(expr)]),
+        BuiltinFn::Round(expr) => UntypedBuiltinFn("round".to_string(), vec![expr2_to_expr0(expr)]),
         BuiltinFn::Ln(expr) => UntypedBuiltinFn("ln".to_string(), vec![expr2_to_expr0(expr)]),
         BuiltinFn::Log10(expr) => UntypedBuiltinFn("log10".to_string(), vec![expr2_to_expr0(expr)]),
         BuiltinFn::Max(lhs, rhs) => {

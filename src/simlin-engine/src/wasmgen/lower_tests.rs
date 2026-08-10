@@ -1837,6 +1837,22 @@ fn apply_min_max() {
     assert_apply_exact(BuiltinId::Min, -1.0, -5.0, 0.0, 0.0, 1.0, -5.0);
 }
 
+/// `Round` lowers to the single `f64.nearest` instruction, which the wasm
+/// spec defines as IEEE roundTiesToEven -- exactly the VM's
+/// `f64::round_ties_even`. Driven by the SHARED case table in `test_common`
+/// (the same rows the VM's `apply_round_ties_to_even` and the end-to-end
+/// pipeline test assert), so a wasm-side regression cannot hide on a row
+/// only the VM test carries. The table's comparison contract compares by
+/// bit pattern, so the signed-zero ties pin `f64.nearest(-0.5)` as NEGATIVE
+/// zero, matching `round_ties_even`.
+#[test]
+fn apply_round() {
+    for &(input, expected) in crate::test_common::ROUND_TIES_TO_EVEN_CASES {
+        let got = apply_eval(BuiltinId::Round, input, 0.0, 0.0, 0.0, 1.0);
+        crate::test_common::assert_round_case(input, got, expected, "wasm-apply");
+    }
+}
+
 #[test]
 fn apply_sign() {
     assert_apply_exact(BuiltinId::Sign, 5.0, 0.0, 0.0, 0.0, 1.0, 1.0);

@@ -129,6 +129,7 @@ impl UnitEvaluator<'_> {
                     | BuiltinFn::Int(a)
                     | BuiltinFn::Ln(a)
                     | BuiltinFn::Log10(a)
+                    | BuiltinFn::Round(a)
                     | BuiltinFn::Sign(a)
                     | BuiltinFn::Sin(a)
                     | BuiltinFn::Tan(a)

@@ -18,6 +18,78 @@ use crate::db::{
 use crate::vm::{CompiledSimulation, Vm};
 use std::collections::HashMap;
 
+/// The `(input, expected)` contract table for the ROUND builtin:
+/// round-half-to-even (Python `round()` / IEEE roundTiesToEven).
+///
+/// This is the SINGLE copy of the case rows, consumed by all three backend
+/// tests -- the end-to-end VM pipeline (`round_builtin_tests`), the VM's
+/// `apply()` unit test (`vm::tests::apply_round_ties_to_even`), and the wasm
+/// backend's parity test (`wasmgen::lower_tests::apply_round`) -- so the
+/// backends are pinned against identical rows and cannot drift apart. The
+/// exact .5 ties are the load-bearing rows: `f64::round` (ties away from
+/// zero) agrees with `round_ties_even` on every non-tie input, so a table
+/// without them would pass with the wrong function.
+///
+/// Comparison contract: a NaN expectation means "result is NaN" (payload
+/// bits unspecified -- wasm may canonicalize); every other row compares by
+/// BIT PATTERN, which is what makes the signed-zero rows meaningful.
+pub const ROUND_TIES_TO_EVEN_CASES: &[(f64, f64)] = &[
+    // Exact .5 ties -> even neighbor (the rows that distinguish
+    // round-half-even from round-half-away-from-zero).
+    (0.5, 0.0),
+    (1.5, 2.0),
+    (2.5, 2.0),
+    (3.5, 4.0),
+    (4.5, 4.0),
+    // roundTiesToEven preserves the sign of zero: round(-0.5) is NEGATIVE
+    // zero (Python's float rounding agrees: round(-0.5, 0) == -0.0).
+    (-0.5, -0.0),
+    (-1.5, -2.0),
+    (-2.5, -2.0),
+    (-3.5, -4.0),
+    // Non-ties round to nearest.
+    (2.4, 2.0),
+    (2.6, 3.0),
+    (-2.4, -2.0),
+    (-2.6, -3.0),
+    (0.4999, 0.0),
+    // The double closest to but below 0.5: rounds to 0, distinguishing
+    // binary-value rounding from decimal-spelling rounding.
+    (0.499_999_999_999_999_94, 0.0),
+    // Integers and zeros are identities (sign of zero preserved).
+    (7.0, 7.0),
+    (-7.0, -7.0),
+    (0.0, 0.0),
+    (-0.0, -0.0),
+    // At 2^52 every double is already an integer: identity, no precision
+    // loss; and the largest representable .5 tie below it rounds to the
+    // even 2^52.
+    (4_503_599_627_370_496.0, 4_503_599_627_370_496.0),
+    (4_503_599_627_370_495.5, 4_503_599_627_370_496.0),
+    // Specials pass through.
+    (f64::NAN, f64::NAN),
+    (f64::INFINITY, f64::INFINITY),
+    (f64::NEG_INFINITY, f64::NEG_INFINITY),
+];
+
+/// Assert one ROUND backend result against a [`ROUND_TIES_TO_EVEN_CASES`]
+/// expectation, applying the table's comparison contract (NaN by class,
+/// everything else by bit pattern).
+pub fn assert_round_case(input: f64, got: f64, expected: f64, backend: &str) {
+    if expected.is_nan() {
+        assert!(
+            got.is_nan(),
+            "{backend}: round({input}) expected NaN, got {got}"
+        );
+    } else {
+        assert_eq!(
+            got.to_bits(),
+            expected.to_bits(),
+            "{backend}: round({input}) got {got}, expected {expected}"
+        );
+    }
+}
+
 /// Builder for creating test projects with support for arrays, units, and all variable types
 pub struct TestProject {
     pub name: String,

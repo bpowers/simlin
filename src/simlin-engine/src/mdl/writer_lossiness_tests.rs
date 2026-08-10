@@ -802,6 +802,57 @@ fn transpose_of_a_prefix_unary_is_grouped() {
     );
 }
 
+// ---- ROUND is a Simlin extension with no Vensim equivalent ----
+
+/// Vensim defines no ROUND function, so an equation calling the Simlin ROUND
+/// builtin cannot be represented in MDL. The catch-all rename emits
+/// `ROUND(...)` as-is (there is no Vensim-expressible round-half-to-even to
+/// degrade to), and the writer's job is to say so.
+#[test]
+fn round_builtin_warns_on_export() {
+    let project = make_project(vec![make_model(vec![
+        make_aux("x", "2.5", None, ""),
+        make_aux("rounded", "round(x)", None, ""),
+    ])]);
+    let (text, warnings) = project_to_mdl_with_warnings(&project).expect("write");
+    let w = message_mentioning(&warnings, "'rounded'").expect("round warning");
+    assert!(
+        w.message.contains("ROUND"),
+        "warning should name the construct: {}",
+        w.message
+    );
+    assert!(
+        text.contains("ROUND(x)"),
+        "the call must still be emitted as-is, got:\n{text}"
+    );
+}
+
+/// A ROUND nested under other expression shapes still warns (the predicate
+/// walks the whole tree), and INT -- which has a genuine Vensim mapping
+/// (INTEGER) -- must not trigger it.
+#[test]
+fn nested_round_warns_and_int_does_not() {
+    let project = make_project(vec![make_model(vec![make_aux(
+        "nested",
+        "1 + int(round(a) / 2)",
+        None,
+        "",
+    )])]);
+    let (_, warnings) = project_to_mdl_with_warnings(&project).expect("write");
+    assert!(
+        message_mentioning(&warnings, "'nested'").is_some(),
+        "a nested ROUND must still warn"
+    );
+
+    let project = make_project(vec![make_model(vec![make_aux(
+        "plain", "int(a)", None, "",
+    )])]);
+    assert!(
+        warnings_of(&project).is_empty(),
+        "INT maps cleanly to INTEGER and must not warn"
+    );
+}
+
 /// An equation with no transpose must not warn.
 #[test]
 fn no_transpose_does_not_warn() {

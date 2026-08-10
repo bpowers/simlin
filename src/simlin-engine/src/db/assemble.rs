@@ -517,6 +517,7 @@ fn collect_expr_refs(exprs: &[crate::compiler::Expr], out: &mut HashSet<Ident<Ca
                 | BuiltinFn::Int(a)
                 | BuiltinFn::Ln(a)
                 | BuiltinFn::Log10(a)
+                | BuiltinFn::Round(a)
                 | BuiltinFn::Sign(a)
                 | BuiltinFn::Sin(a)
                 | BuiltinFn::Sqrt(a)

@@ -126,6 +126,7 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::Exp(l) => format!("exp({})", pretty(l)),
             BuiltinFn::Inf => "\u{221e}".to_string(),
             BuiltinFn::Int(l) => format!("int({})", pretty(l)),
+            BuiltinFn::Round(l) => format!("round({})", pretty(l)),
             BuiltinFn::IsModuleInput(ident, _loc) => format!("isModuleInput({ident})"),
             BuiltinFn::Ln(l) => format!("ln({})", pretty(l)),
             BuiltinFn::Log10(l) => format!("log10({})", pretty(l)),
