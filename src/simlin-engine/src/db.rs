@@ -1446,4 +1446,6 @@ mod stages_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod variable_dimensions_tests;
+#[cfg(test)]
 mod vm_verification_tests;

@@ -551,15 +551,10 @@ fn collect_model_fragments(
     let mut implicit_names: Vec<&String> = implicit_info.keys().collect();
     implicit_names.sort();
     for name in implicit_names {
-        if let Some(result) = compile_implicit_var_fragment(
-            db,
-            &implicit_info[name],
-            model,
-            project,
-            dep_graph,
-            &owned_inputs,
-        ) {
-            push(&mut out, FragmentKind::Implicit, &result);
+        if let Some(result) =
+            compile_implicit_var_fragment(db, model, project, name.clone(), inputs)
+        {
+            push(&mut out, FragmentKind::Implicit, result);
         }
     }
 
@@ -2479,16 +2474,24 @@ fn equation_only_edit_recompiles_only_the_edited_fragment() {
 /// The cache granularity of the OTHER two fragment compilers, measured rather
 /// than assumed.
 ///
-/// `compile_implicit_var_fragment` is not a salsa query at all -- it is a plain
-/// function called from the tracked `assemble_module` -- so every implicit
-/// (SMOOTH/DELAY/TREND/PREVIOUS/INIT) helper recompiles whenever assembly
-/// re-runs, which an equation edit to ANY variable in the model causes.
-/// `compile_ltm_var_fragment` IS tracked, per `(from, to)` link.
+/// `compile_implicit_var_fragment` is a salsa query keyed on the helper's own
+/// canonical name, so an implicit (SMOOTH/DELAY/TREND/PREVIOUS/INIT) helper
+/// recompiles only when something it reads changes -- NOT merely because
+/// assembly re-ran, which an equation edit to any variable in the model
+/// causes. `compile_ltm_var_fragment` is likewise tracked, per `(from, to)`
+/// link.
 ///
-/// Pinned because stage 3 of GH #964 routes all three emitters through one
-/// implementation: if that implementation is a salsa query, these numbers
-/// should drop, and if it is a plain function, the explicit path could
-/// silently acquire the implicit path's granularity instead.
+/// The implicit assertion below is the whole reason the query is keyed the way
+/// it is. While it was a plain function every helper in the model recompiled on
+/// every assembly: this fixture recompiled both of `smoothed`'s helpers when
+/// `unrelated` was edited, and on C-LEARN it was 651 helper compiles per cold
+/// assembly and ~28% of the cost of a warm single-equation edit. A change that
+/// reverts the query to a plain function reds here on the count rather than
+/// merely running slower.
+///
+/// Pinned also because stage 3 of GH #964 routes all three emitters through one
+/// implementation: the explicit path must not silently acquire the implicit
+/// path's granularity, or vice versa.
 #[test]
 fn implicit_and_ltm_fragment_cache_granularity() {
     use salsa::Setter;
@@ -2517,7 +2520,7 @@ fn implicit_and_ltm_fragment_cache_granularity() {
 
     // Edit a variable the SMTH1 helper does not read.
     let edited = project_with("3", "2");
-    let (_state3, execs) = resync_and_assemble(&mut db, &edited, Some(&state2));
+    let (state3, execs) = resync_and_assemble(&mut db, &edited, Some(&state2));
     assert_eq!(
         explicit_execs(&execs),
         vec!["unrelated"],
@@ -2530,13 +2533,36 @@ fn implicit_and_ltm_fragment_cache_granularity() {
         .collect();
     assert_eq!(
         implicit,
-        vec![
-            "smoothed#$\u{205A}smoothed\u{205A}0\u{205A}arg1",
-            "smoothed#$\u{205A}smoothed\u{205A}0\u{205A}smth1"
-        ],
-        "every implicit helper of the model recompiles on an edit to a variable \
-         none of them reads: `compile_implicit_var_fragment` has no cache entry \
-         of its own, so its granularity is `assemble_module`'s"
+        Vec::<&str>::new(),
+        "no implicit helper recompiles on an edit to a variable none of them \
+         reads: `compile_implicit_var_fragment` has its own cache entry per \
+         helper, so its granularity is the helper's, not `assemble_module`'s"
+    );
+
+    // The complement, so the assertion above cannot pass by the query having
+    // become unreachable: editing a variable a helper DOES read must still
+    // recompile it.
+    //
+    // Only ONE of the two helpers reads `src`, and which one is a property of
+    // `builtins_visitor`'s synthesis rather than of this cache: an argument
+    // that is already a bare `Var` is passed through by name and gets no helper
+    // at all, so `SMTH1(src, 2)` synthesizes `⁚arg1` for the literal `2` and
+    // wires `src` straight into the `⁚smth1` module instance. The granularity
+    // is therefore per HELPER, not per parent variable -- editing `src` leaves
+    // the constant-capture helper's fragment cached.
+    let src_edited = project_with("5", "2");
+    let (_state4, src_execs) = resync_and_assemble(&mut db, &src_edited, Some(&state3));
+    let implicit_after_src: Vec<&str> = src_execs
+        .iter()
+        .filter(|(kind, _)| *kind == FragmentExecKind::Implicit)
+        .map(|(_, name)| name.as_str())
+        .collect();
+    assert_eq!(
+        implicit_after_src,
+        vec!["smoothed#$\u{205A}smoothed\u{205A}0\u{205A}smth1"],
+        "editing `src` must still recompile the helper that reads it (a query \
+         that never re-executed would be a cache bug, not a cache win), and \
+         must NOT recompile `\u{205A}arg1`, which captures the literal `2`"
     );
 
     // The LTM link fragments, on the same shape of edit.
