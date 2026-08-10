@@ -2041,6 +2041,22 @@ impl Vm {
                 // sole mechanism -- it replaces the old TIME == INITIAL_TIME
                 // check, which broke when RK stages advanced TIME to trial
                 // points before prev_values was initialized.
+                Opcode::LoadPrevConst { off, lit } => {
+                    let value = if use_prev_fallback {
+                        bytecode.literals[*lit as usize]
+                    } else {
+                        prev_values[module_off + *off as usize]
+                    };
+                    stack.push(value);
+                }
+                Opcode::ApplyTerConst { func, lit } => {
+                    let time = curr[TIME_OFF];
+                    let dt = curr[DT_OFF];
+                    let c = bytecode.literals[*lit as usize];
+                    let b = stack.pop();
+                    let a = stack.pop();
+                    stack.push(apply(*func, time, dt, a, b, c));
+                }
                 Opcode::LoadPrev { off } => {
                     let fallback = stack.pop();
                     let value = if use_prev_fallback {

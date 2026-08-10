@@ -725,6 +725,26 @@ pub(crate) enum Opcode {
     LoadPrev {
         off: VariableOffset,
     },
+    /// Fused `LoadConstant lit; LoadPrev off`.
+    ///
+    /// `LoadPrev` pops its `PREVIOUS()` fallback off the arithmetic stack, so
+    /// codegen emits a `LoadConstant` immediately before every one. Reading the
+    /// fallback from the literal table instead folds the pair into one dispatch.
+    LoadPrevConst {
+        off: VariableOffset,
+        lit: LiteralId,
+    },
+    /// Fused `LoadConstant lit; Apply` for a 3-arity builtin whose trailing
+    /// argument is a literal.
+    ///
+    /// This is NOT the operand padding `Apply` once carried: the arity is a
+    /// property of the builtin and no pads are emitted. A 3-arity builtin's
+    /// third operand is a value it reads -- for `SAFEDIV` it is the
+    /// divide-by-zero result -- so the load survives and is worth folding.
+    ApplyTerConst {
+        func: BuiltinId,
+        lit: LiteralId,
+    },
     /// Load the initial (t=0) value of a variable from the initial-value buffer.
     /// Pushes `initial_values[module_off + off]` onto the stack.
     LoadInitial {
@@ -1451,6 +1471,12 @@ impl Opcode {
             // LoadPrev pops the caller-provided fallback, then pushes
             // either the fallback (at t=INITIAL_TIME) or prev_values[off].
             Opcode::LoadPrev { .. } => (1, 1),
+            // The fused `LoadConstant; LoadPrev` pair: the fallback comes from
+            // the literal table, so nothing is popped.
+            Opcode::LoadPrevConst { .. } => (0, 1),
+            // The fused `LoadConstant; Apply` pair for a 3-arity builtin: two
+            // operands still come off the stack, the third from the literals.
+            Opcode::ApplyTerConst { .. } => (2, 1),
 
             // Legacy subscript: PushSubscriptIndex pops an index from the
             // arithmetic stack and appends it to a separate subscript_index
@@ -1635,6 +1661,8 @@ impl Opcode {
             Opcode::LoadVar { .. } => "LoadVar",
             Opcode::LoadGlobalVar { .. } => "LoadGlobalVar",
             Opcode::LoadPrev { .. } => "LoadPrev",
+            Opcode::LoadPrevConst { .. } => "LoadPrevConst",
+            Opcode::ApplyTerConst { .. } => "ApplyTerConst",
             Opcode::LoadInitial { .. } => "LoadInitial",
             Opcode::PushSubscriptIndex { .. } => "PushSubscriptIndex",
             Opcode::LoadSubscript { .. } => "LoadSubscript",
@@ -2317,7 +2345,22 @@ impl ByteCode {
                                 Opcode::AssignStackConstCurr { dst, b: *b, op }
                             }
                         })
-                        .or_else(|| push2.map(|op| Opcode::BinStackConst { r: *b, op })),
+                        .or_else(|| push2.map(|op| Opcode::BinStackConst { r: *b, op }))
+                        // A trailing constant that is not a binop operand: the
+                        // `PREVIOUS()` fallback `LoadPrev` pops, or the third
+                        // operand of a 3-arity builtin.
+                        .or_else(|| match &self.code[i + 1] {
+                            Opcode::LoadPrev { off } => {
+                                Some(Opcode::LoadPrevConst { off: *off, lit: *b })
+                            }
+                            Opcode::Apply { func } if func.arity() == 3 => {
+                                Some(Opcode::ApplyTerConst {
+                                    func: *func,
+                                    lit: *b,
+                                })
+                            }
+                            _ => None,
+                        }),
                     // `(lhs on stack) op global`. No global stack-leaf-assign
                     // opcode exists (the global ops are pushing-only), so a
                     // `BinOpAssign` combiner (push2 == None) is left unfused: the
@@ -4260,6 +4303,108 @@ mod tests {
         bc.fuse_three_address();
         assert_eq!(bc.code.len(), 3);
         assert_eq!(bc.max_stack_depth().unwrap(), 0);
+    }
+
+    // === Trailing-constant fusion (PREVIOUS fallback, 3-arity builtin) ===
+    //
+    // Neither pattern is a binop, so no existing window can reach either: the
+    // 3- and 2-window combiners are `Op2`/`BinOpAssign`, and `LoadPrev`/`Apply`
+    // are neither. Both absorbed instructions are guarded against jump targets
+    // like every other fusion in the pass.
+
+    #[test]
+    fn test_fuse_previous_fallback_into_load() {
+        // `PREVIOUS(v)` compiles to `LoadConstant <fallback>; LoadPrev v`.
+        let mut bc = ByteCode {
+            literals: vec![0.0],
+            code: vec![Opcode::LoadConstant { id: 0 }, Opcode::LoadPrev { off: 7 }],
+        };
+        let before = bc.max_stack_depth().unwrap();
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::LoadPrevConst { off: 7, lit: 0 }
+        ));
+        // The fused form pushes the same single value the pair did.
+        assert_eq!(bc.max_stack_depth().unwrap(), before);
+    }
+
+    #[test]
+    fn test_fuse_previous_fallback_blocked_by_jump_target() {
+        // A jump landing on the `LoadPrev` means the pair is not a unit.
+        let mut bc = ByteCode {
+            literals: vec![0.0],
+            code: vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadPrev { off: 7 },
+                Opcode::NextIterOrJump { jump_back: -1 },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 3);
+        assert!(matches!(bc.code[0], Opcode::LoadConstant { .. }));
+        assert!(matches!(bc.code[1], Opcode::LoadPrev { .. }));
+    }
+
+    #[test]
+    fn test_fuse_third_operand_of_three_arity_builtin() {
+        // `SAFEDIV(a, b, 0)` -- the trailing literal IS the divide-by-zero
+        // result, an operand `apply` reads, not padding.
+        let mut bc = ByteCode {
+            literals: vec![0.0],
+            code: vec![
+                Opcode::LoadVar { off: 1 },
+                Opcode::LoadVar { off: 2 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::Apply {
+                    func: BuiltinId::SafeDiv,
+                },
+            ],
+        };
+        let before = bc.max_stack_depth().unwrap();
+        bc.fuse_three_address();
+        assert!(
+            bc.code.iter().any(|op| matches!(
+                op,
+                Opcode::ApplyTerConst {
+                    func: BuiltinId::SafeDiv,
+                    lit: 0
+                }
+            )),
+            "got {:?}",
+            bc.code.iter().map(|o| o.name()).collect::<Vec<_>>()
+        );
+        // The third operand no longer transits the stack, so the peak DROPS.
+        // Never rising is what keeps `resolve_bytecode`'s fixed-stack proof --
+        // computed on the pre-fusion stream -- valid for what the Vm executes.
+        assert!(bc.max_stack_depth().unwrap() <= before);
+    }
+
+    #[test]
+    fn test_trailing_constant_not_fused_into_lower_arity_builtin() {
+        // The guard is `arity() == 3`, and it is load-bearing: for a 1- or
+        // 2-arity builtin the preceding `LoadConstant` is one of the operands
+        // the builtin actually reads, so folding it as a "third operand" would
+        // consume a real argument and leave the stack short.
+        for func in [BuiltinId::Abs, BuiltinId::Max] {
+            let mut bc = ByteCode {
+                literals: vec![3.0],
+                code: vec![
+                    Opcode::LoadVar { off: 1 },
+                    Opcode::LoadConstant { id: 0 },
+                    Opcode::Apply { func },
+                ],
+            };
+            bc.fuse_three_address();
+            assert!(
+                !bc.code
+                    .iter()
+                    .any(|op| matches!(op, Opcode::ApplyTerConst { .. })),
+                "{func:?} (arity {}) must not take the ApplyTerConst form",
+                func.arity()
+            );
+        }
     }
 
     // === 3-address fusion with GLOBAL operands and two-constant operands ===
