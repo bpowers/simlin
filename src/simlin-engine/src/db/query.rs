@@ -136,10 +136,12 @@ pub fn project_datamodel_dims(db: &dyn Db, project: SourceProject) -> Vec<datamo
 /// reading `project_datamodel_dims`, which depends solely on the project's
 /// dimensions input -- so it recomputes exactly when the dimensions change, the
 /// SAME dependency granularity the inline rebuild took. The shared context's
-/// only interior mutability is its `relationship_cache` `Mutex`, so it is safe
-/// to share across the rayon-parallel variable compilations (and the
-/// subdimension-relationship memo is now computed once and reused rather than
-/// discarded per variable).
+/// only interior mutability is its `relationship_cache` `Mutex`, which is what
+/// makes the memo `Sync` and therefore shareable at all: one context serves
+/// every variable's compilation instead of one being rebuilt per variable, and
+/// the subdimension-relationship memo is computed once and reused rather than
+/// discarded per variable. Those compilations are sequential today; the `Mutex`
+/// is what keeps the sharing sound rather than evidence that they are not.
 #[salsa::tracked(returns(ref))]
 pub fn project_dimensions_context(
     db: &dyn Db,
@@ -779,20 +781,101 @@ pub fn variable_relevant_dimensions(db: &dyn Db, var: SourceVariable) -> BTreeSe
     }
 }
 
+/// A variable's DECLARED dimensions, resolved against the project.
+///
+/// Derived straight from `var.equation(db)`'s dimension-name list rather than
+/// from a parse, and that is the whole point: the parse is keyed on a
+/// `ModuleIdentContext`, so asking for one here under the empty context --
+/// which is the only context this query could name, since it takes no `model`
+/// -- minted a SECOND full parse of every variable under a key nothing else
+/// uses. On C-LEARN that was 1,910 executions of
+/// `parse_source_variable_with_module_context` for 934 variables (~2.05x), and
+/// removing it measures -3.5% of a cold compile there and -6.7% on WORLD3.
+///
+/// The derivation mirrors `parse_source_variable_impl`'s own narrowed
+/// dimension context exactly -- `variable_relevant_dimensions` widened by
+/// `expand_maps_to_chains` and filtered out of `project_datamodel_dims` -- so
+/// a name resolves here iff it resolves there. Keeping the narrowing (rather
+/// than reading the whole-project `project_dimensions_context`) is what
+/// preserves dimension-granularity invalidation: a scalar variable takes the
+/// early return and never depends on the project's dimensions at all
+/// (`db::dimension_invalidation_tests`).
+///
+/// **`Ast::ApplyToAll` is built as `ast.map(|ast| ApplyToAll(dims, ast))`**, so
+/// an A2A equation that yields no `Ast` yields no dimensions -- and `parse`
+/// answers `Ok(None)` for exactly one reason, an input with no tokens. That is
+/// reachable on VALID, COMPILING models: a standalone lookup-only table (an
+/// empty A2A equation plus a `<gf>`, issue #606) and a module input port whose
+/// own equation is dead are both empty-equation A2A variables, and reporting
+/// their declared extent would widen `variable_size` from 1 and shift every
+/// later variable's layout offset. The A2A arm therefore gates on
+/// `parser::is_token_free`, which is a LEX rather than a parse.
+///
+/// **One arm still differs from the parse, deliberately.** An A2A equation that
+/// is not token-free but does not PARSE (`Err`, not `Ok(None)`) reported no
+/// dimensions and now reports its declared ones. That divergence is confined to
+/// a project which already fails to assemble -- the parse error still reaches
+/// `compile_var_fragment`, which drops the fragment and accumulates the
+/// diagnostic -- and it moves the reported size from a wrong 1 toward the
+/// declaration, so nothing that compiled before reads a different slot. The
+/// unresolvable-dimension-name arm (`[]` on either path) and the `Arrayed` arm
+/// (built unconditionally once its dims resolve, however many element equations
+/// failed) are unchanged. Every arm is enumerated in
+/// `db::variable_dimensions_tests`, asserted against the previous
+/// implementation as an oracle rather than against hand-written expectations.
 #[salsa::tracked(returns(ref))]
 pub fn variable_dimensions(
     db: &dyn Db,
     var: SourceVariable,
     project: SourceProject,
 ) -> Vec<crate::dimensions::Dimension> {
-    // Module context doesn't affect dimension extraction, so an empty
-    // context is correct here.
-    let empty_context = ModuleIdentContext::new(db, vec![]);
-    let parsed = parse_source_variable_with_module_context(db, var, project, empty_context);
-    match parsed.variable.get_dimensions() {
-        Some(dims) => dims.to_vec(),
-        None => Vec::new(),
+    let dimension_names: &[String] = match var.equation(db) {
+        datamodel::Equation::Scalar(_) => return Vec::new(),
+        datamodel::Equation::ApplyToAll(dim_names, eqn) => {
+            // `parse_equation`'s A2A arm is `ast.map(|ast| ApplyToAll(dims, ast))`,
+            // so an equation that produces no `Ast` produces no dimensions --
+            // and `parse` returns `Ok(None)` for exactly one reason: the input
+            // contains no tokens. That is the case for a STANDALONE LOOKUP-ONLY
+            // table (an empty `ApplyToAll` equation plus a `<gf>`) and for a
+            // module input port whose dead equation is empty, both of which are
+            // VALID and both of which compile -- so answering with the declared
+            // dimensions here would widen their `variable_size` from 1 and shift
+            // every later variable's layout offset on a working model.
+            //
+            // `is_token_free` is a lex, not a parse: it neither builds an AST
+            // nor resolves anything, so this keeps the whole point of deriving
+            // the dimensions instead of demanding `parse_source_variable_*`.
+            if crate::parser::is_token_free(eqn, crate::lexer::LexerType::Equation) {
+                return Vec::new();
+            }
+            dim_names
+        }
+        // `Arrayed` needs no such check: the parse builds its `Ast` whenever the
+        // dimension names resolve, however many element equations failed.
+        datamodel::Equation::Arrayed(dim_names, _, _, _) => dim_names,
+    };
+    // A module variable carries a synthesized equation but has no array shape
+    // of its own (the parse's `Variable::Module` has no `ast` for
+    // `get_dimensions` to read), so it must report none.
+    if var.kind(db) == SourceVariableKind::Module {
+        return Vec::new();
     }
+    if dimension_names.is_empty() {
+        return Vec::new();
+    }
+    let expanded = expand_maps_to_chains(
+        variable_relevant_dimensions(db, var),
+        project.dimensions(db),
+    );
+    let dims: Vec<datamodel::Dimension> = project_datamodel_dims(db, project)
+        .iter()
+        .filter(|d| expanded.contains(&d.name))
+        .cloned()
+        .collect();
+    let dim_ctx = crate::dimensions::DimensionsContext::from(&dims);
+    // `Err` is an unresolvable dimension name, which the parse also turns into
+    // "no dimensions" (it pushes a `BadDimensionName` and drops the `Ast`).
+    crate::variable::get_dimensions(&dim_ctx, dimension_names).unwrap_or_default()
 }
 
 #[salsa::tracked(returns(clone))]

@@ -311,6 +311,17 @@ fn build_fragment(spec: &FragSpec) -> PerVarBytecodes {
                         table_count: 1,
                         mode: LookupMode::Interpolate,
                     });
+                    // The constant-element form, addressing the same block by
+                    // its start plus an interior offset. It has to be
+                    // GENERATED, not merely tolerated by the oracles: an opcode
+                    // the generator never emits leaves the property unverified
+                    // however the oracles are written.
+                    code.push(SymbolicOpcode::LookupDirect {
+                        base_gf: start as GraphicalFunctionId,
+                        table_count: block.len as u16,
+                        elem: (block.len - 1).min(u8::MAX as usize) as u8,
+                        mode: LookupMode::Interpolate,
+                    });
                 }
             }
             next_block += 1;
@@ -503,6 +514,17 @@ fn blank_resource_ids(op: &SymbolicOpcode) -> SymbolicOpcode {
             table_count: *table_count,
             mode: *mode,
         },
+        SymbolicOpcode::LookupDirect {
+            table_count,
+            elem,
+            mode,
+            ..
+        } => SymbolicOpcode::LookupDirect {
+            base_gf: 0,
+            table_count: *table_count,
+            elem: *elem,
+            mode: *mode,
+        },
         SymbolicOpcode::LookupArray {
             table_count, mode, ..
         } => SymbolicOpcode::LookupArray {
@@ -656,18 +678,14 @@ fn denote(op: &SymbolicOpcode, tables: &ResourceTables<'_>) -> Result<Denotation
             let i = index(*literal_id, 0, tables.literals.len(), "literal")?;
             d.literals.push(tables.literals[i].to_bits());
         }
-        SymbolicOpcode::Lookup {
-            base_gf,
-            table_count,
-            ..
-        }
-        | SymbolicOpcode::LookupArray {
-            base_gf,
-            table_count,
-            ..
-        } => {
-            for k in 0..(*table_count as usize) {
-                let slot = *base_gf as usize + k;
+        // Every opcode carrying a GF run, taken from `SymbolicOpcode::gf_run`
+        // rather than re-listed here, so this oracle cannot fall behind the
+        // opcode set: that match is exhaustive with no `_`, which makes a new
+        // lookup variant a compile error there instead of a silent skip here.
+        op if op.gf_run().is_some() => {
+            let (base_gf, table_count) = op.gf_run().unwrap();
+            for k in 0..table_count {
+                let slot = base_gf + k;
                 if slot >= tables.graphical_functions.len() {
                     return Err(format!(
                         "GF run [{base_gf}, {base_gf}+{table_count}) is past its table of {}",
@@ -1003,18 +1021,9 @@ proptest! {
                 );
             }
             for op in &frag.symbolic.code {
-                let (base, count) = match op {
-                    SymbolicOpcode::Lookup {
-                        base_gf,
-                        table_count,
-                        ..
-                    }
-                    | SymbolicOpcode::LookupArray {
-                        base_gf,
-                        table_count,
-                        ..
-                    } => (*base_gf as usize, *table_count as usize),
-                    _ => continue,
+                // Same single source of truth as `denote`'s GF arm.
+                let Some((base, count)) = op.gf_run() else {
+                    continue;
                 };
                 for k in 0..count {
                     prop_assert_eq!(

@@ -208,24 +208,32 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // choice, with the sub-model divergence disclosed rather than claimed
     // away.
     //
-    // Unlike `compile_var_fragment` this is NOT a tracked query (the
-    // parent's parse result provides the caching) and unlike the LTM
-    // implicit probe (which sits inside the tracked
-    // `model_ltm_fragment_diagnostics`) it lives in THIS query's body, which
-    // `report_untracked_read` above forces to re-execute every revision --
-    // so the helpers recompile on every revision's FIRST collection,
-    // including the per-edit paths that call `collect_all_diagnostics`
-    // (libsimlin `get_errors`, MCP `edit_model`). Measured on C-LEARN that
-    // is ~15ms per first collection; same-revision re-collections recompile
-    // nothing.
+    // `compile_implicit_var_fragment` is a tracked query keyed per helper, so
+    // what this loop costs is a memo lookup per helper rather than a compile.
+    // That matters because `report_untracked_read` above forces THIS query's
+    // body to re-execute every revision: the walk repeats on every revision's
+    // first collection, but the compiles behind it do not. A helper
+    // recompiles only when its own key is invalidated -- its parse, its
+    // dimensions, or the input set it is instantiated at -- so an edit to an
+    // unrelated variable leaves every other helper's memo intact.
+    //
+    // This is the reason the per-edit paths that call `collect_all_diagnostics`
+    // (libsimlin `get_errors`, MCP `edit_model`) no longer pay a whole-model
+    // helper recompile per revision. Do not "optimize" the walk away on the
+    // assumption it is doing the compiling; it is the accumulator replay that
+    // needs it, and the compiles are already shared with assembly.
     {
         let implicit_info = crate::db::model_implicit_var_info(db, model, project);
-        let dep_graph = crate::db::model_dependency_graph(db, model, project, empty_inputs);
-        let mut sorted_implicit: Vec<_> = implicit_info.iter().collect();
-        sorted_implicit.sort_unstable_by_key(|(name, _)| name.as_str());
-        for (_name, meta) in sorted_implicit {
-            let _ =
-                crate::db::compile_implicit_var_fragment(db, meta, model, project, dep_graph, &[]);
+        let mut sorted_implicit: Vec<&String> = implicit_info.keys().collect();
+        sorted_implicit.sort_unstable_by_key(|name| name.as_str());
+        for name in sorted_implicit {
+            let _ = crate::db::compile_implicit_var_fragment(
+                db,
+                model,
+                project,
+                name.clone(),
+                empty_inputs,
+            );
         }
     }
 

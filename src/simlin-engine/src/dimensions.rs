@@ -2492,6 +2492,48 @@ mod tests {
         assert!(ctx.get(&unknown).is_none());
     }
 
+    /// `Dimension::name()` is canonical for EVERY constructor, which is what
+    /// lets a caller comparing against it skip re-canonicalizing: both arms of
+    /// `From<&datamodel::Dimension>` build the name with
+    /// `CanonicalDimensionName::from_raw`, and so does every other production
+    /// construction of the two variants. `compiler::context`'s
+    /// `is_dimension_name` relies on this to compare a canonicalized subscript
+    /// against `dim.name()` directly; re-canonicalizing there was a provable
+    /// no-op that still scanned the string once per declared dimension per
+    /// reference, and on a 126-dimension model it was ~5% of a compile.
+    ///
+    /// The rows are the shapes canonicalization actually changes -- case,
+    /// interior whitespace, a leading/trailing pad, and a dotted name (the
+    /// period becomes the module-separator middle dot) -- over both the Named
+    /// and the Indexed arm, since they canonicalize at separate call sites.
+    #[test]
+    fn dimension_name_is_canonical_for_every_constructor() {
+        for raw in [
+            "Region",
+            "My Region",
+            "  Padded Region  ",
+            "MIXED.Case",
+            "already_canonical",
+        ] {
+            let named = Dimension::from(&datamodel::Dimension::named(
+                raw.to_string(),
+                vec!["North".to_string()],
+            ));
+            let indexed = Dimension::from(&datamodel::Dimension::indexed(raw.to_string(), 3));
+            let expected = crate::common::canonicalize(raw);
+            assert_eq!(
+                named.name(),
+                &*expected,
+                "Named dimension name not canonical for {raw:?}"
+            );
+            assert_eq!(
+                indexed.name(),
+                &*expected,
+                "Indexed dimension name not canonical for {raw:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_indexed_dimension_with_maps_to_is_ignored() {
         // Indexed dimensions should not have maps_to - this test verifies

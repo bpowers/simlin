@@ -10,6 +10,13 @@ use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamod
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{CompiledSimulation, Vm};
 
+// Back this harness with mimalloc, the allocator every native binary that
+// embeds the engine installs. The compile path is allocation-bound, so timing
+// it against the system allocator measures one no shipped build runs and
+// over-credits any change that only moves malloc traffic.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn build_population_project(stop: f64) -> TestProject {
     TestProject::new("bench_pop")
         .with_sim_time(0.0, stop, 1.0)

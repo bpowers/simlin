@@ -95,19 +95,19 @@ enum SimTier {
 /// `TEST_SDEVERYWHERE_MODELS` style (a small struct rather than parallel
 /// commented sections so the reason travels with the path).
 struct CorpusModel {
+    /// The name of this model's generated expansion-tier `#[test]`, which is
+    /// also how `corpus_entry` looks the entry up. Derived from the path
+    /// (directory under `test/metasd/` plus file stem, snake_cased) so it
+    /// stays legible in a failure report.
+    name: &'static str,
     /// Path relative to `src/simlin-engine/` (the `../../test/...` prefix).
     path: &'static str,
-    /// `true` => the expansion tier for this model is `#[ignore]`d into
-    /// `metasd_expansion_tier_heavy` (it is a large real-world model whose
-    /// compile exceeds the per-test time budget; see `docs/dev/rust.md`).
-    /// `false` => it runs in the fast default `metasd_expansion_tier`.
-    heavy: bool,
     sim: SimTier,
 }
 
 /// The full corpus: every macro-using `.mdl` under `test/metasd/` (the
-/// exact 17-file list, 14 directories). Each entry's `sim` reason and
-/// `heavy` flag is the *measured, verified* status as of Phase 7
+/// exact 17-file list, 14 directories). Each entry's `sim` reason is the
+/// *measured, verified* status as of Phase 7
 /// (2026-05-15). The expansion tier asserts NONE of these -- all 17 -- has a
 /// macro-attributable diagnostic. (Historical note: `thyroid-2008-d.mdl` was
 /// once excluded for a #554-class false-positive `delayn -> delayn`
@@ -118,8 +118,8 @@ struct CorpusModel {
 const CORPUS: &[CorpusModel] = &[
     // -- 12 single-file directories --
     CorpusModel {
+        name: "bathtub_statistics_integration3",
         path: "../../test/metasd/bathtub-statistics/integration3.mdl",
-        heavy: false,
         // Macros trend2/init/pink_noise all expand (correct MacroSpecs).
         sim: SimTier::Skip(
             "no reference output checked in; also unrelated blocker: \
@@ -128,8 +128,8 @@ const CORPUS: &[CorpusModel] = &[
         ),
     },
     CorpusModel {
+        name: "beer_game_realbeer4_sterman13",
         path: "../../test/metasd/beer-game/RealBeer4-Sterman13.mdl",
-        heavy: true, // ~1.2s compile
         sim: SimTier::Skip(
             "no reference output checked in; also unrelated blocker: \
              RANDOM NORMAL (UnknownBuiltin), a model-logic peak->peak \
@@ -138,8 +138,8 @@ const CORPUS: &[CorpusModel] = &[
         ),
     },
     CorpusModel {
+        name: "covid19_us_homer_covid19us_v8",
         path: "../../test/metasd/covid19-us-homer/homer v8/Covid19US v8.mdl",
-        heavy: true, // ~0.17s but large; grouped with the opt-in corpus
         sim: SimTier::Skip(
             "no reference output checked in; also unrelated blocker: the \
              *_data variables are unresolved GET DIRECT/GET XLS DATA refs \
@@ -148,24 +148,24 @@ const CORPUS: &[CorpusModel] = &[
         ),
     },
     CorpusModel {
+        name: "critical_slowing_critical_slowing",
         path: "../../test/metasd/critical-slowing/critical-slowing.mdl",
-        heavy: false,
         sim: SimTier::Skip(
             "no reference output checked in; also unrelated blocker: \
              pink_noise body uses RANDOM NORMAL (UnknownBuiltin)",
         ),
     },
     CorpusModel {
+        name: "early_warnings_catastrophe_catastropewarning2",
         path: "../../test/metasd/early-warnings-catastrophe/catastropeWarning2.mdl",
-        heavy: false,
         sim: SimTier::Skip(
             "no reference output checked in; also unrelated blocker: \
              pink_noise body uses RANDOM NORMAL (UnknownBuiltin)",
         ),
     },
     CorpusModel {
+        name: "free_free_6",
         path: "../../test/metasd/FREE/FREE6/FREE6-original/free 6.mdl",
-        heavy: true, // ~1.2s compile
         // A sibling `all_data2.vdf` EXISTS, but `free 6.mdl` has heavy
         // unrelated MDL-parse / dimension blockers, so it is NOT
         // simulation-tier-eligible (the `init` macro itself expands).
@@ -178,8 +178,8 @@ const CORPUS: &[CorpusModel] = &[
         ),
     },
     CorpusModel {
+        name: "industrial_dynamics_idch15d",
         path: "../../test/metasd/industrial-dynamics/IDch15/IDch15d.mdl",
-        heavy: false,
         sim: SimTier::Skip(
             "no reference output checked in; also unrelated blocker: \
              main-model UnrecognizedToken / UnknownBuiltin (the `clip` \
@@ -187,8 +187,8 @@ const CORPUS: &[CorpusModel] = &[
         ),
     },
     CorpusModel {
+        name: "interpolating_arrays_interpolatingarrays",
         path: "../../test/metasd/interpolating-arrays/InterpolatingArrays.mdl",
-        heavy: false,
         sim: SimTier::Skip(
             "no reference output checked in; also unrelated blocker: \
              main-model ExtraToken / UnrecognizedToken / CantSubscriptScalar \
@@ -196,16 +196,16 @@ const CORPUS: &[CorpusModel] = &[
         ),
     },
     CorpusModel {
+        name: "pink_noise_pinknoise2010",
         path: "../../test/metasd/pink-noise/PinkNoise2010.mdl",
-        heavy: false,
         sim: SimTier::Skip(
             "no reference output checked in; also unrelated blocker: \
              pink_noise body uses RANDOM NORMAL (UnknownBuiltin)",
         ),
     },
     CorpusModel {
+        name: "theil_statistics_theil_2011",
         path: "../../test/metasd/theil-statistics/Theil_2011.mdl",
-        heavy: false,
         // Theil_2011 COMPILES with ZERO errors (the THEIL multi-output
         // macro materializes + simulates -- pinned end-to-end by
         // simulate.rs::corpus_theil_multi_output_materializes_and_simulates).
@@ -219,8 +219,8 @@ const CORPUS: &[CorpusModel] = &[
         ),
     },
     CorpusModel {
+        name: "thyroid_dynamics_thyroid_2008_d",
         path: "../../test/metasd/thyroid-dynamics/thyroid-2008-d.mdl",
-        heavy: false,
         // The #554-class false-positive `delayn -> delayn` macro-registry
         // recursion is FIXED (the #554 follow-up extended the shared
         // renamed-builtin self-edge suppression to the stdlib-module-backed
@@ -238,8 +238,8 @@ const CORPUS: &[CorpusModel] = &[
         ),
     },
     CorpusModel {
+        name: "wonderland_wonderland3",
         path: "../../test/metasd/wonderland/Wonderland3.mdl",
-        heavy: false,
         sim: SimTier::Skip(
             "no reference output checked in; also unrelated blocker: \
              main-model UnknownBuiltin / UnknownDependency (the `p_exp` / \
@@ -248,8 +248,8 @@ const CORPUS: &[CorpusModel] = &[
     },
     // -- scientific-revolution: two macro-using files --
     CorpusModel {
+        name: "scientific_revolution_scirev7",
         path: "../../test/metasd/scientific-revolution/scirev7.mdl",
-        heavy: true, // ~2.5s compile
         sim: SimTier::Skip(
             "no reference output checked in; also unrelated blocker: \
              main-model UnknownBuiltin / UnknownDependency / Generic (the \
@@ -257,8 +257,8 @@ const CORPUS: &[CorpusModel] = &[
         ),
     },
     CorpusModel {
+        name: "scientific_revolution_scirev8",
         path: "../../test/metasd/scientific-revolution/scirev8.mdl",
-        heavy: true, // ~3.6s compile (over the 5s soft ceiling combined)
         sim: SimTier::Skip(
             "no reference output checked in; also unrelated blocker: \
              main-model UnknownBuiltin / UnknownDependency / Generic (the \
@@ -270,8 +270,8 @@ const CORPUS: &[CorpusModel] = &[
     // but every groupon model has heavy unrelated MDL-parse blockers, so
     // none is simulation-tier-eligible (the `report` macro expands). --
     CorpusModel {
+        name: "social_network_valuation_groupon_1",
         path: "../../test/metasd/social-network-valuation/groupon 1.mdl",
-        heavy: false,
         sim: SimTier::Skip(
             "unrelated blocker: data_* variables are EmptyEquation / \
              UnrecognizedToken (unresolved external data) despite sibling \
@@ -279,8 +279,8 @@ const CORPUS: &[CorpusModel] = &[
         ),
     },
     CorpusModel {
+        name: "social_network_valuation_groupon_2",
         path: "../../test/metasd/social-network-valuation/groupon 2.mdl",
-        heavy: false,
         sim: SimTier::Skip(
             "unrelated blocker: data_* variables are EmptyEquation / \
              UnrecognizedToken (unresolved external data) despite sibling \
@@ -288,8 +288,8 @@ const CORPUS: &[CorpusModel] = &[
         ),
     },
     CorpusModel {
+        name: "social_network_valuation_groupon_3",
         path: "../../test/metasd/social-network-valuation/groupon 3.mdl",
-        heavy: false,
         sim: SimTier::Skip(
             "unrelated blocker: data_* variables are EmptyEquation / \
              UnrecognizedToken (unresolved external data) despite sibling \
@@ -453,44 +453,57 @@ fn run_expansion_tier(entries: impl Iterator<Item = &'static CorpusModel>) {
     }
 }
 
-/// macros.AC6.4 (expansion tier, fast subset). The light macro-using
-/// metasd models compile via the salsa path with NO macro-attributable
-/// diagnostic. Runs by default (each model compiles in well under the
-/// per-test budget); the heavy real-world models are in the `#[ignore]`d
-/// `metasd_expansion_tier_heavy` opt-in below (`docs/dev/rust.md`
-/// test-time-budget rules). Together they cover all 14 macro-using metasd
-/// directories / all 17 macro-using files.
-#[test]
-fn metasd_expansion_tier() {
-    run_expansion_tier(CORPUS.iter().filter(|m| !m.heavy));
+/// The `CORPUS` entry a generated expansion-tier test is about.
+fn corpus_entry(name: &str) -> &'static CorpusModel {
+    CORPUS
+        .iter()
+        .find(|m| m.name == name)
+        .unwrap_or_else(|| panic!("no CORPUS entry named {name}"))
 }
 
-/// macros.AC6.4 (expansion tier, the heavy real-world models). Same
-/// assertion as `metasd_expansion_tier` for the large models whose
-/// compile used to exceed the per-test time budget.
+/// macros.AC6.4 (expansion tier): one `#[test]` per corpus model, asserting
+/// that model compiles via the salsa path with NO macro-attributable
+/// diagnostic. All 17 files / 14 directories run by default.
 ///
-/// Still `#[ignore]`d, but no longer for time: `metasd_expansion_tier_full`
-/// now runs by default and is a strict superset of this, so running both in
-/// the default suite would buy nothing. Kept as the focused subset to reach for
-/// when the full tier fails and the light models are not the culprit.
-// Run with: cargo test -p simlin-engine --test integration -- --ignored metasd_expansion_tier_heavy
-#[test]
-#[ignore]
-fn metasd_expansion_tier_heavy() {
-    run_expansion_tier(CORPUS.iter().filter(|m| m.heavy));
+/// One test per model rather than one loop over all of them, for the reason
+/// `docs/dev/rust.md` gives: a binary's parallel wall is
+/// `max(longest test, total/threads)`, so a serial loop over a corpus sets a
+/// floor no number of cores can get under. It also puts the failing model in
+/// the test NAME instead of only in an accumulated list.
+///
+/// `EXPANSION_TEST_NAMES` is what `corpus_is_exactly_the_17_macro_using_metasd_files`
+/// checks the generated set against, so a `CORPUS` entry added without a test
+/// here -- the one way this list can silently under-cover -- fails loudly.
+macro_rules! expansion_tier_tests {
+    ($($name:ident),* $(,)?) => {
+        static EXPANSION_TEST_NAMES: &[&str] = &[$(stringify!($name)),*];
+        $(
+            #[test]
+            fn $name() {
+                run_expansion_tier(std::iter::once(corpus_entry(stringify!($name))));
+            }
+        )*
+    };
 }
 
-/// The full expansion tier over ALL 17 macro-using files in one run
-/// (light + heavy), the AC6.4 "all 14 macro-using metasd models pass the
-/// expansion tier" check.
-///
-/// Runs by default. The "sum of compiles ~10s" that put it over the per-test
-/// budget is now under three seconds on a debug build, and this is the
-/// assertion the acceptance criterion is actually about -- the light-subset
-/// `metasd_expansion_tier` was the compromise, not the goal.
-#[test]
-fn metasd_expansion_tier_full() {
-    run_expansion_tier(CORPUS.iter());
+expansion_tier_tests! {
+    bathtub_statistics_integration3,
+    beer_game_realbeer4_sterman13,
+    covid19_us_homer_covid19us_v8,
+    critical_slowing_critical_slowing,
+    early_warnings_catastrophe_catastropewarning2,
+    free_free_6,
+    industrial_dynamics_idch15d,
+    interpolating_arrays_interpolatingarrays,
+    pink_noise_pinknoise2010,
+    theil_statistics_theil_2011,
+    thyroid_dynamics_thyroid_2008_d,
+    wonderland_wonderland3,
+    scientific_revolution_scirev7,
+    scientific_revolution_scirev8,
+    social_network_valuation_groupon_1,
+    social_network_valuation_groupon_2,
+    social_network_valuation_groupon_3,
 }
 
 /// Positive regression guard (inverted premise -- the bug is FIXED):
@@ -503,8 +516,9 @@ fn metasd_expansion_tier_full() {
 /// follow-up (`module_functions::is_renamed_stdlib_module_builtin`)
 /// suppresses that false self-edge, so thyroid is now in the asserted
 /// expansion tier; this test additionally pins thyroid *specifically* (so a
-/// regression of the follow-up is caught here with a focused message, not
-/// only in the bulk `metasd_expansion_tier`). It deliberately does NOT
+/// regression of the follow-up is caught here with a focused message rather
+/// than only as a generic macro-attributable-diagnostic failure in
+/// `thyroid_dynamics_thyroid_2008_d`). It deliberately does NOT
 /// assert `compiled_ok`: the macro handling is correct, but the body's
 /// `DELAY N(...,Order)` with the order a macro *port* still hits the
 /// orthogonal, pre-existing stdlib "order must be a compile-time constant"
@@ -798,6 +812,27 @@ fn corpus_is_exactly_the_17_macro_using_metasd_files() {
         14,
         "the corpus must span exactly 14 macro-using metasd directories; \
          got {dirs:?}"
+    );
+
+    // Every corpus entry has a generated expansion-tier test, and every
+    // generated test names a real entry. Without this, adding a model to
+    // CORPUS without adding it to `expansion_tier_tests!` would silently
+    // leave it unasserted -- the exact under-coverage the per-model split
+    // could otherwise introduce, and invisible in a green run.
+    let corpus_names: std::collections::BTreeSet<&str> = CORPUS.iter().map(|m| m.name).collect();
+    assert_eq!(
+        corpus_names.len(),
+        CORPUS.len(),
+        "corpus entry names must be unique; a duplicate would make two \
+         generated tests assert the same model and leave another unasserted"
+    );
+    let test_names: std::collections::BTreeSet<&str> =
+        EXPANSION_TEST_NAMES.iter().copied().collect();
+    assert_eq!(
+        corpus_names, test_names,
+        "every CORPUS entry must have a generated expansion-tier test and \
+         vice versa; add the model's `name` to the `expansion_tier_tests!` \
+         list (or remove the stale entry from it)"
     );
 
     for m in CORPUS {

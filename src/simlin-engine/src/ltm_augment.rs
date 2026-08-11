@@ -267,6 +267,15 @@ mod array_freeze;
 
 pub(crate) use array_freeze::{ArrayFreezeHelper, FREEZE_HELPER_PREFIX, materialize_array_freezes};
 
+/// Deciding when a per-element link-score arm is provably `PREVIOUS(target)`
+/// and may therefore be OMITTED rather than materialized (GH #977), in its own
+/// file only to keep this one under the project line-count lint.
+#[path = "ltm_augment_zero_slot.rs"]
+mod zero_slot;
+
+pub(crate) use zero_slot::ZeroSlotPolicy;
+use zero_slot::partial_is_provably_previous_target;
+
 /// Append child index `i` to `path`, yielding the child node's structural path.
 /// The wrap's recursion mirrors `db::ltm_ir::walk_all_in_expr`'s child-index
 /// construction exactly, so the path at any node equals that occurrence's
@@ -1626,6 +1635,12 @@ fn wrap_live_shaped_in_previous(
 /// reference is a *layout* reference (`classify_dependencies` records it
 /// in `referenced_tables`, not `all`), so it adds no causal edge. `None`
 /// leaves the partial unwrapped (an ordinary target).
+///
+/// `zero_slot_policy` decides what happens when the changed-first wrap froze
+/// EVERY occurrence of the source ([`WrapOutcome::live_ref`] is `None`), so
+/// the partial is the fully-frozen target and the guard form it would build
+/// evaluates to ~0. Under [`ZeroSlotPolicy::OmitStructuralZero`] the arm is
+/// dropped (`Ok(None)`) instead of materialized; see that variant's docs.
 #[allow(clippy::too_many_arguments)] // threads the link-score generation context
 fn shaped_guard_form_text(
     target_expr: &Expr0,
@@ -1639,8 +1654,9 @@ fn shaped_guard_form_text(
     target_ref: &str,
     gf_table_ref: Option<&str>,
     occ: &OccurrenceLookup<'_>,
+    zero_slot_policy: ZeroSlotPolicy,
     freeze_helpers: &mut Vec<ArrayFreezeHelper>,
-) -> Result<String, PartialEquationError> {
+) -> Result<Option<String>, PartialEquationError> {
     let gf_wrap = |partial: String| -> String {
         match gf_table_ref {
             Some(table_ref) => format!("LOOKUP({table_ref}, {partial})"),
@@ -1704,6 +1720,31 @@ fn shaped_guard_form_text(
     let mut first_leg_helpers = Vec::new();
     let changed_first = materialize(changed_first, &mut first_leg_helpers);
     if !out.other_dep_mismatch && !contains_unfreezable_previous(&changed_first) {
+        // GH #977: the wrap produced a partial that reads nothing which can have
+        // changed since the previous step, so it recomputes `PREVIOUS(target)`
+        // and the guard form's numerator is identically zero. Drop the arm
+        // rather than print, parse, lower and execute a full equation to arrive
+        // at the constant an absent slot already lowers to.
+        //
+        // The test runs on the MATERIALIZED partial, after the array-freeze
+        // rewrite, so it judges the tree that would actually be emitted rather
+        // than the one before helper substitution.
+        //
+        // The check sits INSIDE the changed-first success block, not before it:
+        // an arm that also trips the doom checks must keep falling through to
+        // the changed-last leg, which rejects it with `Err(UnfreezablePartial)`
+        // and so declares the whole edge unscoreable (the #758/#780 contract,
+        // which drops dependent loop scores). Omitting it earlier would quietly
+        // keep that edge scoreable and change which loops get dropped.
+        //
+        // `first_leg_helpers` is deliberately NOT appended: the arm that would
+        // have referenced those freeze helpers is gone, so appending them would
+        // mint variables no equation reads.
+        if zero_slot_policy == ZeroSlotPolicy::OmitStructuralZero
+            && partial_is_provably_previous_target(target_expr, &changed_first)
+        {
+            return Ok(None);
+        }
         let source_ref = source_ref_for_guard(
             from,
             shape,
@@ -1712,11 +1753,11 @@ fn shaped_guard_form_text(
             source_dim_elements,
         );
         freeze_helpers.append(&mut first_leg_helpers);
-        return Ok(link_score_guard_form(
+        return Ok(Some(link_score_guard_form(
             &gf_wrap(print_eqn(&changed_first)),
             target_ref,
             &source_ref,
-        ));
+        )));
     }
 
     // Changed-last fallback: freeze only the live source, starting from the
@@ -1783,11 +1824,11 @@ fn shaped_guard_form_text(
     // so it needs the same implicit WITH-LOOKUP application the target's
     // own compiled value gets (GH #910).
     let numerator = format!("({target_ref} - ({}))", gf_wrap(print_eqn(&changed_last)));
-    Ok(link_score_guard_form_with_numerator(
+    Ok(Some(link_score_guard_form_with_numerator(
         &numerator,
         target_ref,
         &source_ref,
-    ))
+    )))
 }
 
 /// Wrap every reference to `target` in `PREVIOUS()` -- the *inverse* of
@@ -3512,11 +3553,21 @@ fn build_arrayed_link_score_equation(
     // below are in range by the LTM front door, which refuses a target needing
     // more slots than `db::ltm_ir::MAX_SITE_CHILDREN` can tell apart -- so this
     // model would have emitted no link score to reach here.
+    // GH #977: a slot whose partial holds no live source reference scores a
+    // structural zero, and an omitted slot already lowers to a single
+    // constant-zero assign -- but ONLY when a missing slot means zero. Under
+    // EXCEPT semantics it means "apply the default equation", so those targets
+    // keep every arm. This is the only place the target's flag is in scope.
+    let zero_slot_policy = if apply_default_to_missing {
+        ZeroSlotPolicy::Materialize
+    } else {
+        ZeroSlotPolicy::OmitStructuralZero
+    };
     let slot_equation = |expr: &crate::ast::Expr2,
                          gf_table_ref: Option<&str>,
                          slot: u16,
                          freeze_helpers: &mut Vec<ArrayFreezeHelper>|
-     -> Result<String, PartialEquationError> {
+     -> Result<Option<String>, PartialEquationError> {
         let elem_eqn = crate::patch::expr2_to_expr0(expr);
         // Per-element dependency set: walk *only this slot's* expression
         // (the union over all elements -- what `identifier_set` on the
@@ -3524,15 +3575,16 @@ fn build_arrayed_link_score_equation(
         // from this slot). Pass the target's dimensions so literal
         // element-name subscripts of the *target*'s dims are filtered out;
         // strip the *source*'s dim/element names afterward (see above).
-        let deps_e: HashSet<Ident<Canonical>> = crate::variable::classify_dependencies(
+        let classified = crate::variable::classify_dependencies(
             &crate::ast::Ast::Scalar(expr.clone()),
             target_ast_dims,
             None,
-        )
-        .all
-        .into_iter()
-        .filter(|d| !source_dim_token_set.contains(d.as_str()))
-        .collect();
+        );
+        let deps_e: HashSet<Ident<Canonical>> = classified
+            .all
+            .into_iter()
+            .filter(|d| !source_dim_token_set.contains(d.as_str()))
+            .collect();
         let occ = slot_occurrences.for_slot(slot);
         shaped_guard_form_text(
             &elem_eqn,
@@ -3546,6 +3598,7 @@ fn build_arrayed_link_score_equation(
             target_ref,
             gf_table_ref,
             &occ,
+            zero_slot_policy,
             freeze_helpers,
         )
     };
@@ -3562,15 +3615,26 @@ fn build_arrayed_link_score_equation(
         per_elem.iter().collect();
     sorted_slots.sort_by(|a, b| a.0.cmp(b.0));
 
+    // A slot the policy omitted is simply absent from `elements`; nothing is
+    // pushed for it. That is deliberately NOT the same channel as an arm whose
+    // generated text is EMPTY, which is still pushed and dropped later by
+    // `LtmEquation::to_flow_ast` -- keeping the two distinct is what lets an
+    // empty generated arm stay a symptom of a generator bug rather than a
+    // second, silent way to zero a slot.
     let mut elements: Vec<(String, String)> = Vec::with_capacity(sorted_slots.len());
     for (slot, (elem, expr)) in sorted_slots.iter().enumerate() {
         let gf_table_ref = slot_refs.for_element(elem);
-        elements.push((
-            elem.as_str().to_string(),
-            slot_equation(expr, gf_table_ref.as_deref(), slot as u16, freeze_helpers)?,
-        ));
+        if let Some(text) =
+            slot_equation(expr, gf_table_ref.as_deref(), slot as u16, freeze_helpers)?
+        {
+            elements.push((elem.as_str().to_string(), text));
+        }
     }
 
+    // The default arm follows the same policy. When the policy is
+    // `OmitStructuralZero` the target's `apply_default_to_missing` is false, so
+    // `expand_arrayed_with_hoisting` never consults a default anyway; when it
+    // is `Materialize` the arm is always built and the flatten is a no-op.
     let default_gf_table_ref = slot_refs.for_default();
     let default_slot = default_expr
         .map(|expr| {
@@ -3581,7 +3645,8 @@ fn build_arrayed_link_score_equation(
                 freeze_helpers,
             )
         })
-        .transpose()?;
+        .transpose()?
+        .flatten();
 
     Ok(LtmEquation::arrayed(
         target_dim_names,
@@ -3763,7 +3828,7 @@ fn generate_auxiliary_to_auxiliary_equation(
     // occurrence stream.
     let slot_occurrences = SlotOccurrences::new(to_occurrences);
     let occ = slot_occurrences.for_slot(0);
-    let text = shaped_guard_form_text(
+    let Some(text) = shaped_guard_form_text(
         &to_equation,
         &deps,
         from,
@@ -3777,8 +3842,16 @@ fn generate_auxiliary_to_auxiliary_equation(
         // (GH #910); `None` for an ordinary aux.
         with_lookup_table_ref(to_var).as_deref(),
         &occ,
+        // This builds a whole variable's equation, not one slot of an arrayed
+        // one, so a structural zero still has to be materialized: there is no
+        // slot to leave absent, and dropping the variable would change the
+        // emitted score set.
+        ZeroSlotPolicy::Materialize,
         freeze_helpers,
-    )?;
+    )?
+    else {
+        unreachable!("ZeroSlotPolicy::Materialize never omits an arm")
+    };
     Ok(link_score_equation_for_target(text, to_var))
 }
 
@@ -4078,7 +4151,7 @@ fn generate_stock_to_flow_equation(
     // changed-last fallback for an unfreezable changed-first partial).
     let slot_occurrences = SlotOccurrences::new(to_occurrences);
     let occ = slot_occurrences.for_slot(0);
-    let text = shaped_guard_form_text(
+    let Some(text) = shaped_guard_form_text(
         &flow_equation,
         &deps,
         stock,
@@ -4091,8 +4164,14 @@ fn generate_stock_to_flow_equation(
         // A flow can be an implicit WITH-LOOKUP variable too (GH #910).
         with_lookup_table_ref(flow_var).as_deref(),
         &occ,
+        // A whole variable's equation -- see the twin call in
+        // `generate_link_score_equation_for_link`.
+        ZeroSlotPolicy::Materialize,
         freeze_helpers,
-    )?;
+    )?
+    else {
+        unreachable!("ZeroSlotPolicy::Materialize never omits an arm")
+    };
     Ok(link_score_equation_for_target(text, flow_var))
 }
 

@@ -37,6 +37,13 @@ use simlin_engine::db::{
 };
 use simlin_engine::open_vensim;
 
+// Back this harness with mimalloc, the allocator every native binary that
+// embeds the engine installs. The compile path is allocation-bound, so timing
+// it against the system allocator measures one no shipped build runs and
+// over-credits any change that only moves malloc traffic.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Model metadata for benchmark parameterization.
 struct ModelFixture {
     name: &'static str,

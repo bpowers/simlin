@@ -58,12 +58,19 @@ command -v rustc >/dev/null 2>&1 || missing+=("rustc")
 command -v cargo >/dev/null 2>&1 || missing+=("cargo")
 command -v node  >/dev/null 2>&1 || missing+=("node")
 command -v pnpm  >/dev/null 2>&1 || missing+=("pnpm")
+# python3 is not optional and is not only a pysimlin concern: scripts/pre-commit
+# shells to it in phase 1 (check-deps.py / check-docs.py) and
+# scripts/cargo-target-dir.sh parses `cargo metadata` with it on every
+# `pnpm build`. Without this line a missing python3 surfaces as a bare
+# "python3: command not found" partway through a commit rather than here.
+command -v python3 >/dev/null 2>&1 || missing+=("python3")
 
 if [ ${#missing[@]} -gt 0 ]; then
     errors+=("Missing required tools: ${missing[*]}")
     errors+=("  rustc/cargo: https://rustup.rs/")
     errors+=("  node:        https://nodejs.org/")
     errors+=("  pnpm:        npm install -g pnpm")
+    errors+=("  python3:     https://www.python.org/downloads/")
 fi
 
 # cbindgen (auto-install if cargo is available)

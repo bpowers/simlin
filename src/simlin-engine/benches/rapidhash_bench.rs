@@ -17,6 +17,13 @@ use std::hint::black_box;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use simlin_engine::rapidhash::{hash_bytes, hash_u32_slice};
 
+// Back this harness with mimalloc, the allocator every native binary that
+// embeds the engine installs. The compile path is allocation-bound, so timing
+// it against the system allocator measures one no shipped build runs and
+// over-credits any change that only moves malloc traffic.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Reference FNV-1a 64-bit hash, u32-at-a-time.
 ///
 /// This is a verbatim copy of the pre-rapidhash implementation that

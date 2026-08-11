@@ -1,7 +1,10 @@
 # Engine performance: profile and optimization opportunities
 
-Status: analysis + two rounds of wins landed. Round 1 2026-05-19; round 2
-(constant folding + linear-run fast paths, below) 2026-06-03.
+Status: analysis + four rounds of wins landed. Round 1 2026-05-19; round 2
+(constant folding + linear-run fast paths) 2026-06-03; round 3 2026-08-10 —
+the salsa pipeline's own redundancy on the compile side, a superinstruction
+family on the run side, and the LTM link-score arms that were being
+materialized only to evaluate to zero.
 
 This documents an empirical CPU/memory profile of **compiling and simulating the
 C-LEARN hero model** (the largest model we have: ~53k MDL lines / 1.4 MB, 934
@@ -22,6 +25,107 @@ set of larger proposals grounded in the measured data.
 - Numbers below are the shipped `[profile.release]` (`opt-level="z"`, LTO)
   unless noted. Profile builds add `CARGO_PROFILE_RELEASE_DEBUG=1
   CARGO_PROFILE_RELEASE_STRIP=false`.
+
+### Measuring a change
+
+Three channels, each answering a different question. **None substitutes for
+another**, and a change is not established until the question you are actually
+asking has been answered by the channel that can answer it.
+
+| channel | question it answers | tool |
+|---|---|---|
+| exact instruction attribution | *did the intended work disappear?* | `valgrind --tool=callgrind` |
+| retired instructions / branches | *how much work disappeared?* | `perf stat` |
+| cycles / wall clock | *did it get faster?* | `perf stat`, interleaved A/B |
+
+**Callgrind is deterministic** and immune to both binary layout and machine
+load. It is the right first measurement for any change with a mechanism: it
+says whether the work you meant to remove is gone, per function and per source
+line, with no statistics. A change whose per-call cost is unchanged did not
+fire, whatever the end-to-end counters say.
+
+**Retired instructions and branches are properties of the program**; cycles are
+a property of the machine executing it. That distinction sets the noise floors,
+and they are three orders of magnitude apart. Measured on the C-LEARN run
+across six independent build+run pairs of identical source:
+
+| channel | sd across builds | a 2.7% effect is |
+|---|---|---|
+| instructions | **0.026%** | ~104 sigma |
+| branches | **0.028%** | ~96 sigma |
+| cycles, quiet machine | 1.65% | 1.7 sigma |
+| cycles, machine under load | 9.9%–11% | 0.24 sigma |
+
+So a few-percent effect is resolved by one build pair on the instruction
+channel and is **not** resolvable on the cycles channel without a deliberate
+protocol. Reaching for multi-build A/Bs to establish an instruction-count
+reduction wastes hours the instruction channel settles in one pair; quoting a
+cycles delta from one pair asserts something the measurement cannot support.
+
+**Every cycles claim needs a null control from the same session.** Run the
+identical binary as both sides of the A/B, interleaved, alongside the real
+comparison. The apparent delta it produces is that session's floor. A measured
+example, taken at load average 4–9:
+
+```
+identical binary, both sides, 5 interleaved rounds, medians:
+  instructions   -0.003%
+  branches       -0.004%
+  cycles         -1.540%     <- a "win" from nothing
+```
+
+A cycles delta that does not clearly exceed the session's own null delta is
+**unresolved, and must be reported as unresolved rather than as a small win**.
+Use the session's null, never a floor recorded here or anywhere else: machine
+conditions vary hour to hour, and taking a historical figure for the current
+one is what turns noise into a reported result.
+
+**Contention is a reason to wait, not to average harder.** Resolving 3% at the
+quiet-machine sd of 1.65% needs about 5 builds per side; at a contended 9.9% it
+needs about 175. The second is not a measurement plan. Check the load average
+before starting, pin with `taskset`, interleave A/B/A/B so drift is shared, take
+medians, and reject outliers explicitly rather than letting them widen the
+spread.
+
+**Prefer a structural check to a statistical one where the change admits it.**
+When a change is confined to a function that is `#[inline(never)]` and keeps its
+signature, its callers' machine code should be unchanged. Verify it by
+disassembling both binaries and diffing the caller.
+
+The claim to check is *instruction-sequence-identical modulo relocation*, not
+byte-identical: adding code anywhere shifts the text section, so absolute branch
+targets and every rip-relative displacement move even when nothing about the
+caller changed. Normalise those, then require the same instruction count, the
+same mnemonics and operands, and the same in-function branch offsets.
+
+That is a binary answer rather than a sample, and it directly detects the
+failure mode that has bitten this file's eval-loop work repeatedly: a change
+leaking into `eval_bytecode` and perturbing the register allocation of a very
+large function. Treat a single differing instruction as a hard stop and explain
+it before quoting any number.
+
+**Size a fast path by the work it replaces, not by how often it applies.** How
+many inputs are *eligible* for a shortcut and how many *benefit* from it are
+different questions, and only the second predicts the outcome. A shortcut has
+its own fixed cost, so it wins only where the work it displaces exceeds that
+cost -- which usually means a size threshold, and a fallback that is now paid on
+every input below it. Cost both sides before predicting, and gate on the
+threshold rather than on eligibility.
+
+**Decide what would falsify the change before measuring it.** Write down the
+predicted delta per channel, and the signatures that would mean it did not work:
+end-to-end instructions falling while the callgrind per-call cost is unchanged
+means something other than the intended mechanism moved; instructions falling
+while the branch count holds means a branchy inner loop was not actually
+replaced. Stating these in advance is what makes the eventual number a result
+instead of a reading.
+
+**State which channel a recorded number came from.** A verdict written as "only
+~1.5%" invites the next reader to compare it against whatever floor they happen
+to have in mind, and the floors differ by three orders of magnitude between
+channels. Write "1.5% of retired instructions" or "1.5% of cycles"; a
+percentage with no channel attached is how a cycles floor ends up being applied
+to an instruction measurement.
 
 ## Measured baseline (before this work)
 
@@ -232,13 +336,49 @@ jump table (one indirect branch whose target is data-dependent → BTB-unfriendl
 Classic threaded dispatch (computed-goto / guaranteed tail calls) would spread the
 indirect branch across handlers for better prediction, but **stable Rust offers
 neither computed-goto nor guaranteed TCO** (the `become` keyword is unstable).
-Portable options:
+Superinstructions are the portable lever, and the family below is implemented.
+Each removes a dispatch **and the operand work behind it**, which is why a
+removed dispatch costs ~25.9 instructions rather than the ~10 a bare dispatch
+costs — size proposals in this family against 25.9 or they read ~3x cheaper
+than they are. Both figures were measured by injecting an empty `ProbeNop`
+opcode at controlled rates and taking the instruction slope, validated by
+bit-identical results at every rate and an exactly linear dispatch count.
 
-- **More superinstructions** for the top opcode bigrams/trigrams (e.g.
-  `LoadVar; LoadVar; Op2`, `LoadConstant; Op2`). Each fused opcode removes a
-  dispatch; incremental and low-risk. This is the portable lever today.
-- Revisit explicit tail-call dispatch if/when `become` stabilizes.
-- R2 (register VM) reduces dispatch count more than any dispatch-mechanism change.
+Landed, all created by `ByteCode::fuse_three_address` on the Vm's private
+execution copy unless noted:
+
+| form | fuses |
+|---|---|
+| `SelectIf` / `SelectIfAssignCurr` | `SetCond; If[; AssignCurr]` |
+| `AssignVarCurr` / `AssignInitialCurr` / `AssignModInputCurr` | a leaf load + its store |
+| `BinStackModInput` / `AssignStackModInputCurr` | module inputs as a fusible leaf |
+| `LoadPrevConst` | `LoadConstant; LoadPrev` (the `PREVIOUS` fallback) |
+| `ApplyTerConst` | a 3-arity builtin's literal trailing operand |
+| `SubVarPrev` / `BinStackPrev` | the `v - PREVIOUS(v)` delta, 4->1 and 3->1 |
+| `LookupDirect` (codegen, so it reaches wasmgen) | a lookup's constant element offset |
+
+`SetCond; If` is safe to fuse because codegen is the sole producer of both and
+emits them together, so the pair is adjacent by construction rather than by
+luck.
+
+Two rules this family established. **A fusion may live in the symbolic layer
+iff the fused opcode has a `SymbolicOpcode` form**, because `CompiledSimulation`
+must stay the pure resolution of the cached symbolic fragments; the rest are
+Vm-local and never reach wasmgen. And **score a helper-variable idea against
+the post-fusion stream**: hoisting a repeated subexpression into a shared aux
+replaces each use with a `LoadVar` — one dispatch, exactly what a fused opcode
+costs — so the hoist is worth zero wherever a superinstruction can match the
+pattern, while still paying for a store and a slot.
+
+What this family cannot reach: **mispredicts**. The dispatches superinstructions
+remove best are the perfectly-predicted ones — `SetCond` always jumps to `If`'s
+arm — so fusing them removes instructions and branches but not branch misses.
+Measured: branches −6.3% against branch-misses −2.6%. The mispredict cost lives
+in the genuinely-unpredictable dispatches, which is where #604's hypothesis
+would have to be tested if anyone retries it.
+
+Remaining: revisit explicit tail-call dispatch if/when `become` stabilizes; a
+register VM reduces dispatch count more than any dispatch-mechanism change.
 
 ### Round 2 wins (2026-06-03, measured on Apple M-series / Asahi)
 
@@ -325,10 +465,54 @@ parity, zero-alloc all hold -- but did not clear the keep bar:
 - Branch-misses fell 8.4%, so a mispredict-bound core (the round-1 Ryzen)
   might see a real win -- that is the retry condition recorded on GH #712.
 
-Methodology consequence for future rounds: for effects under ~3%, either
-compare layout-stable counters (instructions/branch-misses via `perf stat`)
-or A/B multiple independent builds per side; a single worktree build pair is
-only conclusive for effects that exceed ~4%.
+**Negative result #4: the uniform-grid lookup index (implemented, not
+landed).** Graphical-function x-axes are overwhelmingly uniform -- 86.6% of
+corpus tables exactly, another 4.7% to within an ulp -- so `lookup`'s binary
+search can be replaced by an O(1) position computed from the table's endpoints
+and then verified, falling back to the search when the check fails. It is exact
+on any sorted axis (the check `x[k-1] < index <= x[k]` identifies the same
+position the search returns) and needs no stored metadata, so nothing is
+threaded through the dispatch arm -- the property whose absence sank #602.
+
+Measured, against predictions registered before implementing:
+
+| | predicted | measured |
+|---|---|---|
+| C-LEARN instructions | -2.7% | **-0.63%** |
+| WORLD3 instructions | -3.1% | **+0.59%** |
+| C-LEARN `vm::lookup` Ir | -60% | **-34.8%** |
+| WORLD3 `vm::lookup` Ir | -35% | **+7.7%** |
+
+The guess costs ~50 instructions (two divisions, a saturating float-to-int
+cast, two bounds-checked loads for the check) against ~12 per search probe, so
+it pays only above about four probes. C-LEARN's tables have a median of 251
+points -- an eight-probe search -- and win; WORLD3's median is 7, a three-probe
+search, and lose. Gating on a 32-point minimum recovered C-LEARN and left
+WORLD3 still 7.7% worse in `lookup`, because the restructured fallback is paid
+by every table below the gate, which is most of the corpus. Forcing the helper
+inline changed nothing (it was already inlined).
+
+**Why this one is worth reading before designing an experiment**: unlike the
+three above, where the effect was merely small, here the aggregate and the
+mechanism DISAGREED. End-to-end C-LEARN alone reads as a -0.63% win and a
+plausible cycles figure could have been quoted to match it. Only the per-call
+mechanism channel showed WORLD3's `lookup` getting 7.7% worse underneath that
+aggregate, and only a pre-registered per-model prediction made the sign flip
+impossible to read as "smaller than hoped". A single-model, single-channel
+measurement ships this change.
+
+The standing lesson is the sizing rule under "Measuring a change": a census
+established that ~100% of both hero models' tables were ELIGIBLE, which is not
+the same as benefiting, and the prediction costed the search being removed
+without costing the guess replacing it. The patch is recoverable from the
+round's scratch artifacts (`p9_option_c.patch`) if a cheaper guess ever makes
+the break-even worth revisiting.
+
+Methodology consequence for future rounds: the ~4% figure above bounds a
+WALL-CLOCK/CYCLES claim from a single build pair, and nothing else. Retired
+instructions and branches have an sd of ~0.026% across builds, so the same
+effect is resolved there by one pair; see "Measuring a change" above for the
+per-channel floors and the null-control rule.
 
 ### R4. `RuntimeView` allocation + `flat_offset` (~20% of post-win run)
 
@@ -356,6 +540,17 @@ changes**. The following are second-order and worth it only if compile latency
 remains a UX problem after the build levers (it matters for the salsa
 *incremental* edit loop more than cold compile).
 
+### C1. Arena-allocate the transient parse AST — NOT the dominant allocator
+
+Re-measured after compile round 3: the parser is no longer where the
+allocations are. Per cold C-LEARN compile, `Expr0::clone` accounts for 212,184
+allocations (3.4% of compile instructions) and the `Expr0`/`Expr2`/`Expr3` drop
+glue for ~7% — so an arena is worth ~10% for a large, medium-risk change, and
+the top allocation site is not the parser at all but `Compiler::intern_name`
+(320,650 allocations per compile, ~10% of all 3.24M; see C5). The original
+figure below (3.86M transient allocations) predates the salsa pipeline and no
+longer describes the code.
+
 ### C1. Arena-allocate the transient parse AST
 
 The equation parser builds `Expr0` with `Box` children + `Vec` args — 3.86M+
@@ -370,6 +565,15 @@ only if profiling after B still shows the parser as a hotspot.
 - Effort: large (thread an arena through the parser; verify nothing cached
   retains an arena reference). Risk: medium.
 
+### C2. Halve `reconstruct_variable` — MOOT
+
+`reconstruct_variable` is now the salsa-cached `reconstruct_model_variables`,
+and every caller is on the LTM / analysis / patch path; it does not appear in
+an ordinary compile profile at all. The 2x duplication that WAS real, and is
+fixed, was a different function: `variable_dimensions` demanded the per-variable
+parse under an empty `ModuleIdentContext`, a cache key nothing else used, so
+every variable was parsed twice per compile.
+
 ### C2. Halve `reconstruct_variable` (6.4% of compile)
 
 `reconstruct_variable` rebuilds a full `datamodel::Variable` (ident/equation/
@@ -381,6 +585,31 @@ avoid ~half the full reconstructions (and their clones).
 
 - Effort: medium. Risk: low–medium (changes the `collect_module_idents` input
   type; behavior must stay identical).
+
+### C3. `canonicalize` — the lever is call elimination, not a faster slow path
+
+`canonicalize` is still the largest non-allocator cost of a cold compile, but
+neither half of the proposal below is the way to reduce it, and the reason is
+worth keeping because the profile invites the wrong conclusion.
+
+**(b) interning is done.** `Ident<Canonical>` is a 64-shard-interned `Arc`
+(`common.rs`): `Clone` is a refcount bump and `PartialEq` is pointer equality.
+
+**(a) an ASCII fast path exists and already carries almost all traffic.**
+`is_canonical_needing_no_trim` is a single-pass byte-table scan returning
+`Cow::Borrowed`, measured at ~90 instructions per call at the hottest site.
+Only **4.6% of calls allocate** (99,322 of 2,146,745 per compile), so making
+the slow path cheaper cannot reach the other 95.4% — while rewriting it puts
+the GH #559 idempotence proptests, which guard the Unicode arm (titlecase,
+U+00A0, quoted sections, backslash unescaping), at risk for that 4.6%.
+
+**What works is not calling it.** Half of all calls came from one predicate
+re-canonicalizing names that are canonical by construction; deleting that inner
+call, which touches `canonicalize` not at all, measured −5.0% of a cold compile.
+The residual worth having is narrower still: `changes_when_lowercased` is asked
+about the separators the engine itself mints (`·` in every `submodel·var`
+ident), which is answered from a three-character list rather than the Unicode
+case tables.
 
 ### C3. `canonicalize` ASCII fast-path + ident interning
 
@@ -394,6 +623,174 @@ re-derivation. (b) is broader but touches many call sites.
 
 - Effort: (a) small/careful, (b) medium–large. Risk: (a) medium (correctness-
   critical function), (b) medium.
+
+### Compile round 3 (2026-08-10): the salsa pipeline's own redundancy
+
+Cold C-LEARN compile 2.119G -> 1.602G retired instructions, **−24.4%**, and a
+warm single-equation edit **−47%** (median wall 38 ms -> 4.3 ms). Every change
+is artifact-identical: 5215 slots, 58291 opcodes (31525 flow + 1477 stock +
+25289 initial), same literal / GF / temp / dimension / view / name / module
+counts. Measured as retired instructions throughout, because the machine was
+contended and the cycles channel cannot resolve effects this size there.
+
+What the round found, stated as the standing shape of the problem rather than
+as five fixes: **the cold compile's redundancy was in the salsa layer's own
+keying, not in the compiler.** Four of the five were a query being asked a
+question it had already answered, under a key that did not say so.
+
+| what | mechanism | share of cold compile |
+|---|---|---|
+| `is_dimension_name` | re-canonicalized every declared dimension name per call | −5.0% |
+| `variable_dimensions` | demanded the parse under an empty `ModuleIdentContext` -> every variable parsed twice | −3.5% |
+| `compile_implicit_var_fragment` | not tracked: every SMOOTH/DELAY/TREND helper recompiled per assembly | −12% cold, **−28% of a warm edit** |
+| `var_phase_symbolic_fragment_prod` | not tracked: cycle gate built 135 fragments per compile for 57 distinct keys | −14.3% |
+| topo-sort probe maps, `changes_when_lowercased` | SipHash and Unicode tables on the engine's own idents | −1.8%, −2.4% |
+
+Two constraints follow, and both are cheap to violate:
+
+- **A per-variable helper needs a per-variable key.** The two biggest wins were
+  functions whose comment said salsa already cached them, because their *parse*
+  was cached. Lowering and codegen are the expensive half and were not. When
+  adding a per-variable compiler, the question is not "is something upstream
+  memoized" but "does this function have a key of its own".
+- **A projection is what keeps a per-variable query per-variable.** Both new
+  queries read a three-bit `RunlistMembership` rather than the whole
+  `ModelDepGraphResult`; taking the whole result would re-execute every
+  fragment whenever any variable's dependencies moved, silently restoring the
+  coarseness the key was introduced to remove.
+
+### C4. Parallel fan-out of per-variable fragment compilation — designed and measured, NOT implemented
+
+The compile is **exactly serial** (`task-clock` / `elapsed` = 1.000 over two
+independent measurements). A prototype fan-out was built and measured on
+C-LEARN before round 3 landed; it is not in the tree, and these are the facts
+whoever implements it needs so they are not rediscovered.
+
+**Achievable, and bounded well below the core count.** Staged prewarm (parse +
+dependency memos, then per-variable fragments) reached **2.23x achieved
+parallelism but only 1.34x wall speedup** (132.7 -> 99.3 ms), at +12% retired
+instructions. The ceiling is a property of the query decomposition: at the time
+of measurement `model_dependency_graph` (35.5% of compile) was one query per
+`(model, input-set)` and could not be split by variable, `compile_implicit_var_fragment`
+(12.2%) had no key to prewarm, and symbolic->concrete resolution (~20%) is
+inherently sequential. Amdahl over that ~68% serial floor predicts 1.44x; the
+measurement was 1.34x. Round 3 has since moved the middle two rows into keyed
+queries, so the floor is lower and the ceiling correspondingly higher — but it
+is still a decomposition question, not a thread-count one.
+
+**The fan-out cannot live inside the salsa query graph.** `salsa::Database` is
+`Send` but **not `Sync`**, so `&dyn Db` cannot cross a rayon boundary and
+neither `assemble_module` nor `assemble_simulation` can fan out from within.
+It has to run from `compile_project_incremental`, which holds a concrete
+`&SimlinDb`. `Storage<Db>: Clone` clones the shared `Arc<Zalsa>` and mints a
+fresh per-thread `ZalsaLocal`, so each worker takes its own **moved** handle
+(`SimlinDb` is `Send`, not `Sync` — a handle may be given to a thread, never
+shared with one). Every handle must drop before the next `db.sync`: `zalsa_mut`
+cancels and blocks on outstanding handles, so a leaked one deadlocks the next
+edit.
+
+**Two hazards found by measurement, not by reasoning.** Both are silent.
+
+1. **The prewarm must run AFTER the module-cycle gate, never before.**
+   `compile_var_fragment` demands the recursive `model_module_map`, which salsa
+   turns into a dependency-graph cycle panic — a process abort under
+   `panic = abort` (GH #806). A prewarm placed ahead of
+   `assemble_simulation`'s `project_module_graph(..).cycle_error_from(..)`
+   check reopened exactly that hole: the lib suite went from its baseline to
+   two extra failures, both module-cycle regression tests, and repeating the
+   gate ahead of the prewarm restored the baseline exactly.
+2. **The fan-out must be gated on cold-ness.** Unconditionally prewarming
+   regressed the fully-cached recompile from 0.85–1.32 ms to 3.29–3.42 ms — a
+   2.5–4x regression on the path that matters most for interactive editing —
+   because it builds a work list over every variable and spins up workers to
+   re-verify memos that are already valid.
+
+Determinism is **not** a hazard here, and that is a measured result rather than
+an assumption: the 12-repeat byte-identical determinism suites
+(`fragment_determinism_tests`, `diagnostic_determinism_tests`) pass with the
+prewarm active. Salsa's accumulator drain is a dependency DFS, not an execution
+order.
+
+### C6. Warm-edit latency: what a single-equation edit costs, and what still does not scale
+
+Interactive edit latency, not cold compile, is what a modeller experiences, and
+it is measured with an out-of-tree probe that drives `SimlinDb::sync` +
+`compile_project_incremental` over real edits to a real model. Two facts about
+the measurement itself come first, because both were got wrong on the way to
+the numbers and either one silently misreports the result by an order of
+magnitude.
+
+**An "equation edit" is not one workload.** Appending a term to an equation can
+change the DEPENDENCY STRUCTURE rather than just the text -- turning a bare
+`INITIAL(x)` into an expression containing an `INITIAL(x)` is the case that bit
+here, and C-LEARN has 177 `INITIAL(` equations. A probe that edits each variable
+once measures the structural cost for every one of them. Pre-applying one edit
+so that later edits only change digits is what separates the two, and it moves
+the reported p90 by a factor of twelve.
+
+**Consumer count does not predict cost.** The obvious explanation for an
+expensive edit -- a constant read by many variables, each recompiling under the
+one-hop rule -- is false and was measured false: the slowest variable
+(`2x CO2 forcing`) has 3 references in the model and a fast one (`c uptake`) has
+47. Do not spend a day on fan-out.
+
+**Structure-preserving single-equation edit, C-LEARN** (40 edits, paired over
+the same variables, before = the first two round-3 commits, after = all six):
+
+| | before | after |
+|---|---:|---:|
+| median | 2.8 ms | 2.8 ms |
+| **p90** | **36.0 ms** | **3.0 ms** |
+| max | 73.9 ms | **6.7 ms** |
+| retired instructions | 11.03G | **5.27G** |
+
+The median was already fine; **the tail was the problem and the tail is gone.**
+That tail was the per-assembly recompile of every implicit helper and the cycle
+gate's un-memoized fragment probe -- the two changes keyed in round 3. A cheap
+edit now costs 40.6M instructions and its profile is almost entirely salsa's
+own `maybe_changed_after` verification plus the lexer re-reading the one edited
+equation, which is what proportional looks like.
+
+**What still costs a full recompile: an edit that changes the dependency
+structure.** Measured at 1.798G instructions -- 85% of a cold compile -- and it
+decomposes as:
+
+| | calls | Ir | share |
+|---|---:|---:|---:|
+| `compile_var_fragment` | **911** of ~955 | 402M | 22% |
+| `model_dependency_graph` | 1 | 565M | 31% |
+| ...of which `resolve_recurrence_sccs` | 2 | 245M | 14% |
+| `compile_implicit_var_fragment` | **651** (all) | 233M | 13% |
+
+Nearly every fragment in the model recompiles, which the per-variable keys
+should have prevented. The reason is already written down one level away, on
+`model_implicit_var_by_name`: a structural edit can change the model's implicit
+helper set, `model_module_ident_context` is an INTERNED handle whose id changes
+when that set grows, and a new key cannot backdate at all -- so every variable's
+parse is re-keyed and every fragment behind it recompiles. The bound is pinned
+by `implicit_helper_add_is_tight_but_module_helper_add_is_not`, which asserts
+exactly this asymmetry.
+
+So the next lever for interactive latency is **not** the dependency graph and
+not the fragment compilers: it is the granularity of the module-ident context's
+interning, which is GH #372's context-stable naming. Anything else attacks the
+22% and 13% rows while leaving the mechanism that produced them in place.
+
+### C5. `Compiler::intern_name` — the top allocation site, blocked on artifact identity
+
+320,650 allocations per cold C-LEARN compile, ~10% of all 3.24M, from two
+independent causes: `intern_name` calls `name.to_string()` twice per new name
+(once for `names`, once for the `name_ids` key), and `Compiler::new` re-interns
+every project dimension and element name for each of ~1,600 per-variable
+fragments.
+
+The second is the real cost and cannot be hoisted naively: `NameId` assignment
+order is baked into the compiled artifact (`base_gf`, `DimId`, and every
+`name_id` operand), and the ids are assigned per fragment from 0 and merged by
+`FragmentMerger`. Sharing a project-global prefix changes those ids. Any
+attempt here must either preserve the assignment exactly or accept an artifact
+change and re-baseline the goldens deliberately — which is why round 3 stopped
+short of it rather than taking a ~2-3%.
 
 ## Suggested ordering
 
@@ -414,8 +811,59 @@ re-derivation. (b) is broader but touches many call sites.
    decompose path for shape-equal non-linear views (a per-loop access-plan
    cache is the next idea there — and see the round-2 negative result before
    attempting it).
-5. **R3 superinstructions** — incremental dispatch wins, low risk.
-6. **C2 / C3** — only if incremental-compile latency still bites after A+B.
+5. ~~**R3 superinstructions**~~ — DONE; the family and its two rules are in the
+   R3 section above. Cumulative on the LTM-augmented run, which is where the
+   `PREVIOUS`-heavy forms pay most: post-fusion flow opcodes −44.3%, retired
+   instructions −28.3% on C-LEARN and −33.6% on WORLD3-03. An instruction/branch
+   win, not a predictor win.
+6. ~~**C2 / C3**~~ — answered, and not as proposed: C2 is moot (the function
+   is salsa-cached and off the ordinary compile path) and C3's two halves are
+   already done or the wrong lever. The compile round 3 section above records
+   what the profile actually pointed at, and what it cost.
+7. **C4 (parallel fan-out)** — the largest remaining compile lever and the only
+   one that needs a design rather than a fix. Read its two hazards before
+   starting; both are silent, and one is a process abort.
+8. **C5 (`Compiler::intern_name`)** — the top allocation site, blocked on
+   `NameId` assignment order being part of the compiled artifact.
+9. **C6's residual** — the remaining interactive lever, and it is GH #372's
+   context-stable helper naming rather than anything in the compile path: a
+   structural edit re-keys `model_module_ident_context`, and a new interned key
+   cannot backdate, so every fragment behind it recompiles.
+10. **LTM link-score arms** — the dominant cost of an LTM-enabled run on an
+    arrayed model, and mostly a generation question rather than a VM one. An
+    arm whose ceteris-paribus partial is *provably* `PREVIOUS(target)` is
+    omitted and lowers to a single zero-store; on C-LEARN that is 4,335 arms
+    and −19.2% of the flow program. The residual is gated on a semantics
+    question, not on engineering: ~5,000 further arms are blocked solely by a
+    live `time()`, because TIME is excluded from the freeze (GH #1016), and
+    resolving that would roughly double the win. Do **not** substitute the
+    cheaper negative test ("the link's source stayed frozen") — it asks a
+    different question and silently rewrites 187 result slots. GH #977 carries
+    the decomposition and the standing constraints.
+
+    "Provably" carries a LAG-ALIGNMENT requirement that a walk stopping at the
+    first `PREVIOUS` will miss: the partial equals `PREVIOUS(target)` only if
+    every read is lagged by exactly one step. An ORIGINAL `PREVIOUS(z)` in the
+    target's equation (which the wrap deliberately leaves untouched, so the
+    partial reads `z(t-1)` where the anchor read `z(t-2)`) and a synthesized
+    `PREVIOUS` nested inside another (which the subscript-index freeze produces)
+    both look entirely frozen and are not aligned. Either one omits an arm worth
+    close to the canonical ±1 attribution. Both are rejected, each is pinned by
+    its own row in `db::ltm_value_gate_tests`, and rejecting them costs zero arms
+    on C-LEARN — the win above is measured with both checks in place.
+
+    One disclosed **value** change remains, on a model that produces non-finite
+    values: a materialized arm over a `NaN` (or infinite) target computes
+    `NaN - NaN` and evaluates to `NaN`, where an omitted slot is `+0.0`. It is
+    reproduced both ways by
+    `db::ltm_value_gate_tests::a_nonfinite_target_arm_is_omitted_to_zero_not_nan`.
+    Whether `0` is the better answer is **open** and tracked as #1022:
+    `src/float.rs` argues an
+    engine-manufactured NaN is noise, while GH #542 built the `denom_summand`
+    exclusion specifically to preserve a `NaN` score as a per-loop "undefined
+    here" signal. The signal survives on the target's own series and on every
+    live arm, so what changes is confined to arms with no causal dependence on
+    their source.
 
 Larger run-side swings identified during round 2 — all three were taken to
 a data verdict in round 3 (2026-06-04):
@@ -427,9 +875,19 @@ a data verdict in round 3 (2026-06-04):
   stack-effect branch-span reconstruction over the fused stream) measured
   C-LEARN at exactly **30,524 executed dispatches/step**, of which lazy-If
   would skip 4,859 (**15.9%**) — but 93% of the skipped opcodes are cheap
-  scalar loads/binops, so the *instruction* share is only **~1.5%** (~35k of
-  ~2.4M instr/step): below the ~4% layout-noise measurement floor, at the
-  highest complexity of the three candidates. WORLD3: 3.25% dispatch share.
+  scalar loads/binops, so the share of RETIRED INSTRUCTIONS is only **~1.5%**
+  (~35k of ~2.4M instr/step). That is measurable (the instruction channel's sd
+  is ~0.026%; see "Measuring a change"), so the verdict does not rest on it
+  being unresolvable — it rests on ~1.5% of instructions being a small return
+  for the highest design cost of the three candidates. WORLD3: 3.25% dispatch
+  share.
+  The cheap part of the win has since been taken WITHOUT that machinery:
+  fusing `SetCond;If[;AssignCurr]` into conditional-select opcodes removes
+  **12.0% of executed dispatches** against this item's projected 15.9%, resting
+  on the pair being adjacent by construction (`compiler::codegen`'s `Expr::If`
+  arm is the sole producer of both and emits them together; executed counts are
+  exactly equal at 1,874,169 each). What remains here is the residual after
+  that fusion, against the full forward-jump cost.
   Notably **69.8% of the skippable dispatches sit behind constant
   conditions** (1,300 of 1,679 flow `If` sites take the same branch for the
   whole run) — a compile-time / #712-family observation, not a runtime-jump

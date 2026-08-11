@@ -1436,6 +1436,8 @@ mod ltm_rank_decline_tests;
 #[cfg(test)]
 mod ltm_unified_tests;
 #[cfg(test)]
+mod ltm_value_gate_tests;
+#[cfg(test)]
 mod module_cycle_tests;
 #[cfg(test)]
 mod module_wiring_tests;
@@ -1445,5 +1447,7 @@ mod prev_init_tests;
 mod stages_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod variable_dimensions_tests;
 #[cfg(test)]
 mod vm_verification_tests;

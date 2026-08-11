@@ -55,10 +55,12 @@ jobs:
           rustup show
           rustup target add wasm32-unknown-unknown
 
+      # A pinned upstream release, NOT `apt-get install binaryen`: the distro
+      # version is older than the flags build.sh passes and fails with a bare
+      # "Unknown option '--enable-bulk-memory-opt'". Shared with ts-release.yml,
+      # which optimizes the bundle it publishes and would fail identically.
       - name: Install wasm-opt
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq binaryen
+        run: ./scripts/install-binaryen.sh
 
       - uses: pnpm/action-setup@v4
 

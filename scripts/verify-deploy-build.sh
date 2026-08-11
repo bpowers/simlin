@@ -158,8 +158,11 @@ fi
 #    and its model-preview pipeline calls simlin_project_render_png; a
 #    slim WASM here would 500 every preview render. A missing or empty
 #    WASM means the Rust+WASM step was skipped or failed silently.
-#    ~1MB minimum is well under any real build (release WASM is ~6MB;
-#    DISABLE_WASM_OPT bumps it to ~12MB).
+#    ~1MB minimum is well under any real build (wasm-opt'd release WASM is
+#    ~6.5MB; DISABLE_WASM_OPT leaves the raw opt-level=z output at ~7.9MB).
+#    This check deliberately passes either way -- it gates "the WASM step
+#    ran and produced the full artifact", not "wasm-opt ran"; that is
+#    .github/workflows/wasm-opt.yml's job.
 if [ ! -f src/engine/core/libsimlin.wasm ]; then
     fail "src/engine/core/libsimlin.wasm missing (engine WASM build skipped?)"
 else
@@ -171,6 +174,55 @@ else
     else
         pass "src/engine/core/libsimlin.wasm exists and is the full artifact ($size bytes)"
     fi
+fi
+
+# 7b. On a DEPLOY, the WASM must additionally be wasm-opt'd. Opt-in via
+#     REQUIRE_WASM_OPT=1 rather than always-on, because CI's frontend job runs
+#     this same script after a deliberate `DISABLE_WASM_OPT=1 pnpm build` --
+#     its subject is the deploy ASSEMBLY, not the artifact's optimization.
+#     `scripts/deploy-web-staged.sh` is the only caller that sets it.
+#
+#     WHAT THIS DOES NOT COVER: `scripts/deploy-web.sh` -- the production
+#     deploy the root CLAUDE.md documents as `pnpm deploy:web` -- does not
+#     invoke this script at all, so neither this check nor any other assembly
+#     check runs on it. GH #1020 tracks closing that; until it does, the
+#     production path is verified by nothing.
+#
+#     That path is nonetheless safe from the specific bug below, but only
+#     incidentally: it runs `pnpm clean` before `pnpm build`, and
+#     src/engine's clean removes `core/`, so the staging cache cannot be
+#     consulted at all. Do not read that as protection -- it is two callers
+#     happening to clean first for unrelated reasons.
+#
+#     This exists because the failure it catches is silent and user-facing: an
+#     unoptimized browser bundle is ~24% larger (5.0MB -> 6.2MB) and nothing
+#     else on the deploy path would notice. It is the backstop for the
+#     src/engine/build.sh cache-key bug -- a pre-commit build staging an
+#     unoptimized blob that then satisfied the next optimizing build's cache
+#     check -- which is fixed at the source but is worth a tripwire here too,
+#     since a deploy is a local command with no CI gate.
+if [ "1" = "${REQUIRE_WASM_OPT-0}" ]; then
+    for wasm in src/engine/core/libsimlin.wasm src/engine/core/libsimlin-browser.wasm; do
+        if [ ! -f "$wasm" ]; then
+            fail "$wasm missing (REQUIRE_WASM_OPT=1 but the engine WASM build did not run)"
+        elif [ ! -f "$wasm.mode" ]; then
+            fail "$wasm.mode missing -- src/engine/build.sh did not stage $wasm, or predates the mode stamp"
+        elif [ "opt" != "$(cat "$wasm.mode")" ]; then
+            fail "$wasm was built WITHOUT wasm-opt (mode: $(cat "$wasm.mode")). Deploying it would ship a ~24% larger bundle. Is wasm-opt installed, and is DISABLE_WASM_OPT unset?"
+        elif [ ! -f "$wasm.raw" ]; then
+            fail "$wasm.raw missing -- cannot corroborate the mode stamp, so $wasm may not actually be optimized"
+        elif cmp -s "$wasm" "$wasm.raw"; then
+            # Independent of the stamp on purpose. The stamp records INTENT and
+            # can outlive the artifact it describes -- a wasm-opt that fails
+            # after the blob is staged used to leave a stale `opt` stamp on a
+            # raw blob, which passed this check on the stamp alone. That window
+            # is closed in src/engine/build.sh, but a guard that can only be as
+            # correct as the thing it guards is not a guard.
+            fail "$wasm is byte-identical to $wasm.raw, so wasm-opt did not transform it despite a '$(cat "$wasm.mode")' stamp -- the staged artifact and its stamp disagree"
+        else
+            pass "$wasm is wasm-opt'd ($(wc -c < "$wasm") bytes, stamp and artifact agree)"
+        fi
+    done
 fi
 
 # 8. The compiled server bundle exists. GAE runs `node src/server/lib`

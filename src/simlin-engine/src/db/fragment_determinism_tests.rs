@@ -27,8 +27,8 @@ use crate::datamodel;
 use crate::db::{
     ModuleInputSet, SimlinDb, assemble_simulation, collect_all_diagnostics,
     compile_implicit_var_fragment, compile_project_incremental, compile_var_fragment,
-    model_dependency_graph, model_implicit_var_info, model_module_ident_context,
-    parse_source_variable_with_module_context, sync_from_datamodel,
+    model_implicit_var_info, model_module_ident_context, parse_source_variable_with_module_context,
+    sync_from_datamodel,
 };
 use crate::test_common::TestProject;
 use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project};
@@ -831,7 +831,6 @@ fn check_helpers_resolve_to_their_own_names() {
         "the fixture's sub-model must be instantiated WITH a bound input, or the \
          two parse contexts coincide and this test proves nothing"
     );
-    let dep_graph = model_dependency_graph(&db, sub, project, inputs);
 
     let info = model_implicit_var_info(&db, sub, project);
     assert!(
@@ -839,15 +838,15 @@ fn check_helpers_resolve_to_their_own_names() {
         "the fixture must synthesize more than one helper in `sub`, or a \
          mis-resolution has nowhere to land; got {info:?}"
     );
-    for (name, meta) in info.iter() {
-        let fragment =
-            compile_implicit_var_fragment(&db, meta, sub, project, dep_graph, inputs.names(&db))
-                .unwrap_or_else(|| {
-                    panic!(
-                        "implicit helper `{name}` failed to lower under its own \
+    for name in info.keys() {
+        let fragment = compile_implicit_var_fragment(&db, sub, project, name.clone(), inputs)
+            .as_ref()
+            .unwrap_or_else(|| {
+                panic!(
+                    "implicit helper `{name}` failed to lower under its own \
                  instance's module-input set (GH #1002)"
-                    )
-                });
+                )
+            });
         assert_eq!(
             &fragment.fragment.ident, name,
             "the fragment compiled for helper `{name}` is actually \
@@ -1074,14 +1073,13 @@ fn an_implicit_helper_declines_when_the_contexts_synthesize_different_sets() {
          helper lists, or it does not exercise anything the order fix left open"
     );
 
-    let dep_graph = model_dependency_graph(&db, sub, project, inputs);
     let info = model_implicit_var_info(&db, sub, project);
     assert!(
         !info.is_empty(),
         "the fixture must derive some helpers, or the loop below is vacuous"
     );
     let mut declined = 0usize;
-    for (name, meta) in info.iter() {
+    for name in info.keys() {
         // `None` is the correct answer here: this parse holds no helper of that
         // name. What must never happen is `Some` carrying a DIFFERENT name --
         // that is the one thing `find_in`'s name check does guarantee. It does
@@ -1089,7 +1087,7 @@ fn an_implicit_helper_declines_when_the_contexts_synthesize_different_sets() {
         // context-stable, which
         // `a_cross_context_helper_name_collision_is_confined_to_a_failing_compile`
         // builds and bounds.
-        match compile_implicit_var_fragment(&db, meta, sub, project, dep_graph, inputs.names(&db)) {
+        match compile_implicit_var_fragment(&db, sub, project, name.clone(), inputs) {
             Some(fragment) => assert_eq!(
                 &fragment.fragment.ident, name,
                 "the fragment compiled for helper `{name}` is filed under `{}`; \

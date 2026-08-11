@@ -83,6 +83,58 @@ impl CompiledSimulation {
     }
 }
 
+/// One `(module, phase)` program's peak arithmetic-stack depth either side of
+/// `ByteCode::fuse_three_address`. `Err` means an opcode's declared
+/// [`Opcode::stack_effect`] underflowed the stack, i.e. the metadata is wrong.
+pub struct FusionDepthCheck {
+    pub module: String,
+    pub phase: &'static str,
+    pub pre_depth: Result<usize, String>,
+    pub post_depth: Result<usize, String>,
+    pub pre_opcodes: usize,
+    pub post_opcodes: usize,
+}
+
+impl CompiledSimulation {
+    /// Peak stack depth before and after fusion, for every module and executed
+    /// phase.
+    ///
+    /// **Standing constraint on `fuse_three_address`: fusion must never RAISE a
+    /// program's peak stack depth.** `compiler::symbolic::resolve_bytecode`
+    /// proves the compiled stream fits `STACK_CAPACITY`, and `vm::Stack` uses
+    /// unchecked access on the strength of that proof -- but the proof is
+    /// computed on the PRE-fusion stream, while the Vm executes the fused one.
+    /// A fused opcode whose `stack_effect` understates its pops would leave the
+    /// Vm running a program the proof does not cover.
+    ///
+    /// Neither the hero models nor a results fingerprint covers this. The
+    /// deepest stack any corpus model reaches is ~12 against a `STACK_CAPACITY`
+    /// of 64, so a wrong stack effect has more than 5x of headroom to hide in:
+    /// it would not overflow, the arithmetic would still be correct, and every
+    /// value would match. Only comparing the two depths detects it.
+    pub fn fusion_depth_audit(&self) -> Vec<FusionDepthCheck> {
+        let mut out = Vec::new();
+        for (key, module) in self.modules.iter() {
+            for (phase, bc) in [
+                ("flows", module.compiled_flows.as_ref()),
+                ("stocks", module.compiled_stocks.as_ref()),
+            ] {
+                let mut fused = bc.clone();
+                fused.fuse_three_address();
+                out.push(FusionDepthCheck {
+                    module: key.0.as_str().to_string(),
+                    phase,
+                    pre_depth: bc.max_stack_depth(),
+                    post_depth: fused.max_stack_depth(),
+                    pre_opcodes: bc.code.len(),
+                    post_opcodes: fused.code.len(),
+                });
+            }
+        }
+        out
+    }
+}
+
 /// Aggregate composition of a compiled simulation's bytecode and side tables.
 /// Produced by [`CompiledSimulation::bytecode_profile`]. `histogram` maps each
 /// opcode variant name to its occurrence count across all modules and phases.

@@ -1752,17 +1752,20 @@ fn setcond_if_uses_approx_eq_truthiness() {
 
 // ── Apply: per-builtin parity with the VM's apply() ───────────────────
 
-/// Run `Apply{func}` over the three operands `(a, b, c)` with `time`/`dt`
-/// seeded into the reserved global slots (TIME at byte 0, DT at byte 8 of
-/// `curr`). The program pushes a, b, c then `Apply`, so `c` is on top --
-/// matching the VM's pop order.
+/// Run `Apply{func}` over the operands `(a, b, c)` with `time`/`dt` seeded into
+/// the reserved global slots (TIME at byte 0, DT at byte 8 of `curr`).
+///
+/// The operand pushes are derived from `BuiltinId::arity()` rather than fixed
+/// at three, because that is what `compiler::codegen` emits: a builtin is
+/// pushed exactly the operands `vm::apply` reads, with no padding. Hard-coding
+/// three here would build a stream production cannot produce and would leave
+/// the extra values stranded on the wasm stack. Operands past the arity are
+/// ignored, so callers may keep passing 0.0 for them.
 fn apply_eval(func: BuiltinId, a: f64, b: f64, c: f64, time: f64, dt: f64) -> f64 {
-    let code = vec![
-        Opcode::LoadConstant { id: 0 },
-        Opcode::LoadConstant { id: 1 },
-        Opcode::LoadConstant { id: 2 },
-        Opcode::Apply { func },
-    ];
+    let code: Vec<Opcode> = (0..func.arity() as u16)
+        .map(|id| Opcode::LoadConstant { id })
+        .chain(std::iter::once(Opcode::Apply { func }))
+        .collect();
     // Seed TIME (slot 0 -> byte 0) and DT (slot 1 -> byte 8) of curr.
     value(code, vec![a, b, c], &[(0, time), (8, dt)])
 }
@@ -2001,12 +2004,11 @@ fn apply_inf_pi() {
 #[test]
 fn apply_inside_if_does_not_clobber_condition() {
     // An `Apply` in an If arm shares the function with the condition local;
-    // the dedicated apply locals must not collide. Build (codegen-padded
-    // Apply operands): `if cond then ABS(a) else f`, cond truthy.
-    let padded = vec![
+    // the dedicated apply locals must not collide. `ABS` has arity 1, so
+    // codegen pushes exactly one operand -- no padding (see
+    // `BuiltinId::arity`). Build `if cond then ABS(a) else f`, cond truthy.
+    let ops = vec![
         Opcode::LoadConstant { id: 1 }, // a = -4 (the `then` operand)
-        Opcode::LoadConstant { id: 3 }, // pad b = 0
-        Opcode::LoadConstant { id: 3 }, // pad c = 0
         Opcode::Apply {
             func: BuiltinId::Abs,
         }, // ABS(-4) = 4 -> the `then` value
@@ -2016,7 +2018,7 @@ fn apply_inside_if_does_not_clobber_condition() {
         Opcode::If {},
     ];
     let got = run(
-        &bc(vec![1.0, -4.0, 99.0, 0.0], padded),
+        &bc(vec![1.0, -4.0, 99.0, 0.0], ops),
         &ctx_with_cond_depth(1),
         true,
         1,

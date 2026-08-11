@@ -1,0 +1,156 @@
+---
+# The ONLY automated job that runs `wasm-opt` and then executes the resulting
+# blob under test.
+#
+# `src/engine/build.sh` runs `wasm-opt -O3` IN PLACE over `core/*.wasm`, which
+# is the file the TypeScript tests load -- so "did wasm-opt run" and "was the
+# optimized bundle executed under test" are the same question. Everywhere else
+# deliberately answers no: both of `ci.yaml`'s build steps set
+# DISABLE_WASM_OPT=1 (the pass is multi-minute and a PR gate does not need
+# release-quality WASM), and `scripts/pre-commit` does the same. Only
+# `ts-release.yml` installs binaryen at all, and by then the artifact is being
+# published. This job is what keeps that gap from reaching a release. See
+# GH #1019.
+#
+# It is path-filtered to the sources that can change the emitted WASM, which is
+# why it lives in its own workflow rather than as a job in `ci.yaml`: GitHub
+# applies `paths` per workflow, not per job, and filtering inside `ci.yaml`
+# would mean adding a third-party paths-filter action.
+#
+# Do NOT make this a required status check in branch protection as-is. A
+# path-filtered workflow reports nothing at all on a PR that touches none of
+# these paths, and a required check that never reports blocks the PR forever.
+# If it needs to be required, the standard workaround is an always-triggered
+# companion job that succeeds trivially when the filter does not match.
+#
+# IF THIS JOB FAILS AND `ci.yaml` PASSED, the difference is wasm-opt. The same
+# TypeScript tests run in `ci.yaml` against an UNOPTIMIZED blob; if they pass
+# there and fail here, the engine's WASM did not survive binaryen's -O3 pass --
+# a miscompilation, an unsupported feature, or a binaryen version
+# incompatibility -- not a defect in the TypeScript under test. Reproduce
+# locally with `bash src/engine/build.sh && pnpm -C src/engine test` (note the
+# absence of DISABLE_WASM_OPT), and compare against
+# `DISABLE_WASM_OPT=1 bash src/engine/build.sh && pnpm -C src/engine test`.
+name: WASM optimized-bundle check
+
+"on":
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/simlin-engine/**'
+      - 'src/libsimlin/**'
+      - 'src/engine/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - '.cargo/config.toml'
+      # The compiler selects what WASM gets emitted, and with it whether
+      # binaryen can still read it -- and the ordinary frontend lane runs with
+      # DISABLE_WASM_OPT=1, so a toolchain bump would otherwise reach a release
+      # without either blob having been optimized once.
+      - 'rust-toolchain.toml'
+      # This lane and ts-release.yml are the installer's only consumers, and
+      # ts-release runs on tags and manual dispatch -- so a version bump, a
+      # changed asset name or a dead URL would otherwise first surface DURING
+      # an npm release.
+      - 'scripts/install-binaryen.sh'
+      - '.github/workflows/wasm-opt.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'src/simlin-engine/**'
+      - 'src/libsimlin/**'
+      - 'src/engine/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - '.cargo/config.toml'
+      # The compiler selects what WASM gets emitted, and with it whether
+      # binaryen can still read it -- and the ordinary frontend lane runs with
+      # DISABLE_WASM_OPT=1, so a toolchain bump would otherwise reach a release
+      # without either blob having been optimized once.
+      - 'rust-toolchain.toml'
+      # This lane and ts-release.yml are the installer's only consumers, and
+      # ts-release runs on tags and manual dispatch -- so a version bump, a
+      # changed asset name or a dead URL would otherwise first surface DURING
+      # an npm release.
+      - 'scripts/install-binaryen.sh'
+      - '.github/workflows/wasm-opt.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  wasm-opt:
+    name: Build with wasm-opt and run the engine tests against it
+    runs-on: ubuntu-latest
+    # wasm-opt -O3 is ~170s on our two blobs (90s + 76s), on top of the wasm
+    # cargo build. Generous cap so a cold cargo cache does not trip it.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      # A pinned upstream release, NOT `apt-get install binaryen`: the distro
+      # version is older than the flags build.sh passes and fails with a bare
+      # "Unknown option '--enable-bulk-memory-opt'". Shared with ts-release.yml,
+      # which optimizes the bundle it publishes and would fail identically.
+      - name: Install wasm-opt
+        run: ./scripts/install-binaryen.sh
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-wasmopt-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-wasmopt-
+
+      - name: Install pnpm dependencies
+        run: pnpm install
+
+      # No DISABLE_WASM_OPT here -- that omission is the entire point of this
+      # workflow, so do not "fix" it to match ci.yaml.
+      - name: Build with wasm-opt enabled
+        run: pnpm build
+
+      # Fail loudly if the pass silently did not run: build.sh skips wasm-opt
+      # when binaryen is absent, printing "Skipping wasm-opt" and exiting 0, so
+      # without this check a broken install would turn this job into an
+      # expensive duplicate of ci.yaml's frontend job.
+      - name: Assert the blobs are actually optimized
+        run: |
+          set -euo pipefail
+          for f in src/engine/core/libsimlin.wasm src/engine/core/libsimlin-browser.wasm; do
+            if [ ! -f "$f.raw" ]; then
+              echo "ERROR: $f.raw missing -- src/engine/build.sh did not stage this blob" >&2
+              exit 1
+            fi
+            if cmp -s "$f" "$f.raw"; then
+              echo "ERROR: $f is byte-identical to the pre-wasm-opt output, so" >&2
+              echo "       wasm-opt did not run. Is binaryen installed, and is" >&2
+              echo "       DISABLE_WASM_OPT unset? This job exists to run it." >&2
+              exit 1
+            fi
+            printf '%s: optimized (%s -> %s bytes)\n' "$f" "$(wc -c < "$f.raw")" "$(wc -c < "$f")"
+          done
+
+      - name: Run the TypeScript tests against the optimized bundle
+        run: pnpm test

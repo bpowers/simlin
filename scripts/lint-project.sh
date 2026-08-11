@@ -17,6 +17,40 @@ fi
 
 ERRORS=0
 
+# Run a check that writes one error per line to stdout, and count those lines.
+# A check that FAILS TO RUN counts as an error in its own right: without that,
+# a crashed script writes its traceback to stderr, contributes zero lines here,
+# and the lint reports success -- a rule that silently stopped running looks
+# exactly like a rule that found nothing.
+run_line_check() {
+    local label="$1"
+    shift
+    local out err rc
+    out=$(mktemp)
+    err=$(mktemp)
+    set +e
+    "$@" > "$out" 2> "$err"
+    rc=$?
+    set -e
+    # Only a FAILING check's stdout is error lines; a passing one may print a
+    # summary there.
+    local found=0
+    if [ "$rc" -ne 0 ]; then
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo "ERROR: $label: $line"
+            ERRORS=$((ERRORS + 1))
+            found=1
+        done < "$out"
+    fi
+    if [ "$rc" -ne 0 ] && [ "$found" -eq 0 ]; then
+        echo "ERROR: $label: check failed to run (exit $rc):"
+        sed 's/^/    /' < "$err" >&2
+        ERRORS=$((ERRORS + 1))
+    fi
+    rm -f "$out" "$err"
+}
+
 # Rule 1: No --no-verify in any script or config file (excluding this lint script itself).
 # This should always have zero occurrences.
 NOVERIFY_PATTERN='--no-verify'
@@ -53,15 +87,15 @@ rm -f "$RS_FILES"
 
 # Rule 3: Copyright headers on all Rust and TypeScript source files
 # check-copyright.py writes one error per line to stdout; summary to stderr.
-COPYRIGHT_OUTPUT=$(mktemp)
-if ! python3 scripts/check-copyright.py > "$COPYRIGHT_OUTPUT"; then
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        echo "ERROR: copyright header: $line"
-        ERRORS=$((ERRORS + 1))
-    done < "$COPYRIGHT_OUTPUT"
-fi
-rm -f "$COPYRIGHT_OUTPUT"
+run_line_check "copyright header" python3 scripts/check-copyright.py
+
+# Rule 4: a path-filtered workflow's push and pull_request `paths` lists must
+# match. They are maintained by hand and read as one filter, so a path added to
+# only one of them silently means "runs on merge but not on the PR" (or the
+# reverse) -- a gap that looks like coverage. `.github/workflows/wasm-opt.yml`
+# is the only such workflow today; the loop covers any future one.
+run_line_check "workflow paths" python3 scripts/check-workflow-paths.py
+rm -f "$PATHS_OUTPUT"
 
 if [ "$ERRORS" -gt 0 ]; then
     echo ""

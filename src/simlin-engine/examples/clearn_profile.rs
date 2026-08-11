@@ -19,23 +19,36 @@
 //!
 //! Environment:
 //!   CLEARN_MODEL          override the .mdl path
+//!   CLEARN_LTM            "1" to compile with Loops That Matter enabled
 //!   CLEARN_COMPILE_ITERS  extra compile-only iterations (default 0)
 //!   CLEARN_RUN_ITERS      extra run-only iterations (default 0)
 //!   CLEARN_PROFILE        "compile" | "run" | "both" (default both) -- which
 //!                         extra-iteration loop(s) to execute
 
-use std::alloc::{GlobalAlloc, Layout, System as Backing};
+use std::alloc::{GlobalAlloc, Layout};
+
+// Back the counting allocator with mimalloc, which is what every native binary
+// embedding the engine installs (simlin-cli, simlin-serve, simlin-mcp, and
+// libsimlin under its `mimalloc` feature, which pysimlin's build turns on).
+// The compile path is allocation-bound, so profiling against system malloc
+// measures an allocator no shipped native build runs.
+use mimalloc::MiMalloc as Backing;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+use simlin_engine::db::{
+    SimlinDb, compile_project_incremental, set_project_ltm_enabled, sync_from_datamodel_incremental,
+};
 use simlin_engine::{CompiledSimulation, Vm, open_vensim};
 
 // --- Counting allocator -----------------------------------------------------
 //
 // Tracks cumulative allocation calls/bytes plus live bytes and a high-water
-// mark. compile_project_incremental can fan out across rayon threads, so all
-// counters are atomic and the peak is maintained with a CAS loop. The default
+// mark. A `GlobalAlloc` must be `Sync` and serves every thread in the process,
+// so the counters are atomic and the peak is maintained with a CAS loop. That
+// is a requirement of the allocator position, not of the workload:
+// compile_project_incremental runs on one thread today (measured at 0.9996 CPUs
+// utilized). The default
 // GlobalAlloc::realloc routes through our alloc/dealloc, so realloc is counted
 // without an explicit override.
 
@@ -145,9 +158,12 @@ fn model_path() -> String {
     )
 }
 
-fn compile_once(datamodel: &simlin_engine::datamodel::Project) -> CompiledSimulation {
+fn compile_once(datamodel: &simlin_engine::datamodel::Project, ltm: bool) -> CompiledSimulation {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    if ltm {
+        set_project_ltm_enabled(&mut db, sync.project, true);
+    }
     compile_project_incremental(&db, sync.project, "main").unwrap()
 }
 
@@ -163,11 +179,13 @@ fn main() {
     let compile_iters = env_usize("CLEARN_COMPILE_ITERS", 0);
     let run_iters = env_usize("CLEARN_RUN_ITERS", 0);
     let which = std::env::var("CLEARN_PROFILE").unwrap_or_else(|_| "both".to_string());
+    let ltm = std::env::var("CLEARN_LTM").is_ok_and(|v| v != "0");
     if std::env::var("CLEARN_COUNT_ALLOCS").is_ok_and(|v| v != "0") {
         COUNTING_ON.store(true, Ordering::Relaxed);
     }
 
     println!("model: {path}");
+    println!("ltm:   {ltm}");
 
     let contents = phase("read_file", || {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"))
@@ -186,7 +204,7 @@ fn main() {
         datamodel.dimensions.len()
     );
 
-    let compiled = phase("compile (salsa)", || compile_once(&datamodel));
+    let compiled = phase("compile (salsa)", || compile_once(&datamodel, ltm));
     println!("  n_slots (root): {}", compiled.n_slots());
 
     let prof = compiled.bytecode_profile();
@@ -255,14 +273,14 @@ fn main() {
     if compile_iters > 0 && do_compile {
         let t0 = Instant::now();
         for _ in 0..compile_iters {
-            std::hint::black_box(compile_once(&datamodel));
+            std::hint::black_box(compile_once(&datamodel, ltm));
         }
         let per = t0.elapsed().as_secs_f64() * 1000.0 / compile_iters as f64;
         println!("compile x{compile_iters}: {per:.2} ms/iter");
     }
 
     if run_iters > 0 && do_run {
-        let compiled = compile_once(&datamodel);
+        let compiled = compile_once(&datamodel, ltm);
         let t0 = Instant::now();
         for _ in 0..run_iters {
             let mut vm = Vm::new(compiled.clone()).unwrap();
