@@ -11484,8 +11484,10 @@ struct SlotDigests {
 /// by `(name, element)`. An unsorted list would make `identity` depend on
 /// `HashMap` iteration order and flap per run.
 ///
-/// `permuting_two_slots_moves_only_the_identity_digest` is the discriminating
-/// test: it constructs exactly the swap the sums cannot see.
+/// `the_digest_sees_both_a_value_swap_and_a_rebinding` is the discriminating
+/// test. Note that it needs TWO rows: a value swap moves an ordered fold
+/// whether or not identity is in it, so only the rebinding row constrains these
+/// `name`/`elem` bytes.
 fn slot_digests(slots: &[(&str, usize, f64)]) -> SlotDigests {
     let mut mantissa_digest: i64 = 0;
     let mut exponent_digest: i64 = 0;
@@ -11512,48 +11514,67 @@ fn slot_digests(slots: &[(&str, usize, f64)]) -> SlotDigests {
     }
 }
 
-/// The property the magnitude sums cannot have, demonstrated rather than
-/// asserted: two slots exchanging their maxima.
+/// The two properties the magnitude sums cannot have, demonstrated rather than
+/// asserted. They are SEPARATE, and conflating them is how the first version of
+/// this test passed for the wrong reason.
 ///
-/// This is the regression class the digest was blind to before the identity
-/// term -- an offset or remapping change that attaches correct values to the
-/// wrong links, leaving every count and every sum intact. The test pins BOTH
-/// halves: that the sums really are unchanged (so the blindness is real and not
-/// a strawman) and that the identity digest really does move.
+/// * **Value swap** -- two slots exchange their maxima, canonical order fixed.
+///   The sums are unchanged (an unordered multiset), and the digest moves
+///   because FNV-1a is an ORDERED fold. This holds whether or not slot identity
+///   is folded in, so it does NOT exercise the name/element bytes.
+/// * **Rebinding** -- the same maxima, in the same order, attached to a
+///   different slot identity: a renamed variable, or the same value at a
+///   different element index. Only the identity bytes catch this, and it is the
+///   closer analogue of the offset/remapping regression the identity term was
+///   added for.
 ///
-/// It is a fast default-suite test rather than part of the `#[ignore]`d C-LEARN
-/// run, because the property belongs to the digest function and needs no model.
+/// The first version of this test asserted only the swap and claimed it
+/// demonstrated identity binding. It did not: removing `name` and `elem` from
+/// the fold left it green, because reordering the value stream is enough to
+/// move an ordered hash. Both rows exist now, and each was mutation-tested
+/// against the fold it is supposed to constrain.
+///
+/// Fast default-suite test rather than part of the `#[ignore]`d run, since the
+/// property belongs to the digest function and needs no model.
 #[test]
-fn permuting_two_slots_moves_only_the_identity_digest() {
+fn the_digest_sees_both_a_value_swap_and_a_rebinding() {
     let baseline = [("alpha", 0usize, 1.5f64), ("beta", 0usize, 42.0f64)];
-    let swapped = [("alpha", 0usize, 42.0f64), ("beta", 0usize, 1.5f64)];
 
+    // Property 1: values exchanged between slots.
+    let swapped = [("alpha", 0usize, 42.0f64), ("beta", 0usize, 1.5f64)];
     let a = slot_digests(&baseline);
     let b = slot_digests(&swapped);
-
     assert_eq!(
         (a.mantissa, a.exponent),
         (b.mantissa, b.exponent),
         "the magnitude sums are permutation-invariant by construction; if this \
-         ever fails the identity digest below is no longer the only thing \
-         catching a swap, and this test's premise needs restating"
+         ever fails, the premise of this test needs restating"
     );
     assert_ne!(
         a.identity, b.identity,
-        "two slots exchanging maxima must move the identity digest -- that is \
-         the whole reason it exists"
+        "two slots exchanging maxima must move the identity digest"
     );
 
-    // The element index is part of the identity too, not just the name: a value
-    // moving between elements of the SAME arrayed variable is the likelier
-    // remapping bug, and it must be visible.
-    let same_var = [("alpha", 0usize, 1.5f64), ("alpha", 1usize, 42.0f64)];
-    let same_var_swapped = [("alpha", 0usize, 42.0f64), ("alpha", 1usize, 1.5f64)];
-    assert_ne!(
-        slot_digests(&same_var).identity,
-        slot_digests(&same_var_swapped).identity,
-        "a swap WITHIN one arrayed variable must move the identity digest"
-    );
+    // Property 2: same values, same order, different slot identity. This is
+    // the row that actually constrains the name/element bytes -- a fold over
+    // values alone reproduces `baseline` exactly here.
+    let renamed = [("alpha", 0usize, 1.5f64), ("gamma", 0usize, 42.0f64)];
+    let reindexed = [("alpha", 0usize, 1.5f64), ("beta", 7usize, 42.0f64)];
+    for (label, other) in [("renamed", &renamed), ("reindexed", &reindexed)] {
+        let c = slot_digests(other);
+        assert_eq!(
+            (a.mantissa, a.exponent),
+            (c.mantissa, c.exponent),
+            "{label}: the sums cannot see a rebinding, which is why the \
+             identity digest exists"
+        );
+        assert_ne!(
+            a.identity, c.identity,
+            "{label}: the same maxima bound to a different slot identity must \
+             move the identity digest -- this is the offset/remapping \
+             regression class"
+        );
+    }
 }
 
 /// Pinned by `clearn_ltm_slot_maxima_digest`; see its rustdoc before changing.
