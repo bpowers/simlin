@@ -538,3 +538,55 @@ fn clearn_ltm_discovery_compiles() {
         panic!("C-LEARN should compile with LTM discovery enabled, got Err: {e:?}")
     });
 }
+
+/// The union-graph enumeration path on a FULL World3 run: candidate
+/// generation must complete (`enumeration_complete`), so the reported 200
+/// (the `MAX_LOOPS` cap binds -- World3's runtime universe holds ~330k
+/// elementary cycles, ~3k of which pass retention) are the exact
+/// retention/ranking selection rather than the strongest-first-DFS sample.
+/// The 2026-08-10 ground-truth audit's smoking gun -- the births ->
+/// population-aging chain loops, which peak at 27% partition dominance yet
+/// were entirely absent from the DFS-sampled report -- must be present.
+///
+/// `#[ignore]`d for runtime class only (a full 401-step simulate plus the
+/// 330k-circuit enumeration and its two scoring passes run minutes in a
+/// debug build); run with `cargo test --release -- --ignored`.
+#[test]
+#[ignore]
+fn world3_full_run_enumeration_is_complete() {
+    let inputs = world3_discovery_inputs();
+    let found = ltm_finding::discover_loops_with_graph(
+        &inputs.results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+        &inputs.expansion,
+        &inputs.sub_model_output_ports,
+        None,
+    )
+    .expect("discovery must succeed on World3");
+
+    assert!(
+        found.enumeration_complete,
+        "World3's 330k-circuit runtime universe is well inside the \
+         enumeration budgets; a fallback here is a regression"
+    );
+    assert!(!found.expansion_cap_saturated);
+    assert_eq!(
+        found.loops.len(),
+        200,
+        "the MAX_LOOPS cap binds on World3 (~3k retention-passing loops)"
+    );
+    assert!(
+        found.loops.iter().any(|fl| {
+            fl.loop_info
+                .links
+                .iter()
+                .any(|l| l.from.as_str() == "maturation_14_to_15")
+        }),
+        "a births -> population-aging loop (via maturation_14_to_15) must be \
+         reported; the capped DFS missed this family entirely (peak 27% \
+         partition dominance -- see the 2026-08-10 audit)"
+    );
+}

@@ -79,6 +79,18 @@ pub struct ModelAnalysis {
     /// wall-clock time budget); this is the structural-completeness signal that
     /// mirrors exhaustive mode's `LtmVariablesResult::agg_recovery_truncated`.
     pub agg_recovery_truncated: bool,
+    /// True when discovery's candidate generation was the union-graph circuit
+    /// enumeration and it completed: the loop candidates were provably the
+    /// full ever-simultaneously-active cycle universe of the recorded link
+    /// scores, so `loop_dominance` is the exact retention/ranking selection
+    /// rather than a heuristic sample. See
+    /// [`crate::ltm_finding::DiscoveryResult::enumeration_complete`].
+    pub enumeration_complete: bool,
+    /// True when the DFS fallback's per-node expansion cap bound somewhere,
+    /// making the candidate set a strongest-first-biased sample. Always false
+    /// when `enumeration_complete` is true. See
+    /// [`crate::ltm_finding::DiscoveryResult::expansion_cap_saturated`].
+    pub expansion_cap_saturated: bool,
 }
 
 /// Build a `json::Model` from the named model in a `datamodel::Project`, with
@@ -161,6 +173,8 @@ pub fn analyze_model(
             analysis_error: Some(msg),
             truncated: false,
             agg_recovery_truncated: false,
+            enumeration_complete: false,
+            expansion_cap_saturated: false,
         });
     }
 
@@ -200,6 +214,8 @@ pub fn analyze_model(
             analysis_error,
             truncated: result.truncated,
             agg_recovery_truncated: result.agg_recovery_truncated,
+            enumeration_complete: result.enumeration_complete,
+            expansion_cap_saturated: result.expansion_cap_saturated,
         }),
         None => Ok(ModelAnalysis {
             model: json_model,
@@ -210,6 +226,8 @@ pub fn analyze_model(
             analysis_error,
             truncated: false,
             agg_recovery_truncated: false,
+            enumeration_complete: false,
+            expansion_cap_saturated: false,
         }),
     }
 }
@@ -290,6 +308,8 @@ struct PipelineResult {
     dominant_loops_by_period: Vec<DominantPeriod>,
     truncated: bool,
     agg_recovery_truncated: bool,
+    enumeration_complete: bool,
+    expansion_cap_saturated: bool,
 }
 
 /// Run the full LTM discovery pipeline.
@@ -419,6 +439,8 @@ fn run_ltm_pipeline(
     let partitions = discovery.partitions;
     let truncated = discovery.truncated;
     let agg_recovery_truncated = discovery.agg_recovery_truncated;
+    let enumeration_complete = discovery.enumeration_complete;
+    let expansion_cap_saturated = discovery.expansion_cap_saturated;
 
     let time = build_time_array(&results);
 
@@ -445,6 +467,8 @@ fn run_ltm_pipeline(
         dominant_loops_by_period,
         truncated,
         agg_recovery_truncated,
+        enumeration_complete,
+        expansion_cap_saturated,
     }))
 }
 

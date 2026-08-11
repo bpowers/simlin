@@ -2,16 +2,30 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Strongest-path loop discovery algorithm from Eberlein & Schoenberg (2020).
+//! Post-simulation "loops that matter" discovery over recorded link scores.
 //!
-//! This module implements the heuristic "loops that matter" discovery algorithm
-//! described in Appendix I of "Finding the Loops That Matter" (2020). Instead of
-//! exhaustively enumerating all feedback loops (which grows factorially with model
-//! size), this algorithm uses a DFS guided by link score magnitudes to find the
-//! most important loops at each simulation timestep.
+//! Runs as a post-processing step on simulation results that include link
+//! score synthetic variables (generated with `ltm_discovery_mode` enabled).
+//! Candidate loops are generated in one of two ways:
 //!
-//! The algorithm runs as a post-processing step on simulation results that include
-//! link score synthetic variables (generated with `ltm_discovery_mode` enabled).
+//! - **Union-graph circuit enumeration** (the primary path; `ltm_finding_enum.rs`,
+//!   design: docs/design-plans/2026-08-10-ltm-discovery-union-enumeration.md):
+//!   because discovery runs after the simulation, the set of edges that ever
+//!   carried a nonzero score is observable, and every scorable loop is an
+//!   ever-simultaneously-active elementary cycle of that union graph.
+//!   Enumerating exactly those cycles (activity-bitset pruning) yields a
+//!   provably complete candidate set whenever the enumeration budgets hold --
+//!   `DiscoveryResult::enumeration_complete` reports it.
+//! - **Per-step strongest-first DFS** (the fallback, from Appendix I of
+//!   Eberlein & Schoenberg, "Finding the Loops That Matter", 2020): a DFS
+//!   guided by link score magnitudes with a per-node expansion cap, run at
+//!   every saved timestep. A sampler, not an enumerator -- on runtime-dense
+//!   graphs the cap binds (`DiscoveryResult::expansion_cap_saturated`) and
+//!   the candidate set is strongest-first biased.
+//!
+//! Either way, each candidate's per-step score is computed exactly (the
+//! product of its links' recorded score series) and the same retention /
+//! competitive-first ranking pipeline selects what is reported.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -23,6 +37,17 @@ use crate::ltm::{CausalGraph, CyclePartitions, Link, LinkPolarity, Loop, LoopPol
 use crate::ltm_post::NormGroup;
 use crate::project::Project;
 use crate::results::Results;
+
+// Union-graph circuit enumeration: discovery's primary candidate generator
+// (docs/design-plans/2026-08-10-ltm-discovery-union-enumeration.md). A
+// sibling file mounted here purely for the per-file line cap.
+#[path = "ltm_finding_enum.rs"]
+mod enum_gen;
+#[cfg(test)]
+pub(crate) use enum_gen::EnumBudgetGuard;
+use enum_gen::{
+    ActivityGraph, accumulate_series_into_totals, enumerate_active_circuits, retain_circuits,
+};
 
 // --- Types ---
 
@@ -229,17 +254,21 @@ pub struct DiscoveredPartition {
     pub loop_count: usize,
 }
 
-/// The outcome of a strongest-path discovery run.
+/// The outcome of a loop-discovery run.
 ///
-/// `truncated` is `true` when a caller-supplied time budget elapsed before the
-/// per-timestep DFS sweep finished, so `loops` reflects only the timesteps
-/// processed before the budget ran out (and is therefore *possibly* partial:
-/// loops only dominant in unprocessed timesteps will be absent, and the
-/// per-step importance series of the loops that *were* found is complete,
-/// since each loop's score is recomputed across all steps once its path is
-/// known). Discovery on large models can be infeasibly slow (GH #647), so the
-/// budget lets callers bound wall-clock time and report partial results rather
-/// than hang.
+/// `truncated` is `true` when a caller-supplied time budget elapsed before
+/// candidate generation finished. A deadline that expires during the primary
+/// union-graph enumeration (or its retention passes) first falls back to the
+/// per-step DFS with whatever wall-clock remains, so a `truncated` result
+/// always reflects the DFS sweep stopping early: `loops` covers only the
+/// timesteps processed before expiry (loops only dominant in unprocessed
+/// timesteps will be absent, while the per-step importance series of the
+/// loops that *were* found is complete, since each loop's score is recomputed
+/// across all steps once its path is known). Discovery on large models can be
+/// infeasibly slow (GH #647), so the budget lets callers bound wall-clock
+/// time and report partial results rather than hang. See
+/// `enumeration_complete` / `expansion_cap_saturated` below for the
+/// completeness statement of an un-truncated run.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 pub struct DiscoveryResult {
     /// Loops discovered (ranked, filtered, and ID-assigned).
@@ -258,6 +287,23 @@ pub struct DiscoveryResult {
     /// *possibly incomplete* for the same structural reason, distinct from the
     /// time-`truncated` flag above.
     pub agg_recovery_truncated: bool,
+    /// Whether candidate generation was the union-graph circuit enumeration
+    /// AND it ran to completion. When `true`, the candidate set is provably
+    /// the full universe of ever-simultaneously-active elementary cycles of
+    /// the recorded link-score series (at saved-step resolution), so the
+    /// reported loops are exactly the retention/ranking pipeline's selection
+    /// from ALL scorable loops -- discovery is exact, not heuristic. When
+    /// `false`, candidates came from the per-step strongest-first DFS
+    /// fallback (an explicit sample; see `expansion_cap_saturated`).
+    pub enumeration_complete: bool,
+    /// Whether the DFS fallback's per-node expansion cap
+    /// (`EXPANSION_BUDGET_PER_SEARCH / |SCC|`) actually bound somewhere.
+    /// When set, the DFS could not explore every branch and the candidate
+    /// set is a strongest-first-biased sample of the loop universe -- the
+    /// previously-silent degradation the World3 audit surfaced (its cap
+    /// saturates on 100% of searches while `truncated` stays `false`).
+    /// Always `false` on the enumeration path.
+    pub expansion_cap_saturated: bool,
 }
 
 #[cfg(test)]
@@ -401,7 +447,7 @@ impl SearchGraph {
                 continue;
             }
 
-            let per_node_cap = (EXPANSION_BUDGET_PER_SEARCH / scc_sizes[stock_scc as usize]).max(1);
+            let per_node_cap = (dfs_expansion_budget() / scc_sizes[stock_scc as usize]).max(1);
             let mut expansions: HashMap<Ident<Canonical>, u32> = HashMap::new();
 
             let mut visiting: HashSet<Ident<Canonical>> = HashSet::new();
@@ -1580,6 +1626,49 @@ const DEADLINE_CHECK_INTERVAL: u32 = 8192;
 /// ones already explored.
 const EXPANSION_BUDGET_PER_SEARCH: u32 = 4096;
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of [`EXPANSION_BUDGET_PER_SEARCH`], scoped by an
+    /// active [`DfsExpansionBudgetGuard`] -- lets a tiny diamond fixture make
+    /// the per-node cap bind (and the `expansion_cap_saturated` flag fire)
+    /// instead of needing a >4096-node graph (docs/dev/rust.md#test-time-budgets).
+    static DFS_EXPANSION_BUDGET_OVERRIDE: std::cell::Cell<Option<u32>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The effective per-search expansion budget for the discovery DFS.
+fn dfs_expansion_budget() -> u32 {
+    #[cfg(test)]
+    {
+        if let Some(b) = DFS_EXPANSION_BUDGET_OVERRIDE.with(|c| c.get()) {
+            return b;
+        }
+    }
+    EXPANSION_BUDGET_PER_SEARCH
+}
+
+/// RAII guard (test-only) overriding [`dfs_expansion_budget`] for the current
+/// thread; restores the previous value on drop.
+#[cfg(test)]
+pub(crate) struct DfsExpansionBudgetGuard {
+    prev: Option<u32>,
+}
+
+#[cfg(test)]
+impl DfsExpansionBudgetGuard {
+    pub(crate) fn new(budget: u32) -> Self {
+        let prev = DFS_EXPANSION_BUDGET_OVERRIDE.with(|c| c.replace(Some(budget)));
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for DfsExpansionBudgetGuard {
+    fn drop(&mut self) {
+        DFS_EXPANSION_BUDGET_OVERRIDE.with(|c| c.set(self.prev));
+    }
+}
+
 /// Per-timestep mutable DFS state, allocated once per `discover_loops_with_graph`
 /// call and reused across stocks and timesteps to avoid per-search reallocation.
 struct DfsScratch {
@@ -1637,6 +1726,11 @@ struct DfsScratch {
     /// Set once `deadline` has passed; every DFS level then unwinds
     /// immediately and the sweep stops.
     deadline_expired: bool,
+    /// Set when the per-node expansion cap actually refuses an expansion
+    /// anywhere in the sweep -- the signal that the DFS degraded from
+    /// effectively-exhaustive to a strongest-first-biased sample
+    /// (surfaced as `DiscoveryResult::expansion_cap_saturated`).
+    cap_saturated: bool,
 }
 
 impl DfsScratch {
@@ -1661,6 +1755,7 @@ impl DfsScratch {
             deadline: None,
             visit_count: 0,
             deadline_expired: false,
+            cap_saturated: false,
         }
     }
 
@@ -1841,7 +1936,7 @@ impl IndexedSearch {
             // the visiting set empty without touching every slot.
             scratch.expansions.iter_mut().for_each(|e| *e = 0);
             scratch.per_node_cap =
-                (EXPANSION_BUDGET_PER_SEARCH / scratch.scc_sizes[stock_scc as usize]).max(1);
+                (dfs_expansion_budget() / scratch.scc_sizes[stock_scc as usize]).max(1);
             scratch.cur_gen = scratch.cur_gen.wrapping_add(1);
             if scratch.cur_gen == 0 {
                 // Generation wrapped; clear so a stale stamp can't read as live.
@@ -1909,6 +2004,7 @@ impl IndexedSearch {
         // tied/super-unit scores and silently drops sibling loops). See
         // [`EXPANSION_BUDGET_PER_SEARCH`].
         if scratch.expansions[idx] >= scratch.per_node_cap {
+            scratch.cap_saturated = true;
             return;
         }
         scratch.expansions[idx] += 1;
@@ -2491,6 +2587,45 @@ pub fn discover_loops_with_graph(
     sub_model_output_ports: &SubModelOutputPorts,
     budget: Option<Duration>,
 ) -> Result<DiscoveryResult> {
+    discover_loops_with_candidate_gen(
+        results,
+        causal_graph,
+        stocks,
+        ltm_vars,
+        dims,
+        expansion,
+        sub_model_output_ports,
+        budget,
+        CandidateGen::Auto,
+    )
+}
+
+/// Which candidate-generation strategy `discover_loops_with_candidate_gen`
+/// uses to find cycles worth scoring.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CandidateGen {
+    /// Union-graph circuit enumeration first (provably complete when it
+    /// finishes within its budgets), the per-step DFS as fallback. The
+    /// production default.
+    Auto,
+    /// Per-step strongest-first DFS only -- the pre-enumeration behavior,
+    /// kept selectable for benchmarks and tests that compare the two paths.
+    DfsOnly,
+}
+
+/// [`discover_loops_with_graph`] with the candidate generator pinned.
+#[allow(clippy::too_many_arguments)]
+pub fn discover_loops_with_candidate_gen(
+    results: &Results,
+    causal_graph: &CausalGraph,
+    stocks: &[Ident<Canonical>],
+    ltm_vars: &[LtmSyntheticVar],
+    dims: &[datamodel::Dimension],
+    expansion: &LinkExpansionContext,
+    sub_model_output_ports: &SubModelOutputPorts,
+    budget: Option<Duration>,
+    candidate_gen: CandidateGen,
+) -> Result<DiscoveryResult> {
     let link_offsets = parse_link_offsets(results, ltm_vars, dims, expansion);
     if link_offsets.is_empty() {
         return Ok(DiscoveryResult {
@@ -2498,6 +2633,8 @@ pub fn discover_loops_with_graph(
             partitions: Vec::new(),
             truncated: false,
             agg_recovery_truncated: false,
+            enumeration_complete: true,
+            expansion_cap_saturated: false,
         });
     }
 
@@ -2513,60 +2650,222 @@ pub fn discover_loops_with_graph(
             partitions: Vec::new(),
             truncated: false,
             agg_recovery_truncated: false,
+            enumeration_complete: true,
+            expansion_cap_saturated: false,
         });
     }
 
-    // Collect all unique loop paths across all timesteps, dedup-keyed
-    // on the canonical edge-sequence rotation so opposite-direction
-    // cycles over the same node set are kept as distinct loops (see
-    // `crate::ltm::canonical_rotation` and issue #308). The key is the
-    // rotation of the path's integer node ids (a bijection with the
-    // string names within this search), so the dedup classes match the
-    // string-keyed original without allocating a string per closure.
-    let mut all_paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
-    let mut seen_sets: HashSet<Vec<u32>> = HashSet::new();
-
     let step_count = results.step_count;
 
-    // Hoist the integer-indexed topology build out of the per-timestep loop:
-    // the graph's edges and result slots are step-invariant, so rebuilding the
-    // `Ident`-keyed `SearchGraph` (and re-hashing every name) per step was pure
-    // waste. Only the per-edge scores change, which the DFS re-reads each step.
+    // Hoist the integer-indexed topology build out of the candidate search:
+    // the graph's edges and result slots are step-invariant. Both candidate
+    // generators (enumeration, per-step DFS) run over this one structure.
     let search = IndexedSearch::build(&link_offsets, stocks);
-    let mut scratch = DfsScratch::new(&search);
 
-    // Skip step 0 where link scores are NaN (PREVIOUS values don't exist).
-    // The original ran a fresh per-step `find_strongest_loops` (whose own
-    // per-step `seen_sets` deduped within a step) and then deduped again across
-    // steps here; both layers keyed on the canonical rotation, so collapsing
-    // them onto the single cross-step `seen_sets` keeps exactly the paths the
-    // two-layer version kept, in the same first-seen order.
-    //
-    // The optional time budget is enforced at two granularities. Between
-    // timesteps, the cheap check below stops before starting a step we can't
-    // afford. *Within* a step, the DFS itself checks the same deadline every
-    // `DEADLINE_CHECK_INTERVAL` node visits (see `IndexedSearch::dfs`):
-    // on dense element-level graphs a SINGLE step's DFS can run for hours
-    // (GH #647), so a between-steps-only check would not honor the budget at
-    // all. Loops recorded before mid-step expiry are kept -- each is a real,
-    // fully-traversed cycle, so partial-step results are still valid loops.
-    // `start` is captured lazily so an unbudgeted run never reads the clock.
-    let mut truncated = false;
+    // Cycle partitions serve both the enumeration retention pass
+    // (full-universe denominators) and the final ranking; compute once.
+    let partitions = causal_graph.compute_cycle_partitions();
+
+    // Wall-clock deadline shared by enumeration, its retention passes, and
+    // the DFS fallback sweep. `start` is captured lazily so an unbudgeted run
+    // never reads the clock.
     let start = budget.map(|_| Instant::now());
-    scratch.deadline = budget.zip(start).map(|(limit, started)| started + limit);
-    for step in 1..step_count {
-        if let (Some(limit), Some(started)) = (budget, start)
-            && started.elapsed() >= limit
-        {
-            truncated = true;
-            break;
+    let deadline = budget.zip(start).map(|(limit, started)| started + limit);
+
+    let mut all_paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
+    let mut truncated = false;
+    let mut enumeration_complete = false;
+    let mut expansion_cap_saturated = false;
+    let mut agg_recovery_truncated = false;
+    // Full-universe per-partition denominators from the enumeration path
+    // (`None` on the DFS path, where `rank_and_filter` computes totals over
+    // the discovered set as before).
+    let mut external_totals: Option<HashMap<usize, Vec<f64>>> = None;
+
+    // --- Primary candidate generation: union-graph circuit enumeration ---
+    // (docs/design-plans/2026-08-10-ltm-discovery-union-enumeration.md).
+    // Every loop with a nonzero score at some saved step has ALL its edges
+    // active at that step (score is a product), so the ever-simultaneously-
+    // active elementary cycles of the union graph are exactly the scorable
+    // loop universe. Enumerating them once replaces the per-step sampling
+    // DFS with a provably complete candidate set whenever the enumeration
+    // budgets hold.
+    if candidate_gen == CandidateGen::Auto {
+        let activity = ActivityGraph::build(&search, results);
+        let candidates = enumerate_active_circuits(&activity, deadline);
+        if candidates.complete {
+            // Per-node metadata for the streaming retention passes.
+            let stock_partition_of_node: Vec<Option<usize>> = search
+                .idents
+                .iter()
+                .map(|ident| partitions.stock_partition.get(ident).copied())
+                .collect();
+            let is_module_node: Vec<bool> = search
+                .idents
+                .iter()
+                .map(|ident| causal_graph.module_graph(ident).is_some())
+                .collect();
+            if let Some(retention) = retain_circuits(
+                &candidates.circuits,
+                &activity,
+                results,
+                &stock_partition_of_node,
+                &is_module_node,
+                deadline,
+            ) {
+                // Cross-agg stitching over the FULL enumerated set, with the
+                // same combinatorial core the DFS path uses below (GH #696).
+                // Stitching must see pre-retention circuits: a petal can fail
+                // retention while a stitched combination passes.
+                let (stitched, stitch_truncated) = {
+                    let petals_by_agg =
+                        crate::db::collect_agg_petals(&candidates.circuits, |id: &u32| {
+                            search.idents[*id as usize].as_str()
+                        });
+                    let mut sorted: Vec<(&str, Vec<crate::db::StitchPetal<u32>>)> =
+                        petals_by_agg.into_iter().collect();
+                    sorted.sort_by(|a, b| a.0.cmp(b.0));
+                    let (stitched, truncated_aggs) = crate::db::stitch_cross_agg_petals(
+                        sorted,
+                        crate::db::cross_agg_loop_budget(),
+                    );
+                    (stitched, !truncated_aggs.is_empty())
+                };
+                agg_recovery_truncated = stitch_truncated;
+
+                // Stitched loops join the candidate set like any other loop:
+                // their mass joins the denominators and they are materialized
+                // below. (They cannot duplicate an enumerated circuit: a
+                // stitched sequence visits its agg node twice, an elementary
+                // cycle never does -- so no cross-dedup is needed here.)
+                let mut totals = retention.partition_totals;
+                for seq in &stitched {
+                    accumulate_series_into_totals(
+                        seq,
+                        &activity,
+                        results,
+                        &stock_partition_of_node,
+                        &mut totals,
+                    );
+                }
+
+                let to_ident_path = |path: &[u32]| -> Vec<Ident<Canonical>> {
+                    path.iter()
+                        .map(|&n| search.idents[n as usize].clone())
+                        .collect()
+                };
+                all_paths.extend(
+                    retention
+                        .survivors
+                        .iter()
+                        .map(|&ci| to_ident_path(&candidates.circuits[ci])),
+                );
+                all_paths.extend(stitched.iter().map(|seq| to_ident_path(seq)));
+                external_totals = Some(totals);
+                enumeration_complete = true;
+            }
         }
-        search.load_step_scores(results, step, &mut scratch);
-        search.discover_step(&mut scratch, &mut seen_sets, &mut all_paths);
-        if scratch.deadline_expired {
-            truncated = true;
-            break;
+        // An incomplete enumeration (circuit budget, visit budget, or
+        // deadline) falls through to the DFS with whatever wall-clock
+        // remains; the partial circuit list is discarded rather than merged
+        // so the fallback's behavior is exactly the pre-enumeration behavior.
+    }
+
+    if !enumeration_complete {
+        // Collect all unique loop paths across all timesteps, dedup-keyed
+        // on the canonical edge-sequence rotation so opposite-direction
+        // cycles over the same node set are kept as distinct loops (see
+        // `crate::ltm::canonical_rotation` and issue #308). The key is the
+        // rotation of the path's integer node ids (a bijection with the
+        // string names within this search), so the dedup classes match the
+        // string-keyed original without allocating a string per closure.
+        let mut seen_sets: HashSet<Vec<u32>> = HashSet::new();
+        let mut scratch = DfsScratch::new(&search);
+
+        // Skip step 0 where link scores are NaN (PREVIOUS values don't exist).
+        // The original ran a fresh per-step `find_strongest_loops` (whose own
+        // per-step `seen_sets` deduped within a step) and then deduped again across
+        // steps here; both layers keyed on the canonical rotation, so collapsing
+        // them onto the single cross-step `seen_sets` keeps exactly the paths the
+        // two-layer version kept, in the same first-seen order.
+        //
+        // The optional time budget is enforced at two granularities. Between
+        // timesteps, the cheap check below stops before starting a step we can't
+        // afford. *Within* a step, the DFS itself checks the same deadline every
+        // `DEADLINE_CHECK_INTERVAL` node visits (see `IndexedSearch::dfs`):
+        // on dense element-level graphs a SINGLE step's DFS can run for hours
+        // (GH #647), so a between-steps-only check would not honor the budget at
+        // all. Loops recorded before mid-step expiry are kept -- each is a real,
+        // fully-traversed cycle, so partial-step results are still valid loops.
+        scratch.deadline = deadline;
+        for step in 1..step_count {
+            if let (Some(limit), Some(started)) = (budget, start)
+                && started.elapsed() >= limit
+            {
+                truncated = true;
+                break;
+            }
+            search.load_step_scores(results, step, &mut scratch);
+            search.discover_step(&mut scratch, &mut seen_sets, &mut all_paths);
+            if scratch.deadline_expired {
+                truncated = true;
+                break;
+            }
         }
+        expansion_cap_saturated = scratch.cap_saturated;
+
+        // Stitch cross-element-through-aggregate loops (GH #696). The discovery DFS
+        // emits only *elementary* element-graph circuits, so a feedback loop that
+        // traverses a hoisted reducer's synthetic agg node more than once
+        // (`pop[a] → agg → pop[b] → agg → pop[a]`) is structurally unreachable --
+        // its `visiting` set forbids revisiting the agg. Exhaustive mode recovers
+        // these by stitching the single-agg "petals" together; do the same here,
+        // reusing the SAME combinatorial core (`stitch_cross_agg_petals`) so
+        // discovery recovers exactly the loops exhaustive does. Each discovered
+        // elementary path that visits one agg once IS a petal; the stitched
+        // sequences are appended to `all_paths` and flow through the identical
+        // FoundLoop construction / trim / dedup / rank pipeline below. The stitched
+        // loop's edge multiset is the union of its petals' (disjoint) edges, so the
+        // per-step loop score read from `link_offset_map` is exactly the product of
+        // the petals' link scores -- scored identically to any discovered loop.
+        agg_recovery_truncated = {
+            // `collect_agg_petals` keys the petal map on `&str` agg names borrowed
+            // from `all_paths`, but the stitched sequences own their `Ident` nodes,
+            // so compute the (owned) stitched paths + truncation flag in an inner
+            // scope that ends the immutable borrow before we push to `all_paths`.
+            let (stitched, was_truncated) = {
+                let petals_by_agg = crate::db::collect_agg_petals(&all_paths, |id| id.as_str());
+                let mut sorted: Vec<(&str, Vec<crate::db::StitchPetal<Ident<Canonical>>>)> =
+                    petals_by_agg.into_iter().collect();
+                sorted.sort_by(|a, b| a.0.cmp(b.0));
+                let (stitched, truncated_aggs) =
+                    crate::db::stitch_cross_agg_petals(sorted, crate::db::cross_agg_loop_budget());
+                (stitched, !truncated_aggs.is_empty())
+            };
+            // Append each stitched cycle as a new path, deduped against the already-
+            // discovered paths (and each other) by canonical-rotation of the node
+            // names -- the same dedup notion `seen_sets` uses above, so a stitched
+            // loop never duplicates an elementary one.
+            let mut seen_strs: HashSet<Vec<String>> = all_paths
+                .iter()
+                .map(|p| {
+                    crate::ltm::canonical_rotation(
+                        &p.iter().map(|n| n.as_str().to_string()).collect::<Vec<_>>(),
+                    )
+                })
+                .collect();
+            for seq in stitched {
+                let key = crate::ltm::canonical_rotation(
+                    &seq.iter()
+                        .map(|n| n.as_str().to_string())
+                        .collect::<Vec<_>>(),
+                );
+                if seen_strs.insert(key) {
+                    all_paths.push(seq);
+                }
+            }
+            was_truncated
+        };
     }
 
     if all_paths.is_empty() {
@@ -2574,62 +2873,11 @@ pub fn discover_loops_with_graph(
             loops: Vec::new(),
             partitions: Vec::new(),
             truncated,
-            agg_recovery_truncated: false,
+            agg_recovery_truncated,
+            enumeration_complete,
+            expansion_cap_saturated,
         });
     }
-
-    // Stitch cross-element-through-aggregate loops (GH #696). The discovery DFS
-    // emits only *elementary* element-graph circuits, so a feedback loop that
-    // traverses a hoisted reducer's synthetic agg node more than once
-    // (`pop[a] → agg → pop[b] → agg → pop[a]`) is structurally unreachable --
-    // its `visiting` set forbids revisiting the agg. Exhaustive mode recovers
-    // these by stitching the single-agg "petals" together; do the same here,
-    // reusing the SAME combinatorial core (`stitch_cross_agg_petals`) so
-    // discovery recovers exactly the loops exhaustive does. Each discovered
-    // elementary path that visits one agg once IS a petal; the stitched
-    // sequences are appended to `all_paths` and flow through the identical
-    // FoundLoop construction / trim / dedup / rank pipeline below. The stitched
-    // loop's edge multiset is the union of its petals' (disjoint) edges, so the
-    // per-step loop score read from `link_offset_map` is exactly the product of
-    // the petals' link scores -- scored identically to any discovered loop.
-    let agg_recovery_truncated = {
-        // `collect_agg_petals` keys the petal map on `&str` agg names borrowed
-        // from `all_paths`, but the stitched sequences own their `Ident` nodes,
-        // so compute the (owned) stitched paths + truncation flag in an inner
-        // scope that ends the immutable borrow before we push to `all_paths`.
-        let (stitched, was_truncated) = {
-            let petals_by_agg = crate::db::collect_agg_petals(&all_paths, |id| id.as_str());
-            let mut sorted: Vec<(&str, Vec<crate::db::StitchPetal<Ident<Canonical>>>)> =
-                petals_by_agg.into_iter().collect();
-            sorted.sort_by(|a, b| a.0.cmp(b.0));
-            let (stitched, truncated_aggs) =
-                crate::db::stitch_cross_agg_petals(sorted, crate::db::cross_agg_loop_budget());
-            (stitched, !truncated_aggs.is_empty())
-        };
-        // Append each stitched cycle as a new path, deduped against the already-
-        // discovered paths (and each other) by canonical-rotation of the node
-        // names -- the same dedup notion `seen_sets` uses above, so a stitched
-        // loop never duplicates an elementary one.
-        let mut seen_strs: HashSet<Vec<String>> = all_paths
-            .iter()
-            .map(|p| {
-                crate::ltm::canonical_rotation(
-                    &p.iter().map(|n| n.as_str().to_string()).collect::<Vec<_>>(),
-                )
-            })
-            .collect();
-        for seq in stitched {
-            let key = crate::ltm::canonical_rotation(
-                &seq.iter()
-                    .map(|n| n.as_str().to_string())
-                    .collect::<Vec<_>>(),
-            );
-            if seen_strs.insert(key) {
-                all_paths.push(seq);
-            }
-        }
-        was_truncated
-    };
 
     // Convert paths to FoundLoop objects with scores
     let mut found_loops: Vec<FoundLoop> = Vec::new();
@@ -2805,14 +3053,15 @@ pub fn discover_loops_with_graph(
     }
     let mut found_loops = deduped;
 
-    let partitions = causal_graph.compute_cycle_partitions();
-    let partition_meta = rank_and_filter(&mut found_loops, &partitions);
+    let partition_meta = rank_and_filter(&mut found_loops, &partitions, external_totals.as_ref());
 
     Ok(DiscoveryResult {
         loops: found_loops,
         partitions: partition_meta,
         truncated,
         agg_recovery_truncated,
+        enumeration_complete,
+        expansion_cap_saturated,
     })
 }
 
@@ -2883,12 +3132,22 @@ fn mean_relative_contribution(fl: &FoundLoop, totals: &[f64]) -> f64 {
 struct RelativeImportance {
     mean_rel: f64,
     competing: bool,
+    /// The loop's raw `avg_abs_score`, the tie-break BETWEEN equal
+    /// `mean_rel` values. Solo loops all carry `mean_rel == 1.0` by
+    /// construction, so without this the order among them -- and therefore
+    /// WHICH solo loops survive `MAX_LOOPS` cap pressure -- fell through to
+    /// the content key, i.e. to their names. Raw magnitude is the only
+    /// meaningful comparison the solo class admits (their relative scores
+    /// are all identically ±1), and it is inert for competing loops, whose
+    /// `mean_rel` values essentially never tie exactly.
+    avg_abs: f64,
     key: (String, Vec<String>),
 }
 
 /// Order two loops for ranking: active loops before never-active (`NaN`)
 /// ones, competing loops before trivially-isolated (solo-partition) ones,
-/// then descending mean relative importance, then content-based tie-breaking.
+/// then descending mean relative importance, then descending raw magnitude,
+/// then content-based tie-breaking.
 ///
 /// The competing-first demotion is deliberate (see [`RelativeImportance`]):
 /// a solo loop's `mean_rel` is `1.0` by construction, so comparing it against
@@ -2908,9 +3167,16 @@ fn cmp_relative_importance(a: &RelativeImportance, b: &RelativeImportance) -> st
         .mean_rel
         .partial_cmp(&a.mean_rel)
         .unwrap_or(std::cmp::Ordering::Equal);
+    // Descending raw magnitude breaks exact mean_rel ties -- load-bearing for
+    // the solo class, where every loop's mean_rel is 1.0 (see the field doc).
+    let by_magnitude = b
+        .avg_abs
+        .partial_cmp(&a.avg_abs)
+        .unwrap_or(std::cmp::Ordering::Equal);
     by_nan
         .then(by_competing)
         .then(by_score)
+        .then(by_magnitude)
         .then_with(|| a.key.cmp(&b.key))
 }
 
@@ -2985,9 +3251,26 @@ fn cmp_relative_importance(a: &RelativeImportance, b: &RelativeImportance) -> st
 /// stocks are element-specific. The logic is partition-naming-agnostic -- it
 /// compares each loop's score to the total within its partition regardless of
 /// granularity.
+///
+/// **External denominators (the enumeration path).** `external_totals`, when
+/// provided, carries the per-engine-internal-partition per-step
+/// `Σ|score_j[t]|` computed over the FULL enumerated loop universe (retention
+/// non-survivors included), and it replaces the internally-computed totals
+/// for every `NormGroup::Partition` group. Relative scores are then
+/// normalized against the whole universe's mass -- matching exhaustive-mode
+/// semantics, where the enumerated set IS the universe -- instead of against
+/// only the loops in `found_loops`. Solo groups keep their own-series totals
+/// either way. The competing-vs-solo classification is deliberately still
+/// computed over `found_loops` (on the enumeration path: retention
+/// survivors): classifying against the full universe would let never-active
+/// or sub-threshold phantom co-members flip a genuinely-solo loop to
+/// "competing" with mean relative score ~1.0 (its denominator gains no mass
+/// from them), vaulting zero-information loops over real competing ones --
+/// exactly the degeneracy the solo demotion exists to prevent.
 fn rank_and_filter(
     found_loops: &mut Vec<FoundLoop>,
     partitions: &CyclePartitions,
+    external_totals: Option<&HashMap<usize, Vec<f64>>>,
 ) -> Vec<DiscoveredPartition> {
     let step_count = found_loops.first().map_or(0, |l| l.scores.len());
     debug_assert!(
@@ -3044,9 +3327,19 @@ fn rank_and_filter(
     // denominator reflects the whole partition (the truncate-before-filter
     // order of GH #310 used to compute totals over only the top-200
     // survivors). A Solo-group total is just that loop's own |score| series.
+    // On the enumeration path, a Partition group's totals instead come from
+    // `external_totals` -- the full enumerated universe's mass (see the fn
+    // doc above).
     let mut partition_totals: HashMap<NormGroup, Vec<f64>> = HashMap::new();
     if step_count > 0 {
         for (&group, indices) in &partition_groups {
+            if let (NormGroup::Partition(p), Some(external)) = (group, external_totals)
+                && let Some(totals) = external.get(&p)
+            {
+                debug_assert_eq!(totals.len(), step_count);
+                partition_totals.insert(group, totals.clone());
+                continue;
+            }
             let mut totals = vec![0.0; step_count];
             for &idx in indices {
                 for (i, &(_, score)) in found_loops[idx].scores.iter().enumerate() {
@@ -3215,6 +3508,7 @@ fn rank_truncate_and_id(
                 RelativeImportance {
                     mean_rel,
                     competing: competing[idx],
+                    avg_abs: fl.avg_abs_score,
                     key,
                 },
                 fl,

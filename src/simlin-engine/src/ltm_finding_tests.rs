@@ -1487,7 +1487,7 @@ fn test_rank_and_filter_truncates_to_max_loops() {
 
     assert_eq!(loops.len(), CAP + EXCESS);
     let _guard = MaxLoopsGuard::new(CAP);
-    rank_and_filter(&mut loops, &partitions);
+    rank_and_filter(&mut loops, &partitions, None);
     assert_eq!(loops.len(), CAP, "Should truncate to the cap ({CAP})");
 }
 
@@ -1512,7 +1512,7 @@ fn test_rank_and_filter_removes_low_contribution() {
     ];
 
     let partitions = single_partition(&["stock_x"]);
-    rank_and_filter(&mut loops, &partitions);
+    rank_and_filter(&mut loops, &partitions, None);
 
     // Only the dominant loop should remain
     assert_eq!(
@@ -1556,7 +1556,7 @@ fn test_rank_and_filter_unpartitioned_loops_do_not_cross_normalize() {
         partitions: vec![],
         stock_partition: HashMap::new(),
     };
-    let meta = rank_and_filter(&mut loops, &partitions);
+    let meta = rank_and_filter(&mut loops, &partitions, None);
 
     assert_eq!(
         loops.len(),
@@ -1597,7 +1597,7 @@ fn test_rank_and_filter_preserves_score_ordering() {
     ];
 
     let partitions = single_partition(&["stock_x"]);
-    rank_and_filter(&mut loops, &partitions);
+    rank_and_filter(&mut loops, &partitions, None);
 
     // Within a SINGLE partition the relative-contribution ranking (GH #543)
     // and the raw-magnitude ranking coincide (the same denominator divides
@@ -1647,7 +1647,7 @@ fn test_rank_and_filter_retains_briefly_dominant_loop() {
 
     let partitions = single_partition(&["stock_x"]);
     let mut loops = vec![spike_loop, steady_loop];
-    rank_and_filter(&mut loops, &partitions);
+    rank_and_filter(&mut loops, &partitions, None);
 
     // Both loops should be retained: the spike loop has 100/(100+50) = 66.7%
     // contribution at step 50, well above MIN_CONTRIBUTION.
@@ -1835,7 +1835,7 @@ fn test_rank_and_filter_element_level_partitions() {
         .collect(),
     };
 
-    let partition_meta = rank_and_filter(&mut loops, &partitions);
+    let partition_meta = rank_and_filter(&mut loops, &partitions, None);
 
     // All 3 loops should be retained: Chicago's loop is 100% of its
     // partition's total, even though globally it's tiny.
@@ -1940,7 +1940,7 @@ fn test_rank_and_filter_543_partition_relative_ranking() {
     ];
 
     let partitions = two_partitions(&["stock_a"], &["stock_b"]);
-    rank_and_filter(&mut loops, &partitions);
+    rank_and_filter(&mut loops, &partitions, None);
 
     let order: Vec<f64> = loops.iter().map(|l| l.avg_abs_score).collect();
     // Relative ranking: b_dom (0.909) > a_big (0.7) > a_small (0.3) >
@@ -1989,7 +1989,7 @@ fn test_rank_and_filter_demotes_trivially_isolated_loops() {
     ];
 
     let partitions = two_partitions(&["stock_a"], &["stock_b"]);
-    let partition_meta = rank_and_filter(&mut loops, &partitions);
+    let partition_meta = rank_and_filter(&mut loops, &partitions, None);
 
     assert_eq!(loops.len(), 3, "all three loops clear MIN_CONTRIBUTION");
     let order: Vec<f64> = loops.iter().map(|l| l.avg_abs_score).collect();
@@ -2053,7 +2053,7 @@ fn test_rank_and_filter_543_truncation_keeps_partition_dominant() {
     // raw-magnitude truncation the survivors would have been a_big (700)
     // and a_small (300), dropping the partition-dominant b_dom.
     let _guard = MaxLoopsGuard::new(2);
-    rank_and_filter(&mut loops, &partitions);
+    rank_and_filter(&mut loops, &partitions, None);
 
     assert_eq!(loops.len(), 2, "cap of 2 retains exactly two loops");
     let mags: Vec<f64> = loops.iter().map(|l| l.avg_abs_score).collect();
@@ -2121,7 +2121,7 @@ fn test_rank_and_filter_truncation_drops_solo_loops_first() {
     // is dropped even though its raw magnitude (100) dwarfs the
     // competing loops'.
     let _guard = MaxLoopsGuard::new(3);
-    let partition_meta = rank_and_filter(&mut loops, &partitions);
+    let partition_meta = rank_and_filter(&mut loops, &partitions, None);
 
     assert_eq!(loops.len(), 3, "cap of 3 retains exactly three loops");
     let order: Vec<f64> = loops.iter().map(|l| l.avg_abs_score).collect();
@@ -2191,7 +2191,7 @@ fn test_rank_and_filter_310_partition_dominant_survives_cap() {
     // truncate-before-filter the survivor would have been a1 (magnitude
     // 900) and the partition-B loop would never have been seen.
     let _guard = MaxLoopsGuard::new(1);
-    rank_and_filter(&mut loops, &partitions);
+    rank_and_filter(&mut loops, &partitions, None);
 
     assert_eq!(loops.len(), 1, "cap of 1 retains exactly one loop");
     assert_eq!(
@@ -2233,8 +2233,8 @@ fn test_rank_and_filter_deterministic_under_permutation() {
     let mut order_b = build();
     order_b.reverse();
 
-    rank_and_filter(&mut order_a, &partitions);
-    rank_and_filter(&mut order_b, &partitions);
+    rank_and_filter(&mut order_a, &partitions, None);
+    rank_and_filter(&mut order_b, &partitions, None);
 
     // Same final ordering (by magnitude proxy), same ids, same partition
     // assignment, same retained set.
@@ -2273,7 +2273,7 @@ fn test_rank_and_filter_no_scores_still_attaches_partitions() {
     ];
 
     let partitions = two_partitions(&["stock_a"], &["stock_b"]);
-    let partition_meta = rank_and_filter(&mut loops, &partitions);
+    let partition_meta = rank_and_filter(&mut loops, &partitions, None);
 
     assert_eq!(loops.len(), 2);
     assert_eq!(partition_meta.len(), 2);
@@ -3220,4 +3220,620 @@ fn recompute_strips_element_subscripts_before_port_match() {
         settled > 0.0,
         "recomputed series follows the m·pos pathway (+); got {settled}. PR #705 r3353758167."
     );
+}
+
+// ===========================================================================
+// Union-graph circuit enumeration (the primary candidate generator; design:
+// docs/design-plans/2026-08-10-ltm-discovery-union-enumeration.md).
+// ===========================================================================
+
+/// Build a scalar stock/flow/aux datamodel project for enumeration tests.
+fn enum_test_project(vars: Vec<crate::datamodel::Variable>) -> crate::datamodel::Project {
+    use crate::datamodel;
+    datamodel::Project {
+        name: "enum_test".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vars,
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+fn enum_stock(
+    ident: &str,
+    eqn: &str,
+    inflows: &[&str],
+    outflows: &[&str],
+) -> crate::datamodel::Variable {
+    use crate::datamodel;
+    datamodel::Variable::Stock(datamodel::Stock {
+        ident: ident.to_string(),
+        equation: datamodel::Equation::Scalar(eqn.to_string()),
+        documentation: String::new(),
+        units: None,
+        inflows: inflows.iter().map(|s| s.to_string()).collect(),
+        outflows: outflows.iter().map(|s| s.to_string()).collect(),
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    })
+}
+
+fn enum_flow(ident: &str, eqn: &str) -> crate::datamodel::Variable {
+    use crate::datamodel;
+    datamodel::Variable::Flow(datamodel::Flow {
+        ident: ident.to_string(),
+        equation: datamodel::Equation::Scalar(eqn.to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    })
+}
+
+fn enum_aux(ident: &str, eqn: &str) -> crate::datamodel::Variable {
+    use crate::datamodel;
+    datamodel::Variable::Aux(datamodel::Aux {
+        ident: ident.to_string(),
+        equation: datamodel::Equation::Scalar(eqn.to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    })
+}
+
+/// Compile + LTM-simulate a datamodel project and run discovery with the
+/// given candidate generator. Returns the result plus the raw Results (so
+/// tests can mutate score series and re-discover).
+fn discover_project(
+    project: &crate::datamodel::Project,
+    candidate_gen: CandidateGen,
+) -> DiscoveryResult {
+    let (results, ctx) = ltm_simulate(project);
+    discover_with(&results, &ctx, candidate_gen)
+}
+
+/// The compiled context discovery needs alongside the Results.
+struct EnumTestCtx {
+    causal_graph: CausalGraph,
+    stocks: Vec<Ident<Canonical>>,
+    ltm_vars: Vec<LtmSyntheticVar>,
+    dims: Vec<datamodel::Dimension>,
+    expansion: LinkExpansionContext,
+}
+
+fn ltm_simulate(project: &crate::datamodel::Project) -> (Results, EnumTestCtx) {
+    use salsa::Setter;
+    let mut db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel_incremental(&mut db, project, None);
+    let sp = sync.project;
+    sp.set_ltm_enabled(&mut db).to(true);
+    sp.set_ltm_discovery_mode(&mut db).to(true);
+    let source_model = *sp.models(&db).get("main").unwrap();
+    let compiled = crate::db::compile_project_incremental(&db, sp, "main").unwrap();
+    let mut vm = crate::vm::Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+    let element_edges = crate::db::model_element_causal_edges(&db, source_model, sp);
+    let causal_graph = crate::db::causal_graph_from_element_edges(element_edges);
+    let stocks: Vec<Ident<Canonical>> = element_edges
+        .stocks
+        .iter()
+        .map(|s| Ident::new(s.as_str()))
+        .collect();
+    let ltm = crate::db::model_ltm_variables(&db, source_model, sp);
+    let dm_dims = crate::db::project_datamodel_dims(&db, sp);
+    let expansion = crate::analysis::build_link_expansion_context(&db, source_model, sp);
+    (
+        results,
+        EnumTestCtx {
+            causal_graph,
+            stocks,
+            ltm_vars: ltm.vars.clone(),
+            dims: dm_dims.clone(),
+            expansion,
+        },
+    )
+}
+
+fn discover_with(
+    results: &Results,
+    ctx: &EnumTestCtx,
+    candidate_gen: CandidateGen,
+) -> DiscoveryResult {
+    discover_loops_with_candidate_gen(
+        results,
+        &ctx.causal_graph,
+        &ctx.stocks,
+        &ctx.ltm_vars,
+        &ctx.dims,
+        &ctx.expansion,
+        &SubModelOutputPorts::new(),
+        None,
+        candidate_gen,
+    )
+    .unwrap()
+}
+
+/// The classic logistic model both candidate generators handle exhaustively:
+/// enumeration and the DFS must report the identical loop set with identical
+/// scores, and the enumeration path must declare itself complete.
+#[test]
+fn enumeration_and_dfs_agree_on_a_simple_model() {
+    let project = enum_test_project(vec![
+        enum_stock("population", "100", &["births"], &["deaths"]),
+        enum_flow("births", "population * 0.1"),
+        enum_flow("deaths", "population * population * 0.0001"),
+    ]);
+    let auto = discover_project(&project, CandidateGen::Auto);
+    let dfs = discover_project(&project, CandidateGen::DfsOnly);
+
+    assert!(auto.enumeration_complete, "tiny model must enumerate fully");
+    assert!(!auto.expansion_cap_saturated);
+    assert!(
+        !dfs.enumeration_complete,
+        "DfsOnly must not claim enumeration"
+    );
+
+    // Identical loop sets, keyed by each loop's sorted link-from set.
+    let key = |r: &DiscoveryResult| -> Vec<Vec<String>> {
+        let mut keys: Vec<Vec<String>> = r
+            .loops
+            .iter()
+            .map(|l| {
+                let mut nodes: Vec<String> = l
+                    .loop_info
+                    .links
+                    .iter()
+                    .map(|k| k.from.as_str().to_string())
+                    .collect();
+                nodes.sort();
+                nodes
+            })
+            .collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(
+        key(&auto),
+        key(&dfs),
+        "loop sets must match across generators"
+    );
+    assert_eq!(auto.loops.len(), 2);
+
+    // Scores agree loop-for-loop (match by id: both paths assign
+    // content-derived ids, so equal loop sets get equal ids).
+    for al in &auto.loops {
+        let dl = dfs
+            .loops
+            .iter()
+            .find(|l| l.loop_info.id == al.loop_info.id)
+            .expect("matching loop id");
+        assert_eq!(
+            al.scores, dl.scores,
+            "loop {} scores differ",
+            al.loop_info.id
+        );
+        assert_eq!(
+            al.rel_scores, dl.rel_scores,
+            "loop {} rel scores differ (full universe == discovered set here)",
+            al.loop_info.id
+        );
+    }
+}
+
+/// A one-variable feedback loop through a PREVIOUS self-reference (the
+/// `SAMPLE IF TRUE(...)`-latch shape: C-LEARN carries 49 ever-active
+/// self-edges of this kind). The stock-seeded DFS structurally cannot find it
+/// -- the aux is not a stock, so its single-node SCC is never searched --
+/// while enumeration emits it as a singleton circuit; it resolves to a
+/// `NormGroup::Solo` loop (GH #750) and ranks after competing loops. This
+/// widening toward the exhaustive loop universe is DELIBERATE (see the
+/// design doc's "honest boundaries").
+#[test]
+fn enumeration_finds_a_previous_self_loop_the_dfs_cannot() {
+    let project = enum_test_project(vec![
+        enum_stock("population", "100", &["births"], &[]),
+        enum_flow("births", "population * 0.1"),
+        enum_aux(
+            "smoothed",
+            "PREVIOUS(smoothed, 100) * 0.9 + population * 0.1",
+        ),
+    ]);
+    let auto = discover_project(&project, CandidateGen::Auto);
+    let dfs = discover_project(&project, CandidateGen::DfsOnly);
+
+    assert!(auto.enumeration_complete);
+    let is_self_loop = |l: &FoundLoop| {
+        l.loop_info.links.len() == 1 && l.loop_info.links[0].from.as_str() == "smoothed"
+    };
+    assert!(
+        auto.loops.iter().any(is_self_loop),
+        "enumeration must surface the smoothed->smoothed latch loop; got {:?}",
+        auto.loops
+            .iter()
+            .map(|l| l
+                .loop_info
+                .links
+                .iter()
+                .map(|k| k.from.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !dfs.loops.iter().any(is_self_loop),
+        "the stock-seeded DFS cannot reach a non-stock self-loop (if this \
+         starts passing, the deliberate-widening claim above needs rewording)"
+    );
+    let self_loop = auto.loops.iter().find(|l| is_self_loop(l)).unwrap();
+    assert_eq!(
+        self_loop.partition, None,
+        "a stockless latch loop resolves to no parent partition (Solo group)"
+    );
+    // The population growth loop itself is reported identically by both.
+    assert!(auto.loops.len() == dfs.loops.len() + 1);
+}
+
+/// Self-filtering: a cycle whose links are never simultaneously nonzero has
+/// loop score exactly 0 at every step, and enumeration must not report it --
+/// pinned by overwriting one loop's two link-score series with disjoint
+/// activity windows post-simulation.
+#[test]
+fn staggered_activity_cycle_is_not_reported_by_either_generator() {
+    let project = enum_test_project(vec![
+        enum_stock("population", "100", &["births"], &["deaths"]),
+        enum_flow("births", "population * 0.1"),
+        enum_flow("deaths", "population * population * 0.0001"),
+    ]);
+    let (mut results, ctx) = ltm_simulate(&project);
+
+    // Overwrite the births-loop link scores with disjoint activity:
+    // population->births active only at steps 1-2, births->population only
+    // at steps 3+. The deaths loop is left untouched.
+    let score_offset = |results: &Results, from: &str, to: &str| -> usize {
+        let name = format!("$\u{205A}ltm\u{205A}link_score\u{205A}{from}\u{2192}{to}");
+        *results
+            .offsets
+            .get(&Ident::<Canonical>::new(&name))
+            .unwrap_or_else(|| panic!("missing link score {name}"))
+    };
+    let p_to_b = score_offset(&results, "population", "births");
+    let b_to_p = score_offset(&results, "births", "population");
+    let (step_size, step_count) = (results.step_size, results.step_count);
+    for step in 1..step_count {
+        let (pb, bp) = if step <= 2 { (1.0, 0.0) } else { (0.0, 1.0) };
+        results.data[step * step_size + p_to_b] = pb;
+        results.data[step * step_size + b_to_p] = bp;
+    }
+
+    let auto = discover_with(&results, &ctx, CandidateGen::Auto);
+    let dfs = discover_with(&results, &ctx, CandidateGen::DfsOnly);
+    assert!(auto.enumeration_complete);
+    for r in [&auto, &dfs] {
+        assert_eq!(
+            r.loops.len(),
+            1,
+            "only the deaths loop is ever simultaneously active"
+        );
+        assert!(
+            r.loops[0]
+                .loop_info
+                .links
+                .iter()
+                .any(|k| k.from.as_str() == "deaths"),
+            "the surviving loop is the deaths loop"
+        );
+    }
+}
+
+/// A tripped enumeration budget falls back to the per-step DFS: the result is
+/// exactly the DfsOnly result, with `enumeration_complete == false`.
+#[test]
+fn enumeration_budget_trip_falls_back_to_dfs() {
+    let project = enum_test_project(vec![
+        enum_stock("population", "100", &["births"], &["deaths"]),
+        enum_flow("births", "population * 0.1"),
+        enum_flow("deaths", "population * population * 0.0001"),
+    ]);
+    let dfs = discover_project(&project, CandidateGen::DfsOnly);
+
+    let _guard = EnumBudgetGuard::new(1, u64::MAX);
+    let auto = discover_project(&project, CandidateGen::Auto);
+    assert!(
+        !auto.enumeration_complete,
+        "a 1-circuit budget cannot complete a 2-loop model"
+    );
+    assert_eq!(auto.loops.len(), dfs.loops.len());
+    for (a, d) in auto.loops.iter().zip(dfs.loops.iter()) {
+        assert_eq!(a.loop_info.id, d.loop_info.id);
+        assert_eq!(a.scores, d.scores);
+    }
+}
+
+/// The DFS fallback's per-node expansion cap, when it binds, must raise
+/// `expansion_cap_saturated` -- the World3 audit found the production cap
+/// saturating on 100% of searches with no observable trace. A diamond (two
+/// parallel paths sharing entry and exit auxes) with a 1-expansion budget
+/// forces the second path's re-arrival at the shared exit to be refused.
+#[test]
+fn dfs_expansion_cap_saturation_is_flagged() {
+    let project = enum_test_project(vec![
+        enum_stock("s", "100", &["f"], &[]),
+        enum_aux("x", "s * 0.5"),
+        enum_aux("y", "s * 0.4"),
+        enum_aux("z", "x + y"),
+        enum_flow("f", "z * 0.1"),
+    ]);
+
+    // Unconstrained: both diamond loops found, no saturation.
+    let free = discover_project(&project, CandidateGen::DfsOnly);
+    assert_eq!(free.loops.len(), 2);
+    assert!(!free.expansion_cap_saturated);
+
+    // Cap of 1 expansion per node: the second path's re-arrival at `z` is
+    // refused, so one loop is lost AND the flag fires.
+    let _guard = DfsExpansionBudgetGuard::new(1);
+    let capped = discover_project(&project, CandidateGen::DfsOnly);
+    assert!(
+        capped.expansion_cap_saturated,
+        "the refused expansion must be observable"
+    );
+    assert!(
+        capped.loops.len() < 2,
+        "a binding cap loses a loop (that is what the flag reports)"
+    );
+
+    // Enumeration under the same conditions is immune: the cap is a DFS
+    // mechanism, and the enumerator finds both loops.
+    let auto = discover_project(&project, CandidateGen::Auto);
+    assert!(auto.enumeration_complete);
+    assert!(!auto.expansion_cap_saturated);
+    assert_eq!(auto.loops.len(), 2);
+}
+
+/// External (full-universe) denominators shrink relative scores relative to
+/// the discovered-set-only denominators: rank_and_filter must use them for
+/// Partition groups when provided.
+#[test]
+fn external_totals_are_used_for_partition_denominators() {
+    let stock: Ident<Canonical> = Ident::new("population");
+    let partitions = CyclePartitions {
+        partitions: vec![vec![stock.clone()]],
+        stock_partition: [(stock.clone(), 0usize)].into_iter().collect(),
+    };
+    let make_loop = || FoundLoop {
+        loop_info: Loop {
+            id: String::new(),
+            links: vec![Link {
+                from: Ident::new("population"),
+                to: Ident::new("births"),
+                polarity: LinkPolarity::Positive,
+            }],
+            stocks: vec![stock.clone()],
+            polarity: LoopPolarity::Reinforcing,
+            dimensions: vec![],
+            slot_links: vec![],
+        },
+        scores: vec![(0.0, 1.0), (1.0, 1.0)],
+        avg_abs_score: 1.0,
+        rel_scores: Vec::new(),
+        partition: None,
+        polarity_confidence: 1.0,
+    };
+
+    // Without external totals: the loop is alone, denominator == its own
+    // series, rel == 1.0.
+    let mut loops = vec![make_loop()];
+    rank_and_filter(&mut loops, &partitions, None);
+    assert_eq!(loops[0].rel_scores, vec![1.0, 1.0]);
+
+    // With external totals carrying the full universe's mass (say 4.0 per
+    // step, three unreported sibling loops' worth), rel == 0.25.
+    let external: HashMap<usize, Vec<f64>> = [(0usize, vec![4.0, 4.0])].into_iter().collect();
+    let mut loops = vec![make_loop()];
+    rank_and_filter(&mut loops, &partitions, Some(&external));
+    assert_eq!(loops[0].rel_scores, vec![0.25, 0.25]);
+}
+
+/// Direct unit coverage of the retention pass's three arms: a loop below
+/// MIN_CONTRIBUTION of its partition's total at every step is dropped; a
+/// module-traversing loop is kept unconditionally; a Solo (no-stock) loop is
+/// kept iff ever active.
+#[test]
+fn retention_pass_drops_below_threshold_keeps_module_and_solo() {
+    // Hand-built results: 2 steps (step 0 unused), edges laid out flat.
+    //   big loop   a<->b: |product| = 1.0 at step 1
+    //   tiny loop  a<->c: |product| = 1e-8 at step 1 (below 0.1% of total)
+    //   solo loop  d<->e: no stock, active at step 1
+    //   dead loop  f<->g: no stock, never active -- wait: never-active edges
+    //     are pruned from the union graph, so it cannot be enumerated;
+    //     instead make it active but let its own product be 0 via one zero
+    //     edge... a zero edge is inactive too. The "Solo never active" arm is
+    //     unreachable through enumeration (activity pruning guarantees >= 1
+    //     active step), so it is not constructed here; the arm exists for
+    //     defense in depth.
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new("b")), 0),
+        ((Ident::new("b"), Ident::new("a")), 1),
+        ((Ident::new("a"), Ident::new("c")), 2),
+        ((Ident::new("c"), Ident::new("a")), 3),
+        ((Ident::new("d"), Ident::new("e")), 4),
+        ((Ident::new("e"), Ident::new("d")), 5),
+    ];
+    let step_size = 6;
+    let step_count = 2;
+    let mut data = vec![0.0f64; step_size * step_count];
+    // step 1 values:
+    data[step_size] = 1.0; // a->b
+    data[step_size + 1] = 1.0; // b->a
+    data[step_size + 2] = 1e-4; // a->c
+    data[step_size + 3] = 1e-4; // c->a  (product 1e-8)
+    data[step_size + 4] = 0.5; // d->e
+    data[step_size + 5] = 0.5; // e->d
+    let results = Results {
+        offsets: HashMap::new(),
+        data: data.into_boxed_slice(),
+        step_size,
+        step_count,
+        specs: crate::results::Specs {
+            start: 0.0,
+            stop: 1.0,
+            dt: 1.0,
+            save_step: 1.0,
+            method: crate::results::Method::Euler,
+            n_chunks: 1,
+        },
+        is_vensim: false,
+    };
+    let stocks = stock_list(&["a"]);
+    let search = IndexedSearch::build(&link_offsets, &stocks);
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results);
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None);
+    assert!(candidates.complete);
+    assert_eq!(candidates.circuits.len(), 3, "three 2-cycles");
+
+    // Node metadata: `a` is a stock in partition 0; no modules.
+    let stock_partition: Vec<Option<usize>> = search
+        .idents
+        .iter()
+        .map(|id| (id.as_str() == "a").then_some(0))
+        .collect();
+    let no_modules = vec![false; search.idents.len()];
+    let outcome = super::enum_gen::retain_circuits(
+        &candidates.circuits,
+        &activity,
+        &results,
+        &stock_partition,
+        &no_modules,
+        None,
+    )
+    .unwrap();
+    let survivor_nodes: Vec<Vec<String>> = outcome
+        .survivors
+        .iter()
+        .map(|&ci| {
+            let mut v: Vec<String> = candidates.circuits[ci]
+                .iter()
+                .map(|&n| search.idents[n as usize].as_str().to_string())
+                .collect();
+            v.sort();
+            v
+        })
+        .collect();
+    assert!(
+        survivor_nodes.contains(&vec!["a".to_string(), "b".to_string()]),
+        "the dominant loop survives"
+    );
+    assert!(
+        survivor_nodes.contains(&vec!["d".to_string(), "e".to_string()]),
+        "the Solo loop survives (rel score is 1 by construction)"
+    );
+    assert!(
+        !survivor_nodes.contains(&vec!["a".to_string(), "c".to_string()]),
+        "the 1e-8-vs-1.0 loop peaks far below MIN_CONTRIBUTION and is dropped"
+    );
+    // Totals carry BOTH partition loops' mass (the dropped one included).
+    let totals = &outcome.partition_totals[&0];
+    assert!((totals[1] - (1.0 + 1e-8)).abs() < 1e-12);
+
+    // Same fixture with `c` marked as a module node: the tiny loop is kept
+    // unconditionally (its final score may use the override series).
+    let modules: Vec<bool> = search.idents.iter().map(|id| id.as_str() == "c").collect();
+    let outcome = super::enum_gen::retain_circuits(
+        &candidates.circuits,
+        &activity,
+        &results,
+        &stock_partition,
+        &modules,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        outcome.survivors.len(),
+        3,
+        "module traversal bypasses retention"
+    );
+}
+
+/// Enumerator unit: min-root canonical emission (each cycle exactly once,
+/// path starting at its minimum node id), self-loop singletons, and the
+/// visit-budget trip reporting incomplete.
+#[test]
+fn enumerator_emits_each_active_cycle_exactly_once() {
+    // Triangle a->b->c->a, its reverse a->c'->b'->a via distinct nodes
+    // (u->v->w->u), and a self-loop z->z; all active at step 1.
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new("b")), 0),
+        ((Ident::new("b"), Ident::new("c")), 1),
+        ((Ident::new("c"), Ident::new("a")), 2),
+        ((Ident::new("u"), Ident::new("v")), 3),
+        ((Ident::new("v"), Ident::new("w")), 4),
+        ((Ident::new("w"), Ident::new("u")), 5),
+        ((Ident::new("z"), Ident::new("z")), 6),
+    ];
+    let step_size = 7;
+    let step_count = 2;
+    let mut data = vec![0.0f64; step_size * step_count];
+    for i in 0..7 {
+        data[step_size + i] = 1.0;
+    }
+    let results = Results {
+        offsets: HashMap::new(),
+        data: data.into_boxed_slice(),
+        step_size,
+        step_count,
+        specs: crate::results::Specs {
+            start: 0.0,
+            stop: 1.0,
+            dt: 1.0,
+            save_step: 1.0,
+            method: crate::results::Method::Euler,
+            n_chunks: 1,
+        },
+        is_vensim: false,
+    };
+    let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results);
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None);
+    assert!(candidates.complete);
+    assert_eq!(
+        candidates.circuits.len(),
+        3,
+        "two triangles + one self-loop"
+    );
+    for c in &candidates.circuits {
+        let min = c.iter().min().unwrap();
+        assert_eq!(c[0], *min, "canonical min-root rotation");
+    }
+    assert!(
+        candidates.circuits.iter().any(|c| c.len() == 1),
+        "the self-loop is a singleton circuit"
+    );
+
+    // A 1-visit budget cannot finish and must say so.
+    let _guard = EnumBudgetGuard::new(usize::MAX, 1);
+    let truncated = super::enum_gen::enumerate_active_circuits(&activity, None);
+    assert!(!truncated.complete);
 }
