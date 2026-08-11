@@ -1522,7 +1522,6 @@ impl Opcode {
             // Assignment: pops 1 (the value to assign)
             Opcode::AssignCurr { .. } => (1, 0),
 
-            // Builtins always take 3 args (actual + padding), push 1 result
             // Builtins pop exactly the operands `vm::apply` reads (see
             // `BuiltinId::arity`), not a fixed 3 with discarded padding.
             Opcode::Apply { func } => (func.arity(), 1),

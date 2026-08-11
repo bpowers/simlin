@@ -155,8 +155,15 @@ pub(crate) struct EmitCtx<'a> {
     /// [`max_condition_depth`]).
     pub condition_locals: Vec<u32>,
     /// Three dedicated scratch f64 local indices `[a, b, c]` for the `Apply`
-    /// opcode, which always pops exactly three operands (codegen pads). They
-    /// are distinct from [`scratch_local`](Self::scratch_local) and the
+    /// opcode. Three is the WIDEST a builtin needs, not the number every
+    /// `Apply` populates: codegen pushes exactly `BuiltinId::arity()` operands
+    /// and emits no padding, so a 1-arity builtin sets only `a` and leaves
+    /// `b`/`c` holding whatever an earlier `Apply` left there. They are
+    /// therefore partially initialized in general, and an arm must read only
+    /// the locals its own arity covers -- enforced by the `apply_*` tests in
+    /// `lower_tests.rs`, since nothing in the types requires it.
+    ///
+    /// Distinct from [`scratch_local`](Self::scratch_local) and the
     /// [`condition_locals`](Self::condition_locals) so an `Apply` inside an
     /// `If` arm (sharing the function) cannot clobber the condition register.
     /// Reserved unconditionally by the function builders (3 unused f64 locals
@@ -2459,11 +2466,19 @@ fn emit_cmp(f: &mut Function, cmp: &Instruction) {
     f.instruction(&Instruction::F64ConvertI32U);
 }
 
-/// Lower the `Apply { func }` opcode, mirroring the VM's `apply()`
-/// (`vm.rs:2938`). The three operands are on the wasm stack in push order
-/// `[a, b, c]` (`c` on top, matching the VM popping `c` then `b` then `a`);
-/// they are parked in the dedicated `ctx.apply_locals` so each builtin can read
-/// them any number of times in any order. The result is left on the stack.
+/// Lower the `Apply { func }` opcode, mirroring the VM's `apply()`.
+///
+/// `BuiltinId::arity()` operands are on the wasm stack in push order -- one,
+/// two or three of `[a, b, c]` with the last on top, matching the order the VM
+/// pops them. Codegen emits no padding, so only the arity's worth are present.
+/// They are parked in the dedicated `ctx.apply_locals` so each builtin can read
+/// them any number of times in any order; the locals above the arity keep
+/// whatever an earlier `Apply` left in them. The result is left on the stack.
+///
+/// The arity table is shared by codegen, the VM and this backend, so a
+/// builtin's operand count is decided in exactly one place and the three
+/// cannot disagree. See the obligation on the pops below for what a new
+/// builtin has to respect and what enforces it.
 ///
 /// `time`/`dt` for the time-driven builtins are read from `curr[TIME_OFF]` /
 /// `curr[DT_OFF]` (absolute global slots, like `LoadGlobalVar`), matching the
