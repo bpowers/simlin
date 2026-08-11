@@ -11190,26 +11190,43 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
 /// per-step maximum magnitude.
 ///
 /// The sub-second half is `db::ltm_value_gate_tests`, which pins exact values on
-/// a three-arm fixture built around the known ways an arm-level change zeroes a
-/// score. It cannot show that the same change leaves 7,000 real variables alone,
+/// small fixtures built around the known ways an arm-level change zeroes a
+/// score. It cannot show that the same change leaves 7,153 real variables alone,
 /// and C-LEARN is the only model in the repo at that scale. Hence this: same
-/// property, real model, `#[ignore]`d purely for runtime (~25 s release, against
-/// the 3-minute debug-build cap in `docs/dev/rust.md`).
+/// property, real model, `#[ignore]`d purely for runtime (~3 s release on top of
+/// a release build, against the 3-minute debug-build cap in
+/// `docs/dev/rust.md`).
 ///
-/// The digest is deliberately NOT a checked-in series slab -- 30k slots x 251
-/// steps is 60 MB of golden nobody would read. It is three numbers that move
-/// under exactly the failure this gate exists for:
+/// It covers **every element of every LTM variable**, not one per variable.
+/// `Results::offsets` is keyed by variable and carries no extent, so the obvious
+/// walk samples only each arrayed score's FIRST element -- 7,000 of 20,892 LTM
+/// slots here, blind to 1,772 slots that carry non-zero scores and to the other
+/// 87% of the damage the positive control below inflicts. Extents come from each
+/// variable's declared dimensions instead.
 ///
+/// The digest is deliberately NOT a checked-in series slab -- 20,892 slots x 251
+/// steps is tens of MB of golden nobody would read. It is a small set of numbers
+/// that move under exactly the failures this gate exists for:
+///
+/// * `CLEARN_LTM_SLOTS` / `CLEARN_LTM_UNKNOWN_EXTENT` -- the coverage itself, so
+///   a change that silently narrows what is examined fails here rather than
+///   passing quietly. `unknown_extent` counts LTM-prefixed result slots the
+///   variable metadata does not describe; it is 0 today.
 /// * `nonzero_slots` -- how many LTM slots are ever non-zero. Rewriting live
 ///   arms to zero moves this DOWN, which is the GH #977 failure (a change that
 ///   zeroed 149 C-LEARN LTM slots passed every named C-LEARN gate); wrongly
 ///   materializing structural zeros as small residuals moves it UP.
 /// * `finite_slots` -- how many are finite throughout, so a regression that
 ///   replaces values with NaN cannot hide behind an unchanged non-zero count.
-/// * `mantissa_digest` / `exponent_digest` -- an order-independent sum over each
-///   slot's maximum magnitude, split into a 9-significant-digit mantissa and its
-///   decimal exponent (`nine_significant_digits`). Two slots swapping values
-///   keeps the first two numbers and moves these.
+/// * `mantissa_digest` / `exponent_digest` -- sums over each slot's maximum
+///   magnitude, split into a 9-significant-digit mantissa and its decimal
+///   exponent (`nine_significant_digits`). Interpretable, and therefore worth
+///   keeping: a drop in one localises a regression faster than a hash does.
+/// * `identity_digest` -- the same stream bound to slot IDENTITY. The sums above
+///   are permutation-invariant, so two slots exchanging maxima leaves them and
+///   both counts exactly unchanged; only this moves. See `slot_digests`, and
+///   `permuting_two_slots_moves_only_the_identity_digest`, which constructs that
+///   swap rather than asserting the property.
 ///
 /// Quantizing is what makes the pin usable rather than a per-run coin flip: raw
 /// f64 maxima carry last-bit noise across allocator and layout changes, and a
@@ -11228,16 +11245,20 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
 /// were measured.** Three runs of this digest, same binary, differing only in
 /// `ltm_augment_zero_slot`:
 ///
-/// * predicate as shipped -- `(1369, 7000, 10_248_673_492_482_445_132_733_301)`
+/// * predicate as shipped -- `nonzero_slots` 3,141 of 20,892.
 /// * `ZeroSlotPolicy::Materialize` forced everywhere, i.e. GH #977's omission
-///   disabled -- **identical in all three numbers**. That is this gate's other
+///   disabled -- **identical in every pinned number**. That is this gate's other
 ///   job: it is the reproducible, checked-in form of the whole-slab differential
 ///   that established the omission's value-neutrality on C-LEARN, which
-///   previously existed only as a throwaway probe nobody could re-run.
+///   previously existed only as a throwaway probe nobody could re-run. Note the
+///   scope this now carries: value-neutrality is established over all 20,892 LTM
+///   slots, where the pre-widening walk could only speak for the 7,000 it
+///   sampled.
 /// * `partial_is_provably_previous_target` forced to `true`, so every arm is
-///   omitted whether or not it is a structural zero -- `(1287, 7000,
-///   10_248_673_492_258_319_975_585_940)`. 82 slots that carry real scores go to
-///   zero and the digest reds.
+///   omitted whether or not it is a structural zero -- `nonzero_slots` falls to
+///   2,527 and every magnitude number moves. **614** slots carrying real scores
+///   go to zero; the pre-widening walk saw 82 of them, an eighth of the
+///   damage.
 ///
 /// The third run is what makes the second meaningful. Without it, "unchanged
 /// when the omission is disabled" would be equally consistent with a digest that
@@ -11249,6 +11270,8 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
 #[test]
 #[ignore]
 fn clearn_ltm_slot_maxima_digest() {
+    use simlin_engine::common::CanonicalDimensionName;
+    use simlin_engine::db::project_dimensions_context;
     use simlin_engine::open_vensim;
 
     let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
@@ -11257,31 +11280,83 @@ fn clearn_ltm_slot_maxima_digest() {
     let project =
         open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
 
-    let compiled = compile_ltm_discovery_incremental(&project);
+    // `compile_ltm_discovery_incremental` inlined, because the slot extents
+    // below need the same `db` and sync the compile used -- a second database
+    // would be a second derivation of the thing being pinned.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("C-LEARN must compile with LTM enabled");
+    let dim_ctx = project_dimensions_context(&db, sync.project);
+
     let mut vm = Vm::new(compiled).expect("vm");
     vm.run_to_end()
         .expect("C-LEARN must simulate with LTM enabled");
     let results = vm.into_results();
 
-    // Which result slots belong to LTM, taken from the run's own offset map
-    // rather than from a name list, so a renamed synthetic prefix fails loudly
-    // here instead of quietly shrinking the gate's scope.
-    let ltm_offsets: Vec<usize> = results
-        .offsets
-        .iter()
-        .filter(|(name, _)| name.as_str().starts_with("$\u{205A}ltm\u{205A}"))
-        .map(|(_, &off)| off)
-        .collect();
+    // Which result slots belong to LTM. `Results::offsets` is one entry per
+    // VARIABLE and carries no extent -- `calc_flattened_offsets_incremental`
+    // computes a size but `CompiledSimulation` drops it -- so reading one slot
+    // per entry would sample only the FIRST element of every arrayed score. On
+    // C-LEARN that is ~7,000 of 21,045 LTM slots across 1,088 arrayed
+    // variables, and a regression in any later element would leave every pinned
+    // number unchanged. The extent therefore comes from each variable's own
+    // declared dimensions, resolved through the project's dimension context.
+    let mut ltm_widths: HashMap<String, usize> = HashMap::new();
+    for m in sync.models.values() {
+        for v in model_ltm_variables(&db, m.source_model, sync.project)
+            .vars
+            .iter()
+        {
+            let width: usize = v
+                .dimensions
+                .iter()
+                .map(|d| {
+                    let canonical = CanonicalDimensionName::from_raw(d);
+                    dim_ctx.get(&canonical).map(|dim| dim.len()).unwrap_or(1)
+                })
+                .product::<usize>()
+                .max(1);
+            ltm_widths.insert(v.name.clone(), width);
+        }
+    }
+
+    // (name, element index, base offset), canonically ordered. The ORDER is
+    // what makes the digest below permutation-sensitive, and it must not come
+    // from a HashMap.
+    let mut ltm_slots: Vec<(&str, usize, usize)> = Vec::new();
+    let mut unknown_extent = 0usize;
+    for (name, &base) in results.offsets.iter() {
+        let name = name.as_str();
+        if !name.starts_with("$\u{205A}ltm\u{205A}") {
+            continue;
+        }
+        let width = match ltm_widths.get(name) {
+            Some(&w) => w,
+            None => {
+                // An LTM-prefixed slot the metadata does not describe: an
+                // implicit helper, which is scalar. Counted so a change in that
+                // population is visible rather than silently absorbed.
+                unknown_extent += 1;
+                1
+            }
+        };
+        for elem in 0..width {
+            ltm_slots.push((name, elem, base + elem));
+        }
+    }
+    ltm_slots.sort_unstable();
     assert!(
-        !ltm_offsets.is_empty(),
+        !ltm_slots.is_empty(),
         "no LTM slots found in the results; the gate would pass vacuously"
     );
 
     let mut nonzero_slots = 0usize;
     let mut finite_slots = 0usize;
-    let mut mantissa_digest: i64 = 0;
-    let mut exponent_digest: i64 = 0;
-    for &off in &ltm_offsets {
+    let mut maxima: Vec<(&str, usize, f64)> = Vec::with_capacity(ltm_slots.len());
+    for &(name, elem, off) in &ltm_slots {
         let mut max_mag = 0.0f64;
         let mut all_finite = true;
         let mut ever_nonzero = false;
@@ -11304,23 +11379,32 @@ fn clearn_ltm_slot_maxima_digest() {
         if all_finite {
             finite_slots += 1;
         }
-        let (mantissa, exponent) = nine_significant_digits(max_mag);
-        mantissa_digest += mantissa;
-        exponent_digest += exponent;
+        maxima.push((name, elem, max_mag));
     }
+    let SlotDigests {
+        mantissa: mantissa_digest,
+        exponent: exponent_digest,
+        identity: identity_digest,
+    } = slot_digests(&maxima);
 
     assert_eq!(
         (
+            ltm_slots.len(),
+            unknown_extent,
             nonzero_slots,
             finite_slots,
             mantissa_digest,
-            exponent_digest
+            exponent_digest,
+            identity_digest
         ),
         (
+            CLEARN_LTM_SLOTS,
+            CLEARN_LTM_UNKNOWN_EXTENT,
             CLEARN_LTM_NONZERO_SLOTS,
             CLEARN_LTM_FINITE_SLOTS,
             CLEARN_LTM_MANTISSA_DIGEST,
-            CLEARN_LTM_EXPONENT_DIGEST
+            CLEARN_LTM_EXPONENT_DIGEST,
+            CLEARN_LTM_IDENTITY_DIGEST
         ),
         "C-LEARN's LTM slot values moved. A DROP in nonzero_slots is the \
          silent-zeroing regression this gate exists for; re-derive before \
@@ -11372,8 +11456,111 @@ fn nine_significant_digits(x: f64) -> (i64, i64) {
     (mantissa, exponent)
 }
 
+/// The three magnitude aggregates over a canonically ordered slot list.
+struct SlotDigests {
+    mantissa: i64,
+    exponent: i64,
+    identity: u64,
+}
+
+/// Reduce `(name, element, maximum magnitude)` triples to the aggregates
+/// `clearn_ltm_slot_maxima_digest` pins.
+///
+/// `mantissa` and `exponent` are plain sums, and they are useful precisely
+/// because they are interpretable: a drop in one localises a regression far
+/// faster than a hash does. But they are also permutation-INVARIANT -- two
+/// slots exchanging their maxima leaves both of them, and the slot counts,
+/// exactly unchanged -- so on their own they cannot see an offset or remapping
+/// regression that attaches correct values to the wrong links.
+///
+/// `identity` closes that: an FNV-1a over the ordered
+/// `(name, element, mantissa, exponent)` stream, so every contribution is bound
+/// to the slot it came from. It is stable across runs and across allocator or
+/// layout changes because both the ORDER and the INPUTS derive from names and
+/// relatively-quantized values, never from addresses -- which is what keeps the
+/// relative-tolerance property the mantissa split exists for.
+///
+/// The caller must pass `slots` in a canonical order; the C-LEARN caller sorts
+/// by `(name, element)`. An unsorted list would make `identity` depend on
+/// `HashMap` iteration order and flap per run.
+///
+/// `permuting_two_slots_moves_only_the_identity_digest` is the discriminating
+/// test: it constructs exactly the swap the sums cannot see.
+fn slot_digests(slots: &[(&str, usize, f64)]) -> SlotDigests {
+    let mut mantissa_digest: i64 = 0;
+    let mut exponent_digest: i64 = 0;
+    let mut identity: u64 = 0xcbf2_9ce4_8422_2325;
+    let fold = |bytes: &[u8], acc: &mut u64| {
+        for b in bytes {
+            *acc ^= u64::from(*b);
+            *acc = acc.wrapping_mul(0x100_0000_01b3);
+        }
+    };
+    for (name, elem, max_mag) in slots {
+        let (mantissa, exponent) = nine_significant_digits(*max_mag);
+        mantissa_digest += mantissa;
+        exponent_digest += exponent;
+        fold(name.as_bytes(), &mut identity);
+        fold(&(*elem as u64).to_le_bytes(), &mut identity);
+        fold(&mantissa.to_le_bytes(), &mut identity);
+        fold(&exponent.to_le_bytes(), &mut identity);
+    }
+    SlotDigests {
+        mantissa: mantissa_digest,
+        exponent: exponent_digest,
+        identity,
+    }
+}
+
+/// The property the magnitude sums cannot have, demonstrated rather than
+/// asserted: two slots exchanging their maxima.
+///
+/// This is the regression class the digest was blind to before the identity
+/// term -- an offset or remapping change that attaches correct values to the
+/// wrong links, leaving every count and every sum intact. The test pins BOTH
+/// halves: that the sums really are unchanged (so the blindness is real and not
+/// a strawman) and that the identity digest really does move.
+///
+/// It is a fast default-suite test rather than part of the `#[ignore]`d C-LEARN
+/// run, because the property belongs to the digest function and needs no model.
+#[test]
+fn permuting_two_slots_moves_only_the_identity_digest() {
+    let baseline = [("alpha", 0usize, 1.5f64), ("beta", 0usize, 42.0f64)];
+    let swapped = [("alpha", 0usize, 42.0f64), ("beta", 0usize, 1.5f64)];
+
+    let a = slot_digests(&baseline);
+    let b = slot_digests(&swapped);
+
+    assert_eq!(
+        (a.mantissa, a.exponent),
+        (b.mantissa, b.exponent),
+        "the magnitude sums are permutation-invariant by construction; if this \
+         ever fails the identity digest below is no longer the only thing \
+         catching a swap, and this test's premise needs restating"
+    );
+    assert_ne!(
+        a.identity, b.identity,
+        "two slots exchanging maxima must move the identity digest -- that is \
+         the whole reason it exists"
+    );
+
+    // The element index is part of the identity too, not just the name: a value
+    // moving between elements of the SAME arrayed variable is the likelier
+    // remapping bug, and it must be visible.
+    let same_var = [("alpha", 0usize, 1.5f64), ("alpha", 1usize, 42.0f64)];
+    let same_var_swapped = [("alpha", 0usize, 42.0f64), ("alpha", 1usize, 1.5f64)];
+    assert_ne!(
+        slot_digests(&same_var).identity,
+        slot_digests(&same_var_swapped).identity,
+        "a swap WITHIN one arrayed variable must move the identity digest"
+    );
+}
+
 /// Pinned by `clearn_ltm_slot_maxima_digest`; see its rustdoc before changing.
-const CLEARN_LTM_NONZERO_SLOTS: usize = 1369;
-const CLEARN_LTM_FINITE_SLOTS: usize = 7000;
-const CLEARN_LTM_MANTISSA_DIGEST: i64 = 371_710_864_477;
-const CLEARN_LTM_EXPONENT_DIGEST: i64 = 1019;
+const CLEARN_LTM_SLOTS: usize = 20_892;
+const CLEARN_LTM_UNKNOWN_EXTENT: usize = 0;
+const CLEARN_LTM_NONZERO_SLOTS: usize = 3_141;
+const CLEARN_LTM_FINITE_SLOTS: usize = 20_892;
+const CLEARN_LTM_MANTISSA_DIGEST: i64 = 798_101_758_590;
+const CLEARN_LTM_EXPONENT_DIGEST: i64 = 2_254;
+const CLEARN_LTM_IDENTITY_DIGEST: u64 = 11_438_420_344_658_315_382;
