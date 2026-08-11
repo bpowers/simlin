@@ -63,6 +63,43 @@ if ! python3 scripts/check-copyright.py > "$COPYRIGHT_OUTPUT"; then
 fi
 rm -f "$COPYRIGHT_OUTPUT"
 
+# Rule 4: a path-filtered workflow's push and pull_request `paths` lists must
+# match. They are maintained by hand and read as one filter, so a path added to
+# only one of them silently means "runs on merge but not on the PR" (or the
+# reverse) -- a gap that looks like coverage. `.github/workflows/wasm-opt.yml`
+# is the only such workflow today; the loop covers any future one.
+PATHS_OUTPUT=$(mktemp)
+if ! python3 - > "$PATHS_OUTPUT" <<'PYEOF'; then
+import glob, sys
+import yaml
+
+status = 0
+for path in sorted(glob.glob(".github/workflows/*.y*ml")):
+    with open(path) as fh:
+        wf = yaml.safe_load(fh)
+    triggers = (wf or {}).get(True) or (wf or {}).get("on") or {}
+    if not isinstance(triggers, dict):
+        continue
+    push = (triggers.get("push") or {}).get("paths")
+    pull = (triggers.get("pull_request") or {}).get("paths")
+    if push is None and pull is None:
+        continue
+    if push != pull:
+        only_push = [p for p in (push or []) if p not in (pull or [])]
+        only_pull = [p for p in (pull or []) if p not in (push or [])]
+        print(f"{path}: push and pull_request `paths` differ; "
+              f"push-only={only_push} pull_request-only={only_pull}")
+        status = 1
+sys.exit(status)
+PYEOF
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        echo "ERROR: workflow paths: $line"
+        ERRORS=$((ERRORS + 1))
+    done < "$PATHS_OUTPUT"
+fi
+rm -f "$PATHS_OUTPUT"
+
 if [ "$ERRORS" -gt 0 ]; then
     echo ""
     echo "Project lint check failed with $ERRORS error(s)."
