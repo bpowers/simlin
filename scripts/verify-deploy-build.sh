@@ -209,8 +209,18 @@ if [ "1" = "${REQUIRE_WASM_OPT-0}" ]; then
             fail "$wasm.mode missing -- src/engine/build.sh did not stage $wasm, or predates the mode stamp"
         elif [ "opt" != "$(cat "$wasm.mode")" ]; then
             fail "$wasm was built WITHOUT wasm-opt (mode: $(cat "$wasm.mode")). Deploying it would ship a ~24% larger bundle. Is wasm-opt installed, and is DISABLE_WASM_OPT unset?"
+        elif [ ! -f "$wasm.raw" ]; then
+            fail "$wasm.raw missing -- cannot corroborate the mode stamp, so $wasm may not actually be optimized"
+        elif cmp -s "$wasm" "$wasm.raw"; then
+            # Independent of the stamp on purpose. The stamp records INTENT and
+            # can outlive the artifact it describes -- a wasm-opt that fails
+            # after the blob is staged used to leave a stale `opt` stamp on a
+            # raw blob, which passed this check on the stamp alone. That window
+            # is closed in src/engine/build.sh, but a guard that can only be as
+            # correct as the thing it guards is not a guard.
+            fail "$wasm is byte-identical to $wasm.raw, so wasm-opt did not transform it despite a '$(cat "$wasm.mode")' stamp -- the staged artifact and its stamp disagree"
         else
-            pass "$wasm is wasm-opt'd ($(wc -c < "$wasm") bytes)"
+            pass "$wasm is wasm-opt'd ($(wc -c < "$wasm") bytes, stamp and artifact agree)"
         fi
     done
 fi

@@ -65,6 +65,27 @@ build_wasm() {
   if [ ! -f "core/$out_name" ] \
       || [ "$have_mode" != "$want_mode" ] \
       || ! cmp -s "$WASM_SRC" "core/$out_name.raw"; then
+    # Invalidate the stamp BEFORE restaging, not merely write it after.
+    #
+    # Writing it last protects a FIRST build: an abort leaves no stamp, so the
+    # next run redoes the work. It does NOT protect an update, because a valid
+    # stamp from the previous build is still on disk. If wasm-opt then fails or
+    # is interrupted after the copies below, `.raw` already matches the new
+    # cargo output while the staged blob is raw -- and the surviving `opt`
+    # stamp makes the next run early-out, treat the raw blob as optimized, and
+    # exit 0. That is the wrong answer the stamp exists to prevent, arriving
+    # through the update path, and it also defeats verify-deploy-build.sh's
+    # REQUIRE_WASM_OPT check, which reads this stamp.
+    #
+    # Removing it here makes the whole window self-invalidating: no stamp means
+    # indeterminate, and indeterminate means rebuild.
+    rm -f "core/$out_name.mode"
+
+    # Blob before `.raw`, deliberately. If the second copy fails, `.raw` still
+    # holds the PREVIOUS output, so the `cmp` above fails next run and the work
+    # is redone. Reversed, a failure between the two would leave a `.raw`
+    # describing the new source beside a blob built from the old one -- which
+    # `cmp` cannot detect, since it only ever compares `.raw` to cargo.
     cp "$WASM_SRC" "core/$out_name"
     cp "$WASM_SRC" "core/$out_name.raw"
 
@@ -80,8 +101,9 @@ build_wasm() {
       echo "Skipping wasm-opt (not installed or disabled)"
     fi
 
-    # Written LAST so an interrupted build leaves no stamp and the next run
-    # redoes the work rather than trusting a half-staged artifact.
+    # Written LAST, and only now that the artifact matches it. Paired with the
+    # `rm -f` above this makes the stamp transactional: it exists only while it
+    # is true of what is on disk.
     printf '%s\n' "$want_mode" > "core/$out_name.mode"
   fi
 }
