@@ -123,7 +123,11 @@ few Simlin constructs (a non-negative stock or flow, a discrete or
 extrapolating lookup, the ROUND builtin, ...); saving such a model to
 `.mdl` still succeeds, writes the closest Vensim form, and reports each
 degradation -- in the editor's save notice, in the HTTP save response's
-`warnings`, and in the MCP `EditModel` result's `warnings`.
+`warnings`, and in the MCP `EditModel` result's `warnings`. The first save
+also normalizes a hand-written Vensim file: it is regenerated from the
+parsed model, so anything the parser does not keep (free-standing
+comments, custom `:GRAPH`/`:TABLE` blocks, formatting) is not carried
+over.
 
 A `.mdl` sitting next to a same-stem `.sd.json` (the trace of an earlier
 release that saved `.mdl` edits into a JSON "sidecar") is two independent

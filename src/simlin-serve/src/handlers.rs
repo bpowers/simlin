@@ -31,7 +31,9 @@ use crate::path_resolution::{self, ResolutionError, to_forward_slash};
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry, RegistryError};
 use crate::scan::scan_into_registry;
 use crate::validation::{BaselineErrors, ValidationFailure, ValidationOutcome, validate_save};
-use crate::writer::{commit_write, resolve_save_target, serialize_project};
+use crate::writer::{
+    PreflightRejection, commit_write, preflight_serialize, resolve_save_target, serialize_project,
+};
 
 /// Process-wide state injected into every handler. Cloning is cheap because
 /// each field is `Arc`-shared; the inner data is never copied per-request.
@@ -820,6 +822,26 @@ pub async fn save_project(
         });
     }
 
+    // Resolve the writer from the request URL's source format; every
+    // format writes back to the file the request named.
+    let target = resolve_save_target(&resolved.canonical, resolved.initial_format);
+
+    // Pre-flight the writer on the validated project BEFORE the merge: a
+    // model the on-disk format cannot hold is a 422 naming the violated
+    // invariant, and the registry doc is still untouched (see
+    // `writer::preflight_serialize` for why the order matters).
+    match preflight_serialize(&outcome.project, &target) {
+        Ok(()) => {}
+        Err(PreflightRejection::Unrepresentable(err)) => {
+            return Err(SaveError::Validation { errors: vec![err] });
+        }
+        Err(PreflightRejection::Internal(e)) => {
+            return Err(SaveError::Internal(anyhow::anyhow!(
+                "preflight serialize_project: {e}"
+            )));
+        }
+    }
+
     // Re-canonicalize the validated project to JSON for the merge. We
     // route through `json::Project::from(&datamodel::Project)` rather
     // than passing the raw incoming `body.json` so the doc always sees
@@ -869,10 +891,6 @@ pub async fn save_project(
             ))
         })?;
     let merged_project: simlin_engine::datamodel::Project = merged_json_project.into();
-
-    // Resolve the writer from the request URL's source format; every
-    // format writes back to the file the request named.
-    let target = resolve_save_target(&resolved.canonical, resolved.initial_format);
 
     // Serialize before writing so the echo-suppression hash can be stored in
     // the registry before the bytes land on disk. Without this ordering the

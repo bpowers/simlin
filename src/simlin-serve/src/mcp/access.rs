@@ -32,7 +32,9 @@ use crate::hashing::content_hash;
 use crate::path_resolution::{self, to_forward_slash};
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, RegistryError};
 use crate::validation::{compute_baseline, validate_save_project};
-use crate::writer::{commit_write, resolve_save_target, serialize_project};
+use crate::writer::{
+    PreflightRejection, commit_write, preflight_serialize, resolve_save_target, serialize_project,
+};
 
 /// Registry-backed `ProjectAccess` impl shared by every MCP session.
 ///
@@ -289,6 +291,23 @@ impl ProjectAccess for RegistryAccess {
             return Err(AccessError::Validation { errors });
         }
 
+        // Pre-flight the writer on the validated project BEFORE the merge
+        // (same rule as the HTTP save handler): a model the on-disk format
+        // cannot hold is a Validation error naming the violated invariant,
+        // and the registry doc is still untouched.
+        let target = resolve_save_target(&canonical, registry_format);
+        match preflight_serialize(&outcome.project, &target) {
+            Ok(()) => {}
+            Err(PreflightRejection::Unrepresentable(err)) => {
+                return Err(AccessError::Validation { errors: vec![err] });
+            }
+            Err(PreflightRejection::Internal(e)) => {
+                return Err(AccessError::WriteError(std::io::Error::other(format!(
+                    "preflight serialize_project: {e}"
+                ))));
+            }
+        }
+
         // Re-canonicalize the validated project so the merge sees the
         // engine's canonical JSON shape regardless of any subtle drift in
         // the input the MCP caller produced.
@@ -337,7 +356,6 @@ impl ProjectAccess for RegistryAccess {
             })?;
         let merged_project: datamodel::Project = merged_json_project.into();
 
-        let target = resolve_save_target(&canonical, registry_format);
         let write_outcome = serialize_project(&merged_project, &target).map_err(|e| {
             AccessError::WriteError(std::io::Error::other(format!("serialize_project: {e}")))
         })?;

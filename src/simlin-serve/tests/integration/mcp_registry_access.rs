@@ -728,3 +728,54 @@ async fn mcp_save_for_mdl_reports_export_lossiness_as_warnings() {
     let text = fs::read_to_string(&mdl_abs).expect("read mdl");
     simlin_engine::open_vensim(&text).expect("degraded .mdl still parses");
 }
+
+/// Same pre-flight rule as the HTTP handler: an MCP save of a project the
+/// `.mdl` cannot hold is an `AccessError::Validation` naming the invariant,
+/// the registry version stays 0, the doc still holds the original state,
+/// and a representable save at version 0 then succeeds.
+#[tokio::test]
+async fn mcp_save_for_mdl_rejects_an_unrepresentable_project_before_the_merge() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let mdl_abs = copy_fixture("teacup.mdl", &canonical_root);
+    let original_mdl_bytes = fs::read(&mdl_abs).expect("read original mdl");
+    let state = build_state(canonical_root.clone());
+    seed_registry(&state, &mdl_abs, ProjectFormat::Mdl);
+
+    let access = RegistryAccess::new(state.clone());
+    let opened = access.open(&mdl_abs).await.expect("open mdl");
+    let mut two_models = opened.project.clone();
+    let mut second = two_models.models[0].clone();
+    second.name = "second".to_string();
+    two_models.models.push(second);
+
+    match access
+        .save(&mdl_abs, &two_models, opened.source_format, Some(0))
+        .await
+    {
+        Err(simlin_mcp_core::errors::AccessError::Validation { errors }) => {
+            assert_eq!(errors.len(), 1);
+            assert_eq!(errors[0].code, "generic");
+            assert_eq!(errors[0].kind, "model");
+            assert!(
+                errors[0].message.starts_with("MDL export:")
+                    && errors[0].message.contains("single model"),
+                "{errors:?}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+
+    assert_eq!(state.registry.get(&mdl_abs).unwrap().version, 0);
+    let reopened = access.open(&mdl_abs).await.expect("reopen");
+    assert_eq!(reopened.version, 0);
+    assert_eq!(reopened.project.models.len(), 1, "doc must be untouched");
+    assert_eq!(fs::read(&mdl_abs).unwrap(), original_mdl_bytes);
+
+    let edited = rewrite_first_aux_equation(&opened.project, "77");
+    let outcome = access
+        .save(&mdl_abs, &edited, opened.source_format, Some(0))
+        .await
+        .expect("a representable save at version 0 still lands");
+    assert_eq!(outcome.version, 1);
+}

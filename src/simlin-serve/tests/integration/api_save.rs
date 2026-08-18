@@ -497,6 +497,86 @@ async fn save_mdl_reports_export_lossiness_as_warnings_and_still_writes() {
     simlin_engine::open_vensim(&text).expect("degraded .mdl still parses");
 }
 
+/// A project Vensim structurally cannot hold (here: a second model) is
+/// rejected as 422 with the violated invariant named, BEFORE the registry
+/// doc is merged: the version stays 0, a re-GET still serves the original
+/// state, the `.mdl` on disk is untouched, and the next valid save at
+/// version 0 succeeds -- the entry was never left holding an unsaveable
+/// merge.
+#[tokio::test]
+async fn save_mdl_rejects_an_unrepresentable_project_before_the_merge() {
+    let dir = TempDir::new().unwrap();
+    let mdl_abs = copy_fixture("teacup.mdl", dir.path());
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let mdl_canonical = mdl_abs.canonicalize().unwrap();
+    let state = build_state(canonical_root.clone());
+    seed_registry(&state, &mdl_canonical, ProjectFormat::Mdl);
+    let pre_mdl_bytes = fs::read(&mdl_canonical).unwrap();
+
+    let (_, json_body) = get_canonical_json(state.clone(), "/api/projects/teacup.mdl").await;
+    let mut value: Value = serde_json::from_str(&json_body).unwrap();
+    let mut second = value["models"][0].clone();
+    second["name"] = Value::String("second".to_string());
+    value["models"].as_array_mut().unwrap().push(second);
+    let two_models = serde_json::to_string(&value).unwrap();
+
+    let body = serde_json::json!({"json": two_models, "version": 0}).to_string();
+    let (status, response_bytes) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.mdl",
+        Body::from(body),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "an unrepresentable .mdl save is a validation failure; body: {}",
+        String::from_utf8_lossy(&response_bytes)
+    );
+    let response = parse_body(&response_bytes);
+    assert_eq!(response["error"].as_str(), Some("validation_failed"));
+    let details = response["details"].as_array().expect("details");
+    assert_eq!(details.len(), 1);
+    assert_eq!(details[0]["code"].as_str(), Some("generic"));
+    assert_eq!(details[0]["kind"].as_str(), Some("model"));
+    assert!(
+        details[0]["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("MDL export:") && m.contains("single model")),
+        "the invariant must be named: {details:?}"
+    );
+
+    // Registry untouched: version 0, doc still the original single model.
+    assert_eq!(state.registry.get(&mdl_canonical).unwrap().version, 0);
+    let (version, after_json) = get_canonical_json(state.clone(), "/api/projects/teacup.mdl").await;
+    assert_eq!(version, 0);
+    let after: Value = serde_json::from_str(&after_json).unwrap();
+    assert_eq!(after["models"].as_array().unwrap().len(), 1);
+    assert_eq!(fs::read(&mdl_canonical).unwrap(), pre_mdl_bytes);
+
+    // The entry is still saveable: a representable edit at version 0 lands.
+    let body = serde_json::json!({
+        "json": set_aux_equation(&json_body, "room_temperature", "75"),
+        "version": 0,
+    })
+    .to_string();
+    let (status, response_bytes) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.mdl",
+        Body::from(body),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&response_bytes)
+    );
+    assert_eq!(parse_body(&response_bytes)["version"].as_u64(), Some(1));
+}
+
 /// Optimistic locking applies to `.mdl` like any other format: a second
 /// tab that never observed the first tab's save POSTs a stale version and
 /// gets 409, and the `.mdl` on disk keeps the first tab's edit.

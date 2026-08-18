@@ -25,7 +25,9 @@
 use std::path::{Path, PathBuf};
 
 use simlin_engine::datamodel;
-use simlin_mcp_core::types::{ErrorOutput, mdl_export_warnings_to_outputs};
+use simlin_mcp_core::types::{
+    ErrorOutput, mdl_export_error_to_output, mdl_export_warnings_to_outputs,
+};
 
 use crate::registry::ProjectFormat;
 
@@ -140,6 +142,41 @@ pub fn serialize_project(
                 warnings: Vec::new(),
             })
         }
+    }
+}
+
+/// Why a pre-flight serialization rejected a save. `Unrepresentable` is
+/// the format's own verdict on the model (today: the MDL writer's hard
+/// errors -- a project Vensim structurally cannot hold) and is a client
+/// error to render as a validation failure; `Internal` is anything else
+/// the writer can raise and is a server error.
+#[derive(Debug)]
+pub enum PreflightRejection {
+    Unrepresentable(ErrorOutput),
+    Internal(SaveDiskError),
+}
+
+/// Run the writer for `target` on `project` and discard the bytes.
+///
+/// Both save paths (HTTP `save_project`, MCP `RegistryAccess::save`) call
+/// this on the validated incoming project BEFORE `check_increment_and_merge`,
+/// so a model the on-disk format cannot hold is rejected while the registry
+/// doc is still untouched. Without it the merge would land first, the
+/// serialization would fail second, and the entry would sit at a version
+/// whose state can never reach disk (and every later save of that entry
+/// would fail the same way). The post-merge `serialize_project` still
+/// renders the bytes that are written -- from the merged doc, which is
+/// what the file must reflect.
+pub fn preflight_serialize(
+    project: &datamodel::Project,
+    target: &SaveTarget,
+) -> Result<(), PreflightRejection> {
+    match serialize_project(project, target) {
+        Ok(_) => Ok(()),
+        Err(SaveDiskError::MdlSerialize(e)) => Err(PreflightRejection::Unrepresentable(
+            mdl_export_error_to_output(project, &e),
+        )),
+        Err(other) => Err(PreflightRejection::Internal(other)),
     }
 }
 
@@ -399,6 +436,37 @@ mod tests {
         assert!(target_path.is_file(), "the write must still land");
         let text = fs::read_to_string(&target_path).unwrap();
         simlin_engine::open_vensim(&text).expect("degraded output still parses");
+    }
+
+    /// `preflight_serialize` maps the writer's verdicts for the save paths:
+    /// a representable project passes, a project Vensim structurally cannot
+    /// hold is `Unrepresentable` with the wire `ErrorOutput` shape, and a
+    /// lossless format never rejects.
+    #[test]
+    fn preflight_serialize_rejects_only_the_unrepresentable() {
+        let target = SaveTarget::InPlaceMdl(PathBuf::from("/nonexistent/x.mdl"));
+        preflight_serialize(&load_teacup_mdl_project(), &target).expect("representable");
+
+        let mut two = empty_project();
+        let mut second = two.models[0].clone();
+        second.name = "second".to_string();
+        two.models.push(second);
+        match preflight_serialize(&two, &target) {
+            Err(PreflightRejection::Unrepresentable(out)) => {
+                assert_eq!(out.code, "generic");
+                assert_eq!(out.kind, "model");
+                assert!(out.message.starts_with("MDL export:"), "{out:?}");
+            }
+            other => panic!("expected Unrepresentable, got {other:?}"),
+        }
+        // The pre-flight never touches disk: the target's parent does not exist.
+        assert!(!Path::new("/nonexistent/x.mdl").exists());
+
+        preflight_serialize(
+            &two,
+            &SaveTarget::SdJson(PathBuf::from("/nonexistent/x.sd.json")),
+        )
+        .expect("JSON holds any project");
     }
 
     /// The writer's hard errors fail the save: Vensim has no representation
