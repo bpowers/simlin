@@ -945,7 +945,14 @@ fn every_edge_closures(scratch: &mut FallbackScratch, seed: u32) -> Vec<Vec<u32>
     let mut dedup = CycleDedup::default();
     let mut paths = Vec::new();
     let mut cycle = Vec::new();
-    scratch.collect_every_edge_closures(seed, &mut cycle, &mut dedup, &mut paths);
+    scratch.collect_every_edge_closures(
+        seed,
+        &mut cycle,
+        &mut dedup,
+        &mut paths,
+        None,
+        &mut SystemClock,
+    );
     paths
 }
 
@@ -1643,6 +1650,30 @@ fn the_candidate_cap_shrinks_with_the_saved_step_count() {
     assert!(max_fallback_paths(crossover + 1) < MAX_FALLBACK_PATHS);
     assert_eq!(max_fallback_paths(usize::MAX / 32), 1, "never below one");
     assert_eq!(max_fallback_paths(0), max_fallback_paths(1));
+}
+
+/// Under every-edge closures the scan itself stops at a full cap: once
+/// `paths` reaches the cap every insert is refused, so rebuilding a reverse
+/// tail per remaining edge is work that cannot contribute, and the scan
+/// returns early with the seed reported as not completed -- `truncated`,
+/// with exactly the cap's worth of candidates kept.
+#[test]
+fn a_full_candidate_cap_stops_the_every_edge_closure_scan() {
+    let _guard = MaxFallbackPathsGuard::new(1);
+    let (search, results) = three_way_fixture();
+    let out = sweep(
+        &search,
+        &results,
+        FallbackConfig {
+            closures: FallbackClosures::EveryEdge,
+            ..FallbackConfig::DEFAULT
+        },
+        None,
+        &mut SystemClock,
+    );
+    assert!(out.truncated);
+    assert_eq!(out.paths.len(), 1, "exactly the cap's worth is kept");
+    assert_eq!(out.steps_processed, 0, "the only step never finished");
 }
 
 /// The not-tripped control for the test above: a cap comfortably above the

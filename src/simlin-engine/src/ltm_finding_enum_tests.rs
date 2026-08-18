@@ -1549,6 +1549,34 @@ fn a_circuit_whose_product_always_underflows_to_zero_does_not_inflate_the_univer
          never a survivor -- unaffected by the count fix, checked for good \
          measure"
     );
+    assert_eq!(
+        outcome.distinct_circuits, 1,
+        "the distinct-loop count behind universe_loops is the mass-bearing \
+         count, so the zero-product circuit is not in it either"
+    );
+
+    // The same rule for a Solo circuit (no stock on it): its own series is its
+    // denominator, and a zero product at every step means it carries nothing
+    // -- it is scored, found massless, and neither survives nor counts.
+    let solo_partition: Vec<Option<usize>> = vec![None; search.idents.len()];
+    let solo_outcome = super::enum_gen::retain_circuits(
+        &candidates,
+        &activity,
+        &solo_partition,
+        &no_modules,
+        &no_agg_nodes,
+        &mut |_, _, _| None,
+        None,
+        &mut SystemClock,
+    )
+    .unwrap();
+    assert_eq!(
+        survivor_node_sets(&solo_outcome, &candidates, &activity, &search),
+        vec![vec!["a".to_string(), "c".to_string()]],
+        "a Solo circuit whose product is zero at every step is dropped by \
+         scoring, not kept for being enumerated"
+    );
+    assert_eq!(solo_outcome.distinct_circuits, 1);
 
     // The ranking consequence: with a universe count of 1, `rank_and_filter`
     // must classify Y as NOT competing (mean_rel exactly 1.0, ranked as if
@@ -1903,6 +1931,27 @@ fn each_enumeration_budget_arm_reports_incomplete() {
             "a tripped {arm} must report an incomplete enumeration"
         );
     }
+}
+
+/// The union graph's own storage (one score row plus one activity bitset per
+/// active edge) is bounded by a byte budget of its own: the circuit and
+/// edge-row budgets bound the enumeration, not this copy, and on a many-edge,
+/// many-saved-step model it would duplicate a large part of the results slab
+/// before a single circuit is considered. Tripping it abandons the build --
+/// the same `None` an expired deadline yields -- so discovery takes the
+/// fallback, which reads the slab in place.
+#[test]
+fn a_union_graph_over_its_storage_budget_abandons_the_build() {
+    let (search, results) = two_triangles_search_and_results();
+    assert!(
+        super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock).is_some(),
+        "the fixture builds when nothing is overridden"
+    );
+    let _guard = super::enum_gen::ActivityGraphBytesGuard::new(1);
+    assert!(
+        super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock).is_none(),
+        "one byte cannot hold a single edge's row, so the build must abandon"
+    );
 }
 
 // --- Budget split (AC4.4) -------------------------------------------------
@@ -2519,10 +2568,12 @@ fn a_module_input_edge_is_active_where_a_pathway_is_finite_under_a_nan_composite
         vec![vec!["a".to_string(), "b".to_string()]],
         "the pathway makes the edge, and so the cycle, active"
     );
-    // The score row carries the repaired composite: the max-abs active
-    // pathway value where the composite is NaN.
+    // Only ACTIVITY is repaired: the score row keeps the recorded composite
+    // (NaN here), so a circuit whose per-exit-port override does not resolve
+    // scores NaN at this step -- exactly what materialization reports --
+    // rather than banking a pathway value the returned loop never carries.
     let row = activity.edge_row_of(0, 1).expect("a->b is a union edge");
-    assert_eq!(activity.score_at(row, 1), 0.5);
+    assert!(activity.score_at(row, 1).is_nan());
 
     let outcome = super::fallback::sweep(
         &search,

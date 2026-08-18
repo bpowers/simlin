@@ -973,17 +973,33 @@ impl FallbackScratch {
     ///
     /// `cycle` is the caller's scratch buffer: the forward half is written
     /// once per source node and only the reverse tail is rewritten per edge.
+    ///
+    /// Returns `false` when it stopped early: the candidate cap is already
+    /// full (every further insert would be refused, so rebuilding tails is
+    /// work that cannot contribute) or the deadline expired -- checked once
+    /// per `DEADLINE_CHECK_INTERVAL` closures scanned (the production
+    /// constant, not the test-overridable pop interval: a small component's
+    /// scan then reads no clock at all and the searches' calibrated read
+    /// schedule is undisturbed), since on a dense component this scan is
+    /// `O(E x V)` and would otherwise run past a spent budget unnoticed.
     fn collect_every_edge_closures(
         &mut self,
         seed: u32,
         cycle: &mut Vec<u32>,
         dedup: &mut CycleDedup,
         paths: &mut Vec<Vec<u32>>,
-    ) {
+        deadline: Option<Instant>,
+        clock: &mut dyn Clock,
+    ) -> bool {
         let generation = self.generation;
         let rev_generation = self.rev_generation;
         let seed_scc = self.scc_ids[seed as usize];
+        let check_interval = DEADLINE_CHECK_INTERVAL;
+        let mut scanned: u32 = 0;
         for u in 0..self.adj.len() as u32 {
+            if paths.len() >= dedup.cap {
+                return false;
+            }
             if self.scc_ids[u as usize] != seed_scc
                 || self.reached_gen[u as usize] != generation
                 || self.adj[u as usize].is_empty()
@@ -1003,6 +1019,10 @@ impl FallbackScratch {
             let forward_len = cycle.len();
 
             for k in 0..self.adj[u as usize].len() {
+                scanned = scanned.wrapping_add(1);
+                if scanned & (check_interval - 1) == 0 && expired(deadline, clock) {
+                    return false;
+                }
                 let w = self.adj[u as usize][k].node;
                 if self.scc_ids[w as usize] != seed_scc
                     || self.rev_reached_gen[w as usize] != rev_generation
@@ -1037,6 +1057,7 @@ impl FallbackScratch {
                 dedup.insert_if_new(cycle, paths);
             }
         }
+        true
     }
 
     /// Write the forward tree path `seed -> .. -> node` into `out`, seed first.
@@ -1388,13 +1409,15 @@ pub(super) fn sweep(
                     // reverse tree belonging to THIS seed rather than the
                     // previous one's.
                     let reverse_completed = scratch.dijkstra_to(seed, deadline, clock);
-                    scratch.collect_every_edge_closures(
+                    let closures_completed = scratch.collect_every_edge_closures(
                         seed,
                         &mut cycle_buf,
                         &mut dedup,
                         &mut paths,
+                        deadline,
+                        clock,
                     );
-                    completed = completed && reverse_completed;
+                    completed = completed && reverse_completed && closures_completed;
                 }
             }
             if !completed {

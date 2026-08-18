@@ -249,6 +249,61 @@ impl DeadlineWorkTracker {
     }
 }
 
+/// Byte budget for the union graph's own storage: the contiguous per-edge
+/// score rows plus activity bitsets `ActivityGraph::build` copies out of the
+/// results slab, `union_edges x step_count x (8 B + 1 bit)`. The circuit and
+/// edge-row budgets bound the ENUMERATION; nothing else bounds this copy,
+/// which on a many-edge, many-saved-step model duplicates a large part of the
+/// resident results before a single circuit is considered. World3 is 258 x
+/// 401 x 8 B ~ 0.8 MB and C-LEARN ~6 MB; a 20,000-edge model saved at
+/// 100,000 steps would be 16 GB. Above this the build abandons and discovery
+/// takes the fallback, which reads scores straight from the results slab and
+/// whose own materialization is bounded by [`super::fallback`]'s
+/// byte-derived candidate cap.
+pub(super) const MAX_ACTIVITY_GRAPH_BYTES: usize = 512 * 1024 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of [`MAX_ACTIVITY_GRAPH_BYTES`], scoped by an active
+    /// [`ActivityGraphBytesGuard`] so a two-edge fixture can trip the storage
+    /// budget instead of one large enough to trip the production constant.
+    static ACTIVITY_GRAPH_BYTES_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The effective union-graph storage budget.
+fn max_activity_graph_bytes() -> usize {
+    #[cfg(test)]
+    {
+        if let Some(b) = ACTIVITY_GRAPH_BYTES_OVERRIDE.with(|c| c.get()) {
+            return b;
+        }
+    }
+    MAX_ACTIVITY_GRAPH_BYTES
+}
+
+/// RAII guard (test-only) overriding [`max_activity_graph_bytes`] for the
+/// current thread; restores the previous value on drop.
+#[cfg(test)]
+pub(crate) struct ActivityGraphBytesGuard {
+    prev: Option<usize>,
+}
+
+#[cfg(test)]
+impl ActivityGraphBytesGuard {
+    pub(crate) fn new(bytes: usize) -> Self {
+        let prev = ACTIVITY_GRAPH_BYTES_OVERRIDE.with(|c| c.replace(Some(bytes)));
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ActivityGraphBytesGuard {
+    fn drop(&mut self) {
+        ACTIVITY_GRAPH_BYTES_OVERRIDE.with(|c| c.set(self.prev));
+    }
+}
+
 /// The three enumeration budgets: circuits, edge-visits, emitted edge rows.
 type EnumBudgets = (usize, u64, u64);
 
@@ -434,6 +489,13 @@ impl ActivityGraph {
         let mut radj: Vec<Vec<u32>> = vec![Vec::new(); n_nodes];
         let mut bits: Vec<u64> = Vec::new();
         let mut series: Vec<f64> = Vec::new();
+        // Storage this build has committed to; the per-edge cost is one score
+        // row plus one bitset. Checked before each append so the copy never
+        // exceeds the budget by more than one edge.
+        let bytes_per_edge =
+            step_count * std::mem::size_of::<f64>() + words * std::mem::size_of::<u64>();
+        let byte_budget = max_activity_graph_bytes();
+        let mut bytes_committed = 0usize;
         let mut edge_from: Vec<u32> = Vec::new();
 
         let mut edge_bits = vec![0u64; words];
@@ -462,9 +524,18 @@ impl ActivityGraph {
                     }
                     let block_end = (step + values_until_check).min(step_count);
                     for s in step..block_end {
-                        let value = edge.value_at(results, s * results.step_size);
-                        edge_series[s] = value;
-                        if is_active(value) {
+                        let base = s * results.step_size;
+                        // The score row keeps the edge's RECORDED value (the
+                        // module composite for a module-input edge): scoring
+                        // must never bank a value materialization cannot
+                        // report, and where a per-exit-port override exists
+                        // it substitutes for this row anyway. Only ACTIVITY
+                        // is read through the composite's NaN shadow, so a
+                        // circuit whose override is finite there is
+                        // enumerated and then scored honestly -- NaN when
+                        // no override resolves.
+                        edge_series[s] = results.data[base + edge.offset];
+                        if is_active(edge.value_at(results, base)) {
                             edge_bits[s / 64] |= 1u64 << (s % 64);
                             // Membership in the union graph is decided over
                             // `1..step_count` only, so a step-0-only edge is
@@ -476,6 +547,13 @@ impl ActivityGraph {
                     step = block_end;
                 }
                 if any {
+                    bytes_committed += bytes_per_edge;
+                    if bytes_committed > byte_budget {
+                        // The union graph would outgrow its storage budget;
+                        // abandon so discovery takes the fallback, which
+                        // reads the results slab in place.
+                        return None;
+                    }
                     let row = edge_from.len() as u32;
                     adj[from].push((edge.to, row));
                     radj[edge.to as usize].push(from as u32);
@@ -666,7 +744,11 @@ impl RootScc {
 
     /// Recompute the explorable set for `root`. Returns `false` when the
     /// component is trivial (fewer than two nodes), so no cycle is rooted here.
-    fn recompute(&mut self, graph: &ActivityGraph, root: u32) -> bool {
+    /// `work` receives the number of adjacency entries the two traversals
+    /// scanned, so the caller can charge it against the same visit budget and
+    /// deadline schedule as the DFS proper -- on a large union SCC this pass
+    /// alone is a full forward and reverse sweep per root.
+    fn recompute(&mut self, graph: &ActivityGraph, root: u32, work: &mut u64) -> bool {
         self.generation += 1;
         let generation = self.generation;
         let root_scc = graph.scc_of[root as usize];
@@ -678,6 +760,7 @@ impl RootScc {
         self.reaches_from[root as usize] = generation;
         self.stack.push(root);
         while let Some(v) = self.stack.pop() {
+            *work += graph.adj[v as usize].len() as u64;
             for &(to, _) in &graph.adj[v as usize] {
                 if admits(to) && self.reaches_from[to as usize] != generation {
                     self.reaches_from[to as usize] = generation;
@@ -693,6 +776,7 @@ impl RootScc {
         self.stack.push(root);
         while let Some(v) = self.stack.pop() {
             size += 1;
+            *work += graph.radj[v as usize].len() as u64;
             for &from in &graph.radj[v as usize] {
                 if admits(from)
                     && self.reaches_from[from as usize] == generation
@@ -817,9 +901,31 @@ pub(super) fn enumerate_active_circuits(
     let mut and_stack: Vec<u64> = Vec::new();
 
     let mut explorable = RootScc::new(n_nodes);
+    // Adjacency entries the per-root pruning passes scanned, charged to the
+    // visit budget alongside the DFS's own `visits`.
+    let mut prune_total: u64 = 0;
 
     for root in 0..n_nodes as u32 {
-        if !explorable.recompute(graph, root) {
+        // The per-root pruning pass is charged to the same visit budget and
+        // deadline schedule as the DFS: its two traversals over a large union
+        // SCC are real work that must not run past the caller's budget
+        // unnoticed, and a root whose induced component is trivial would
+        // otherwise never reach a check at all.
+        let mut prune_work = 0u64;
+        let admits_root = explorable.recompute(graph, root, &mut prune_work);
+        // Pruning work counts against the visit BUDGET but not against the
+        // DFS's clock-read schedule (`visits`, whose first-visit and interval
+        // arms the deadline tests are calibrated to): the clock is read for a
+        // pruning pass only when that pass alone was a full check interval of
+        // work (a large union SCC), so a small root's pass costs no read.
+        prune_total += prune_work;
+        if visits + prune_total > max_visits
+            || (prune_work >= u64::from(DEADLINE_CHECK_INTERVAL) && expired(deadline, clock))
+        {
+            out.complete = false;
+            return out;
+        }
+        if !admits_root {
             continue;
         }
 
@@ -847,7 +953,7 @@ pub(super) fn enumerate_active_circuits(
                 if (visits == 1 || visits & (visit_interval - 1) == 0) && expired(deadline, clock) {
                     break 'dfs;
                 }
-                if visits > max_visits {
+                if visits + prune_total > max_visits {
                     break 'dfs;
                 }
 
@@ -927,10 +1033,12 @@ pub(super) struct RetentionOutcome {
     /// a threshold, so this is the population the competing-vs-solo
     /// classification is entitled to ask about.
     pub partition_circuit_counts: HashMap<usize, usize>,
-    /// How many of the enumerated circuits are DISTINCT reported loops: the
-    /// enumerated count minus the non-representative twins the trimmed-key
-    /// dedup below dropped before either total was touched. `ltm_finding.rs`
-    /// adds the (deduped) stitched cross-agg loop count to this to populate
+    /// How many of the enumerated circuits are DISTINCT loops carrying mass:
+    /// non-representative twins the trimmed-key dedup dropped are excluded,
+    /// and so is any circuit whose reported product is zero or NaN at every
+    /// step (its edges are individually active but it banks nothing, so it is
+    /// not one of the loops the denominators sum). `ltm_finding.rs` adds the
+    /// (deduped) stitched cross-agg loop count to this to populate
     /// `DiscoveryResult::universe_loops`.
     pub distinct_circuits: usize,
 }
@@ -1043,7 +1151,11 @@ pub(super) fn retain_circuits(
         deadline,
         clock,
     )?;
-    let distinct_circuits = candidates.len() - dropped.iter().filter(|&&d| d).count();
+    // Distinct loops whose mass the denominators (or, for a Solo circuit,
+    // its own reported series) actually carry: counted below as each
+    // circuit banks nonzero mass, so a circuit whose product underflows to
+    // zero at every step is neither a universe member nor a survivor.
+    let mut distinct_circuits = 0usize;
 
     for (ci, &is_dropped) in dropped.iter().enumerate() {
         if work.check(ci, deadline, clock) {
@@ -1058,18 +1170,6 @@ pub(super) fn retain_circuits(
         let rows = candidates.circuit(ci);
         let partition = circuit_partition(rows, graph, stock_partition_of_node);
         let (lo, hi) = graph.active_window(candidates.activity_of(ci));
-        let Some(part) = partition else {
-            // Solo: "ever active" is decided by the RAW enumerated activity
-            // window regardless of any override -- the enumerator's own
-            // decision to emit this circuit at all (built from the raw
-            // composite series) is unaffected by a later per-exit-port
-            // substitution.
-            if lo < hi {
-                survivors.push(ci);
-            }
-            continue;
-        };
-
         // A module-traversing circuit's raw activity window is a window over
         // the COMPOSITE score, which can disagree with the override series
         // `score_steps` may substitute for it. The circuit's own window stays
@@ -1081,6 +1181,30 @@ pub(super) fn retain_circuits(
             effective_scoring_window(rows, graph, is_module_node, override_for, (lo, hi))
         } else {
             (lo, hi)
+        };
+
+        let Some(part) = partition else {
+            // Solo: its own reported series is its denominator, so retention
+            // reduces to "does it ever carry nonzero mass" -- decided by
+            // scoring it (edges individually active at every step still let
+            // the product underflow to 0, and an override can zero it), not
+            // by the activity window alone. Nothing is banked anywhere.
+            score_steps(
+                rows,
+                graph,
+                score_lo,
+                has_module_node,
+                is_module_node,
+                override_for,
+                &mut scratch[score_lo..score_hi],
+                &mut nan_mask[score_lo..score_hi],
+            );
+            work.record(rows.len() as u64 * (score_hi - score_lo) as u64);
+            if (score_lo..score_hi).any(|t| !nan_mask[t] && scratch[t] != 0.0) {
+                distinct_circuits += 1;
+                survivors.push(ci);
+            }
+            continue;
         };
 
         score_steps(
@@ -1127,6 +1251,7 @@ pub(super) fn retain_circuits(
         }
         if banked_mass {
             *partition_circuit_counts.entry(part).or_insert(0) += 1;
+            distinct_circuits += 1;
         }
         if bound >= MIN_CONTRIBUTION {
             to_confirm.push(ci);
