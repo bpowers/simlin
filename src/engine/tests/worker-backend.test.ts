@@ -204,6 +204,37 @@ describe('WorkerBackend', () => {
       expect(initTransfer).toBeUndefined();
     });
 
+    test('init with a precompiled WebAssembly.Module clones it in the body, no transfer', async () => {
+      const { backend, transfers } = createTestPair();
+      const bytes = loadWasmSource();
+      const module = await WebAssembly.compile(
+        bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+      );
+      await backend.init(module);
+      expect(backend.isInitialized()).toBe(true);
+      // A compiled module is structured-cloneable but not Transferable.
+      const initTransfer = transfers.find((t) => t !== undefined && t.length > 0);
+      expect(initTransfer).toBeUndefined();
+
+      // And the worker-side engine is genuinely usable from that module.
+      const handle = await backend.projectOpenXmile(loadTestXmile());
+      expect(await backend.projectGetModelCount(handle)).toBeGreaterThan(0);
+      await backend.projectDispose(handle);
+    });
+
+    test('configureWasm with a precompiled WebAssembly.Module initializes the worker', async () => {
+      const { backend } = createTestPair();
+      // The wasm singleton is process-wide; drop the previous test's instance.
+      await backend.reset();
+      const bytes = loadWasmSource();
+      const module = await WebAssembly.compile(
+        bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+      );
+      backend.configureWasm({ source: module });
+      await backend.init();
+      expect(backend.isInitialized()).toBe(true);
+    });
+
     test('configureWasm with buffer transfers during init', async () => {
       const { backend, transfers } = createTestPair();
       await backend.reset();

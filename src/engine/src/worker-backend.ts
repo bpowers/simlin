@@ -127,13 +127,19 @@ export class WorkerBackend implements EngineBackend {
 
   private async resolveWasmSource(
     source?: WasmSourceProvider,
-  ): Promise<{ buffer?: ArrayBuffer; url?: string } | undefined> {
+  ): Promise<{ buffer?: ArrayBuffer; url?: string; module?: WebAssembly.Module } | undefined> {
     if (source === undefined) {
       return undefined;
     }
     if (typeof source === 'function') {
       const resolved = await source();
       return this.resolveWasmSource(resolved);
+    }
+    if (source instanceof WebAssembly.Module) {
+      // A compiled module is structured-cloneable (the engine shares the
+      // compiled code with the worker; only instantiation happens there), so
+      // it rides in the message body rather than the transfer list.
+      return { module: source };
     }
     if (source instanceof Uint8Array) {
       // Extract the underlying ArrayBuffer region. For WASM sources this
@@ -175,7 +181,7 @@ export class WorkerBackend implements EngineBackend {
             (requestId) => ({
               type: 'configureWasm',
               requestId,
-              config: { source: resolved.buffer, url: resolved.url },
+              config: { source: resolved.buffer, url: resolved.url, module: resolved.module },
             }),
             transfer,
           );
@@ -191,6 +197,7 @@ export class WorkerBackend implements EngineBackend {
           requestId,
           wasmSource: resolved?.buffer,
           wasmUrl: resolved?.url,
+          wasmModule: resolved?.module,
         }),
         transfer,
       );

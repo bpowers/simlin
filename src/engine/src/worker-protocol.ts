@@ -34,10 +34,14 @@ export interface SerializedError {
 
 export type WorkerRequest =
   // Lifecycle
-  | { type: 'init'; requestId: number; wasmSource?: ArrayBuffer; wasmUrl?: string }
+  | { type: 'init'; requestId: number; wasmSource?: ArrayBuffer; wasmUrl?: string; wasmModule?: WebAssembly.Module }
   | { type: 'isInitialized'; requestId: number }
   | { type: 'reset'; requestId: number }
-  | { type: 'configureWasm'; requestId: number; config: { source?: ArrayBuffer; url?: string } }
+  | {
+      type: 'configureWasm';
+      requestId: number;
+      config: { source?: ArrayBuffer; url?: string; module?: WebAssembly.Module };
+    }
   // Project open
   | { type: 'projectOpenXmile'; requestId: number; data: Uint8Array }
   | { type: 'projectOpenProtobuf'; requestId: number; data: Uint8Array }

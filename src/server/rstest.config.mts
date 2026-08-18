@@ -36,7 +36,7 @@ export default defineConfig({
       // Pin the node flavor. Trailing `$` is an exact match, so the specific
       // entries must precede the prefix ones.
       '@simlin/engine/internal/wasm$': path.join(engineLib, 'internal/wasm.node.js'),
-      '@simlin/engine/internal/backend-factory$': path.join(engineLib, 'backend-factory.node.js'),
+      '@simlin/engine/internal/backend-factory$': path.join(engineLib, 'backend-factory.direct.js'),
       '@simlin/engine$': path.join(engineLib, 'index.js'),
       '@simlin/engine': engineLib,
       '@simlin/core$': path.join(coreLib, 'index.js'),
