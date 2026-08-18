@@ -1,4 +1,4 @@
-.PHONY: all build test clean install dev lint type-check
+.PHONY: all build test clean install dev lint type-check assets check-assets
 
 # Build the libsimlin library. mimalloc: the engine compile path is
 # allocation-heavy and mimalloc roughly halves allocator time on native builds
@@ -6,7 +6,17 @@
 build-lib:
 	cd ../libsimlin && cargo build --release --features mimalloc
 
-# Build the Python package
+# Stage the notebook widget's assets (widget.js + libsimlin-browser.wasm +
+# ASSETS.json) into simlin/_widget/. Builds the TypeScript workspace first;
+# `python scripts/stage_widget_assets.py --no-build` restages without it.
+assets:
+	python3 scripts/stage_widget_assets.py
+
+# Verify the staged assets are complete and match their manifest.
+check-assets:
+	python3 scripts/stage_widget_assets.py --check
+
+# Build the Python package (build_wheels.py stages the widget assets itself)
 build: build-lib
 	uv run python scripts/build_wheels.py
 
@@ -35,7 +45,8 @@ format:
 # Clean build artifacts
 clean:
 	rm -rf build dist *.egg-info .venv
-	rm -rf simlin/_ffi.*.so simlin/_ffi.*.pyd
+	rm -rf simlin/_clib.*.so simlin/_clib.*.pyd
+	rm -f simlin/_widget/widget.js simlin/_widget/libsimlin-browser.wasm simlin/_widget/ASSETS.json
 	rm -rf .pytest_cache .mypy_cache
 	find . -type d -name __pycache__ -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete

@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
-"""Build wheels for multiple platforms."""
+"""Build the pysimlin wheel for the current platform.
 
+Three inputs go into the wheel and this script produces all of them in order:
+the libsimlin static library (cargo), the notebook widget assets (the
+TypeScript workspace build, staged by ``stage_widget_assets.py``), and the
+CFFI extension + Python package (``python -m build``).
+"""
+
+import argparse
 import json
 import os
 import platform
@@ -11,6 +18,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LIBSIMLIN_DIR = REPO_ROOT / "src" / "libsimlin"
+STAGE_ASSETS = Path(__file__).resolve().with_name("stage_widget_assets.py")
 
 
 def get_platform_tag() -> str:
@@ -74,6 +82,27 @@ def build_libsimlin() -> Path:
     return lib_path
 
 
+def stage_widget_assets(build: bool, require_opt: bool) -> None:
+    """Put the notebook widget's JS module and engine wasm into
+    ``simlin/_widget/`` so the wheel carries them.
+
+    ``build`` runs the TypeScript workspace build first (engine wasm, diagram,
+    widget); ``False`` stages whatever those builds last produced. Either way
+    the staging script writes ``ASSETS.json`` and ``setup.py`` refuses the
+    wheel if anything is missing or inconsistent, so a wheel produced here can
+    never silently lack the widget. ``require_opt`` additionally fails the
+    build when the wasm was not wasm-opt'd (a raw wasm is what a
+    DISABLE_WASM_OPT development build leaves behind).
+    """
+    print("Staging notebook widget assets...")
+    args = [sys.executable, str(STAGE_ASSETS)]
+    if not build:
+        args.append("--no-build")
+    if require_opt:
+        args.append("--require-opt")
+    subprocess.run(args, cwd=REPO_ROOT, check=True)
+
+
 def build_wheel(lib_path: Path) -> None:
     """Build the wheel for the current platform.
 
@@ -130,12 +159,28 @@ def build_wheel(lib_path: Path) -> None:
     print(f"Wheel built: {new_path}")
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """Main entry point."""
+    parser = argparse.ArgumentParser(description="Build the pysimlin wheel for this platform.")
+    parser.add_argument(
+        "--no-asset-build",
+        action="store_true",
+        help="stage the notebook widget assets from the existing TypeScript build outputs "
+        "instead of running the pnpm build first",
+    )
+    parser.add_argument(
+        "--require-opt",
+        action="store_true",
+        help="fail unless the staged wasm was built with wasm-opt (release builds); "
+        "off by default so a development build without binaryen still produces a wheel",
+    )
+    args = parser.parse_args(argv)
+
     print("Building simlin Python package...")
     print(f"Platform: {platform.system()} {platform.machine()}")
 
     lib_path = build_libsimlin()
+    stage_widget_assets(build=not args.no_asset_build, require_opt=args.require_opt)
     build_wheel(lib_path)
 
     print("Build complete!")

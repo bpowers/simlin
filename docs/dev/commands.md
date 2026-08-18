@@ -89,4 +89,7 @@ uv run pytest tests/ -x           # Run tests
 uv run ruff check                  # Lint
 uv run ruff format                 # Format
 uv run mypy simlin                 # Type check (strict)
+make assets                        # Build + stage the notebook widget assets (widget.js + wasm)
+make check-assets                  # Verify the staged widget assets
+uv run python scripts/build_wheels.py   # Build the wheel (libsimlin + widget assets + CFFI)
 ```
