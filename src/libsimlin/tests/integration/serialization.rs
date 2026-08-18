@@ -671,8 +671,8 @@ unsafe fn serialize_mdl_ok(proj: *mut SimlinProject) -> (String, *mut SimlinErro
 
 /// A Vensim model with a sketch survives open -> serialize_mdl -> open: the
 /// same variables are present and the view elements are carried through the
-/// sketch section, so a file-backed `.mdl` model keeps its diagram when
-/// pysimlin writes it back in place.
+/// sketch section, so a caller round-tripping an `.mdl` through
+/// `serialize_mdl` keeps its diagram.
 #[test]
 fn test_serialize_mdl_roundtrip_preserves_variables_and_sketch() {
     let data = std::fs::read("testdata/SIR.mdl").expect("SIR.mdl fixture must exist");
