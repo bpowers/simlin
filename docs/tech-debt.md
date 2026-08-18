@@ -212,12 +212,12 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 
 ### 24. LTM SearchGraph Uses String-Backed Idents in Hot Path
 
-- **Component**: simlin-engine (src/simlin-engine/src/ltm_finding.rs `SearchGraph::check_outbound_uses`)
-- **Severity**: medium
-- **Description**: The per-timestep strongest-path DFS keys `best_score` and `visiting` on `Ident<Canonical>` (String-backed), cloning identifiers into hash maps on every recursive call. For a 1000-variable model with 500 saved timesteps this is ~5x10^7 map operations per run; element-level expansion makes it far worse. Apply the same NodeId indexing pattern that `IndexedGraph` uses in the exhaustive path: per-timestep `Vec<u32>`-indexed `SearchGraph`, dense `Vec<f64>` for `best_score`, `Vec<bool>` for `visiting`. Expected 5-10x speedup on large discovery runs.
+- **Component**: simlin-engine (src/simlin-engine/src/ltm_finding.rs)
+- **Severity**: RESOLVED
+- **Description**: (**Resolved**; the code this names no longer exists. See `docs/design-plans/2026-08-17-ltm-discovery-exact.md`.) The per-timestep DFS keyed its `best_score` and `visiting` state on `Ident<Canonical>` (String-backed), cloning identifiers into hash maps on every recursive call. Discovery now runs entirely on integer-indexed structures: `IndexedSearch` interns each node once and both candidate generators address nodes, edges, activity bitsets, and score rows by `u32` index. Kept as a historical pointer to the indexing lesson -- an `Ident`-keyed hot path in a per-step search is the shape to look for.
 - **Tracked in**: #481 (LTM tracking epic: #488)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-29
+- **Last reviewed**: 2026-08-18
 
 ### 25. LTM Element-Level Loop Enumeration Runs at Wrong Granularity
 
@@ -250,20 +250,20 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 ### 28. LTM Discovery Truncates Before Partition-Scoped Filtering
 
 - **Component**: simlin-engine (src/simlin-engine/src/ltm_finding.rs `rank_and_filter`)
-- **Severity**: low
-- **Description**: `rank_and_filter` sorts loops by average absolute score, truncates to MAX_LOOPS=200, and then applies MIN_CONTRIBUTION filtering per-partition. A loop that is dominant in a small partition but globally ranked below 200 is lost before the partition scope sees it. In practice MAX_LOOPS is generous enough that the case is rare; the comment already acknowledges the concern. Fix: filter first, truncate second.
+- **Severity**: RESOLVED
+- **Description**: (**Resolved** by GH #310; the ordering is now filter-then-cap, and the cap itself is coverage-aware -- see `rank_and_filter`'s rustdoc and `docs/design/ltm--loops-that-matter.md`, "Ranking and Filtering".) `rank_and_filter` used to sort by average absolute score, truncate to `MAX_LOOPS` = 200, and only then apply per-partition `MIN_CONTRIBUTION` filtering, so a loop dominant in a small partition but globally ranked below 200 was lost before the partition scope saw it. Retention now runs over the whole discovered set before any cap, and `select_reported` guarantees every step's dominant loop within a competing partition a slot even under cap pressure.
 - **Tracked in**: #310 (LTM tracking epic: #488)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-29
+- **Last reviewed**: 2026-08-18
 
 ### 29. LTM LOOPSCORE / PATHSCORE Builtins Not Implemented
 
 - **Component**: simlin-engine (LTM augmentation layer)
 - **Severity**: low
-- **Description**: The reference treats `LOOPSCORE(path...)` and `PATHSCORE(path...)` as primitives users invoke to track loops the heuristic discovery may have missed. Simlin does not implement them. Given discovery is heuristic, users currently have no way to pin a specific loop and compare it across runs or parameter sweeps. Fix: generate one synthetic variable per user-named loop that computes the product of its constituent link scores; coexists cleanly with discovery.
+- **Description**: The reference treats `LOOPSCORE(path...)` and `PATHSCORE(path...)` as equation-level primitives. Simlin does not implement either as a builtin, but the *capability* LOOPSCORE exists for -- naming a loop and scoring it every run regardless of what discovery reported -- is implemented as pinned loops (`SetLoopName` patch primitive -> `LoopMetadata` -> `db/ltm/pinned.rs::model_pinned_loops`, which always emits that loop's `loop_score` in both modes; LTM ref section 10). What is missing is the equation-level syntax: a modeler cannot write `LOOPSCORE(a, b, c)` inside another variable's equation and use the value. Fix: parse the builtins and lower them onto the existing pinned-loop machinery, so the two spellings share one implementation.
 - **Tracked in**: #484 (LTM tracking epic: #488)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-29
+- **Last reviewed**: 2026-08-18
 
 ### 30. LTM Polarity Confidence Metric Missing
 
