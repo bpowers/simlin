@@ -16,6 +16,7 @@ if (baseConfig) {
       WebAssembly: 'readonly',
       HTMLElement: 'readonly',
       Element: 'readonly',
+      HTMLDivElement: 'readonly',
       AbortController: 'readonly',
       AbortSignal: 'readonly',
       Blob: 'readonly',

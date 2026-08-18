@@ -121,6 +121,16 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
   }));
   const [notice, setNotice] = React.useState<Notice | null>(null);
   const [hostTheme, setHostTheme] = React.useState<HostThemeSignals>(readHostThemeSignals);
+  // The wrapper element, once mounted: it is the Editor's portalContainer, so
+  // the drawer/dialogs/menus/listbox render INSIDE the widget box (where the
+  // scoped theme tokens, data-theme and data-lm-suppress-shortcuts live --
+  // portaled to document.body they would sit outside the widget root class
+  // and every var(--*) would be undefined) and position against it rather
+  // than the viewport (JupyterLab's windowed notebook translates its viewport
+  // with a transform, which would displace fixed-position boxes). The Editor
+  // is rendered only once the wrapper exists so it never mounts in the
+  // viewport mode first.
+  const [wrapper, setWrapper] = React.useState<HTMLDivElement | null>(null);
 
   const refs = React.useRef<WidgetRefs>({
     disposed: false,
@@ -330,6 +340,7 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
 
   return (
     <div
+      ref={setWrapper}
       className={`${WIDGET_ROOT_CLASS} ${styles.host}`}
       style={wrapperStyle(traits.height)}
       data-theme={theme}
@@ -344,16 +355,22 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
           {notice.text}
         </div>
       ) : null}
-      <Editor
-        key={`${seed.revision}#${seed.generation}`}
-        inputFormat="json"
-        initialProjectJson={seed.projectJson}
-        initialProjectVersion={seed.revision}
-        name={name}
-        readOnlyMode={traits.readOnly}
-        onSave={handleSave}
-        onSelectionChanged={handleSelectionChanged}
-      />
+      {wrapper !== null ? (
+        <Editor
+          key={`${seed.revision}#${seed.generation}`}
+          inputFormat="json"
+          initialProjectJson={seed.projectJson}
+          initialProjectVersion={seed.revision}
+          name={name}
+          readOnlyMode={traits.readOnly}
+          onSave={handleSave}
+          onSelectionChanged={handleSelectionChanged}
+          portalContainer={wrapper}
+          // The notebook page has no "/" to go home to; the drawer's Exit
+          // link would pushState the notebook page away.
+          showHomeLink={false}
+        />
+      ) : null}
     </div>
   );
 }

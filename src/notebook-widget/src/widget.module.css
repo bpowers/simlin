@@ -5,6 +5,14 @@
   position: relative;
   width: 100%;
   overflow: hidden;
+  /* The wrapper is the Editor's portalContainer: the drawer, dialogs, menus
+     and the autocomplete listbox render inside it (their z-indexes are in the
+     1200-1300 band) alongside the notice below (z 20). Isolating the stacking
+     context keeps that whole band local to the widget box: the surfaces stack
+     over the Editor's own chrome and never compete with the notebook page's
+     own layers by raw z-index. They are clipped to the box by overflow: hidden,
+     which is the intended containment. */
+  isolation: isolate;
   border: 1px solid var(--color-border, #d6d6d6);
   border-radius: 4px;
   box-sizing: border-box;

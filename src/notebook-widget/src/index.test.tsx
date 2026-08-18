@@ -77,6 +77,12 @@ describe('AFM lifecycle', () => {
     expect(mounts).toHaveLength(1);
     expect(mounts[0].props.name).toBe('model');
     expect(mounts[0].props.inputFormat).toBe('json');
+    // The Editor's overlay surfaces (drawer, dialogs, menus, listbox) render
+    // inside the wrapper -- the element carrying the scoped tokens, data-theme
+    // and data-lm-suppress-shortcuts -- not on document.body; and the drawer
+    // shows no Exit link, since a notebook page has no "/" to go to.
+    expect(mounts[0].props.portalContainer).toBe(wrapper);
+    expect(mounts[0].props.showHomeLink).toBe(false);
 
     // Every model listener the view added is registered...
     for (const name of [
