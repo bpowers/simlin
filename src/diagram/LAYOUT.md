@@ -353,6 +353,17 @@ Labels can be positioned relative to their element using the `LabelSide` propert
 - **'right'**: Right of element, left-aligned text
 - **'center'**: Centered on element (default for stocks/flows, overlays the element)
 
+### Label Side Ownership
+- **Chosen once**: the engine's layout picks an element's `labelSide` when it
+  creates the element (fresh layout, or a new/rebuilt element in an
+  incremental pass). After that the side belongs to whoever placed it.
+- **Incremental edits never move existing labels**: an `edit()`/MCP/widget
+  reload that adds or removes unrelated variables returns every untouched
+  element's position and `labelSide` byte-for-byte. A new connector may end
+  up running through a hand-placed label; that is accepted -- the human (or
+  a full relayout) moves it. See `incremental_layout` in
+  `src/simlin-engine/src/layout/mod.rs`.
+
 ### Label Layout Calculation
 
 **Constants**:
