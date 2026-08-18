@@ -2396,6 +2396,19 @@ fn doc_with_embedded_carriage_return_is_idempotent() {
         doc_of(&reparsed2),
         "the multi-line doc field must be a round-trip fixpoint",
     );
+    // And a fixpoint from the FIRST round trip, on the datamodel side: the
+    // reader normalizes the CRLF the writer emits back to LF, so an LF doc
+    // reads back as it was written rather than flipping to `\r\n` once.
+    assert_eq!(doc1, "line one\nline two");
+    let lf_var = make_aux("x", "5", Some("Units"), "line one\nline two");
+    let lf_project = make_project(vec![make_model(vec![lf_var])]);
+    let lf_write = crate::mdl::project_to_mdl(&lf_project).unwrap();
+    assert!(
+        lf_write.contains("line one\r\nline two"),
+        "the file is CRLF"
+    );
+    let lf_reparsed = crate::mdl::parse_mdl(&lf_write).expect("re-parse");
+    assert_eq!(doc_of(&lf_reparsed), "line one\nline two");
 }
 
 #[test]

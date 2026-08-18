@@ -61,7 +61,9 @@ brew install uv
 cd src/libsimlin
 cargo build --release
 
-# Install Python package in dev mode with uv
+# Install Python package in dev mode with uv (the dev extra includes the
+# `notebook` extra -- anywidget -- because the widget tests drive the real
+# ModelWidget; users get it with pip install "pysimlin[notebook]")
 cd src/pysimlin
 uv sync --extra dev
 
@@ -78,8 +80,9 @@ uv run black --check simlin tests
 
 ### Notebook widget assets
 
-`Model.widget()` (the anywidget-based diagram editor) needs two build outputs
-of the TypeScript workspace as package data in `simlin/_widget/`:
+`Model.widget()` (the anywidget-based diagram editor; anywidget itself is the
+optional `notebook` extra, see `pyproject.toml`) needs two build outputs of
+the TypeScript workspace as package data in `simlin/_widget/`:
 
 - `widget.js` -- `src/notebook-widget`'s single-file ES module (`dist/widget.js`)
 - `libsimlin-browser.wasm` -- the engine from `src/engine/core/`, `wasm-opt`'d
@@ -122,8 +125,11 @@ uv run python scripts/build_wheels.py --require-opt      # refuse a wasm that wa
 ```
 
 `--require-opt` is off by default so a development machine without binaryen
-still produces a wheel (with a `raw` wasm and a warning); the release workflow
-always passes it.
+still produces a wheel (with a `raw` wasm and a warning). The release
+workflow does not run `build_wheels.py`; it passes `--require-opt` to
+`scripts/stage_widget_assets.py` (its `widget-assets` job) and to
+`scripts/check_wheel_assets.py`, so a raw wasm is refused before and after
+cibuildwheel.
 
 This will:
 1. Build libsimlin.a for current platform (mimalloc feature)

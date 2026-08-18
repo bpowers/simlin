@@ -44,6 +44,52 @@ export const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 
 export type Theme = 'auto' | 'light' | 'dark';
 
+/**
+ * The model the Editor mounts first (`ProjectController.modelName`), and
+ * therefore the one whose first view must exist for anything to render.
+ */
+export const EDITOR_ROOT_MODEL = 'main';
+
+/**
+ * Give the root model of an engine-native project JSON text an empty
+ * stock-flow view when it has none, returning the EXACT input text otherwise.
+ *
+ * The Editor renders `model.views[0]` and is a dead, blank canvas without it.
+ * The kernel lays a viewless model out before seeding (pysimlin
+ * `Project._ensure_view`); this is the defence in depth for a seed that
+ * arrives viewless anyway (the layout failed, an older kernel). Text that is
+ * not a repairable project (not JSON, no models list, no root model) is
+ * returned as it is -- the Editor reports its own error for that. Returning
+ * the identical string when nothing is missing matters: `classifyPush`
+ * compares trait text with the bytes the Editor sent, and an Editor snapshot
+ * always carries the view once one exists.
+ */
+export function withEditorView(projectJson: string): string {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(projectJson);
+  } catch {
+    return projectJson;
+  }
+  if (!isRecord(doc) || !Array.isArray(doc.models)) {
+    return projectJson;
+  }
+  const index = doc.models.findIndex((m: unknown) => isRecord(m) && m.name === EDITOR_ROOT_MODEL);
+  if (index < 0) {
+    return projectJson;
+  }
+  const root = doc.models[index] as Record<string, unknown>;
+  if (Array.isArray(root.views) && root.views.length > 0) {
+    return projectJson;
+  }
+  const models = [...doc.models];
+  models[index] = {
+    ...root,
+    views: [{ kind: 'stock_flow', elements: [], viewBox: { x: 0, y: 0, width: 0, height: 0 }, zoom: 1 }],
+  };
+  return JSON.stringify({ ...doc, models });
+}
+
 /** The kernel-owned traits the shell reads, coerced to the types it needs. */
 export interface WidgetTraits {
   projectJson: string;
@@ -60,7 +106,10 @@ export interface WidgetTraits {
  * should degrade to sane defaults rather than a broken widget: a missing or
  * non-positive height becomes {@link DEFAULT_HEIGHT_PX}, an unknown theme
  * becomes `auto`, a non-string project becomes the empty string (which the
- * Editor reports as an error rather than crashing on), a missing or
+ * Editor reports as an error rather than crashing on) and a project whose
+ * root model has no view gets an empty one ({@link withEditorView}; applied
+ * here so the seed and every later push are normalised the same way and the
+ * pair comparisons in `classifyPush` stay consistent), a missing or
  * non-positive snapshot cap becomes {@link MAX_SNAPSHOT_BYTES}.
  */
 export function readTraits(get: (key: string) => unknown): WidgetTraits {
@@ -78,7 +127,7 @@ export function readTraits(get: (key: string) => unknown): WidgetTraits {
   const maxSnapshotBytes =
     typeof capRaw === 'number' && Number.isInteger(capRaw) && capRaw > 0 ? capRaw : MAX_SNAPSHOT_BYTES;
   return {
-    projectJson: typeof projectRaw === 'string' ? projectRaw : '',
+    projectJson: typeof projectRaw === 'string' ? withEditorView(projectRaw) : '',
     revision,
     height,
     theme,

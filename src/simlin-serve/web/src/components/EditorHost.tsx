@@ -110,8 +110,11 @@ function formatValidationErrors(errors: ReadonlyArray<ServerValidationError>): s
     return 'Save failed: validation rejected the edit but the server returned no details.';
   }
   const lines = errors.map((e) => {
-    const variable = e.variableName ?? '(unknown)';
-    return ` - ${e.code}: ${variable}: ${e.message}`;
+    // A variable-scoped error names its variable; a model-scoped one (a
+    // simulation-spec problem, a units error on the model) names the
+    // model instead of printing "(unknown)".
+    const where = e.variableName ?? (e.modelName !== undefined ? `model ${e.modelName}` : '(unknown)');
+    return ` - ${e.code}: ${where}: ${e.message}`;
   });
   return `Save failed:\n${lines.join('\n')}`;
 }

@@ -435,8 +435,19 @@ impl<'input> EquationReader<'input> {
         // Check for supplementary flag (third ~ followed by :SUP or :SUPPLEMENTARY)
         let (comment, supplementary) = Self::extract_supplementary_flag(raw_comment);
 
+        // Line endings inside the comment are normalized to LF: Vensim writes
+        // (and our writer emits) CRLF files, so a raw capture would make the
+        // documentation of every variable read from an .mdl carry `\r`, and
+        // an LF-authored file's docs would flip to `\r\n` after one in-place
+        // rewrite (the writer's own final LF->CRLF pass) -- the datamodel
+        // would change on the first round trip and be stable only after.
+        // Normalizing here makes read(write(p)) == p for the doc field.
         let comment = if comment.is_empty() {
             None
+        } else if comment.contains('\r') {
+            Some(Cow::Owned(
+                comment.replace("\r\n", "\n").replace('\r', "\n"),
+            ))
         } else {
             Some(Cow::Borrowed(comment))
         };
@@ -1346,6 +1357,25 @@ mod tests {
                 );
             }
             other => panic!("Expected equation with comment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_multi_line_comment_line_endings_are_normalized_to_lf() {
+        // CRLF (Vensim's own line ending) and lone CR both read as `\n`;
+        // an LF comment is untouched (and stays borrowed).
+        for (input, expected) in [
+            ("x = 5 ~ ~ line one\r\nline two |", "line one\nline two"),
+            ("x = 5 ~ ~ line one\rline two |", "line one\nline two"),
+            ("x = 5 ~ ~ line one\nline two |", "line one\nline two"),
+        ] {
+            let mut reader = EquationReader::new(input);
+            match reader.next_item() {
+                Some(Ok(MdlItem::Equation(eq))) => {
+                    assert_eq!(eq.comment.as_ref().unwrap().as_ref(), expected, "{input:?}");
+                }
+                other => panic!("Expected equation with comment, got {:?}", other),
+            }
         }
     }
 

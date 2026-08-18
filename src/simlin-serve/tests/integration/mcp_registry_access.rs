@@ -570,6 +570,80 @@ async fn create_writes_xmile_for_stmx_extension() {
     assert_eq!(meta.version, 0);
 }
 
+/// The `.mdl` arm of create: the file is written as Vensim text (the same
+/// writer the save path uses), the registry entry is `Mdl`, and the text
+/// re-parses.
+#[tokio::test]
+async fn create_writes_vensim_text_for_mdl_extension() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let abs = canonical_root.join("fresh.mdl");
+    let state = build_state(canonical_root.clone());
+
+    let access = RegistryAccess::new(state.clone());
+    let project = minimal_project("mdl-creation");
+    access
+        .create(&abs, &project, SourceFormat::Mdl)
+        .await
+        .expect("create");
+
+    let text = fs::read_to_string(&abs).expect("read created file");
+    // Vensim text: the encoding marker and the .Control section, not JSON
+    // or XML.
+    assert!(
+        text.starts_with("{UTF-8}") && text.contains(".Control"),
+        "an .mdl is Vensim text: {text}"
+    );
+    simlin_engine::open_vensim(&text).expect("created .mdl parses");
+
+    let meta = state.registry.get(&abs).expect("registry holds entry");
+    assert_eq!(meta.format, ProjectFormat::Mdl);
+    assert_eq!(meta.version, 0);
+}
+
+/// Every path create accepts is one discovery would list, and vice versa:
+/// the two consult the same table (`discovery::format_for_path`), so a
+/// file this server writes never becomes one it cannot see.
+#[tokio::test]
+async fn create_format_table_is_discoverys() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let state = build_state(canonical_root.clone());
+    let access = RegistryAccess::new(state.clone());
+    let project = minimal_project("table");
+    for (name, expected) in [
+        ("a.sd.json", Some(ProjectFormat::SdJson)),
+        ("b.stmx", Some(ProjectFormat::Stmx)),
+        ("c.xmile", Some(ProjectFormat::Xmile)),
+        ("d.xml", Some(ProjectFormat::Xmile)),
+        ("e.mdl", Some(ProjectFormat::Mdl)),
+        ("f.MDL", Some(ProjectFormat::Mdl)),
+        ("g.json", None),
+        ("h.txt", None),
+        ("i", None),
+    ] {
+        let abs = canonical_root.join(name);
+        assert_eq!(
+            simlin_serve::discovery::format_for_path(&abs),
+            expected,
+            "discovery's answer for {name}"
+        );
+        let result = access
+            .create(&abs, &project, SourceFormat::NativeJson)
+            .await;
+        match expected {
+            Some(format) => {
+                result.unwrap_or_else(|e| panic!("create {name} must succeed: {e:?}"));
+                assert_eq!(state.registry.get(&abs).expect("entry").format, format);
+            }
+            None => {
+                assert!(result.is_err(), "create {name} must be refused");
+                assert!(!abs.exists(), "a refused create writes nothing");
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn create_rejects_existing_file() {
     let temp = TempDir::new().expect("tempdir");

@@ -35,6 +35,7 @@ from .errors import (
     ErrorCode,
     ErrorSeverity,
     SimlinAssetError,
+    SimlinDependencyError,
     SimlinError,
     SimlinRuntimeError,
 )
@@ -386,29 +387,43 @@ class Model:
         fallback for static renderers; call this to keep a handle on the
         widget or to set its options.
 
+        A model with no diagram view yet (one built from scratch through
+        :meth:`edit`, a sketch-less ``.mdl``) is laid out first -- the same
+        committed change as ``project.auto_layout()``: ``revision`` advances
+        and a file-backed project writes the file, ``read_only`` or not --
+        because the editor mounts the model's first view (see the README's
+        "Interactive Editing in Notebooks").  A model whose view already
+        places its variables is shown as it is.
+
         Args:
             height: Editor height in CSS pixels.
             theme: ``"auto"`` (follow the notebook), ``"light"``, or ``"dark"``.
             read_only: Show the diagram without allowing edits.
-            max_snapshot_bytes: Largest edit (the project as native JSON,
-                UTF-8 bytes) the editor sends back to the kernel; the
-                default, ``simlin._widget_core.MAX_SNAPSHOT_BYTES`` (8 MiB),
-                stays inside the notebook server's 10 MiB websocket message
-                limit.  Raise it only together with that server limit.
+            max_snapshot_bytes: Largest edit the editor sends back to the
+                kernel, measured on the wire (the project as native JSON,
+                JSON-string-escaped, in UTF-8 bytes); the default,
+                ``simlin._widget_core.MAX_SNAPSHOT_BYTES`` (8 MiB), stays
+                inside the notebook server's 10 MiB websocket message limit.
+                Raise it only together with that server limit.
 
         Raises:
+            SimlinDependencyError: if the ``notebook`` extra is not
+                installed (``pip install "pysimlin[notebook]"``); the
+                message carries the install line for the running host.
             SimlinAssetError: if the widget's JS/wasm assets are missing
                 from the installation.
             SimlinRuntimeError: if this model is not attached to a project.
         """
-        # Imported here so that ``import simlin`` does not pay for anywidget
-        # and ipywidgets (a few hundred milliseconds) unless a widget is used.
-        from .widget import ModelWidget
+        # Imported here: anywidget/ipywidgets are the optional ``notebook``
+        # extra, and ``import simlin`` never pays for them (a few hundred
+        # milliseconds) unless a widget is used.
+        from ._widget_core import import_widget_module
 
+        widget_class: type[ModelWidget] = import_widget_module().ModelWidget
         options: dict[str, Any] = {"height": height, "theme": theme, "read_only": read_only}
         if max_snapshot_bytes is not None:
             options["max_snapshot_bytes"] = max_snapshot_bytes
-        return ModelWidget(self, **options)
+        return widget_class(self, **options)
 
     def _repr_mimebundle_(
         self, include: object = None, exclude: object = None
@@ -420,17 +435,18 @@ class Model:
         keeps no reference to any of them.  The SVG rides in the same
         bundle so nbconvert, GitHub, and other static renderers show the
         diagram; a model whose diagram cannot be rendered still gets the
-        interactive view (with a warning).  Conversely, when the widget's
-        assets are missing from the installation the display degrades to
-        the SVG and a ``RuntimeWarning`` carrying the actionable message --
-        a notebook user then sees the diagram and the fix rather than a
-        traceback; :meth:`widget` itself still raises.
+        interactive view (with a warning).  Conversely, when the
+        ``notebook`` extra is not installed, or the widget's assets are
+        missing from the installation, the display degrades to the SVG and
+        a ``RuntimeWarning`` carrying the actionable message (the install
+        line, the missing file) -- a notebook user then sees the diagram and
+        the fix rather than a traceback; :meth:`widget` itself still raises.
         """
         data: dict[str, Any] = {}
         metadata: dict[str, Any] = {}
         try:
             widget = self.widget()
-        except SimlinAssetError as exc:
+        except (SimlinDependencyError, SimlinAssetError) as exc:
             warnings.warn(
                 f"simlin: showing the static diagram only; the interactive editor is "
                 f"unavailable because {exc}",

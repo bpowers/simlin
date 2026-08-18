@@ -133,7 +133,11 @@ A `.mdl` sitting next to a same-stem `.sd.json` (the trace of an earlier
 release that saved `.mdl` edits into a JSON "sidecar") is two independent
 projects: the `.mdl` holds the Vensim source and the `.sd.json` holds the
 edits saved back then. `simlin-serve` names each such pair once at
-startup; delete the `.sd.json` when its edits are no longer needed.
+startup. To fold those edits back into the `.mdl`, write the `.sd.json`
+over it -- with pysimlin,
+`simlin.load("model.sd.json").project.save_as("model.mdl")`, which reports
+what Vensim text cannot carry -- and then delete the `.sd.json`; or just
+delete the `.sd.json` when its edits are no longer needed.
 
 ## MCP tool surface
 

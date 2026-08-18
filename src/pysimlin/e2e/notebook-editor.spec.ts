@@ -12,6 +12,12 @@
  * real `jupyter lab` (see global-setup) with a real ipykernel: no fakes on
  * either side of the comm.
  *
+ * The second test is the other headline path (both example notebooks open
+ * with it): a model built from scratch with `Project.new()` + `edit()`,
+ * which has no diagram view until it is displayed -- the display must lay
+ * it out (a blank Editor is what a viewless model renders as) and a Python
+ * edit afterwards must keep that in-memory diagram in step.
+ *
  * What it does NOT establish: behaviour in Colab or VS Code (manual
  * checklists, AC2.8), or the bundle-level invariants (nothing fetched
  * relative to the module, wasm shared across cells) that
@@ -44,6 +50,26 @@ const CELLS = [
   ['print("REV", m.revision, sorted(m.get_var_names()))'],
 ];
 
+const SCRATCH_NOTEBOOK = 'scratch.ipynb';
+const SCRATCH_CELLS = [
+  [
+    'import simlin',
+    'project = simlin.Project.new(name="scratch")',
+    'm = project.get_model()',
+    'with m.edit() as (_, p):',
+    '    p.upsert(simlin.Stock(name="population", initial_equation="100", inflows=["births"]))',
+    '    p.upsert(simlin.Flow(name="births", equation="population * birth_rate"))',
+    '    p.upsert(simlin.Aux(name="birth_rate", equation="0.02"))',
+    'print("REV", m.revision)',
+    'm',
+  ],
+  [
+    'with m.edit() as (_, p):',
+    '    p.upsert(simlin.Aux(name="from_python", equation="1"))',
+    'print("REV", m.revision)',
+  ],
+];
+
 function notebookJson(cells: string[][]): string {
   return JSON.stringify(
     {
@@ -72,9 +98,46 @@ function required(name: string): string {
   return value;
 }
 
+/**
+ * The cells of the ACTIVE notebook.  JupyterLab restores the workspace, so
+ * a second test finds the first test's notebook still open in a hidden tab
+ * (Lumino marks inactive dock tabs `lm-mod-hidden`); an unscoped `.jp-Cell`
+ * would count both notebooks' cells.
+ */
+function activeCells(page: Page): Locator {
+  return page.locator('.jp-NotebookPanel:not(.lm-mod-hidden) .jp-Notebook .jp-Cell');
+}
+
+/**
+ * Wait until the visible notebook has a live kernel. On a cold server (the
+ * first notebook opened after Lab's caches were rebuilt) Lab can still be
+ * starting the session when the page shows its cells; a Shift+Enter then
+ * opens the "Select Kernel" dialog instead of running the cell. The toolbar's
+ * kernel-name button is no signal (it shows the preferred name before a
+ * session exists); the execution indicator reports `data-status="idle"` only
+ * once a kernel is connected. A "Select Kernel" dialog left open is accepted
+ * so the default kernel starts.
+ */
+async function waitForKernel(page: Page): Promise<void> {
+  const dialogSelect = page.locator('.jp-Dialog button.jp-mod-accept', { hasText: /^select$/i });
+  const indicator = page.locator('.jp-NotebookPanel:not(.lm-mod-hidden) .jp-Notebook-ExecutionIndicator');
+  await expect
+    .poll(
+      async () => {
+        if (await dialogSelect.isVisible()) {
+          await dialogSelect.click();
+        }
+        return indicator.first().getAttribute('data-status');
+      },
+      { timeout: 90_000, message: 'waiting for the notebook kernel to connect' },
+    )
+    .toMatch(/^(idle|busy)$/);
+}
+
 /** Click into cell `index`'s editor and run it with Shift+Enter. */
 async function runCell(page: Page, index: number): Promise<Locator> {
-  const cell = page.locator('.jp-Notebook .jp-Cell').nth(index);
+  await waitForKernel(page);
+  const cell = activeCells(page).nth(index);
   await cell.locator('.jp-InputArea-editor').click();
   await page.keyboard.press('Shift+Enter');
   return cell;
@@ -130,8 +193,7 @@ test('pysimlin-widget.AC4.2: JupyterLab notebook edits a model file through the 
   });
 
   await page.goto(`${baseUrl}lab/tree/${NOTEBOOK}?token=${token}`);
-  const cells = page.locator('.jp-Notebook .jp-Cell');
-  await expect(cells).toHaveCount(CELLS.length, { timeout: 90_000 });
+  await expect(activeCells(page)).toHaveCount(CELLS.length, { timeout: 90_000 });
 
   // --- display: the Editor renders in the cell output -------------------
   const displayCell = await runCell(page, 0);
@@ -229,6 +291,51 @@ test('pysimlin-widget.AC4.2: JupyterLab notebook edits a model file through the 
   expect(consoleErrors).toEqual([]);
 });
 
+test('a model built from scratch in memory displays with a laid-out diagram and follows Python edits', async ({
+  page,
+}) => {
+  const baseUrl = required(ENV.url);
+  const token = required(ENV.token);
+  const rootDir = required(ENV.rootDir);
+  fs.writeFileSync(path.join(rootDir, SCRATCH_NOTEBOOK), notebookJson(SCRATCH_CELLS));
+
+  const consoleErrors: string[] = [];
+  page.on('pageerror', (err) => consoleErrors.push(`pageerror: ${err.message}`));
+  page.on('console', (msg) => {
+    if (msg.type() === 'error') {
+      consoleErrors.push(`console.error: ${msg.text()}`);
+    }
+  });
+
+  await page.goto(`${baseUrl}lab/tree/${SCRATCH_NOTEBOOK}?token=${token}`);
+  await expect(activeCells(page)).toHaveCount(SCRATCH_CELLS.length, { timeout: 90_000 });
+
+  // The display lays the viewless model out (one committed change, so the
+  // revision printed BEFORE the display is one behind what the next cell
+  // sees) and the Editor shows every variable, not a blank canvas.
+  const displayCell = await runCell(page, 0);
+  const before = await cellOutput(displayCell, 'REV');
+  expect(revisionIn(before)).toBe(1);
+  const widget = displayCell.locator('.simlin-notebook-widget');
+  await expect(widget).toBeVisible({ timeout: 90_000 });
+  const canvas = widget.locator('svg.simlin-canvas');
+  await expect(canvas).toBeVisible({ timeout: 60_000 });
+  await expect(canvas.locator('g.simlin-stock', { hasText: /population/i })).toBeVisible();
+  await expect(canvas.locator('g.simlin-aux', { hasText: /birth\s*rate/i })).toBeVisible();
+
+  // An in-memory model that has a diagram keeps it in step: the Python
+  // edit's variable gets an element and the notice names the source.
+  const notice = widget.getByRole('status');
+  const afterPython = await cellOutput(await runCell(page, 1), 'REV');
+  expect(revisionIn(afterPython)).toBe(3);
+  await expect(notice).toHaveText('Updated from Python');
+  await expect(canvas.locator('g.simlin-aux', { hasText: /from\s*python/ })).toBeVisible();
+
+  await expect(page.locator('.jp-OutputArea-output[data-mime-type="application/vnd.jupyter.error"]')).toHaveCount(0);
+  await expect(page.locator('.jp-OutputArea-output[data-mime-type="application/vnd.jupyter.stderr"]')).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
+});
+
 // AC2.6 in a real JupyterLab: keys typed with the Editor focused act on the
 // Editor and never on the notebook. Two mechanisms are under test, and only
 // a real Lab can exercise them: (1) a pointer press anywhere inside the
@@ -257,9 +364,7 @@ test('pysimlin-widget.AC2.6: keys with the Editor focused act on the Editor, not
   const panel = page.locator('.jp-NotebookPanel:not(.lm-mod-hidden)');
   const cells = panel.locator('.jp-Notebook .jp-Cell');
   await expect(cells).toHaveCount(cellSources.length, { timeout: 90_000 });
-  const displayCell = cells.nth(0);
-  await displayCell.locator('.jp-InputArea-editor').click();
-  await page.keyboard.press('Shift+Enter');
+  const displayCell = await runCell(page, 0);
   const widget = displayCell.locator('.simlin-notebook-widget');
   const canvas = widget.locator('svg.simlin-canvas');
   await expect(canvas).toBeVisible({ timeout: 90_000 });

@@ -5,7 +5,8 @@
 # `src/engine/build.sh` runs `wasm-opt -O3` IN PLACE over `core/*.wasm`, which
 # is the file the TypeScript tests load -- so "did wasm-opt run" and "was the
 # optimized bundle executed under test" are the same question. Everywhere else
-# deliberately answers no: both of `ci.yaml`'s build steps set
+# deliberately answers no: all three of `ci.yaml`'s build steps (the deploy
+# assembly, the notebook-widget assets for pysimlin-e2e, the serve SPA) set
 # DISABLE_WASM_OPT=1 (the pass is multi-minute and a PR gate does not need
 # release-quality WASM), and `scripts/pre-commit` does the same. Only the
 # release workflows (`ts-release.yml`, `release.yml`'s widget-assets job)

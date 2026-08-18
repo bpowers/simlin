@@ -313,6 +313,19 @@ describe('EditorHost', () => {
               variableName: 'loop',
               kind: 'equation',
             },
+            // Model-scoped (no variable): a sim-spec problem.
+            {
+              code: 'bad_simspecs',
+              message: 'dt must be positive',
+              modelName: 'main',
+              kind: 'simulation',
+            },
+            // Project-scoped: neither.
+            {
+              code: 'no_models',
+              message: 'project has no models',
+              kind: 'project',
+            },
           ],
         }),
       });
@@ -338,6 +351,10 @@ describe('EditorHost', () => {
     expect(msg).toContain('circular_dependency');
     expect(msg).toContain('loop');
     expect(msg).toContain('depends on itself');
+    // A model-scoped error names the model, not "(unknown)"; only an error
+    // with neither scope falls back to it.
+    expect(msg).toContain(' - bad_simspecs: model main: dt must be positive');
+    expect(msg).toContain(' - no_models: (unknown): project has no models');
   });
 
   test('on 422 with no details, throws a generic save-failed error', async () => {

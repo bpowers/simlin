@@ -2469,9 +2469,16 @@ mod zoom_unit_tests {
 
     /// The real Stella export that surfaced the defect: `teacup.stmx` carries
     /// `<view ... zoom="200" ...>` and must open at a 2x factor, not 200x.
+    /// (The engine's test corpus under `test/`, not another package's
+    /// fixture: pysimlin's copy is free to change with pysimlin's tests.)
     #[test]
     fn teacup_stmx_fixture_opens_at_2x() {
-        const TEACUP: &str = include_str!("../../../pysimlin/tests/fixtures/teacup.stmx");
+        const TEACUP: &str =
+            include_str!("../../../../test/test-models/samples/teacup/teacup.stmx");
+        assert!(
+            TEACUP.contains(r#"zoom="200""#),
+            "fixture drifted: no zoom=\"200\" view"
+        );
         let project = project_from_reader(&mut BufReader::new(TEACUP.as_bytes()))
             .expect("teacup.stmx must parse");
         assert_close(only_view_zoom(&project), 2.0);

@@ -116,34 +116,24 @@ fn resolve_create_path_within_root(
     })
 }
 
-/// Pick the on-disk `ProjectFormat` for a fresh file based on its
-/// extension. This is the writer-side analogue of the reader-side
-/// `format_for_path` in `handlers.rs`. We dispatch on extension rather
-/// than the caller-supplied `SourceFormat` because the caller's
-/// perception of the project's *content* shape (Xmile vs NativeJson)
-/// can disagree with how the file is stored on disk; the on-disk
-/// extension is authoritative for the registry entry.
+/// Pick the on-disk `ProjectFormat` for a fresh file from its path, with
+/// the ONE format table (`discovery::format_for_path`) so that anything
+/// `create` is willing to write is exactly what discovery will later list
+/// and the save path will write back. We dispatch on the path rather than
+/// the caller-supplied `SourceFormat` because the caller's perception of
+/// the project's *content* shape (Xmile vs NativeJson) can disagree with
+/// how the file is stored on disk; the on-disk extension is authoritative
+/// for the registry entry.
 fn project_format_for_create(abs_path: &Path) -> Result<ProjectFormat, AccessError> {
-    let path_str = abs_path.to_string_lossy().to_lowercase();
-    if path_str.ends_with(".sd.json") {
-        return Ok(ProjectFormat::SdJson);
-    }
-    let ext = abs_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase);
-    match ext.as_deref() {
-        Some("stmx") => Ok(ProjectFormat::Stmx),
-        Some("xmile") | Some("xml") => Ok(ProjectFormat::Xmile),
-        Some("mdl") => Ok(ProjectFormat::Mdl),
-        _ => Err(AccessError::WriteError(std::io::Error::new(
+    crate::discovery::format_for_path(abs_path).ok_or_else(|| {
+        AccessError::WriteError(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
                 "unrecognized file extension for create: {}",
                 abs_path.display()
             ),
-        ))),
-    }
+        ))
+    })
 }
 
 /// Serialize `project` to bytes appropriate for the on-disk `ProjectFormat`,

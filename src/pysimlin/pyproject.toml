@@ -41,13 +41,22 @@ dependencies = [
     # client environments need cattrs 23.1; we only use hand-registered
     # hooks on cattrs.Converter, verified against 23.1.0 through 25.3.0
     "cattrs>=23",
-    # The notebook editor widget (simlin.widget.ModelWidget) is part of the
-    # core package, not an extra: pip install pysimlin must be enough to
-    # display a model in a notebook cell.
-    "anywidget>=0.9",
 ]
 
 [project.optional-dependencies]
+# The notebook editor (simlin.widget.ModelWidget, displaying a model in a
+# cell). Optional on purpose: anywidget's chain (ipywidgets, traitlets,
+# IPython, ...) is a couple of dozen packages that scripts, MCP servers, and
+# CI installs which never display a model should not carry. Without it,
+# `import simlin` and everything else works; `Model.widget()` raises
+# SimlinDependencyError with the install line and displaying a model shows
+# the SVG diagram plus a warning. anywidget (not a homegrown stack) because
+# it is what makes the same widget render on JupyterLab, Notebook 7, VS
+# Code (whose kernel needs `import ipywidgets`), Colab, and marimo (which
+# needs anywidget.AnyWidget).
+notebook = [
+    "anywidget>=0.9",
+]
 test = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
@@ -57,6 +66,10 @@ test = [
 ]
 dev = [
     "pysimlin[test]",
+    # The widget tests (tests/test_widget.py) drive the real ModelWidget
+    # through a recording comm; tests/test_widget_optional.py covers the
+    # extra's ABSENCE by blocking the import.
+    "pysimlin[notebook]",
     "mypy>=1.5.0",
     "ruff>=0.8.0",
     "pandas-stubs>=2.0.0",
@@ -84,6 +97,7 @@ notebooks = [
 # whose ephemeral prefix hides the anywidget/ipywidgets labextensions that
 # ship under this venv's share/jupyter).
 e2e = [
+    "pysimlin[notebook]",
     "jupyterlab>=4.3",
 ]
 
