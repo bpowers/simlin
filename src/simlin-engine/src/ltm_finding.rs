@@ -2324,6 +2324,26 @@ pub(crate) fn discover_loops_with_deadlines(
                         // product, so its mass joins the denominators after
                         // materialization -- the same rule retention applies
                         // to the enumerated circuits.
+                        //
+                        // NOT independently covered by an end-to-end fixture
+                        // (unlike the retention-side arm, pinned by
+                        // `ltm_finding_tests.rs`'s
+                        // `a_dropped_module_duplicate_leaves_the_denominator_untouched`
+                        // and its siblings): a module can only be built this
+                        // way today by reading a NAMED aux, and any such aux
+                        // sitting strictly between a synthetic agg and its
+                        // per-element consumers is, by construction, shared
+                        // across every element's petal -- which makes those
+                        // petals' `internal` node sets overlap
+                        // (`db::stitch_cross_agg_petals`'s disjointness test),
+                        // so `stitch_cross_agg_petals` never combines them and
+                        // no stitched sequence can ever reach a module this
+                        // way. A module that is only in ONE element's petal
+                        // (not shared) does not create the double-counting
+                        // risk this arm guards, since a lone petal never
+                        // stitches with itself. If a future module-instancing
+                        // shape reopens this path, add a fixture here rather
+                        // than trusting this argument to still hold.
                         continue;
                     }
                     accumulate_series_into_totals(
@@ -2537,6 +2557,18 @@ pub(crate) fn discover_loops_with_deadlines(
         let Some(reported_links) = trim_synthetic_aggs_from_loop_links(&links) else {
             continue;
         };
+        // Defense in depth for AC1.1 (no reported loop has a single link): a
+        // 2-node `agg -> x -> agg` circuit trims to a single `x -> x`
+        // self-link (the wraparound arm of `trim_synthetic_aggs_from_loop_links`
+        // merges both edges into one). No compiling model reaches this today
+        // -- the enumerator never emits a length-1 circuit and the fallback's
+        // cycle recovery is likewise elementary -- but nothing upstream of
+        // this call proves a trim can never collapse further than two nodes,
+        // so a defensive length check is cheaper than an invariant nothing
+        // enforces.
+        if reported_links.len() < 2 {
+            continue;
+        }
         let polarity_structural = causal_graph.calculate_polarity(&reported_links);
 
         // Determine runtime polarity from scores, capturing the confidence
@@ -2708,6 +2740,15 @@ fn add_reported_mass_to_totals(
 /// partition necessarily has a total (this loop's own mass built it), and the
 /// result cannot go negative, since a float subtraction of a summand from a
 /// sum of non-negative terms is bounded below by zero.
+///
+/// The partition here is derived via `loop_partition_slot` (`partition_for_loop`
+/// over `loop_info.stocks`); the mass being removed was banked via
+/// `stock_partition_of_node` over the enumerated circuit's node ids
+/// (`retain_circuits`/`accumulate_series_into_totals`). Both read the same
+/// `CyclePartitions`, computed once per discovery call
+/// (`causal_graph.compute_cycle_partitions()`), so the two routes cannot
+/// disagree about which stock resolves to which partition -- the
+/// `debug_assert!`s below are what would catch it if they ever did.
 fn subtract_reported_mass_from_totals(
     fl: &FoundLoop,
     partitions: &CyclePartitions,
@@ -2717,11 +2758,31 @@ fn subtract_reported_mass_from_totals(
         return;
     };
     let Some(series) = totals.get_mut(&part) else {
+        debug_assert!(
+            false,
+            "a duplicate representative's partition ({part}) must already \
+             carry a total: its own raw mass built it during retention"
+        );
         return;
     };
     for (t, &(_, score)) in fl.scores.iter().enumerate() {
         if !score.is_nan() {
             series[t] -= score.abs();
+            // `!(v < 0.0)` rather than `v >= 0.0`: the two differ only on
+            // NaN, and NaN is exactly what this assert must NOT flag -- it is
+            // ruled out separately by the `!score.is_nan()` guard above, so a
+            // NaN reaching here would be a different bug this assert is not
+            // the right place to report.
+            #[allow(clippy::neg_cmp_op_on_partial_ord)]
+            let non_negative = !(series[t] < 0.0);
+            debug_assert!(
+                non_negative,
+                "subtracting a duplicate representative's mass must not \
+                 drive partition {part}'s total negative at step {t}: it \
+                 removes exactly the bit pattern that was added for this \
+                 circuit, so the result is zero or positive up to floating \
+                 rounding"
+            );
         }
     }
 }

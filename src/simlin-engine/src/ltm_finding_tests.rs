@@ -2896,6 +2896,237 @@ fn discover_share_of_total_feedback(elems: &[&str]) -> DiscoveryResult {
     .unwrap()
 }
 
+/// The MODULE arm of the dedup mass correction, missing from the two AC4.2 /
+/// AC4.3 fixtures above: those cover a KEPT module loop (whose reported mass
+/// must be ADDED to the denominator) and a DROPPED non-module duplicate
+/// (whose raw mass must be SUBTRACTED). Neither covers a DROPPED module
+/// duplicate, whose mass must be left alone -- it never contributed any raw
+/// mass to begin with (`retain_circuits` skips module-traversing circuits
+/// entirely), so subtracting it would drive the partition's total negative.
+/// A regression that dropped the `if !*traverses_module` guard in
+/// `ltm_finding.rs`'s dedup-correction loop would do exactly that, and
+/// `rank_and_filter`'s `totals[i] > 0.0` guard would then silently blank
+/// every relative score in the partition at the affected steps.
+///
+/// `total = pop[a] / SUM(pop[*])` gives element `a` the same direct-plus-agg
+/// duplicate AC4.3 exercises (a direct `pop[a] -> total` numerator and a
+/// `pop[a] -> $ltm:agg -> total` denominator reference), but routes BOTH
+/// through the scalar module `m` before closing back to `pop[a]` via
+/// `growth[a]` -- so both enumerated circuits are module-traversing, and one
+/// of them is the dropped duplicate this test targets. Element `b` has no
+/// direct reference into `total` (only the agg one), so its loop is a
+/// single, non-duplicate module-traversing circuit -- extra coverage that the
+/// addition side still works alongside a dropped duplicate in the same
+/// partition.
+fn discover_module_loop_with_a_trimmed_duplicate() -> DiscoveryResult {
+    use crate::datamodel::{self, Equation, Variable};
+    use salsa::Setter;
+
+    let aux = |ident: &str, eqn: &str, is_input: bool| {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: Equation::Scalar(eqn.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat {
+                can_be_module_input: is_input,
+                ..datamodel::Compat::default()
+            },
+        })
+    };
+
+    let passthrough = datamodel::Model {
+        name: "passthrough".to_string(),
+        sim_specs: None,
+        variables: vec![aux("input_val", "0", true), aux("pos", "input_val", false)],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    };
+    let main = datamodel::Model {
+        name: "main".to_string(),
+        sim_specs: None,
+        variables: vec![
+            Variable::Stock(datamodel::Stock {
+                ident: "pop".to_string(),
+                // Asymmetric initial populations: `growth` applies the SAME
+                // absolute (not proportional) increment to both elements, so
+                // a symmetric start would keep `total` an exact CONSTANT --
+                // and the link-score guard's "target didn't change -> 0" arm
+                // would zero out every edge into it, collapsing the whole
+                // fixture to no active loops.
+                equation: Equation::Arrayed(
+                    vec!["Region".to_string()],
+                    vec![
+                        ("a".to_string(), "100".to_string(), None, None),
+                        ("b".to_string(), "50".to_string(), None, None),
+                    ],
+                    None,
+                    false,
+                ),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["growth".to_string()],
+                outflows: vec![],
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+            aux("total", "pop[a] / SUM(pop[*])", false),
+            datamodel::Variable::Module(datamodel::Module {
+                ident: "m".to_string(),
+                model_name: "passthrough".to_string(),
+                documentation: String::new(),
+                references: vec![datamodel::ModuleReference {
+                    src: "total".to_string(),
+                    dst: "m.input_val".to_string(),
+                }],
+                units: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            Variable::Flow(datamodel::Flow {
+                ident: "growth".to_string(),
+                equation: Equation::ApplyToAll(
+                    vec!["Region".to_string()],
+                    "m.pos * 0.001".to_string(),
+                ),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    };
+    let project = datamodel::Project {
+        name: "dropped_module_duplicate".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        )],
+        units: vec![],
+        models: vec![main, passthrough],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
+    let sp = sync.project;
+    sp.set_ltm_enabled(&mut db).to(true);
+    sp.set_ltm_discovery_mode(&mut db).to(true);
+    let source_model = *sp.models(&db).get("main").unwrap();
+
+    let compiled = crate::db::compile_project_incremental(&db, sp, "main").unwrap();
+    let mut vm = crate::vm::Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let element_edges = crate::db::model_element_causal_edges(&db, source_model, sp);
+    let causal_graph = crate::db::causal_graph_from_element_edges_with_modules(
+        &db,
+        source_model,
+        sp,
+        element_edges,
+    );
+    let stocks: Vec<Ident<Canonical>> = element_edges
+        .stocks
+        .iter()
+        .map(|s| Ident::new(s.as_str()))
+        .collect();
+    let ltm = crate::db::model_ltm_variables(&db, source_model, sp);
+    let dm_dims = crate::db::project_datamodel_dims(&db, sp);
+    let expansion = crate::analysis::build_link_expansion_context(&db, source_model, sp);
+    let ports = crate::analysis::build_sub_model_output_ports(&db, sp);
+
+    discover_loops_with_candidate_gen(
+        &results,
+        &causal_graph,
+        &stocks,
+        &ltm.vars,
+        dm_dims,
+        &expansion,
+        &ports,
+        None,
+        CandidateGen::Auto,
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_dropped_module_duplicate_leaves_the_denominator_untouched() {
+    let result = discover_module_loop_with_a_trimmed_duplicate();
+
+    // Element a's direct+agg pair trims to one reported loop; element b's
+    // single agg-routed circuit reports as the other. Both traverse `m`.
+    assert_eq!(
+        result.loops.len(),
+        2,
+        "one reported loop per element, both through the module; got {:?}",
+        result
+            .loops
+            .iter()
+            .map(|l| l
+                .loop_info
+                .links
+                .iter()
+                .map(|k| k.from.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        result
+            .loops
+            .iter()
+            .all(|l| l.loop_info.links.iter().any(|k| k.to.as_str() == "m")),
+        "both reported loops must traverse the module instance"
+    );
+
+    // If the dedup-correction loop's `if !*traverses_module` guard were
+    // dropped, the dropped duplicate's reported mass (never added, since
+    // `retain_circuits` contributes no raw mass for a module-traversing
+    // circuit) would be subtracted anyway, driving the partition's total
+    // negative and every relative score's magnitude above 1. This is the
+    // same shared-partition invariant `reported_mass_share_per_step` checks
+    // in the sibling AC4.2/AC4.3 tests.
+    let shares = reported_mass_share_per_step(&result);
+    for (t, &share) in shares.iter().enumerate() {
+        if share == 0.0 {
+            continue;
+        }
+        assert!(
+            (share - 1.0).abs() < 1e-9,
+            "step {t}: the reported loops account for {share} of the \
+             partition's mass; a value above 1.0 means the dropped \
+             duplicate's mass was wrongly subtracted from a denominator it \
+             never contributed to"
+        );
+    }
+    assert!(
+        shares.iter().any(|&s| s > 0.0),
+        "the fixture must have active steps"
+    );
+}
+
 // ===========================================================================
 // Union-graph circuit enumeration (the primary candidate generator; design:
 // docs/design-plans/2026-08-17-ltm-discovery-exact.md).
