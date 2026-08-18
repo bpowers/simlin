@@ -27,7 +27,7 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: 0,
   workers: 1,
-  reporter: process.env.CI ? 'github' : 'list',
+  reporter: process.env.CI ? [['github'], ['list']] : 'list',
   // The whole journey (kernel start, wasm compile, several cell executions,
   // a disk-poll round trip) fits well inside this; the budget is a backstop
   // against a wedged kernel, not a target.

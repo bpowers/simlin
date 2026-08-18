@@ -179,7 +179,10 @@ test('pysimlin-widget.AC4.2: JupyterLab notebook edits a model file through the 
 
   // --- the kernel sees it: revision, names, and a run -------------------
   const afterEditor = await cellOutput(await runCell(page, 1), 'RUN');
-  expect(revisionIn(afterEditor)).toBeGreaterThanOrEqual(1);
+  // Exactly two accepted snapshots so far: the creation (name accepted) and
+  // the equation save. Placing the element and opening its details do not
+  // change the project, and the Editor sends one snapshot per accepted edit.
+  expect(revisionIn(afterEditor)).toBe(2);
   expect(afterEditor).toContain("'new_variable'");
   const runLine = afterEditor.split('\n').find((line) => line.startsWith('RUN'));
   expect(runLine).toContain("'new_variable'");

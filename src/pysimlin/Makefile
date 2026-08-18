@@ -45,6 +45,7 @@ type-check:
 # e2e/playwright.config.ts for the environment variables.
 e2e:
 	uv sync --inexact --extra dev --extra e2e
+	../../node_modules/.bin/tsc -p e2e/tsconfig.json
 	../../node_modules/.bin/playwright test -c e2e/playwright.config.ts
 
 # Format code

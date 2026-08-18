@@ -88,6 +88,12 @@ export function jupyterEnv(tmpDir: string): Record<string, string> {
     JUPYTER_CONFIG_DIR: path.join(tmpDir, 'config'),
     JUPYTER_DATA_DIR: path.join(tmpDir, 'data'),
     JUPYTER_RUNTIME_DIR: path.join(tmpDir, 'runtime'),
+    // Cleared, not merely unset-by-omission: the child inherits process.env,
+    // and any of these would pull extensions, config, or a lab build from
+    // outside the venv into the run.
+    JUPYTER_PATH: '',
+    JUPYTER_CONFIG_PATH: '',
+    JUPYTERLAB_DIR: '',
     // The kernel must not inherit a widget-asset override from the shell
     // running the test: the journey covers the default (bundled) delivery.
     SIMLIN_WIDGET_ASSET: '',

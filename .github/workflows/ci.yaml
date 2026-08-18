@@ -304,8 +304,9 @@ jobs:
     runs-on: ubuntu-24.04
     # Dominated by builds (libsimlin release, the wasm32 engine, the diagram
     # and widget bundles); the journey itself runs in well under a minute.
-    # A warm cargo cache brings the whole job to a few minutes.
-    timeout-minutes: 30
+    # A warm cargo cache brings the whole job to a few minutes; the headroom
+    # is for a cold cache, which builds two engines from scratch.
+    timeout-minutes: 45
     env:
       RUST_BACKTRACE: 1
     steps:
@@ -376,12 +377,23 @@ jobs:
       # comes with jupyterlab): every cell must run clean and the display
       # cell must produce the widget view with its SVG fallback. The
       # script-style run in tests/test_examples.py cannot see the display
-      # path; this can.
+      # path; this can, so it asserts both mime types are in the executed
+      # notebook and no output is an error.
       - name: Execute the example notebook headless
         working-directory: src/pysimlin
-        run: >
-          uv run jupyter nbconvert --to notebook --execute
-          --output "$RUNNER_TEMP/notebook_editor.ipynb" examples/notebook_editor.ipynb
+        run: |
+          uv run jupyter nbconvert --to notebook --execute \
+            --output "$RUNNER_TEMP/notebook_editor.ipynb" examples/notebook_editor.ipynb
+          uv run python - "$RUNNER_TEMP/notebook_editor.ipynb" <<'PY'
+          import json, sys
+          nb = json.load(open(sys.argv[1]))
+          outputs = [o for c in nb["cells"] if c["cell_type"] == "code" for o in c["outputs"]]
+          errors = [o for o in outputs if o["output_type"] == "error"]
+          assert not errors, [f"{e['ename']}: {e['evalue']}" for e in errors]
+          mimes = {m for o in outputs if o["output_type"] == "execute_result" for m in o["data"]}
+          assert {"image/svg+xml", "application/vnd.jupyter.widget-view+json"} <= mimes, mimes
+          print("display cell produced", sorted(mimes))
+          PY
 
       # Screenshots, the trace, and the jupyter server log are what a failed
       # journey needs to be understood.
