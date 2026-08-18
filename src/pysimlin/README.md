@@ -243,12 +243,14 @@ print(simlin.load(model_path).get_variable("max_growth_rate").equation)   # 0.1
 ```
 
 A variable added through `edit()` also gets a diagram element (existing
-elements keep their positions) whenever there is a diagram to keep in step:
-on any file-backed model, so the saved file draws correctly in Simlin,
-Stella, or `model.diagram()`, and on an in-memory model that has a view.
-An in-memory model built from scratch has none until you display it or call
-`project.auto_layout()`; `model.diagram()` draws it with a transient layout
-either way.
+elements keep their positions) whenever there is a diagram to keep in step,
+for two reasons: on any file-backed model, so the saved file stays openable
+and draws correctly in Simlin, Stella, or `model.diagram()`; and on an
+in-memory model that has a view -- one you displayed, or laid out with
+`project.auto_layout()` -- so an editor showing it keeps up with what Python
+adds. An in-memory model built from scratch has no view until you display it
+or call `project.auto_layout()`; `model.diagram()` draws it with a transient
+layout either way.
 
 Every write regenerates the whole file from the in-memory model; it is not
 a byte-preserving edit of what was there. For XMILE and Simlin JSON that is
