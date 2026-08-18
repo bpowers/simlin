@@ -10,8 +10,69 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # The notebook widget's assets (simlin/_widget/widget.js and the wasm-opt'd
+  # libsimlin-browser.wasm) are built ONCE here and every platform wheel
+  # ships this one set, byte for byte: cibuildwheel's manylinux containers
+  # have no node, and building per platform would let the wheels drift.
+  widget-assets:
+    name: Build widget assets
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      # A pinned upstream release, NOT `apt-get install binaryen`: the distro
+      # version is older than the flags src/engine/build.sh passes. Shared
+      # with wasm-opt.yml and ts-release.yml.
+      - name: Install wasm-opt
+        run: ./scripts/install-binaryen.sh
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-wasmopt-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-wasmopt-
+
+      - name: Install pnpm dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Builds @simlin/engine (the wasm, optimized -- --require-opt fails the
+      # job if build.sh skipped wasm-opt), @simlin/core, @simlin/diagram and
+      # @simlin/notebook-widget, then stages the two assets plus ASSETS.json
+      # (sizes, sha256s, source commit) into src/pysimlin/simlin/_widget/.
+      - name: Build and stage widget assets
+        run: python3 src/pysimlin/scripts/stage_widget_assets.py --require-opt
+
+      - name: Upload widget assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: widget-assets
+          path: |
+            src/pysimlin/simlin/_widget/widget.js
+            src/pysimlin/simlin/_widget/libsimlin-browser.wasm
+            src/pysimlin/simlin/_widget/ASSETS.json
+          if-no-files-found: error
+
   build-wheels:
     name: Build wheels
+    needs: widget-assets
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -19,6 +80,19 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # The staged assets land where setup.py's package-data expects them;
+      # the check re-verifies them (present, non-empty, hashes match the
+      # manifest, wasm-opt'd) before any wheel is built, so a broken
+      # artifact fails here rather than as a missing file in the wheel.
+      - name: Download widget assets
+        uses: actions/download-artifact@v4
+        with:
+          name: widget-assets
+          path: src/pysimlin/simlin/_widget
+
+      - name: Verify widget assets
+        run: python3 src/pysimlin/scripts/stage_widget_assets.py --check --require-opt
 
       - name: Set up QEMU
         if: runner.os == 'Linux'
@@ -144,6 +218,20 @@ jobs:
             ls -la $(python -c "import site; print(site.getsitepackages()[0])")/pysimlin* || true
             exit 1
           }
+
+      # AC4.1/AC4.4 of docs/design-plans/2026-08-17-pysimlin-widget.md: every
+      # wheel carries widget.js + libsimlin-browser.wasm (+ ASSETS.json), the
+      # assets are byte-identical across all platform wheels, and the
+      # installed package can construct a ModelWidget. Both invocations exit
+      # non-zero on a wheel missing the assets. The --installed probe runs
+      # from a directory that does not contain src/pysimlin so `import
+      # simlin` resolves to the installed wheel.
+      - name: Check widget assets in the wheels
+        run: |
+          python src/pysimlin/scripts/check_wheel_assets.py --require-opt wheelhouse/*.whl
+          mkdir -p /tmp/asset_probe
+          cd /tmp/asset_probe
+          python ${{ github.workspace }}/src/pysimlin/scripts/check_wheel_assets.py --installed --require-opt
 
       - name: Run tests
         run: |
