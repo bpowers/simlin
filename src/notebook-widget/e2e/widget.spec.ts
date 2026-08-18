@@ -66,7 +66,7 @@ async function serveHarness(page: Page): Promise<void> {
 
 interface HarnessWindow {
   harness: {
-    loadWidgetModule(): Promise<unknown>;
+    loadWidgetModule(inlineWasmBase64?: string): Promise<unknown>;
     mount(mod: unknown, el: HTMLElement, state: Record<string, unknown>): Promise<number>;
     models: Array<{
       state: Record<string, unknown>;
@@ -461,6 +461,37 @@ test.describe('notebook widget bundle', () => {
     expect(narrow.closeRight).toBeLessThanOrEqual(narrow.panelRight);
     // Kept as a visual artifact of the run (gitignored), not an assertion.
     await page.screenshot({ path: path.join(here, '.output', 'drawer-contained.png'), fullPage: true });
+  });
+
+  test('SIMLIN_WIDGET_ASSET=inline: the module compiles the engine from the inline global and never asks the kernel', async ({
+    page,
+  }) => {
+    await serveHarness(page);
+    const wasmBase64 = fs.readFileSync(files['/libsimlin-browser.wasm'].path).toString('base64');
+    const idx = await page.evaluate(
+      async ({ state, wasmBase64 }) => {
+        const w = window as unknown as HarnessWindow;
+        const mod = await w.harness.loadWidgetModule(wasmBase64);
+        return w.harness.mount(mod, document.getElementById('cell1')!, state);
+      },
+      { state: initialState({ height: 300 }), wasmBase64 },
+    );
+    expect(idx).toBe(0);
+    const cell = page.locator('#cell1');
+    await expect(cell.locator('svg.simlin-canvas')).toBeVisible({ timeout: 60_000 });
+    await expect(cell.getByText('Population', { exact: true }).first()).toBeVisible();
+    const after = await page.evaluate(() => {
+      const m = (window as unknown as HarnessWindow).harness.models[0];
+      return {
+        wasmRequests: m.wasmRequests,
+        sent: m.sent,
+        // Consumed by the module: not left on the page.
+        inlineGlobal: (globalThis as Record<string, unknown>).__simlinWidgetInlineWasm,
+      };
+    });
+    expect(after.wasmRequests).toBe(0);
+    expect(after.sent).toEqual([]);
+    expect(after.inlineGlobal).toBeUndefined();
   });
 
   test('a kernel that cannot supply the engine shows the error in the cell and a later widget retries', async ({

@@ -7,6 +7,8 @@ import { describe, it, expect, beforeEach, afterEach, rs } from '@rstest/core';
 import {
   ensureEngine,
   GLOBAL_KEY,
+  INLINE_WASM_GLOBAL,
+  takeInlineWasm,
   requestWasmModule,
   resetEngineBootstrapForTests,
   sharedWasmModule,
@@ -161,6 +163,68 @@ describe('sharedWasmModule / ensureEngine', () => {
     expect(model2.sent).toEqual([{ type: 'wasm' }]);
     model2.trigger('msg:custom', { type: 'wasm' }, [new DataView(EMPTY_WASM.buffer.slice(0))]);
     await p2;
+    expect(readyCalls).toHaveLength(1);
+  });
+});
+
+describe('inline wasm (SIMLIN_WIDGET_ASSET=inline)', () => {
+  // pysimlin's `inline` mode prepends `globalThis.__simlinWidgetInlineWasm =
+  // "<base64>";` to the module text, so the global is set when this module
+  // evaluates and the bytes are available without any comm round trip
+  // (Colab may not deliver binary comm buffers).
+  const base64 = Buffer.from(EMPTY_WASM).toString('base64');
+  beforeEach(() => {
+    resetEngineBootstrapForTests();
+    resetEngineMock();
+  });
+  afterEach(() => {
+    resetEngineBootstrapForTests();
+    delete (globalThis as Record<string, unknown>)[INLINE_WASM_GLOBAL];
+  });
+
+  it('takeInlineWasm reads and clears the global; a missing or non-string global is null', () => {
+    expect(takeInlineWasm()).toBeNull();
+    (globalThis as Record<string, unknown>)[INLINE_WASM_GLOBAL] = 42;
+    expect(takeInlineWasm()).toBeNull();
+    (globalThis as Record<string, unknown>)[INLINE_WASM_GLOBAL] = base64;
+    expect(takeInlineWasm()).toBe(base64);
+    // Consumed: a second read finds nothing (the next instance's own module
+    // text sets it again before that instance evaluates).
+    expect((globalThis as Record<string, unknown>)[INLINE_WASM_GLOBAL]).toBeUndefined();
+    expect(takeInlineWasm()).toBeNull();
+  });
+
+  it('ensureEngine compiles the inline bytes and never asks the kernel', async () => {
+    resetEngineBootstrapForTests({ inlineWasm: base64 });
+    const model = new FakeModel(defaultState());
+    // The fake kernel would answer a wasm request; the point is that none is sent.
+    await ensureEngine(model);
+    expect(model.sent).toEqual([]);
+    expect(readyCalls).toHaveLength(1);
+    expect(readyCalls[0]).toBeInstanceOf(WebAssembly.Module);
+    // Cached page-wide under the same identity key as a comm-delivered module.
+    await expect((globalThis as Record<string, unknown>)[GLOBAL_KEY]).resolves.toBeInstanceOf(WebAssembly.Module);
+    // A second instance (module-level memo cleared, page cache kept) reuses it.
+    resetEngineBootstrapForTests({ keepPageCache: true });
+    const model2 = new FakeModel(defaultState());
+    await ensureEngine(model2);
+    expect(model2.sent).toEqual([]);
+  });
+
+  it('unusable inline bytes fall back to the comm request (the kernel answers in every mode)', async () => {
+    resetEngineBootstrapForTests({ inlineWasm: 'not base64 at all!!' });
+    const model = new FakeModel(defaultState());
+    const warn = rs.spyOn(console, 'warn').mockImplementation(() => {});
+    const p = ensureEngine(model);
+    // The inline attempt fails asynchronously, then the request goes out.
+    for (let i = 0; i < 20 && model.sent.length === 0; i++) {
+      await Promise.resolve();
+    }
+    expect(model.sent).toEqual([{ type: 'wasm' }]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+    model.trigger('msg:custom', { type: 'wasm' }, [new DataView(EMPTY_WASM.buffer.slice(0))]);
+    await p;
     expect(readyCalls).toHaveLength(1);
   });
 });
