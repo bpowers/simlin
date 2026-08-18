@@ -70,7 +70,13 @@ from ._ffi import (
 )
 from ._formats import FileFormat, resolve_read_format, resolve_write_format
 from ._sync import ChangeEvent, SyncState
-from .errors import ErrorDetail, SimlinError, SimlinImportError, SimlinRuntimeError
+from .errors import (
+    ErrorDetail,
+    SimlinError,
+    SimlinImportError,
+    SimlinRuntimeError,
+    SimlinWriteError,
+)
 from .json_converter import converter
 from .json_types import (
     JsonProjectPatch,
@@ -654,6 +660,14 @@ class Project:
         atomic_write(path, data)
         _, self._sync = _sync.decide(self._sync, _sync.WriteCompleted(content_hash(data)))
 
+    def _snapshot(self) -> tuple[bytes, int]:
+        """The current native-JSON contents and the revision they belong to,
+        read together under ``_file_lock`` so a change on another thread
+        cannot land between the two reads and split the pair.  This is what
+        a widget seeds and re-seeds the browser from."""
+        with self._file_lock:
+            return self.serialize_json(), self._sync.revision
+
     # ── internal: accepting changes ─────────────────────────────────────
 
     def _register_model(self, model: Model) -> None:
@@ -735,6 +749,11 @@ class Project:
         Raises:
             SimlinRuntimeError: if the snapshot does not parse; the project
                 and revision are unchanged.
+            SimlinWriteError: if the snapshot was applied (revision bumped,
+                subscribers notified, ``dirty`` set) but the autosave write
+                failed; ``__cause__`` is the underlying error.  Distinct from
+                the parse failure so the caller can tell the browser its
+                edit stands and only the file lags.
         """
         write_error: BaseException | None = None
         with self._file_lock:
@@ -753,7 +772,10 @@ class Project:
                 write_error = self._try_autosave()
         self._notify(ChangeEvent("widget", revision))
         if write_error is not None:
-            raise write_error
+            raise SimlinWriteError(
+                f"snapshot applied (revision {revision}) but not written: {write_error}",
+                revision,
+            ) from write_error
         return True
 
     # ── internal: loading from disk ─────────────────────────────────────

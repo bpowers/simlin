@@ -13,22 +13,23 @@
 //! every call sees the file's current bytes.
 //!
 //! It lives here rather than in the binary so the tests and the binary run
-//! the SAME impl. `simlin-mcp-core`'s integration suites previously used a
-//! hand-maintained near-copy (`test_support::TestFileSystemAccess`), which
-//! had drifted at exactly the two points where this file is non-trivial: it
-//! did not reject `.mdl` writes, and it did not regenerate the SD-AI
-//! `relationships` field, so every test that exercised a save was proving
-//! something about a simpler function than the one that ships.
+//! the SAME impl: `test_support::TestFileSystemAccess` is a type alias for
+//! this struct, never a second implementation. A hand-maintained near-copy
+//! drifts at exactly the points where this file is non-trivial (the MDL
+//! lossiness-warning channel and the SD-AI `relationships` regeneration on
+//! save), so a test saving through a copy proves something about a simpler
+//! function than the one that ships.
 //!
 //! `expected_version` is ignored on `save` because there is no shared
 //! state to lock against; we always return `0` (the same constant
 //! [`ProjectAccess::open`] supplies).  `simlin-serve` provides its own
 //! registry-backed `ProjectAccess` impl that actually honours the token.
 //!
-//! `.mdl` files are write-rejected here so an LLM gets a single,
-//! actionable error message rather than the engine's deeper "MDL writer
-//! is not implemented" failure.  The exact string is matched verbatim by
-//! existing `@simlin/mcp` clients, so it must not change.
+//! `.mdl` files are written back in place as regenerated Vensim text (the
+//! engine's `to_mdl_with_warnings`), the same way `.stmx` is regenerated
+//! XMILE.  Constructs Vensim cannot express are written in their closest
+//! representable form and reported through [`SaveOutcome::warnings`]; they
+//! never fail the save.
 
 use std::io;
 use std::path::Path;
@@ -36,10 +37,10 @@ use std::path::Path;
 use simlin_engine::datamodel;
 use simlin_engine::json as ejson;
 
-use crate::access::{OpenedProject, ProjectAccess};
+use crate::access::{OpenedProject, ProjectAccess, SaveOutcome};
 use crate::errors::AccessError;
 use crate::open::open_project;
-use crate::types::SourceFormat;
+use crate::types::{ErrorOutput, SourceFormat, mdl_export_warnings_to_outputs};
 
 /// Stateless filesystem-backed `ProjectAccess`.
 ///
@@ -80,29 +81,13 @@ impl ProjectAccess for FileSystemAccess {
         project: &datamodel::Project,
         format: SourceFormat,
         _expected_version: Option<u64>,
-    ) -> Result<u64, AccessError> {
-        // .mdl write rejection: the canonical message must match exactly
-        // because @simlin/mcp clients render it verbatim.  We check the
-        // path's extension rather than the format because `.mdl` files
-        // are parsed as Xmile internally — only the on-disk extension
-        // distinguishes a Vensim-source project from an XMILE one here.
-        //
-        // Defense in depth: `tools::edit_model` rejects a `.mdl` path before
-        // it ever calls `save`, so in production this arm is unreachable
-        // through the MCP tool surface. It is kept because `ProjectAccess`
-        // is a public trait -- any other caller reaching `save` directly
-        // must get the same refusal rather than an engine-level failure.
-        if has_mdl_extension(abs_path) {
-            return Err(AccessError::WriteError(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Vensim .mdl files are read-only. Use ReadModel to inspect a .mdl file, \
-                 then CreateModel to start a new .sd.json file you can edit.",
-            )));
-        }
-
-        let bytes = serialize_project(project, format)?;
+    ) -> Result<SaveOutcome, AccessError> {
+        let (bytes, warnings) = serialize_project(project, format)?;
         simlin_engine::io::atomic_write(abs_path, &bytes).map_err(AccessError::WriteError)?;
-        Ok(0)
+        Ok(SaveOutcome {
+            version: 0,
+            warnings,
+        })
     }
 
     async fn create(
@@ -131,19 +116,20 @@ impl ProjectAccess for FileSystemAccess {
                 .map_err(AccessError::WriteError)?;
         }
 
-        let bytes = serialize_project(project, format)?;
+        // `create` has no warnings channel: the only production caller
+        // (`tools::create_model`) writes an empty project, which no writer
+        // degrades. A caller that reaches `create` directly with a
+        // populated project would lose MDL lossiness warnings here; use
+        // `save` for that.
+        let (bytes, _warnings) = serialize_project(project, format)?;
         simlin_engine::io::atomic_write(abs_path, &bytes).map_err(AccessError::WriteError)?;
         Ok(())
     }
 }
 
-fn has_mdl_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("mdl"))
-}
-
-/// Serialise `project` to bytes in the requested `format`.
+/// Serialise `project` to bytes in the requested `format`, plus any
+/// non-fatal lossiness warnings the writer raised (only the MDL writer has
+/// any today; every other arm returns an empty list).
 ///
 /// SdaiJson outputs include a derived `relationships` field computed
 /// from the engine's salsa-backed link-polarity analysis — this matches
@@ -155,19 +141,37 @@ fn has_mdl_extension(path: &Path) -> bool {
 fn serialize_project(
     project: &datamodel::Project,
     format: SourceFormat,
-) -> Result<Vec<u8>, AccessError> {
+) -> Result<(Vec<u8>, Vec<ErrorOutput>), AccessError> {
     match format {
         SourceFormat::Xmile => {
             let xml = simlin_engine::to_xmile(project).map_err(|e| {
                 AccessError::ParseError(anyhow::anyhow!("failed to serialize XMILE: {e:?}"))
             })?;
-            Ok(xml.into_bytes())
+            Ok((xml.into_bytes(), Vec::new()))
+        }
+        SourceFormat::Mdl => {
+            // Hard errors here are the writer's structural impossibilities
+            // (more than one non-macro model, an ordinary Module variable);
+            // they fail the save because the alternative is corrupt Vensim
+            // text.  Degraded-but-representable constructs come back as
+            // warnings and the write proceeds.
+            let (text, warnings) = simlin_engine::to_mdl_with_warnings(project).map_err(|e| {
+                AccessError::WriteError(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("failed to serialize Vensim MDL: {e}"),
+                ))
+            })?;
+            Ok((
+                text.into_bytes(),
+                mdl_export_warnings_to_outputs(project, &warnings),
+            ))
         }
         SourceFormat::NativeJson => {
             let json_project = ejson::Project::from(project);
-            serde_json::to_vec_pretty(&json_project).map_err(|e| {
+            let bytes = serde_json::to_vec_pretty(&json_project).map_err(|e| {
                 AccessError::ParseError(anyhow::anyhow!("failed to serialize JSON: {e}"))
-            })
+            })?;
+            Ok((bytes, Vec::new()))
         }
         SourceFormat::SdaiJson => {
             let mut sdai_model = simlin_engine::json_sdai::SdaiModel::from(project);
@@ -191,24 +195,10 @@ fn serialize_project(
                     );
                 }
             }
-            serde_json::to_vec_pretty(&sdai_model).map_err(|e| {
+            let bytes = serde_json::to_vec_pretty(&sdai_model).map_err(|e| {
                 AccessError::ParseError(anyhow::anyhow!("failed to serialize SD-AI JSON: {e}"))
-            })
+            })?;
+            Ok((bytes, Vec::new()))
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn has_mdl_extension_is_case_insensitive() {
-        assert!(has_mdl_extension(Path::new("foo.mdl")));
-        assert!(has_mdl_extension(Path::new("foo.MDL")));
-        assert!(has_mdl_extension(Path::new("FOO.Mdl")));
-        assert!(!has_mdl_extension(Path::new("foo.sd.json")));
-        assert!(!has_mdl_extension(Path::new("foo.stmx")));
-        assert!(!has_mdl_extension(Path::new("foo")));
     }
 }

@@ -41,6 +41,10 @@ dependencies = [
     # client environments need cattrs 23.1; we only use hand-registered
     # hooks on cattrs.Converter, verified against 23.1.0 through 25.3.0
     "cattrs>=23",
+    # The notebook editor widget (simlin.widget.ModelWidget) is part of the
+    # core package, not an extra: pip install pysimlin must be enough to
+    # display a model in a notebook cell.
+    "anywidget>=0.9",
 ]
 
 [project.optional-dependencies]

@@ -88,18 +88,19 @@ describe('fetchProject', () => {
 });
 
 describe('saveProject', () => {
-  test('POSTs JSON body and returns the new version + path on 200', async () => {
+  test('POSTs JSON body and returns the new version (and any writer warnings) on 200', async () => {
+    const warnings = [{ code: 'generic', message: 'MDL export: dropped a flag', kind: 'model' }];
     const fetchMock = rs.fn().mockResolvedValue(
       jsonResponse({
         version: 3,
-        path: 'teacup.stmx',
+        warnings,
       }),
     );
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
     const result = await saveProject('teacup.stmx', '{"models":[]}', 2);
 
-    expect(result).toEqual({ version: 3, path: 'teacup.stmx' });
+    expect(result).toEqual({ version: 3, warnings });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('/api/projects/teacup.stmx');

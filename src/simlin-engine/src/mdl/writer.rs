@@ -1834,6 +1834,45 @@ fn warn_group_lossiness(group: &datamodel::ModelGroup, warnings: &mut Vec<Export
     }
 }
 
+/// Record a warning per `loop_metadata` entry: MDL has no construct for any
+/// of it (the MDL reader never produces `loop_metadata`), so every entry is
+/// dropped on export. Three arms, each of which a user would miss: a named
+/// loop (its name/description), a hidden-loop marker (`deleted`), and an
+/// unnamed non-deleted entry -- which is not inert: `db/sync.rs` treats every
+/// non-deleted entry as an LTM pinned loop and layout uses it as a fallback,
+/// so dropping it changes analysis, not just labels.
+fn warn_dropped_loop_metadata(model: &datamodel::Model, warnings: &mut Vec<ExportWarning>) {
+    for lm in &model.loop_metadata {
+        let message = if !lm.name.is_empty() {
+            format!(
+                "loop name '{}' (and its description) has no MDL representation and \
+                 was dropped on export; Vensim MDL does not store loop metadata",
+                lm.name
+            )
+        } else if !lm.description.is_empty() {
+            format!(
+                "the description of the unnamed loop over variable uids {:?} has no MDL \
+                 representation and was dropped on export; Vensim MDL does not store \
+                 loop metadata",
+                lm.uids
+            )
+        } else if lm.deleted {
+            format!(
+                "the hidden-loop marker for the loop over variable uids {:?} has no MDL \
+                 representation and was dropped on export",
+                lm.uids
+            )
+        } else {
+            format!(
+                "the pinned loop over variable uids {:?} (unnamed loop metadata, used as \
+                 an LTM pin) has no MDL representation and was dropped on export",
+                lm.uids
+            )
+        };
+        warnings.push(ExportWarning::new(message));
+    }
+}
+
 fn discrete_gf_warning(name: &str) -> ExportWarning {
     ExportWarning::new(format!(
         "graphical function for '{name}' uses discrete (hold-last) interpolation, \
@@ -3963,6 +4002,7 @@ impl MdlWriter {
         self.write_equations_section(model, project)?;
         self.write_sketch_section(&model.views);
         self.write_settings_section(project);
+        warn_dropped_loop_metadata(model, &mut self.warnings);
         // Collapse exact-duplicate warnings while preserving first-seen order,
         // so a construct emitted from more than one path (or an incidental
         // repeat) surfaces once rather than as stderr noise. Per-element

@@ -23,7 +23,9 @@ use simlin_engine::json as ejson;
 use crate::access::ProjectAccess;
 use crate::errors::AccessError;
 use crate::open::resolve_model_name;
-use crate::types::{DominantPeriodOutput, ErrorOutput, LoopDominanceSummary, PartitionOutput};
+use crate::types::{
+    DominantPeriodOutput, ErrorOutput, LoopDominanceSummary, PartitionOutput, preflight_export,
+};
 
 // ── Curated input types ───────────────────────────────────────────────
 //
@@ -235,9 +237,14 @@ pub struct EditModelOutput {
     /// to report -- see `ReadModelOutput::universe_loops`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub universe_loops: Option<usize>,
-    /// Non-fatal diagnostics scoped to the edited model (the LTM auto-flip
-    /// advisory and synthetic-fragment compile-failure warnings, GH #662).
-    /// Empty (and elided from JSON) when there are none.
+    /// Non-fatal diagnostics scoped to the edited model: the LTM auto-flip
+    /// advisory and synthetic-fragment compile-failure warnings (GH #662),
+    /// plus the on-disk writer's lossiness warnings (an MDL project holding
+    /// a construct Vensim cannot express is saved in its closest
+    /// representable form; the message carries an `MDL export:` prefix).
+    /// A `dryRun` computes the writer warnings without writing, so an agent
+    /// can preview what a real save would degrade.  Empty (and elided from
+    /// JSON) when there are none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<ErrorOutput>,
     /// `Some(message)` when the just-edited model could not be compiled for
@@ -265,22 +272,6 @@ pub async fn edit_model<A: ProjectAccess>(
     input: EditModelInput,
 ) -> Result<EditModelOutput, AccessError> {
     let path = Path::new(&input.project_path);
-
-    // Vensim .mdl files are read-only here so an LLM gets a clear pointer
-    // to CreateModel rather than a generic write failure deep in the
-    // engine.  The Phase 6 RegistryAccess will revisit this when it gains
-    // sidecar support.
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    if ext == "mdl" {
-        return Err(AccessError::ParseError(anyhow::anyhow!(
-            "Vensim .mdl files are read-only. Use ReadModel to inspect a .mdl file, \
-             then CreateModel to start a new .sd.json file you can edit."
-        )));
-    }
 
     let opened = access.open(path).await?;
     let mut project = opened.project;
@@ -370,7 +361,7 @@ pub async fn edit_model<A: ProjectAccess>(
 
     // Model-scoped non-fatal warnings (e.g. the LTM auto-flip advisory) to
     // include in the success response (GH #662).
-    let warnings: Vec<ErrorOutput> = simlin_engine::errors::collect_formatted_errors(
+    let mut warnings: Vec<ErrorOutput> = simlin_engine::errors::collect_formatted_errors(
         all_diagnostics
             .iter()
             .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Warning)),
@@ -407,10 +398,24 @@ pub async fn edit_model<A: ProjectAccess>(
     )
     .map_err(|e| AccessError::ParseError(anyhow::anyhow!("analysis failed: {e}")))?;
 
-    if !dry_run {
-        access
+    // Pre-flight the on-disk writer before touching the backing store: a
+    // project the format structurally cannot hold is rejected here as a
+    // Validation error (the edit never lands, so a registry-backed store is
+    // not left holding a merged doc it cannot persist), and the lossiness
+    // warnings a save would report are known even on a dry run.
+    let export_warnings = preflight_export(&project, source_format)?;
+
+    if dry_run {
+        warnings.extend(export_warnings);
+    } else {
+        let saved = access
             .save(path, &project, source_format, Some(expected_version))
             .await?;
+        // The writer's lossiness warnings (MDL today) ride the same field
+        // as the model diagnostics: the write succeeded, but the agent has
+        // to know a construct was degraded on disk to decide what to do
+        // next. The store's own report is authoritative for what landed.
+        warnings.extend(saved.warnings);
     }
 
     let agg_recovery_truncated = analysis.agg_recovery_truncated;

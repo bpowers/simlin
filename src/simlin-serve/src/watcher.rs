@@ -51,7 +51,7 @@ use crate::events::{ChangeSource, WsMessage};
 use crate::handlers::AppState;
 use crate::hashing::content_hash;
 use crate::parse::parse_to_datamodel;
-use crate::path_resolution::{resolve_canonical_path, sidecar_for_mdl, to_forward_slash};
+use crate::path_resolution::{resolve_canonical_path, to_forward_slash};
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, RegistryError};
 use crate::validation::{compute_baseline, validate_save_project};
 
@@ -566,27 +566,16 @@ impl WatcherActor {
     /// On success, broadcasts `ProjectChanged { source: Disk }` so the
     /// browser remounts the editor with the merged state.
     ///
-    /// Sidecar override (plan note 9): if `format == Mdl` and a sibling
-    /// `.sd.json` exists, ignore the `.mdl` event entirely. The sidecar
-    /// is canonical once it exists; an event on the `.mdl` is stale.
+    /// Every format is handled the same way: an event on a `.mdl` merges
+    /// the `.mdl`'s content, exactly as an event on a `.stmx` does. A
+    /// `.mdl` and a same-stem `.sd.json` sitting next to it are two
+    /// independent projects with two registry entries.
     async fn handle_model_change(
         state: &AppState,
         path: PathBuf,
         format: ProjectFormat,
         change: ChangeKind,
     ) {
-        if format == ProjectFormat::Mdl {
-            let sidecar = sidecar_for_mdl(&path);
-            if sidecar.is_file() {
-                tracing::debug!(
-                    path = %path.display(),
-                    sidecar = %sidecar.display(),
-                    "watcher: ignoring .mdl event because sidecar exists"
-                );
-                return;
-            }
-        }
-
         // Canonicalize before reading so the bytes come from the path the
         // registry is keyed by. When `path` and its canonical form differ
         // (e.g. a symlink inside the watched tree), reading `path` would hash
@@ -961,13 +950,8 @@ impl WatcherActor {
     /// does, the next `Create(File)` event in the same batch will drive
     /// the merge correctly.
     ///
-    /// Sidecar pairing on .mdl: when the .sd.json sidecar is removed the
-    /// .mdl theoretically becomes the source-of-truth again. Implementing
-    /// that round-trip is documented in the design plan (note 9) and
-    /// deferred to Phase 8 polish; for Phase 4 we simply remove whichever
-    /// path the watcher tells us about. The registry is permissive
-    /// (`remove` is a no-op for unknown keys) so this is safe even when
-    /// the path was already absent.
+    /// The registry is permissive (`remove` is a no-op for unknown keys)
+    /// so this is safe even when the path was already absent.
     async fn handle_model_removal(state: &AppState, path: PathBuf, format: Option<ProjectFormat>) {
         // If the file still exists on disk, the Remove event came from an
         // atomic rename-over (the old inode was unlinked but the path
