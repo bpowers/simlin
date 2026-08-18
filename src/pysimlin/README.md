@@ -13,6 +13,8 @@ Python bindings for [Simlin](https://simlin.com), a system dynamics simulation e
 - Edit models, or build them from scratch, through a transactional context manager
 - Open a model file with `simlin.open()`: edits save back to the file in its
   own format, and changes other tools make to the file are picked up
+- Display a model in a notebook cell to edit its diagram interactively; the
+  editor writes to the model file and follows changes made to it
 - Import Vensim `.vdf` binary output as DataFrames
 - Generate SVG and PNG diagrams of the model's structure
 - Full type hints
@@ -30,7 +32,7 @@ import simlin
 ```
 
 Requires Python 3.11+ on macOS (ARM64) or Linux (ARM64, x86_64). Depends on
-numpy, pandas, and cffi.
+numpy, pandas, cffi, and anywidget (for the notebook editor).
 
 ## Quick Start
 
@@ -278,6 +280,55 @@ wrote:
 ```python
 print(model.reload())   # False
 ```
+
+### Interactive Editing in Notebooks
+
+In JupyterLab, Notebook 7, VS Code, or Colab, a model displayed as a cell's
+value is the Simlin diagram editor, live. `pip install pysimlin` is all it
+needs: the editor and its engine ship inside the wheel as an
+[anywidget](https://anywidget.dev), so there is no extension to install and
+no sidecar process. Static renderers (nbconvert, GitHub) get the SVG
+diagram in the same output.
+
+<!-- pysimlin-test: skip -->
+```python
+model            # the last expression in a cell: shows the editor
+
+widget = model.widget(height=500, theme="dark")   # or keep a handle
+display(widget)
+```
+
+The file on disk is the single source of truth, so every collaborator sees
+the same model:
+
+- Each edit made in the editor (a new variable, an equation, a moved
+  element) is written to `model.path` in its own format before the next
+  cell runs; `model.revision` advances and `model.run()` reflects it.
+- `model.edit()` in a cell, or an external write to the file (Claude Code
+  editing it, the `simlin` MCP server, `git checkout`), updates the editor
+  in place with a short "Updated on disk" notice; the editor's undo history
+  resets on such remounts (its own edits never remount).
+- The same model displayed in two cells stays consistent: an edit in one
+  appears in the other.
+- An edit made against a version the kernel has since moved past is
+  rejected with a notice and never written; the editor reloads from the
+  current model.
+- `model.selection` is the tuple of variable names selected in the editor,
+  so a cell can ask what the human is looking at:
+
+```python
+print(model.selection)   # () until something is selected in a displayed editor
+```
+
+`on_change` subscribers see editor saves as `source == "widget"`. With
+`read_only=True` the editor shows the diagram without accepting edits;
+`theme` is `"auto"` (follow the notebook), `"light"`, or `"dark"`.
+
+Displaying a widget stores its JS module (about 1.5 MB) in the notebook
+file's widget state; if that is a concern, or the front-end cannot receive
+binary comm messages, set `SIMLIN_WIDGET_ASSET` **before** `import simlin`:
+`inline` embeds the engine wasm into the module (works everywhere, largest
+output), or an `http(s)://` URL loads the module from a server you run.
 
 ### Running Simulations
 
