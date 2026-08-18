@@ -15,6 +15,11 @@ cargo build --release -p simlin
 mkdir -p src/libsimlin/target/release
 cp target/release/libsimlin.a src/libsimlin/target/release/
 
+# Stage the notebook widget assets (widget.js + wasm + ASSETS.json) from the
+# frontend build outputs; setup.py refuses to build a wheel without them.
+echo "Staging widget assets..."
+python3 src/pysimlin/scripts/stage_widget_assets.py --no-build
+
 # Build the wheel
 echo "Building wheel..."
 cd src/pysimlin

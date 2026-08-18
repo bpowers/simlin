@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel", "cffi>=1.15.0", "setuptools-scm>=8.0"]
+# setuptools >= 70.1 ships bdist_wheel itself, which setup.py subclasses to
+# guard the widget assets (no separate `wheel` requirement).
+requires = ["setuptools>=70.1", "cffi>=1.15.0", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -61,6 +63,8 @@ dev = [
     "types-cffi>=1.16.0",
     "types-setuptools",
     "build>=1.0.0",
+    # setup.py's packaging guard is exercised directly by the test suite.
+    "setuptools>=70.1",
 ]
 # Everything the repo-level notebooks/ build scripts need on top of dev:
 # building and executing the .ipynb (nbformat/nbclient/ipykernel), rendering
@@ -95,8 +99,16 @@ package-dir = {"" = "."}
 
 [tool.setuptools.package-data]
 # _widget/ holds the notebook widget's JS module and engine wasm (build
-# outputs of src/notebook-widget; see simlin/_widget/README.md).
-simlin = ["py.typed", "*.pyi", "_widget/*.js", "_widget/*.wasm", "_widget/README.md"]
+# outputs of src/notebook-widget staged by scripts/stage_widget_assets.py,
+# which also writes ASSETS.json; see simlin/_widget/README.md).
+simlin = [
+    "py.typed",
+    "*.pyi",
+    "_widget/*.js",
+    "_widget/*.wasm",
+    "_widget/ASSETS.json",
+    "_widget/README.md",
+]
 
 [tool.mypy]
 python_version = "3.11"

@@ -70,8 +70,13 @@ echo "Running pysimlin examples..."
 uv run --directory src/pysimlin python examples/edit_existing_model.py
 uv run --directory src/pysimlin python examples/population_model.py
 
-# Build wheel only in CI or when explicitly requested (not needed for pre-commit)
+# Build wheel only in CI or when explicitly requested (not needed for pre-commit).
+# The wheel carries the notebook widget's assets, staged from the frontend
+# build outputs (`pnpm build` must have run); setup.py refuses to build the
+# wheel without them, and the staging step names what is missing.
 if [ "${BUILD_WHEEL:-0}" = "1" ] || [ -n "${CI:-}" ]; then
+  echo "Staging notebook widget assets..."
+  python3 src/pysimlin/scripts/stage_widget_assets.py --no-build
   echo "Building wheel..."
   uv run --directory src/pysimlin python -m build -w .
 fi

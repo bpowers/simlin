@@ -471,6 +471,82 @@ fn group_multiword_name_and_doc_warn() {
     );
 }
 
+// ---- loop metadata dropped on export ----
+
+/// A model's `loop_metadata` has no MDL representation -- the MDL reader
+/// never produces any -- so every entry is dropped on export and must be
+/// reported. Rows cover each arm of the message dispatch: a named loop, an
+/// unnamed loop with a description, a hidden (deleted) marker, and a bare
+/// unnamed entry (an LTM pin: `db/sync.rs` pins every non-deleted entry).
+#[test]
+fn loop_metadata_entries_warn_on_export() {
+    let mut model = make_model(vec![
+        make_stock("s", "1", None, ""),
+        make_flow("f", "s * 0.1"),
+    ]);
+    model.loop_metadata = vec![
+        datamodel::LoopMetadata {
+            uids: vec![1, 2],
+            deleted: false,
+            name: "Growth".to_owned(),
+            description: "reinforcing growth".to_owned(),
+        },
+        datamodel::LoopMetadata {
+            uids: vec![7, 8],
+            deleted: false,
+            name: String::new(),
+            description: "described but unnamed".to_owned(),
+        },
+        datamodel::LoopMetadata {
+            uids: vec![3, 4],
+            deleted: true,
+            name: String::new(),
+            description: String::new(),
+        },
+        datamodel::LoopMetadata {
+            uids: vec![5],
+            deleted: false,
+            name: String::new(),
+            description: String::new(),
+        },
+    ];
+    let project = make_project(vec![model]);
+    let warnings = warnings_of(&project);
+    let loop_warnings: Vec<&ExportWarning> = warnings
+        .iter()
+        .filter(|w| w.message.contains("loop"))
+        .collect();
+    assert_eq!(
+        loop_warnings.len(),
+        4,
+        "one warning per entry: {warnings:?}"
+    );
+    assert!(message_mentioning(&warnings, "loop name 'Growth'").is_some());
+    assert!(
+        message_mentioning(
+            &warnings,
+            "description of the unnamed loop over variable uids [7, 8]"
+        )
+        .is_some()
+    );
+    assert!(
+        message_mentioning(
+            &warnings,
+            "hidden-loop marker for the loop over variable uids [3, 4]"
+        )
+        .is_some()
+    );
+    assert!(message_mentioning(&warnings, "pinned loop over variable uids [5]").is_some());
+    assert!(
+        message_mentioning(&warnings, "loop name ''").is_none(),
+        "an unnamed entry must not be reported as an empty name: {warnings:?}"
+    );
+
+    let mut clean = make_model(vec![make_aux("x", "1", None, "")]);
+    clean.loop_metadata = vec![];
+    assert!(warnings_of(&make_project(vec![clean])).is_empty());
+}
+
 // ---- #887: conveyor/queue compat dropped on export ----
 
 /// A conveyor block with only the required transit time set.

@@ -76,17 +76,64 @@ uv run ruff check simlin tests
 uv run black --check simlin tests
 ```
 
+### Notebook widget assets
+
+`Model.widget()` (the anywidget-based diagram editor) needs two build outputs
+of the TypeScript workspace as package data in `simlin/_widget/`:
+
+- `widget.js` -- `src/notebook-widget`'s single-file ES module (`dist/widget.js`)
+- `libsimlin-browser.wasm` -- the engine from `src/engine/core/`, `wasm-opt`'d
+  when binaryen is installed (`src/engine/build.sh` records `opt`/`raw` in a
+  `.mode` sibling)
+
+They are not committed (`simlin/_widget/.gitignore`). `scripts/stage_widget_assets.py`
+is the ONE place that puts them there; everything else calls it:
+
+```bash
+cd src/pysimlin
+make assets                                        # pnpm build of the widget + deps, then stage
+python3 scripts/stage_widget_assets.py --no-build  # restage from the existing build outputs
+make check-assets                                  # verify what is staged (exit 1 on a problem)
+```
+
+The notebook-widget package's `pnpm build` (and so the root `pnpm build` and the
+pre-commit hook) also runs the `--no-build` staging after `rsbuild build`, so a
+checkout that has built the frontend already has the assets in place. Beside
+the two files the script writes `ASSETS.json` -- source commit, wasm-opt mode,
+and each file's size and sha256 -- deterministically (no timestamps): a rerun
+on an unchanged tree rewrites nothing, and every wheel built from one staging
+carries byte-identical assets.
+
+`setup.py` refuses `bdist_wheel` and `sdist` when either asset is missing or
+empty or does not match `ASSETS.json` (a wheel that silently lacked the widget
+would raise `SimlinAssetError` on every install), warns when the manifest's
+commit is not `HEAD` or the wasm is not `wasm-opt`'d, and can be bypassed
+deliberately with `SIMLIN_ALLOW_MISSING_WIDGET_ASSETS=1`. `uv sync` /
+`build_ext --inplace` (the test path) are not guarded: the pysimlin tests run
+without the widget assets.
+
 ### Building Wheels
 
 ```bash
 cd src/pysimlin
-uv run python scripts/build_wheels.py
+uv run python scripts/build_wheels.py                    # everything from source
+uv run python scripts/build_wheels.py --no-asset-build   # reuse the last frontend build
+uv run python scripts/build_wheels.py --require-opt      # refuse a wasm that was not wasm-opt'd
 ```
 
+`--require-opt` is off by default so a development machine without binaryen
+still produces a wheel (with a `raw` wasm and a warning); the release workflow
+always passes it.
+
 This will:
-1. Build libsimlin.a for current platform
-2. Copy library to platform-specific directory
-3. Build wheel with correct platform tag
+1. Build libsimlin.a for current platform (mimalloc feature)
+2. Build and stage the notebook widget assets (above)
+3. Build the wheel (`python -m build`) with the correct platform tag
+
+The sdist (`python -m build --sdist`) includes the staged assets and
+`scripts/stage_widget_assets.py`, so building from it needs no node; it is
+not otherwise self-contained (the CFFI build reads `simlin.h` from the
+libsimlin crate in the repo tree), and releases publish wheels only.
 
 ## Testing
 
@@ -272,12 +319,21 @@ Update version in:
    ```
 
 2. **Build All Platform Wheels**:
-   - Use GitHub Actions workflow
+   - Use the GitHub Actions workflow (`.github/workflows/release.yml`, run by
+     `scripts/release-pysimlin.sh`'s tag): its `widget-assets` job builds the
+     notebook widget assets ONCE on ubuntu (`stage_widget_assets.py
+     --require-opt`) and uploads them; every `build-wheels` runner downloads
+     that artifact into `simlin/_widget/` and re-verifies it before
+     cibuildwheel, so all platform wheels carry identical assets; `test-wheels`
+     runs `scripts/check_wheel_assets.py` over the wheels (present, non-empty,
+     manifest-consistent, identical across wheels) and `--installed` against
+     the installed wheel (`Project.new().main_model.widget()` constructs)
    - Or build on each platform manually
 
 3. **Test Wheels**:
    ```bash
-   uv pip install dist/simlin-*.whl
+   python3 scripts/check_wheel_assets.py dist/pysimlin-*.whl
+   uv pip install dist/pysimlin-*.whl
    python -c "import simlin; print(simlin.__version__)"
    ```
 

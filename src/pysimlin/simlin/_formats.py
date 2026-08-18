@@ -24,13 +24,11 @@ pysimlin reads it as MDL text but a regenerated ``.mdl`` body is not a
 protobuf *input*; writing a binary blob under it would mislead).  Saving to
 either raises unless an explicit ``format`` is given.
 
-Known divergences from the other hosts, so nobody re-derives them as bugs:
-simlin-serve and simlin-mcp-core do not write ``.mdl`` in place (they keep
-an ``.sd.json`` sidecar) while pysimlin regenerates the ``.mdl`` file; and
+Known divergence from the other hosts, so nobody re-derives it as a bug:
 simlin-mcp-core recomputes the SD-AI ``relationships`` field on every save
 while pysimlin's SD-AI writer emits what the engine serializes (no
 regenerated relationships) -- a known limitation of the SD-AI write path
-here.
+here.  (``.mdl`` is written in place by every host, pysimlin included.)
 """
 
 from __future__ import annotations

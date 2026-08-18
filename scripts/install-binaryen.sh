@@ -4,10 +4,12 @@
 # `apt-get install binaryen` is NOT sufficient: the version Ubuntu ships is
 # older than the flags `src/engine/build.sh` passes, and the failure is a bare
 # `Unknown option '--enable-bulk-memory-opt'` from a `wasm-opt` that ran at all.
-# Both workflows that optimize the bundle -- the optimized-WASM check and the
-# npm publish -- therefore install from the upstream release rather than from
-# the distro, so CI runs the same binaryen a developer does instead of whatever
-# the runner image happens to carry.
+# Every workflow that optimizes the bundle -- the optimized-WASM check
+# (wasm-opt.yml), the npm publish (ts-release.yml) and the pysimlin release
+# (release.yml, whose widget-assets job stages the wasm the wheels ship) --
+# therefore installs from the upstream release rather than from the distro, so
+# CI runs the same binaryen a developer does instead of whatever the runner
+# image happens to carry.
 #
 # Bump VERSION when build.sh starts using a newer flag. Keep it at or below the
 # version developers have locally, since this is the one that gates a release.

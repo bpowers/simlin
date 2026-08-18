@@ -15,14 +15,101 @@ use serde::Serialize;
 use simlin_engine::{datamodel, json as ejson};
 
 /// Identifies how a model file was parsed so write-back can use the same
-/// format.  `Xmile` covers `.stmx`, `.xmile`, `.xml`, and (read-only)
-/// `.mdl` Vensim files; the JSON variants are distinguished by content
-/// rather than extension (`models` vs `variables` at the top level).
+/// format.  `Xmile` covers `.stmx`, `.xmile`, and `.xml`; `Mdl` is a Vensim
+/// `.mdl` file, read by the engine's MDL parser and written back in place by
+/// its MDL writer (`simlin_engine::to_mdl_with_warnings`); the JSON variants
+/// are distinguished by content rather than extension (`models` vs
+/// `variables` at the top level).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceFormat {
     Xmile,
+    Mdl,
     NativeJson,
     SdaiJson,
+}
+
+/// Convert the MDL writer's lossiness warnings into the wire `ErrorOutput`
+/// shape so they ride the same `warnings` field as the engine's other
+/// non-fatal diagnostics.
+///
+/// An `ExportWarning` carries only a message naming the affected variable,
+/// dimension, or group; there is no engine `ErrorCode` for lossiness, so
+/// each rides the `generic` code (the same choice libsimlin makes for
+/// `simlin_project_serialize_mdl`, so pysimlin and MCP report the same
+/// thing).  The message is prefixed with `MDL export:` so an agent can tell a
+/// degraded-on-disk construct from a model diagnostic.  The warning is scoped
+/// to the project's single non-macro model, which is the only model an MDL
+/// file can hold.
+pub fn mdl_export_warnings_to_outputs(
+    project: &datamodel::Project,
+    warnings: &[simlin_engine::mdl::ExportWarning],
+) -> Vec<ErrorOutput> {
+    warnings
+        .iter()
+        .map(|w| mdl_export_output(project, &w.message))
+        .collect()
+}
+
+/// The wire shape of an MDL writer *hard error* (a project Vensim structurally
+/// cannot hold: more than one non-macro model, an ordinary Module variable).
+/// Same code/kind/prefix as the warnings so a client renders both channels
+/// uniformly; callers put it in a `Validation` error so the edit is rejected
+/// with the violated invariant named, rather than an opaque write failure.
+pub fn mdl_export_error_to_output(
+    project: &datamodel::Project,
+    err: &simlin_engine::Error,
+) -> ErrorOutput {
+    let detail = err.details.as_deref().unwrap_or("export failed");
+    mdl_export_output(project, strip_mdl_export_lead_in(detail))
+}
+
+/// The engine's hard-error messages sometimes open with their own
+/// "MDL export ..." lead-in; `mdl_export_output` adds the wire prefix, so
+/// drop the engine's to avoid "MDL export: MDL export cannot ...".
+fn strip_mdl_export_lead_in(detail: &str) -> &str {
+    detail
+        .strip_prefix("MDL export: ")
+        .or_else(|| detail.strip_prefix("MDL export "))
+        .unwrap_or(detail)
+}
+
+fn mdl_export_output(project: &datamodel::Project, message: &str) -> ErrorOutput {
+    let model_name = project
+        .models
+        .iter()
+        .find(|m| m.macro_spec.is_none())
+        .map(|m| m.name.clone());
+    ErrorOutput {
+        code: simlin_engine::common::ErrorCode::Generic.to_string(),
+        message: format!("MDL export: {message}"),
+        model_name,
+        variable_name: None,
+        kind: "model".to_string(),
+    }
+}
+
+/// Dry-run the on-disk writer for `format` without producing bytes: the
+/// lossiness warnings a save would report, or the `Validation` error a save
+/// would fail with. Only the MDL writer has either today; every other format
+/// is lossless and returns an empty list.
+///
+/// `edit_model` calls this on a dry run so an agent can preview what a real
+/// save would degrade, and before a real save so a structurally
+/// unrepresentable project is rejected up front rather than after the
+/// backing store has already merged it.
+pub fn preflight_export(
+    project: &datamodel::Project,
+    format: SourceFormat,
+) -> Result<Vec<ErrorOutput>, crate::errors::AccessError> {
+    match format {
+        SourceFormat::Mdl => match simlin_engine::to_mdl_with_warnings(project) {
+            Ok((_text, warnings)) => Ok(mdl_export_warnings_to_outputs(project, &warnings)),
+            Err(e) => Err(crate::errors::AccessError::Validation {
+                errors: vec![mdl_export_error_to_output(project, &e)],
+            }),
+        },
+        SourceFormat::Xmile | SourceFormat::NativeJson | SourceFormat::SdaiJson => Ok(Vec::new()),
+    }
 }
 
 /// Sim-spec defaults used by [`build_empty_project`].
@@ -370,6 +457,115 @@ mod tests {
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["polarityConfidence"].as_f64().unwrap(), 0.994);
         assert_eq!(json["polarity"].as_str().unwrap(), "mostly_reinforcing");
+    }
+
+    /// The MDL lossiness channel rides the same `ErrorOutput` shape as every
+    /// other non-fatal diagnostic: `generic` code (no engine code exists for
+    /// lossiness), model-scoped to the single non-macro model, and a message
+    /// an agent can attribute to the on-disk export rather than the model.
+    #[test]
+    fn mdl_export_warnings_map_to_generic_model_scoped_outputs() {
+        let mut project = build_empty_project();
+        project.models[0].name = "cooling".to_string();
+        let warnings = vec![
+            simlin_engine::mdl::ExportWarning {
+                message: "flow 'heat loss' is non-negative; Vensim cannot express this".to_string(),
+            },
+            simlin_engine::mdl::ExportWarning {
+                message: "graphical function for 'demand' uses discrete interpolation".to_string(),
+            },
+        ];
+        let outputs = mdl_export_warnings_to_outputs(&project, &warnings);
+        assert_eq!(outputs.len(), 2);
+        for (out, w) in outputs.iter().zip(&warnings) {
+            assert_eq!(out.code, "generic");
+            assert_eq!(out.kind, "model");
+            assert_eq!(out.model_name.as_deref(), Some("cooling"));
+            assert_eq!(out.variable_name, None);
+            assert_eq!(out.message, format!("MDL export: {}", w.message));
+        }
+        assert!(mdl_export_warnings_to_outputs(&project, &[]).is_empty());
+    }
+
+    /// The engine's own "MDL export ..." lead-in is stripped so the wire
+    /// prefix is not doubled; a message without one passes through, and a
+    /// missing detail gets a generic body.
+    #[test]
+    fn mdl_export_error_to_output_does_not_double_the_prefix() {
+        use simlin_engine::common::{ErrorCode, ErrorKind};
+        let project = build_empty_project();
+        let cases = [
+            (
+                Some("MDL export cannot faithfully reconstruct 1 macro"),
+                "MDL export: cannot faithfully reconstruct 1 macro",
+            ),
+            (Some("MDL export: something"), "MDL export: something"),
+            (
+                Some("MDL format supports only a single model"),
+                "MDL export: MDL format supports only a single model",
+            ),
+            (None, "MDL export: export failed"),
+        ];
+        for (detail, expected) in cases {
+            let err = simlin_engine::Error::new(
+                ErrorKind::Import,
+                ErrorCode::Generic,
+                detail.map(str::to_string),
+            );
+            assert_eq!(mdl_export_error_to_output(&project, &err).message, expected);
+        }
+    }
+
+    /// `preflight_export` is a four-way dispatch on `SourceFormat`; the three
+    /// lossless arms return nothing, and the `Mdl` arm forwards the writer's
+    /// two channels: warnings for a degraded construct, and a `Validation`
+    /// error (same generic/model/`MDL export:` shape) for a project Vensim
+    /// structurally cannot hold.
+    #[test]
+    fn preflight_export_covers_every_format_and_both_mdl_channels() {
+        let clean = build_empty_project();
+        for format in [
+            SourceFormat::Xmile,
+            SourceFormat::NativeJson,
+            SourceFormat::SdaiJson,
+            SourceFormat::Mdl,
+        ] {
+            assert_eq!(
+                preflight_export(&clean, format).expect("clean project"),
+                Vec::new(),
+                "{format:?}"
+            );
+        }
+
+        let mut lossy = build_empty_project();
+        lossy.models[0].loop_metadata.push(datamodel::LoopMetadata {
+            uids: vec![1],
+            deleted: false,
+            name: "Growth".to_string(),
+            description: String::new(),
+        });
+        let warnings = preflight_export(&lossy, SourceFormat::Mdl).expect("lossy still exports");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.starts_with("MDL export:") && w.message.contains("Growth")),
+            "{warnings:?}"
+        );
+
+        let mut two_models = build_empty_project();
+        let mut second = two_models.models[0].clone();
+        second.name = "second".to_string();
+        two_models.models.push(second);
+        match preflight_export(&two_models, SourceFormat::Mdl) {
+            Err(crate::errors::AccessError::Validation { errors }) => {
+                assert_eq!(errors.len(), 1);
+                assert_eq!(errors[0].code, "generic");
+                assert_eq!(errors[0].kind, "model");
+                assert!(errors[0].message.starts_with("MDL export:"), "{errors:?}");
+                assert!(errors[0].message.contains("single model"), "{errors:?}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
     }
 
     #[test]

@@ -356,13 +356,11 @@ jobs:
           DISABLE_WASM_OPT: "1"
         run: pnpm --filter "@simlin/notebook-widget..." run build
 
-      # simlin/_widget/ is package data that ships in the wheel; in a
-      # checkout it is populated from the two build outputs above (see
-      # src/pysimlin/simlin/_widget/README.md).
+      # simlin/_widget/ is package data that ships in the wheel; the one
+      # owner of its staging is this script (see its module docstring), here
+      # from the build outputs of the step above.
       - name: Stage the widget assets into pysimlin
-        run: |
-          cp src/notebook-widget/dist/widget.js src/pysimlin/simlin/_widget/
-          cp src/engine/core/libsimlin-browser.wasm src/pysimlin/simlin/_widget/
+        run: python3 src/pysimlin/scripts/stage_widget_assets.py --no-build
 
       - name: Install pysimlin with the dev and e2e extras
         working-directory: src/pysimlin

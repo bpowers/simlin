@@ -394,7 +394,8 @@ async fn mcp_save_emits_diagnostics_changed_when_set_differs() {
     let new_version = access
         .save(&abs, &opened.project, opened.source_format, Some(0))
         .await
-        .expect("mcp save");
+        .expect("mcp save")
+        .version;
     assert_eq!(new_version, 1);
 
     let pc = await_event(&mut rx, |msg| {
