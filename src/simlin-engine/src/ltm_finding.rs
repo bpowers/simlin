@@ -48,10 +48,7 @@ use crate::results::Results;
 mod enum_gen;
 #[cfg(test)]
 pub(crate) use enum_gen::EnumBudgetGuard;
-use enum_gen::{
-    ActivityGraph, accumulate_series_into_totals, enumerate_active_circuits, path_partition,
-    retain_circuits,
-};
+use enum_gen::{ActivityGraph, enumerate_active_circuits, retain_circuits};
 
 // Shortest-path fallback: the candidate generator that runs when the
 // enumeration cannot complete within its budgets or the caller's deadline
@@ -2697,7 +2694,7 @@ pub(crate) fn discover_loops_with_deadlines(
     if enumeration_ran
         && let Some(activity) = ActivityGraph::build(&search, results, deadlines.enumeration, clock)
     {
-        let candidates = enumerate_active_circuits(&activity, deadlines.enumeration, clock);
+        let mut candidates = enumerate_active_circuits(&activity, deadlines.enumeration, clock);
         if candidates.complete {
             // Per-node metadata for the streaming retention passes.
             let stock_partition_of_node: Vec<Option<usize>> = search
@@ -2734,6 +2731,46 @@ pub(crate) fn discover_loops_with_deadlines(
                     &search.idents[next_node as usize],
                 )
             };
+            // Cross-agg stitching over the FULL enumerated set (GH #696), BEFORE
+            // retention: a petal can fail retention while a stitched
+            // combination passes, and a stitched loop is a candidate like any
+            // other -- it joins `candidates` here so retention's trimmed-key
+            // dedup, its bank/confirm gate, its universe count and its
+            // survivor list all cover it uniformly, with nothing banked or
+            // counted after the fact.
+            //
+            // Only a circuit visiting EXACTLY ONE synthetic agg node can be a
+            // petal, and `collect_agg_petals` needs node paths rather than the
+            // edge rows the enumerator emits, so the node paths are
+            // materialized for those circuits alone -- on a model carrying no
+            // agg node at all (every scalar model) that is none of them.
+            // Pre-filtering changes nothing `collect_agg_petals` would keep:
+            // it drops the same circuits itself, in the same order. The agg
+            // count is taken off the edge rows via `edge_source` (O(1), no
+            // allocation) so `circuit_nodes` -- which allocates a `Vec` -- is
+            // called only for the circuits that pass the count test.
+            let petal_circuits: Vec<Vec<u32>> = if is_agg_node.contains(&true) {
+                (0..candidates.len())
+                    .filter(|&ci| {
+                        candidates
+                            .circuit(ci)
+                            .iter()
+                            .filter(|&&row| is_agg_node[activity.edge_source(row) as usize])
+                            .count()
+                            == 1
+                    })
+                    .map(|ci| activity.circuit_nodes(candidates.circuit(ci)))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let (stitched, stitch_truncated) =
+                stitch_cross_agg_node_paths(&search, &petal_circuits);
+            agg_recovery_truncated = stitch_truncated;
+            for seq in &stitched {
+                candidates.push_node_path(seq, &activity);
+            }
+
             if let Some(retention) = retain_circuits(
                 &candidates,
                 &activity,
@@ -2744,108 +2781,22 @@ pub(crate) fn discover_loops_with_deadlines(
                 deadlines.enumeration,
                 clock,
             ) {
-                // Cross-agg stitching over the FULL enumerated set (GH #696).
-                // Stitching must see pre-retention circuits: a petal can fail
-                // retention while a stitched combination passes.
-                //
-                // Only a circuit visiting EXACTLY ONE synthetic agg node can be
-                // a petal, and `collect_agg_petals` needs node paths rather than
-                // the edge rows the enumerator emits, so the node paths are
-                // materialized for those circuits alone -- on a model carrying
-                // no agg node at all (every scalar model) that is none of them.
-                // Pre-filtering changes nothing `collect_agg_petals` would keep:
-                // it drops the same circuits itself, in the same order. The agg
-                // count itself is taken off the edge rows via `edge_source`
-                // (O(1), no allocation) so `circuit_nodes` -- which allocates a
-                // `Vec` -- is called only for the circuits that pass the count
-                // test, not for every enumerated circuit (World3's universe is
-                // ~150k circuits, almost all of which visit zero agg nodes).
-                let petal_circuits: Vec<Vec<u32>> = if is_agg_node.contains(&true) {
-                    (0..candidates.len())
-                        .filter(|&ci| {
-                            candidates
-                                .circuit(ci)
-                                .iter()
-                                .filter(|&&row| is_agg_node[activity.edge_source(row) as usize])
-                                .count()
-                                == 1
-                        })
-                        .map(|ci| activity.circuit_nodes(candidates.circuit(ci)))
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                let (stitched, stitch_truncated) =
-                    stitch_cross_agg_node_paths(&search, &petal_circuits);
-                agg_recovery_truncated = stitch_truncated;
-
                 let survivors: Vec<Vec<u32>> = retention
                     .survivors
                     .iter()
                     .map(|&ci| activity.circuit_nodes(candidates.circuit(ci)))
                     .collect();
-                let stitched = new_paths_by_rotation(&survivors, stitched);
-
-                // Stitched loops join the candidate set like any other loop:
-                // their mass joins the denominators and they are materialized
-                // below.
-                let mut stats = UniverseStats {
+                // `universe_loops` is the number of DISTINCT loops whose mass
+                // the partition denominators sum -- enumerated circuits and
+                // stitched cross-agg loops alike, minus the twins retention's
+                // trimmed-key dedup merged and minus anything that banked no
+                // mass; retention counts exactly that as it goes.
+                let universe_loop_count = retention.distinct_circuits;
+                node_paths = survivors;
+                universe = Some(UniverseStats {
                     totals: retention.partition_totals,
                     loop_counts: retention.partition_circuit_counts,
-                };
-                for seq in &stitched {
-                    // Retention never saw this loop -- it is a COMBINATION of
-                    // enumerated petals rather than one of them -- so nothing
-                    // has counted it yet, and it is one more loop dividing its
-                    // partition's denominator.
-                    //
-                    // The solo -> competing transition this `+1` can cause (a
-                    // partition whose only other universe member is a
-                    // stitched loop) has no fixture: a stitch needs two or
-                    // more pairwise-disjoint petals, each itself an
-                    // enumerated circuit already counted, so with a symmetric
-                    // reducer the partition is competing before any stitch.
-                    // Named here as uncovered rather than implied covered.
-                    if let Some(part) = path_partition(seq, &stock_partition_of_node) {
-                        *stats.loop_counts.entry(part).or_insert(0) += 1;
-                    }
-                    // Scored through the SAME `override_for` closure retention
-                    // used above, so a module-traversing stitched loop banks
-                    // its REPORTED (per-exit-port override) mass here, up
-                    // front -- no separate module arm, and no later
-                    // materialization-side correction needed for this class
-                    // of loop. `db::stitch_cross_agg_petals`'s disjointness
-                    // test means a module shared across every element's petal
-                    // can never actually appear in a stitched sequence today
-                    // (see the historical note on `ltm_finding_tests.rs`'s
-                    // `a_dropped_module_duplicate_leaves_the_denominator_untouched`),
-                    // but scoring unconditionally costs nothing when it
-                    // doesn't fire and is correct if that constraint ever
-                    // loosens.
-                    accumulate_series_into_totals(
-                        seq,
-                        &activity,
-                        &stock_partition_of_node,
-                        &is_module_node,
-                        &mut override_for,
-                        &mut stats.totals,
-                    );
-                }
-
-                // `universe_loops` is the number of DISTINCT loops whose mass
-                // the partition denominators above sum: the enumerated
-                // circuits, minus the non-representative twins retention's
-                // own trimmed-key dedup dropped before they ever banked any
-                // mass (`retention.distinct_circuits`), plus the stitched
-                // cross-agg loops just added to `node_paths` -- combinations
-                // of enumerated petals rather than circuits of the union
-                // graph, so they are counted here rather than folded into
-                // `distinct_circuits`.
-                let universe_loop_count = retention.distinct_circuits + stitched.len();
-
-                node_paths = survivors;
-                node_paths.extend(stitched);
-                universe = Some(stats);
+                });
                 enumeration_complete = true;
                 universe_loops = Some(universe_loop_count);
             }
@@ -3168,6 +3119,15 @@ pub(crate) fn discover_loops_with_deadlines(
     // non-stitched duplicate, that failure is telling you `dedup_trimmed_twins`
     // missed a collision class, not that this function is wrong.
     if let Some(stats) = universe.as_mut() {
+        // On the enumeration path every candidate -- enumerated circuits and
+        // stitched cross-agg loops alike -- went through retention's trimmed-
+        // key dedup before banking mass, so nothing reaching this point can
+        // still be a duplicate: a hit here means that dedup missed a collision
+        // class, and a debug build says so rather than quietly correcting.
+        debug_assert!(
+            dropped.is_empty(),
+            "a reported-cycle duplicate survived retention's trimmed-key dedup"
+        );
         for fl in &dropped {
             subtract_reported_mass_from_totals(fl, &partitions, &mut stats.totals);
             subtract_reported_loop_from_counts(fl, &partitions, &mut stats.loop_counts);

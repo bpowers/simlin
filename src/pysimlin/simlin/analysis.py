@@ -444,7 +444,8 @@ class Analysis:
     per-step importance series), and `dominant_periods` records which loops
     dominate during each interval.
 
-    `truncated` is True when discovery hit its `timeout` before finishing, so
+    `truncated` is True when discovery stopped before covering every saved
+    step (its `timeout` elapsed, or the fallback's candidate cap tripped), so
     `loops`/`dominant_periods` may be partial. Discovery on very large models
     can be infeasibly slow, so `Model.analyze` is an explicit, opt-in,
     timeout-guarded call -- it is never run automatically by `Model.run`.
@@ -478,9 +479,12 @@ class Analysis:
     :attr:`Partition.loop_count` is above 1 to drop them."""
 
     truncated: bool = False
-    """True when the `timeout` elapsed before discovery finished, so
-    `loops`/`dominant_periods` may be partial. This is the wall-clock time
-    budget -- distinct from `agg_recovery_truncated`."""
+    """True when candidate generation stopped before covering every saved
+    step, so `loops`/`dominant_periods` may be partial: the `timeout` elapsed,
+    or the shortest-path fallback hit its candidate cap (a byte budget over
+    materialized score series, reachable on a long run even with no timeout
+    -- a longer timeout then cannot change the result). Distinct from
+    `agg_recovery_truncated`."""
 
     agg_recovery_truncated: bool = False
     """True when discovery's cross-element-through-aggregate loop recovery hit

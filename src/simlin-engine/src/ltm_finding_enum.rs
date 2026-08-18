@@ -842,6 +842,26 @@ impl EnumeratedCandidates {
         self.activity.extend_from_slice(and_bits);
     }
 
+    /// Append a loop given as a NODE path -- a stitched cross-agg sequence,
+    /// whose every consecutive pair (wrapping) is a union-graph edge -- so it
+    /// joins the enumerated circuits in retention as one more candidate: same
+    /// trimmed-key dedup, same bank/confirm, same universe count. Its activity
+    /// AND is the AND of its edges' bitsets, exactly what the enumerator would
+    /// have carried had it emitted the sequence itself; a sequence whose
+    /// petals are never simultaneously active gets an empty AND and, like any
+    /// circuit that banks no mass, is neither a survivor nor a universe member.
+    pub(super) fn push_node_path(&mut self, path: &[u32], graph: &ActivityGraph) {
+        let rows = path_edge_rows(path, graph);
+        let mut and_bits = vec![u64::MAX; self.words];
+        for &row in &rows {
+            for (acc, bit) in and_bits.iter_mut().zip(graph.edge_bits(row)) {
+                *acc &= *bit;
+            }
+        }
+        let (open, closing) = rows.split_at(rows.len() - 1);
+        self.push(open, closing[0], &and_bits);
+    }
+
     pub(super) fn len(&self) -> usize {
         self.starts.len() - 1
     }
@@ -1599,73 +1619,6 @@ fn effective_scoring_window(
     raw_window
 }
 
-/// Add one loop's REPORTED |score| mass into the external totals (used for
-/// stitched cross-agg loops, which are appended after the enumeration passes
-/// but must participate in the denominators like every other loop).
-///
-/// Scored through `override_for` exactly like an enumerated circuit (see
-/// `score_steps`), so a stitched loop that traverses a module instance banks
-/// the SAME per-exit-port override series its materialized `FoundLoop` will
-/// report -- there is no longer a separate module-traversing exclusion
-/// pushed onto the caller: every stitched sequence's mass belongs in the
-/// totals up front.
-///
-/// Stitched sequences arrive as node paths, so this is the one place that
-/// resolves `(from, to)` pairs back to edge rows.
-pub(super) fn accumulate_series_into_totals(
-    path: &[u32],
-    graph: &ActivityGraph,
-    stock_partition_of_node: &[Option<usize>],
-    is_module_node: &[bool],
-    override_for: &mut ModuleOverrideFn,
-    partition_totals: &mut HashMap<usize, Vec<f64>>,
-) {
-    let Some(part) = path_partition(path, stock_partition_of_node) else {
-        return;
-    };
-    let rows = path_edge_rows(path, graph);
-    let step_count = graph.step_count;
-    let mut scratch = vec![0.0f64; step_count];
-    let mut nan_mask = vec![false; step_count];
-    // Stitched loops are few (bounded by `MAX_CROSS_AGG_LOOPS`), so
-    // recomputing this per call rather than threading it in from the caller
-    // costs nothing measurable; see `score_steps`'s doc for why it matters at
-    // all on the circuit-count scale `retain_circuits` operates at.
-    let has_module_node = is_module_node.contains(&true);
-    score_series(
-        &rows,
-        graph,
-        has_module_node,
-        is_module_node,
-        override_for,
-        &mut scratch,
-        &mut nan_mask,
-    );
-    let totals = partition_totals
-        .entry(part)
-        .or_insert_with(|| vec![0.0; step_count]);
-    for t in 0..step_count {
-        if !nan_mask[t] {
-            totals[t] += scratch[t].abs();
-        }
-    }
-}
-
-/// The engine-internal cycle partition of a node path: that of its first stock
-/// node in traversal order, or `None` (Solo) when no node resolves to one.
-///
-/// The node-path twin of [`circuit_partition`], which answers the same question
-/// off a circuit's edge rows. Both the mass a path contributes and the count of
-/// loops that mass came from must land on the same key, so the two callers ask
-/// through this one function rather than each spelling the `find_map`.
-pub(super) fn path_partition(
-    path: &[u32],
-    stock_partition_of_node: &[Option<usize>],
-) -> Option<usize> {
-    path.iter()
-        .find_map(|&n| stock_partition_of_node[n as usize])
-}
-
 /// Resolve a node path's consecutive-pair (wrapping) edge rows. Every pair is a
 /// union-graph edge by construction of the stitcher (stitched sequences
 /// concatenate petals whose hops are all real edges).
@@ -1677,28 +1630,6 @@ fn path_edge_rows(path: &[u32], graph: &ActivityGraph) -> Vec<u32> {
                 .expect("stitched path edge must exist in the union graph")
         })
         .collect()
-}
-
-/// One loop's signed per-step score series over every saved step.
-fn score_series(
-    rows: &[u32],
-    graph: &ActivityGraph,
-    has_module_node: bool,
-    is_module_node: &[bool],
-    override_for: &mut ModuleOverrideFn,
-    out: &mut [f64],
-    nan_mask: &mut [bool],
-) {
-    score_steps(
-        rows,
-        graph,
-        0,
-        has_module_node,
-        is_module_node,
-        override_for,
-        out,
-        nan_mask,
-    )
 }
 
 /// One loop's signed per-step score series (product of link values) over the

@@ -629,6 +629,12 @@ class Model:
             An :class:`Analysis` with the discovered loops (each carrying its
             importance ``behavior_time_series``), the dominant periods, a
             ``truncated`` flag, and the completeness fields above.
+            ``truncated`` is True when candidate generation stopped before
+            covering every saved step -- because the ``timeout`` elapsed OR
+            because the shortest-path fallback hit its candidate cap (a
+            byte budget over materialized score series, which a long run
+            can reach with ``timeout=None``); in the second case a longer
+            timeout cannot change the result.
 
         Example:
             >>> analysis = model.analyze(timeout=5.0)
