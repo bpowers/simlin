@@ -122,8 +122,11 @@ uv run python scripts/build_wheels.py --require-opt      # refuse a wasm that wa
 ```
 
 `--require-opt` is off by default so a development machine without binaryen
-still produces a wheel (with a `raw` wasm and a warning); the release workflow
-always passes it.
+still produces a wheel (with a `raw` wasm and a warning). The release
+workflow does not run `build_wheels.py`; it passes `--require-opt` to
+`scripts/stage_widget_assets.py` (its `widget-assets` job) and to
+`scripts/check_wheel_assets.py`, so a raw wasm is refused before and after
+cibuildwheel.
 
 This will:
 1. Build libsimlin.a for current platform (mimalloc feature)
