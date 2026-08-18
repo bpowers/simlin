@@ -171,6 +171,32 @@ class FakeResizeObserver {
 }
 
 /** Synthesize a resize to `width`x`height` on every live observed element. */
+/**
+ * Make every element report `clientWidth`/`clientHeight` as `size` until the
+ * returned restore function runs. jsdom's own getters (on `Element.prototype`)
+ * always return 0; the Canvas mount effect measures its container through
+ * them, so this is the only way to mount "already sized".
+ */
+function overrideClientSize(size: { width: number; height: number }): () => void {
+  const proto = Element.prototype;
+  const origWidth = Object.getOwnPropertyDescriptor(proto, 'clientWidth');
+  const origHeight = Object.getOwnPropertyDescriptor(proto, 'clientHeight');
+  Object.defineProperty(proto, 'clientWidth', { configurable: true, get: () => size.width });
+  Object.defineProperty(proto, 'clientHeight', { configurable: true, get: () => size.height });
+  return () => {
+    if (origWidth) {
+      Object.defineProperty(proto, 'clientWidth', origWidth);
+    } else {
+      delete (proto as unknown as Record<string, unknown>).clientWidth;
+    }
+    if (origHeight) {
+      Object.defineProperty(proto, 'clientHeight', origHeight);
+    } else {
+      delete (proto as unknown as Record<string, unknown>).clientHeight;
+    }
+  };
+}
+
 export function triggerResize(width: number, height: number): void {
   act(() => {
     for (const obs of liveResizeObservers) {
@@ -336,14 +362,14 @@ export function makeFlow(
   };
 }
 
-function makeView(elements: readonly ViewElement[]): StockFlowView {
+function makeView(elements: readonly ViewElement[], zoom = 1): StockFlowView {
   const viewBox: Rect = { x: 0, y: 0, width: 1000, height: 1000 };
   const maxUid = elements.reduce((m, e) => Math.max(m, e.uid), 0);
   return {
     nextUid: maxUid + 1,
     elements,
     viewBox,
-    zoom: 1,
+    zoom,
     useLetteredPolarity: false,
   };
 }
@@ -418,6 +444,21 @@ export interface HarnessOptions {
   readOnly?: boolean;
   variables?: ReadonlyMap<string, Variable>;
   /**
+   * The zoom the view MOUNTS with (default 1). Lets a test model a stored view
+   * whose zoom came from a file rather than a gesture (e.g. an out-of-range
+   * value) and observe what the mount-time fit does with it.
+   */
+  zoom?: number;
+  /**
+   * The container size the Canvas MEASURES during its mount effect (jsdom
+   * reports 0x0 by default). Set it equal to the fixture viewBox (1000x1000)
+   * to mount with NO size mismatch, so the only thing that can make the
+   * mount-time fit commit is the stored view itself (e.g. an out-of-range
+   * zoom). Applied via a temporary `clientWidth`/`clientHeight` override on
+   * `Element.prototype` for the duration of the initial render only.
+   */
+  mountSize?: { width: number; height: number };
+  /**
    * When true (the default), `onSetSelection` commits the new selection back
    * into `props.selection` and re-renders -- modeling the real host (Editor),
    * which sets its selection state in the same React event so the resulting
@@ -473,7 +514,7 @@ export interface CanvasHarness {
 export function renderCanvas(opts: HarnessOptions): CanvasHarness {
   installCanvasPolyfills();
 
-  const view = makeView(opts.elements);
+  const view = makeView(opts.elements, opts.zoom);
   const model = makeModel(view, opts.variables);
   const project = makeProject(model);
   const callbacks = makeCallbacks();
@@ -509,9 +550,14 @@ export function renderCanvas(opts: HarnessOptions): CanvasHarness {
   }
 
   let result!: RenderResult;
-  act(() => {
-    result = render(<Canvas {...buildProps()} />);
-  });
+  const restoreMountSize = opts.mountSize ? overrideClientSize(opts.mountSize) : undefined;
+  try {
+    act(() => {
+      result = render(<Canvas {...buildProps()} />);
+    });
+  } finally {
+    restoreMountSize?.();
+  }
 
   // Pin the bounding rect on the canvas container div so getCanvasPoint is
   // deterministic. The container is the outer div with the simlin-canvas class.

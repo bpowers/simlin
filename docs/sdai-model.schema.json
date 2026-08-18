@@ -404,6 +404,7 @@
           ]
         },
         "zoom": {
+          "description": "View zoom as a factor: 1.0 = 100%, 2.0 = twice as big (XMILE's\npercentage is converted on import/export). Omitted means 1.0.",
           "type": "number",
           "format": "double"
         },

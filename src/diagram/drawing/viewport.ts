@@ -36,8 +36,9 @@ export const VELOCITY_THRESHOLD = 15;
 // native macOS apps like Maps and Preview.
 export const PINCH_ZOOM_DIVISOR = 100;
 
-// MIN_ZOOM matches the 0.2 floor used in the render transform (which clamps
-// zoom < 0.2 to 1.0); keeping the state floor and the render floor identical
+// The zoom range gestures may produce. The Canvas also uses these bounds (via
+// isRenderableZoom) to decide whether a STORED view zoom is usable at all:
+// keeping the gesture clamps and the render-time validity check identical
 // avoids a mismatch between stored view state and what is actually drawn.
 export const MIN_ZOOM = 0.2;
 export const MAX_ZOOM = 5.0;
@@ -56,6 +57,20 @@ export interface VelocitySample {
 /** Clamp a zoom value into the supported [MIN_ZOOM, MAX_ZOOM] range. */
 export function clampZoom(zoom: number): number {
   return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom));
+}
+
+/**
+ * Whether a stored view zoom is one the Canvas can draw as-is: finite and
+ * within [MIN_ZOOM, MAX_ZOOM]. Gestures can never produce anything else, so a
+ * value outside this range comes from data -- an unset/zero zoom, or a file
+ * whose zoom was recorded in the wrong unit (e.g. an XMILE percentage such as
+ * 200 stored where a factor of 2 belongs). The Canvas treats such a value as
+ * "no usable zoom" and falls back to 1.0 rather than clamping: a 200x (or 0x)
+ * request carries no information about the intended scale, and rendering at
+ * the clamp edge would still hand the user an unreadable canvas.
+ */
+export function isRenderableZoom(zoom: number): boolean {
+  return isFinite(zoom) && zoom >= MIN_ZOOM && zoom <= MAX_ZOOM;
 }
 
 // --- wheel pan -----------------------------------------------------------

@@ -152,6 +152,7 @@ class View:
     elements: list[ViewElement] = field(default_factory=list)
     kind: str = ""
     view_box: Rect | None = None
+    # Zoom factor (1.0 = 100%, 2.0 = twice as big); 0.0 means the default of 1.0.
     zoom: float = 0.0
 
 

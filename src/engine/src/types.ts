@@ -408,7 +408,7 @@ export interface View {
   readonly kind?: string;
   /** View bounding box for scrolling/zooming */
   readonly viewBox?: Rect;
-  /** Zoom level */
+  /** Zoom factor: 1.0 = 100%, 2.0 = twice as big (XMILE's percentage is converted on import/export) */
   readonly zoom?: number;
 }
 
