@@ -29,6 +29,8 @@ if (baseConfig) {
       Node: 'readonly',
       Response: 'readonly',
       TextEncoder: 'readonly',
+      // Build-time constant defined by rsbuild.config.ts (see globals.d.ts).
+      SIMLIN_WIDGET_WASM_SHA256: 'readonly',
     },
   };
 }

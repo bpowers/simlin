@@ -21,6 +21,21 @@
  * `{type:'wasm'}` and the kernel answers with a custom message carrying the
  * artifact as a binary buffer. Both caches drop a rejected promise so a later
  * render (possibly under a different, healthy widget/kernel) can retry.
+ *
+ * The page-wide key carries the identity of the engine artifact this bundle
+ * was built against ({@link WASM_IDENTITY}), so instances from two different
+ * builds on one page -- two notebooks with two kernels running different
+ * pysimlin versions, or a redisplay after an upgrade beside an old output --
+ * each compile their own engine instead of the second silently running the
+ * first one's wasm against a JS side built for another ABI. The identity is
+ * the sha256 of libsimlin-browser.wasm at build time (rsbuild.config.ts bakes
+ * it in; the staging script ships that same file beside widget.js), which is
+ * why an instance can key the cache without ever seeing the bytes: a cache
+ * hit means "a bundle built against this exact artifact already compiled it".
+ * A widget cannot verify what the kernel actually sent against this identity;
+ * the kernel does not carry the wasm's hash in its reply (it is in the wheel's
+ * ASSETS.json), so a mismatched wheel -- widget.js from one build, wasm from
+ * another -- is a packaging error the build/staging checks own, not this key.
  */
 
 import { ready } from '@simlin/engine';
@@ -28,7 +43,21 @@ import { ready } from '@simlin/engine';
 import type { AnyModel } from './anywidget-model';
 import { parseWasmReply, WASM_REQUEST } from './widget-core';
 
-export const GLOBAL_KEY = '__simlinWidgetWasmModule';
+/**
+ * The engine artifact identity baked into this bundle (see the module doc);
+ * `unversioned` outside a bundle (unit tests), where no artifact exists.
+ */
+export const WASM_IDENTITY: string =
+  typeof SIMLIN_WIDGET_WASM_SHA256 === 'string' && SIMLIN_WIDGET_WASM_SHA256 !== ''
+    ? SIMLIN_WIDGET_WASM_SHA256
+    : 'unversioned';
+
+/** The globalThis property caching the compiled module for `identity`. */
+export function wasmCacheKey(identity: string): string {
+  return `__simlinWidgetWasmModule:${identity}`;
+}
+
+export const GLOBAL_KEY = wasmCacheKey(WASM_IDENTITY);
 
 /**
  * How long to wait for the kernel's wasm reply. anywidget queues comm
@@ -45,7 +74,7 @@ export const GLOBAL_KEY = '__simlinWidgetWasmModule';
  */
 export const WASM_REPLY_TIMEOUT_MS = 60_000;
 
-type GlobalCache = { [GLOBAL_KEY]?: Promise<WebAssembly.Module> };
+type GlobalCache = Record<string, Promise<WebAssembly.Module> | undefined>;
 
 let enginePromise: Promise<void> | null = null;
 

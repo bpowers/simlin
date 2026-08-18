@@ -10,7 +10,9 @@ import {
   requestWasmModule,
   resetEngineBootstrapForTests,
   sharedWasmModule,
+  WASM_IDENTITY,
   WASM_REPLY_TIMEOUT_MS,
+  wasmCacheKey,
 } from './engine-bootstrap';
 import { readyCalls, resetEngineMock } from './test-utils/engine-mock';
 import { FakeModel, defaultState } from './test-utils/fake-model';
@@ -96,6 +98,22 @@ describe('sharedWasmModule / ensureEngine', () => {
     expect(request).toHaveBeenCalledWith(m1);
     expect((globalThis as Record<string, unknown>)[GLOBAL_KEY]).toBe(a);
     await a;
+  });
+
+  it('the page-wide key carries the engine artifact identity, so a module compiled by a bundle built against another artifact is not reused', async () => {
+    expect(GLOBAL_KEY).toBe(wasmCacheKey(WASM_IDENTITY));
+    expect(wasmCacheKey('a')).not.toBe(wasmCacheKey('b'));
+    // Outside a bundle there is no artifact: the identity is the placeholder
+    // (rsbuild.config.ts bakes the real sha256 in; e2e/ checks the built key).
+    expect(WASM_IDENTITY).toBe('unversioned');
+    // Another build's compiled module on the page: not ours to reuse.
+    const other = wasmCacheKey('deadbeef');
+    (globalThis as Record<string, unknown>)[other] = Promise.resolve(await emptyModule());
+    const m = new FakeModel(defaultState());
+    const request = rs.fn(async (_model: unknown) => emptyModule());
+    await sharedWasmModule(m, request);
+    expect(request).toHaveBeenCalledTimes(1);
+    delete (globalThis as Record<string, unknown>)[other];
   });
 
   it('drops a rejected shared promise so the next requester retries', async () => {

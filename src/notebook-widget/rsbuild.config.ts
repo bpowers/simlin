@@ -19,11 +19,28 @@
  *   be in that one file (`splitChunks: false` + LimitChunkCountPlugin(1)).
  */
 
+import { createHash } from 'node:crypto';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+
 import { defineConfig, rspack } from '@rsbuild/core';
 import { pluginReact } from '@rsbuild/plugin-react';
 
 import { scopeCssPlugin } from './build/scope-css';
 import { WIDGET_ROOT_CLASS } from './src/widget-root-class';
+
+// The engine artifact this bundle is built against. Its sha256 is baked into
+// the bundle (SIMLIN_WIDGET_WASM_SHA256, see src/engine-bootstrap.ts) and keys
+// the page-global compiled-module cache, so two widget instances share a
+// compiled engine only when they were built with the same wasm; the staging
+// script copies this same file into the wheel beside widget.js. Missing means
+// the engine has not been built (`pnpm build` in src/engine) -- fail here
+// rather than ship a bundle whose cache key says nothing.
+const wasmPath = path.resolve(import.meta.dirname, '../engine/core/libsimlin-browser.wasm');
+if (!fs.existsSync(wasmPath)) {
+  throw new Error(`notebook-widget: ${wasmPath} is missing; build src/engine first`);
+}
+const wasmSha256 = createHash('sha256').update(fs.readFileSync(wasmPath)).digest('hex');
 
 // Which engine backend to bundle. 'direct' (default) runs libsimlin on the
 // main thread; 'worker' keeps @simlin/engine's Web Worker backend and is here
@@ -37,6 +54,9 @@ export default defineConfig({
   source: {
     entry: {
       widget: './src/index.tsx',
+    },
+    define: {
+      SIMLIN_WIDGET_WASM_SHA256: JSON.stringify(wasmSha256),
     },
   },
   resolve: {

@@ -17,6 +17,7 @@
  * Colab / VS Code hosts (Phase 4's JupyterLab journey covers that).
  */
 
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -164,6 +165,16 @@ test.describe('notebook widget bundle', () => {
     // Exactly one wasm request went to the kernel.
     const wasmRequests = await page.evaluate(() => (window as unknown as HarnessWindow).harness.models[0].wasmRequests);
     expect(wasmRequests).toBe(1);
+    // The compiled module is cached page-wide under a key carrying the sha256
+    // of the wasm this bundle was built against (rsbuild.config.ts bakes it
+    // in), so bundles from different builds never share a compiled engine.
+    const wasmSha256 = createHash('sha256')
+      .update(fs.readFileSync(files['/libsimlin-browser.wasm'].path))
+      .digest('hex');
+    const cacheKeys = await page.evaluate(() =>
+      Object.keys(globalThis).filter((k) => k.startsWith('__simlinWidgetWasmModule')),
+    );
+    expect(cacheKeys).toEqual([`__simlinWidgetWasmModule:${wasmSha256}`]);
 
     // Add a variable through the UI: open the tool dial, pick "Variable",
     // click on empty canvas, accept the default name with Enter.
