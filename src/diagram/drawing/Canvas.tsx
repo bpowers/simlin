@@ -50,6 +50,7 @@ import {
 } from './common';
 import { Connector, ConnectorProps, computeLinkCreationArc } from './Connector';
 import { EditableLabel } from './EditableLabel';
+import { CanvasRenderContext, EXPORT_LABEL_FILTER_ID, type CanvasRenderContextValue } from './canvas-render-context';
 import { Flow, flowBounds } from './Flow';
 import { applyGroupMovement } from '../group-movement';
 import { growEndpointDrag, growInCreationFlow } from '../flow-attach';
@@ -394,6 +395,27 @@ interface LatestState {
 // reads from escaped callbacks go through the `latest` ref (see LatestState).
 export const Canvas = React.memo(function Canvas(props: CanvasProps): React.ReactElement {
   const svgRef = React.useRef<HTMLDivElement | null>(null);
+
+  // The label-halo filter id (see canvas-render-context.ts). Interactive
+  // canvases each get their own: the halo's flood colour is a theme token that
+  // resolves in the filter's OWN ancestor chain, so a shared id would paint one
+  // Editor's halos in another Editor's theme when two sit on one page (two
+  // notebook cells with different `theme` traits). The export path keeps the
+  // fixed id the Rust renderer emits. NOT React.useId: that is unique only
+  // within one React root, and the notebook widget mounts one root -- from its
+  // own copy of React -- per cell, so two cells both get `_r_1_`; `url(#id)`
+  // resolves document-wide to the first match, which is exactly the cross-theme
+  // leak this id exists to prevent. A random suffix drawn once per mount is
+  // unique across roots and React copies alike (interactive canvases are never
+  // server-rendered, so there is nothing to hydrate against).
+  const [labelHaloId] = React.useState(() => `label-halo-${Math.random().toString(36).slice(2, 10)}`);
+  const renderContext = React.useMemo<CanvasRenderContextValue>(
+    () =>
+      props.embedded
+        ? { embedded: true, labelFilterId: EXPORT_LABEL_FILTER_ID }
+        : { embedded: false, labelFilterId: labelHaloId },
+    [props.embedded, labelHaloId],
+  );
 
   // ---- Discrete + continuous state (formerly CanvasState) -----------------
   const [interaction, setInteraction] = React.useState<InteractionState>(idleState);
@@ -2871,6 +2893,43 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   // event handlers read them after render returns (getElementByUid and the
   // pointer callbacks resolve connector ends / persist the dragged-link arc).
 
+  // The label halo: each label's glyphs dilated and blurred into a soft
+  // backing plate at 85% opacity, so a label stays legible where it crosses a
+  // connector or a flow. Two variants of one filter, differing only in where
+  // the plate's colour comes from (see canvas-render-context.ts):
+  //  - export: a colour matrix that forces every pixel to literal white -- the
+  //    standalone SVG has no tokens, and this markup is byte-identical to the
+  //    Rust renderer's;
+  //  - interactive: an feFlood whose colour is the `--color-white` token (the
+  //    same token every canvas primitive uses for its fill: white in light
+  //    mode, dark in a dark host), composited `in` the blurred alpha. `in`
+  //    multiplies the flood's alpha by the blur's, exactly what the matrix's
+  //    alpha row does, so light mode renders pixel-for-pixel as before. Filter
+  //    primitives cannot read `var()` from presentation attributes in every
+  //    engine, so the colour is set as a CSS property (`style`), which they can.
+  const labelHaloFilter = renderContext.embedded ? (
+    <filter id={renderContext.labelFilterId} x="-50%" y="-50%" width="200%" height="200%">
+      <feMorphology operator="dilate" radius="4" />
+      <feGaussianBlur stdDeviation="2" />
+      <feColorMatrix
+        type="matrix"
+        values="0 0 0 0 1
+                          0 0 0 0 1
+                          0 0 0 0 1
+                          0 0 0 0.85 0"
+      />
+      <feComposite operator="over" in="SourceGraphic" />
+    </filter>
+  ) : (
+    <filter id={renderContext.labelFilterId} x="-50%" y="-50%" width="200%" height="200%">
+      <feMorphology operator="dilate" radius="4" />
+      <feGaussianBlur stdDeviation="2" result="plate" />
+      <feFlood style={{ floodColor: 'var(--color-white)' }} floodOpacity={0.85} />
+      <feComposite operator="in" in2="plate" />
+      <feComposite operator="over" in="SourceGraphic" />
+    </filter>
+  );
+
   return (
     <div
       style={{ height: '100%', width: '100%' }}
@@ -2887,24 +2946,13 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
         onPointerCancel={handlePointerCancel}
         onPointerUp={handlePointerCancel}
       >
-        <defs>
-          <filter id="labelBackground" x="-50%" y="-50%" width="200%" height="200%">
-            <feMorphology operator="dilate" radius="4" />
-            <feGaussianBlur stdDeviation="2" />
-            <feColorMatrix
-              type="matrix"
-              values="0 0 0 0 1
-                          0 0 0 0 1
-                          0 0 0 0 1
-                          0 0 0 0.85 0"
-            />
-            <feComposite operator="over" in="SourceGraphic" />
-          </filter>
-        </defs>
-        <g transform={transform}>
-          {zLayers}
-          {dragRect}
-        </g>
+        <defs>{labelHaloFilter}</defs>
+        <CanvasRenderContext.Provider value={renderContext}>
+          <g transform={transform}>
+            {zLayers}
+            {dragRect}
+          </g>
+        </CanvasRenderContext.Provider>
       </svg>
       {overlay}
     </div>

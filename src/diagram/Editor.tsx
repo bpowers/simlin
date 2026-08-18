@@ -75,7 +75,9 @@ import { countModelInstances } from './module-details-utils';
 import { buildModuleReferencePayload } from './module-wiring';
 import { buildVariableRenameOps } from './rename-ops';
 import { BreadcrumbBar } from './BreadcrumbBar';
-import { ProjectController, type ProjectSnapshot, type EngineApi } from './project-controller';
+import { ProjectController, type ProjectSnapshot, type EngineApi, type Viewport } from './project-controller';
+
+export type { Viewport } from './project-controller';
 
 import styles from './Editor.module.css';
 // These must stay in sync with --panel-width-sm/-md/-lg in theme.css (and the
@@ -294,6 +296,28 @@ interface EditorPropsBase {
   // element must be positioned (it is the surfaces' containing block). See
   // components/portal-container.ts.
   portalContainer?: HTMLElement;
+  // Open the root model's first view at THIS viewport (pan offset + size and
+  // zoom) instead of the one stored in the project. Applied like a pan the user
+  // just made -- shown from the first frame, round-tripped to the engine as a
+  // view-only update, no undo entry, no save -- so the next saved edit
+  // persists it. For a host that remounts the Editor on new project bytes
+  // while the user is looking at it (the notebook widget on a kernel push): a
+  // pan or zoom is never persisted by itself (only the next edit's save
+  // carries it), so a remount on the stored bytes would silently reset the
+  // user's viewport; the host reads the live one through `onViewportChange`
+  // and hands it back here. Hosts that mount once per project (the app,
+  // simlin-serve) leave it unset. Ignored when the view is absent or the
+  // viewport is unusable (a non-finite coordinate, a non-positive zoom).
+  initialViewport?: Viewport;
+  // Fires from a post-commit effect with the model name and the COMMITTED
+  // viewport of the model being viewed whenever that viewport changes by value:
+  // once when the project first renders (the stored viewport, or
+  // `initialViewport`, or the mount-time fit), then on each settled pan/zoom/
+  // pinch/momentum coast, an idle resize, and module navigation (the child
+  // model's viewport, with its name). Never per gesture frame: the canvas owns
+  // the live viewport during a gesture and commits it once on settle. A
+  // content-equal republished view fires nothing.
+  onViewportChange?: (modelName: string, viewport: Viewport) => void;
 }
 
 export type EditorProps = EditorPropsBase & ProjectInputProps;
@@ -374,6 +398,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         p.inputFormat === 'protobuf'
           ? { format: 'protobuf', data: p.initialProjectBinary }
           : { format: 'json', data: p.initialProjectJson },
+      initialViewport: p.initialViewport,
       // The concrete engine Project/Model/Run structurally satisfy the
       // controller's EngineApi surface; cast through unknown to bridge the
       // nominal type difference.
@@ -605,6 +630,53 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       onSelectionChanged(getSelectionIdents());
     }
   }, [state.selection]);
+
+  // ---- Post-commit effect: onViewportChange --------------------------------
+  // Report the committed viewport of the viewed model whenever it changes by
+  // VALUE (offset, size or zoom), including the first render that has a view.
+  // Keyed on the controller snapshot: every viewport commit -- a settled
+  // gesture's queueViewUpdate, the mount-time fit, an idle resize, module
+  // navigation's viewport restore -- publishes a new snapshot, and the
+  // prev-value ref keeps content-equal republishes (a content edit, a save
+  // acknowledgment) silent. The Canvas holds a gesture's live viewport locally
+  // and commits once on settle, so this never fires per frame.
+  // The last reported value, held as a flat record of its own (never the object
+  // handed to the host, which the host may keep or mutate).
+  const prevViewportRef = React.useRef<
+    { modelName: string; x: number; y: number; width: number; height: number; zoom: number } | undefined
+  >(undefined);
+  React.useEffect(() => {
+    const snapshot = state.controllerSnapshot;
+    const view = snapshot.project?.models.get(snapshot.modelName)?.views[0];
+    if (!view) {
+      return;
+    }
+    const cur = {
+      modelName: snapshot.modelName,
+      x: view.viewBox.x,
+      y: view.viewBox.y,
+      width: view.viewBox.width,
+      height: view.viewBox.height,
+      zoom: view.zoom,
+    };
+    const prev = prevViewportRef.current;
+    if (
+      prev &&
+      prev.modelName === cur.modelName &&
+      prev.x === cur.x &&
+      prev.y === cur.y &&
+      prev.width === cur.width &&
+      prev.height === cur.height &&
+      prev.zoom === cur.zoom
+    ) {
+      return;
+    }
+    prevViewportRef.current = cur;
+    latest.current.props.onViewportChange?.(cur.modelName, {
+      viewBox: { x: cur.x, y: cur.y, width: cur.width, height: cur.height },
+      zoom: cur.zoom,
+    });
+  }, [state.controllerSnapshot]);
 
   // ---- Post-commit effect: navResetSeq (componentDidUpdate part 2) ---------
   // When undo/redo restores a project that no longer contains the viewed model,
