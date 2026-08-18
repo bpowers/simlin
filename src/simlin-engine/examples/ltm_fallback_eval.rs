@@ -54,18 +54,30 @@
 //! different rotation still matches. Rotation, not sorted node set: two
 //! distinct directed cycles over the same nodes are different loops.
 //!
-//! Step-dominant coverage sweeps saved steps `t in 1..step_count` -- the same
-//! range the fallback's own sweep covers, and the range over which link scores
-//! are defined (step 0 has no `PREVIOUS` value). At each step with an active
-//! loop it takes the exact-path loop with the largest `|rel_scores[t]|` and
-//! asks whether the fallback reported it. This is the statistic a
-//! dominance-over-time reading depends on: a report that misses the dominant
-//! loop at a step names the wrong loop for that step.
+//! Step-dominant coverage is counted per (competing group, saved step) PAIR,
+//! not per step. A GLOBAL argmax over `exact.loops` measures nothing: a loop
+//! alone in its cycle partition (or the sole retention SURVIVOR of one, once
+//! the reported list is capped) has `|rel_scores[t]| == 1` at every active
+//! step by construction, so it wins any global argmax it is active for
+//! regardless of raw magnitude -- on both models here a global argmax names a
+//! non-competing loop at literally every step, which is the design doc's own
+//! audit finding restated as a property of THIS harness rather than only of
+//! the Python cross-check. A group is "competing" iff at least two REPORTED
+//! exact loops share its partition (`DiscoveredPartition::loop_count >= 2` --
+//! the same population `rel_scores` is normalized against), matching AC5.1's
+//! "within a competing partition". Within a competing group, at each saved
+//! step `t in 1..step_count` where some member is active, the pair `(group,
+//! t)` is covered iff the fallback reported the group's step-max loop. This is
+//! the statistic a dominance-over-time reading depends on: a report that
+//! misses the dominant loop at a step names the wrong loop for that step, and
+//! counting pairs (rather than requiring every competing group to agree at a
+//! step before counting it) keeps one large indifferent partition from hiding
+//! a genuine miss in a small competing one.
 //!
 //! Usage:
 //!   cargo run --release --example ltm_fallback_eval [model.mdl ...]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use salsa::Setter;
@@ -75,8 +87,8 @@ use simlin_engine::db::{
     sync_from_datamodel_incremental,
 };
 use simlin_engine::ltm_finding::{
-    CandidateGen, FallbackClosures, FallbackConfig, FallbackSeeds, FallbackTieBreak,
-    FallbackWeight, FoundLoop,
+    CandidateGen, DiscoveryResult, FallbackClosures, FallbackConfig, FallbackSeeds,
+    FallbackTieBreak, FallbackWeight, FoundLoop,
 };
 use simlin_engine::{canonicalize, open_vensim, open_xmile};
 
@@ -286,19 +298,36 @@ fn loop_key(fl: &FoundLoop) -> Vec<String> {
     canonical_rotation(&nodes)
 }
 
-/// Per-step dominance of the exact path: for each saved step, the index into
-/// the exact loop list of the loop with the largest `|rel_scores[t]|`, or
-/// `None` where no exact loop is active.
+/// Every (competing group, saved step) pair where some group member is
+/// active, paired with the index into `exact.loops` of that pair's dominant
+/// loop -- the group member with the largest `|rel_scores[t]|` there.
 ///
-/// `rel_scores` is the signed partition-relative series the engine already
-/// computed against universe denominators; a NaN or zero entry is "not active
-/// at this step" and cannot dominate.
-fn step_dominant(exact: &[FoundLoop], step_count: usize) -> Vec<Option<usize>> {
-    (0..step_count)
-        .map(|t| {
+/// See the module doc for why this is per (group, step) rather than a global
+/// per-step argmax. `rel_scores` is the signed partition-relative series the
+/// engine already computed against universe denominators; a NaN or zero entry
+/// is "not active at this step" and cannot dominate. Steps are swept over
+/// `1..step_count`: step 0 has no `PREVIOUS` value yet, so no link score --
+/// and therefore no loop score -- is defined there, matching the range both
+/// generators' own sweeps cover.
+fn step_dominant_pairs(exact: &DiscoveryResult, step_count: usize) -> Vec<(usize, usize)> {
+    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, fl) in exact.loops.iter().enumerate() {
+        // Competing within the REPORTED set, mirroring what `rel_scores` was
+        // actually normalized against: a partition holding only one surviving
+        // loop has that loop's `rel_scores` pinned to +/-1 by construction
+        // (see the module doc), so it contributes no pairs.
+        if let Some(p) = fl.partition
+            && exact.partitions[p].loop_count >= 2
+        {
+            groups.entry(p).or_default().push(i);
+        }
+    }
+    let mut pairs = Vec::new();
+    for members in groups.values() {
+        for t in 1..step_count {
             let mut best: Option<(usize, f64)> = None;
-            for (i, fl) in exact.iter().enumerate() {
-                let Some(&rel) = fl.rel_scores.get(t) else {
+            for &i in members {
+                let Some(&rel) = exact.loops[i].rel_scores.get(t) else {
                     continue;
                 };
                 let mag = rel.abs();
@@ -309,9 +338,12 @@ fn step_dominant(exact: &[FoundLoop], step_count: usize) -> Vec<Option<usize>> {
                     best = Some((i, mag));
                 }
             }
-            best.map(|(i, _)| i)
-        })
-        .collect()
+            if let Some((i, _)) = best {
+                pairs.push((t, i));
+            }
+        }
+    }
+    pairs
 }
 
 fn main() {
@@ -413,39 +445,35 @@ fn eval_model(path: &str) {
          reference keys must be distinct"
     );
 
-    let dominant = step_dominant(&exact.loops, results.step_count);
-    // Step 0 has no link scores (no `PREVIOUS` value yet) and is excluded from
-    // both generators' sweeps, so it is excluded here too.
-    let dominant_steps: Vec<usize> = (1..results.step_count)
-        .filter(|&t| dominant[t].is_some())
-        .collect();
+    let dominant_pairs = step_dominant_pairs(&exact, results.step_count);
 
     println!(
         "  saved steps {} | stocks {} | exact run {exact_s:.3}s | exact reported loops {} \
-         | steps with an active exact loop {} of {}",
+         | competing (group, step) pairs {}",
         results.step_count,
         stocks.len(),
         exact.loops.len(),
-        dominant_steps.len(),
-        results.step_count.saturating_sub(1),
+        dominant_pairs.len(),
     );
     println!(
-        "  distinct dominant loops over those steps: {}",
-        dominant_steps
+        "  distinct dominant loops across those pairs: {}",
+        dominant_pairs
             .iter()
-            .filter_map(|&t| dominant[t])
+            .map(|&(_, i)| i)
             .collect::<HashSet<_>>()
             .len()
     );
 
-    // --- Header: one column per recall K, plus step-dominant coverage. ---
-    let mut header = String::from("| weight \\| seeds \\| closures | time (s) | loops |");
-    let mut rule = String::from("|---|---|---|");
+    // --- Header: candidate volume, one column per recall K, plus the
+    // per-(competing group, step) coverage statistic. ---
+    let mut header =
+        String::from("| weight \\| seeds \\| closures | time (s) | candidates | loops |");
+    let mut rule = String::from("|---|---|---|---|");
     for k in RECALL_KS {
         header.push_str(&format!(" recall@{k} |"));
         rule.push_str("---|");
     }
-    header.push_str(" step-dominant covered |");
+    header.push_str(" step-dominant (group, step) pairs covered |");
     rule.push_str("---|");
     println!("\n{header}\n{rule}");
 
@@ -459,7 +487,13 @@ fn eval_model(path: &str) {
         );
         let fallback_set: HashSet<Vec<String>> = found.loops.iter().map(loop_key).collect();
 
-        let mut row = format!("| {label} | {elapsed:.3} | {} |", found.loops.len());
+        let mut row = format!(
+            "| {label} | {elapsed:.3} | {} | {} |",
+            found
+                .fallback_candidates
+                .map_or_else(|| "--".to_string(), |n| n.to_string()),
+            found.loops.len()
+        );
         for k in RECALL_KS {
             // K is a prefix of the exact ranked list; a model reporting fewer
             // than K exact loops has no top-K, and printing a recall over a
@@ -484,11 +518,11 @@ fn eval_model(path: &str) {
             ));
         }
 
-        let covered = dominant_steps
+        let covered = dominant_pairs
             .iter()
-            .filter(|&&t| dominant[t].is_some_and(|i| fallback_set.contains(&exact_keys[i])))
+            .filter(|&&(_, i)| fallback_set.contains(&exact_keys[i]))
             .count();
-        let total = dominant_steps.len();
+        let total = dominant_pairs.len();
         row.push_str(&format!(
             " {:.2} ({covered}/{total}) |",
             if total == 0 {
