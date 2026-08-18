@@ -215,13 +215,26 @@ pub(super) struct ActivityGraph {
     /// Flat per-edge activity bitsets: `edge_row * words .. +words`. Bit `t` is
     /// set when the edge's score at saved step `t` is finite nonzero, or
     /// infinite (a real divergent signal the totals keep; only NaN and exact 0
-    /// are inactive, matching `load_step_scores`' NaN->0-then-drop rule).
+    /// are inactive -- the same test [`Self::build`] applies per step below).
     ///
-    /// Bit 0 is carried but never satisfies the enumerator's activity test:
-    /// step 0's link scores are startup-degenerate (`PREVIOUS` has no prior
-    /// value), so a cycle active only there is not a scorable loop. Carrying it
-    /// anyway is what keeps windowed scoring exact -- were step 0 ever active,
-    /// its mass would still reach the partition totals.
+    /// Bit 0 is carried but never satisfies the enumerator's activity test
+    /// (the `head & !1u64` mask in [`enumerate_active_circuits`]): step 0
+    /// (`TIME = INITIAL_TIME`) is every link-score equation's own first-step
+    /// guard arm, which every generator (`ltm_augment::link_score_guard_form_with_numerator`
+    /// and its module-composite twin) emits as the literal constant `0`, so a
+    /// cycle active only there is not a scorable loop. In today's production
+    /// output bit 0 is therefore never actually SET (every link score is
+    /// exactly 0 there), which makes the mask inert rather than load-bearing
+    /// -- it exists as defense in depth against a link score that is ever
+    /// genuinely nonzero at step 0. A circuit whose activity AND is nonempty
+    /// ONLY at step 0 is never emitted at all (masked out at every depth of
+    /// the search, not merely windowed out of scoring), so such a circuit's
+    /// mass is excluded from the universe -- and hence from the partition
+    /// totals -- entirely, matching the "step 0 is not a scorable loop" rule.
+    /// Carrying the bit anyway is what keeps [`Self::active_window`] exact for
+    /// every circuit that IS emitted (one whose activity AND also has a bit
+    /// set at some step >= 1): its window can start at step 0 rather than
+    /// silently dropping a genuinely active first step from the totals.
     bits: Vec<u64>,
     /// Words per edge bitset.
     words: usize,
@@ -650,9 +663,9 @@ pub(super) fn enumerate_active_circuits(
                 let base = and_stack.len() - words;
                 let ebits = graph.edge_bits(row);
                 and_stack.reserve(words);
-                // Step 0 is startup-degenerate, so it never makes a circuit
-                // scorable -- mask its bit out of the emptiness test while
-                // still carrying it, so windowed scoring stays exact.
+                // Step 0 is never a scorable loop (see the `bits` field doc),
+                // so mask its bit out of the emptiness test while still
+                // carrying it, so windowed scoring stays exact.
                 let head = and_stack[base] & ebits[0];
                 let mut nonzero = head & !1u64 != 0;
                 and_stack.push(head);
@@ -733,8 +746,8 @@ pub(super) struct RetentionOutcome {
 /// 2. **Confirm** (only circuits whose bound clears the threshold): recompute
 ///    the exact ratio against the final totals. The bound is loose for a
 ///    circuit that arrives early -- the first circuit of a partition bounds at
-///    exactly 1.0 -- so this step is what makes the answer the retention rule
-///    rather than an approximation of it.
+///    exactly 1.0 -- so this step is what makes the answer exact against the
+///    totals THIS pass computes.
 ///
 /// Two classes skip both. A circuit in a Solo group (no stock resolves to a
 /// partition) is its own denominator, so its relative score is +/-1 wherever
@@ -744,6 +757,27 @@ pub(super) struct RetentionOutcome {
 /// module-traversing circuit is kept unconditionally, because its reported
 /// score may come from the per-exit-port override series rather than the raw
 /// product judged here.
+///
+/// **Exact against these totals is not exact against the reported totals.**
+/// `ltm_finding.rs` corrects the totals THIS pass returns, after
+/// materialization: a module-traversing circuit's zero raw contribution is
+/// replaced by its reported override series, and a trimmed duplicate
+/// representative's raw mass (two enumerated circuits -- a direct reference
+/// and its hoisted-reducer twin -- that trim to the same *reported* loop,
+/// AC4.3) is subtracted back out. A module-traversing circuit is kept here
+/// unconditionally regardless of the threshold, so only the dedup
+/// subtraction can move a NON-module circuit's outcome, and it can only
+/// LOWER a partition's denominator relative to what this pass saw. So a
+/// non-module circuit this pass drops for falling short of
+/// [`MIN_CONTRIBUTION`] against the pre-correction total could, against the
+/// smaller post-correction one, have cleared it -- and having never been
+/// materialized, it can never be reconsidered: `rank_and_filter`'s own
+/// (exact, post-correction) retention pass only ever sees survivors of this
+/// one. The error this can cause is bounded by the dropped duplicates' share
+/// of the partition's final mass, which is nonzero only in a partition
+/// containing a hoisted-reducer duplicate pathway; every other partition's
+/// pre- and post-correction totals for non-module circuits agree exactly, so
+/// this pass's decision there already IS the final one.
 ///
 /// Nothing per-circuit larger than O(1) is retained for non-survivors, so the
 /// pass is safe at [`MAX_DISCOVERY_ENUM_CIRCUITS`] scale.

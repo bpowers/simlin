@@ -1977,9 +1977,10 @@ mod tests {
     /// output `m·pos` feeding an arrayed reader (`growth[Region] = m·pos * 0.1`)
     /// emitted a single SCALAR `$⁚ltm⁚link_score⁚m→growth`, whose fragment could
     /// not compile and so read a constant 0, and a zero-scored edge is dropped
-    /// from the discovery search graph (`IndexedSearch::load_step_scores`) --
+    /// from the discovery search graph -- carrying no set bit in any saved
+    /// step's activity test (`ltm_finding_enum::ActivityGraph::build`) --
     /// taking every loop through it with it. `try_implicit_scalar_to_arrayed_link_scores`
-    /// now emits one score per target element, so the loops form.
+    /// emits one score per target element, so the loops form.
     ///
     /// TWO loops, not one, and not four: `m` is scalar, so every element of
     /// `growth` genuinely reads it, but each `growth[e]` feeds only `s[e]`, so

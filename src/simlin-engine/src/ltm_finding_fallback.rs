@@ -533,8 +533,10 @@ pub(super) struct FallbackOutcome {
 
 /// Run the fallback over every saved step, returning the candidate cycles.
 ///
-/// Step 0 is skipped: its link scores are NaN by construction (no `PREVIOUS`
-/// value exists yet), the same `1..step_count` window the enumerator uses.
+/// Step 0 is skipped: every link score's `TIME = INITIAL_TIME` guard arm
+/// emits it as the literal constant `0` (not a genuine score --
+/// `ltm_augment::link_score_guard_form_with_numerator`), the same
+/// `1..step_count` window the enumerator uses.
 ///
 /// The clock is read at exactly three places, all of them bounded: once at the
 /// top of each step, once before each seed stock's search, and once per

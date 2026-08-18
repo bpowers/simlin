@@ -1824,7 +1824,11 @@ fn discovery_graph_stats_reports_structure_and_scores() {
     offsets.insert(Ident::new("a"), 3usize);
 
     let data = vec![
-        // step 0 (skipped by discovery; NaNs)
+        // step 0: `sample_steps` below (`&[1, 2]`) never asks for it, so its
+        // value is never read either way. NaN here (rather than the literal
+        // `0` production actually emits for every link score at
+        // `TIME = INITIAL_TIME`) is a sentinel: an accidental read would
+        // propagate loudly instead of silently matching a plausible score.
         f64::NAN,
         f64::NAN,
         f64::NAN,
@@ -3554,9 +3558,10 @@ fn external_totals_are_used_for_partition_denominators() {
 /// supplied row-major as `data[step * n_offsets + offset]`.
 ///
 /// Step 0 is whatever the caller left there, and every fixture below leaves it
-/// zero: link scores are `PREVIOUS`-based, so a real run's step 0 is
-/// startup-degenerate and carries no signal (measured on World3 and C-LEARN --
-/// every union edge's step-0 value is exactly 0).
+/// zero: every link score's `TIME = INITIAL_TIME` guard arm emits the literal
+/// constant `0` there (`ltm_augment::link_score_guard_form_with_numerator`),
+/// so it carries no signal in a real run -- confirmed on World3 and C-LEARN,
+/// where every union edge's step-0 value is exactly 0.
 fn enum_results(n_offsets: usize, step_count: usize, data: Vec<f64>) -> Results {
     assert_eq!(
         data.len(),

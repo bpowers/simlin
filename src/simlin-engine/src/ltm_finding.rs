@@ -2227,9 +2227,15 @@ pub(crate) fn discover_loops_with_deadlines(
     // measured against: retention judges a circuit's peak share of its
     // partition's whole-universe mass, and `rank_and_filter` normalizes
     // relative scores against the same totals via `external_totals`. Those
-    // totals are the mass the REPORTED loops carry, which the corrections
-    // below maintain where a loop's reported score is not the raw product the
-    // enumeration pass banked.
+    // totals are the FULL enumerated universe's raw mass (retention
+    // non-survivors included, GH #310) -- NOT the mass reported loops carry --
+    // corrected below so that each distinct reported cycle contributes its
+    // mass exactly once and by the series it reports: a module-traversing
+    // loop's raw product is replaced by its per-exit-port override series
+    // (they can differ by any factor), and a duplicate representative the
+    // reported-cycle dedup discards has its raw mass subtracted back out.
+    // Every other circuit -- retention non-survivors included -- keeps its
+    // raw enumerated product in the totals unmodified.
     if candidate_gen == CandidateGen::Auto
         && let Some(activity) = ActivityGraph::build(&search, results, deadlines.enumeration, clock)
     {
@@ -2611,7 +2617,11 @@ pub(crate) fn discover_loops_with_deadlines(
         }
     }
 
-    // Bring the universe denominators into agreement with what is reported.
+    // Correct the two classes of enumerated mass the totals bank under a
+    // series different from the one actually reported. Every other circuit's
+    // raw product stays in the totals untouched -- the totals remain the
+    // enumerated universe's raw mass (retention non-survivors included), just
+    // no longer carrying these two discrepancies.
     //
     // Enumeration banks each circuit's RAW product as its partition's mass,
     // which two classes of loop do not report. A module-traversing loop
@@ -2622,9 +2632,10 @@ pub(crate) fn discover_loops_with_deadlines(
     // to the same reported loop each banked mass, while only the surviving
     // representative's score is reported, so the other's comes back out.
     //
-    // The alternative -- leaving the denominator as the raw universe -- makes
-    // every relative score in the partition a fraction of mass no reported
-    // loop carries.
+    // Skipping this leaves a module-traversing loop's slice of the
+    // denominator holding a composite product nothing reports, and leaves a
+    // trimmed duplicate's mass in the denominator with no reported loop
+    // behind it either.
     if let Some(totals) = external_totals.as_mut() {
         for (fl, traverses_module) in &deduped {
             if *traverses_module {
