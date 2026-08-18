@@ -299,6 +299,95 @@ jobs:
         working-directory: src/pysimlin
         run: uv run pytest -q --no-cov tests/
 
+  pysimlin-e2e:
+    name: pysimlin notebook editor journey (JupyterLab)
+    runs-on: ubuntu-24.04
+    # Dominated by builds (libsimlin release, the wasm32 engine, the diagram
+    # and widget bundles); the journey itself runs in well under a minute.
+    # A warm cargo cache brings the whole job to a few minutes.
+    timeout-minutes: 30
+    env:
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-pysimlin-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-pysimlin-e2e-
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install pnpm dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build libsimlin
+        run: cargo build --release --manifest-path src/libsimlin/Cargo.toml
+
+      # The widget bundle and its workspace deps (@simlin/engine builds the
+      # wasm32 engine, @simlin/core, @simlin/diagram) in topological order.
+      # DISABLE_WASM_OPT=1 skips the multi-minute wasm-opt pass: the journey
+      # exercises the widget's behaviour, not the release blob's size.
+      - name: Build the notebook widget and its dependencies
+        env:
+          DISABLE_WASM_OPT: "1"
+        run: pnpm --filter "@simlin/notebook-widget..." run build
+
+      # simlin/_widget/ is package data that ships in the wheel; in a
+      # checkout it is populated from the two build outputs above (see
+      # src/pysimlin/simlin/_widget/README.md).
+      - name: Stage the widget assets into pysimlin
+        run: |
+          cp src/notebook-widget/dist/widget.js src/pysimlin/simlin/_widget/
+          cp src/engine/core/libsimlin-browser.wasm src/pysimlin/simlin/_widget/
+
+      - name: Install pysimlin with the dev and e2e extras
+        working-directory: src/pysimlin
+        run: |
+          uv sync --extra dev --extra e2e
+          uv pip install setuptools
+          uv run python setup.py build_ext --inplace
+
+      # The version pinned by the root package.json's @playwright/test.
+      - name: Install Playwright chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run the JupyterLab journey
+        run: make -C src/pysimlin e2e
+
+      # Screenshots, the trace, and the jupyter server log are what a failed
+      # journey needs to be understood.
+      - name: Upload journey output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pysimlin-e2e-output
+          path: src/pysimlin/e2e/.output/
+          if-no-files-found: ignore
+
   policy:
     name: Policy checks
     runs-on: ubuntu-latest
