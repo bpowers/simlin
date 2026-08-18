@@ -37,4 +37,9 @@ uv run pytest tests/ -x     # Run tests
 uv run ruff check            # Lint
 uv run ruff format           # Format
 uv run mypy simlin           # Type check (strict)
+make assets                  # Build + stage the notebook widget assets into simlin/_widget/
+make check-assets            # Verify the staged assets against ASSETS.json
+uv run python scripts/build_wheels.py   # libsimlin + assets + wheel (see DEVELOPMENT.md)
 ```
+
+The widget assets (`simlin/_widget/widget.js`, `libsimlin-browser.wasm`, `ASSETS.json`) are build outputs, staged only by `scripts/stage_widget_assets.py` (the notebook-widget package's `pnpm build` calls it too); `setup.py` refuses to build a wheel/sdist without them and `scripts/check_wheel_assets.py` is the release workflow's wheel-content check. Details: [DEVELOPMENT.md](/src/pysimlin/DEVELOPMENT.md).

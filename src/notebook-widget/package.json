@@ -6,7 +6,8 @@
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
-    "build": "rsbuild build",
+    "build": "rsbuild build && pnpm run stage",
+    "stage": "python3 ../pysimlin/scripts/stage_widget_assets.py --no-build",
     "test": "rstest run",
     "test:e2e": "playwright test -c e2e/playwright.config.ts",
     "lint": "eslint --cache --cache-location node_modules/.cache/eslint/ .",

@@ -82,7 +82,17 @@ packages = ["simlin"]
 package-dir = {"" = "."}
 
 [tool.setuptools.package-data]
-simlin = ["py.typed", "*.pyi"]
+# _widget/ holds the notebook widget's JS module and engine wasm (build
+# outputs of src/notebook-widget staged by scripts/stage_widget_assets.py,
+# which also writes ASSETS.json; see simlin/_widget/README.md).
+simlin = [
+    "py.typed",
+    "*.pyi",
+    "_widget/*.js",
+    "_widget/*.wasm",
+    "_widget/ASSETS.json",
+    "_widget/README.md",
+]
 
 [tool.mypy]
 python_version = "3.11"
