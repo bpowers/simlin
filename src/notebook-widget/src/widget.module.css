@@ -1,0 +1,47 @@
+/* Widget-level chrome around the Editor: the loading/error placeholder and
+   the transient kernel notice. Everything else is the Editor's own CSS. */
+
+.host {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--color-border, #d6d6d6);
+  border-radius: 4px;
+  box-sizing: border-box;
+  font-family: Roboto, system-ui, sans-serif;
+}
+
+.placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  color: var(--color-text-secondary, #6b6b6b);
+  font-size: 14px;
+  text-align: center;
+  white-space: pre-wrap;
+}
+
+.placeholderError {
+  color: var(--color-error, #c62828);
+}
+
+.notice {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  padding: 6px 12px;
+  border-radius: 4px;
+  background: rgba(33, 33, 33, 0.92);
+  color: #ffffff;
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.noticeWarn {
+  background: var(--color-error, #c62828);
+}

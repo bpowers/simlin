@@ -1,0 +1,45 @@
+{
+  "name": "@simlin/notebook-widget",
+  "version": "0.1.0",
+  "description": "anywidget front-end module that hosts the Simlin diagram Editor in a notebook cell (shipped inside the pysimlin wheel)",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "rsbuild build",
+    "test": "rstest run",
+    "test:e2e": "playwright test -c e2e/playwright.config.ts",
+    "lint": "eslint --cache --cache-location node_modules/.cache/eslint/ .",
+    "needs-format": "prettier -l '**/*.ts' '**/*.tsx'",
+    "format": "prettier --write '**/*.ts' '**/*.tsx'",
+    "clean": "rm -rf dist node_modules/.cache"
+  },
+  "dependencies": {
+    "@simlin/diagram": "workspace:^",
+    "@simlin/engine": "workspace:^",
+    "katex": "^0.16.28",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.1",
+    "@rsbuild/core": "^2.1.5",
+    "@rsbuild/plugin-react": "^2.1.0",
+    "@rstest/core": "^0.11.0",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^25.2.0",
+    "@types/react": "^19.2.11",
+    "@types/react-dom": "^19.2.3",
+    "@typescript-eslint/eslint-plugin": "^8.63.0",
+    "@typescript-eslint/parser": "^8.63.0",
+    "@typescript/native": "npm:typescript@^7.0.2",
+    "eslint": "^9.39.2",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-react": "^7.37.5",
+    "jsdom": "^29.1.1",
+    "postcss": "^8.5.15",
+    "prettier": "^3.8.1",
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
+  }
+}

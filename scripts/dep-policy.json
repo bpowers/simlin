@@ -15,6 +15,7 @@
     "@simlin/app": ["@simlin/core", "@simlin/diagram", "@simlin/engine"],
     "@simlin/server": ["@simlin/core", "@simlin/diagram", "@simlin/engine"],
     "@simlin/serve-web": ["@simlin/core", "@simlin/diagram", "@simlin/engine"],
+    "@simlin/notebook-widget": ["@simlin/diagram", "@simlin/engine"],
     "simlin-site": ["@simlin/diagram"]
   }
 }
