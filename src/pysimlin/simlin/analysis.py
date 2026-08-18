@@ -48,8 +48,8 @@ class LtmMode(IntEnum):
     - ``EXHAUSTIVE`` (1): every elementary feedback circuit was enumerated
       (Johnson). Used for small models.
     - ``DISCOVERY`` (2): the model's causal graph exceeded the SCC-size gate
-      (or discovery was requested directly), so loops are ranked by the
-      per-timestep strongest-path heuristic instead of enumerated.
+      (or discovery was requested directly), so loops are found
+      post-simulation from the recorded link scores instead of enumerated.
 
     ``str(mode)`` yields the lowercase name (``"disabled"`` / ``"exhaustive"``
     / ``"discovery"``), which is what :attr:`Run.ltm_mode` returns.
@@ -434,12 +434,13 @@ class Loop:
 
 @dataclass(frozen=True)
 class Analysis:
-    """Result of strongest-path loop *discovery* (`Model.analyze`).
+    """Result of post-simulation loop *discovery* (`Model.analyze`).
 
-    Discovery is the heuristic "Loops That Matter" algorithm
-    (Eberlein & Schoenberg, 2020): instead of exhaustively enumerating every
-    feedback loop -- which is empty for large models that auto-flip to
-    discovery mode -- it finds the loops that drive behavior. Each discovered
+    Discovery is the "Loops That Matter" analysis (Eberlein & Schoenberg,
+    2020) run over the recorded link scores: instead of exhaustively
+    enumerating every structural feedback loop -- which is empty for large
+    models that auto-flip to discovery mode -- it finds the loops that drive
+    behavior. Each discovered
     `Loop` carries its `behavior_time_series` (the per-step importance series),
     and `dominant_periods` records which loops dominate during each interval.
 

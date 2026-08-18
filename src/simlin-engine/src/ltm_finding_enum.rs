@@ -10,18 +10,16 @@
 //! per-file line cap; everything here is `pub(super)` implementation detail of
 //! `discover_loops_with_graph`.
 //!
-//! The per-step strongest-first DFS bounds its work with a per-node expansion
-//! cap, which silently degrades to a biased sampler on runtime-dense graphs
-//! (World3: the cap saturates on 100% of searches and the report misses the
-//! step-dominant loop at 57% of steps). Enumeration inverts the approach:
-//! because discovery runs AFTER the simulation, the set of edges that ever
+//! Because discovery runs AFTER the simulation, the set of edges that ever
 //! carried signal is observable, and every loop with a nonzero score at some
 //! saved step is -- score being a product -- an elementary cycle of that
 //! *union graph* all of whose edges are simultaneously active at that step.
 //! Enumerating exactly the ever-simultaneously-active cycles (activity-bitset
-//! pruning) yields a provably complete candidate set; cycles active only at
-//! disjoint steps are never emitted, and the per-step DFS remains as the
-//! fallback when the budgets or deadline trip.
+//! pruning) therefore yields a provably COMPLETE candidate set rather than a
+//! sample: cycles active only at disjoint steps are never emitted, and
+//! nothing else is missed. The shortest-path fallback
+//! (`ltm_finding_fallback.rs`) takes over when the budgets or the deadline
+//! trip.
 //!
 //! A cycle here always spans at least two variables. An elementary cycle never
 //! repeats a node, so a self-edge can never be part of one of length >= 2, and
@@ -44,7 +42,7 @@ use super::{Clock, DEADLINE_CHECK_INTERVAL, IndexedSearch, MIN_CONTRIBUTION, exp
 use crate::results::Results;
 
 /// Maximum elementary circuits the union-graph enumerator may emit before
-/// discovery falls back to the per-step DFS.
+/// discovery falls back to the shortest-path sweep.
 ///
 /// This deliberately exceeds compile-time exhaustive mode's
 /// [`crate::ltm::MAX_LTM_CIRCUITS`] (100k): that constant is bounded by
@@ -294,7 +292,7 @@ impl ActivityGraph {
                         edge_bits[step / 64] |= 1u64 << (step % 64);
                         // Membership in the union graph is decided over
                         // `1..step_count` only, so a step-0-only edge is
-                        // excluded exactly as the per-step DFS excludes it.
+                        // excluded -- the same window the fallback sweeps.
                         any |= step >= 1;
                     }
                 }

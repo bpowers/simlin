@@ -1,6 +1,6 @@
 """Tests for explicit, opt-in loop discovery via Model.analyze().
 
-Discovery (the strongest-path "Loops That Matter" algorithm) is exposed as
+Discovery (post-simulation "Loops That Matter" analysis) is exposed as
 Model.analyze(timeout=None) -> Analysis.  It is deliberately separate from
 Model.run(): run() never triggers discovery, because discovery can be slow or
 infeasible on large models.

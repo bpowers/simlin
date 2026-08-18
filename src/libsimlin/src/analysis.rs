@@ -750,14 +750,14 @@ fn discovery_polarity(polarity: &str) -> SimlinLoopPolarity {
     }
 }
 
-/// Run strongest-path LTM loop discovery on a model and return the discovered
-/// loops (with per-step importance series), the dominant periods, and a
-/// truncation flag, as one `SimlinDiscoveryResult`.
+/// Run post-simulation LTM loop discovery on a model and return the
+/// discovered loops (with per-step importance series), the dominant periods,
+/// and a truncation flag, as one `SimlinDiscoveryResult`.
 ///
-/// `budget_ms` bounds the wall-clock time spent in discovery's per-timestep
-/// DFS sweep; `0` means unlimited.  When the budget elapses before discovery
-/// finishes, `truncated` is set and the returned loops/periods reflect only
-/// the timesteps processed so far.  Discovery on very large models can be
+/// `budget_ms` bounds the wall-clock time spent generating loop candidates;
+/// `0` means unlimited.  When the budget elapses before discovery finishes,
+/// `truncated` is set and the returned loops/periods reflect only the
+/// timesteps processed so far.  Discovery on very large models can be
 /// infeasibly slow (GH #647), so the budget lets callers bound it.
 ///
 /// This deliberately returns loops + periods + truncated together rather than
@@ -1113,7 +1113,7 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
 /// compilation failed before LTM could run), `Exhaustive` when every
 /// elementary circuit was enumerated, and `Discovery` when the model tripped
 /// the SCC-size gate (or discovery was requested directly) so loops are
-/// ranked by the per-timestep strongest-path heuristic.  The mode is captured
+/// found post-simulation from the recorded link scores.  The mode is captured
 /// at `simlin_sim_new` time, so it is available without running the
 /// simulation.
 ///

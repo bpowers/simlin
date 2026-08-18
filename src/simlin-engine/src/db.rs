@@ -460,8 +460,9 @@ pub struct LtmSyntheticVar {
 /// `model_ltm_variables` either enumerates every elementary circuit
 /// (Johnson, [`Exhaustive`](LtmMode::Exhaustive)) or, for models whose
 /// variable-level or cross-element SCC exceeds `ltm::MAX_LTM_SCC_NODES`
-/// (or when the caller requested discovery directly), falls back to the
-/// per-timestep strongest-path heuristic ([`Discovery`](LtmMode::Discovery)).
+/// (or when the caller requested discovery directly), falls back to
+/// post-simulation discovery over the recorded link scores
+/// ([`Discovery`](LtmMode::Discovery)).
 /// A user sees empty or different loop results in the two modes with no
 /// other signal; this enum is that signal, surfaced through the FFI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

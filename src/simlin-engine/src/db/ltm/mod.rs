@@ -1269,8 +1269,8 @@ pub fn model_ltm_variables(
              this scale would enumerate millions of circuits (see \
              docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md and \
              docs/design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md). \
-             Per-loop scores are ranked post-simulation via the \
-             strongest-path search; see \
+             Per-loop scores are found and ranked post-simulation from the \
+             recorded link scores; see \
              docs/design/ltm--loops-that-matter.md for the two-tier \
              strategy.",
             var_scc_size,
@@ -1407,7 +1407,8 @@ pub fn model_ltm_variables(
                  (MAX_LTM_CIRCUITS = {}).  The model's feedback structure is too \
                  dense for exhaustive per-loop scoring (circuit count grows \
                  super-exponentially with cycle density).  Per-loop scores are \
-                 ranked post-simulation via the strongest-path search; see \
+                 found and ranked post-simulation from the recorded link \
+                 scores; see \
                  docs/design/ltm--loops-that-matter.md for the two-tier \
                  strategy.",
                 crate::ltm::ltm_circuit_budget(),
@@ -1434,7 +1435,7 @@ pub fn model_ltm_variables(
                 "LTM analysis auto-switched from exhaustive to discovery mode: \
                  the cross-element / mixed slow-path subgraph's largest SCC has {} nodes, \
                  exceeding MAX_LTM_SCC_NODES = {}.  Per-loop scores are ranked \
-                 post-simulation via the strongest-path search; see \
+                 post-simulation from the recorded link scores; see \
                  docs/design/ltm--loops-that-matter.md for the two-tier strategy.",
                 tiered.slow_path_largest_scc,
                 crate::ltm::MAX_LTM_SCC_NODES,

@@ -220,7 +220,7 @@ enum FixtureLtm {
     /// Johnson enumeration of every elementary circuit: emits one link score
     /// per loop edge plus a `$⁚ltm⁚loop_score⁚{id}` per circuit.
     Exhaustive,
-    /// The strongest-path heuristic: emits a link score per causal edge
+    /// Post-simulation discovery: emits a link score per causal edge
     /// (including edges no circuit traverses) and no loop-score variables.
     Discovery,
 }
@@ -1760,8 +1760,9 @@ fn char_ltm_fragments_discovery() {
             ],
             why: "Discovery mode scores every CAUSAL edge, so `rate→growth` \
                   appears here even though no circuit traverses it, and no \
-                  loop-score variable is emitted at all (discovery ranks \
-                  strongest paths per step instead of enumerating circuits). \
+                  loop-score variable is emitted at all (discovery finds \
+                  and ranks loops after the run instead of enumerating \
+                  circuits at compile time). \
                   Every score is a scalar aux, hence flow-only. Only the \
                   `growth→level` score -- the stock-update edge, whose \
                   ceteris-paribus numerator re-integrates the stock -- \

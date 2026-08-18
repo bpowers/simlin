@@ -2189,7 +2189,7 @@ fn test_two_a2a_subsystems_per_slot_rel_score_round_trips() {
 /// itself) and open it via the protobuf FFI, returning `(project, model)`.
 ///
 /// population[t] is a stock fed by `births = population * growth_rate`, so the
-/// strongest-path discovery finds a single reinforcing loop
+/// discovery finds a single reinforcing loop
 /// `population -> births -> population` with a non-trivial importance series.
 unsafe fn open_reinforcing_loop_model() -> (*mut SimlinProject, *mut SimlinModel) {
     let test_project = TestProject::new("main")
@@ -2589,7 +2589,7 @@ fn collapsed_macro_edge_carries_composite_score() {
             })
             .expect("composite level -> smoothed_level edge");
         // The composite edge through the macro carries a score series (the
-        // product/strongest-path path score), not a dropped/null one.
+        // product path score), not a dropped/null one.
         assert!(!through.score.is_null());
         assert!(through.score_len > 0);
         simlin_free_links(links_ptr);

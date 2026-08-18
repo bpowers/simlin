@@ -557,10 +557,11 @@ class Model:
         return tuple(partitions)
 
     def analyze(self, timeout: float | None = None) -> Analysis:
-        """Run strongest-path loop *discovery* on this model.
+        """Run post-simulation loop *discovery* on this model.
 
-        Discovery is the heuristic "Loops That Matter" algorithm: it finds the
-        feedback loops that drive behavior, even on large models where the
+        Discovery is the "Loops That Matter" analysis over the recorded link
+        scores: it finds the feedback loops that drive behavior, even on large
+        models where the
         exhaustive structural enumeration behind ``Model.loops`` / ``Run.loops``
         returns nothing (because such models auto-flip to discovery mode).
 
@@ -799,8 +800,8 @@ class Model:
         loops_structural = self.loops
 
         # Surface the discovery auto-flip: on models too large for exhaustive
-        # loop enumeration, LTM resolves to the strongest-path discovery
-        # heuristic, where run.loops contains only explicitly pinned loops.
+        # loop enumeration, LTM resolves to post-simulation discovery,
+        # where run.loops contains only explicitly pinned loops.
         # Without this warning an empty loop list is indistinguishable from
         # "this model has no feedback loops".
         if analyze_loops and not loops_structural and run.ltm_mode == "discovery":

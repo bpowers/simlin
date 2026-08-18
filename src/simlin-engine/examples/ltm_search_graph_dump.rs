@@ -4,8 +4,8 @@
 
 //! Dump the exact element-level search graph LTM discovery consumes, with
 //! per-edge link-score series, so external tooling (notebooks, audits) can
-//! exhaustively enumerate cycles and compare against the discovery DFS's
-//! output on the IDENTICAL graph.
+//! exhaustively enumerate cycles and compare against discovery's reported
+//! loops on the IDENTICAL graph.
 //!
 //! The edge set comes from the public [`simlin_engine::ltm_finding::link_score_offsets`]
 //! (the production `parse_link_offsets` expansion), never a re-derivation --
@@ -16,7 +16,7 @@
 //!   {
 //!     "model": "<path>",
 //!     "step_count": N,           // saved steps
-//!     "stocks": ["...", ...],    // DFS seed nodes, engine order
+//!     "stocks": ["...", ...],    // the fallback's seed nodes, engine order
 //!     "edges": [{"from": "...", "to": "...", "scores": [f64; N]}, ...],
 //!     "discovered": [{"id": "...", "nodes": ["...", ...]}, ...]
 //!   }
@@ -90,7 +90,7 @@ fn main() {
         &expansion,
     );
 
-    // Run the production discovery DFS on the same inputs for cross-checking.
+    // Run production discovery on the same inputs for cross-checking.
     let sub_model_ports =
         simlin_engine::analysis::build_sub_model_output_ports(&db, source_project);
     let found = simlin_engine::ltm_finding::discover_loops_with_graph(

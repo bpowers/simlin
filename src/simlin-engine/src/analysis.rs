@@ -131,7 +131,7 @@ fn model_snapshot(project: &datamodel::Project, model_name: &str) -> Option<json
 /// `analysis_error == None`.
 ///
 /// `budget` optionally bounds the wall-clock time spent in loop discovery's
-/// per-timestep DFS sweep. Discovery on very large models can be infeasibly
+/// candidate generation. Discovery on very large models can be infeasibly
 /// slow (GH #647), so callers that want a bounded run pass `Some(duration)`;
 /// the returned `ModelAnalysis::truncated` reports whether the budget elapsed
 /// before discovery finished. `None` runs discovery to completion.

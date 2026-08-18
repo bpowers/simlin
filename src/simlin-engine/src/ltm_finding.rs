@@ -185,7 +185,7 @@ const LTM_LINK_SEP: char = '→';
 
 // --- Public types ---
 
-/// A loop found by the strongest-path algorithm, with its scores over time.
+/// A loop found by discovery, with its scores over time.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 pub struct FoundLoop {
     /// The loop structure (reuses existing Loop type from ltm.rs)
@@ -770,11 +770,11 @@ fn get_stock_variables(project: &Project) -> Vec<Ident<Canonical>> {
     stocks
 }
 
-/// Run the strongest-path loop discovery on simulation results.
+/// Run loop discovery on simulation results.
 ///
 /// Reads link score values from `results` (computed during simulation via
-/// LTM synthetic variables), then runs the strongest-path DFS at each saved
-/// timestep to discover important loops.
+/// LTM synthetic variables), then generates and scores loop candidates over
+/// the recorded series.
 ///
 /// The simulation must have been compiled with `ltm_discovery_mode` enabled
 /// so that link score variables exist for all causal links.
@@ -1085,9 +1085,9 @@ fn max_abs_score_series(a: Option<Vec<f64>>, b: Option<Vec<f64>>) -> Option<Vec<
 ///
 /// The traversal never re-enters a real node and visits each synthetic node at
 /// most once per path, so a synthetic-internal cycle cannot loop forever.
-/// The accumulated composite payload for one collapsed edge: its current
-/// (strongest-path) polarity and its composite score series (`None` until a
-/// scored path contributes).
+/// The accumulated composite payload for one collapsed edge: the polarity of
+/// the largest-magnitude path found so far and its composite score series
+/// (`None` until a scored path contributes).
 type CompositePayload = (LinkPolarity, Option<Vec<f64>>);
 
 /// One real endpoint reached by a synthetic chain, with the chain's accumulated
@@ -1412,10 +1412,10 @@ impl IndexedSearch {
         };
 
         // First pass: assign ids and collect edges. Edges keep their
-        // `link_offsets` insertion order within each `from` node so the
-        // per-timestep stable score sort breaks ties identically to the
-        // original `SearchGraph::from_edges` (which pushed in the same order
-        // before its stable `sort_by`).
+        // `link_offsets` insertion order within each `from` node, which is
+        // sorted by `(from, to)` -- so every per-node traversal order, and
+        // hence every generator's emission order, is a function of the model
+        // rather than of hash iteration.
         let mut adj: Vec<Vec<IndexedEdge>> = Vec::new();
         for ((from, to), offset) in link_offsets {
             let from_id = intern(from, &mut id_of, &mut idents);

@@ -6,13 +6,11 @@
 //!
 //! `examples/ltm_fragment_failures.rs` answers "which fragments fail and why".
 //! It cannot answer the question that decides whether a failure MATTERS:
-//! `ltm_finding::IndexedSearch::load_step_scores` DROPS a zero-scored edge from
-//! the per-step discovery graph, so a dead score on a *feed-forward* edge costs
-//! only that edge's attribution, while a dead score on an edge inside a cycle
-//! makes every loop through it undiscoverable. Counting failures without
-//! separating those two conflates a cosmetic gap with a structural one. (The
-//! `SearchGraph::from_edges` twin is `#[cfg(test)]` -- a reference oracle, not
-//! the production drop site.)
+//! discovery treats a zero-scored edge as INACTIVE and drops it from the graph
+//! it searches, so a dead score on a *feed-forward* edge costs only that edge's
+//! attribution, while a dead score on an edge inside a cycle makes every loop
+//! through it undiscoverable. Counting failures without separating those two
+//! conflates a cosmetic gap with a structural one.
 //!
 //! This harness joins, per variable-level causal edge:
 //!   * is the edge inside a cycle (both endpoints in one non-trivial SCC of the

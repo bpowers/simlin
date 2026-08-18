@@ -16,10 +16,10 @@
 //! LTM has two loop-finding modes. The *exhaustive* mode (Johnson
 //! elementary-circuit enumeration) is gated by `MAX_LTM_SCC_NODES = 50`:
 //! a model whose variable-level causal-graph SCC exceeds that threshold
-//! auto-flips to *discovery* mode -- the strongest-path heuristic from
-//! Eberlein & Schoenberg, "Finding the Loops That Matter" (2020),
-//! Appendix I, implemented in `ltm_finding::discover_loops_with_graph`.
-//! World3's variable-level SCC is 166, so it auto-flips to discovery.
+//! auto-flips to *discovery* mode -- post-simulation loop finding over the
+//! recorded link scores, implemented in
+//! `ltm_finding::discover_loops_with_graph`. World3's variable-level SCC is
+//! 166, so it auto-flips to discovery.
 //!
 //! Nothing else in the suite exercises discovery on a large model:
 //! `tests/wrld3_ltm_panic.rs` only checks that LTM *compilation*
@@ -43,8 +43,8 @@
 //!
 //! LTM link scores are `PREVIOUS()`-based, so the first two saved
 //! timesteps (indices 0 and 1) are startup-degenerate. Step 0's link
-//! scores can be NaN -- `discover_loops_with_graph` skips step 0 in the
-//! discovery DFS for exactly that reason -- and steps 0-1 carry no
+//! scores can be NaN -- both discovery generators skip step 0 for exactly
+//! that reason -- and steps 0-1 carry no
 //! positive loop contribution, so `rank_and_filter` drops every loop
 //! whose only timesteps are those two. Step index 2 is the first
 //! genuinely discoverable timestep. `FIRST_DISCOVERABLE_STEP` and
@@ -63,15 +63,14 @@
 //! over all 401 saved timesteps ran 390+ seconds and allocated 22+ GB
 //! before a hard kill, and even a single discoverable timestep of the
 //! element-level production path did not finish within a 20 s budget.
-//! The blow-up was in the strongest-path DFS: `best_score` pruning only
-//! bounds work when path-score products shrink along paths, and on
-//! World3's dense 166-node SCC with link scores straddling 1.0 that
-//! pruning degraded, so the DFS re-explored subtrees super-polynomially
-//! and accumulated loops without bound.
+//! The blow-up was in the candidate search: it pruned on the assumption
+//! that path-score products shrink as paths extend, and on World3's dense
+//! 166-node SCC with link scores straddling 1.0 that assumption does not
+//! hold, so the search re-explored subtrees super-polynomially and
+//! accumulated loops without bound.
 //!
-//! The discovery rewrite (commit `081e9848`, "make LTM strongest-path
-//! discovery feasible on large models") fixed this; GH #540 is closed.
-//! World3 discovery now completes quickly: the single discoverable
+//! The discovery rewrite (commit `081e9848`) fixed this; GH #540 is
+//! closed. World3 discovery completes quickly: the single discoverable
 //! timestep of the element-level production path that
 //! `world3_discovery_single_timestep` exercises finishes in roughly 20 ms
 //! of pure discovery work (a sub-second test run end to end, dominated by
@@ -146,8 +145,8 @@ const FIRST_DISCOVERABLE_STEP: usize = 2;
 /// single-discoverable-timestep discovery run: the two startup-guard
 /// steps (0, 1) plus the first discoverable timestep (`= 2`). A window
 /// of exactly this size forces `discover_loops_with_graph` through one
-/// real discoverable DFS pass and is the smallest window in which a
-/// correct discovery still returns a non-empty loop set.
+/// real discoverable step and is the smallest window in which a correct
+/// discovery still returns a non-empty loop set.
 const TRUNCATED_STEP_COUNT: usize = FIRST_DISCOVERABLE_STEP + 1;
 
 /// Owned, `'static` inputs for the element-level discovery production
@@ -206,11 +205,10 @@ fn world3_discovery_inputs() -> DiscoveryInputs {
 /// Return a copy of `results` truncated to the first `n_steps` saved
 /// timesteps.
 ///
-/// `discover_loops_with_graph` iterates `for step in 1..step_count`,
-/// rebuilding the per-timestep search graph and re-running the
-/// strongest-path DFS from every stock at each step. A truncated copy
-/// lets a test exercise one discoverable timestep's DFS on real link
-/// scores while keeping the run within the per-test time budget.
+/// Discovery's candidate generators both range over `1..step_count` of the
+/// recorded series. A truncated copy lets a test exercise one discoverable
+/// timestep on real link scores while keeping the run within the per-test
+/// time budget.
 fn truncate_results(results: &Results, n_steps: usize) -> Results {
     let n = n_steps.min(results.step_count);
     let data: Box<[f64]> = results.data[..n * results.step_size]
@@ -317,10 +315,12 @@ fn assert_discovery_contract(found: &[ltm_finding::FoundLoop]) {
 /// loudly.
 ///
 /// Why a single discoverable timestep rather than the full 401-step run:
-/// the per-timestep DFS (`SearchGraph::check_outbound_uses`) was the
-/// historical blow-up, so one discoverable timestep is the smallest
-/// honest exercise of the production DFS on real link scores while
-/// keeping the whole test within the per-test time budget.
+/// the per-timestep candidate search was the historical blow-up, so one
+/// discoverable timestep is the smallest honest exercise of the production
+/// search on real link scores while keeping the whole test within the
+/// per-test time budget. The full-run companion below
+/// (`world3_full_run_enumeration_is_complete`) is `#[ignore]`d for
+/// runtime class.
 ///
 /// Why the element-level path: `analysis::analyze_model` (the production
 /// caller) runs `discover_loops_with_graph` on the element-level graph
@@ -341,7 +341,7 @@ fn world3_discovery_single_timestep() {
     // Truncate to steps 0, 1, 2: the two startup-guard steps plus the
     // first genuinely discoverable timestep (step 2). This drives
     // `discover_loops_with_graph` through exactly one real discoverable
-    // DFS pass on World3's element-level graph.
+    // step of World3's element-level graph.
     let truncated = truncate_results(&inputs.results, TRUNCATED_STEP_COUNT);
     let DiscoveryInputs {
         results: _,
@@ -544,11 +544,11 @@ fn clearn_ltm_discovery_compiles() {
 /// (the `MAX_LOOPS` cap binds -- World3's ever-simultaneously-active universe
 /// holds ~150k elementary cycles, ~3k of which pass retention; the larger
 /// ~330k figure is its cycle count WITHOUT the activity constraint, which the
-/// enumerator never materializes) are the exact
-/// retention/ranking selection rather than the strongest-first-DFS sample.
-/// The 2026-08-10 ground-truth audit's smoking gun -- the births ->
-/// population-aging chain loops, which peak at 27% partition dominance yet
-/// were entirely absent from the DFS-sampled report -- must be present.
+/// enumerator never materializes) are the exact retention/ranking selection
+/// rather than a sample. The 2026-08-10 ground-truth audit's smoking gun --
+/// the births -> population-aging chain loops, which peak at 27% partition
+/// dominance yet were entirely absent from the sampled report -- must be
+/// present.
 ///
 /// `#[ignore]`d for runtime class only (a full 401-step simulate plus the
 /// ~150k-circuit enumeration and its scoring passes run minutes in a debug
@@ -587,7 +587,7 @@ fn world3_full_run_enumeration_is_complete() {
                 .any(|l| l.from.as_str() == "maturation_14_to_15")
         }),
         "a births -> population-aging loop (via maturation_14_to_15) must be \
-         reported; the capped DFS missed this family entirely (peak 27% \
-         partition dominance -- see the 2026-08-10 audit)"
+         reported; the pre-enumeration sampler missed this family entirely \
+         (peak 27% partition dominance -- see the 2026-08-10 audit)"
     );
 }

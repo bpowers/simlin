@@ -53,8 +53,8 @@ typedef enum {
 // `Disabled` means the simulation was created without LTM (`enable_ltm =
 // false`), so no loop enumeration ran. `Exhaustive` means every elementary
 // circuit was enumerated (Johnson). `Discovery` means the model tripped the
-// SCC-size gate (or discovery was requested directly) and loops are ranked
-// by the per-timestep strongest-path heuristic instead. Without this signal
+// SCC-size gate (or discovery was requested directly) and loops are found
+// post-simulation from the recorded link scores instead. Without this signal
 // a caller cannot tell why an LTM-enabled run produced empty or different
 // loop results.
 typedef enum {
@@ -242,7 +242,7 @@ typedef struct {
   uint8_t _private[0];
 } SimlinSim;
 
-// A single loop discovered via the strongest-path LTM discovery algorithm.
+// A single loop found by post-simulation LTM loop discovery.
 //
 // This mirrors `SimlinLoop` but adds a per-timestep `importance` series.
 // We do NOT reuse `SimlinLoop` (despite the score-on-loop suggestion in the
@@ -476,14 +476,14 @@ SimlinLoops *simlin_analyze_get_loops_runtime(SimlinSim *sim, SimlinError **out_
 // - `loops` must be a valid pointer returned by simlin_analyze_get_loops
 void simlin_free_loops(SimlinLoops *loops);
 
-// Run strongest-path LTM loop discovery on a model and return the discovered
-// loops (with per-step importance series), the dominant periods, and a
-// truncation flag, as one `SimlinDiscoveryResult`.
+// Run post-simulation LTM loop discovery on a model and return the
+// discovered loops (with per-step importance series), the dominant periods,
+// and a truncation flag, as one `SimlinDiscoveryResult`.
 //
-// `budget_ms` bounds the wall-clock time spent in discovery's per-timestep
-// DFS sweep; `0` means unlimited.  When the budget elapses before discovery
-// finishes, `truncated` is set and the returned loops/periods reflect only
-// the timesteps processed so far.  Discovery on very large models can be
+// `budget_ms` bounds the wall-clock time spent generating loop candidates;
+// `0` means unlimited.  When the budget elapses before discovery finishes,
+// `truncated` is set and the returned loops/periods reflect only the
+// timesteps processed so far.  Discovery on very large models can be
 // infeasibly slow (GH #647), so the budget lets callers bound it.
 //
 // This deliberately returns loops + periods + truncated together rather than
@@ -532,7 +532,7 @@ SimlinLinks *simlin_analyze_get_links(SimlinSim *sim,
 // compilation failed before LTM could run), `Exhaustive` when every
 // elementary circuit was enumerated, and `Discovery` when the model tripped
 // the SCC-size gate (or discovery was requested directly) so loops are
-// ranked by the per-timestep strongest-path heuristic.  The mode is captured
+// found post-simulation from the recorded link scores.  The mode is captured
 // at `simlin_sim_new` time, so it is available without running the
 // simulation.
 //

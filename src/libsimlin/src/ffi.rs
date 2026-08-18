@@ -82,8 +82,8 @@ pub enum SimlinLinkPolarity {
 /// `Disabled` means the simulation was created without LTM (`enable_ltm =
 /// false`), so no loop enumeration ran. `Exhaustive` means every elementary
 /// circuit was enumerated (Johnson). `Discovery` means the model tripped the
-/// SCC-size gate (or discovery was requested directly) and loops are ranked
-/// by the per-timestep strongest-path heuristic instead. Without this signal
+/// SCC-size gate (or discovery was requested directly) and loops are found
+/// post-simulation from the recorded link scores instead. Without this signal
 /// a caller cannot tell why an LTM-enabled run produced empty or different
 /// loop results.
 #[repr(C)]
@@ -221,7 +221,7 @@ pub struct SimlinLinks {
     pub count: usize,
 }
 
-/// A single loop discovered via the strongest-path LTM discovery algorithm.
+/// A single loop found by post-simulation LTM loop discovery.
 ///
 /// This mirrors `SimlinLoop` but adds a per-timestep `importance` series.
 /// We do NOT reuse `SimlinLoop` (despite the score-on-loop suggestion in the

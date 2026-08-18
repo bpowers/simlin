@@ -1849,9 +1849,9 @@ fn recover_cross_agg_loops(
 /// Group elementary circuits' single-agg petals by their agg, deduped on the
 /// rotation-invariant internal node set.
 ///
-/// A circuit that visits exactly one synthetic agg node (Johnson / the
-/// discovery DFS emit simple cycles, so "one agg in the node list" means
-/// "visited once") is a *petal*: rotate it so the agg is first, and the rest
+/// A circuit that visits exactly one synthetic agg node (Johnson and both
+/// discovery generators emit simple cycles, so "one agg in the node list"
+/// means "visited once") is a *petal*: rotate it so the agg is first, and the rest
 /// is the petal's internal nodes. A circuit touching zero or two-plus distinct
 /// aggs is not a petal (the latter is already a complete cross-agg loop).
 ///

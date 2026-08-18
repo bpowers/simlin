@@ -2,7 +2,7 @@
 link collapsing.
 
 Task A: ``Run.ltm_mode`` / ``Sim.get_ltm_mode()`` expose whether LTM ran in
-exhaustive (Johnson enumeration) or discovery (strongest-path heuristic) mode,
+exhaustive (Johnson enumeration) or discovery (post-simulation) mode,
 or was disabled entirely.
 
 Task B: ``Sim.get_links(include_internal=False)`` (the default) collapses
@@ -170,7 +170,7 @@ class TestGetLinksCollapse:
 
     def test_collapsed_composite_carries_score(self) -> None:
         """The collapsed edge through the macro carries a composite score
-        series (the product/strongest-path score), not a dropped/None score."""
+        series (the product of its links' scores), not a dropped/None score."""
         model = _smooth_feedback_model()
         with model.simulate(enable_ltm=True) as sim:
             sim.run_to_end()
