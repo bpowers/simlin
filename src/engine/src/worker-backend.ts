@@ -161,8 +161,14 @@ export class WorkerBackend implements EngineBackend {
     if (source instanceof URL) {
       return { url: source.toString() };
     }
-    // string path or URL
-    return { url: source };
+    if (typeof source === 'string') {
+      // path or URL
+      return { url: source };
+    }
+    // Every WasmSource member is handled above; a new one must be routed
+    // through the worker protocol explicitly, not fall through as a URL.
+    const exhaustive: never = source;
+    throw new Error(`unsupported wasm source: ${String(exhaustive)}`);
   }
 
   async init(wasmSource?: WasmSourceProvider): Promise<void> {

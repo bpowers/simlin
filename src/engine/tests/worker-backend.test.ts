@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { describe, test, expect, beforeEach } from '@rstest/core';
+import { describe, test, expect, beforeEach, rs } from '@rstest/core';
 
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -210,7 +210,12 @@ describe('WorkerBackend', () => {
       const module = await WebAssembly.compile(
         bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
       );
+      // The module must be USED, not re-derived: no compile happens anywhere
+      // on the init path (server side included -- the pair runs in-process).
+      const compileSpy = rs.spyOn(WebAssembly, 'compile');
       await backend.init(module);
+      expect(compileSpy).not.toHaveBeenCalled();
+      compileSpy.mockRestore();
       expect(backend.isInitialized()).toBe(true);
       // A compiled module is structured-cloneable but not Transferable.
       const initTransfer = transfers.find((t) => t !== undefined && t.length > 0);
@@ -231,7 +236,10 @@ describe('WorkerBackend', () => {
         bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
       );
       backend.configureWasm({ source: module });
+      const compileSpy = rs.spyOn(WebAssembly, 'compile');
       await backend.init();
+      expect(compileSpy).not.toHaveBeenCalled();
+      compileSpy.mockRestore();
       expect(backend.isInitialized()).toBe(true);
     });
 
