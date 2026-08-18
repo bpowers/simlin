@@ -260,30 +260,61 @@ print(f"partitions   {len(analysis.partitions)} "
       f"(loop counts: {sorted((p.loop_count for p in analysis.partitions), reverse=True)[:8]})")
 print(f"truncated    {analysis.truncated}")
 print(f"agg_recovery_truncated {analysis.agg_recovery_truncated}")
+print(f"enumeration_complete   {analysis.enumeration_complete}")
+print(f"retained_loops         {analysis.retained_loops}")
+print(f"universe_loops         {analysis.universe_loops}")
 print("polarity mix:", dict(Counter(str(lp.polarity) for lp in analysis.loops)))
 """
     )
 
     md(
         """
-### `enumeration_complete` is not on this object yet
+### `enumeration_complete`, `retained_loops`, `universe_loops`
 
 `DiscoveryResult::enumeration_complete` -- the engine's statement that candidate
 generation was the union-graph enumeration *and* it ran to completion, so the
-candidate set is the provable universe rather than the fallback's sample -- is not
-exposed through `pysimlin` at the time of writing. Phase 5 of the design plan adds
-it to libsimlin, `pysimlin.Analysis`, and the MCP outputs.
+candidate set is the provable universe rather than the fallback's sample -- and its
+two companions `retained_loops` (survivors before the report cap) and
+`universe_loops` (the enumerated candidate count, `None` on a sampled run) are all
+three on `pysimlin.Analysis` directly now (`Model.analyze()`'s return value, printed
+above).
 
-Until then the flag is read from the dump, which calls the engine entry point
-directly. That is a strictly weaker place to read it from: the dump and
-`analyze()` are two separate discovery runs over two separate simulations of the
-same model, so the cell below cross-checks that they agree on the loop count
-before any conclusion is drawn from either.
+The dump's own copies of the same three fields come from a SEPARATE discovery run
+over a separate simulation of the same model (the dump calls the engine entry point
+directly rather than going through pysimlin), so the cell below cross-checks that
+`analyze()` and the dump agree on all three before either is used as evidence --
+content-pure discovery on an unbudgeted run should make them agree exactly, and a
+disagreement here means the dump binary and the pysimlin extension were built from
+different engine revisions.
 """
     )
 
     code(
         """
+def decode_score(v):
+    \"\"\"Decode one score value from the dump's non-finite-safe encoding
+    (`ltm_search_graph_dump.rs`'s `score_to_json`): a JSON number stays a
+    float, and the strings "nan"/"inf"/"-inf" decode to the IEEE value they
+    name. Without this, `json.load` turns a bare non-finite JSON `null` (the
+    default `serde_json` encoding this dump deliberately avoids) into
+    Python `None`, and `np.array([None, ...], dtype=np.float64)` silently
+    converts EVERY `None` to `nan` -- collapsing a genuinely infinite score
+    (ACTIVE per `is_active`, a real divergent signal that multiplies through
+    a partition's totals) into NaN (INACTIVE, poisons any product it is
+    part of). That is exactly the distinction the union-graph active-edge
+    computation below depends on, so decoding it correctly here is what
+    keeps this notebook an independent check on the engine rather than one
+    that quietly agrees with it by losing the same information the same way.
+    \"\"\"
+    if isinstance(v, str):
+        return {"nan": float("nan"), "inf": float("inf"), "-inf": float("-inf")}[v]
+    return float(v)
+
+
+def decode_scores(vs):
+    return [decode_score(v) for v in vs]
+
+
 dump = json.load(open(DUMP_PATH))
 T = dump["step_count"]
 
@@ -303,6 +334,29 @@ print(f"\\ndump reported {len(dump['discovered'])} loops, analyze() reported "
 if not same:
     print("  the dump binary and the pysimlin extension were built from different "
           "engine revisions; rebuild pysimlin before reading section 5")
+
+# pysimlin/dump completeness cross-check: `analyze()`'s Analysis fields
+# (section 1, above) and the dump's copies of the same three fields come
+# from two SEPARATE discovery runs, so agreement here is not definitional --
+# it is what makes trusting either one (rather than re-running discovery a
+# third time) justified for the rest of this notebook.
+completeness_agree = (
+    analysis.enumeration_complete == dump["enumeration_complete"]
+    and analysis.retained_loops == dump["retained_loops"]
+    and analysis.universe_loops == dump["universe_loops"]
+)
+print(
+    f"\\npysimlin/dump completeness cross-check: "
+    f"{'AGREE' if completeness_agree else 'DISAGREE'} "
+    f"(enumeration_complete {analysis.enumeration_complete}=={dump['enumeration_complete']}, "
+    f"retained_loops {analysis.retained_loops}=={dump['retained_loops']}, "
+    f"universe_loops {analysis.universe_loops}=={dump['universe_loops']})"
+)
+assert completeness_agree, (
+    "analyze() and the dump disagree on completeness -- rebuild pysimlin "
+    "and regenerate the dump from the same engine revision before trusting "
+    "either"
+)
 """
     )
 
@@ -357,13 +411,14 @@ rows: list[list[float]] = []
 duplicate_pairs = 0
 for e in dump["edges"]:
     uv = (nid(e["from"]), nid(e["to"]))
+    scores = decode_scores(e["scores"])
     if uv in edge_index:
         duplicate_pairs += 1
-        rows[edge_index[uv]] = e["scores"]  # last wins, as `link_offset_map` does
+        rows[edge_index[uv]] = scores  # last wins, as `link_offset_map` does
     else:
         edge_index[uv] = len(pairs)
         pairs.append(uv)
-        rows.append(e["scores"])
+        rows.append(scores)
 for s in dump["stocks"]:
     nid(s)
 NN = len(node_names)
@@ -925,7 +980,7 @@ for d in dump["discovered"]:
     if c is None:
         continue
 
-    e_raw = np.array(d["scores"], dtype=np.float64)
+    e_raw = np.array(decode_scores(d["scores"]), dtype=np.float64)
     p_raw = score[c]
     both = (~np.isnan(e_raw)) & (~np.isnan(p_raw))
     if both.any():
@@ -940,7 +995,7 @@ for d in dump["discovered"]:
         if g is not None:
             tot = group_totals(g)
             p_rel = np.where(tot == 0.0, 0.0, p_raw / np.where(tot == 0.0, 1.0, tot))
-            e_rel = np.array(d["rel_scores"], dtype=np.float64)
+            e_rel = np.array(decode_scores(d["rel_scores"]), dtype=np.float64)
             both = (~np.isnan(e_rel)) & (~np.isnan(p_rel))
             if both.any():
                 rel_max = max(rel_max, float(np.abs(e_rel[both] - p_rel[both]).max()))
@@ -1081,7 +1136,9 @@ verdict_rows = [
     ("max relative difference in raw loop scores", f"{raw_max:.3e}"),
     ("max |rel score| difference", f"{rel_max:.3e}"),
     ("step-dominant coverage (competing groups)", f"{covered}/{total_steps}"),
-    ("enumeration_complete", f"{dump['enumeration_complete']}"),
+    ("enumeration_complete", f"{analysis.enumeration_complete}"),
+    ("retained_loops (pysimlin)", f"{analysis.retained_loops}"),
+    ("universe_loops (pysimlin)", f"{analysis.universe_loops}"),
 ]
 for label, value in verdict_rows:
     print(f"{label}: {value}")
@@ -1092,8 +1149,9 @@ gap = total_steps - covered
 display(Markdown(f\"\"\"
 ### Verdict
 
-- **Candidate generation**: the engine's `enumeration_complete` is
-  `{dump['enumeration_complete']}`, and an independent enumeration of the same union
+- **Candidate generation**: `pysimlin.Analysis.enumeration_complete` is
+  `{analysis.enumeration_complete}` (cross-checked against the dump's own copy,
+  section 1), and an independent enumeration of the same union
   graph finds **{n_cyc}** ever-simultaneously-active elementary cycles. Every one of
   the engine's {len(engine_set)} reported loops
   {'is' if len(not_in_universe) == 0 else 'is NOT all'} in that universe

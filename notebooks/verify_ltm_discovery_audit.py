@@ -34,6 +34,10 @@ MODELS = ("clearn", "wrld3")
 # own verdict even if every cell still runs green.
 MARKERS = {
     "enumeration_complete": "the engine's own completeness flag",
+    "pysimlin/dump completeness cross-check": (
+        "pysimlin.Analysis's enumeration_complete/retained_loops/universe_loops "
+        "agree with the dump's own copies"
+    ),
     "elementary cycles ever simultaneously active": "the independent universe size",
     "retention survivors": "how many cycles clear the 0.1% threshold",
     "engine loops absent from the independent universe": "no fabricated loops",

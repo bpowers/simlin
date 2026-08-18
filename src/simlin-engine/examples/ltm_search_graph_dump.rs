@@ -20,6 +20,8 @@
 //!     "partitions": [["stock", ...], ...],  // cycle partitions, engine order
 //!     "edges": [{"from": "...", "to": "...", "scores": [f64; N]}, ...],
 //!     "enumeration_complete": bool,
+//!     "universe_loops": usize|null,   // Some(n) iff enumeration_complete
+//!     "retained_loops": usize,
 //!     "truncated": bool,
 //!     "agg_recovery_truncated": bool,
 //!     "discovered": [{"id": "...", "nodes": [...], "scores": [f64; N],
@@ -44,17 +46,52 @@
 //! the `edges` rows, so a consumer can detect that from the data instead of
 //! having to know which nodes the engine treats as modules.
 //!
+//! **Non-finite score values are spelled explicitly, never `null`.** Every
+//! score array (`edges[].scores`, `discovered[].scores`,
+//! `discovered[].rel_scores`) encodes a finite value as a JSON number and a
+//! non-finite one as the string `"nan"`, `"inf"`, or `"-inf"` -- `serde_json`
+//! collapses NaN/Inf/-Inf to `null` by default, which erases the distinction
+//! the loader needs: per `is_active` (the ONE activity rule both generators
+//! and the totals share), an infinite score is ACTIVE -- a genuine divergent
+//! signal that multiplies through a partition's totals -- while NaN is
+//! INACTIVE and poisons any product it appears in. `null` cannot tell those
+//! apart, so a consumer reading it either has to guess or treats every
+//! non-finite step as inactive, which silently disagrees with the engine on
+//! a divergent run. `notebooks/build_ltm_discovery_audit.py`'s loader decodes
+//! the three spellings back to `float('nan')`/`float('inf')`/`float('-inf')`.
+//!
 //! Environment:
 //!   LTM_DUMP_MODEL   override the model path (default: C-LEARN v77)
 //!   LTM_DUMP_OUT     output file path (default: stdout)
 
 use salsa::Setter;
 use simlin_engine::db::{
-    SimlinDb, causal_graph_from_element_edges, compile_project_incremental,
+    SimlinDb, causal_graph_from_element_edges_with_modules, compile_project_incremental,
     model_element_causal_edges, model_ltm_variables, project_datamodel_dims,
     sync_from_datamodel_incremental,
 };
 use simlin_engine::{canonicalize, open_vensim, open_xmile};
+
+/// Encode one score value as JSON, spelling a non-finite value explicitly
+/// (`"nan"` / `"inf"` / `"-inf"`) instead of letting `serde_json` collapse it
+/// to `null` -- see the module doc for why the distinction matters to the
+/// loader.
+fn score_to_json(v: f64) -> serde_json::Value {
+    if v.is_nan() {
+        serde_json::Value::String("nan".to_string())
+    } else if v == f64::INFINITY {
+        serde_json::Value::String("inf".to_string())
+    } else if v == f64::NEG_INFINITY {
+        serde_json::Value::String("-inf".to_string())
+    } else {
+        serde_json::json!(v)
+    }
+}
+
+/// [`score_to_json`] over a whole series.
+fn scores_to_json(vs: &[f64]) -> Vec<serde_json::Value> {
+    vs.iter().copied().map(score_to_json).collect()
+}
 
 fn main() {
     let path = std::env::var("LTM_DUMP_MODEL").unwrap_or_else(|_| {
@@ -95,7 +132,19 @@ fn main() {
         .unwrap();
 
     let element_edges = model_element_causal_edges(&db, source_model, source_project);
-    let causal_graph = causal_graph_from_element_edges(element_edges);
+    // The PRODUCTION constructor (`analysis::analyze_model` uses the
+    // identical call): the bare `causal_graph_from_element_edges` leaves the
+    // module sub-graphs and variable map empty, which silently disables the
+    // discovery-mode per-exit-port pathway recompute this dump's own module-
+    // override doc above describes (GH #698) -- on a module-bearing model
+    // that made this instrument run a DIFFERENT discovery path than
+    // `Model.analyze()`.
+    let causal_graph = causal_graph_from_element_edges_with_modules(
+        &db,
+        source_model,
+        source_project,
+        element_edges,
+    );
     let stocks: Vec<_> = element_edges
         .stocks
         .iter()
@@ -144,7 +193,7 @@ fn main() {
             serde_json::json!({
                 "from": from.as_str(),
                 "to": to.as_str(),
-                "scores": scores,
+                "scores": scores_to_json(&scores),
             })
         })
         .collect();
@@ -169,13 +218,14 @@ fn main() {
                     .copied()
                     .expect("a reported partition's stocks are cycle-partition members")
             });
+            let scores: Vec<f64> = l.scores.iter().map(|&(_, s)| s).collect();
             serde_json::json!({
                 "id": l.loop_info.id,
                 "polarity": format!("{:?}", l.loop_info.polarity),
                 "avg_abs_score": l.avg_abs_score,
                 "nodes": nodes,
-                "scores": l.scores.iter().map(|&(_, s)| s).collect::<Vec<_>>(),
-                "rel_scores": l.rel_scores,
+                "scores": scores_to_json(&scores),
+                "rel_scores": scores_to_json(&l.rel_scores),
                 "partition": partition,
             })
         })
@@ -192,6 +242,8 @@ fn main() {
             .collect::<Vec<_>>(),
         "edges": edges,
         "enumeration_complete": found.enumeration_complete,
+        "universe_loops": found.universe_loops,
+        "retained_loops": found.retained_loops,
         "truncated": found.truncated,
         "agg_recovery_truncated": found.agg_recovery_truncated,
         "discovered": discovered,

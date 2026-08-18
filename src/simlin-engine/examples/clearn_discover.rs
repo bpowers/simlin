@@ -24,7 +24,7 @@ use std::time::Instant;
 use salsa::Setter;
 use simlin_engine::analysis::analyze_model;
 use simlin_engine::db::{
-    SimlinDb, causal_graph_from_element_edges, compile_project_incremental,
+    SimlinDb, causal_graph_from_element_edges_with_modules, compile_project_incremental,
     model_element_causal_edges, model_ltm_variables, project_datamodel_dims,
     sync_from_datamodel_incremental,
 };
@@ -236,7 +236,17 @@ fn main() {
     let element_edges = phase("build element causal graph", || {
         model_element_causal_edges(&db, source_model, source_project)
     });
-    let causal_graph = causal_graph_from_element_edges(element_edges);
+    // The PRODUCTION constructor (`analysis::analyze_model` calls the
+    // identical form): the bare `causal_graph_from_element_edges` leaves
+    // module sub-graphs and the variable map empty, silently disabling the
+    // discovery-mode per-exit-port pathway recompute (GH #698) on a
+    // module-bearing model like C-LEARN (SMOOTH/DELAY stdlib modules).
+    let causal_graph = causal_graph_from_element_edges_with_modules(
+        &db,
+        source_model,
+        source_project,
+        element_edges,
+    );
     let stocks: Vec<_> = element_edges
         .stocks
         .iter()
