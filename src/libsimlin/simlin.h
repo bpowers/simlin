@@ -942,9 +942,9 @@ void simlin_free_string(char *s);
 // compile or codegen failure stores a `SimlinError` (never panics across the
 // boundary) and leaves both output buffers NULL.
 //
-// `ltm_enabled` and `ltm_discovery_mode` flip the same flags
-// `simlin_project_enable_ltm` sets on a `SimlinProject`, but locally for this
-// compile: the produced blob's layout includes the `$\u{205A}ltm\u{205A}*`
+// `ltm_enabled` and `ltm_discovery_mode` flip the same salsa flags
+// `simlin_sim_new(.., enable_ltm=true)` sets transiently on the project's
+// `SourceProject`, but locally for this compile: the produced blob's layout includes the `$\u{205A}ltm\u{205A}*`
 // synthetic series iff `ltm_enabled` is true.
 //
 // # Safety
@@ -1234,6 +1234,63 @@ SimlinModel *simlin_project_get_model(SimlinProject *project,
                                       const char *model_name,
                                       SimlinError **out_error);
 
+// Replace the contents of `dst` with a copy of the contents of `src`.
+//
+// `dst`'s `datamodel::Project` becomes a deep clone of `src`'s, and `dst`'s
+// salsa db is re-synced to it incrementally, so unchanged variables keep
+// their cached compile fragments. `src` is only read (its refcount is not
+// touched) and may be freed immediately afterwards.
+//
+// This is the in-place reload primitive: a caller that reloads a project
+// from disk opens the new bytes with the matching `simlin_project_open_*`
+// function into a scratch project and replaces the live project's contents
+// from it, instead of building a new `SimlinProject` -- so it composes with
+// every format the open functions support and never needs a per-format
+// variant.
+//
+// # Effect on live handles
+//
+// A `SimlinModel` holds a pointer to its `SimlinProject` plus a model NAME,
+// not a copy of the model, so:
+//
+// - Every existing `SimlinModel` handle on `dst` stays valid and observes
+//   the NEW contents on its next call (variables, equations, sim specs,
+//   diagnostics via `simlin_project_get_errors`, a fresh `simlin_sim_new`).
+// - A handle whose model name is absent from the replacement is not
+//   invalidated: queries through it return `BadModelName`, and a sim
+//   created through it fails on its first run with `NotSimulatable` naming
+//   the model (`simlin_sim_new` defers compile failures to the run, per its
+//   own contract) -- until a model of that name exists again, at which point
+//   the same handle works once more.
+// - A `SimlinSim` created BEFORE the replace is a stale snapshot for the
+//   simulation entry points (`simlin_sim_*`): it was compiled from the old
+//   contents and keeps its results and its ability to `reset`/re-run against
+//   that compiled program. The sim-bearing ANALYSIS entry points
+//   (`simlin_analyze_get_loops_runtime`, `simlin_analyze_get_links`, ...)
+//   are not snapshots: they enumerate loops/links from the project's CURRENT
+//   contents and read scores out of the stale sim's results by position, so
+//   after a replace they mix old results with the new model. Callers should
+//   create and run a new sim after a replace before analyzing.
+//
+// # Locking
+//
+// `src`'s datamodel lock is taken alone, just long enough to clone, and
+// released BEFORE `dst`'s locks are acquired -- so two threads replacing in
+// opposite directions cannot deadlock, and `dst == src` (a permitted no-op
+// re-sync) does not self-deadlock. `dst`'s datamodel and db locks are then
+// held together, in the datamodel-then-db order used project-wide, across
+// both the db re-sync and the datamodel swap, so no concurrent reader
+// (`simlin_sim_new`, `simlin_project_get_errors`, `simlin_project_apply_patch`)
+// observes the datamodel and the db disagreeing.
+//
+// # Safety
+// - `dst` must be a valid pointer to a SimlinProject
+// - `src` must be a valid pointer to a SimlinProject
+// - `out_error` may be null
+void simlin_project_replace_contents(SimlinProject *dst,
+                                     const SimlinProject *src,
+                                     SimlinError **out_error);
+
 // Open a project from XMILE/STMX format data
 //
 // Parses and imports a system dynamics model from XMILE format, the industry
@@ -1463,6 +1520,42 @@ void simlin_project_serialize_xmile(SimlinProject *project,
                                     uint8_t **out_buffer,
                                     uintptr_t *out_len,
                                     SimlinError **out_error);
+
+// Serialize a project to Vensim MDL format
+//
+// Exports the project's single model (plus any macro-marked models, emitted
+// as `:MACRO:` blocks) as Vensim MDL text, including the sketch section for
+// a model that has a diagram view. The output buffer contains UTF-8 text.
+//
+// The MDL surface cannot represent every Simlin construct. The engine's
+// lossiness contract (`simlin_engine::mdl::project_to_mdl_with_warnings`)
+// splits the gap in two, and this function surfaces both halves separately:
+//
+// - **Hard errors** (a project with more than one ordinary model, an
+//   ordinary module instance, an unreconstructable macro cluster) fail the
+//   export: `out_error` is set and no buffer is produced.
+// - **Lossiness warnings** (a dropped non-negative flag, a discrete or
+//   extrapolating lookup emitted in the closest representable form, a
+//   truncated group name, ...) do NOT fail the export. The text is still
+//   written, and each warning is reported as a `Warning`-severity detail on
+//   `out_collected_errors` (an aggregate `SimlinError`, freed with
+//   `simlin_error_free`; NULL when there were no warnings). Pass NULL for
+//   `out_collected_errors` to discard the warnings. This mirrors how
+//   `simlin_project_apply_patch` separates a rejection (`out_error`) from
+//   the diagnostics it collected along the way (`out_collected_errors`).
+//
+// Caller must free the output buffer with `simlin_free`.
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+// - `out_buffer` and `out_len` must be valid pointers
+// - `out_collected_errors` may be null
+// - `out_error` may be null
+void simlin_project_serialize_mdl(SimlinProject *project,
+                                  uint8_t **out_buffer,
+                                  uintptr_t *out_len,
+                                  SimlinError **out_collected_errors,
+                                  SimlinError **out_error);
 
 // Serialize a project to systems format
 //

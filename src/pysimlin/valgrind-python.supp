@@ -319,10 +319,35 @@
    fun:Py_Initialize*
 }
 
-# Suppress uninitialized value warnings in Python internals
+# Suppress uninitialized value warnings in Python internals (valgrind
+# accepts no wildcard in the Value kind, so one block per access width)
 {
-   python_uninitialized_value
-   Memcheck:Value*
+   python_uninitialized_value_1
+   Memcheck:Value1
+   ...
+   obj:/usr/bin/python*
+}
+{
+   python_uninitialized_value_2
+   Memcheck:Value2
+   ...
+   obj:/usr/bin/python*
+}
+{
+   python_uninitialized_value_4
+   Memcheck:Value4
+   ...
+   obj:/usr/bin/python*
+}
+{
+   python_uninitialized_value_8
+   Memcheck:Value8
+   ...
+   obj:/usr/bin/python*
+}
+{
+   python_uninitialized_value_16
+   Memcheck:Value16
    ...
    obj:/usr/bin/python*
 }
