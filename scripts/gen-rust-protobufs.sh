@@ -48,9 +48,15 @@ fn main() {
 }
 EOF
 
-# Run the build to generate the protobuf code
+# Run the build to generate the protobuf code. prost-build shells out to
+# `protoc`; surface its stderr on failure (a missing protoc is the common case)
+# instead of exiting silently with nothing written.
 cd "$TEMP_DIR"
-cargo build 2>/dev/null
+if ! cargo build 2>"$TEMP_DIR/build.log"; then
+    cat "$TEMP_DIR/build.log" >&2
+    echo "error: prost-build failed; see output above" >&2
+    exit 1
+fi
 
 # Prepend the header to the generated file
 {
