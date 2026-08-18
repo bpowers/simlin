@@ -336,14 +336,14 @@ export function makeFlow(
   };
 }
 
-function makeView(elements: readonly ViewElement[]): StockFlowView {
+function makeView(elements: readonly ViewElement[], zoom = 1): StockFlowView {
   const viewBox: Rect = { x: 0, y: 0, width: 1000, height: 1000 };
   const maxUid = elements.reduce((m, e) => Math.max(m, e.uid), 0);
   return {
     nextUid: maxUid + 1,
     elements,
     viewBox,
-    zoom: 1,
+    zoom,
     useLetteredPolarity: false,
   };
 }
@@ -418,6 +418,12 @@ export interface HarnessOptions {
   readOnly?: boolean;
   variables?: ReadonlyMap<string, Variable>;
   /**
+   * The zoom the view MOUNTS with (default 1). Lets a test model a stored view
+   * whose zoom came from a file rather than a gesture (e.g. an out-of-range
+   * value) and observe what the mount-time fit does with it.
+   */
+  zoom?: number;
+  /**
    * When true (the default), `onSetSelection` commits the new selection back
    * into `props.selection` and re-renders -- modeling the real host (Editor),
    * which sets its selection state in the same React event so the resulting
@@ -473,7 +479,7 @@ export interface CanvasHarness {
 export function renderCanvas(opts: HarnessOptions): CanvasHarness {
   installCanvasPolyfills();
 
-  const view = makeView(opts.elements);
+  const view = makeView(opts.elements, opts.zoom);
   const model = makeModel(view, opts.variables);
   const project = makeProject(model);
   const callbacks = makeCallbacks();
