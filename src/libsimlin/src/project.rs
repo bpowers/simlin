@@ -440,6 +440,82 @@ pub unsafe extern "C" fn simlin_project_get_model(
     Box::into_raw(Box::new(model))
 }
 
+/// Replace the contents of `dst` with a copy of the contents of `src`.
+///
+/// `dst`'s `datamodel::Project` becomes a deep clone of `src`'s, and `dst`'s
+/// salsa db is re-synced to it incrementally, so unchanged variables keep
+/// their cached compile fragments. `src` is only read (its refcount is not
+/// touched) and may be freed immediately afterwards.
+///
+/// This is the in-place reload primitive: a host that mirrors a model file on
+/// disk (pysimlin's `open()`, the notebook widget) opens the new bytes with
+/// the matching `simlin_project_open_*` function into a scratch project and
+/// replaces the live project's contents from it, instead of building a new
+/// `SimlinProject` -- so it composes with every format the open functions
+/// support and never needs a per-format variant.
+///
+/// # Effect on live handles
+///
+/// A `SimlinModel` holds a pointer to its `SimlinProject` plus a model NAME,
+/// not a copy of the model, so:
+///
+/// - Every existing `SimlinModel` handle on `dst` stays valid and observes
+///   the NEW contents on its next call (variables, equations, sim specs,
+///   diagnostics via `simlin_project_get_errors`, a fresh `simlin_sim_new`).
+/// - A handle whose model name is absent from the replacement is not
+///   invalidated: queries through it return `BadModelName`, and a sim
+///   created through it fails on its first run with `NotSimulatable` naming
+///   the model (`simlin_sim_new` defers compile failures to the run, per its
+///   own contract) -- until a model of that name exists again, at which point
+///   the same handle works once more.
+/// - A `SimlinSim` created BEFORE the replace is a stale snapshot: it was
+///   compiled from the old contents and keeps its results and its ability to
+///   `reset`/re-run against that compiled program. Create a new sim to
+///   simulate the replacement.
+///
+/// # Locking
+///
+/// `src`'s datamodel lock is taken alone, just long enough to clone, and
+/// released BEFORE `dst`'s locks are acquired -- so two threads replacing in
+/// opposite directions cannot deadlock, and `dst == src` (a permitted no-op
+/// re-sync) does not self-deadlock. `dst`'s datamodel and db locks are then
+/// held together, in the datamodel-then-db order used project-wide, across
+/// both the db re-sync and the datamodel swap, so no concurrent reader
+/// (`simlin_sim_new`, `simlin_project_get_errors`, `simlin_project_apply_patch`)
+/// observes the datamodel and the db disagreeing.
+///
+/// # Safety
+/// - `dst` must be a valid pointer to a SimlinProject
+/// - `src` must be a valid pointer to a SimlinProject
+/// - `out_error` may be null
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_replace_contents(
+    dst: *mut SimlinProject,
+    src: *const SimlinProject,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    let dst_ref = ffi_try!(out_error, require_project(dst));
+    if src.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("source project pointer must not be NULL"),
+        );
+        return;
+    }
+    let src_ref = &*src;
+
+    // Clone under src's lock alone, then release it before touching dst (see
+    // the locking notes above).
+    let new_datamodel = src_ref.datamodel.lock().unwrap().clone();
+
+    let mut datamodel_locked = dst_ref.datamodel.lock().unwrap();
+    let mut db_locked = dst_ref.db.lock().unwrap();
+    db_locked.sync(&new_datamodel);
+    *datamodel_locked = new_datamodel;
+}
+
 /// Open a project from XMILE/STMX format data
 ///
 /// Parses and imports a system dynamics model from XMILE format, the industry

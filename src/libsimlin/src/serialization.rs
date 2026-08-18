@@ -4,8 +4,8 @@
 
 //! Serialization FFI functions.
 //!
-//! Functions for serializing projects to protobuf, JSON, XMILE, SVG, and
-//! PNG formats. The memory for the output buffers is allocated via
+//! Functions for serializing projects to protobuf, JSON, XMILE, Vensim MDL,
+//! systems, SVG, and PNG formats. The memory for the output buffers is allocated via
 //! `simlin_malloc` so that callers free it with `simlin_free`.
 
 use prost::Message;
@@ -15,11 +15,12 @@ use std::os::raw::c_char;
 use std::ptr;
 
 use crate::ffi;
-use crate::ffi_error::SimlinError;
+use crate::ffi_error::{ErrorDetail, SimlinError};
 use crate::ffi_try;
 use crate::memory::simlin_malloc;
 use crate::{
-    clear_out_error, require_project, store_anyhow_error, store_error, SimlinErrorCode,
+    build_simlin_error, clear_out_error, require_project, store_anyhow_error, store_error,
+    write_bytes_to_ffi_output, SimlinErrorCode, SimlinErrorKind, SimlinErrorSeverity,
     SimlinProject,
 };
 
@@ -302,6 +303,102 @@ pub unsafe extern "C" fn simlin_project_serialize_xmile(
             );
         }
     }
+}
+
+/// Serialize a project to Vensim MDL format
+///
+/// Exports the project's single model (plus any macro-marked models, emitted
+/// as `:MACRO:` blocks) as Vensim MDL text, including the sketch section for
+/// a model that has a diagram view. The output buffer contains UTF-8 text.
+///
+/// The MDL surface cannot represent every Simlin construct. The engine's
+/// lossiness contract (`simlin_engine::mdl::project_to_mdl_with_warnings`)
+/// splits the gap in two, and this function surfaces both halves separately:
+///
+/// - **Hard errors** (a project with more than one ordinary model, an
+///   ordinary module instance, an unreconstructable macro cluster) fail the
+///   export: `out_error` is set and no buffer is produced.
+/// - **Lossiness warnings** (a dropped non-negative flag, a discrete or
+///   extrapolating lookup emitted in the closest representable form, a
+///   truncated group name, ...) do NOT fail the export. The text is still
+///   written, and each warning is reported as a `Warning`-severity detail on
+///   `out_collected_errors` (an aggregate `SimlinError`, freed with
+///   `simlin_error_free`; NULL when there were no warnings). Pass NULL for
+///   `out_collected_errors` to discard the warnings. This mirrors how
+///   `simlin_project_apply_patch` separates a rejection (`out_error`) from
+///   the diagnostics it collected along the way (`out_collected_errors`).
+///
+/// Caller must free the output buffer with `simlin_free`.
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - `out_buffer` and `out_len` must be valid pointers
+/// - `out_collected_errors` may be null
+/// - `out_error` may be null
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_serialize_mdl(
+    project: *mut SimlinProject,
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_collected_errors: *mut *mut SimlinError,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if !out_collected_errors.is_null() {
+        *out_collected_errors = ptr::null_mut();
+    }
+    if out_buffer.is_null() || out_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+
+    // Clear output pointers upfront so callers that ignore errors don't free stale pointers
+    *out_buffer = ptr::null_mut();
+    *out_len = 0;
+
+    let proj = ffi_try!(out_error, require_project(project));
+
+    let datamodel_locked = proj.datamodel.lock().unwrap();
+    let (mdl_text, warnings) = match simlin_engine::to_mdl_with_warnings(&datamodel_locked) {
+        Ok(result) => result,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::from(err.code))
+                    .with_message(format!("failed to export MDL: {err}")),
+            );
+            return;
+        }
+    };
+    drop(datamodel_locked);
+
+    if !write_bytes_to_ffi_output(mdl_text.as_bytes(), out_buffer, out_len, out_error, "MDL") {
+        return;
+    }
+
+    if out_collected_errors.is_null() || warnings.is_empty() {
+        return;
+    }
+
+    // An `ExportWarning` carries only a message naming the affected variable,
+    // dimension, or group; there is no engine `ErrorCode` for lossiness, so
+    // each rides the wire `Generic` code with `Warning` severity -- the
+    // severity is what tells a caller the export succeeded.
+    let details: Vec<ErrorDetail> = warnings
+        .into_iter()
+        .map(|w| ErrorDetail {
+            message: Some(format!("MDL export: {}", w.message)),
+            kind: SimlinErrorKind::Model,
+            severity: SimlinErrorSeverity::Warning,
+            details: Some(w.message),
+            ..ErrorDetail::new(SimlinErrorCode::Generic)
+        })
+        .collect();
+    *out_collected_errors = build_simlin_error(SimlinErrorCode::Generic, &details).into_raw();
 }
 
 /// Serialize a project to systems format

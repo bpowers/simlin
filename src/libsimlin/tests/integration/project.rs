@@ -12,7 +12,7 @@ use simlin_engine::serde as engine_serde;
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{self as engine};
 
-use crate::common::{expect_no_error, open_project_from_datamodel};
+use crate::common::{expect_error_code, expect_no_error, open_project_from_datamodel};
 
 #[test]
 fn test_project_lifecycle() {
@@ -1674,6 +1674,343 @@ fn test_stdlib_models_present_after_json_open() {
         );
 
         simlin_free(pb_buf);
+        simlin_project_unref(proj);
+    }
+}
+
+// ── simlin_project_replace_contents ────────────────────────────────────
+
+/// Sorted variable names of `model` via the public FFI (what a live handle
+/// observes), asserting the query succeeded.
+unsafe fn ffi_var_names(model: *mut SimlinModel) -> Vec<String> {
+    let mut count: usize = 0;
+    let mut err: *mut SimlinError = ptr::null_mut();
+    simlin_model_get_var_count(model, 0, ptr::null(), &mut count, &mut err);
+    expect_no_error(err, "get_var_count");
+    let mut names: Vec<*mut std::os::raw::c_char> = vec![ptr::null_mut(); count];
+    let mut written: usize = 0;
+    err = ptr::null_mut();
+    simlin_model_get_var_names(
+        model,
+        0,
+        ptr::null(),
+        names.as_mut_ptr(),
+        count,
+        &mut written,
+        &mut err,
+    );
+    expect_no_error(err, "get_var_names");
+    let mut out: Vec<String> = names
+        .into_iter()
+        .take(written)
+        .map(|p| {
+            let s = CStr::from_ptr(p).to_str().unwrap().to_string();
+            simlin_free_string(p);
+            s
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+unsafe fn replace_contents_ok(dst: *mut SimlinProject, src: *mut SimlinProject) {
+    let mut err: *mut SimlinError = ptr::null_mut();
+    simlin_project_replace_contents(dst, src, &mut err);
+    expect_no_error(err, "replace_contents");
+}
+
+/// Sim step count via the FFI, asserting success.
+unsafe fn ffi_stepcount(sim: *mut SimlinSim) -> usize {
+    let mut steps: usize = 0;
+    let mut err: *mut SimlinError = ptr::null_mut();
+    simlin_sim_get_stepcount(sim, &mut steps, &mut err);
+    expect_no_error(err, "get_stepcount");
+    steps
+}
+
+fn population_project(stop: f64) -> engine::datamodel::Project {
+    TestProject::new("population")
+        .with_sim_time(0.0, stop, 1.0)
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * birth_rate", None)
+        .aux("birth_rate", "0.02", None)
+        .build_datamodel()
+}
+
+/// The core contract: a `SimlinModel` handle obtained BEFORE the replace
+/// keeps working and observes the new contents (variables, sim specs), so a
+/// host reloading a model file in place does not have to invalidate its
+/// model objects. The source project is untouched and, once its own
+/// refcount is dropped, the destination still holds an independent copy.
+#[test]
+fn test_replace_contents_live_model_handle_observes_new_contents() {
+    let dst = open_project_from_datamodel(&population_project(10.0));
+    let src_datamodel = TestProject::new("population_v2")
+        .with_sim_time(0.0, 20.0, 1.0)
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * birth_rate", None)
+        .flow("deaths", "population * death_rate", None)
+        .aux("birth_rate", "0.02", None)
+        .aux("death_rate", "0.01", None)
+        .build_datamodel();
+    let src = open_project_from_datamodel(&src_datamodel);
+
+    unsafe {
+        let src_snapshot = (*src).datamodel.lock().unwrap().clone();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(dst, ptr::null(), &mut err);
+        expect_no_error(err, "get_model");
+        assert_eq!(
+            ffi_var_names(model),
+            vec!["birth_rate", "births", "population"]
+        );
+
+        let dst_refs_before = (*dst).ref_count.load(Ordering::SeqCst);
+        let src_refs_before = (*src).ref_count.load(Ordering::SeqCst);
+
+        replace_contents_ok(dst, src);
+
+        // The same handle now sees the replacement's variables ...
+        assert_eq!(
+            ffi_var_names(model),
+            vec!["birth_rate", "births", "death_rate", "deaths", "population"]
+        );
+        // ... and a simulation created through it compiles the replacement
+        // (20 time units => 21 saved steps, vs 11 for the original).
+        err = ptr::null_mut();
+        let sim = simlin_sim_new(model, false, &mut err);
+        expect_no_error(err, "sim_new after replace");
+        err = ptr::null_mut();
+        simlin_sim_run_to_end(sim, &mut err);
+        expect_no_error(err, "run_to_end after replace");
+        assert_eq!(ffi_stepcount(sim), 21);
+        simlin_sim_unref(sim);
+
+        // Replacing copies contents only: neither refcount moves, and the
+        // source project is left exactly as it was.
+        assert_eq!((*dst).ref_count.load(Ordering::SeqCst), dst_refs_before);
+        assert_eq!((*src).ref_count.load(Ordering::SeqCst), src_refs_before);
+        assert!(
+            *(*src).datamodel.lock().unwrap() == src_snapshot,
+            "source project must be left untouched"
+        );
+
+        // The copy is deep: freeing the source leaves the destination usable.
+        simlin_project_unref(src);
+        assert_eq!(
+            ffi_var_names(model),
+            vec!["birth_rate", "births", "death_rate", "deaths", "population"]
+        );
+
+        simlin_model_unref(model);
+        simlin_project_unref(dst);
+    }
+}
+
+/// `simlin_project_get_errors` on the destination reflects the replacement's
+/// diagnostics: a clean project replaced by a broken one reports the error,
+/// and replacing back clears it (the salsa db is re-synced, not just the
+/// datamodel swapped).
+#[test]
+fn test_replace_contents_get_errors_reflects_new_contents() {
+    let clean = population_project(10.0);
+    let broken = TestProject::new("broken")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .aux("a", "b + 1", None)
+        .aux("b", "a + 1", None)
+        .build_datamodel();
+    let dst = open_project_from_datamodel(&clean);
+    let broken_src = open_project_from_datamodel(&broken);
+    let clean_src = open_project_from_datamodel(&clean);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let errors = simlin_project_get_errors(dst, &mut err);
+        expect_no_error(err, "get_errors (clean)");
+        assert!(errors.is_null(), "the population model has no errors");
+
+        replace_contents_ok(dst, broken_src);
+        err = ptr::null_mut();
+        let errors = simlin_project_get_errors(dst, &mut err);
+        expect_no_error(err, "get_errors (broken)");
+        assert!(
+            !errors.is_null(),
+            "after replacing with a circular model, get_errors must report it"
+        );
+        let count = simlin_error_get_detail_count(errors);
+        let details = std::slice::from_raw_parts(simlin_error_get_details(errors), count);
+        assert!(
+            details
+                .iter()
+                .any(|d| d.code == SimlinErrorCode::CircularDependency),
+            "expected a CircularDependency detail"
+        );
+        simlin_error_free(errors);
+
+        replace_contents_ok(dst, clean_src);
+        err = ptr::null_mut();
+        let errors = simlin_project_get_errors(dst, &mut err);
+        expect_no_error(err, "get_errors (clean again)");
+        assert!(
+            errors.is_null(),
+            "replacing back must clear the diagnostics"
+        );
+
+        simlin_project_unref(clean_src);
+        simlin_project_unref(broken_src);
+        simlin_project_unref(dst);
+    }
+}
+
+/// A `SimlinModel` handle whose model name is absent from the replacement is
+/// left dangling BY NAME only: every call through it returns a clear
+/// `BadModelName` error (no crash, no stale data), and once a model of that
+/// name reappears the same handle works again. Meanwhile the models the
+/// replacement DOES contain are reachable through fresh handles.
+#[test]
+fn test_replace_contents_missing_model_handle_errors_cleanly() {
+    let dst = open_project_from_datamodel(&population_project(10.0));
+    let mut renamed = population_project(10.0);
+    renamed.models[0].name = "other".to_string();
+    let renamed_src = open_project_from_datamodel(&renamed);
+    let original_src = open_project_from_datamodel(&population_project(10.0));
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let main_handle = simlin_project_get_model(dst, ptr::null(), &mut err);
+        expect_no_error(err, "get_model(main)");
+
+        replace_contents_ok(dst, renamed_src);
+
+        // Every query through the stale-by-name handle reports BadModelName.
+        let mut count: usize = 0;
+        err = ptr::null_mut();
+        simlin_model_get_var_count(main_handle, 0, ptr::null(), &mut count, &mut err);
+        expect_error_code(err, SimlinErrorCode::BadModelName, "get_var_count");
+
+        // `simlin_sim_new` defers a compile failure to the first run (its own
+        // contract), so the missing model surfaces there, naming the model.
+        err = ptr::null_mut();
+        let sim = simlin_sim_new(main_handle, false, &mut err);
+        expect_no_error(err, "sim_new (deferred compile failure)");
+        assert!(!sim.is_null());
+        err = ptr::null_mut();
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(
+            !err.is_null(),
+            "running a sim for a missing model must fail"
+        );
+        let code = simlin_error_get_code(err);
+        let msg = CStr::from_ptr(simlin_error_get_message(err))
+            .to_str()
+            .unwrap()
+            .to_string();
+        simlin_error_free(err);
+        assert_eq!(code, SimlinErrorCode::NotSimulatable);
+        assert!(
+            msg.contains("main"),
+            "the error must name the missing model: {msg}"
+        );
+        simlin_sim_unref(sim);
+
+        // The replacement's own model is reachable through a fresh handle.
+        let other_name = CString::new("other").unwrap();
+        err = ptr::null_mut();
+        let other_handle = simlin_project_get_model(dst, other_name.as_ptr(), &mut err);
+        expect_no_error(err, "get_model(other)");
+        assert_eq!(
+            ffi_var_names(other_handle),
+            vec!["birth_rate", "births", "population"]
+        );
+        simlin_model_unref(other_handle);
+
+        // Restoring a project that has "main" again revives the old handle.
+        replace_contents_ok(dst, original_src);
+        assert_eq!(
+            ffi_var_names(main_handle),
+            vec!["birth_rate", "births", "population"]
+        );
+
+        simlin_model_unref(main_handle);
+        simlin_project_unref(original_src);
+        simlin_project_unref(renamed_src);
+        simlin_project_unref(dst);
+    }
+}
+
+/// A `SimlinSim` created before the replace is a stale snapshot: it was
+/// compiled from the old contents and keeps its results and its ability to
+/// reset/re-run against that compiled program. Only a sim created AFTER the
+/// replace reflects the new contents.
+#[test]
+fn test_replace_contents_existing_sim_is_stale_snapshot() {
+    let dst = open_project_from_datamodel(&population_project(10.0));
+    let src = open_project_from_datamodel(&population_project(20.0));
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(dst, ptr::null(), &mut err);
+        expect_no_error(err, "get_model");
+
+        err = ptr::null_mut();
+        let old_sim = simlin_sim_new(model, false, &mut err);
+        expect_no_error(err, "sim_new (before)");
+        err = ptr::null_mut();
+        simlin_sim_run_to_end(old_sim, &mut err);
+        expect_no_error(err, "run_to_end (before)");
+        assert_eq!(ffi_stepcount(old_sim), 11);
+
+        replace_contents_ok(dst, src);
+
+        // Results already computed are untouched ...
+        assert_eq!(ffi_stepcount(old_sim), 11);
+        // ... and reset + re-run still executes the OLD compiled program.
+        err = ptr::null_mut();
+        simlin_sim_reset(old_sim, &mut err);
+        expect_no_error(err, "reset (stale sim)");
+        err = ptr::null_mut();
+        simlin_sim_run_to_end(old_sim, &mut err);
+        expect_no_error(err, "run_to_end (stale sim)");
+        assert_eq!(ffi_stepcount(old_sim), 11);
+
+        // A fresh sim from the same handle picks up the replacement.
+        err = ptr::null_mut();
+        let new_sim = simlin_sim_new(model, false, &mut err);
+        expect_no_error(err, "sim_new (after)");
+        err = ptr::null_mut();
+        simlin_sim_run_to_end(new_sim, &mut err);
+        expect_no_error(err, "run_to_end (after)");
+        assert_eq!(ffi_stepcount(new_sim), 21);
+
+        simlin_sim_unref(new_sim);
+        simlin_sim_unref(old_sim);
+        simlin_model_unref(model);
+        simlin_project_unref(src);
+        simlin_project_unref(dst);
+    }
+}
+
+/// Replacing a project with itself is a permitted no-op re-sync (it must not
+/// deadlock on the project's own locks), and both NULL positions reject with
+/// `Generic` without touching anything.
+#[test]
+fn test_replace_contents_self_and_null_safety() {
+    let proj = open_project_from_datamodel(&population_project(10.0));
+
+    unsafe {
+        let snapshot = (*proj).datamodel.lock().unwrap().clone();
+        replace_contents_ok(proj, proj);
+        assert!(*(*proj).datamodel.lock().unwrap() == snapshot);
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_project_replace_contents(ptr::null_mut(), proj, &mut err);
+        expect_error_code(err, SimlinErrorCode::Generic, "NULL dst");
+
+        err = ptr::null_mut();
+        simlin_project_replace_contents(proj, ptr::null(), &mut err);
+        expect_error_code(err, SimlinErrorCode::Generic, "NULL src");
+        assert!(*(*proj).datamodel.lock().unwrap() == snapshot);
+
         simlin_project_unref(proj);
     }
 }

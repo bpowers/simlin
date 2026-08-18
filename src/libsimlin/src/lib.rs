@@ -16,7 +16,7 @@
 //! | `model`         | Model queries (variables, links, LaTeX equations)   |
 //! | `simulation`    | Simulation lifecycle (create, run, set values, reset) |
 //! | `results`       | Standalone results handles (Vensim VDF import)      |
-//! | `serialization` | Serialize to protobuf, JSON, XMILE, SVG             |
+//! | `serialization` | Serialize to protobuf, JSON, XMILE, MDL, SVG        |
 //! | `analysis`      | Feedback-loop / causal-link analysis, LTM scores    |
 //! | `patch`         | JSON patch application and error collection          |
 //!
@@ -569,6 +569,36 @@ pub(crate) fn error_from_anyhow(err: AnyError) -> SimlinError {
 
 pub(crate) fn store_anyhow_error(out_error: *mut *mut SimlinError, err: AnyError) {
     store_error(out_error, error_from_anyhow(err));
+}
+
+/// Allocate an FFI output buffer and copy `bytes` into it.
+///
+/// On success, writes the buffer pointer and length to `out_buffer`/`out_len`
+/// and returns `true`. On allocation failure, stores an error and returns `false`.
+///
+/// # Safety
+/// `out_buffer` and `out_len` must be valid, non-null pointers.
+pub(crate) unsafe fn write_bytes_to_ffi_output(
+    bytes: &[u8],
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+    context: &str,
+) -> bool {
+    let len = bytes.len();
+    let buf = memory::simlin_malloc(len);
+    if buf.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message(format!("allocation failed while serializing {context}")),
+        );
+        return false;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+    *out_buffer = buf;
+    *out_len = len;
+    true
 }
 
 pub(crate) unsafe fn drop_c_string(ptr: *mut c_char) {

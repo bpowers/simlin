@@ -16,10 +16,9 @@ use std::sync::MutexGuard;
 use crate::ffi::SimlinLinks;
 use crate::ffi_error::SimlinError;
 use crate::ffi_try;
-use crate::memory::simlin_malloc;
 use crate::{
     clear_out_error, drop_c_string, require_model, store_anyhow_error, store_error,
-    SimlinErrorCode, SimlinModel,
+    write_bytes_to_ffi_output, SimlinErrorCode, SimlinModel,
 };
 
 pub const SIMLIN_VARTYPE_STOCK: u32 = 1 << 0;
@@ -53,36 +52,6 @@ unsafe fn parse_filter(filter: *const c_char) -> Result<Option<String>, SimlinEr
         Err(_) => Err(SimlinError::new(SimlinErrorCode::Generic)
             .with_message("filter string is not valid UTF-8")),
     }
-}
-
-/// Allocate an FFI output buffer and copy `bytes` into it.
-///
-/// On success, writes the buffer pointer and length to `out_buffer`/`out_len`
-/// and returns `true`. On allocation failure, stores an error and returns `false`.
-///
-/// # Safety
-/// `out_buffer` and `out_len` must be valid, non-null pointers.
-unsafe fn write_bytes_to_ffi_output(
-    bytes: &[u8],
-    out_buffer: *mut *mut u8,
-    out_len: *mut usize,
-    out_error: *mut *mut SimlinError,
-    context: &str,
-) -> bool {
-    let len = bytes.len();
-    let buf = simlin_malloc(len);
-    if buf.is_null() {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic)
-                .with_message(format!("allocation failed while serializing {context}")),
-        );
-        return false;
-    }
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
-    *out_buffer = buf;
-    *out_len = len;
-    true
 }
 
 /// Compile the model to a self-contained WebAssembly module plus its layout.

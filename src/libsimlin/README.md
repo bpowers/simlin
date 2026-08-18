@@ -54,6 +54,8 @@ Some major components are:
 - `simlin_project_serialize_protobuf`: Serialize a project to protobuf bytes
 - `simlin_project_serialize_json`: Serialize a project to JSON
 - `simlin_project_serialize_xmile`: Serialize a project to XMILE/STMX
+- `simlin_project_serialize_mdl`: Serialize a project to Vensim MDL (lossiness warnings on a side channel)
+- `simlin_project_replace_contents`: Replace a project's contents in place from another project (live model handles observe the new contents)
 - `simlin_project_ref/unref`: Reference counting
 - `simlin_project_enable_ltm`: Enable Loop Thinking Method analysis
 
