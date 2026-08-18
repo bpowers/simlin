@@ -45,6 +45,21 @@ class TestAnalyzeDiscovery:
         assert isinstance(analysis.agg_recovery_truncated, bool)
         assert analysis.agg_recovery_truncated is False
 
+    def test_completeness_counters(self, logistic_model: simlin.Model) -> None:
+        # Discovery on a model this small is EXACT: the engine enumerates the
+        # whole candidate universe rather than sampling it, so
+        # `enumeration_complete` is True and `universe_loops` is a real count
+        # rather than None. `retained_loops` equals len(loops) because the
+        # 200-loop report cap cannot bind on a two-loop model -- the counters
+        # only diverge on a model large enough to be capped, which is out of
+        # scope for a plumbing test. The False/None arm is
+        # `test_tiny_timeout_reports_a_sampled_analysis`.
+        analysis = logistic_model.analyze()
+        assert analysis.enumeration_complete is True
+        assert analysis.universe_loops is not None
+        assert analysis.universe_loops >= len(analysis.loops)
+        assert analysis.retained_loops == len(analysis.loops)
+
     def test_discovers_loops_with_importance(self, logistic_model: simlin.Model) -> None:
         analysis = logistic_model.analyze()
 
@@ -243,6 +258,18 @@ class TestAnalyzeTruncation:
         # prompt return.
         analysis = large_horizon_model.analyze(timeout=0.001)
         assert analysis.truncated
+
+    def test_tiny_timeout_reports_a_sampled_analysis(
+        self, large_horizon_model: simlin.Model
+    ) -> None:
+        # The other arm of the completeness counters: the exact enumeration
+        # never finished, so the shortest-path fallback SAMPLED the loop
+        # universe. `enumeration_complete` says so, and `universe_loops` is
+        # None because a sample has no universe to report -- distinct from a
+        # count of 0, which would claim the model has no loops at all.
+        analysis = large_horizon_model.analyze(timeout=0.001)
+        assert analysis.enumeration_complete is False
+        assert analysis.universe_loops is None
 
     def test_negative_timeout_rejected(self, logistic_model: simlin.Model) -> None:
         with pytest.raises(ValueError, match="non-negative"):

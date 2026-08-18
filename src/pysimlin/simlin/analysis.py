@@ -495,3 +495,24 @@ class Analysis:
     the ranked loop list; result-scoped. Group loops by partition to present
     each feedback subsystem separately -- importance is only comparable
     within a partition."""
+
+    enumeration_complete: bool = False
+    """True when discovery ENUMERATED the whole candidate universe rather than
+    sampling it, so `loops` is the exact selection from every loop that can
+    ever score. False means a shortest-path fallback generated the candidates
+    -- because the enumeration's budgets or the `timeout` did not allow it to
+    finish -- and `loops` is a SAMPLE. Check this before reading an absent
+    loop as evidence the model has none."""
+
+    retained_loops: int = 0
+    """How many loops passed discovery's importance filter, before the report
+    cap truncated `loops`. Equal to ``len(loops)`` when the cap did not bind;
+    larger when it did, which is the only signal that `loops` is a
+    most-important-first prefix rather than the whole retained set."""
+
+    universe_loops: int | None = None
+    """How many ever-simultaneously-active feedback loops the candidate
+    universe holds -- the population each loop's importance is a share of --
+    or None when `enumeration_complete` is False, since a sampled analysis has
+    no universe to report. None and 0 are different claims: 0 means the model
+    genuinely has no scorable loop."""

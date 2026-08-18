@@ -347,6 +347,9 @@ analysis = model.analyze(timeout=30.0)
 if analysis.truncated:
     print("timeout elapsed; results are partial")
 
+if not analysis.enumeration_complete:
+    print("loops below are a sample, not every loop the model has")
+
 for loop in analysis.loops[:3]:
     chain = " -> ".join(loop.variables[:3])
     print(f"{loop.id} ({loop.polarity}) importance {loop.average_importance():.3f}: {chain} ...")
@@ -371,6 +374,18 @@ as above. `analysis.dominant_periods` is also available, but with hundreds
 of loops the per-timestep dominant sets are fine-grained -- ranking by
 `average_importance()` and reading the top loops' variable chains is
 usually the more legible summary.
+
+Three fields say how complete that list is.
+`analysis.enumeration_complete` distinguishes an EXACT analysis -- the engine
+enumerated every loop that could ever score and picked from that whole set --
+from a SAMPLED one, where a budget cut the enumeration short and a
+shortest-path search stood in for it; a loop missing from a sampled analysis
+is not evidence the model lacks it. `analysis.universe_loops` is how large
+that enumerated universe was (`None` when sampled, which is a different claim
+from `0`), and `analysis.retained_loops` is how many loops cleared the
+importance filter before the report cap. On a model like World3 both run to
+thousands against the 200 loops reported, which is what tells you the list is
+a ranked prefix rather than the whole story.
 
 Two details worth knowing: the `timeout` bounds only the discovery sweep --
 the model is first compiled and simulated with loop instrumentation, and

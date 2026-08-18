@@ -584,19 +584,37 @@ class Model:
         or time-range changes); it compiles and simulates internally in LTM
         discovery mode.
 
+        How complete is the answer? Three fields on the result say so, and
+        they matter most on the large models discovery exists for:
+
+        * ``enumeration_complete`` is True when the engine ENUMERATED every
+          loop that could ever score and picked from that whole set, so
+          ``loops`` is exact. False means the budgets or the ``timeout`` cut
+          the enumeration short and a shortest-path fallback SAMPLED the
+          model's loops instead -- a loop missing from a sampled analysis is
+          not evidence the model lacks it.
+        * ``universe_loops`` is how many loops that enumerated universe held,
+          or ``None`` on a sampled analysis (which has no universe to report;
+          ``None`` and ``0`` are different claims).
+        * ``retained_loops`` is how many loops passed the importance filter
+          before the report cap truncated ``loops``. When it exceeds
+          ``len(loops)``, you are seeing a most-important-first prefix.
+
         Args:
             timeout: Maximum seconds to spend in discovery, or ``None`` for no
                 limit. Must be non-negative.
 
         Returns:
             An :class:`Analysis` with the discovered loops (each carrying its
-            importance ``behavior_time_series``), the dominant periods, and a
-            ``truncated`` flag.
+            importance ``behavior_time_series``), the dominant periods, a
+            ``truncated`` flag, and the completeness fields above.
 
         Example:
             >>> analysis = model.analyze(timeout=5.0)
             >>> if analysis.truncated:
             ...     print("discovery hit the timeout; results are partial")
+            >>> if not analysis.enumeration_complete:
+            ...     print("loops below are a sample, not every loop")
             >>> for loop in analysis.loops:
             ...     print(loop.id, loop.average_importance())
         """
@@ -618,6 +636,9 @@ class Model:
             check_out_error(err_ptr, "Discover loops")
 
         if result_ptr == ffi.NULL:
+            # No result to describe: nothing ran, so nothing is claimed about
+            # completeness either (`enumeration_complete` False,
+            # `universe_loops` None -- the "no universe reported" value).
             return Analysis(loops=(), dominant_periods=(), truncated=False, partitions=())
 
         try:
@@ -682,12 +703,19 @@ class Model:
                     )
                 )
 
+            # `universe_loops` rides the FFI as an int64 with -1 meaning
+            # "the fallback sampled, so there is no universe" -- decoded back
+            # to None here so a caller never mistakes the sentinel for a count.
+            universe_loops = int(result_ptr.universe_loops)
             return Analysis(
                 loops=tuple(loops),
                 dominant_periods=tuple(periods),
                 truncated=bool(result_ptr.truncated),
                 agg_recovery_truncated=bool(result_ptr.agg_recovery_truncated),
                 partitions=tuple(partitions),
+                enumeration_complete=bool(result_ptr.enumeration_complete),
+                retained_loops=int(result_ptr.retained_loops),
+                universe_loops=None if universe_loops < 0 else universe_loops,
             )
         finally:
             lib.simlin_free_discovery_result(result_ptr)
