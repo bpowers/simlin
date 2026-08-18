@@ -17,6 +17,8 @@
   max-width: 480px;
   width: 100%;
   padding: var(--spacing-3, 24px);
+  /* width + padding: must be border-box without relying on the global reset. */
+  box-sizing: border-box;
   border: 1px solid var(--color-divider, #ddd);
   border-radius: 4px;
   background: var(--color-white, #ffffff);

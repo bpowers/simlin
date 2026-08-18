@@ -40,6 +40,11 @@ interface ModelPropertiesDrawerProps {
   // the model, but the fields are disabled: sim specs are project content and
   // a draft that silently never commits would misrepresent editability.
   readOnly?: boolean;
+  // The "Exit" link navigates to "/" -- the project list in the app and in
+  // simlin-serve. Defaults to shown; a host that embeds the Editor in a page it
+  // owns (a notebook cell) has no such route and hides it, which also means no
+  // router is needed to mount the drawer.
+  showHomeLink?: boolean;
 }
 
 interface SimSpecDraftFieldProps {
@@ -183,6 +188,7 @@ export function ModelPropertiesDrawer(props: ModelPropertiesDrawerProps): React.
     onDownloadXmile,
     onDelete,
     readOnly,
+    showHomeLink = true,
   } = props;
 
   const handleOpen = (): void => {
@@ -207,11 +213,13 @@ export function ModelPropertiesDrawer(props: ModelPropertiesDrawerProps): React.
               href mode renders a single <a> styled as an icon button. The
               previous <a><button/></a> nesting was invalid interactive
               content (and double-announced to assistive tech). */}
-          <Link to="/" asChild>
-            <IconButton className={styles.menuButton} color="inherit" aria-label="Exit">
-              <ArrowBackIcon />
-            </IconButton>
-          </Link>
+          {showHomeLink ? (
+            <Link to="/" asChild>
+              <IconButton className={styles.menuButton} color="inherit" aria-label="Exit">
+                <ArrowBackIcon />
+              </IconButton>
+            </Link>
+          ) : null}
           <IconButton className={styles.closeButton} color="inherit" aria-label="Close" onClick={handleClose}>
             <ClearIcon />
           </IconButton>

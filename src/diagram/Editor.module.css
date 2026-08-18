@@ -38,7 +38,11 @@
 }
 
 .snapshotImg {
+  /* Block (not the inline default) so no baseline gap opens under the image;
+     reset.css does this for every img, but a host may not load it. */
+  display: block;
   width: 100%;
+  max-width: 100%;
   object-fit: scale-down;
 }
 
@@ -60,10 +64,15 @@
   top: 8px;
   right: 8px;
   height: var(--searchbar-height);
-  /* Clamp to the viewport on narrow screens so the bar never overflows the
-     left edge (it is anchored right:8px); stays in lockstep with the detail
-     panel cards that share this slot. */
-  width: min(var(--panel-width-sm), calc(100vw - 16px));
+  /* Clamp to the CONTAINER (the positioned .editor root) on narrow screens so
+     the bar never overflows the left edge (it is anchored right:8px); stays in
+     lockstep with the detail panel cards that share this slot. Percent, not
+     100vw: an embedded editor (a notebook cell) is a box on a page it does not
+     own, and viewport units would size the bar against the page. The
+     breakpoints below stay viewport media queries deliberately -- they pick a
+     panel width by how much room the USER has, and Editor.tsx's panelWidth()
+     mirrors them via window.innerWidth. */
+  width: min(var(--panel-width-sm), calc(100% - 16px));
   /* Explicit border-box: the global reset is not reliably present in every
      host bundle, and without it the 8px horizontal padding makes this box
      16px wider than the details card it must align with. */
@@ -81,13 +90,13 @@
 
 @media (min-width: 900px) and (max-width: 1199.95px) {
   .searchBar {
-    width: min(var(--panel-width-md), calc(100vw - 16px));
+    width: min(var(--panel-width-md), calc(100% - 16px));
   }
 }
 
 @media (min-width: 1200px) {
   .searchBar {
-    width: min(var(--panel-width-lg), calc(100vw - 16px));
+    width: min(var(--panel-width-lg), calc(100% - 16px));
   }
 }
 
@@ -228,7 +237,7 @@
   position: absolute;
   top: var(--shared-model-banner-top);
   right: 8px;
-  width: min(var(--panel-width-sm), calc(100vw - 16px));
+  width: min(var(--panel-width-sm), calc(100% - 16px));
   padding: 4px 12px;
   font-size: var(--font-size-caption);
   /* Explicit line-height makes the banner's rendered height deterministic (it
@@ -246,19 +255,41 @@
 
 @media (min-width: 900px) and (max-width: 1199.95px) {
   .sharedModelBanner {
-    width: min(var(--panel-width-md), calc(100vw - 16px));
+    width: min(var(--panel-width-md), calc(100% - 16px));
   }
 }
 
 @media (min-width: 1200px) {
   .sharedModelBanner {
-    width: min(var(--panel-width-lg), calc(100vw - 16px));
+    width: min(var(--panel-width-lg), calc(100% - 16px));
   }
 }
 
+/* The root is the containing block for every piece of floating chrome (search
+   bar, detail cards, banners, bottom-left controls, the toast viewport): all of
+   it is position: absolute and anchors HERE, so an editor embedded as one box
+   on a host page (a notebook cell) keeps its chrome inside that box. Nothing in
+   the tree may use position: fixed or viewport units
+   (tests/editor-embeddable-css.test.ts). A full-page host is unaffected: its
+   editor box IS the viewport. */
 .editor {
+  position: relative;
   box-sizing: border-box;
   overflow: hidden;
+  /* Typography is pinned here rather than inherited from <body>: reset.css
+     sets these on body, but a host that loads only theme.css (an editor
+     embedded in a page it does not own) has whatever the page uses. Same
+     computed values as the reset gives a full-page host. */
+  font-family: var(--font-family-base);
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+/* The root is focusable (tabindex=-1) purely so focus settles inside the
+   editor after a click on non-focusable chrome; it is not an interactive
+   control, so it never draws a focus ring. */
+.editor:focus {
+  outline: none;
 }
 
 .editorBg {

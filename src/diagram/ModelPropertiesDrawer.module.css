@@ -59,6 +59,12 @@
   padding: 32px;
 }
 
+/* The heading's UA margins are removed here rather than by reset.css, which a
+   host may not load. */
+.propsForm h2 {
+  margin: 0;
+}
+
 .downloadButton {
   justify-content: center;
   width: 100%;

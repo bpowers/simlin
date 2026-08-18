@@ -62,6 +62,13 @@ import { Point, searchableName } from './drawing/common';
 import { computeFlowAttachment } from './flow-attach';
 import { applyGroupMovement } from './group-movement';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
+import {
+  EDITOR_ROOT_ATTRIBUTE,
+  activeEditorRoot,
+  editorOwnsKeyEvent,
+  markActiveEditorRoot,
+  releaseEditorRoot,
+} from './editor-key-scope';
 import { isStdlibModel } from './module-navigation';
 import { countModelInstances } from './module-details-utils';
 import { buildModuleReferencePayload } from './module-wiring';
@@ -79,6 +86,12 @@ const SearchbarWidthLg = 480;
 // The effective right-panel width at the current viewport, mirroring the
 // media queries in Editor.module.css. Used by viewport-centering math, which
 // previously hardcoded one width and was wrong at the other breakpoints.
+// window.innerWidth is deliberately what is read here: the CSS breakpoints
+// are viewport media queries (they size the panel by how much room the USER
+// has, not by the editor's box), so this must evaluate the same quantity or
+// the centering math and the rendered panel would disagree in an embedded
+// editor narrower than the page. Only the panel's overflow CLAMP is
+// container-relative (calc(100% - 16px) in the stylesheets).
 function panelWidth(): number {
   if (typeof window === 'undefined') {
     return SearchbarWidthSm;
@@ -263,6 +276,12 @@ interface EditorPropsBase {
   // error in the confirmation dialog. Hosts without a deletable backing
   // project (the local file-backed viewer, embeds) leave this undefined.
   onDeleteProject?: () => Promise<void>;
+  // Whether the model-properties drawer shows its "Exit" link to "/" (the
+  // project list in the app and simlin-serve). Defaults to true. Hosts that
+  // embed the Editor in a page they own (a notebook cell) pass false: there is
+  // no route to go to, and the link would pushState on the host page. No
+  // router is required to mount the Editor either way.
+  showHomeLink?: boolean;
 }
 
 export type EditorProps = EditorPropsBase & ProjectInputProps;
@@ -436,6 +455,10 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   const latest = React.useRef<EditorLatest>(undefined as unknown as EditorLatest);
   latest.current = { props, state };
 
+  // The Editor's outermost element: the keyboard-scoping identity of this
+  // instance (see editor-key-scope.ts).
+  const rootRef = React.useRef<HTMLDivElement>(null);
+
   const errorKey = (err: Error): number => {
     let key = r.errorKeys.get(err);
     if (key === undefined) {
@@ -481,6 +504,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     // derived from the CURRENT prop on every render.
 
     document.addEventListener('keydown', handleKeyDown);
+    // Captured here (not read in the cleanup): React detaches refs before
+    // passive-effect cleanups run, so rootRef.current is null by then.
+    const root = rootRef.current;
 
     // Open the engine, then schedule the first sim run. The controller guards
     // its own dispose-races internally (see ProjectController.dispose), so no
@@ -502,6 +528,10 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       // setup above so a StrictMode mount/unmount/mount cycle builds a fresh
       // controller on remount and leaves nothing stuck.
       document.removeEventListener('keydown', handleKeyDown);
+      if (root) {
+        // A key on <body> must never resolve to an unmounted instance.
+        releaseEditorRoot(root);
+      }
 
       if (r.unsubscribe) {
         r.unsubscribe();
@@ -626,6 +656,15 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     if (p.embedded || isEditableElement(e.target)) {
       return;
     }
+    // Several Editors can share one document (a notebook with an Editor per
+    // cell). This listener is document-level, so it acts only when the event
+    // belongs to THIS instance: its target is inside our root, or focus is
+    // nowhere (<body>) and we are the instance that most recently saw pointer
+    // or focus activity. See editor-key-scope.ts for the full decision.
+    const root = rootRef.current;
+    if (!root || !editorOwnsKeyEvent(root, e.composedPath(), activeEditorRoot())) {
+      return;
+    }
 
     const action = detectUndoRedo(e);
     if (action) {
@@ -662,6 +701,18 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         void handleSelectionDelete();
       }
       return;
+    }
+  }, []);
+
+  // Pointer presses and focus entering this instance (including its portaled
+  // drawer/dialog/menus, which React routes through this tree) make it the
+  // target of the next key event that lands on <body>. Capture-phase handlers
+  // so a child that stops propagation (the Canvas does, on pointerdown) cannot
+  // hide the activity.
+  const handleActivity = React.useCallback((): void => {
+    const root = rootRef.current;
+    if (root) {
+      markActiveEditorRoot(root);
     }
   }, []);
 
@@ -1334,6 +1385,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         // Sim specs are project content; the download stays available (it is
         // a read). Project-scoped like undo/redo: readOnlyMode, not isReadOnly.
         readOnly={!!latest.current.props.readOnlyMode}
+        showHomeLink={latest.current.props.showHomeLink}
       />
     );
   };
@@ -2596,8 +2648,19 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   // the paint-order overlay (it does NOT lift the panel above the search bar).
   const sharedModelBannerInfo = getSharedModelBannerInfo();
 
+  // tabIndex={-1}: a click on non-focusable chrome inside the editor then
+  // settles focus on this root (the nearest focusable ancestor) rather than on
+  // <body>, so the key event that follows carries the root in its path. Not in
+  // the tab order; the outline is suppressed in Editor.module.css.
   return (
-    <div className={classNames}>
+    <div
+      ref={rootRef}
+      className={classNames}
+      tabIndex={-1}
+      {...{ [EDITOR_ROOT_ATTRIBUTE]: '' }}
+      onPointerDownCapture={handleActivity}
+      onFocusCapture={handleActivity}
+    >
       {getDrawer()}
       {getDetails(sharedModelBannerInfo.visible)}
       {getSearchBar()}

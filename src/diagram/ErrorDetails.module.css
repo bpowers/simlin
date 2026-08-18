@@ -1,5 +1,5 @@
 .card {
-  width: min(var(--panel-width-sm), calc(100vw - 16px));
+  width: min(var(--panel-width-sm), calc(100% - 16px));
   /* Match .searchBar: see VariableDetails.module.css */
   box-sizing: border-box;
   border-radius: 4px;
@@ -12,13 +12,13 @@
 
 @media (min-width: 900px) and (max-width: 1199.95px) {
   .card {
-    width: min(var(--panel-width-md), calc(100vw - 16px));
+    width: min(var(--panel-width-md), calc(100% - 16px));
   }
 }
 
 @media (min-width: 1200px) {
   .card {
-    width: min(var(--panel-width-lg), calc(100vw - 16px));
+    width: min(var(--panel-width-lg), calc(100% - 16px));
   }
 }
 

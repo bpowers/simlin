@@ -659,15 +659,19 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     return screenToCanvasPoint(x, y, zoom);
   };
 
+  // Move focus onto the canvas after a click. An <svg> can't take focus, so
+  // the focus target is the container div (tabindex=-1, no focus ring). Focus
+  // must land INSIDE the editor, never merely leave the previous element: a
+  // text field the user was typing in still blurs (its blur commits), and the
+  // key events that follow carry the editor in their path, so the Editor's
+  // keyboard scoping resolves them to this instance directly and hosts that
+  // gate their own shortcuts on the event target (a notebook) see them land in
+  // the editor's subtree. Blurring alone would leave focus on <body>.
+  // preventScroll: a host page (notebook) may scroll; focusing must not jump it.
+  // No fallback for a missing container: this runs from pointer handlers on a
+  // rendered canvas, where svgRef is always attached.
   const focusCanvas = (): void => {
-    // an SVG element can't actually be focused.  Instead, blur any _other_
-    // focused element.
-    if (typeof document !== 'undefined' && document && document.activeElement) {
-      const activeElement = document.activeElement;
-      if ('blur' in activeElement && typeof activeElement.blur === 'function') {
-        activeElement.blur();
-      }
-    }
+    svgRef.current?.focus({ preventScroll: true });
   };
 
   const getNewVariableName = (base: string): string => {
@@ -2855,7 +2859,12 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   // pointer callbacks resolve connector ends / persist the dragged-link arc).
 
   return (
-    <div style={{ height: '100%', width: '100%' }} ref={svgRef} className={`${styles.canvas} simlin-canvas`}>
+    <div
+      style={{ height: '100%', width: '100%' }}
+      ref={svgRef}
+      className={`${styles.canvas} ${styles.canvasContainer} simlin-canvas`}
+      tabIndex={-1}
+    >
       <svg
         viewBox={viewBox}
         preserveAspectRatio="xMinYMin"

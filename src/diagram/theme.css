@@ -64,6 +64,13 @@
   --spacing-9: 72px;
   --spacing-10: 80px;
 
+  /* Base UI typeface. The editor root and every portaled surface (drawer sheet,
+     dialog, menu, autocomplete listbox) set this themselves rather than
+     inheriting it from <body>: reset.css supplies it there, but a host that
+     loads only theme.css (an editor embedded in a page it does not own) must
+     get the same face. */
+  --font-family-base: 'Roboto', 'Helvetica', 'Arial', sans-serif;
+
   /* Type scale. rem-based so editor/panel text honors the user's browser zoom
      and root font-size (the raw-px sizes this replaced did not). 0.75rem == 12px
      at the default root; mirrors MUI's "caption" variant
