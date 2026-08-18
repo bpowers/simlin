@@ -3444,16 +3444,15 @@ fn enumeration_and_dfs_agree_on_a_simple_model() {
     }
 }
 
-/// A one-variable feedback loop through a PREVIOUS self-reference (the
-/// `SAMPLE IF TRUE(...)`-latch shape: C-LEARN carries 49 ever-active
-/// self-edges of this kind). The stock-seeded DFS structurally cannot find it
-/// -- the aux is not a stock, so its single-node SCC is never searched --
-/// while enumeration emits it as a singleton circuit; it resolves to a
-/// `NormGroup::Solo` loop (GH #750) and ranks after competing loops. This
-/// widening toward the exhaustive loop universe is DELIBERATE (see the
-/// design doc's "honest boundaries").
+/// A one-variable PREVIOUS self-reference (the `SAMPLE IF TRUE(...)`-latch
+/// shape: C-LEARN carries 49 ever-active self-edges of this kind) is NOT a
+/// feedback loop: a self-edge can never be part of an elementary cycle of
+/// length >= 2, and both LTM surfaces agree that one variable referencing
+/// itself is not feedback (`ltm::indexed`'s `circuit.len() > 1` contract,
+/// `CausalGraph::order_variable_cycle`'s `vars.len() < 2` rejection). Neither
+/// generator reports it; both report only the population growth loop.
 #[test]
-fn enumeration_finds_a_previous_self_loop_the_dfs_cannot() {
+fn a_previous_self_latch_is_not_reported_as_a_loop() {
     let project = enum_test_project(vec![
         enum_stock("population", "100", &["births"], &[]),
         enum_flow("births", "population * 0.1"),
@@ -3466,34 +3465,35 @@ fn enumeration_finds_a_previous_self_loop_the_dfs_cannot() {
     let dfs = discover_project(&project, CandidateGen::DfsOnly);
 
     assert!(auto.enumeration_complete);
-    let is_self_loop = |l: &FoundLoop| {
-        l.loop_info.links.len() == 1 && l.loop_info.links[0].from.as_str() == "smoothed"
-    };
-    assert!(
-        auto.loops.iter().any(is_self_loop),
-        "enumeration must surface the smoothed->smoothed latch loop; got {:?}",
-        auto.loops
+    let node_sets = |r: &DiscoveryResult| -> Vec<Vec<String>> {
+        r.loops
             .iter()
-            .map(|l| l
-                .loop_info
-                .links
-                .iter()
-                .map(|k| k.from.as_str())
-                .collect::<Vec<_>>())
-            .collect::<Vec<_>>()
-    );
-    assert!(
-        !dfs.loops.iter().any(is_self_loop),
-        "the stock-seeded DFS cannot reach a non-stock self-loop (if this \
-         starts passing, the deliberate-widening claim above needs rewording)"
-    );
-    let self_loop = auto.loops.iter().find(|l| is_self_loop(l)).unwrap();
+            .map(|l| {
+                let mut nodes: Vec<String> = l
+                    .loop_info
+                    .links
+                    .iter()
+                    .map(|k| k.from.as_str().to_string())
+                    .collect();
+                nodes.sort();
+                nodes
+            })
+            .collect()
+    };
     assert_eq!(
-        self_loop.partition, None,
-        "a stockless latch loop resolves to no parent partition (Solo group)"
+        node_sets(&auto),
+        vec![vec!["births".to_string(), "population".to_string()]],
+        "only the population growth loop is a feedback loop here"
     );
-    // The population growth loop itself is reported identically by both.
-    assert!(auto.loops.len() == dfs.loops.len() + 1);
+    assert_eq!(
+        node_sets(&auto),
+        node_sets(&dfs),
+        "both generators agree a self-latch is not a loop"
+    );
+    // AC1.1: no reported loop is a single link, under either generator.
+    for r in [&auto, &dfs] {
+        assert!(r.loops.iter().all(|l| l.loop_info.links.len() >= 2));
+    }
 }
 
 /// Self-filtering: a cycle whose links are never simultaneously nonzero has
@@ -3778,7 +3778,7 @@ fn retention_pass_drops_below_threshold_keeps_module_and_solo() {
 }
 
 /// Enumerator unit: min-root canonical emission (each cycle exactly once,
-/// path starting at its minimum node id), self-loop singletons, and the
+/// path starting at its minimum node id), self-edge exclusion, and the
 /// visit-budget trip reporting incomplete.
 #[test]
 fn enumerator_emits_each_active_cycle_exactly_once() {
@@ -3820,17 +3820,14 @@ fn enumerator_emits_each_active_cycle_exactly_once() {
     assert!(candidates.complete);
     assert_eq!(
         candidates.circuits.len(),
-        3,
-        "two triangles + one self-loop"
+        2,
+        "two triangles; the active z->z self-edge yields no circuit"
     );
     for c in &candidates.circuits {
+        assert_eq!(c.len(), 3, "both circuits are triangles");
         let min = c.iter().min().unwrap();
         assert_eq!(c[0], *min, "canonical min-root rotation");
     }
-    assert!(
-        candidates.circuits.iter().any(|c| c.len() == 1),
-        "the self-loop is a singleton circuit"
-    );
 
     // A 1-visit budget cannot finish and must say so.
     let _guard = EnumBudgetGuard::new(usize::MAX, 1);

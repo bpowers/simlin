@@ -541,16 +541,18 @@ fn clearn_ltm_discovery_compiles() {
 
 /// The union-graph enumeration path on a FULL World3 run: candidate
 /// generation must complete (`enumeration_complete`), so the reported 200
-/// (the `MAX_LOOPS` cap binds -- World3's runtime universe holds ~330k
-/// elementary cycles, ~3k of which pass retention) are the exact
+/// (the `MAX_LOOPS` cap binds -- World3's ever-simultaneously-active universe
+/// holds ~150k elementary cycles, ~3k of which pass retention; the larger
+/// ~330k figure is its cycle count WITHOUT the activity constraint, which the
+/// enumerator never materializes) are the exact
 /// retention/ranking selection rather than the strongest-first-DFS sample.
 /// The 2026-08-10 ground-truth audit's smoking gun -- the births ->
 /// population-aging chain loops, which peak at 27% partition dominance yet
 /// were entirely absent from the DFS-sampled report -- must be present.
 ///
 /// `#[ignore]`d for runtime class only (a full 401-step simulate plus the
-/// 330k-circuit enumeration and its two scoring passes run minutes in a
-/// debug build); run with `cargo test --release -- --ignored`.
+/// ~150k-circuit enumeration and its scoring passes run minutes in a debug
+/// build); run with `cargo test --release -- --ignored`.
 #[test]
 #[ignore]
 fn world3_full_run_enumeration_is_complete() {
@@ -569,8 +571,8 @@ fn world3_full_run_enumeration_is_complete() {
 
     assert!(
         found.enumeration_complete,
-        "World3's 330k-circuit runtime universe is well inside the \
-         enumeration budgets; a fallback here is a regression"
+        "World3's ~150k-circuit ever-simultaneously-active universe is well \
+         inside the enumeration budgets; a fallback here is a regression"
     );
     assert!(!found.expansion_cap_saturated);
     assert_eq!(

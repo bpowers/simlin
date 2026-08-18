@@ -22,6 +22,14 @@
 //! pruning) yields a provably complete candidate set; cycles active only at
 //! disjoint steps are never emitted, and the per-step DFS remains as the
 //! fallback when the budgets or deadline trip.
+//!
+//! A cycle here always spans at least two variables. An elementary cycle never
+//! repeats a node, so a self-edge can never be part of one of length >= 2, and
+//! a one-variable "loop" is not feedback in the SD sense -- the same contract
+//! compile-time exhaustive mode states as `circuit.len() > 1`
+//! ([`crate::ltm::indexed`]) and `CausalGraph::order_variable_cycle` states as
+//! `vars.len() < 2`. Self-edges are therefore dropped from the union graph at
+//! build time rather than traversed and filtered later.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -37,8 +45,10 @@ use crate::results::Results;
 /// per-loop `loop_score` synthetic-variable emission (the 65,536 VM
 /// result-slot ceiling) and the `build_element_level_loops` materialization
 /// cliff, neither of which applies here -- an enumerated circuit is a compact
-/// `Vec<u32>` node path (World3's full 330k-circuit universe is ~60 MB), and
-/// only retention survivors are materialized as `FoundLoop`s. The binding
+/// `Vec<u32>` node path (World3's ever-simultaneously-active universe of
+/// ~150k circuits is ~30 MB; the ~330k figure is its cycle count WITHOUT the
+/// activity constraint, which this enumerator never materializes), and only
+/// retention survivors are materialized as `FoundLoop`s. The binding
 /// costs are the O(circuits x mean-length x steps) retention passes and the
 /// circuit storage itself, both linear in this budget.
 pub(super) const MAX_DISCOVERY_ENUM_CIRCUITS: usize = 1_000_000;
@@ -51,7 +61,7 @@ pub(super) const MAX_DISCOVERY_ENUM_CIRCUITS: usize = 1_000_000;
 /// activity-bitset pruning below is path-dependent and breaks Johnson's
 /// invariant). Each visit is a bitset AND plus bookkeeping (tens of ns), so
 /// this bound caps enumeration at a few seconds of work. World3 -- the
-/// densest runtime graph in the repo corpus -- completes its full 330k-circuit
+/// densest runtime graph in the repo corpus -- completes its full ~150k-circuit
 /// enumeration well under this bound.
 pub(super) const MAX_DISCOVERY_ENUM_VISITS: u64 = 100_000_000;
 
@@ -98,9 +108,10 @@ impl Drop for EnumBudgetGuard {
     }
 }
 
-/// The union-of-active-edges graph: the discovery edge set restricted to edges
-/// whose recorded |score| is nonzero (finite) at >= 1 saved step, each edge
-/// carrying a word-packed activity bitset over steps `1..step_count`.
+/// The union-of-active-edges graph: the discovery edge set restricted to
+/// non-self edges whose recorded |score| is nonzero (finite) at >= 1 saved
+/// step, each edge carrying a word-packed activity bitset over steps
+/// `1..step_count`.
 ///
 /// Node ids are [`IndexedSearch`]'s (the enumerated circuits index straight
 /// into its `idents`); edges here are unique per `(from, to)` because
@@ -134,6 +145,14 @@ impl ActivityGraph {
 
         for (from, edges) in search.adj.iter().enumerate() {
             for edge in edges {
+                if edge.to as usize == from {
+                    // A self-edge can never be part of an elementary cycle of
+                    // length >= 2 (such a cycle never repeats a node), and a
+                    // one-variable "loop" is not feedback -- see the module
+                    // doc. Dropping it here keeps it out of the traversal, the
+                    // SCC structure, and the scoring rows alike.
+                    continue;
+                }
                 let mut edge_bits = vec![0u64; words];
                 let mut any = false;
                 for step in 1..step_count {
@@ -239,7 +258,8 @@ fn tarjan_scc_of(adj: &[Vec<(u32, u32)>], n_nodes: usize) -> Vec<u32> {
 pub(super) struct EnumeratedCandidates {
     /// Elementary circuits as node-id paths, each starting at its minimum
     /// node id (the canonical rotation, by construction of the min-root
-    /// search). Singleton paths are active self-loops.
+    /// search). Every path holds at least two nodes: the union graph carries
+    /// no self-edges.
     pub circuits: Vec<Vec<u32>>,
     /// `true` iff every branch was explored within the circuit/visit budgets
     /// and the deadline -- the emitted set is then provably the complete
