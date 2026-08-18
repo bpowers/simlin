@@ -89,4 +89,12 @@ uv run pytest tests/ -x           # Run tests
 uv run ruff check                  # Lint
 uv run ruff format                 # Format
 uv run mypy simlin                 # Type check (strict)
+make e2e                           # JupyterLab notebook-editor journey (Playwright)
 ```
+
+`make e2e` launches a real `jupyter lab` from the pysimlin venv (synced with the
+`e2e` extra) and drives the notebook editor widget end to end. It is its own CI
+job (`pysimlin-e2e`), not part of the pre-commit hook. It needs the widget
+assets staged into `simlin/_widget/` (build `src/notebook-widget` and
+`src/engine`, then copy `dist/widget.js` and `core/libsimlin-browser.wasm`
+there) and Playwright's chromium (`npx playwright install --with-deps chromium`).

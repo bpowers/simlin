@@ -1,4 +1,4 @@
-.PHONY: all build test clean install dev lint type-check
+.PHONY: all build test clean install dev lint type-check e2e
 
 # Build the libsimlin library. mimalloc: the engine compile path is
 # allocation-heavy and mimalloc roughly halves allocator time on native builds
@@ -26,6 +26,16 @@ lint:
 # Run type checking
 type-check:
 	uv run mypy simlin
+
+# The JupyterLab journey (Playwright, e2e/): launches jupyter lab from this
+# venv, so the e2e extra must be installed alongside dev; --inexact keeps
+# whatever else the venv holds (a plain `uv sync --extra dev` elsewhere prunes
+# jupyterlab again, and this re-adds it). Needs the CFFI extension built, the
+# widget assets staged in simlin/_widget/, and Playwright's chromium; see
+# e2e/playwright.config.ts for the environment variables.
+e2e:
+	uv sync --inexact --extra dev --extra e2e
+	../../node_modules/.bin/playwright test -c e2e/playwright.config.ts
 
 # Format code
 format:
