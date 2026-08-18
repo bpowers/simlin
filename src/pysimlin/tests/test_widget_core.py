@@ -7,12 +7,14 @@ The shell that executes them is covered in ``tests/test_widget.py``.
 from __future__ import annotations
 
 import base64
+import json
 
 import pytest
 
 from simlin._sync import ChangeEvent
 from simlin._widget_core import (
     ASSET_ENV,
+    ENVELOPE_HEADROOM_BYTES,
     INLINE_WASM_GLOBAL,
     MAX_SNAPSHOT_BYTES,
     TORNADO_DEFAULT_MAX_MESSAGE_SIZE,
@@ -25,7 +27,7 @@ from simlin._widget_core import (
     Unrecognised,
     WasmRequest,
     dispatch_for_shell,
-    format_mib,
+    format_size,
     inline_esm,
     is_own_change,
     missing_asset_message,
@@ -36,6 +38,7 @@ from simlin._widget_core import (
     parse_asset_mode,
     parse_incoming,
     plan_snapshot_reply,
+    snapshot_wire_size,
 )
 
 
@@ -134,25 +137,56 @@ class TestSnapshotSize:
     warning, notice)."""
 
     def test_default_cap_leaves_room_under_the_tornado_default(self) -> None:
-        # The measured envelope inflation on the repo's models is at most
-        # 1.16x (see the MAX_SNAPSHOT_BYTES rationale); the cap times that
-        # must still fit under tornado's default with headroom for headers.
+        # The cap is measured on the escaped snapshot text, so the only
+        # other bytes in the frame are the envelope/header, bounded by
+        # ENVELOPE_HEADROOM_BYTES; the sum must fit tornado's default.
         assert MAX_SNAPSHOT_BYTES == 8 * 1024 * 1024
         assert TORNADO_DEFAULT_MAX_MESSAGE_SIZE == 10 * 1024 * 1024
-        assert MAX_SNAPSHOT_BYTES * 1.16 < TORNADO_DEFAULT_MAX_MESSAGE_SIZE - 64 * 1024
+        assert MAX_SNAPSHOT_BYTES + ENVELOPE_HEADROOM_BYTES < TORNADO_DEFAULT_MAX_MESSAGE_SIZE
 
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("", 2),  # the two quotes
+            ("abc", 5),
+            ('{"a":1}', 11),  # two escaped quotes -> +2, plus the outer quotes
+            ("back\\slash", 13),  # one escaped backslash
+            ("Ünï", 7),  # UTF-8, not \\uXXXX escapes (ensure_ascii=False)
+            ("line\nbreak", 13),  # control character escaped to \\n
+        ],
+    )
+    def test_snapshot_wire_size_is_the_escaped_utf8_length(self, text: str, expected: int) -> None:
+        assert snapshot_wire_size(text) == expected
+        assert snapshot_wire_size(text) == len(json.dumps(text, ensure_ascii=False).encode())
+
+    # Pinned identically in src/notebook-widget/src/widget-core.test.ts
+    # (`SIZE_FIXTURE`): both sides must print the same figure so the
+    # kernel's notice and the browser's toast collapse into one message.
     @pytest.mark.parametrize(
         ("nbytes", "text"),
         [
+            (0, "0 KiB"),
+            (1, "0 KiB"),
+            (512, "0 KiB"),  # 0.5: a tie, rounds to even
+            (1536, "2 KiB"),  # 1.5: a tie, rounds to even
+            (1537, "2 KiB"),
+            (1024, "1 KiB"),
+            (16, "0 KiB"),
+            (262144, "256 KiB"),
+            (1024 * 1024 - 1, "1024 KiB"),
+            (1024 * 1024, "1 MiB"),
+            (1_357_590, "1.3 MiB"),
             (8 * 1024 * 1024, "8 MiB"),
+            (8 * 1024 * 1024 + 256 * 1024, "8.2 MiB"),  # 8.25: a tie, rounds to even
+            (8 * 1024 * 1024 + 768 * 1024, "8.8 MiB"),  # 8.75: a tie, rounds to even
+            (9_000_000, "8.6 MiB"),
             (10 * 1024 * 1024, "10 MiB"),
             (int(12.3 * 1024 * 1024), "12.3 MiB"),
-            (1_357_590, "1.3 MiB"),
-            (0, "0 MiB"),
+            (104857600, "100 MiB"),
         ],
     )
-    def test_format_mib(self, nbytes: int, text: str) -> None:
-        assert format_mib(nbytes) == text
+    def test_format_size(self, nbytes: int, text: str) -> None:
+        assert format_size(nbytes) == text
 
     @pytest.mark.parametrize("nbytes", [0, 1, MAX_SNAPSHOT_BYTES - 1, MAX_SNAPSHOT_BYTES])
     def test_at_or_below_the_cap_is_no_warning(self, nbytes: int) -> None:
@@ -163,12 +197,17 @@ class TestSnapshotSize:
         assert text is not None
         assert text.startswith("simlin: ")
         assert "8 MiB" in text
+        assert "JSON-escaped" in text
         assert "will not be saved" in text
         assert "model.edit()" in text
         assert "websocket_max_message_size" in text
         assert "10 MiB" in text
         assert "--ServerApp.tornado_settings" in text
         assert "max_snapshot_bytes" in text
+        # Hosts: only those behind a Jupyter server are subject to tornado's
+        # limit; VS Code's local kernels are not, and must not be named.
+        assert "through a Jupyter server" in text
+        assert "VS Code" not in text
 
     def test_custom_limit_is_what_the_texts_report(self) -> None:
         limit = 32 * 1024 * 1024
@@ -199,6 +238,8 @@ class TestSnapshotSize:
                 "(8.6 MiB > 8 MiB limit); edit it from Python instead."
             ),
         }
+        # Small caps (tests, tiny hosts) read in KiB, never "0.0 MiB > 0.0 MiB".
+        assert "(1 KiB > 0 KiB limit)" in oversize_notice(1024, 16)["text"]
 
 
 class TestPlanSnapshotReply:

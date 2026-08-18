@@ -8,7 +8,7 @@ import {
   checkSnapshotSize,
   classifyPush,
   DEFAULT_HEIGHT_PX,
-  formatMiB,
+  formatSize,
   inFlightFor,
   MAX_SNAPSHOT_BYTES,
   oversizeMessage,
@@ -21,7 +21,7 @@ import {
   seedAfterSaved,
   snapshotMessage,
   TRAITS,
-  snapshotByteLength,
+  snapshotWireSize,
   versionAfterReply,
   wrapperStyle,
 } from './widget-core';
@@ -274,27 +274,53 @@ describe('snapshot size', () => {
     expect(MAX_SNAPSHOT_BYTES).toBe(8 * 1024 * 1024);
   });
 
-  it('measures UTF-8 bytes, not UTF-16 units', () => {
-    expect(snapshotByteLength('abc')).toBe(3);
-    expect(snapshotByteLength('Ünï')).toBe(5);
-    expect(snapshotByteLength('')).toBe(0);
+  // Same rows as tests/test_widget_core.py::test_snapshot_wire_size_is_the_escaped_utf8_length.
+  it.each([
+    ['empty: the two quotes', '', 2],
+    ['plain', 'abc', 5],
+    ['quotes escape', '{"a":1}', 11],
+    ['backslash escapes', 'back\\slash', 13],
+    ['UTF-8, not \\uXXXX', 'Ünï', 7],
+    ['control character escapes', 'line\nbreak', 13],
+  ])('snapshotWireSize: %s', (_label, json, expected) => {
+    expect(snapshotWireSize(json)).toBe(expected);
   });
 
   it.each([
-    ['at the limit is ok', 'abcd', 4, { kind: 'ok', bytes: 4 }],
-    ['below the limit is ok', 'ab', 4, { kind: 'ok', bytes: 2 }],
-    ['one byte over is oversize', 'abcde', 4, { kind: 'oversize', bytes: 5, limit: 4 }],
-    ['multi-byte characters count as bytes', 'Ünï', 4, { kind: 'oversize', bytes: 5, limit: 4 }],
+    ['at the limit is ok', 'ab', 4, { kind: 'ok', bytes: 4 }],
+    ['below the limit is ok', 'a', 4, { kind: 'ok', bytes: 3 }],
+    ['one byte over is oversize', 'abc', 4, { kind: 'oversize', bytes: 5, limit: 4 }],
+    ['escaping counts: a quote costs two', '"', 3, { kind: 'oversize', bytes: 4, limit: 3 }],
+    ['multi-byte characters count as bytes', 'Ü', 3, { kind: 'oversize', bytes: 4, limit: 3 }],
   ])('checkSnapshotSize: %s', (_label, json, limit, expected) => {
     expect(checkSnapshotSize(json, limit)).toEqual(expected);
   });
 
-  it('formats MiB like pysimlin format_mib', () => {
-    expect(formatMiB(8 * 1024 * 1024)).toBe('8 MiB');
-    expect(formatMiB(10 * 1024 * 1024)).toBe('10 MiB');
-    expect(formatMiB(9_000_000)).toBe('8.6 MiB');
-    expect(formatMiB(1_357_590)).toBe('1.3 MiB');
-    expect(formatMiB(0)).toBe('0 MiB');
+  // SIZE_FIXTURE: pinned identically in tests/test_widget_core.py
+  // (`test_format_size`); both sides must print the same figure so the
+  // kernel's notice and the browser's toast collapse into one message.
+  const SIZE_FIXTURE: Array<[number, string]> = [
+    [0, '0 KiB'],
+    [1, '0 KiB'],
+    [512, '0 KiB'], // 0.5: a tie, rounds to even
+    [1536, '2 KiB'], // 1.5: a tie, rounds to even
+    [1537, '2 KiB'],
+    [1024, '1 KiB'],
+    [16, '0 KiB'],
+    [262144, '256 KiB'],
+    [1024 * 1024 - 1, '1024 KiB'],
+    [1024 * 1024, '1 MiB'],
+    [1_357_590, '1.3 MiB'],
+    [8 * 1024 * 1024, '8 MiB'],
+    [8 * 1024 * 1024 + 256 * 1024, '8.2 MiB'], // 8.25: a tie, rounds to even
+    [8 * 1024 * 1024 + 768 * 1024, '8.8 MiB'], // 8.75: a tie, rounds to even
+    [9_000_000, '8.6 MiB'],
+    [10 * 1024 * 1024, '10 MiB'],
+    [Math.trunc(12.3 * 1024 * 1024), '12.3 MiB'],
+    [104857600, '100 MiB'],
+  ];
+  it.each(SIZE_FIXTURE)('formatSize(%d) = %s', (bytes, expected) => {
+    expect(formatSize(bytes)).toBe(expected);
   });
 
   it('the report and the toast carry both sizes', () => {
@@ -303,5 +329,7 @@ describe('snapshot size', () => {
       level: 'warn',
       text: 'Edit not saved: the model is too large for the notebook connection (8.6 MiB > 8 MiB limit); edit it from Python instead.',
     });
+    // Small caps read in KiB, never "0.0 MiB > 0.0 MiB".
+    expect(oversizeNotice(1024, 16).text).toContain('(1 KiB > 0 KiB limit)');
   });
 });

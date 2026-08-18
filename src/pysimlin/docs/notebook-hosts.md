@@ -77,16 +77,18 @@ Things every host shares:
   saved state), or an `http(s)://` URL of the module (a dev server or CDN;
   wasm still over the comm).
 - **Snapshot size**: an edit travels browser-to-kernel as the whole project
-  in JSON. The editor refuses to send one above `max_snapshot_bytes`
-  (default 8 MiB) because JupyterLab/Notebook 7's server drops websocket
-  messages above tornado's 10 MiB `websocket_max_message_size` by closing
-  the connection. The cap applies on every host; whether a given host has
+  in JSON. The editor refuses to send one whose wire size (the text
+  JSON-escaped) is above `max_snapshot_bytes` (default 8 MiB) because a
+  Jupyter server (JupyterLab, Notebook 7) drops websocket messages above
+  tornado's 10 MiB `websocket_max_message_size` by closing the connection. The cap applies on every host; whether a given host has
   its own limit above or below is a fact to check per host, not to assume.
 - **Static renderers**: the display's output also carries the SVG diagram.
   nbconvert shows it when the notebook has no saved widget state
-  (`--ExecutePreprocessor.store_widget_state=False` when executing);
-  with saved state nbconvert exports the widget itself, loading ipywidgets
-  from a CDN when opened (verified by `make export-check`).
+  (`--ExecutePreprocessor.store_widget_state=False` when executing), and
+  with saved state exports the widget view plus the embedded state instead
+  -- both verified by `make export-check`. That widget export loads the
+  ipywidgets html-manager from a CDN when opened; whether it then renders
+  the editor in a browser is not verified.
 - **Poll thread**: an opened model polls its file every 0.5 s on a daemon
   thread (about 0.1% of a core for twenty open models); `watch=False`
   disables it. Change notifications are marshalled onto the kernel's IO
@@ -97,16 +99,18 @@ Things every host shares:
 
 Status: `make -C src/pysimlin e2e` (CI job `pysimlin-e2e`) drives a real
 JupyterLab 4.6.3 with Playwright and verifies: display renders the editor
-(AC2.1); adding a variable and saving an equation in the editor rewrites the
+with its diagram (AC2.1's rendering only -- not the height/theme options,
+nor that no style leaks out of the cell); adding a variable and saving an equation in the editor rewrites the
 file and the next `m.run()` sees it, with exactly one accepted snapshot per
 edit (AC2.2); `m.selection` (AC2.7); a Python `edit()` -> "Updated from
 Python" and the element drawn (AC2.3); a write from a second process ->
 "Updated on disk" and `m.revision` advanced (AC2.3); no page errors, no
 stderr, no error outputs. `make export-check` verifies the static exports.
-NOT covered by the journey (unit-tested, not observed in a browser): two
-views of one model (AC2.4), stale-snapshot rejection (AC2.5), keyboard
-scoping (AC2.6), theme following, the oversize toast, the "model not found"
-reopen case. Run those rows of the table by hand when touching them.
+NOT covered by the journey (unit-tested, not observed in a browser): the
+height/theme/CSS-scoping parts of AC2.1, two views of one model (AC2.4),
+stale-snapshot rejection (AC2.5), keyboard scoping (AC2.6), theme
+following, the oversize toast, the "model not found" reopen case. Run
+those rows of the table by hand when touching them.
 
 Install and run:
 

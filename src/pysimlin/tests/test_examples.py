@@ -53,7 +53,7 @@ def _is_magic_cell(cell: dict[str, Any]) -> bool:
 
 
 @pytest.mark.parametrize("notebook", NOTEBOOKS, ids=[n.stem for n in NOTEBOOKS])
-def test_example_notebook_is_clean_and_runs(notebook: Path) -> None:
+def test_example_notebook_is_clean_and_runs(notebook: Path, tmp_path: Path) -> None:
     """Example notebooks are committed without outputs (so diffs stay
     readable) and their code cells run top to bottom as a plain script.
 
@@ -68,6 +68,10 @@ def test_example_notebook_is_clean_and_runs(notebook: Path) -> None:
     they need a network and a kernel, and installing the released pysimlin
     over the checkout under test would be wrong anyway.  Every other cell
     of every example notebook must run against this checkout.
+
+    The script runs with a temporary working directory: notebooks write
+    model files next to themselves (``Path.cwd()``, Colab's ``/content``),
+    and running from ``examples/`` would leave those files in the tree.
     """
     nb = json.loads(notebook.read_text(encoding="utf-8"))
     assert nb["nbformat"] == 4, f"{notebook.name}: expected nbformat 4"
@@ -83,7 +87,7 @@ def test_example_notebook_is_clean_and_runs(notebook: Path) -> None:
     script = "\n\n".join("".join(cell["source"]) for cell in python_cells)
     result = subprocess.run(
         [sys.executable, "-c", script],
-        cwd=str(EXAMPLES_DIR),
+        cwd=str(tmp_path),
         capture_output=True,
         text=True,
         timeout=120,

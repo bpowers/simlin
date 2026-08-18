@@ -14,6 +14,7 @@ import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 
 import widget from './index';
 import { GLOBAL_KEY, resetEngineBootstrapForTests } from './engine-bootstrap';
+import { formatSize } from './widget-core';
 import { NOTICE_TIMEOUT_MS, SELECTION_DEBOUNCE_MS } from './WidgetApp';
 import { localJson, mounts, resetEditorMock } from './test-utils/editor-mock';
 import { readyCalls, resetEngineMock } from './test-utils/engine-mock';
@@ -383,13 +384,16 @@ describe('WidgetApp <-> model protocol', () => {
     await mount(model);
     fireEvent.click(screen.getByText('edit'));
     await waitFor(() => expect(mounts[0].saveResults).toEqual([undefined]));
-    const bytes = new TextEncoder().encode(localJson(SEED, 1)).byteLength;
+    // The reported size is the WIRE size: the snapshot JSON-escaped, which
+    // is what the frame carries (every quote in it costs an extra byte).
+    const bytes = new TextEncoder().encode(JSON.stringify(localJson(SEED, 1))).byteLength;
+    expect(bytes).toBeGreaterThan(new TextEncoder().encode(localJson(SEED, 1)).byteLength);
     expect(bytes).toBeGreaterThan(16);
     expect(model.snapshotsDelivered()).toEqual([]);
     expect(model.sent).toEqual([{ type: 'oversize', bytes }]);
     // The toast is the widget's own; the kernel's echoed notice has the same
     // text, so the two collapse into one visible message.
-    const text = `Edit not saved: the model is too large for the notebook connection (${(bytes / 1048576).toFixed(1)} MiB > 0.0 MiB limit); edit it from Python instead.`;
+    const text = `Edit not saved: the model is too large for the notebook connection (${formatSize(bytes)} > 0 KiB limit); edit it from Python instead.`;
     expect(screen.getByRole('status').textContent).toBe(text);
     expect(screen.getAllByRole('status')).toHaveLength(1);
     // Nothing moved kernel-side, no remount, the Editor keeps its local
@@ -414,9 +418,9 @@ describe('WidgetApp <-> model protocol', () => {
     expect(mounts).toHaveLength(1);
   });
 
-  it('a snapshot exactly at max_snapshot_bytes is sent', async () => {
+  it('a snapshot exactly at max_snapshot_bytes (wire size) is sent', async () => {
     const json = localJson(SEED, 1);
-    const bytes = new TextEncoder().encode(json).byteLength;
+    const bytes = new TextEncoder().encode(JSON.stringify(json)).byteLength;
     const model = new FakeModel(defaultState({ revision: 3, max_snapshot_bytes: bytes }));
     await mount(model);
     fireEvent.click(screen.getByText('edit'));

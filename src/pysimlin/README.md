@@ -299,8 +299,10 @@ wherever anywidget does -- Notebook 7, VS Code, Google Colab, marimo --
 with the checklist and the honest status of each host in
 [`docs/notebook-hosts.md`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/docs/notebook-hosts.md)
 ([`examples/colab_quickstart.ipynb`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/examples/colab_quickstart.ipynb)
-is the two-minute Colab start). Static renderers get the SVG diagram in the
-same output.
+is the two-minute Colab start; Colab itself is not yet verified -- if the
+editor does not appear there, set `SIMLIN_WIDGET_ASSET=inline` before
+`import simlin` and please report which worked). Static renderers get the
+SVG diagram in the same output.
 
 <!-- pysimlin-test: skip -->
 ```python
@@ -361,16 +363,17 @@ Practical notes:
   module (works everywhere, largest output), or an `http(s)://` URL loads
   the module from a server you run.
 - **Very large models** display but cannot be edited from the editor: each
-  edit travels browser-to-kernel as the whole project in JSON, and the
-  notebook server drops websocket messages above 10 MiB (tornado's
+  edit travels browser-to-kernel as the whole project in JSON, and a Jupyter
+  server drops websocket messages above 10 MiB (tornado's
   `websocket_max_message_size`) by closing the connection. The editor
-  therefore refuses to send an edit whose snapshot exceeds 8 MiB
-  (`model.widget(max_snapshot_bytes=...)` sets the cap) with the notice
-  "Edit not saved: the model is too large for the notebook connection ..."
-  instead of hanging, and displaying such a model emits a `RuntimeWarning`
-  up front. For scale, C-LEARN (911 variables) is 1.3 MiB. Editing from
-  Python is unaffected. To edit models that large in the editor, raise
-  both limits: `jupyter lab --ServerApp.tornado_settings='{"websocket_max_message_size": 104857600}'`
+  therefore refuses to send an edit whose snapshot, as it rides in the
+  message (JSON-escaped), exceeds 8 MiB (`model.widget(max_snapshot_bytes=...)`
+  sets the cap) with the notice "Edit not saved: the model is too large for
+  the notebook connection ..." instead of hanging, and displaying such a
+  model emits a `RuntimeWarning` up front. For scale, C-LEARN (911
+  variables) is 1.4 MiB. Editing from Python is unaffected. To edit models
+  that large in the editor, raise both limits:
+  `jupyter lab --ServerApp.tornado_settings='{"websocket_max_message_size": 104857600}'`
   and `max_snapshot_bytes` at or below about 80% of that.
 
 ### Running Simulations

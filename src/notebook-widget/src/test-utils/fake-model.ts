@@ -23,7 +23,7 @@
 // notice pysimlin sends (`_widget_core.oversize_notice`) and nothing else.
 
 import type { AnyModel } from '../anywidget-model';
-import { MAX_SNAPSHOT_BYTES, formatMiB } from '../widget-core';
+import { MAX_SNAPSHOT_BYTES, formatSize } from '../widget-core';
 
 type Listener = (...args: unknown[]) => void;
 
@@ -257,7 +257,7 @@ export class FakeModel implements AnyModel {
       this.kernelSend({
         type: 'notice',
         level: 'warn',
-        text: `Edit not saved: the model is too large for the notebook connection (${formatMiB(bytes)} > ${formatMiB(limit)} limit); edit it from Python instead.`,
+        text: `Edit not saved: the model is too large for the notebook connection (${formatSize(bytes)} > ${formatSize(limit)} limit); edit it from Python instead.`,
       });
     }
     // `wasm` and unknown types are left to the individual test.

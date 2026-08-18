@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import functools
 import os
+import sys
 import warnings
 import weakref
 from dataclasses import dataclass
@@ -78,11 +79,13 @@ from ._widget_core import (
     parse_asset_mode,
     parse_incoming,
     plan_snapshot_reply,
+    snapshot_wire_size,
 )
 from .errors import SimlinAssetError, SimlinError, SimlinWriteError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from types import FrameType
 
     from ._sync import ChangeEvent
     from .model import Model
@@ -176,6 +179,26 @@ def _kernel_dispatch() -> Dispatch | None:
     return dispatch_for_shell(get_ipython())  # type: ignore[no-untyped-call]
 
 
+def _stacklevel_outside_package() -> int:
+    """The ``warnings.warn(stacklevel=)`` that attributes a warning raised
+    from inside pysimlin to the first caller frame outside the ``simlin``
+    package (the user's cell), however deep the internal call chain
+    (``Model._repr_mimebundle_`` -> ``Model.widget`` -> ``ModelWidget``
+    -> ``_warn_if_oversize``).  Level 1 is the caller of ``warn``; every
+    ``simlin.*`` frame between it and the outside adds one.  Python 3.12's
+    ``skip_file_prefixes`` does the same and is not available on 3.11."""
+    level = 1
+    frame: FrameType | None = sys._getframe(1)  # the function about to call warnings.warn
+    package_prefix = __package__ + "."
+    while frame is not None:
+        name = frame.f_globals.get("__name__", "")
+        if name != __package__ and not name.startswith(package_prefix):
+            return level
+        level += 1
+        frame = frame.f_back
+    return level
+
+
 # ── the widget ──────────────────────────────────────────────────────────
 
 
@@ -219,6 +242,17 @@ class ModelWidget(anywidget.AnyWidget):
     theme = traitlets.Enum(("auto", "light", "dark"), default_value="auto").tag(sync=True)
     read_only = traitlets.Bool(False).tag(sync=True)
     max_snapshot_bytes = traitlets.Int(MAX_SNAPSHOT_BYTES, min=1).tag(sync=True)
+
+    @traitlets.validate("max_snapshot_bytes")
+    def _validate_max_snapshot_bytes(self, proposal: dict[str, Any]) -> int:
+        # traitlets.Int accepts bool (a Python int subclass); True is never
+        # a byte count, so refuse it explicitly rather than cap at 1 byte.
+        value = proposal["value"]
+        if isinstance(value, bool):
+            raise traitlets.TraitError(
+                f"max_snapshot_bytes must be a positive integer number of bytes, got {value!r}"
+            )
+        return int(value)
 
     # Declared explicitly (rather than as a class-level string, which
     # anywidget also accepts) so the module text is supplied per instance:
@@ -283,7 +317,7 @@ class ModelWidget(anywidget.AnyWidget):
             **kwargs,
         )
         self.on_msg(self._on_custom_msg)
-        self._warn_if_oversize(len(json_bytes))
+        self._warn_if_oversize(json_bytes.decode("utf-8"))
         # A weak reference: the project holds its listeners strongly, and a
         # closed widget must not be kept alive by a project it no longer
         # watches (unsubscribing is the normal path; this is the backstop).
@@ -319,21 +353,26 @@ class ModelWidget(anywidget.AnyWidget):
         with self.hold_sync():
             self.project_json = json_text
             self.revision = revision
-        self._warn_if_oversize(len(json_text.encode("utf-8")))
+        self._warn_if_oversize(json_text)
 
-    def _warn_if_oversize(self, nbytes: int) -> None:
+    def _warn_if_oversize(self, json_text: str) -> None:
         """Warn (once per widget) when the project the browser now holds is
-        too large for the browser to send edits of it back.  The kernel ->
-        browser direction has no such limit, so the model still displays;
-        the warning is what tells the Python user why editor edits will be
-        refused, and how to lift both limits."""
+        too large for the browser to send edits of it back -- measured as
+        the browser will measure it, JSON-escaped (:func:`snapshot_wire_size`).
+        The kernel -> browser direction has no such limit, so the model
+        still displays; the warning is what tells the Python user why editor
+        edits will be refused, and how to lift both limits.  Attributed to
+        the first frame outside the ``simlin`` package -- the user's cell
+        for a display, ``Model.widget()`` call or ``edit()`` block -- so the
+        warning shows in that cell's output rather than pointing at
+        ``model.py``."""
         if self._warned_oversize:
             return
-        text = oversize_warning(nbytes, int(self.max_snapshot_bytes))
+        text = oversize_warning(snapshot_wire_size(json_text), int(self.max_snapshot_bytes))
         if text is None:
             return
         self._warned_oversize = True
-        warnings.warn(text, RuntimeWarning, stacklevel=3)
+        warnings.warn(text, RuntimeWarning, stacklevel=_stacklevel_outside_package())
 
     def _push_from_project(self) -> None:
         json_bytes, revision = self._project._snapshot()
@@ -365,8 +404,11 @@ class ModelWidget(anywidget.AnyWidget):
                 self._handle_snapshot(message)
             case OversizeReport(bytes=nbytes):
                 # The browser already resolved the save unsaved and showed a
-                # toast; the kernel's part is the record for the Python user
-                # (a warning in the cell output) plus the same notice.
+                # toast; the kernel's part is the same notice plus a warning
+                # on the kernel's stderr as the record (a comm handler runs
+                # outside any cell, so JupyterLab shows it in the Log Console
+                # rather than a cell output -- the toast is what the user
+                # sees).
                 limit = int(self.max_snapshot_bytes)
                 warnings.warn(oversize_report_warning(nbytes, limit), RuntimeWarning, stacklevel=2)
                 self.send(oversize_notice(nbytes, limit))

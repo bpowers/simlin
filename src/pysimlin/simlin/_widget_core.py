@@ -21,6 +21,7 @@ widget-owned), and every request or reply is a custom message
 from __future__ import annotations
 
 import base64
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Union
 
@@ -124,64 +125,93 @@ browser -> server frame above it makes tornado close the socket (code 1009,
 "message too big") -- the message never reaches the kernel."""
 
 MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
-"""Default largest project snapshot (UTF-8 bytes of the native JSON) the
-browser will send to the kernel; the widget's ``max_snapshot_bytes`` trait
-carries the value the JS enforces, and the seed/push warning fires above the
-same number.  8 MiB, not 10: the snapshot rides inside a JSON envelope
-(``{"method":"custom","content":{"type":"snapshot","base":n,"json":"..."}}``
-plus the jupyter message header), where JSON-string escaping of the
-project's quotes and backslashes inflates it by 7-16% on the repo's models
-(1.07x for C-LEARN, 1.16x for small XMILE models), so 8 MiB of snapshot is
-about 9.3 MiB on the wire -- inside the 10 MiB tornado default with room for
-the headers.  A model above this cannot be edited from the widget: the
-browser reports ``oversize`` instead of hanging on a snapshot the server
-would drop.  Users who raise the server limit may raise the widget's
-too, ``model.widget(max_snapshot_bytes=...)``.  Must equal
-``MAX_SNAPSHOT_BYTES`` in ``src/notebook-widget/src/widget-core.ts`` (the
-JS default when the trait is missing)."""
+"""Default largest project snapshot the browser will send to the kernel,
+measured AS IT RIDES IN THE MESSAGE: the UTF-8 bytes of the snapshot text
+JSON-string-escaped (:func:`snapshot_wire_size`), which is how it sits in
+the comm envelope ``{"method":"custom","content":{"type":"snapshot",
+"base":n,"json":"..."}}``.  Measuring the raw text instead would under-count
+by 7-39% depending on content (quotes and backslashes in equations and
+names each cost an extra byte), and an 8 MiB raw snapshot could be over 11
+MiB on the wire and still hang.  The widget's ``max_snapshot_bytes`` trait
+carries the value the JS enforces, and the seed/push warning fires above
+the same number.  8 MiB, not 10: the envelope's other fields plus the
+jupyter message header are well under 2 KiB, so 8 MiB leaves ~2 MiB of
+headroom under tornado's default regardless of content.  A model above
+this cannot be edited from the widget: the browser reports ``oversize``
+instead of hanging on a snapshot the server would drop.  Users who raise
+the server limit may raise the widget's too,
+``model.widget(max_snapshot_bytes=...)``.  Must equal ``MAX_SNAPSHOT_BYTES``
+in ``src/notebook-widget/src/widget-core.ts`` (the JS default when the
+trait is missing)."""
+
+ENVELOPE_HEADROOM_BYTES = 64 * 1024
+"""Generous bound on everything in a snapshot's websocket frame that is not
+the escaped snapshot text: the envelope's other fields, the jupyter message
+header/parent/metadata, and the comm id -- a few hundred bytes in practice."""
 
 
-def format_mib(nbytes: int) -> str:
-    """``nbytes`` as a short human figure in MiB (one decimal; whole numbers
-    print without it: ``8 MiB``, ``12.3 MiB``)."""
-    mib = nbytes / (1024 * 1024)
-    if mib == int(mib):
-        return f"{int(mib)} MiB"
-    return f"{mib:.1f} MiB"
+def snapshot_wire_size(text: str) -> int:
+    """UTF-8 byte length of ``text`` as a JSON string value -- what the
+    snapshot contributes to its websocket frame.  ``ensure_ascii=False``
+    because ipykernel's serializer emits UTF-8, not ``\\uXXXX`` escapes;
+    the JS side (``JSON.stringify`` + ``TextEncoder``) counts the same
+    bytes."""
+    return len(json.dumps(text, ensure_ascii=False).encode("utf-8"))
+
+
+def format_size(nbytes: int) -> str:
+    """``nbytes`` as a short human figure: KiB below 1 MiB, else MiB to one
+    decimal (whole numbers print without it: ``8 MiB``, ``12.3 MiB``,
+    ``512 KiB``).  Rounding is on integer tenths (``round`` on an integer
+    numerator, so a tie like 0.25 MiB rounds to even: ``0.2 MiB`` never
+    occurs since that range prints in KiB, and 8.25 MiB prints ``8.2 MiB``
+    on both sides); the JS ``formatSize`` produces byte-identical output
+    for the fixture list pinned in both test suites."""
+    kib = nbytes / 1024
+    if nbytes < 1024 * 1024:
+        return f"{round(kib)} KiB"
+    tenths = round(nbytes * 10 / (1024 * 1024))
+    if tenths % 10 == 0:
+        return f"{tenths // 10} MiB"
+    return f"{tenths // 10}.{tenths % 10} MiB"
 
 
 def oversize_warning(nbytes: int, limit: int) -> str | None:
-    """The kernel-side warning for a project whose snapshot (``nbytes``)
-    exceeds ``limit``: ``None`` when it does not.  Issued when the widget
-    seeds or pushes such a project, because the browser side will refuse to
-    send edits of it back (see :func:`oversize_notice`); the text says why,
-    what still works, and how to raise both limits."""
+    """The kernel-side warning for a project whose snapshot (``nbytes``, wire
+    size) exceeds ``limit``: ``None`` when it does not.  Issued when the
+    widget seeds or pushes such a project, because the browser side will
+    refuse to send edits of it back (see :func:`oversize_notice`); the text
+    says why, what still works, and how to raise both limits."""
     if nbytes <= limit:
         return None
     return (
-        f"simlin: this model is {format_mib(nbytes)} as a snapshot, above the "
-        f"{format_mib(limit)} the notebook editor will send back to the kernel, so edits "
-        f"made in the displayed editor will not be saved (they are refused with a notice); "
-        f"the model still displays, and edits from Python (model.edit()) work as usual. The "
-        f"cap exists because the notebook server drops browser->kernel websocket messages "
-        f"above tornado's websocket_max_message_size "
-        f"({format_mib(TORNADO_DEFAULT_MAX_MESSAGE_SIZE)} by default; JupyterLab, Notebook 7 "
-        f"and VS Code all go through it) by closing the connection, which would leave the "
-        f"editor waiting forever. To edit models this large in the editor, raise both: start "
-        f"the server with a larger limit, e.g. jupyter lab --ServerApp.tornado_settings="
+        f"simlin: this model is {format_size(nbytes)} as a snapshot (JSON-escaped, as it "
+        f"travels), above the {format_size(limit)} the notebook editor will send back to the "
+        f"kernel, so edits made in the displayed editor will not be saved (they are refused "
+        f"with a notice); the model still displays, and edits from Python (model.edit()) work "
+        f"as usual. The cap exists because a Jupyter server drops browser->kernel websocket "
+        f"messages above tornado's websocket_max_message_size "
+        f"({format_size(TORNADO_DEFAULT_MAX_MESSAGE_SIZE)} by default; any host that reaches "
+        f"the kernel through a Jupyter server, such as JupyterLab or Notebook 7, is subject to "
+        f"it) by closing the connection, which would leave the editor waiting forever. To edit "
+        f"models this large in the editor, raise both: start the server with a larger limit, "
+        f"e.g. jupyter lab --ServerApp.tornado_settings="
         f"'{{\"websocket_max_message_size\": 104857600}}', and display with "
         f"model.widget(max_snapshot_bytes=<bytes>) below roughly 80% of that."
     )
 
 
 def oversize_report_warning(nbytes: int, limit: int) -> str:
-    """The kernel-side warning for a browser ``oversize`` report: the record,
-    in the cell output, that an editor edit was refused and why."""
+    """The kernel-side warning for a browser ``oversize`` report.  It goes
+    to the kernel's stderr as a ``RuntimeWarning`` (JupyterLab shows it in
+    the Log Console, not in a cell -- the toast is what the user sees); it
+    is the record for someone reading the kernel log."""
     return (
         f"simlin: an edit made in the notebook editor was not saved: the model's snapshot is "
-        f"{format_mib(nbytes)}, above the widget's max_snapshot_bytes ({format_mib(limit)}). "
-        f"Edit the model from Python instead, or raise the limit together with the notebook "
-        f"server's websocket_max_message_size (see simlin._widget_core.MAX_SNAPSHOT_BYTES)."
+        f"{format_size(nbytes)} (JSON-escaped, as it travels), above the widget's "
+        f"max_snapshot_bytes ({format_size(limit)}). Edit the model from Python instead, or "
+        f"raise the limit together with the notebook server's websocket_max_message_size "
+        f"(see simlin._widget_core.MAX_SNAPSHOT_BYTES)."
     )
 
 
@@ -191,7 +221,7 @@ def oversize_notice(nbytes: int, limit: int) -> dict[str, Any]:
     two collapse into one visible message."""
     return notice_message(
         f"Edit not saved: the model is too large for the notebook connection "
-        f"({format_mib(nbytes)} > {format_mib(limit)} limit); edit it from Python instead.",
+        f"({format_size(nbytes)} > {format_size(limit)} limit); edit it from Python instead.",
         "warn",
     )
 
@@ -218,7 +248,8 @@ class SnapshotRequest:
 @dataclass(frozen=True)
 class OversizeReport:
     """``{type:'oversize', bytes}``: the browser refused to send a snapshot of
-    ``bytes`` UTF-8 bytes because it exceeds its ``max_snapshot_bytes`` (the
+    ``bytes`` (its JSON-escaped UTF-8 size, as it would ride in the message)
+    because it exceeds ``max_snapshot_bytes`` (the
     save was resolved unsaved and a toast shown).  Nothing was applied and
     no ``saved``/``rejected`` reply is owed; the kernel warns and sends the
     matching notice."""
@@ -444,6 +475,7 @@ def dispatch_for_shell(shell: object) -> Callable[[Callable[[], None]], None] | 
 __all__ = [
     "ASSET_ENV",
     "ASSET_PACKAGE_DIR",
+    "ENVELOPE_HEADROOM_BYTES",
     "INLINE_WASM_GLOBAL",
     "MAX_SNAPSHOT_BYTES",
     "TORNADO_DEFAULT_MAX_MESSAGE_SIZE",
@@ -461,7 +493,7 @@ __all__ = [
     "Unrecognised",
     "WasmRequest",
     "dispatch_for_shell",
-    "format_mib",
+    "format_size",
     "inline_esm",
     "is_own_change",
     "missing_asset_message",
@@ -475,6 +507,7 @@ __all__ = [
     "plan_snapshot_reply",
     "rejected_message",
     "saved_message",
+    "snapshot_wire_size",
     "wasm_error_reply",
     "wasm_reply",
 ]

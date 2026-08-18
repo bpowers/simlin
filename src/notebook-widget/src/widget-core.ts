@@ -24,18 +24,21 @@ export const TRAITS = {
 export const DEFAULT_HEIGHT_PX = 600;
 
 /**
- * Default cap on the snapshot (UTF-8 bytes of the project JSON) `onSave` will
- * send to the kernel; the kernel's `max_snapshot_bytes` trait carries the
- * value in force and this is what a missing/invalid trait falls back to.
- * MUST equal `MAX_SNAPSHOT_BYTES` in pysimlin's `simlin/_widget_core.py`,
- * which also holds the rationale: the notebook server drops browser->kernel
- * websocket messages above tornado's `websocket_max_message_size` (10 MiB by
- * default) by closing the connection, so a snapshot that large would never
- * arrive and its save would wait forever; the snapshot travels JSON-escaped
- * inside a message envelope (7-16% inflation measured on the repo's models),
- * so 8 MiB of snapshot is ~9.3 MiB on the wire, inside the default with
- * headroom. Above the cap `onSave` sends `{type:'oversize', bytes}` instead
- * and the edit is reported as not saved.
+ * Default cap on the snapshot `onSave` will send to the kernel, measured AS
+ * IT RIDES IN THE MESSAGE: the UTF-8 bytes of the snapshot text
+ * JSON-string-escaped (`snapshotWireSize`), which is how it sits in the comm
+ * envelope. The kernel's `max_snapshot_bytes` trait carries the value in
+ * force and this is what a missing/invalid trait falls back to. MUST equal
+ * `MAX_SNAPSHOT_BYTES` in pysimlin's `simlin/_widget_core.py`, which holds
+ * the full rationale: the notebook server drops browser->kernel websocket
+ * messages above tornado's `websocket_max_message_size` (10 MiB by default)
+ * by closing the connection, so a snapshot that large would never arrive and
+ * its save would wait forever. Measuring the raw text would under-count by
+ * 7-39% depending on content (every quote and backslash in the project costs
+ * an extra byte); on the escaped size, 8 MiB leaves ~2 MiB of headroom under
+ * the default regardless of content, the envelope's other fields and the
+ * message header being a few hundred bytes. Above the cap `onSave` sends
+ * `{type:'oversize', bytes}` instead and the edit is reported as not saved.
  */
 export const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 
@@ -201,32 +204,64 @@ export function snapshotMessage(base: number, json: string): { type: 'snapshot';
 
 // ---- snapshot size --------------------------------------------------------------
 
-/** UTF-8 byte length of a snapshot: what the websocket frame carries (the JS string length counts UTF-16 units). */
-export function snapshotByteLength(json: string): number {
-  return new TextEncoder().encode(json).byteLength;
+/**
+ * Byte length of a snapshot as it rides in the message: the text as a JSON
+ * string value (`JSON.stringify` adds the quotes and escapes quotes,
+ * backslashes and control characters), in UTF-8 (what the websocket frame
+ * carries; the JS string length counts UTF-16 units and does not). Mirrors
+ * pysimlin's `snapshot_wire_size` byte for byte: JSON.stringify leaves
+ * non-ASCII as UTF-8 exactly as `json.dumps(ensure_ascii=False)` does.
+ */
+export function snapshotWireSize(json: string): number {
+  return new TextEncoder().encode(JSON.stringify(json)).byteLength;
 }
 
 /**
- * `bytes` as a short human figure in MiB, one decimal, whole numbers without
- * it (`8 MiB`, `12.3 MiB`). Same rendering as pysimlin's `format_mib`, so the
- * toast the widget shows and the notice the kernel sends back read the same
- * and collapse into one visible message.
+ * Round-half-to-even on a rational `numerator / denominator` (both
+ * non-negative integers): the rounding Python's `round()` applies, so the
+ * figures printed here and by pysimlin's `format_size` are identical.
+ * `Math.round` rounds ties up and would print 8.25 MiB as "8.3" against
+ * Python's "8.2".
  */
-export function formatMiB(bytes: number): string {
-  const mib = bytes / (1024 * 1024);
-  return Number.isInteger(mib) ? `${mib} MiB` : `${mib.toFixed(1)} MiB`;
+function roundHalfEven(numerator: number, denominator: number): number {
+  const quotient = Math.floor(numerator / denominator);
+  const remainder2 = 2 * (numerator - quotient * denominator);
+  if (remainder2 > denominator) {
+    return quotient + 1;
+  }
+  if (remainder2 < denominator) {
+    return quotient;
+  }
+  return quotient % 2 === 0 ? quotient : quotient + 1;
+}
+
+/**
+ * `bytes` as a short human figure: KiB below 1 MiB, else MiB to one decimal
+ * (whole numbers without it: `8 MiB`, `12.3 MiB`, `512 KiB`), rounding
+ * half-to-even like pysimlin's `format_size` -- the toast the widget shows
+ * and the notice the kernel sends back must read the same so they collapse
+ * into one visible message. The shared fixture list is pinned in both test
+ * suites.
+ */
+export function formatSize(bytes: number): string {
+  const MIB = 1024 * 1024;
+  if (bytes < MIB) {
+    return `${roundHalfEven(bytes, 1024)} KiB`;
+  }
+  const tenths = roundHalfEven(bytes * 10, MIB);
+  return tenths % 10 === 0 ? `${tenths / 10} MiB` : `${Math.floor(tenths / 10)}.${tenths % 10} MiB`;
 }
 
 export type SnapshotSizeCheck = { kind: 'ok'; bytes: number } | { kind: 'oversize'; bytes: number; limit: number };
 
 /**
  * Whether a snapshot may be sent under `limit` (the kernel's
- * `max_snapshot_bytes`). Exactly at the limit is fine; above it the save is
- * refused up front -- a clear "not saved" instead of a message the server
- * drops and a promise that never resolves.
+ * `max_snapshot_bytes`), measured on its wire size. Exactly at the limit is
+ * fine; above it the save is refused up front -- a clear "not saved" instead
+ * of a message the server drops and a promise that never resolves.
  */
 export function checkSnapshotSize(json: string, limit: number): SnapshotSizeCheck {
-  const bytes = snapshotByteLength(json);
+  const bytes = snapshotWireSize(json);
   return bytes > limit ? { kind: 'oversize', bytes, limit } : { kind: 'ok', bytes };
 }
 
@@ -239,7 +274,7 @@ export function oversizeMessage(bytes: number): { type: 'oversize'; bytes: numbe
 export function oversizeNotice(bytes: number, limit: number): Notice {
   return {
     level: 'warn',
-    text: `Edit not saved: the model is too large for the notebook connection (${formatMiB(bytes)} > ${formatMiB(limit)} limit); edit it from Python instead.`,
+    text: `Edit not saved: the model is too large for the notebook connection (${formatSize(bytes)} > ${formatSize(limit)} limit); edit it from Python instead.`,
   };
 }
 
