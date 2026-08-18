@@ -276,6 +276,12 @@ interface EditorPropsBase {
   // error in the confirmation dialog. Hosts without a deletable backing
   // project (the local file-backed viewer, embeds) leave this undefined.
   onDeleteProject?: () => Promise<void>;
+  // Whether the model-properties drawer shows its "Exit" link to "/" (the
+  // project list in the app and simlin-serve). Defaults to true. Hosts that
+  // embed the Editor in a page they own (a notebook cell) pass false: there is
+  // no route to go to, and the link would pushState on the host page. No
+  // router is required to mount the Editor either way.
+  showHomeLink?: boolean;
 }
 
 export type EditorProps = EditorPropsBase & ProjectInputProps;
@@ -1379,6 +1385,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         // Sim specs are project content; the download stays available (it is
         // a read). Project-scoped like undo/redo: readOnlyMode, not isReadOnly.
         readOnly={!!latest.current.props.readOnlyMode}
+        showHomeLink={latest.current.props.showHomeLink}
       />
     );
   };
