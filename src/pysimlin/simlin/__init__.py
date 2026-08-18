@@ -8,7 +8,7 @@ allowing you to load, run, and analyze system dynamics models.
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _dist_version
 from pathlib import Path
-from typing import Union
+from typing import TYPE_CHECKING, Any, Union
 
 try:
     __version__ = _dist_version("pysimlin")
@@ -35,6 +35,7 @@ from .errors import (
     ErrorCode,
     ErrorDetail,
     ErrorSeverity,
+    SimlinAssetError,
     SimlinError,
     SimlinImportError,
     SimlinRuntimeError,
@@ -67,6 +68,21 @@ from .types import (
     Variable,
 )
 from .vdf import load_vdf
+
+if TYPE_CHECKING:
+    from .widget import ModelWidget
+
+
+def __getattr__(name: str) -> Any:
+    # ``ModelWidget`` is exported lazily: importing anywidget/ipywidgets
+    # costs a few hundred milliseconds that scripts, servers, and tests
+    # which never display a widget should not pay.  ``Model.widget()`` and
+    # displaying a model import it on demand the same way.
+    if name == "ModelWidget":
+        from .widget import ModelWidget
+
+        return ModelWidget
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def load(path: Union[str, Path]) -> Model:
@@ -178,6 +194,7 @@ __all__ = [
     "LtmMode",
     "Model",
     "ModelIssue",
+    "ModelWidget",
     "Module",
     "ModuleReference",
     "Partition",
@@ -185,6 +202,7 @@ __all__ = [
     "Queue",
     "Run",
     "Sim",
+    "SimlinAssetError",
     "SimlinError",
     "SimlinImportError",
     "SimlinRuntimeError",

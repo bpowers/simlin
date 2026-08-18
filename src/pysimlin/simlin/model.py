@@ -31,7 +31,7 @@ from ._ffi import (
 )
 from .analysis import Analysis, Link, LinkPolarity, Loop, LoopPolarity, Partition
 from .diagram import Diagram
-from .errors import ErrorCode, ErrorSeverity, SimlinRuntimeError
+from .errors import ErrorCode, ErrorSeverity, SimlinError, SimlinRuntimeError
 from .json_converter import converter, structure_variable
 from .json_types import (
     DeleteVariable,
@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     from .project import Project
     from .run import Run
     from .sim import Sim
+    from .widget import ModelWidget
 
 
 # Variable type bitmask constants, matching SIMLIN_VARTYPE_* from the C FFI.
@@ -360,6 +361,71 @@ class Model:
         """The static ``image/svg+xml`` representation, the fallback for
         renderers that cannot show an interactive widget."""
         return {"image/svg+xml": self.diagram().svg}
+
+    def widget(
+        self,
+        *,
+        height: int = 600,
+        theme: str = "auto",
+        read_only: bool = False,
+    ) -> ModelWidget:
+        """An interactive diagram editor for this model, for a notebook cell.
+
+        Edits made in the browser are applied to the project exactly like
+        :meth:`edit` (written to the file, ``revision`` bumped, ``on_change``
+        subscribers told with ``source == "widget"``); Python edits and
+        external changes to the file appear in the editor.  Displaying the
+        model itself does the same thing (``_repr_mimebundle_``), with an SVG
+        fallback for static renderers; call this to keep a handle on the
+        widget or to set its options.
+
+        Args:
+            height: Editor height in CSS pixels.
+            theme: ``"auto"`` (follow the notebook), ``"light"``, or ``"dark"``.
+            read_only: Show the diagram without allowing edits.
+
+        Raises:
+            SimlinAssetError: if the widget's JS/wasm assets are missing
+                from the installation.
+            SimlinRuntimeError: if this model is not attached to a project.
+        """
+        # Imported here so that ``import simlin`` does not pay for anywidget
+        # and ipywidgets (a few hundred milliseconds) unless a widget is used.
+        from .widget import ModelWidget
+
+        return ModelWidget(self, height=height, theme=theme, read_only=read_only)
+
+    def _repr_mimebundle_(
+        self, include: object = None, exclude: object = None
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Display as a fresh :meth:`widget` plus the static SVG.
+
+        Each display creates a new widget (each subscribes to the project;
+        the browser shares one compiled engine per page), and the model
+        keeps no reference to any of them.  The SVG rides in the same
+        bundle so nbconvert, GitHub, and other static renderers show the
+        diagram; a model whose diagram cannot be rendered still gets the
+        interactive view (with a warning).
+        """
+        widget = self.widget()
+        bundle = widget._repr_mimebundle_()
+        data: dict[str, Any] = {}
+        metadata: dict[str, Any] = {}
+        if isinstance(bundle, tuple):
+            data, metadata = dict(bundle[0]), dict(bundle[1])
+        elif isinstance(bundle, dict):
+            data = dict(bundle)
+        data["text/plain"] = repr(self)
+        try:
+            data.update(self._svg_mimebundle())
+        except SimlinError as exc:
+            warnings.warn(
+                f"simlin: no static diagram for this model ({exc}); only the interactive "
+                f"widget is displayed",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return data, metadata
 
     def get_variable(self, name: str) -> Variable | None:
         """Get a single variable by name, or None if not found.
