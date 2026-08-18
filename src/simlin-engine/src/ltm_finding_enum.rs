@@ -1152,6 +1152,9 @@ pub(super) fn retain_circuits(
     let mut nan_mask = vec![false; step_count];
 
     let mut survivors: Vec<usize> = Vec::new();
+    // Mass-bearing Solo circuits as `(mean |reported score|, index)`; only
+    // the top `max_loops()` become survivors (see the Solo arm below).
+    let mut solo_ranked: Vec<(f64, usize)> = Vec::new();
     let mut to_confirm: Vec<usize> = Vec::new();
     // Shared across `dedup_trimmed_twins` and both loops below, so the
     // work-based deadline trigger sees this whole call's scoring as one
@@ -1209,20 +1212,43 @@ pub(super) fn retain_circuits(
             // scoring it (edges individually active at every step still let
             // the product underflow to 0, and an override can zero it), not
             // by the activity window alone. Nothing is banked anywhere.
+            //
+            // A Solo loop's relative score is +/-1 wherever it is active, so
+            // the ranking can only ever separate Solo loops by raw magnitude
+            // and reports at most `max_loops()` of them (after every
+            // competing loop). Retention therefore keeps exactly the top
+            // `max_loops()` Solo circuits by mean |reported score| -- the
+            // same statistic materialization computes as `avg_abs_score`,
+            // over the FULL saved-step range so the two agree step for step
+            // -- and no more: on a stockless component with hundreds of
+            // thousands of mass-bearing cycles that is the difference between
+            // materializing 200 loops and materializing all of them.
             score_steps(
                 rows,
                 graph,
-                score_lo,
+                0,
                 has_module_node,
                 is_module_node,
                 override_for,
-                &mut scratch[score_lo..score_hi],
-                &mut nan_mask[score_lo..score_hi],
+                &mut scratch[..],
+                &mut nan_mask[..],
             );
-            work.record(rows.len() as u64 * (score_hi - score_lo) as u64);
-            if (score_lo..score_hi).any(|t| !nan_mask[t] && scratch[t] != 0.0) {
+            work.record(rows.len() as u64 * step_count as u64);
+            let mut sum = 0.0f64;
+            let mut valid = 0usize;
+            let mut any_mass = false;
+            for t in 0..step_count {
+                if nan_mask[t] {
+                    continue;
+                }
+                let mass = scratch[t].abs();
+                any_mass |= mass != 0.0;
+                sum += mass;
+                valid += 1;
+            }
+            if any_mass {
                 distinct_circuits += 1;
-                survivors.push(ci);
+                solo_ranked.push((sum / valid as f64, ci));
             }
             continue;
         };
@@ -1261,7 +1287,17 @@ pub(super) fn retain_circuits(
             if mass != 0.0 {
                 banked_mass = true;
             }
-            totals[t] += mass;
+            // Saturating: a sum of FINITE masses that would overflow to Inf
+            // would make every finite share read as 0 and drop a real loop
+            // universe wholesale; capping the total at f64::MAX keeps shares
+            // finite (and merely compressed) there. A genuinely infinite mass
+            // still makes the total Inf, the dominance-inflection convention.
+            let sum = totals[t] + mass;
+            totals[t] = if sum.is_infinite() && mass.is_finite() && totals[t].is_finite() {
+                f64::MAX
+            } else {
+                sum
+            };
             if totals[t] > 0.0 {
                 // `max` drops a NaN ratio (`Inf / Inf` at a dominance
                 // inflection), which is right: the exact test rejects that step
@@ -1310,6 +1346,16 @@ pub(super) fn retain_circuits(
             survivors.push(ci);
         }
     }
+    // Strongest Solo loops first, index order among exact ties (the ranking's
+    // own content-key tie-break decides presentation later; retention only
+    // has to keep every loop the ranking could report).
+    solo_ranked.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    survivors.extend(
+        solo_ranked
+            .iter()
+            .take(super::max_loops())
+            .map(|&(_, ci)| ci),
+    );
     survivors.sort_unstable();
 
     Some(RetentionOutcome {

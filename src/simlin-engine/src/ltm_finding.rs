@@ -3636,7 +3636,16 @@ fn rank_and_filter(
             for &idx in indices {
                 for (i, &(_, score)) in found_loops[idx].scores.iter().enumerate() {
                     if !score.is_nan() {
-                        totals[i] += score.abs();
+                        // Saturating, as retention's own bank is: a finite
+                        // sum overflowing to Inf would zero every finite share.
+                        let mass = score.abs();
+                        let sum = totals[i] + mass;
+                        totals[i] =
+                            if sum.is_infinite() && mass.is_finite() && totals[i].is_finite() {
+                                f64::MAX
+                            } else {
+                                sum
+                            };
                     }
                 }
             }

@@ -2588,3 +2588,124 @@ fn a_module_input_edge_is_active_where_a_pathway_is_finite_under_a_nan_composite
         "the fallback reads the same repaired activity"
     );
 }
+
+/// A Solo loop's relative score is +/-1 by construction, so the ranking can
+/// only ever report the strongest `max_loops()` of them; retention keeps
+/// exactly those (by mean |reported score|, index order among ties) and drops
+/// the rest before anything is materialized -- the difference, on a stockless
+/// component with very many mass-bearing cycles, between materializing the
+/// cap's worth of loops and all of them. The distinct-loop count still counts
+/// every mass-bearing Solo circuit: they are all real loops of the universe.
+#[test]
+fn retention_keeps_only_the_strongest_max_loops_solo_circuits() {
+    // Three disjoint 2-cycles, no stocks anywhere (all Solo), with means
+    // 3.0 (a<->b), 1.0 (c<->d), 2.0 (e<->f) over the two saved steps.
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new("b")), 0),
+        ((Ident::new("b"), Ident::new("a")), 1),
+        ((Ident::new("c"), Ident::new("d")), 2),
+        ((Ident::new("d"), Ident::new("c")), 3),
+        ((Ident::new("e"), Ident::new("f")), 4),
+        ((Ident::new("f"), Ident::new("e")), 5),
+    ];
+    let n_offsets = 6;
+    let step_count = 2;
+    let mut data = vec![0.0f64; n_offsets * step_count];
+    data[n_offsets] = 6.0; // a->b   (product 6 at step 1; mean over 2 steps = 3)
+    data[n_offsets + 1] = 1.0; // b->a
+    data[n_offsets + 2] = 2.0; // c->d   (product 2; mean 1)
+    data[n_offsets + 3] = 1.0; // d->c
+    data[n_offsets + 4] = 4.0; // e->f   (product 4; mean 2)
+    data[n_offsets + 5] = 1.0; // f->e
+    let results = enum_results(n_offsets, step_count, data);
+    let search = IndexedSearch::build(&link_offsets, &stock_list(&[]));
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
+        .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
+    assert!(candidates.complete);
+    assert_eq!(candidates.len(), 3);
+    let solo: Vec<Option<usize>> = vec![None; search.idents.len()];
+    let no_modules = vec![false; search.idents.len()];
+    let no_agg = vec![false; search.idents.len()];
+
+    let _guard = MaxLoopsGuard::new(2);
+    let outcome = super::enum_gen::retain_circuits(
+        &candidates,
+        &activity,
+        &solo,
+        &no_modules,
+        &no_agg,
+        &mut |_, _, _| None,
+        None,
+        &mut SystemClock,
+    )
+    .unwrap();
+    assert_eq!(
+        survivor_node_sets(&outcome, &candidates, &activity, &search),
+        vec![
+            vec!["a".to_string(), "b".to_string()],
+            vec!["e".to_string(), "f".to_string()],
+        ],
+        "the two strongest Solo loops survive; the weakest is dropped by the cap"
+    );
+    assert_eq!(
+        outcome.distinct_circuits, 3,
+        "every mass-bearing Solo loop is still a member of the universe"
+    );
+}
+
+/// A partition total is accumulated saturating: two finite masses whose sum
+/// overflows f64 leave the total at f64::MAX rather than Inf, so each loop's
+/// share stays finite (0.5 here) and both clear retention -- an Inf total would
+/// have read every finite share as 0 and dropped a real universe wholesale.
+#[test]
+fn a_finite_partition_total_saturates_instead_of_overflowing_to_inf() {
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new("b")), 0),
+        ((Ident::new("a"), Ident::new("c")), 1),
+        ((Ident::new("b"), Ident::new("a")), 2),
+        ((Ident::new("c"), Ident::new("a")), 3),
+    ];
+    let n_offsets = 4;
+    let step_count = 2;
+    let mut data = vec![0.0f64; n_offsets * step_count];
+    data[n_offsets] = 1e308; // a->b
+    data[n_offsets + 1] = 1e308; // a->c
+    data[n_offsets + 2] = 1.0; // b->a
+    data[n_offsets + 3] = 1.0; // c->a
+    assert!(
+        (1e308f64 + 1e308f64).is_infinite(),
+        "the fixture must overflow"
+    );
+    let results = enum_results(n_offsets, step_count, data);
+    let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
+        .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
+    assert_eq!(candidates.len(), 2);
+    let stock_partition: Vec<Option<usize>> = search
+        .idents
+        .iter()
+        .map(|id| (id.as_str() == "a").then_some(0))
+        .collect();
+    let no_modules = vec![false; search.idents.len()];
+    let no_agg = vec![false; search.idents.len()];
+    let outcome = super::enum_gen::retain_circuits(
+        &candidates,
+        &activity,
+        &stock_partition,
+        &no_modules,
+        &no_agg,
+        &mut |_, _, _| None,
+        None,
+        &mut SystemClock,
+    )
+    .unwrap();
+    assert_eq!(
+        outcome.partition_totals[&0][1],
+        f64::MAX,
+        "saturated, not Inf"
+    );
+    assert_eq!(outcome.survivors.len(), 2, "both loops keep a finite share");
+    assert_eq!(outcome.partition_circuit_counts[&0], 2);
+}

@@ -734,8 +734,52 @@ for c in range(n_cyc):
             break
 
 mass = np.where(np.isnan(score), 0.0, np.abs(score))  # NaN contributes nothing
-totals = {int(p): mass[cyc_part == p].sum(axis=0)
+
+# Reported-cycle identity: the engine trims synthetic aggregate nodes
+# (`$⁚ltm⁚agg⁚…`) out of a reported loop, so a direct pathway and its
+# hoisted-reducer twin are ONE reported loop -- and only the strongest
+# representative (largest mean |score|) banks mass, counts, or can be reported.
+# The audit applies the same rule before totals are formed, so its universe is
+# the same population the engine's denominators sum.
+AGG_PREFIX = "$\u205altm\u205aagg\u205a"
+
+
+def trimmed_names(c: int) -> tuple[str, ...]:
+    return tuple(node_names[n] for n in cyc_nodes[c]
+                 if not node_names[n].startswith(AGG_PREFIX))
+
+
+def rotate_min(names: tuple[str, ...]) -> tuple[str, ...]:
+    if not names:
+        return names
+    k = names.index(min(names))
+    return names[k:] + names[:k]
+
+
+valid_any = ~np.isnan(score)
+avg_abs_all = np.where(valid_any.any(axis=1),
+                       np.nansum(np.abs(score), axis=1) / np.maximum(valid_any.sum(axis=1), 1),
+                       0.0)
+representative = np.ones(n_cyc, dtype=bool)
+by_identity: dict[tuple[str, ...], int] = {}
+for c in range(n_cyc):
+    key = rotate_min(trimmed_names(c))
+    if not key:
+        representative[c] = False   # trims to nothing: not a reportable loop
+        continue
+    prev = by_identity.get(key)
+    if prev is None:
+        by_identity[key] = c
+    elif avg_abs_all[c] > avg_abs_all[prev]:
+        representative[prev] = False
+        by_identity[key] = c
+    else:
+        representative[c] = False
+mass[~representative] = 0.0             # a merged twin banks nothing
+mass[(mass == 0.0).all(axis=1)] = 0.0    # (no-op, for clarity: massless banks nothing)
+totals = {int(p): mass[(cyc_part == p) & representative].sum(axis=0)
           for p in np.unique(cyc_part) if p >= 0}
+print(f"cycles merged into a stronger twin's reported identity: {int((~representative).sum())}")
 
 print(f"scored {n_cyc} cycles in {score_s:.1f}s")
 print(f"cycles with no stock (Solo groups): {int((cyc_part < 0).sum())}")
@@ -750,7 +794,10 @@ for p, tot in totals.items():
     sel = np.nonzero(cyc_part == p)[0]
     safe = np.where(tot > 0, tot, np.inf)
     kept[sel] = (mass[sel] / safe[None, :] >= MIN_CONTRIBUTION).any(axis=1)
-kept[cyc_part < 0] = True   # Solo: own denominator, ratio 1 wherever active
+# Solo: own denominator, ratio 1 wherever it carries mass; a Solo loop with no
+# mass at any step is not a loop the universe holds.
+kept[cyc_part < 0] = (mass[cyc_part < 0] != 0.0).any(axis=1)
+kept &= representative
 survivors = np.nonzero(kept)[0]
 
 # Normalization group per survivor: its cycle partition, or its own Solo group.
@@ -770,19 +817,19 @@ def group_label(g) -> str:
 
 
 def canonical(c: int) -> tuple[str, ...]:
-    \"\"\"Lexicographically minimal rotation of the cycle's node names.
+    \"\"\"Lexicographically minimal rotation of the cycle's REPORTED node names
+    (synthetic aggregate nodes trimmed, as the engine reports them).
 
     Rotation, not sorting: two distinct directed cycles over the same node set
     are different loops and must not collide on one key.\"\"\"
-    names = tuple(node_names[n] for n in cyc_nodes[c])
-    k = names.index(min(names))
-    return names[k:] + names[:k]
+    return rotate_min(trimmed_names(c))
 
 
 # How many loops divide each partition's denominator, over the whole
 # UNIVERSE -- a retention non-survivor still holds mass there, so it still
 # makes its partition a place where loops compete.
-universe_counts = {int(p): int((cyc_part == p).sum())
+massy = representative & (mass != 0.0).any(axis=1)
+universe_counts = {int(p): int(((cyc_part == p) & massy).sum())
                    for p in np.unique(cyc_part) if p >= 0}
 
 ranked = []
