@@ -107,17 +107,17 @@ describe('the Editor root is the containing block for its floating chrome', () =
     expect(block).not.toContain('fixed');
   });
 
-  // The right-hand chrome (search bar, banner, detail cards) clamps its width
-  // to the container -- calc(100% - 16px) of the positioned root -- so a narrow
-  // host box never has it overflow the left edge; a full-page host resolves
-  // 100% to the viewport, so nothing moves there. Every rule that used to say
-  // 100vw must say 100% now, including the breakpoint overrides.
+  // The right-hand chrome (search bar, banner, the details slot) clamps its
+  // width to the container -- calc(100% - 16px) of the positioned root -- so a
+  // narrow host box never has it overflow the left edge; a full-page host
+  // resolves 100% to the viewport, so nothing moves there. The width lives on
+  // the positioned boxes themselves (never on the cards inside .varDetails: a
+  // percentage inside a shrink-wrapped absolute box resolves against the
+  // content-sized box, not the editor -- see the .varDetails comment).
   const clamped: Array<[string, string]> = [
     ['Editor.module.css', '.searchBar'],
     ['Editor.module.css', '.sharedModelBanner'],
-    ['VariableDetails.module.css', '.card'],
-    ['ModuleDetails.module.css', '.card'],
-    ['ErrorDetails.module.css', '.card'],
+    ['Editor.module.css', '.varDetails'],
   ];
 
   it.each(clamped)('%s %s clamps its width to calc(100% - 16px) at every breakpoint', (file, selector) => {
@@ -134,11 +134,32 @@ describe('the Editor root is the containing block for its floating chrome', () =
     }
   });
 
+  // The height cap sits on the positioned slot (where the percentage resolves
+  // against the editor root) and the cards opt out of the flex-item
+  // min-height: auto floor so they shrink to it and scroll. This is only the
+  // stylesheet's shape; whether it actually caps in a 400px box is asserted
+  // by the notebook widget's Playwright journey (src/notebook-widget/e2e),
+  // which has a layout engine -- a text assertion here once stayed green
+  // while the card overflowed the box.
+  it('.varDetails caps its height against the container and lays the card out as a shrinkable flex item', () => {
+    const block = blockFor(stripComments(readCss('Editor.module.css')), '.varDetails').replace(/\s+/g, ' ');
+    expect(block).toContain('max-height: calc(100% - 18px)');
+    expect(block).toContain('display: flex');
+    expect(block).toContain('flex-direction: column');
+  });
+
   it.each([
     ['VariableDetails.module.css', '.card'],
     ['ModuleDetails.module.css', '.card'],
-  ])('%s %s caps its height against the container, not the viewport', (file, selector) => {
-    const block = blockFor(stripComments(readCss(file)), selector);
-    expect(block.replace(/\s+/g, ' ')).toContain('max-height: calc(100% - 18px)');
-  });
+    ['ErrorDetails.module.css', '.card'],
+  ])(
+    '%s %s shrinks to the slot cap (min-height: 0; overflow-y: auto) and declares no width or height cap of its own',
+    (file, selector) => {
+      const block = blockFor(stripComments(readCss(file)), selector).replace(/\s+/g, ' ');
+      expect(block).toContain('min-height: 0');
+      expect(block).toContain('overflow-y: auto');
+      expect(block).not.toMatch(/(?:^|[^-])width:/);
+      expect(block).not.toContain('max-height');
+    },
+  );
 });

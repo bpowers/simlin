@@ -262,6 +262,74 @@ test.describe('notebook widget bundle', () => {
     await expect(cell.locator('[data-lm-suppress-shortcuts]')).toHaveCount(0);
   });
 
+  // Layout claims need a real layout engine: jsdom cannot tell a max-height
+  // that resolves to `none` from one that caps, which is exactly how the
+  // details card once grew past a short host box while a stylesheet-text
+  // test stayed green. So the box-fitting contract of the right-hand panel
+  // (src/diagram/CLAUDE.md, Hosting Requirements) is asserted here, on the
+  // built bundle in a 400px cell.
+  test('the details panel fits a short host box: it scrolls inside the box and aligns with the search bar', async ({
+    page,
+  }) => {
+    await serveHarness(page);
+    await mountWidget(page, 'cell1', initialState({ height: 400 }));
+    const cell = page.locator('#cell1');
+    await expect(cell.locator('svg.simlin-canvas')).toBeVisible({ timeout: 60_000 });
+
+    // A click (press + release, no drag) on the stock opens its details panel.
+    const stock = cell.locator('g.simlin-stock rect').first();
+    const stockBox = await stock.boundingBox();
+    if (stockBox === null) {
+      throw new Error('stock has no bounding box');
+    }
+    await page.mouse.click(stockBox.x + stockBox.width / 2, stockBox.y + stockBox.height / 2);
+    const deleteButton = cell.getByRole('button', { name: 'Delete', exact: true });
+    await expect(deleteButton).toBeAttached();
+
+    const layout = await page.evaluate(() => {
+      const rect = (el: Element): { top: number; bottom: number; left: number; right: number } => {
+        const b = el.getBoundingClientRect();
+        return { top: b.top, bottom: b.bottom, left: b.left, right: b.right };
+      };
+      const root = document.querySelector('#cell1 [data-simlin-editor-root]');
+      const searchBar = document.querySelector('#cell1 [class*="searchBar"]');
+      // The details slot's only child is the card (Delete is inside it).
+      const deleteBtn = Array.from(document.querySelectorAll('#cell1 button')).find(
+        (b) => b.textContent?.trim() === 'Delete',
+      );
+      const card = deleteBtn?.closest('[class*="varDetails"] > *');
+      if (!root || !searchBar || !deleteBtn || !card) {
+        throw new Error('missing editor root, search bar, or details card');
+      }
+      return {
+        root: rect(root),
+        searchBar: rect(searchBar),
+        card: rect(card),
+        cardScrollHeight: card.scrollHeight,
+        cardClientHeight: card.clientHeight,
+      };
+    });
+    // The card is capped by the box and scrolls its content instead of
+    // growing past the editor's (overflow: hidden) bottom edge.
+    expect(layout.cardScrollHeight).toBeGreaterThan(layout.cardClientHeight);
+    expect(layout.card.bottom).toBeLessThanOrEqual(layout.root.bottom);
+    expect(layout.card.top).toBeGreaterThanOrEqual(layout.root.top);
+    // Edge-aligned with the search bar that overlays its top (same width
+    // clamp, same right anchor).
+    expect(layout.card.left).toBeCloseTo(layout.searchBar.left, 0);
+    expect(layout.card.right).toBeCloseTo(layout.searchBar.right, 0);
+    // The panel's bottom controls are reachable: scrolling the card brings
+    // Delete inside the box.
+    await deleteButton.scrollIntoViewIfNeeded();
+    const deleteBox = await deleteButton.boundingBox();
+    if (deleteBox === null) {
+      throw new Error('Delete has no bounding box');
+    }
+    expect(deleteBox.y + deleteBox.height).toBeLessThanOrEqual(layout.root.bottom);
+    expect(deleteBox.y).toBeGreaterThanOrEqual(layout.root.top);
+    await expect(deleteButton).toBeVisible();
+  });
+
   test('a kernel that cannot supply the engine shows the error in the cell and a later widget retries', async ({
     page,
   }) => {

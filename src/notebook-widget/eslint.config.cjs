@@ -15,6 +15,7 @@ if (baseConfig) {
       ...baseConfig.languageOptions.globals,
       WebAssembly: 'readonly',
       HTMLElement: 'readonly',
+      Element: 'readonly',
       AbortController: 'readonly',
       AbortSignal: 'readonly',
       Blob: 'readonly',

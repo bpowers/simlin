@@ -109,10 +109,38 @@
   box-sizing: border-box;
 }
 
+/* The details slot: the sized box the variable/module/error cards fill. It
+   carries the panel width (the same min(token, calc(100% - 16px)) clamp as
+   .searchBar, at the same viewport breakpoints, so the two stay edge-aligned)
+   and the height cap against the editor root -- both MUST live on this
+   positioned wrapper, not on the cards. An absolutely positioned box with
+   auto width/height shrink-wraps its content, and a percentage inside a
+   shrink-wrapped box resolves against that content-sized box (width) or to
+   none (max-height): put on the card, calc(100% - 16px) came out 16px narrower
+   than the panel and calc(100% - 18px) did not cap at all, so the card grew
+   past the editor's bottom edge and was clipped by .editor's overflow: hidden
+   -- Delete/units/docs unreachable in a short host box. The flex column lets
+   the card (min-height: 0; overflow-y: auto) shrink to the cap and scroll. */
 .varDetails {
   position: absolute;
   top: 8px;
   right: 8px;
+  width: min(var(--panel-width-sm), calc(100% - 16px));
+  max-height: calc(100% - 18px);
+  display: flex;
+  flex-direction: column;
+}
+
+@media (min-width: 900px) and (max-width: 1199.95px) {
+  .varDetails {
+    width: min(var(--panel-width-md), calc(100% - 16px));
+  }
+}
+
+@media (min-width: 1200px) {
+  .varDetails {
+    width: min(var(--panel-width-lg), calc(100% - 16px));
+  }
 }
 
 /* When the shared-model banner is shown it overlays the top of this same

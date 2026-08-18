@@ -1,12 +1,12 @@
 .card {
-  /* Clamp to the editor root on narrow screens (anchored right:8px). */
-  width: min(var(--panel-width-sm), calc(100% - 16px));
+  /* Sized by the details slot it fills (Editor.module.css .varDetails carries
+     the panel width and the height cap; see the comment there for why they
+     cannot live here). As a flex item it must opt out of min-height: auto to
+     shrink to the slot's cap and scroll instead of overflowing it. */
+  min-height: 0;
   /* Match .searchBar: both must compute as border-box so their edges align
      regardless of whether the global reset is present in the host bundle. */
   box-sizing: border-box;
-  /* Against the positioned editor root, not the viewport, so an embedded
-     editor's panel never outgrows the box it lives in. */
-  max-height: calc(100% - 18px);
   overflow-y: auto;
   scrollbar-gutter: stable;
   border-radius: 4px;
@@ -16,18 +16,6 @@
      flips dark. */
   color: var(--color-text-primary);
   box-shadow: var(--shadow-1);
-}
-
-@media (min-width: 900px) and (max-width: 1199.95px) {
-  .card {
-    width: min(var(--panel-width-md), calc(100% - 16px));
-  }
-}
-
-@media (min-width: 1200px) {
-  .card {
-    width: min(var(--panel-width-lg), calc(100% - 16px));
-  }
 }
 
 /* Clears the 48px search/breadcrumb bar overlaying the top of this slot. */
