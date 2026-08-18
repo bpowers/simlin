@@ -57,10 +57,9 @@ Some major components are:
 - `simlin_project_serialize_mdl`: Serialize a project to Vensim MDL (lossiness warnings on a side channel)
 - `simlin_project_replace_contents`: Replace a project's contents in place from another project (live model handles observe the new contents)
 - `simlin_project_ref/unref`: Reference counting
-- `simlin_project_enable_ltm`: Enable Loop Thinking Method analysis
 
 ### Simulation Operations
-- `simlin_sim_new`: Create a simulation from a project
+- `simlin_sim_new`: Create a simulation from a model (`enable_ltm` turns on Loops That Matter analysis)
 - `simlin_sim_run_to`: Run simulation to a specific time
 - `simlin_sim_run_to_end`: Complete the simulation
 - `simlin_sim_reset`: Reset to initial conditions

@@ -1,8 +1,8 @@
-"""Tests for the ``simlin._ffi`` wrappers behind file-backed models.
+"""Tests for the ``simlin._ffi`` wrappers behind reloading a project from disk.
 
 These exercise the low-level bindings directly (``serialize_mdl``,
-``replace_contents``, and the patch-aware ``diagram_sync``); the file-backed
-``Project`` API built on top of them has its own tests.
+``replace_contents``, and the patch-aware ``diagram_sync``); the ``Project``
+API built on top of them has its own tests.
 """
 
 from __future__ import annotations
@@ -56,6 +56,23 @@ def upsert_patch_json(model_name: str, *variables: Stock | Flow | Aux) -> bytes:
     return json.dumps(converter.unstructure(JsonProjectPatch(models=[builder.build()]))).encode(
         "utf-8"
     )
+
+
+def perturb_view_positions(project: simlin.Project, delta: float = 1234.5) -> simlin.Project:
+    """Return a project whose main-model view has every named element shifted.
+
+    Full relayout of a small model is deterministic, so a diagram_sync that
+    silently ignored its patch would reproduce a fresh layout's coordinates
+    exactly. Shifting the persisted positions first makes "existing element
+    positions survive" distinguishable from "the layout was regenerated".
+    """
+    project_dict = json.loads(project.serialize_json())
+    (model_dict,) = [m for m in project_dict["models"] if m["name"] == "main"]
+    for el in model_dict["views"][0]["elements"]:
+        if "name" in el and "x" in el:
+            el["x"] += delta
+            el["y"] += delta
+    return simlin.Project(_ffi.open_json(json.dumps(project_dict).encode("utf-8")))
 
 
 def view_positions(project: simlin.Project, model_name: str = "main") -> dict[str, tuple]:
@@ -233,11 +250,14 @@ class TestReplaceContents:
 class TestDiagramSync:
     def test_incremental_layout_places_new_element_and_keeps_existing_positions(self) -> None:
         model = build_population_model()
-        project = model.project
-        assert project is not None
-        _ffi.diagram_sync(project._ptr, "main")
+        laid_out = model.project
+        assert laid_out is not None
+        _ffi.diagram_sync(laid_out._ptr, "main")
+        fresh = view_positions(laid_out)
+        project = perturb_view_positions(laid_out)
         before = view_positions(project)
         assert set(before) == {"population", "net_growth", "rate"}
+        assert all(before[n] != fresh[n] for n in before), "perturbation must move elements"
 
         patch_json = upsert_patch_json("main", Aux(name="carrying_capacity", equation="1000"))
         _ffi.apply_patch_json(project._ptr, patch_json, dry_run=False, allow_errors=False)
@@ -246,7 +266,20 @@ class TestDiagramSync:
         after = view_positions(project)
         assert "carrying_capacity" in after
         for name, position in before.items():
-            assert after[name] == position, f"{name} must keep its position"
+            assert after[name] == position, f"{name} must keep its (perturbed) position"
+
+    def test_full_relayout_discards_existing_positions(self) -> None:
+        """The None arm really is a relayout: perturbed positions do not survive."""
+        model = build_population_model()
+        laid_out = model.project
+        assert laid_out is not None
+        _ffi.diagram_sync(laid_out._ptr, "main")
+        fresh = view_positions(laid_out)
+        project = perturb_view_positions(laid_out)
+
+        _ffi.diagram_sync(project._ptr, "main", None)
+
+        assert view_positions(project) == fresh
 
     def test_full_relayout_when_patch_is_none(self) -> None:
         model = build_population_model()
@@ -271,10 +304,12 @@ class TestDiagramSync:
 
     def test_patch_without_ops_for_model_leaves_view_untouched(self) -> None:
         model = build_population_model()
-        project = model.project
-        assert project is not None
-        _ffi.diagram_sync(project._ptr, "main")
+        laid_out = model.project
+        assert laid_out is not None
+        _ffi.diagram_sync(laid_out._ptr, "main")
+        project = perturb_view_positions(laid_out)
         before = view_positions(project)
+        assert before != view_positions(laid_out)
 
         _ffi.diagram_sync(project._ptr, "main", upsert_patch_json("some_other_model"))
 

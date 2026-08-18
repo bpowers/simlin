@@ -942,9 +942,9 @@ void simlin_free_string(char *s);
 // compile or codegen failure stores a `SimlinError` (never panics across the
 // boundary) and leaves both output buffers NULL.
 //
-// `ltm_enabled` and `ltm_discovery_mode` flip the same flags
-// `simlin_project_enable_ltm` sets on a `SimlinProject`, but locally for this
-// compile: the produced blob's layout includes the `$\u{205A}ltm\u{205A}*`
+// `ltm_enabled` and `ltm_discovery_mode` flip the same salsa flags
+// `simlin_sim_new(.., enable_ltm=true)` sets transiently on the project's
+// `SourceProject`, but locally for this compile: the produced blob's layout includes the `$\u{205A}ltm\u{205A}*`
 // synthetic series iff `ltm_enabled` is true.
 //
 // # Safety
@@ -1241,12 +1241,12 @@ SimlinModel *simlin_project_get_model(SimlinProject *project,
 // their cached compile fragments. `src` is only read (its refcount is not
 // touched) and may be freed immediately afterwards.
 //
-// This is the in-place reload primitive: a host that mirrors a model file on
-// disk (pysimlin's `open()`, the notebook widget) opens the new bytes with
-// the matching `simlin_project_open_*` function into a scratch project and
-// replaces the live project's contents from it, instead of building a new
-// `SimlinProject` -- so it composes with every format the open functions
-// support and never needs a per-format variant.
+// This is the in-place reload primitive: a caller that reloads a project
+// from disk opens the new bytes with the matching `simlin_project_open_*`
+// function into a scratch project and replaces the live project's contents
+// from it, instead of building a new `SimlinProject` -- so it composes with
+// every format the open functions support and never needs a per-format
+// variant.
 //
 // # Effect on live handles
 //
@@ -1262,10 +1262,15 @@ SimlinModel *simlin_project_get_model(SimlinProject *project,
 //   the model (`simlin_sim_new` defers compile failures to the run, per its
 //   own contract) -- until a model of that name exists again, at which point
 //   the same handle works once more.
-// - A `SimlinSim` created BEFORE the replace is a stale snapshot: it was
-//   compiled from the old contents and keeps its results and its ability to
-//   `reset`/re-run against that compiled program. Create a new sim to
-//   simulate the replacement.
+// - A `SimlinSim` created BEFORE the replace is a stale snapshot for the
+//   simulation entry points (`simlin_sim_*`): it was compiled from the old
+//   contents and keeps its results and its ability to `reset`/re-run against
+//   that compiled program. The sim-bearing ANALYSIS entry points
+//   (`simlin_analyze_get_loops_runtime`, `simlin_analyze_get_links`, ...)
+//   are not snapshots: they enumerate loops/links from the project's CURRENT
+//   contents and read scores out of the stale sim's results by position, so
+//   after a replace they mix old results with the new model. Callers should
+//   create and run a new sim after a replace before analyzing.
 //
 // # Locking
 //

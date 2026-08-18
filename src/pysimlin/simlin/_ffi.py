@@ -418,15 +418,17 @@ def serialize_mdl(project_ptr: Any) -> tuple[bytes, list[ErrorDetail]]:
     )
     warnings_ptr = out_collected_errors_ptr[0]
     try:
+        # On a hard error the engine leaves output_ptr NULL (simlin_free of
+        # NULL is a no-op) and no warnings handle, so both frees below are
+        # unconditional and cover every exit, including extract_error_details
+        # raising.
         check_out_error(err_ptr, "Project MDL serialization")
         warnings: list[ErrorDetail] = []
         if warnings_ptr != ffi.NULL:
             warnings = extract_error_details(warnings_ptr)
-        try:
-            return bytes(ffi.buffer(output_ptr[0], output_len_ptr[0])), warnings
-        finally:
-            lib.simlin_free(output_ptr[0])
+        return bytes(ffi.buffer(output_ptr[0], output_len_ptr[0])), warnings
     finally:
+        lib.simlin_free(output_ptr[0])
         if warnings_ptr != ffi.NULL:
             lib.simlin_error_free(warnings_ptr)
 
@@ -439,15 +441,25 @@ def replace_contents(dst_project_ptr: Any, src_project_ptr: Any) -> None:
     the project pointer plus a model name) stay valid and observe the new
     contents on their next call. ``src`` is only read: its refcount is
     untouched and it may be closed immediately afterwards. This is the
-    reload primitive for a file-backed project: open the new bytes with the
+    primitive for reloading a project from disk: open the new bytes with the
     matching ``simlin_project_open_*`` into a scratch project, then replace
     from it, so every format is covered without per-format variants.
+
+    This is a pointer-level operation: it does not know about the Python
+    wrappers, so the caller owns invalidating any Python-side caches held
+    against the old contents -- in particular ``Model._invalidate_caches()``
+    for every ``Model`` on ``dst`` (its ``_cached_base_case`` was run
+    against the replaced model).
 
     A model name present in a live ``Model`` but absent from the replacement
     is not invalidated: queries through it raise ``BadModelName`` and a sim
     created through it fails on first run, until a model of that name exists
-    again. A ``Sim`` created BEFORE the replace is a stale snapshot of the
-    program it compiled; create a new one to simulate the replacement.
+    again. A ``Sim`` created BEFORE the replace is a stale snapshot for the
+    simulation calls (``run_to``, ``get_series``, ``reset``): it keeps the
+    program it compiled. Its sim-bearing analysis calls (runtime loops,
+    links) are NOT snapshots -- they enumerate from the project's current
+    contents and read the stale results by position -- so create and run a
+    new ``Sim`` after a replace before analyzing.
 
     Args:
         dst_project_ptr: Pointer to the SimlinProject to overwrite

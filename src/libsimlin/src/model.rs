@@ -77,9 +77,9 @@ unsafe fn parse_filter(filter: *const c_char) -> Result<Option<String>, SimlinEr
 /// compile or codegen failure stores a `SimlinError` (never panics across the
 /// boundary) and leaves both output buffers NULL.
 ///
-/// `ltm_enabled` and `ltm_discovery_mode` flip the same flags
-/// `simlin_project_enable_ltm` sets on a `SimlinProject`, but locally for this
-/// compile: the produced blob's layout includes the `$\u{205A}ltm\u{205A}*`
+/// `ltm_enabled` and `ltm_discovery_mode` flip the same salsa flags
+/// `simlin_sim_new(.., enable_ltm=true)` sets transiently on the project's
+/// `SourceProject`, but locally for this compile: the produced blob's layout includes the `$\u{205A}ltm\u{205A}*`
 /// synthetic series iff `ltm_enabled` is true.
 ///
 /// # Safety

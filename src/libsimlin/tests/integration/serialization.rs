@@ -695,9 +695,12 @@ fn test_serialize_mdl_roundtrip_preserves_variables_and_sketch() {
             collected.is_null(),
             "the SIR model uses no lossy constructs, so no export warnings are expected"
         );
+        // A `10,<uid>,<name>,...` line is a sketch VARIABLE element (the writer
+        // emits the sketch header even for a model with no view, so the
+        // header alone would prove nothing).
         assert!(
-            mdl_text.contains("Sketch information"),
-            "MDL output must include a sketch section"
+            mdl_text.lines().any(|l| l.starts_with("10,")),
+            "MDL output must carry sketch elements for the view"
         );
 
         err = ptr::null_mut();
@@ -762,11 +765,13 @@ fn test_serialize_mdl_reports_lossiness_warnings_non_fatally() {
         assert_eq!(detail.severity, SimlinErrorSeverity::Warning);
         assert_eq!(detail.kind, SimlinErrorKind::Model);
         assert_eq!(detail.code, SimlinErrorCode::Generic);
+        assert!(!detail.message.is_null(), "warning must carry a message");
         let message = CStr::from_ptr(detail.message).to_str().unwrap();
         assert!(
             message.contains("reservoir") && message.contains("non-negative"),
             "warning must name the variable and the dropped construct: {message}"
         );
+        assert!(!detail.details.is_null(), "warning must carry bare details");
         let details = CStr::from_ptr(detail.details).to_str().unwrap();
         assert!(
             details.contains("reservoir"),
