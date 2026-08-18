@@ -65,6 +65,28 @@ describe('Canvas: stored zoom validity', () => {
     expect(renderedZoom(h.getTransform())).toBeCloseTo(1, 5);
   });
 
+  it('with NO size mismatch, an out-of-range stored zoom alone makes the mount fit commit exactly once, with zoom 1', () => {
+    // The fixture viewBox is 1000x1000; mounting already measured at 1000x1000
+    // removes every other reason the mount-time fit could commit, so this pins
+    // the "persist the healed zoom" arm specifically (a mount effect that only
+    // healed for drawing but never persisted would commit nothing here).
+    const size = { width: 1000, height: 1000 };
+    const h = renderCanvas({ elements: [makeAux(1, 'a', 100, 100)], zoom: 200, mountSize: size });
+    expect(h.callbacks.onViewBoxChange).toHaveBeenCalledTimes(1);
+    const [viewBox, zoom] = h.callbacks.onViewBoxChange.mock.calls[0];
+    expect(zoom).toBe(1);
+    expect(viewBox).toMatchObject({ width: 1000, height: 1000 });
+    expect(renderedZoom(h.getTransform())).toBeCloseTo(1, 5);
+    h.unmount();
+
+    // Control: the same mount with a valid stored zoom commits nothing, which
+    // is what proves the commit above was caused by the zoom and not by size.
+    const ok = renderCanvas({ elements: [makeAux(1, 'a', 100, 100)], zoom: 2, mountSize: size });
+    expect(ok.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+    expect(renderedZoom(ok.getTransform())).toBeCloseTo(2, 5);
+    ok.unmount();
+  });
+
   it('every out-of-range stored zoom (0, negative, NaN, just above MAX_ZOOM) resets to 1', () => {
     for (const zoom of [0, -1, Number.NaN, MAX_ZOOM + 0.01]) {
       const h = renderCanvas({ elements: [makeAux(1, 'a', 100, 100)], zoom });

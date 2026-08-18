@@ -842,7 +842,7 @@ pub struct StockFlow {
     pub view_box: Rect,
     /// Zoom as a FACTOR: 1.0 = 100%, 2.0 = twice as big. This unit is shared
     /// by the protobuf, JSON, and TypeScript models. XMILE stores zoom as a
-    /// PERCENTAGE (spec section 6.1: "100 is default, 200 is 2x bigger"), and
+    /// PERCENTAGE (spec section 5.1: "100 is default, 200 is 2x bigger"), and
     /// the conversion lives only in `xmile::views` -- readers and writers of
     /// other formats hand the factor through unchanged.
     pub zoom: f64,

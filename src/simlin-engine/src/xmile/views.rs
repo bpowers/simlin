@@ -1828,8 +1828,11 @@ impl ToXml<XmlWriter> for View {
             ("isee:show_pages", "false"),
             ("page_width", "800"),
             ("page_height", "600"),
-            // The spec's attribute is `type` (section 6.1: `<view type="stock_flow">`),
-            // which is also what the reader (`@type`) looks for.
+            // The spec's attribute is `type` (section 5.1: `<view type="stock_flow">`),
+            // which is also what the reader (`@type`) looks for. The spec DOES
+            // have an attribute literally named `view_type`, but only on
+            // `<link target="view" view_type="interface">` inside `<event>`
+            // (section 4.1.2.1) -- never on `<view>` -- so do not "restore" it here.
             ("type", self.kind.unwrap_or(ViewType::StockFlow).as_str()),
         ];
         if let Some(zoom) = zoom.as_deref() {
@@ -2147,7 +2150,7 @@ fn view_object_to_element(
 
 /// Convert an XMILE `<view zoom="...">` value to the datamodel's zoom factor.
 ///
-/// XMILE spec section 6.1 ("Views", `docs/reference/xmile-v1.0.html`):
+/// XMILE spec section 5.1 ("Views", `docs/reference/xmile-v1.0.html`):
 /// "Views may also have an OPTIONAL zoom specified as a double where 100 is
 /// default, 200 is 2x bigger by a factor of 2 and 50 is smaller by a factor
 /// of 2." The datamodel (`datamodel::StockFlow::zoom`, the protobuf, the JSON
@@ -2176,11 +2179,14 @@ fn zoom_factor_from_xmile_percent(percent: Option<f64>) -> f64 {
 /// `110.00000000000001` in f64, and that noise would otherwise be written into
 /// every file. Stella itself writes at most one decimal (`zoom="165.6"`).
 fn xmile_percent_from_zoom_factor(factor: f64) -> Option<f64> {
-    if factor.is_finite() && factor > 0.0 {
-        Some((factor * 100.0 * 1000.0).round() / 1000.0)
-    } else {
-        None
+    if !factor.is_finite() {
+        return None;
     }
+    // Filter the ROUNDED value, not the input: a tiny positive factor (1e-6)
+    // rounds to 0, and `zoom="0"` reads back as the default 1.0 -- a silent
+    // unit trip that would make write->read non-idempotent.
+    let percent = (factor * 100.0 * 1000.0).round() / 1000.0;
+    if percent > 0.0 { Some(percent) } else { None }
 }
 
 impl From<View> for datamodel::View {
@@ -2291,7 +2297,7 @@ fn test_view_roundtrip() {
     }
 }
 
-/// The `<view zoom="...">` unit contract. XMILE spec section 6.1
+/// The `<view zoom="...">` unit contract. XMILE spec section 5.1
 /// (`docs/reference/xmile-v1.0.html`, "Views"): "Views may also have an
 /// OPTIONAL zoom specified as a double where 100 is default, 200 is 2x bigger
 /// by a factor of 2 and 50 is smaller by a factor of 2." The datamodel carries
@@ -2374,6 +2380,47 @@ mod zoom_unit_tests {
         }
     }
 
+    /// A factor too small to survive the writer's rounding must be OMITTED
+    /// (spec default 100%) rather than written as `zoom="0"`: `0` reads back
+    /// as 1.0 anyway, so emitting it would be a silent unit trip and a
+    /// second write of the re-read project would differ from the first.
+    #[test]
+    fn writer_omits_zoom_that_rounds_to_zero() {
+        for factor in [1e-6, 4e-6, 0.0, -2.0, f64::NAN, f64::INFINITY] {
+            let mut project = project_with_view(r#"zoom="100""#);
+            {
+                let model = project
+                    .models
+                    .iter_mut()
+                    .find(|m| m.name == "main")
+                    .expect("main model");
+                let datamodel::View::StockFlow(sf) = &mut model.views[0];
+                sf.zoom = factor;
+            }
+            let xml = project_to_xmile(&project).expect("must serialize");
+            assert!(
+                !xml.contains("zoom="),
+                "factor {factor} must omit the zoom attribute, not write zoom=\"0\": {xml}"
+            );
+            let reparsed =
+                project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("must re-import");
+            assert_close(only_view_zoom(&reparsed), 1.0);
+        }
+        // Just above the rounding floor it IS written, and round-trips.
+        let mut project = project_with_view(r#"zoom="100""#);
+        {
+            let model = project
+                .models
+                .iter_mut()
+                .find(|m| m.name == "main")
+                .expect("main model");
+            let datamodel::View::StockFlow(sf) = &mut model.views[0];
+            sf.zoom = 1e-5;
+        }
+        let xml = project_to_xmile(&project).expect("must serialize");
+        assert!(xml.contains(r#"zoom="0.001""#), "{xml}");
+    }
+
     /// The writer emits the datamodel factor back as a spec percentage, and
     /// the emitted text re-imports to the same factor (text-level round trip,
     /// not just struct-level). 1.1 is deliberate: `1.1 * 100.0` is not exactly
@@ -2403,7 +2450,9 @@ mod zoom_unit_tests {
     }
 
     /// The writer emits the spec's `type` attribute (`<view type="stock_flow">`,
-    /// spec section 6.1), which is also what the reader looks for.
+    /// spec section 5.1), which is also what the reader looks for. The spec's
+    /// only `view_type` attribute lives on `<link target="view">` inside
+    /// `<event>` (section 4.1.2.1), not on `<view>`.
     #[test]
     fn writer_emits_spec_view_type_attribute() {
         let project = project_with_view("");
