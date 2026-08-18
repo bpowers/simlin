@@ -226,9 +226,9 @@ describe('WidgetApp <-> model protocol', () => {
     expect(model.lastSnapshot()).toEqual({ base: 4, json: localJson('{"name":"disk"}', 1) });
   });
 
-  it('an equal-bytes reject (kernel write failed, revision unchanged) does not remount and does not loop', async () => {
+  it('a reject at an unchanged revision (kernel failed before applying) does not remount and does not loop', async () => {
     const model = new FakeModel(defaultState({ revision: 3 }));
-    model.kernel.writeFails = true;
+    model.kernel.applyFails = true;
     await mount(model);
     fireEvent.click(screen.getByText('edit'));
     await waitFor(() => expect(mounts[0].saveResults).toEqual([undefined]));
@@ -239,20 +239,20 @@ describe('WidgetApp <-> model protocol', () => {
     expect(mounts[0].serverVersion).toBe(3);
     // Nothing else was sent: no retry storm.
     expect(model.snapshotsDelivered()).toHaveLength(1);
-    // Once the kernel can write again, the next edit goes out against the
+    // Once the kernel can apply again, the next edit goes out against the
     // same base and is accepted.
-    model.kernel.writeFails = false;
+    model.kernel.applyFails = false;
     fireEvent.click(screen.getByText('edit'));
     await waitFor(() => expect(mounts[0].saveResults).toEqual([undefined, 4]));
     expect(model.lastSnapshot()).toEqual({ base: 3, json: localJson(SEED, 2) });
     // The accept adopted (4, edit2) as the seed: an idempotent re-push of that
-    // pair, and an equal-bytes reject right after it, both leave the Editor
+    // pair, and an unchanged-revision reject right after it, both leave the Editor
     // mounted (no remount to stale content, no lost edit).
     act(() => {
       model.kernelPush({ project_json: localJson(SEED, 2), revision: 4 });
     });
     expect(mounts).toHaveLength(1);
-    model.kernel.writeFails = true;
+    model.kernel.applyFails = true;
     fireEvent.click(screen.getByText('edit'));
     await waitFor(() => expect(mounts[0].saveResults).toEqual([undefined, 4, undefined]));
     expect(mounts).toHaveLength(1);
