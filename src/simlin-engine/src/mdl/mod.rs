@@ -67,17 +67,31 @@ pub fn project_to_mdl(project: &Project) -> Result<String> {
 ///   state. These would produce corrupt or meaningless `.mdl` and so fail
 ///   loudly rather than warn.
 /// - **Warnings** (non-empty `Vec<ExportWarning>`): the export succeeded but a
-///   construct was degraded to the closest representable form. Today these are:
-///   a dropped `compat.non_negative` flag (changes Vensim sim semantics); a
-///   Discrete graphical function (no Vensim equivalent -- emitted continuous);
-///   an Extrapolate graphical function on an inline `WITH LOOKUP` (no `TABXL`
-///   call site can mark it -- emitted clamped); a one-to-many dimension element
-///   mapping (MDL positional notation cannot express it -- emitted as a plain
-///   name mapping); a multi-word group name (the reader truncates the banner at
-///   the first whitespace) or a group's documentation (dropped on re-import);
-///   and an EXCEPT default that could not be reconstructed (dimension
-///   membership unavailable, or the default references its own dimensions).
-///   Each names the affected variable, dimension, or group.
+///   construct was degraded to the closest representable form. The arms are
+///   the `ExportWarning::new` sites in `writer.rs`; by construct:
+///   - equations: one that could not be parsed (written as raw text, builtin
+///     renames not applied), one using the transpose operator, one calling
+///     ROUND (a Simlin extension Vensim does not define) -- each written
+///     through as-is with a warning that it will not re-import as meant;
+///   - stocks/flows: a dropped `compat.non_negative` flag (changes Vensim sim
+///     semantics); a conveyor or queue stock, a conveyor leakage flow, a
+///     conveyor inflow placement (spreadflow), a queue overflow outflow (no
+///     Vensim construct -- emitted as plain stock/flow);
+///   - graphical functions: Discrete interpolation (emitted continuous); an
+///     Extrapolate table on an inline `WITH LOOKUP`, one with no `LOOKUP` call
+///     site to rewrite as `TABXL`, or one on a per-element arrayed GF (each
+///     emitted clamped);
+///   - arrays: a one-to-many dimension element mapping (MDL positional
+///     notation cannot express it -- emitted as a plain name mapping); an
+///     EXCEPT default that could not be reconstructed (dimension membership
+///     unavailable, or the default references its own dimensions);
+///   - groups: a multi-word group name (the reader truncates the banner at the
+///     first whitespace) and a group's documentation (dropped on re-import);
+///   - `loop_metadata`: every entry (named loop, described unnamed loop,
+///     hidden-loop marker, unnamed LTM pin) -- MDL has no construct for any of
+///     it (`warn_dropped_loop_metadata`).
+///
+///   Each names the affected variable, dimension, group, or loop.
 /// - **Silently lossless**: everything else, including a *standalone*
 ///   Extrapolate lookup table (its call sites are rewritten to `TABXL`, so the
 ///   kind round-trips) and an EXCEPT default that IS reconstructed (its covered
