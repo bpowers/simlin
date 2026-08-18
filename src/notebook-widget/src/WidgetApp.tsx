@@ -32,10 +32,13 @@ import {
   snapshotMessage,
   TRAITS,
   versionAfterReply,
+  viewportToCarry,
   wrapperStyle,
   type EditorSeedPair,
   type InFlightSnapshot,
+  type LiveViewport,
   type Notice,
+  type Viewport,
   type WidgetTraits,
 } from './widget-core';
 
@@ -56,6 +59,10 @@ interface EditorSeed extends EditorSeedPair {
   // that restored an older revision number) still gets a fresh Editor --
   // `revision` alone would not change the key.
   generation: number;
+  // The viewport the remounted Editor opens with, when the outgoing Editor's
+  // live pan/zoom is carried across the remount (`viewportToCarry`); unset on
+  // the first mount and whenever the kernel's own stored viewport should win.
+  initialViewport?: Viewport;
 }
 
 interface WidgetRefs {
@@ -72,6 +79,11 @@ interface WidgetRefs {
   // `staleRepliesOwed` save replies belong to those snapshots, not to
   // whatever the new Editor has in flight: each is consumed and ignored.
   staleRepliesOwed: number;
+  // The live Editor's last committed viewport (`onViewportChange`), carried
+  // into the next mount on a kernel-originated remount (see remountFrom). A pan
+  // or zoom by itself is never saved, so without this every kernel push would
+  // reset the user's framing to the stored one.
+  liveViewport: LiveViewport | null;
   selectionTimer: ReturnType<typeof setTimeout> | null;
   noticeTimer: ReturnType<typeof setTimeout> | null;
 }
@@ -94,7 +106,7 @@ function matchDarkScheme(): MediaQueryList | null {
     : null;
 }
 
-function readHostThemeSignals(): HostThemeSignals {
+export function readHostThemeSignals(): HostThemeSignals {
   const body = typeof document !== 'undefined' ? document.body : null;
   return { jpThemeLight: body?.dataset.jpThemeLight, prefersDark: matchDarkScheme()?.matches ?? false };
 }
@@ -173,6 +185,7 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
     seed: { revision: traits.revision, projectJson: traits.projectJson },
     inFlight: null,
     staleRepliesOwed: 0,
+    liveViewport: null,
     selectionTimer: null,
     noticeTimer: null,
   });
@@ -194,14 +207,23 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
 
   // Remount the Editor on the kernel-authoritative pair. Idempotent on the
   // pair: a push and the `rejected` that follows it (or the two change events
-  // of one hold_sync) remount once.
+  // of one hold_sync) remount once. The outgoing Editor's live viewport is
+  // carried into the new mount unless the kernel change moved the stored one
+  // itself (`viewportToCarry`, decided against the OUTGOING seed's text, i.e.
+  // the project the live Editor was mounted from).
   const remountFrom = React.useCallback((pair: EditorSeedPair): void => {
     const r = refs.current;
     if (pair.revision === r.seed.revision && pair.projectJson === r.seed.projectJson) {
       return;
     }
+    const initialViewport = viewportToCarry(r.liveViewport, r.seed.projectJson, pair.projectJson);
     r.seed = { revision: pair.revision, projectJson: pair.projectJson };
-    setSeed((prev) => ({ revision: pair.revision, projectJson: pair.projectJson, generation: prev.generation + 1 }));
+    setSeed((prev) => ({
+      revision: pair.revision,
+      projectJson: pair.projectJson,
+      generation: prev.generation + 1,
+      initialViewport,
+    }));
   }, []);
 
   // Kernel pushes. Only the kernel writes `project_json` and `revision`, so
@@ -380,6 +402,12 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
     [model, readModelTraits, showNotice],
   );
 
+  // The Editor's committed viewport (once per settled pan/zoom/fit, never per
+  // frame); kept for the next kernel-originated remount.
+  const handleViewportChange = React.useCallback((modelName: string, viewport: Viewport): void => {
+    refs.current.liveViewport = { modelName, viewBox: { ...viewport.viewBox }, zoom: viewport.zoom };
+  }, []);
+
   const handleSelectionChanged = React.useCallback(
     (idents: ReadonlyArray<string>): void => {
       const r = refs.current;
@@ -425,6 +453,8 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
           readOnlyMode={traits.readOnly}
           onSave={handleSave}
           onSelectionChanged={handleSelectionChanged}
+          onViewportChange={handleViewportChange}
+          initialViewport={seed.initialViewport}
           portalContainer={wrapper}
           // The notebook page has no "/" to go home to; the drawer's Exit
           // link would pushState the notebook page away.

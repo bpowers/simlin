@@ -476,6 +476,85 @@ test.describe('notebook widget bundle', () => {
     await page.screenshot({ path: path.join(here, '.output', 'drawer-contained.png'), fullPage: true });
   });
 
+  // Theming needs a real style engine: the label fill is a stylesheet token
+  // (no inline value), the halo is an SVG filter whose flood colour is a token
+  // set as a CSS property on the filter primitive, and the wrapper paints the
+  // page-background token -- jsdom resolves none of those. In a forced dark
+  // theme every one must resolve to its dark value; in light, to the exact
+  // black/white the app has always drawn (visually identical there).
+  test('theme=dark: labels are light with a dark halo on a dark ground; theme=light keeps black on white', async ({
+    page,
+  }) => {
+    await serveHarness(page);
+    await mountWidget(page, 'cell1', initialState({ height: 400, theme: 'dark' }));
+    await mountWidget(page, 'cell2', initialState({ height: 400, theme: 'light' }));
+    for (const cell of ['#cell1', '#cell2']) {
+      await expect(page.locator(`${cell} svg.simlin-canvas`)).toBeVisible({ timeout: 60_000 });
+      await expect(page.locator(cell).getByText('Population', { exact: true }).first()).toBeVisible();
+    }
+
+    const read = (cell: string) =>
+      page.evaluate((sel) => {
+        const wrapper = document.querySelector(`${sel} .simlin-notebook-widget`) as HTMLElement;
+        const canvas = document.querySelector(`${sel} svg.simlin-canvas`) as HTMLElement;
+        const label = Array.from(canvas.querySelectorAll('g.simlin-stock text')).find(
+          (t) => t.textContent?.trim() === 'Population',
+        ) as HTMLElement | undefined;
+        if (!label) {
+          throw new Error('no Population label');
+        }
+        const filterRef = /url\("?#([^")]+)"?\)/.exec(getComputedStyle(label).filter);
+        // Resolve the reference the way the renderer does: document-wide by
+        // id. It must land on THIS canvas's filter, and be the only element
+        // with that id on the page.
+        const matches = filterRef ? document.querySelectorAll(`[id="${filterRef[1]}"]`) : [];
+        const filter = matches.length === 1 ? matches[0] : null;
+        const flood = filter?.querySelector('feFlood') ?? null;
+        return {
+          theme: wrapper.getAttribute('data-theme'),
+          wrapperBackground: getComputedStyle(wrapper).backgroundColor,
+          labelFill: getComputedStyle(label).fill,
+          labelInlineFill: label.style.fill,
+          filterId: filterRef ? filterRef[1] : null,
+          filterIdMatches: matches.length,
+          filterInOwnCanvas: filter !== null && canvas.contains(filter),
+          floodColor: flood ? getComputedStyle(flood).floodColor : null,
+          floodOpacity: flood ? getComputedStyle(flood).floodOpacity : null,
+        };
+      }, cell);
+
+    const dark = await read('#cell1');
+    expect(dark.theme).toBe('dark');
+    expect(dark.filterIdMatches).toBe(1);
+    expect(dark.filterInOwnCanvas).toBe(true);
+    // theme.css dark values: --color-background #121212, --color-black #bbbbbb,
+    // --color-white #222222.
+    expect(dark.wrapperBackground).toBe('rgb(18, 18, 18)');
+    expect(dark.labelInlineFill).toBe('');
+    expect(dark.labelFill).toBe('rgb(187, 187, 187)');
+    expect(dark.floodColor).toBe('rgb(34, 34, 34)');
+    expect(dark.floodOpacity).toBe('0.85');
+
+    const light = await read('#cell2');
+    expect(light.theme).toBe('light');
+    expect(light.filterIdMatches).toBe(1);
+    expect(light.filterInOwnCanvas).toBe(true);
+    expect(light.wrapperBackground).toBe('rgb(242, 242, 242)');
+    expect(light.labelFill).toBe('rgb(0, 0, 0)');
+    expect(light.floodColor).toBe('rgb(255, 255, 255)');
+    expect(light.floodOpacity).toBe('0.85');
+
+    // Two Editors on one page under different themes -- each its own React
+    // root from its own copy of React: each label references its own canvas's
+    // filter, so the dark halo cannot come from the light widget's filter (or
+    // the reverse; a per-root id such as React.useId collides here).
+    expect(dark.filterId).not.toBeNull();
+    expect(light.filterId).not.toBeNull();
+    expect(dark.filterId).not.toBe(light.filterId);
+    // Kept as a visual artifact of the run (gitignored), not an assertion.
+    await page.screenshot({ path: path.join(here, '.output', 'dark-and-light.png'), fullPage: true });
+  });
+
   test('SIMLIN_WIDGET_ASSET=inline: the module compiles the engine from the inline global and never asks the kernel', async ({
     page,
   }) => {

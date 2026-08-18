@@ -73,7 +73,12 @@ describe('AFM lifecycle', () => {
     expect(wrapper.style.height).toBe('400px');
     expect(wrapper.style.width).toBe('100%');
     expect(wrapper.style.position).toBe('relative');
+    // The wrapper paints the themed page background itself, so a forced theme
+    // never leaves the transparent canvas on the notebook cell's colour.
+    expect(wrapper.style.background).toBe('var(--color-background)');
     expect(wrapper.getAttribute('data-theme')).toBe('light');
+    // The first mount opens at the project's stored viewport (nothing to carry).
+    expect(mounts[0].props.initialViewport).toBeUndefined();
     expect(mounts).toHaveLength(1);
     expect(mounts[0].props.name).toBe('model');
     expect(mounts[0].props.inputFormat).toBe('json');
@@ -759,5 +764,121 @@ describe('WidgetApp <-> model protocol', () => {
     expect(model.sets.filter((s) => s.key === 'selection')).toHaveLength(1);
     expect(model.lastSet('selection')).toEqual(['a', 'b']);
     expect(model.saveChangesCount).toBe(1);
+  });
+});
+
+describe('viewport carried across a kernel-originated remount', () => {
+  beforeEach(async () => {
+    resetEngineBootstrapForTests();
+    resetEngineMock();
+    resetEditorMock();
+    await seedSharedModule();
+  });
+  afterEach(() => {
+    resetEngineBootstrapForTests();
+    document.body.innerHTML = '';
+  });
+
+  const projectWith = (viewBox: Record<string, number> | undefined, extra: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      name: 'p',
+      models: [
+        { name: 'main', views: [{ elements: [], ...(viewBox === undefined ? {} : { viewBox, zoom: 1 }) }], ...extra },
+      ],
+    });
+  const box = { x: 10, y: 20, width: 800, height: 400 };
+  // What the mock's first "pan" reports (editor-mock.tsx).
+  const firstPan = { viewBox: { x: -10, y: 5, width: 800, height: 400 }, zoom: 1.25 };
+  const secondPan = { viewBox: { x: -20, y: 10, width: 800, height: 400 }, zoom: 1.5 };
+
+  it('a kernel push that left the stored viewport unchanged remounts on the LIVE viewport (the last committed pan)', async () => {
+    const model = new FakeModel(defaultState({ project_json: projectWith(box), revision: 3 }));
+    await mount(model);
+    fireEvent.click(screen.getByText('pan'));
+    fireEvent.click(screen.getByText('pan'));
+    // A Python edit adds a variable; the stored viewBox/zoom are the same.
+    act(() => {
+      model.kernelChange(
+        projectWith(box, { auxiliaries: [{ name: 'from_python', equation: '1' }] }),
+        'Updated from Python',
+      );
+    });
+    expect(mounts).toHaveLength(2);
+    expect(mounts[1].props.initialViewport).toEqual(secondPan);
+    // The new Editor is seeded from the kernel's bytes; only the viewport rides along.
+    expect(mounts[1].props.initialProjectJson).toBe(
+      projectWith(box, { auxiliaries: [{ name: 'from_python', equation: '1' }] }),
+    );
+  });
+
+  it("a kernel push that moved the stored viewport remounts on the kernel's (nothing carried)", async () => {
+    const model = new FakeModel(defaultState({ project_json: projectWith(box), revision: 3 }));
+    await mount(model);
+    fireEvent.click(screen.getByText('pan'));
+    act(() => {
+      model.kernelChange(projectWith({ ...box, x: 300 }));
+    });
+    expect(mounts).toHaveLength(2);
+    expect(mounts[1].props.initialViewport).toBeUndefined();
+  });
+
+  it('a stored viewport that is still unset (a converted model) keeps the live framing across kernel pushes', async () => {
+    const model = new FakeModel(defaultState({ project_json: projectWith(undefined), revision: 1 }));
+    await mount(model);
+    // The real Editor reports the mount-time fit as its first committed viewport.
+    fireEvent.click(screen.getByText('pan'));
+    act(() => {
+      model.kernelChange(projectWith(undefined, { auxiliaries: [{ name: 'a', equation: '1' }] }));
+    });
+    expect(mounts).toHaveLength(2);
+    expect(mounts[1].props.initialViewport).toEqual(firstPan);
+    // The carried viewport is compared against the OUTGOING seed on the next
+    // push too: with the second Editor's own pan reported, a further push
+    // carries that one.
+    fireEvent.click(screen.getAllByText('pan')[0]);
+    act(() => {
+      model.kernelChange(
+        projectWith(undefined, {
+          auxiliaries: [
+            { name: 'a', equation: '1' },
+            { name: 'b', equation: '2' },
+          ],
+        }),
+      );
+    });
+    expect(mounts).toHaveLength(3);
+    // The second mount's mock counts its own pans from 1.
+    expect(mounts[2].props.initialViewport).toEqual(firstPan);
+  });
+
+  it('a live viewport of a drilled-into module is not carried onto the root the remount opens', async () => {
+    const model = new FakeModel(defaultState({ project_json: projectWith(box), revision: 3 }));
+    await mount(model);
+    fireEvent.click(screen.getByText('pan'));
+    fireEvent.click(screen.getByText('pan-child'));
+    act(() => {
+      model.kernelChange(projectWith(box, { auxiliaries: [] }));
+    });
+    expect(mounts).toHaveLength(2);
+    expect(mounts[1].props.initialViewport).toBeUndefined();
+  });
+
+  it('a reject that re-seeds onto moved kernel state also carries the live viewport (same remount path)', async () => {
+    const model = new FakeModel(defaultState({ project_json: projectWith(box), revision: 3 }));
+    await mount(model);
+    fireEvent.click(screen.getByText('pan'));
+    model.busyKernel = true;
+    fireEvent.click(screen.getByText('edit'));
+    // A foreign change lands while the snapshot waits: its push remounts (with
+    // the pan carried); the following rejected is a no-op on the pair.
+    act(() => {
+      model.kernelChange(projectWith(box, { auxiliaries: [{ name: 'x', equation: '1' }] }));
+    });
+    expect(mounts).toHaveLength(2);
+    expect(mounts[1].props.initialViewport).toEqual(firstPan);
+    await act(async () => {
+      model.releaseKernel();
+    });
+    expect(mounts).toHaveLength(2);
   });
 });
