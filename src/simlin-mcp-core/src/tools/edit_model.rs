@@ -23,7 +23,9 @@ use simlin_engine::json as ejson;
 use crate::access::ProjectAccess;
 use crate::errors::AccessError;
 use crate::open::resolve_model_name;
-use crate::types::{DominantPeriodOutput, ErrorOutput, LoopDominanceSummary, PartitionOutput};
+use crate::types::{
+    DominantPeriodOutput, ErrorOutput, LoopDominanceSummary, PartitionOutput, preflight_export,
+};
 
 // ── Curated input types ───────────────────────────────────────────────
 //
@@ -237,12 +239,12 @@ pub struct EditModelOutput {
     pub universe_loops: Option<usize>,
     /// Non-fatal diagnostics scoped to the edited model: the LTM auto-flip
     /// advisory and synthetic-fragment compile-failure warnings (GH #662),
-    /// plus -- when the file was written -- the on-disk writer's lossiness
-    /// warnings (an MDL project holding a construct Vensim cannot express
-    /// was saved in its closest representable form; the message carries an
-    /// `MDL export:` prefix).  Writer warnings are only produced by a real
-    /// write, so a `dryRun` result never carries them.  Empty (and elided
-    /// from JSON) when there are none.
+    /// plus the on-disk writer's lossiness warnings (an MDL project holding
+    /// a construct Vensim cannot express is saved in its closest
+    /// representable form; the message carries an `MDL export:` prefix).
+    /// A `dryRun` computes the writer warnings without writing, so an agent
+    /// can preview what a real save would degrade.  Empty (and elided from
+    /// JSON) when there are none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<ErrorOutput>,
     /// `Some(message)` when the just-edited model could not be compiled for
@@ -396,14 +398,23 @@ pub async fn edit_model<A: ProjectAccess>(
     )
     .map_err(|e| AccessError::ParseError(anyhow::anyhow!("analysis failed: {e}")))?;
 
-    if !dry_run {
+    // Pre-flight the on-disk writer before touching the backing store: a
+    // project the format structurally cannot hold is rejected here as a
+    // Validation error (the edit never lands, so a registry-backed store is
+    // not left holding a merged doc it cannot persist), and the lossiness
+    // warnings a save would report are known even on a dry run.
+    let export_warnings = preflight_export(&project, source_format)?;
+
+    if dry_run {
+        warnings.extend(export_warnings);
+    } else {
         let saved = access
             .save(path, &project, source_format, Some(expected_version))
             .await?;
         // The writer's lossiness warnings (MDL today) ride the same field
         // as the model diagnostics: the write succeeded, but the agent has
         // to know a construct was degraded on disk to decide what to do
-        // next.
+        // next. The store's own report is authoritative for what landed.
         warnings.extend(saved.warnings);
     }
 

@@ -34,7 +34,7 @@ CRITICAL: this is new software -- `ReadModel` and `CreateModel` are safe, but ON
 | SD-AI JSON | `.json` (with `variables` key)             | Yes | Yes |
 | Vensim | `.mdl`                                     | Yes | Yes |
 
-Every format is edited in place: EditModel rewrites the file in its own format (regenerated XMILE, Vensim text including the sketch, or JSON), and CreateModel picks the format from the path's extension. Vensim cannot express a few Simlin constructs (a non-negative stock or flow, a discrete or extrapolating lookup, the ROUND builtin, ...); an EditModel on a `.mdl` still saves those in their closest Vensim form and lists each degradation in the response's `warnings` with an `MDL export:` prefix. Check `warnings` after editing a `.mdl` and tell the user when a construct was degraded.
+Every format is edited in place: EditModel rewrites the file in its own format (regenerated XMILE, Vensim text including the sketch, or JSON), and CreateModel picks the format from the path's extension. Vensim cannot express a few Simlin constructs (a non-negative stock or flow, a discrete or extrapolating lookup, the ROUND builtin, loop names set with `setLoopName`, ...); an EditModel on a `.mdl` still saves those in their closest Vensim form and lists each degradation in the response's `warnings` with an `MDL export:` prefix. Check `warnings` after editing a `.mdl` and tell the user when a construct was degraded. The first in-place rewrite of a hand-written Vensim file also normalizes it: it is regenerated from the parsed model, so anything the parser does not keep (free-standing comments, custom `:GRAPH`/`:TABLE` blocks, formatting) is not carried over.
 
 ## Equation syntax
 

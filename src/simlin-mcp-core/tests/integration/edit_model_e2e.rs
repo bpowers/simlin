@@ -17,8 +17,8 @@ use simlin_mcp_core::access::ProjectAccess;
 use simlin_mcp_core::errors::AccessError;
 use simlin_mcp_core::test_support::{TestFileSystemAccess, chain_scc_project_json};
 use simlin_mcp_core::tools::edit_model::{
-    EditModelInput, EditOperation, UpsertAuxiliaryInput, UpsertFlowInput, UpsertStockInput,
-    edit_model,
+    EditModelInput, EditOperation, SetLoopNameInput, UpsertAuxiliaryInput, UpsertFlowInput,
+    UpsertStockInput, edit_model,
 };
 use simlin_mcp_core::types::SourceFormat;
 
@@ -405,11 +405,49 @@ async fn mdl_edit_surfaces_export_lossiness_as_warnings_and_still_writes() {
     assert!(variable_names(&after.project).contains(&"stepped".to_string()));
 }
 
-/// A dry run on a `.mdl` previews without writing, and because nothing was
-/// serialised it carries no export warnings even for a lossy edit -- the
-/// warnings describe what landed on disk, not what would.
+/// `SetLoopName` on a `.mdl` is the loudest kind of lossiness: the write
+/// succeeds, nothing in the file changes for the loop, and without the
+/// warning the agent would believe the name stuck. The MDL writer reports
+/// the dropped loop metadata and it reaches the tool result.
 #[tokio::test]
-async fn mdl_dry_run_leaves_the_file_alone_and_reports_no_export_warnings() {
+async fn mdl_set_loop_name_warns_that_the_name_was_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = copy_teacup_mdl(dir.path());
+
+    let input = EditModelInput {
+        project_path: path.to_str().unwrap().to_string(),
+        model_name: None,
+        dry_run: None,
+        sim_specs: None,
+        operations: Some(vec![EditOperation::SetLoopName(SetLoopNameInput {
+            variables: vec!["Teacup Temperature".into(), "Heat Loss to Room".into()],
+            name: "Cooling".into(),
+            description: Some("balancing cooling loop".into()),
+        })]),
+    };
+    let output = edit_model(&TestFileSystemAccess, input)
+        .await
+        .expect("edit mdl");
+    assert!(
+        output.warnings.iter().any(|w| {
+            w.message.starts_with("MDL export:") && w.message.contains("loop name 'Cooling'")
+        }),
+        "the dropped loop name must be reported: {:?}",
+        output.warnings
+    );
+
+    let after = TestFileSystemAccess.open(&path).await.expect("reopen mdl");
+    assert!(
+        after.project.models[0].loop_metadata.is_empty(),
+        "the reopened .mdl carries no loop metadata -- which is exactly why the warning exists"
+    );
+}
+
+/// A dry run on a `.mdl` previews without writing, and still reports the
+/// export warnings a real save would produce, so an agent can see the
+/// lossiness before committing to it.
+#[tokio::test]
+async fn mdl_dry_run_leaves_the_file_alone_and_previews_export_warnings() {
     let dir = tempfile::tempdir().unwrap();
     let path = copy_teacup_mdl(dir.path());
     let original = std::fs::read(&path).unwrap();
@@ -419,18 +457,21 @@ async fn mdl_dry_run_leaves_the_file_alone_and_reports_no_export_warnings() {
         model_name: None,
         dry_run: Some(true),
         sim_specs: None,
-        operations: Some(vec![upsert_aux("preview only", "1")]),
+        operations: Some(vec![EditOperation::SetLoopName(SetLoopNameInput {
+            variables: vec!["Teacup Temperature".into(), "Heat Loss to Room".into()],
+            name: "Cooling".into(),
+            description: None,
+        })]),
     };
     let output = edit_model(&TestFileSystemAccess, input)
         .await
         .expect("dry run");
     assert!(output.dry_run);
     assert!(
-        !output
-            .warnings
-            .iter()
-            .any(|w| w.message.starts_with("MDL export:")),
-        "dry run must not report export warnings: {:?}",
+        output.warnings.iter().any(|w| {
+            w.message.starts_with("MDL export:") && w.message.contains("loop name 'Cooling'")
+        }),
+        "dry run must preview the export warnings: {:?}",
         output.warnings
     );
     assert_eq!(

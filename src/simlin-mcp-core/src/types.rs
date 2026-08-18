@@ -44,21 +44,62 @@ pub fn mdl_export_warnings_to_outputs(
     project: &datamodel::Project,
     warnings: &[simlin_engine::mdl::ExportWarning],
 ) -> Vec<ErrorOutput> {
+    warnings
+        .iter()
+        .map(|w| mdl_export_output(project, &w.message))
+        .collect()
+}
+
+/// The wire shape of an MDL writer *hard error* (a project Vensim structurally
+/// cannot hold: more than one non-macro model, an ordinary Module variable).
+/// Same code/kind/prefix as the warnings so a client renders both channels
+/// uniformly; callers put it in a `Validation` error so the edit is rejected
+/// with the violated invariant named, rather than an opaque write failure.
+pub fn mdl_export_error_to_output(
+    project: &datamodel::Project,
+    err: &simlin_engine::Error,
+) -> ErrorOutput {
+    let detail = err.details.as_deref().unwrap_or("MDL export failed");
+    mdl_export_output(project, detail)
+}
+
+fn mdl_export_output(project: &datamodel::Project, message: &str) -> ErrorOutput {
     let model_name = project
         .models
         .iter()
         .find(|m| m.macro_spec.is_none())
         .map(|m| m.name.clone());
-    warnings
-        .iter()
-        .map(|w| ErrorOutput {
-            code: simlin_engine::common::ErrorCode::Generic.to_string(),
-            message: format!("MDL export: {}", w.message),
-            model_name: model_name.clone(),
-            variable_name: None,
-            kind: "model".to_string(),
-        })
-        .collect()
+    ErrorOutput {
+        code: simlin_engine::common::ErrorCode::Generic.to_string(),
+        message: format!("MDL export: {message}"),
+        model_name,
+        variable_name: None,
+        kind: "model".to_string(),
+    }
+}
+
+/// Dry-run the on-disk writer for `format` without producing bytes: the
+/// lossiness warnings a save would report, or the `Validation` error a save
+/// would fail with. Only the MDL writer has either today; every other format
+/// is lossless and returns an empty list.
+///
+/// `edit_model` calls this on a dry run so an agent can preview what a real
+/// save would degrade, and before a real save so a structurally
+/// unrepresentable project is rejected up front rather than after the
+/// backing store has already merged it.
+pub fn preflight_export(
+    project: &datamodel::Project,
+    format: SourceFormat,
+) -> Result<Vec<ErrorOutput>, crate::errors::AccessError> {
+    match format {
+        SourceFormat::Mdl => match simlin_engine::to_mdl_with_warnings(project) {
+            Ok((_text, warnings)) => Ok(mdl_export_warnings_to_outputs(project, &warnings)),
+            Err(e) => Err(crate::errors::AccessError::Validation {
+                errors: vec![mdl_export_error_to_output(project, &e)],
+            }),
+        },
+        SourceFormat::Xmile | SourceFormat::NativeJson | SourceFormat::SdaiJson => Ok(Vec::new()),
+    }
 }
 
 /// Sim-spec defaults used by [`build_empty_project`].
@@ -434,6 +475,58 @@ mod tests {
             assert_eq!(out.message, format!("MDL export: {}", w.message));
         }
         assert!(mdl_export_warnings_to_outputs(&project, &[]).is_empty());
+    }
+
+    /// `preflight_export` is a four-way dispatch on `SourceFormat`; the three
+    /// lossless arms return nothing, and the `Mdl` arm forwards the writer's
+    /// two channels: warnings for a degraded construct, and a `Validation`
+    /// error (same generic/model/`MDL export:` shape) for a project Vensim
+    /// structurally cannot hold.
+    #[test]
+    fn preflight_export_covers_every_format_and_both_mdl_channels() {
+        let clean = build_empty_project();
+        for format in [
+            SourceFormat::Xmile,
+            SourceFormat::NativeJson,
+            SourceFormat::SdaiJson,
+            SourceFormat::Mdl,
+        ] {
+            assert_eq!(
+                preflight_export(&clean, format).expect("clean project"),
+                Vec::new(),
+                "{format:?}"
+            );
+        }
+
+        let mut lossy = build_empty_project();
+        lossy.models[0].loop_metadata.push(datamodel::LoopMetadata {
+            uids: vec![1],
+            deleted: false,
+            name: "Growth".to_string(),
+            description: String::new(),
+        });
+        let warnings = preflight_export(&lossy, SourceFormat::Mdl).expect("lossy still exports");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.starts_with("MDL export:") && w.message.contains("Growth")),
+            "{warnings:?}"
+        );
+
+        let mut two_models = build_empty_project();
+        let mut second = two_models.models[0].clone();
+        second.name = "second".to_string();
+        two_models.models.push(second);
+        match preflight_export(&two_models, SourceFormat::Mdl) {
+            Err(crate::errors::AccessError::Validation { errors }) => {
+                assert_eq!(errors.len(), 1);
+                assert_eq!(errors[0].code, "generic");
+                assert_eq!(errors[0].kind, "model");
+                assert!(errors[0].message.starts_with("MDL export:"), "{errors:?}");
+                assert!(errors[0].message.contains("single model"), "{errors:?}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
     }
 
     #[test]
