@@ -819,13 +819,17 @@ class Project:
         Raises:
             SimlinRuntimeError: if the snapshot does not parse; the project
                 and revision are unchanged.
-            SimlinWriteError: if the snapshot was applied (revision bumped,
-                subscribers notified, ``dirty`` set) but the autosave write
-                failed; ``__cause__`` is the underlying error.  Distinct from
-                the parse failure so the caller can tell the browser its
-                edit stands and only the file lags.
+            SimlinWriteError: if the snapshot was applied (revision bumped)
+                but a step after that failed -- the autosave write
+                (``write_failed``; ``dirty`` stays set) or, less likely,
+                notifying subscribers (a dispatcher raising on a closed
+                kernel loop); ``__cause__`` is the underlying error.  The
+                type is what lets the caller tell the browser its edit
+                stands: an exception of any other type means nothing was
+                applied, so every failure past the commit point below must
+                be raised as this one or the widget would reply ``rejected``
+                for a change that is real and wedge its view.
         """
-        write_error: BaseException | None = None
         with self._file_lock:
             persist = self._path is not None and self._autosave
             decision, new_state = _sync.decide(
@@ -835,12 +839,35 @@ class Project:
                 return False
             assert isinstance(decision, _sync.Write | _sync.MarkDirty)
             self._replace_from_bytes(data, FileFormat.NATIVE_JSON)
+            # Commit point: the contents are replaced and the revision moves.
             self._sync = new_state
             revision = decision.revision
-            self._invalidate_model_caches()
-            if isinstance(decision, _sync.Write):
-                write_error = self._try_autosave()
-        self._notify(ChangeEvent("widget", revision))
+            try:
+                self._invalidate_model_caches()
+                write_error = self._try_autosave() if isinstance(decision, _sync.Write) else None
+            except Exception as exc:
+                raise SimlinWriteError(
+                    f"snapshot applied (revision {revision}) but its bookkeeping failed: {exc!r}",
+                    revision,
+                    write_failed=False,
+                ) from exc
+        try:
+            self._notify(ChangeEvent("widget", revision))
+        except Exception as exc:
+            if write_error is not None:
+                # The write failure is the one with a remedy (dirty; save()
+                # retries), so it stays the cause; the second failure rides
+                # in the message.
+                raise SimlinWriteError(
+                    f"snapshot applied (revision {revision}) but not written: {write_error}; "
+                    f"notifying subscribers then failed too: {exc!r}",
+                    revision,
+                ) from write_error
+            raise SimlinWriteError(
+                f"snapshot applied (revision {revision}) but notifying subscribers failed: {exc!r}",
+                revision,
+                write_failed=False,
+            ) from exc
         if write_error is not None:
             raise SimlinWriteError(
                 f"snapshot applied (revision {revision}) but not written: {write_error}",

@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, Literal, Union
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection
-    from types import ModuleType
+    from types import FrameType, ModuleType
 
     from ._sync import ChangeEvent, ChangeSource
 
@@ -46,15 +46,52 @@ def install_hint() -> str:
     """The one-line install command for the running host: Colab wants the
     ``%pip`` magic (a plain ``pip`` there installs into the wrong
     interpreter often enough that Colab documents the magic), everywhere
-    else plain ``pip``.  Colab is detected by whether ``google.colab`` is
-    importable (a Colab kernel has it imported already), which is how
-    anywidget itself detects it."""
-    if sys.modules.get("google.colab") is None:
-        try:
-            importlib.import_module("google.colab")
-        except ImportError:
-            return f'pip install "{NOTEBOOK_EXTRA}"'
-    return f'%pip install "{NOTEBOOK_EXTRA}"'
+    else plain ``pip``.  Colab is detected the way anywidget detects it
+    (``anywidget._util.in_colab``): ``"google.colab.output"`` is already in
+    ``sys.modules`` in a Colab kernel by the time user code runs.  Nothing is
+    imported to find out -- an import attempt would be a side effect in a
+    function that runs while an error message is being built."""
+    if "google.colab.output" in sys.modules:
+        return f'%pip install "{NOTEBOOK_EXTRA}"'
+    return f'pip install "{NOTEBOOK_EXTRA}"'
+
+
+def user_stacklevel() -> int:
+    """The ``warnings.warn(stacklevel=)`` that attributes a warning raised
+    from inside pysimlin to the user's own code -- in a notebook, the cell
+    -- however deep the call chain above it: every frame of the ``simlin``
+    package is skipped (``Model._repr_mimebundle_`` -> ``Model.widget`` ->
+    ``ModelWidget`` -> ``_warn_if_oversize``), and so is every frame of
+    IPython/ipykernel between the cell and us: a bare display reaches
+    ``_repr_mimebundle_`` through IPython's display formatter, which is one
+    source location for every display, and a warning attributed there would
+    be shown once per kernel session by Python's once-per-location filter
+    and point at ``formatters.py``.  Attributed to the cell it shows in that
+    cell's output, and re-running the very same cell is what the filter
+    dedupes (ipykernel names a cell's code object by a hash of its source).
+    Level 1 is the caller of ``warn``; every skipped frame adds one; when
+    every frame is skipped (a warning raised from a thread with no user
+    code on its stack) the outermost frame is named.  Python 3.12's
+    ``skip_file_prefixes`` does the package half of this and is not
+    available on 3.11."""
+    level = 1
+    frame: FrameType | None = sys._getframe(1)  # the function about to call warnings.warn
+    while frame is not None:
+        if not _is_library_frame(frame.f_globals.get("__name__", "")):
+            return level
+        level += 1
+        frame = frame.f_back
+    return level - 1
+
+
+_LIBRARY_PACKAGES = (__package__, "IPython", "ipykernel")
+
+
+def _is_library_frame(module_name: str) -> bool:
+    return any(
+        module_name == package or module_name.startswith(package + ".")
+        for package in _LIBRARY_PACKAGES
+    )
 
 
 def missing_dependency_message() -> str:
@@ -387,16 +424,19 @@ class SnapshotOutcome:
 
     ``applied`` says whether the project took the change: ``True`` when
     :meth:`Project._apply_snapshot` returned ``True``, AND when it raised
-    after applying (a write failure: the change is real in memory, the
-    revision advanced by one, ``dirty`` is set) -- ``False`` for a stale
-    base or a parse failure, which leave the project untouched.  ``error``
-    is the exception text when it raised.  ``revision`` is the project's
-    revision afterwards.
+    after applying (``SimlinWriteError``: the change is real in memory and
+    the revision advanced by one) -- ``False`` for a stale base or a parse
+    failure, which leave the project untouched.  ``error`` is the exception
+    text when it raised; with ``applied``, ``write_failed`` says whether
+    that was the autosave write (``dirty`` is set and ``model.save()``
+    retries) rather than a later step after the file was written.
+    ``revision`` is the project's revision afterwards.
     """
 
     applied: bool
     revision: int
     error: str | None = None
+    write_failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -428,6 +468,10 @@ def plan_snapshot_reply(request: SnapshotRequest, outcome: SnapshotOutcome) -> S
       so the browser is told the same ``saved`` -- its acknowledged version
       must match the kernel's or every later save would be rejected as
       stale -- plus a warning notice naming the error and ``model.save()``.
+    - applied, a later step failed (the file was written; notifying
+      subscribers raised): the same ``saved``, plus a warning notice that
+      names the error but does not send the user to ``model.save()`` --
+      there is nothing to retry.
     - not applied (stale base, or the snapshot did not parse): the traits
       are NOT touched (they already hold the authoritative state; a
       notification still queued behind this message pushes it), then
@@ -436,12 +480,21 @@ def plan_snapshot_reply(request: SnapshotRequest, outcome: SnapshotOutcome) -> S
     if outcome.applied:
         accepted_revision = request.base + 1
         messages: list[dict[str, Any]] = [saved_message(accepted_revision)]
-        if outcome.error is not None:
+        if outcome.error is not None and outcome.write_failed:
             messages.append(
                 notice_message(
                     f"Your edit was applied but could not be written to the file: "
                     f"{outcome.error}. The model is marked dirty; call model.save() to "
                     f"retry the write.",
+                    "warn",
+                )
+            )
+        elif outcome.error is not None:
+            messages.append(
+                notice_message(
+                    f"Your edit was applied, but the kernel could not finish handling it: "
+                    f"{outcome.error}. Other views of this model may be out of date until "
+                    f"the next change.",
                     "warn",
                 )
             )
@@ -558,6 +611,7 @@ __all__ = [
     "rejected_message",
     "saved_message",
     "snapshot_wire_size",
+    "user_stacklevel",
     "wasm_error_reply",
     "wasm_reply",
 ]

@@ -23,8 +23,11 @@ x86_64/aarch64 and macOS arm64, Python 3.11+; from a checkout, the wheel
 `scripts/build_wheels.py` produces). The `notebook` extra is anywidget;
 without it a displayed model degrades to its SVG diagram plus a
 `RuntimeWarning` carrying this install line (`%pip install
-"pysimlin[notebook]"` under Colab), and `m.widget()` raises
-`SimlinDependencyError`. No extension, no sidecar process.
+"pysimlin[notebook]"` under Colab), attributed to the displaying cell; the
+model's plain-text repr in the same output carries the line as well (Python
+shows a given warning once per source location, so re-running the same cell
+may not repeat it), and `m.widget()` raises `SimlinDependencyError`. No
+extension, no sidecar process.
 
 The cells, run in order (this is
 [`examples/notebook_editor.ipynb`](../examples/notebook_editor.ipynb) in

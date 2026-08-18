@@ -1375,6 +1375,89 @@ class TestSnapshotEdgeCases:
             project._apply_snapshot(b"{", base_revision=1)
         assert not isinstance(parse_exc.value, simlin.SimlinWriteError)
         assert project.revision == 1
+        assert excinfo.value.write_failed is True
+
+    def test_snapshot_failure_after_the_commit_is_a_write_error_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The exception type is what tells a caller "the change is real":
+        # anything that raises AFTER the contents were replaced and the
+        # revision bumped -- here a subscriber dispatcher that fails (a
+        # closed kernel loop) -- surfaces as SimlinWriteError, not as the
+        # raw exception a caller would read as "nothing applied".  The file
+        # was written, so it is not a write failure and save() has nothing
+        # to retry.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        project = Project.open(path, watch=False)
+
+        def closed_loop(fn: object) -> None:
+            raise RuntimeError("IOLoop is closed")
+
+        project.on_change(lambda event: None, dispatch=closed_loop)
+        scratch = simlin.load(path)
+        _add_aux(scratch, "applied")
+        snapshot = scratch.project.serialize_json()  # type: ignore[union-attr]
+        with pytest.raises(simlin.SimlinWriteError, match="IOLoop is closed") as excinfo:
+            project._apply_snapshot(snapshot, base_revision=0)
+        assert isinstance(excinfo.value.__cause__, RuntimeError)
+        assert excinfo.value.revision == 1
+        assert excinfo.value.write_failed is False
+        assert project.revision == 1
+        assert project.dirty is False
+        assert simlin.load(path).get_variable("applied") is not None
+
+    def test_snapshot_failure_inside_the_commit_bookkeeping_is_a_write_error_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The other post-commit step, under the lock: a bug there is still
+        # "applied but ..." (the revision has moved), and the lock is
+        # released on the way out so the project keeps working.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        project = Project.open(path, watch=False)
+        scratch = simlin.load(path)
+        _add_aux(scratch, "applied")
+        snapshot = scratch.project.serialize_json()  # type: ignore[union-attr]
+
+        def boom(*args: object) -> None:
+            raise RuntimeError("cache bookkeeping bug")
+
+        monkeypatch.setattr(project, "_invalidate_model_caches", boom)
+        with pytest.raises(simlin.SimlinWriteError, match="cache bookkeeping bug") as excinfo:
+            project._apply_snapshot(snapshot, base_revision=0)
+        assert excinfo.value.revision == 1
+        assert excinfo.value.write_failed is False
+        assert project.revision == 1
+        monkeypatch.undo()
+        assert project._apply_snapshot(snapshot, base_revision=1) is True
+
+    def test_snapshot_write_and_notify_both_failing_reports_the_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Both post-commit steps failing: the write failure is the one with
+        # a remedy (dirty; save() retries), so it is the cause and the flag,
+        # and the second failure rides in the message.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        project = Project.open(path, watch=False)
+
+        def closed_loop(fn: object) -> None:
+            raise RuntimeError("IOLoop is closed")
+
+        project.on_change(lambda event: None, dispatch=closed_loop)
+        scratch = simlin.load(path)
+        _add_aux(scratch, "unsaved")
+        snapshot = scratch.project.serialize_json()  # type: ignore[union-attr]
+
+        def fail(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("simlin.project.atomic_write", fail)
+        with pytest.raises(simlin.SimlinWriteError, match="disk full") as excinfo:
+            project._apply_snapshot(snapshot, base_revision=0)
+        assert isinstance(excinfo.value.__cause__, OSError)
+        assert excinfo.value.write_failed is True
+        assert "IOLoop is closed" in str(excinfo.value)
+        assert project.revision == 1
+        assert project.dirty is True
 
     def test_m9_unparsable_snapshot_leaves_revision_unchanged(self, tmp_path: Path) -> None:
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)

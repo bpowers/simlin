@@ -264,7 +264,7 @@ Every write regenerates the whole file from the in-memory model; it is not
 a byte-preserving edit of what was there. For XMILE and Simlin JSON that is
 the same document. For Vensim `.mdl` the file is re-emitted from Simlin's
 model, so the first save of a Vensim-authored file shows a whole-file diff:
-formatting is normalised, identifiers in equations are lower-cased, spaces
+formatting is normalised, identifier casing is normalised, spaces
 in unit names become `_`, and constructs Simlin does not carry are dropped:
 unit ranges such as `[0,?]` silently, a non-negativity flag or a discrete
 lookup with a `RuntimeWarning` (once per distinct message per project).
@@ -322,7 +322,10 @@ there is no extension to install and no sidecar process (anywidget rather
 than a homegrown stack because it is what makes one widget render on every
 host: VS Code's kernel needs `import ipywidgets`, marimo needs
 `anywidget.AnyWidget`). Without the extra a displayed model shows its SVG
-diagram and a warning with the install line. It is verified on JupyterLab 4
+diagram and a `RuntimeWarning` with the install line in the displaying
+cell's output; the model's plain-text repr in the same output carries the
+line too (Python shows a given warning once per source location, so a
+re-run of the same cell may not repeat it). It is verified on JupyterLab 4
 (an automated browser journey runs in CI on pull requests and pushes to `main`) and expected to work
 wherever anywidget does -- Notebook 7, VS Code, Google Colab, marimo --
 with the checklist and the honest status of each host in

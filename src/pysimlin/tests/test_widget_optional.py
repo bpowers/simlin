@@ -10,8 +10,11 @@ pin what a bare ``pip install pysimlin`` user sees:
     import simlin                 -> fine
     Model.widget()                -> SimlinDependencyError (an ImportError)
                                      naming the pip line
-    display(model)                -> the SVG diagram + text/plain, and ONE
-                                     RuntimeWarning with the same pip line;
+    display(model)                -> the SVG diagram + a text/plain that
+                                     carries the pip line, and ONE
+                                     RuntimeWarning with the same line,
+                                     attributed to the displaying cell even
+                                     through IPython's display formatter;
                                      never a traceback
     the pip line under Colab      -> the %pip magic
 
@@ -24,11 +27,15 @@ import importlib
 import sys
 import warnings
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 import simlin
 from simlin import SimlinDependencyError
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -54,6 +61,14 @@ def _model() -> simlin.Model:
     return simlin.load(FIXTURES / "teacup.stmx")
 
 
+def _through_ipython_formatter(fn: Callable[[], object]) -> object:
+    """Call ``fn`` from a frame whose module is ``IPython.core.formatters``,
+    the frame a kernel's display puts between the cell and the repr."""
+    namespace: dict[str, Any] = {"__name__": "IPython.core.formatters", "fn": fn}
+    exec("result = fn()", namespace)
+    return namespace["result"]
+
+
 class TestWithoutTheExtra:
     def test_import_simlin_never_needs_anywidget(self, no_anywidget: None) -> None:
         importlib.reload(simlin)
@@ -72,7 +87,9 @@ class TestWithoutTheExtra:
         with pytest.raises(SimlinDependencyError, match=r"pysimlin\[notebook\]"):
             _ = simlin.ModelWidget
 
-    def test_display_degrades_to_svg_with_one_warning(self, no_anywidget: None) -> None:
+    def test_display_degrades_to_svg_with_one_warning_and_the_hint_in_text_plain(
+        self, no_anywidget: None
+    ) -> None:
         model = _model()
         with pytest.warns(RuntimeWarning, match=r"pysimlin\[notebook\]") as record:
             data, metadata = model._repr_mimebundle_()
@@ -80,7 +97,26 @@ class TestWithoutTheExtra:
         assert record[0].filename == __file__  # attributed to the display's cell
         assert set(data) == {"image/svg+xml", "text/plain"}
         assert data["image/svg+xml"].startswith("<svg")
+        # The plain-text repr carries the install line too: Python shows a
+        # warning once per source location, so a re-run of the same cell may
+        # not repeat it; the repr is printed every time.
+        assert data["text/plain"].startswith(repr(model))
+        assert 'pip install "pysimlin[notebook]"' in data["text/plain"]
+        assert "interactive editor unavailable" in data["text/plain"]
         assert metadata == {}
+
+    def test_display_warning_names_the_cell_not_ipythons_formatter(
+        self, no_anywidget: None
+    ) -> None:
+        # In a kernel a bare display reaches _repr_mimebundle_ through
+        # IPython's display formatter; the warning still names the cell (this
+        # frame), not formatters.py -- which would be one location for every
+        # display and so warn once per kernel session.
+        model = _model()
+        with pytest.warns(RuntimeWarning, match=r"pysimlin\[notebook\]") as record:
+            _through_ipython_formatter(model._repr_mimebundle_)
+        assert len(record) == 1
+        assert record[0].filename == __file__
 
     def test_display_never_raises_even_when_svg_fails(
         self, no_anywidget: None, monkeypatch: pytest.MonkeyPatch
@@ -98,11 +134,18 @@ class TestWithoutTheExtra:
         assert len(record) == 2
 
     def test_install_hint_is_colab_aware(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Colab is detected exactly as anywidget detects it: the module
+        # ``google.colab.output`` is present in sys.modules (a Colab kernel
+        # imports it before user code runs); nothing is imported to check.
         from simlin._widget_core import install_hint
 
-        monkeypatch.setitem(sys.modules, "google.colab", None)
+        monkeypatch.delitem(sys.modules, "google.colab.output", raising=False)
         assert install_hint() == 'pip install "pysimlin[notebook]"'
+        # A parent ``google.colab`` alone (or its import merely being
+        # possible) is not the signal.
         monkeypatch.setitem(sys.modules, "google.colab", type(sys)("google.colab"))
+        assert install_hint() == 'pip install "pysimlin[notebook]"'
+        monkeypatch.setitem(sys.modules, "google.colab.output", type(sys)("google.colab.output"))
         assert install_hint() == '%pip install "pysimlin[notebook]"'
 
 

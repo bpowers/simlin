@@ -24,9 +24,14 @@ Message-type x state table covered here (each row is a test):
                                             warn notice, project dirty
     snapshot  | handler raises anywhere  -> exactly one reply, always: raised
                                             BEFORE applying -> rejected + warn
-                                            notice; raised AFTER applying -> an
-                                            accept (sent bytes pushed at base+1,
-                                            saved) + warn notice
+                                            notice; raised AFTER applying (in
+                                            the project's post-commit steps or
+                                            in this class) -> an accept (sent
+                                            bytes pushed at base+1, saved) +
+                                            warn notice; raised AFTER the reply
+                                            went out -> nothing more; a
+                                            BaseException -> the same reply,
+                                            then it propagates
     snapshot  | malformed base/json      -> RuntimeWarning, rejected + warn notice
     oversize  | well-formed              -> RuntimeWarning on the kernel's stderr (a
                                             comm handler runs outside any cell, so
@@ -324,12 +329,21 @@ class TestSeedHasAView:
         # The widget did not hear about its own seeding layout as a change.
         assert [k for k, _, _ in _sent(w) if k == "custom"] == []
 
-    def test_empty_model_gets_an_empty_view(self, assets: WidgetAssets) -> None:
-        w = _widget(Project.new().get_model(), assets)
+    def test_empty_model_gets_an_empty_view_once(self, assets: WidgetAssets) -> None:
+        project = Project.new()
+        model = project.get_model()
+        w = _widget(model, assets)
         views = self._views(w.project_json)
         assert len(views) == 1
         assert views[0]["elements"] == []
         assert views[0]["kind"] == "stock_flow"
+        assert project.revision == 1
+        # An empty view over an EMPTY model is left alone by every later
+        # display: there is nothing to place, so a second widget (the same
+        # model shown in another cell) commits no layout and no revision.
+        w2 = _widget(model, assets)
+        assert project.revision == 1
+        assert self._views(w2.project_json) == views
 
     def test_viewless_file_backed_model_autosaves_the_layout(
         self, tmp_path: Path, assets: WidgetAssets
@@ -747,12 +761,6 @@ class TestExactlyOneReply:
         assert sent[0][1] == {"type": "rejected", "revision": 0}
         assert sent[1][1]["type"] == "notice"
         assert "unexpected" in sent[1][1]["text"]
-        # The failed attempt left no own-revision marker behind: a later
-        # foreign change at revision 1 is pushed, not skipped.
-        _drain(w)
-        with model.edit() as (_, patch):
-            patch.upsert(Aux(name="from_python", equation="1"))
-        assert [kind for kind, _, _ in _sent(w)] == ["update", "custom"]
 
     def test_a_failure_while_pushing_still_replies_saved(
         self, model: Model, model_path: Path, assets: WidgetAssets, monkeypatch: pytest.MonkeyPatch
@@ -819,33 +827,150 @@ class TestExactlyOneReply:
         assert model.revision == 2
         assert _sent(w)[-1] == ("custom", {"type": "saved", "revision": 2}, None)
 
-    def test_a_failure_before_apply_pushes_the_real_state_before_rejected(
+    def test_a_failure_before_apply_leaves_no_own_marker_for_another_views_snapshot(
         self, model: Model, model_path: Path, assets: WidgetAssets
     ) -> None:
         # The handler failed BEFORE anything was applied (nothing moved): the
-        # reply is ``rejected`` at the current revision; the re-push of the
-        # project's pair is a no-op (unchanged traits send nothing).
-        w = _widget(model, assets)
+        # reply is ``rejected`` at the current revision and the re-push of the
+        # project's pair is a no-op (unchanged traits send nothing).  The
+        # revision the snapshot WOULD have produced (base + 1) was remembered
+        # as this widget's own before the call and must be forgotten again:
+        # the observable is a SECOND widget's accepted snapshot at that very
+        # revision -- a ``widget``-sourced change, the only source
+        # ``is_own_change`` ever treats as own -- which w1 must push as
+        # foreign rather than skip as its own.
+        w1 = _widget(model, assets)
+        w2 = _widget(model, assets)
         text = _snapshot_with(model_path, "x")
 
         def boom(*args: object, **kwargs: object) -> bool:
             raise RuntimeError("apply exploded")
 
-        _drain(w)
+        _drain(w1)
         with pytest.MonkeyPatch.context() as broken:
             broken.setattr(_project(model), "_apply_snapshot", boom)
             with pytest.warns(RuntimeWarning, match="apply exploded"):
-                _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
+                _from_browser(w1, {"type": "snapshot", "base": 0, "json": text})
         assert model.revision == 0
-        sent = _sent(w)
+        sent = _sent(w1)
         assert [k for k, _, _ in sent] == ["custom", "custom"]
         assert sent[0][1] == {"type": "rejected", "revision": 0}
-        # Nothing was applied, so a later foreign change at revision 1 is
-        # pushed (no stale own-revision marker).
+        _drain(w1)
+        _drain(w2)
+        from_w2 = _snapshot_with(model_path, "from_w2")
+        _from_browser(w2, {"type": "snapshot", "base": 0, "json": from_w2})
+        assert model.revision == 1
+        assert _sent(w2)[-1] == ("custom", {"type": "saved", "revision": 1}, None)
+        sent = _sent(w1)
+        assert [k for k, _, _ in sent] == ["update", "custom"]
+        assert sent[0][1]["revision"] == 1
+        assert sent[1] == (
+            "custom",
+            {"type": "notice", "text": "Updated in another view", "level": "info"},
+            None,
+        )
+
+    def test_a_notify_failure_after_apply_is_an_accept(
+        self, model: Model, model_path: Path, assets: WidgetAssets
+    ) -> None:
+        # The change applied and the file was written; what failed was
+        # ``Project._notify`` -- here the widget's own dispatcher, the shape
+        # a closed kernel loop takes -- which the project raises as
+        # ``SimlinWriteError`` (applied but ...).  The reply is ``saved`` at
+        # base + 1 with the sent bytes pushed, plus a warn notice that names
+        # the error but not model.save(): there is nothing to retry.
+        def closed_loop(fn: Callable[[], None]) -> None:
+            raise RuntimeError("IOLoop is closed")
+
+        w = _widget(model, assets, dispatch=closed_loop)
+        text = _snapshot_with(model_path, "x")
         _drain(w)
-        with model.edit() as (_, patch):
-            patch.upsert(Aux(name="from_python", equation="1"))
-        assert [k for k, _, _ in _sent(w)] == ["update", "custom"]
+        with pytest.warns(RuntimeWarning, match="IOLoop is closed"):
+            _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
+        assert model.revision == 1
+        assert model.dirty is False
+        assert simlin.load(model_path).get_variable("x") is not None
+        sent = _sent(w)
+        assert [k for k, _, _ in sent] == ["update", "custom", "custom"]
+        assert sent[0][1] == {"project_json": text, "revision": 1}
+        assert sent[1][1] == {"type": "saved", "revision": 1}
+        notice = sent[2][1]
+        assert notice["type"] == "notice"
+        assert notice["level"] == "warn"
+        assert "IOLoop is closed" in notice["text"]
+        assert "model.save()" not in notice["text"]
+
+    @pytest.mark.parametrize("arm", ["before-apply", "after-apply"])
+    def test_a_base_exception_still_gets_its_one_reply_then_propagates(
+        self, model: Model, model_path: Path, assets: WidgetAssets, arm: str
+    ) -> None:
+        # A KeyboardInterrupt landing while a comm message is handled is not
+        # the widget's to swallow, but the snapshot is still owed its reply
+        # first -- rejected when nothing was applied, saved when it was --
+        # or the view wedges on top of the interrupt.
+        w = _widget(model, assets)
+        text = _snapshot_with(model_path, "x")
+
+        def interrupt(*args: object, **kwargs: object) -> None:
+            raise KeyboardInterrupt
+
+        target = (
+            (_project(model), "_apply_snapshot")
+            if arm == "before-apply"
+            else ("simlin.widget", "plan_snapshot_reply")
+        )
+        _drain(w)
+        with pytest.MonkeyPatch.context() as broken:
+            if isinstance(target[0], str):
+                broken.setattr(f"{target[0]}.{target[1]}", interrupt)
+            else:
+                broken.setattr(target[0], target[1], interrupt)
+            with pytest.raises(KeyboardInterrupt):
+                _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
+        replies = [
+            c for k, c, _ in _sent(w) if k == "custom" and c["type"] in ("saved", "rejected")
+        ]
+        if arm == "before-apply":
+            assert model.revision == 0
+            assert replies == [{"type": "rejected", "revision": 0}]
+        else:
+            assert model.revision == 1
+            assert replies == [{"type": "saved", "revision": 1}]
+        notice = [c for k, c, _ in _sent(w) if k == "custom" and c["type"] == "notice"]
+        assert len(notice) == 1
+        assert "KeyboardInterrupt" in notice[0]["text"]
+
+    def test_a_failure_after_the_reply_went_out_does_not_reply_twice(
+        self, model: Model, model_path: Path, assets: WidgetAssets, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The write-failure arm sends ``saved`` and then a warn notice; if
+        # sending the notice raises, the reply has already gone out and a
+        # second one would be consumed by the browser's NEXT snapshot.
+        w = _widget(model, assets)
+        text = _snapshot_with(model_path, "unsaved")
+
+        def fail(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("simlin.project.atomic_write", fail)
+        real_send = w.send
+
+        def flaky_send(content: Any, buffers: Any = None) -> None:
+            if isinstance(content, dict) and content.get("type") == "notice":
+                raise RuntimeError("comm hiccup")
+            real_send(content, buffers)
+
+        monkeypatch.setattr(w, "send", flaky_send)
+        _drain(w)
+        with pytest.warns(RuntimeWarning) as record:
+            _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
+        assert any("comm hiccup" in str(r.message) for r in record)
+        replies = [
+            c for k, c, _ in _sent(w) if k == "custom" and c["type"] in ("saved", "rejected")
+        ]
+        assert replies == [{"type": "saved", "revision": 1}]
+        assert model.revision == 1
+        assert w.revision == 1
 
     @pytest.mark.parametrize(
         "arm",
@@ -1030,7 +1155,8 @@ class TestSnapshotSize:
     ) -> None:
         # Model._repr_mimebundle_ -> Model.widget -> ModelWidget: deeper than
         # the direct construction above, and the warning must still name the
-        # user's frame, not model.py.
+        # user's frame (this test), not model.py -- even when a kernel's
+        # display formatter sits between the cell and the repr.
         with pytest.warns(RuntimeWarning, match="will not be saved") as record:
             model.widget(max_snapshot_bytes=16)
         assert record[0].filename == __file__
@@ -1045,6 +1171,13 @@ class TestSnapshotSize:
         monkeypatch.setattr(Model, "widget", small_cap_widget)
         with pytest.warns(RuntimeWarning, match="will not be saved") as record:
             model._repr_mimebundle_()
+        assert record[0].filename == __file__
+        namespace: dict[str, Any] = {
+            "__name__": "IPython.core.formatters",
+            "fn": model._repr_mimebundle_,
+        }
+        with pytest.warns(RuntimeWarning, match="will not be saved") as record:
+            exec("fn()", namespace)
         assert record[0].filename == __file__
 
     @pytest.mark.parametrize("bad", [0, -1, 1.5, "4096"])
@@ -1461,7 +1594,12 @@ class TestModelDisplay:
         assert str(asset_dir) in str(record[0].message)
         assert "application/vnd.jupyter.widget-view+json" not in data
         assert data["image/svg+xml"] == model.diagram().svg
-        assert data["text/plain"] == repr(model)
+        # The plain-text repr carries the same message: Python shows a
+        # warning once per source location (a re-run of the same cell may
+        # not repeat it), the repr is printed with every display.
+        assert data["text/plain"].startswith(repr(model))
+        assert "interactive editor unavailable" in data["text/plain"]
+        assert "widget.js" in data["text/plain"]
         assert metadata == {}
         assert _project(model)._listeners == {}  # no half-made widget left behind
         assert simlin.ModelWidget is ModelWidget  # the package itself is fine

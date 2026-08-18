@@ -8,10 +8,14 @@ from __future__ import annotations
 
 import base64
 import json
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from simlin._sync import ChangeEvent
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 from simlin._widget_core import (
     ASSET_ENV,
     INLINE_WASM_GLOBAL,
@@ -38,6 +42,7 @@ from simlin._widget_core import (
     parse_incoming,
     plan_snapshot_reply,
     snapshot_wire_size,
+    user_stacklevel,
 )
 
 
@@ -256,7 +261,8 @@ class TestPlanSnapshotReply:
 
     def test_applied_but_unwritten_is_saved_plus_a_warning(self) -> None:
         plan = plan_snapshot_reply(
-            self.request, SnapshotOutcome(applied=True, revision=5, error="disk full")
+            self.request,
+            SnapshotOutcome(applied=True, revision=5, error="disk full", write_failed=True),
         )
         assert plan.push == ('{"the":"snapshot"}', 5)
         assert plan.messages[0] == {"type": "saved", "revision": 5}
@@ -265,6 +271,26 @@ class TestPlanSnapshotReply:
         assert notice["level"] == "warn"
         assert "disk full" in notice["text"]
         assert "model.save()" in notice["text"]
+        assert len(plan.messages) == 2
+
+    def test_applied_then_failed_later_is_saved_plus_a_warning_without_the_save_hint(
+        self,
+    ) -> None:
+        # Applied AND written; what failed came after (notifying subscribers).
+        # Still an accept, and the notice must not claim the file lags or
+        # send the user to model.save(): there is nothing to retry.
+        plan = plan_snapshot_reply(
+            self.request, SnapshotOutcome(applied=True, revision=5, error="IOLoop is closed")
+        )
+        assert plan.push == ('{"the":"snapshot"}', 5)
+        assert plan.messages[0] == {"type": "saved", "revision": 5}
+        notice = plan.messages[1]
+        assert notice["type"] == "notice"
+        assert notice["level"] == "warn"
+        assert "IOLoop is closed" in notice["text"]
+        assert "applied" in notice["text"]
+        assert "model.save()" not in notice["text"]
+        assert "written" not in notice["text"]
         assert len(plan.messages) == 2
 
     def test_stale_touches_no_trait_and_rejects_with_notice(self) -> None:
@@ -291,7 +317,8 @@ class TestPlanSnapshotReply:
         "outcome",
         [
             SnapshotOutcome(applied=True, revision=5),
-            SnapshotOutcome(applied=True, revision=5, error="disk full"),
+            SnapshotOutcome(applied=True, revision=5, error="disk full", write_failed=True),
+            SnapshotOutcome(applied=True, revision=5, error="IOLoop is closed"),
             SnapshotOutcome(applied=False, revision=7),
             SnapshotOutcome(applied=False, revision=4, error="bad json"),
         ],
@@ -374,3 +401,50 @@ class TestDispatchForShell:
         assert dispatch is not None
         dispatch(lambda: None)
         assert len(calls) == 1
+
+
+def _frame_in(module_name: str) -> Callable[..., Any]:
+    """A function whose frame belongs to module ``module_name`` (its
+    ``f_globals['__name__']``, which is what ``user_stacklevel`` reads;
+    the file the code lives in is not).  ``call(f, *rest)`` calls
+    ``f(*rest)`` -- so a chain ``a(b, c, target)`` puts exactly the frames
+    a -> b -> c -> target on the stack, with nothing of this module between
+    them (a lambda would add a frame of this module)."""
+    namespace: dict[str, Any] = {"__name__": module_name}
+    exec("def call(f, *rest):\n    return f(*rest)\n", namespace)
+    call: Callable[..., Any] = namespace["call"]
+    return call
+
+
+class TestUserStacklevel:
+    """The stacklevel that names the user's cell: every ``simlin.*`` frame
+    and every IPython/ipykernel frame between the cell and the ``warn``
+    call adds one; the first frame of anything else is the target."""
+
+    def test_direct_caller_is_level_one(self) -> None:
+        # The function about to warn (this test) is user code: level 1.
+        assert user_stacklevel() == 1
+
+    def test_package_frames_are_skipped(self) -> None:
+        # warn's caller is simlin.model, called from simlin.widget, called
+        # from here -> 3.
+        assert _frame_in("simlin.widget")(_frame_in("simlin.model"), user_stacklevel) == 3
+
+    def test_ipython_and_ipykernel_frames_are_skipped(self) -> None:
+        # A bare display: cell -> IPython.core.displayhook -> IPython.core.
+        # formatters -> simlin.model._repr_mimebundle_ -> warn.  Naming the
+        # formatter would put the warning at formatters.py once per kernel
+        # session; the cell is what the user sees.
+        level = _frame_in("IPython.core.displayhook")(
+            _frame_in("IPython.core.formatters"), _frame_in("simlin.model"), user_stacklevel
+        )
+        assert level == 4
+        assert _frame_in("ipykernel.zmqshell")(_frame_in("simlin.widget"), user_stacklevel) == 3
+
+    def test_other_libraries_are_the_target(self) -> None:
+        # Only simlin and the IPython machinery are skipped: a caller from
+        # any other package (a user's own module, a framework) is the
+        # target -- and a name that merely starts with "IPython" is not it.
+        assert _frame_in("mylib.views")(_frame_in("simlin.model"), user_stacklevel) == 2
+        assert _frame_in("IPythonish")(_frame_in("simlin.model"), user_stacklevel) == 2
+        assert _frame_in("__main__")(user_stacklevel) == 1
