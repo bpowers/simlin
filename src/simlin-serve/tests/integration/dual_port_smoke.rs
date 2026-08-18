@@ -127,6 +127,64 @@ fn dual_port_smoke_binds_both_listeners() {
     );
 }
 
+/// A same-stem `.mdl` / `.sd.json` pair in the root (the trace of an
+/// earlier release's sidecar rule) is named once at startup, on stdout
+/// where the tracing subscriber writes, before the URL block, with both
+/// paths and the way to fold the sidecar's edits back.  Only such pairs:
+/// an `.mdl` on its own says nothing.
+#[test]
+fn legacy_sidecar_pair_is_named_once_at_startup() {
+    let temp = TempDir::new().expect("tempdir");
+    let fixtures = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"));
+    std::fs::copy(fixtures.join("teacup.mdl"), temp.path().join("teacup.mdl")).expect("copy mdl");
+    // A second .mdl without a sibling must not be reported.
+    std::fs::copy(fixtures.join("teacup.mdl"), temp.path().join("alone.mdl")).expect("copy mdl");
+    std::fs::write(
+        temp.path().join("teacup.sd.json"),
+        r#"{"name": "teacup", "simSpecs": {"startTime": 0, "endTime": 10, "dt": "1", "method": "euler"}, "models": [{"name": "main"}]}"#,
+    )
+    .expect("write sd.json");
+
+    let mut child = Command::new(BIN)
+        .args([
+            "--port",
+            "0",
+            "--mcp-port",
+            "0",
+            "--no-open",
+            temp.path().to_str().expect("utf-8 tempdir"),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn simlin-serve");
+    let stdout = child.stdout.take().expect("stdout pipe");
+    let lines = wait_for_url_block(stdout, Duration::from_secs(15));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        lines.iter().any(|l| l.starts_with("  MCP:")),
+        "server did not come up: {lines:?}"
+    );
+    let warnings: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("found a .mdl next to a same-stem .sd.json"))
+        .collect();
+    assert_eq!(warnings.len(), 1, "exactly one pair warning: {lines:?}");
+    let warning = warnings[0];
+    assert!(warning.contains("WARN"), "{warning}");
+    assert!(
+        warning.contains("teacup.mdl") && warning.contains("teacup.sd.json"),
+        "{warning}"
+    );
+    assert!(!warning.contains("alone.mdl"), "{warning}");
+    assert!(
+        warning.contains("save_as"),
+        "says how to fold the edits back: {warning}"
+    );
+}
+
 #[test]
 fn port_conflict_on_ui_exits_with_friendly_error() {
     let temp = TempDir::new().expect("tempdir");
