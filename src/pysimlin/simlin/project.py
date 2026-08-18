@@ -250,6 +250,8 @@ class Project:
         self._next_listener_id = 0
         self._watcher: FileWatcher | None = None
         self._closed = False
+        # MDL lossiness messages already reported for this project (to_mdl).
+        self._mdl_warned: set[str] = set()
         # Model handles created by get_model(); their caches are invalidated
         # on every accepted change.  Weak so a project never pins its models.
         self._models: weakref.WeakSet[Model] = weakref.WeakSet()
@@ -1142,6 +1144,10 @@ class Project:
     def to_mdl(self) -> bytes:
         """Export the project to Vensim MDL format (including the sketch).
 
+        Constructs MDL cannot express (a non-negative flag, a discrete
+        lookup) are dropped and reported as ``RuntimeWarning``s, once per
+        distinct message for the lifetime of this project.
+
         Returns:
             The ``.mdl`` text as UTF-8 bytes
 
@@ -1151,13 +1157,23 @@ class Project:
         with self._lock:
             self._check_alive()
             data, issues = _ffi_serialize_mdl(self._ptr)
-        for issue in issues:
-            warnings.warn(
-                f"simlin: Vensim export: {issue.message}"
-                + (f" ({issue.variable_name})" if issue.variable_name else ""),
-                RuntimeWarning,
-                stacklevel=2,
-            )
+        # An autosaving .mdl project exports on every edit, and the same
+        # lossy constructs (a non-negative flag, a discrete lookup) are
+        # dropped every time; warn once per distinct message per project --
+        # the same rule the watcher applies to bad on-disk content.  A
+        # message is remembered for the project's lifetime, so a construct
+        # that disappears and later reappears does not warn again.
+        fresh: list[str] = []
+        with self._file_lock:
+            for issue in issues:
+                message = f"simlin: Vensim export: {issue.message}" + (
+                    f" ({issue.variable_name})" if issue.variable_name else ""
+                )
+                if message not in self._mdl_warned:
+                    self._mdl_warned.add(message)
+                    fresh.append(message)
+        for message in fresh:
+            warnings.warn(message, RuntimeWarning, stacklevel=2)
         return data
 
     def set_sim_specs(self, **kwargs: Any) -> None:

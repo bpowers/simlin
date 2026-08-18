@@ -252,6 +252,28 @@ class TestEditAutosave:
         assert reopened.project is not None
         assert reopened.project.format == FileFormat.MDL
 
+    def test_mdl_lossiness_warnings_fire_once_per_distinct_message(self, tmp_path: Path) -> None:
+        # teacup.stmx carries non-negative flags the MDL writer cannot
+        # express; a notebook autosaving an .mdl on every edit must not repeat
+        # that warning each time.
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        path = tmp_path / "teacup.mdl"
+        with warnings.catch_warnings(record=True) as first:
+            warnings.simplefilter("always")
+            model.project.save_as(path)  # type: ignore[union-attr]
+        messages = [str(w.message) for w in first if w.category is RuntimeWarning]
+        assert messages, "fixture must trigger at least one lossiness warning"
+        assert len(messages) == len(set(messages))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _add_aux(model, "a1")
+            _add_aux(model, "a2")
+            model.project.to_mdl()  # type: ignore[union-attr]
+        # A different project has its own memory (the .mdl on disk has
+        # already lost the flags, so use the XMILE source again).
+        with pytest.warns(RuntimeWarning, match="Vensim export"):
+            simlin.load(FIXTURES / "teacup.stmx").project.to_mdl()  # type: ignore[union-attr]
+
     def test_ac1_2_revision_increments_by_exactly_one_per_edit(self, tmp_path: Path) -> None:
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
         model = simlin.open(path, watch=False)
