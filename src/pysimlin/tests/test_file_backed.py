@@ -463,6 +463,26 @@ class TestIncrementalLayout:
         positions = _view_positions(path)
         assert set(positions) == {"population", "births", "rate"}
 
+    def test_ac1_3_incremental_layout_keeps_the_editor_viewport(self, tmp_path: Path) -> None:
+        # The view box is the editor's viewport (pan offset + canvas size),
+        # not the content bounds; a kernel-side edit that re-boxed it to the
+        # content would snap the human's pan back and make the diagram jump
+        # on every "Updated from Python".  Start from a panned, resized box
+        # no bounds computation would produce.
+        source = simlin.load(FIXTURES / "teacup.stmx").project
+        assert source is not None
+        doc = json.loads(source.serialize_json())
+        panned = {"x": -321.5, "y": 77.25, "width": 1234.0, "height": 567.0}
+        doc["models"][0]["views"][0]["viewBox"] = panned
+        path = tmp_path / "panned.sd.json"
+        path.write_text(json.dumps(doc))
+        model = simlin.open(path, watch=False)
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="Insulation", equation="0.5"))
+        after = json.loads(path.read_text())["models"][0]["views"][0]
+        assert after["viewBox"] == panned
+        assert any(e.get("name") == "Insulation" for e in after["elements"])
+
     def test_deleted_variable_loses_its_element(self, tmp_path: Path) -> None:
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
         model = simlin.open(path, watch=False)

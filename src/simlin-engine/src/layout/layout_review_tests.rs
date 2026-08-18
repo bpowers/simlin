@@ -12,7 +12,6 @@ fn test_build_stock_flow_from_state_resets_invalid_zoom() {
     // When a template view has zoom <= 0 (e.g. from an imported or
     // hand-authored JSON view), build_stock_flow_from_state should
     // fall back to 1.0 instead of preserving the invalid value.
-    let config = LayoutConfig::default();
     let model = simple_model();
     let project = test_project(model.clone());
     let layout = generate_best_layout(&project, TEST_MODEL, None).expect("layout should succeed");
@@ -22,7 +21,7 @@ fn test_build_stock_flow_from_state_resets_invalid_zoom() {
     let mut bad_template = layout.clone();
     bad_template.zoom = 0.0;
 
-    let result = build_stock_flow_from_state(state, &config, &bad_template);
+    let result = build_stock_flow_from_state(state, &bad_template);
     assert!(
         result.zoom > 0.0,
         "zoom must be positive, got {}",
@@ -38,7 +37,7 @@ fn test_build_stock_flow_from_state_resets_invalid_zoom() {
     let state2 = LayoutState::from_existing_view(&layout, &model);
     let mut neg_template = layout;
     neg_template.zoom = -1.5;
-    let result2 = build_stock_flow_from_state(state2, &config, &neg_template);
+    let result2 = build_stock_flow_from_state(state2, &neg_template);
     assert!(
         (result2.zoom - 1.0).abs() < f64::EPSILON,
         "negative zoom should reset to 1.0, got {}",
@@ -1700,19 +1699,27 @@ fn test_incremental_layout_view_only_patch_returns_unchanged() {
     );
 }
 
-/// When an existing view has elements at negative coordinates,
-/// build_stock_flow_from_state must produce a view_box that encompasses
-/// them. Previously the view_box was always anchored at (0,0).
+/// The view box is the editor's viewport (pan offset + canvas size), not the
+/// content bounds: an incremental pass must hand it back verbatim even when
+/// the elements now sit outside it (here, one moved to negative
+/// coordinates), otherwise every kernel-side edit snaps the user's pan back
+/// and re-sizes the box away from the canvas, which the editor answers with
+/// a refit -- the diagram jumps on every "Updated from Python".
 #[test]
-fn test_build_stock_flow_from_state_negative_coordinate_view_box() {
-    let config = LayoutConfig::default();
+fn test_build_stock_flow_from_state_keeps_the_viewport_verbatim() {
     let model = simple_model();
     let project = test_project(model.clone());
-    let layout = generate_best_layout(&project, TEST_MODEL, None).expect("layout should succeed");
+    let mut layout =
+        generate_best_layout(&project, TEST_MODEL, None).expect("layout should succeed");
+    // A panned, resized viewport that no bounds computation would produce.
+    layout.view_box = datamodel::Rect {
+        x: -321.5,
+        y: 77.25,
+        width: 1234.0,
+        height: 567.0,
+    };
 
     let mut state = LayoutState::from_existing_view(&layout, &model);
-
-    // Move an element to negative coordinates
     for elem in &mut state.elements {
         if let ViewElement::Aux(a) = elem
             && canonicalize(&a.name).as_ref() == "birth_rate"
@@ -1724,26 +1731,61 @@ fn test_build_stock_flow_from_state_negative_coordinate_view_box() {
         }
     }
 
-    let result = build_stock_flow_from_state(state, &config, &layout);
+    let result = build_stock_flow_from_state(state, &layout);
+    assert_eq!(result.view_box, layout.view_box);
+}
 
-    // The view box must encompass the element at (-100, -50)
+/// The same contract through the public entry point: an incremental layout
+/// for a patch that adds a variable keeps the old view's viewport.
+#[test]
+fn test_incremental_layout_keeps_the_viewport() {
+    let model = simple_model();
+    let project = test_project(model.clone());
+    let mut old_view =
+        generate_best_layout(&project, TEST_MODEL, None).expect("layout should succeed");
+    old_view.view_box = datamodel::Rect {
+        x: -321.5,
+        y: 77.25,
+        width: 1234.0,
+        height: 567.0,
+    };
+
+    let mut new_model = model.clone();
+    new_model
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "far_away".to_string(),
+            equation: datamodel::Equation::Scalar("1".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        }));
+    let new_project = test_project(new_model);
+    let patch = crate::patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![crate::patch::ModelOperation::UpsertAux(datamodel::Aux {
+            ident: "far_away".to_string(),
+            equation: datamodel::Equation::Scalar("1".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        })],
+    };
+    let result = incremental_layout(&old_view, &new_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout should succeed");
     assert!(
-        result.view_box.x <= -100.0,
-        "view_box.x ({}) must be <= -100.0 to encompass element at x=-100",
-        result.view_box.x
+        result.elements.iter().any(
+            |e| matches!(e, ViewElement::Aux(a) if canonicalize(&a.name).as_ref() == "far_away")
+        ),
+        "the new variable was placed"
     );
-    assert!(
-        result.view_box.y <= -50.0,
-        "view_box.y ({}) must be <= -50.0 to encompass element at y=-50",
-        result.view_box.y
-    );
-    // The right edge must still encompass the positive elements
-    let right_edge = result.view_box.x + result.view_box.width;
-    assert!(
-        right_edge > 100.0,
-        "view_box right edge ({}) must extend past positive elements",
-        right_edge
-    );
+    assert_eq!(result.view_box, old_view.view_box);
 }
 
 // ---------------------------------------------------------------------------

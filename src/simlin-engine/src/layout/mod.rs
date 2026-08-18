@@ -5061,34 +5061,26 @@ pub fn count_view_crossings(view: &datamodel::StockFlow) -> usize {
 }
 
 /// Assemble a [`datamodel::StockFlow`] from finalized layout state, copying
-/// metadata (name, zoom, font, sketch_compat) from `template`.
+/// metadata (name, view box, zoom, font, sketch_compat) from `template`.
 ///
-/// The view box is derived from the bounding box of `state.elements`; an
-/// empty or degenerate element set produces a zero-area default box.
+/// The view box is copied verbatim, never recomputed from the elements: the
+/// editor stores its viewport there (the pan offset and the canvas size it
+/// was last shown at, `Canvas.tsx` `getCanvasOffset`), and an incremental
+/// pass runs after every kernel/MCP edit of a diagram someone is looking
+/// at -- re-boxing it to the content bounds snaps their pan back and, when
+/// the size no longer matches the canvas, triggers the editor's
+/// proportional refit, so the diagram jumps on every "Updated from Python".
+/// Content that ends up outside the viewport is the editor's business (it
+/// re-centres an offscreen diagram on mount). Only a from-scratch layout
+/// synthesises a box.
 fn build_stock_flow_from_state(
     state: LayoutState,
-    config: &LayoutConfig,
     template: &datamodel::StockFlow,
 ) -> datamodel::StockFlow {
-    let (bmin_x, bmin_y, bmax_x, bmax_y) = compute_bounds(&state.elements, config);
-    let view_box = if !state.elements.is_empty() && bmin_x != f64::MAX {
-        // Account for elements at negative coordinates (e.g. from imported
-        // or hand-edited views preserved by incremental layout).
-        let vb_x = (bmin_x - DIAGRAM_ORIGIN_MARGIN).min(0.0);
-        let vb_y = (bmin_y - DIAGRAM_ORIGIN_MARGIN).min(0.0);
-        Rect {
-            x: vb_x,
-            y: vb_y,
-            width: bmax_x - vb_x + DIAGRAM_ORIGIN_MARGIN,
-            height: bmax_y - vb_y + DIAGRAM_ORIGIN_MARGIN,
-        }
-    } else {
-        Rect::default()
-    };
     datamodel::StockFlow {
         name: template.name.clone(),
         elements: state.elements,
-        view_box,
+        view_box: template.view_box.clone(),
         zoom: if template.zoom > 0.0 {
             template.zoom
         } else {
@@ -5589,7 +5581,7 @@ pub fn incremental_layout(
         optimize_labels_for(&mut state, model, &metadata, needs_label_placement);
         apply_loop_curvature(&mut state, &config, model, &metadata);
         validate_view_completeness(&state, model)?;
-        return Ok(build_stock_flow_from_state(state, &config, old_view));
+        return Ok(build_stock_flow_from_state(state, old_view));
     }
 
     let initial_positions = compute_new_element_positions(&state, &metadata, &new_elements);
@@ -5764,7 +5756,7 @@ pub fn incremental_layout(
     validate_view_completeness(&state, model)?;
 
     // Step 9: Build StockFlow
-    Ok(build_stock_flow_from_state(state, &config, old_view))
+    Ok(build_stock_flow_from_state(state, old_view))
 }
 
 /// Generate a complete stock-flow diagram layout for a model using a single
