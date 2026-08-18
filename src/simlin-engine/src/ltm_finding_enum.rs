@@ -766,6 +766,12 @@ pub(super) struct RetentionOutcome {
     /// a threshold, so this is the population the competing-vs-solo
     /// classification is entitled to ask about.
     pub partition_circuit_counts: HashMap<usize, usize>,
+    /// How many of the enumerated circuits are DISTINCT reported loops: the
+    /// enumerated count minus the non-representative twins the trimmed-key
+    /// dedup below dropped before either total was touched. `ltm_finding.rs`
+    /// adds the (deduped) stitched cross-agg loop count to this to populate
+    /// `DiscoveryResult::universe_loops`.
+    pub distinct_circuits: usize,
 }
 
 /// Single-pass retention over the enumerated circuits, with a confirm step.
@@ -797,26 +803,19 @@ pub(super) struct RetentionOutcome {
 /// score may come from the per-exit-port override series rather than the raw
 /// product judged here.
 ///
-/// **Exact against these totals is not exact against the reported totals.**
-/// `ltm_finding.rs` corrects the totals THIS pass returns, after
-/// materialization: a module-traversing circuit's zero raw contribution is
-/// replaced by its reported override series, and a trimmed duplicate
-/// representative's raw mass (two enumerated circuits -- a direct reference
-/// and its hoisted-reducer twin -- that trim to the same *reported* loop,
-/// AC4.3) is subtracted back out. A module-traversing circuit is kept here
-/// unconditionally regardless of the threshold, so only the dedup
-/// subtraction can move a NON-module circuit's outcome, and it can only
-/// LOWER a partition's denominator relative to what this pass saw. So a
-/// non-module circuit this pass drops for falling short of
-/// [`MIN_CONTRIBUTION`] against the pre-correction total could, against the
-/// smaller post-correction one, have cleared it -- and having never been
-/// materialized, it can never be reconsidered: `rank_and_filter`'s own
-/// (exact, post-correction) retention pass only ever sees survivors of this
-/// one. The error this can cause is bounded by the dropped duplicates' share
-/// of the partition's final mass, which is nonzero only in a partition
-/// containing a hoisted-reducer duplicate pathway; every other partition's
-/// pre- and post-correction totals for non-module circuits agree exactly, so
-/// this pass's decision there already IS the final one.
+/// **Exact against these totals is exact against the reported totals, for
+/// every non-module circuit.** Two enumerated circuits can trim to the same
+/// *reported* loop (a direct reference and its hoisted-reducer twin, AC4.3);
+/// [`dedup_trimmed_twins`] decides the representative BEFORE either
+/// candidate's mass reaches a partition total, so this pass's own totals
+/// already are the totals `rank_and_filter` will use -- a non-representative
+/// twin banks no mass, is never confirmed, and is never a survivor. A
+/// module-traversing circuit is the one remaining exception: it is kept
+/// unconditionally and banks no raw mass here regardless (its reported score
+/// may come from the per-exit-port override series, which this pass cannot
+/// judge), so a module-traversing duplicate still relies on
+/// `ltm_finding.rs`'s post-materialization `by_reported_cycle` dedup and the
+/// `subtract_reported_mass_from_totals` safety net.
 ///
 /// Nothing per-circuit larger than O(1) is retained for non-survivors, so the
 /// pass is safe at [`MAX_DISCOVERY_ENUM_CIRCUITS`] scale.
@@ -831,6 +830,7 @@ pub(super) fn retain_circuits(
     graph: &ActivityGraph,
     stock_partition_of_node: &[Option<usize>],
     is_module_node: &[bool],
+    is_agg_node: &[bool],
     deadline: Option<Instant>,
     clock: &mut dyn Clock,
 ) -> Option<RetentionOutcome> {
@@ -844,21 +844,42 @@ pub(super) fn retain_circuits(
     let mut survivors: Vec<usize> = Vec::new();
     let mut to_confirm: Vec<usize> = Vec::new();
 
-    for ci in 0..candidates.len() {
+    let dropped = dedup_trimmed_twins(
+        candidates,
+        graph,
+        is_module_node,
+        is_agg_node,
+        &mut scratch,
+        &mut nan_mask,
+        deadline,
+        clock,
+    )?;
+    let distinct_circuits = candidates.len() - dropped.iter().filter(|&&d| d).count();
+
+    for (ci, &is_dropped) in dropped.iter().enumerate() {
         if deadline_expired(ci, deadline, clock) {
             return None;
         }
+        if is_dropped {
+            // A non-representative twin: no raw mass, no confirm, not a
+            // survivor. Its reported representative already covers the
+            // same reported loop.
+            continue;
+        }
         let rows = candidates.circuit(ci);
         let partition = circuit_partition(rows, graph, stock_partition_of_node);
-        if let Some(part) = partition {
-            *partition_circuit_counts.entry(part).or_insert(0) += 1;
-        }
         if circuit_traverses_module(rows, graph, is_module_node) {
             // Kept, and contributing NO raw mass: what such a loop reports is
             // the per-exit-port override series, and the module composite this
             // product multiplies in max-abs-selects across ALL of the module's
             // output ports, so the two can differ by any factor. Its reported
-            // mass joins the denominators after materialization instead.
+            // mass joins the denominators after materialization instead. A
+            // module circuit always counts toward its partition's universe
+            // (unconditionally kept, unlike the raw-mass gate below): it WILL
+            // contribute nonzero reported mass once materialized.
+            if let Some(part) = partition {
+                *partition_circuit_counts.entry(part).or_insert(0) += 1;
+            }
             survivors.push(ci);
             continue;
         }
@@ -876,11 +897,23 @@ pub(super) fn retain_circuits(
             .entry(part)
             .or_insert_with(|| vec![0.0; step_count]);
         let mut bound = 0.0f64;
+        // Whether this circuit ever banks NONZERO mass -- an edge can be
+        // individually active (nonzero, finite or Inf) at every step of the
+        // circuit's activity window while the PRODUCT still underflows to
+        // exactly 0 (or, via `Inf * 0`, is NaN) at every one of them. Such a
+        // circuit contributes nothing to any total and can satisfy no
+        // threshold, so it must not inflate its partition's universe count
+        // either: that count means "how many loops' mass is in this total",
+        // and a circuit that banked none is not one of them.
+        let mut banked_mass = false;
         for t in lo..hi {
             if nan_mask[t] {
                 continue;
             }
             let mass = scratch[t].abs();
+            if mass != 0.0 {
+                banked_mass = true;
+            }
             totals[t] += mass;
             if totals[t] > 0.0 {
                 // `max` drops a NaN ratio (`Inf / Inf` at a dominance
@@ -888,6 +921,9 @@ pub(super) fn retain_circuits(
                 // too, so ignoring it costs no survivor.
                 bound = bound.max(mass / totals[t]);
             }
+        }
+        if banked_mass {
+            *partition_circuit_counts.entry(part).or_insert(0) += 1;
         }
         if bound >= MIN_CONTRIBUTION {
             to_confirm.push(ci);
@@ -917,7 +953,196 @@ pub(super) fn retain_circuits(
         survivors,
         partition_totals,
         partition_circuit_counts,
+        distinct_circuits,
     })
+}
+
+/// The identity [`retain_circuits`]' trimmed-key dedup groups circuits by:
+/// the circuit's node sequence with every synthetic `$⁚ltm⁚agg⁚{n}` node
+/// removed, canonically rotated.
+///
+/// This is the node-id twin of what `ltm_finding.rs`'s
+/// `trim_synthetic_aggs_from_loop_links` (merging agg-touching links) plus
+/// `crate::ltm::canonical_rotation` (over the trimmed links' `from` idents)
+/// produce once a circuit has been materialized into a reported loop's node
+/// names -- the two MUST agree, since they are two routes to the same
+/// question ("which reported loop does this circuit trim to?") asked at two
+/// different points in the pipeline, and `ltm_finding_tests.rs`'s
+/// `retention_dedup_key_matches_the_materialization_trim` asserts the
+/// equivalence directly rather than trusting the argument. Operating on node
+/// ids rather than names avoids a string allocation per circuit; within one
+/// `IndexedSearch` the id <-> name map is a bijection, so the equivalence
+/// classes are identical either way.
+///
+/// A circuit with no agg node in its path is already its own trimmed key
+/// (filtering removes nothing), which is exactly why only an agg-bearing
+/// circuit can ever collide with another distinct circuit here: an edge row
+/// is a complete identity for a `(from, to)` pair, so two DISTINCT non-agg
+/// circuits can never share a node sequence.
+pub(super) fn trimmed_circuit_key(
+    rows: &[u32],
+    graph: &ActivityGraph,
+    is_agg_node: &[bool],
+) -> Vec<u32> {
+    let nodes: Vec<u32> = rows
+        .iter()
+        .map(|&row| graph.edge_source(row))
+        .filter(|&n| !is_agg_node[n as usize])
+        .collect();
+    crate::ltm::canonical_rotation(&nodes)
+}
+
+/// One circuit's mean `|score|` over the saved steps where its raw product is
+/// a number, computed over the FULL saved-step range -- the exact statistic
+/// `FoundLoop::avg_abs_score` computes for a materialized (non-module) loop,
+/// so a winner picked here by comparing this value is the same winner
+/// `ltm_finding.rs`'s post-materialization `by_reported_cycle` dedup would
+/// pick if it ever saw both circuits (it never does, once this drops one).
+///
+/// Deliberately NOT windowed to the circuit's `active_window`: outside that
+/// window a step is either NaN (excluded from both the sum and the count) or
+/// exactly 0 (excluded from the sum but COUNTED), and a windowed computation
+/// would silently drop that second class from the denominator, changing the
+/// average relative to what materialization will report. Only circuits that
+/// actually collide with another circuit's trimmed key pay this full-range
+/// cost -- see [`dedup_trimmed_twins`].
+fn raw_avg_abs_score(
+    rows: &[u32],
+    graph: &ActivityGraph,
+    scratch: &mut [f64],
+    nan_mask: &mut [bool],
+) -> f64 {
+    score_steps(rows, graph, 0, scratch, nan_mask);
+    let mut sum = 0.0f64;
+    let mut valid = 0usize;
+    for (i, &is_nan) in nan_mask.iter().enumerate() {
+        if !is_nan {
+            sum += scratch[i].abs();
+            valid += 1;
+        }
+    }
+    if valid > 0 { sum / valid as f64 } else { 0.0 }
+}
+
+/// Decide, before either candidate's mass reaches a partition total, which
+/// enumerated circuits are non-representative twins of another circuit that
+/// trims to the identical reported loop (AC4.3 exactness).
+///
+/// Only a circuit visiting >= 1 synthetic agg node can have a trimmed twin
+/// (see [`trimmed_circuit_key`]'s doc), so the work here is bounded by the
+/// model's agg-bearing circuit population rather than the whole universe:
+///
+/// 1. **Cheap short-circuit**: if the graph has no agg node at all (the
+///    overwhelming majority of models, including every purely-scalar one),
+///    nothing can collide and no circuit is touched.
+/// 2. **Group the agg-bearing circuits** (excluding module-traversing ones,
+///    which never participate -- see the parent fn's doc) by their trimmed
+///    key, scoring each with [`raw_avg_abs_score`]. This population is
+///    bounded by the model's synthetic agg count, not by the universe size.
+/// 3. **Test every non-agg, non-module circuit's OWN identity** (its full
+///    node sequence IS its trimmed key) against those keys. This still costs
+///    one node-sequence materialization per non-agg circuit -- O(total edge
+///    rows), the same order `circuit_partition`/`circuit_traverses_module`
+///    already pay -- but the expensive part, scoring, runs only on an actual
+///    match, which is exactly the (rare) direct/agg-twin collision this
+///    exists to catch.
+///
+/// Ties break exactly as `by_reported_cycle` does: strictly greater
+/// `raw_avg_abs_score` wins, and among equal scores the SMALLEST circuit
+/// index wins (matching `by_reported_cycle`'s left-to-right "only a strict
+/// improvement replaces the representative" scan over ascending circuit
+/// index) -- computed order-independently here since circuits reach this
+/// decision from two separate loops (step 2's agg population, step 3's
+/// colliding non-agg one) that do not themselves run in circuit-index order
+/// relative to each other.
+#[allow(clippy::too_many_arguments)]
+fn dedup_trimmed_twins(
+    candidates: &EnumeratedCandidates,
+    graph: &ActivityGraph,
+    is_module_node: &[bool],
+    is_agg_node: &[bool],
+    scratch: &mut [f64],
+    nan_mask: &mut [bool],
+    deadline: Option<Instant>,
+    clock: &mut dyn Clock,
+) -> Option<Vec<bool>> {
+    let mut dropped = vec![false; candidates.len()];
+
+    if !is_agg_node.contains(&true) {
+        return Some(dropped);
+    }
+
+    let mut groups: HashMap<Vec<u32>, Vec<(usize, f64)>> = HashMap::new();
+
+    for ci in 0..candidates.len() {
+        if deadline_expired(ci, deadline, clock) {
+            return None;
+        }
+        let rows = candidates.circuit(ci);
+        if circuit_traverses_module(rows, graph, is_module_node) {
+            continue;
+        }
+        let has_agg = rows
+            .iter()
+            .any(|&row| is_agg_node[graph.edge_source(row) as usize]);
+        if !has_agg {
+            continue;
+        }
+        let key = trimmed_circuit_key(rows, graph, is_agg_node);
+        let avg = raw_avg_abs_score(rows, graph, scratch, nan_mask);
+        groups.entry(key).or_default().push((ci, avg));
+    }
+
+    if groups.is_empty() {
+        // Agg nodes exist somewhere in the graph, but no enumerated circuit
+        // visits one -- nothing to group.
+        return Some(dropped);
+    }
+
+    for ci in 0..candidates.len() {
+        if deadline_expired(ci, deadline, clock) {
+            return None;
+        }
+        let rows = candidates.circuit(ci);
+        if circuit_traverses_module(rows, graph, is_module_node) {
+            continue;
+        }
+        let has_agg = rows
+            .iter()
+            .any(|&row| is_agg_node[graph.edge_source(row) as usize]);
+        if has_agg {
+            continue; // already scored and grouped above
+        }
+        let key = trimmed_circuit_key(rows, graph, is_agg_node);
+        let Some(members) = groups.get_mut(&key) else {
+            continue; // no agg-bearing circuit shares this identity
+        };
+        let avg = raw_avg_abs_score(rows, graph, scratch, nan_mask);
+        members.push((ci, avg));
+    }
+
+    for members in groups.values() {
+        if members.len() < 2 {
+            // A solitary agg-bearing circuit whose trimmed identity no other
+            // circuit shares -- e.g. its would-be direct twin's edges do not
+            // exist in the union graph at all -- has nothing to be
+            // representative OF.
+            continue;
+        }
+        let mut winner = members[0];
+        for &(idx, avg) in &members[1..] {
+            if avg > winner.1 || (avg == winner.1 && idx < winner.0) {
+                winner = (idx, avg);
+            }
+        }
+        for &(idx, _) in members {
+            if idx != winner.0 {
+                dropped[idx] = true;
+            }
+        }
+    }
+
+    Some(dropped)
 }
 
 /// The engine-internal cycle partition of a circuit: that of its first stock

@@ -84,8 +84,13 @@ cannot have. Exploit it:
   discoverable where the stock-seeded DFS structurally could not find them;
   they resolve to `NormGroup::Solo` (GH #750) and rank after competing loops.
   This is a deliberate widening toward the exhaustive universe.
-- The `stocks.is_empty()` early return is kept (a model with no parent stocks
-  still reports no loops), unchanged from today.
+- A model with no parent stocks is still analyzed rather than declared an
+  empty universe: the enumerator needs no stock seeds and the fallback's
+  default seed policy (`StocksAndStocklessSccs`) seeds stockless SCCs
+  directly, so a stockless stateful cycle resolves to the `NormGroup::Solo`
+  group above instead of being skipped (2026-08-18 correction; the original
+  plan's `stocks.is_empty()` early return declared such a model's universe
+  empty, which contradicted the very widening this plan describes).
 - Reported relative scores change on models where discovery was previously
   lossy (denominators now include the full universe's mass). That is the
   point, but it is a semantic change.

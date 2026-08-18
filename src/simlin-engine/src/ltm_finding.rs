@@ -311,17 +311,24 @@ pub struct DiscoveryResult {
     /// the sample, not the universe.
     pub retained_loops: usize,
     /// On the enumeration path, the size of the candidate universe: the
-    /// number of ever-simultaneously-active elementary cycles the enumerator
-    /// emitted, which is the population every retention denominator and
+    /// number of DISTINCT loops whose mass the partition denominators sum --
+    /// the enumerated ever-simultaneously-active elementary cycles, minus the
+    /// non-representative twins retention's own trimmed-key dedup drops
+    /// before they ever bank mass (two enumerated circuits, e.g. a direct
+    /// reference and its hoisted-reducer twin, that trim to the identical
+    /// *reported* loop, AC4.3), plus the cross-agg loops stitched from
+    /// disjoint petals (GH #696, which are combinations of enumerated
+    /// circuits rather than circuits of the union graph in their own right).
+    /// This is the population every retention denominator and
     /// competing-vs-solo decision is measured against.
     ///
     /// `Some` exactly when `enumeration_complete` -- a fallback sample and an
     /// abandoned (budget- or deadline-tripped) enumeration alike have no
-    /// universe to report, and an enumeration that never had to run because
-    /// the model carries no links reports an empty one. Cross-agg stitched
-    /// loops (GH #696) are combinations of enumerated petals rather than
-    /// enumerated circuits, so they join the candidate set without being
-    /// counted here.
+    /// universe to report. An enumeration that never had to run because the
+    /// model carries no links reports an empty one (`Some(0)`), and so does
+    /// one that ran to completion and simply found no scorable cycle at all
+    /// (a model with no stocks and no scorable stockless cycle, among other
+    /// shapes).
     pub universe_loops: Option<usize>,
     /// On the fallback path, the number of distinct elementary cycles the
     /// shortest-path sweep proposed (`fallback::FallbackOutcome::paths.len()`),
@@ -2315,20 +2322,18 @@ pub(crate) fn discover_loops_with_deadlines(
         .map(|((from, to), offset)| ((from.clone(), to.clone()), *offset))
         .collect();
 
-    if stocks.is_empty() {
-        return Ok(DiscoveryResult {
-            loops: Vec::new(),
-            partitions: Vec::new(),
-            truncated: false,
-            agg_recovery_truncated: false,
-            enumeration_complete: enumeration_ran,
-            retained_loops: 0,
-            // An empty universe, on the enumeration path only (see above).
-            universe_loops: enumeration_ran.then_some(0),
-            // Neither generator ran.
-            fallback_candidates: None,
-        });
-    }
+    // A model with no parent-level stocks is NOT an empty universe: the
+    // enumerator needs no stock seeds at all (it walks every union-graph
+    // root regardless), and the fallback's default seed policy
+    // (`StocksAndStocklessSccs`) seeds one representative per non-trivial
+    // stockless SCC directly. A 2+-node cycle whose only state is a
+    // module-internal level or a `PREVIOUS` lag between auxes is therefore
+    // still analyzed -- it resolves to no parent-level partition (every
+    // `stock_partition_of_node`/`CyclePartitions::stock_partition` entry is
+    // `None` when `causal_graph.stocks` is empty) and is reported in a
+    // `NormGroup::Solo` group, ranked after every competing loop (AC1.3).
+    // Bailing out here used to declare that universe empty by construction
+    // rather than letting the pipeline discover it has nothing to partition.
 
     let step_count = results.step_count;
 
@@ -2398,11 +2403,24 @@ pub(crate) fn discover_loops_with_deadlines(
                 .iter()
                 .map(|ident| causal_graph.module_graph(ident).is_some())
                 .collect();
+            // Which nodes are synthetic `$⁚ltm⁚agg⁚{n}` aggregates -- needed
+            // both by retention's own trimmed-key dedup (a circuit can only
+            // have a twin that trims to the same reported loop if it visits
+            // >= 1 of these) and, below, by the cross-agg petal stitcher.
+            // Computed once and shared, so a model with no agg node at all
+            // (every scalar model) pays for exactly one `contains(&true)`
+            // scan in either consumer rather than two.
+            let is_agg_node: Vec<bool> = search
+                .idents
+                .iter()
+                .map(|ident| crate::ltm_agg::is_synthetic_agg_name(ident.as_str()))
+                .collect();
             if let Some(retention) = retain_circuits(
                 &candidates,
                 &activity,
                 &stock_partition_of_node,
                 &is_module_node,
+                &is_agg_node,
                 deadlines.enumeration,
                 clock,
             ) {
@@ -2422,11 +2440,6 @@ pub(crate) fn discover_loops_with_deadlines(
                 // `Vec` -- is called only for the circuits that pass the count
                 // test, not for every enumerated circuit (World3's universe is
                 // ~150k circuits, almost all of which visit zero agg nodes).
-                let is_agg_node: Vec<bool> = search
-                    .idents
-                    .iter()
-                    .map(|ident| crate::ltm_agg::is_synthetic_agg_name(ident.as_str()))
-                    .collect();
                 let petal_circuits: Vec<Vec<u32>> = if is_agg_node.contains(&true) {
                     (0..candidates.len())
                         .filter(|&ci| {
@@ -2515,15 +2528,22 @@ pub(crate) fn discover_loops_with_deadlines(
                     );
                 }
 
+                // `universe_loops` is the number of DISTINCT loops whose mass
+                // the partition denominators above sum: the enumerated
+                // circuits, minus the non-representative twins retention's
+                // own trimmed-key dedup dropped before they ever banked any
+                // mass (`retention.distinct_circuits`), plus the stitched
+                // cross-agg loops just added to `node_paths` -- combinations
+                // of enumerated petals rather than circuits of the union
+                // graph, so they are counted here rather than folded into
+                // `distinct_circuits`.
+                let universe_loop_count = retention.distinct_circuits + stitched.len();
+
                 node_paths = survivors;
                 node_paths.extend(stitched);
                 universe = Some(stats);
                 enumeration_complete = true;
-                // The candidate UNIVERSE is the enumerated circuit set. The
-                // stitched cross-agg loops just added to `node_paths` are
-                // combinations of those circuits rather than circuits of the
-                // union graph, so they are not part of the count.
-                universe_loops = Some(candidates.len());
+                universe_loops = Some(universe_loop_count);
             }
         }
         // An incomplete enumeration (circuit budget, visit budget, edge-row
@@ -2857,6 +2877,23 @@ pub(crate) fn discover_loops_with_deadlines(
         }
         for (fl, traverses_module) in &dropped {
             if !*traverses_module {
+                // Safety net, not the primary path any more: `retain_circuits`'
+                // own trimmed-key dedup (`ltm_finding_enum.rs`'s
+                // `dedup_trimmed_twins`) now decides the representative among
+                // ENUMERATED non-module twins before either candidate's mass
+                // ever reaches a partition total, so this branch should no
+                // longer fire for one of those -- a non-module hit here now
+                // means one of the two things that dedup pass cannot see: a
+                // STITCHED cross-agg loop (added to `node_paths` after
+                // retention, never part of its grouping) colliding with
+                // another reported loop's trimmed identity, or a circuit from
+                // the fallback... which cannot reach here at all, since this
+                // whole block is gated on `universe.as_mut()`, `Some` only on
+                // the enumeration path. Kept rather than asserted away: a
+                // stitched collision has no dedicated fixture (see the
+                // "solo -> competing" boundary note above this loop), so a
+                // future case this reasoning misses would silently reintroduce
+                // AC4.3's inflated-denominator bug rather than surface loudly.
                 subtract_reported_mass_from_totals(fl, &partitions, &mut stats.totals);
             }
             // Whether or not it banked raw mass, a dropped duplicate is no
@@ -3006,7 +3043,13 @@ fn add_reported_mass_to_totals(
 /// mass was banked by the enumeration pass and no loop reports it. The
 /// partition necessarily has a total (this loop's own mass built it), and the
 /// result cannot go negative, since a float subtraction of a summand from a
-/// sum of non-negative terms is bounded below by zero.
+/// sum of non-negative terms is bounded below by zero -- except at a step
+/// whose running total is already `Inf` (a dominance inflection, kept by
+/// convention rather than excluded like a NaN summand), where the
+/// subtraction is skipped entirely: `Inf - Inf` is `NaN` whenever the dropped
+/// duplicate's own score is ALSO infinite there, and poisoning the total with
+/// NaN would be strictly worse than leaving one duplicate's mass in an
+/// already-divergent step.
 ///
 /// The partition here is derived via `loop_partition_slot` (`partition_for_loop`
 /// over `loop_info.stocks`); the mass being removed was banked via
@@ -3033,24 +3076,38 @@ fn subtract_reported_mass_from_totals(
         return;
     };
     for (t, &(_, score)) in fl.scores.iter().enumerate() {
-        if !score.is_nan() {
-            series[t] -= score.abs();
-            // `!(v < 0.0)` rather than `v >= 0.0`: the two differ only on
-            // NaN, and NaN is exactly what this assert must NOT flag -- it is
-            // ruled out separately by the `!score.is_nan()` guard above, so a
-            // NaN reaching here would be a different bug this assert is not
-            // the right place to report.
-            #[allow(clippy::neg_cmp_op_on_partial_ord)]
-            let non_negative = !(series[t] < 0.0);
-            debug_assert!(
-                non_negative,
-                "subtracting a duplicate representative's mass must not \
-                 drive partition {part}'s total negative at step {t}: it \
-                 removes exactly the bit pattern that was added for this \
-                 circuit, so the result is zero or positive up to floating \
-                 rounding"
-            );
+        if score.is_nan() {
+            continue;
         }
+        if series[t].is_infinite() {
+            // At a dominance inflection the total is `Inf` by convention (a
+            // real divergent signal, kept rather than excluded like a NaN
+            // summand). `Inf - finite == Inf`, so leaving it alone would be
+            // harmless on its own, but a step where the DROPPED duplicate's
+            // own score is ALSO infinite computes `Inf - Inf == NaN`, which
+            // would poison the total for every sibling loop at that step for
+            // the rest of the run -- exactly the failure mode
+            // `an_inf_times_zero_product_is_excluded_from_totals_and_retention`
+            // pins for pass 1. Skipping the subtraction here keeps the
+            // convention: an infinite total stays `Inf`, never becomes NaN.
+            continue;
+        }
+        series[t] -= score.abs();
+        // `!(v < 0.0)` rather than `v >= 0.0`: the two differ only on
+        // NaN, and NaN is exactly what this assert must NOT flag -- it is
+        // ruled out separately by the `!score.is_nan()` guard above, so a
+        // NaN reaching here would be a different bug this assert is not
+        // the right place to report.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        let non_negative = !(series[t] < 0.0);
+        debug_assert!(
+            non_negative,
+            "subtracting a duplicate representative's mass must not \
+             drive partition {part}'s total negative at step {t}: it \
+             removes exactly the bit pattern that was added for this \
+             circuit, so the result is zero or positive up to floating \
+             rounding"
+        );
     }
 }
 
@@ -3886,3 +3943,7 @@ fn loop_sort_key(loop_info: &Loop) -> (String, Vec<String>) {
 #[cfg(test)]
 #[path = "ltm_finding_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "ltm_finding_enum_tests.rs"]
+mod enum_tests;
