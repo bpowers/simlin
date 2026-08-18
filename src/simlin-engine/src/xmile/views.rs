@@ -1828,10 +1828,9 @@ impl ToXml<XmlWriter> for View {
             ("isee:show_pages", "false"),
             ("page_width", "800"),
             ("page_height", "600"),
-            (
-                "view_type",
-                self.kind.unwrap_or(ViewType::StockFlow).as_str(),
-            ),
+            // The spec's attribute is `type` (section 6.1: `<view type="stock_flow">`),
+            // which is also what the reader (`@type`) looks for.
+            ("type", self.kind.unwrap_or(ViewType::StockFlow).as_str()),
         ];
         if let Some(zoom) = zoom.as_deref() {
             attrs.push(("zoom", zoom));
@@ -2401,6 +2400,22 @@ mod zoom_unit_tests {
                 project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("must re-import");
             assert_close(only_view_zoom(&reparsed), factor);
         }
+    }
+
+    /// The writer emits the spec's `type` attribute (`<view type="stock_flow">`,
+    /// spec section 6.1), which is also what the reader looks for.
+    #[test]
+    fn writer_emits_spec_view_type_attribute() {
+        let project = project_with_view("");
+        let xml = project_to_xmile(&project).expect("must serialize");
+        assert!(
+            xml.contains(r#"<view "#) && xml.contains(r#"type="stock_flow""#),
+            "view must carry the spec's type attribute: {xml}"
+        );
+        assert!(
+            !xml.contains("view_type="),
+            "view_type is not an XMILE view attribute: {xml}"
+        );
     }
 
     /// The real Stella export that surfaced the defect: `teacup.stmx` carries
