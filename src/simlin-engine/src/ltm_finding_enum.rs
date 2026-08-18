@@ -695,14 +695,19 @@ pub(super) fn retain_circuits(
         if let Some(part) = partition {
             *partition_circuit_counts.entry(part).or_insert(0) += 1;
         }
-        let traverses_module = circuit_traverses_module(rows, graph, is_module_node);
-        if traverses_module {
+        if circuit_traverses_module(rows, graph, is_module_node) {
+            // Kept, and contributing NO raw mass: what such a loop reports is
+            // the per-exit-port override series, and the module composite this
+            // product multiplies in max-abs-selects across ALL of the module's
+            // output ports, so the two can differ by any factor. Its reported
+            // mass joins the denominators after materialization instead.
             survivors.push(ci);
+            continue;
         }
 
         let (lo, hi) = graph.active_window(candidates.activity_of(ci));
         let Some(part) = partition else {
-            if !traverses_module && lo < hi {
+            if lo < hi {
                 survivors.push(ci);
             }
             continue;
@@ -726,7 +731,7 @@ pub(super) fn retain_circuits(
                 bound = bound.max(mass / totals[t]);
             }
         }
-        if !traverses_module && bound >= MIN_CONTRIBUTION {
+        if bound >= MIN_CONTRIBUTION {
             to_confirm.push(ci);
         }
     }

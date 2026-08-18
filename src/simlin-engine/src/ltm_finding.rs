@@ -57,6 +57,17 @@ type LinkOffset = ((Ident<Canonical>, Ident<Canonical>), usize);
 /// HashMap for O(1) link offset lookup by (from, to) key.
 type LinkOffsetMap = HashMap<(Ident<Canonical>, Ident<Canonical>), usize>;
 
+/// Memoized per-exit-port module-input recompute, within one discovery call.
+///
+/// The key is everything `recompute_module_input_edge_series` reads that
+/// varies by loop edge -- the module-input source, the module instance, and
+/// the reader that identifies the exit port -- each stripped of any element
+/// subscript, exactly as the recompute strips them before its own lookups. An
+/// arrayed loop through a module therefore hits one entry per element rather
+/// than re-enumerating the sub-model's pathway map each time.
+type ModuleSeriesCache =
+    HashMap<(Ident<Canonical>, Ident<Canonical>, Ident<Canonical>), Option<Vec<f64>>>;
+
 /// Per-sub-model emitted LTM output-port set, keyed by the sub-model's
 /// canonical name. The discovery-mode per-exit-port recompute (GH #698) uses
 /// it to enumerate pathway indices against the SAME sorted port set the
@@ -2778,6 +2789,14 @@ pub fn discover_loops_with_candidate_gen(
                 // cycle never does -- so no cross-dedup is needed here.)
                 let mut totals = retention.partition_totals;
                 for seq in &stitched {
+                    if seq.iter().any(|&n| is_module_node[n as usize]) {
+                        // A module-traversing loop reports the per-exit-port
+                        // override series rather than the raw composite
+                        // product, so its mass joins the denominators after
+                        // materialization -- the same rule retention applies
+                        // to the enumerated circuits.
+                        continue;
+                    }
                     accumulate_series_into_totals(
                         seq,
                         &activity,
@@ -2916,10 +2935,22 @@ pub fn discover_loops_with_candidate_gen(
         });
     }
 
-    // Convert paths to FoundLoop objects with scores
-    let mut found_loops: Vec<FoundLoop> = Vec::new();
+    // Convert paths to FoundLoop objects with scores. Each is paired with
+    // whether its path traverses a module instance -- the same predicate the
+    // enumeration retention pass uses, so the mass a module loop is denied
+    // there and the mass it is granted below are exactly complementary.
+    let mut found_loops: Vec<(FoundLoop, bool)> = Vec::new();
+
+    // The per-exit-port recompute below is keyed by
+    // (module-input source, module instance, exit-port reader) and nothing
+    // else, so within one discovery call the answer is memoizable. Without it
+    // every loop through a module re-enumerates the sub-model's pathway map
+    // once per link -- the same map, over the same sorted port set, every
+    // time.
+    let mut module_series_cache: ModuleSeriesCache = HashMap::new();
 
     for path in &all_paths {
+        let traverses_module = path.iter().any(|n| causal_graph.module_graph(n).is_some());
         // Convert path to links using CausalGraph. These links carry the
         // un-trimmed per-element path -- they map to the synthetic
         // `$⁚ltm⁚link_score⁚...` variables emitted during compilation, so the
@@ -2957,14 +2988,44 @@ pub fn discover_loops_with_candidate_gen(
         // verbatim everywhere this returns `None`.
         let link_override_series: Vec<Option<Vec<f64>>> = (0..links.len())
             .map(|i| {
-                recompute_module_input_edge_series(
+                let n = links.len();
+                let next = &links[(i + 1) % n];
+                // Gate on the module instance before spelling a cache key: on
+                // a model with no modules -- most of them -- this is the only
+                // work the recompute costs per link.
+                let module_name =
+                    Ident::<Canonical>::new(crate::ltm::strip_subscript(links[i].to.as_str()));
+                if causal_graph.module_graph(&module_name).is_none() || next.from != links[i].to {
+                    // A non-sequential link list has no exit port to read, and
+                    // the recompute declines it; that case is outside what the
+                    // cache key spells, so it is answered uncached.
+                    return recompute_module_input_edge_series(
+                        causal_graph,
+                        results,
+                        &links,
+                        i,
+                        step_count,
+                        sub_model_output_ports,
+                    );
+                }
+                let key = (
+                    Ident::<Canonical>::new(crate::ltm::strip_subscript(links[i].from.as_str())),
+                    module_name,
+                    Ident::<Canonical>::new(crate::ltm::strip_subscript(next.to.as_str())),
+                );
+                if let Some(cached) = module_series_cache.get(&key) {
+                    return cached.clone();
+                }
+                let series = recompute_module_input_edge_series(
                     causal_graph,
                     results,
                     &links,
                     i,
                     step_count,
                     sub_model_output_ports,
-                )
+                );
+                module_series_cache.insert(key, series.clone());
+                series
             })
             .collect();
 
@@ -3045,16 +3106,19 @@ pub fn discover_loops_with_candidate_gen(
             slot_links: vec![],
         };
 
-        found_loops.push(FoundLoop {
-            loop_info,
-            scores,
-            avg_abs_score,
-            // Filled in once partition denominators are known (rank_truncate_and_id).
-            rel_scores: Vec::new(),
-            // Filled in by attach_partition_metadata at the end of ranking.
-            partition: None,
-            polarity_confidence,
-        });
+        found_loops.push((
+            FoundLoop {
+                loop_info,
+                scores,
+                avg_abs_score,
+                // Filled in once partition denominators are known (rank_truncate_and_id).
+                rel_scores: Vec::new(),
+                // Filled in by attach_partition_metadata at the end of ranking.
+                partition: None,
+                polarity_confidence,
+            },
+            traverses_module,
+        ));
     }
 
     // Two distinct discovered cycles can trim to the same *reported* loop: a
@@ -3067,9 +3131,11 @@ pub fn discover_loops_with_candidate_gen(
     // follows the dominant pathway. The kept loop's score series is that one
     // pathway's product at every step (no per-step path flipping).
     let mut by_reported_cycle: HashMap<Vec<String>, usize> = HashMap::new();
-    let mut deduped: Vec<FoundLoop> = Vec::new();
-    for fl in found_loops {
-        let nodes: Vec<String> = fl
+    let mut deduped: Vec<(FoundLoop, bool)> = Vec::new();
+    let mut dropped: Vec<(FoundLoop, bool)> = Vec::new();
+    for entry in found_loops {
+        let nodes: Vec<String> = entry
+            .0
             .loop_info
             .links
             .iter()
@@ -3078,17 +3144,47 @@ pub fn discover_loops_with_candidate_gen(
         let key = crate::ltm::canonical_rotation(&nodes);
         match by_reported_cycle.get(&key) {
             Some(&idx) => {
-                if fl.avg_abs_score > deduped[idx].avg_abs_score {
-                    deduped[idx] = fl;
+                if entry.0.avg_abs_score > deduped[idx].0.avg_abs_score {
+                    dropped.push(std::mem::replace(&mut deduped[idx], entry));
+                } else {
+                    dropped.push(entry);
                 }
             }
             None => {
                 by_reported_cycle.insert(key, deduped.len());
-                deduped.push(fl);
+                deduped.push(entry);
             }
         }
     }
-    let mut found_loops = deduped;
+
+    // Bring the universe denominators into agreement with what is reported.
+    //
+    // Enumeration banks each circuit's RAW product as its partition's mass,
+    // which two classes of loop do not report. A module-traversing loop
+    // reports the per-exit-port override series (the composite the raw product
+    // uses max-abs-selects across ALL of the module's output ports, and so can
+    // carry an entirely different magnitude), so it contributed nothing then
+    // and contributes its materialized series now. And two circuits that trim
+    // to the same reported loop each banked mass, while only the surviving
+    // representative's score is reported, so the other's comes back out.
+    //
+    // The alternative -- leaving the denominator as the raw universe -- makes
+    // every relative score in the partition a fraction of mass no reported
+    // loop carries.
+    if let Some(totals) = external_totals.as_mut() {
+        for (fl, traverses_module) in &deduped {
+            if *traverses_module {
+                add_reported_mass_to_totals(fl, &partitions, step_count, totals);
+            }
+        }
+        for (fl, traverses_module) in &dropped {
+            if !*traverses_module {
+                subtract_reported_mass_from_totals(fl, &partitions, totals);
+            }
+        }
+    }
+
+    let mut found_loops: Vec<FoundLoop> = deduped.into_iter().map(|(fl, _)| fl).collect();
 
     let partition_meta = rank_and_filter(&mut found_loops, &partitions, external_totals.as_ref());
 
@@ -3100,6 +3196,70 @@ pub fn discover_loops_with_candidate_gen(
         enumeration_complete,
         expansion_cap_saturated,
     })
+}
+
+/// The engine-internal cycle partition a discovered loop normalizes against,
+/// or `None` for a loop whose stocks resolve to none (a `NormGroup::Solo`
+/// loop, which is its own denominator and takes no share of a partition
+/// total).
+///
+/// Discovered loops are always scalar, so `partition_for_loop` returns a
+/// length-1 vector; collapse it to slot 0, exactly as `rank_and_filter` does.
+fn loop_partition_slot(fl: &FoundLoop, partitions: &CyclePartitions) -> Option<usize> {
+    partitions
+        .partition_for_loop(&fl.loop_info, &[])
+        .first()
+        .copied()
+        .flatten()
+}
+
+/// Add a loop's REPORTED |score| series into its partition's universe total.
+///
+/// Used for the loops enumeration deliberately withheld mass from: a
+/// module-traversing loop's reported score comes from the per-exit-port
+/// override series, which the raw product the retention pass sees cannot
+/// stand in for. The partition may have no total yet -- every one of its
+/// circuits may traverse a module -- so the entry is created on demand.
+fn add_reported_mass_to_totals(
+    fl: &FoundLoop,
+    partitions: &CyclePartitions,
+    step_count: usize,
+    totals: &mut HashMap<usize, Vec<f64>>,
+) {
+    let Some(part) = loop_partition_slot(fl, partitions) else {
+        return;
+    };
+    let series = totals.entry(part).or_insert_with(|| vec![0.0; step_count]);
+    for (t, &(_, score)) in fl.scores.iter().enumerate() {
+        if !score.is_nan() {
+            series[t] += score.abs();
+        }
+    }
+}
+
+/// Remove a loop's |score| series from its partition's universe total.
+///
+/// Used for a duplicate representative the reported-cycle dedup discarded: its
+/// mass was banked by the enumeration pass and no loop reports it. The
+/// partition necessarily has a total (this loop's own mass built it), and the
+/// result cannot go negative, since a float subtraction of a summand from a
+/// sum of non-negative terms is bounded below by zero.
+fn subtract_reported_mass_from_totals(
+    fl: &FoundLoop,
+    partitions: &CyclePartitions,
+    totals: &mut HashMap<usize, Vec<f64>>,
+) {
+    let Some(part) = loop_partition_slot(fl, partitions) else {
+        return;
+    };
+    let Some(series) = totals.get_mut(&part) else {
+        return;
+    };
+    for (t, &(_, score)) in fl.scores.iter().enumerate() {
+        if !score.is_nan() {
+            series[t] -= score.abs();
+        }
+    }
 }
 
 /// Mean magnitude of a loop's relative loop score over the steps where it is

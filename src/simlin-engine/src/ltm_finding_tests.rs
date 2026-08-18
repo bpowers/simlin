@@ -3222,6 +3222,447 @@ fn recompute_strips_element_subscripts_before_port_match() {
     );
 }
 
+/// The share of a partition's universe mass that its REPORTED loops account
+/// for, at each saved step: `Sum_j |rel_score_j[t]|`.
+///
+/// A relative score is `score / partition_total`, so this sums to exactly 1.0
+/// at every active step precisely when the denominator is the sum of the
+/// reported loops' own |score| series -- which is the property the enumeration
+/// path's denominator corrections exist to maintain. Any circuit whose mass is
+/// in the total but whose score is not reported (because a duplicate
+/// representative was trimmed away, or because a module loop's raw composite
+/// product was banked instead of the override series it actually reports)
+/// shows up here as a shortfall.
+///
+/// Only meaningful when every universe circuit is reported, which the fixtures
+/// below assert directly.
+fn reported_mass_share_per_step(result: &DiscoveryResult) -> Vec<f64> {
+    let step_count = result.loops.first().map_or(0, |l| l.rel_scores.len());
+    (0..step_count)
+        .map(|t| {
+            result
+                .loops
+                .iter()
+                .map(|l| l.rel_scores[t].abs())
+                .sum::<f64>()
+        })
+        .collect()
+}
+
+/// AC4.2: a loop through a multi-output module reports the per-exit-port
+/// override series, not the raw product its module-input link contributes.
+/// That link's recorded score is the module COMPOSITE, which max-abs-selects
+/// across every output port of the module -- so on a module whose ports carry
+/// different magnitudes it is a different number entirely from the pathway the
+/// loop traverses. The mass such a loop puts into its partition's denominator
+/// has to be the mass it reports, or every loop in the partition is normalized
+/// against a total that includes a score nothing reports.
+#[test]
+fn a_module_loop_contributes_its_override_mass_to_the_denominator() {
+    let (result, results) = discover_multi_output_module_feedback();
+
+    assert_eq!(
+        result.loops.len(),
+        2,
+        "the module growth loop and the decay loop; got {:?}",
+        result
+            .loops
+            .iter()
+            .map(|l| l
+                .loop_info
+                .links
+                .iter()
+                .map(|k| k.from.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
+    let module_loop = result
+        .loops
+        .iter()
+        .find(|l| l.loop_info.links.iter().any(|k| k.to.as_str() == "m"))
+        .expect("one reported loop runs through the module instance");
+
+    // The fixture only bites if the composite and the override really differ,
+    // so read the raw link scores the composite product would have used and
+    // check the reported score is not that.
+    let score_at = |from: &str, to: &str, step: usize| -> f64 {
+        let name = format!("$\u{205A}ltm\u{205A}link_score\u{205A}{from}\u{2192}{to}");
+        let offset = *results
+            .offsets
+            .get(&Ident::<Canonical>::new(&name))
+            .unwrap_or_else(|| panic!("missing link score {name}"));
+        results.data[step * results.step_size + offset]
+    };
+    let differs = (2..results.step_count).any(|step| {
+        let composite_product = score_at("s", "m", step)
+            * score_at("m", "growth", step)
+            * score_at("growth", "s", step);
+        let reported = module_loop.scores[step].1;
+        composite_product.is_finite()
+            && reported.is_finite()
+            && (composite_product.abs() - reported.abs()).abs() > 1e-9
+    });
+    assert!(
+        differs,
+        "the fixture must be one where the composite product and the reported \
+         override score differ; otherwise this test cannot tell the two \
+         denominators apart"
+    );
+
+    let shares = reported_mass_share_per_step(&result);
+    for (t, &share) in shares.iter().enumerate() {
+        if share == 0.0 {
+            continue;
+        }
+        assert!(
+            (share - 1.0).abs() < 1e-9,
+            "step {t}: the reported loops account for {share} of the \
+             partition's mass, so the denominator carries the module loop's \
+             raw composite product rather than the override series it reports"
+        );
+    }
+    assert!(
+        shares.iter().any(|&s| s > 0.0),
+        "the fixture must be active"
+    );
+}
+
+/// A stock whose growth runs through a sub-model with TWO output ports of
+/// different magnitudes: `pos` shares its change with a second input, so the
+/// `input_val -> pos` pathway carries less than the whole change, while
+/// `neg` depends on `input_val` alone and carries all of it. The module
+/// composite therefore selects `neg`, while the loop -- which reads `pos` --
+/// is scored on the `pos` pathway. A second, module-free loop through the same
+/// stock puts both in one cycle partition.
+fn discover_multi_output_module_feedback() -> (DiscoveryResult, Results) {
+    use crate::datamodel::{self, Equation};
+    use salsa::Setter;
+
+    let aux = |ident: &str, eqn: &str, is_input: bool| {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: Equation::Scalar(eqn.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat {
+                can_be_module_input: is_input,
+                ..datamodel::Compat::default()
+            },
+        })
+    };
+    let flow = |ident: &str, eqn: &str| {
+        datamodel::Variable::Flow(datamodel::Flow {
+            ident: ident.to_string(),
+            equation: Equation::Scalar(eqn.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })
+    };
+
+    let passthrough = datamodel::Model {
+        name: "passthrough".to_string(),
+        sim_specs: None,
+        variables: vec![
+            aux("input_val", "0", true),
+            aux("other", "0", true),
+            aux("pos", "input_val * 0.02 + other", false),
+            aux("neg", "0 - input_val", false),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    };
+    let main = datamodel::Model {
+        name: "main".to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "s".to_string(),
+                equation: Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["growth".to_string()],
+                outflows: vec!["decay".to_string()],
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+            datamodel::Variable::Module(datamodel::Module {
+                ident: "m".to_string(),
+                model_name: "passthrough".to_string(),
+                documentation: String::new(),
+                references: vec![
+                    datamodel::ModuleReference {
+                        src: "s".to_string(),
+                        dst: "m.input_val".to_string(),
+                    },
+                    datamodel::ModuleReference {
+                        src: "drift".to_string(),
+                        dst: "m.other".to_string(),
+                    },
+                ],
+                units: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            flow("growth", "m.pos * 0.1"),
+            flow("decay", "s * 0.05"),
+            aux("drift", "TIME + 1", false),
+            aux("watcher", "m.neg", false),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    };
+    let project = datamodel::Project {
+        name: "multi_output_module".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 6.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![main, passthrough],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
+    let sp = sync.project;
+    sp.set_ltm_enabled(&mut db).to(true);
+    sp.set_ltm_discovery_mode(&mut db).to(true);
+    let source_model = *sp.models(&db).get("main").unwrap();
+
+    let compiled = crate::db::compile_project_incremental(&db, sp, "main").unwrap();
+    let mut vm = crate::vm::Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let element_edges = crate::db::model_element_causal_edges(&db, source_model, sp);
+    let causal_graph = crate::db::causal_graph_from_element_edges_with_modules(
+        &db,
+        source_model,
+        sp,
+        element_edges,
+    );
+    let stocks: Vec<Ident<Canonical>> = element_edges
+        .stocks
+        .iter()
+        .map(|s| Ident::new(s.as_str()))
+        .collect();
+    let ltm = crate::db::model_ltm_variables(&db, source_model, sp);
+    let dm_dims = crate::db::project_datamodel_dims(&db, sp);
+    let expansion = crate::analysis::build_link_expansion_context(&db, source_model, sp);
+    let ports = crate::analysis::build_sub_model_output_ports(&db, sp);
+
+    let result = discover_loops_with_graph(
+        &results,
+        &causal_graph,
+        &stocks,
+        &ltm.vars,
+        dm_dims,
+        &expansion,
+        &ports,
+        None,
+    )
+    .unwrap();
+    (result, results)
+}
+
+/// AC4.3: two enumerated circuits can trim to the SAME reported loop -- a
+/// direct `pop[d] -> share[d]` numerator reference and the
+/// `pop[d] -> $ltm:agg -> share[d]` reducer reference differ only in the
+/// synthetic aggregate node the report hides. Both are scored into the
+/// partition's universe total, and only one survives as the reported
+/// representative, so the dropped one's mass has to come back out of the
+/// denominator; otherwise every loop in the partition is normalized against
+/// mass no reported loop carries.
+#[test]
+fn a_trimmed_duplicate_circuit_leaves_no_mass_in_the_denominator() {
+    let result = discover_share_of_total_feedback(&["a", "b"]);
+    // Per element: the direct circuit and its agg-routed twin trim to one
+    // reported loop; the two agg petals additionally stitch into one
+    // cross-element loop. Five enumerated candidates, three reported.
+    assert_eq!(
+        result.loops.len(),
+        3,
+        "two per-element loops plus the stitched cross-element one; got {:?}",
+        result
+            .loops
+            .iter()
+            .map(|l| l
+                .loop_info
+                .links
+                .iter()
+                .map(|k| k.from.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        result.loops.iter().all(|l| l
+            .loop_info
+            .links
+            .iter()
+            .all(|k| !crate::ltm_agg::is_synthetic_agg_name(k.from.as_str()))),
+        "the reported loops are the trimmed form both circuits collapse onto"
+    );
+
+    let shares = reported_mass_share_per_step(&result);
+    for (t, &share) in shares.iter().enumerate() {
+        if share == 0.0 {
+            continue; // the partition is not yet active at this step
+        }
+        assert!(
+            (share - 1.0).abs() < 1e-9,
+            "step {t}: the reported loops account for {share} of the \
+             partition's mass, so the trimmed duplicates' mass is still in \
+             the denominator"
+        );
+    }
+    assert!(
+        shares.iter().any(|&s| s > 0.0),
+        "the fixture must have active steps"
+    );
+}
+
+/// `share[d] = pop[d] / SUM(pop[*])` feeding growth back into `pop[d]`: the
+/// only shape that makes ONE reported loop out of TWO enumerated circuits,
+/// because `pop` is read both directly (the numerator) and through the
+/// hoisted reducer (the denominator), and the report hides the synthetic
+/// aggregate node that distinguishes them.
+fn discover_share_of_total_feedback(elems: &[&str]) -> DiscoveryResult {
+    use crate::datamodel::{self, Equation, Variable};
+    use salsa::Setter;
+
+    let project = datamodel::Project {
+        name: "share_of_total".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            elems.iter().map(|s| s.to_string()).collect(),
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "pop".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        elems
+                            .iter()
+                            .enumerate()
+                            .map(|(i, e)| {
+                                let init = 100.0 * (i as f64 + 1.0);
+                                (e.to_string(), format!("{init}"), None, None)
+                            })
+                            .collect(),
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["growth".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "share".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "pop[Region] / SUM(pop[*])".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "growth".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "share[Region] * 10 + 1".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
+    let sp = sync.project;
+    sp.set_ltm_enabled(&mut db).to(true);
+    sp.set_ltm_discovery_mode(&mut db).to(true);
+    let source_model = *sp.models(&db).get("main").unwrap();
+
+    let compiled = crate::db::compile_project_incremental(&db, sp, "main").unwrap();
+    let mut vm = crate::vm::Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let element_edges = crate::db::model_element_causal_edges(&db, source_model, sp);
+    let causal_graph = crate::db::causal_graph_from_element_edges(element_edges);
+    let stocks: Vec<Ident<Canonical>> = element_edges
+        .stocks
+        .iter()
+        .map(|s| Ident::new(s.as_str()))
+        .collect();
+    let ltm = crate::db::model_ltm_variables(&db, source_model, sp);
+    let dm_dims = crate::db::project_datamodel_dims(&db, sp);
+    let expansion = crate::analysis::build_link_expansion_context(&db, source_model, sp);
+
+    discover_loops_with_graph(
+        &results,
+        &causal_graph,
+        &stocks,
+        &ltm.vars,
+        dm_dims,
+        &expansion,
+        &SubModelOutputPorts::new(),
+        None,
+    )
+    .unwrap()
+}
+
 // ===========================================================================
 // Union-graph circuit enumeration (the primary candidate generator; design:
 // docs/design-plans/2026-08-10-ltm-discovery-union-enumeration.md).
