@@ -396,11 +396,12 @@ class Model:
             height: Editor height in CSS pixels.
             theme: ``"auto"`` (follow the notebook), ``"light"``, or ``"dark"``.
             read_only: Show the diagram without allowing edits.
-            max_snapshot_bytes: Largest edit (the project as native JSON,
-                UTF-8 bytes) the editor sends back to the kernel; the
-                default, ``simlin._widget_core.MAX_SNAPSHOT_BYTES`` (8 MiB),
-                stays inside the notebook server's 10 MiB websocket message
-                limit.  Raise it only together with that server limit.
+            max_snapshot_bytes: Largest edit the editor sends back to the
+                kernel, measured on the wire (the project as native JSON,
+                JSON-string-escaped, in UTF-8 bytes); the default,
+                ``simlin._widget_core.MAX_SNAPSHOT_BYTES`` (8 MiB), stays
+                inside the notebook server's 10 MiB websocket message limit.
+                Raise it only together with that server limit.
 
         Raises:
             SimlinAssetError: if the widget's JS/wasm assets are missing

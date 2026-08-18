@@ -191,6 +191,19 @@ def _pretty_json(compact: bytes) -> bytes:
     return json.dumps(json.loads(compact), indent=2, ensure_ascii=False).encode("utf-8")
 
 
+def _warn_at_file(message: str, path: Path) -> None:
+    """Emit a ``RuntimeWarning`` from the poll thread, located at the model
+    file it concerns.  A ``stacklevel`` cannot reach user code from a thread
+    that has none on its stack -- it would name whichever internal frame
+    happens to be running, which tells the reader nothing -- so the warning
+    is placed explicitly at the file whose change it reports; line 0 keeps
+    the formatter from quoting a line of the model file as if it were source.
+    No registry is passed, so the standard "once per location" filter does
+    not swallow a later, different message about the same file; the sync
+    state machine already keeps the same bad bytes from warning twice."""
+    warnings.warn_explicit(message, RuntimeWarning, filename=str(path), lineno=0, module=__name__)
+
+
 def _disk_handler(project_ref: weakref.ref[Project]) -> Callable[[FileWatcher, bytes, str], bool]:
     """Build the poll-thread callback for a project.
 
@@ -877,13 +890,12 @@ class Project:
                 case _sync.IgnoreEcho():
                     return
                 case _sync.KeepLastKnownGood(reason="dirty"):
-                    warnings.warn(
+                    _warn_at_file(
                         f"simlin: {path} changed on disk but this project has unsaved "
                         f"local changes; keeping the in-memory model. Call reload() to "
                         f"take the on-disk version (discarding the local changes) or "
                         f"save(force=True) to overwrite the file with them.",
-                        RuntimeWarning,
-                        stacklevel=2,
+                        path,
                     )
                     return
                 case _sync.KeepLastKnownGood():
@@ -892,11 +904,10 @@ class Project:
                     try:
                         revision = self._load_disk_bytes(path, data, digest)
                     except SimlinError as exc:
-                        warnings.warn(
+                        _warn_at_file(
                             f"simlin: {path} changed on disk but could not be loaded; "
                             f"keeping the previous model: {exc}",
-                            RuntimeWarning,
-                            stacklevel=2,
+                            path,
                         )
                         return
                 case _:

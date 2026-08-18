@@ -128,7 +128,7 @@ Complete, runnable programs live in
   is the same in Google Colab: `pip install`, build and open a model,
   display the editor, simulate.
 
-All of them run in CI on every commit (the Colab notebook's `%pip` cell excepted).
+All of them run in CI on pull requests and pushes to `main` (the Colab notebook's `%pip` cell excepted).
 
 ## API Reference
 
@@ -250,6 +250,16 @@ An in-memory model built from scratch has none until you display it or call
 `project.auto_layout()`; `model.diagram()` draws it with a transient layout
 either way.
 
+Every write regenerates the whole file from the in-memory model; it is not
+a byte-preserving edit of what was there. For XMILE and Simlin JSON that is
+the same document. For Vensim `.mdl` the file is re-emitted from Simlin's
+model, so the first save of a Vensim-authored file shows a whole-file diff:
+formatting is normalised, identifiers in equations are lower-cased, spaces
+in unit names become `_`, and constructs Simlin does not carry are dropped:
+unit ranges such as `[0,?]` silently, a non-negativity flag or a discrete
+lookup with a `RuntimeWarning` (once per distinct message per project).
+Keep the original under version control if that diff matters.
+
 Pass `autosave=False` to batch changes: edits then set `dirty` and stay in
 memory until `model.save()`. With autosave on (the default), `dirty` is only
 ever true after a failed or refused write (disk full, permissions, or the
@@ -299,7 +309,7 @@ A model displayed as a cell's value is the Simlin diagram editor, live.
 `pip install pysimlin` is all it needs: the editor and its engine ship
 inside the wheel as an [anywidget](https://anywidget.dev), so there is no
 extension to install and no sidecar process. It is verified on JupyterLab 4
-(an automated browser journey runs on every commit) and expected to work
+(an automated browser journey runs in CI on pull requests and pushes to `main`) and expected to work
 wherever anywidget does -- Notebook 7, VS Code, Google Colab, marimo --
 with the checklist and the honest status of each host in
 [`docs/notebook-hosts.md`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/docs/notebook-hosts.md)
@@ -324,12 +334,17 @@ The file on disk is the single source of truth, so every collaborator sees
 the same model:
 
 - Each edit made in the editor (a new variable, an equation, a moved
-  element) is written to `model.path` in its own format before the next
-  cell runs; `model.revision` advances and `model.run()` reflects it.
-- `model.edit()` in a cell, or an external write to the file (Claude Code
-  editing it, the `simlin` MCP server, `git checkout`), updates the editor
-  in place with a short "Updated on disk" notice; the editor's undo history
-  resets on such remounts (its own edits never remount).
+  element) is written to `model.path` in its own format as soon as the
+  kernel handles it -- immediately, even while a long cell runs, on
+  ipykernel 7 (JupyterLab 4.4+); when the current cell finishes on older
+  kernels -- and always before the next cell runs; `model.revision`
+  advances and `model.run()` reflects it.
+- `model.edit()` in a cell updates the editor in place with a short
+  "Updated from Python" notice; an external write to the file (Claude Code
+  editing it, the `simlin` MCP server, `git checkout`) does the same with
+  "Updated on disk", and `model.reload()` with "Reloaded from disk". The
+  editor's undo history resets on such remounts (its own edits never
+  remount).
 - The same model displayed in two cells stays consistent: an edit in one
   appears in the other.
 - An edit made against a version the kernel has since moved past is
@@ -352,8 +367,9 @@ Practical notes:
 
 - **Widget lifetime.** Each display creates a kernel-side widget that stays
   subscribed to the model until it is closed (`widget.close()`, or
-  `simlin.ModelWidget.close_all()`); re-running a display cell leaves the
-  previous one alive, which is harmless but worth knowing in long sessions.
+  `simlin.ModelWidget.close_all()`, which closes every model editor and no
+  other widget); re-running a display cell leaves the previous one alive,
+  which is harmless but worth knowing in long sessions.
 - **Reopening a notebook.** JupyterLab shows "model not found" in place of
   a widget when a notebook is reopened without a running kernel or saved
   widget state; re-run the display cell. Hosts that save widget state into
@@ -361,10 +377,12 @@ Practical notes:
   widget's JS module, about 1.5 MB, per displayed widget.
 - **Static export.** The SVG in the same output is what nbconvert, GitHub,
   or a viewer without a kernel shows -- whenever the notebook carries no
-  saved widget state. `jupyter nbconvert --execute` stores that state by
-  default and then exports the widget itself (module embedded, ipywidgets
-  loaded from a CDN when opened); pass
-  `--ExecutePreprocessor.store_widget_state=False` to get the diagram.
+  saved widget state. Plainly: the DEFAULT `jupyter nbconvert --to html
+  --execute` stores that state and exports the widget itself, which in the
+  exported page has no kernel to ask for its engine and so shows "Loading
+  the Simlin engine..." and then a timeout message, not the diagram; pass
+  `--ExecutePreprocessor.store_widget_state=False` to get the SVG diagram
+  in the export (`make export-check` in `src/pysimlin` exercises both arms).
 - **Asset delivery.** If the saved-state size is a concern, or the
   front-end cannot receive binary comm messages, set `SIMLIN_WIDGET_ASSET`
   **before** `import simlin`: `inline` embeds the engine wasm into the

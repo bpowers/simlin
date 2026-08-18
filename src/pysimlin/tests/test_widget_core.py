@@ -14,7 +14,6 @@ import pytest
 from simlin._sync import ChangeEvent
 from simlin._widget_core import (
     ASSET_ENV,
-    ENVELOPE_HEADROOM_BYTES,
     INLINE_WASM_GLOBAL,
     MAX_SNAPSHOT_BYTES,
     TORNADO_DEFAULT_MAX_MESSAGE_SIZE,
@@ -138,11 +137,13 @@ class TestSnapshotSize:
 
     def test_default_cap_leaves_room_under_the_tornado_default(self) -> None:
         # The cap is measured on the escaped snapshot text, so the only
-        # other bytes in the frame are the envelope/header, bounded by
-        # ENVELOPE_HEADROOM_BYTES; the sum must fit tornado's default.
+        # other bytes in the frame are the envelope's other fields and the
+        # jupyter message header/parent/metadata -- under 2 KiB in practice.
+        # Pin a whole MiB of headroom so a future bump of the cap has to
+        # argue with this line, not discover 1009 closes in a notebook.
         assert MAX_SNAPSHOT_BYTES == 8 * 1024 * 1024
         assert TORNADO_DEFAULT_MAX_MESSAGE_SIZE == 10 * 1024 * 1024
-        assert MAX_SNAPSHOT_BYTES + ENVELOPE_HEADROOM_BYTES < TORNADO_DEFAULT_MAX_MESSAGE_SIZE
+        assert MAX_SNAPSHOT_BYTES + 1024 * 1024 <= TORNADO_DEFAULT_MAX_MESSAGE_SIZE
 
     @pytest.mark.parametrize(
         ("text", "expected"),
@@ -306,15 +307,16 @@ class TestIsOwnChange:
     @pytest.mark.parametrize(
         ("event", "own", "expected"),
         [
-            (ChangeEvent("widget", 3), 3, True),
-            (ChangeEvent("widget", 3), 4, False),
-            (ChangeEvent("widget", 3), None, False),
-            (ChangeEvent("edit", 3), 3, False),
-            (ChangeEvent("disk", 3), 3, False),
-            (ChangeEvent("reload", 3), 3, False),
+            (ChangeEvent("widget", 3), {3}, True),
+            (ChangeEvent("widget", 3), {2, 3, 4}, True),  # several accepts pending
+            (ChangeEvent("widget", 3), {4}, False),
+            (ChangeEvent("widget", 3), set(), False),
+            (ChangeEvent("edit", 3), {3}, False),
+            (ChangeEvent("disk", 3), {3}, False),
+            (ChangeEvent("reload", 3), {3}, False),
         ],
     )
-    def test_arms(self, event: ChangeEvent, own: int | None, expected: bool) -> None:
+    def test_arms(self, event: ChangeEvent, own: set[int], expected: bool) -> None:
         assert is_own_change(event, own) is expected
 
 

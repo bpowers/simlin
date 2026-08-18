@@ -817,6 +817,7 @@ class TestWatcherWiring:
             with pytest.warns(RuntimeWarning, match="unsaved local changes") as record:
                 _poll(model)
             assert len(record) == 1
+            assert (record[0].filename, record[0].lineno) == (str(path), 0)
             with warnings.catch_warnings():
                 warnings.simplefilter("error")
                 _poll(model)  # same bytes again: silent
@@ -884,6 +885,12 @@ class TestWatcherWiring:
             with pytest.warns(RuntimeWarning, match="could not be loaded") as record:
                 _poll(model)
             assert len(record) == 1
+            # Raised on the poll thread, where no user frame exists: the
+            # warning is located at the file it is about, not at an internal
+            # frame of project.py, and line 0 so no "source line" is quoted.
+            assert record[0].filename == str(path)
+            assert record[0].lineno == 0
+            assert str(path) in str(record[0].message)
             with warnings.catch_warnings():
                 warnings.simplefilter("error")
                 _poll(model)  # same bad bytes: no second warning

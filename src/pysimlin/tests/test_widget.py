@@ -23,7 +23,10 @@ Message-type x state table covered here (each row is a test):
     snapshot  | write fails after apply  -> traits (exact json, base+1), saved +
                                             warn notice, project dirty
     snapshot  | handler raises anywhere  -> rejected + warn notice (exactly one
-                                            reply, always)
+                                            reply, always); if it raised AFTER
+                                            applying, the real pair is pushed
+                                            before rejected so the browser
+                                            re-seeds on it
     snapshot  | malformed base/json      -> RuntimeWarning, rejected + warn notice
     oversize  | well-formed              -> RuntimeWarning on the kernel's stderr (a
                                             comm handler runs outside any cell, so
@@ -512,6 +515,33 @@ class TestSnapshotAccept:
             fn()
         assert _sent(w) == []  # recognised as our own: no re-push, no notice
 
+    def test_several_own_accepts_queued_behind_a_busy_loop_are_all_recognised(
+        self, model: Model, model_path: Path, assets: WidgetAssets
+    ) -> None:
+        # ipykernel 7 handles comm messages on a subshell thread while a cell
+        # runs, so three drags during a long cell are three accepted
+        # snapshots whose notifications all queue on the (busy) IO loop and
+        # drain together afterwards.  Every one of them is this widget's own:
+        # none may be re-pushed or announced as "Updated in another view".
+        queue: list[Callable[[], None]] = []
+        w = _widget(model, assets, dispatch=queue.append)
+        _drain(w)
+        for i, name in enumerate(["a", "b", "c"]):
+            text = _snapshot_with(model_path, name)
+            _from_browser(w, {"type": "snapshot", "base": i, "json": text})
+        assert model.revision == 3
+        assert len(queue) == 3
+        _drain(w)
+        for fn in queue:
+            fn()
+        assert _sent(w) == []
+        # A foreign change afterwards is still pushed.
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="from_python", equation="1"))
+        for fn in queue[3:]:
+            fn()
+        assert [kind for kind, _, _ in _sent(w)] == ["update", "custom"]
+
 
 class TestSnapshotReject:
     def test_ac2_5_stale_base_is_rejected_and_never_written(
@@ -715,13 +745,49 @@ class TestExactlyOneReply:
             _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
         # The change was applied (the file has it) and the browser still gets
         # exactly one reply -- rejected, at the kernel's real revision -- so
-        # its save queue never hangs; its next save is stale and re-seeds.
+        # its save queue never hangs.  With ``_push`` itself broken the
+        # re-push before ``rejected`` fails too (and warns); the reply is
+        # still owed and still sent.
         assert model.revision == 1
         assert simlin.load(model_path).get_variable("x") is not None
         replies = [
             c for k, c, _ in _sent(w) if k == "custom" and c["type"] in ("saved", "rejected")
         ]
         assert replies == [{"type": "rejected", "revision": 1}]
+
+    def test_a_failure_after_apply_pushes_the_real_state_before_rejected(
+        self, model: Model, model_path: Path, assets: WidgetAssets
+    ) -> None:
+        # The snapshot applied (revision moved, file written) and the handler
+        # failed AFTER that, before the browser was told.  On ``rejected`` the
+        # browser re-seeds from the traits, so the traits must carry the
+        # kernel's real state first -- otherwise the browser keeps editing
+        # from revision 0 and every later save is rejected as stale.
+        w = _widget(model, assets)
+        text = _snapshot_with(model_path, "x")
+
+        def boom(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("reply planning exploded")
+
+        _drain(w)
+        with pytest.MonkeyPatch.context() as broken:
+            broken.setattr("simlin.widget.plan_snapshot_reply", boom)
+            with pytest.warns(RuntimeWarning, match="reply planning exploded"):
+                _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
+        assert model.revision == 1
+        sent = _sent(w)
+        assert [k for k, _, _ in sent] == ["update", "custom", "custom"]
+        assert sent[0][1] == {
+            "project_json": _project(model).serialize_json().decode("utf-8"),
+            "revision": 1,
+        }
+        assert sent[1][1] == {"type": "rejected", "revision": 1}
+        assert sent[2][1]["type"] == "notice"
+        # And the browser's next save from that pushed state is accepted.
+        _drain(w)
+        _from_browser(w, {"type": "snapshot", "base": 1, "json": _snapshot_with(model_path, "y")})
+        assert model.revision == 2
+        assert _sent(w)[-1] == ("custom", {"type": "saved", "revision": 2}, None)
 
     @pytest.mark.parametrize(
         "arm", ["accept", "stale", "unparsable", "write-failure", "handler-bug"]
@@ -1230,6 +1296,24 @@ class TestCleanup:
         assert len(project._listeners) == 2
         ModelWidget.close_all()
         assert project._listeners == {}
+
+    def test_close_all_leaves_other_ipywidgets_open(
+        self, model: Model, assets: WidgetAssets
+    ) -> None:
+        # The inherited Widget.close_all() closes every widget in the kernel;
+        # ours is scoped to model editors.
+        import ipywidgets
+
+        other = ipywidgets.IntSlider()
+        w = _widget(model, assets)
+        ModelWidget.close_all()
+        assert w.comm is None
+        assert other.comm is not None
+        # A closed widget is not closed twice; a fresh one is.
+        w2 = _widget(model, assets)
+        ModelWidget.close_all()
+        assert w2.comm is None
+        other.close()
 
     def test_subscription_never_keeps_a_closed_widget_alive(
         self, model: Model, assets: WidgetAssets

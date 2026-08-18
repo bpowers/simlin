@@ -31,14 +31,23 @@ the browser is chosen once, when this module is imported, from the
 - an ``http(s)://`` URL: ``_esm`` is that URL (a dev server or CDN serving
   the module); the wasm still goes over the comm.
 
-Threading.  Comm messages are handled on the kernel's main thread.  Project
-change notifications may originate on the poll thread; when a kernel IO
-loop is present (``shell.kernel.io_loop``) they are marshalled onto it with
-``add_callback`` -- the same thread the comm handlers run on -- so a widget
-never touches its traits from two threads at once.  Without a kernel loop
-(a script, tests) delivery is direct.  A widget never holds a Project lock
-while sending; ``Project.on_change`` already guarantees callbacks run with
-no lock held.
+Threading.  Which thread handles a comm message is the kernel's choice, and
+it is not always the main thread: ipykernel 7 (JupyterLab 4.4+) runs comm
+messages on a subshell thread WHILE a cell executes, so a browser edit made
+during a long cell is applied and written immediately, on that thread, and
+``_push``/``send`` run there too (as ipywidgets' own handlers do).  Project
+change notifications may originate on the poll thread or on that subshell
+thread; when a kernel IO loop is present (``shell.kernel.io_loop``) they
+are marshalled onto it with ``add_callback`` and delivered when it runs
+(after the cell, if one is running).  Without a kernel loop (a script,
+tests) delivery is direct.  What makes this safe: the model side is
+serialised by ``Project._file_lock`` (a snapshot and a concurrent ``edit()``
+cannot interleave; whichever comes second sees the moved revision -- the
+stale-base rejection, or ``edit()``'s "project changed during edit"), and
+the widget's own two pieces of cross-thread state, the trait push and the
+set of own pending revisions, sit under ``_state_lock``.  A widget never
+holds a Project lock while sending; ``Project.on_change`` already
+guarantees callbacks run with no lock held.
 """
 
 from __future__ import annotations
@@ -46,12 +55,13 @@ from __future__ import annotations
 import functools
 import os
 import sys
+import threading
 import warnings
 import weakref
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import anywidget
 import traitlets
@@ -222,18 +232,27 @@ class ModelWidget(anywidget.AnyWidget):
     is written by the browser (mirrored to :attr:`Model.selection`);
     ``height`` (px), ``theme`` (``auto`` follows the notebook, else
     ``light``/``dark``) and ``read_only`` configure the editor;
-    ``max_snapshot_bytes`` is the largest edit (the whole project as native
-    JSON, in UTF-8 bytes) the browser will send back -- above it an edit is
-    refused with a notice instead of being lost to the notebook server's
-    websocket message limit (see ``simlin._widget_core.MAX_SNAPSHOT_BYTES``
-    for the default and why).  Seeding or pushing a project above that size
-    warns once per widget.
+    ``max_snapshot_bytes`` is the largest edit the browser will send back,
+    measured as it rides in the message (the whole project as native JSON,
+    JSON-string-escaped, in UTF-8 bytes: :func:`~simlin._widget_core.
+    snapshot_wire_size`) -- above it an edit is refused with a notice
+    instead of being lost to the notebook server's websocket message limit
+    (see ``simlin._widget_core.MAX_SNAPSHOT_BYTES`` for the default and
+    why).  Seeding or pushing a project above that size warns once per
+    widget.
 
     Lifetime: like every ipywidget, a widget stays alive until
     :meth:`close` (ipywidgets keeps a registry of open widgets), and it
     keeps its model's project alive with it; ``close()`` unsubscribes from
-    the project.
+    the project.  :meth:`close_all` closes every open ``ModelWidget`` and
+    nothing else (the inherited ``ipywidgets.Widget.close_all`` closes every
+    widget of every kind in the kernel).
     """
+
+    _open: ClassVar[weakref.WeakSet[ModelWidget]] = weakref.WeakSet()
+    """Every ``ModelWidget`` not yet closed, so :meth:`close_all` can be
+    scoped to this class without reaching into ipywidgets' private
+    registry.  Weak: ipywidgets' own registry is what keeps a widget alive."""
 
     project_json = traitlets.Unicode("").tag(sync=True)
     revision = traitlets.Int(0).tag(sync=True)
@@ -295,11 +314,19 @@ class ModelWidget(anywidget.AnyWidget):
         self._project: Project = project
         self._assets = resolved
         self._dispatch = _kernel_dispatch() if dispatch is None else dispatch
-        # The revision the widget's own in-flight snapshot will produce if
-        # accepted; ``is_own_change`` uses it to skip re-pushing (and thereby
-        # remounting) the browser's own edit.  Set before ``_apply_snapshot``
-        # because, without a dispatcher, the notification fires inside it.
-        self._own_revision: int | None = None
+        # The revisions this widget's accepted snapshots produced whose
+        # project notification has not been delivered yet; ``is_own_change``
+        # uses them to skip re-pushing (and thereby remounting) the browser's
+        # own edits.  A set, not one slot: with notifications marshalled onto
+        # a busy IO loop, several accepts can precede the first delivery.
+        # Guarded by ``_state_lock``: added on the comm handler's thread,
+        # discarded on the IO loop's (see the module docstring on threading).
+        self._own_revisions: set[int] = set()
+        # Serialises trait pushes (``_push``) and the own-revision set across
+        # the two threads that may touch them.  ``hold_sync`` is per widget
+        # and not thread-safe; two interleaved pushes could otherwise send a
+        # torn (json, revision) pair.
+        self._state_lock = threading.RLock()
         self._unsubscribe: Callable[[], None] | None = None
         # The oversize warning is per widget, not per push: a Python edit()
         # loop on a too-large model would otherwise warn on every iteration.
@@ -334,6 +361,7 @@ class ModelWidget(anywidget.AnyWidget):
             **kwargs,
         )
         self.on_msg(self._on_custom_msg)
+        ModelWidget._open.add(self)
         self._warn_if_oversize(json_bytes.decode("utf-8"))
         # A weak reference: the project holds its listeners strongly, and a
         # closed widget must not be kept alive by a project it no longer
@@ -356,18 +384,29 @@ class ModelWidget(anywidget.AnyWidget):
 
     def close(self) -> None:
         """Stop following the project and close the comm (idempotent)."""
+        ModelWidget._open.discard(self)
         unsubscribe = getattr(self, "_unsubscribe", None)
         if unsubscribe is not None:
             self._unsubscribe = None
             unsubscribe()
         super().close()
 
+    @classmethod
+    def close_all(cls) -> None:
+        """Close every open ``ModelWidget`` (each stops following its
+        project) and no other widget.  Overrides ``ipywidgets.Widget.
+        close_all``, which closes EVERY widget in the kernel -- sliders,
+        progress bars, other libraries' -- and is not what "close the model
+        editors" means."""
+        for widget in list(cls._open):
+            widget.close()
+
     # ── kernel -> browser ───────────────────────────────────────────
 
     def _push(self, json_text: str, revision: int) -> None:
         """Assign the authoritative pair in one sync message, so the browser
         never observes a revision without its contents (or vice versa)."""
-        with self.hold_sync():
+        with self._state_lock, self.hold_sync():
             self.project_json = json_text
             self.revision = revision
         self._warn_if_oversize(json_text)
@@ -404,7 +443,10 @@ class ModelWidget(anywidget.AnyWidget):
         the project's current pair -- read at delivery time, not from the
         event, since a later change may already have landed -- and say
         where the change came from."""
-        if is_own_change(event, self._own_revision):
+        with self._state_lock:
+            own = is_own_change(event, self._own_revisions)
+            self._own_revisions.discard(event.revision)
+        if own:
             return
         self._push_from_project()
         text, level = notice_for_change(event.source)
@@ -473,17 +515,35 @@ class ModelWidget(anywidget.AnyWidget):
                 RuntimeWarning,
                 stacklevel=2,
             )
-            self._own_revision = None
+            with self._state_lock:
+                self._own_revisions.discard(request.base + 1)
+            # The failure may have come AFTER the snapshot was applied (the
+            # revision moved, the file was written) but before the browser
+            # was told: on ``rejected`` the browser re-seeds from the traits,
+            # so they must carry the kernel's real state first, otherwise it
+            # keeps editing from the old revision and every later save is
+            # rejected as stale.  Unchanged traits send nothing (ipywidgets
+            # skips an empty update), so this is a no-op when nothing moved.
+            try:
+                self._push_from_project()
+            except Exception as push_exc:
+                warnings.warn(
+                    f"simlin: ModelWidget could not re-push its project after a failed "
+                    f"snapshot: {push_exc!r}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             self.send(core.rejected_message(int(self._project.revision)))
             self._notice(f"Your edit could not be applied: {exc}.", "warn")
 
     def _apply_and_reply(self, request: SnapshotRequest) -> None:
         project = self._project
-        # The revision this snapshot produces if applied.  Set before the
-        # call because, without a dispatcher, the project's notification
-        # fires inside ``_apply_snapshot``; cleared below if nothing was
+        # The revision this snapshot produces if applied.  Remembered before
+        # the call because, without a dispatcher, the project's notification
+        # fires inside ``_apply_snapshot``; forgotten below if nothing was
         # produced so someone else's change at that revision is not skipped.
-        self._own_revision = request.base + 1
+        with self._state_lock:
+            self._own_revisions.add(request.base + 1)
         error: str | None = None
         try:
             applied = project._apply_snapshot(request.json.encode("utf-8"), request.base)
@@ -502,7 +562,8 @@ class ModelWidget(anywidget.AnyWidget):
                 f"simlin: a widget edit could not be applied: {exc}", RuntimeWarning, stacklevel=3
             )
         if not applied:
-            self._own_revision = None
+            with self._state_lock:
+                self._own_revisions.discard(request.base + 1)
         outcome = SnapshotOutcome(applied=applied, revision=int(project.revision), error=error)
         plan = plan_snapshot_reply(request, outcome)
         if plan.push is not None:

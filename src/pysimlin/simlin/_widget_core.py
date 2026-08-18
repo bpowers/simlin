@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Union
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Collection
 
     from ._sync import ChangeEvent, ChangeSource
 
@@ -143,11 +143,6 @@ the server limit may raise the widget's too,
 ``model.widget(max_snapshot_bytes=...)``.  Must equal ``MAX_SNAPSHOT_BYTES``
 in ``src/notebook-widget/src/widget-core.ts`` (the JS default when the
 trait is missing)."""
-
-ENVELOPE_HEADROOM_BYTES = 64 * 1024
-"""Generous bound on everything in a snapshot's websocket frame that is not
-the escaped snapshot text: the envelope's other fields, the jupyter message
-header/parent/metadata, and the comm id -- a few hundred bytes in practice."""
 
 
 def snapshot_wire_size(text: str) -> int:
@@ -422,17 +417,23 @@ def plan_snapshot_reply(request: SnapshotRequest, outcome: SnapshotOutcome) -> S
 # ── change notifications ────────────────────────────────────────────────
 
 
-def is_own_change(event: ChangeEvent, own_revision: int | None) -> bool:
-    """Whether a project change notification is this widget's own accepted
-    snapshot (which the widget already pushed itself, so re-pushing would
-    remount the browser's editor and lose its undo history).
+def is_own_change(event: ChangeEvent, own_revisions: Collection[int]) -> bool:
+    """Whether a project change notification is one of this widget's own
+    accepted snapshots (which the widget already pushed itself, so
+    re-pushing would remount the browser's editor and lose its undo
+    history).
 
-    Only ``widget``-sourced events can be ours; a disk reload or a Python
-    ``edit()`` that happens to land at the remembered revision is impossible
+    ``own_revisions`` holds every revision this widget's accepted snapshots
+    produced whose notification has not been delivered yet -- a set, not
+    one slot, because a kernel that handles comm messages while a cell runs
+    (ipykernel 7 subshells) can accept several snapshots before the IO loop
+    drains their notifications, and each of them is ours.  Only
+    ``widget``-sourced events can be ours; a disk reload or a Python
+    ``edit()`` that happens to land at a remembered revision is impossible
     because revisions are unique per project, but the source check keeps
     the rule readable.
     """
-    return event.source == "widget" and own_revision is not None and event.revision == own_revision
+    return event.source == "widget" and event.revision in own_revisions
 
 
 def notice_for_change(source: ChangeSource) -> tuple[str, NoticeLevel]:
@@ -475,7 +476,6 @@ def dispatch_for_shell(shell: object) -> Callable[[Callable[[], None]], None] | 
 __all__ = [
     "ASSET_ENV",
     "ASSET_PACKAGE_DIR",
-    "ENVELOPE_HEADROOM_BYTES",
     "INLINE_WASM_GLOBAL",
     "MAX_SNAPSHOT_BYTES",
     "TORNADO_DEFAULT_MAX_MESSAGE_SIZE",
