@@ -54,7 +54,6 @@ from __future__ import annotations
 
 import functools
 import os
-import sys
 import threading
 import warnings
 import weakref
@@ -90,12 +89,12 @@ from ._widget_core import (
     parse_incoming,
     plan_snapshot_reply,
     snapshot_wire_size,
+    user_stacklevel,
 )
 from .errors import SimlinAssetError, SimlinError, SimlinWriteError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from types import FrameType
 
     from ._sync import ChangeEvent
     from .model import Model
@@ -189,24 +188,20 @@ def _kernel_dispatch() -> Dispatch | None:
     return dispatch_for_shell(get_ipython())  # type: ignore[no-untyped-call]
 
 
-def _stacklevel_outside_package() -> int:
-    """The ``warnings.warn(stacklevel=)`` that attributes a warning raised
-    from inside pysimlin to the first caller frame outside the ``simlin``
-    package (the user's cell), however deep the internal call chain
-    (``Model._repr_mimebundle_`` -> ``Model.widget`` -> ``ModelWidget``
-    -> ``_warn_if_oversize``).  Level 1 is the caller of ``warn``; every
-    ``simlin.*`` frame between it and the outside adds one.  Python 3.12's
-    ``skip_file_prefixes`` does the same and is not available on 3.11."""
-    level = 1
-    frame: FrameType | None = sys._getframe(1)  # the function about to call warnings.warn
-    package_prefix = __package__ + "."
-    while frame is not None:
-        name = frame.f_globals.get("__name__", "")
-        if name != __package__ and not name.startswith(package_prefix):
-            return level
-        level += 1
-        frame = frame.f_back
-    return level
+def _describe(exc: BaseException) -> str:
+    """``str(exc)``, or the type name when that is empty (a bare
+    ``KeyboardInterrupt``): the text ends up in a notice the user reads."""
+    return str(exc) or type(exc).__name__
+
+
+@dataclass
+class _SnapshotProgress:
+    """How far the handling of one snapshot got, so a failure anywhere in
+    it can still be answered with the one reply it is owed (see
+    ``ModelWidget._handle_snapshot``)."""
+
+    applied: bool = False
+    replied: bool = False
 
 
 # ── the widget ──────────────────────────────────────────────────────────
@@ -347,7 +342,7 @@ class ModelWidget(anywidget.AnyWidget):
             warnings.warn(
                 f"simlin: could not lay out (or save) a diagram for the editor: {exc}",
                 RuntimeWarning,
-                stacklevel=_stacklevel_outside_package(),
+                stacklevel=user_stacklevel(),
             )
         json_bytes, revision = project._snapshot()
         super().__init__(
@@ -418,17 +413,17 @@ class ModelWidget(anywidget.AnyWidget):
         The kernel -> browser direction has no such limit, so the model
         still displays; the warning is what tells the Python user why editor
         edits will be refused, and how to lift both limits.  Attributed to
-        the first frame outside the ``simlin`` package -- the user's cell
-        for a display, ``Model.widget()`` call or ``edit()`` block -- so the
-        warning shows in that cell's output rather than pointing at
-        ``model.py``."""
+        the user's cell (:func:`~simlin._widget_core.user_stacklevel`) --
+        the one that displayed the model, called ``Model.widget()`` or ran
+        the ``edit()`` block -- so the warning shows in that cell's output
+        rather than pointing at ``model.py``."""
         if self._warned_oversize:
             return
         text = oversize_warning(snapshot_wire_size(json_text), int(self.max_snapshot_bytes))
         if text is None:
             return
         self._warned_oversize = True
-        warnings.warn(text, RuntimeWarning, stacklevel=_stacklevel_outside_package())
+        warnings.warn(text, RuntimeWarning, stacklevel=user_stacklevel())
 
     def _push_from_project(self) -> None:
         json_bytes, revision = self._project._snapshot()
@@ -506,30 +501,45 @@ class ModelWidget(anywidget.AnyWidget):
         save only on ``saved``/``rejected`` and runs one save at a time, so
         a snapshot whose reply never comes hangs every later save of that
         view; hence the belt-and-braces: any exception anywhere in the
-        handling -- including a bug in this class -- still ends in exactly
-        one reply.  Which reply follows obligation 5's logic: if the
-        snapshot was applied before the failure (the revision moved), it is
-        an ACCEPT -- the sent bytes are pushed at ``base + 1`` (best effort)
-        and ``saved`` is sent -- because a ``rejected`` would wedge the view:
-        the browser's re-seed on a reject lands on the pair it already holds
-        (in the steady state the kernel's bytes equal the sent bytes) and its
-        acknowledged base stays one behind for good.  If nothing was applied
-        it is a reject at the current revision."""
-        applied: list[bool] = [False]
+        handling -- including a bug in this class, or a ``KeyboardInterrupt``
+        landing while a comm message is handled -- still ends in exactly one
+        reply (a ``BaseException`` is then re-raised: it is not ours to
+        swallow, only to answer first).  Which reply follows obligation 5's
+        logic: if the snapshot was applied before the failure (the revision
+        moved), it is an ACCEPT -- the sent bytes are pushed at ``base + 1``
+        (best effort) and ``saved`` is sent -- because a ``rejected`` would
+        wedge the view: the browser's re-seed on a reject lands on the pair
+        it already holds (in the steady state the kernel's bytes equal the
+        sent bytes) and its acknowledged base stays one behind for good.  If
+        nothing was applied it is a reject at the current revision.  And if
+        the reply itself already went out (the failure was in a message
+        after it, such as the warn notice), nothing more is sent: a second
+        reply would be consumed by the browser's NEXT snapshot."""
+        progress = _SnapshotProgress()
         try:
-            self._apply_and_reply(request, applied)
+            self._apply_and_reply(request, progress)
         except Exception as exc:  # the reply is owed regardless
             warnings.warn(
                 f"simlin: ModelWidget failed while handling a snapshot: {exc!r}",
                 RuntimeWarning,
                 stacklevel=2,
             )
-            if applied[0]:
-                self._reply_after_failure_applied(request, exc)
-            else:
-                self._reply_after_failure_unapplied(request, exc)
+            self._reply_after_failure(request, exc, progress)
+        except BaseException as exc:
+            self._reply_after_failure(request, exc, progress)
+            raise
 
-    def _reply_after_failure_applied(self, request: SnapshotRequest, exc: Exception) -> None:
+    def _reply_after_failure(
+        self, request: SnapshotRequest, exc: BaseException, progress: _SnapshotProgress
+    ) -> None:
+        if progress.replied:
+            return
+        if progress.applied:
+            self._reply_after_failure_applied(request, exc)
+        else:
+            self._reply_after_failure_unapplied(request, exc)
+
+    def _reply_after_failure_applied(self, request: SnapshotRequest, exc: BaseException) -> None:
         """The accept arm of a handler failure: the change is real (revision
         ``base + 1``, file written or ``dirty``), so the browser is told
         exactly what an ordinary accept tells it.  ``base + 1`` stays in
@@ -545,10 +555,11 @@ class ModelWidget(anywidget.AnyWidget):
             )
         self.send(core.saved_message(revision))
         self._notice(
-            f"Your edit was applied, but the editor could not be told cleanly: {exc}.", "warn"
+            f"Your edit was applied, but the editor could not be told cleanly: {_describe(exc)}.",
+            "warn",
         )
 
-    def _reply_after_failure_unapplied(self, request: SnapshotRequest, exc: Exception) -> None:
+    def _reply_after_failure_unapplied(self, request: SnapshotRequest, exc: BaseException) -> None:
         """The reject arm of a handler failure: nothing moved.  The project's
         real pair is re-pushed first (unchanged traits send nothing, so this
         is a no-op unless some other change landed meanwhile) and the
@@ -565,14 +576,16 @@ class ModelWidget(anywidget.AnyWidget):
                 stacklevel=3,
             )
         self.send(core.rejected_message(int(self._project.revision)))
-        self._notice(f"Your edit could not be applied: {exc}.", "warn")
+        self._notice(f"Your edit could not be applied: {_describe(exc)}.", "warn")
 
-    def _apply_and_reply(self, request: SnapshotRequest, applied_out: list[bool]) -> None:
-        """Apply ``request`` and send its reply.  ``applied_out[0]`` is set to
-        ``True`` the moment the snapshot is known to be applied (the
-        ``_apply_snapshot`` call returned ``True`` or raised
-        ``SimlinWriteError``), so a failure anywhere after that point can be
-        answered as the accept it is (see ``_handle_snapshot``)."""
+    def _apply_and_reply(self, request: SnapshotRequest, progress: _SnapshotProgress) -> None:
+        """Apply ``request`` and send its reply, recording in ``progress``
+        the two facts a failure anywhere in here needs answered correctly
+        (see ``_handle_snapshot``): ``applied`` the moment the snapshot is
+        known to be applied (the ``_apply_snapshot`` call returned ``True``
+        or raised ``SimlinWriteError``, whose type alone means "applied
+        but ..."), and ``replied`` the moment the ``saved``/``rejected``
+        message has been sent."""
         project = self._project
         # The revision this snapshot produces if applied.  Remembered before
         # the call because, without a dispatcher, the project's notification
@@ -581,14 +594,21 @@ class ModelWidget(anywidget.AnyWidget):
         with self._state_lock:
             self._own_revisions.add(request.base + 1)
         error: str | None = None
+        write_failed = False
         try:
             applied = project._apply_snapshot(request.json.encode("utf-8"), request.base)
-        except SimlinWriteError as exc:  # applied in memory; only the file lags
+        except SimlinWriteError as exc:  # applied; a step after the commit failed
             applied = True
-            applied_out[0] = True
-            error = str(exc.__cause__ or exc)
+            progress.applied = True
+            error = _describe(exc.__cause__ or exc)
+            write_failed = exc.write_failed
+            what = (
+                "could not be written"
+                if write_failed
+                else "the kernel could not finish handling it"
+            )
             warnings.warn(
-                f"simlin: a widget edit was applied but could not be written: {error}",
+                f"simlin: a widget edit was applied but {what}: {error}",
                 RuntimeWarning,
                 stacklevel=3,
             )
@@ -599,11 +619,16 @@ class ModelWidget(anywidget.AnyWidget):
                 f"simlin: a widget edit could not be applied: {exc}", RuntimeWarning, stacklevel=3
             )
         else:
-            applied_out[0] = applied
+            progress.applied = applied
         if not applied:
             with self._state_lock:
                 self._own_revisions.discard(request.base + 1)
-        outcome = SnapshotOutcome(applied=applied, revision=int(project.revision), error=error)
+        outcome = SnapshotOutcome(
+            applied=applied,
+            revision=int(project.revision),
+            error=error,
+            write_failed=write_failed,
+        )
         plan = plan_snapshot_reply(request, outcome)
         if plan.push is not None:
             # hold_sync exits (state message sent) before the reply goes out,
@@ -611,6 +636,8 @@ class ModelWidget(anywidget.AnyWidget):
             self._push(*plan.push)
         for message in plan.messages:
             self.send(message)
+            if message["type"] in ("saved", "rejected"):
+                progress.replied = True
 
     @traitlets.observe("selection")
     def _selection_changed(self, change: dict[str, Any]) -> None:

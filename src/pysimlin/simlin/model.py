@@ -29,6 +29,7 @@ from ._ffi import (
     model_get_var_names,
     string_to_c,
 )
+from ._widget_core import user_stacklevel
 from .analysis import Analysis, Link, LinkPolarity, Loop, LoopPolarity, Partition
 from .diagram import Diagram
 from .errors import (
@@ -441,17 +442,25 @@ class Model:
         a ``RuntimeWarning`` carrying the actionable message (the install
         line, the missing file) -- a notebook user then sees the diagram and
         the fix rather than a traceback; :meth:`widget` itself still raises.
+        The warning is attributed to the user's cell (``user_stacklevel``:
+        the display formatter frames between the cell and this method are
+        skipped, else it would point at IPython's ``formatters.py`` and be
+        shown once per kernel session); the same message also rides in the
+        bundle's ``text/plain``, which Python's once-per-location warning
+        filter never dedupes.
         """
         data: dict[str, Any] = {}
         metadata: dict[str, Any] = {}
+        unavailable: str | None = None
         try:
             widget = self.widget()
         except (SimlinDependencyError, SimlinAssetError) as exc:
+            unavailable = str(exc)
             warnings.warn(
                 f"simlin: showing the static diagram only; the interactive editor is "
-                f"unavailable because {exc}",
+                f"unavailable because {unavailable}",
                 RuntimeWarning,
-                stacklevel=2,
+                stacklevel=user_stacklevel(),
             )
         else:
             bundle = widget._repr_mimebundle_()
@@ -459,7 +468,11 @@ class Model:
                 data, metadata = dict(bundle[0]), dict(bundle[1])
             elif isinstance(bundle, dict):
                 data = dict(bundle)
-        data["text/plain"] = repr(self)
+        data["text/plain"] = (
+            repr(self)
+            if unavailable is None
+            else f"{self!r} -- interactive editor unavailable: {unavailable}"
+        )
         try:
             data.update(self._svg_mimebundle())
         except SimlinError as exc:

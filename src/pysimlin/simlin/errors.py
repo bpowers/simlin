@@ -158,18 +158,23 @@ class SimlinImportError(SimlinError):
 
 
 class SimlinWriteError(SimlinRuntimeError):
-    """A change was applied to the in-memory project (its revision advanced
-    and it is now ``dirty``) but writing the file failed.
+    """A change was applied to the in-memory project (its revision advanced)
+    but a step after that failed.
 
     Raised by :meth:`Project._apply_snapshot` so a caller can tell "applied
-    but unwritten" from "not applied" without inspecting the project;
-    ``__cause__`` is the underlying ``OSError`` or conflict error, and
-    ``revision`` the revision the change produced.  ``save()`` retries.
+    but ..." from "not applied" without inspecting the project: the type
+    alone says the change is real, whatever failed afterwards.  ``revision``
+    is the revision the change produced and ``__cause__`` the underlying
+    error.  ``write_failed`` says whether that step was the autosave write
+    -- the project is then ``dirty`` and ``save()`` retries -- as opposed to
+    a later one (notifying subscribers) after the file was written, where
+    there is nothing to retry.
     """
 
-    def __init__(self, message: str, revision: int):
+    def __init__(self, message: str, revision: int, *, write_failed: bool = True):
         super().__init__(message)
         self.revision = revision
+        self.write_failed = write_failed
 
 
 class SimlinDependencyError(SimlinError, ImportError):
