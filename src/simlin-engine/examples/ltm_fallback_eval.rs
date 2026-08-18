@@ -75,7 +75,8 @@ use simlin_engine::db::{
     sync_from_datamodel_incremental,
 };
 use simlin_engine::ltm_finding::{
-    CandidateGen, FallbackClosures, FallbackConfig, FallbackSeeds, FallbackWeight, FoundLoop,
+    CandidateGen, FallbackClosures, FallbackConfig, FallbackSeeds, FallbackTieBreak,
+    FallbackWeight, FoundLoop,
 };
 use simlin_engine::{canonicalize, open_vensim, open_xmile};
 
@@ -93,100 +94,152 @@ const RECALL_KS: [usize; 5] = [1, 10, 50, 100, 200];
 ///
 /// Adding an enum arm without adding a row here shows up as a missing table
 /// row rather than as silently unmeasured behaviour.
-const STRATEGIES: [(&str, FallbackConfig); 10] = [
-    (
+const STRATEGIES: [(&str, FallbackConfig); 15] = [
+    // The weight axis at the cheapest setting of the other two (AC7.2).
+    row(
         "log \\| stock \\| in-edge",
-        cfg(
-            FallbackWeight::ClampedLogAbs,
-            FallbackSeeds::Stocks,
-            FallbackClosures::SeedInEdges,
-        ),
+        W_LOG,
+        S_STOCK,
+        C_IN_EDGE,
+        T_HOPS,
     ),
-    (
+    row(
         "rel \\| stock \\| in-edge",
-        cfg(
-            FallbackWeight::RelativeLinkScore,
-            FallbackSeeds::Stocks,
-            FallbackClosures::SeedInEdges,
-        ),
+        W_REL,
+        S_STOCK,
+        C_IN_EDGE,
+        T_HOPS,
     ),
-    (
+    row(
         "hop \\| stock \\| in-edge",
-        cfg(
-            FallbackWeight::HopCount,
-            FallbackSeeds::Stocks,
-            FallbackClosures::SeedInEdges,
-        ),
+        W_HOP,
+        S_STOCK,
+        C_IN_EDGE,
+        T_HOPS,
     ),
-    (
+    row(
+        "shift \\| stock \\| in-edge",
+        W_SHIFT,
+        S_STOCK,
+        C_IN_EDGE,
+        T_HOPS,
+    ),
+    // The weight axis again at the closure setting production uses, so the
+    // weight verdict is not an artifact of the cheap closure family.
+    row(
         "log \\| stock \\| every-edge",
-        cfg(
-            FallbackWeight::ClampedLogAbs,
-            FallbackSeeds::Stocks,
-            FallbackClosures::EveryEdge,
-        ),
+        W_LOG,
+        S_STOCK,
+        C_EVERY,
+        T_HOPS,
     ),
-    (
+    row(
         "rel \\| stock \\| every-edge",
-        cfg(
-            FallbackWeight::RelativeLinkScore,
-            FallbackSeeds::Stocks,
-            FallbackClosures::EveryEdge,
-        ),
+        W_REL,
+        S_STOCK,
+        C_EVERY,
+        T_HOPS,
     ),
-    (
+    row(
         "hop \\| stock \\| every-edge",
-        cfg(
-            FallbackWeight::HopCount,
-            FallbackSeeds::Stocks,
-            FallbackClosures::EveryEdge,
-        ),
+        W_HOP,
+        S_STOCK,
+        C_EVERY,
+        T_HOPS,
     ),
-    (
+    row(
+        "shift \\| stock \\| every-edge",
+        W_SHIFT,
+        S_STOCK,
+        C_EVERY,
+        T_HOPS,
+    ),
+    // The seed axis at the two contending weights.
+    row(
         "log \\| +stockless \\| in-edge",
-        cfg(
-            FallbackWeight::ClampedLogAbs,
-            FallbackSeeds::StocksAndStocklessSccs,
-            FallbackClosures::SeedInEdges,
-        ),
+        W_LOG,
+        S_LESS,
+        C_IN_EDGE,
+        T_HOPS,
     ),
-    (
+    row(
         "log \\| +stockless \\| every-edge",
-        cfg(
-            FallbackWeight::ClampedLogAbs,
-            FallbackSeeds::StocksAndStocklessSccs,
-            FallbackClosures::EveryEdge,
-        ),
+        W_LOG,
+        S_LESS,
+        C_EVERY,
+        T_HOPS,
     ),
-    (
+    row(
+        "shift \\| +stockless \\| every-edge",
+        W_SHIFT,
+        S_LESS,
+        C_EVERY,
+        T_HOPS,
+    ),
+    // The tie-break axis, on both contending weights, at the production
+    // setting: the question is whether the hop term's bias toward SHORT cycles
+    // is what caps recall on a graph whose dominant loops are long.
+    row(
+        "log \\| +stockless \\| every-edge \\| node-id tie",
+        W_LOG,
+        S_LESS,
+        C_EVERY,
+        T_NODE,
+    ),
+    row(
+        "shift \\| +stockless \\| every-edge \\| node-id tie",
+        W_SHIFT,
+        S_LESS,
+        C_EVERY,
+        T_NODE,
+    ),
+    // The widest seed policy, which has to justify its cost.
+    row(
         "log \\| all-scc \\| in-edge",
-        cfg(
-            FallbackWeight::ClampedLogAbs,
-            FallbackSeeds::AllSccNodes,
-            FallbackClosures::SeedInEdges,
-        ),
+        W_LOG,
+        S_ALL,
+        C_IN_EDGE,
+        T_HOPS,
     ),
-    (
+    row(
         "log \\| all-scc \\| every-edge",
-        cfg(
-            FallbackWeight::ClampedLogAbs,
-            FallbackSeeds::AllSccNodes,
-            FallbackClosures::EveryEdge,
-        ),
+        W_LOG,
+        S_ALL,
+        C_EVERY,
+        T_HOPS,
     ),
 ];
 
-/// Spell a strategy without repeating the field names ten times.
-const fn cfg(
+const W_LOG: FallbackWeight = FallbackWeight::ClampedLogAbs;
+const W_REL: FallbackWeight = FallbackWeight::RelativeLinkScore;
+const W_HOP: FallbackWeight = FallbackWeight::HopCount;
+const W_SHIFT: FallbackWeight = FallbackWeight::ShiftedLogAbs;
+const S_STOCK: FallbackSeeds = FallbackSeeds::Stocks;
+const S_LESS: FallbackSeeds = FallbackSeeds::StocksAndStocklessSccs;
+const S_ALL: FallbackSeeds = FallbackSeeds::AllSccNodes;
+const C_IN_EDGE: FallbackClosures = FallbackClosures::SeedInEdges;
+const C_EVERY: FallbackClosures = FallbackClosures::EveryEdge;
+const T_HOPS: FallbackTieBreak = FallbackTieBreak::Hops;
+const T_NODE: FallbackTieBreak = FallbackTieBreak::NodeId;
+
+/// Spell one strategy row without repeating the field names fifteen times.
+/// `\|` escapes the pipe inside a markdown table cell.
+const fn row(
+    label: &'static str,
     weight: FallbackWeight,
     seeds: FallbackSeeds,
     closures: FallbackClosures,
-) -> FallbackConfig {
-    FallbackConfig {
-        weight,
-        seeds,
-        closures,
-    }
+    tie_break: FallbackTieBreak,
+) -> (&'static str, FallbackConfig) {
+    (
+        label,
+        FallbackConfig {
+            weight,
+            seeds,
+            closures,
+            tie_break,
+        },
+    )
 }
 
 /// The lexicographically minimal rotation of a cycle's node sequence.

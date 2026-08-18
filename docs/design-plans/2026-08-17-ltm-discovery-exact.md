@@ -584,13 +584,28 @@ Reading the axes:
   the exact enumeration it stands in for -- for recall@200 of 32 against 23,
   and with in-edge closures it costs 0.151 s for 14, worse per unit time than
   stock-seeded every-edge's 23 at 0.141 s. It stays selectable and unused.
-- **The hop tie-break is unconditional.** Rows 1-3 above are directly
-  comparable to the After-Phase-3 tables (same harness, same models, same
-  weights, same in-edge closures; the tie-break is the only difference) and
-  every recall column is identical. It costs nothing measured, and what it
-  buys is inside the zero-weight plateau `ClampedLogAbs` creates: with a third
-  of a real graph's active links weighing exactly 0, many cycles tie, and the
-  tie-break decides among them on cycle length rather than on node numbering.
+- **The hop tie-break is the default and is measurement-neutral.** It is an
+  axis (`FallbackTieBreak::{Hops, NodeId}`), and both arms were measured at
+  the chosen seeds/closures with both contending weights: every recall column
+  and every step-dominant count is identical between them on both models
+  (World3 23/200 and 55/399 under `ClampedLogAbs` either way; C-LEARN 150/153
+  either way). What `Hops` buys is inside the zero-weight plateau
+  `ClampedLogAbs` creates -- with a third of a real graph's active links
+  weighing exactly 0, many cycles tie, and the tie-break decides among them on
+  cycle length rather than on node numbering -- which is a statement about
+  the model rather than about interning order, at no measured cost.
+- **`ShiftedLogAbs` was measured and rejected.** `w = ln(max active |s|) -
+  ln|s|` keeps the relative gain among super-unit links that the clamp
+  discards (an edge of gain 1000 costs less than one of gain 2), which is the
+  distinction World3's long high-gain dominant loops turn on -- so it was the
+  obvious hypothesis for the clamp's low recall. Measured at the chosen
+  seeds/closures it is WORSE: World3 recall@200 10 against 23 and
+  step-dominant 48 against 55; C-LEARN 138/153 against 150/153, where its
+  rows are identical to `HopCount`'s. The mechanism is visible in the sum:
+  `Sigma w = L * ln(max) - ln(product)`, and on these models `ln(max)` per hop
+  (max |s| ~1e4-1e6 on World3, up to 1e14 on C-LEARN) dwarfs any product
+  term, so the shifted arm degenerates into a hop count. It stays selectable
+  as a documented negative result.
 
 **k-best via edge penalty was considered and not adopted.** World3's chosen
 strategy already reports the full 200-loop cap while spending 0.141 s of a

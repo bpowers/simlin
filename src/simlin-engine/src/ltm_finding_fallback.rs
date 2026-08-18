@@ -108,13 +108,55 @@ pub enum FallbackWeight {
     /// magnitude.
     RelativeLinkScore,
     /// `w = 1` per hop: shortest-cycle control, ignoring the scores entirely.
-    /// The baseline the other two have to beat in the evaluation harness.
+    /// The baseline the others have to beat in the evaluation harness.
     HopCount,
+    /// `w = ln(max active |s| at this step) - ln|s|`: the same `-ln` cost as
+    /// [`Self::ClampedLogAbs`], shifted by the step's strongest link instead of
+    /// clamped at 0.
+    ///
+    /// The shift is what makes it non-negative: `max >= |s|` for every active
+    /// edge by construction, so no information has to be thrown away to
+    /// satisfy Dijkstra. That is the whole difference from the clamped arm,
+    /// which collapses EVERY super-unit link to a free hop and so cannot tell
+    /// a link of gain 1000 from one of gain 2 -- on a model whose dominant
+    /// loops are long chains of super-unit links, that is exactly the
+    /// distinction that decides which cycle is strongest.
+    ///
+    /// Summed over a cycle of length `L`, `Σ w = L·ln(max) - ln(Π|s|)`: it
+    /// still charges `ln(max)` per hop, so it prefers short cycles among equal
+    /// products, but a longer cycle with a large enough product still wins.
+    /// The clamped arm cannot express that trade at all, since every
+    /// super-unit hop is free and only the sub-unit links carry cost.
+    ///
+    /// Infinite links: `ln(inf)` would make every finite edge's weight `inf`
+    /// and every infinite edge's `NaN`, so the shift uses the largest FINITE
+    /// active |score| and an infinite edge weighs 0. That keeps a divergent
+    /// link the cheapest hop available, which is what every other arm does
+    /// with one. When every active edge is infinite there is no finite
+    /// reference at all and they are all free hops -- the same reading
+    /// [`Self::RelativeLinkScore`] gives an inf-against-inf pair.
+    ShiftedLogAbs,
 }
 
 impl FallbackWeight {
     /// The formulation production uses unless a caller pins another one.
     pub const DEFAULT: FallbackWeight = FallbackWeight::ClampedLogAbs;
+}
+
+/// How a search orders two routes of equal weight.
+///
+/// Not a corner case under [`FallbackWeight::ClampedLogAbs`], which collapses
+/// every super-unit link to weight 0: a large share of a real graph then ties,
+/// and something has to decide. Which decision is better is a measurement, so
+/// it is an axis.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FallbackTieBreak {
+    /// Fewer hops first. Among equally-weighted routes the shorter one is the
+    /// loop a modeller means, and it is a statement about the model.
+    Hops,
+    /// Lower node id first. Deterministic, and a statement about nothing --
+    /// the control the hop term is measured against.
+    NodeId,
 }
 
 /// Which nodes the fallback runs a search from.
@@ -181,6 +223,8 @@ pub struct FallbackConfig {
     pub seeds: FallbackSeeds,
     /// Which cycles a completed search closes.
     pub closures: FallbackClosures,
+    /// How two routes of equal weight are ordered.
+    pub tie_break: FallbackTieBreak,
 }
 
 impl FallbackConfig {
@@ -199,6 +243,7 @@ impl FallbackConfig {
         weight: FallbackWeight::DEFAULT,
         seeds: FallbackSeeds::StocksAndStocklessSccs,
         closures: FallbackClosures::EveryEdge,
+        tie_break: FallbackTieBreak::Hops,
     };
 
     /// [`Self::DEFAULT`] with the weight replaced -- the spelling the weight
@@ -211,11 +256,29 @@ impl FallbackConfig {
     }
 }
 
-/// The search weight of an edge whose |link score| is `abs_score` and whose
-/// target's active in-edges sum to `in_sum`.
+/// The step-scoped normalizers an edge weight may read.
+///
+/// Both are properties of the loaded step rather than of the edge, and each is
+/// read by exactly one arm -- which is why they travel together rather than as
+/// positional arguments: a new arm needing a new normalizer adds a field here
+/// and `load_step` fills it once, instead of threading another parameter
+/// through every call site.
+#[derive(Clone, Copy)]
+struct EdgeNorms {
+    /// Sum of |score| over the TARGET's active in-edges: the denominator of
+    /// [`FallbackWeight::RelativeLinkScore`].
+    in_sum: f64,
+    /// The largest FINITE |score| over every active edge of the step: the
+    /// shift of [`FallbackWeight::ShiftedLogAbs`]. Zero when the step has no
+    /// finite active edge at all, which only that arm's infinite case reaches.
+    step_max_finite: f64,
+}
+
+/// The search weight of an edge whose |link score| is `abs_score`, under the
+/// step's normalizers.
 ///
 /// `abs_score` is always strictly positive (an inactive edge never reaches
-/// here), so `in_sum >= abs_score > 0` and no arm divides by zero.
+/// here), so `norms.in_sum >= abs_score > 0` and no arm divides by zero.
 ///
 /// The infinite cases are decided rather than avoided, because a divergent
 /// link is signal and dropping it would make the reachable cycle set depend on
@@ -223,6 +286,9 @@ impl FallbackConfig {
 ///
 /// - `ClampedLogAbs`: `ln(inf)` is `inf`, so the clamp makes an infinite link
 ///   a free hop -- consistent with every other super-unit link.
+/// - `ShiftedLogAbs`: an infinite link is a free hop and the shift is taken
+///   over the finite links only, so a finite edge's weight stays finite and
+///   ordered while the divergent one is preferred.
 /// - `RelativeLinkScore` with a finite score against an infinite sibling: the
 ///   share underflows to 0 and the weight is `+inf`. The edge stays walkable
 ///   (an infinite distance still orders and still closes a cycle) but is never
@@ -230,11 +296,28 @@ impl FallbackConfig {
 /// - `RelativeLinkScore` with an infinite score against an infinite sibling:
 ///   `inf / inf` is NaN, which no ordering can use. Both links are equally
 ///   divergent, so the pair is treated as free hops.
-fn edge_weight(weight: FallbackWeight, abs_score: f64, in_sum: f64) -> f64 {
+fn edge_weight(weight: FallbackWeight, abs_score: f64, norms: EdgeNorms) -> f64 {
     match weight {
         FallbackWeight::ClampedLogAbs => (-abs_score.ln()).max(0.0),
+        FallbackWeight::ShiftedLogAbs => {
+            if abs_score.is_infinite() {
+                // The cheapest hop available: a divergent link is the
+                // strongest signal there is, and the finite shift below cannot
+                // describe it.
+                return 0.0;
+            }
+            // `step_max_finite >= abs_score` for every finite active edge, so
+            // the shift makes this non-negative WITHOUT discarding anything --
+            // unlike the clamped arm, which is what this formulation exists to
+            // avoid. The clamp is only a guard on the floating-point identity:
+            // `f64::ln` is not contractually monotone, so two adjacent floats
+            // could in principle round the wrong way, and a negative edge
+            // breaks Dijkstra's settle-once argument silently rather than
+            // loudly.
+            (norms.step_max_finite.ln() - abs_score.ln()).max(0.0)
+        }
         FallbackWeight::RelativeLinkScore => {
-            let w = -(abs_score / in_sum).ln();
+            let w = -(abs_score / norms.in_sum).ln();
             if w.is_nan() {
                 0.0
             } else {
@@ -333,6 +416,12 @@ struct WeightedEdge {
 /// derived-equality trap is avoided by defining `PartialEq` from `cmp`.
 struct HeapEntry {
     dist: f64,
+    /// The ORDERING hop component, flattened to a constant when the configured
+    /// tie-break does not use hops ([`order_hops`]). Separate from `hops` so
+    /// that turning the term off changes the ordering and nothing else -- the
+    /// real hop count still has to travel, because the relaxations extend it.
+    tie: u32,
+    /// The route's real hop count, carried rather than ordered on.
     hops: u32,
     node: u32,
 }
@@ -342,7 +431,7 @@ impl Ord for HeapEntry {
         other
             .dist
             .total_cmp(&self.dist)
-            .then_with(|| other.hops.cmp(&self.hops))
+            .then_with(|| other.tie.cmp(&self.tie))
             .then_with(|| other.node.cmp(&self.node))
     }
 }
@@ -383,6 +472,13 @@ struct FallbackScratch {
     /// node -> sum of |link score| over its active in-edges at the loaded
     /// step: the denominator of [`FallbackWeight::RelativeLinkScore`].
     in_sum: Vec<f64>,
+    /// The largest FINITE |link score| over the loaded step's active edges:
+    /// the shift of [`FallbackWeight::ShiftedLogAbs`]. Zero when the step has
+    /// no finite active edge.
+    step_max_finite: f64,
+    /// How the searches order two routes of equal weight. Fixed for the whole
+    /// sweep, so it is read rather than passed at every relaxation.
+    tie_break: FallbackTieBreak,
     /// Reusable projection of `adj` (targets only) for the per-step Tarjan run.
     scc_adj: Vec<Vec<u32>>,
     /// node -> strongly-connected-component id of the loaded step's active
@@ -448,7 +544,7 @@ struct FallbackScratch {
 impl FallbackScratch {
     /// Allocate reusable state sized for `search`'s node universe, with each
     /// node's per-step edge buffers pre-reserved to its static out-degree.
-    fn new(search: &IndexedSearch) -> Self {
+    fn new(search: &IndexedSearch, tie_break: FallbackTieBreak) -> Self {
         let n_nodes = search.node_count();
         FallbackScratch {
             adj: search
@@ -458,6 +554,8 @@ impl FallbackScratch {
                 .collect(),
             rev: vec![Vec::new(); n_nodes],
             in_sum: vec![0.0; n_nodes],
+            step_max_finite: 0.0,
+            tie_break,
             scc_adj: vec![Vec::new(); n_nodes],
             scc_ids: Vec::new(),
             scc_sizes: Vec::new(),
@@ -503,6 +601,7 @@ impl FallbackScratch {
             row.clear();
         }
         self.in_sum.fill(0.0);
+        self.step_max_finite = 0.0;
 
         // Pass 1: select the active edges, stashing |score| in the weight slot
         // and accumulating each target's determinant mass. The normalization
@@ -530,6 +629,12 @@ impl FallbackScratch {
                     weight: abs_score,
                 });
                 self.in_sum[edge.to as usize] += abs_score;
+                // The shift of `ShiftedLogAbs`, over FINITE scores only: an
+                // infinite one would make every finite weight infinite and
+                // every infinite weight NaN.
+                if abs_score.is_finite() && abs_score > self.step_max_finite {
+                    self.step_max_finite = abs_score;
+                }
             }
         }
 
@@ -539,7 +644,14 @@ impl FallbackScratch {
         for from in 0..self.adj.len() {
             for k in 0..self.adj[from].len() {
                 let edge = self.adj[from][k];
-                let w = edge_weight(weight, edge.weight, self.in_sum[edge.node as usize]);
+                let w = edge_weight(
+                    weight,
+                    edge.weight,
+                    EdgeNorms {
+                        in_sum: self.in_sum[edge.node as usize],
+                        step_max_finite: self.step_max_finite,
+                    },
+                );
                 self.adj[from][k].weight = w;
                 self.rev[edge.node as usize].push(WeightedEdge {
                     node: from as u32,
@@ -649,8 +761,10 @@ impl FallbackScratch {
         self.hops[seed as usize] = 0;
         self.parent[seed as usize] = seed;
         self.reached_gen[seed as usize] = generation;
+        let tie_break = self.tie_break;
         self.heap.push(HeapEntry {
             dist: 0.0,
+            tie: 0,
             hops: 0,
             node: seed,
         });
@@ -658,7 +772,10 @@ impl FallbackScratch {
         let pop_interval = deadline_pop_interval();
         let mut pops: u32 = 0;
 
-        while let Some(HeapEntry { dist, hops, node }) = self.heap.pop() {
+        while let Some(HeapEntry {
+            dist, hops, node, ..
+        }) = self.heap.pop()
+        {
             pops = pops.wrapping_add(1);
             if pops & (pop_interval - 1) == 0 && expired(deadline, clock) {
                 return false;
@@ -683,8 +800,8 @@ impl FallbackScratch {
                 let candidate_hops = hops + 1;
                 let improves = self.reached_gen[to_idx] != generation
                     || key_is_better(
-                        (candidate, candidate_hops),
-                        (self.dist[to_idx], self.hops[to_idx]),
+                        (candidate, order_hops(tie_break, candidate_hops)),
+                        (self.dist[to_idx], order_hops(tie_break, self.hops[to_idx])),
                     );
                 if improves {
                     self.reached_gen[to_idx] = generation;
@@ -693,6 +810,7 @@ impl FallbackScratch {
                     self.parent[to_idx] = node;
                     self.heap.push(HeapEntry {
                         dist: candidate,
+                        tie: order_hops(tie_break, candidate_hops),
                         hops: candidate_hops,
                         node: to,
                     });
@@ -731,8 +849,10 @@ impl FallbackScratch {
         self.rev_hops[seed as usize] = 0;
         self.rev_parent[seed as usize] = seed;
         self.rev_reached_gen[seed as usize] = generation;
+        let tie_break = self.tie_break;
         self.heap.push(HeapEntry {
             dist: 0.0,
+            tie: 0,
             hops: 0,
             node: seed,
         });
@@ -740,7 +860,10 @@ impl FallbackScratch {
         let pop_interval = deadline_pop_interval();
         let mut pops: u32 = 0;
 
-        while let Some(HeapEntry { dist, hops, node }) = self.heap.pop() {
+        while let Some(HeapEntry {
+            dist, hops, node, ..
+        }) = self.heap.pop()
+        {
             pops = pops.wrapping_add(1);
             if pops & (pop_interval - 1) == 0 && expired(deadline, clock) {
                 return false;
@@ -765,8 +888,11 @@ impl FallbackScratch {
                 let candidate_hops = hops + 1;
                 let improves = self.rev_reached_gen[from_idx] != generation
                     || key_is_better(
-                        (candidate, candidate_hops),
-                        (self.rev_dist[from_idx], self.rev_hops[from_idx]),
+                        (candidate, order_hops(tie_break, candidate_hops)),
+                        (
+                            self.rev_dist[from_idx],
+                            order_hops(tie_break, self.rev_hops[from_idx]),
+                        ),
                     );
                 if improves {
                     self.rev_reached_gen[from_idx] = generation;
@@ -775,6 +901,7 @@ impl FallbackScratch {
                     self.rev_parent[from_idx] = node;
                     self.heap.push(HeapEntry {
                         dist: candidate,
+                        tie: order_hops(tie_break, candidate_hops),
                         hops: candidate_hops,
                         node: from,
                     });
@@ -817,9 +944,10 @@ impl FallbackScratch {
                 from,
             ));
         }
+        let tie_break = self.tie_break;
         out.sort_by(|a, b| {
             a.0.total_cmp(&b.0)
-                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| order_hops(tie_break, a.1).cmp(&order_hops(tie_break, b.1)))
                 .then_with(|| a.2.cmp(&b.2))
         });
     }
@@ -926,6 +1054,21 @@ fn key_is_better(a: (f64, u32), b: (f64, u32)) -> bool {
         Ordering::Less => true,
         Ordering::Equal => a.1 < b.1,
         Ordering::Greater => false,
+    }
+}
+
+/// The hop component of a search key under `tie_break`.
+///
+/// [`FallbackTieBreak::NodeId`] flattens it to a constant, which is how the
+/// hop term is turned OFF in one place rather than at every ordering site: the
+/// heap comparison and `key_is_better` both read this and cannot disagree
+/// about whether hops are in the key. The real hop count stays in
+/// `FallbackScratch::hops` either way, because `collect_closings` reports it.
+#[inline]
+fn order_hops(tie_break: FallbackTieBreak, hops: u32) -> u32 {
+    match tie_break {
+        FallbackTieBreak::Hops => hops,
+        FallbackTieBreak::NodeId => 0,
     }
 }
 
@@ -1051,7 +1194,7 @@ pub(super) fn sweep(
     deadline: Option<Instant>,
     clock: &mut dyn Clock,
 ) -> FallbackOutcome {
-    let mut scratch = FallbackScratch::new(search);
+    let mut scratch = FallbackScratch::new(search, config.tie_break);
     // Dedup on the node-id cycle rather than on names. Within one
     // `IndexedSearch` the id <-> name map is a bijection, so these are the same
     // equivalence classes a name-keyed dedup would give, without allocating a

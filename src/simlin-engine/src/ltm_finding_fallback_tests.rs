@@ -121,6 +121,26 @@ fn shortest_cycle(scratch: &mut FallbackScratch, seed: u32) -> Option<(f64, Vec<
 
 // --- Weight formulations --------------------------------------------------
 
+/// Every [`FallbackWeight`] variant, derived by hand from the enum's arm list.
+///
+/// The corpora below sweep this rather than a hand-picked subset, so adding an
+/// arm without measuring it is a compile-visible omission rather than silently
+/// unexercised behaviour.
+const WEIGHT_ARMS: [FallbackWeight; 4] = [
+    FallbackWeight::ClampedLogAbs,
+    FallbackWeight::RelativeLinkScore,
+    FallbackWeight::HopCount,
+    FallbackWeight::ShiftedLogAbs,
+];
+
+/// Spell the step-scoped normalizers positionally for the arm-level tests.
+fn norms(in_sum: f64, step_max_finite: f64) -> EdgeNorms {
+    EdgeNorms {
+        in_sum,
+        step_max_finite,
+    }
+}
+
 #[test]
 fn default_weight_is_clamped_log_abs() {
     // The design's starting formulation: the one arm that keeps Dijkstra's
@@ -161,7 +181,13 @@ fn default_config_is_the_measured_best() {
 
 #[test]
 fn clamped_log_abs_charges_sub_unit_links_and_frees_super_unit_ones() {
-    let w = |abs| edge_weight(FallbackWeight::ClampedLogAbs, abs, f64::NAN);
+    let w = |abs| {
+        edge_weight(
+            FallbackWeight::ClampedLogAbs,
+            abs,
+            norms(f64::NAN, f64::NAN),
+        )
+    };
     // Sub-unit: cost grows as the link weakens.
     assert!((w(0.5) - std::f64::consts::LN_2).abs() < 1e-12);
     assert!(w(0.01) > w(0.5));
@@ -172,21 +198,128 @@ fn clamped_log_abs_charges_sub_unit_links_and_frees_super_unit_ones() {
     // Inf is a real divergent signal, and ln(Inf) clamps to a free hop.
     assert_eq!(w(f64::INFINITY), 0.0);
     // The in-edge sum is not consulted by this arm at all.
-    assert_eq!(edge_weight(FallbackWeight::ClampedLogAbs, 2.0, 1.0), 0.0);
+    assert_eq!(
+        edge_weight(FallbackWeight::ClampedLogAbs, 2.0, norms(1.0, 1.0)),
+        0.0
+    );
 }
 
 #[test]
 fn hop_count_charges_one_per_hop_regardless_of_score() {
-    let w = |abs, sum| edge_weight(FallbackWeight::HopCount, abs, sum);
+    let w = |abs, sum| edge_weight(FallbackWeight::HopCount, abs, norms(sum, f64::NAN));
     assert_eq!(w(1e-9, 1e-9), 1.0);
     assert_eq!(w(1.0, 2.0), 1.0);
     assert_eq!(w(1e9, 1e9), 1.0);
     assert_eq!(w(f64::INFINITY, f64::INFINITY), 1.0);
 }
 
+/// `ShiftedLogAbs` keeps the distinction the clamped arm throws away: among
+/// super-unit links a stronger one is CHEAPER, rather than all of them being
+/// free.
+#[test]
+fn shifted_log_abs_ranks_super_unit_links_by_gain() {
+    // A step whose strongest active link is 1000.
+    let w = |abs| edge_weight(FallbackWeight::ShiftedLogAbs, abs, norms(f64::NAN, 1000.0));
+    // The step's strongest link is the free hop; everything else pays the gap.
+    assert_eq!(w(1000.0), 0.0);
+    assert!((w(100.0) - 10.0f64.ln()).abs() < 1e-12);
+    assert!((w(2.0) - 500.0f64.ln()).abs() < 1e-12);
+    // Strictly ordered by gain across the whole range, super-unit included --
+    // which is exactly what the clamped arm collapses.
+    assert!(w(1000.0) < w(100.0));
+    assert!(w(100.0) < w(2.0));
+    assert!(w(2.0) < w(1.0));
+    assert!(w(1.0) < w(0.5));
+    let clamped = |abs| edge_weight(FallbackWeight::ClampedLogAbs, abs, norms(f64::NAN, 1000.0));
+    assert_eq!(clamped(1000.0), clamped(2.0), "the clamped arm cannot");
+    // Never negative: the shift is the step's own maximum, so no active edge
+    // can exceed it.
+    for abs in [1e-9, 0.5, 1.0, 2.0, 999.999, 1000.0] {
+        assert!(w(abs) >= 0.0, "{abs} weighed {}", w(abs));
+    }
+}
+
+/// The sum over a cycle is `L*ln(max) - ln(product)`, so the arm charges
+/// `ln(max)` per hop and credits the cycle's whole gain -- a long high-gain
+/// chain can beat a short weak one, which is the trade the clamped arm cannot
+/// express.
+#[test]
+fn shifted_log_abs_trades_cycle_length_against_product() {
+    let max = 1000.0f64;
+    let w = |abs: f64| edge_weight(FallbackWeight::ShiftedLogAbs, abs, norms(f64::NAN, max));
+    // A four-link chain of strong links against a two-link pair of weak ones.
+    let long: f64 = [900.0, 800.0, 700.0, 600.0].iter().map(|&a| w(a)).sum();
+    let short: f64 = [2.0, 3.0].iter().map(|&a| w(a)).sum();
+    assert!(
+        long < short,
+        "the high-gain four-link cycle must be cheaper: {long} vs {short}"
+    );
+    // And the identity the doc states, checked rather than asserted in prose.
+    let links = [900.0f64, 800.0, 700.0, 600.0];
+    let product: f64 = links.iter().product();
+    let expected = links.len() as f64 * max.ln() - product.ln();
+    assert!((long - expected).abs() < 1e-9, "{long} != {expected}");
+}
+
+#[test]
+fn shifted_log_abs_inf_arms_keep_dijkstra_well_defined() {
+    // An infinite link is the cheapest hop there is, and the shift is taken
+    // over the FINITE scores so a finite sibling keeps a finite ordered
+    // weight rather than `inf` or NaN.
+    let w = |abs, max| edge_weight(FallbackWeight::ShiftedLogAbs, abs, norms(f64::NAN, max));
+    assert_eq!(w(f64::INFINITY, 8.0), 0.0);
+    assert!((w(2.0, 8.0) - 4.0f64.ln()).abs() < 1e-12);
+    // Every active edge infinite: no finite reference exists, and they are all
+    // equally divergent, so all are free hops.
+    assert_eq!(w(f64::INFINITY, 0.0), 0.0);
+}
+
+/// The step shift is the maximum over the step's FINITE active scores, taken
+/// through `load_step` rather than hand-supplied -- so what the arm divides by
+/// is what production computes.
+#[test]
+fn the_step_shift_is_the_largest_finite_active_score() {
+    let (search, results) = fixture(
+        &[
+            ("s", "a", vec![4.0, 0.0]),
+            ("a", "s", vec![0.25, 9.0]),
+            ("s", "b", vec![f64::INFINITY, 1.0]),
+            ("b", "s", vec![1.0, 1.0]),
+        ],
+        &["s"],
+    );
+    let mut scratch = FallbackScratch::new(&search, FallbackConfig::DEFAULT.tie_break);
+
+    // Step 1: active finite scores are 4.0, 0.25 and 1.0; the infinite one is
+    // excluded from the shift and weighs 0 itself.
+    scratch.load_step(&search, &results, 1, FallbackWeight::ShiftedLogAbs);
+    assert_eq!(scratch.step_max_finite, 4.0);
+    let (s, a, b) = (
+        node_id(&search, "s"),
+        node_id(&search, "a"),
+        node_id(&search, "b"),
+    );
+    let weight_of = |scratch: &FallbackScratch, from: u32, to: u32| -> f64 {
+        scratch.adj[from as usize]
+            .iter()
+            .find(|e| e.node == to)
+            .unwrap_or_else(|| panic!("edge {from}->{to} is not active"))
+            .weight
+    };
+    assert_eq!(weight_of(&scratch, s, a), 0.0, "4.0 IS the step maximum");
+    assert_eq!(weight_of(&scratch, s, b), 0.0, "an infinite link is free");
+    assert!((weight_of(&scratch, a, s) - 16.0f64.ln()).abs() < 1e-12);
+
+    // Step 2: `s->a` is inactive, so the maximum moves to 9.0.
+    scratch.load_step(&search, &results, 2, FallbackWeight::ShiftedLogAbs);
+    assert_eq!(scratch.step_max_finite, 9.0);
+    assert_eq!(weight_of(&scratch, a, s), 0.0);
+    assert!((weight_of(&scratch, s, b) - 9.0f64.ln()).abs() < 1e-12);
+}
+
 #[test]
 fn relative_link_score_normalizes_against_the_targets_in_edges() {
-    let w = |abs, sum| edge_weight(FallbackWeight::RelativeLinkScore, abs, sum);
+    let w = |abs, sum| edge_weight(FallbackWeight::RelativeLinkScore, abs, norms(sum, f64::NAN));
     // Sole determinant of its target: the relative link score is 1, cost 0.
     assert_eq!(w(4.0, 4.0), 0.0);
     // One of several: -ln of its share (LTM reference 13.3).
@@ -198,7 +331,7 @@ fn relative_link_score_normalizes_against_the_targets_in_edges() {
 
 #[test]
 fn relative_link_score_inf_arms_keep_dijkstra_well_defined() {
-    let w = |abs, sum| edge_weight(FallbackWeight::RelativeLinkScore, abs, sum);
+    let w = |abs, sum| edge_weight(FallbackWeight::RelativeLinkScore, abs, norms(sum, f64::NAN));
     // A finite link competing with an Inf sibling has share 0: weight +Inf,
     // so it is never preferred while the Inf sibling is available. It stays
     // TRAVERSABLE (rather than being dropped) so the set of cycles the
@@ -223,7 +356,7 @@ fn in_edge_sums_cover_only_the_steps_active_in_edges() {
         ],
         &["s"],
     );
-    let mut scratch = FallbackScratch::new(&search);
+    let mut scratch = FallbackScratch::new(&search, FallbackConfig::DEFAULT.tie_break);
     let (s, y, z) = (
         node_id(&search, "s"),
         node_id(&search, "y"),
@@ -335,11 +468,7 @@ fn path_weight(adj: &[Vec<WeightedEdge>], path: &[u32]) -> f64 {
 /// exactness claim is about the search, not the formulation.
 #[test]
 fn dijkstra_min_cycle_matches_brute_force_on_random_graphs() {
-    let arms = [
-        FallbackWeight::ClampedLogAbs,
-        FallbackWeight::RelativeLinkScore,
-        FallbackWeight::HopCount,
-    ];
+    let arms = WEIGHT_ARMS;
     let names = ["n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7"];
     let mut compared_with_cycle = 0usize;
     let mut compared_without_cycle = 0usize;
@@ -369,7 +498,7 @@ fn dijkstra_min_cycle_matches_brute_force_on_random_graphs() {
         }
         let (search, results) = fixture(&edges, &["n0"]);
         let seed = node_id(&search, "n0");
-        let mut scratch = FallbackScratch::new(&search);
+        let mut scratch = FallbackScratch::new(&search, FallbackConfig::DEFAULT.tie_break);
 
         for arm in arms {
             scratch.load_step(&search, &results, 1, arm);
@@ -425,6 +554,7 @@ fn in_edge_closures(weight: FallbackWeight) -> FallbackConfig {
         weight,
         seeds: FallbackSeeds::Stocks,
         closures: FallbackClosures::SeedInEdges,
+        tie_break: FallbackConfig::DEFAULT.tie_break,
     }
 }
 
@@ -502,7 +632,7 @@ fn relative_link_score_prefers_the_largest_share_of_the_stocks_in_edges() {
     // and e->s (10.0), so its determinant mass is 14.5. Every other node has
     // a single determinant, so all non-closing hops are free and each cycle's
     // weight is just -ln(share) of its closing edge.
-    let mut scratch = FallbackScratch::new(&search);
+    let mut scratch = FallbackScratch::new(&search, FallbackConfig::DEFAULT.tie_break);
     scratch.load_step(&search, &results, 1, FallbackWeight::RelativeLinkScore);
     let s = node_id(&search, "s");
     assert_eq!(scratch.in_sum[s as usize], 14.5);
@@ -638,7 +768,7 @@ fn equal_weight_cycles_are_ordered_by_hop_count_not_node_id() {
         "the long cycle must close through the lower node id"
     );
 
-    let mut scratch = FallbackScratch::new(&search);
+    let mut scratch = FallbackScratch::new(&search, FallbackConfig::DEFAULT.tie_break);
     scratch.load_step(&search, &results, 1, FallbackWeight::ClampedLogAbs);
     assert!(scratch.dijkstra_from(s, None, &mut SystemClock));
     let mut closings = Vec::new();
@@ -662,6 +792,107 @@ fn equal_weight_cycles_are_ordered_by_hop_count_not_node_id() {
         "the sweep emits a seed's closures cheapest first, and among equals \
          shortest first"
     );
+}
+
+/// Both [`FallbackTieBreak`] arms, on the fixture where they disagree: the
+/// three-node cycle closes through the LOWER node id, so ordering on node id
+/// alone ranks it first while ordering on hops first ranks the two-node cycle.
+///
+/// The control matters because it is what the hop term is measured against in
+/// `examples/ltm_fallback_eval.rs`: without an arm that demonstrably picks
+/// differently, "the hop tie-break changes nothing" would be unfalsifiable.
+#[test]
+fn each_tie_break_arm_orders_equal_weight_cycles_its_own_way() {
+    let (search, results) = fixture(
+        &[
+            ("aa", "ab", vec![2.0]),
+            ("ab", "s", vec![2.0]),
+            ("s", "aa", vec![2.0]),
+            ("s", "zz", vec![2.0]),
+            ("zz", "s", vec![2.0]),
+        ],
+        &["s"],
+    );
+    let order = |tie_break| -> Vec<Vec<String>> {
+        let out = sweep(
+            &search,
+            &results,
+            FallbackConfig {
+                weight: FallbackWeight::ClampedLogAbs,
+                seeds: FallbackSeeds::Stocks,
+                closures: FallbackClosures::SeedInEdges,
+                tie_break,
+            },
+            None,
+            &mut SystemClock,
+        );
+        named(&search, &out.paths)
+    };
+    assert_eq!(
+        order(FallbackTieBreak::Hops),
+        vec![vec!["s", "zz"], vec!["s", "aa", "ab"]],
+        "shortest first among equal weights"
+    );
+    assert_eq!(
+        order(FallbackTieBreak::NodeId),
+        vec![vec!["s", "aa", "ab"], vec!["s", "zz"]],
+        "lowest closing node id first, which is the longer cycle here"
+    );
+}
+
+/// Turning the hop term off changes the ORDER and nothing else: the same
+/// cycles are found either way, since the tie-break decides which of two
+/// equally-weighted routes a tree holds, not which cycles exist.
+#[test]
+fn the_tie_break_does_not_change_which_cycles_exist() {
+    let names = ["n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7"];
+    let mut compared = 0usize;
+    for seed_value in 1..=40u64 {
+        let mut rng = Lcg(seed_value);
+        let n = 3 + (rng.next_u32() % 6) as usize;
+        let density = 0.10 + 0.06 * ((seed_value % 6) as f64);
+        let mut edges: Vec<FixtureEdge> = Vec::new();
+        for from in 0..n {
+            for to in 0..n {
+                if from == to || rng.next_unit() > density {
+                    continue;
+                }
+                let score = (rng.next_unit() * 6.0 - 3.0).exp();
+                edges.push((names[from], names[to], vec![score]));
+            }
+        }
+        if edges.is_empty() {
+            continue;
+        }
+        let (search, results) = fixture(&edges, &["n0"]);
+        let run = |tie_break| {
+            sweep(
+                &search,
+                &results,
+                FallbackConfig {
+                    tie_break,
+                    ..FallbackConfig::DEFAULT
+                },
+                None,
+                &mut SystemClock,
+            )
+        };
+        let hops = run(FallbackTieBreak::Hops);
+        let node = run(FallbackTieBreak::NodeId);
+        for path in &hops.paths {
+            assert!(
+                node.paths.iter().any(|p| is_same_cycle(path, p)),
+                "graph {seed_value}: the node-id arm lost {path:?}"
+            );
+            compared += 1;
+        }
+        assert_eq!(
+            hops.paths.len(),
+            node.paths.len(),
+            "graph {seed_value}: the two arms found different counts"
+        );
+    }
+    assert!(compared >= 20, "corpus must find cycles ({compared})");
 }
 
 // --- Every-edge closures --------------------------------------------------
@@ -735,11 +966,7 @@ fn every_edge_closures(scratch: &mut FallbackScratch, seed: u32) -> Vec<Vec<u32>
 /// candidate is skipped.
 #[test]
 fn every_edge_closures_are_minimum_weight_cycles_through_their_edge() {
-    let arms = [
-        FallbackWeight::ClampedLogAbs,
-        FallbackWeight::RelativeLinkScore,
-        FallbackWeight::HopCount,
-    ];
+    let arms = WEIGHT_ARMS;
     let names = ["n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7"];
     let mut checked_cycles = 0usize;
     let mut pairs_with_a_cycle = 0usize;
@@ -764,7 +991,7 @@ fn every_edge_closures_are_minimum_weight_cycles_through_their_edge() {
         }
         let (search, results) = fixture(&edges, &["n0"]);
         let seed = node_id(&search, "n0");
-        let mut scratch = FallbackScratch::new(&search);
+        let mut scratch = FallbackScratch::new(&search, FallbackConfig::DEFAULT.tie_break);
 
         for arm in arms {
             scratch.load_step(&search, &results, 1, arm);
@@ -1041,7 +1268,7 @@ fn each_seed_policy_selects_the_nodes_it_names() {
         ],
         &["s"],
     );
-    let mut scratch = FallbackScratch::new(&search);
+    let mut scratch = FallbackScratch::new(&search, FallbackConfig::DEFAULT.tie_break);
     scratch.load_step(&search, &results, 1, FallbackWeight::DEFAULT);
     let names_of = |scratch: &mut FallbackScratch, policy| -> Vec<String> {
         let mut seeds = Vec::new();
@@ -1106,7 +1333,7 @@ fn a_self_edge_inside_a_real_cycle_is_never_traversed() {
     );
     assert_eq!(named(&search, &out.paths), vec![vec!["s", "a"]]);
     // The self edge is not in the step graph at all, so nothing can walk it.
-    let mut scratch = FallbackScratch::new(&search);
+    let mut scratch = FallbackScratch::new(&search, FallbackConfig::DEFAULT.tie_break);
     scratch.load_step(&search, &results, 1, FallbackWeight::DEFAULT);
     let a = node_id(&search, "a");
     assert!(scratch.adj[a as usize].iter().all(|e| e.node != a));
@@ -1374,11 +1601,7 @@ fn an_unbudgeted_sweep_never_reads_the_clock() {
 #[test]
 fn sweep_output_is_content_pure() {
     let (search, results) = three_way_fixture();
-    for arm in [
-        FallbackWeight::ClampedLogAbs,
-        FallbackWeight::RelativeLinkScore,
-        FallbackWeight::HopCount,
-    ] {
+    for arm in WEIGHT_ARMS {
         let config = FallbackConfig::with_weight(arm);
         let first = sweep(&search, &results, config, None, &mut SystemClock);
         let second = sweep(&search, &results, config, None, &mut SystemClock);

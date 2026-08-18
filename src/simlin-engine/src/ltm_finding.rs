@@ -57,7 +57,9 @@ use enum_gen::{
 // mounted here purely for the per-file line cap.
 #[path = "ltm_finding_fallback.rs"]
 mod fallback;
-pub use fallback::{FallbackClosures, FallbackConfig, FallbackSeeds, FallbackWeight};
+pub use fallback::{
+    FallbackClosures, FallbackConfig, FallbackSeeds, FallbackTieBreak, FallbackWeight,
+};
 
 // --- Types ---
 
