@@ -13,6 +13,7 @@ import {
   parseWasmReply,
   readTraits,
   resolveTheme,
+  seedAfterSaved,
   snapshotMessage,
   TRAITS,
   versionAfterReply,
@@ -188,9 +189,12 @@ describe('snapshot protocol', () => {
   it('parseSaveReply accepts saved/rejected with an integer revision, nothing else', () => {
     expect(parseSaveReply({ type: 'saved', revision: 5 })).toEqual({ kind: 'saved', revision: 5 });
     expect(parseSaveReply({ type: 'rejected', revision: 4 })).toEqual({ kind: 'rejected', revision: 4 });
-    expect(parseSaveReply({ type: 'saved' })).toBeNull();
-    expect(parseSaveReply({ type: 'saved', revision: 1.5 })).toBeNull();
-    expect(parseSaveReply({ type: 'saved', revision: '5' })).toBeNull();
+    // Reply-typed but unusable: malformed, not ignored (it still consumes the
+    // one reply the in-flight snapshot is owed).
+    expect(parseSaveReply({ type: 'saved' })).toEqual({ kind: 'malformed' });
+    expect(parseSaveReply({ type: 'saved', revision: 1.5 })).toEqual({ kind: 'malformed' });
+    expect(parseSaveReply({ type: 'saved', revision: '5' })).toEqual({ kind: 'malformed' });
+    expect(parseSaveReply({ type: 'rejected', revision: null })).toEqual({ kind: 'malformed' });
     expect(parseSaveReply({ type: 'notice', text: 'x' })).toBeNull();
     expect(parseSaveReply({ type: 'wasm' })).toBeNull();
     expect(parseSaveReply(null)).toBeNull();
@@ -201,9 +205,17 @@ describe('snapshot protocol', () => {
     expect(inFlightFor(3, 'J')).toEqual({ json: 'J', base: 3, expectedRevision: 4 });
   });
 
-  it('versionAfterReply resolves the saved revision, undefined on reject', () => {
+  it('versionAfterReply resolves the saved revision, undefined on reject or malformed', () => {
     expect(versionAfterReply({ kind: 'saved', revision: 7 })).toBe(7);
     expect(versionAfterReply({ kind: 'rejected', revision: 6 })).toBeUndefined();
+    expect(versionAfterReply({ kind: 'malformed' })).toBeUndefined();
+  });
+
+  it('seedAfterSaved is the in-flight bytes at the reported revision', () => {
+    expect(seedAfterSaved(inFlightFor(3, 'S1'), 4)).toEqual({ revision: 4, projectJson: 'S1' });
+    // A kernel that reports a different revision than base+1 (it should not,
+    // but the reply is authoritative): the seed follows the reply.
+    expect(seedAfterSaved(inFlightFor(3, 'S1'), 6)).toEqual({ revision: 6, projectJson: 'S1' });
   });
 
   describe('classifyPush', () => {

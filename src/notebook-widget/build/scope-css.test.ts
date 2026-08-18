@@ -37,6 +37,10 @@ describe('scopeSelector', () => {
     ['.katex .foo', `:where(.${ROOT}) .katex .foo`],
     ['[data-x]', `:where(.${ROOT}) [data-x]`],
     ['bodyguard', `:where(.${ROOT}) bodyguard`],
+    // A second page-root token further along is left alone: the result can
+    // never match (inert), and never leaks.
+    ['html body .x', `.${ROOT} body .x`],
+    ['.a body .b', `:where(.${ROOT}) .a body .b`],
     ['htmlfoo .x', `:where(.${ROOT}) htmlfoo .x`],
     [`.${ROOT}`, `.${ROOT}`],
     [`.${ROOT} .already`, `.${ROOT} .already`],

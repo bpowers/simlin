@@ -176,20 +176,29 @@ export function snapshotMessage(base: number, json: string): { type: 'snapshot';
   return { type: 'snapshot', base, json };
 }
 
-/** The kernel's answer to a snapshot: accepted at `revision`, or rejected. */
-export type SaveReply = { kind: 'saved'; revision: number } | { kind: 'rejected'; revision: number };
+/**
+ * The kernel's answer to a snapshot: accepted at `revision`, rejected, or a
+ * reply-typed message whose payload is unusable (`malformed`: a `saved` /
+ * `rejected` with a missing or non-integer revision).
+ */
+export type SaveReply =
+  | { kind: 'saved'; revision: number }
+  | { kind: 'rejected'; revision: number }
+  | { kind: 'malformed' };
 
 /**
- * Interpret a `msg:custom` delivery as a save reply (`{type:'saved',
- * revision}` / `{type:'rejected', revision}`). Anything else -- wasm,
- * notices, unknown types, a reply with a non-integer revision -- is `null`.
+ * Interpret a `msg:custom` delivery as a save reply. Anything that is not
+ * reply-typed (wasm, notices, unknown types) is `null`. A reply-typed
+ * message with a bad `revision` is `malformed`: the shell treats it as a
+ * reject while a snapshot is in flight, because every snapshot gets exactly
+ * one reply and ignoring a broken one would hang the Editor's save queue.
  */
 export function parseSaveReply(msg: unknown): SaveReply | null {
   if (!isRecord(msg) || (msg.type !== 'saved' && msg.type !== 'rejected')) {
     return null;
   }
   if (typeof msg.revision !== 'number' || !Number.isInteger(msg.revision)) {
-    return null;
+    return { kind: 'malformed' };
   }
   return { kind: msg.type, revision: msg.revision };
 }
@@ -266,4 +275,14 @@ export function classifyPush(
  */
 export function versionAfterReply(reply: SaveReply): number | undefined {
   return reply.kind === 'saved' ? reply.revision : undefined;
+}
+
+/**
+ * The seed pair the Editor is at once the kernel has accepted the in-flight
+ * snapshot: its bytes at the revision the kernel reported. Adopted on the
+ * `saved` reply itself (not only on the state push) so the two are
+ * order-independent: whichever arrives first, the other classifies `none`.
+ */
+export function seedAfterSaved(inFlight: InFlightSnapshot, revision: number): EditorSeedPair {
+  return { revision, projectJson: inFlight.json };
 }

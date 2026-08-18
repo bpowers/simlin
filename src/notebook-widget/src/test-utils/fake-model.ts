@@ -69,6 +69,11 @@ export class FakeModel implements AnyModel {
     this.state[key] = value;
     this.sets.push({ key, value });
     this.bufferedKeys.add(key);
+    // Backbone gates `change:` events on deep equality (_.isEqual), so two
+    // equal-by-value arrays would NOT fire there. Identity is used here
+    // because every value the widget sets is a fresh array/string whose
+    // identity change coincides with a value change in these tests; a test
+    // that relied on equal-value suppression would need _.isEqual semantics.
     if (prev !== value) {
       this.trigger(`change:${key}`);
     }

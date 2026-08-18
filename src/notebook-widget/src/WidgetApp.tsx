@@ -25,6 +25,7 @@ import {
   parseSaveReply,
   readTraits,
   resolveTheme,
+  seedAfterSaved,
   snapshotMessage,
   TRAITS,
   versionAfterReply,
@@ -55,6 +56,9 @@ interface EditorSeed extends EditorSeedPair {
 }
 
 interface WidgetRefs {
+  // Set by the effect cleanup: a save that arrives after unmount (a queued
+  // controller flush racing the dispose) is refused, not sent.
+  disposed: boolean;
   // The pair the live Editor was seeded from; the reference for classifyPush
   // and for making remounts idempotent.
   seed: EditorSeedPair;
@@ -116,6 +120,7 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
   const [hostTheme, setHostTheme] = React.useState<HostThemeSignals>(readHostThemeSignals);
 
   const refs = React.useRef<WidgetRefs>({
+    disposed: false,
     seed: { revision: traits.revision, projectJson: traits.projectJson },
     inFlight: null,
     selectionTimer: null,
@@ -170,12 +175,25 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
           return;
         }
         r.inFlight = null;
-        if (reply.kind === 'rejected') {
-          // The kernel did not accept our snapshot. Its traits are
-          // authoritative (it never touches them on a reject unless its state
-          // moved, in which case the push already remounted us); re-seed the
-          // Editor from them so its local state and version match the
-          // kernel's again. Idempotent with the push's remount.
+        if (reply.kind === 'saved') {
+          // Adopt the accepted state as the seed NOW, before resolving and
+          // independently of the kernel's trait push: if the push arrived
+          // first it classified `own-ack` and adopted the same pair; if it
+          // arrives later (a host that dispatches the custom message before
+          // applying the state update, or a kernel that sends `saved` early)
+          // it now classifies `none` instead of remounting and discarding
+          // local edits.
+          r.seed = seedAfterSaved(flight, reply.revision);
+        } else {
+          // Rejected -- or a malformed reply, which is treated as a reject
+          // rather than ignored (every snapshot gets exactly one reply; an
+          // ignored one would hang the controller's save queue). The kernel's
+          // traits are authoritative: re-seed the Editor from them so its
+          // local state and version match the kernel's again. When the
+          // kernel's state moved, its push already remounted us and this is a
+          // no-op (remountFrom is idempotent on the pair); when it did not,
+          // the pair equals the seed and this is a no-op too -- the reject
+          // costs the local edits only in the moved case.
           const t = readModelTraits();
           remountFrom({ revision: t.revision, projectJson: t.projectJson });
         }
@@ -213,6 +231,7 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
       model.off(`change:${TRAITS.readOnly}`, onOther);
       model.off('msg:custom', onCustom);
       unwatchTheme();
+      r.disposed = true;
       // Nothing may dangle past unmount: an in-flight save resolves
       // undefined (the controller is being disposed anyway).
       if (r.inFlight !== null) {
@@ -247,6 +266,11 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
         return Promise.resolve(undefined);
       }
       const r = refs.current;
+      if (r.disposed) {
+        // A queued controller flush racing the unmount: nothing may be sent
+        // after cleanup (no listener would ever resolve it).
+        return Promise.resolve(undefined);
+      }
       if (r.inFlight !== null) {
         // The controller never does this; if it ever did, two snapshots in
         // flight would make the replies ambiguous. Refuse rather than guess.

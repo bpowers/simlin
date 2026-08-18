@@ -81,6 +81,12 @@ export function scopeSelector(selector: string, rootClass: string): string {
       }
     }
   }
+  // A second page-root token further along a selector is left as is:
+  // `html body .x` became `.root body .x` above, `.a body .b` becomes
+  // `:where(.root) .a body .b` here. Neither can ever match (nothing inside
+  // the widget is <html>/<body>), so such a rule is inert -- no leak, just
+  // dead CSS. Neither bundled stylesheet has one; rewriting it would be
+  // guessing at intent.
   return `${where} ${trimmed}`;
 }
 

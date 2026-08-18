@@ -77,12 +77,30 @@ describe('AFM lifecycle', () => {
     expect(mounts[0].props.name).toBe('model');
     expect(mounts[0].props.inputFormat).toBe('json');
 
+    // Every model listener the view added is registered...
+    for (const name of [
+      'change:revision',
+      'change:project_json',
+      'change:height',
+      'change:theme',
+      'change:read_only',
+      'msg:custom',
+    ]) {
+      expect(model.listenerCount(name)).toBe(1);
+    }
     cleanup();
     expect(el.childElementCount).toBe(0);
-    // Every model listener the view added is gone.
-    expect(model.listenerCount('change:revision')).toBe(0);
-    expect(model.listenerCount('change:project_json')).toBe(0);
-    expect(model.listenerCount('msg:custom')).toBe(0);
+    // ...and every one of them is gone after cleanup.
+    for (const name of [
+      'change:revision',
+      'change:project_json',
+      'change:height',
+      'change:theme',
+      'change:read_only',
+      'msg:custom',
+    ]) {
+      expect(model.listenerCount(name)).toBe(0);
+    }
   });
 
   it('render shows the failure in the cell when the engine cannot be obtained', async () => {
@@ -208,7 +226,7 @@ describe('WidgetApp <-> model protocol', () => {
     expect(model.lastSnapshot()).toEqual({ base: 4, json: localJson('{"name":"disk"}', 1) });
   });
 
-  it('an equal-bytes reject (kernel write failed, revision unchanged) remounts once and does not loop', async () => {
+  it('an equal-bytes reject (kernel write failed, revision unchanged) does not remount and does not loop', async () => {
     const model = new FakeModel(defaultState({ revision: 3 }));
     model.kernel.writeFails = true;
     await mount(model);
@@ -227,6 +245,64 @@ describe('WidgetApp <-> model protocol', () => {
     fireEvent.click(screen.getByText('edit'));
     await waitFor(() => expect(mounts[0].saveResults).toEqual([undefined, 4]));
     expect(model.lastSnapshot()).toEqual({ base: 3, json: localJson(SEED, 2) });
+    // The accept adopted (4, edit2) as the seed: an idempotent re-push of that
+    // pair, and an equal-bytes reject right after it, both leave the Editor
+    // mounted (no remount to stale content, no lost edit).
+    act(() => {
+      model.kernelPush({ project_json: localJson(SEED, 2), revision: 4 });
+    });
+    expect(mounts).toHaveLength(1);
+    model.kernel.writeFails = true;
+    fireEvent.click(screen.getByText('edit'));
+    await waitFor(() => expect(mounts[0].saveResults).toEqual([undefined, 4, undefined]));
+    expect(mounts).toHaveLength(1);
+    expect(mounts[0].serverVersion).toBe(4);
+  });
+
+  it("a `saved` dispatched BEFORE the accept's state push keeps the Editor (order-independent)", async () => {
+    // Some hosts may dispatch the custom message before applying the state
+    // update, or a kernel may send `saved` early. Model that by holding the
+    // kernel busy, then delivering saved first and the push second.
+    const model = new FakeModel(defaultState({ revision: 3 }));
+    model.busyKernel = true;
+    await mount(model);
+    fireEvent.click(screen.getByText('edit'));
+    const json = localJson(SEED, 1);
+    act(() => {
+      model.kernelSend({ type: 'saved', revision: 4 });
+    });
+    await waitFor(() => expect(mounts[0].saveResults).toEqual([4]));
+    expect(mounts).toHaveLength(1);
+    act(() => {
+      model.kernelPush({ project_json: json, revision: 4 });
+    });
+    // The push is the state we already adopted from `saved`: none, no remount.
+    expect(mounts).toHaveLength(1);
+    expect(mounts[0].serverVersion).toBe(4);
+    // And the reverse order (push first, then saved) is the normal path,
+    // covered by the first test; both leave exactly one mount.
+  });
+
+  it('a malformed reply while a snapshot is in flight is treated as a reject, not ignored', async () => {
+    // A kernel whose reply lost its revision (say a serialization bug): the
+    // reply still consumes the one answer the snapshot is owed.
+    const model = new FakeModel(defaultState({ revision: 3 }));
+    model.busyKernel = true;
+    await mount(model);
+    fireEvent.click(screen.getByText('edit'));
+    act(() => {
+      model.kernelSend({ type: 'saved' });
+    });
+    // Resolved undefined (the controller's save queue is not stuck), no
+    // trait moved so no remount, and the Editor keeps its local edit.
+    await waitFor(() => expect(mounts[0].saveResults).toEqual([undefined]));
+    expect(mounts).toHaveLength(1);
+    expect(mounts[0].serverVersion).toBe(3);
+    // The next edit sends a fresh snapshot (base still 3) -- the widget is
+    // not wedged waiting on the broken reply.
+    fireEvent.click(screen.getByText('edit'));
+    expect(model.sent.filter((m) => (m as { type: string }).type === 'snapshot')).toHaveLength(2);
+    expect(model.sent[model.sent.length - 1]).toEqual({ type: 'snapshot', base: 3, json: localJson(SEED, 2) });
   });
 
   it('a kernel-originated snapshot remounts the Editor on the new JSON and revision, exactly once', async () => {
@@ -267,7 +343,7 @@ describe('WidgetApp <-> model protocol', () => {
     expect(mounts[1].props.initialProjectJson).toBe('X');
   });
 
-  it('a save in flight at unmount resolves undefined and a late reply is ignored', async () => {
+  it('a save in flight at unmount resolves undefined, a late reply is ignored, a late onSave is refused', async () => {
     const model = new FakeModel(defaultState({ revision: 3 }));
     model.busyKernel = true;
     const { cleanup } = await mount(model);
@@ -278,6 +354,10 @@ describe('WidgetApp <-> model protocol', () => {
     // The kernel answers later: no listener, no throw.
     model.releaseKernel();
     expect(model.kernel.revision).toBe(4);
+    // A queued controller flush racing the dispose: refused, nothing sent.
+    const late = await mounts[0].props.onSave({ format: 'json', data: 'LATE' }, 4);
+    expect(late).toBeUndefined();
+    expect(model.sent.filter((m) => (m as { type: string }).type === 'snapshot')).toHaveLength(1);
   });
 
   it('a second onSave while one is in flight is refused (defense: the controller never does this)', async () => {
@@ -416,6 +496,43 @@ describe('WidgetApp <-> model protocol', () => {
     cleanup();
     expect(listeners.size).toBe(0);
     rs.unstubAllGlobals();
+  });
+
+  it('two selection syncs while a sync is in flight (busy kernel) collapse into one merged patch on release', async () => {
+    // Pins the transport rule the design leans on for the trait-vs-custom
+    // decision (see FakeModel): ipywidgets allows one in-flight sync per
+    // model and assign-merges the patches buffered behind it. `selection` is
+    // the widget's only trait write, so it is where the collapse is observed:
+    // two debounced selection syncs during a busy kernel reach it as ONE patch
+    // carrying the LAST value. Harmless for selection (latest wins is the
+    // right answer); fatal for snapshots -- which is why they are messages.
+    const model = new FakeModel(defaultState());
+    model.busyKernel = true;
+    await mount(model);
+    fireEvent.click(screen.getByText('select'));
+    act(() => {
+      rs.advanceTimersByTime(SELECTION_DEBOUNCE_MS);
+    });
+    // The first sync went out (queued at the busy kernel) and is in flight.
+    expect(model.saveChangesCount).toBe(1);
+    // A second selection later: its patch merges behind the in-flight one.
+    mounts[0].props.onSelectionChanged?.(['c']);
+    act(() => {
+      rs.advanceTimersByTime(SELECTION_DEBOUNCE_MS);
+    });
+    expect(model.saveChangesCount).toBe(2);
+    model.releaseKernel();
+    const patches = model.delivered.filter((d) => d.kind === 'patch');
+    // First in-flight patch, then exactly one merged patch -- not two.
+    expect(patches).toHaveLength(2);
+    expect(patches[0].content).toEqual({ selection: ['a', 'b'] });
+    expect(patches[1].content).toEqual({ selection: ['c'] });
+    // A third sync after both were acknowledged goes out on its own.
+    mounts[0].props.onSelectionChanged?.(['d']);
+    act(() => {
+      rs.advanceTimersByTime(SELECTION_DEBOUNCE_MS);
+    });
+    expect(model.delivered.filter((d) => d.kind === 'patch')).toHaveLength(3);
   });
 
   it('selection changes are debounced into one selection trait sync', async () => {
