@@ -12,6 +12,7 @@ present; they run unchanged once libsimlin provides them.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import threading
 import warnings
@@ -256,8 +257,11 @@ class TestEditAutosave:
         model = simlin.open(path, watch=False)
         _add_aux(model)
         text = path.read_text()
-        assert "new_aux" in text
+        # Vensim text uses display names ("new aux"); the sketch section must
+        # survive the rewrite and carry an element for the new variable.
+        assert re.search(r"^new[ _]aux\s*=", text, re.MULTILINE)
         assert "Sketch information" in text
+        assert re.search(r"^10,\d+,new[ _]aux,", text, re.MULTILINE)
         reopened = simlin.open(path, watch=False)
         assert reopened.get_variable("new_aux") is not None
         assert reopened.project is not None
