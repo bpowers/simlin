@@ -511,8 +511,11 @@ class Analysis:
     most-important-first prefix rather than the whole retained set."""
 
     universe_loops: int | None = None
-    """How many ever-simultaneously-active feedback loops the candidate
-    universe holds -- the population each loop's importance is a share of --
-    or None when `enumeration_complete` is False, since a sampled analysis has
-    no universe to report. None and 0 are different claims: 0 means the model
-    genuinely has no scorable loop."""
+    """How many DISTINCT loops' mass the discovery denominators sum -- the
+    ever-simultaneously-active feedback loops the candidate universe holds,
+    minus any non-representative duplicate retention merges into a single
+    reported loop, plus any cross-aggregate loop stitched together from
+    disjoint elementary pieces -- the population each loop's importance is a
+    share of. None when `enumeration_complete` is False, since a sampled
+    analysis has no universe to report. None and 0 are different claims: 0
+    means the model genuinely has no scorable loop."""

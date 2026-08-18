@@ -350,11 +350,15 @@ pub struct SimlinDiscoveryResult {
     /// `loops` is a capped prefix of the loops worth reporting rather than
     /// all of them.
     pub retained_loops: usize,
-    /// The size of the candidate universe: how many ever-simultaneously-active
-    /// elementary cycles the enumeration found, which is the population every
-    /// reported loop's importance is measured against.  `-1` when
-    /// `enumeration_complete` is zero, since a sampled report has no universe
-    /// to describe; the two fields always agree, and the sentinel keeps "the
-    /// fallback ran" distinct from a genuinely empty universe (`0`).
+    /// The size of the candidate universe: how many DISTINCT loops' mass the
+    /// discovery denominators sum -- the ever-simultaneously-active
+    /// elementary cycles the enumeration found, minus any non-representative
+    /// duplicate the retention pass merges into a single reported loop, plus
+    /// any cross-aggregate loop stitched together from disjoint elementary
+    /// pieces -- which is the population every reported loop's importance is
+    /// measured against.  `-1` when `enumeration_complete` is zero, since a
+    /// sampled report has no universe to describe; the two fields always
+    /// agree, and the sentinel keeps "the fallback ran" distinct from a
+    /// genuinely empty universe (`0`).
     pub universe_loops: i64,
 }

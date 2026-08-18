@@ -96,11 +96,13 @@ pub struct ModelAnalysis {
     /// which is the only way a caller learns the report is capped. See
     /// [`crate::ltm_finding::DiscoveryResult::retained_loops`].
     pub retained_loops: usize,
-    /// The number of ever-simultaneously-active elementary cycles in the
-    /// candidate universe, or `None` when the shortest-path fallback (which
-    /// samples rather than enumerating) generated the candidates. `Some`
-    /// exactly when `enumeration_complete`. See
-    /// [`crate::ltm_finding::DiscoveryResult::universe_loops`].
+    /// The number of DISTINCT loops whose mass the discovery denominators
+    /// sum in the candidate universe -- the ever-simultaneously-active
+    /// elementary cycles the enumerator found, corrected for retention-time
+    /// duplicate merging and cross-aggregate stitching -- or `None` when the
+    /// shortest-path fallback (which samples rather than enumerating)
+    /// generated the candidates. `Some` exactly when `enumeration_complete`.
+    /// See [`crate::ltm_finding::DiscoveryResult::universe_loops`].
     pub universe_loops: Option<usize>,
 }
 

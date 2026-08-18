@@ -84,8 +84,12 @@ pub struct ReadModelOutput {
     /// real statement, `0` ("no loop cleared the filter") included, so there
     /// is no value whose absence would mean anything a `0` does not.
     pub retained_loops: usize,
-    /// How many ever-simultaneously-active loops the enumerated candidate
-    /// universe held -- the population each loop's importance is a share of.
+    /// How many DISTINCT loops' mass the discovery denominators sum -- the
+    /// ever-simultaneously-active loops the enumerated candidate universe
+    /// held, minus any non-representative duplicate retention merges into a
+    /// single reported loop, plus any cross-aggregate loop stitched together
+    /// from disjoint elementary pieces -- the population each loop's
+    /// importance is a share of.
     ///
     /// Elided when `enumerationComplete` is false, because a SAMPLE has no
     /// universe to report -- which is a different claim from a universe of

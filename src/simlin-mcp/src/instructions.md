@@ -87,7 +87,7 @@ ReadModel returns loop analysis data from the Loops That Matter (LTM) algorithm:
 
 - `enumerationComplete`: Whether the loop analysis was EXACT. `true` means the engine enumerated every loop that could ever score and `loopDominance` is the selection from that whole set. `false` means a budget cut the enumeration short and a shortest-path search sampled the model's loops instead -- on a `false` result, a loop's absence from `loopDominance` is not evidence the model lacks it, so say so rather than concluding the model has no such feedback. Always present.
 - `retainedLoops`: How many loops cleared the importance filter before the 200-loop report cap truncated `loopDominance`. When this exceeds the length of `loopDominance`, you are looking at a most-important-first prefix, not the whole set.
-- `universeLoops`: How many loops the enumerated candidate universe held -- the population each loop's `importance` is a share of. Absent when `enumerationComplete` is false, because a sample has no universe to report (which is a different claim from a universe of zero).
+- `universeLoops`: How many DISTINCT loops the enumerated candidate universe held -- the population each loop's `importance` is a share of. Absent when `enumerationComplete` is false, because a sample has no universe to report (which is a different claim from a universe of zero).
 
 - `dominantLoopsByPeriod`: Time intervals showing which loop dominates, computed per cycle partition (a loop's importance is its share WITHIN its partition, so dominance across partitions is not comparable). The list carries one period timeline per partition, most-competitive partition first. Each period has:
   - `startTime`, `endTime`: Time range

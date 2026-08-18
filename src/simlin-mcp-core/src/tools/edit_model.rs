@@ -222,10 +222,9 @@ pub struct EditModelOutput {
     /// cap truncated `loopDominance`; above `loopDominance.len()` when the cap
     /// bound. Always serialized -- see `ReadModelOutput::retained_loops`.
     pub retained_loops: usize,
-    /// How many ever-simultaneously-active loops the enumerated candidate
-    /// universe held. Elided when `enumerationComplete` is false, since a
-    /// sample has no universe to report -- see
-    /// `ReadModelOutput::universe_loops`.
+    /// How many DISTINCT loops' mass the discovery denominators sum. Elided
+    /// when `enumerationComplete` is false, since a sample has no universe
+    /// to report -- see `ReadModelOutput::universe_loops`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub universe_loops: Option<usize>,
     /// Non-fatal diagnostics scoped to the edited model (the LTM auto-flip
