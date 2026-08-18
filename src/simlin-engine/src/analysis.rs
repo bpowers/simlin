@@ -87,6 +87,18 @@ pub struct ModelAnalysis {
     /// generated the candidates and `loop_dominance` is a sample. See
     /// [`crate::ltm_finding::DiscoveryResult::enumeration_complete`].
     pub enumeration_complete: bool,
+    /// How many discovered loops passed discovery's retention filter, before
+    /// the reported-loop cap truncated `loop_dominance`. Equal to
+    /// `loop_dominance.len()` unless the cap bound; above it when it did,
+    /// which is the only way a caller learns the report is capped. See
+    /// [`crate::ltm_finding::DiscoveryResult::retained_loops`].
+    pub retained_loops: usize,
+    /// The number of ever-simultaneously-active elementary cycles in the
+    /// candidate universe, or `None` when the shortest-path fallback (which
+    /// samples rather than enumerating) generated the candidates. `Some`
+    /// exactly when `enumeration_complete`. See
+    /// [`crate::ltm_finding::DiscoveryResult::universe_loops`].
+    pub universe_loops: Option<usize>,
 }
 
 /// Build a `json::Model` from the named model in a `datamodel::Project`, with
@@ -170,6 +182,8 @@ pub fn analyze_model(
             truncated: false,
             agg_recovery_truncated: false,
             enumeration_complete: false,
+            retained_loops: 0,
+            universe_loops: None,
         });
     }
 
@@ -210,6 +224,8 @@ pub fn analyze_model(
             truncated: result.truncated,
             agg_recovery_truncated: result.agg_recovery_truncated,
             enumeration_complete: result.enumeration_complete,
+            retained_loops: result.retained_loops,
+            universe_loops: result.universe_loops,
         }),
         None => Ok(ModelAnalysis {
             model: json_model,
@@ -221,6 +237,8 @@ pub fn analyze_model(
             truncated: false,
             agg_recovery_truncated: false,
             enumeration_complete: false,
+            retained_loops: 0,
+            universe_loops: None,
         }),
     }
 }
@@ -302,6 +320,8 @@ struct PipelineResult {
     truncated: bool,
     agg_recovery_truncated: bool,
     enumeration_complete: bool,
+    retained_loops: usize,
+    universe_loops: Option<usize>,
 }
 
 /// Run the full LTM discovery pipeline.
@@ -432,6 +452,8 @@ fn run_ltm_pipeline(
     let truncated = discovery.truncated;
     let agg_recovery_truncated = discovery.agg_recovery_truncated;
     let enumeration_complete = discovery.enumeration_complete;
+    let retained_loops = discovery.retained_loops;
+    let universe_loops = discovery.universe_loops;
 
     let time = build_time_array(&results);
 
@@ -459,6 +481,8 @@ fn run_ltm_pipeline(
         truncated,
         agg_recovery_truncated,
         enumeration_complete,
+        retained_loops,
+        universe_loops,
     }))
 }
 

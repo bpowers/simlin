@@ -300,6 +300,29 @@ pub struct DiscoveryResult {
     /// two `false` causes are deliberately not distinguished -- a budget trip
     /// and a deadline expiry leave the report equally a sample.
     pub enumeration_complete: bool,
+    /// How many candidate loops passed the `MIN_CONTRIBUTION` retention
+    /// filter, BEFORE the `MAX_LOOPS` cap truncated the report.
+    ///
+    /// Equal to `loops.len()` whenever the cap did not bind; above it when it
+    /// did, which is the only way a caller can tell "this model has N loops
+    /// worth reporting and you are seeing the top `MAX_LOOPS` of them" from
+    /// "this model has `loops.len()` loops worth reporting". Counted on both
+    /// generator paths -- on the fallback path the population it filters is
+    /// the sample, not the universe.
+    pub retained_loops: usize,
+    /// On the enumeration path, the size of the candidate universe: the
+    /// number of ever-simultaneously-active elementary cycles the enumerator
+    /// emitted, which is the population every retention denominator and
+    /// competing-vs-solo decision is measured against.
+    ///
+    /// `Some` exactly when `enumeration_complete` -- a fallback sample and an
+    /// abandoned (budget- or deadline-tripped) enumeration alike have no
+    /// universe to report, and an enumeration that never had to run because
+    /// the model carries no links reports an empty one. Cross-agg stitched
+    /// loops (GH #696) are combinations of enumerated petals rather than
+    /// enumerated circuits, so they join the candidate set without being
+    /// counted here.
+    pub universe_loops: Option<usize>,
 }
 
 /// Parse link score variable names from results offsets, expanding A2A
@@ -2261,6 +2284,12 @@ pub(crate) fn discover_loops_with_deadlines(
             truncated: false,
             agg_recovery_truncated: false,
             enumeration_complete: enumeration_ran,
+            retained_loops: 0,
+            // Discovery bails before either generator runs, so the universe
+            // is EMPTY rather than unknown -- and only the enumeration path
+            // may say so, keeping `universe_loops.is_some()` equal to
+            // `enumeration_complete` on every path out of this function.
+            universe_loops: enumeration_ran.then_some(0),
         });
     }
 
@@ -2277,6 +2306,9 @@ pub(crate) fn discover_loops_with_deadlines(
             truncated: false,
             agg_recovery_truncated: false,
             enumeration_complete: enumeration_ran,
+            retained_loops: 0,
+            // An empty universe, on the enumeration path only (see above).
+            universe_loops: enumeration_ran.then_some(0),
         });
     }
 
@@ -2296,6 +2328,10 @@ pub(crate) fn discover_loops_with_deadlines(
     let mut node_paths: Vec<Vec<u32>> = Vec::new();
     let mut truncated = false;
     let mut enumeration_complete = false;
+    // Set alongside `enumeration_complete` and only there, so the pair is one
+    // statement: `Some(n)` iff the enumeration ran to completion and its
+    // universe holds `n` circuits.
+    let mut universe_loops: Option<usize> = None;
     let mut agg_recovery_truncated = false;
     // Full-universe per-partition denominators and loop counts from the
     // enumeration path (`None` on the fallback path, where `rank_and_filter`
@@ -2453,6 +2489,11 @@ pub(crate) fn discover_loops_with_deadlines(
                 node_paths.extend(stitched);
                 universe = Some(stats);
                 enumeration_complete = true;
+                // The candidate UNIVERSE is the enumerated circuit set. The
+                // stitched cross-agg loops just added to `node_paths` are
+                // combinations of those circuits rather than circuits of the
+                // union graph, so they are not part of the count.
+                universe_loops = Some(candidates.len());
             }
         }
         // An incomplete enumeration (circuit budget, visit budget, edge-row
@@ -2507,6 +2548,8 @@ pub(crate) fn discover_loops_with_deadlines(
             truncated,
             agg_recovery_truncated,
             enumeration_complete,
+            retained_loops: 0,
+            universe_loops,
         });
     }
 
@@ -2797,14 +2840,16 @@ pub(crate) fn discover_loops_with_deadlines(
 
     let mut found_loops: Vec<FoundLoop> = deduped.into_iter().map(|(fl, _)| fl).collect();
 
-    let partition_meta = rank_and_filter(&mut found_loops, &partitions, universe.as_ref());
+    let ranked = rank_and_filter(&mut found_loops, &partitions, universe.as_ref());
 
     Ok(DiscoveryResult {
         loops: found_loops,
-        partitions: partition_meta,
+        partitions: ranked.partitions,
         truncated,
         agg_recovery_truncated,
         enumeration_complete,
+        retained_loops: ranked.retained_loops,
+        universe_loops,
     })
 }
 
@@ -3172,7 +3217,7 @@ fn rank_and_filter(
     found_loops: &mut Vec<FoundLoop>,
     partitions: &CyclePartitions,
     universe: Option<&UniverseStats>,
-) -> Vec<DiscoveredPartition> {
+) -> RankOutcome {
     let step_count = found_loops.first().map_or(0, |l| l.scores.len());
     debug_assert!(
         found_loops.iter().all(|l| l.scores.len() == step_count),
@@ -3280,6 +3325,7 @@ fn rank_and_filter(
     // unchanged): keep a loop if at ANY single timestep its |score| is
     // >= MIN_CONTRIBUTION of its partition's total at that step. Runs BEFORE
     // the cap (GH #310).
+    let retained_loops;
     if step_count > 0 {
         let mut keep = vec![false; found_loops.len()];
         for (idx, fl) in found_loops.iter().enumerate() {
@@ -3308,6 +3354,9 @@ fn rank_and_filter(
         let mut keep_iter = keep.iter();
         found_loops.retain(|_| *keep_iter.next().unwrap());
         debug_assert_eq!(retained_groups.len(), found_loops.len());
+        // Read BEFORE the cap: the whole point of reporting this count is to
+        // say how much the cap dropped.
+        retained_loops = found_loops.len();
 
         rank_truncate_and_id(
             found_loops,
@@ -3319,7 +3368,9 @@ fn rank_and_filter(
         // No score data: nothing to rank relative to; just assign IDs over the
         // (cap-respecting) set. `partition_for_loop` still resolves, but with no
         // timesteps the relative key is undefined, so fall back to the content
-        // key alone for a stable order.
+        // key alone for a stable order. With no scores there is no retention
+        // filter either, so every discovered loop trivially survives it.
+        retained_loops = found_loops.len();
         found_loops.truncate(max_loops());
         assign_loop_ids(found_loops);
         found_loops.sort_by_cached_key(|fl| loop_sort_key(&fl.loop_info));
@@ -3329,7 +3380,21 @@ fn rank_and_filter(
     // paths): partition indices are dense, in first-appearance order, so a
     // caller's `loops[0].partition` is always `Some(0)` or `None` and the
     // partition list is exactly the partitions the returned loops live in.
-    attach_partition_metadata(found_loops, partitions)
+    RankOutcome {
+        partitions: attach_partition_metadata(found_loops, partitions),
+        retained_loops,
+    }
+}
+
+/// What [`rank_and_filter`] reports about the list it just ranked, beyond the
+/// mutated loop list itself.
+struct RankOutcome {
+    /// The result-scoped partitions the surviving loops live in
+    /// (`DiscoveryResult::partitions`).
+    partitions: Vec<DiscoveredPartition>,
+    /// How many loops passed the retention filter, before the `MAX_LOOPS` cap
+    /// truncated the list (`DiscoveryResult::retained_loops`).
+    retained_loops: usize,
 }
 
 /// Resolve each surviving loop's cycle partition, remap the engine-internal

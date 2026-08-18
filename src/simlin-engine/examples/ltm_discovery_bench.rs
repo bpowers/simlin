@@ -136,9 +136,18 @@ fn main() {
             )
             .unwrap();
             let elapsed = t0.elapsed().as_secs_f64();
+            // `universe` and `retained` are what the "Measured" tables in
+            // docs/design-plans/2026-08-17-ltm-discovery-exact.md call
+            // Circuits and Survivors; printing them here keeps those columns
+            // readable off one run rather than re-derived.
             println!(
-                "  {label}: {elapsed:>7.3}s | loops {:>4} | enumeration_complete {} | truncated {} | agg_trunc {}",
+                "  {label}: {elapsed:>7.3}s | loops {:>4} | retained {:>5} | universe {:>7} | \
+                 enumeration_complete {} | truncated {} | agg_trunc {}",
                 found.loops.len(),
+                found.retained_loops,
+                found
+                    .universe_loops
+                    .map_or_else(|| "--".to_string(), |n| n.to_string()),
                 found.enumeration_complete,
                 found.truncated,
                 found.agg_recovery_truncated,

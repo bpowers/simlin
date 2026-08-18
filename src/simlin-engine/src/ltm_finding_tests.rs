@@ -1097,7 +1097,7 @@ fn test_rank_and_filter_unpartitioned_loops_do_not_cross_normalize() {
         partitions: vec![],
         stock_partition: HashMap::new(),
     };
-    let meta = rank_and_filter(&mut loops, &partitions, None);
+    let meta = rank_and_filter(&mut loops, &partitions, None).partitions;
 
     assert_eq!(
         loops.len(),
@@ -1254,7 +1254,7 @@ fn test_rank_and_filter_element_level_partitions() {
         .collect(),
     };
 
-    let partition_meta = rank_and_filter(&mut loops, &partitions, None);
+    let partition_meta = rank_and_filter(&mut loops, &partitions, None).partitions;
 
     // All 3 loops should be retained: Chicago's loop is 100% of its
     // partition's total, even though globally it's tiny.
@@ -1408,7 +1408,7 @@ fn test_rank_and_filter_demotes_trivially_isolated_loops() {
     ];
 
     let partitions = two_partitions(&["stock_a"], &["stock_b"]);
-    let partition_meta = rank_and_filter(&mut loops, &partitions, None);
+    let partition_meta = rank_and_filter(&mut loops, &partitions, None).partitions;
 
     assert_eq!(loops.len(), 3, "all three loops clear MIN_CONTRIBUTION");
     let order: Vec<f64> = loops.iter().map(|l| l.avg_abs_score).collect();
@@ -1540,7 +1540,7 @@ fn test_rank_and_filter_truncation_drops_solo_loops_first() {
     // is dropped even though its raw magnitude (100) dwarfs the
     // competing loops'.
     let _guard = MaxLoopsGuard::new(3);
-    let partition_meta = rank_and_filter(&mut loops, &partitions, None);
+    let partition_meta = rank_and_filter(&mut loops, &partitions, None).partitions;
 
     assert_eq!(loops.len(), 3, "cap of 3 retains exactly three loops");
     let order: Vec<f64> = loops.iter().map(|l| l.avg_abs_score).collect();
@@ -1692,7 +1692,7 @@ fn test_rank_and_filter_no_scores_still_attaches_partitions() {
     ];
 
     let partitions = two_partitions(&["stock_a"], &["stock_b"]);
-    let partition_meta = rank_and_filter(&mut loops, &partitions, None);
+    let partition_meta = rank_and_filter(&mut loops, &partitions, None).partitions;
 
     assert_eq!(loops.len(), 2);
     assert_eq!(partition_meta.len(), 2);
@@ -4081,6 +4081,105 @@ fn enumeration_budget_trip_falls_back_to_the_shortest_path_sweep() {
         assert_eq!(a.loop_info.id, d.loop_info.id);
         assert_eq!(a.scores, d.scores);
     }
+    // The enumerator ran but did not COMPLETE, so there is no universe to
+    // report even though the generator that was asked for was the exact one:
+    // the partial circuit list is discarded, not published as a universe.
+    assert_eq!(
+        auto.universe_loops, None,
+        "an abandoned enumeration publishes no universe count"
+    );
+}
+
+/// The logistic fixture every counter test below shares: one stock with a
+/// reinforcing births loop and a balancing deaths loop, so the universe is
+/// exactly two elementary cycles and both carry real mass.
+fn two_loop_logistic_project() -> crate::datamodel::Project {
+    enum_test_project(vec![
+        enum_stock("population", "100", &["births"], &["deaths"]),
+        enum_flow("births", "population * 0.1"),
+        enum_flow("deaths", "population * population * 0.0001"),
+    ])
+}
+
+/// AC6.1: an exact run reports the size of the candidate universe it
+/// enumerated and how many of those loops passed retention, alongside the
+/// loops themselves. On a model where nothing is dropped anywhere the three
+/// counts agree -- which is what makes the fixtures below, where they
+/// deliberately DISAGREE, readable.
+#[test]
+fn an_exact_run_reports_its_universe_and_retained_counts() {
+    let auto = discover_project(&two_loop_logistic_project(), CandidateGen::Auto);
+
+    assert!(auto.enumeration_complete);
+    assert_eq!(
+        auto.universe_loops,
+        Some(2),
+        "the universe is exactly the births and deaths cycles"
+    );
+    assert_eq!(auto.retained_loops, 2, "both loops carry real mass");
+    assert_eq!(
+        auto.loops.len(),
+        auto.retained_loops,
+        "an uncapped run reports every retained loop"
+    );
+}
+
+/// `retained_loops` counts retention survivors BEFORE the `MAX_LOOPS` cap, so
+/// a caller can tell "this model has two loops and you are being shown one"
+/// apart from "this model has one loop". `loops.len()` alone cannot say that,
+/// and neither can `universe_loops` (which counts candidates, most of which a
+/// real model's retention drops).
+#[test]
+fn a_capped_run_reports_the_pre_cap_retained_count() {
+    let project = two_loop_logistic_project();
+    let _guard = MaxLoopsGuard::new(1);
+    let auto = discover_project(&project, CandidateGen::Auto);
+
+    assert!(auto.enumeration_complete);
+    assert_eq!(auto.universe_loops, Some(2));
+    assert_eq!(auto.retained_loops, 2, "both loops pass retention");
+    assert_eq!(auto.loops.len(), 1, "the cap reports only one of them");
+}
+
+/// The fallback is a declared SAMPLE, so it has no universe to report:
+/// `universe_loops` is `None` there while `retained_loops` still counts the
+/// sample's retention survivors.
+///
+/// Three of the four arms `universe_loops` can take are pinned by name: the
+/// completed enumeration (`Some(count)`, above), the abandoned one (`None`,
+/// in `enumeration_budget_trip_falls_back_to_the_shortest_path_sweep`), and
+/// the pinned fallback (here). The fourth -- the degenerate early returns,
+/// where discovery bails before either generator runs -- is
+/// `a_model_with_no_links_reports_an_empty_universe`.
+#[test]
+fn the_fallback_reports_no_universe() {
+    let fallback = discover_project(
+        &two_loop_logistic_project(),
+        CandidateGen::FallbackOnly(FallbackConfig::DEFAULT),
+    );
+
+    assert!(!fallback.enumeration_complete);
+    assert_eq!(
+        fallback.universe_loops, None,
+        "a sample has no universe to report"
+    );
+    assert!(!fallback.loops.is_empty());
+    assert_eq!(fallback.retained_loops, fallback.loops.len());
+}
+
+/// A model with no causal links at all: discovery bails before either
+/// generator runs. The universe is EMPTY rather than unknown -- the arm that
+/// keeps `universe_loops.is_some()` equal to `enumeration_complete` on every
+/// path, so a caller can read the pair as one statement.
+#[test]
+fn a_model_with_no_links_reports_an_empty_universe() {
+    let project = enum_test_project(vec![enum_aux("constant", "42")]);
+    let auto = discover_project(&project, CandidateGen::Auto);
+
+    assert!(auto.loops.is_empty());
+    assert!(auto.enumeration_complete);
+    assert_eq!(auto.universe_loops, Some(0));
+    assert_eq!(auto.retained_loops, 0);
 }
 
 /// AC2.4's diamond -- two parallel paths sharing an entry stock and an exit
