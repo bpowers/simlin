@@ -8,6 +8,7 @@ import ReactDOM from 'react-dom';
 import clsx from 'clsx';
 
 import styles from './Drawer.module.css';
+import { usePortalContainer } from './portal-container';
 
 interface DrawerProps {
   open: boolean;
@@ -87,16 +88,22 @@ export default function Drawer(props: DrawerProps): React.ReactElement {
     onClose();
   };
 
+  // Viewport mode (document.body): the backdrop and sheet are fixed against
+  // the viewport. Contained mode (a host box): they are absolute inside it, so
+  // the sheet slides in from the box's left edge and the backdrop covers the
+  // box -- see portal-container.ts.
+  const { container, contained } = usePortalContainer();
+
   const content = (
     <>
       <div
-        className={clsx(styles.backdrop, !open && styles.backdropHidden)}
+        className={clsx(styles.backdrop, contained && styles.contained, !open && styles.backdropHidden)}
         onClick={handleBackdropClick}
         aria-hidden="true"
       />
       <div
         ref={panelRef}
-        className={clsx(styles.panel, !open && styles.panelHidden)}
+        className={clsx(styles.panel, contained && styles.contained, !open && styles.panelHidden)}
         role="dialog"
         aria-modal="true"
         tabIndex={-1}
@@ -106,5 +113,5 @@ export default function Drawer(props: DrawerProps): React.ReactElement {
     </>
   );
 
-  return ReactDOM.createPortal(content, document.body);
+  return ReactDOM.createPortal(content, container);
 }

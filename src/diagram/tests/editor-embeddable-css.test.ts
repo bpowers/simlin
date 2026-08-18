@@ -11,12 +11,13 @@
 // Editor root and size against it. jsdom can't do layout, so -- like
 // tests/panel-css.test.ts -- these assert the stylesheet text.
 //
-// The exemptions are deliberate and enumerated: content rendered through a
-// portal to document.body (Drawer, Dialog) IS viewport-level and correctly
-// uses fixed positioning / viewport units, as does the drawer's sheet inside
-// it; AppBar is page chrome the app composes outside the Editor; the
-// HostedWebEditor shell is src/app's own full-page host; reset.css is a
-// page-level reset a host may or may not load.
+// The exemptions are deliberate and enumerated: the portaled surfaces
+// (Drawer, Dialog) are viewport-level in their default mode and correctly use
+// fixed positioning there (their contained mode swaps only `position` for
+// absolute -- see components/portal-container.ts -- so even they must not use
+// viewport units, which is asserted below); AppBar is page chrome the app
+// composes outside the Editor; the HostedWebEditor shell is src/app's own
+// full-page host; reset.css is a page-level reset a host may or may not load.
 
 import { describe, it, expect } from '@rstest/core';
 
@@ -67,13 +68,23 @@ function blockFor(css: string, selector: string): string {
 // document.body, page-level chrome, the app's host shell, the page reset) and
 // may therefore reference the viewport.
 const VIEWPORT_LEVEL_STYLESHEETS = new Set([
-  'components/Dialog.module.css', // Radix portal to document.body
-  'components/Drawer.module.css', // ReactDOM portal to document.body
-  'ModelPropertiesDrawer.module.css', // the sheet inside the Drawer portal
+  'components/Dialog.module.css', // portaled surface: fixed in viewport mode
+  'components/Drawer.module.css', // portaled surface: fixed in viewport mode
   'components/AppBar.module.css', // page chrome, composed by src/app outside the Editor
   'HostedWebEditor.module.css', // src/app's full-page host shell around the Editor
   'reset.css', // page-level reset
 ]);
+
+// Portaled surfaces may be fixed (viewport mode) but never sized in viewport
+// units: in contained mode (Editor `portalContainer`) they position against
+// the host box, and only `position` may differ between the modes.
+const PORTALED_SURFACE_STYLESHEETS = [
+  'components/Dialog.module.css',
+  'components/Drawer.module.css',
+  'components/Menu.module.css',
+  'components/Autocomplete.module.css',
+  'ModelPropertiesDrawer.module.css',
+];
 
 describe('nothing inside the Editor tree positions or sizes against the viewport', () => {
   const files = allCssFiles();
@@ -92,6 +103,11 @@ describe('nothing inside the Editor tree positions or sizes against the viewport
   });
 
   it.each(inTree)('%s uses no viewport units (vw/vh/vmin/vmax)', (file) => {
+    expect(stripComments(readCss(file))).not.toMatch(/\d(?:vw|vh|vmin|vmax|dvh|svh|lvh|dvw|svw|lvw)\b/);
+  });
+
+  it.each(PORTALED_SURFACE_STYLESHEETS)('%s (a portaled surface) uses no viewport units either', (file) => {
+    expect(files).toContain(file);
     expect(stripComments(readCss(file))).not.toMatch(/\d(?:vw|vh|vmin|vmax|dvh|svh|lvh|dvw|svw|lvw)\b/);
   });
 });

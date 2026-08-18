@@ -1,10 +1,11 @@
 .content {
-  /* Clamp to the viewport: the sheet's natural width is 375px, but on a 320px
-     phone a fixed 375px overflowed and clipped the right column (the close
-     button). The 48px margin keeps a visible strip of backdrop exposed so
-     tap-outside-to-dismiss survives (320px viewport -> 272px sheet); any
-     viewport >= 423px still gets the full 375px. */
-  width: min(375px, calc(100vw - 48px));
+  /* The sheet's natural width; the Drawer panel caps itself at its overlay
+     area minus a 48px strip (Drawer.module.css), and this follows the cap so
+     a 320px phone or a narrow host box gets a 272px sheet with the right
+     column (the close button) still inside it. Never a viewport unit here:
+     inside a host box (Editor portalContainer) the overlay area is the box. */
+  width: 375px;
+  max-width: 100%;
 }
 
 .imageWrap {

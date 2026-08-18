@@ -8,6 +8,7 @@ import ReactDOM from 'react-dom';
 import clsx from 'clsx';
 
 import styles from './Autocomplete.module.css';
+import { anchoredOffsets, overlayBoxFor, overlayPosition, usePortalContainer } from './portal-container';
 import { useCombobox } from './useCombobox';
 
 export interface AutocompleteRenderInputParams {
@@ -62,26 +63,28 @@ export default function Autocomplete(props: AutocompleteProps) {
     clearOnEscape,
   });
 
+  // Viewport mode (document.body): the listbox is fixed at the input's
+  // viewport coordinates. Contained mode (a host box): absolute inside the
+  // box, offset from the box's edges -- see portal-container.ts.
+  const target = usePortalContainer();
+
   const updateDropdownPosition = React.useCallback(() => {
     if (wrapperRef.current) {
       const rect = wrapperRef.current.getBoundingClientRect();
-      setDropdownPosition({
-        top: rect.bottom + window.scrollY,
-        left: rect.left + window.scrollX,
-        width: rect.width,
-      });
+      const offsets = anchoredOffsets(rect, overlayBoxFor(target));
+      setDropdownPosition({ top: offsets.top, left: offsets.left, width: rect.width });
     }
-  }, []);
+  }, [target]);
 
   React.useEffect(() => {
     if (!isOpen) {
       return;
     }
     updateDropdownPosition();
-    // The listbox is portaled to document.body, so it doesn't move with the
-    // input. Recompute while open: capture-phase scroll catches scrolls of
-    // any ancestor (e.g. the scrollable details panel hosting the wiring
-    // table), not just the window.
+    // The listbox is portaled out of the input's subtree, so it doesn't move
+    // with the input. Recompute while open: capture-phase scroll catches
+    // scrolls of any ancestor (e.g. the scrollable details panel hosting the
+    // wiring table), not just the window.
     window.addEventListener('scroll', updateDropdownPosition, true);
     window.addEventListener('resize', updateDropdownPosition);
     return () => {
@@ -107,7 +110,7 @@ export default function Autocomplete(props: AutocompleteProps) {
         {...menuProps}
         className={styles.listbox}
         style={{
-          position: 'absolute',
+          position: overlayPosition(target),
           top: dropdownPosition.top,
           left: dropdownPosition.left,
           width: dropdownPosition.width,
@@ -130,7 +133,7 @@ export default function Autocomplete(props: AutocompleteProps) {
   return (
     <div className={styles.wrapper}>
       {renderInput(params)}
-      {ReactDOM.createPortal(listbox, document.body)}
+      {ReactDOM.createPortal(listbox, target.container)}
     </div>
   );
 }

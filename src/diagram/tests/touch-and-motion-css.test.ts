@@ -64,13 +64,21 @@ function blockFor(css: string, selector: string): string {
   return m[1];
 }
 
-describe('drawer width clamps to the viewport', () => {
-  it('ModelPropertiesDrawer .content is min(375px, 100vw - margin), not a fixed 375px', () => {
+describe('drawer width clamps to its overlay area', () => {
+  it('the Drawer panel caps at calc(100% - 48px) and the ModelPropertiesDrawer sheet follows the cap, not a fixed 375px', () => {
     // A fixed 375px sheet overflows a 320px phone and clips its own close
-    // button; the clamp leaves a tappable strip of backdrop at any width.
-    const css = readCss('ModelPropertiesDrawer.module.css');
-    const content = blockFor(css, '.content');
-    expect(content.replace(/\s+/g, ' ')).toContain('width: min(375px, calc(100vw - 48px))');
+    // button; the cap leaves a tappable strip of backdrop at any width. It is
+    // a percentage of the containing block -- the viewport in the default
+    // portal mode, the host box in contained mode (portal-container.ts) -- so
+    // it MUST NOT be a viewport unit (100vw would size a contained sheet by
+    // the page, not the box).
+    const panel = blockFor(readCss('components/Drawer.module.css'), '.panel');
+    expect(panel.replace(/\s+/g, ' ')).toContain('max-width: calc(100% - 48px)');
+    const content = blockFor(readCss('ModelPropertiesDrawer.module.css'), '.content');
+    const flat = content.replace(/\s+/g, ' ');
+    expect(flat).toContain('width: 375px');
+    expect(flat).toContain('max-width: 100%');
+    expect(flat).not.toMatch(/\dvw/);
   });
 });
 

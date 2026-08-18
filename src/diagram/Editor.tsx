@@ -7,6 +7,7 @@ import * as React from 'react';
 import clsx from 'clsx';
 import TextField from './components/TextField';
 import Autocomplete, { type AutocompleteRenderInputParams } from './components/Autocomplete';
+import { PortalContainerContext } from './components/portal-container';
 import Snackbar from './components/Snackbar';
 import { ClearIcon, EditIcon } from './components/icons';
 import SpeedDial, { CloseReason, SpeedDialAction, SpeedDialIcon } from './components/SpeedDial';
@@ -282,6 +283,17 @@ interface EditorPropsBase {
   // no route to go to, and the link would pushState on the host page. No
   // router is required to mount the Editor either way.
   showHomeLink?: boolean;
+  // Where the Editor's overlay surfaces (the model-properties drawer, dialogs,
+  // menus, the autocomplete listbox) render. Default: document.body, where
+  // they are viewport-level (position: fixed) -- right for hosts that own the
+  // page. A host that gives the Editor one box on a page it does not own (a
+  // notebook cell) passes that box: the surfaces render inside it and
+  // position against it (drawer from its left edge, dialogs centred in it),
+  // so the host's tokens / data-theme / shortcut-scoping attributes on the box
+  // reach them and a transformed page ancestor cannot displace them. The
+  // element must be positioned (it is the surfaces' containing block). See
+  // components/portal-container.ts.
+  portalContainer?: HTMLElement;
 }
 
 export type EditorProps = EditorPropsBase & ProjectInputProps;
@@ -2653,23 +2665,25 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   // <body>, so the key event that follows carries the root in its path. Not in
   // the tab order; the outline is suppressed in Editor.module.css.
   return (
-    <div
-      ref={rootRef}
-      className={classNames}
-      tabIndex={-1}
-      {...{ [EDITOR_ROOT_ATTRIBUTE]: '' }}
-      onPointerDownCapture={handleActivity}
-      onFocusCapture={handleActivity}
-    >
-      {getDrawer()}
-      {getDetails(sharedModelBannerInfo.visible)}
-      {getSearchBar()}
-      {getSharedModelBanner(sharedModelBannerInfo)}
-      {getCanvas()}
-      {getSnackbar()}
-      {getEditorControls()}
-      {getMetaActionsBar()}
-      {getSnapshot()}
-    </div>
+    <PortalContainerContext.Provider value={props.portalContainer ?? null}>
+      <div
+        ref={rootRef}
+        className={classNames}
+        tabIndex={-1}
+        {...{ [EDITOR_ROOT_ATTRIBUTE]: '' }}
+        onPointerDownCapture={handleActivity}
+        onFocusCapture={handleActivity}
+      >
+        {getDrawer()}
+        {getDetails(sharedModelBannerInfo.visible)}
+        {getSearchBar()}
+        {getSharedModelBanner(sharedModelBannerInfo)}
+        {getCanvas()}
+        {getSnackbar()}
+        {getEditorControls()}
+        {getMetaActionsBar()}
+        {getSnapshot()}
+      </div>
+    </PortalContainerContext.Provider>
   );
 });
