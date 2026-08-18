@@ -2513,3 +2513,119 @@ fn test_flow_endpoints_geometrically_attached_to_stocks() {
         }
     }
 }
+
+/// A two-word variable added through incremental layout gets a wrapped label,
+/// and that label must survive every serialization the model can be saved in
+/// (protobuf, JSON, XMILE) byte-for-byte. The layout writes the break as the
+/// literal two-character `\n` -- the storage form Stella-authored files use
+/// (`test/modules_hares_and_foxes/modules_hares_and_foxes.stmx`:
+/// `name="hares killed\nper lynx"`), the form the XMILE spec prescribes for
+/// user text (section 4.1: use identifier escapes, not `&#x0A`), and the form
+/// the TS editor writes (`encodeNameNewlines`). A raw newline in an XML
+/// attribute is normalized to a space on read, silently losing the break.
+#[test]
+fn test_incremental_two_word_label_round_trips_every_format() {
+    use simlin_engine::datamodel;
+    use simlin_engine::layout::incremental_layout;
+    use simlin_engine::prost::Message;
+    use simlin_engine::{ModelOperation, ModelPatch, json, project_io, serde as project_serde};
+
+    let project = load_project("test/test-models/samples/teacup/teacup_w_diagram.xmile");
+    let old_view = match project.get_model(MAIN_MODEL).unwrap().views.first() {
+        Some(datamodel::View::StockFlow(sf)) => sf.clone(),
+        _ => panic!("teacup_w_diagram carries a stock-flow view"),
+    };
+
+    let new_aux = datamodel::Aux {
+        ident: "from python".to_string(),
+        equation: datamodel::Equation::Scalar("1".to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: Default::default(),
+    };
+    let mut patched = project.clone();
+    patched
+        .get_model_mut(MAIN_MODEL)
+        .unwrap()
+        .variables
+        .push(datamodel::Variable::Aux(new_aux.clone()));
+    let patch = ModelPatch {
+        name: String::new(),
+        ops: vec![ModelOperation::UpsertAux(new_aux)],
+    };
+    let new_view = incremental_layout(&old_view, &patched, MAIN_MODEL, &patch, None)
+        .expect("incremental layout should succeed");
+
+    let label_of = |view: &datamodel::StockFlow| -> String {
+        view.elements
+            .iter()
+            .find_map(|e| match e {
+                ViewElement::Aux(a) if canonicalize(&a.name) == "from_python" => {
+                    Some(a.name.clone())
+                }
+                _ => None,
+            })
+            .expect("new aux is in the view")
+    };
+    let laid_out = label_of(&new_view);
+    assert_eq!(
+        laid_out, "from\\npython",
+        "layout wraps at the word boundary"
+    );
+    assert!(
+        !laid_out.contains('\n'),
+        "layout must not put a raw newline into a view element name"
+    );
+
+    patched.get_model_mut(MAIN_MODEL).unwrap().views = vec![datamodel::View::StockFlow(new_view)];
+    let first_view = |p: &datamodel::Project| -> datamodel::StockFlow {
+        match p.get_model(MAIN_MODEL).unwrap().views.first() {
+            Some(datamodel::View::StockFlow(sf)) => sf.clone(),
+            _ => panic!("view survived"),
+        }
+    };
+
+    // protobuf
+    let pb: project_io::Project = project_serde::serialize(&patched).unwrap();
+    let mut bytes = Vec::new();
+    pb.encode(&mut bytes).unwrap();
+    let from_pb = project_serde::deserialize(project_io::Project::decode(&bytes[..]).unwrap());
+    assert_eq!(
+        label_of(&first_view(&from_pb)),
+        laid_out,
+        "protobuf round trip"
+    );
+
+    // JSON
+    let json_project: json::Project = (&patched).into();
+    let json_str = serde_json::to_string(&json_project).unwrap();
+    let from_json: datamodel::Project = serde_json::from_str::<json::Project>(&json_str)
+        .unwrap()
+        .into();
+    assert_eq!(
+        label_of(&first_view(&from_json)),
+        laid_out,
+        "JSON round trip"
+    );
+
+    // XMILE
+    let xml = simlin_engine::xmile::project_to_xmile(&patched).unwrap();
+    assert!(
+        xml.contains(r#"name="from\npython""#),
+        "XMILE writes the literal escape, got: {}",
+        xml.lines()
+            .find(|l| l.contains("from"))
+            .unwrap_or("<no line>")
+    );
+    let from_xmile =
+        simlin_engine::xmile::project_from_reader(&mut std::io::Cursor::new(xml.as_bytes()))
+            .unwrap();
+    assert_eq!(
+        label_of(&first_view(&from_xmile)),
+        laid_out,
+        "XMILE round trip"
+    );
+}

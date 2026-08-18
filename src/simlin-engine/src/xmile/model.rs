@@ -211,7 +211,10 @@ fn reconstruct_macro_invocation(inv: &MacroInvocation) -> Vec<datamodel::Variabl
         inv.primary_binding.clone(),
         &inv.module,
         &inv.primary_output,
-        inv.primary_doc.clone().unwrap_or_default(),
+        inv.primary_doc
+            .as_deref()
+            .map(super::decode_free_text_attribute)
+            .unwrap_or_default(),
         inv.primary_units.clone(),
     ));
 
@@ -531,7 +534,11 @@ impl From<Model> for datamodel::Model {
                     uids,
                     deleted: lm.deleted.unwrap_or(false),
                     name: lm.name,
-                    description: lm.description.unwrap_or_default(),
+                    description: lm
+                        .description
+                        .as_deref()
+                        .map(super::decode_free_text_attribute)
+                        .unwrap_or_default(),
                 }
             })
             .collect();

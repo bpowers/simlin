@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Result, canonicalize};
 use crate::datamodel;
 use crate::xmile::{
-    ToXml, XmlWriter, write_tag, write_tag_end, write_tag_start_with_attrs, xml_error,
+    ToXml, XmlWriter, push_attribute, write_tag, write_tag_end, write_tag_start_with_attrs,
+    xml_error,
 };
 
 use quick_xml::events::{BytesStart, Event};
@@ -312,15 +313,17 @@ impl ToXml<XmlWriter> for Gf {
     fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         let mut elem = BytesStart::new("gf");
         if let Some(ref name) = self.name {
-            elem.push_attribute(("name", name.as_str()));
+            push_attribute(&mut elem, "name", name);
         }
         if let Some(ref kind) = self.kind {
             match kind {
                 GraphicalFunctionKind::Continuous => {
                     // default, so don't write anything
                 }
-                GraphicalFunctionKind::Extrapolate => elem.push_attribute(("type", "extrapolate")),
-                GraphicalFunctionKind::Discrete => elem.push_attribute(("type", "discrete")),
+                GraphicalFunctionKind::Extrapolate => {
+                    push_attribute(&mut elem, "type", "extrapolate")
+                }
+                GraphicalFunctionKind::Discrete => push_attribute(&mut elem, "type", "discrete"),
             }
         }
         writer.write_event(Event::Start(elem)).map_err(xml_error)?;

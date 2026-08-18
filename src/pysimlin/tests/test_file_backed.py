@@ -395,7 +395,43 @@ def _view_positions(path: Path) -> dict[str, tuple[float, float]]:
     }
 
 
+def _view_geometry(path: Path) -> dict[str, tuple[float, float, str]]:
+    """name -> (x, y, labelSide) for the named elements of the first view."""
+    project = simlin.load(path).project
+    assert project is not None
+    doc = json.loads(project.serialize_json())
+    views = doc["models"][0].get("views") or []
+    assert views, "fixture must carry a view"
+    return {
+        e["name"]: (e["x"], e["y"], e["labelSide"])
+        for e in views[0]["elements"]
+        if "name" in e and e["type"] in ("stock", "flow", "aux", "module")
+    }
+
+
 class TestIncrementalLayout:
+    def test_ac1_3_unrelated_edit_keeps_every_existing_label_side(self, tmp_path: Path) -> None:
+        # Pin Room_Temperature's label on the right, as a widget user who
+        # dragged it there would have, and let the other three fall to the
+        # reader's defaults. Every one of them, not just the pinned one, must
+        # come back byte-identical after an edit that only adds an unrelated
+        # variable -- otherwise the next Python edit undoes the human's drag.
+        path = _copy(FIXTURES / "teacup.xmile", tmp_path)
+        unpinned = '<aux name="Room_Temperature" x="369" y="250"/>'
+        text = path.read_text()
+        assert unpinned in text, "fixture drifted: Room_Temperature element not found"
+        path.write_text(text.replace(unpinned, unpinned[:-2] + ' label_side="right"/>'))
+        before = _view_geometry(path)
+        assert before["Room_Temperature"][2] == "right"
+        assert len({g[2] for g in before.values()}) > 1, "fixture mixes label sides"
+        model = simlin.open(path, watch=False)
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="x", equation="1"))
+        after = _view_geometry(path)
+        assert "x" in after
+        for name, geometry in before.items():
+            assert after[name] == geometry, f"{name} changed during incremental layout"
+
     def test_ac1_3_new_variable_gets_a_view_element_and_others_keep_positions(
         self, tmp_path: Path
     ) -> None:
