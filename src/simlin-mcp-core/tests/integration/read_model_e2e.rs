@@ -52,6 +52,13 @@ async fn read_model_returns_clean_xmile_snapshot() {
         value.get("aggRecoveryTruncated").is_none(),
         "a false agg_recovery_truncated must be elided from the wire shape"
     );
+    // `truncated` follows the same rule: an unbudgeted read of a tiny model
+    // completes candidate generation, so the flag is false and off the wire.
+    assert!(!output.truncated, "tiny fixture must not report truncation");
+    assert!(
+        value.get("truncated").is_none(),
+        "a false truncated must be elided from the wire shape"
+    );
     // The completeness counters. `enumerationComplete` is ALWAYS on the wire
     // (unlike `aggRecoveryTruncated` above): its interesting value is `false`,
     // so a client that cannot see the field cannot tell an exact analysis from

@@ -602,17 +602,24 @@ class Model:
           ``enumeration_complete`` False) are different claims that look
           identical everywhere else.
         * ``enumeration_complete`` is True when the engine ENUMERATED every
-          loop that could ever score and picked from that whole set, so
-          ``loops`` is exact. False means the budgets or the ``timeout`` cut
-          the enumeration short and a shortest-path fallback SAMPLED the
-          model's loops instead -- a loop missing from a sampled analysis is
-          not evidence the model lacks it.
+          loop that could ever score and picked from that whole set. The
+          report is exact when it is True AND ``agg_recovery_truncated`` is
+          False (cross-aggregate reducer loops are recovered under their own
+          budget). False means the budgets or the ``timeout`` cut the
+          enumeration short and a shortest-path fallback SAMPLED the model's
+          loops instead -- a loop missing from a sampled analysis is not
+          evidence the model lacks it.
         * ``universe_loops`` is how many loops that enumerated universe held,
           or ``None`` on a sampled analysis (which has no universe to report;
           ``None`` and ``0`` are different claims).
         * ``retained_loops`` is how many loops passed the importance filter
           before the report cap truncated ``loops``. When it exceeds
-          ``len(loops)``, you are seeing a most-important-first prefix.
+          ``len(loops)``, ``loops`` is a coverage-aware SUBSET of the retained
+          set -- every step's dominant loop in each competing partition is
+          guaranteed a slot and the rest is filled by mean importance -- so
+          it is presented in importance order but is not a strict
+          most-important-first prefix: an omitted loop can outrank a reported
+          one that anchors a step.
 
         Args:
             timeout: Maximum seconds to spend in discovery, or ``None`` for no

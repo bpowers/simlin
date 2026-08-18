@@ -63,11 +63,19 @@ pub struct ReadModelOutput {
     /// elided when false to preserve the stable wire shape.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub agg_recovery_truncated: bool,
+    /// True when candidate generation stopped before covering every saved
+    /// step: the shortest-path fallback hit its candidate bound (or a
+    /// wall-clock budget, though these tools pass none), so `loopDominance`
+    /// is a sample cut short rather than a completed one. Elided when false,
+    /// like `aggRecoveryTruncated`: the interesting value is `true`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
     /// True when loop discovery ENUMERATED every loop that could ever score
-    /// and `loopDominance` is the exact selection from that set; false when a
-    /// budget cut the enumeration short and a shortest-path search SAMPLED
-    /// the model's loops instead, so a loop absent from `loopDominance` is
-    /// not evidence the model lacks it.
+    /// and `loopDominance` is the exact selection from that set (exact for
+    /// cross-aggregate reducer loops too only while `aggRecoveryTruncated` is
+    /// absent/false); false when a budget cut the enumeration short and a
+    /// shortest-path search SAMPLED the model's loops instead, so a loop
+    /// absent from `loopDominance` is not evidence the model lacks it.
     ///
     /// ALWAYS serialized, unlike `aggRecoveryTruncated` above: there the
     /// interesting value is `true` and eliding the common `false` keeps the
@@ -78,7 +86,10 @@ pub struct ReadModelOutput {
     pub enumeration_complete: bool,
     /// How many loops passed discovery's importance filter before the report
     /// cap truncated `loopDominance`. Above `loopDominance.len()` when the cap
-    /// bound, which is the only signal that the list is a ranked prefix.
+    /// bound, which is the signal that the list is a coverage-aware SUBSET of
+    /// the retained loops (each step's dominant loop per competing partition
+    /// is guaranteed a slot, the rest is filled by mean importance): presented
+    /// in importance order, but not a strict most-important-first prefix.
     ///
     /// Always serialized, and not optional: every count this can carry is a
     /// real statement, `0` ("no loop cleared the filter") included, so there
@@ -161,6 +172,7 @@ pub async fn read_model<A: ProjectAccess>(
             .map_err(|e| AccessError::ParseError(anyhow::anyhow!("analysis failed: {e}")))?;
 
     let agg_recovery_truncated = analysis.agg_recovery_truncated;
+    let truncated = analysis.truncated;
     let enumeration_complete = analysis.enumeration_complete;
     let retained_loops = analysis.retained_loops;
     let universe_loops = analysis.universe_loops;
@@ -184,6 +196,7 @@ pub async fn read_model<A: ProjectAccess>(
         partitions,
         dominant_loops_by_period,
         agg_recovery_truncated,
+        truncated,
         enumeration_complete,
         retained_loops,
         universe_loops,

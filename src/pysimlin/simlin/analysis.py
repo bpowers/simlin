@@ -499,7 +499,9 @@ class Analysis:
     enumeration_complete: bool = False
     """True when discovery ENUMERATED the whole candidate universe rather than
     sampling it, so `loops` is the exact selection from every loop that can
-    ever score. False means a shortest-path fallback generated the candidates
+    ever score -- exact for cross-aggregate reducer loops too only while
+    `agg_recovery_truncated` is also False, since those are stitched under
+    their own budget. False means a shortest-path fallback generated the candidates
     -- because the enumeration's budgets or the `timeout` did not allow it to
     finish -- and `loops` is a SAMPLE. Check this before reading an absent
     loop as evidence the model has none.
@@ -512,8 +514,11 @@ class Analysis:
     retained_loops: int = 0
     """How many loops passed discovery's importance filter, before the report
     cap truncated `loops`. Equal to ``len(loops)`` when the cap did not bind;
-    larger when it did, which is the only signal that `loops` is a
-    most-important-first prefix rather than the whole retained set."""
+    larger when it did, which is the signal that `loops` is a coverage-aware
+    SUBSET of the retained set: each step's dominant loop per competing
+    partition is guaranteed a slot and the remaining slots are filled by mean
+    importance, so `loops` is presented in importance order but is not a
+    strict most-important-first prefix."""
 
     universe_loops: int | None = None
     """How many DISTINCT loops' mass the discovery denominators sum -- the

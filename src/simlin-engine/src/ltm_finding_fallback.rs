@@ -621,7 +621,7 @@ impl FallbackScratch {
                 if edge.to as usize == from {
                     continue;
                 }
-                let value = results.data[base + edge.offset];
+                let value = edge.value_at(results, base);
                 if !is_active(value) {
                     continue;
                 }
@@ -1107,13 +1107,16 @@ fn order_hops(tie_break: FallbackTieBreak, hops: u32) -> u32 {
 /// materialized into a `FoundLoop` carrying a `step_count`-long `Vec<(f64,
 /// f64)>` score series BEFORE retention has a chance to drop any of them
 /// (`ltm_finding.rs`'s materialization loop runs over `all_paths` in full),
-/// so the bound that actually matters is candidates x steps x 16 bytes: at
-/// 20,000 candidates and a 401-step model (World3's shape) that is
-/// `20,000 * 401 * 16 B ~ 128 MB`, a bounded, tolerable spike; the former
-/// 200,000 put the same arithmetic at ~1.3 GB, the same multi-GB-cliff shape
-/// AC3.3's enumeration-side `MAX_DISCOVERY_ENUM_EDGE_ROWS` exists to prevent,
-/// just on the fallback's own candidate count instead of the enumerator's
-/// edge-row count.
+/// so the bound that actually matters is candidates x steps x 16 bytes. The
+/// effective cap is therefore the SMALLER of this count and
+/// [`MAX_FALLBACK_MATERIALIZATION_BYTES`] divided by the run's per-candidate
+/// series size (`max_fallback_paths(step_count)`): at 401 saved steps
+/// (World3's shape) 20,000 candidates is ~128 MB and the count binds; at
+/// 100,000 saved steps the byte budget binds instead and the cap falls to
+/// ~160 candidates -- a bounded, tolerable spike either way, where a fixed
+/// count alone would let a long run climb to tens of GB (the same
+/// multi-GB-cliff shape AC3.3's enumeration-side `MAX_DISCOVERY_ENUM_EDGE_ROWS`
+/// exists to prevent).
 ///
 /// It is still sized with real headroom over what the corpus actually
 /// produces -- `examples/ltm_discovery_bench` measured 2,150 deduped
@@ -1131,6 +1134,15 @@ fn order_hops(tie_break: FallbackTieBreak, hops: u32) -> u32 {
 /// wall-clock-truncated sweep already reads.
 const MAX_FALLBACK_PATHS: usize = 20_000;
 
+/// Materialization budget for one fallback sweep's candidates, in bytes of
+/// `FoundLoop` score series (`step_count * 16 B` each). See
+/// [`MAX_FALLBACK_PATHS`] for why the count alone does not bound memory.
+const MAX_FALLBACK_MATERIALIZATION_BYTES: usize = 256 * 1024 * 1024;
+
+/// Bytes one materialized candidate's score series costs: `(f64, f64)` per
+/// saved step.
+const BYTES_PER_MATERIALIZED_STEP: usize = 16;
+
 #[cfg(test)]
 thread_local! {
     /// Test-only override of [`MAX_FALLBACK_PATHS`], scoped by an active
@@ -1141,17 +1153,20 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-/// The candidate-cycle budget for the current sweep. Returns
-/// [`MAX_FALLBACK_PATHS`] unless a test has installed a
-/// [`MaxFallbackPathsGuard`] override.
-fn max_fallback_paths() -> usize {
+/// The candidate-cycle budget for a sweep over `step_count` saved steps:
+/// the smaller of [`MAX_FALLBACK_PATHS`] and the count whose materialized
+/// series fit [`MAX_FALLBACK_MATERIALIZATION_BYTES`] (never below 1, so a
+/// pathologically long run still proposes something). A test-installed
+/// [`MaxFallbackPathsGuard`] override replaces both.
+fn max_fallback_paths(step_count: usize) -> usize {
     #[cfg(test)]
     {
         if let Some(n) = MAX_FALLBACK_PATHS_OVERRIDE.with(|c| c.get()) {
             return n;
         }
     }
-    MAX_FALLBACK_PATHS
+    let per_candidate = step_count.max(1) * BYTES_PER_MATERIALIZED_STEP;
+    MAX_FALLBACK_PATHS.min((MAX_FALLBACK_MATERIALIZATION_BYTES / per_candidate).max(1))
 }
 
 /// RAII guard (test-only) overriding [`max_fallback_paths`] for the current
@@ -1331,7 +1346,7 @@ pub(super) fn sweep(
     clock: &mut dyn Clock,
 ) -> FallbackOutcome {
     let mut scratch = FallbackScratch::new(search, config.tie_break);
-    let cap = max_fallback_paths();
+    let cap = max_fallback_paths(results.step_count);
     // Dedup on the node-id cycle rather than on names. Within one
     // `IndexedSearch` the id <-> name map is a bijection, so these are the same
     // equivalence classes a name-keyed dedup would give, without allocating a

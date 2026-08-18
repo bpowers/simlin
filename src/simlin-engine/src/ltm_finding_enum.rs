@@ -462,7 +462,7 @@ impl ActivityGraph {
                     }
                     let block_end = (step + values_until_check).min(step_count);
                     for s in step..block_end {
-                        let value = results.data[s * results.step_size + edge.offset];
+                        let value = edge.value_at(results, s * results.step_size);
                         edge_series[s] = value;
                         if is_active(value) {
                             edge_bits[s / 64] |= 1u64 << (s % 64);
@@ -530,6 +530,21 @@ impl ActivityGraph {
     /// over a circuit's edge rows before deciding whether the full
     /// [`Self::circuit_nodes`] path is worth materializing.
     #[inline]
+    /// The union-graph edge row for `from -> to`, if that edge is ever active.
+    #[cfg(test)]
+    pub(super) fn edge_row_of(&self, from: u32, to: u32) -> Option<u32> {
+        self.adj[from as usize]
+            .iter()
+            .find(|(t, _)| *t == to)
+            .map(|(_, row)| *row)
+    }
+
+    /// The (NaN-shadow-repaired) score of edge `row` at saved step `step`.
+    #[cfg(test)]
+    pub(super) fn score_at(&self, row: u32, step: usize) -> f64 {
+        self.series[row as usize * self.step_count + step]
+    }
+
     pub(super) fn edge_source(&self, row: u32) -> u32 {
         self.edge_from[row as usize]
     }

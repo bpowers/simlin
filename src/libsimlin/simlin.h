@@ -342,7 +342,9 @@ typedef struct {
   // circuit enumeration AND it ran to completion: `loops` is then the
   // retention/ranking pipeline's selection from the PROVABLY COMPLETE set
   // of loops that can ever score, so discovery was exact rather than
-  // heuristic.  Zero means the shortest-path fallback generated the
+  // heuristic (exact for cross-aggregate reducer loops too only while
+  // `agg_recovery_truncated` is also false: those are stitched under their
+  // own budget).  Zero means the shortest-path fallback generated the
   // candidates -- an explicit SAMPLE of the loop universe -- because the
   // enumeration's budgets or `budget_ms` did not allow it to finish.  Read
   // this before treating an absent loop as evidence the model has none.
@@ -353,9 +355,11 @@ typedef struct {
   bool enumeration_complete;
   // How many loops passed discovery's retention filter, BEFORE the
   // reported-loop cap truncated `loops`.  Equal to `loop_count` when the
-  // cap did not bind, and above it when it did -- the only signal that
-  // `loops` is a capped prefix of the loops worth reporting rather than
-  // all of them.
+  // cap did not bind, and above it when it did -- the signal that `loops`
+  // is a coverage-aware SUBSET of the loops worth reporting (each step's
+  // dominant loop per competing partition is guaranteed a slot, the rest
+  // is filled by mean importance): presented in importance order, but not
+  // a strict most-important-first prefix.
   uintptr_t retained_loops;
   // The size of the candidate universe: how many DISTINCT loops' mass the
   // discovery denominators sum -- the ever-simultaneously-active

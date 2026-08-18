@@ -1621,6 +1621,30 @@ fn a_tiny_candidate_budget_trips_and_keeps_only_what_fit() {
     assert_eq!(named(&search, &out.paths), vec![vec!["s", "b", "c"]]);
 }
 
+/// The cap is the smaller of the count bound and the materialization byte
+/// budget: at World3's 401 saved steps the count binds (20,000 candidates is
+/// ~128 MB), while at 100,000 saved steps a fixed count would let the
+/// materialized series climb to ~32 GB, so the byte budget takes over and
+/// the cap falls with the run length. Never below one candidate.
+#[test]
+fn the_candidate_cap_shrinks_with_the_saved_step_count() {
+    let per = |steps: usize| steps * BYTES_PER_MATERIALIZED_STEP;
+    assert_eq!(max_fallback_paths(401), MAX_FALLBACK_PATHS);
+    assert_eq!(
+        max_fallback_paths(100_000),
+        MAX_FALLBACK_MATERIALIZATION_BYTES / per(100_000)
+    );
+    assert!(max_fallback_paths(100_000) < MAX_FALLBACK_PATHS);
+    // The count and the byte budget swap roles exactly where the series of
+    // MAX_FALLBACK_PATHS candidates fill the budget.
+    let crossover =
+        MAX_FALLBACK_MATERIALIZATION_BYTES / (MAX_FALLBACK_PATHS * BYTES_PER_MATERIALIZED_STEP);
+    assert_eq!(max_fallback_paths(crossover), MAX_FALLBACK_PATHS);
+    assert!(max_fallback_paths(crossover + 1) < MAX_FALLBACK_PATHS);
+    assert_eq!(max_fallback_paths(usize::MAX / 32), 1, "never below one");
+    assert_eq!(max_fallback_paths(0), max_fallback_paths(1));
+}
+
 /// The not-tripped control for the test above: a cap comfortably above the
 /// fixture's candidate count changes nothing about the sweep's output.
 #[test]

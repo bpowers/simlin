@@ -2462,3 +2462,78 @@ fn walk_simple_cycles(
     path.pop();
     on_path[at] = false;
 }
+
+/// A module-input edge's activity is read through the composite's NaN shadow:
+/// its own slot (the module COMPOSITE) is NaN at the only step the cycle could
+/// score, but a per-pathway slot behind it is finite, so the edge is active
+/// there, the union graph carries the cycle, the enumerator emits it with the
+/// pathway value in its score row, and the fallback closes it too. Without the
+/// pathway slots (the control below) the same fixture holds no cycle at all --
+/// which is the blind spot `IndexedEdge::value_at` exists to close.
+#[test]
+fn a_module_input_edge_is_active_where_a_pathway_is_finite_under_a_nan_composite() {
+    // Slots: 0 = a->b composite, 1 = b->a, 2 = a->b pathway. Two steps.
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new("b")), 0),
+        ((Ident::new("b"), Ident::new("a")), 1),
+    ];
+    let n_offsets = 3;
+    let step_count = 2;
+    let mut data = vec![0.0f64; n_offsets * step_count];
+    data[n_offsets] = f64::NAN; // a->b composite: shadowed
+    data[n_offsets + 1] = 1.0; // b->a
+    data[n_offsets + 2] = 0.5; // a->b pathway: finite
+    let results = enum_results(n_offsets, step_count, data);
+    let stocks = stock_list(&["a"]);
+
+    // Control: composite-only activity sees no cycle.
+    let bare = IndexedSearch::build(&link_offsets, &stocks);
+    let activity = super::enum_gen::ActivityGraph::build(&bare, &results, None, &mut SystemClock)
+        .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
+    assert!(candidates.complete);
+    assert_eq!(candidates.len(), 0, "the NaN composite hides the cycle");
+
+    // With the pathway slot attached the edge is active at step 1.
+    let mut search = IndexedSearch::build(&link_offsets, &stocks);
+    let a: Ident<Canonical> = Ident::new("a");
+    let b: Ident<Canonical> = Ident::new("b");
+    search.attach_module_pathways(&mut |from, to| {
+        if *from == a && *to == b {
+            vec![2]
+        } else {
+            Vec::new()
+        }
+    });
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
+        .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
+    assert!(candidates.complete);
+    assert_eq!(
+        canonical_name_cycles(
+            &search,
+            &(0..candidates.len())
+                .map(|i| activity.circuit_nodes(candidates.circuit(i)))
+                .collect::<Vec<_>>()
+        ),
+        vec![vec!["a".to_string(), "b".to_string()]],
+        "the pathway makes the edge, and so the cycle, active"
+    );
+    // The score row carries the repaired composite: the max-abs active
+    // pathway value where the composite is NaN.
+    let row = activity.edge_row_of(0, 1).expect("a->b is a union edge");
+    assert_eq!(activity.score_at(row, 1), 0.5);
+
+    let outcome = super::fallback::sweep(
+        &search,
+        &results,
+        FallbackConfig::DEFAULT,
+        None,
+        &mut SystemClock,
+    );
+    assert_eq!(
+        canonical_name_cycles(&search, &outcome.paths),
+        vec![vec!["a".to_string(), "b".to_string()]],
+        "the fallback reads the same repaired activity"
+    );
+}

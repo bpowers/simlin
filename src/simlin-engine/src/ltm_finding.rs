@@ -304,14 +304,17 @@ pub struct DiscoveryResult {
     /// the full universe of ever-simultaneously-active elementary cycles of
     /// the recorded link-score series (at saved-step resolution), so the
     /// reported loops are exactly the retention/ranking pipeline's selection
-    /// from ALL scorable loops -- discovery is exact, not heuristic.
+    /// from ALL scorable loops -- discovery is exact, not heuristic -- with
+    /// one further condition: cross-aggregate reducer loops are recovered by
+    /// stitching under their own budget, so the report is exact for that
+    /// class only while `agg_recovery_truncated` is also `false`. "Exact"
+    /// therefore reads `enumeration_complete && !agg_recovery_truncated`.
     ///
     /// When `false`, the shortest-path fallback generated the candidates: an
-    /// explicit SAMPLE of the loop universe, holding the minimum-weight cycle
-    /// through each (stock, saved step) plus whatever its closing in-edges
-    /// recover. This is the only completeness signal a caller gets, and the
-    /// two `false` causes are deliberately not distinguished -- a budget trip
-    /// and a deadline expiry leave the report equally a sample.
+    /// explicit SAMPLE of the loop universe (the minimum-weight cycle through
+    /// each seed and each edge on it, per saved step). The two `false` causes
+    /// -- a budget trip and a deadline expiry -- are deliberately not
+    /// distinguished: both leave the report equally a sample.
     pub enumeration_complete: bool,
     /// How many candidate loops passed the `MIN_CONTRIBUTION` retention
     /// filter, BEFORE the `MAX_LOOPS` cap truncated the report.
@@ -1352,9 +1355,48 @@ struct IndexedSearch {
 
 /// A static outbound edge: target node id plus the result slot its score is
 /// read from each timestep.
+/// Resolves the per-pathway result slots behind a `(from, to)` edge -- empty
+/// unless `to` is a module instance with a unique entry port fed by `from`
+/// (see [`ModuleOverrideCache::pathway_offsets`]).
+type ModulePathwayFn<'a> = dyn FnMut(&Ident<Canonical>, &Ident<Canonical>) -> Vec<usize> + 'a;
+
 struct IndexedEdge {
     to: u32,
     offset: usize,
+    /// Result slots of the per-pathway series (`m·$⁚ltm⁚path⁚{entry}⁚{idx}`)
+    /// behind this edge when it enters a module instance; empty otherwise.
+    /// The edge's own `offset` holds the module COMPOSITE, whose max-abs fold
+    /// lets a NaN pathway shadow a finite one; the pathways let
+    /// [`IndexedEdge::value_at`] see through that shadow so an edge (and any
+    /// cycle through it) that a per-exit-port override can score is never
+    /// read as inactive. Attached by [`IndexedSearch::attach_module_pathways`].
+    extra_offsets: Vec<usize>,
+}
+
+impl IndexedEdge {
+    /// The edge's link score at results row `base` (`step * step_size`),
+    /// NaN-shadow-repaired for a module-input edge: the composite when it is
+    /// active, otherwise the max-abs active pathway value (which is what the
+    /// composite's own max-abs fold would have produced without a NaN
+    /// operand), otherwise the composite as recorded (0 or NaN). For an edge
+    /// with no pathways this is exactly `results.data[base + offset]`.
+    #[inline]
+    fn value_at(&self, results: &Results, base: usize) -> f64 {
+        let composite = results.data[base + self.offset];
+        if self.extra_offsets.is_empty() || is_active(composite) {
+            return composite;
+        }
+        let mut best = composite;
+        let mut best_abs = -1.0f64;
+        for &off in &self.extra_offsets {
+            let v = results.data[base + off];
+            if is_active(v) && v.abs() > best_abs {
+                best_abs = v.abs();
+                best = v;
+            }
+        }
+        best
+    }
 }
 
 /// How much work a deadline-aware search may do between wall-clock checks.
@@ -1501,6 +1543,7 @@ impl IndexedSearch {
             adj[from_id as usize].push(IndexedEdge {
                 to: to_id,
                 offset: *offset,
+                extra_offsets: Vec::new(),
             });
         }
 
@@ -1528,6 +1571,23 @@ impl IndexedSearch {
     /// Number of distinct nodes.
     fn node_count(&self) -> usize {
         self.idents.len()
+    }
+
+    /// Attach the per-pathway result slots to every edge entering a module
+    /// instance, so edge activity is read through the NaN shadow of the
+    /// module composite (see [`IndexedEdge::extra_offsets`]). `pathways` is
+    /// asked once per `(from, to)` edge and returns the slots for that pair
+    /// (empty for a non-module target or an ambiguous entry port); a module
+    /// with no resolvable pathways keeps composite-only activity, exactly as
+    /// its scoring keeps the composite when the recompute declines.
+    fn attach_module_pathways(&mut self, pathways: &mut ModulePathwayFn<'_>) {
+        for from in 0..self.adj.len() {
+            for k in 0..self.adj[from].len() {
+                let to = self.adj[from][k].to;
+                let extra = pathways(&self.idents[from], &self.idents[to as usize]);
+                self.adj[from][k].extra_offsets = extra;
+            }
+        }
     }
 }
 
@@ -1772,7 +1832,7 @@ pub fn discovery_graph_stats(
         let mut nonzero_adj: Vec<Vec<u32>> = vec![Vec::new(); n_nodes];
         for (node, edges) in search.adj.iter().enumerate() {
             for edge in edges {
-                let value = results.data[base + edge.offset];
+                let value = edge.value_at(results, base);
                 let score = if value.is_nan() { 0.0 } else { value.abs() };
                 if score == 0.0 {
                     zero_edges += 1;
@@ -2124,6 +2184,9 @@ pub(crate) struct ModuleOverrideCache<'a> {
     sub_model_output_ports: &'a SubModelOutputPorts,
     step_count: usize,
     cache: ModuleSeriesCache,
+    /// `(from, module)` -> every pathway slot behind that module-input edge,
+    /// regardless of exit port (see [`Self::pathway_offsets`]).
+    pathway_cache: HashMap<(Ident<Canonical>, Ident<Canonical>), Vec<usize>>,
 }
 
 impl<'a> ModuleOverrideCache<'a> {
@@ -2139,7 +2202,77 @@ impl<'a> ModuleOverrideCache<'a> {
             sub_model_output_ports,
             step_count,
             cache: HashMap::new(),
+            pathway_cache: HashMap::new(),
         }
+    }
+
+    /// Every `m·$⁚ltm⁚path⁚{entry}⁚{idx}` result slot behind the edge
+    /// `from -> module`, over ALL exit ports -- the series whose max-abs fold
+    /// is the composite the edge's own slot records. Used to read edge
+    /// ACTIVITY through the composite's NaN shadow (a NaN pathway hides a
+    /// finite sibling in the fold): if any pathway is active at a step, some
+    /// per-exit-port override through this edge can be, so the edge is. Empty
+    /// for a non-module target, an ambiguous entry port (`from` feeds two
+    /// input ports -- the same decline as [`Self::series`], whose scoring then
+    /// keeps the composite too), or a module with no emitted pathways.
+    pub(crate) fn pathway_offsets(
+        &mut self,
+        from: &Ident<Canonical>,
+        module: &Ident<Canonical>,
+    ) -> Vec<usize> {
+        use crate::ltm::{normalize_module_ref, strip_subscript};
+        use crate::variable::Variable;
+
+        let key = (
+            Ident::<Canonical>::new(strip_subscript(from.as_str())),
+            Ident::<Canonical>::new(strip_subscript(module.as_str())),
+        );
+        if let Some(cached) = self.pathway_cache.get(&key) {
+            return cached.clone();
+        }
+        let resolve = || -> Option<Vec<usize>> {
+            let module_graph = self.causal_graph.module_graph(&key.1)?;
+            let module_var = self.causal_graph.variables().get(&key.1)?;
+            let Variable::Module {
+                inputs,
+                model_name: sub_model_name,
+                ..
+            } = module_var
+            else {
+                return None;
+            };
+            let mut matching = inputs
+                .iter()
+                .filter(|inp| normalize_module_ref(&inp.src) == key.0);
+            let entry_port = matching.next()?.dst.clone();
+            if matching.next().is_some() {
+                return None;
+            }
+            let output_ports = self.sub_model_output_ports.get(sub_model_name)?;
+            if output_ports.is_empty() {
+                return None;
+            }
+            let (pathways, _truncated) =
+                module_graph.enumerate_pathways_to_outputs_with_truncation(output_ports);
+            let port_pathways = pathways.get(&entry_port)?;
+            let offsets: Vec<usize> = (0..port_pathways.len())
+                .filter_map(|idx| {
+                    let name = format!(
+                        "{}\u{00B7}$\u{205A}ltm\u{205A}path\u{205A}{}\u{205A}{idx}",
+                        key.1.as_str(),
+                        entry_port.as_str()
+                    );
+                    self.results
+                        .offsets
+                        .get(&Ident::<Canonical>::new(&name))
+                        .copied()
+                })
+                .collect();
+            Some(offsets)
+        };
+        let offsets = resolve().unwrap_or_default();
+        self.pathway_cache.insert(key, offsets.clone());
+        offsets
     }
 
     /// The override series for the edge `from -> module` whose next hop reads
@@ -2497,7 +2630,7 @@ pub(crate) fn discover_loops_with_deadlines(
     // Hoist the integer-indexed topology build out of the candidate search:
     // the graph's edges and result slots are step-invariant. Both candidate
     // generators run over this one structure.
-    let search = IndexedSearch::build(&link_offsets, stocks);
+    let mut search = IndexedSearch::build(&link_offsets, stocks);
 
     // Cycle partitions serve both the enumeration retention pass
     // (full-universe denominators) and the final ranking; compute once.
@@ -2530,6 +2663,14 @@ pub(crate) fn discover_loops_with_deadlines(
     // fallback path too.
     let mut module_override_cache =
         ModuleOverrideCache::new(causal_graph, results, sub_model_output_ports, step_count);
+
+    // Let both candidate generators read a module-input edge's activity
+    // through its pathways rather than only its composite: the composite's
+    // max-abs fold lets a NaN pathway shadow a finite one, and a cycle whose
+    // per-exit-port override is finite there must not be dropped as inactive
+    // before retention ever scores it (that shadow was this pipeline's one
+    // stated blind spot; `IndexedEdge::value_at` closes it).
+    search.attach_module_pathways(&mut |from, to| module_override_cache.pathway_offsets(from, to));
 
     // --- Primary candidate generation: union-graph circuit enumeration ---
     // (docs/design-plans/2026-08-17-ltm-discovery-exact.md).
@@ -3030,6 +3171,12 @@ pub(crate) fn discover_loops_with_deadlines(
         for fl in &dropped {
             subtract_reported_mass_from_totals(fl, &partitions, &mut stats.totals);
             subtract_reported_loop_from_counts(fl, &partitions, &mut stats.loop_counts);
+        }
+        // A duplicate discarded here is one fewer DISTINCT loop in the
+        // universe the denominators now sum, so the count reported to
+        // callers moves with the totals it describes.
+        if let Some(n) = universe_loops.as_mut() {
+            *n = n.saturating_sub(dropped.len());
         }
     }
 
