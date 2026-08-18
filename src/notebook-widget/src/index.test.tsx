@@ -14,7 +14,7 @@ import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 
 import widget from './index';
 import { GLOBAL_KEY, resetEngineBootstrapForTests } from './engine-bootstrap';
-import { formatSize } from './widget-core';
+import { formatSize, withEditorView } from './widget-core';
 import { NOTICE_TIMEOUT_MS, SELECTION_DEBOUNCE_MS } from './WidgetApp';
 import { localJson, mounts, resetEditorMock } from './test-utils/editor-mock';
 import { readyCalls, resetEngineMock } from './test-utils/engine-mock';
@@ -331,6 +331,37 @@ describe('WidgetApp <-> model protocol', () => {
     });
     expect(mounts).toHaveLength(4);
     expect(mounts[3].props.initialProjectVersion).toBe(6);
+  });
+
+  it('a project whose root model has no view is seeded with an empty view, and its first save carries it', async () => {
+    // Defence in depth: the kernel lays a viewless model out before seeding
+    // (pysimlin `_ensure_view`), but if that failed the Editor must not mount
+    // dead on views[0] === undefined.
+    const viewless = '{"name":"p","models":[{"name":"main","auxiliaries":[{"name":"a","equation":"1"}]}]}';
+    const model = new FakeModel(defaultState({ project_json: viewless, revision: 2 }));
+    const { el } = await mount(model);
+    const editor = el.querySelector('[data-testid="editor-mock"]');
+    const seeded = JSON.parse(editor?.getAttribute('data-initial-json') ?? '') as {
+      models: Array<{ name: string; views?: Array<{ kind: string; elements: unknown[] }> }>;
+    };
+    expect(seeded.models[0].views).toHaveLength(1);
+    expect(seeded.models[0].views?.[0]).toMatchObject({ kind: 'stock_flow', elements: [] });
+    expect(seeded.models[0].name).toBe('main');
+    // The kernel's own trait is untouched (only the kernel writes it) ...
+    expect(model.get('project_json')).toBe(viewless);
+    // ... and an edit saves the repaired project against the seeded base as
+    // an own-ack (no remount): the kernel echoes our bytes, which have the view.
+    fireEvent.click(screen.getByText('edit'));
+    await waitFor(() => expect(mounts[0].saveResults).toEqual([3]));
+    expect(mounts).toHaveLength(1);
+    expect(model.lastSnapshot()?.base).toBe(2);
+    expect(model.lastSnapshot()?.json).toBe(localJson(withEditorView(viewless), 1));
+    // A later viewless push from the kernel remounts on the repaired text once.
+    act(() => {
+      model.kernelChange('{"name":"p","models":[{"name":"main"}]}');
+    });
+    expect(mounts).toHaveLength(2);
+    expect(mounts[1].props.initialProjectJson).toBe(withEditorView('{"name":"p","models":[{"name":"main"}]}'));
   });
 
   it('a revision that goes backwards with the same bytes still remounts (generation bump)', async () => {

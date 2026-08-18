@@ -8,6 +8,7 @@ import {
   checkSnapshotSize,
   classifyPush,
   DEFAULT_HEIGHT_PX,
+  EDITOR_ROOT_MODEL,
   formatSize,
   inFlightFor,
   MAX_SNAPSHOT_BYTES,
@@ -23,6 +24,7 @@ import {
   TRAITS,
   snapshotWireSize,
   versionAfterReply,
+  withEditorView,
   wrapperStyle,
 } from './widget-core';
 
@@ -30,7 +32,56 @@ function getterFor(state: Record<string, unknown>): (key: string) => unknown {
   return (key) => state[key];
 }
 
+describe('withEditorView', () => {
+  const EMPTY_VIEW = { kind: 'stock_flow', elements: [], viewBox: { x: 0, y: 0, width: 0, height: 0 }, zoom: 1 };
+
+  it('gives the root model an empty stock-flow view when it has none', () => {
+    const viewless = JSON.stringify({ name: 'p', models: [{ name: EDITOR_ROOT_MODEL, auxiliaries: [] }] });
+    const doc = JSON.parse(withEditorView(viewless)) as { models: Array<{ name: string; views?: unknown[] }> };
+    expect(doc.models[0].views).toEqual([EMPTY_VIEW]);
+    expect(doc.models[0].name).toBe(EDITOR_ROOT_MODEL);
+  });
+
+  it('treats an empty views list like a missing one', () => {
+    const viewless = JSON.stringify({ name: 'p', models: [{ name: EDITOR_ROOT_MODEL, views: [] }] });
+    const doc = JSON.parse(withEditorView(viewless)) as { models: Array<{ views?: unknown[] }> };
+    expect(doc.models[0].views).toEqual([EMPTY_VIEW]);
+  });
+
+  it('returns the exact input text when the root model already has a view (own-ack comparisons rely on this)', () => {
+    const withView = '{"name":"p","models":[{"name":"main","views":[{"kind":"stock_flow","elements":[]}]}]}';
+    expect(withEditorView(withView)).toBe(withView);
+  });
+
+  it('touches only the root model: other models keep their (missing) views', () => {
+    const doc = { name: 'p', models: [{ name: 'sub' }, { name: EDITOR_ROOT_MODEL }] };
+    const out = JSON.parse(withEditorView(JSON.stringify(doc))) as {
+      models: Array<{ name: string; views?: unknown[] }>;
+    };
+    expect(out.models[0]).toEqual({ name: 'sub' });
+    expect(out.models[1].views).toEqual([EMPTY_VIEW]);
+  });
+
+  it.each([
+    ['not JSON', '{'],
+    ['not an object', '[1]'],
+    ['no models list', '{"name":"p"}'],
+    ['models not a list', '{"models":{}}'],
+    ['no root model', '{"models":[{"name":"other"}]}'],
+    ['empty string', ''],
+  ])('leaves text it cannot repair as it is (%s)', (_label, text) => {
+    expect(withEditorView(text)).toBe(text);
+  });
+});
+
 describe('readTraits', () => {
+  it('seeds a viewless root model with an empty view (the Editor is blank without views[0])', () => {
+    const viewless = JSON.stringify({ name: 'p', models: [{ name: EDITOR_ROOT_MODEL }] });
+    const t = readTraits(getterFor({ [TRAITS.projectJson]: viewless }));
+    expect(t.projectJson).toBe(withEditorView(viewless));
+    expect(t.projectJson).not.toBe(viewless);
+  });
+
   it('reads well-typed traits through', () => {
     const t = readTraits(
       getterFor({

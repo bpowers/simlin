@@ -162,6 +162,19 @@ def _models_with_variable_ops(patch_json: bytes) -> list[str]:
     return list(names)
 
 
+def _models_with_views(project_json: bytes) -> set[str]:
+    """Names of the models in an engine-native JSON project that carry at
+    least one diagram view (an empty ``stock_flow`` view counts: it is a
+    diagram to keep in step, and what the editor mounts).  Names are the
+    ones the FFI takes: the default model is ``"main"``, never ``""``."""
+    doc = json.loads(project_json)
+    names: set[str] = set()
+    for model in doc.get("models") or []:
+        if isinstance(model, dict) and model.get("views"):
+            names.add(model.get("name") or "main")
+    return names
+
+
 def _read_model_file(path: Path) -> bytes:
     """Read a model file for :func:`simlin.load` / :meth:`Project.open`,
     turning the two ways a path can be wrong into ``SimlinImportError``."""
@@ -683,17 +696,36 @@ class Project:
         for model in models:
             model._invalidate_caches()
 
+    def _models_with_views_locked(self) -> set[str]:
+        """Which models currently have a diagram; caller holds ``_file_lock``.
+        Answered from a serialization because the FFI has no view query and
+        the answer is only needed after a variable-changing edit or before a
+        display, never in a hot loop."""
+        return _models_with_views(self.serialize_json())
+
     def _sync_diagram_for_patch(self, patch_json: bytes) -> None:
-        """Give newly created variables diagram elements after an edit.
+        """Keep a model's diagram in step with the variables after an edit.
 
         Runs the engine's incremental layout for every model whose patch
         adds, deletes, or renames variables: existing element positions are
-        preserved, new elements are placed, removed ones dropped.  A model
-        with no diagram yet gets a full layout.  Layout failure is not an
+        preserved, new elements are placed, removed ones dropped.  A diagram
+        is kept only when there is one to keep -- a model that has a view
+        (from its file, a display, or :meth:`auto_layout`), or any model of a
+        file-backed project (files are opened by other tools, which expect a
+        diagram; the same rule as simlin-mcp-core's ``edit_model``, where a
+        model with no diagram yet gets a full layout).  A diagram-less
+        in-memory model stays diagram-less: scripted model-building would
+        otherwise pay for a full layout on every edit for a picture nobody
+        asked for; displaying it (or :meth:`auto_layout`) creates the view,
+        after which its edits keep it in step too.  Layout failure is not an
         edit failure -- the model data is already correct -- so it is
         reported as a ``RuntimeWarning`` and the edit stands.
         """
-        for model_name in _models_with_variable_ops(patch_json):
+        model_names = _models_with_variable_ops(patch_json)
+        if model_names and self._path is None:
+            with_views = self._models_with_views_locked()
+            model_names = [name for name in model_names if name in with_views]
+        for model_name in model_names:
             try:
                 with self._lock:
                     self._check_alive()
@@ -1120,10 +1152,9 @@ class Project:
             if dry_run:
                 return diagnostics
             # Every accepted mutation funnels through here (edit(),
-            # set_sim_specs()); a file-backed project keeps its diagram in
-            # step with the variables before the change is committed/saved.
-            if self._path is not None:
-                self._sync_diagram_for_patch(patch_json)
+            # set_sim_specs()); the diagram is brought in step with the
+            # variables before the change is committed/saved.
+            self._sync_diagram_for_patch(patch_json)
             revision, write_error = self._commit_change_locked()
         self._notify(ChangeEvent("edit", revision))
         if write_error is not None:
@@ -1302,13 +1333,46 @@ class Project:
             SimlinRuntimeError: If the model doesn't exist or layout fails
         """
         with self._file_lock:
-            with self._lock:
-                self._check_alive()
-                _ffi_diagram_sync(self._ptr, model_name)
-            revision, write_error = self._commit_change_locked()
+            revision, write_error = self._auto_layout_locked(model_name)
         self._notify(ChangeEvent("edit", revision))
         if write_error is not None:
             raise write_error
+
+    def _auto_layout_locked(self, model_name: str) -> tuple[int, BaseException | None]:
+        """:meth:`auto_layout`'s mutate-and-commit half; caller holds
+        ``_file_lock`` and notifies with the returned revision after
+        releasing it."""
+        with self._lock:
+            self._check_alive()
+            _ffi_diagram_sync(self._ptr, model_name)
+        return self._commit_change_locked()
+
+    def _ensure_view(self, model_name: str = "main") -> bool:
+        """Give ``model_name`` a persisted diagram view if it has none.
+
+        What an interactive display needs before it seeds an editor: the
+        editor mounts the model's first view and shows a blank canvas without
+        one.  A model that already has a view (even an empty one) is left
+        exactly as it is and ``False`` is returned; otherwise this is
+        :meth:`auto_layout` -- a committed change (revision bump, autosave,
+        subscribers notified with ``source == "edit"``) -- and ``True``.
+        The check and the layout happen under ``_file_lock`` so a concurrent
+        edit cannot slip between them.
+
+        Raises:
+            SimlinRuntimeError: If the model doesn't exist or layout fails
+                (nothing is committed).
+            Exception: the autosave failure when the layout was committed in
+                memory but could not be written; :attr:`dirty` stays set.
+        """
+        with self._file_lock:
+            if (model_name or "main") in self._models_with_views_locked():
+                return False
+            revision, write_error = self._auto_layout_locked(model_name)
+        self._notify(ChangeEvent("edit", revision))
+        if write_error is not None:
+            raise write_error
+        return True
 
     def render_svg(self, model_name: str = "main") -> bytes:
         """Render a model's stock-and-flow diagram as SVG.

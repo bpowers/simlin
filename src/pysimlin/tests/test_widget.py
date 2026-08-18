@@ -277,15 +277,111 @@ class TestConstruction:
         model = project.get_model()
         w = _widget(model, assets)
         _drain(w)
+        base = w.revision
         scratch = Project.new()  # the browser's edited copy of the same project
         with scratch.get_model().edit() as (_, patch):
             patch.upsert(Aux(name="added", equation="1"))
         text = scratch.serialize_json().decode("utf-8")
-        _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
-        assert model.revision == 1
+        _from_browser(w, {"type": "snapshot", "base": base, "json": text})
+        assert model.revision == base + 1
         assert model.dirty is True
         assert model.get_variable("added") is not None
-        assert _sent(w)[-1] == ("custom", {"type": "saved", "revision": 1}, None)
+        assert _sent(w)[-1] == ("custom", {"type": "saved", "revision": base + 1}, None)
+
+
+class TestSeedHasAView:
+    """The Editor mounts a model's first view; a model without one renders
+    as a dead, blank editor.  Seeding therefore lays out a diagram-less model
+    first (``Project.new() -> edit() -> display`` is the headline path of
+    the example notebooks), through the same committed change as
+    ``auto_layout()``: the revision bumps, a file-backed project autosaves
+    it, and other subscribers hear about it.  A model that already has a
+    view is seeded as it is."""
+
+    @staticmethod
+    def _views(project_json: str) -> list[Any]:
+        doc = json.loads(project_json)
+        return doc["models"][0].get("views") or []
+
+    def test_viewless_in_memory_model_is_laid_out_first(self, assets: WidgetAssets) -> None:
+        project = Project.new()
+        model = project.get_model()
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="rate", equation="0.1"))
+        assert self._views(project.serialize_json().decode()) == []
+        revision = project.revision
+        w = _widget(model, assets)
+        views = self._views(w.project_json)
+        assert len(views) == 1
+        assert {e["name"] for e in views[0]["elements"] if "name" in e} == {"rate"}
+        assert w.revision == revision + 1 == project.revision
+        # The layout is the project's, not just the seed's.
+        assert self._views(project.serialize_json().decode()) == views
+        # The widget did not hear about its own seeding layout as a change.
+        assert [k for k, _, _ in _sent(w) if k == "custom"] == []
+
+    def test_empty_model_gets_an_empty_view(self, assets: WidgetAssets) -> None:
+        w = _widget(Project.new().get_model(), assets)
+        views = self._views(w.project_json)
+        assert len(views) == 1
+        assert views[0]["elements"] == []
+        assert views[0]["kind"] == "stock_flow"
+
+    def test_viewless_file_backed_model_autosaves_the_layout(
+        self, tmp_path: Path, assets: WidgetAssets
+    ) -> None:
+        project = Project.new()
+        path = tmp_path / "scratch.sd.json"
+        project.save_as(path)
+        model = project.get_model()
+        events = _Events()
+        project.on_change(events)
+        w = _widget(model, assets)
+        assert w.revision == 1
+        assert model.dirty is False
+        on_disk = json.loads(path.read_text())
+        assert len(on_disk["models"][0].get("views") or []) == 1
+        assert [(e.source, e.revision) for e in events.events] == [("edit", 1)]
+
+    def test_model_with_a_view_is_seeded_as_is(self, model: Model, assets: WidgetAssets) -> None:
+        before = _project(model).serialize_json().decode("utf-8")
+        w = _widget(model, assets)
+        assert w.revision == 0
+        assert w.project_json == before
+
+    def test_layout_failure_still_seeds_with_a_warning(
+        self, assets: WidgetAssets, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project = Project.new()
+        model = project.get_model()
+
+        def boom(*args: object, **kwargs: object) -> None:
+            raise simlin.SimlinRuntimeError("layout exploded")
+
+        monkeypatch.setattr("simlin.project._ffi_diagram_sync", boom)
+        with pytest.warns(RuntimeWarning, match="layout exploded"):
+            w = _widget(model, assets)
+        assert w.revision == 0
+        assert self._views(w.project_json) == []
+
+    def test_write_failure_after_layout_still_seeds_the_laid_out_project(
+        self, tmp_path: Path, assets: WidgetAssets, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project = Project.new()
+        path = tmp_path / "scratch.sd.json"
+        project.save_as(path)
+        model = project.get_model()
+
+        def fail(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("simlin.project.atomic_write", fail)
+        with pytest.warns(RuntimeWarning, match="disk full"):
+            w = _widget(model, assets)
+        # The layout is real in memory (and seeded); only the file lags.
+        assert w.revision == 1
+        assert len(self._views(w.project_json)) == 1
+        assert model.dirty is True
 
 
 # ── wasm ────────────────────────────────────────────────────────────────

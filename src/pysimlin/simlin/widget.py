@@ -305,6 +305,23 @@ class ModelWidget(anywidget.AnyWidget):
         # loop on a too-large model would otherwise warn on every iteration.
         self._warned_oversize = False
 
+        # The Editor mounts the model's first view and is a blank canvas
+        # without one, so a diagram-less model (``Project.new()`` built up
+        # through ``edit()``) is laid out first: a committed change exactly
+        # like ``project.auto_layout()`` (revision bump, autosave when
+        # file-backed), made BEFORE this widget subscribes so it is not
+        # pushed back to itself.  Failing to lay out or to write the layout
+        # must not stop the display: the seed goes out as it is (the JS side
+        # mounts an empty view for a viewless model) and the warning says
+        # what did not happen.
+        try:
+            project._ensure_view(model._name or "main")
+        except Exception as exc:  # see above: nothing here may block a display
+            warnings.warn(
+                f"simlin: could not lay out (or save) a diagram for the editor: {exc}",
+                RuntimeWarning,
+                stacklevel=_stacklevel_outside_package(),
+            )
         json_bytes, revision = project._snapshot()
         super().__init__(
             _esm=resolved.esm,

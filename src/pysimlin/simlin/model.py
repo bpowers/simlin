@@ -386,6 +386,12 @@ class Model:
         fallback for static renderers; call this to keep a handle on the
         widget or to set its options.
 
+        A model with no diagram view yet (one built from scratch through
+        :meth:`edit`) is laid out first -- the same committed change as
+        ``project.auto_layout()``: ``revision`` advances and a file-backed
+        project writes the layout -- because the editor mounts the model's
+        first view.  A model that has a view is shown as it is.
+
         Args:
             height: Editor height in CSS pixels.
             theme: ``"auto"`` (follow the notebook), ``"light"``, or ``"dark"``.

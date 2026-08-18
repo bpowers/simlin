@@ -97,7 +97,8 @@ did.
 Every model is also a diagram. `render_svg()` draws the stock-and-flow
 structure, computing a layout automatically for a model that doesn't
 already carry one (`render_png()` is the bitmap sibling; in a notebook,
-`model.diagram()` shows the same picture inline):
+`model.diagram()` shows the same picture inline; nothing is persisted --
+`project.auto_layout()` writes a layout into the model):
 
 ```python
 from pathlib import Path
@@ -241,9 +242,13 @@ print(model.revision, model.dirty)   # 1 False: already written back to disk
 print(simlin.load(model_path).get_variable("max_growth_rate").equation)   # 0.1
 ```
 
-A variable added through `edit()` on a file-backed model also gets a
-diagram element (existing elements keep their positions), so the saved file
-draws correctly in Simlin, Stella, or `model.diagram()`.
+A variable added through `edit()` also gets a diagram element (existing
+elements keep their positions) whenever there is a diagram to keep in step:
+on any file-backed model, so the saved file draws correctly in Simlin,
+Stella, or `model.diagram()`, and on an in-memory model that has a view.
+An in-memory model built from scratch has none until you display it or call
+`project.auto_layout()`; `model.diagram()` draws it with a transient layout
+either way.
 
 Pass `autosave=False` to batch changes: edits then set `dirty` and stay in
 memory until `model.save()`. With autosave on (the default), `dirty` is only
@@ -302,7 +307,10 @@ with the checklist and the honest status of each host in
 is the two-minute Colab start; Colab itself is not yet verified -- if the
 editor does not appear there, set `SIMLIN_WIDGET_ASSET=inline` before
 `import simlin` and please report which worked). Static renderers get the
-SVG diagram in the same output.
+SVG diagram in the same output. Displaying a model that has no diagram yet
+(one built from scratch with `edit()`) lays it out first -- a committed
+change like `project.auto_layout()`, so `revision` advances and a
+file-backed project writes the layout.
 
 <!-- pysimlin-test: skip -->
 ```python
