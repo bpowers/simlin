@@ -471,6 +471,62 @@ fn group_multiword_name_and_doc_warn() {
     );
 }
 
+// ---- loop metadata dropped on export ----
+
+/// A model's `loop_metadata` (loop names/descriptions, hidden-loop markers)
+/// has no MDL representation -- the MDL reader never produces any -- so every
+/// entry is dropped on export and must be reported. Rows: a named loop, a
+/// hidden (deleted) marker, and an entry that carries nothing (silent).
+#[test]
+fn loop_metadata_entries_warn_on_export() {
+    let mut model = make_model(vec![
+        make_stock("s", "1", None, ""),
+        make_flow("f", "s * 0.1"),
+    ]);
+    model.loop_metadata = vec![
+        datamodel::LoopMetadata {
+            uids: vec![1, 2],
+            deleted: false,
+            name: "Growth".to_owned(),
+            description: "reinforcing growth".to_owned(),
+        },
+        datamodel::LoopMetadata {
+            uids: vec![3, 4],
+            deleted: true,
+            name: String::new(),
+            description: String::new(),
+        },
+        datamodel::LoopMetadata {
+            uids: vec![5],
+            deleted: false,
+            name: String::new(),
+            description: String::new(),
+        },
+    ];
+    let project = make_project(vec![model]);
+    let warnings = warnings_of(&project);
+    assert!(
+        message_mentioning(&warnings, "loop name 'Growth'").is_some(),
+        "a named loop must warn: {warnings:?}"
+    );
+    assert!(
+        message_mentioning(&warnings, "hidden-loop marker").is_some(),
+        "a deleted marker must warn: {warnings:?}"
+    );
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|w| w.message.contains("loop"))
+            .count(),
+        2,
+        "an entry carrying nothing is silent: {warnings:?}"
+    );
+
+    let mut clean = make_model(vec![make_aux("x", "1", None, "")]);
+    clean.loop_metadata = vec![];
+    assert!(warnings_of(&make_project(vec![clean])).is_empty());
+}
+
 // ---- #887: conveyor/queue compat dropped on export ----
 
 /// A conveyor block with only the required transit time set.

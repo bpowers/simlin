@@ -1834,6 +1834,29 @@ fn warn_group_lossiness(group: &datamodel::ModelGroup, warnings: &mut Vec<Export
     }
 }
 
+/// Record a warning per `loop_metadata` entry that carries something: MDL has
+/// no construct for a loop's name/description or for a hidden-loop marker
+/// (the MDL reader never produces `loop_metadata`), so every entry is dropped
+/// on export. An entry with no name, no description, and no `deleted` flag
+/// carries nothing a user would miss and is silent.
+fn warn_dropped_loop_metadata(model: &datamodel::Model, warnings: &mut Vec<ExportWarning>) {
+    for lm in &model.loop_metadata {
+        if !lm.name.is_empty() || !lm.description.is_empty() {
+            warnings.push(ExportWarning::new(format!(
+                "loop name '{}' (and its description) has no MDL representation and \
+                 was dropped on export; Vensim MDL does not store loop metadata",
+                lm.name
+            )));
+        } else if lm.deleted {
+            warnings.push(ExportWarning::new(format!(
+                "the hidden-loop marker for the loop over variable uids {:?} has no MDL \
+                 representation and was dropped on export",
+                lm.uids
+            )));
+        }
+    }
+}
+
 fn discrete_gf_warning(name: &str) -> ExportWarning {
     ExportWarning::new(format!(
         "graphical function for '{name}' uses discrete (hold-last) interpolation, \
@@ -3963,6 +3986,7 @@ impl MdlWriter {
         self.write_equations_section(model, project)?;
         self.write_sketch_section(&model.views);
         self.write_settings_section(project);
+        warn_dropped_loop_metadata(model, &mut self.warnings);
         // Collapse exact-duplicate warnings while preserving first-seen order,
         // so a construct emitted from more than one path (or an incidental
         // repeat) surfaces once rather than as stderr noise. Per-element
