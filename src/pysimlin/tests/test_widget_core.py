@@ -16,6 +16,7 @@ from simlin._widget_core import (
     INLINE_WASM_GLOBAL,
     WASM_FILE,
     AssetMode,
+    MalformedSnapshot,
     SnapshotOutcome,
     SnapshotRequest,
     Unrecognised,
@@ -86,6 +87,16 @@ class TestParseIncoming:
             (None, "expected a JSON object"),
             ({}, "unknown message type None"),
             ({"type": "saved"}, "unknown message type 'saved'"),
+        ],
+    )
+    def test_unrecognised(self, content: object, reason: str) -> None:
+        message = parse_incoming(content)
+        assert isinstance(message, Unrecognised)
+        assert reason in message.reason
+
+    @pytest.mark.parametrize(
+        ("content", "reason"),
+        [
             ({"type": "snapshot", "json": "{}"}, "'base' must be an integer"),
             ({"type": "snapshot", "base": "3", "json": "{}"}, "'base' must be an integer"),
             ({"type": "snapshot", "base": True, "json": "{}"}, "'base' must be an integer"),
@@ -93,9 +104,11 @@ class TestParseIncoming:
             ({"type": "snapshot", "base": 3, "json": {"a": 1}}, "'json' must be"),
         ],
     )
-    def test_malformed(self, content: object, reason: str) -> None:
+    def test_malformed_snapshot_is_distinct_so_it_gets_its_reply(
+        self, content: object, reason: str
+    ) -> None:
         message = parse_incoming(content)
-        assert isinstance(message, Unrecognised)
+        assert isinstance(message, MalformedSnapshot)
         assert reason in message.reason
 
 

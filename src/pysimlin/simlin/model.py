@@ -31,7 +31,13 @@ from ._ffi import (
 )
 from .analysis import Analysis, Link, LinkPolarity, Loop, LoopPolarity, Partition
 from .diagram import Diagram
-from .errors import ErrorCode, ErrorSeverity, SimlinError, SimlinRuntimeError
+from .errors import (
+    ErrorCode,
+    ErrorSeverity,
+    SimlinAssetError,
+    SimlinError,
+    SimlinRuntimeError,
+)
 from .json_converter import converter, structure_variable
 from .json_types import (
     DeleteVariable,
@@ -405,16 +411,29 @@ class Model:
         keeps no reference to any of them.  The SVG rides in the same
         bundle so nbconvert, GitHub, and other static renderers show the
         diagram; a model whose diagram cannot be rendered still gets the
-        interactive view (with a warning).
+        interactive view (with a warning).  Conversely, when the widget's
+        assets are missing from the installation the display degrades to
+        the SVG and a ``RuntimeWarning`` carrying the actionable message --
+        a notebook user then sees the diagram and the fix rather than a
+        traceback; :meth:`widget` itself still raises.
         """
-        widget = self.widget()
-        bundle = widget._repr_mimebundle_()
         data: dict[str, Any] = {}
         metadata: dict[str, Any] = {}
-        if isinstance(bundle, tuple):
-            data, metadata = dict(bundle[0]), dict(bundle[1])
-        elif isinstance(bundle, dict):
-            data = dict(bundle)
+        try:
+            widget = self.widget()
+        except SimlinAssetError as exc:
+            warnings.warn(
+                f"simlin: showing the static diagram only; the interactive editor is "
+                f"unavailable because {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        else:
+            bundle = widget._repr_mimebundle_()
+            if isinstance(bundle, tuple):
+                data, metadata = dict(bundle[0]), dict(bundle[1])
+            elif isinstance(bundle, dict):
+                data = dict(bundle)
         data["text/plain"] = repr(self)
         try:
             data.update(self._svg_mimebundle())

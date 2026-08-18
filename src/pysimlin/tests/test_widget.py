@@ -24,7 +24,7 @@ Message-type x state table covered here (each row is a test):
                                             warn notice, project dirty
     snapshot  | handler raises anywhere  -> rejected + warn notice (exactly one
                                             reply, always)
-    snapshot  | malformed message        -> RuntimeWarning, nothing sent
+    snapshot  | malformed base/json      -> RuntimeWarning, rejected + warn notice
     other     | unknown type             -> RuntimeWarning, nothing sent
 
 Change-source x delivery table (kernel -> browser):
@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import gc
 import json
+import os
 import shutil
 import warnings
 import weakref
@@ -192,14 +193,25 @@ def _browser_sets(widget: ModelWidget, **state: Any) -> None:
     )
 
 
+def _browser_shaped(engine_json: bytes) -> str:
+    """Re-serialise engine JSON the way the browser does (``JSON.stringify``
+    of its own object graph): the same document, but NOT the same bytes --
+    keys sorted, ``", "``/``": "`` separators, non-ASCII left as UTF-8.  A
+    test that only ever sends the engine's own bytes cannot tell "pushed
+    the exact string received" from "pushed serialize_json()"."""
+    text = json.dumps(json.loads(engine_json), sort_keys=True, ensure_ascii=False)
+    assert text != engine_json.decode("utf-8")
+    return text
+
+
 def _snapshot_with(model_path: Path, name: str) -> str:
     """A snapshot the way a browser would produce one: the whole project as
-    native JSON, edited by adding an aux -- built with the engine so it is
-    exactly the kind of bytes the Editor sends."""
+    native JSON (browser-shaped, see :func:`_browser_shaped`), edited by
+    adding an aux whose documentation carries a non-ASCII character."""
     scratch = simlin.load(model_path)
     with scratch.edit() as (_, patch):
-        patch.upsert(Aux(name=name, equation="42"))
-    return _project(scratch).serialize_json().decode("utf-8")
+        patch.upsert(Aux(name=name, equation="42", documentation="Ünïcode ok"))
+    return _browser_shaped(_project(scratch).serialize_json())
 
 
 class _Events:
@@ -336,6 +348,10 @@ class TestSnapshotAccept:
         ]
         assert w.project_json == text
         assert w.revision == 1
+        # The exact string received, not the engine's re-serialisation of it
+        # (the browser matches its own snapshot by string equality).
+        assert text != _project(model).serialize_json().decode("utf-8")
+        assert json.loads(text) == json.loads(_project(model).serialize_json())
 
     def test_identical_snapshot_bumps_revision_and_syncs_only_the_revision(
         self, model: Model, assets: WidgetAssets
@@ -495,6 +511,7 @@ class TestSnapshotReject:
         # ...and the browser is told exactly what an accept says -- its
         # acknowledged version must match the kernel's or every later save
         # would be stale -- plus a warning naming the error and the fix.
+        assert text != _project(model).serialize_json().decode("utf-8")
         assert _sent(w) == [
             ("update", {"project_json": text, "revision": 1}, None),
             ("custom", {"type": "saved", "revision": 1}, None),
@@ -656,6 +673,28 @@ class TestMalformed:
         [
             {"type": "snapshot", "base": "0", "json": "{}"},
             {"type": "snapshot", "base": 0},
+            {"type": "snapshot"},
+        ],
+    )
+    def test_malformed_snapshot_still_gets_exactly_one_rejected_reply(
+        self, model: Model, assets: WidgetAssets, content: object
+    ) -> None:
+        w = _widget(model, assets)
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="k", equation="1"))
+        _drain(w)
+        with pytest.warns(RuntimeWarning, match="malformed snapshot"):
+            _from_browser(w, content)
+        sent = _sent(w)
+        assert [kind for kind, _, _ in sent] == ["custom", "custom"]
+        assert sent[0][1] == {"type": "rejected", "revision": 1}
+        assert sent[1][1]["type"] == "notice"
+        assert sent[1][1]["level"] == "warn"
+        assert model.revision == 1
+
+    @pytest.mark.parametrize(
+        "content",
+        [
             {"type": "saved", "revision": 1},
             "hello",
         ],
@@ -992,8 +1031,17 @@ class TestModelDisplay:
         with pytest.raises(SimlinAssetError, match=r"widget\.js") as excinfo:
             model.widget()
         assert str(asset_dir) in str(excinfo.value)
-        with pytest.raises(SimlinAssetError):
-            model._repr_mimebundle_()
+        # Displaying degrades to the static diagram plus the actionable
+        # message as a warning: the notebook user sees the picture and the
+        # fix, not a traceback.
+        with pytest.warns(RuntimeWarning, match=r"widget\.js") as record:
+            data, metadata = model._repr_mimebundle_()
+        assert str(asset_dir) in str(record[0].message)
+        assert "application/vnd.jupyter.widget-view+json" not in data
+        assert data["image/svg+xml"] == model.diagram().svg
+        assert data["text/plain"] == repr(model)
+        assert metadata == {}
+        assert _project(model)._listeners == {}  # no half-made widget left behind
         assert simlin.ModelWidget is ModelWidget  # the package itself is fine
 
     def test_svg_failure_still_displays_the_widget(
@@ -1065,20 +1113,24 @@ class TestAssets:
         assert resolved.error is not None
         assert "SIMLIN_WIDGET_ASSET" in resolved.error
 
-    def test_module_level_resolution_reads_the_environment(
-        self, monkeypatch: pytest.MonkeyPatch
+    def test_url_mode_from_the_environment_reaches_the_widget(
+        self, monkeypatch: pytest.MonkeyPatch, asset_dir: Path, model: Model
     ) -> None:
-        import importlib
-
+        # ``_ASSETS`` is ``resolve_assets(os.environ.get(ASSET_ENV), <pkg dir>)``
+        # evaluated once at import.  Reloading the module in a test would
+        # re-create the ModelWidget class and make later isinstance checks
+        # order-dependent, so the same expression is evaluated here with the
+        # environment set and installed as the process-wide resolution.
         import simlin.widget as widget_module
 
-        monkeypatch.setenv("SIMLIN_WIDGET_ASSET", "https://cdn.example/widget.js")
-        try:
-            reloaded = importlib.reload(widget_module)
-            assert reloaded._ASSETS.esm == "https://cdn.example/widget.js"
-        finally:
-            monkeypatch.delenv("SIMLIN_WIDGET_ASSET")
-            importlib.reload(widget_module)
+        monkeypatch.setenv(widget_module.ASSET_ENV, "https://cdn.example/widget.js")
+        resolved = resolve_assets(os.environ.get(widget_module.ASSET_ENV), asset_dir)
+        monkeypatch.setattr("simlin.widget._ASSETS", resolved)
+        w = model.widget()
+        assert w._esm == "https://cdn.example/widget.js"
+        _drain(w)
+        _from_browser(w, {"type": "wasm"})  # the wasm still comes from the package dir
+        assert _sent(w) == [("custom", {"type": "wasm"}, [FAKE_WASM])]
 
     def test_repo_checkout_without_built_assets_imports_fine(self) -> None:
         # Whatever the state of simlin/_widget/ on this machine, importing

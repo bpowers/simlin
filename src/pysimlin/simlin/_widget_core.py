@@ -133,23 +133,36 @@ class SnapshotRequest:
 
 
 @dataclass(frozen=True)
-class Unrecognised:
-    """A message the kernel does not understand; ``reason`` says why."""
+class MalformedSnapshot:
+    """A ``{type:'snapshot'}`` whose ``base``/``json`` are missing or
+    mistyped.  Still a snapshot as far as the browser is concerned: it is
+    waiting for its one reply, so the shell answers ``rejected`` (nothing
+    was applied) plus a notice with ``reason``."""
 
     reason: str
 
 
-IncomingMessage = Union[WasmRequest, SnapshotRequest, Unrecognised]
+@dataclass(frozen=True)
+class Unrecognised:
+    """A message the kernel does not understand at all (not a JSON object,
+    or an unknown ``type``); ``reason`` says why.  Nothing is owed a reply."""
+
+    reason: str
+
+
+IncomingMessage = Union[WasmRequest, SnapshotRequest, MalformedSnapshot, Unrecognised]
 
 
 def parse_incoming(content: object) -> IncomingMessage:
     """Classify a custom message from the browser.
 
     A malformed message is never an exception in the kernel: the browser is
-    the untrusted side of this protocol, so a bad ``snapshot`` (missing or
-    mistyped ``base``/``json``) becomes :class:`Unrecognised`, which the
-    shell reports and otherwise ignores.  ``bool`` is rejected as a base
-    even though it is an ``int`` in Python: ``true`` is never a revision.
+    the untrusted side of this protocol.  A ``snapshot`` with a bad
+    ``base``/``json`` is :class:`MalformedSnapshot` -- it gets the reply
+    every snapshot is owed -- and anything else unintelligible is
+    :class:`Unrecognised`, which the shell reports and otherwise ignores.
+    ``bool`` is rejected as a base even though it is an ``int`` in Python:
+    ``true`` is never a revision.
     """
     if not isinstance(content, dict):
         return Unrecognised(f"expected a JSON object, got {type(content).__name__}")
@@ -160,9 +173,9 @@ def parse_incoming(content: object) -> IncomingMessage:
         base = content.get("base")
         json_text = content.get("json")
         if isinstance(base, bool) or not isinstance(base, int):
-            return Unrecognised(f"snapshot 'base' must be an integer revision, got {base!r}")
+            return MalformedSnapshot(f"snapshot 'base' must be an integer revision, got {base!r}")
         if not isinstance(json_text, str):
-            return Unrecognised(
+            return MalformedSnapshot(
                 f"snapshot 'json' must be the project as a JSON string, got "
                 f"{type(json_text).__name__}"
             )
@@ -335,6 +348,7 @@ __all__ = [
     "AssetKind",
     "AssetMode",
     "IncomingMessage",
+    "MalformedSnapshot",
     "NoticeLevel",
     "SnapshotOutcome",
     "SnapshotPlan",

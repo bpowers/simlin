@@ -326,11 +326,19 @@ print(model.selection)   # () until something is selected in a displayed editor
 `read_only=True` the editor shows the diagram without accepting edits;
 `theme` is `"auto"` (follow the notebook), `"light"`, or `"dark"`.
 
-Displaying a widget stores its JS module (about 1.5 MB) in the notebook
-file's widget state; if that is a concern, or the front-end cannot receive
-binary comm messages, set `SIMLIN_WIDGET_ASSET` **before** `import simlin`:
-`inline` embeds the engine wasm into the module (works everywhere, largest
-output), or an `http(s)://` URL loads the module from a server you run.
+Each display creates a kernel-side widget that stays subscribed to the
+model until it is closed (`widget.close()`, or `simlin.ModelWidget.close_all()`);
+re-running a display cell leaves the previous one alive, which is harmless
+but worth knowing in long sessions. The SVG in the same output is for
+static renderers -- nbconvert, GitHub, a viewer without a kernel; JupyterLab
+itself shows "model not found" in place of a widget when a notebook is
+reopened without a running kernel or saved widget state. Hosts that save
+widget state into the notebook file (Colab does by default; JupyterLab does
+not) store the widget's JS module, about 1.5 MB, per displayed widget. If
+that size is a concern, or the front-end cannot receive binary comm
+messages, set `SIMLIN_WIDGET_ASSET` **before** `import simlin`: `inline`
+embeds the engine wasm into the module (works everywhere, largest output),
+or an `http(s)://` URL loads the module from a server you run.
 
 ### Running Simulations
 

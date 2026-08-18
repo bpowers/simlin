@@ -62,6 +62,7 @@ from ._widget_core import (
     WASM_FILE,
     WIDGET_JS,
     AssetMode,
+    MalformedSnapshot,
     SnapshotOutcome,
     SnapshotRequest,
     Unrecognised,
@@ -326,6 +327,16 @@ class ModelWidget(anywidget.AnyWidget):
                 self._reply_wasm()
             case SnapshotRequest():
                 self._handle_snapshot(message)
+            case MalformedSnapshot(reason=reason):
+                # Still owed its one reply: nothing was applied, so rejected
+                # at the current revision, and the notice says what was wrong.
+                warnings.warn(
+                    f"simlin: ModelWidget rejected a malformed snapshot: {reason}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                self.send(core.rejected_message(int(self._project.revision)))
+                self._notice(f"Your edit could not be applied: {reason}.", "warn")
             case Unrecognised(reason=reason):
                 warnings.warn(
                     f"simlin: ModelWidget ignored a message from the browser: {reason}",
