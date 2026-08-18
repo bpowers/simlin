@@ -18,9 +18,13 @@ Design and acceptance criteria: [docs/design-plans/2026-08-17-pysimlin-widget.md
 
 ## What is common to every host
 
-Install: `pip install pysimlin` (a wheel exists for Linux x86_64/aarch64
-and macOS arm64, Python 3.11+; from a checkout, the wheel
-`scripts/build_wheels.py` produces). No extension, no sidecar process.
+Install: `pip install "pysimlin[notebook]"` (a wheel exists for Linux
+x86_64/aarch64 and macOS arm64, Python 3.11+; from a checkout, the wheel
+`scripts/build_wheels.py` produces). The `notebook` extra is anywidget;
+without it a displayed model degrades to its SVG diagram plus a
+`RuntimeWarning` carrying this install line (`%pip install
+"pysimlin[notebook]"` under Colab), and `m.widget()` raises
+`SimlinDependencyError`. No extension, no sidecar process.
 
 The cells, run in order (this is
 [`examples/notebook_editor.ipynb`](../examples/notebook_editor.ipynb) in
@@ -62,10 +66,10 @@ What to observe, per acceptance criterion:
 | AC2.2 | Add a variable from the tool dial, click it, give it an equation, Save. Before running cell 3 the model file on disk already contains it; cell 3 prints a higher `revision`, `dirty == False`, and `run.results` has the new column.                                                                                                                                                                                                                                  |
 | AC2.3 | Cell 4: the editor shows the new equation with a short "Updated from Python" toast (its undo history resets). Step 5: within about a second, "Updated on disk" and the change is drawn; `m.revision` advanced.                                                                                                                                                                                                                                                       |
 | AC2.4 | Cell 7: a second editor of the same model. An edit in either appears in the other (the other shows "Updated in another view"). The browser asked the kernel for the engine wasm once for the page (network/devtools: one `{type:'wasm'}` reply carrying ~5 MB, not two).                                                                                                                                                                      |
-| AC2.5 | Make an edit in the editor while a long cell (`import time; time.sleep(20)`) is running, then during that time run nothing else; the edit is saved when the cell finishes. To provoke a stale snapshot: edit in one of two views, then quickly edit in the other before the first save's reply arrives -- the second view shows a warn toast ("Your edit was based on an older version...") and reloads; the file holds the first edit only. |
+| AC2.5 | Make an edit in the editor while a long cell (`import time; time.sleep(20)`) is running, then during that time run nothing else; the edit is saved -- immediately on ipykernel 7 (JupyterLab 4.4+ hands comm messages to a subshell thread while the cell runs; the file changes and the toast, if any, shows at once) or when the cell finishes on older kernels; either way exactly once, with no "Updated in another view" toast for your own edits after the cell ends. To provoke a stale snapshot: edit in one of two views, then quickly edit in the other before the first save's reply arrives -- the second view shows a warn toast ("Your edit was based on an older version...") and reloads; the file holds the first edit only. |
 | AC2.6 | With the editor focused, Delete/Backspace remove the selected element and Ctrl/Cmd-Z undoes; typing Backspace inside the equation editor edits text and deletes nothing; none of these run the notebook's own shortcuts (in JupyterLab, `d d` while a variable is selected must not delete the cell).                                                                                                                                              |
 | AC2.7 | Select a variable, run cell 6: its name (a tuple of names). Deselect, run again: `()`.                                                                                                                                                                                                                                                                                                                                                       |
-| size  | Display a model whose native JSON exceeds `max_snapshot_bytes` (8 MiB; use `m.widget(max_snapshot_bytes=1024)` to test with a small model): a `RuntimeWarning` appears with the display; an editor edit shows the warn toast "Edit not saved: the model is too large for the notebook connection ..." and the file does not change; `m.edit()` still works.                                                                                        |
+| size  | Display a model whose snapshot wire size (its native JSON, JSON-string-escaped) exceeds `max_snapshot_bytes` (8 MiB; use `m.widget(max_snapshot_bytes=1024)` to test with a small model): a `RuntimeWarning` appears with the display; an editor edit shows the warn toast "Edit not saved: the model is too large for the notebook connection ..." and the file does not change; `m.edit()` still works.                                                                                        |
 | theme | `theme="auto"` follows the host's light/dark setting live; `"light"`/`"dark"` force it.                                                                                                                                                                                                                                                                                                                                                       |
 
 Things every host shares:
@@ -85,10 +89,13 @@ Things every host shares:
 - **Static renderers**: the display's output also carries the SVG diagram.
   nbconvert shows it when the notebook has no saved widget state
   (`--ExecutePreprocessor.store_widget_state=False` when executing), and
-  with saved state exports the widget view plus the embedded state instead
-  -- both verified by `make export-check`. That widget export loads the
-  ipywidgets html-manager from a CDN when opened; whether it then renders
-  the editor in a browser is not verified.
+  with saved state (nbconvert's DEFAULT when executing) exports the widget
+  view plus the embedded state instead -- both verified by `make
+  export-check`. That widget export loads the ipywidgets html-manager from
+  a CDN when opened, but has no kernel to answer the engine request, so in
+  a browser it shows "Loading the Simlin engine..." and then a timeout
+  message rather than the diagram: for a static page, execute with
+  `store_widget_state=False`.
 - **Poll thread**: an opened model polls its file every 0.5 s on a daemon
   thread (about 0.1% of a core for twenty open models); `watch=False`
   disables it. Change notifications are marshalled onto the kernel's IO
@@ -115,7 +122,7 @@ those rows of the table by hand when touching them.
 Install and run:
 
 ```bash
-pip install pysimlin jupyterlab
+pip install "pysimlin[notebook]" jupyterlab
 jupyter lab
 ```
 
@@ -142,7 +149,7 @@ labextensions, same JupyterLab theming attributes; expected to behave as
 JupyterLab 4. Not run.
 
 ```bash
-pip install pysimlin notebook
+pip install "pysimlin[notebook]" notebook
 jupyter notebook
 ```
 
@@ -152,7 +159,7 @@ apply unchanged; "model not found" on reopen applies unchanged.
 ## VS Code (local kernel) -- UNVERIFIED
 
 ```bash
-pip install pysimlin ipykernel
+pip install "pysimlin[notebook]" ipykernel
 # open a .ipynb in VS Code with the Jupyter extension, pick this interpreter as the kernel
 ```
 
@@ -222,7 +229,7 @@ investigation, not from a run):
 marimo runs cells as reactive Python and hosts anywidgets natively.
 
 ```bash
-pip install pysimlin marimo
+pip install "pysimlin[notebook]" marimo
 marimo edit
 ```
 

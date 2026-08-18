@@ -385,6 +385,11 @@ def _view_positions(path: Path) -> dict[str, tuple[float, float]]:
     """name -> (x, y) for the named elements of the first model's first view."""
     project = simlin.load(path).project
     assert project is not None
+    return _positions_of(project)
+
+
+def _positions_of(project: Project) -> dict[str, tuple[float, float]]:
+    """name -> (x, y) for the named elements of the first model's first view."""
     doc = json.loads(project.serialize_json())
     views = doc["models"][0].get("views") or []
     assert views, "fixture must carry a view"
@@ -458,6 +463,26 @@ class TestIncrementalLayout:
         positions = _view_positions(path)
         assert set(positions) == {"population", "births", "rate"}
 
+    def test_ac1_3_incremental_layout_keeps_the_editor_viewport(self, tmp_path: Path) -> None:
+        # The view box is the editor's viewport (pan offset + canvas size),
+        # not the content bounds; a kernel-side edit that re-boxed it to the
+        # content would snap the human's pan back and make the diagram jump
+        # on every "Updated from Python".  Start from a panned, resized box
+        # no bounds computation would produce.
+        source = simlin.load(FIXTURES / "teacup.stmx").project
+        assert source is not None
+        doc = json.loads(source.serialize_json())
+        panned = {"x": -321.5, "y": 77.25, "width": 1234.0, "height": 567.0}
+        doc["models"][0]["views"][0]["viewBox"] = panned
+        path = tmp_path / "panned.sd.json"
+        path.write_text(json.dumps(doc))
+        model = simlin.open(path, watch=False)
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="Insulation", equation="0.5"))
+        after = json.loads(path.read_text())["models"][0]["views"][0]
+        assert after["viewBox"] == panned
+        assert any(e.get("name") == "Insulation" for e in after["elements"])
+
     def test_deleted_variable_loses_its_element(self, tmp_path: Path) -> None:
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
         model = simlin.open(path, watch=False)
@@ -469,15 +494,43 @@ class TestIncrementalLayout:
         assert "Insulation" not in _view_positions(path)
 
     def test_in_memory_edits_do_not_persist_a_layout(self) -> None:
-        # Documented contract for in-memory projects (see test_rendering):
-        # views stay empty until auto_layout(); only file-backed projects
-        # keep their diagram in step automatically.
+        # Documented contract (see test_rendering): a diagram is kept in step
+        # with the variables only when there is one to keep -- a model with a
+        # view, or any file-backed project.  A diagram-less in-memory model
+        # stays diagram-less until auto_layout() or a display asks for one.
         project = Project.new(name="scratch")
         model = project.get_model()
         with model.edit() as (_, patch):
             patch.upsert(Aux(name="rate", equation="0.1"))
         doc = json.loads(project.serialize_json())
         assert doc["models"][0].get("views", []) == []
+
+    def test_in_memory_model_with_a_view_keeps_it_in_step(self) -> None:
+        # The other in-memory arm: a model that has a diagram (here, loaded
+        # from a file that carries one) gets the incremental layout, so a
+        # displayed in-memory model's editor shows the variables Python adds
+        # and nothing already placed moves.
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        project = model.project
+        assert project is not None
+        assert project.path is None
+        before = _positions_of(project)
+        assert before, "teacup.stmx has a diagram"
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="Insulation", equation="0.5"))
+        after = _positions_of(project)
+        assert "Insulation" in after
+        for name, xy in before.items():
+            assert after[name] == xy, f"{name} moved during incremental layout"
+
+    def test_in_memory_view_only_edit_does_not_relayout(self) -> None:
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        project = model.project
+        assert project is not None
+        before = _positions_of(project)
+        with model.edit() as (_, patch):
+            patch.set_loop_name("cooling", ["teacup_temperature", "heat_loss_to_room"])
+        assert _positions_of(project) == before
 
     def test_view_only_edit_does_not_relayout(self, tmp_path: Path) -> None:
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
@@ -764,6 +817,7 @@ class TestWatcherWiring:
             with pytest.warns(RuntimeWarning, match="unsaved local changes") as record:
                 _poll(model)
             assert len(record) == 1
+            assert (record[0].filename, record[0].lineno) == (str(path), 0)
             with warnings.catch_warnings():
                 warnings.simplefilter("error")
                 _poll(model)  # same bytes again: silent
@@ -831,6 +885,12 @@ class TestWatcherWiring:
             with pytest.warns(RuntimeWarning, match="could not be loaded") as record:
                 _poll(model)
             assert len(record) == 1
+            # Raised on the poll thread, where no user frame exists: the
+            # warning is located at the file it is about, not at an internal
+            # frame of project.py, and line 0 so no "source line" is quoted.
+            assert record[0].filename == str(path)
+            assert record[0].lineno == 0
+            assert str(path) in str(record[0].message)
             with warnings.catch_warnings():
                 warnings.simplefilter("error")
                 _poll(model)  # same bad bytes: no second warning

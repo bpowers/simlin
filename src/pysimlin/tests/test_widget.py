@@ -22,8 +22,11 @@ Message-type x state table covered here (each row is a test):
                                             project untouched
     snapshot  | write fails after apply  -> traits (exact json, base+1), saved +
                                             warn notice, project dirty
-    snapshot  | handler raises anywhere  -> rejected + warn notice (exactly one
-                                            reply, always)
+    snapshot  | handler raises anywhere  -> exactly one reply, always: raised
+                                            BEFORE applying -> rejected + warn
+                                            notice; raised AFTER applying -> an
+                                            accept (sent bytes pushed at base+1,
+                                            saved) + warn notice
     snapshot  | malformed base/json      -> RuntimeWarning, rejected + warn notice
     oversize  | well-formed              -> RuntimeWarning on the kernel's stderr (a
                                             comm handler runs outside any cell, so
@@ -54,6 +57,7 @@ import os
 import shutil
 import warnings
 import weakref
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -277,15 +281,134 @@ class TestConstruction:
         model = project.get_model()
         w = _widget(model, assets)
         _drain(w)
+        base = w.revision
         scratch = Project.new()  # the browser's edited copy of the same project
         with scratch.get_model().edit() as (_, patch):
             patch.upsert(Aux(name="added", equation="1"))
         text = scratch.serialize_json().decode("utf-8")
-        _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
-        assert model.revision == 1
+        _from_browser(w, {"type": "snapshot", "base": base, "json": text})
+        assert model.revision == base + 1
         assert model.dirty is True
         assert model.get_variable("added") is not None
-        assert _sent(w)[-1] == ("custom", {"type": "saved", "revision": 1}, None)
+        assert _sent(w)[-1] == ("custom", {"type": "saved", "revision": base + 1}, None)
+
+
+class TestSeedHasAView:
+    """The Editor mounts a model's first view; a model without one renders
+    as a dead, blank editor.  Seeding therefore lays out a diagram-less model
+    first (``Project.new() -> edit() -> display`` is the headline path of
+    the example notebooks), through the same committed change as
+    ``auto_layout()``: the revision bumps, a file-backed project autosaves
+    it, and other subscribers hear about it.  A model that already has a
+    view is seeded as it is."""
+
+    @staticmethod
+    def _views(project_json: str) -> list[Any]:
+        doc = json.loads(project_json)
+        return doc["models"][0].get("views") or []
+
+    def test_viewless_in_memory_model_is_laid_out_first(self, assets: WidgetAssets) -> None:
+        project = Project.new()
+        model = project.get_model()
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="rate", equation="0.1"))
+        assert self._views(project.serialize_json().decode()) == []
+        revision = project.revision
+        w = _widget(model, assets)
+        views = self._views(w.project_json)
+        assert len(views) == 1
+        assert {e["name"] for e in views[0]["elements"] if "name" in e} == {"rate"}
+        assert w.revision == revision + 1 == project.revision
+        # The layout is the project's, not just the seed's.
+        assert self._views(project.serialize_json().decode()) == views
+        # The widget did not hear about its own seeding layout as a change.
+        assert [k for k, _, _ in _sent(w) if k == "custom"] == []
+
+    def test_empty_model_gets_an_empty_view(self, assets: WidgetAssets) -> None:
+        w = _widget(Project.new().get_model(), assets)
+        views = self._views(w.project_json)
+        assert len(views) == 1
+        assert views[0]["elements"] == []
+        assert views[0]["kind"] == "stock_flow"
+
+    def test_viewless_file_backed_model_autosaves_the_layout(
+        self, tmp_path: Path, assets: WidgetAssets
+    ) -> None:
+        project = Project.new()
+        path = tmp_path / "scratch.sd.json"
+        project.save_as(path)
+        model = project.get_model()
+        events = _Events()
+        project.on_change(events)
+        w = _widget(model, assets)
+        assert w.revision == 1
+        assert model.dirty is False
+        on_disk = json.loads(path.read_text())
+        assert len(on_disk["models"][0].get("views") or []) == 1
+        assert [(e.source, e.revision) for e in events.events] == [("edit", 1)]
+
+    def test_empty_view_over_variables_is_laid_out(self, assets: WidgetAssets) -> None:
+        # An empty view over a model that HAS variables is a blank editor
+        # too (a JSON project written before its variables existed, or a
+        # sidecar-era file): the display lays it out.  An empty view over an
+        # empty model is left alone -- there is nothing to place.
+        project = Project.new()
+        model = project.get_model()
+        project.auto_layout("main")  # an empty stock_flow view, revision 1
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="rate", equation="0.1"))
+        # (in-memory + a view -> the edit kept it in step, so unplace it
+        # again to build the fixture the arm is about)
+        doc = json.loads(project.serialize_json())
+        doc["models"][0]["views"][0]["elements"] = []
+        scratch = Project._from_bytes(json.dumps(doc).encode(), simlin.FileFormat.NATIVE_JSON)
+        scratch_model = scratch.get_model()
+        assert self._views(scratch.serialize_json().decode())[0]["elements"] == []
+        revision = scratch.revision
+        w = _widget(scratch_model, assets)
+        views = self._views(w.project_json)
+        assert {e["name"] for e in views[0]["elements"] if "name" in e} == {"rate"}
+        assert w.revision == revision + 1
+
+    def test_model_with_a_view_is_seeded_as_is(self, model: Model, assets: WidgetAssets) -> None:
+        before = _project(model).serialize_json().decode("utf-8")
+        w = _widget(model, assets)
+        assert w.revision == 0
+        assert w.project_json == before
+
+    def test_layout_failure_still_seeds_with_a_warning(
+        self, assets: WidgetAssets, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project = Project.new()
+        model = project.get_model()
+
+        def boom(*args: object, **kwargs: object) -> None:
+            raise simlin.SimlinRuntimeError("layout exploded")
+
+        monkeypatch.setattr("simlin.project._ffi_diagram_sync", boom)
+        with pytest.warns(RuntimeWarning, match="layout exploded"):
+            w = _widget(model, assets)
+        assert w.revision == 0
+        assert self._views(w.project_json) == []
+
+    def test_write_failure_after_layout_still_seeds_the_laid_out_project(
+        self, tmp_path: Path, assets: WidgetAssets, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project = Project.new()
+        path = tmp_path / "scratch.sd.json"
+        project.save_as(path)
+        model = project.get_model()
+
+        def fail(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("simlin.project.atomic_write", fail)
+        with pytest.warns(RuntimeWarning, match="disk full"):
+            w = _widget(model, assets)
+        # The layout is real in memory (and seeded); only the file lags.
+        assert w.revision == 1
+        assert len(self._views(w.project_json)) == 1
+        assert model.dirty is True
 
 
 # ── wasm ────────────────────────────────────────────────────────────────
@@ -415,6 +538,33 @@ class TestSnapshotAccept:
         for fn in queue:
             fn()
         assert _sent(w) == []  # recognised as our own: no re-push, no notice
+
+    def test_several_own_accepts_queued_behind_a_busy_loop_are_all_recognised(
+        self, model: Model, model_path: Path, assets: WidgetAssets
+    ) -> None:
+        # ipykernel 7 handles comm messages on a subshell thread while a cell
+        # runs, so three drags during a long cell are three accepted
+        # snapshots whose notifications all queue on the (busy) IO loop and
+        # drain together afterwards.  Every one of them is this widget's own:
+        # none may be re-pushed or announced as "Updated in another view".
+        queue: list[Callable[[], None]] = []
+        w = _widget(model, assets, dispatch=queue.append)
+        _drain(w)
+        for i, name in enumerate(["a", "b", "c"]):
+            text = _snapshot_with(model_path, name)
+            _from_browser(w, {"type": "snapshot", "base": i, "json": text})
+        assert model.revision == 3
+        assert len(queue) == 3
+        _drain(w)
+        for fn in queue:
+            fn()
+        assert _sent(w) == []
+        # A foreign change afterwards is still pushed.
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="from_python", equation="1"))
+        for fn in queue[3:]:
+            fn()
+        assert [kind for kind, _, _ in _sent(w)] == ["update", "custom"]
 
 
 class TestSnapshotReject:
@@ -604,7 +754,7 @@ class TestExactlyOneReply:
             patch.upsert(Aux(name="from_python", equation="1"))
         assert [kind for kind, _, _ in _sent(w)] == ["update", "custom"]
 
-    def test_a_failure_while_pushing_still_replies_rejected(
+    def test_a_failure_while_pushing_still_replies_saved(
         self, model: Model, model_path: Path, assets: WidgetAssets, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         w = _widget(model, assets)
@@ -617,18 +767,89 @@ class TestExactlyOneReply:
         _drain(w)
         with pytest.warns(RuntimeWarning, match="push exploded"):
             _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
-        # The change was applied (the file has it) and the browser still gets
-        # exactly one reply -- rejected, at the kernel's real revision -- so
-        # its save queue never hangs; its next save is stale and re-seeds.
+        # The change was applied (the file has it), so the reply is ``saved``
+        # at base+1 even though the state push itself is what failed: the
+        # browser adopts (sent bytes, base+1) from ``saved`` on its own, and a
+        # ``rejected`` here would leave it one revision behind for good.
         assert model.revision == 1
         assert simlin.load(model_path).get_variable("x") is not None
         replies = [
             c for k, c, _ in _sent(w) if k == "custom" and c["type"] in ("saved", "rejected")
         ]
-        assert replies == [{"type": "rejected", "revision": 1}]
+        assert replies == [{"type": "saved", "revision": 1}]
+
+    def test_a_failure_after_apply_is_an_accept_with_the_sent_bytes(
+        self, model: Model, model_path: Path, assets: WidgetAssets
+    ) -> None:
+        # The snapshot applied (revision moved, file written) and the handler
+        # failed AFTER that, before the browser was told.  This is an accept
+        # (obligation 5's logic): push the EXACT bytes received at base+1 and
+        # reply ``saved``.  A ``rejected`` would wedge the view: in the steady
+        # state the kernel's re-serialization equals the sent bytes byte for
+        # byte (same engine on both sides), so a re-push classifies as the
+        # browser's own ack and the following ``rejected`` re-seeds onto the
+        # pair it already holds -- the browser's acknowledged base stays one
+        # behind and every later save is stale.  Pinned with the engine's own
+        # bytes so the fixture IS that steady state.
+        w = _widget(model, assets)
+        scratch = simlin.load(model_path)
+        with scratch.edit() as (current, patch):
+            patch.upsert(replace(current["room temperature"], equation="60"))
+        text = _project(scratch).serialize_json().decode("utf-8")
+
+        def boom(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("reply planning exploded")
+
+        _drain(w)
+        with pytest.MonkeyPatch.context() as broken:
+            broken.setattr("simlin.widget.plan_snapshot_reply", boom)
+            with pytest.warns(RuntimeWarning, match="reply planning exploded"):
+                _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
+        assert model.revision == 1
+        assert _project(model).serialize_json().decode("utf-8") == text  # steady state
+        sent = _sent(w)
+        assert [k for k, _, _ in sent] == ["update", "custom", "custom"]
+        assert sent[0][1] == {"project_json": text, "revision": 1}
+        assert sent[1][1] == {"type": "saved", "revision": 1}
+        assert sent[2][1]["type"] == "notice"
+        assert sent[2][1]["level"] == "warn"
+        # The browser chains from the acknowledged base as after any accept.
+        _drain(w)
+        _from_browser(w, {"type": "snapshot", "base": 1, "json": _snapshot_with(model_path, "y")})
+        assert model.revision == 2
+        assert _sent(w)[-1] == ("custom", {"type": "saved", "revision": 2}, None)
+
+    def test_a_failure_before_apply_pushes_the_real_state_before_rejected(
+        self, model: Model, model_path: Path, assets: WidgetAssets
+    ) -> None:
+        # The handler failed BEFORE anything was applied (nothing moved): the
+        # reply is ``rejected`` at the current revision; the re-push of the
+        # project's pair is a no-op (unchanged traits send nothing).
+        w = _widget(model, assets)
+        text = _snapshot_with(model_path, "x")
+
+        def boom(*args: object, **kwargs: object) -> bool:
+            raise RuntimeError("apply exploded")
+
+        _drain(w)
+        with pytest.MonkeyPatch.context() as broken:
+            broken.setattr(_project(model), "_apply_snapshot", boom)
+            with pytest.warns(RuntimeWarning, match="apply exploded"):
+                _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
+        assert model.revision == 0
+        sent = _sent(w)
+        assert [k for k, _, _ in sent] == ["custom", "custom"]
+        assert sent[0][1] == {"type": "rejected", "revision": 0}
+        # Nothing was applied, so a later foreign change at revision 1 is
+        # pushed (no stale own-revision marker).
+        _drain(w)
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="from_python", equation="1"))
+        assert [k for k, _, _ in _sent(w)] == ["update", "custom"]
 
     @pytest.mark.parametrize(
-        "arm", ["accept", "stale", "unparsable", "write-failure", "handler-bug"]
+        "arm",
+        ["accept", "stale", "unparsable", "write-failure", "handler-bug", "bug-after-apply"],
     )
     def test_every_arm_replies_exactly_once_with_an_int_revision(
         self,
@@ -658,6 +879,12 @@ class TestExactlyOneReply:
                 raise RuntimeError("bug")
 
             monkeypatch.setattr(_project(model), "_apply_snapshot", boom)
+        elif arm == "bug-after-apply":
+
+            def boom_after(*args: object, **kwargs: object) -> None:
+                raise RuntimeError("bug after apply")
+
+            monkeypatch.setattr("simlin.widget.plan_snapshot_reply", boom_after)
         _drain(w)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -1134,6 +1361,24 @@ class TestCleanup:
         assert len(project._listeners) == 2
         ModelWidget.close_all()
         assert project._listeners == {}
+
+    def test_close_all_leaves_other_ipywidgets_open(
+        self, model: Model, assets: WidgetAssets
+    ) -> None:
+        # The inherited Widget.close_all() closes every widget in the kernel;
+        # ours is scoped to model editors.
+        import ipywidgets
+
+        other = ipywidgets.IntSlider()
+        w = _widget(model, assets)
+        ModelWidget.close_all()
+        assert w.comm is None
+        assert other.comm is not None
+        # A closed widget is not closed twice; a fresh one is.
+        w2 = _widget(model, assets)
+        ModelWidget.close_all()
+        assert w2.comm is None
+        other.close()
 
     def test_subscription_never_keeps_a_closed_widget_alive(
         self, model: Model, assets: WidgetAssets

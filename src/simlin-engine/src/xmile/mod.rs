@@ -712,11 +712,11 @@ pub(crate) fn write_tag_start(writer: &mut Writer<XmlWriter>, tag_name: &str) ->
 /// identifier on read.
 ///
 /// The two FREE-TEXT attributes (`simlin:macro-invocation primary-doc`,
-/// `simlin:loop-metadata description`) keep raw newlines in the datamodel;
-/// their readers pair with this via [`decode_free_text_attribute`] so a
-/// multi-line doc round-trips instead of reading back as a literal
-/// backslash-n. Identifier-carrying attributes need no decode: the stored
-/// form IS the escape.
+/// `simlin:loop-metadata description`) keep raw text in the datamodel; their
+/// writers run [`encode_free_text_attribute`] first (which also escapes the
+/// backslash itself, so the pair is a fixpoint) and their readers
+/// [`decode_free_text_attribute`]. Identifier-carrying attributes need
+/// neither: the stored form IS the escape.
 ///
 /// Every attribute the writer emits goes through here so the rule cannot be
 /// bypassed by a new call site that pushes onto `BytesStart` directly.
@@ -729,13 +729,55 @@ pub(crate) fn push_attribute(elem: &mut BytesStart<'_>, key: &str, value: &str) 
     }
 }
 
-/// Decode a free-text attribute (documentation, description) read from
-/// XMILE back to the datamodel's raw-newline form: the inverse of the
-/// newline escaping [`push_attribute`] applies on write. Apply ONLY to
-/// attributes whose datamodel field holds raw newlines -- names keep the
-/// escape as their stored form and must not go through here.
+/// Encode a free-text attribute value (documentation, description) for
+/// XMILE: the datamodel's raw text becomes the spec's identifier escapes,
+/// `\` -> `\\` and newline -> `\n` (section 4.1: documentation "must use
+/// XMILE identifier escape sequences ... \n for newline ... and,
+/// necessarily, \\ for backslash"). Escaping the backslash is what makes
+/// write -> read a fixpoint: without it a doc containing the two characters
+/// `\n` (a Windows path, a regex, a mention of the escape itself) reads back
+/// as a newline, and a re-save of THAT is stable, so the corruption is
+/// silent. Pair with [`decode_free_text_attribute`]; apply ONLY to attributes
+/// whose datamodel field holds raw text -- names are stored already escaped
+/// and go through [`push_attribute`] verbatim.
+pub(crate) fn encode_free_text_attribute(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Decode a free-text attribute read from XMILE back to the datamodel's raw
+/// form: the inverse of [`encode_free_text_attribute`], one left-to-right
+/// pass so `\\n` is a backslash followed by `n`, never a newline. A
+/// backslash before any other character is kept verbatim (lenient: the spec
+/// forbids it, and dropping it would lose text).
 pub(crate) fn decode_free_text_attribute(value: &str) -> String {
-    value.replace("\\n", "\n")
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('\\') => {
+                chars.next();
+                out.push('\\');
+            }
+            Some('n') => {
+                chars.next();
+                out.push('\n');
+            }
+            _ => out.push('\\'),
+        }
+    }
+    out
 }
 
 pub(crate) fn write_tag_start_with_attrs(
@@ -2025,6 +2067,52 @@ fn test_xmile_roundtrips_loop_metadata() {
     assert_eq!(lm1.name, "decay loop");
     assert!(lm1.deleted);
     assert!(lm1.description.is_empty());
+
+    // The description is free text: a literal `\n` and a trailing backslash
+    // survive (the backslash is escaped on write, spec 4.1), and the second
+    // round trip is byte-stable.
+    let mut project = project;
+    project.models[0].loop_metadata[0].description =
+        "literal \\n stays; path C:\\new; ends in \\".to_string();
+    let xml = project_to_xmile(&project).unwrap();
+    assert!(
+        xml.contains(r#"description="literal \\n stays; path C:\\new; ends in \\""#),
+        "{xml}"
+    );
+    let rt = project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap();
+    assert_eq!(
+        rt.models[0].loop_metadata[0].description,
+        project.models[0].loop_metadata[0].description
+    );
+    assert_eq!(project_to_xmile(&rt).unwrap(), xml, "byte-stable");
+}
+
+/// The free-text escape pair over every arm of the decoder: `\\` and `\n`
+/// are the two escapes, a backslash before anything else is kept, and
+/// encode -> decode is the identity on arbitrary text.
+#[test]
+fn free_text_attribute_escapes_are_a_fixpoint() {
+    let cases: &[(&str, &str)] = &[
+        ("plain", "plain"),
+        ("two\nlines", "two\\nlines"),
+        ("literal \\n", "literal \\\\n"),
+        ("C:\\new", "C:\\\\new"),
+        ("ends in \\", "ends in \\\\"),
+        ("\\\n", "\\\\\\n"),
+        ("", ""),
+    ];
+    for (raw, encoded) in cases {
+        assert_eq!(encode_free_text_attribute(raw), *encoded, "encode {raw:?}");
+        assert_eq!(
+            decode_free_text_attribute(encoded),
+            *raw,
+            "decode {encoded:?}"
+        );
+    }
+    // Lenient decode: an escape the spec does not define is kept verbatim
+    // rather than dropped (files from other tools; older simlin wrote
+    // backslashes unescaped).
+    assert_eq!(decode_free_text_attribute("\\t \\x \\"), "\\t \\x \\");
 }
 
 #[cfg(test)]
@@ -2685,6 +2773,51 @@ mod macro_tests {
         assert_eq!(total.documentation, doc, "raw newline restored on read");
 
         let xml2 = project_to_xmile(&rt).expect("must re-serialize");
+        let rt2 = project_from_reader(&mut BufReader::new(xml2.as_bytes())).unwrap();
+        assert_eq!(project_to_xmile(&rt2).unwrap(), xml2, "byte-stable");
+    }
+
+    /// The backslash itself is escaped in free text (spec 4.1: "necessarily,
+    /// \\ for backslash"), so a doc that CONTAINS the two characters `\n`,
+    /// or ends in a backslash, comes back as written instead of turning into
+    /// a newline on the first read -- write -> read must be a fixpoint, and
+    /// a doc that changed on the first round trip but is stable afterwards
+    /// is the silent kind of corruption.
+    #[test]
+    fn multi_output_invocation_primary_doc_with_backslashes_round_trips() {
+        let mut project = multi_output_macro_project();
+        let main = project
+            .models
+            .iter_mut()
+            .find(|m| m.name == "main")
+            .unwrap();
+        let doc = "see C:\\new\\notes; the escape is spelled \\n; trailing \\\nsecond line";
+        for v in &mut main.variables {
+            if let Variable::Aux(a) = v
+                && a.ident == "total"
+            {
+                a.documentation = doc.to_string();
+            }
+        }
+
+        let xml = project_to_xmile(&project).expect("must serialize");
+        assert!(
+            xml.contains(
+                r#"primary-doc="see C:\\new\\notes; the escape is spelled \\n; trailing \\\nsecond line""#
+            ),
+            "backslashes doubled, the newline escaped; got:\n{xml}"
+        );
+        let rt = project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("must re-import");
+        let main = rt.models.iter().find(|m| m.name == "main").unwrap();
+        let Some(Variable::Aux(total)) = main.variables.iter().find(|v| v.get_ident() == "total")
+        else {
+            panic!("total is an aux");
+        };
+        assert_eq!(total.documentation, doc, "read is the inverse of write");
+        // Stability from the second serialization on, like the multi-line
+        // test above (the first pass reorders the macro's variables).
+        let xml2 = project_to_xmile(&rt).expect("must re-serialize");
+        assert!(xml2.contains(r#"the escape is spelled \\n;"#), "{xml2}");
         let rt2 = project_from_reader(&mut BufReader::new(xml2.as_bytes())).unwrap();
         assert_eq!(project_to_xmile(&rt2).unwrap(), xml2, "byte-stable");
     }

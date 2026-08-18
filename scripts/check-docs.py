@@ -160,7 +160,12 @@ def check_file(file_path: Path, repo_root: Path) -> list[str]:
             # the walker below refuses to descend into): a CLAUDE.md legitimately
             # names its package's build artifact (`dist/widget.js`), and whether
             # that file exists depends on what was last built in this checkout,
-            # not on whether the docs are correct.
+            # not on whether the docs are correct.  Most such paths are also
+            # git-ignored and would be skipped by the is_git_ignored check
+            # below once resolution fails; this token check is the cheap,
+            # git-independent first line (a vendored `third_party/` tree is
+            # tracked, not ignored, and a shallow or partial checkout may
+            # not have the ignore rules the path relies on).
             if any(part in GENERATED_DIRS for part in token.split()[0].split("/")[:-1]):
                 continue
             # Skip XML/XMILE tag tokens (e.g. `<overflow/>`, `<leak_integers/>`).

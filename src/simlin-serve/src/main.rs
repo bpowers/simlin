@@ -60,7 +60,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             sd_json = %sd_json.display(),
             "found a .mdl next to a same-stem .sd.json (a sidecar written by an earlier \
              simlin-serve); both are served as independent projects and edits to one \
-             do not affect the other -- delete the .sd.json once its edits are no longer needed"
+             do not affect the other. To fold the .sd.json's edits back into the .mdl, \
+             write it over the .mdl (pysimlin: simlin.load(\"<name>.sd.json\").project\
+             .save_as(\"<name>.mdl\"), which reports what Vensim text cannot carry) and \
+             then delete the .sd.json; or delete the .sd.json once its edits are no \
+             longer needed"
         );
     }
 

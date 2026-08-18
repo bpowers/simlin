@@ -713,9 +713,8 @@ impl IntoResponse for SaveError {
 
 /// `POST /api/projects/{*rel_path}` — save edits to a model.
 ///
-/// Phase 3 (Task 8) routes every successful save through the in-memory
-/// `ProjectDoc` rather than writing the raw incoming JSON straight to
-/// disk:
+/// Every successful save goes through the in-memory `ProjectDoc` rather
+/// than writing the raw incoming JSON straight to disk:
 ///
 /// 1. Sanitize + canonicalize the relative path. 404 if the file is
 ///    missing; 403 if it canonicalizes outside the scan root.
@@ -741,8 +740,8 @@ impl IntoResponse for SaveError {
 /// 10. Publish a `ProjectChanged { source: User }` event to subscribed
 ///     WebSocket clients so other tabs can remount their editors.
 ///
-/// The `invalidate_doc` stop-gap from Task 5 is removed: the doc is
-/// the post-save state by virtue of the merge in step 6.
+/// The doc needs no separate invalidation after a save: the merge in
+/// step 7 leaves it holding exactly the post-save state.
 pub async fn save_project(
     State(state): State<AppState>,
     AxumPath(rel_path): AxumPath<String>,

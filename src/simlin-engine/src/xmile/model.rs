@@ -118,7 +118,13 @@ impl ToXml<XmlWriter> for MacroInvocation {
             ("primary-binding", self.primary_binding.as_str()),
             ("primary-output", self.primary_output.as_str()),
         ];
-        if let Some(ref doc) = self.primary_doc {
+        // Free text (the reader decodes it), unlike every other attribute
+        // here, which carries an already-escaped identifier.
+        let primary_doc = self
+            .primary_doc
+            .as_deref()
+            .map(super::encode_free_text_attribute);
+        if let Some(ref doc) = primary_doc {
             attrs.push(("primary-doc", doc.as_str()));
         }
         if let Some(ref units) = self.primary_units {
@@ -467,7 +473,13 @@ impl ToXml<XmlWriter> for Model {
                     deleted_str = "true".to_string();
                     attrs.push(("deleted", &deleted_str));
                 }
-                if let Some(ref desc) = lm.description {
+                // Free text, paired with the reader's decode; `name` is an
+                // identifier-like label stored as written.
+                let description = lm
+                    .description
+                    .as_deref()
+                    .map(super::encode_free_text_attribute);
+                if let Some(ref desc) = description {
                     attrs.push(("description", desc));
                 }
                 let uids_text = lm.uids_text.as_deref().unwrap_or("");

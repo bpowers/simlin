@@ -103,7 +103,7 @@ def test_example_notebook_is_clean_and_runs(notebook: Path, tmp_path: Path) -> N
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
-        ("%pip install --quiet pysimlin", True),
+        ('%pip install --quiet "pysimlin[notebook]"', True),
         ("\n  !pip install pysimlin\n", True),
         ("%%time\nimport simlin", True),
         ("import simlin  # % in a comment", False),

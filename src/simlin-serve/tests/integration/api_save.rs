@@ -372,9 +372,12 @@ async fn missing_path_returns_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-/// AC3.4: Saving an edit to a `.mdl` file rewrites the `.mdl` itself as
+/// Saving an edit to a `.mdl` file rewrites the `.mdl` itself as
 /// regenerated Vensim text (sketch included) that parses back with the
-/// edit applied; no sibling file is created.
+/// edit applied; no sibling file is created.  (This supersedes the
+/// server-rewrite design's AC3.4/AC3.5, which specified an `.sd.json`
+/// sidecar; see the crate CLAUDE.md "every format is read from and written
+/// to its own file".)
 #[tokio::test]
 async fn save_mdl_rewrites_the_mdl_in_place_with_edits() {
     let dir = TempDir::new().unwrap();

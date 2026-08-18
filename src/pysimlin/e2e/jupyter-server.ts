@@ -70,6 +70,26 @@ export function serverArgs(rootDir: string, token: string): string[] {
   ];
 }
 
+/**
+ * User settings written into the run's config tree before launch.  The
+ * server-side `news_url=None` stops the fetch, but the front end still asks
+ * "Would you like to get notified about official Jupyter news?" until the
+ * user answers, and that toast sits over the notebook in every screenshot;
+ * answering it in the settings file (`fetchNews: "false"`, the persisted
+ * form of clicking No) is what JupyterLab documents for headless installs.
+ * The path is under `JUPYTER_CONFIG_DIR/lab/user-settings`, LabApp's default
+ * `user_settings_dir`, so nothing outside the temporary tree is touched.
+ */
+export function userSettingsFiles(configDir: string): Array<{ file: string; contents: string }> {
+  const settingsDir = path.join(configDir, 'lab', 'user-settings');
+  return [
+    {
+      file: path.join(settingsDir, '@jupyterlab', 'apputils-extension', 'notification.jupyterlab-settings'),
+      contents: JSON.stringify({ fetchNews: 'false' }, null, 2) + '\n',
+    },
+  ];
+}
+
 /** Read `url`/`token`/`root_dir` from a `jpserver-<pid>.json` runtime file. */
 export function parseServerInfo(json: string): ServerInfo {
   const info = JSON.parse(json) as { url?: unknown; token?: unknown; root_dir?: unknown };
@@ -152,6 +172,10 @@ export async function launchJupyterLab(): Promise<LaunchedServer> {
   for (const dir of [rootDir, env.JUPYTER_CONFIG_DIR, env.JUPYTER_DATA_DIR, env.JUPYTER_RUNTIME_DIR]) {
     fs.mkdirSync(dir, { recursive: true });
   }
+  for (const { file, contents } of userSettingsFiles(env.JUPYTER_CONFIG_DIR)) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, contents);
+  }
   const token = crypto.randomBytes(24).toString('hex');
   const logPath = path.join(tmpDir, 'jupyter-lab.log');
   const log = fs.openSync(logPath, 'w');
@@ -166,25 +190,56 @@ export async function launchJupyterLab(): Promise<LaunchedServer> {
     exited = true;
   });
 
-  const runtimeDir = env.JUPYTER_RUNTIME_DIR;
-  const info = await waitFor('the jupyter runtime file', 60_000, async () => {
-    if (exited) {
-      throw new Error(`jupyter lab exited during startup; see ${logPath}:\n${fs.readFileSync(logPath, 'utf8')}`);
+  // Whatever the server's state, take it down (the whole process group, so
+  // kernels go with it) and drop the temporary tree; the log is read before
+  // the tree goes so a failure report can carry it.
+  const killAndClean = (): void => {
+    if (!exited && child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        // Already gone.
+      }
     }
-    const files = fs.readdirSync(runtimeDir).filter((f) => f.startsWith('jpserver-') && f.endsWith('.json'));
-    if (files.length === 0) {
-      return undefined;
+    fs.closeSync(log);
+    if (process.env.SIMLIN_E2E_KEEP_TMP === undefined) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     }
-    return parseServerInfo(fs.readFileSync(path.join(runtimeDir, files[0]), 'utf8'));
-  });
-  await waitFor('the jupyter REST API', 60_000, async () => {
-    try {
-      const res = await fetch(`${info.url}api/status`, { headers: { Authorization: `token ${info.token}` } });
-      return res.ok ? true : undefined;
-    } catch {
-      return undefined;
-    }
-  });
+  };
+
+  let info: ServerInfo;
+  try {
+    const runtimeDir = env.JUPYTER_RUNTIME_DIR;
+    info = await waitFor('the jupyter runtime file', 60_000, async () => {
+      if (exited) {
+        throw new Error(`jupyter lab exited during startup; see ${logPath}:\n${fs.readFileSync(logPath, 'utf8')}`);
+      }
+      const files = fs.readdirSync(runtimeDir).filter((f) => f.startsWith('jpserver-') && f.endsWith('.json'));
+      if (files.length === 0) {
+        return undefined;
+      }
+      return parseServerInfo(fs.readFileSync(path.join(runtimeDir, files[0]), 'utf8'));
+    });
+    const url = info.url;
+    const bearer = info.token;
+    await waitFor('the jupyter REST API', 60_000, async () => {
+      try {
+        const res = await fetch(`${url}api/status`, { headers: { Authorization: `token ${bearer}` } });
+        return res.ok ? true : undefined;
+      } catch {
+        return undefined;
+      }
+    });
+  } catch (err) {
+    // A startup failure must not leave a detached jupyter (and its
+    // kernels) running or a temporary tree behind; the error already
+    // carries the log where it matters (exit during startup), and a
+    // timeout gets the log appended here before the tree is removed.
+    const message = err instanceof Error ? err.message : String(err);
+    const logText = message.includes(logPath) ? '' : `\n${logPath}:\n${fs.readFileSync(logPath, 'utf8')}`;
+    killAndClean();
+    throw new Error(`${message}${logText}`);
+  }
 
   const stop = async (): Promise<void> => {
     if (!exited) {
@@ -201,18 +256,8 @@ export async function launchJupyterLab(): Promise<LaunchedServer> {
       while (!exited && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
-      if (!exited && child.pid !== undefined) {
-        try {
-          process.kill(-child.pid, 'SIGKILL');
-        } catch {
-          // Already gone.
-        }
-      }
     }
-    fs.closeSync(log);
-    if (process.env.SIMLIN_E2E_KEEP_TMP === undefined) {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    }
+    killAndClean();
   };
 
   return { ...info, tmpDir, logPath, stop };

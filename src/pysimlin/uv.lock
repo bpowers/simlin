@@ -2065,7 +2065,6 @@ wheels = [
 name = "pysimlin"
 source = { editable = "." }
 dependencies = [
-    { name = "anywidget" },
     { name = "cattrs" },
     { name = "cffi" },
     { name = "numpy" },
@@ -2074,6 +2073,7 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "anywidget" },
     { name = "build" },
     { name = "hypothesis" },
     { name = "jsonschema" },
@@ -2088,7 +2088,11 @@ dev = [
     { name = "types-setuptools" },
 ]
 e2e = [
+    { name = "anywidget" },
     { name = "jupyterlab" },
+]
+notebook = [
+    { name = "anywidget" },
 ]
 notebooks = [
     { name = "ipykernel" },
@@ -2108,7 +2112,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anywidget", specifier = ">=0.9" },
+    { name = "anywidget", marker = "extra == 'notebook'", specifier = ">=0.9" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "cattrs", specifier = ">=23" },
     { name = "cffi", specifier = ">=1.15.0" },
@@ -2125,6 +2129,8 @@ requires-dist = [
     { name = "pandas", specifier = ">=1.5.0" },
     { name = "pandas-stubs", marker = "extra == 'dev'", specifier = ">=2.0.0" },
     { name = "pillow", marker = "extra == 'notebooks'", specifier = ">=10.0" },
+    { name = "pysimlin", extras = ["notebook"], marker = "extra == 'dev'" },
+    { name = "pysimlin", extras = ["notebook"], marker = "extra == 'e2e'" },
     { name = "pysimlin", extras = ["test"], marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0.0" },
@@ -2134,7 +2140,7 @@ requires-dist = [
     { name = "types-cffi", marker = "extra == 'dev'", specifier = ">=1.16.0" },
     { name = "types-setuptools", marker = "extra == 'dev'" },
 ]
-provides-extras = ["test", "dev", "notebooks", "e2e"]
+provides-extras = ["notebook", "test", "dev", "notebooks", "e2e"]
 
 [[package]]
 name = "pytest"

@@ -21,14 +21,60 @@ widget-owned), and every request or reply is a custom message
 from __future__ import annotations
 
 import base64
+import importlib
 import json
+import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Union
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Collection
+    from types import ModuleType
 
     from ._sync import ChangeEvent, ChangeSource
+
+# ── the optional extra ──────────────────────────────────────────────────
+
+NOTEBOOK_EXTRA = "pysimlin[notebook]"
+"""The extra that installs the notebook editor's dependencies (anywidget,
+and through it ipywidgets/traitlets/IPython).  Optional because that chain
+is a couple of dozen packages that scripts, MCP servers, and CI installs
+which never display a model should not carry."""
+
+
+def install_hint() -> str:
+    """The one-line install command for the running host: Colab wants the
+    ``%pip`` magic (a plain ``pip`` there installs into the wrong
+    interpreter often enough that Colab documents the magic), everywhere
+    else plain ``pip``.  Colab is detected by whether ``google.colab`` is
+    importable (a Colab kernel has it imported already), which is how
+    anywidget itself detects it."""
+    if sys.modules.get("google.colab") is None:
+        try:
+            importlib.import_module("google.colab")
+        except ImportError:
+            return f'pip install "{NOTEBOOK_EXTRA}"'
+    return f'%pip install "{NOTEBOOK_EXTRA}"'
+
+
+def missing_dependency_message() -> str:
+    return (
+        f"the notebook editor needs the optional {NOTEBOOK_EXTRA!r} extra "
+        f"(anywidget); install it with: {install_hint()}"
+    )
+
+
+def import_widget_module() -> ModuleType:
+    """``simlin.widget``, imported on demand.  Raises
+    :class:`~simlin.errors.SimlinDependencyError` (an ``ImportError``)
+    naming the install line when anywidget is not installed."""
+    from .errors import SimlinDependencyError
+
+    try:
+        return importlib.import_module(f"{__package__}.widget")
+    except ImportError as exc:
+        raise SimlinDependencyError(missing_dependency_message()) from exc
+
 
 # ── asset delivery ──────────────────────────────────────────────────────
 
@@ -143,11 +189,6 @@ the server limit may raise the widget's too,
 ``model.widget(max_snapshot_bytes=...)``.  Must equal ``MAX_SNAPSHOT_BYTES``
 in ``src/notebook-widget/src/widget-core.ts`` (the JS default when the
 trait is missing)."""
-
-ENVELOPE_HEADROOM_BYTES = 64 * 1024
-"""Generous bound on everything in a snapshot's websocket frame that is not
-the escaped snapshot text: the envelope's other fields, the jupyter message
-header/parent/metadata, and the comm id -- a few hundred bytes in practice."""
 
 
 def snapshot_wire_size(text: str) -> int:
@@ -422,17 +463,23 @@ def plan_snapshot_reply(request: SnapshotRequest, outcome: SnapshotOutcome) -> S
 # ── change notifications ────────────────────────────────────────────────
 
 
-def is_own_change(event: ChangeEvent, own_revision: int | None) -> bool:
-    """Whether a project change notification is this widget's own accepted
-    snapshot (which the widget already pushed itself, so re-pushing would
-    remount the browser's editor and lose its undo history).
+def is_own_change(event: ChangeEvent, own_revisions: Collection[int]) -> bool:
+    """Whether a project change notification is one of this widget's own
+    accepted snapshots (which the widget already pushed itself, so
+    re-pushing would remount the browser's editor and lose its undo
+    history).
 
-    Only ``widget``-sourced events can be ours; a disk reload or a Python
-    ``edit()`` that happens to land at the remembered revision is impossible
+    ``own_revisions`` holds every revision this widget's accepted snapshots
+    produced whose notification has not been delivered yet -- a set, not
+    one slot, because a kernel that handles comm messages while a cell runs
+    (ipykernel 7 subshells) can accept several snapshots before the IO loop
+    drains their notifications, and each of them is ours.  Only
+    ``widget``-sourced events can be ours; a disk reload or a Python
+    ``edit()`` that happens to land at a remembered revision is impossible
     because revisions are unique per project, but the source check keeps
     the rule readable.
     """
-    return event.source == "widget" and own_revision is not None and event.revision == own_revision
+    return event.source == "widget" and event.revision in own_revisions
 
 
 def notice_for_change(source: ChangeSource) -> tuple[str, NoticeLevel]:
@@ -475,9 +522,9 @@ def dispatch_for_shell(shell: object) -> Callable[[Callable[[], None]], None] | 
 __all__ = [
     "ASSET_ENV",
     "ASSET_PACKAGE_DIR",
-    "ENVELOPE_HEADROOM_BYTES",
     "INLINE_WASM_GLOBAL",
     "MAX_SNAPSHOT_BYTES",
+    "NOTEBOOK_EXTRA",
     "TORNADO_DEFAULT_MAX_MESSAGE_SIZE",
     "WASM_FILE",
     "WIDGET_JS",
@@ -494,9 +541,12 @@ __all__ = [
     "WasmRequest",
     "dispatch_for_shell",
     "format_size",
+    "import_widget_module",
     "inline_esm",
+    "install_hint",
     "is_own_change",
     "missing_asset_message",
+    "missing_dependency_message",
     "notice_for_change",
     "notice_message",
     "oversize_notice",
