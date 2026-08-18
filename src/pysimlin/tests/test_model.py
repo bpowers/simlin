@@ -171,6 +171,44 @@ class TestModelEditing:
         )
         assert flow_dict.get("equation", "") == "0"
 
+    def test_edit_update_stock_flows_rewires_without_touching_other_fields(
+        self, teacup_stmx_path
+    ) -> None:
+        """updateStockFlows replaces only the flow lists; the engine keeps
+        every other stock field (initial equation, units, docs)."""
+        from simlin import Flow, Stock
+
+        model = simlin.load(teacup_stmx_path)
+        baseline_final = model.run(analyze_loops=False).results["teacup_temperature"].iloc[-1]
+        stock = model.get_variable("teacup_temperature")
+        assert isinstance(stock, Stock)
+        assert stock.outflows == ("heat_loss_to_room",)
+        assert stock.inflows == ()
+
+        with model.edit() as (_, patch):
+            patch.upsert(Flow(name="reheating", equation="1"))
+            patch.update_stock_flows(
+                "teacup_temperature", inflows=["reheating"], outflows=stock.outflows
+            )
+
+        after = model.get_variable("teacup_temperature")
+        assert isinstance(after, Stock)
+        assert after.inflows == ("reheating",)
+        assert after.outflows == ("heat_loss_to_room",)
+        assert after.initial_equation == stock.initial_equation
+        assert after.units == stock.units
+        assert after.documentation == stock.documentation
+        # And the wiring is real: the new inflow changes behaviour.
+        final = model.run(analyze_loops=False).results["teacup_temperature"].iloc[-1]
+        assert final > baseline_final
+
+    def test_edit_update_stock_flows_unknown_stock_rejected(self, teacup_stmx_path) -> None:
+        from simlin import SimlinRuntimeError
+
+        model = simlin.load(teacup_stmx_path)
+        with pytest.raises(SimlinRuntimeError), model.edit() as (_, patch):
+            patch.update_stock_flows("no_such_stock", inflows=[], outflows=[])
+
     def test_edit_context_dry_run_does_not_commit(self, mdl_model_path) -> None:
         """dry_run=True should validate without mutating the project."""
         model = simlin.load(mdl_model_path)

@@ -11,6 +11,8 @@ Python bindings for [Simlin](https://simlin.com), a system dynamics simulation e
   dominance shifts
 - Inspect model structure: variables, equations, causal links, feedback loops
 - Edit models, or build them from scratch, through a transactional context manager
+- Open a model file with `simlin.open()`: edits save back to the file in its
+  own format, and changes other tools make to the file are picked up
 - Import Vensim `.vdf` binary output as DataFrames
 - Generate SVG and PNG diagrams of the model's structure
 - Full type hints
@@ -92,7 +94,8 @@ did.
 
 Every model is also a diagram. `render_svg()` draws the stock-and-flow
 structure, computing a layout automatically for a model that doesn't
-already carry one (`render_png()` is the bitmap sibling):
+already carry one (`render_png()` is the bitmap sibling; in a notebook,
+`model.diagram()` shows the same picture inline):
 
 ```python
 from pathlib import Path
@@ -130,11 +133,15 @@ extension:
 
 <!-- pysimlin-test: skip -->
 ```python
-model = simlin.load("model.stmx")   # XMILE (.stmx, .xmile, .xml)
-model = simlin.load("model.mdl")    # Vensim
-model = simlin.load("model.json")   # Simlin JSON
-project = model.project             # the containing Project
+model = simlin.load("model.stmx")     # XMILE (.stmx, .xmile, .xml)
+model = simlin.load("model.mdl")      # Vensim
+model = simlin.load("model.sd.json")  # Simlin JSON (SD-AI JSON is detected by content)
+project = model.project               # the containing Project
 ```
+
+`load()` reads the file into memory. `simlin.open()` takes the same files
+but keeps the model attached to the file, writing edits back and noticing
+external changes; see [Editing and Saving Models](#editing-and-saving-models).
 
 To start from nothing, create a project with `simlin.Project.new()` and add
 variables with `model.edit()`, as in Quick Start.
@@ -195,6 +202,71 @@ with model.edit() as (current, patch):
     patch.upsert(Aux(name="harvest_fraction", equation="0.01"))
     stock = current["population"]
     patch.upsert(replace(stock, outflows=[*stock.outflows, "harvest"]))
+```
+
+### Editing and Saving Models
+
+`simlin.load()` reads a file into memory; `simlin.open()` keeps the model
+attached to its file. A file-backed model knows its `path` and format
+(XMILE for `.stmx`/`.xmile`, Vensim for `.mdl`, Simlin JSON for `.sd.json`),
+and every accepted edit is written straight back to that file, in that
+format, with an atomic tempfile-and-rename write. `revision` counts accepted
+changes; `dirty` says whether the file lags the in-memory model. To give an
+in-memory project a file, `save_as()` it first (the suffix picks the format):
+
+```python
+import tempfile
+from pathlib import Path
+
+workdir = Path(tempfile.mkdtemp())
+model_path = workdir / "logistic-growth.stmx"
+project.save_as(model_path)
+
+model = simlin.open(model_path)
+print(model.path.name, model.revision, model.dirty)   # logistic-growth.stmx 0 False
+
+with model.edit() as (current, patch):
+    patch.upsert(replace(current["max_growth_rate"], equation="0.1"))
+
+print(model.revision, model.dirty)   # 1 False: already written back to disk
+print(simlin.load(model_path).get_variable("max_growth_rate").equation)   # 0.1
+```
+
+A variable added through `edit()` on a file-backed model also gets a
+diagram element (existing elements keep their positions), so the saved file
+draws correctly in Simlin, Stella, or `model.diagram()`.
+
+Pass `autosave=False` to batch changes: edits then set `dirty` and stay in
+memory until `model.save()`. A failed write (disk full, permissions) raises
+and keeps the in-memory change with `dirty` still true.
+
+The file is the shared truth between you and any other tool that edits it,
+such as Claude Code rewriting equations in the file, or the `simlin` MCP
+server. By default an opened model polls its file every half second (a
+plain stdlib thread; pass `watch=False` to disable, `model.project.watch()`
+to control it): an external change is loaded in place, `revision`
+advances, cached results such as `base_case` are dropped, and the next
+`model.run()` reflects it. Your own saves are recognised by content hash
+and never round-trip as external changes; a file rewritten with unparsable
+contents is not loaded (a `RuntimeWarning` names the problem and the last
+good model stays); `model.reload()` forces a re-read and returns whether
+anything changed. Subscribe to all of this with `on_change`:
+
+```python
+def announce(event):
+    print(f"revision {event.revision} from {event.source}")   # edit | widget | disk | reload
+
+unsubscribe = model.project.on_change(announce)
+with model.edit() as (_, patch):
+    patch.upsert(Aux(name="observed_growth", equation="net_growth / population"))
+unsubscribe()
+```
+
+`model.reload()` returns `False` here -- the file holds exactly what we
+wrote:
+
+```python
+print(model.reload())   # False
 ```
 
 ### Running Simulations
@@ -424,7 +496,9 @@ xmile_bytes = project.to_xmile()        # XMILE XML
 json_bytes = project.serialize_json()   # Simlin JSON
 ```
 
-Write the bytes to a file to save the model (`.stmx` for XMILE).
+To save to a file, prefer `project.save_as(path)` (or `save()` on a
+file-backed project): it picks the format from the suffix and writes
+atomically.
 
 ### Error Handling
 
