@@ -660,26 +660,18 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   };
 
   // Move focus onto the canvas after a click. An <svg> can't take focus, so
-  // the focus target is the container div (tabindex=-1, no focus ring). Doing
-  // this rather than merely blurring the active element still takes focus away
-  // from a text field the user was typing in (its blur commits as before), but
-  // keeps focus -- and so the key events that follow -- INSIDE the editor
-  // rather than on <body>. The Editor's keyboard scoping resolves such events
-  // to this instance directly, and hosts that gate their own shortcuts on the
-  // event target (a notebook) see them land in the editor's subtree.
+  // the focus target is the container div (tabindex=-1, no focus ring). Focus
+  // must land INSIDE the editor, never merely leave the previous element: a
+  // text field the user was typing in still blurs (its blur commits), and the
+  // key events that follow carry the editor in their path, so the Editor's
+  // keyboard scoping resolves them to this instance directly and hosts that
+  // gate their own shortcuts on the event target (a notebook) see them land in
+  // the editor's subtree. Blurring alone would leave focus on <body>.
   // preventScroll: a host page (notebook) may scroll; focusing must not jump it.
+  // No fallback for a missing container: this runs from pointer handlers on a
+  // rendered canvas, where svgRef is always attached.
   const focusCanvas = (): void => {
-    const container = svgRef.current;
-    if (container && typeof container.focus === 'function') {
-      container.focus({ preventScroll: true });
-      return;
-    }
-    if (typeof document !== 'undefined' && document && document.activeElement) {
-      const activeElement = document.activeElement;
-      if ('blur' in activeElement && typeof activeElement.blur === 'function') {
-        activeElement.blur();
-      }
-    }
+    svgRef.current?.focus({ preventScroll: true });
   };
 
   const getNewVariableName = (base: string): string => {

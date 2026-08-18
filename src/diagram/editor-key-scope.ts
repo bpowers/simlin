@@ -5,19 +5,19 @@
 // Keyboard scoping for Editor instances that share a document.
 //
 // The Editor's shortcuts (Delete/Backspace, Escape, undo/redo) are handled by a
-// document-level keydown listener because the canvas is an <svg> that never
-// holds focus: after a click the active element is blurred and key events
-// target <body>. That is fine while one Editor owns the page (src/app,
-// simlin-serve) and wrong the moment several share it (a notebook with an
-// Editor per output cell): every instance would act on every key. Each
-// instance therefore asks `editorOwnsKeyEvent` before acting.
+// document-level keydown listener because the canvas is an <svg> that cannot
+// hold focus (the Canvas focuses its container div after a click, but keys can
+// still arrive with focus elsewhere). That is fine while one Editor owns the
+// page (src/app, simlin-serve) and wrong the moment several share it (a
+// notebook with an Editor per output cell): every instance would act on every
+// key. Each instance therefore asks `editorOwnsKeyEvent` before acting.
 //
 // The decision is a pure function of the event's composed path and one piece
 // of shared state -- which Editor root most recently saw pointer or focus
 // activity inside it (`markActiveEditorRoot`). Focus alone is not enough to
-// carry that state: besides the canvas blur, focus falls to <body> whenever the
-// focused control unmounts (a details panel closing on delete, the inline name
-// editor committing), and users expect Ctrl+Z to keep working through those.
+// carry that state: focus falls to <body> whenever the focused control
+// unmounts (a details panel closing on delete, the inline name editor
+// committing), and users expect Ctrl+Z to keep working through those.
 
 /** Marks an Editor's outermost element so instances can recognize each other in
  *  an event path without a shared registry. Set with an empty value. */

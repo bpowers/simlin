@@ -191,6 +191,46 @@ describe('Editor mounted without reset.css', () => {
     expect(fixed).toEqual([]);
   });
 
+  // Every portaled surface inherits from <body>, so each must pin the same
+  // typography the editor root does. Asserted on the stylesheet text (these
+  // surfaces need user interaction or unavailable state to mount); the drawer
+  // arm is additionally checked live below.
+  const portaledSurfaces: Array<[string, string]> = [
+    ['components/Drawer.module.css', '.panel'],
+    ['components/Dialog.module.css', '.content'],
+    ['components/Menu.module.css', '.menuContent'],
+    ['components/Autocomplete.module.css', '.listbox'],
+  ];
+
+  it.each(portaledSurfaces)('%s %s pins font-family/size/line-height itself', (file, selector) => {
+    const css = fs.readFileSync(path.join(diagramDir, file), 'utf-8').replace(/\/\*[\s\S]*?\*\//g, '');
+    const re = new RegExp(`${selector.replace('.', '\\.')}\\s*\\{([^}]*)\\}`);
+    const m = re.exec(css);
+    expect(m).not.toBeNull();
+    const block = m![1].replace(/\s+/g, ' ');
+    expect(block).toContain('font-family: var(--font-family-base)');
+    expect(block).toContain('font-size: 1rem');
+    expect(block).toContain('line-height: 1.5');
+  });
+
+  // The raw elements the tree renders carry what reset.css would have given
+  // them. These rules are cheap to assert on the stylesheet text and, unlike the
+  // rules above, do not need the element mounted.
+  const rawElementRules: Array<[string, string, string]> = [
+    ['Editor.module.css', '.snapshotImg', 'display: block'],
+    ['ModuleDetails.module.css', '.modelRefSelect', 'font-family: inherit'],
+    ['ErrorBoundary.module.css', '.box', 'box-sizing: border-box'],
+    ['ModelPropertiesDrawer.module.css', '.propsForm h2', 'margin: 0'],
+  ];
+
+  it.each(rawElementRules)('%s %s declares %s', (file, selector, decl) => {
+    const css = fs.readFileSync(path.join(diagramDir, file), 'utf-8').replace(/\/\*[\s\S]*?\*\//g, '');
+    const re = new RegExp(`${selector.replace(/\./g, '\\.')}\\s*\\{([^}]*)\\}`);
+    const m = re.exec(css);
+    expect(m).not.toBeNull();
+    expect(m![1].replace(/\s+/g, ' ')).toContain(decl);
+  });
+
   it('the portaled drawer sheet pins its typography and its heading has no UA margin', () => {
     mount();
     act(() => {

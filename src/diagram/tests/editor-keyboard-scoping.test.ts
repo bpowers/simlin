@@ -12,9 +12,10 @@
 //  1. the event's composedPath() includes this Editor's root -> this instance;
 //  2. the path includes ANOTHER Editor's root -> not this instance;
 //  3. the path reaches no element besides <body>/<html> (focus is "nowhere",
-//     which is where it rests after a canvas click blurs the active element or
-//     a DOM change unmounts the focused control) -> the instance that most
-//     recently saw pointer/focus activity inside it, and only that one;
+//     which is where it falls when a DOM change unmounts the focused control --
+//     a details panel closing on delete, the inline name editor committing) ->
+//     the instance that most recently saw pointer/focus activity inside it, and
+//     only that one;
 //  4. the path holds some element outside every Editor (focus moved to the
 //     host page) -> nobody.
 //
@@ -31,6 +32,7 @@ import type { StockFlowView, Variable } from '@simlin/core/datamodel';
 
 import { ProjectController, type ProjectSnapshot } from '../project-controller';
 import type { CanvasProps } from '../drawing/Canvas';
+import { EDITOR_ROOT_ATTRIBUTE, activeEditorRoot } from '../editor-key-scope';
 
 rs.mock('../components/SpeedDial', () => {
   return {
@@ -206,6 +208,11 @@ describe('Editor keyboard scoping across instances', () => {
     });
     const root = result.container.firstElementChild as HTMLElement;
     expect(root).not.toBeNull();
+    // The root's scoping identity and its focus sink: the attribute is how
+    // instances recognize each other in a path; tabindex=-1 is what makes a
+    // click on non-focusable chrome settle focus here instead of on <body>.
+    expect(root.hasAttribute(EDITOR_ROOT_ATTRIBUTE)).toBe(true);
+    expect(root.getAttribute('tabindex')).toBe('-1');
     const controller = controllers[before];
     expect(controller).toBeDefined();
     const canvas = (): CanvasProps => {
@@ -225,9 +232,11 @@ describe('Editor keyboard scoping across instances', () => {
   }
 
   // A pointer press anywhere inside the instance (the canvas, in real use).
-  // The Canvas prevents the default focus change on pointerdown and blurs the
-  // active element on release, so a canvas click leaves focus on <body>: the
-  // pointer activity itself is what marks the instance active.
+  // The Canvas prevents the default focus change on pointerdown, so the press
+  // itself -- not a focus change -- is what marks the instance active; the
+  // container focus the Canvas applies on release is a separate step that
+  // these tests (with a stub Canvas) do not perform, which is exactly the
+  // focus-nowhere situation arm 3 exists for.
   function pressInside(inst: Instance): void {
     act(() => {
       fireEvent.pointerDown(inst.root);
@@ -361,9 +370,13 @@ describe('Editor keyboard scoping across instances', () => {
     const b = mountEditor();
     pressInside(a);
     pressInside(b);
+    expect(activeEditorRoot()).toBe(b.root);
     act(() => {
       b.result.unmount();
     });
+    // The unmount cleanup released it; the slot does not silently fall back to
+    // a sibling either.
+    expect(activeEditorRoot()).toBeNull();
 
     await pressKey(document.body, { key: 'z', ctrlKey: true });
     expect(undoRedoCalls).toEqual([]);
