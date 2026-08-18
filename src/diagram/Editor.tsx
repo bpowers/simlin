@@ -86,6 +86,12 @@ const SearchbarWidthLg = 480;
 // The effective right-panel width at the current viewport, mirroring the
 // media queries in Editor.module.css. Used by viewport-centering math, which
 // previously hardcoded one width and was wrong at the other breakpoints.
+// window.innerWidth is deliberately what is read here: the CSS breakpoints
+// are viewport media queries (they size the panel by how much room the USER
+// has, not by the editor's box), so this must evaluate the same quantity or
+// the centering math and the rendered panel would disagree in an embedded
+// editor narrower than the page. Only the panel's overflow CLAMP is
+// container-relative (calc(100% - 16px) in the stylesheets).
 function panelWidth(): number {
   if (typeof window === 'undefined') {
     return SearchbarWidthSm;

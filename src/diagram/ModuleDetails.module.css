@@ -3,12 +3,14 @@
  * Version 2.0, that can be found in the LICENSE file. */
 
 .card {
-  /* Clamp to the viewport on narrow screens so the panel never overflows the
-     left edge or dominates the canvas (it is anchored right:8px). */
-  width: min(var(--panel-width-sm), calc(100vw - 16px));
+  /* Clamp to the editor root on narrow screens so the panel never overflows
+     the left edge or dominates the canvas (it is anchored right:8px). */
+  width: min(var(--panel-width-sm), calc(100% - 16px));
   /* Match .searchBar: see VariableDetails.module.css */
   box-sizing: border-box;
-  max-height: calc(100vh - 18px);
+  /* Against the positioned editor root, not the viewport, so an embedded
+     editor's panel never outgrows the box it lives in. */
+  max-height: calc(100% - 18px);
   overflow-y: auto;
   scrollbar-gutter: stable;
   border-radius: 4px;
@@ -21,13 +23,13 @@
 
 @media (min-width: 900px) and (max-width: 1199.95px) {
   .card {
-    width: min(var(--panel-width-md), calc(100vw - 16px));
+    width: min(var(--panel-width-md), calc(100% - 16px));
   }
 }
 
 @media (min-width: 1200px) {
   .card {
-    width: min(var(--panel-width-lg), calc(100vw - 16px));
+    width: min(var(--panel-width-lg), calc(100% - 16px));
   }
 }
 
