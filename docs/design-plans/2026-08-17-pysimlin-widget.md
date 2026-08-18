@@ -58,8 +58,8 @@ Each criterion names success and failure behaviour. Test names use the prefix `p
 |        |            -> revision++ -> notify                      |
 |        v                                                          |
 |  ModelWidget (anywidget.AnyWidget)                                |
-|     traits: project_json, revision, selection, height, theme,    |
-|             pending_base;  custom msgs: wasm bytes, notices       |
+|     traits: project_json, revision, selection, height, theme;    |
+|             custom msgs: wasm bytes, snapshot/saved/rejected     |
 +-------------------^-----------------------------|----------------+
                     | comm (ipywidgets protocol)  |
 +-------------------|-----------------------------v----------------+
@@ -127,25 +127,25 @@ Watching is a stdlib polling thread (stat every 0.5s, hash on mtime/size change)
 
 ```python
 class ModelWidget(anywidget.AnyWidget):
-    _esm = <bundled widget.js>          # read once at import; env SIMLIN_WIDGET_ASSET=url|inline|<http url>
-    project_json = Unicode()            # kernel -> widget seed; widget -> kernel snapshot
-    revision     = Int()                # kernel-owned; widget echoes the base it edited from
+    _esm = <bundled widget.js>          # read once at import; env SIMLIN_WIDGET_ASSET=inline|<http url>
+    project_json = Unicode()            # KERNEL-OWNED authoritative snapshot; the widget never sets it
+    revision     = Int()                # kernel-owned
     selection    = List(Unicode())      # widget -> kernel
     height       = Int(600)
     theme        = Unicode("auto")      # auto|light|dark
-    pending_base = Int()                # widget -> kernel: revision the snapshot was edited from
     read_only    = Bool(False)
 ```
 
-Protocol:
-- Seed: kernel sets `project_json`+`revision` on construction and on every accepted change.
-- Widget edit: Editor `onSave(json, base_rev)` -> JS does `model.set("project_json", json); model.set("pending_base", base_rev); model.save_changes()` (one coalesced sync message). Kernel `observe(project_json)`: if `pending_base == revision` accept (apply via `_replace_from_bytes`, write file, `revision += 1`, echo suppressed by hash) else reject (re-push the kernel's authoritative `project_json` at the unchanged `revision`, plus a conflict notice -> widget remounts). Kernel obligations (MUST): after an accept, push the EXACT bytes the widget sent (no re-serialization) together with `revision + 1` in ONE sync message (`hold_sync()` plus an explicit `send_state` for `project_json`, because assigning an equal value to a traitlet is silent); bump `revision` by exactly one per accepted snapshot; on reject, re-push `project_json` explicitly even though its value is unchanged.
-- Kernel change (edit/disk): kernel sets `project_json` and `revision` in one message; JS remounts `<Editor>` on any kernel-originated JSON that is not one of its own pending snapshots -- whether or not `revision` changed (so a reject re-seeds even at an unchanged revision). The widget keeps a bounded queue of sent-but-unacknowledged snapshots and pops the OLDEST entry on a content match, so its own accepted saves never remount (undo history preserved) even for edit/undo/redo bursts while the kernel is busy.
-- Notices ("Updated on disk", conflict) travel as custom messages `{type:'notice', text, level}` from kernel to widget, never as a trait: a trait re-set to an equal value sends nothing.
-- WASM: on first `render` per page, JS looks for `globalThis.__simlinWidgetWasmModule` (a promise of the compiled `WebAssembly.Module`; the engine backend itself is per module instance). If absent it sends `{type:"wasm"}`; the kernel replies with a custom message `{type:'wasm'}` carrying the wasm bytes as the first binary buffer (or `{type:'wasm', error}`); JS compiles once and caches the promise page-wide, dropping it on failure so a later widget retries. Fallback: `SIMLIN_WIDGET_ASSET=inline` base64-embeds the wasm in `_esm` (Colab-safe but bloats output); `SIMLIN_WIDGET_ASSET=<url>` loads `_esm` from a URL (dev server / CDN). Chosen at import time (anywidget reads `_esm` at class definition), same as rerun's `RERUN_NOTEBOOK_ASSET`.
-- Selection: Editor `onSelectionChanged` -> `selection` trait (150 ms debounce as in simlin-serve).
+Everything that is a request or a reply travels as a custom message, never as a trait: traits are last-writer-wins state with silent equal-value assignment and merge-on-buffer semantics on the frontend (ipywidgets allows one in-flight `patch` per model and assign-merges anything buffered behind it), which is unusable for a request stream.
 
-### 4. `src/notebook-widget` (new TS package `@simlin/notebook-widget`)
+- Widget -> kernel: `{type:'wasm'}`; `{type:'snapshot', base:int, json:string}` -- the whole snapshot rides in the message (custom messages are ordered and never merged).
+- Kernel -> widget: `{type:'wasm'}` + first binary buffer (or `{type:'wasm', error}`); `{type:'saved', revision}`; `{type:'rejected', revision}`; `{type:'notice', text, level?}`.
+- ONE snapshot in flight: the Editor's `onSave` sends `{type:'snapshot'}` and resolves only when the matching `saved` (-> new version) or `rejected` (-> `undefined`, remount from the authoritative traits) reply arrives. `ProjectController` already serialises saves (one in flight plus one queued flush that re-reads the server version), so with a busy kernel the Editor keeps working locally and a single flush of the latest state goes when the reply lands. No timeout while in flight (a long-running cell legitimately delays the reply); the promise resolves `undefined` on unmount.
+- Kernel accept: `_apply_snapshot(json, base)` succeeds -> file written -> inside one `hold_sync()` assign `project_json = <exact bytes received>` and `revision += 1` (plain assignments; the frontend never wrote this trait, so there is no property lock) -> send `{type:'saved', revision}`. Kernel reject (stale base, or write failure): traits untouched, send `{type:'rejected', revision}` plus a notice. Kernel-originated changes (`edit()`, disk reload): assign both traits in one `hold_sync()` (plus an "Updated on disk" notice for external sources).
+- Widget on trait change (idempotent over the final `(revision, project_json)` pair): if a snapshot is in flight and the pair equals `(expected revision, in-flight json)` it is the accept's state -- no remount; otherwise remount `<Editor>` seeded from the pair (remount is idempotent on the pair, so a `rejected` reply following a disk push does not remount twice). Own accepted saves therefore never remount and undo history survives; kernel/disk changes remount (undo history resets, as in simlin-serve).
+- WASM: on first `render` per page, JS looks for `globalThis.__simlinWidgetWasmModule` (a promise of the compiled `WebAssembly.Module`; the engine backend itself is per module instance). If absent it sends `{type:"wasm"}`; the kernel replies with the bytes as the first binary buffer; JS compiles once and caches the promise page-wide, dropping it on failure so a later widget retries. Fallback: `SIMLIN_WIDGET_ASSET=inline` base64-embeds the wasm in `_esm` (Colab-safe but bloats output); `SIMLIN_WIDGET_ASSET=<url>` loads `_esm` from a URL (dev server / CDN). Chosen at import time (anywidget reads `_esm` at class definition), same as rerun's `RERUN_NOTEBOOK_ASSET`.
+- Selection: Editor `onSelectionChanged` -> `selection` trait (150 ms debounce as in simlin-serve).
+- The kernel-side contract is also written as MUST/guarantee lists in `src/notebook-widget/CLAUDE.md`; where the two disagree, that file is authoritative for implementers.
 
 - Entry exports anywidget AFM `{ initialize, render }` (default export). `render` mounts React 19 into `el` (light DOM; theme tokens applied via `data-theme` on the wrapper; `data-lm-suppress-shortcuts` set on the wrapper), imports `@simlin/diagram/theme.css` and component CSS but NOT `reset.css`.
 - Sizing: wrapper `position:relative; height: <height>px; width:100%`; Editor chrome anchors to it.
@@ -165,11 +165,11 @@ Protocol:
 
 ## Data Flow (happy paths and edge cases)
 
-1. Human edits in widget -> Editor autosave -> `onSave(json, base)` -> traits -> kernel `observe` -> `_sync.decide(widget_snapshot)` = accept -> `_replace_from_bytes(json)` -> incremental layout is unnecessary (UI already positioned) -> serialize in file format -> `atomic_write` -> `last_written_hash = xxh/sha of bytes` -> `revision += 1` -> `on_change(widget)` -> traits pushed (`project_json` identical to what widget sent, `revision+1`) -> JS sees own snapshot, no remount.
+1. Human edits in widget -> Editor autosave -> `onSave(json, base)` -> `{type:'snapshot'}` message -> kernel `_apply_snapshot(json, base)` = accept -> `_replace_from_bytes(json)` -> incremental layout is unnecessary (UI already positioned) -> serialize in file format -> `atomic_write` -> remember content hash -> `revision += 1` -> `on_change(widget)` -> traits assigned in one `hold_sync` (`project_json` = the widget's bytes, `revision+1`) -> `{type:'saved', revision}` -> JS: pair matches the in-flight snapshot, no remount; `onSave` resolves the new version.
 2. Python `edit()` -> patch applied -> `diagram_sync(patch)` incremental -> serialize -> write -> hash -> `revision += 1` -> traits pushed -> JS remounts Editor at new revision (undo history reset; documented).
 3. Claude Code / MCP / `git checkout` writes the file -> poll thread sees mtime change -> read bytes -> hash != last_written -> open into a temporary project and `replace_contents` in place (`_replace_from_bytes`) -> if parse fails: warn, keep last-known-good, remember bad hash so we don't re-warn every poll -> else `revision += 1`, `on_change(disk)`, traits pushed plus an "Updated on disk" notice message.
-4. Stale widget snapshot (kernel advanced between the widget's base and its send) -> reject -> conflict notice message + authoritative `project_json` re-pushed at the unchanged revision -> remount. Because the Editor autosaves after every discrete edit and the kernel applies synchronously, this window is tiny outside the "cell running for a long time" case.
-5. Kernel busy (long cell): widget edits queue in the frontend (ipywidgets semantics); the Editor keeps working locally; when the cell finishes the queued snapshot arrives with its base rev and is accepted if nothing else advanced. Documented behaviour; not a correctness issue because the file is only written by the kernel.
+4. Stale widget snapshot (kernel advanced between the widget's base and its send) -> reject -> `{type:'rejected', revision}` + conflict notice; the traits already hold the authoritative state (the kernel pushed it when it advanced), so the widget remounts from them and the next save carries the new base. Because the Editor autosaves after every discrete edit and the kernel applies synchronously, this window is tiny outside the "cell running for a long time" case.
+5. Kernel busy (long cell): at most one snapshot is in flight, so the Editor keeps working locally and one flush of its latest state goes when the reply arrives; the flush carries the last acknowledged base and is accepted if nothing else advanced. Documented behaviour; not a correctness issue because the file is only written by the kernel and every write is against an acknowledged base.
 6. Widget displayed twice (two cells): both `ModelWidget` instances subscribe to the same `Project.on_change`; each display gets seeded and pushed independently; wasm compiled once per page via the global cache.
 7. Non-widget contexts (nbconvert, GitHub, Colab without custom widget manager -> anywidget enables it automatically): SVG fallback in the mimebundle.
 
