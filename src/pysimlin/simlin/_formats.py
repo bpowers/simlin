@@ -17,6 +17,20 @@ their top-level key exactly as ``simlin-mcp-core::open::open_project`` does:
 is the *write* default for native JSON; on read it is sniffed like any other
 JSON suffix, because SD-AI payloads exist under that suffix too
 (``test/sd-ai-simple.sd.json``).
+
+Two suffixes are read-only: ``.vpm`` (a Vensim published/packaged model;
+pysimlin reads it as MDL text but a regenerated ``.mdl`` body is not a
+``.vpm``) and ``.proto`` (a schema suffix that has been accepted for
+protobuf *input*; writing a binary blob under it would mislead).  Saving to
+either raises unless an explicit ``format`` is given.
+
+Known divergences from the other hosts, so nobody re-derives them as bugs:
+simlin-serve and simlin-mcp-core do not write ``.mdl`` in place (they keep
+an ``.sd.json`` sidecar) while pysimlin regenerates the ``.mdl`` file; and
+simlin-mcp-core recomputes the SD-AI ``relationships`` field on every save
+while pysimlin's SD-AI writer emits what the engine serializes (no
+regenerated relationships) -- a known limitation of the SD-AI write path
+here.
 """
 
 from __future__ import annotations
@@ -26,7 +40,7 @@ import json
 from pathlib import Path
 from typing import Union
 
-from .errors import SimlinImportError
+from .errors import SimlinImportError, SimlinRuntimeError
 
 _PathLike = Union[str, Path]
 
@@ -51,6 +65,8 @@ _XMILE_SUFFIXES = frozenset({".stmx", ".xmile", ".xml"})
 _MDL_SUFFIXES = frozenset({".mdl", ".vpm"})
 _JSON_SUFFIXES = frozenset({".json"})
 _PROTOBUF_SUFFIXES = frozenset({".pb", ".bin", ".proto"})
+# Suffixes the table reads but will not write to (see the module docstring).
+_READ_ONLY_SUFFIXES = frozenset({".vpm", ".proto"})
 
 
 def format_for_suffix(path: _PathLike) -> FileFormat | None:
@@ -179,19 +195,35 @@ def resolve_write_format(path: _PathLike, format: FileFormat | None) -> FileForm
 
     Raises:
         ValueError: when the suffix is unknown and no format was given.
+        SimlinRuntimeError: when the suffix is read-only (``.vpm``,
+            ``.proto``) and no format was given.
     """
     if format is not None:
         return format
-    by_suffix = format_for_suffix(path)
+    p = Path(path)
+    if p.suffix.lower() in _READ_ONLY_SUFFIXES:
+        writable = ", ".join(sorted(WRITABLE_SUFFIXES))
+        raise SimlinRuntimeError(
+            f"{p.suffix} files can be read but not written; save to one of {writable} "
+            f"or pass format= explicitly"
+        )
+    by_suffix = format_for_suffix(p)
     if by_suffix is None:
         raise ValueError(
-            f"cannot infer a model format from the suffix of {Path(path)}; "
+            f"cannot infer a model format from the suffix of {p}; "
             f"pass format= explicitly (one of {', '.join(f.name for f in FileFormat)})"
         )
     return by_suffix
 
 
+WRITABLE_SUFFIXES: frozenset[str] = (
+    _XMILE_SUFFIXES | _MDL_SUFFIXES | _JSON_SUFFIXES | _PROTOBUF_SUFFIXES
+) - _READ_ONLY_SUFFIXES
+"""Every suffix :func:`resolve_write_format` accepts without an explicit format."""
+
+
 __all__ = [
+    "WRITABLE_SUFFIXES",
     "FileFormat",
     "format_for_suffix",
     "resolve_read_format",

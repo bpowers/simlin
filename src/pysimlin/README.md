@@ -237,8 +237,17 @@ diagram element (existing elements keep their positions), so the saved file
 draws correctly in Simlin, Stella, or `model.diagram()`.
 
 Pass `autosave=False` to batch changes: edits then set `dirty` and stay in
-memory until `model.save()`. A failed write (disk full, permissions) raises
-and keeps the in-memory change with `dirty` still true.
+memory until `model.save()`. With autosave on (the default), `dirty` is only
+ever true after a failed write (disk full, permissions): the write raises
+and the in-memory change is kept until a later `save()` succeeds.
+
+`save()` never silently overwrites someone else's work. If the file changed
+on disk since the model last read or wrote it, `save()` raises and leaves
+both file and model as they are; `model.reload()` takes the on-disk version
+(discarding local changes) and `model.project.save(force=True)` overwrites
+it with yours. Likewise an `edit()` block whose model changed underneath it
+(a reload from disk landed, or another thread edited) is rejected unapplied
+-- re-run the block against the current contents.
 
 The file is the shared truth between you and any other tool that edits it,
 such as Claude Code rewriting equations in the file, or the `simlin` MCP

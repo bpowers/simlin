@@ -101,16 +101,17 @@ def load(path: Union[str, Path]) -> Model:
         >>> model.base_case.results["population"].plot()
     """
     from ._formats import resolve_read_format
+    from .project import _read_model_file
 
     p = Path(path)
-    if not p.exists():
-        raise SimlinImportError(f"File not found: {p}")
-    data = p.read_bytes()
+    data = _read_model_file(p)
     fmt = resolve_read_format(p, data)
     return Project._from_bytes(data, fmt).get_model()
 
 
-def open(  # shadows the builtin on purpose: it is the file-opening entry point
+# ``simlin.open`` deliberately mirrors the builtin's name for files, so it is
+# left out of ``__all__``: ``from simlin import *`` must not shadow ``open``.
+def open(
     path: Union[str, Path],
     *,
     autosave: bool = True,
@@ -195,5 +196,4 @@ __all__ = [
     "links_by_target",
     "load",
     "load_vdf",
-    "open",
 ]

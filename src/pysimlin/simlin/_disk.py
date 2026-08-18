@@ -25,6 +25,14 @@ if TYPE_CHECKING:
 _PathLike = Union[str, Path]
 
 
+class _Unknown:
+    """Type of the ``_UNKNOWN`` sentinel (distinct from ``None`` = "the file
+    did not exist at the last tick")."""
+
+
+_UNKNOWN = _Unknown()
+
+
 def content_hash(data: bytes) -> str:
     """Hex SHA-256 of ``data``: the identity of a file's contents used for
     echo suppression and change detection."""
@@ -94,12 +102,19 @@ class FileWatcher:
     ``pip install pysimlin``.
 
     Each tick stats the file and, when its ``(mtime, size, inode)``
-    signature changed, reads the bytes and calls ``handler(data, hash)``.
-    The read is re-checked against a second stat so a non-atomic writer
-    caught mid-write is skipped this tick rather than delivered as a
-    truncated file.  ``handler`` returns ``False`` to stop the thread (the
-    ``Project`` uses this to end watching once it has been garbage
-    collected, so the thread never keeps a project alive).
+    signature changed, reads the bytes and calls
+    ``handler(watcher, data, hash)``.  The very first tick always reads and
+    delivers, so a change that landed between the caller's last read of the
+    file and ``start()`` is never missed (the receiver recognises its own
+    bytes by hash).  The read is re-checked against a second stat so a
+    non-atomic writer caught mid-write is skipped this tick rather than
+    delivered as a truncated file.  ``handler`` returns ``False`` to stop the
+    thread (the ``Project`` uses this to end watching once it has been
+    garbage collected, so the thread never keeps a project alive).
+
+    A watcher is single-use: once stopped it cannot be started again --
+    create a new one.  This keeps "is this the project's current watcher"
+    a simple identity check for the receiver.
 
     The thread never dies silently: any exception from the stat/read/handler
     path is reported through ``warnings.warn(RuntimeWarning)`` -- once per
@@ -109,7 +124,7 @@ class FileWatcher:
     def __init__(
         self,
         path: _PathLike,
-        handler: Callable[[bytes, str], bool],
+        handler: Callable[[FileWatcher, bytes, str], bool],
         *,
         interval: float = 0.5,
     ) -> None:
@@ -120,8 +135,10 @@ class FileWatcher:
         self._interval = float(interval)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._last_signature = self._signature()
+        # No signature yet: the first tick reads whatever is there.
+        self._last_signature: tuple[int, int, int] | None | _Unknown = _UNKNOWN
         self._warned: set[str] = set()
+        self._stopped = False
 
     @property
     def path(self) -> Path:
@@ -137,18 +154,26 @@ class FileWatcher:
         return thread is not None and thread.is_alive()
 
     def start(self) -> None:
+        if self._stopped:
+            raise RuntimeError("a stopped FileWatcher cannot be restarted; create a new one")
         if self.running:
             return
-        self._stop.clear()
         self._thread = threading.Thread(
             target=self._run, name=f"simlin-watch:{self._path.name}", daemon=True
         )
         self._thread.start()
 
+    def request_stop(self) -> None:
+        """Ask the poll thread to exit at its next wake-up without waiting
+        for it.  Safe from any context, including a ``weakref.finalize``
+        callback during garbage collection where joining would be wrong."""
+        self._stopped = True
+        self._stop.set()
+
     def stop(self) -> None:
         """Stop polling and (unless called from the poll thread itself, e.g.
         inside a change callback) wait for the thread to exit."""
-        self._stop.set()
+        self.request_stop()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=max(1.0, self._interval * 4))
@@ -201,7 +226,7 @@ class FileWatcher:
             # next tick re-reads the settled file.
             return True
         self._last_signature = before
-        return self._handler(data, content_hash(data))
+        return self._handler(self, data, content_hash(data))
 
 
 __all__ = ["FileWatcher", "atomic_write", "content_hash"]

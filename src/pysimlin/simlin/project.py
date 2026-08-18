@@ -11,7 +11,7 @@ decided by the pure state machine in ``simlin._sync``; this class executes
 those decisions.
 
 Thread-safety: each ``Project`` owns two locks.  ``_lock`` (a plain
-``Lock``) protects ``_ptr`` and the FFI calls, exactly as before.
+``Lock``) protects ``_ptr`` and the FFI calls.
 ``_file_lock`` (an ``RLock``) protects the file-backing state -- path,
 format, sync state, listeners, models -- and serialises whole
 mutate-then-write sequences so a poll-thread reload cannot interleave with
@@ -143,16 +143,27 @@ def _models_with_variable_ops(patch_json: bytes) -> list[str]:
         return []
     if not isinstance(patch, dict):
         return []
-    names: list[str] = []
+    names: dict[str, None] = {}
     for model_patch in patch.get("models") or []:
         if not isinstance(model_patch, dict):
             continue
         ops = model_patch.get("ops") or []
         if any(isinstance(op, dict) and op.get("type") in _VARIABLE_OP_TYPES for op in ops):
             # The engine treats "" and "main" as the same default model, but
-            # the FFI requires a non-empty name.
-            names.append(model_patch.get("name") or "main")
-    return names
+            # the FFI requires a non-empty name.  A patch may legally carry
+            # several entries for one model; lay it out once.
+            names[model_patch.get("name") or "main"] = None
+    return list(names)
+
+
+def _read_model_file(path: Path) -> bytes:
+    """Read a model file for :func:`simlin.load` / :meth:`Project.open`,
+    turning the two ways a path can be wrong into ``SimlinImportError``."""
+    if not path.exists():
+        raise SimlinImportError(f"File not found: {path}")
+    if not path.is_file():
+        raise SimlinImportError(f"{path} is not a file")
+    return path.read_bytes()
 
 
 def _pretty_json(compact: bytes) -> bytes:
@@ -161,19 +172,21 @@ def _pretty_json(compact: bytes) -> bytes:
     return json.dumps(json.loads(compact), indent=2, ensure_ascii=False).encode("utf-8")
 
 
-def _disk_handler(project_ref: weakref.ref[Project]) -> Callable[[bytes, str], bool]:
+def _disk_handler(project_ref: weakref.ref[Project]) -> Callable[[FileWatcher, bytes, str], bool]:
     """Build the poll-thread callback for a project.
 
     The watcher thread must never keep the project alive, so the handler
     holds only a weak reference and asks the watcher to stop (returns
-    ``False``) once the project has been collected.
+    ``False``) once the project has been collected.  (The project also
+    stops its watcher from a ``weakref.finalize``, so an idle file does not
+    leave the thread polling until the next change either.)
     """
 
-    def handler(data: bytes, digest: str) -> bool:
+    def handler(watcher: FileWatcher, data: bytes, digest: str) -> bool:
         project = project_ref()
         if project is None:
             return False
-        project._ingest_disk_bytes(data, digest)
+        project._ingest_disk_bytes(watcher, data, digest)
         return True
 
     return handler
@@ -189,7 +202,11 @@ class Project:
     A project opened with :meth:`open` (or given a path by :meth:`save_as`)
     is *file-backed*: it remembers its :attr:`path` and :attr:`format`,
     every accepted change bumps :attr:`revision`, and with
-    :attr:`autosave` on, each change is written straight back to the file.
+    :attr:`autosave` on (the default), each change is written straight back
+    to the file, so :attr:`dirty` only becomes true when such a write fails
+    (and clears once :meth:`save` succeeds).  A save never overwrites a
+    change another tool made to the file since we last read or wrote it;
+    see :meth:`save`.
     :meth:`watch` polls the file so changes made by other tools are loaded
     in place -- existing :class:`Model` handles keep working and see the
     new contents.  Subscribe with :meth:`on_change` to be told about every
@@ -232,6 +249,7 @@ class Project:
         self._listeners: dict[int, tuple[ChangeCallback, Dispatch | None]] = {}
         self._next_listener_id = 0
         self._watcher: FileWatcher | None = None
+        self._closed = False
         # Model handles created by get_model(); their caches are invalidated
         # on every accepted change.  Weak so a project never pins its models.
         self._models: weakref.WeakSet[Model] = weakref.WeakSet()
@@ -309,9 +327,7 @@ class Project:
             SimlinRuntimeError: if the engine cannot parse the file.
         """
         p = Path(path)
-        if not p.exists():
-            raise SimlinImportError(f"File not found: {p}")
-        data = p.read_bytes()
+        data = _read_model_file(p)
         fmt = resolve_read_format(p, data)
         project = cls(
             cls._open_bytes(data, fmt),
@@ -371,21 +387,30 @@ class Project:
         with self._file_lock:
             return self._watcher is not None and self._watcher.running
 
-    def save(self) -> None:
+    def save(self, *, force: bool = False) -> None:
         """Write the project to :attr:`path` in :attr:`format`, atomically.
+
+        A save never silently overwrites someone else's work: if the file
+        on disk no longer holds the bytes this project last loaded or wrote
+        (another tool changed it and, because of unsaved local changes, the
+        change was held back), ``save()`` raises and leaves both the file
+        and the in-memory project as they are.  Resolve it with
+        :meth:`reload` (take the on-disk version, discarding local changes)
+        or ``save(force=True)`` (overwrite the file with the local version).
 
         Raises:
             SimlinRuntimeError: if the project has no path (use
-                :meth:`save_as`).
+                :meth:`save_as`), or the file changed on disk and ``force``
+                is not set.
             OSError: if the write fails; the in-memory project is kept and
-                :attr:`dirty` stays ``True``.
+                :attr:`dirty` is unchanged.
         """
         with self._file_lock:
             if self._path is None or self._format is None:
                 raise SimlinRuntimeError(
                     "project has no file path; use save_as(path) to choose one"
                 )
-            self._write_to(self._path, self._format)
+            self._write_to(self._path, self._format, force=force)
 
     def save_as(self, path: _PathLike, format: FileFormat | None = None) -> None:
         """Write the project to ``path`` and adopt it as :attr:`path`.
@@ -394,8 +419,14 @@ class Project:
         ``path``.  If the project was watching its previous file, it now
         watches the new one.
 
+        Saving to a *different* path never conflicts with changes to the
+        current file; ``save_as`` to the current path behaves like
+        :meth:`save`.
+
         Raises:
             ValueError: if the suffix is unknown and no ``format`` is given.
+            SimlinRuntimeError: if the suffix is read-only (``.vpm``,
+                ``.proto``) and no ``format`` is given.
             OSError: if the write fails; nothing is adopted.
         """
         target = Path(path)
@@ -429,6 +460,7 @@ class Project:
         Raises:
             SimlinRuntimeError: if the project has no path, or the file no
                 longer parses (the previous contents are kept).
+            OSError: if the file cannot be read (e.g. it was deleted).
         """
         with self._file_lock:
             path = self._path
@@ -468,6 +500,8 @@ class Project:
         old_watcher: FileWatcher | None = None
         with self._file_lock:
             if enabled:
+                if self._closed:
+                    raise SimlinRuntimeError("cannot watch a closed project")
                 if self._path is None:
                     raise SimlinRuntimeError(
                         "cannot watch an in-memory project; save_as(path) first"
@@ -490,6 +524,11 @@ class Project:
 
     def _start_watcher(self, path: Path, interval: float) -> FileWatcher:
         watcher = FileWatcher(path, _disk_handler(weakref.ref(self)), interval=interval)
+        # The handler only runs when the file changes, so it alone would let
+        # the thread outlive a collected project on an idle file; the
+        # finalizer asks the thread to exit as soon as the project is gone
+        # (request_stop, not stop: never join from inside garbage collection).
+        weakref.finalize(self, watcher.request_stop)
         watcher.start()
         return watcher
 
@@ -510,6 +549,13 @@ class Project:
         Callbacks never run under a project lock, and an exception in one is
         reported as a ``RuntimeWarning`` rather than propagating into the
         edit or poll that triggered it.
+
+        Because delivery happens after the lock is released, two changes
+        racing on different threads may deliver their events out of
+        revision order.  ``event.revision`` says which change an event is
+        about; a listener that wants the project's state should read the
+        current :attr:`revision` / contents at delivery time rather than
+        assume the event describes the latest state.
 
         Returns:
             A zero-argument function that unsubscribes.
@@ -563,19 +609,37 @@ class Project:
             case FileFormat.PROTOBUF:
                 return self.serialize_protobuf()
 
-    def _write_to(self, path: Path, format: FileFormat) -> None:
+    def _disk_conflict(self, path: Path) -> bool:
+        """Whether ``path`` (our own file) no longer holds the bytes we last
+        loaded or wrote.  A missing file is not a conflict: re-creating it
+        loses nothing.  Caller holds ``_file_lock``."""
+        known = self._sync.disk_hash
+        if known is None:
+            return False
+        try:
+            current = path.read_bytes()
+        except FileNotFoundError:
+            return False
+        return content_hash(current) != known
+
+    def _write_to(self, path: Path, format: FileFormat, *, force: bool = False) -> None:
         """Serialize and atomically write; caller holds ``_file_lock``.
 
-        On success the sync state records the written bytes' hash so the
-        poll thread treats them as our echo.  On failure the state is left
-        dirty and the exception propagates; the in-memory project is kept.
+        Writing to our own :attr:`path` first checks that nobody else has
+        changed the file since we last read or wrote it (see :meth:`save`);
+        ``force`` skips that check.  On success the sync state records the
+        written bytes' hash so the poll thread treats them as our echo.  On
+        failure the exception propagates and the sync state is untouched:
+        ``dirty`` already says whether memory differs from the file.
         """
+        if not force and path == self._path and self._disk_conflict(path):
+            raise SimlinRuntimeError(
+                f"{path} changed on disk since it was loaded or last saved; call "
+                f"reload() to take the on-disk version (discarding local changes) or "
+                f"save(force=True) to overwrite it"
+            )
         data = self._serialize(format)
-        try:
-            atomic_write(path, data)
-        except BaseException:
-            self._sync = dataclasses.replace(self._sync, dirty=True)
-            raise
+        atomic_write(path, data)
         _, self._sync = _sync.decide(self._sync, _sync.WriteCompleted(content_hash(data)))
 
     # ── internal: accepting changes ─────────────────────────────────────
@@ -617,25 +681,21 @@ class Project:
                     stacklevel=3,
                 )
 
-    def _commit_change(self, source: _sync.ChangeSource) -> None:
-        """Bookkeeping after an in-memory mutation was accepted: bump the
-        revision, invalidate model caches, autosave if configured, and
-        notify subscribers.  A failed autosave still bumps and notifies
-        (the in-memory change is real) and then re-raises with
-        :attr:`dirty` left ``True``.
+    def _commit_change_locked(self) -> tuple[int, BaseException | None]:
+        """Bookkeeping after an in-memory mutation was accepted, with
+        ``_file_lock`` held by the caller: bump the revision, invalidate model
+        caches, and autosave if configured.  Returns the new revision and the
+        autosave failure (if any) so the caller can release the lock, notify
+        subscribers of the in-memory change, and only then raise -- a failed
+        autosave still bumps and notifies because the in-memory change is
+        real; :attr:`dirty` stays ``True`` until a save succeeds.
         """
-        write_error: BaseException | None = None
-        with self._file_lock:
-            persist = self._path is not None and self._autosave
-            decision, self._sync = _sync.decide(self._sync, _sync.LocalEdit(persist))
-            assert isinstance(decision, _sync.Write | _sync.MarkDirty)
-            revision = decision.revision
-            self._invalidate_model_caches()
-            if isinstance(decision, _sync.Write):
-                write_error = self._try_autosave()
-        self._notify(ChangeEvent(source, revision))
-        if write_error is not None:
-            raise write_error
+        persist = self._path is not None and self._autosave
+        decision, self._sync = _sync.decide(self._sync, _sync.LocalEdit(persist))
+        assert isinstance(decision, _sync.Write | _sync.MarkDirty)
+        self._invalidate_model_caches()
+        write_error = self._try_autosave() if isinstance(decision, _sync.Write) else None
+        return decision.revision, write_error
 
     def _try_autosave(self) -> BaseException | None:
         """Autosave to the current path; caller holds ``_file_lock`` and has
@@ -708,8 +768,8 @@ class Project:
         Returns the new revision on success.  On a parse failure the state
         records the declined hash and the exception propagates.
         """
-        fmt = resolve_read_format(path, data)
         try:
+            fmt = resolve_read_format(path, data)
             self._replace_from_bytes(data, fmt)
         except SimlinError:
             _, self._sync = _sync.decide(self._sync, _sync.DiskParsed(digest, ok=False))
@@ -722,14 +782,29 @@ class Project:
         self._invalidate_model_caches()
         return decision.revision
 
-    def _ingest_disk_bytes(self, data: bytes, digest: str) -> None:
-        """Poll-thread entry: the file now holds ``data``.  Executes the
-        sync machine's decision; never raises (the watcher would only warn
-        anyway, and these messages are more specific)."""
+    def _ingest_disk_bytes(self, watcher: FileWatcher, data: bytes, digest: str) -> None:
+        """Poll-thread entry: ``watcher`` read ``data`` from the file.
+        Executes the sync machine's decision; never raises (the watcher
+        would only warn anyway, and these messages are more specific).
+
+        The delivery is re-verified under ``_file_lock`` before it counts:
+        it must come from the project's current watcher for its current
+        path (``save_as`` retires watchers), and the file must still hold
+        ``data``.  Between the watcher's read and this point our own
+        ``edit()`` may have written the file; loading the watcher's older
+        bytes over that write would silently revert it, so a delivery that
+        no longer matches the file is dropped -- the watcher sees the newer
+        write on its next tick.
+        """
         revision: int | None = None
         with self._file_lock:
             path = self._path
-            if path is None:
+            if path is None or watcher is not self._watcher or watcher.path != path:
+                return
+            try:
+                if content_hash(path.read_bytes()) != digest:
+                    return
+            except OSError:
                 return
             decision, self._sync = _sync.decide(self._sync, _sync.DiskObserved(digest))
             match decision:
@@ -965,6 +1040,7 @@ class Project:
         *,
         dry_run: bool = False,
         allow_errors: bool = False,
+        expected_revision: int | None = None,
     ) -> list[ErrorDetail]:
         """Apply a JSON patch, surfacing validation details as Python exceptions.
 
@@ -982,6 +1058,9 @@ class Project:
             patch_json: JSON-encoded patch data (UTF-8 bytes)
             dry_run: If True, validate without applying changes
             allow_errors: If True, apply even when validation reports errors
+            expected_revision: The :attr:`revision` the patch was built
+                against; if the project has changed since (a reload from
+                disk, another edit), the patch is rejected unapplied
 
         Returns:
             List of ErrorDetail objects for collected diagnostics (including
@@ -989,10 +1068,17 @@ class Project:
 
         Raises:
             SimlinRuntimeError: If the patch is rejected (or fails to
-                parse/apply); the exception carries the underlying
+                parse/apply), or the project's revision no longer matches
+                ``expected_revision``; the exception carries the underlying
                 diagnostics on its ``details`` attribute.
         """
         with self._file_lock:
+            if expected_revision is not None and expected_revision != self._sync.revision:
+                raise SimlinRuntimeError(
+                    f"project changed during edit (revision {expected_revision} -> "
+                    f"{self._sync.revision}); the edit was not applied, re-run it "
+                    f"against the current contents"
+                )
             with self._lock:
                 self._check_alive()
                 diagnostics = _ffi_apply_patch_json(self._ptr, patch_json, dry_run, allow_errors)
@@ -1003,7 +1089,10 @@ class Project:
             # step with the variables before the change is committed/saved.
             if self._path is not None:
                 self._sync_diagram_for_patch(patch_json)
-            self._commit_change("edit")
+            revision, write_error = self._commit_change_locked()
+        self._notify(ChangeEvent("edit", revision))
+        if write_error is not None:
+            raise write_error
         return diagnostics
 
     def serialize_json(self, format: str = JSON_FORMAT_SIMLIN) -> bytes:
@@ -1167,7 +1256,10 @@ class Project:
             with self._lock:
                 self._check_alive()
                 _ffi_diagram_sync(self._ptr, model_name)
-            self._commit_change("edit")
+            revision, write_error = self._commit_change_locked()
+        self._notify(ChangeEvent("edit", revision))
+        if write_error is not None:
+            raise write_error
 
     def render_svg(self, model_name: str = "main") -> bytes:
         """Render a model's stock-and-flow diagram as SVG.
@@ -1258,6 +1350,9 @@ class Project:
         self.watch(False)
         with self._file_lock:
             self._listeners.clear()
+            self._closed = True
+            self._path = None
+            self._format = None
         with self._lock:
             finalizer = getattr(self, "_finalizer", None)
             if finalizer and getattr(finalizer, "alive", False):

@@ -194,8 +194,15 @@ class _ModelEditContext:
         self._allow_errors = allow_errors
         self._current: dict[str, Variable] = {}
         self._patch = ModelPatchBuilder(model._name or "")
+        self._base_revision: int | None = None
 
     def __enter__(self) -> tuple[dict[str, Variable], ModelPatchBuilder]:
+        # The revision the edit is built against; if the project changes
+        # before the block exits (a reload from disk, another edit), the
+        # patch would be applied to contents ``current`` never described,
+        # so it is rejected instead (see Project._apply_patch_json).
+        project = self._model._project
+        self._base_revision = project.revision if project is not None else None
         with self._model._lock:
             self._model._check_alive()
             names = model_get_var_names(self._model._ptr)
@@ -243,6 +250,7 @@ class _ModelEditContext:
             patch_json,
             dry_run=self._dry_run,
             allow_errors=self._allow_errors,
+            expected_revision=self._base_revision,
         )
 
 
@@ -977,12 +985,19 @@ class Model:
             if self._cached_base_case is not None:
                 return self._cached_base_case
 
+        # A run computed against revision N is only a valid cache entry if
+        # the project is still at N when the run finishes; a change landing
+        # mid-run (an edit, a reload from disk) invalidates the cache before
+        # we would fill it, so fill it only when nothing moved.
+        project = self._project
+        revision_before = project.revision if project is not None else 0
         result = self.run()
+        revision_after = project.revision if project is not None else 0
 
         with self._lock:
-            if self._cached_base_case is None:
+            if self._cached_base_case is None and revision_after == revision_before:
                 self._cached_base_case = result
-            return self._cached_base_case
+            return self._cached_base_case if self._cached_base_case is not None else result
 
     def check(self) -> tuple[ModelIssue, ...]:
         """Check model for common issues.

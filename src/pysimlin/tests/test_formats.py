@@ -12,8 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from simlin import SimlinImportError
+from simlin import SimlinImportError, SimlinRuntimeError
 from simlin._formats import (
+    WRITABLE_SUFFIXES,
     FileFormat,
     format_for_suffix,
     resolve_read_format,
@@ -149,3 +150,16 @@ class TestResolveWriteFormat:
     def test_unknown_suffix_without_format_raises(self) -> None:
         with pytest.raises(ValueError, match=r"m\.txt"):
             resolve_write_format(Path("m.txt"), None)
+
+    @pytest.mark.parametrize("name", ["m.vpm", "m.VPM", "m.proto"])
+    def test_read_only_suffixes_refuse_writes_and_name_the_alternatives(self, name: str) -> None:
+        with pytest.raises(SimlinRuntimeError, match=r"read but not written.*\.stmx"):
+            resolve_write_format(Path(name), None)
+        # An explicit format turns the suffix into just a file name.
+        assert resolve_write_format(Path(name), FileFormat.MDL) == FileFormat.MDL
+
+    def test_writable_suffixes_are_exactly_the_readable_minus_read_only(self) -> None:
+        readable = {".stmx", ".xmile", ".xml", ".mdl", ".vpm", ".json", ".pb", ".bin", ".proto"}
+        assert readable - {".vpm", ".proto"} == WRITABLE_SUFFIXES
+        for suffix in WRITABLE_SUFFIXES:
+            assert resolve_write_format(Path("m" + suffix), None) is not None

@@ -76,6 +76,22 @@ class TestAtomicWrite:
         assert sorted(p.name for p in tmp_path.iterdir()) == ["adir", "m.stmx"]
         assert target.read_bytes() == b"old"
 
+    @pytest.mark.parametrize("failing", ["os.replace", "os.fsync"])
+    def test_failure_mid_write_keeps_old_bytes_and_no_tempfile(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str
+    ) -> None:
+        target = tmp_path / "m.stmx"
+        target.write_bytes(b"old")
+
+        def boom(*args: object, **kwargs: object) -> None:
+            raise OSError(f"{failing} failed")
+
+        monkeypatch.setattr(f"simlin._disk.{failing}", boom)
+        with pytest.raises(OSError, match=failing):
+            atomic_write(target, b"new")
+        assert target.read_bytes() == b"old"
+        assert [p.name for p in tmp_path.iterdir()] == ["m.stmx"]
+
     def test_missing_parent_directory_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
             atomic_write(tmp_path / "nope" / "m.stmx", b"x")
@@ -87,9 +103,11 @@ class _Recorder:
 
     def __init__(self) -> None:
         self.calls: list[tuple[bytes, str]] = []
+        self.watchers: list[FileWatcher] = []
         self.keep_going = True
 
-    def __call__(self, data: bytes, digest: str) -> bool:
+    def __call__(self, watcher: FileWatcher, data: bytes, digest: str) -> bool:
+        self.watchers.append(watcher)
         self.calls.append((data, digest))
         return self.keep_going
 
@@ -108,11 +126,27 @@ class TestFileWatcherPolling:
         with pytest.raises(ValueError, match="interval"):
             FileWatcher(tmp_path / "m", _Recorder(), interval=0)
 
-    def test_unchanged_file_delivers_nothing(self, tmp_path: Path) -> None:
+    def test_first_tick_delivers_current_contents_and_passes_self(self, tmp_path: Path) -> None:
+        # A change between the receiver's last read and start() must not be
+        # lost, so the first tick always reports what is on disk; the
+        # receiver dedupes by hash.
         path = tmp_path / "m.stmx"
         path.write_bytes(b"one")
         rec = _Recorder()
         watcher = FileWatcher(path, rec, interval=0.01)
+        assert watcher.poll_once() is True
+        assert rec.calls == [(b"one", content_hash(b"one"))]
+        assert rec.watchers == [watcher]
+        assert watcher.poll_once() is True
+        assert rec.calls == [(b"one", content_hash(b"one"))]
+
+    def test_unchanged_file_delivers_nothing_after_the_first_tick(self, tmp_path: Path) -> None:
+        path = tmp_path / "m.stmx"
+        path.write_bytes(b"one")
+        rec = _Recorder()
+        watcher = FileWatcher(path, rec, interval=0.01)
+        watcher.poll_once()
+        rec.calls.clear()
         assert watcher.poll_once() is True
         assert watcher.poll_once() is True
         assert rec.calls == []
@@ -122,6 +156,8 @@ class TestFileWatcherPolling:
         path.write_bytes(b"one")
         rec = _Recorder()
         watcher = FileWatcher(path, rec, interval=0.01)
+        watcher.poll_once()
+        rec.calls.clear()
         _touch_change(path, b"two")
         assert watcher.poll_once() is True
         assert rec.calls == [(b"two", content_hash(b"two"))]
@@ -144,6 +180,8 @@ class TestFileWatcherPolling:
         path.write_bytes(b"one")
         rec = _Recorder()
         watcher = FileWatcher(path, rec, interval=0.01)
+        watcher.poll_once()
+        rec.calls.clear()
         path.unlink()
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -162,11 +200,10 @@ class TestFileWatcherPolling:
         path = tmp_path / "m.stmx"
         path.write_bytes(b"one")
 
-        def boom(data: bytes, digest: str) -> bool:
+        def boom(watcher: FileWatcher, data: bytes, digest: str) -> bool:
             raise RuntimeError("handler exploded")
 
         watcher = FileWatcher(path, boom, interval=0.01)
-        _touch_change(path, b"two")
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             assert watcher.poll_once() is True
@@ -178,7 +215,6 @@ class TestFileWatcherPolling:
         rec = _Recorder()
         rec.keep_going = False
         watcher = FileWatcher(path, rec, interval=0.01)
-        _touch_change(path, b"two")
         assert watcher.poll_once() is False
 
 
@@ -189,9 +225,10 @@ class TestFileWatcherThread:
         delivered = threading.Event()
         seen: list[bytes] = []
 
-        def handler(data: bytes, digest: str) -> bool:
+        def handler(watcher: FileWatcher, data: bytes, digest: str) -> bool:
             seen.append(data)
-            delivered.set()
+            if data == b"two":
+                delivered.set()
             return True
 
         watcher = FileWatcher(path, handler, interval=0.02)
@@ -201,7 +238,7 @@ class TestFileWatcherThread:
         try:
             _touch_change(path, b"two")
             assert delivered.wait(5.0), "watcher thread never delivered the change"
-            assert seen == [b"two"]
+            assert seen[-1] == b"two"
         finally:
             watcher.stop()
         assert watcher.running is False
@@ -218,6 +255,27 @@ class TestFileWatcherThread:
         watcher.stop()
         assert watcher.running is False
 
+    def test_stopped_watcher_cannot_be_restarted(self, tmp_path: Path) -> None:
+        path = tmp_path / "m.stmx"
+        path.write_bytes(b"one")
+        watcher = FileWatcher(path, _Recorder(), interval=0.02)
+        watcher.start()
+        watcher.stop()
+        with pytest.raises(RuntimeError, match="stopped"):
+            watcher.start()
+        assert watcher.running is False
+
+    def test_request_stop_ends_the_thread_without_joining(self, tmp_path: Path) -> None:
+        path = tmp_path / "m.stmx"
+        path.write_bytes(b"one")
+        watcher = FileWatcher(path, _Recorder(), interval=0.02)
+        watcher.start()
+        thread = watcher._thread
+        assert thread is not None
+        watcher.request_stop()
+        thread.join(timeout=5.0)
+        assert not thread.is_alive()
+
     def test_thread_exits_when_handler_returns_false(self, tmp_path: Path) -> None:
         path = tmp_path / "m.stmx"
         path.write_bytes(b"one")
@@ -227,7 +285,6 @@ class TestFileWatcherThread:
         watcher.start()
         thread = watcher._thread
         assert thread is not None
-        _touch_change(path, b"two")
         thread.join(timeout=5.0)
         assert not thread.is_alive()
         assert watcher.running is False
@@ -246,7 +303,7 @@ class TestFileWatcherThread:
         owner_ref = weakref.ref(owner)
 
         def make_handler(ref: weakref.ref[Owner]):  # type: ignore[no-untyped-def]
-            def handler(data: bytes, digest: str) -> bool:
+            def handler(watcher: FileWatcher, data: bytes, digest: str) -> bool:
                 return ref() is not None
 
             return handler
