@@ -78,8 +78,9 @@ def perturb_view_positions(project: simlin.Project, delta: float = 1234.5) -> si
 def view_positions(project: simlin.Project, model_name: str = "main") -> dict[str, tuple]:
     """Named diagram element -> (x, y) from the model's first persisted view.
 
-    View elements carry display names (spaces/newlines for word wrapping);
-    keys are folded back to the variable ident.
+    View elements carry display names (spaces, and the stored backslash-n
+    line break the layout inserts for word wrapping); keys are folded back to
+    the variable ident.
     """
     project_dict = json.loads(project.serialize_json())
     (model_dict,) = [m for m in project_dict["models"] if m["name"] == model_name]
@@ -87,7 +88,7 @@ def view_positions(project: simlin.Project, model_name: str = "main") -> dict[st
     if not views:
         return {}
     return {
-        el["name"].replace("\n", "_").replace(" ", "_"): (el["x"], el["y"])
+        el["name"].replace("\\n", "_").replace("\n", "_").replace(" ", "_"): (el["x"], el["y"])
         for el in views[0]["elements"]
         if "name" in el and "x" in el
     }
