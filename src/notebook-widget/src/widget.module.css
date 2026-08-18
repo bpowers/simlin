@@ -43,5 +43,5 @@
 }
 
 .noticeWarn {
-  background: rgba(198, 40, 40, 0.94);
+  background: var(--color-error, #c62828);
 }

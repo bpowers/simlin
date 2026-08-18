@@ -11,17 +11,23 @@
  * apply to JupyterLab itself, and N displayed widgets would inject N copies
  * of it. Every selector is rewritten to live under the root class:
  *
- *   :root, :host, html, body   ->  .simlin-notebook-widget   (the root IS the page)
+ *   :root, :host, html, body   ->  .simlin-notebook-widget      (the root IS the page)
  *   :root[data-theme=dark]     ->  .simlin-notebook-widget[data-theme=dark]
- *   *, .katex .foo, [attr]     ->  .simlin-notebook-widget *, .simlin-notebook-widget .katex .foo, ...
+ *   *, .katex .foo, [attr]     ->  :where(.simlin-notebook-widget) *, ...
  *
- * `@font-face` and `@keyframes` have no selector and are left alone (fonts and
- * animations are addressed by name, which is fine). CSS Modules (`*.module.css`)
- * are skipped: their classes are already hashed per module.
+ * Descendant prefixes use `:where(...)`, which contributes ZERO specificity,
+ * so the scoped rules keep exactly the specificity their authors gave them
+ * and the cascade against the Editor's own CSS-Module rules is unchanged. The
+ * page-root rewrite deliberately keeps its class specificity: `:root` and
+ * `body` were (0,1,0)/(0,0,1) and now are (0,1,0), and nothing else in the
+ * bundle targets the wrapper by type or pseudo-class.
  *
- * Kept a plain-string transform on `rule.selectors` (no selector parser):
- * the two stylesheets it runs on are known quantities, and the test pins
- * that no top-level selector survives without the root class in front.
+ * `@font-face`, `@keyframes` and friends have no selectors and are left
+ * alone. Conditional at-rules (`@media`, `@supports`, `@layer`,
+ * `@container`) are descended into. Any OTHER at-rule containing rules fails
+ * the build: an unknown grouping construct is exactly where a page-wide rule
+ * could slip through unscoped, so the plugin fails closed rather than
+ * guessing. CSS Modules (`*.module.css`) are skipped: their classes are hashed.
  */
 
 import type { AtRule, Plugin, Rule } from 'postcss';
@@ -35,6 +41,7 @@ const PAGE_ROOT_SELECTORS = new Set([':root', ':host', 'html', 'body']);
  */
 export function scopeSelector(selector: string, rootClass: string): string {
   const root = `.${rootClass}`;
+  const where = `:where(${root})`;
   const trimmed = selector.trim();
   if (trimmed === '') {
     return trimmed;
@@ -42,10 +49,11 @@ export function scopeSelector(selector: string, rootClass: string): string {
   // Already scoped (e.g. running twice) -- leave it.
   if (
     trimmed === root ||
-    trimmed.startsWith(`${root} `) ||
     trimmed.startsWith(`${root}[`) ||
     trimmed.startsWith(`${root}.`) ||
-    trimmed.startsWith(`${root}:`)
+    trimmed.startsWith(`${root}:`) ||
+    trimmed.startsWith(`${root} `) ||
+    trimmed.startsWith(`${where} `)
   ) {
     return trimmed;
   }
@@ -73,22 +81,37 @@ export function scopeSelector(selector: string, rootClass: string): string {
       }
     }
   }
-  return `${root} ${trimmed}`;
+  return `${where} ${trimmed}`;
 }
 
-/** At-rules whose bodies hold rules with selectors we must scope. */
-const RULE_BEARING_AT_RULES = new Set(['media', 'supports', 'layer', 'container']);
+/** At-rules whose bodies hold rules with selectors we descend into. */
+const CONDITIONAL_AT_RULES = new Set(['media', 'supports', 'layer', 'container']);
 /** At-rules that hold no selectors and are addressed by name. */
-const NAME_ADDRESSED_AT_RULES = new Set(['font-face', 'keyframes', 'counter-style', 'property', 'import', 'charset']);
+const NAME_ADDRESSED_AT_RULES = new Set([
+  'font-face',
+  'keyframes',
+  'counter-style',
+  'property',
+  'page',
+  'font-feature-values',
+]);
 
+/**
+ * `true` when the rule is inside a name-addressed at-rule (leave it alone);
+ * throws when it is inside an at-rule this plugin does not know (fail closed).
+ */
 function insideNameAddressedAtRule(rule: Rule): boolean {
   let parent = rule.parent as AtRule | undefined;
   while (parent && parent.type === 'atrule') {
-    if (NAME_ADDRESSED_AT_RULES.has(parent.name.replace(/^-\w+-/, ''))) {
+    const name = parent.name.replace(/^-\w+-/, '');
+    if (NAME_ADDRESSED_AT_RULES.has(name)) {
       return true;
     }
-    if (!RULE_BEARING_AT_RULES.has(parent.name)) {
-      return true;
+    if (!CONDITIONAL_AT_RULES.has(name)) {
+      throw rule.error(
+        `simlin-scope-css: rule inside unknown at-rule @${parent.name}; ` +
+          'add it to CONDITIONAL_AT_RULES (descend) or NAME_ADDRESSED_AT_RULES (skip) in build/scope-css.ts',
+      );
     }
     parent = parent.parent as AtRule | undefined;
   }

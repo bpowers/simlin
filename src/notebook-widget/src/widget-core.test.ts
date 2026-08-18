@@ -5,17 +5,17 @@
 import { describe, it, expect } from '@rstest/core';
 
 import {
+  classifyPush,
   DEFAULT_HEIGHT_PX,
-  initialSyncState,
-  MAX_PENDING_SNAPSHOTS,
-  optimisticVersionAfterSave,
+  inFlightFor,
   parseNoticeMessage,
+  parseSaveReply,
   parseWasmReply,
   readTraits,
-  reconcileRevision,
-  recordSentSnapshot,
   resolveTheme,
+  snapshotMessage,
   TRAITS,
+  versionAfterReply,
   wrapperStyle,
 } from './widget-core';
 
@@ -180,104 +180,59 @@ describe('parseNoticeMessage', () => {
   });
 });
 
-describe('revision reconciliation', () => {
-  it('same revision and content is a no-op', () => {
-    const s = initialSyncState(3, 'x');
-    expect(reconcileRevision(s, { revision: 3, projectJson: 'x' })).toEqual({ state: s, action: 'none' });
+describe('snapshot protocol', () => {
+  it('snapshotMessage carries base and the whole json', () => {
+    expect(snapshotMessage(4, '{"a":1}')).toEqual({ type: 'snapshot', base: 4, json: '{"a":1}' });
   });
 
-  it('an echo of our own snapshot is an ack that keeps the Editor', () => {
-    let s = initialSyncState(3, 'seed');
-    s = recordSentSnapshot(s, 'A');
-    const r = reconcileRevision(s, { revision: 4, projectJson: 'A' });
-    expect(r.action).toBe('ack');
-    expect(r.state).toEqual({ revision: 4, knownJson: 'A', pendingSnapshots: [] });
-    // Re-running on the same pair (the second change event of one message).
-    expect(reconcileRevision(r.state, { revision: 4, projectJson: 'A' }).action).toBe('none');
+  it('parseSaveReply accepts saved/rejected with an integer revision, nothing else', () => {
+    expect(parseSaveReply({ type: 'saved', revision: 5 })).toEqual({ kind: 'saved', revision: 5 });
+    expect(parseSaveReply({ type: 'rejected', revision: 4 })).toEqual({ kind: 'rejected', revision: 4 });
+    expect(parseSaveReply({ type: 'saved' })).toBeNull();
+    expect(parseSaveReply({ type: 'saved', revision: 1.5 })).toBeNull();
+    expect(parseSaveReply({ type: 'saved', revision: '5' })).toBeNull();
+    expect(parseSaveReply({ type: 'notice', text: 'x' })).toBeNull();
+    expect(parseSaveReply({ type: 'wasm' })).toBeNull();
+    expect(parseSaveReply(null)).toBeNull();
+    expect(parseSaveReply('saved')).toBeNull();
   });
 
-  it('a burst [S1, S2, S3] acks one at a time in order', () => {
-    let s = initialSyncState(0, 'seed');
-    for (const j of ['S1', 'S2', 'S3']) {
-      s = recordSentSnapshot(s, j);
-    }
-    const r1 = reconcileRevision(s, { revision: 1, projectJson: 'S1' });
-    expect(r1.action).toBe('ack');
-    expect(r1.state.pendingSnapshots).toEqual(['S2', 'S3']);
-    const r2 = reconcileRevision(r1.state, { revision: 2, projectJson: 'S2' });
-    expect(r2.action).toBe('ack');
-    expect(r2.state.pendingSnapshots).toEqual(['S3']);
-    const r3 = reconcileRevision(r2.state, { revision: 3, projectJson: 'S3' });
-    expect(r3.action).toBe('ack');
-    expect(r3.state).toEqual({ revision: 3, knownJson: 'S3', pendingSnapshots: [] });
+  it('inFlightFor expects base + 1', () => {
+    expect(inFlightFor(3, 'J')).toEqual({ json: 'J', base: 3, expectedRevision: 4 });
   });
 
-  it('an edit/undo/redo burst [A, B, A] acks all three (position, not value)', () => {
-    let s = initialSyncState(0, 'seed');
-    for (const j of ['A', 'B', 'A']) {
-      s = recordSentSnapshot(s, j);
-    }
-    const r1 = reconcileRevision(s, { revision: 1, projectJson: 'A' });
-    expect(r1.action).toBe('ack');
-    expect(r1.state.pendingSnapshots).toEqual(['B', 'A']);
-    const r2 = reconcileRevision(r1.state, { revision: 2, projectJson: 'B' });
-    expect(r2.action).toBe('ack');
-    expect(r2.state.pendingSnapshots).toEqual(['A']);
-    const r3 = reconcileRevision(r2.state, { revision: 3, projectJson: 'A' });
-    expect(r3.action).toBe('ack');
-    expect(r3.state.pendingSnapshots).toEqual([]);
+  it('versionAfterReply resolves the saved revision, undefined on reject', () => {
+    expect(versionAfterReply({ kind: 'saved', revision: 7 })).toBe(7);
+    expect(versionAfterReply({ kind: 'rejected', revision: 6 })).toBeUndefined();
   });
 
-  it('a foreign snapshot remounts and discards every pending snapshot', () => {
-    let s = initialSyncState(0, 'seed');
-    s = recordSentSnapshot(s, 'A');
-    const r = reconcileRevision(s, { revision: 1, projectJson: 'Z' });
-    expect(r).toEqual({ state: { revision: 1, knownJson: 'Z', pendingSnapshots: [] }, action: 'remount' });
-  });
+  describe('classifyPush', () => {
+    const seed = { revision: 3, projectJson: 'SEED' };
 
-  it('a rejected snapshot (authoritative content re-pushed at an unchanged revision) remounts', () => {
-    let s = initialSyncState(3, 'seed');
-    s = recordSentSnapshot(s, 'A');
-    // The kernel had moved to different content the widget never saw...
-    const r = reconcileRevision(s, { revision: 3, projectJson: 'seed-authoritative' });
-    expect(r.action).toBe('remount');
-    expect(r.state).toEqual({ revision: 3, knownJson: 'seed-authoritative', pendingSnapshots: [] });
-    // ...or it re-sends exactly what the widget was seeded from: the trait
-    // had held our snapshot, so this still fired a change and still means
-    // "rejected, start again from here".
-    let s2 = initialSyncState(3, 'seed');
-    s2 = recordSentSnapshot(s2, 'A');
-    const r2 = reconcileRevision(s2, { revision: 3, projectJson: 'seed' });
-    expect(r2.action).toBe('remount');
-    expect(r2.state).toEqual({ revision: 3, knownJson: 'seed', pendingSnapshots: [] });
-    // Idempotent afterwards.
-    expect(reconcileRevision(r2.state, { revision: 3, projectJson: 'seed' }).action).toBe('none');
-  });
+    it('the seed pair again is none (second change event, idempotent re-push)', () => {
+      expect(classifyPush(seed, null, seed)).toBe('none');
+      expect(classifyPush(seed, inFlightFor(3, 'S1'), seed)).toBe('none');
+    });
 
-  it('a revision bump with unchanged content still remounts (the Editor must learn the version)', () => {
-    const r = reconcileRevision(initialSyncState(3, 'seed'), { revision: 4, projectJson: 'seed' });
-    expect(r.action).toBe('remount');
-    expect(r.state.revision).toBe(4);
-  });
+    it('the in-flight snapshot at base+1 is our own ack', () => {
+      expect(classifyPush(seed, inFlightFor(3, 'S1'), { revision: 4, projectJson: 'S1' })).toBe('own-ack');
+    });
 
-  it('a revision that goes backwards (kernel restart / reseed) still remounts', () => {
-    const r = reconcileRevision(initialSyncState(5, 'x'), { revision: 0, projectJson: 'fresh' });
-    expect(r.action).toBe('remount');
-    expect(r.state.revision).toBe(0);
-  });
+    it('the in-flight json at any other revision is a kernel change (remount)', () => {
+      // A disk change carrying the same bytes at a different revision is not
+      // an ack of ours; the kernel decides via saved/rejected.
+      expect(classifyPush(seed, inFlightFor(3, 'S1'), { revision: 5, projectJson: 'S1' })).toBe('remount');
+    });
 
-  it('bounds the pending snapshot memory', () => {
-    let s = initialSyncState(0, 'seed');
-    for (let i = 0; i < MAX_PENDING_SNAPSHOTS + 5; i++) {
-      s = recordSentSnapshot(s, `S${i}`);
-    }
-    expect(s.pendingSnapshots).toHaveLength(MAX_PENDING_SNAPSHOTS);
-    expect(s.pendingSnapshots[0]).toBe('S5');
-    expect(s.pendingSnapshots[MAX_PENDING_SNAPSHOTS - 1]).toBe(`S${MAX_PENDING_SNAPSHOTS + 4}`);
-  });
+    it('a different pair with nothing in flight remounts (Python edit, disk reload)', () => {
+      expect(classifyPush(seed, null, { revision: 4, projectJson: 'X' })).toBe('remount');
+      expect(classifyPush(seed, null, { revision: 4, projectJson: 'SEED' })).toBe('remount');
+      expect(classifyPush(seed, null, { revision: 3, projectJson: 'X' })).toBe('remount');
+      expect(classifyPush(seed, null, { revision: 0, projectJson: 'fresh' })).toBe('remount');
+    });
 
-  it('optimistic version chains by exactly one', () => {
-    expect(optimisticVersionAfterSave(0)).toBe(1);
-    expect(optimisticVersionAfterSave(41)).toBe(42);
+    it('a different pair while a snapshot is in flight remounts (disk change raced our save)', () => {
+      expect(classifyPush(seed, inFlightFor(3, 'S1'), { revision: 4, projectJson: 'DISK' })).toBe('remount');
+    });
   });
 });

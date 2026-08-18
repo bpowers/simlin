@@ -73,8 +73,11 @@ interface HarnessWindow {
       saveChangesCount: number;
       wasmRequests: number;
       sent: unknown[];
+      snapshots: Array<{ base: number; json: string }>;
+      kernel: { revision: number; projectJson: string };
       kernelPush(patch: Record<string, unknown>): void;
       kernelSend(content: unknown): void;
+      kernelChange(projectJson: string, notice?: string): void;
       cleanup?: () => void;
     }>;
   };
@@ -84,7 +87,6 @@ function initialState(overrides: Record<string, unknown> = {}): Record<string, u
   return {
     project_json: projectJson,
     revision: 0,
-    pending_base: 0,
     selection: [],
     height: 520,
     theme: 'light',
@@ -156,14 +158,14 @@ test.describe('notebook widget bundle', () => {
     await page.mouse.click(box.x + 120, box.y + 120);
     await page.keyboard.press('Enter');
 
-    // The Editor autosaves the whole project through onSave -> model.set.
+    // The Editor autosaves the whole project through onSave -> a `snapshot`
+    // custom message; the fake kernel accepts it and pushes the traits.
     await expect
       .poll(
         async () =>
           page.evaluate(() => {
             const m = (window as unknown as HarnessWindow).harness.models[0];
-            const last = [...m.sets].reverse().find((s) => s.key === 'project_json');
-            return typeof last?.value === 'string' ? (last.value as string) : '';
+            return m.snapshots.length > 0 ? m.snapshots[m.snapshots.length - 1].json : '';
           }),
         { timeout: 30_000 },
       )
@@ -173,19 +175,33 @@ test.describe('notebook widget bundle', () => {
 
     const saved = await page.evaluate(() => {
       const m = (window as unknown as HarnessWindow).harness.models[0];
-      const setKeys = m.sets.map((s) => s.key);
-      const last = [...m.sets].reverse().find((s) => s.key === 'project_json');
-      const base = [...m.sets].reverse().find((s) => s.key === 'pending_base');
-      return { setKeys, json: last?.value as string, base: base?.value, saveChangesCount: m.saveChangesCount };
+      const last = m.snapshots[m.snapshots.length - 1];
+      return {
+        setKeys: m.sets.map((s) => s.key),
+        json: last.json,
+        base: last.base,
+        kernel: m.kernel,
+        traitJson: m.state.project_json,
+        traitRevision: m.state.revision,
+      };
     });
     const parsed = JSON.parse(saved.json) as {
       models: Array<{ auxiliaries: Array<{ name: string }>; stocks: Array<{ name: string }> }>;
     };
     expect(parsed.models[0].auxiliaries.map((a) => a.name)).toContain('New Variable');
     expect(parsed.models[0].stocks.map((s) => s.name)).toContain('population');
-    expect(saved.setKeys).toContain('pending_base');
     expect(saved.base).toBe(0);
-    expect(saved.saveChangesCount).toBeGreaterThan(0);
+    // The widget never writes the kernel-owned traits (only `selection`).
+    expect(saved.setKeys.filter((k) => k !== 'selection')).toEqual([]);
+    // Accepted: kernel state advanced and its traits carry our exact bytes.
+    expect(saved.kernel.revision).toBe(1);
+    expect(saved.kernel.projectJson).toBe(saved.json);
+    expect(saved.traitJson).toBe(saved.json);
+    expect(saved.traitRevision).toBe(1);
+    // The Editor was NOT remounted by the accept: the new variable is still
+    // on screen from the live Editor (a remount would also show it, so check
+    // the editor tools state instead: the dial is still open from our click).
+    await expect(cell.getByRole('button', { name: 'Variable', exact: true })).toBeVisible();
 
     // A second widget instance (a second cell, a second module instance) reuses
     // the page-wide compiled module: it renders without asking the kernel for
@@ -208,9 +224,7 @@ test.describe('notebook widget bundle', () => {
     const renamed = projectJson.replace('"name": "Population"', '"name": "People"');
     expect(renamed).not.toBe(projectJson);
     await page.evaluate((json) => {
-      const m = (window as unknown as HarnessWindow).harness.models[1];
-      m.kernelPush({ project_json: json, revision: 1 });
-      m.kernelSend({ type: 'notice', text: 'Updated on disk' });
+      (window as unknown as HarnessWindow).harness.models[1].kernelChange(json, 'Updated on disk');
     }, renamed);
     await expect(cell2.getByText('People', { exact: true }).first()).toBeVisible({ timeout: 30_000 });
     await expect(cell2.getByRole('status')).toHaveText('Updated on disk');

@@ -21,6 +21,10 @@ if (baseConfig) {
       MediaQueryList: 'readonly',
       getComputedStyle: 'readonly',
       MutationObserver: 'readonly',
+      MutationObserverInit: 'readonly',
+      MutationCallback: 'readonly',
+      MutationRecord: 'readonly',
+      Node: 'readonly',
       Response: 'readonly',
     },
   };

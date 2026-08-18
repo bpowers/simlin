@@ -3,9 +3,13 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 // Stand-in for @simlin/diagram/Editor in the shell tests: records the props of
-// every mount and exposes buttons that drive the two host callbacks, so the
-// tests exercise the widget's onSave / onSelectionChanged wiring without the
-// WASM engine. The real Editor runs in the Playwright journey (e2e/).
+// every mount and reproduces the ONE piece of controller behaviour the save
+// protocol leans on -- ProjectController.save()'s serialisation: a save while
+// one is in flight queues exactly one flush; each flush serialises the LATEST
+// local state and sends the live acknowledged version; a resolved version
+// advances it, undefined leaves it. The buttons drive edits and selection so
+// the tests exercise the widget's onSave / onSelectionChanged wiring without
+// the WASM engine. The real Editor runs in the Playwright journey (e2e/).
 
 import * as React from 'react';
 
@@ -23,11 +27,15 @@ export interface EditorMockProps {
 
 interface MountRecord {
   props: EditorMockProps;
-  // The controller-side "server version" this mount currently believes in,
-  // advanced by onSave's return value exactly like ProjectController does.
+  // The controller-side acknowledged version, exactly as ProjectController
+  // tracks serverVersion.
   serverVersion: number;
   // Every value onSave resolved with, in order.
   saveResults: Array<number | undefined>;
+  // Local edit counter: the "content" of this mount's project.
+  edits: number;
+  inSave: boolean;
+  saveQueued: boolean;
 }
 
 export const mounts: MountRecord[] = [];
@@ -35,31 +43,57 @@ export function resetEditorMock(): void {
   mounts.length = 0;
 }
 
+/** The snapshot a mount produces for its current local state. */
+export function localJson(initial: string, edits: number): string {
+  return JSON.stringify({ edited: edits, from: initial });
+}
+
 export function Editor(props: EditorMockProps): React.ReactElement {
   const record = React.useMemo<MountRecord>(() => {
-    const r: MountRecord = { props, serverVersion: props.initialProjectVersion, saveResults: [] };
+    const r: MountRecord = {
+      props,
+      serverVersion: props.initialProjectVersion,
+      saveResults: [],
+      edits: 0,
+      inSave: false,
+      saveQueued: false,
+    };
     mounts.push(r);
     return r;
   }, []);
   record.props = props;
-  const [, setSaves] = React.useState(0);
-  // Counted at click time (not from render state) so two clicks before a
-  // re-render still produce two distinct snapshots.
-  const clicks = React.useRef(0);
-  const save = async (json: string): Promise<void> => {
-    // Mirror ProjectController.save: send the acknowledged version, adopt the
-    // returned one (a resolved-undefined leaves it untouched).
-    const next = await props.onSave({ format: 'json', data: json }, record.serverVersion);
-    record.saveResults.push(next);
-    if (next) {
-      record.serverVersion = next;
+  const [, rerender] = React.useState(0);
+
+  // ProjectController.save() semantics.
+  const save = async (): Promise<void> => {
+    if (record.inSave) {
+      record.saveQueued = true;
+      return;
     }
-    setSaves((n) => n + 1);
+    record.inSave = true;
+    try {
+      const json = localJson(record.props.initialProjectJson, record.edits);
+      const next = await record.props.onSave({ format: 'json', data: json }, record.serverVersion);
+      record.saveResults.push(next);
+      if (next) {
+        record.serverVersion = next;
+      }
+    } finally {
+      record.inSave = false;
+      rerender((n) => n + 1);
+      if (record.saveQueued) {
+        record.saveQueued = false;
+        await save();
+      }
+    }
   };
-  const nextEditedJson = (): string => {
-    clicks.current += 1;
-    return JSON.stringify({ edited: clicks.current, from: props.initialProjectJson });
+
+  // A discrete edit: bump local content and autosave (scheduleSave).
+  const edit = (): void => {
+    record.edits += 1;
+    void save();
   };
+
   return (
     <div
       data-testid="editor-mock"
@@ -68,11 +102,8 @@ export function Editor(props: EditorMockProps): React.ReactElement {
       data-read-only={String(props.readOnlyMode ?? false)}
       data-server-version={record.serverVersion}
     >
-      <button type="button" onClick={() => void save(nextEditedJson())}>
-        save
-      </button>
-      <button type="button" onClick={() => void save(props.initialProjectJson)}>
-        save-same
+      <button type="button" onClick={edit}>
+        edit
       </button>
       <button type="button" onClick={() => props.onSelectionChanged?.(['a', 'b'])}>
         select

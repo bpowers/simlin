@@ -19,17 +19,19 @@ import type { AnyModel } from './anywidget-model';
 import styles from './widget.module.css';
 import { WIDGET_ROOT_CLASS } from './widget-root-class';
 import {
-  initialSyncState,
-  optimisticVersionAfterSave,
+  classifyPush,
+  inFlightFor,
   parseNoticeMessage,
+  parseSaveReply,
   readTraits,
-  reconcileRevision,
-  recordSentSnapshot,
   resolveTheme,
+  snapshotMessage,
   TRAITS,
+  versionAfterReply,
   wrapperStyle,
+  type EditorSeedPair,
+  type InFlightSnapshot,
   type Notice,
-  type SyncState,
   type WidgetTraits,
 } from './widget-core';
 
@@ -44,21 +46,20 @@ export const NOTICE_TIMEOUT_MS = 5000;
  */
 export const SELECTION_DEBOUNCE_MS = 150;
 
-interface EditorSeed {
-  json: string;
-  revision: number;
-  // Bumped on every kernel-originated remount so a remount at an unchanged
-  // revision number (a rejected snapshot re-seeding us) still gets a fresh
-  // Editor -- `revision` alone would not change the key.
+interface EditorSeed extends EditorSeedPair {
+  // Bumped on every kernel-originated remount so a remount whose revision
+  // number is unchanged (a reject re-seed at the same revision, a disk reload
+  // that restored an older revision number) still gets a fresh Editor --
+  // `revision` alone would not change the key.
   generation: number;
 }
 
 interface WidgetRefs {
-  sync: SyncState;
-  // True while handleSave is inside its own synchronous model.set calls, so
-  // the change listeners can tell the widget's own writes from kernel pushes
-  // (Backbone fires change events synchronously from set()).
-  selfSet: boolean;
+  // The pair the live Editor was seeded from; the reference for classifyPush
+  // and for making remounts idempotent.
+  seed: EditorSeedPair;
+  // At most one snapshot in flight (see handleSave); null between saves.
+  inFlight: (InFlightSnapshot & { resolve: (version: number | undefined) => void }) | null;
   selectionTimer: ReturnType<typeof setTimeout> | null;
   noticeTimer: ReturnType<typeof setTimeout> | null;
 }
@@ -107,7 +108,7 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
 
   const [traits, setTraits] = React.useState<WidgetTraits>(readModelTraits);
   const [seed, setSeed] = React.useState<EditorSeed>(() => ({
-    json: traits.projectJson,
+    projectJson: traits.projectJson,
     revision: traits.revision,
     generation: 0,
   }));
@@ -115,39 +116,72 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
   const [hostTheme, setHostTheme] = React.useState<HostThemeSignals>(readHostThemeSignals);
 
   const refs = React.useRef<WidgetRefs>({
-    sync: initialSyncState(traits.revision, traits.projectJson),
-    selfSet: false,
+    seed: { revision: traits.revision, projectJson: traits.projectJson },
+    inFlight: null,
     selectionTimer: null,
     noticeTimer: null,
   });
 
-  // Kernel pushes. `revision` and `project_json` travel in ONE kernel message
-  // but surface as up to two change events (Backbone fires per changed key,
-  // and skips a key whose value did not change -- an accepted snapshot echoes
-  // the exact bytes we already hold, so only `change:revision` fires then).
-  // Both handlers therefore read the current pair and run the idempotent
-  // reconcile; the widget's own synchronous sets are skipped via `selfSet`.
+  // Remount the Editor on the kernel-authoritative pair. Idempotent on the
+  // pair: a push and the `rejected` that follows it (or the two change events
+  // of one hold_sync) remount once.
+  const remountFrom = React.useCallback((pair: EditorSeedPair): void => {
+    const r = refs.current;
+    if (pair.revision === r.seed.revision && pair.projectJson === r.seed.projectJson) {
+      return;
+    }
+    r.seed = { revision: pair.revision, projectJson: pair.projectJson };
+    setSeed((prev) => ({ revision: pair.revision, projectJson: pair.projectJson, generation: prev.generation + 1 }));
+  }, []);
+
+  // Kernel pushes. Only the kernel writes `project_json` and `revision`, so
+  // every change event on them is a kernel push. The two travel in ONE
+  // hold_sync but surface as up to two change events (Backbone fires per
+  // changed key), so both handlers read the FINAL pair and classify it
+  // idempotently.
   React.useEffect(() => {
     const r = refs.current;
     const onKernelState = (): void => {
-      if (r.selfSet) {
+      const next = readModelTraits();
+      setTraits(next);
+      const incoming = { revision: next.revision, projectJson: next.projectJson };
+      const action = classifyPush(r.seed, r.inFlight, incoming);
+      if (action === 'own-ack') {
+        // Our snapshot's state; the `saved` reply resolves the save. Adopt
+        // it as the seed so a later identical push is `none`, no remount.
+        r.seed = incoming;
         return;
       }
-      const next = readModelTraits();
-      const { state, action } = reconcileRevision(r.sync, {
-        revision: next.revision,
-        projectJson: next.projectJson,
-      });
-      r.sync = state;
-      setTraits(next);
       if (action === 'remount') {
-        setSeed((prev) => ({ json: next.projectJson, revision: next.revision, generation: prev.generation + 1 }));
+        remountFrom(incoming);
       }
     };
     const onOther = (): void => {
       setTraits(readModelTraits());
     };
     const onCustom = (...args: unknown[]): void => {
+      const reply = parseSaveReply(args[0]);
+      if (reply !== null) {
+        const flight = r.inFlight;
+        if (flight === null) {
+          // A reply for a snapshot this view no longer tracks (another view of
+          // the same model, or a reply after unmount/abort resolved it): the
+          // traits already carry the authoritative state; nothing to do.
+          return;
+        }
+        r.inFlight = null;
+        if (reply.kind === 'rejected') {
+          // The kernel did not accept our snapshot. Its traits are
+          // authoritative (it never touches them on a reject unless its state
+          // moved, in which case the push already remounted us); re-seed the
+          // Editor from them so its local state and version match the
+          // kernel's again. Idempotent with the push's remount.
+          const t = readModelTraits();
+          remountFrom({ revision: t.revision, projectJson: t.projectJson });
+        }
+        flight.resolve(versionAfterReply(reply));
+        return;
+      }
       const parsed = parseNoticeMessage(args[0]);
       if (parsed === null) {
         return;
@@ -179,6 +213,13 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
       model.off(`change:${TRAITS.readOnly}`, onOther);
       model.off('msg:custom', onCustom);
       unwatchTheme();
+      // Nothing may dangle past unmount: an in-flight save resolves
+      // undefined (the controller is being disposed anyway).
+      if (r.inFlight !== null) {
+        const flight = r.inFlight;
+        r.inFlight = null;
+        flight.resolve(undefined);
+      }
       if (r.selectionTimer !== null) {
         clearTimeout(r.selectionTimer);
         r.selectionTimer = null;
@@ -188,33 +229,33 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
         r.noticeTimer = null;
       }
     };
-  }, [model, readModelTraits]);
+  }, [model, readModelTraits, remountFrom]);
 
-  // Editor autosave -> kernel. One coalesced sync message carries the whole
-  // snapshot and the revision it was edited from; the kernel accepts it only
-  // if that base is still current. A snapshot equal to the trait's current
-  // value would produce NO comm message (ipywidgets sends only changed keys),
-  // so no echo would ever come back: return undefined so the controller does
-  // not advance its acknowledged version for a save that never happened.
+  // Editor autosave -> kernel. The whole snapshot rides in a `snapshot` custom
+  // message with the revision it was edited from (`base`); the promise
+  // resolves ONLY when the kernel answers `saved` (the new revision) or
+  // `rejected` (undefined). ProjectController serialises saves -- one in
+  // flight, one queued flush that re-reads the acknowledged version -- so at
+  // most one snapshot is ever in flight from this view, and a busy kernel
+  // (long-running cell) means the Editor keeps working locally and one flush
+  // of the LATEST state goes out when the answer arrives. Deliberately no
+  // timeout: a long cell legitimately delays the reply and a timeout would
+  // misfire into a spurious failure; unmount resolves it instead.
   const handleSave = React.useCallback(
-    async (project: JsonProjectData, currVersion: number): Promise<number | undefined> => {
+    (project: JsonProjectData, currVersion: number): Promise<number | undefined> => {
       if (project.format !== 'json') {
-        return undefined;
-      }
-      if (project.data === model.get(TRAITS.projectJson)) {
-        return undefined;
+        return Promise.resolve(undefined);
       }
       const r = refs.current;
-      r.sync = recordSentSnapshot(r.sync, project.data);
-      r.selfSet = true;
-      try {
-        model.set(TRAITS.projectJson, project.data);
-        model.set(TRAITS.pendingBase, currVersion);
-      } finally {
-        r.selfSet = false;
+      if (r.inFlight !== null) {
+        // The controller never does this; if it ever did, two snapshots in
+        // flight would make the replies ambiguous. Refuse rather than guess.
+        return Promise.resolve(undefined);
       }
-      model.save_changes();
-      return optimisticVersionAfterSave(currVersion);
+      return new Promise<number | undefined>((resolve) => {
+        r.inFlight = { ...inFlightFor(currVersion, project.data), resolve };
+        model.send(snapshotMessage(currVersion, project.data));
+      });
     },
     [model],
   );
@@ -255,7 +296,7 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
       <Editor
         key={`${seed.revision}#${seed.generation}`}
         inputFormat="json"
-        initialProjectJson={seed.json}
+        initialProjectJson={seed.projectJson}
         initialProjectVersion={seed.revision}
         name={name}
         readOnlyMode={traits.readOnly}

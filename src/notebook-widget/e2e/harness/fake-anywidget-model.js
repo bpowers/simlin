@@ -6,10 +6,12 @@
 // model-proxy.ts over a Backbone DOMWidgetModel) with the pieces this widget
 // uses: get/set/save_changes, Backbone-style `change:<key>` events, and the
 // custom-message channel (`send` out, `msg:custom` in). It also plays the
-// kernel side of the wasm handshake -- answering `{type:'wasm'}` with the
-// artifact as a DataView buffer, exactly how ipywidgets hands binary buffers
-// to `msg:custom` listeners -- and records what the widget did to it so the
-// Playwright spec can assert on it.
+// kernel side of the protocol: it answers `{type:'wasm'}` with the artifact
+// as a DataView buffer (exactly how ipywidgets hands binary buffers to
+// `msg:custom` listeners), and it handles `{type:'snapshot', base, json}` the
+// way pysimlin's ModelWidget must -- accept when base equals its revision
+// (push project_json + revision, then reply `saved`), else reply `rejected`
+// -- and records everything so the Playwright spec can assert on it.
 export class FakeAnyModel {
   constructor(initialState, wasmUrl) {
     this.state = { ...initialState };
@@ -20,6 +22,11 @@ export class FakeAnyModel {
     this.wasmRequests = 0;
     this.wasmUrl = wasmUrl;
     this.wasmReplyDelayMs = 0;
+    this.kernel = {
+      revision: typeof initialState.revision === 'number' ? initialState.revision : 0,
+      projectJson: typeof initialState.project_json === 'string' ? initialState.project_json : '',
+    };
+    this.snapshots = [];
   }
 
   get(key) {
@@ -73,9 +80,25 @@ export class FakeAnyModel {
   }
 
   // Kernel-side behaviour: the pysimlin ModelWidget answers a wasm request
-  // with a custom message whose first binary buffer is the artifact.
+  // with a custom message whose first binary buffer is the artifact, and a
+  // snapshot with saved/rejected. Replies are asynchronous (a real comm
+  // round trip never resolves within the sending call).
   send(content, _callbacks, _buffers) {
     this.sent.push(content);
+    if (content && content.type === 'snapshot') {
+      this.snapshots.push({ base: content.base, json: content.json });
+      setTimeout(() => {
+        if (content.base !== this.kernel.revision) {
+          this.trigger('msg:custom', { type: 'rejected', revision: this.kernel.revision }, []);
+          return;
+        }
+        this.kernel.revision += 1;
+        this.kernel.projectJson = content.json;
+        this.kernelPush({ project_json: content.json, revision: this.kernel.revision });
+        this.trigger('msg:custom', { type: 'saved', revision: this.kernel.revision }, []);
+      }, 0);
+      return;
+    }
     if (content && content.type === 'wasm') {
       this.wasmRequests += 1;
       const reply = async () => {
@@ -92,6 +115,17 @@ export class FakeAnyModel {
   // Kernel-side behaviour: a custom message with no buffers (notices).
   kernelSend(content) {
     this.trigger('msg:custom', content, []);
+  }
+
+  // Kernel-side behaviour: the kernel's own state changed (Python edit(),
+  // disk reload): bump revision, push both traits, optionally notice.
+  kernelChange(projectJson, notice) {
+    this.kernel.revision += 1;
+    this.kernel.projectJson = projectJson;
+    this.kernelPush({ project_json: projectJson, revision: this.kernel.revision });
+    if (notice !== undefined) {
+      this.kernelSend({ type: 'notice', text: notice });
+    }
   }
 
   // Kernel-side behaviour: push new state as one message (all keys set, then

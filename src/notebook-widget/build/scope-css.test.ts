@@ -32,16 +32,17 @@ describe('scopeSelector', () => {
     ['html:focus-within', `.${ROOT}:focus-within`],
     ['body.dark .foo', `.${ROOT}.dark .foo`],
     ['body > .foo', `.${ROOT} > .foo`],
-    ['*', `.${ROOT} *`],
-    ['*::before', `.${ROOT} *::before`],
-    ['.katex .foo', `.${ROOT} .katex .foo`],
-    ['[data-x]', `.${ROOT} [data-x]`],
-    ['bodyguard', `.${ROOT} bodyguard`],
-    ['htmlfoo .x', `.${ROOT} htmlfoo .x`],
+    ['*', `:where(.${ROOT}) *`],
+    ['*::before', `:where(.${ROOT}) *::before`],
+    ['.katex .foo', `:where(.${ROOT}) .katex .foo`],
+    ['[data-x]', `:where(.${ROOT}) [data-x]`],
+    ['bodyguard', `:where(.${ROOT}) bodyguard`],
+    ['htmlfoo .x', `:where(.${ROOT}) htmlfoo .x`],
     [`.${ROOT}`, `.${ROOT}`],
     [`.${ROOT} .already`, `.${ROOT} .already`],
+    [`:where(.${ROOT}) .already`, `:where(.${ROOT}) .already`],
     [`.${ROOT}[data-theme="dark"]`, `.${ROOT}[data-theme="dark"]`],
-    ['  .padded  ', `.${ROOT} .padded`],
+    ['  .padded  ', `:where(.${ROOT}) .padded`],
   ])('%s -> %s', (input, expected) => {
     expect(scopeSelector(input, ROOT)).toBe(expected);
   });
@@ -80,13 +81,17 @@ describe('scopeCssPlugin on the stylesheets the widget bundles', () => {
     const selectors = topLevelSelectors(root);
     expect(selectors.length).toBeGreaterThan(3);
     for (const s of selectors) {
-      expect(s.startsWith(`.${ROOT}`)).toBe(true);
+      expect(s.startsWith(`.${ROOT}`) || s.startsWith(`:where(.${ROOT}) `)).toBe(true);
     }
     const out = root.toString();
     expect(out).not.toMatch(/(^|[,\s{}]):root/);
     expect(out).not.toMatch(/(^|[,\s{}]):host/);
     // The reduced-motion universal rule is now the widget's own subtree.
-    expect(out).toMatch(new RegExp(`\\.${ROOT} \\*,\\s*\\.${ROOT} \\*::before,\\s*\\.${ROOT} \\*::after`));
+    expect(out).toMatch(
+      new RegExp(
+        `:where\\(\\.${ROOT}\\) \\*,\\s*:where\\(\\.${ROOT}\\) \\*::before,\\s*:where\\(\\.${ROOT}\\) \\*::after`,
+      ),
+    );
     // The dark-theme token block keys off the wrapper's data-theme.
     expect(out).toContain(`.${ROOT}[data-theme="dark"]`);
   });
@@ -96,7 +101,7 @@ describe('scopeCssPlugin on the stylesheets the widget bundles', () => {
     expect(katexCss).toContain('body{counter-reset:');
     const root = await scoped(katexCss);
     for (const s of topLevelSelectors(root)) {
-      expect(s.startsWith(`.${ROOT}`)).toBe(true);
+      expect(s.startsWith(`.${ROOT}`) || s.startsWith(`:where(.${ROOT}) `)).toBe(true);
     }
     const out = root.toString();
     expect(out).toContain(`.${ROOT}{counter-reset:`);
@@ -115,6 +120,40 @@ describe('scopeCssPlugin on the stylesheets the widget bundles', () => {
     expect(result.root.toString()).toBe(':root { --a: 1 } .host { b: 2 }');
   });
 
+  it('descendant prefixes add zero specificity (:where), page-root rewrites keep class specificity', async () => {
+    // Specificity is what decides the cascade against the Editor's own
+    // CSS-Module rules; a plain `.root .katex .foo` prefix would have raised
+    // every scoped rule by one class and let theme/katex rules beat module
+    // rules they used to lose to.
+    const out = (await scoped('.katex .foo { a: 1 } * { b: 2 } :root { --c: 3 } body.dark .x { d: 4 }')).toString();
+    expect(out).toContain(`:where(.${ROOT}) .katex .foo`);
+    expect(out).toContain(`:where(.${ROOT}) *`);
+    expect(out).toContain(`.${ROOT} { --c: 3 }`);
+    expect(out).toContain(`.${ROOT}.dark .x`);
+    // No descendant prefix without :where.
+    expect(out).not.toMatch(new RegExp(`(^|[,{}\\s])\\.${ROOT} [^{]`));
+  });
+
+  it('fails closed on a rule inside an at-rule it does not know', async () => {
+    await expect(scoped('@scope (.a) { .b { c: 1 } }')).rejects.toThrow(/unknown at-rule @scope/);
+    await expect(scoped('@-moz-document url(x) { .b { c: 1 } }')).rejects.toThrow(/unknown at-rule/);
+  });
+
+  it('descends into every conditional at-rule and skips every name-addressed one', async () => {
+    const out = (
+      await scoped(
+        '@media (x) { .a { b: 1 } } @supports (x: y) { .c { d: 1 } } @layer l { .e { f: 1 } } @container (min-width: 1px) { .g { h: 1 } } ' +
+          '@font-face { font-family: F } @keyframes k { from { a: 1 } } @counter-style s { system: cyclic } @property --p { syntax: "*" } @page { margin: 0 }',
+      )
+    ).toString();
+    for (const cls of ['.a', '.c', '.e', '.g']) {
+      expect(out).toContain(`:where(.${ROOT}) ${cls}`);
+    }
+    expect(out).toContain('from');
+    expect(out).not.toContain(`${ROOT}) from`);
+    expect(out).toContain('@font-face { font-family: F }');
+  });
+
   it('dedupes selectors that collapse onto the root', async () => {
     const out = (await scoped(':root, :host { --a: 1 }')).toString();
     expect(out).toBe(`.${ROOT} { --a: 1 }`);
@@ -130,6 +169,6 @@ describe('scopeCssPlugin on the stylesheets the widget bundles', () => {
     const out = (await scoped('@keyframes spin { from { a: 1 } to { a: 2 } } @media (x) { .a { b: 1 } }')).toString();
     expect(out).toContain('from');
     expect(out).not.toContain(`.${ROOT} from`);
-    expect(out).toContain(`.${ROOT} .a`);
+    expect(out).toContain(`:where(.${ROOT}) .a`);
   });
 });
