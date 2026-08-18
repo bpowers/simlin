@@ -3,6 +3,7 @@ include LICENSE
 include pyproject.toml
 recursive-include simlin *.py *.pyi *.typed
 recursive-include simlin *.h
+recursive-include simlin/_widget *.js *.wasm README.md
 recursive-include tests *.py
 recursive-include tests/fixtures *
 prune __pycache__

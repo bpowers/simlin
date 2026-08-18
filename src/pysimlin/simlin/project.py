@@ -654,6 +654,14 @@ class Project:
         atomic_write(path, data)
         _, self._sync = _sync.decide(self._sync, _sync.WriteCompleted(content_hash(data)))
 
+    def _snapshot(self) -> tuple[bytes, int]:
+        """The current native-JSON contents and the revision they belong to,
+        read together under ``_file_lock`` so a change on another thread
+        cannot land between the two reads and split the pair.  This is what
+        a widget seeds and re-seeds the browser from."""
+        with self._file_lock:
+            return self.serialize_json(), self._sync.revision
+
     # ── internal: accepting changes ─────────────────────────────────────
 
     def _register_model(self, model: Model) -> None:

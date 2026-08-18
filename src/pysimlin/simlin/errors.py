@@ -155,3 +155,13 @@ class SimlinImportError(SimlinError):
     """Exception raised when importing a model fails."""
 
     pass
+
+
+class SimlinAssetError(SimlinError):
+    """A file that ships inside the pysimlin package -- the notebook widget's
+    JS module or engine wasm -- is missing or cannot be delivered.
+
+    Raised when a :class:`simlin.ModelWidget` is created (displaying a
+    model), never on ``import simlin``; the message names the file and how
+    to get it.
+    """

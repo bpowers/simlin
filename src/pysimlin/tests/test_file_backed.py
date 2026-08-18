@@ -1216,6 +1216,39 @@ class TestSnapshotEdgeCases:
         assert project.revision == 1
         assert events.events == [ChangeEvent("widget", 1)]
 
+    def test_snapshot_pair_is_read_under_one_lock(self, tmp_path: Path) -> None:
+        # The widget seeds and re-seeds the browser from _snapshot(); the
+        # contents and the revision must belong together even while another
+        # thread edits.  Hammer it: every pair observed must be one the
+        # project actually passed through (revision r <=> r auxes added).
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        project = model.project
+        assert project is not None
+        data, revision = project._snapshot()
+        assert revision == 0
+        assert data == project.serialize_json()
+        stop = threading.Event()
+        pairs: list[tuple[int, int]] = []
+
+        def read() -> None:
+            while not stop.is_set():
+                d, r = project._snapshot()  # type: ignore[union-attr]
+                auxes = json.loads(d)["models"][0].get("auxiliaries") or []
+                added = sum(1 for v in auxes if v["name"].startswith("aux_"))
+                pairs.append((r, added))
+
+        reader = threading.Thread(target=read)
+        reader.start()
+        try:
+            for i in range(20):
+                _add_aux(model, f"aux_{i}")
+        finally:
+            stop.set()
+            reader.join()
+        assert pairs
+        assert all(r == added for r, added in pairs), pairs
+
     def test_m9_unparsable_snapshot_leaves_revision_unchanged(self, tmp_path: Path) -> None:
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
         before = path.read_bytes()
