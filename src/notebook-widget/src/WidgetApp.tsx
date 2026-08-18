@@ -67,6 +67,11 @@ interface WidgetRefs {
   seed: EditorSeedPair;
   // At most one snapshot in flight (see handleSave); null between saves.
   inFlight: (InFlightSnapshot & { resolve: (version: number | undefined) => void }) | null;
+  // Replies the kernel still owes for snapshots whose slot was freed by a
+  // remount (see onKernelState). Kernel replies arrive in order, so the next
+  // `staleRepliesOwed` save replies belong to those snapshots, not to
+  // whatever the new Editor has in flight: each is consumed and ignored.
+  staleRepliesOwed: number;
   selectionTimer: ReturnType<typeof setTimeout> | null;
   noticeTimer: ReturnType<typeof setTimeout> | null;
 }
@@ -136,6 +141,7 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
     disposed: false,
     seed: { revision: traits.revision, projectJson: traits.projectJson },
     inFlight: null,
+    staleRepliesOwed: 0,
     selectionTimer: null,
     noticeTimer: null,
   });
@@ -186,6 +192,21 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
         return;
       }
       if (action === 'remount') {
+        // The Editor that sent any in-flight snapshot is about to be replaced:
+        // resolve its save undefined now (nothing may wait on a reply for a
+        // mount that no longer exists) and free the slot, otherwise the NEW
+        // Editor's first save would be refused as "one already in flight" and
+        // that edit would sit unsaved until a later edit. The kernel still
+        // owes exactly one reply for the freed snapshot; it is marked stale
+        // so onCustom consumes and ignores it -- it must neither remount
+        // (the push already did) nor adopt its (revision, json) as the seed,
+        // which would step the seed back behind the state we just remounted on.
+        if (r.inFlight !== null) {
+          const flight = r.inFlight;
+          r.inFlight = null;
+          r.staleRepliesOwed += 1;
+          flight.resolve(undefined);
+        }
         remountFrom(incoming);
       }
     };
@@ -195,6 +216,13 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
     const onCustom = (...args: unknown[]): void => {
       const reply = parseSaveReply(args[0]);
       if (reply !== null) {
+        if (r.staleRepliesOwed > 0) {
+          // The reply for a snapshot whose Editor a kernel push already
+          // replaced (see onKernelState); replies arrive in order, so this
+          // one is that snapshot's, whatever the new Editor has in flight.
+          r.staleRepliesOwed -= 1;
+          return;
+        }
         const flight = r.inFlight;
         if (flight === null) {
           // A reply for a snapshot this view no longer tracks (another view of

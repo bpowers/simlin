@@ -233,6 +233,101 @@ describe('WidgetApp <-> model protocol', () => {
     expect(model.lastSnapshot()).toEqual({ base: 4, json: localJson('{"name":"disk"}', 1) });
   });
 
+  it("a remount while a snapshot is in flight frees the slot: the new Editor's first edit is SENT with the new base and accepted; the stale reply is consumed and ignored", async () => {
+    const model = new FakeModel(defaultState({ revision: 3 }));
+    model.busyKernel = true;
+    await mount(model);
+    fireEvent.click(screen.getByText('edit'));
+    expect(model.sent.filter((m) => (m as { type: string }).type === 'snapshot')).toHaveLength(1);
+    // Disk change lands kernel-side (revision 4) while our snapshot (base 3)
+    // waits at the busy kernel; the push remounts the Editor.
+    act(() => {
+      model.kernelChange('{"name":"disk"}');
+    });
+    expect(mounts).toHaveLength(2);
+    // The old Editor is gone, so its save resolves undefined NOW (nothing may
+    // wait on a reply for a mount that no longer exists) and the in-flight
+    // slot is free for the new Editor.
+    await waitFor(() => expect(mounts[0].saveResults).toEqual([undefined]));
+    // The new Editor's FIRST edit goes out immediately with the new base --
+    // it is not refused as "one already in flight" (that lost the edit until
+    // a second edit came along).
+    fireEvent.click(screen.getByText('edit'));
+    expect(model.sent.filter((m) => (m as { type: string }).type === 'snapshot')).toHaveLength(2);
+    expect(model.sent[model.sent.length - 1]).toEqual({
+      type: 'snapshot',
+      base: 4,
+      json: localJson('{"name":"disk"}', 1),
+    });
+    // The kernel now handles both in order: the stale snapshot (base 3) is
+    // rejected -- that reply belongs to the freed slot and is consumed and
+    // ignored: no second remount, the seed stays at the kernel's state -- and
+    // the new one (base 4) is accepted.
+    await act(async () => {
+      model.releaseKernel();
+    });
+    await waitFor(() => expect(mounts[1].saveResults).toEqual([5]));
+    expect(mounts).toHaveLength(2);
+    expect(mounts[0].saveResults).toEqual([undefined]);
+    expect(model.kernel.revision).toBe(5);
+    expect(model.kernel.projectJson).toBe(localJson('{"name":"disk"}', 1));
+    expect(mounts[1].serverVersion).toBe(5);
+    // And the accepted state is the seed: its own push is `none` (no
+    // remount), a further edit chains from 5.
+    act(() => {
+      model.kernelPush({ project_json: localJson('{"name":"disk"}', 1), revision: 5 });
+    });
+    expect(mounts).toHaveLength(2);
+    fireEvent.click(screen.getByText('edit'));
+    await waitFor(() => expect(mounts[1].saveResults).toEqual([5, 6]));
+    expect(model.lastSnapshot()).toEqual({ base: 5, json: localJson('{"name":"disk"}', 2) });
+  });
+
+  it('a stale reply that is a `saved` (the kernel accepted the old snapshot, then moved on) does not regress the seed', async () => {
+    // Order on the wire: the accept's state push, then a further kernel
+    // change, then the `saved` custom message dispatching late (a host that
+    // dispatches customs after states, or a slow reply). By the time `saved`
+    // arrives the Editor has been remounted on the later state; adopting the
+    // reply's (4, json1) as the seed would step the seed backwards and the
+    // next kernel push of revision 5 would remount again for nothing.
+    const model = new FakeModel(defaultState({ revision: 3 }));
+    model.busyKernel = true;
+    await mount(model);
+    fireEvent.click(screen.getByText('edit'));
+    const json1 = localJson(SEED, 1);
+    act(() => {
+      model.kernelPush({ project_json: json1, revision: 4 });
+    });
+    // own-ack: no remount, save still in flight (no reply yet).
+    expect(mounts).toHaveLength(1);
+    expect(mounts[0].saveResults).toEqual([]);
+    // Kernel-side that accept happened (revision 4, our bytes); now it moves on.
+    model.kernel.revision = 4;
+    model.kernel.projectJson = json1;
+    act(() => {
+      model.kernelChange('{"name":"later"}');
+    });
+    // Remount on the later state; the old save resolves undefined.
+    expect(mounts).toHaveLength(2);
+    expect(mounts[1].props.initialProjectVersion).toBe(5);
+    await waitFor(() => expect(mounts[0].saveResults).toEqual([undefined]));
+    // The late `saved` for the old snapshot: consumed, ignored.
+    act(() => {
+      model.kernelSend({ type: 'saved', revision: 4 });
+    });
+    expect(mounts).toHaveLength(2);
+    // The seed is still (5, later): its own re-push is `none`...
+    act(() => {
+      model.kernelPush({ project_json: '{"name":"later"}', revision: 5 });
+    });
+    expect(mounts).toHaveLength(2);
+    // ...and the next edit carries base 5.
+    model.busyKernel = false;
+    fireEvent.click(screen.getByText('edit'));
+    await waitFor(() => expect(mounts[1].saveResults).toEqual([6]));
+    expect(model.lastSnapshot()).toEqual({ base: 5, json: localJson('{"name":"later"}', 1) });
+  });
+
   it('a reject at an unchanged revision (kernel failed before applying) does not remount and does not loop', async () => {
     const model = new FakeModel(defaultState({ revision: 3 }));
     model.kernel.applyFails = true;
