@@ -2333,6 +2333,48 @@ fn discover_loops_returns_loops_periods_and_importance() {
     }
 }
 
+/// AC6.1: the three completeness counters reach the C surface.
+///
+/// On an unbudgeted tiny model discovery is EXACT, so `enumeration_complete`
+/// is set, `universe_loops` names the enumerated candidate universe rather
+/// than the `-1` that means "the fallback sampled", and `retained_loops`
+/// equals `loop_count` because the 200-loop cap cannot bind on a model whose
+/// universe is a single cycle. The tripped arms are covered by
+/// `discover_loops_tiny_budget_truncates` (fallback) and by the engine's own
+/// `a_capped_run_reports_the_pre_cap_retained_count` (cap), which needs a
+/// test-only cap override this FFI does not expose.
+#[test]
+fn discover_loops_reports_enumeration_completeness() {
+    unsafe {
+        let (proj, model) = open_reinforcing_loop_model();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let result = simlin_analyze_discover_loops(model, 0, &mut err);
+        assert!(err.is_null(), "discovery should not error");
+        assert!(!result.is_null());
+
+        let res = &*result;
+        assert!(
+            res.enumeration_complete,
+            "an unbudgeted run on a tiny model enumerates its whole universe"
+        );
+        // population -> births -> population is the model's only cycle.
+        assert_eq!(
+            res.universe_loops, 1,
+            "the universe is the single reinforcing cycle"
+        );
+        assert_eq!(res.loop_count, 1);
+        assert_eq!(
+            res.retained_loops, res.loop_count,
+            "nothing is capped away on a one-loop model"
+        );
+
+        simlin_free_discovery_result(result);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 #[test]
 fn discover_loops_tiny_budget_truncates() {
     unsafe {
@@ -2383,6 +2425,17 @@ fn discover_loops_tiny_budget_truncates() {
         assert!(
             res.truncated,
             "a 1ms budget on a 200k-step sweep must report truncated discovery"
+        );
+        // The fallback generated whatever was found, so the report is a
+        // sample: it names no universe (`-1`, the sentinel that keeps
+        // "the fallback ran" distinct from "the universe is empty").
+        assert!(
+            !res.enumeration_complete,
+            "a budget the enumeration cannot meet reports an incomplete enumeration"
+        );
+        assert_eq!(
+            res.universe_loops, -1,
+            "a sampled report has no universe count"
         );
 
         simlin_free_discovery_result(result);

@@ -335,4 +335,26 @@ pub struct SimlinDiscoveryResult {
     /// that mirrors exhaustive mode's analogous salsa Warning, surfacing the
     /// completeness asymmetry that previously left discovery callers blind.
     pub agg_recovery_truncated: bool,
+    /// Non-zero when discovery's candidate generation was the union-graph
+    /// circuit enumeration AND it ran to completion: `loops` is then the
+    /// retention/ranking pipeline's selection from the PROVABLY COMPLETE set
+    /// of loops that can ever score, so discovery was exact rather than
+    /// heuristic.  Zero means the shortest-path fallback generated the
+    /// candidates -- an explicit SAMPLE of the loop universe -- because the
+    /// enumeration's budgets or `budget_ms` did not allow it to finish.  Read
+    /// this before treating an absent loop as evidence the model has none.
+    pub enumeration_complete: bool,
+    /// How many loops passed discovery's retention filter, BEFORE the
+    /// reported-loop cap truncated `loops`.  Equal to `loop_count` when the
+    /// cap did not bind, and above it when it did -- the only signal that
+    /// `loops` is a capped prefix of the loops worth reporting rather than
+    /// all of them.
+    pub retained_loops: usize,
+    /// The size of the candidate universe: how many ever-simultaneously-active
+    /// elementary cycles the enumeration found, which is the population every
+    /// reported loop's importance is measured against.  `-1` when
+    /// `enumeration_complete` is zero, since a sampled report has no universe
+    /// to describe; the two fields always agree, and the sentinel keeps "the
+    /// fallback ran" distinct from a genuinely empty universe (`0`).
+    pub universe_loops: i64,
 }

@@ -975,6 +975,16 @@ unsafe fn discovery_to_ffi(
         partition_count,
         truncated: analysis.truncated,
         agg_recovery_truncated: analysis.agg_recovery_truncated,
+        enumeration_complete: analysis.enumeration_complete,
+        retained_loops: analysis.retained_loops,
+        // Saturating rather than the `-1`-on-overflow the `partition` fields
+        // use: here `-1` MEANS "the fallback ran", so an unrepresentable
+        // count must never spell it. A universe above `i64::MAX` circuits is
+        // unreachable (the enumerator's edge-row budget stops it many orders
+        // of magnitude earlier), so the arm is defensive.
+        universe_loops: analysis
+            .universe_loops
+            .map_or(-1, |n| i64::try_from(n).unwrap_or(i64::MAX)),
     }))
 }
 
