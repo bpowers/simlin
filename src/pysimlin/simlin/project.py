@@ -441,10 +441,7 @@ class Project:
             if self._watcher is not None:
                 old_watcher = self._watcher
                 self._watcher = self._start_watcher(target, old_watcher.interval)
-        # Joining the poll thread must not happen under _file_lock: the
-        # thread may be blocked on that very lock in _ingest_disk_bytes.
-        if old_watcher is not None:
-            old_watcher.stop()
+        self._retire_watcher(old_watcher)
 
     def reload(self) -> bool:
         """Re-read :attr:`path` and replace the project contents in place.
@@ -491,7 +488,8 @@ class Project:
         a ``RuntimeWarning`` names the error (once per distinct content), and
         the next valid write is picked up.  While unsaved local changes exist
         (:attr:`dirty`), external changes are likewise held back with a
-        warning until you :meth:`save` or :meth:`reload`.
+        warning; resolve with :meth:`reload` (take the file's version) or
+        ``save(force=True)`` (overwrite it) -- a plain :meth:`save` refuses.
 
         Polling is a stdlib daemon thread; see ``simlin._disk.FileWatcher``
         for why polling rather than inotify/``watchfiles``.
@@ -521,8 +519,7 @@ class Project:
             else:
                 old_watcher = self._watcher
                 self._watcher = None
-        if old_watcher is not None:
-            old_watcher.stop()
+        self._retire_watcher(old_watcher)
 
     def _start_watcher(self, path: Path, interval: float) -> FileWatcher:
         watcher = FileWatcher(path, _disk_handler(weakref.ref(self)), interval=interval)
@@ -530,9 +527,22 @@ class Project:
         # the thread outlive a collected project on an idle file; the
         # finalizer asks the thread to exit as soon as the project is gone
         # (request_stop, not stop: never join from inside garbage collection).
-        weakref.finalize(self, watcher.request_stop)
+        watcher.finalizer = weakref.finalize(self, watcher.request_stop)
         watcher.start()
         return watcher
+
+    @staticmethod
+    def _retire_watcher(watcher: FileWatcher | None) -> None:
+        """Stop a watcher this project no longer uses and drop the GC
+        finalizer that would otherwise reference it until the project dies.
+        Must be called with ``_file_lock`` released: ``stop()`` joins the
+        poll thread, which may be blocked on that lock."""
+        if watcher is None:
+            return
+        finalizer = watcher.finalizer
+        if finalizer is not None:
+            finalizer.detach()
+        watcher.stop()
 
     def on_change(
         self,
@@ -815,8 +825,9 @@ class Project:
                 case _sync.KeepLastKnownGood(reason="dirty"):
                     warnings.warn(
                         f"simlin: {path} changed on disk but this project has unsaved "
-                        f"local changes; keeping the in-memory model. Call save() to "
-                        f"overwrite the file or reload() to discard the local changes.",
+                        f"local changes; keeping the in-memory model. Call reload() to "
+                        f"take the on-disk version (discarding the local changes) or "
+                        f"save(force=True) to overwrite the file with them.",
                         RuntimeWarning,
                         stacklevel=2,
                     )

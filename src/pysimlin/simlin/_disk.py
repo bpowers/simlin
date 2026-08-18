@@ -17,9 +17,10 @@ import shutil
 import threading
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Any, Union
 
 if TYPE_CHECKING:
+    import weakref
     from collections.abc import Callable
 
 _PathLike = Union[str, Path]
@@ -139,6 +140,10 @@ class FileWatcher:
         self._last_signature: tuple[int, int, int] | None | _Unknown = _UNKNOWN
         self._warned: set[str] = set()
         self._stopped = False
+        # Owner-managed: the Project stores the weakref.finalize that stops
+        # this watcher when the project is collected, so retiring the
+        # watcher early can detach it.
+        self.finalizer: weakref.finalize[Any, Any] | None = None
 
     @property
     def path(self) -> Path:
@@ -213,11 +218,15 @@ class FileWatcher:
         if before == self._last_signature:
             return True
         if before is None:
-            # The file is gone (deleted, or mid-rename by a non-atomic
-            # writer).  Remember that so its reappearance is a change, and
-            # tell the user once -- an editor that recreates the file will
-            # clear this on the next successful tick.
+            # No file.  On the first tick that means we were pointed at a
+            # path that does not exist (usually a mistake); later it means it
+            # was deleted or is mid-rename by a non-atomic writer.  Remember
+            # that so its (re)appearance is a change, and tell the user once
+            # -- a tick that finds the file clears the warning memory.
+            never_seen = self._last_signature is _UNKNOWN
             self._last_signature = None
+            if never_seen:
+                raise FileNotFoundError(f"{self._path} does not exist")
             raise FileNotFoundError(f"{self._path} no longer exists")
         data = self._path.read_bytes()
         after = self._signature()

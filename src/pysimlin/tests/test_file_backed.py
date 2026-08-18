@@ -13,6 +13,7 @@ import json
 import re
 import shutil
 import threading
+import time
 import warnings
 from dataclasses import replace
 from pathlib import Path
@@ -33,7 +34,7 @@ from simlin import (
     SimlinRuntimeError,
     Stock,
 )
-from simlin._disk import content_hash
+from simlin._disk import _UNKNOWN, content_hash
 
 from .conftest import get_repo_root
 
@@ -887,13 +888,22 @@ class TestWatcherLifecycle:
     def test_i1_dropping_the_project_stops_the_thread_without_a_file_change(
         self, tmp_path: Path
     ) -> None:
+        # The thread must exit because the project is gone, not because a
+        # tick happened to run the weak-ref handler: let the first tick
+        # complete (so the handler path has already fired and returned True)
+        # and only then drop the project with the file idle.
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
         baseline = {t.name for t in threading.enumerate()}
-        model = simlin.open(path)  # watch=True
+        model = simlin.open(path, watch=False)
+        model.project.watch(True, interval=0.02)  # type: ignore[union-attr]
         watcher = model.project._watcher  # type: ignore[union-attr]
         assert watcher is not None
         thread = watcher._thread
         assert thread is not None
+        deadline = time.monotonic() + 5.0
+        while watcher._last_signature is _UNKNOWN and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert watcher._last_signature is not _UNKNOWN, "first tick never ran"
         assert thread.is_alive()
         del model
         gc.collect()
@@ -958,6 +968,29 @@ class TestWatcherLifecycle:
         finally:
             project.watch(False)
 
+    def test_i5_delivery_from_a_watcher_retired_by_watch_false_is_ignored(
+        self, tmp_path: Path
+    ) -> None:
+        # Same path, so only the identity check (watcher is self._watcher)
+        # can reject it: an in-flight delivery from a stopped watcher must
+        # not load bytes the user asked us to stop watching for.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        _watch_idle(model)
+        project = model.project
+        assert project is not None
+        retired = project._watcher
+        assert retired is not None
+        project.watch(False)
+        _add_aux(simlin.open(path, watch=False), "after_unwatch")
+        data = path.read_bytes()
+        retired._handler(retired, data, content_hash(data))
+        assert model.get_variable("after_unwatch") is None
+        assert model.revision == 0
+        # The change is still there for an explicit reload().
+        assert model.reload() is True
+        assert model.get_variable("after_unwatch") is not None
+
     def test_i5_delivery_from_a_retired_watcher_is_ignored(self, tmp_path: Path) -> None:
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
         model = simlin.open(path, watch=False)
@@ -980,6 +1013,17 @@ class TestWatcherLifecycle:
 
 
 class TestSaveConflicts:
+    def test_model_save_passes_force_through(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, autosave=False, watch=False)
+        _add_aux(model, "local")
+        _add_aux(simlin.open(path, watch=False), "claude_wrote_this")
+        with pytest.raises(SimlinRuntimeError, match="changed on disk"):
+            model.save()
+        model.save(force=True)
+        assert model.dirty is False
+        assert simlin.load(path).get_variable("local") is not None
+
     def test_i3_save_over_an_external_change_raises_unless_forced(self, tmp_path: Path) -> None:
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
         model = simlin.open(path, autosave=False, watch=False)
@@ -1047,6 +1091,16 @@ class TestSaveConflicts:
         assert model.dirty is True
         assert model.get_variable("local") is not None
         assert simlin.load(path).get_variable("claude_wrote_this") is not None
+
+    def test_save_recreates_a_deleted_file_without_a_conflict(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, autosave=False, watch=False)
+        _add_aux(model, "local")
+        path.unlink()
+        model.save()  # a missing file is not someone else's change
+        assert path.exists()
+        assert model.dirty is False
+        assert simlin.load(path).get_variable("local") is not None
 
     def test_m2_failed_save_of_a_clean_project_stays_clean(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1203,12 +1257,16 @@ class TestSnapshotEdgeCases:
         finally:
             model.project.watch(False)  # type: ignore[union-attr]
 
-    def test_m9_notify_runs_with_no_project_lock_held(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("arm", ["edit", "auto_layout", "widget", "disk", "reload"])
+    def test_m9_notify_runs_with_no_project_lock_held(self, tmp_path: Path, arm: str) -> None:
+        # Every _notify call site: a listener that touches the project (or
+        # is marshalled onto another thread that does) must not deadlock.
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
         model = simlin.open(path, watch=False)
+        _watch_idle(model)
         project = model.project
         assert project is not None
-        results: list[bool] = []
+        results: list[tuple[str, bool]] = []
 
         def probe(event: ChangeEvent) -> None:
             def try_locks() -> None:
@@ -1218,15 +1276,37 @@ class TestSnapshotEdgeCases:
                 got_ptr = project._lock.acquire(blocking=False)
                 if got_ptr:
                     project._lock.release()
-                results.append(got_file and got_ptr)
+                results.append((event.source, got_file and got_ptr))
 
             t = threading.Thread(target=try_locks)
             t.start()
             t.join()
 
         project.on_change(probe)
-        _add_aux(model)
-        assert results == [True]
+        try:
+            match arm:
+                case "edit":
+                    _add_aux(model)
+                    expected = "edit"
+                case "auto_layout":
+                    project.auto_layout("main")
+                    expected = "edit"
+                case "widget":
+                    project._apply_snapshot(project.serialize_json(), base_revision=0)
+                    expected = "widget"
+                case "disk":
+                    _add_aux(simlin.open(path, watch=False), "ext")
+                    _poll(model)
+                    expected = "disk"
+                case "reload":
+                    _add_aux(simlin.open(path, watch=False), "ext")
+                    assert project.reload() is True
+                    expected = "reload"
+                case _:
+                    raise AssertionError(arm)
+        finally:
+            project.watch(False)
+        assert results == [(expected, True)]
 
 
 class TestOpenOnDirectory:

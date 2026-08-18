@@ -320,9 +320,10 @@ class Model:
         """Whether the containing project has unsaved changes."""
         return self._require_project().dirty
 
-    def save(self) -> None:
-        """Save the containing project to its file (see :meth:`Project.save`)."""
-        self._require_project().save()
+    def save(self, *, force: bool = False) -> None:
+        """Save the containing project to its file (see :meth:`Project.save`;
+        ``force=True`` overwrites a file another tool changed)."""
+        self._require_project().save(force=force)
 
     def reload(self) -> bool:
         """Reload the containing project from its file (see

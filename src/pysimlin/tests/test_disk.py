@@ -166,11 +166,17 @@ class TestFileWatcherPolling:
         assert rec.calls == [(b"two", content_hash(b"two"))]
 
     def test_file_created_after_watcher_starts_is_delivered(self, tmp_path: Path) -> None:
+        # Watching a path that does not exist yet is reported once (it is
+        # usually a mistake), then the file's creation is delivered.
         path = tmp_path / "later.stmx"
         rec = _Recorder()
         watcher = FileWatcher(path, rec, interval=0.01)
-        assert watcher.poll_once() is True
+        with pytest.warns(RuntimeWarning, match="does not exist"):
+            assert watcher.poll_once() is True
         assert rec.calls == []
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert watcher.poll_once() is True
         path.write_bytes(b"now")
         assert watcher.poll_once() is True
         assert rec.calls == [(b"now", content_hash(b"now"))]

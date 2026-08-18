@@ -238,8 +238,9 @@ draws correctly in Simlin, Stella, or `model.diagram()`.
 
 Pass `autosave=False` to batch changes: edits then set `dirty` and stay in
 memory until `model.save()`. With autosave on (the default), `dirty` is only
-ever true after a failed write (disk full, permissions): the write raises
-and the in-memory change is kept until a later `save()` succeeds.
+ever true after a failed or refused write (disk full, permissions, or the
+conflict below): the write raises and the in-memory change is kept until a
+later `save()` succeeds.
 
 `save()` never silently overwrites someone else's work. If the file changed
 on disk since the model last read or wrote it, `save()` raises and leaves
