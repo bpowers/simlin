@@ -696,3 +696,53 @@ class TestMemoryLeakDetection:
 
         final_refs = len(_finalizer_refs)
         assert final_refs <= initial_refs + 5
+
+
+class TestReloadPrimitivesNoLeak:
+    """Churn the FFI primitives behind file-backed reloads.
+
+    ``replace_contents`` swaps a whole datamodel under the live project and
+    ``serialize_mdl`` hands back a buffer plus an optional warnings handle
+    that the wrapper must free on every path; running them in a loop here
+    puts both under the ASan/leak run this module is executed with in CI.
+    """
+
+    def test_replace_and_serialize_churn(self, mdl_model_path) -> None:
+        from simlin import Compat, Flow, Stock, _ffi
+
+        gc.collect()
+        baseline_refs = len(_finalizer_refs)
+
+        model = simlin.load(mdl_model_path)
+        project = model.project
+        assert project is not None
+
+        lossy = simlin.Project.new(name="lossy")
+        with lossy.get_model().edit() as (_, patch):
+            patch.upsert(
+                Stock(
+                    name="reservoir",
+                    initial_equation="100",
+                    inflows=["inflow"],
+                    compat=Compat(non_negative=True),
+                )
+            )
+            patch.upsert(Flow(name="inflow", equation="1"))
+        original = simlin.load(mdl_model_path).project
+        assert original is not None
+
+        for _ in range(50):
+            _ffi.replace_contents(project._ptr, lossy._ptr)
+            text, warnings = _ffi.serialize_mdl(project._ptr)
+            assert text
+            assert len(warnings) == 1
+            _ffi.replace_contents(project._ptr, original._ptr)
+            text, warnings = _ffi.serialize_mdl(project._ptr)
+            assert text
+            assert warnings == []
+            # The Model object obtained before the churn is still usable.
+            assert model.get_var_names()
+
+        del model, project, lossy, original
+        gc.collect()
+        assert len(_finalizer_refs) <= baseline_refs + 5
