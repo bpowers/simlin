@@ -119,8 +119,12 @@ Complete, runnable programs live in
   alters behavior.
 - [`population_model.py`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/examples/population_model.py)
   builds a model from scratch and validates the shape of its output.
+- [`notebook_editor.ipynb`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/examples/notebook_editor.ipynb)
+  opens a model file in a notebook, edits it in the interactive editor and
+  from Python, and follows a change made by another tool -- the workflow for
+  collaborating on a model with Claude Code.
 
-Both run in CI on every commit.
+All of them run in CI on every commit.
 
 ## API Reference
 

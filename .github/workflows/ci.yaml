@@ -299,6 +299,112 @@ jobs:
         working-directory: src/pysimlin
         run: uv run pytest -q --no-cov tests/
 
+  pysimlin-e2e:
+    name: pysimlin notebook editor journey (JupyterLab)
+    runs-on: ubuntu-24.04
+    # Dominated by builds (libsimlin release, the wasm32 engine, the diagram
+    # and widget bundles); the journey itself runs in well under a minute.
+    # A warm cargo cache brings the whole job to a few minutes; the headroom
+    # is for a cold cache, which builds two engines from scratch.
+    timeout-minutes: 45
+    env:
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-pysimlin-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-pysimlin-e2e-
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install pnpm dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build libsimlin
+        run: cargo build --release --manifest-path src/libsimlin/Cargo.toml
+
+      # The widget bundle and its workspace deps (@simlin/engine builds the
+      # wasm32 engine, @simlin/core, @simlin/diagram) in topological order;
+      # the widget's build ends by staging widget.js and the wasm into
+      # src/pysimlin/simlin/_widget/ (scripts/stage_widget_assets.py).
+      # DISABLE_WASM_OPT=1 skips the multi-minute wasm-opt pass: the journey
+      # exercises the widget's behaviour, not the release blob's size.
+      - name: Build the notebook widget and stage its assets into pysimlin
+        env:
+          DISABLE_WASM_OPT: "1"
+        run: pnpm --filter "@simlin/notebook-widget..." run build
+
+      - name: Install pysimlin with the dev and e2e extras
+        working-directory: src/pysimlin
+        run: |
+          uv sync --extra dev --extra e2e
+          uv pip install setuptools
+          uv run python setup.py build_ext --inplace
+
+      # The version pinned by the root package.json's @playwright/test.
+      - name: Install Playwright chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run the JupyterLab journey
+        run: make -C src/pysimlin e2e
+
+      # The example notebook, executed headless in a real kernel (nbconvert
+      # comes with jupyterlab): every cell must run clean and the display
+      # cell must produce the widget view with its SVG fallback. The
+      # script-style run in tests/test_examples.py cannot see the display
+      # path; this can, so it asserts both mime types are in the executed
+      # notebook and no output is an error.
+      - name: Execute the example notebook headless
+        working-directory: src/pysimlin
+        run: |
+          uv run jupyter nbconvert --to notebook --execute \
+            --output "$RUNNER_TEMP/notebook_editor.ipynb" examples/notebook_editor.ipynb
+          uv run python - "$RUNNER_TEMP/notebook_editor.ipynb" <<'PY'
+          import json, sys
+          nb = json.load(open(sys.argv[1]))
+          outputs = [o for c in nb["cells"] if c["cell_type"] == "code" for o in c["outputs"]]
+          errors = [o for o in outputs if o["output_type"] == "error"]
+          assert not errors, [f"{e['ename']}: {e['evalue']}" for e in errors]
+          mimes = {m for o in outputs if o["output_type"] == "execute_result" for m in o["data"]}
+          assert {"image/svg+xml", "application/vnd.jupyter.widget-view+json"} <= mimes, mimes
+          print("display cell produced", sorted(mimes))
+          PY
+
+      # Screenshots, the trace, and the jupyter server log are what a failed
+      # journey needs to be understood.
+      - name: Upload journey output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pysimlin-e2e-output
+          path: src/pysimlin/e2e/.output/
+          if-no-files-found: ignore
+
   policy:
     name: Policy checks
     runs-on: ubuntu-latest

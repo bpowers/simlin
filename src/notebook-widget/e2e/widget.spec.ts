@@ -131,14 +131,15 @@ test.describe('notebook widget bundle', () => {
     const modelIdx = await mountWidget(page, 'cell1', initialState());
     expect(modelIdx).toBe(0);
 
-    // The Editor is up: the search bar's model-status button renders once the
-    // project has been opened by the (main-thread) engine.
+    // The Editor is up: the diagram canvas (not the first <svg>, which is a
+    // search-bar icon) renders once the project has been opened by the
+    // (main-thread) engine.
     const cell = page.locator('#cell1');
     const wrapper = cell.locator('[data-lm-suppress-shortcuts]');
     await expect(wrapper).toBeVisible();
     await expect(wrapper).toHaveAttribute('data-theme', 'light');
     await expect(wrapper).toHaveCSS('height', '520px');
-    await expect(cell.locator('svg').first()).toBeVisible({ timeout: 60_000 });
+    await expect(cell.locator('svg.simlin-canvas')).toBeVisible({ timeout: 60_000 });
     // The stock from the fixture is drawn.
     await expect(cell.getByText('Population', { exact: true }).first()).toBeVisible();
 
@@ -150,7 +151,7 @@ test.describe('notebook widget bundle', () => {
     // click on empty canvas, accept the default name with Enter.
     await cell.getByRole('button', { name: 'hide or show editor tools' }).click();
     await cell.getByRole('button', { name: 'Variable', exact: true }).click();
-    const svg = cell.locator('svg').first();
+    const svg = cell.locator('svg.simlin-canvas');
     const box = await svg.boundingBox();
     if (box === null) {
       throw new Error('canvas has no bounding box');
@@ -209,7 +210,7 @@ test.describe('notebook widget bundle', () => {
     const secondIdx = await mountWidget(page, 'cell2', initialState({ height: 300 }));
     expect(secondIdx).toBe(1);
     const cell2 = page.locator('#cell2');
-    await expect(cell2.locator('svg').first()).toBeVisible({ timeout: 60_000 });
+    await expect(cell2.locator('svg.simlin-canvas')).toBeVisible({ timeout: 60_000 });
     await expect(cell2.locator('[data-lm-suppress-shortcuts]')).toHaveCSS('height', '300px');
     const secondWasmRequests = await page.evaluate(
       () => (window as unknown as HarnessWindow).harness.models[1].wasmRequests,
@@ -300,7 +301,7 @@ test.describe('notebook widget bundle', () => {
     // dropped, so this one requests the wasm itself and renders.
     const second = await mountWidget(page, 'cell2', initialState({ height: 320 }));
     expect(second).toBe(1);
-    await expect(page.locator('#cell2').locator('svg').first()).toBeVisible({ timeout: 60_000 });
+    await expect(page.locator('#cell2').locator('svg.simlin-canvas')).toBeVisible({ timeout: 60_000 });
     const requests = await page.evaluate(() => (window as unknown as HarnessWindow).harness.models[1].wasmRequests);
     expect(requests).toBe(1);
   });

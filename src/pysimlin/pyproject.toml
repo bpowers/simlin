@@ -78,6 +78,14 @@ notebooks = [
     "matplotlib>=3.8",
     "pillow>=10.0",
 ]
+# The JupyterLab the Playwright journey (e2e/) launches. Kept out of dev:
+# jupyterlab pulls in ~80 packages that unit tests, lint, and type checking
+# never import. It must live in THIS venv (not `uv run --with jupyterlab`,
+# whose ephemeral prefix hides the anywidget/ipywidgets labextensions that
+# ship under this venv's share/jupyter).
+e2e = [
+    "jupyterlab>=4.3",
+]
 
 [project.urls]
 Homepage = "https://github.com/bpowers/simlin"
