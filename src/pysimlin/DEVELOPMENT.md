@@ -179,11 +179,23 @@ The GitHub Actions workflow `.github/workflows/memory.yml` provides comprehensiv
 - Faster execution than Valgrind with better error reporting
 - Primary memory testing approach
 
-**Valgrind Testing:**
+**Valgrind Testing (local, not in CI):**
 - Comprehensive memory error detection as fallback
 - Uses custom suppression file (`valgrind-python.supp`) for Python internals
 - Detects definite memory leaks while filtering false positives
 - Broader platform compatibility
+- Run valgrind on the venv's `python` directly (not on `uv run`, which only
+  spawns it -- valgrind would trace `uv` and finish in a second having seen
+  nothing), with `PYTHONMALLOC=malloc` so allocations are visible to it:
+
+```bash
+cd src/pysimlin
+PYTHONMALLOC=malloc valgrind --leak-check=full --show-leak-kinds=definite \
+  --errors-for-leak-kinds=definite --suppressions=valgrind-python.supp \
+  --log-file=valgrind.log \
+  .venv/bin/python -m pytest -q --no-cov -p no:cacheprovider tests/test_ffi.py
+grep -E "definitely lost|ERROR SUMMARY" valgrind.log
+```
 
 **macOS Testing:**
 - Uses native macOS `leaks` tool when available

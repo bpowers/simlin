@@ -381,6 +381,86 @@ def serialize_json(project_ptr: Any) -> bytes:
         lib.simlin_free(output_ptr[0])
 
 
+def serialize_mdl(project_ptr: Any) -> tuple[bytes, list[ErrorDetail]]:
+    """Serialize a project to Vensim MDL text.
+
+    The MDL surface cannot represent every construct, and the engine splits
+    the gap in two. A structural impossibility (a project with more than one
+    ordinary model, an ordinary module instance) is a hard failure and
+    raises. A lossy-but-representable construct (a dropped non-negative
+    flag, a discrete lookup emitted as continuous, a truncated group name)
+    never fails the export: the text is still produced and each such
+    degradation is returned as a ``Warning``-severity ``ErrorDetail``,
+    mirroring how ``apply_patch_json`` returns collected diagnostics for an
+    accepted patch.
+
+    Args:
+        project_ptr: Pointer to a SimlinProject
+
+    Returns:
+        ``(mdl_text, warnings)``: the MDL document as UTF-8 bytes and the
+        (possibly empty) list of lossiness warnings
+
+    Raises:
+        SimlinRuntimeError: If the project cannot be expressed as MDL
+    """
+    output_ptr = ffi.new("uint8_t **")
+    output_len_ptr = ffi.new("uintptr_t *")
+    out_collected_errors_ptr = ffi.new("SimlinError **")
+    err_ptr = ffi.new("SimlinError **")
+
+    lib.simlin_project_serialize_mdl(
+        project_ptr,
+        output_ptr,
+        output_len_ptr,
+        out_collected_errors_ptr,
+        err_ptr,
+    )
+    warnings_ptr = out_collected_errors_ptr[0]
+    try:
+        check_out_error(err_ptr, "Project MDL serialization")
+        warnings: list[ErrorDetail] = []
+        if warnings_ptr != ffi.NULL:
+            warnings = extract_error_details(warnings_ptr)
+        try:
+            return bytes(ffi.buffer(output_ptr[0], output_len_ptr[0])), warnings
+        finally:
+            lib.simlin_free(output_ptr[0])
+    finally:
+        if warnings_ptr != ffi.NULL:
+            lib.simlin_error_free(warnings_ptr)
+
+
+def replace_contents(dst_project_ptr: Any, src_project_ptr: Any) -> None:
+    """Replace the contents of one project in place with a copy of another's.
+
+    ``dst``'s datamodel becomes a deep clone of ``src``'s and its salsa db is
+    re-synced, so ``Model`` objects already obtained from ``dst`` (which hold
+    the project pointer plus a model name) stay valid and observe the new
+    contents on their next call. ``src`` is only read: its refcount is
+    untouched and it may be closed immediately afterwards. This is the
+    reload primitive for a file-backed project: open the new bytes with the
+    matching ``simlin_project_open_*`` into a scratch project, then replace
+    from it, so every format is covered without per-format variants.
+
+    A model name present in a live ``Model`` but absent from the replacement
+    is not invalidated: queries through it raise ``BadModelName`` and a sim
+    created through it fails on first run, until a model of that name exists
+    again. A ``Sim`` created BEFORE the replace is a stale snapshot of the
+    program it compiled; create a new one to simulate the replacement.
+
+    Args:
+        dst_project_ptr: Pointer to the SimlinProject to overwrite
+        src_project_ptr: Pointer to the SimlinProject to copy from
+
+    Raises:
+        SimlinRuntimeError: If either pointer is NULL
+    """
+    err_ptr = ffi.new("SimlinError **")
+    lib.simlin_project_replace_contents(dst_project_ptr, src_project_ptr, err_ptr)
+    check_out_error(err_ptr, "Replace project contents")
+
+
 def open_json(json_data: bytes) -> Any:
     """Open a project from JSON data.
 
@@ -403,24 +483,38 @@ def open_json(json_data: bytes) -> Any:
     return project_ptr
 
 
-def diagram_sync(project_ptr: Any, model_name: str) -> None:
-    """Generate an automatic diagram layout for a model, replacing its views.
+def diagram_sync(project_ptr: Any, model_name: str, patch_json: bytes | None = None) -> None:
+    """Lay out a model's diagram, replacing its views in place.
 
-    Passes a NULL patch to ``simlin_project_diagram_sync``, which always
-    generates a full layout from scratch (the incremental, patch-aware
-    mode is not exposed here).
+    With ``patch_json`` (the UTF-8 JSON project patch that was just applied
+    with ``apply_patch_json``), the engine uses incremental layout: elements
+    the patch touched are placed and every existing element keeps its
+    position, so a variable created programmatically gets a diagram element
+    without disturbing a hand-arranged view. When the patch has no
+    operations for ``model_name`` and the model already has a non-empty
+    view, the view is left untouched. Incremental layout needs an existing
+    non-empty view to be incremental against; a model with no view is laid
+    out from scratch either way.
+
+    With ``patch_json=None`` the engine always generates a full layout from
+    scratch (existing positions are discarded; only the zoom is kept).
 
     Args:
         project_ptr: Pointer to a SimlinProject
         model_name: Name of the model to lay out
+        patch_json: The applied JSON project patch, or None for a full relayout
 
     Raises:
-        SimlinRuntimeError: If the model doesn't exist or layout fails
+        SimlinRuntimeError: If the model doesn't exist, the patch does not
+            parse, or layout fails
     """
     c_name = string_to_c(model_name)
+    # A ``char[]`` built from bytes is NUL-terminated, which is what the
+    # ``const char *patch_json`` parameter expects.
+    c_patch = ffi.NULL if patch_json is None else ffi.new("char[]", patch_json)
     err_ptr = ffi.new("SimlinError **")
 
-    lib.simlin_project_diagram_sync(project_ptr, c_name, ffi.NULL, err_ptr)
+    lib.simlin_project_diagram_sync(project_ptr, c_name, c_patch, err_ptr)
     check_out_error(err_ptr, f"Auto-layout for model '{model_name}'")
 
 
@@ -512,6 +606,7 @@ __all__ = [
     "c_to_string",
     "check_error",
     "check_out_error",
+    "diagram_sync",
     "extract_error_details",
     "ffi",
     "free_c_string",
@@ -523,6 +618,8 @@ __all__ = [
     "open_json",
     "render_png",
     "render_svg",
+    "replace_contents",
     "serialize_json",
+    "serialize_mdl",
     "string_to_c",
 ]
