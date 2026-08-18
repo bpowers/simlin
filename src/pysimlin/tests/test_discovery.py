@@ -276,6 +276,59 @@ class TestAnalyzeTruncation:
             logistic_model.analyze(timeout=-1.0)
 
 
+class TestAnalyzeAnalysisError:
+    """`analysis_error` distinguishes "analysis never ran" from "sampled,
+    found nothing" -- the two report the SAME `enumeration_complete=False`,
+    `universe_loops=None` shape otherwise, so this is the field to check
+    first."""
+
+    def test_unanalyzable_model_reports_analysis_error(
+        self, rk4_feedback_model: simlin.Model
+    ) -> None:
+        # RK4 + a stock in a feedback loop cannot be compiled for LTM (the
+        # flow-to-stock link-score formula assumes Euler stepping -- GH #486).
+        # `Model.analyze()` itself must not raise: this is a structural fact
+        # about the model, surfaced as data on the result.
+        analysis = rk4_feedback_model.analyze()
+        assert analysis.analysis_error is not None
+        assert "Euler" in analysis.analysis_error
+        assert analysis.loops == ()
+        assert analysis.dominant_periods == ()
+        assert analysis.partitions == ()
+        assert analysis.retained_loops == 0
+        # The never-ran case reports the SAME shape a sampled-but-empty
+        # analysis would -- analysis_error is what tells them apart.
+        assert analysis.enumeration_complete is False
+        assert analysis.universe_loops is None
+
+    def test_healthy_model_has_no_analysis_error(self, logistic_model: simlin.Model) -> None:
+        analysis = logistic_model.analyze()
+        assert analysis.analysis_error is None
+
+
+@pytest.fixture
+def rk4_feedback_model() -> simlin.Model:
+    """A single-stock feedback-loop model using RK4 integration.
+
+    Simulates fine without LTM, but an LTM-enabled compile is rejected (the
+    flow-to-stock link-score formula assumes Euler -- GH #486), which is what
+    makes `Model.analyze()` report `analysis_error` instead of running
+    discovery at all.
+    """
+    from simlin.types import Aux, Flow, Stock
+
+    project = simlin.Project.new(name="rk4_feedback", sim_start=0.0, sim_stop=10.0, dt=1.0)
+    project.set_sim_specs(sim_method="rk4")
+    model = project.main_model
+    with model.edit() as (_current, patch):
+        patch.upsert(Aux(name="birth_rate", equation="0.02"))
+        patch.upsert(
+            Stock(name="population", initial_equation="100", inflows=["births"], outflows=[])
+        )
+        patch.upsert(Flow(name="births", equation="population * birth_rate"))
+    return model
+
+
 @pytest.fixture
 def large_horizon_model() -> simlin.Model:
     """Build a large-horizon balancing model in memory for truncation tests.

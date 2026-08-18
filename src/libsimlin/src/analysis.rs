@@ -962,6 +962,17 @@ unsafe fn discovery_to_ffi(
         });
     }
 
+    // An interior NUL folds to NULL (the compile-failure message is still
+    // conceptually present, just unreadable through this string) rather than
+    // failing the whole result -- mirroring `name`'s precedent above, and
+    // never reachable in practice: this is an engine-formatted diagnostic,
+    // not user-authored model text.
+    let analysis_error = analysis
+        .analysis_error
+        .as_deref()
+        .and_then(|s| CString::new(s).ok())
+        .map_or(ptr::null_mut(), |s| s.into_raw());
+
     let (loops, loop_count) = vec_into_raw_parts(c_loops);
     let (periods, period_count) = vec_into_raw_parts(c_periods);
     let (partitions, partition_count) = vec_into_raw_parts(c_partitions);
@@ -985,6 +996,7 @@ unsafe fn discovery_to_ffi(
         universe_loops: analysis
             .universe_loops
             .map_or(-1, |n| i64::try_from(n).unwrap_or(i64::MAX)),
+        analysis_error,
     }))
 }
 
@@ -1030,6 +1042,7 @@ pub unsafe extern "C" fn simlin_free_discovery_result(result: *mut SimlinDiscove
             result.partition_count,
         ));
     }
+    drop_c_string(result.analysis_error);
 }
 
 /// Gets all causal links in a model

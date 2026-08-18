@@ -2458,6 +2458,103 @@ fn discover_loops_null_model_errors_without_panic() {
     }
 }
 
+/// A model that CANNOT be analyzed for LTM at all (GH #486: a non-Euler
+/// integration method with a stock in a feedback loop -- the flow-to-stock
+/// link-score formula assumes Euler stepping) must surface `analysis_error`
+/// non-NULL rather than returning a successful-looking empty/sampled result:
+/// `simlin_analyze_discover_loops` itself still succeeds (this is a
+/// STRUCTURAL fact about the model, not an FFI error), but the discovery
+/// result reports "analysis never ran" -- `enumeration_complete == false`
+/// AND `universe_loops == -1`, the SAME shape a genuinely sampled fallback
+/// run reports, which is exactly why `analysis_error` has to be the field a
+/// caller checks first.
+#[test]
+fn discover_loops_reports_analysis_error_when_ltm_never_ran() {
+    unsafe {
+        let test_project = TestProject::new("main")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .with_sim_method(simlin_engine::datamodel::SimMethod::RungeKutta4)
+            .stock("population", "100", &["births"], &[], None)
+            .flow("births", "population * 0.02", None);
+        let datamodel_project = test_project.build_datamodel();
+        let project = engine_serde::serialize(&datamodel_project).unwrap();
+        let mut buf = Vec::new();
+        project.encode(&mut buf).unwrap();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+        assert!(err.is_null());
+        assert!(!proj.is_null());
+        let mut err_model: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err_model);
+        assert!(err_model.is_null());
+        assert!(!model.is_null());
+
+        err = ptr::null_mut();
+        let result = simlin_analyze_discover_loops(model, 0, &mut err);
+        assert!(
+            err.is_null(),
+            "an unanalyzable model is a discovery RESULT, not an FFI error"
+        );
+        assert!(!result.is_null());
+
+        let res = &*result;
+        assert!(
+            !res.analysis_error.is_null(),
+            "RK4 + a stock in a loop cannot be compiled for LTM analysis"
+        );
+        let msg = CStr::from_ptr(res.analysis_error)
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            msg.contains("Euler"),
+            "analysis_error must reference the Euler assumption, got: {msg}"
+        );
+        assert_eq!(res.loop_count, 0, "analysis never reached candidates");
+        assert_eq!(res.period_count, 0);
+        assert_eq!(res.partition_count, 0);
+        assert_eq!(res.retained_loops, 0);
+        assert!(
+            !res.enumeration_complete,
+            "analysis never ran, so this is false by construction (not a \
+             genuine sample verdict)"
+        );
+        assert_eq!(
+            res.universe_loops, -1,
+            "the never-ran case reports the SAME -1 sentinel a sampled run \
+             would -- analysis_error is what distinguishes them"
+        );
+
+        simlin_free_discovery_result(result);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// The healthy-model control for the test above: a model LTM CAN analyze
+/// must leave `analysis_error` NULL.
+#[test]
+fn discover_loops_healthy_model_has_no_analysis_error() {
+    unsafe {
+        let (proj, model) = open_reinforcing_loop_model();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let result = simlin_analyze_discover_loops(model, 0, &mut err);
+        assert!(err.is_null());
+        assert!(!result.is_null());
+
+        let res = &*result;
+        assert!(
+            res.analysis_error.is_null(),
+            "a healthy, analyzable model must not report analysis_error"
+        );
+
+        simlin_free_discovery_result(result);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 // === LTM mode signal (Task A) and macro-internal link collapse (Task B) ===
 
 /// Build a SMTH1-in-feedback-loop protobuf (mirrors the engine's

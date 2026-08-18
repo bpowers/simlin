@@ -584,9 +584,23 @@ class Model:
         or time-range changes); it compiles and simulates internally in LTM
         discovery mode.
 
-        How complete is the answer? Three fields on the result say so, and
-        they matter most on the large models discovery exists for:
+        How complete is the answer? Four fields on the result say so, and
+        they matter most on the large models discovery exists for. Check
+        them in this order -- the completeness fields are meaningless if
+        analysis never ran at all:
 
+        * ``analysis_error`` is non-``None`` when the model could not be
+          compiled/analyzed for LTM AT ALL (a malformed equation, an
+          unresolved reference, or a hard compile failure such as choosing a
+          non-Euler integration method on a model with a stock in a feedback
+          loop). When set, ``loops``/``dominant_periods``/``partitions`` are
+          empty, ``enumeration_complete`` is False, and ``universe_loops`` is
+          ``None`` -- the SAME shape a genuinely sampled analysis with zero
+          discovered loops would report, which is exactly why this is the
+          field to check first: "never ran" (``analysis_error`` set) and
+          "sampled, found nothing" (``analysis_error`` is ``None``,
+          ``enumeration_complete`` False) are different claims that look
+          identical everywhere else.
         * ``enumeration_complete`` is True when the engine ENUMERATED every
           loop that could ever score and picked from that whole set, so
           ``loops`` is exact. False means the budgets or the ``timeout`` cut
@@ -716,6 +730,7 @@ class Model:
                 enumeration_complete=bool(result_ptr.enumeration_complete),
                 retained_loops=int(result_ptr.retained_loops),
                 universe_loops=None if universe_loops < 0 else universe_loops,
+                analysis_error=c_to_string(result_ptr.analysis_error),
             )
         finally:
             lib.simlin_free_discovery_result(result_ptr)

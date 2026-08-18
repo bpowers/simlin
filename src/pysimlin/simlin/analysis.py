@@ -502,7 +502,12 @@ class Analysis:
     ever score. False means a shortest-path fallback generated the candidates
     -- because the enumeration's budgets or the `timeout` did not allow it to
     finish -- and `loops` is a SAMPLE. Check this before reading an absent
-    loop as evidence the model has none."""
+    loop as evidence the model has none.
+
+    Also False -- by construction, not as a genuine sample verdict -- when
+    `analysis_error` is set: analysis never reached candidate generation at
+    all. Check `analysis_error` FIRST; a False here alone cannot distinguish
+    "sampled, found nothing" from "never ran"."""
 
     retained_loops: int = 0
     """How many loops passed discovery's importance filter, before the report
@@ -519,3 +524,17 @@ class Analysis:
     share of. None when `enumeration_complete` is False, since a sampled
     analysis has no universe to report. None and 0 are different claims: 0
     means the model genuinely has no scorable loop."""
+
+    analysis_error: str | None = None
+    """Set when the model could not be compiled or analyzed for LTM AT ALL --
+    a malformed equation, an unresolved reference, or a hard compile failure
+    such as picking a non-Euler integration method on a model with a stock in
+    a feedback loop (that link-score formula assumes Euler stepping). When
+    set, every other field describes an analysis that never STARTED: `loops`,
+    `dominant_periods`, and `partitions` are empty, `retained_loops` is 0,
+    `enumeration_complete` is False, and `universe_loops` is None -- the SAME
+    shape a genuinely SAMPLED analysis that happened to find zero loops would
+    report. This is why `analysis_error` is the field to check first: "never
+    ran" and "sampled, found nothing" are different claims that otherwise
+    look identical. `None` means analysis ran (exactly or as a sample;
+    consult `enumeration_complete` next)."""
