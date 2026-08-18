@@ -59,7 +59,7 @@ Each criterion names success and failure behaviour. Test names use the prefix `p
 |        v                                                          |
 |  ModelWidget (anywidget.AnyWidget)                                |
 |     traits: project_json, revision, selection, height, theme,    |
-|             notice;  custom msg: wasm bytes (binary buffer)      |
+|             pending_base;  custom msgs: wasm bytes, notices       |
 +-------------------^-----------------------------|----------------+
                     | comm (ipywidgets protocol)  |
 +-------------------|-----------------------------v----------------+
@@ -133,15 +133,16 @@ class ModelWidget(anywidget.AnyWidget):
     selection    = List(Unicode())      # widget -> kernel
     height       = Int(600)
     theme        = Unicode("auto")      # auto|light|dark
-    notice       = Unicode("")          # kernel -> widget transient toast text
+    pending_base = Int()                # widget -> kernel: revision the snapshot was edited from
     read_only    = Bool(False)
 ```
 
 Protocol:
 - Seed: kernel sets `project_json`+`revision` on construction and on every accepted change.
-- Widget edit: Editor `onSave(json, base_rev)` -> JS does `model.set("project_json", json); model.set("pending_base", base_rev); model.save_changes()` (one coalesced sync message). Kernel `observe(project_json)`: if `pending_base == revision` accept (apply via `_replace_from_bytes`, write file, `revision += 1`, echo suppressed by hash) else reject (`notice = "conflict"`, re-set `project_json`/`revision` from kernel state -> widget remounts). `pending_base` is an `Int()` trait declared alongside the others.
-- Kernel change (edit/disk): kernel sets `project_json` and `revision`; JS `change:revision` -> remount `<Editor key=revision>`. The widget's own accepted saves also arrive as `revision+1` with identical JSON; JS compares the incoming JSON to what it last sent and skips the remount in that case (undo history preserved for the human's own edits).
-- WASM: on first `render` per page, JS looks for `globalThis.__simlinWidget` (compiled module + engine backend promise). If absent it sends `{type:"wasm"}`; the kernel replies with a custom message carrying the wasm bytes as a binary buffer; JS compiles once and caches. Fallback: `SIMLIN_WIDGET_ASSET=inline` base64-embeds the wasm in `_esm` (Colab-safe but bloats output); `SIMLIN_WIDGET_ASSET=<url>` loads `_esm` from a URL (dev server / CDN). Chosen at import time (anywidget reads `_esm` at class definition), same as rerun's `RERUN_NOTEBOOK_ASSET`.
+- Widget edit: Editor `onSave(json, base_rev)` -> JS does `model.set("project_json", json); model.set("pending_base", base_rev); model.save_changes()` (one coalesced sync message). Kernel `observe(project_json)`: if `pending_base == revision` accept (apply via `_replace_from_bytes`, write file, `revision += 1`, echo suppressed by hash) else reject (re-push the kernel's authoritative `project_json` at the unchanged `revision`, plus a conflict notice -> widget remounts). Kernel obligations (MUST): after an accept, push the EXACT bytes the widget sent (no re-serialization) together with `revision + 1` in ONE sync message (`hold_sync()` plus an explicit `send_state` for `project_json`, because assigning an equal value to a traitlet is silent); bump `revision` by exactly one per accepted snapshot; on reject, re-push `project_json` explicitly even though its value is unchanged.
+- Kernel change (edit/disk): kernel sets `project_json` and `revision` in one message; JS remounts `<Editor>` on any kernel-originated JSON that is not one of its own pending snapshots -- whether or not `revision` changed (so a reject re-seeds even at an unchanged revision). The widget keeps a bounded queue of sent-but-unacknowledged snapshots and pops the OLDEST entry on a content match, so its own accepted saves never remount (undo history preserved) even for edit/undo/redo bursts while the kernel is busy.
+- Notices ("Updated on disk", conflict) travel as custom messages `{type:'notice', text, level}` from kernel to widget, never as a trait: a trait re-set to an equal value sends nothing.
+- WASM: on first `render` per page, JS looks for `globalThis.__simlinWidgetWasmModule` (a promise of the compiled `WebAssembly.Module`; the engine backend itself is per module instance). If absent it sends `{type:"wasm"}`; the kernel replies with a custom message `{type:'wasm'}` carrying the wasm bytes as the first binary buffer (or `{type:'wasm', error}`); JS compiles once and caches the promise page-wide, dropping it on failure so a later widget retries. Fallback: `SIMLIN_WIDGET_ASSET=inline` base64-embeds the wasm in `_esm` (Colab-safe but bloats output); `SIMLIN_WIDGET_ASSET=<url>` loads `_esm` from a URL (dev server / CDN). Chosen at import time (anywidget reads `_esm` at class definition), same as rerun's `RERUN_NOTEBOOK_ASSET`.
 - Selection: Editor `onSelectionChanged` -> `selection` trait (150 ms debounce as in simlin-serve).
 
 ### 4. `src/notebook-widget` (new TS package `@simlin/notebook-widget`)
@@ -166,13 +167,13 @@ Protocol:
 
 1. Human edits in widget -> Editor autosave -> `onSave(json, base)` -> traits -> kernel `observe` -> `_sync.decide(widget_snapshot)` = accept -> `_replace_from_bytes(json)` -> incremental layout is unnecessary (UI already positioned) -> serialize in file format -> `atomic_write` -> `last_written_hash = xxh/sha of bytes` -> `revision += 1` -> `on_change(widget)` -> traits pushed (`project_json` identical to what widget sent, `revision+1`) -> JS sees own snapshot, no remount.
 2. Python `edit()` -> patch applied -> `diagram_sync(patch)` incremental -> serialize -> write -> hash -> `revision += 1` -> traits pushed -> JS remounts Editor at new revision (undo history reset; documented).
-3. Claude Code / MCP / `git checkout` writes the file -> poll thread sees mtime change -> read bytes -> hash != last_written -> open into a temporary project and `replace_contents` in place (`_replace_from_bytes`) -> if parse fails: warn, keep last-known-good, remember bad hash so we don't re-warn every poll -> else `revision += 1`, `on_change(disk)`, traits pushed with `notice="Updated on disk"`.
-4. Stale widget snapshot (kernel advanced between the widget's base and its send) -> reject -> `notice="Your change conflicted with an update; re-apply it"` -> traits re-pushed -> remount. Because the Editor autosaves after every discrete edit and the kernel applies synchronously, this window is tiny outside the "cell running for a long time" case.
+3. Claude Code / MCP / `git checkout` writes the file -> poll thread sees mtime change -> read bytes -> hash != last_written -> open into a temporary project and `replace_contents` in place (`_replace_from_bytes`) -> if parse fails: warn, keep last-known-good, remember bad hash so we don't re-warn every poll -> else `revision += 1`, `on_change(disk)`, traits pushed plus an "Updated on disk" notice message.
+4. Stale widget snapshot (kernel advanced between the widget's base and its send) -> reject -> conflict notice message + authoritative `project_json` re-pushed at the unchanged revision -> remount. Because the Editor autosaves after every discrete edit and the kernel applies synchronously, this window is tiny outside the "cell running for a long time" case.
 5. Kernel busy (long cell): widget edits queue in the frontend (ipywidgets semantics); the Editor keeps working locally; when the cell finishes the queued snapshot arrives with its base rev and is accepted if nothing else advanced. Documented behaviour; not a correctness issue because the file is only written by the kernel.
 6. Widget displayed twice (two cells): both `ModelWidget` instances subscribe to the same `Project.on_change`; each display gets seeded and pushed independently; wasm compiled once per page via the global cache.
 7. Non-widget contexts (nbconvert, GitHub, Colab without custom widget manager -> anywidget enables it automatically): SVG fallback in the mimebundle.
 
-Error handling: file write errors raise from `edit()`/`save()` (autosave failure surfaces as an exception in the cell, and the in-memory change is kept with `dirty=True`); widget-originated write failures set `notice` and leave `dirty=True`; parse failures on disk are warnings, never exceptions from a background thread; the poll thread never dies silently (exceptions are logged via `warnings` and the thread continues).
+Error handling: file write errors raise from `edit()`/`save()` (autosave failure surfaces as an exception in the cell, and the in-memory change is kept with `dirty=True`); widget-originated write failures send a notice and leave `dirty=True`; parse failures on disk are warnings, never exceptions from a background thread; the poll thread never dies silently (exceptions are logged via `warnings` and the thread continues).
 
 ## Existing Patterns Followed
 
