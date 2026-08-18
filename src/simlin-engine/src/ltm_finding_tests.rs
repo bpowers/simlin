@@ -4542,6 +4542,77 @@ fn activity_graph_build_never_reads_the_clock_when_unbudgeted() {
     assert_eq!(clock.reads, 0);
 }
 
+/// A chain of edges whose score series is longer than one deadline-check
+/// interval: the shape of a small model saved at very many steps, which is
+/// what the libsimlin and pysimlin wall-clock budget fixtures are (200,001
+/// saved steps over a handful of links). Every value is active, so the build
+/// does its full per-step work on every edge.
+fn long_series_search_and_results(
+    edges: &[(&str, &str)],
+    step_count: usize,
+) -> (IndexedSearch, Results) {
+    let link_offsets: Vec<LinkOffset> = edges
+        .iter()
+        .enumerate()
+        .map(|(i, (from, to))| ((Ident::new(from), Ident::new(to)), i))
+        .collect();
+    let n_offsets = edges.len();
+    let data = vec![1.0f64; n_offsets * step_count];
+    let results = enum_results(n_offsets, step_count, data);
+    let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
+    (search, results)
+}
+
+/// The deadline check has to fire INSIDE one edge's series, not only between
+/// edges. A model saved at many steps over few links makes a single edge's
+/// copy milliseconds of work, so an edge-granular check would spend a
+/// millisecond-scale budget entirely inside the build and hand the fallback a
+/// deadline that has already passed (AC4.4).
+#[test]
+fn activity_graph_build_checks_the_deadline_inside_one_edges_series() {
+    let step_count = super::enum_gen::ACTIVITY_BUILD_DEADLINE_CHECK_VALUES + 4096;
+    let (search, results) = long_series_search_and_results(&[("a", "b")], step_count);
+    // Read 1 is the pre-scan check (not expired); read 2 is the first interval
+    // boundary, which lands one check interval into this single edge.
+    let mut clock = ScriptedClock::new(2);
+    let deadline = clock.deadline();
+    assert!(
+        super::enum_gen::ActivityGraph::build(&search, &results, Some(deadline), &mut clock)
+            .is_none(),
+        "a deadline expiring part way through one long edge must abandon the build"
+    );
+    assert_eq!(
+        clock.reads, 2,
+        "the interval boundary is inside the edge, not at the next edge"
+    );
+}
+
+/// One check interval is the same number of VALUES whichever way the graph is
+/// shaped -- many edges over few steps, or few edges over many steps -- which
+/// is the claim `ACTIVITY_BUILD_DEADLINE_CHECK_VALUES` makes.
+#[test]
+fn activity_graph_build_spends_one_check_interval_per_block_of_values() {
+    let check_values = super::enum_gen::ACTIVITY_BUILD_DEADLINE_CHECK_VALUES;
+    let step_count = check_values + 4096;
+    let (search, results) = long_series_search_and_results(&[("a", "b"), ("b", "a")], step_count);
+    let mut clock = ScriptedClock::new(usize::MAX);
+    let deadline = clock.deadline();
+    assert!(
+        super::enum_gen::ActivityGraph::build(&search, &results, Some(deadline), &mut clock)
+            .is_some(),
+        "a live deadline lets the build finish"
+    );
+    // One read before any value is copied, then one per whole interval of
+    // values copied after it -- so the count depends on the total values and
+    // not on how they are split across edges.
+    let values = 2 * step_count;
+    assert_eq!(
+        clock.reads,
+        values.div_ceil(check_values),
+        "the check interval must be counted in values, not in edges"
+    );
+}
+
 #[test]
 fn enumerate_active_circuits_abandons_an_already_expired_deadline() {
     // The enumerator amortizes its clock reads over `DEADLINE_CHECK_INTERVAL`

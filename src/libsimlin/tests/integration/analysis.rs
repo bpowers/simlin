@@ -2343,12 +2343,15 @@ fn discover_loops_tiny_budget_truncates() {
         //
         // What the budget buys is split: the enumeration path gets half of it
         // and copying 200k steps of per-edge score rows exceeds that on its
-        // own, so it is abandoned; the shortest-path fallback then runs on the
-        // remainder and stops at the top of the first saved step it cannot
-        // afford. `truncated` is therefore the FALLBACK's verdict, and it is
-        // reachable only because the split leaves the fallback time to reach
-        // it -- an undivided budget would have been spent entirely inside the
-        // abandoned enumeration and the caller would get nothing at all.
+        // own, so it is abandoned at the first block boundary past its half
+        // -- a block being a fixed number of VALUES, so one edge's long
+        // series is cut mid-copy rather than overrunning to the next edge.
+        // The shortest-path fallback then runs on the remainder and stops at
+        // the top of the first saved step it cannot afford. `truncated` is
+        // therefore the FALLBACK's verdict, and it is reachable only because
+        // the split leaves the fallback time to reach it -- an undivided
+        // budget would have been spent entirely inside the abandoned
+        // enumeration and the caller would get nothing at all.
         let test_project = TestProject::new("main")
             .with_sim_time(0.0, 200_000.0, 1.0)
             .stock("population", "10", &["adjustment"], &[], None)

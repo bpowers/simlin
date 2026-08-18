@@ -38,7 +38,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use super::{Clock, DEADLINE_CHECK_INTERVAL, IndexedSearch, MIN_CONTRIBUTION, expired};
+use super::{Clock, DEADLINE_CHECK_INTERVAL, IndexedSearch, MIN_CONTRIBUTION, expired, is_active};
 use crate::results::Results;
 
 /// Maximum elementary circuits the union-graph enumerator may emit before
@@ -86,12 +86,15 @@ pub(super) const MAX_DISCOVERY_ENUM_EDGE_ROWS: u64 = 20_000_000;
 /// The build's work is `union edges x step_count` slab reads, and either
 /// factor alone can be the large one: World3 is ~430 edges over 401 saved
 /// steps, while a two-variable goal-seeking model saved at 200k steps is 6
-/// edges over 200,001. Counting VALUES rather than edges keeps one check
-/// interval the same amount of work in both shapes -- the stride in edges is
-/// derived from the step count, so the inner per-step loop stays check-free.
-/// The first check happens before the first edge is copied, so an
-/// already-expired deadline costs no work at all.
-const ACTIVITY_BUILD_DEADLINE_CHECK_VALUES: usize = 1 << 16;
+/// edges over 200,001. Counting VALUES rather than edges is what keeps one
+/// check interval the same amount of work in both shapes: a single edge of
+/// the second model is more values than this whole interval, so the copy of
+/// one edge's series is itself split into blocks and checked at the block
+/// boundaries. An edge-granular check on that model would spend a
+/// millisecond-scale budget entirely inside the build and hand the fallback a
+/// deadline that had already passed. The first check happens before any value
+/// is copied, so an already-expired deadline costs no work at all.
+pub(super) const ACTIVITY_BUILD_DEADLINE_CHECK_VALUES: usize = 1 << 16;
 
 /// How many circuits [`retain_circuits`] scores between wall-clock deadline
 /// checks. A circuit's scoring pass is O(active steps), so a few thousand of
@@ -213,9 +216,11 @@ pub(super) struct ActivityGraph {
     /// Per-node inbound neighbours, for the per-root induced-SCC computation.
     radj: Vec<Vec<u32>>,
     /// Flat per-edge activity bitsets: `edge_row * words .. +words`. Bit `t` is
-    /// set when the edge's score at saved step `t` is finite nonzero, or
-    /// infinite (a real divergent signal the totals keep; only NaN and exact 0
-    /// are inactive -- the same test [`Self::build`] applies per step below).
+    /// set when the edge's score at saved step `t` is active by
+    /// [`super::is_active`] -- finite nonzero, or infinite (a real divergent
+    /// signal the totals keep; only NaN and exact 0 are inactive). That rule
+    /// is shared with the fallback, so both generators agree on which cycles
+    /// exist.
     ///
     /// Bit 0 is carried but never satisfies the enumerator's activity test
     /// (the `head & !1u64` mask in [`enumerate_active_circuits`]): step 0
@@ -270,8 +275,14 @@ impl ActivityGraph {
         let n_nodes = search.node_count();
         let step_count = results.step_count;
         let words = step_count.div_ceil(64).max(1);
-        let check_stride = (ACTIVITY_BUILD_DEADLINE_CHECK_VALUES / step_count.max(1)).max(1);
-        let mut edges_scanned = 0usize;
+        if expired(deadline, clock) {
+            return None;
+        }
+        // Values this check interval has left. Decremented by every value
+        // copied and refilled at each check, so the interval spans the same
+        // work whether the graph is wide (many short edges) or deep (few long
+        // ones).
+        let mut values_until_check = ACTIVITY_BUILD_DEADLINE_CHECK_VALUES;
 
         let mut adj: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n_nodes];
         let mut radj: Vec<Vec<u32>> = vec![Vec::new(); n_nodes];
@@ -284,30 +295,39 @@ impl ActivityGraph {
 
         for (from, edges) in search.adj.iter().enumerate() {
             for edge in edges {
-                if edges_scanned.is_multiple_of(check_stride) && expired(deadline, clock) {
-                    return None;
-                }
-                edges_scanned += 1;
                 if edge.to as usize == from {
                     // A self-edge can never be part of an elementary cycle of
                     // length >= 2 (such a cycle never repeats a node), and a
                     // one-variable "loop" is not feedback -- see the module
                     // doc. Dropping it here keeps it out of the traversal, the
-                    // SCC structure, and the scoring rows alike.
+                    // SCC structure, and the scoring rows alike. It copies no
+                    // values, so it also consumes no check interval.
                     continue;
                 }
                 edge_bits.iter_mut().for_each(|w| *w = 0);
                 let mut any = false;
-                for step in 0..step_count {
-                    let value = results.data[step * results.step_size + edge.offset];
-                    edge_series[step] = value;
-                    if value != 0.0 && value.is_finite() || value.is_infinite() {
-                        edge_bits[step / 64] |= 1u64 << (step % 64);
-                        // Membership in the union graph is decided over
-                        // `1..step_count` only, so a step-0-only edge is
-                        // excluded -- the same window the fallback sweeps.
-                        any |= step >= 1;
+                let mut step = 0usize;
+                while step < step_count {
+                    if values_until_check == 0 {
+                        if expired(deadline, clock) {
+                            return None;
+                        }
+                        values_until_check = ACTIVITY_BUILD_DEADLINE_CHECK_VALUES;
                     }
+                    let block_end = (step + values_until_check).min(step_count);
+                    for s in step..block_end {
+                        let value = results.data[s * results.step_size + edge.offset];
+                        edge_series[s] = value;
+                        if is_active(value) {
+                            edge_bits[s / 64] |= 1u64 << (s % 64);
+                            // Membership in the union graph is decided over
+                            // `1..step_count` only, so a step-0-only edge is
+                            // excluded -- the same window the fallback sweeps.
+                            any |= s >= 1;
+                        }
+                    }
+                    values_until_check -= block_end - step;
+                    step = block_end;
                 }
                 if any {
                     let row = edge_from.len() as u32;

@@ -237,9 +237,10 @@ class TestAnalyzeTruncation:
         # A 1ms timeout on a model with a very long time horizon exceeds the
         # budget in candidate generation, so the result is marked truncated.
         # The engine splits the budget: the exact enumeration is abandoned
-        # part way and the shortest-path fallback runs on the remainder,
-        # stopping at the first saved step it cannot afford.  The contract
-        # here is the flag plus a prompt return.
+        # part way through copying one edge's 200k-step score series, and the
+        # shortest-path fallback runs on the remainder, stopping at the first
+        # saved step it cannot afford.  The contract here is the flag plus a
+        # prompt return.
         analysis = large_horizon_model.analyze(timeout=0.001)
         assert analysis.truncated
 
