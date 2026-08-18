@@ -139,7 +139,15 @@ def check_installed(*, require_opt: bool) -> int:
         return 1
 
     project = simlin.Project.new()
-    widget = project.main_model.widget()
+    try:
+        widget = project.main_model.widget()
+    except simlin.SimlinDependencyError as exc:
+        print(
+            f"error: {exc}\n       (this probe must run where the wheel is installed WITH "
+            f"the notebook extra: pip install 'pysimlin[notebook]')",
+            file=sys.stderr,
+        )
+        return 1
     esm = getattr(widget, "_esm", "")
     if not isinstance(esm, str) or not esm.strip():
         print("error: ModelWidget._esm is empty; the widget module did not load", file=sys.stderr)

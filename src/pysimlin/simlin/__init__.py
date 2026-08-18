@@ -36,6 +36,7 @@ from .errors import (
     ErrorDetail,
     ErrorSeverity,
     SimlinAssetError,
+    SimlinDependencyError,
     SimlinError,
     SimlinImportError,
     SimlinRuntimeError,
@@ -75,14 +76,16 @@ if TYPE_CHECKING:
 
 
 def __getattr__(name: str) -> Any:
-    # ``ModelWidget`` is exported lazily: importing anywidget/ipywidgets
-    # costs a few hundred milliseconds that scripts, servers, and tests
-    # which never display a widget should not pay.  ``Model.widget()`` and
-    # displaying a model import it on demand the same way.
+    # ``ModelWidget`` is exported lazily: anywidget/ipywidgets are the
+    # OPTIONAL ``notebook`` extra (``pip install "pysimlin[notebook]"``), and
+    # importing them costs a few hundred milliseconds that scripts, servers,
+    # and tests which never display a widget should not pay.
+    # ``Model.widget()`` and displaying a model import it on demand the same
+    # way; without the extra the import raises ``SimlinDependencyError``.
     if name == "ModelWidget":
-        from .widget import ModelWidget
+        from ._widget_core import import_widget_module
 
-        return ModelWidget
+        return import_widget_module().ModelWidget
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -204,6 +207,7 @@ __all__ = [
     "Run",
     "Sim",
     "SimlinAssetError",
+    "SimlinDependencyError",
     "SimlinError",
     "SimlinImportError",
     "SimlinRuntimeError",

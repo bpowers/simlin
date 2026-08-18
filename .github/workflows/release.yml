@@ -202,9 +202,14 @@ jobs:
           fi
 
           echo "Installing wheel: $WHEEL"
-          uv pip install --system "$WHEEL"
+          # The notebook extra: the asset probe below constructs a
+          # ModelWidget and the test suite drives it (a bare wheel install
+          # is covered by tests/test_widget_optional.py, which blocks the
+          # import). Extras on a local wheel path: pip accepts
+          # "path[extra]", so this spells the extra that way.
+          uv pip install --system "${WHEEL}[notebook]"
 
-          # Install test dependencies explicitly (extras don't work reliably with local wheel paths)
+          # Install test dependencies explicitly (the test extra's pins live in pyproject; kept in step by hand)
           echo "Installing test dependencies..."
           uv pip install --system "pytest>=7.0.0" "pytest-cov>=4.0.0" "hypothesis>=6.100.0" "jsonschema>=4.20.0"
 
@@ -222,10 +227,11 @@ jobs:
       # AC4.1/AC4.4 of docs/design-plans/2026-08-17-pysimlin-widget.md: every
       # wheel carries widget.js + libsimlin-browser.wasm (+ ASSETS.json), the
       # assets are byte-identical across all platform wheels, and the
-      # installed package can construct a ModelWidget. Both invocations exit
-      # non-zero on a wheel missing the assets. The --installed probe runs
-      # from a directory that does not contain src/pysimlin so `import
-      # simlin` resolves to the installed wheel.
+      # installed package (with the notebook extra) can construct a
+      # ModelWidget. Both invocations exit non-zero on a wheel missing the
+      # assets. The --installed probe runs from a directory that does not
+      # contain src/pysimlin so `import simlin` resolves to the installed
+      # wheel.
       - name: Check widget assets in the wheels
         run: |
           python src/pysimlin/scripts/check_wheel_assets.py --require-opt wheelhouse/*.whl

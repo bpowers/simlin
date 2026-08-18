@@ -172,6 +172,19 @@ class SimlinWriteError(SimlinRuntimeError):
         self.revision = revision
 
 
+class SimlinDependencyError(SimlinError, ImportError):
+    """An optional dependency this feature needs is not installed.
+
+    The notebook editor (:meth:`simlin.Model.widget`, displaying a model)
+    needs the ``notebook`` extra -- ``pip install "pysimlin[notebook]"`` --
+    which a bare ``pip install pysimlin`` deliberately leaves out so
+    scripts and servers that never display a model do not carry the
+    anywidget/ipywidgets chain.  Also an :class:`ImportError`, so code that
+    guards optional imports with ``except ImportError`` keeps working.  The
+    message carries the install line for the running host.
+    """
+
+
 class SimlinAssetError(SimlinError):
     """A file that ships inside the pysimlin package -- the notebook widget's
     JS module or engine wasm -- is missing or cannot be delivered.

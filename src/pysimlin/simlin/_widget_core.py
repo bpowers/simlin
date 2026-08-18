@@ -21,14 +21,60 @@ widget-owned), and every request or reply is a custom message
 from __future__ import annotations
 
 import base64
+import importlib
 import json
+import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Union
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection
+    from types import ModuleType
 
     from ._sync import ChangeEvent, ChangeSource
+
+# ── the optional extra ──────────────────────────────────────────────────
+
+NOTEBOOK_EXTRA = "pysimlin[notebook]"
+"""The extra that installs the notebook editor's dependencies (anywidget,
+and through it ipywidgets/traitlets/IPython).  Optional because that chain
+is a couple of dozen packages that scripts, MCP servers, and CI installs
+which never display a model should not carry."""
+
+
+def install_hint() -> str:
+    """The one-line install command for the running host: Colab wants the
+    ``%pip`` magic (a plain ``pip`` there installs into the wrong
+    interpreter often enough that Colab documents the magic), everywhere
+    else plain ``pip``.  Colab is detected by whether ``google.colab`` is
+    importable (a Colab kernel has it imported already), which is how
+    anywidget itself detects it."""
+    if sys.modules.get("google.colab") is None:
+        try:
+            importlib.import_module("google.colab")
+        except ImportError:
+            return f'pip install "{NOTEBOOK_EXTRA}"'
+    return f'%pip install "{NOTEBOOK_EXTRA}"'
+
+
+def missing_dependency_message() -> str:
+    return (
+        f"the notebook editor needs the optional {NOTEBOOK_EXTRA!r} extra "
+        f"(anywidget); install it with: {install_hint()}"
+    )
+
+
+def import_widget_module() -> ModuleType:
+    """``simlin.widget``, imported on demand.  Raises
+    :class:`~simlin.errors.SimlinDependencyError` (an ``ImportError``)
+    naming the install line when anywidget is not installed."""
+    from .errors import SimlinDependencyError
+
+    try:
+        return importlib.import_module(f"{__package__}.widget")
+    except ImportError as exc:
+        raise SimlinDependencyError(missing_dependency_message()) from exc
+
 
 # ── asset delivery ──────────────────────────────────────────────────────
 
@@ -478,6 +524,7 @@ __all__ = [
     "ASSET_PACKAGE_DIR",
     "INLINE_WASM_GLOBAL",
     "MAX_SNAPSHOT_BYTES",
+    "NOTEBOOK_EXTRA",
     "TORNADO_DEFAULT_MAX_MESSAGE_SIZE",
     "WASM_FILE",
     "WIDGET_JS",
@@ -494,9 +541,12 @@ __all__ = [
     "WasmRequest",
     "dispatch_for_shell",
     "format_size",
+    "import_widget_module",
     "inline_esm",
+    "install_hint",
     "is_own_change",
     "missing_asset_message",
+    "missing_dependency_message",
     "notice_for_change",
     "notice_message",
     "oversize_notice",

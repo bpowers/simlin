@@ -18,9 +18,13 @@ Design and acceptance criteria: [docs/design-plans/2026-08-17-pysimlin-widget.md
 
 ## What is common to every host
 
-Install: `pip install pysimlin` (a wheel exists for Linux x86_64/aarch64
-and macOS arm64, Python 3.11+; from a checkout, the wheel
-`scripts/build_wheels.py` produces). No extension, no sidecar process.
+Install: `pip install "pysimlin[notebook]"` (a wheel exists for Linux
+x86_64/aarch64 and macOS arm64, Python 3.11+; from a checkout, the wheel
+`scripts/build_wheels.py` produces). The `notebook` extra is anywidget;
+without it a displayed model degrades to its SVG diagram plus a
+`RuntimeWarning` carrying this install line (`%pip install
+"pysimlin[notebook]"` under Colab), and `m.widget()` raises
+`SimlinDependencyError`. No extension, no sidecar process.
 
 The cells, run in order (this is
 [`examples/notebook_editor.ipynb`](../examples/notebook_editor.ipynb) in
@@ -118,7 +122,7 @@ those rows of the table by hand when touching them.
 Install and run:
 
 ```bash
-pip install pysimlin jupyterlab
+pip install "pysimlin[notebook]" jupyterlab
 jupyter lab
 ```
 
@@ -145,7 +149,7 @@ labextensions, same JupyterLab theming attributes; expected to behave as
 JupyterLab 4. Not run.
 
 ```bash
-pip install pysimlin notebook
+pip install "pysimlin[notebook]" notebook
 jupyter notebook
 ```
 
@@ -155,7 +159,7 @@ apply unchanged; "model not found" on reopen applies unchanged.
 ## VS Code (local kernel) -- UNVERIFIED
 
 ```bash
-pip install pysimlin ipykernel
+pip install "pysimlin[notebook]" ipykernel
 # open a .ipynb in VS Code with the Jupyter extension, pick this interpreter as the kernel
 ```
 
@@ -225,7 +229,7 @@ investigation, not from a run):
 marimo runs cells as reactive Python and hosts anywidgets natively.
 
 ```bash
-pip install pysimlin marimo
+pip install "pysimlin[notebook]" marimo
 marimo edit
 ```
 

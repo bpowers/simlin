@@ -22,8 +22,16 @@ Python bindings for [Simlin](https://simlin.com), a system dynamics simulation e
 ## Installation
 
 ```bash
-pip install pysimlin
+pip install pysimlin                # simulate, analyze, edit, render diagrams
+pip install "pysimlin[notebook]"    # + the interactive editor in notebook cells
 ```
+
+The `notebook` extra adds [anywidget](https://anywidget.dev) (and through it
+ipywidgets/IPython) -- a couple of dozen packages that a script, an MCP
+server, or a CI install which never displays a model does not need, which
+is why the bare install leaves them out. Without it everything else works;
+displaying a model shows the static SVG diagram plus a warning with the
+install line, and `model.widget()` raises `SimlinDependencyError`.
 
 The distribution is named `pysimlin`; the importable package is `simlin`:
 
@@ -32,7 +40,7 @@ import simlin
 ```
 
 Requires Python 3.11+ on macOS (ARM64) or Linux (ARM64, x86_64). Depends on
-numpy, pandas, cffi, and anywidget (for the notebook editor).
+numpy, pandas, cffi, and cattrs; the `notebook` extra adds anywidget.
 
 ## Quick Start
 
@@ -125,7 +133,7 @@ Complete, runnable programs live in
   from Python, and follows a change made by another tool -- the workflow for
   collaborating on a model with Claude Code.
 - [`colab_quickstart.ipynb`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/examples/colab_quickstart.ipynb)
-  is the same in Google Colab: `pip install`, build and open a model,
+  is the same in Google Colab: `%pip install "pysimlin[notebook]"`, build and open a model,
   display the editor, simulate.
 
 All of them run in CI on pull requests and pushes to `main` (the Colab notebook's `%pip` cell excepted).
@@ -308,9 +316,13 @@ print(model.reload())   # False
 ### Interactive Editing in Notebooks
 
 A model displayed as a cell's value is the Simlin diagram editor, live.
-`pip install pysimlin` is all it needs: the editor and its engine ship
-inside the wheel as an [anywidget](https://anywidget.dev), so there is no
-extension to install and no sidecar process. It is verified on JupyterLab 4
+`pip install "pysimlin[notebook]"` is all it needs: the editor and its
+engine ship inside the wheel as an [anywidget](https://anywidget.dev), so
+there is no extension to install and no sidecar process (anywidget rather
+than a homegrown stack because it is what makes one widget render on every
+host: VS Code's kernel needs `import ipywidgets`, marimo needs
+`anywidget.AnyWidget`). Without the extra a displayed model shows its SVG
+diagram and a warning with the install line. It is verified on JupyterLab 4
 (an automated browser journey runs in CI on pull requests and pushes to `main`) and expected to work
 wherever anywidget does -- Notebook 7, VS Code, Google Colab, marimo --
 with the checklist and the honest status of each host in

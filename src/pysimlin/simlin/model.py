@@ -35,6 +35,7 @@ from .errors import (
     ErrorCode,
     ErrorSeverity,
     SimlinAssetError,
+    SimlinDependencyError,
     SimlinError,
     SimlinRuntimeError,
 )
@@ -406,18 +407,23 @@ class Model:
                 Raise it only together with that server limit.
 
         Raises:
+            SimlinDependencyError: if the ``notebook`` extra is not
+                installed (``pip install "pysimlin[notebook]"``); the
+                message carries the install line for the running host.
             SimlinAssetError: if the widget's JS/wasm assets are missing
                 from the installation.
             SimlinRuntimeError: if this model is not attached to a project.
         """
-        # Imported here so that ``import simlin`` does not pay for anywidget
-        # and ipywidgets (a few hundred milliseconds) unless a widget is used.
-        from .widget import ModelWidget
+        # Imported here: anywidget/ipywidgets are the optional ``notebook``
+        # extra, and ``import simlin`` never pays for them (a few hundred
+        # milliseconds) unless a widget is used.
+        from ._widget_core import import_widget_module
 
+        widget_class: type[ModelWidget] = import_widget_module().ModelWidget
         options: dict[str, Any] = {"height": height, "theme": theme, "read_only": read_only}
         if max_snapshot_bytes is not None:
             options["max_snapshot_bytes"] = max_snapshot_bytes
-        return ModelWidget(self, **options)
+        return widget_class(self, **options)
 
     def _repr_mimebundle_(
         self, include: object = None, exclude: object = None
@@ -429,17 +435,18 @@ class Model:
         keeps no reference to any of them.  The SVG rides in the same
         bundle so nbconvert, GitHub, and other static renderers show the
         diagram; a model whose diagram cannot be rendered still gets the
-        interactive view (with a warning).  Conversely, when the widget's
-        assets are missing from the installation the display degrades to
-        the SVG and a ``RuntimeWarning`` carrying the actionable message --
-        a notebook user then sees the diagram and the fix rather than a
-        traceback; :meth:`widget` itself still raises.
+        interactive view (with a warning).  Conversely, when the
+        ``notebook`` extra is not installed, or the widget's assets are
+        missing from the installation, the display degrades to the SVG and
+        a ``RuntimeWarning`` carrying the actionable message (the install
+        line, the missing file) -- a notebook user then sees the diagram and
+        the fix rather than a traceback; :meth:`widget` itself still raises.
         """
         data: dict[str, Any] = {}
         metadata: dict[str, Any] = {}
         try:
             widget = self.widget()
-        except SimlinAssetError as exc:
+        except (SimlinDependencyError, SimlinAssetError) as exc:
             warnings.warn(
                 f"simlin: showing the static diagram only; the interactive editor is "
                 f"unavailable because {exc}",
