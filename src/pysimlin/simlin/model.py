@@ -374,6 +374,7 @@ class Model:
         height: int = 600,
         theme: str = "auto",
         read_only: bool = False,
+        max_snapshot_bytes: int | None = None,
     ) -> ModelWidget:
         """An interactive diagram editor for this model, for a notebook cell.
 
@@ -389,6 +390,11 @@ class Model:
             height: Editor height in CSS pixels.
             theme: ``"auto"`` (follow the notebook), ``"light"``, or ``"dark"``.
             read_only: Show the diagram without allowing edits.
+            max_snapshot_bytes: Largest edit (the project as native JSON,
+                UTF-8 bytes) the editor sends back to the kernel; the
+                default, ``simlin._widget_core.MAX_SNAPSHOT_BYTES`` (8 MiB),
+                stays inside the notebook server's 10 MiB websocket message
+                limit.  Raise it only together with that server limit.
 
         Raises:
             SimlinAssetError: if the widget's JS/wasm assets are missing
@@ -399,7 +405,10 @@ class Model:
         # and ipywidgets (a few hundred milliseconds) unless a widget is used.
         from .widget import ModelWidget
 
-        return ModelWidget(self, height=height, theme=theme, read_only=read_only)
+        options: dict[str, Any] = {"height": height, "theme": theme, "read_only": read_only}
+        if max_snapshot_bytes is not None:
+            options["max_snapshot_bytes"] = max_snapshot_bytes
+        return ModelWidget(self, **options)
 
     def _repr_mimebundle_(
         self, include: object = None, exclude: object = None

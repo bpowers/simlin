@@ -5,9 +5,14 @@
 import { describe, it, expect } from '@rstest/core';
 
 import {
+  checkSnapshotSize,
   classifyPush,
   DEFAULT_HEIGHT_PX,
+  formatMiB,
   inFlightFor,
+  MAX_SNAPSHOT_BYTES,
+  oversizeMessage,
+  oversizeNotice,
   parseNoticeMessage,
   parseSaveReply,
   parseWasmReply,
@@ -16,6 +21,7 @@ import {
   seedAfterSaved,
   snapshotMessage,
   TRAITS,
+  snapshotByteLength,
   versionAfterReply,
   wrapperStyle,
 } from './widget-core';
@@ -33,6 +39,7 @@ describe('readTraits', () => {
         [TRAITS.height]: 480,
         [TRAITS.theme]: 'dark',
         [TRAITS.readOnly]: true,
+        [TRAITS.maxSnapshotBytes]: 4096,
       }),
     );
     expect(t).toEqual({
@@ -41,6 +48,7 @@ describe('readTraits', () => {
       height: 480,
       theme: 'dark',
       readOnly: true,
+      maxSnapshotBytes: 4096,
     });
   });
 
@@ -52,7 +60,19 @@ describe('readTraits', () => {
       height: DEFAULT_HEIGHT_PX,
       theme: 'auto',
       readOnly: false,
+      maxSnapshotBytes: MAX_SNAPSHOT_BYTES,
     });
+  });
+
+  it.each([
+    ['cap 0', 0, MAX_SNAPSHOT_BYTES],
+    ['cap negative', -1, MAX_SNAPSHOT_BYTES],
+    ['cap fractional', 1.5, MAX_SNAPSHOT_BYTES],
+    ['cap NaN', NaN, MAX_SNAPSHOT_BYTES],
+    ['cap string', '4096', MAX_SNAPSHOT_BYTES],
+    ['cap positive integer', 4096, 4096],
+  ])('maxSnapshotBytes: %s', (_label, raw, expected) => {
+    expect(readTraits(getterFor({ [TRAITS.maxSnapshotBytes]: raw })).maxSnapshotBytes).toBe(expected);
   });
 
   // Enumerate every coercion arm rather than one representative each.
@@ -245,6 +265,43 @@ describe('snapshot protocol', () => {
 
     it('a different pair while a snapshot is in flight remounts (disk change raced our save)', () => {
       expect(classifyPush(seed, inFlightFor(3, 'S1'), { revision: 4, projectJson: 'DISK' })).toBe('remount');
+    });
+  });
+});
+
+describe('snapshot size', () => {
+  it('the default cap is 8 MiB, matching pysimlin', () => {
+    expect(MAX_SNAPSHOT_BYTES).toBe(8 * 1024 * 1024);
+  });
+
+  it('measures UTF-8 bytes, not UTF-16 units', () => {
+    expect(snapshotByteLength('abc')).toBe(3);
+    expect(snapshotByteLength('Ünï')).toBe(5);
+    expect(snapshotByteLength('')).toBe(0);
+  });
+
+  it.each([
+    ['at the limit is ok', 'abcd', 4, { kind: 'ok', bytes: 4 }],
+    ['below the limit is ok', 'ab', 4, { kind: 'ok', bytes: 2 }],
+    ['one byte over is oversize', 'abcde', 4, { kind: 'oversize', bytes: 5, limit: 4 }],
+    ['multi-byte characters count as bytes', 'Ünï', 4, { kind: 'oversize', bytes: 5, limit: 4 }],
+  ])('checkSnapshotSize: %s', (_label, json, limit, expected) => {
+    expect(checkSnapshotSize(json, limit)).toEqual(expected);
+  });
+
+  it('formats MiB like pysimlin format_mib', () => {
+    expect(formatMiB(8 * 1024 * 1024)).toBe('8 MiB');
+    expect(formatMiB(10 * 1024 * 1024)).toBe('10 MiB');
+    expect(formatMiB(9_000_000)).toBe('8.6 MiB');
+    expect(formatMiB(1_357_590)).toBe('1.3 MiB');
+    expect(formatMiB(0)).toBe('0 MiB');
+  });
+
+  it('the report and the toast carry both sizes', () => {
+    expect(oversizeMessage(9_000_000)).toEqual({ type: 'oversize', bytes: 9_000_000 });
+    expect(oversizeNotice(9_000_000, MAX_SNAPSHOT_BYTES)).toEqual({
+      level: 'warn',
+      text: 'Edit not saved: the model is too large for the notebook connection (8.6 MiB > 8 MiB limit); edit it from Python instead.',
     });
   });
 });

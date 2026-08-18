@@ -14,18 +14,25 @@ from simlin._sync import ChangeEvent
 from simlin._widget_core import (
     ASSET_ENV,
     INLINE_WASM_GLOBAL,
+    MAX_SNAPSHOT_BYTES,
+    TORNADO_DEFAULT_MAX_MESSAGE_SIZE,
     WASM_FILE,
     AssetMode,
     MalformedSnapshot,
+    OversizeReport,
     SnapshotOutcome,
     SnapshotRequest,
     Unrecognised,
     WasmRequest,
     dispatch_for_shell,
+    format_mib,
     inline_esm,
     is_own_change,
     missing_asset_message,
     notice_for_change,
+    oversize_notice,
+    oversize_report_warning,
+    oversize_warning,
     parse_asset_mode,
     parse_incoming,
     plan_snapshot_reply,
@@ -80,6 +87,12 @@ class TestParseIncoming:
             base=3, json="{}"
         )
 
+    def test_oversize(self) -> None:
+        assert parse_incoming({"type": "oversize", "bytes": 9_000_000}) == OversizeReport(
+            bytes=9_000_000
+        )
+        assert parse_incoming({"type": "oversize", "bytes": 0}) == OversizeReport(bytes=0)
+
     @pytest.mark.parametrize(
         ("content", "reason"),
         [
@@ -87,6 +100,10 @@ class TestParseIncoming:
             (None, "expected a JSON object"),
             ({}, "unknown message type None"),
             ({"type": "saved"}, "unknown message type 'saved'"),
+            ({"type": "oversize"}, "oversize 'bytes' must be a non-negative integer"),
+            ({"type": "oversize", "bytes": "9"}, "oversize 'bytes' must be"),
+            ({"type": "oversize", "bytes": True}, "oversize 'bytes' must be"),
+            ({"type": "oversize", "bytes": -1}, "oversize 'bytes' must be"),
         ],
     )
     def test_unrecognised(self, content: object, reason: str) -> None:
@@ -110,6 +127,78 @@ class TestParseIncoming:
         message = parse_incoming(content)
         assert isinstance(message, MalformedSnapshot)
         assert reason in message.reason
+
+
+class TestSnapshotSize:
+    """The snapshot cap and its three texts (seed/push warning, report
+    warning, notice)."""
+
+    def test_default_cap_leaves_room_under_the_tornado_default(self) -> None:
+        # The measured envelope inflation on the repo's models is at most
+        # 1.16x (see the MAX_SNAPSHOT_BYTES rationale); the cap times that
+        # must still fit under tornado's default with headroom for headers.
+        assert MAX_SNAPSHOT_BYTES == 8 * 1024 * 1024
+        assert TORNADO_DEFAULT_MAX_MESSAGE_SIZE == 10 * 1024 * 1024
+        assert MAX_SNAPSHOT_BYTES * 1.16 < TORNADO_DEFAULT_MAX_MESSAGE_SIZE - 64 * 1024
+
+    @pytest.mark.parametrize(
+        ("nbytes", "text"),
+        [
+            (8 * 1024 * 1024, "8 MiB"),
+            (10 * 1024 * 1024, "10 MiB"),
+            (int(12.3 * 1024 * 1024), "12.3 MiB"),
+            (1_357_590, "1.3 MiB"),
+            (0, "0 MiB"),
+        ],
+    )
+    def test_format_mib(self, nbytes: int, text: str) -> None:
+        assert format_mib(nbytes) == text
+
+    @pytest.mark.parametrize("nbytes", [0, 1, MAX_SNAPSHOT_BYTES - 1, MAX_SNAPSHOT_BYTES])
+    def test_at_or_below_the_cap_is_no_warning(self, nbytes: int) -> None:
+        assert oversize_warning(nbytes, MAX_SNAPSHOT_BYTES) is None
+
+    def test_above_the_cap_warns_with_the_cause_and_both_fixes(self) -> None:
+        text = oversize_warning(MAX_SNAPSHOT_BYTES + 1, MAX_SNAPSHOT_BYTES)
+        assert text is not None
+        assert text.startswith("simlin: ")
+        assert "8 MiB" in text
+        assert "will not be saved" in text
+        assert "model.edit()" in text
+        assert "websocket_max_message_size" in text
+        assert "10 MiB" in text
+        assert "--ServerApp.tornado_settings" in text
+        assert "max_snapshot_bytes" in text
+
+    def test_custom_limit_is_what_the_texts_report(self) -> None:
+        limit = 32 * 1024 * 1024
+        assert oversize_warning(limit, limit) is None
+        text = oversize_warning(limit + 1, limit)
+        assert text is not None
+        assert "32 MiB" in text
+        assert "32 MiB" in oversize_report_warning(limit + 1, limit)
+        assert "32 MiB" in oversize_notice(limit + 1, limit)["text"]
+
+    def test_report_warning_names_the_python_alternative_and_the_knob(self) -> None:
+        text = oversize_report_warning(9_000_000, MAX_SNAPSHOT_BYTES)
+        assert text.startswith("simlin: ")
+        assert "was not saved" in text
+        assert "8.6 MiB" in text
+        assert "8 MiB" in text
+        assert "from Python" in text
+        assert "max_snapshot_bytes" in text
+        assert "websocket_max_message_size" in text
+
+    def test_notice_is_a_warn_level_notice_with_both_sizes(self) -> None:
+        notice = oversize_notice(9_000_000, MAX_SNAPSHOT_BYTES)
+        assert notice == {
+            "type": "notice",
+            "level": "warn",
+            "text": (
+                "Edit not saved: the model is too large for the notebook connection "
+                "(8.6 MiB > 8 MiB limit); edit it from Python instead."
+            ),
+        }
 
 
 class TestPlanSnapshotReply:

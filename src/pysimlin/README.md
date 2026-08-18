@@ -344,6 +344,19 @@ messages, set `SIMLIN_WIDGET_ASSET` **before** `import simlin`: `inline`
 embeds the engine wasm into the module (works everywhere, largest output),
 or an `http(s)://` URL loads the module from a server you run.
 
+Very large models display but cannot be edited from the notebook editor:
+each edit travels browser-to-kernel as the whole project in JSON, and the
+notebook server drops websocket messages above 10 MiB (tornado's
+`websocket_max_message_size`) by closing the connection. The editor
+therefore refuses to send an edit whose snapshot exceeds 8 MiB
+(`model.widget(max_snapshot_bytes=...)` sets the cap) and says "Edit not
+saved: the model is too large for the notebook connection ..." instead of
+hanging; displaying such a model emits a `RuntimeWarning` up front. For
+scale, C-LEARN (911 variables) is 1.3 MiB. Editing from Python is
+unaffected. To edit models that large in the editor, raise both limits:
+`jupyter lab --ServerApp.tornado_settings='{"websocket_max_message_size": 104857600}'`
+and `max_snapshot_bytes` at or below about 80% of that.
+
 ### Running Simulations
 
 ```python

@@ -59,10 +59,12 @@ from . import _widget_core as core
 from ._widget_core import (
     ASSET_ENV,
     ASSET_PACKAGE_DIR,
+    MAX_SNAPSHOT_BYTES,
     WASM_FILE,
     WIDGET_JS,
     AssetMode,
     MalformedSnapshot,
+    OversizeReport,
     SnapshotOutcome,
     SnapshotRequest,
     Unrecognised,
@@ -70,6 +72,9 @@ from ._widget_core import (
     dispatch_for_shell,
     is_own_change,
     notice_for_change,
+    oversize_notice,
+    oversize_report_warning,
+    oversize_warning,
     parse_asset_mode,
     parse_incoming,
     plan_snapshot_reply,
@@ -193,7 +198,13 @@ class ModelWidget(anywidget.AnyWidget):
     authoritative snapshot and never written by the browser; ``selection``
     is written by the browser (mirrored to :attr:`Model.selection`);
     ``height`` (px), ``theme`` (``auto`` follows the notebook, else
-    ``light``/``dark``) and ``read_only`` configure the editor.
+    ``light``/``dark``) and ``read_only`` configure the editor;
+    ``max_snapshot_bytes`` is the largest edit (the whole project as native
+    JSON, in UTF-8 bytes) the browser will send back -- above it an edit is
+    refused with a notice instead of being lost to the notebook server's
+    websocket message limit (see ``simlin._widget_core.MAX_SNAPSHOT_BYTES``
+    for the default and why).  Seeding or pushing a project above that size
+    warns once per widget.
 
     Lifetime: like every ipywidget, a widget stays alive until
     :meth:`close` (ipywidgets keeps a registry of open widgets), and it
@@ -207,6 +218,7 @@ class ModelWidget(anywidget.AnyWidget):
     height = traitlets.Int(600).tag(sync=True)
     theme = traitlets.Enum(("auto", "light", "dark"), default_value="auto").tag(sync=True)
     read_only = traitlets.Bool(False).tag(sync=True)
+    max_snapshot_bytes = traitlets.Int(MAX_SNAPSHOT_BYTES, min=1).tag(sync=True)
 
     # Declared explicitly (rather than as a class-level string, which
     # anywidget also accepts) so the module text is supplied per instance:
@@ -221,16 +233,20 @@ class ModelWidget(anywidget.AnyWidget):
         height: int = 600,
         theme: str = "auto",
         read_only: bool = False,
+        max_snapshot_bytes: int = MAX_SNAPSHOT_BYTES,
         dispatch: Dispatch | None = None,
         assets: WidgetAssets | None = None,
         **kwargs: Any,
     ) -> None:
         """Wrap ``model`` (which must belong to a :class:`Project`).
 
-        ``dispatch`` marshals project change notifications; by default the
-        kernel's IO loop when running under ipykernel, else direct
-        delivery.  ``assets`` overrides the process-wide asset resolution
-        (tests; embedding hosts that supply their own build).
+        ``max_snapshot_bytes`` caps the edits the browser sends back (see the
+        class docstring); raise it only together with the notebook server's
+        ``websocket_max_message_size``.  ``dispatch`` marshals project change
+        notifications; by default the kernel's IO loop when running under
+        ipykernel, else direct delivery.  ``assets`` overrides the
+        process-wide asset resolution (tests; embedding hosts that supply
+        their own build).
 
         Raises:
             SimlinAssetError: if the widget's JS module cannot be supplied
@@ -251,6 +267,9 @@ class ModelWidget(anywidget.AnyWidget):
         # because, without a dispatcher, the notification fires inside it.
         self._own_revision: int | None = None
         self._unsubscribe: Callable[[], None] | None = None
+        # The oversize warning is per widget, not per push: a Python edit()
+        # loop on a too-large model would otherwise warn on every iteration.
+        self._warned_oversize = False
 
         json_bytes, revision = project._snapshot()
         super().__init__(
@@ -260,9 +279,11 @@ class ModelWidget(anywidget.AnyWidget):
             height=height,
             theme=theme,
             read_only=read_only,
+            max_snapshot_bytes=max_snapshot_bytes,
             **kwargs,
         )
         self.on_msg(self._on_custom_msg)
+        self._warn_if_oversize(len(json_bytes))
         # A weak reference: the project holds its listeners strongly, and a
         # closed widget must not be kept alive by a project it no longer
         # watches (unsubscribing is the normal path; this is the backstop).
@@ -298,6 +319,21 @@ class ModelWidget(anywidget.AnyWidget):
         with self.hold_sync():
             self.project_json = json_text
             self.revision = revision
+        self._warn_if_oversize(len(json_text.encode("utf-8")))
+
+    def _warn_if_oversize(self, nbytes: int) -> None:
+        """Warn (once per widget) when the project the browser now holds is
+        too large for the browser to send edits of it back.  The kernel ->
+        browser direction has no such limit, so the model still displays;
+        the warning is what tells the Python user why editor edits will be
+        refused, and how to lift both limits."""
+        if self._warned_oversize:
+            return
+        text = oversize_warning(nbytes, int(self.max_snapshot_bytes))
+        if text is None:
+            return
+        self._warned_oversize = True
+        warnings.warn(text, RuntimeWarning, stacklevel=3)
 
     def _push_from_project(self) -> None:
         json_bytes, revision = self._project._snapshot()
@@ -327,6 +363,13 @@ class ModelWidget(anywidget.AnyWidget):
                 self._reply_wasm()
             case SnapshotRequest():
                 self._handle_snapshot(message)
+            case OversizeReport(bytes=nbytes):
+                # The browser already resolved the save unsaved and showed a
+                # toast; the kernel's part is the record for the Python user
+                # (a warning in the cell output) plus the same notice.
+                limit = int(self.max_snapshot_bytes)
+                warnings.warn(oversize_report_warning(nbytes, limit), RuntimeWarning, stacklevel=2)
+                self.send(oversize_notice(nbytes, limit))
             case MalformedSnapshot(reason=reason):
                 # Still owed its one reply: nothing was applied, so rejected
                 # at the current revision, and the notice says what was wrong.

@@ -18,9 +18,26 @@ export const TRAITS = {
   height: 'height',
   theme: 'theme',
   readOnly: 'read_only',
+  maxSnapshotBytes: 'max_snapshot_bytes',
 } as const;
 
 export const DEFAULT_HEIGHT_PX = 600;
+
+/**
+ * Default cap on the snapshot (UTF-8 bytes of the project JSON) `onSave` will
+ * send to the kernel; the kernel's `max_snapshot_bytes` trait carries the
+ * value in force and this is what a missing/invalid trait falls back to.
+ * MUST equal `MAX_SNAPSHOT_BYTES` in pysimlin's `simlin/_widget_core.py`,
+ * which also holds the rationale: the notebook server drops browser->kernel
+ * websocket messages above tornado's `websocket_max_message_size` (10 MiB by
+ * default) by closing the connection, so a snapshot that large would never
+ * arrive and its save would wait forever; the snapshot travels JSON-escaped
+ * inside a message envelope (7-16% inflation measured on the repo's models),
+ * so 8 MiB of snapshot is ~9.3 MiB on the wire, inside the default with
+ * headroom. Above the cap `onSave` sends `{type:'oversize', bytes}` instead
+ * and the edit is reported as not saved.
+ */
+export const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 
 export type Theme = 'auto' | 'light' | 'dark';
 
@@ -31,6 +48,7 @@ export interface WidgetTraits {
   height: number;
   theme: Theme;
   readOnly: boolean;
+  maxSnapshotBytes: number;
 }
 
 /**
@@ -39,7 +57,8 @@ export interface WidgetTraits {
  * should degrade to sane defaults rather than a broken widget: a missing or
  * non-positive height becomes {@link DEFAULT_HEIGHT_PX}, an unknown theme
  * becomes `auto`, a non-string project becomes the empty string (which the
- * Editor reports as an error rather than crashing on).
+ * Editor reports as an error rather than crashing on), a missing or
+ * non-positive snapshot cap becomes {@link MAX_SNAPSHOT_BYTES}.
  */
 export function readTraits(get: (key: string) => unknown): WidgetTraits {
   const heightRaw = get(TRAITS.height);
@@ -52,12 +71,16 @@ export function readTraits(get: (key: string) => unknown): WidgetTraits {
   const revisionRaw = get(TRAITS.revision);
   const revision = typeof revisionRaw === 'number' && Number.isInteger(revisionRaw) ? revisionRaw : 0;
   const projectRaw = get(TRAITS.projectJson);
+  const capRaw = get(TRAITS.maxSnapshotBytes);
+  const maxSnapshotBytes =
+    typeof capRaw === 'number' && Number.isInteger(capRaw) && capRaw > 0 ? capRaw : MAX_SNAPSHOT_BYTES;
   return {
     projectJson: typeof projectRaw === 'string' ? projectRaw : '',
     revision,
     height,
     theme,
     readOnly: get(TRAITS.readOnly) === true,
+    maxSnapshotBytes,
   };
 }
 
@@ -174,6 +197,50 @@ export function parseNoticeMessage(msg: unknown): Notice | null {
  */
 export function snapshotMessage(base: number, json: string): { type: 'snapshot'; base: number; json: string } {
   return { type: 'snapshot', base, json };
+}
+
+// ---- snapshot size --------------------------------------------------------------
+
+/** UTF-8 byte length of a snapshot: what the websocket frame carries (the JS string length counts UTF-16 units). */
+export function snapshotByteLength(json: string): number {
+  return new TextEncoder().encode(json).byteLength;
+}
+
+/**
+ * `bytes` as a short human figure in MiB, one decimal, whole numbers without
+ * it (`8 MiB`, `12.3 MiB`). Same rendering as pysimlin's `format_mib`, so the
+ * toast the widget shows and the notice the kernel sends back read the same
+ * and collapse into one visible message.
+ */
+export function formatMiB(bytes: number): string {
+  const mib = bytes / (1024 * 1024);
+  return Number.isInteger(mib) ? `${mib} MiB` : `${mib.toFixed(1)} MiB`;
+}
+
+export type SnapshotSizeCheck = { kind: 'ok'; bytes: number } | { kind: 'oversize'; bytes: number; limit: number };
+
+/**
+ * Whether a snapshot may be sent under `limit` (the kernel's
+ * `max_snapshot_bytes`). Exactly at the limit is fine; above it the save is
+ * refused up front -- a clear "not saved" instead of a message the server
+ * drops and a promise that never resolves.
+ */
+export function checkSnapshotSize(json: string, limit: number): SnapshotSizeCheck {
+  const bytes = snapshotByteLength(json);
+  return bytes > limit ? { kind: 'oversize', bytes, limit } : { kind: 'ok', bytes };
+}
+
+/** The widget -> kernel report sent INSTEAD of an oversize snapshot; owed no `saved`/`rejected` reply. */
+export function oversizeMessage(bytes: number): { type: 'oversize'; bytes: number } {
+  return { type: 'oversize', bytes };
+}
+
+/** The toast for a refused oversize save; the kernel's own notice uses the same words. */
+export function oversizeNotice(bytes: number, limit: number): Notice {
+  return {
+    level: 'warn',
+    text: `Edit not saved: the model is too large for the notebook connection (${formatMiB(bytes)} > ${formatMiB(limit)} limit); edit it from Python instead.`,
+  };
 }
 
 /**

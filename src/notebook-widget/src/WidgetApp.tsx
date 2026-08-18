@@ -19,8 +19,11 @@ import type { AnyModel } from './anywidget-model';
 import styles from './widget.module.css';
 import { WIDGET_ROOT_CLASS } from './widget-root-class';
 import {
+  checkSnapshotSize,
   classifyPush,
   inFlightFor,
+  oversizeMessage,
+  oversizeNotice,
   parseNoticeMessage,
   parseSaveReply,
   readTraits,
@@ -127,6 +130,21 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
     noticeTimer: null,
   });
 
+  // Show a transient notice; a repeat restarts the timer (a notice is an
+  // event, not state). Used for kernel notices and the widget's own
+  // oversize toast alike.
+  const showNotice = React.useCallback((next: Notice): void => {
+    const r = refs.current;
+    if (r.noticeTimer !== null) {
+      clearTimeout(r.noticeTimer);
+    }
+    setNotice(next);
+    r.noticeTimer = setTimeout(() => {
+      r.noticeTimer = null;
+      setNotice(null);
+    }, NOTICE_TIMEOUT_MS);
+  }, []);
+
   // Remount the Editor on the kernel-authoritative pair. Idempotent on the
   // pair: a push and the `rejected` that follows it (or the two change events
   // of one hold_sync) remount once.
@@ -201,17 +219,9 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
         return;
       }
       const parsed = parseNoticeMessage(args[0]);
-      if (parsed === null) {
-        return;
+      if (parsed !== null) {
+        showNotice(parsed);
       }
-      if (r.noticeTimer !== null) {
-        clearTimeout(r.noticeTimer);
-      }
-      setNotice(parsed);
-      r.noticeTimer = setTimeout(() => {
-        r.noticeTimer = null;
-        setNotice(null);
-      }, NOTICE_TIMEOUT_MS);
     };
     const onHostTheme = (): void => {
       setHostTheme(readHostThemeSignals());
@@ -248,7 +258,7 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
         r.noticeTimer = null;
       }
     };
-  }, [model, readModelTraits, remountFrom]);
+  }, [model, readModelTraits, remountFrom, showNotice]);
 
   // Editor autosave -> kernel. The whole snapshot rides in a `snapshot` custom
   // message with the revision it was edited from (`base`); the promise
@@ -260,6 +270,15 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
   // of the LATEST state goes out when the answer arrives. Deliberately no
   // timeout: a long cell legitimately delays the reply and a timeout would
   // misfire into a spurious failure; unmount resolves it instead.
+  //
+  // Size: a snapshot above the kernel's `max_snapshot_bytes` is not sent at
+  // all -- the notebook server would drop it (tornado closes the socket on a
+  // frame above `websocket_max_message_size`) and the save would hang.
+  // Instead an `oversize` report goes to the kernel (which warns and echoes
+  // the notice), the toast says the edit was not saved, and the promise
+  // resolves undefined so the controller keeps its version and the Editor
+  // keeps the local edit; the next edit will be refused the same way until
+  // the model shrinks or is edited from Python.
   const handleSave = React.useCallback(
     (project: JsonProjectData, currVersion: number): Promise<number | undefined> => {
       if (project.format !== 'json') {
@@ -276,12 +295,20 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
         // flight would make the replies ambiguous. Refuse rather than guess.
         return Promise.resolve(undefined);
       }
+      // Read live rather than from the traits state so a kernel that raised
+      // the cap after mount is honoured without a re-render.
+      const check = checkSnapshotSize(project.data, readModelTraits().maxSnapshotBytes);
+      if (check.kind === 'oversize') {
+        model.send(oversizeMessage(check.bytes));
+        showNotice(oversizeNotice(check.bytes, check.limit));
+        return Promise.resolve(undefined);
+      }
       return new Promise<number | undefined>((resolve) => {
         r.inFlight = { ...inFlightFor(currVersion, project.data), resolve };
         model.send(snapshotMessage(currVersion, project.data));
       });
     },
-    [model],
+    [model, readModelTraits, showNotice],
   );
 
   const handleSelectionChanged = React.useCallback(
