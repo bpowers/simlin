@@ -8,8 +8,12 @@ For Python-specific standards (thread safety, lock ordering), see [docs/dev/pyth
 
 ## Key Files
 
-- `simlin/project.py` -- `Project` wrapper class (main API)
-- `simlin/model.py` -- `Model` wrapper class
+- `simlin/project.py` -- `Project` wrapper class (main API). Also the imperative shell for file-backed projects: `Project.open()` / `simlin.open()`, `path`/`format`/`revision`/`dirty`/`autosave`, `save()`/`save_as()`/`reload()`/`watch()`/`on_change()`. Every accepted mutation funnels through `_apply_patch_json` (or `auto_layout`) into `_commit_change_locked` (bump revision, invalidate model caches, autosave) followed by `_notify` AFTER `_file_lock` is released -- new mutation paths must go through it, not around it, and must never notify under the lock. `_apply_patch_json(expected_revision=)` rejects an `edit()` whose base revision moved; `_write_to` refuses to overwrite a file another tool changed (`save(force=True)` overrides); the poll thread's delivery is re-verified against the current watcher/path/bytes in `_ingest_disk_bytes`. A file-backed project also runs the engine's incremental layout after variable ops (mirroring simlin-mcp-core's `edit_model`); in-memory projects deliberately do not persist a layout until `auto_layout()`
+- `simlin/_formats.py` -- `FileFormat` and the single suffix/content -> format table shared by `load()`, `open()`, `save()`, `save_as()` (mirrors simlin-serve `format_for_path` + simlin-mcp-core JSON key sniffing). Add formats here only
+- `simlin/_sync.py` -- pure sync state machine (`decide(state, event)`) for local edits, widget snapshots, disk observations, and explicit reloads; the tests enumerate every arm. `ChangeEvent`/`ChangeSource` live here
+- `simlin/_disk.py` -- `content_hash`, mode-preserving `atomic_write` (tempfile + rename), and the stdlib polling `FileWatcher` (deliberately not inotify/watchfiles: one file, all filesystems incl. Colab FUSE, no native wheel)
+- `simlin/diagram.py` -- `Diagram`, the `_repr_svg_` value returned by `Model.diagram()`
+- `simlin/model.py` -- `Model` wrapper class; proxies `path`/`revision`/`dirty`/`save()`/`reload()` to its project, holds `selection` (set by the widget layer), and `diagram()` / `_svg_mimebundle()` (the static seam the widget's `_repr_mimebundle_` falls back to)
 - `simlin/sim.py` -- `Sim` wrapper class (simulation runner)
 - `simlin/run.py` -- High-level run utilities
 - `simlin/vdf.py` -- `simlin.load_vdf(path)`: import a Vensim VDF binary output file (run, sensitivity, or dataset container, auto-detected by magic) as a `Run.results`-shaped DataFrame (time index, canonical column names, `"var[element]"` arrayed columns). A function returning a plain DataFrame, not a class: a VDF carries only named series, exactly the `Run.results` surface, and no loop/override metadata that would justify a wrapper object. Malformed files raise `SimlinRuntimeError` (the engine's VDF readers are total on arbitrary bytes; see the sweep test in [/src/simlin-engine/src/vdf.rs](/src/simlin-engine/src/vdf.rs))
@@ -23,7 +27,7 @@ For Python-specific standards (thread safety, lock ordering), see [docs/dev/pyth
 
 ## Thread Safety
 
-All wrapper classes have a per-instance lock (`Sim`'s is an `RLock` so `get_run()` can hold it across the whole Run snapshot). Lock ordering: release `Model._lock` before calling `Project` methods. See [docs/dev/python.md](/docs/dev/python.md).
+All wrapper classes have a per-instance lock (`Sim`'s is an `RLock` so `get_run()` can hold it across the whole Run snapshot). `Project` has a second `RLock`, `_file_lock`, for file-backing state and whole mutate-then-write sequences. Lock ordering: `Project._file_lock` -> `Project._lock` -> `Model._lock`; release `Model._lock` before calling `Project` methods; change callbacks fire with no lock held. See [docs/dev/python.md](/docs/dev/python.md).
 
 ## Non-Standard Commands
 

@@ -61,6 +61,7 @@ from .json_types import (
     SimSpecs,
     StockViewElement,
     Unit,
+    UpdateStockFlows,
     UpsertAux,
     UpsertFlow,
     UpsertModule,
@@ -744,6 +745,18 @@ def _create_converter() -> cattrs.Converter:
 
     conv.register_unstructure_hook(DeleteView, unstructure_delete_view)
 
+    def unstructure_update_stock_flows(op: UpdateStockFlows) -> dict[str, Any]:
+        return {
+            "type": "updateStockFlows",
+            "payload": {
+                "ident": op.ident,
+                "inflows": list(op.inflows),
+                "outflows": list(op.outflows),
+            },
+        }
+
+    conv.register_unstructure_hook(UpdateStockFlows, unstructure_update_stock_flows)
+
     def unstructure_set_loop_name(op: SetLoopName) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "variables": list(op.variables),
@@ -765,6 +778,7 @@ def _create_converter() -> cattrs.Converter:
         "renameVariable",
         "upsertView",
         "deleteView",
+        "updateStockFlows",
         "setLoopName",
     )
 
@@ -789,6 +803,12 @@ def _create_converter() -> cattrs.Converter:
             return UpsertView(index=payload["index"], view=conv.structure(payload["view"], View))
         elif type_name == "deleteView":
             return DeleteView(index=payload["index"])
+        elif type_name == "updateStockFlows":
+            return UpdateStockFlows(
+                ident=payload["ident"],
+                inflows=list(payload.get("inflows") or []),
+                outflows=list(payload.get("outflows") or []),
+            )
         elif type_name == "setLoopName":
             return SetLoopName(
                 variables=list(payload["variables"]),
@@ -812,6 +832,7 @@ def _create_converter() -> cattrs.Converter:
             RenameVariable,
             UpsertView,
             DeleteView,
+            UpdateStockFlows,
             SetLoopName,
         ],
         structure_model_op,

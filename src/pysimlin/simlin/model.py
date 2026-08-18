@@ -30,6 +30,7 @@ from ._ffi import (
     string_to_c,
 )
 from .analysis import Analysis, Link, LinkPolarity, Loop, LoopPolarity, Partition
+from .diagram import Diagram
 from .errors import ErrorCode, ErrorSeverity, SimlinRuntimeError
 from .json_converter import converter, structure_variable
 from .json_types import (
@@ -40,6 +41,7 @@ from .json_types import (
     JsonProjectPatch,
     RenameVariable,
     SetLoopName,
+    UpdateStockFlows,
     UpsertAux,
     UpsertFlow,
     UpsertModule,
@@ -61,6 +63,8 @@ from .types import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from pathlib import Path
     from types import TracebackType
 
     from .project import Project
@@ -131,6 +135,23 @@ class ModelPatchBuilder:
     def delete_view(self, index: int) -> None:
         self._ops.append(DeleteView(index=index))
 
+    def update_stock_flows(
+        self,
+        ident: str,
+        inflows: Sequence[str],
+        outflows: Sequence[str],
+    ) -> None:
+        """Replace a stock's inflow and outflow lists, leaving every other
+        field of the stock untouched.
+
+        Equivalent to ``upsert(replace(current[ident], inflows=..., outflows=...))``
+        but does not need the current definition in hand, so it composes
+        with patches built from a variable name alone.
+        """
+        self._ops.append(
+            UpdateStockFlows(ident=ident, inflows=list(inflows), outflows=list(outflows))
+        )
+
     def set_loop_name(
         self, name: str, variables: list[str], description: str | None = None
     ) -> None:
@@ -173,8 +194,15 @@ class _ModelEditContext:
         self._allow_errors = allow_errors
         self._current: dict[str, Variable] = {}
         self._patch = ModelPatchBuilder(model._name or "")
+        self._base_revision: int | None = None
 
     def __enter__(self) -> tuple[dict[str, Variable], ModelPatchBuilder]:
+        # The revision the edit is built against; if the project changes
+        # before the block exits (a reload from disk, another edit), the
+        # patch would be applied to contents ``current`` never described,
+        # so it is rejected instead (see Project._apply_patch_json).
+        project = self._model._project
+        self._base_revision = project.revision if project is not None else None
         with self._model._lock:
             self._model._check_alive()
             names = model_get_var_names(self._model._ptr)
@@ -216,14 +244,14 @@ class _ModelEditContext:
         patch_dict = converter.unstructure(project_patch)
         patch_json = json.dumps(patch_dict).encode("utf-8")
 
+        # The project invalidates every attached model's caches (this one
+        # included) as part of committing the change.
         project._apply_patch_json(
             patch_json,
             dry_run=self._dry_run,
             allow_errors=self._allow_errors,
+            expected_revision=self._base_revision,
         )
-
-        # Invalidate caches since model state has changed
-        self._model._invalidate_caches()
 
 
 class Model:
@@ -249,6 +277,9 @@ class Model:
         _register_finalizer(self, lib.simlin_model_unref, ptr)
 
         self._cached_base_case: Run | None = None
+        self._selection: tuple[str, ...] = ()
+        if project is not None:
+            project._register_model(self)
 
     def _check_alive(self) -> None:
         """Raise if the underlying C object has been freed.
@@ -266,6 +297,69 @@ class Model:
             The parent Project instance, or None if this model is not attached to a project
         """
         return self._project
+
+    def _require_project(self) -> Project:
+        if self._project is None:
+            raise SimlinRuntimeError("Model is not attached to a Project")
+        return self._project
+
+    # ── file-backing proxies (see Project) ──────────────────────────────
+
+    @property
+    def path(self) -> Path | None:
+        """The file the containing project is backed by, or ``None``."""
+        return self._require_project().path
+
+    @property
+    def revision(self) -> int:
+        """The containing project's revision (see :attr:`Project.revision`)."""
+        return self._require_project().revision
+
+    @property
+    def dirty(self) -> bool:
+        """Whether the containing project has unsaved changes."""
+        return self._require_project().dirty
+
+    def save(self, *, force: bool = False) -> None:
+        """Save the containing project to its file (see :meth:`Project.save`;
+        ``force=True`` overwrites a file another tool changed)."""
+        self._require_project().save(force=force)
+
+    def reload(self) -> bool:
+        """Reload the containing project from its file (see
+        :meth:`Project.reload`); this handle stays valid."""
+        return self._require_project().reload()
+
+    @property
+    def selection(self) -> tuple[str, ...]:
+        """Variable names currently selected in an interactive display of
+        this model (empty when none is shown or nothing is selected).  Set
+        by the widget layer; readable so a cell can ask what the human is
+        looking at."""
+        with self._lock:
+            return self._selection
+
+    @selection.setter
+    def selection(self, names: tuple[str, ...] | list[str]) -> None:
+        with self._lock:
+            self._selection = tuple(names)
+
+    # ── display ─────────────────────────────────────────────────────────
+
+    def diagram(self) -> Diagram:
+        """Render this model's stock-and-flow diagram.
+
+        A model without a saved view is drawn with a transient automatic
+        layout (nothing is persisted; use ``project.auto_layout()`` for
+        that).  The result displays inline in notebooks.
+        """
+        project = self._require_project()
+        return Diagram(project.render_svg_string(self._name or "main"))
+
+    def _svg_mimebundle(self) -> dict[str, str]:
+        """The static ``image/svg+xml`` representation, the fallback for
+        renderers that cannot show an interactive widget."""
+        return {"image/svg+xml": self.diagram().svg}
 
     def get_variable(self, name: str) -> Variable | None:
         """Get a single variable by name, or None if not found.
@@ -892,12 +986,19 @@ class Model:
             if self._cached_base_case is not None:
                 return self._cached_base_case
 
+        # A run computed against revision N is only a valid cache entry if
+        # the project is still at N when the run finishes; a change landing
+        # mid-run (an edit, a reload from disk) invalidates the cache before
+        # we would fill it, so fill it only when nothing moved.
+        project = self._project
+        revision_before = project.revision if project is not None else 0
         result = self.run()
+        revision_after = project.revision if project is not None else 0
 
         with self._lock:
-            if self._cached_base_case is None:
+            if self._cached_base_case is None and revision_after == revision_before:
                 self._cached_base_case = result
-            return self._cached_base_case
+            return self._cached_base_case if self._cached_base_case is not None else result
 
     def check(self) -> tuple[ModelIssue, ...]:
         """Check model for common issues.
@@ -1025,9 +1126,7 @@ class Model:
             dry_run: Validate the batched operations without applying them.
             allow_errors: Apply the patch even if validation reports errors.
         """
-        if self._project is None:
-            raise SimlinRuntimeError("Model is not attached to a Project")
-
+        self._require_project()
         return _ModelEditContext(self, dry_run=dry_run, allow_errors=allow_errors)
 
     def __enter__(self) -> Self:
