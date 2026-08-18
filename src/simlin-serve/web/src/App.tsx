@@ -273,18 +273,6 @@ export function App(): React.ReactElement {
     [setState],
   );
 
-  // After a .mdl save creates a sibling .sd.json sidecar the registry
-  // swaps the .mdl entry for the sidecar entry. Update the active
-  // selection to the new path and re-fetch the project list so the
-  // sidebar reflects the rename without a full reload.
-  const handlePathRedirect = React.useCallback(
-    (newPath: string): void => {
-      setState({ selectedPath: newPath });
-      void loadProjects();
-    },
-    [setState, loadProjects],
-  );
-
   // The NewProjectButton calls this with the freshly-created file's
   // relative path. Selecting the new path opens the editor on it; the
   // server-side `ProjectChanged` broadcast already refreshed the list
@@ -357,7 +345,6 @@ export function App(): React.ReactElement {
             path={selectedPath}
             liveVersion={liveVersion}
             liveSource={liveSource}
-            onPathRedirect={handlePathRedirect}
             socket={refs.current.socket ?? undefined}
           />
         </div>

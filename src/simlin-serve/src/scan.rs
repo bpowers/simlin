@@ -139,6 +139,36 @@ pub fn scan_into_registry(
     Ok(inserted)
 }
 
+/// Same-stem `(<name>.mdl, <name>.sd.json)` pairs among the registry's
+/// entries, as relative display paths.
+///
+/// Earlier simlin-serve releases never wrote a `.mdl`; an edit to one landed
+/// in a sibling `.sd.json` "sidecar" that then shadowed the `.mdl` on read.
+/// Today every file is its own project and a `.mdl` is rewritten in place, so
+/// such a pair is two independent projects: the `.mdl` holds the Vensim
+/// source and the `.sd.json` holds whatever was saved into it before. This
+/// helper exists so startup can point the user at those pairs once (see
+/// `main.rs`); nothing else treats them specially.
+pub fn legacy_sidecar_pairs(registry: &ProjectRegistry) -> Vec<(PathBuf, PathBuf)> {
+    let snapshot = registry.snapshot();
+    let sd_json: std::collections::HashSet<&Path> = snapshot
+        .iter()
+        .filter(|m| m.format == crate::registry::ProjectFormat::SdJson)
+        .map(|m| m.path.as_path())
+        .collect();
+    snapshot
+        .iter()
+        .filter(|m| m.format == crate::registry::ProjectFormat::Mdl)
+        .filter_map(|m| {
+            let stem = m.path.file_stem()?.to_str()?;
+            let sibling = m.path.with_file_name(format!("{stem}.sd.json"));
+            sd_json
+                .contains(sibling.as_path())
+                .then(|| (m.path.clone(), sibling))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,5 +338,32 @@ mod tests {
         );
         let snap = registry.snapshot();
         assert_eq!(snap[0].path, PathBuf::from("a.stmx"));
+    }
+
+    /// A `.mdl` next to a same-stem `.sd.json` is the on-disk trace of an
+    /// older release's sidecar write. Both are registered as ordinary,
+    /// independent projects; the pair is only reported so startup can name
+    /// it. Rows: a real pair, a `.mdl` alone, a `.sd.json` alone, and a
+    /// pair split across directories (stem match is per-directory).
+    #[test]
+    fn legacy_sidecar_pairs_reports_same_directory_stem_matches_only() {
+        let dir = TempDir::new().unwrap();
+        touch(dir.path(), "paired.mdl", b"{UTF-8}\n");
+        touch(dir.path(), "paired.sd.json", b"{}");
+        touch(dir.path(), "lonely.mdl", b"{UTF-8}\n");
+        touch(dir.path(), "solo.sd.json", b"{}");
+        touch(dir.path(), "a/split.mdl", b"{UTF-8}\n");
+        touch(dir.path(), "b/split.sd.json", b"{}");
+
+        let canonical = dir.path().canonicalize().unwrap();
+        let registry = ProjectRegistry::new(canonical.clone());
+        let git = GitProbe::new_unavailable();
+        scan_into_registry(dir.path(), &registry, &git).unwrap();
+        assert_eq!(registry.len(), 6, "every file is its own project");
+
+        assert_eq!(
+            legacy_sidecar_pairs(&registry),
+            vec![(PathBuf::from("paired.mdl"), PathBuf::from("paired.sd.json"))]
+        );
     }
 }

@@ -31,7 +31,7 @@ use crate::path_resolution::{self, ResolutionError, to_forward_slash};
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry, RegistryError};
 use crate::scan::scan_into_registry;
 use crate::validation::{BaselineErrors, ValidationFailure, ValidationOutcome, validate_save};
-use crate::writer::{SaveTarget, commit_write, resolve_save_target, serialize_project};
+use crate::writer::{commit_write, resolve_save_target, serialize_project};
 
 /// Process-wide state injected into every handler. Cloning is cheap because
 /// each field is `Arc`-shared; the inner data is never copied per-request.
@@ -130,9 +130,6 @@ pub struct GetProjectResponse {
 /// the canonicalized root (defense-in-depth against TOCTOU and symlinks
 /// pointing out of the tree); a violation is 403 Forbidden.
 ///
-/// `.mdl` requests check for a sibling `<basename>.sd.json` first: when the
-/// sidecar exists, it becomes source-of-truth.
-///
 /// Phase 3: the response no longer comes from re-reading and re-parsing the
 /// file each call. Instead the registry's lazy `ProjectDoc` is hydrated on
 /// first access (reading from disk once) and every subsequent GET reads from
@@ -166,26 +163,17 @@ pub async fn get_project(
         }
     };
 
-    // Determine source format. The sidecar-preference rule is applied
-    // through `path_resolution::apply_sidecar_preference`; when it
-    // redirects the format becomes SdJson regardless of the initial
-    // dispatch (the input was `.mdl`, the resolved registry key is the
-    // sibling `.sd.json`).
-    let initial_format = format_for_path(&canonical).ok_or(ApiError::BadRequest(
+    // The on-disk extension is the format; the file the request named is
+    // the registry key. Every format is read from and written to its own
+    // file, so there is no per-format aliasing to apply here.
+    let effective_format = format_for_path(&canonical).ok_or(ApiError::BadRequest(
         "unrecognized file extension".to_string(),
     ))?;
+    let effective_path = canonical;
 
-    let resolved_key = path_resolution::apply_sidecar_preference(&canonical, &root_canonical);
-    let effective_path = resolved_key.path;
-    let effective_format = if resolved_key.redirected_to_sidecar {
-        ProjectFormat::SdJson
-    } else {
-        initial_format
-    };
-
-    // Ensure the registry has an entry for the effective path so
-    // `get_or_init_doc` has somewhere to cache the hydrated `ProjectDoc`.
-    // First-touch races are absorbed by `ensure_or_get`'s atomic insert.
+    // Ensure the registry has an entry for the path so `get_or_init_doc`
+    // has somewhere to cache the hydrated `ProjectDoc`. First-touch races
+    // are absorbed by `ensure_or_get`'s atomic insert.
     state.registry.ensure_or_get(effective_path.clone(), || {
         let metadata = std::fs::metadata(&effective_path);
         let (mtime, size) = match metadata {
@@ -255,14 +243,17 @@ pub struct SaveRequest {
     pub version: u64,
 }
 
-/// Wire shape of a successful save response. `path` is the (forward-slash)
-/// relative path the server actually wrote; this differs from the request
-/// path when a `.mdl`-backed entry redirects to a sibling `.sd.json`
-/// sidecar (Phase 2 Subcomponent B).
+/// Wire shape of a successful save response. `warnings` carries the on-disk
+/// writer's non-fatal lossiness diagnostics -- today only Vensim `.mdl`
+/// produces any (a construct Vensim cannot express was written in its
+/// closest representable form). The write has succeeded whenever this
+/// response is sent; the SPA shows the warnings alongside the saved model.
+/// Elided from the JSON when empty so the common case stays `{version}`.
 #[derive(Debug, Serialize)]
 pub struct SaveResponse {
     pub version: u64,
-    pub path: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<ValidationError>,
 }
 
 /// Structured detail attached to 422 responses. This is the same type
@@ -281,9 +272,10 @@ pub use crate::events::ValidationError;
 /// file lands at the root.  `format` is validated by hand (rather than
 /// via a serde-typed enum) so the handler can return a clean `400 Bad
 /// Request` for `mdl`/`xmile` instead of axum's `422 Unprocessable
-/// Entity` for unknown variants — Mdl is read-only and Xmile is
-/// preserved for existing files only, so they are explicitly rejected
-/// with a useful message.
+/// Entity` for unknown variants — new files are authored in the two
+/// canonical formats (`stmx`, `sd_json`); Mdl and Xmile are fully
+/// supported for files that already exist on disk but are not offered
+/// for fresh ones, so they are explicitly rejected with a useful message.
 #[derive(Debug, Deserialize)]
 pub struct NewProjectRequest {
     pub name: String,
@@ -293,10 +285,10 @@ pub struct NewProjectRequest {
 }
 
 /// The subset of `ProjectFormat` accepted for new-file creation.  Mdl
-/// and Xmile are intentionally absent: Mdl is read-only (saves go to a
-/// `.sd.json` sidecar instead) and Xmile is preserved only for files
-/// already on disk.  Stmx is the canonical native XMILE format and
-/// SdJson is the canonical AI/SD-AI format.
+/// and Xmile are intentionally absent: both are read and written in
+/// place once a file exists, but a fresh model is authored in a
+/// canonical format -- Stmx for native XMILE and SdJson for AI/SD-AI --
+/// rather than a compatibility one.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum NewProjectFormat {
     Stmx,
@@ -735,8 +727,8 @@ impl IntoResponse for SaveError {
 ///    acquisition this checks the optimistic-lock version, increments
 ///    it, and applies the new JSON into the doc. Stale version -> 409.
 /// 7. Outside the lock, serialize the merged doc state back to a
-///    `datamodel::Project` and write it to disk with the format-aware
-///    writer. Sidecar redirects move the registry key as before.
+///    `datamodel::Project` and write it to disk in place with the
+///    format-aware writer.
 /// 8. Refresh the registry mtime/size from the post-write stat.
 /// 9. Publish a `ProjectChanged { source: User }` event to subscribed
 ///    WebSocket clients so other tabs can remount their editors.
@@ -878,12 +870,8 @@ pub async fn save_project(
         })?;
     let merged_project: simlin_engine::datamodel::Project = merged_json_project.into();
 
-    // Resolve the target shape from the request URL's source format.
-    // For `.mdl` we always pick the SidecarJson arm; the registry-side
-    // redirect happens after the write so the new entry replaces the
-    // `.mdl` key with the sidecar key. For `.sd.json` requests
-    // (including ones following an earlier redirect where the frontend
-    // updated its URL state) we use the SdJson arm.
+    // Resolve the writer from the request URL's source format; every
+    // format writes back to the file the request named.
     let target = resolve_save_target(&resolved.canonical, resolved.initial_format);
 
     // Serialize before writing so the echo-suppression hash can be stored in
@@ -906,84 +894,10 @@ pub async fn save_project(
         .registry
         .prime_echo_hash(&resolved.canonical, written_hash);
 
-    // For sidecar saves the watcher event fires for the .sd.json path,
-    // not the .mdl key the registry currently holds the entry under.
-    // Pre-establish a sidecar placeholder carrying the primed hash and
-    // a shared doc Arc so a watcher event arriving between commit_write
-    // and redirect_to_sidecar finds the entry it expects and short-circuits
-    // via echo-suppression instead of re-merging the just-written content.
-    if let SaveTarget::SidecarJson {
-        mdl_path,
-        sidecar_path,
-    } = &target
-        && let Err(e) =
-            state
-                .registry
-                .prime_sidecar_echo_hash(mdl_path, sidecar_path.clone(), written_hash)
-    {
-        tracing::warn!(
-            error = %e,
-            ".mdl entry vanished before sidecar prime; commit_write may produce a spurious watcher merge"
-        );
-    }
-
     // Commit to disk. The echo-suppression hash is already in the registry
     // so a watcher event that arrives here will be suppressed correctly.
     commit_write(&write_outcome)
         .map_err(|e| SaveError::Internal(anyhow::anyhow!("commit_write: {e}")))?;
-
-    // For SidecarJson, redirect the registry's `.mdl` key to the new
-    // sidecar key (carrying the just-incremented version forward) so
-    // subsequent reads via either path see the sidecar content. For the
-    // other arms the registry key is unchanged.
-    //
-    // The frontend counterpart is App.handlePathRedirect (called via
-    // EditorHost's onPathRedirect prop) which updates the active
-    // selectedPath so the sidebar list and URL reflect the new sidecar
-    // path after the first save of a .mdl-backed entry.
-    let registry_key: PathBuf = match &target {
-        SaveTarget::SidecarJson {
-            mdl_path,
-            sidecar_path,
-        } => {
-            match state
-                .registry
-                .redirect_to_sidecar(mdl_path, sidecar_path.clone())
-            {
-                Ok(()) => sidecar_path.clone(),
-                Err(e) => {
-                    // The disk write succeeded but the registry entry for
-                    // the .mdl path was concurrently removed (e.g. by a
-                    // scan between the version-lock release and here).
-                    // Re-insert the sidecar entry directly so the registry
-                    // tracks the file we just created. Without this the
-                    // sidecar exists on disk but is invisible to the
-                    // registry until the next scan, and the client sees a
-                    // version number that no registry entry can satisfy.
-                    tracing::warn!(
-                        error = %e,
-                        "registry redirect_to_sidecar failed; re-inserting sidecar entry"
-                    );
-                    state.registry.upsert_max_version(
-                        sidecar_path.clone(),
-                        ProjectMeta {
-                            path: PathBuf::new(),
-                            format: crate::registry::ProjectFormat::SdJson,
-                            mtime: std::time::SystemTime::UNIX_EPOCH,
-                            size: 0,
-                            git: GitState::Untracked,
-                            version: new_version,
-                            doc: Default::default(),
-                            last_disk_hash: written_hash,
-                            last_diagnostic_keys: std::collections::BTreeSet::new(),
-                        },
-                    );
-                    sidecar_path.clone()
-                }
-            }
-        }
-        SaveTarget::InPlaceXmile(_) | SaveTarget::SdJson(_) => resolved.canonical.clone(),
-    };
 
     // Refresh the registry's mtime + size + hash from the freshly-written
     // file. The mtime and size feed the SPA's stale-data heuristics; the
@@ -992,26 +906,15 @@ pub async fn save_project(
     if let Ok(metadata) = std::fs::metadata(&written_path)
         && let Ok(mtime) = metadata.modified()
     {
-        state
-            .registry
-            .refresh_after_write(&registry_key, mtime, metadata.len(), written_hash);
+        state.registry.refresh_after_write(
+            &resolved.canonical,
+            mtime,
+            metadata.len(),
+            written_hash,
+        );
     }
 
-    // For SidecarJson the response path points at the freshly-created
-    // sidecar so the SPA can update its URL state to follow the
-    // redirect. For the other arms the path is unchanged.
-    let response_path = match &target {
-        SaveTarget::SidecarJson { sidecar_path, .. } => {
-            let rel = sidecar_path
-                .strip_prefix(&resolved.root_canonical)
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|_| sidecar_path.clone());
-            to_forward_slash(&rel)
-        }
-        SaveTarget::InPlaceXmile(_) | SaveTarget::SdJson(_) => {
-            to_forward_slash(&resolved.relative_path)
-        }
-    };
+    let response_path = to_forward_slash(&resolved.relative_path);
 
     // Publish AFTER the disk write + meta refresh so a subscriber can
     // assume the file on disk reflects the announced version. Two
@@ -1019,7 +922,7 @@ pub async fn save_project(
     // subscriber's perspective; the client uses the version number to
     // decide whether to re-render, so order doesn't change correctness.
     state.events.publish(WsMessage::ProjectChanged {
-        path: response_path.clone(),
+        path: response_path,
         version: new_version,
         source: ChangeSource::User,
     });
@@ -1030,36 +933,32 @@ pub async fn save_project(
     // broadcast channel preserves FIFO within one sender's call sequence
     // so subscribers always see ProjectChanged first. Documented in
     // `diagnostics::maybe_emit_diagnostics_changed`.
-    crate::diagnostics::maybe_emit_diagnostics_changed(&state, &registry_key, &merged_project);
+    crate::diagnostics::maybe_emit_diagnostics_changed(
+        &state,
+        &resolved.canonical,
+        &merged_project,
+    );
 
     Ok(Json(SaveResponse {
         version: new_version,
-        path: response_path,
+        warnings: write_outcome.warnings,
     }))
 }
 
 /// Path-resolution outcome shared between the save handler's various
 /// error paths. `initial_format` is what the request URL maps to; the
 /// registry entry the save handler operates on is keyed by `canonical`
-/// throughout the flow. Sidecar redirection (a `.mdl` request whose
-/// sibling `.sd.json` exists) is now expressed entirely through the
-/// post-write `redirect_to_sidecar` move on the registry — Task 8
-/// reads the pre-edit baseline from the in-memory `ProjectDoc` rather
-/// than re-reading the on-disk file, so we no longer need a separate
-/// effective_path for the baseline source.
+/// throughout the flow. The pre-edit baseline is read from the in-memory
+/// `ProjectDoc` rather than the on-disk file, so no separate baseline
+/// path is needed.
 struct ResolvedPath {
     /// The canonicalized absolute path of the requested file.
     canonical: PathBuf,
-    /// The canonicalized scan root, computed once in `resolve_save_path`
-    /// so callers don't need to re-canonicalize `state.root` for path
-    /// relativization or descendant checks.
-    root_canonical: PathBuf,
-    /// The relative path (relative to the scan root) the client should
-    /// see in the response. May differ from the request when a sidecar
-    /// redirect happens.
+    /// The relative path (relative to the scan root) announced on the
+    /// event bus for this save.
     relative_path: PathBuf,
-    /// Source format inferred from the request URL itself (no sidecar
-    /// redirect). Used for the registry-entry seed.
+    /// Source format inferred from the request URL's extension. Used for
+    /// the registry-entry seed and to pick the writer.
     initial_format: ProjectFormat,
 }
 
@@ -1092,36 +991,15 @@ fn resolve_save_path(state: &AppState, rel_path: &str) -> Result<ResolvedPath, S
     let initial_format = format_for_path(&canonical)
         .ok_or_else(|| SaveError::BadRequest("unrecognized file extension".to_string()))?;
 
-    // Sidecar-preference rule: when the request is for `.mdl` and the
-    // sibling `.sd.json` exists on disk, route the save to the sidecar
-    // key. Mirrors `get_project`'s read-side preference and
-    // `RegistryAccess::open`/`save`'s MCP-side preference; the shared
-    // primitive in `path_resolution::apply_sidecar_preference` is the
-    // single point that implements the rule. Without it, a stale tab
-    // POSTing to the `.mdl` path with `version=0` (after a prior save's
-    // `redirect_to_sidecar` removed the `.mdl` registry entry) would
-    // hit the `ensure_or_get` fallback below at version 0; the
-    // optimistic-lock check would spuriously pass (0 == 0) and silently
-    // overwrite newer sidecar content. Resolving to the sidecar key
-    // keeps the version check honest.
-    let resolved_key = path_resolution::apply_sidecar_preference(&canonical, &root_canonical);
-    let effective_canonical = resolved_key.path;
-    let effective_format = if resolved_key.redirected_to_sidecar {
-        ProjectFormat::SdJson
-    } else {
-        initial_format
-    };
-
-    let relative_path = effective_canonical
+    let relative_path = canonical
         .strip_prefix(&root_canonical)
         .map(Path::to_path_buf)
-        .unwrap_or_else(|_| effective_canonical.clone());
+        .unwrap_or_else(|_| canonical.clone());
 
     Ok(ResolvedPath {
-        canonical: effective_canonical,
-        root_canonical,
+        canonical,
         relative_path,
-        initial_format: effective_format,
+        initial_format,
     })
 }
 

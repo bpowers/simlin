@@ -24,7 +24,7 @@ use simlin_serve::handlers::AppState;
 use simlin_serve::launcher::{build_launch_url, open_browser};
 use simlin_serve::mcp::build_mcp_router;
 use simlin_serve::registry::ProjectRegistry;
-use simlin_serve::scan::scan_into_registry;
+use simlin_serve::scan::{legacy_sidecar_pairs, scan_into_registry};
 use simlin_serve::serving::bind_or_die;
 use simlin_serve::watcher::{ShutdownSignal, spawn_watcher};
 
@@ -48,6 +48,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let git = Arc::new(GitProbe::detect());
     if let Err(err) = scan_into_registry(&canonical_root, &registry, &git) {
         tracing::warn!(error = %err, "initial scan failed; registry starts empty");
+    }
+    // Earlier releases saved `.mdl` edits into a sibling `.sd.json` that then
+    // shadowed the `.mdl`. Both files are ordinary independent projects now,
+    // so a pair left over from that era is worth one heads-up: the `.sd.json`
+    // holds the edits made back then, the `.mdl` is written in place from
+    // here on, and neither will pick up the other's changes.
+    for (mdl, sd_json) in legacy_sidecar_pairs(&registry) {
+        tracing::warn!(
+            mdl = %mdl.display(),
+            sd_json = %sd_json.display(),
+            "found a .mdl next to a same-stem .sd.json (a sidecar written by an earlier \
+             simlin-serve); both are served as independent projects and edits to one \
+             do not affect the other -- delete the .sd.json once its edits are no longer needed"
+        );
     }
 
     // Bind both listeners up front so a port-conflict diagnosis surfaces

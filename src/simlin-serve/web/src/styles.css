@@ -45,6 +45,9 @@
   --serve-primary: #1976d2;
   --serve-success: #2e7d32;
   --serve-warning: #f57f17;
+  /* Darker companion for warning-coloured body text: #f57f17 itself is a
+     fill/accent shade and falls short of AA contrast on the light panel. */
+  --serve-warning-text: #9a4d00;
   --serve-error: #c62828;
   --serve-muted: #6b6b6b;
   --serve-border: #d6d6d6;
@@ -300,12 +303,21 @@ body,
   color: var(--serve-muted);
 }
 
-.serve-mdl-banner {
-  background: rgba(25, 118, 210, 0.08);
-  color: var(--serve-primary);
+.serve-save-warnings {
+  background: rgba(245, 127, 23, 0.1);
+  color: var(--serve-warning-text);
   padding: 8px 16px;
   border-bottom: 1px solid var(--serve-border);
   font-size: 13px;
+}
+
+.serve-save-warnings p {
+  margin: 0 0 4px;
+}
+
+.serve-save-warnings ul {
+  margin: 0;
+  padding-left: 20px;
 }
 
 .serve-disk-notice {

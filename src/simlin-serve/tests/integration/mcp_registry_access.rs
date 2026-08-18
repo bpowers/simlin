@@ -623,49 +623,108 @@ async fn create_broadcasts_project_changed_with_agent_source_and_version_zero() 
     }
 }
 
+/// An MCP save of a `.mdl` rewrites the `.mdl` itself as Vensim text: the
+/// entry stays keyed on the `.mdl`, its format stays `Mdl`, the version
+/// advances, no sibling file appears, and the file reparses with the edit.
 #[tokio::test]
-async fn mcp_save_for_mdl_writes_sidecar_and_leaves_mdl_unchanged() {
+async fn mcp_save_for_mdl_rewrites_the_mdl_in_place() {
     let temp = TempDir::new().expect("tempdir");
     let canonical_root = temp.path().canonicalize().expect("canon root");
     let mdl_abs = copy_fixture("teacup.mdl", &canonical_root);
     let original_mdl_bytes = fs::read(&mdl_abs).expect("read original mdl");
-    let sidecar_abs = canonical_root.join("teacup.sd.json");
     let state = build_state(canonical_root.clone());
     seed_registry(&state, &mdl_abs, ProjectFormat::Mdl);
 
     let access = RegistryAccess::new(state.clone());
     let opened = access.open(&mdl_abs).await.expect("open mdl");
-    // .mdl reads come back as XMILE-shaped projects.
-    assert_eq!(opened.source_format, SourceFormat::Xmile);
+    assert_eq!(opened.source_format, SourceFormat::Mdl);
 
     let edited = rewrite_first_aux_equation(&opened.project, "77");
-    let new_version = access
+    let outcome = access
         .save(&mdl_abs, &edited, opened.source_format, Some(0))
         .await
-        .expect("mcp save mdl")
-        .version;
-    assert_eq!(new_version, 1);
+        .expect("mcp save mdl");
+    assert_eq!(outcome.version, 1);
+    assert!(
+        outcome.warnings.is_empty(),
+        "a Vensim-expressible edit carries no export warnings: {:?}",
+        outcome.warnings
+    );
 
-    // The original .mdl must be byte-untouched.
     let post_mdl_bytes = fs::read(&mdl_abs).expect("read post mdl");
-    assert_eq!(
+    assert_ne!(
         post_mdl_bytes, original_mdl_bytes,
-        ".mdl file must not be modified by an MCP-driven save"
+        ".mdl must be rewritten in place"
     );
-    // The sidecar must exist.
+    let text = String::from_utf8(post_mdl_bytes).expect("utf8");
     assert!(
-        sidecar_abs.is_file(),
-        "sidecar .sd.json must be created on save"
+        text.starts_with("{UTF-8}"),
+        "rewritten file must be MDL text"
     );
-    // The registry must now point at the sidecar, not the .mdl.
+    let reparsed = simlin_engine::open_vensim(&text).expect("rewritten .mdl parses");
+    let first_aux_eq = reparsed.models[0]
+        .variables
+        .iter()
+        .find_map(|v| match v {
+            simlin_engine::datamodel::Variable::Aux(a) => Some(&a.equation),
+            _ => None,
+        })
+        .expect("an aux");
+    assert_eq!(
+        *first_aux_eq,
+        simlin_engine::datamodel::Equation::Scalar("77".to_string())
+    );
+
     assert!(
-        state.registry.get(&mdl_abs).is_none(),
-        "registry must drop the .mdl entry"
+        !canonical_root.join("teacup.sd.json").exists(),
+        "no sidecar may be created"
     );
-    let sidecar_meta = state
+    let meta = state
         .registry
-        .get(&sidecar_abs)
-        .expect("registry must hold sidecar entry");
-    assert_eq!(sidecar_meta.format, ProjectFormat::SdJson);
-    assert_eq!(sidecar_meta.version, 1);
+        .get(&mdl_abs)
+        .expect("registry must keep the .mdl entry");
+    assert_eq!(meta.format, ProjectFormat::Mdl);
+    assert_eq!(meta.version, 1);
+}
+
+/// The MDL writer's lossiness channel reaches the MCP save outcome: an
+/// edit Vensim cannot express (a non-negative flow) still writes, and the
+/// degradation is reported on `SaveOutcome::warnings` -- the same field
+/// `edit_model` appends to its response.
+#[tokio::test]
+async fn mcp_save_for_mdl_reports_export_lossiness_as_warnings() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let mdl_abs = copy_fixture("teacup.mdl", &canonical_root);
+    let state = build_state(canonical_root.clone());
+    seed_registry(&state, &mdl_abs, ProjectFormat::Mdl);
+
+    let access = RegistryAccess::new(state.clone());
+    let opened = access.open(&mdl_abs).await.expect("open mdl");
+    let mut edited = opened.project.clone();
+    let flow = edited.models[0]
+        .variables
+        .iter_mut()
+        .find_map(|v| match v {
+            simlin_engine::datamodel::Variable::Flow(f) => Some(f),
+            _ => None,
+        })
+        .expect("teacup has a flow");
+    flow.compat.non_negative = true;
+
+    let outcome = access
+        .save(&mdl_abs, &edited, opened.source_format, Some(0))
+        .await
+        .expect("a lossy MDL export must still succeed");
+    assert_eq!(outcome.version, 1);
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|w| w.message.starts_with("MDL export:") && w.message.contains("non-negative")),
+        "the dropped non-negative flag must be reported: {:?}",
+        outcome.warnings
+    );
+    let text = fs::read_to_string(&mdl_abs).expect("read mdl");
+    simlin_engine::open_vensim(&text).expect("degraded .mdl still parses");
 }
