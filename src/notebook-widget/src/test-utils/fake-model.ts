@@ -39,8 +39,15 @@ export class FakeModel implements AnyModel {
   /** What actually reached the kernel handler, in order. */
   readonly delivered: Delivered[] = [];
   saveChangesCount = 0;
-  /** Kernel-side authoritative state. */
-  kernel: { revision: number; projectJson: string; writeFails: boolean };
+  /**
+   * Kernel-side authoritative state. `applyFails` makes the fake kernel
+   * reject a well-based snapshot WITHOUT advancing its revision -- the
+   * kernel raised before applying anything (a parse failure, a handler
+   * bug). A write failure AFTER applying is not a reject in pysimlin: the
+   * revision has advanced and dirty is set, so the kernel replies `saved`
+   * plus a warning notice.
+   */
+  kernel: { revision: number; projectJson: string; applyFails: boolean };
   /** While true, inbound messages queue instead of being handled. */
   busyKernel = false;
   private inbound: Delivered[] = [];
@@ -54,7 +61,7 @@ export class FakeModel implements AnyModel {
     this.kernel = {
       revision: typeof initial.revision === 'number' ? initial.revision : 0,
       projectJson: typeof initial.project_json === 'string' ? initial.project_json : '',
-      writeFails: false,
+      applyFails: false,
     };
   }
 
@@ -231,7 +238,7 @@ export class FakeModel implements AnyModel {
     if (msg.content.type === 'snapshot') {
       const base = msg.content.base as number;
       const json = msg.content.json as string;
-      if (base !== this.kernel.revision || this.kernel.writeFails) {
+      if (base !== this.kernel.revision || this.kernel.applyFails) {
         this.kernelSend({ type: 'rejected', revision: this.kernel.revision });
         return;
       }

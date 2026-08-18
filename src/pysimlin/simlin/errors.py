@@ -155,3 +155,28 @@ class SimlinImportError(SimlinError):
     """Exception raised when importing a model fails."""
 
     pass
+
+
+class SimlinWriteError(SimlinRuntimeError):
+    """A change was applied to the in-memory project (its revision advanced
+    and it is now ``dirty``) but writing the file failed.
+
+    Raised by :meth:`Project._apply_snapshot` so a caller can tell "applied
+    but unwritten" from "not applied" without inspecting the project;
+    ``__cause__`` is the underlying ``OSError`` or conflict error, and
+    ``revision`` the revision the change produced.  ``save()`` retries.
+    """
+
+    def __init__(self, message: str, revision: int):
+        super().__init__(message)
+        self.revision = revision
+
+
+class SimlinAssetError(SimlinError):
+    """A file that ships inside the pysimlin package -- the notebook widget's
+    JS module or engine wasm -- is missing or cannot be delivered.
+
+    Raised when a :class:`simlin.ModelWidget` is created (displaying a
+    model), never on ``import simlin``; the message names the file and how
+    to get it.
+    """
