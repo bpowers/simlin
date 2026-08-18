@@ -552,6 +552,8 @@ pub struct View {
     pub elements: Vec<ViewElement>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub view_box: Option<Rect>,
+    /// View zoom as a factor: 1.0 = 100%, 2.0 = twice as big (XMILE's
+    /// percentage is converted on import/export). Omitted means 1.0.
     #[serde(skip_serializing_if = "is_zero_f64", default)]
     pub zoom: f64,
     #[serde(skip_serializing_if = "is_false", default)]

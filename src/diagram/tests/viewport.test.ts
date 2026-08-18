@@ -17,6 +17,7 @@ import {
   calculateVelocity,
   centerOffsetForBounds,
   clampZoom,
+  isRenderableZoom,
   frictionPosition,
   frictionVelocity,
   isDiagramOffscreen,
@@ -37,6 +38,26 @@ describe('clampZoom', () => {
     expect(clampZoom(MIN_ZOOM - 1)).toBe(MIN_ZOOM);
     expect(clampZoom(MAX_ZOOM + 1)).toBe(MAX_ZOOM);
     expect(clampZoom(1)).toBe(1);
+  });
+});
+
+describe('isRenderableZoom', () => {
+  it('accepts exactly the finite values inside [MIN_ZOOM, MAX_ZOOM]', () => {
+    for (const ok of [MIN_ZOOM, 1, 2, MAX_ZOOM]) {
+      expect(isRenderableZoom(ok)).toBe(true);
+    }
+    for (const bad of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      0,
+      -1,
+      MIN_ZOOM - 0.001,
+      MAX_ZOOM + 0.001,
+      200,
+    ]) {
+      expect(isRenderableZoom(bad)).toBe(false);
+    }
   });
 });
 

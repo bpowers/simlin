@@ -1819,15 +1819,25 @@ pub struct View {
 
 impl ToXml<XmlWriter> for View {
     fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
+        // `self.zoom` is already in XMILE's unit (a percentage, see
+        // `xmile_percent_from_zoom_factor`); it is only ever None when the
+        // datamodel factor was unusable, in which case the spec default
+        // (100) applies and nothing needs to be written.
+        let zoom = self.zoom.map(|z| format!("{z}"));
         let mut attrs = vec![
             ("isee:show_pages", "false"),
             ("page_width", "800"),
             ("page_height", "600"),
-            (
-                "view_type",
-                self.kind.unwrap_or(ViewType::StockFlow).as_str(),
-            ),
+            // The spec's attribute is `type` (section 5.1: `<view type="stock_flow">`),
+            // which is also what the reader (`@type`) looks for. The spec DOES
+            // have an attribute literally named `view_type`, but only on
+            // `<link target="view" view_type="interface">` inside `<event>`
+            // (section 4.1.2.1) -- never on `<view>` -- so do not "restore" it here.
+            ("type", self.kind.unwrap_or(ViewType::StockFlow).as_str()),
         ];
+        if let Some(zoom) = zoom.as_deref() {
+            attrs.push(("zoom", zoom));
+        }
         if let Some(name) = self.name.as_deref() {
             attrs.push(("name", name));
         }
@@ -2138,6 +2148,47 @@ fn view_object_to_element(
     }
 }
 
+/// Convert an XMILE `<view zoom="...">` value to the datamodel's zoom factor.
+///
+/// XMILE spec section 5.1 ("Views", `docs/reference/xmile-v1.0.html`):
+/// "Views may also have an OPTIONAL zoom specified as a double where 100 is
+/// default, 200 is 2x bigger by a factor of 2 and 50 is smaller by a factor
+/// of 2." The datamodel (`datamodel::StockFlow::zoom`, the protobuf, the JSON
+/// and TypeScript models) carries zoom as a FACTOR where 1.0 = 100%, so this
+/// is the one place the unit changes on the way in; `xmile_percent_from_zoom_factor`
+/// is its inverse on the way out. Never pass the raw attribute through: a
+/// Stella export's `zoom="200"` rendered as a 200x factor is exactly the
+/// defect this conversion exists to prevent.
+///
+/// An absent attribute is the spec default (100%). `zoom="0"` is what Stella
+/// writes on interface views and on some stock_flow views; like a negative or
+/// non-finite value it is not a usable scale, so all of those read as 1.0.
+fn zoom_factor_from_xmile_percent(percent: Option<f64>) -> f64 {
+    match percent {
+        Some(percent) if percent.is_finite() && percent > 0.0 => percent / 100.0,
+        _ => 1.0,
+    }
+}
+
+/// Convert the datamodel's zoom factor (1.0 = 100%) to the XMILE percentage
+/// (inverse of `zoom_factor_from_xmile_percent`; see its doc for the spec
+/// citation). Returns `None` for an unusable factor (zero, negative,
+/// non-finite) so the writer omits the attribute and the spec default applies.
+///
+/// The percentage is rounded to 3 decimal places (0.001%): `1.1 * 100.0` is
+/// `110.00000000000001` in f64, and that noise would otherwise be written into
+/// every file. Stella itself writes at most one decimal (`zoom="165.6"`).
+fn xmile_percent_from_zoom_factor(factor: f64) -> Option<f64> {
+    if !factor.is_finite() {
+        return None;
+    }
+    // Filter the ROUNDED value, not the input: a tiny positive factor (1e-6)
+    // rounds to 0, and `zoom="0"` reads back as the default 1.0 -- a silent
+    // unit trip that would make write->read non-idempotent.
+    let percent = (factor * 100.0 * 1000.0).round() / 1000.0;
+    if percent > 0.0 { Some(percent) } else { None }
+}
+
 impl From<View> for datamodel::View {
     fn from(v: View) -> Self {
         if v.kind.unwrap_or(ViewType::StockFlow) == ViewType::StockFlow {
@@ -2175,16 +2226,7 @@ impl From<View> for datamodel::View {
                     .map(|obj| view_object_to_element(obj, &positions))
                     .collect(),
                 view_box,
-                zoom: match v.zoom {
-                    None => 1.0,
-                    Some(zoom) => {
-                        if crate::float::approx_eq(zoom, 0.0) {
-                            1.0
-                        } else {
-                            zoom
-                        }
-                    }
-                },
+                zoom: zoom_factor_from_xmile_percent(v.zoom),
                 use_lettered_polarity: false,
                 font: None,
                 sketch_compat: None,
@@ -2212,7 +2254,7 @@ impl From<datamodel::View> for View {
                     .cloned()
                     .map(|element| ViewObject::from(element, &v))
                     .collect(),
-                zoom: Some(v.zoom),
+                zoom: xmile_percent_from_zoom_factor(v.zoom),
                 offset_x: Some(v.view_box.x),
                 offset_y: Some(v.view_box.y),
                 width: Some(v.view_box.width),
@@ -2252,5 +2294,186 @@ fn test_view_roundtrip() {
         let expected = expected.clone();
         let actual = datamodel::View::from(View::from(expected.clone()));
         assert_eq!(expected, actual);
+    }
+}
+
+/// The `<view zoom="...">` unit contract. XMILE spec section 5.1
+/// (`docs/reference/xmile-v1.0.html`, "Views"): "Views may also have an
+/// OPTIONAL zoom specified as a double where 100 is default, 200 is 2x bigger
+/// by a factor of 2 and 50 is smaller by a factor of 2." The datamodel carries
+/// zoom as a FACTOR (1.0 = 100%), so the reader divides by 100 and the writer
+/// multiplies by 100. Every `<view zoom>` in the repo's Stella-authored
+/// fixtures is a percentage (80..333.7) or `0` on interface views.
+#[cfg(test)]
+mod zoom_unit_tests {
+    use std::io::BufReader;
+
+    use crate::datamodel;
+    use crate::xmile::{project_from_reader, project_to_xmile};
+
+    fn project_with_view(view_attrs: &str) -> datamodel::Project {
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>t</name><vendor>x</vendor><product version="1">p</product></header>
+  <sim_specs><start>0</start><stop>1</stop><dt>1</dt></sim_specs>
+  <model>
+    <variables><aux name="a"><eqn>1</eqn></aux></variables>
+    <views>
+      <view type="stock_flow" {view_attrs}>
+        <aux name="a" x="10" y="20"/>
+      </view>
+    </views>
+  </model>
+</xmile>"#
+        );
+        project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("must parse")
+    }
+
+    fn only_view_zoom(project: &datamodel::Project) -> f64 {
+        let model = project
+            .models
+            .iter()
+            .find(|m| m.name == "main")
+            .expect("main model");
+        assert_eq!(model.views.len(), 1, "exactly one view expected");
+        let datamodel::View::StockFlow(sf) = &model.views[0];
+        sf.zoom
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    /// The reader converts the spec's percentage into the datamodel factor:
+    /// 200 -> 2.0, 50 -> 0.5, 165.6 -> 1.656.
+    #[test]
+    fn reader_converts_percent_to_factor() {
+        for (attr, expected) in [
+            (r#"zoom="200""#, 2.0),
+            (r#"zoom="100""#, 1.0),
+            (r#"zoom="50""#, 0.5),
+            (r#"zoom="165.6""#, 1.656),
+        ] {
+            assert_close(only_view_zoom(&project_with_view(attr)), expected);
+        }
+    }
+
+    /// An absent zoom is the spec default (100% -> factor 1.0). `zoom="0"` is
+    /// what Stella writes on `<view type="interface">` and on some stock_flow
+    /// views (e.g. `test/test-models/samples/SIR/SIR.xmile`); it is not a real
+    /// 0% zoom and must read as the default rather than an unrenderable 0.
+    /// Negative and non-finite values are equally meaningless as a scale.
+    #[test]
+    fn reader_defaults_absent_zero_and_invalid_zoom_to_unity() {
+        for attr in [
+            "",
+            r#"zoom="0""#,
+            r#"zoom="-200""#,
+            r#"zoom="NaN""#,
+            r#"zoom="inf""#,
+        ] {
+            assert_close(only_view_zoom(&project_with_view(attr)), 1.0);
+        }
+    }
+
+    /// A factor too small to survive the writer's rounding must be OMITTED
+    /// (spec default 100%) rather than written as `zoom="0"`: `0` reads back
+    /// as 1.0 anyway, so emitting it would be a silent unit trip and a
+    /// second write of the re-read project would differ from the first.
+    #[test]
+    fn writer_omits_zoom_that_rounds_to_zero() {
+        for factor in [1e-6, 4e-6, 0.0, -2.0, f64::NAN, f64::INFINITY] {
+            let mut project = project_with_view(r#"zoom="100""#);
+            {
+                let model = project
+                    .models
+                    .iter_mut()
+                    .find(|m| m.name == "main")
+                    .expect("main model");
+                let datamodel::View::StockFlow(sf) = &mut model.views[0];
+                sf.zoom = factor;
+            }
+            let xml = project_to_xmile(&project).expect("must serialize");
+            assert!(
+                !xml.contains("zoom="),
+                "factor {factor} must omit the zoom attribute, not write zoom=\"0\": {xml}"
+            );
+            let reparsed =
+                project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("must re-import");
+            assert_close(only_view_zoom(&reparsed), 1.0);
+        }
+        // Just above the rounding floor it IS written, and round-trips.
+        let mut project = project_with_view(r#"zoom="100""#);
+        {
+            let model = project
+                .models
+                .iter_mut()
+                .find(|m| m.name == "main")
+                .expect("main model");
+            let datamodel::View::StockFlow(sf) = &mut model.views[0];
+            sf.zoom = 1e-5;
+        }
+        let xml = project_to_xmile(&project).expect("must serialize");
+        assert!(xml.contains(r#"zoom="0.001""#), "{xml}");
+    }
+
+    /// The writer emits the datamodel factor back as a spec percentage, and
+    /// the emitted text re-imports to the same factor (text-level round trip,
+    /// not just struct-level). 1.1 is deliberate: `1.1 * 100.0` is not exactly
+    /// 110 in f64, and the writer must not leak that noise into the file.
+    #[test]
+    fn writer_emits_percent_and_text_round_trips() {
+        for (factor, expected_attr) in [(2.0, r#"zoom="200""#), (1.1, r#"zoom="110""#)] {
+            let mut project = project_with_view(r#"zoom="100""#);
+            {
+                let model = project
+                    .models
+                    .iter_mut()
+                    .find(|m| m.name == "main")
+                    .expect("main model");
+                let datamodel::View::StockFlow(sf) = &mut model.views[0];
+                sf.zoom = factor;
+            }
+            let xml = project_to_xmile(&project).expect("must serialize");
+            assert!(
+                xml.contains(expected_attr),
+                "writer must emit zoom as a percentage ({expected_attr}): {xml}"
+            );
+            let reparsed =
+                project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("must re-import");
+            assert_close(only_view_zoom(&reparsed), factor);
+        }
+    }
+
+    /// The writer emits the spec's `type` attribute (`<view type="stock_flow">`,
+    /// spec section 5.1), which is also what the reader looks for. The spec's
+    /// only `view_type` attribute lives on `<link target="view">` inside
+    /// `<event>` (section 4.1.2.1), not on `<view>`.
+    #[test]
+    fn writer_emits_spec_view_type_attribute() {
+        let project = project_with_view("");
+        let xml = project_to_xmile(&project).expect("must serialize");
+        assert!(
+            xml.contains(r#"<view "#) && xml.contains(r#"type="stock_flow""#),
+            "view must carry the spec's type attribute: {xml}"
+        );
+        assert!(
+            !xml.contains("view_type="),
+            "view_type is not an XMILE view attribute: {xml}"
+        );
+    }
+
+    /// The real Stella export that surfaced the defect: `teacup.stmx` carries
+    /// `<view ... zoom="200" ...>` and must open at a 2x factor, not 200x.
+    #[test]
+    fn teacup_stmx_fixture_opens_at_2x() {
+        const TEACUP: &str = include_str!("../../../pysimlin/tests/fixtures/teacup.stmx");
+        let project = project_from_reader(&mut BufReader::new(TEACUP.as_bytes()))
+            .expect("teacup.stmx must parse");
+        assert_close(only_view_zoom(&project), 2.0);
     }
 }

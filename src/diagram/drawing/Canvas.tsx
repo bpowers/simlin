@@ -65,6 +65,7 @@ import {
   centerOffsetForBounds,
   isDiagramOffscreen,
   isMomentumDone,
+  isRenderableZoom,
   momentumOffsetAt,
   pinchOffset,
   pinchZoom,
@@ -541,7 +542,17 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   // own in-progress viewport.
   const getCanvasOffset = (): Readonly<Point> => latest.current.liveViewport ?? latest.current.props.view.viewBox;
 
-  const getCanvasZoom = (): number => latest.current.liveViewport?.zoom ?? latest.current.props.view.zoom;
+  // The STORED zoom, healed: a value outside the renderable range (unset 0, or
+  // a file that recorded a percentage where a factor belongs) is read as 1 so
+  // that no gesture threshold, commit, or transform ever consumes it raw. The
+  // mount-time fit persists the healed value; until the host reflects it,
+  // every read here still sees a sane number.
+  const getViewZoom = (): number => {
+    const zoom = latest.current.props.view.zoom;
+    return isRenderableZoom(zoom) ? zoom : 1;
+  };
+
+  const getCanvasZoom = (): number => latest.current.liveViewport?.zoom ?? getViewZoom();
 
   // Push the live viewport to the controller exactly once and clear it. This is
   // the single settle-time commit shared by every gesture tail (pan release with
@@ -1319,7 +1330,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     const showDetails = shouldShowVariableDetails(
       r.selectionCenterOffset !== undefined,
       latest.current.moveDelta,
-      latest.current.props.view.zoom,
+      getViewZoom(),
       isDraggingArrowhead(latest.current.interaction),
       isDraggingSource(latest.current.interaction),
       latest.current.interaction.mode === 'movingLabel',
@@ -1333,7 +1344,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     // deferred fields now live in the movingSelection union variant.
     const interactionNow = latest.current.interaction;
     if (interactionNow.mode === 'movingSelection' && interactionNow.deferredSingleSelectUid !== undefined) {
-      const didDrag = isDrag(latest.current.moveDelta, latest.current.props.view.zoom);
+      const didDrag = isDrag(latest.current.moveDelta, getViewZoom());
       const newSel = resolveDeferredSelection(interactionNow.deferredSingleSelectUid, didDrag);
       // Collapse the group selection to the pressed element on a no-drag
       // pointer-up (Figma-style). Name editing is NOT entered from here: a
@@ -1390,7 +1401,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
           // A sub-threshold pointer wobble during a click is not a drag: don't
           // nudge the element. shouldShowVariableDetails (which applies the
           // same threshold) will open the details panel for it instead.
-          if (isDragMovement(delta, latest.current.props.view.zoom)) {
+          if (isDragMovement(delta, getViewZoom())) {
             latest.current.props.onMoveSelection(delta, arcPoint, getDraggingSegmentIndex(interactionNow));
           }
         } else {
@@ -1411,10 +1422,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
           } else if (element.type === 'flow') {
             // don't create a flow stacked on top of 2 clouds due to a misclick
             // (a click that wobbled a pixel is still a misclick, not a drag)
-            if (
-              !isDragMovement(latest.current.moveDelta, latest.current.props.view.zoom) &&
-              latest.current.inCreation
-            ) {
+            if (!isDragMovement(latest.current.moveDelta, getViewZoom()) && latest.current.inCreation) {
               clearPointerState();
               return;
             }
@@ -2580,7 +2588,11 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     const svgHeight = svgElement.clientHeight;
 
     const viewBox = latest.current.props.view.viewBox;
-    let zoom = latest.current.props.view.zoom;
+    // getViewZoom already heals an out-of-range stored zoom to 1; the raw value
+    // is only consulted to decide that the healed one must be PERSISTED
+    // (through onViewBoxChange below), so the model is fixed on first open.
+    const storedZoom = latest.current.props.view.zoom;
+    const zoom = getViewZoom();
 
     let shouldUpdate = false;
     const prevBounds = viewBox;
@@ -2591,8 +2603,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       viewBox.height !== svgHeight ||
       !isFinite(viewBox.x) ||
       !isFinite(viewBox.y) ||
-      !isFinite(zoom) ||
-      zoom < 0.2
+      !isRenderableZoom(storedZoom)
     ) {
       shouldUpdate = true;
     }
@@ -2600,10 +2611,6 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     if (shouldUpdate) {
       let x = 0;
       let y = 0;
-
-      if (!isFinite(zoom) || zoom < 0.2) {
-        zoom = 1;
-      }
 
       // on a new diagram we won't have an initial bounds, but we should
       // still set the width/height
@@ -2728,7 +2735,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     }
 
     const offset = props.view.viewBox;
-    const zoom = props.view.zoom;
+    const zoom = getViewZoom();
     if (!isDiagramOffscreen(bounds, offset, zoom, svgSize)) {
       return;
     }
@@ -2841,8 +2848,9 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       viewBox = `${left} ${top} ${width} ${height}`;
     }
   } else {
-    const liveZoom = getCanvasZoom();
-    const zoom = liveZoom >= 0.2 ? liveZoom : 1;
+    // getCanvasZoom heals an out-of-range stored zoom, so nothing is ever drawn
+    // at, say, 200x because a file recorded a percentage where a factor belongs.
+    const zoom = getCanvasZoom();
     const offset = getCanvasOffset();
 
     transform = `matrix(${zoom} 0 0 ${zoom} ${offset.x * zoom} ${offset.y * zoom})`;

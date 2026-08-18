@@ -1485,6 +1485,12 @@ export interface StockFlowView {
   readonly nextUid: number;
   readonly elements: readonly ViewElement[];
   readonly viewBox: Rect;
+  /**
+   * Zoom as a factor: 1.0 = 100%, 2.0 = twice as big. The engine's XMILE
+   * reader/writer converts to and from the spec's percentage, so a factor is
+   * the only unit that ever reaches the diagram (Canvas clamps out-of-range
+   * values defensively).
+   */
   readonly zoom: number;
   readonly useLetteredPolarity: boolean;
 }
