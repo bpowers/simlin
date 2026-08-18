@@ -2285,7 +2285,12 @@ pub(crate) fn discover_loops_with_deadlines(
                 // materialized for those circuits alone -- on a model carrying
                 // no agg node at all (every scalar model) that is none of them.
                 // Pre-filtering changes nothing `collect_agg_petals` would keep:
-                // it drops the same circuits itself, in the same order.
+                // it drops the same circuits itself, in the same order. The agg
+                // count itself is taken off the edge rows via `edge_source`
+                // (O(1), no allocation) so `circuit_nodes` -- which allocates a
+                // `Vec` -- is called only for the circuits that pass the count
+                // test, not for every enumerated circuit (World3's universe is
+                // ~150k circuits, almost all of which visit zero agg nodes).
                 let is_agg_node: Vec<bool> = search
                     .idents
                     .iter()
@@ -2293,11 +2298,15 @@ pub(crate) fn discover_loops_with_deadlines(
                     .collect();
                 let petal_circuits: Vec<Vec<u32>> = if is_agg_node.contains(&true) {
                     (0..candidates.len())
-                        .filter_map(|ci| {
-                            let nodes = activity.circuit_nodes(candidates.circuit(ci));
-                            let aggs = nodes.iter().filter(|&&n| is_agg_node[n as usize]).count();
-                            (aggs == 1).then_some(nodes)
+                        .filter(|&ci| {
+                            candidates
+                                .circuit(ci)
+                                .iter()
+                                .filter(|&&row| is_agg_node[activity.edge_source(row) as usize])
+                                .count()
+                                == 1
                         })
+                        .map(|ci| activity.circuit_nodes(candidates.circuit(ci)))
                         .collect()
                 } else {
                     Vec::new()
@@ -2475,10 +2484,19 @@ pub(crate) fn discover_loops_with_deadlines(
                 // work the recompute costs per link.
                 let module_name =
                     Ident::<Canonical>::new(crate::ltm::strip_subscript(links[i].to.as_str()));
-                if causal_graph.module_graph(&module_name).is_none() || next.from != links[i].to {
+                // No module instance at `links[i].to` at all: the recompute's
+                // own gate (`module_graph(&module_name)?`) would decline for
+                // the identical reason, so answer `None` directly instead of
+                // re-stripping/re-interning the same names only to reach the
+                // same `?` immediately.
+                causal_graph.module_graph(&module_name)?;
+                if next.from != links[i].to {
                     // A non-sequential link list has no exit port to read, and
                     // the recompute declines it; that case is outside what the
-                    // cache key spells, so it is answered uncached.
+                    // cache key spells, so it is answered uncached. (The
+                    // recompute's own guard for this is weaker -- it compares
+                    // stripped names further along -- so delegating here still
+                    // does real work, unlike the module-graph arm above.)
                     return recompute_module_input_edge_series(
                         causal_graph,
                         results,
@@ -2504,8 +2522,7 @@ pub(crate) fn discover_loops_with_deadlines(
                     step_count,
                     sub_model_output_ports,
                 );
-                module_series_cache.insert(key, series.clone());
-                series
+                module_series_cache.entry(key).or_insert(series).clone()
             })
             .collect();
 

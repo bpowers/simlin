@@ -359,6 +359,15 @@ impl ActivityGraph {
             .collect()
     }
 
+    /// The source node of a single edge row, without allocating a node path.
+    /// Lets a caller test a per-row predicate (e.g. "is this an agg node?")
+    /// over a circuit's edge rows before deciding whether the full
+    /// [`Self::circuit_nodes`] path is worth materializing.
+    #[inline]
+    pub(super) fn edge_source(&self, row: u32) -> u32 {
+        self.edge_from[row as usize]
+    }
+
     /// The half-open saved-step range `[lo, hi)` spanning every step at which
     /// the circuit whose activity AND is `and_bits` can be nonzero.
     ///
