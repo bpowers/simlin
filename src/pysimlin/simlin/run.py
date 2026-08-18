@@ -302,7 +302,7 @@ class Run:
         Example:
             >>> run = model.run()
             >>> if run.ltm_mode == "discovery":
-            ...     print("loops ranked heuristically; not exhaustively enumerated")
+            ...     print("loops found after simulation; not exhaustively enumerated")
         """
         if self._cached_ltm_mode is None:
             self._cached_ltm_mode = str(self._sim.get_ltm_mode())

@@ -137,7 +137,7 @@ class ModelPatchBuilder:
         """Pin (name) a feedback loop by the variables forming its cycle.
 
         Pinning forces the LTM engine to ALWAYS score this loop, even in
-        discovery mode where the heuristic search might not surface it. The
+        discovery mode, whose reported list is capped and might not name it. The
         pinned loop then appears in ``model.loops`` / ``run.loops`` and its
         score is readable via ``Sim.get_relative_loop_score`` by the loop's
         ``pin{n}`` id. ``variables`` lists the loop's member variables (order
@@ -561,22 +561,24 @@ class Model:
 
         Discovery is the "Loops That Matter" analysis over the recorded link
         scores: it finds the feedback loops that drive behavior, even on large
-        models where the
-        exhaustive structural enumeration behind ``Model.loops`` / ``Run.loops``
-        returns nothing (because such models auto-flip to discovery mode).
+        models where the exhaustive structural enumeration behind
+        ``Model.loops`` / ``Run.loops`` returns nothing (because such models
+        auto-flip to discovery mode).
 
         This is an EXPLICIT, opt-in call: ``Model.run()`` never triggers
         discovery, because discovery can be slow or even infeasible on very
-        large models. Pass a ``timeout`` to bound the wall-clock time spent in
-        discovery's per-timestep sweep; when it elapses before discovery
-        finishes, the returned :class:`Analysis` has ``truncated=True`` and its
-        ``loops`` / ``dominant_periods`` reflect only the work done so far.
+        large models. Pass a ``timeout`` to bound the wall-clock time spent
+        finding candidate loops; when it elapses before discovery finishes, the
+        returned :class:`Analysis` has ``truncated=True`` and its ``loops`` /
+        ``dominant_periods`` reflect only the work done so far.
 
         .. note::
-            The ``timeout`` bounds only the loop-discovery sweep itself. The
-            model must first be compiled with LTM instrumentation and simulated,
-            and that time is NOT counted against the timeout -- on large models
-            it can dominate the total wall-clock time of this call.
+            The ``timeout`` bounds only the search for candidate loops. The
+            model must first be compiled with LTM instrumentation and
+            simulated, and that time is NOT counted against the timeout -- on
+            large models it can dominate the total wall-clock time of this
+            call. Scoring and ranking the candidates the search proposed also
+            run after the timeout, so a call can outlast it.
 
         The analysis runs against the model's base configuration (no overrides
         or time-range changes); it compiles and simulates internally in LTM
@@ -808,7 +810,7 @@ class Model:
             warnings.warn(
                 "this model is too large for exhaustive feedback-loop enumeration, "
                 "so LTM resolved to discovery mode and run.loops is empty. Use "
-                "Model.analyze(timeout=...) for heuristic loop discovery, or pin "
+                "Model.analyze(timeout=...) for post-simulation loop discovery, or pin "
                 "the loops you care about with set_loop_name() in model.edit() so "
                 "they are always scored.",
                 RuntimeWarning,

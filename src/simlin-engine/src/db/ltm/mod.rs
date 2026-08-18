@@ -1816,9 +1816,9 @@ pub fn model_ltm_variables(
     //
     // A modeler pins a loop by naming its variable set; the engine then ALWAYS
     // emits that loop's `loop_score`, regardless of mode. This is the whole
-    // point in discovery mode -- the heuristic search emits NO loop_score var
-    // for any loop, so a pinned loop is the only way to score a specific loop
-    // there. In exhaustive mode a pin usually duplicates an already-enumerated
+    // point in discovery mode -- loops are found after the simulation, so no
+    // loop_score var is emitted for any of them and a pinned loop is the only
+    // way to score a specific loop there. In exhaustive mode a pin usually duplicates an already-enumerated
     // loop, so we dedup against `loops` (by canonical variable-cycle rotation)
     // and skip re-emitting; the enumerated loop already carries a score under
     // its `r{n}`/`b{n}`/`u{n}` id.

@@ -474,7 +474,7 @@ pub(crate) struct SimState {
     /// with `enable_ltm = false` or compilation failed; `Some(mode)`
     /// otherwise.  Surfaced through `simlin_sim_get_ltm_mode` so a caller can
     /// tell exhaustive Johnson enumeration apart from the auto-flipped
-    /// discovery heuristic.
+    /// post-simulation discovery.
     pub(crate) ltm_mode: Option<engine::db::LtmMode>,
     /// Per-(partition, slot) denominator series cached across FFI calls to
     /// `simlin_analyze_get_relative_loop_score`.  The rel-loop-score

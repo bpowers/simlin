@@ -440,9 +440,9 @@ class Analysis:
     2020) run over the recorded link scores: instead of exhaustively
     enumerating every structural feedback loop -- which is empty for large
     models that auto-flip to discovery mode -- it finds the loops that drive
-    behavior. Each discovered
-    `Loop` carries its `behavior_time_series` (the per-step importance series),
-    and `dominant_periods` records which loops dominate during each interval.
+    behavior. Each discovered `Loop` carries its `behavior_time_series` (the
+    per-step importance series), and `dominant_periods` records which loops
+    dominate during each interval.
 
     `truncated` is True when discovery hit its `timeout` before finishing, so
     `loops`/`dominant_periods` may be partial. Discovery on very large models

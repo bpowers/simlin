@@ -316,7 +316,7 @@ class SetLoopName:
     """Operation to pin (name) a feedback loop by its variable set.
 
     Naming a loop forces the LTM engine to ALWAYS score it -- even in
-    discovery mode, where the heuristic search may not surface it (the
+    discovery mode, whose reported list is capped and may not name it (the
     LOOPSCORE capability from the LTM literature). ``variables`` lists the
     variable names forming the loop's cycle (order does not matter; the cycle
     is recovered from the model's causal graph).

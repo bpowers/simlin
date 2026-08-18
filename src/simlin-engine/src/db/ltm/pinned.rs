@@ -6,8 +6,8 @@
 //! section 10).
 //!
 //! A practitioner pins a loop by naming its variable *set* (via the
-//! `SetLoopName` patch primitive, which writes `LoopMetadata`). The LTM
-//! discovery heuristic may not surface a loop the modeler cares about; pinning
+//! `SetLoopName` patch primitive, which writes `LoopMetadata`). Discovery's
+//! report is capped and may not name a loop the modeler cares about; pinning
 //! forces it to ALWAYS be scored, in both exhaustive and discovery mode.
 //!
 //! `model_pinned_loops` is the single salsa-tracked place a pinned loop's

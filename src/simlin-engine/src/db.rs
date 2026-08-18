@@ -469,17 +469,17 @@ pub struct LtmSyntheticVar {
 pub enum LtmMode {
     /// Exhaustive Johnson enumeration of every elementary circuit.
     Exhaustive,
-    /// Strongest-path discovery heuristic (the model tripped the SCC gate
-    /// or the caller explicitly requested discovery).
+    /// Post-simulation discovery over the recorded link scores (the model
+    /// tripped the SCC gate or the caller explicitly requested discovery).
     Discovery,
 }
 
 /// Result of LTM variable generation for a model.
 ///
 /// `mode` records whether loop enumeration ran exhaustively or auto-flipped
-/// (or was forced) to the discovery heuristic -- the only signal a caller has
-/// for telling the two apart, since the synthetic-variable output otherwise
-/// just looks empty or different.
+/// (or was forced) to post-simulation discovery -- the only signal a caller
+/// has for telling the two apart, since the synthetic-variable output
+/// otherwise just looks empty or different.
 ///
 /// `loop_partitions` maps each loop ID (as in `$⁚ltm⁚loop_score⁚{id}`) to
 /// its cycle-partition index **per slot**: length 1 for scalar/cross-element/

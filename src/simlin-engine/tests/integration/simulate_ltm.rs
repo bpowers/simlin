@@ -472,15 +472,16 @@ fn discovery_decoupled_stocks() {
     let exhaustive_loops = model_detected_loops(&db, source_model, sync.project);
     // Discovery mode -- the decoupled stocks model has time-varying loop
     // activity where different loops activate at different timesteps,
-    // demonstrating why per-timestep discovery is necessary.
+    // demonstrating why discovery is decided per saved step.
     let found = discover_loops_from_path(model_path);
 
-    // The heuristic finds 2 of 3 loops: the self-loops for each stock.
-    // The cross-stock loop is missed because its two cross-links are
-    // never simultaneously nonzero at any saved timestep (stock_1->flow_2
-    // is active only around step 4, stock_2->flow_1 only at steps 6-10),
-    // so the per-step zero-edge-excluded search graph never contains the
-    // full cycle -- the "baton-passing" limitation tracked as GH #699.
+    // Discovery finds 2 of 3 loops: the self-loops for each stock. The
+    // cross-stock loop is missed because its two cross-links are never
+    // simultaneously nonzero at any saved timestep (stock_1->flow_2 is active
+    // only around step 4, stock_2->flow_1 only at steps 6-10), so the cycle's
+    // activity intersection is empty and it is outside the
+    // ever-simultaneously-active universe -- the "baton-passing" limitation
+    // tracked as GH #699.
     assert_eq!(
         found.len(),
         2,
@@ -9338,10 +9339,11 @@ fn build_reducer_feedback_model(name: &str, elems: &[&str]) -> simlin_engine::da
 /// emits 7 cross-element loops (3 single-petal + 3 disjoint-pair + 1 triple).
 /// Before the fix, discovery (the production `analyze_model` path) returned
 /// only the 3 single-petal loops: both discovery generators emit ELEMENTARY
-/// cycles, which by definition never revisit the synthetic agg node. This cross-validates the discovered loop
-/// set against exhaustive on the SAME model: same count, and -- for the
-/// loops that traverse the agg -- a per-element loop-score series equal to the
-/// exhaustive loop_score variables (to within FP reassociation).
+/// cycles, which by definition never revisit the synthetic agg node. This
+/// cross-validates the discovered loop set against exhaustive on the SAME
+/// model: same count, and -- for the loops that traverse the agg -- a
+/// per-element loop-score series equal to the exhaustive loop_score variables
+/// (to within FP reassociation).
 #[test]
 fn discovery_recovers_cross_agg_loops_matches_exhaustive() {
     let elems = ["a", "b", "c"];
@@ -10146,8 +10148,9 @@ fn discovery_multi_output_loop_polarity_matches_exhaustive() {
         "exhaustive settled loop score should be positive (reinforcing), got {exhaustive_settled}"
     );
 
-    // Discovery: run loop discovery and find the loop through the module. Its settled signed score must have the same sign exhaustive
-    // reports, not the inverted one the composite tie-break produced.
+    // Discovery: run loop discovery and find the loop through the module. Its
+    // settled signed score must have the same sign exhaustive reports, not the
+    // inverted one the composite tie-break produced.
     let compiled = compile_ltm_discovery_incremental(&project);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().expect("discovery simulation should run");

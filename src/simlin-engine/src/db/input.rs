@@ -120,7 +120,7 @@ impl SourceVariableKind {
 /// cycle from `model_causal_edges` alone.
 ///
 /// Pinning lets a practitioner force a specific loop to ALWAYS be scored,
-/// regardless of whether the (heuristic) discovery search surfaced it -- the
+/// regardless of whether post-simulation discovery reported it -- the
 /// `LOOPSCORE` capability from the LTM papers (section 10), built on the
 /// existing loop-naming primitive rather than a new equation builtin.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -207,7 +207,8 @@ pub struct SourceModel {
     /// Modeler-pinned feedback loops, resolved from the model's non-deleted
     /// `loop_metadata` (UIDs -> canonical variable names) at sync time. The
     /// LTM pipeline reads this to always emit a `loop_score` for each pinned
-    /// loop, even in discovery mode where the heuristic search may miss it.
+    /// loop, even in discovery mode, whose report is capped and, when the
+    /// enumeration cannot complete, a sample.
     #[returns(ref)]
     pub pinned_loops: Vec<PinnedLoopSpec>,
 }
