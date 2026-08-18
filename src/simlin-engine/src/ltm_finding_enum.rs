@@ -36,10 +36,36 @@
 //! consumer needs one ([`ActivityGraph::circuit_nodes`]).
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Instant;
 
 use super::{Clock, DEADLINE_CHECK_INTERVAL, IndexedSearch, MIN_CONTRIBUTION, expired, is_active};
 use crate::results::Results;
+
+/// Closure consulted by [`score_steps`] whenever a circuit edge's target is a
+/// module-instance node: `(from_node, module_node, next_node) ->
+/// Option<(Rc<Vec<f64>>, (usize, usize))>`, where `next_node` is the node the
+/// module hands off to along THIS circuit's traversal order -- the source of
+/// the row immediately following `module_node` -- the same "exit-port reader"
+/// `FoundLoop` materialization resolves. `Some` REPLACES the raw composite
+/// row for that one hop with the returned per-exit-port override series for
+/// the whole score computation; `None` (an ambiguous entry/exit port, a
+/// pathless module, ...) leaves the raw composite row in place.
+///
+/// The paired `(usize, usize)` is the override series' OWN active window
+/// (`[lo, hi)`, per `is_active`) -- outside it the series is 0 or NaN at
+/// every step by construction, so [`effective_scoring_window`] can bound a
+/// module-traversing circuit's scoring range by THIS window instead of the
+/// full saved-step range, without missing any mass.
+///
+/// Built once per discovery call (`ltm_finding::ModuleOverrideCache::series`,
+/// memoized by the subscript-stripped `(from, module, exit)` triple -- the
+/// window is computed once per unique entry alongside the series) and shared
+/// by retention (this module) and `FoundLoop` materialization
+/// (`ltm_finding.rs`), so the two phases can never disagree about which
+/// override a module-traversing loop's score resolves to.
+pub(super) type ModuleOverrideFn<'a> =
+    dyn FnMut(u32, u32, u32) -> Option<(Rc<Vec<f64>>, (usize, usize))> + 'a;
 
 /// Maximum elementary circuits the union-graph enumerator may emit before
 /// discovery falls back to the shortest-path sweep.
@@ -101,7 +127,127 @@ pub(super) const ACTIVITY_BUILD_DEADLINE_CHECK_VALUES: usize = 1 << 16;
 /// them is the same order of work as the other phases' intervals; the first
 /// check is at circuit 0, so an already-expired deadline is caught before any
 /// scoring.
+///
+/// This bounds the wrong thing on its own: a circuit's scoring cost is
+/// `O(len * window)`, not `O(1)`, so a model with few but LONG,
+/// densely-active circuits (a long `PREVIOUS` chain saved at many steps, say)
+/// can do far more work between two circuit-count-spaced checks than the
+/// interval's name suggests -- unbounded, in principle, since nothing here
+/// caps a single circuit's own length or window. [`RETENTION_DEADLINE_CHECK_EDGE_STEPS`]
+/// is the second, WORK-based trigger that closes that gap; the two run
+/// together (see [`DeadlineWorkTracker`]), so whichever bound the model's
+/// circuit shape stresses is the one that fires.
 const RETENTION_DEADLINE_CHECK_CIRCUITS: usize = 4096;
+
+/// How many edge-steps (`circuit_len * scored_window`, summed since the last
+/// check) [`retain_circuits`] and [`dedup_trimmed_twins`] may score between
+/// wall-clock deadline checks, alongside [`RETENTION_DEADLINE_CHECK_CIRCUITS`]'s
+/// circuit-count trigger. Must stay a power of two: the test override
+/// (mirroring [`enum_deadline_visit_interval`]) is a single `debug_assert`
+/// rather than a mask here, since the comparison is a plain `>=` against a
+/// running total instead of a bitwise `visits & (interval - 1)` test -- the
+/// running total does not wrap the way a per-visit counter does, so there is
+/// no mask to keep aligned, but the power-of-two convention is kept anyway
+/// for consistency with the enumerator's own interval and to leave room for a
+/// masked implementation later without changing the constant's contract.
+const RETENTION_DEADLINE_CHECK_EDGE_STEPS: u64 = 1 << 20;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of [`RETENTION_DEADLINE_CHECK_EDGE_STEPS`], scoped
+    /// by an active [`RetentionDeadlineCheckEdgeStepsGuard`] -- lets a
+    /// fixture with two long circuits over many steps reach the work-based
+    /// check without needing a model that actually scores a million edge-steps
+    /// (docs/dev/rust.md#test-time-budgets).
+    static RETENTION_DEADLINE_CHECK_EDGE_STEPS_OVERRIDE: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The effective edge-step interval for [`DeadlineWorkTracker`]'s work-based
+/// deadline check.
+fn retention_deadline_check_edge_steps() -> u64 {
+    #[cfg(test)]
+    {
+        if let Some(interval) = RETENTION_DEADLINE_CHECK_EDGE_STEPS_OVERRIDE.with(|c| c.get()) {
+            debug_assert!(interval.is_power_of_two());
+            return interval;
+        }
+    }
+    RETENTION_DEADLINE_CHECK_EDGE_STEPS
+}
+
+/// RAII guard (test-only) overriding [`retention_deadline_check_edge_steps`]
+/// for the current thread; restores the previous value on drop so a
+/// panicking test does not leak the override to the next test on the same
+/// thread.
+#[cfg(test)]
+pub(crate) struct RetentionDeadlineCheckEdgeStepsGuard {
+    prev: Option<u64>,
+}
+
+#[cfg(test)]
+impl RetentionDeadlineCheckEdgeStepsGuard {
+    pub(crate) fn new(interval: u64) -> Self {
+        let prev = RETENTION_DEADLINE_CHECK_EDGE_STEPS_OVERRIDE.with(|c| c.replace(Some(interval)));
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RetentionDeadlineCheckEdgeStepsGuard {
+    fn drop(&mut self) {
+        RETENTION_DEADLINE_CHECK_EDGE_STEPS_OVERRIDE.with(|c| c.set(self.prev));
+    }
+}
+
+/// Accumulates scoring work between deadline checks for [`retain_circuits`]
+/// and [`dedup_trimmed_twins`], and decides when the next check is due.
+///
+/// A check fires whenever EITHER trigger is due: the circuit-count interval
+/// (`RETENTION_DEADLINE_CHECK_CIRCUITS`, which also catches circuit 0 --
+/// `0.is_multiple_of(_)` is always true, so an already-expired deadline is
+/// caught before any scoring) or the work-based interval
+/// (`RETENTION_DEADLINE_CHECK_EDGE_STEPS`, accumulated edge-steps recorded
+/// since the last check). Whichever fires resets the work accumulator, so the
+/// two triggers cannot compound into checking far more often than either
+/// alone would. An unbudgeted call (`deadline: None`) never reads the clock:
+/// `expired` short-circuits before touching it either way.
+///
+/// [`Self::check`] runs BEFORE a circuit is scored (so an already-expired
+/// deadline is caught before any work happens) and [`Self::record`] runs
+/// AFTER, which is why they are two calls rather than one: the work a check
+/// can react to is always the PRIOR circuits' work, never the one about to be
+/// scored.
+struct DeadlineWorkTracker {
+    edge_steps_since_check: u64,
+}
+
+impl DeadlineWorkTracker {
+    fn new() -> Self {
+        DeadlineWorkTracker {
+            edge_steps_since_check: 0,
+        }
+    }
+
+    /// Record `len * window` edge-steps just scored for the circuit the
+    /// caller's most recent [`Self::check`] cleared.
+    fn record(&mut self, edge_steps: u64) {
+        self.edge_steps_since_check += edge_steps;
+    }
+
+    /// Whether a check is due for circuit `ci` (either trigger) and, if so,
+    /// whether the deadline has expired. Resets the work accumulator whenever
+    /// a check actually runs, regardless of which trigger fired it.
+    fn check(&mut self, ci: usize, deadline: Option<Instant>, clock: &mut dyn Clock) -> bool {
+        let work_due = self.edge_steps_since_check >= retention_deadline_check_edge_steps();
+        let circuit_due = ci.is_multiple_of(RETENTION_DEADLINE_CHECK_CIRCUITS);
+        if !(work_due || circuit_due) {
+            return false;
+        }
+        self.edge_steps_since_check = 0;
+        expired(deadline, clock)
+    }
+}
 
 /// The three enumeration budgets: circuits, edge-visits, emitted edge rows.
 type EnumBudgets = (usize, u64, u64);
@@ -794,28 +940,40 @@ pub(super) struct RetentionOutcome {
 ///    exactly 1.0 -- so this step is what makes the answer exact against the
 ///    totals THIS pass computes.
 ///
-/// Two classes skip both. A circuit in a Solo group (no stock resolves to a
+/// One class skips both: a circuit in a Solo group (no stock resolves to a
 /// partition) is its own denominator, so its relative score is +/-1 wherever
 /// it is active and "ever active" is the whole test -- which the enumerator
 /// guarantees, since a circuit is emitted only with a nonempty activity AND;
-/// the check that the AND is nonempty is kept as cheap defense in depth. And a
-/// module-traversing circuit is kept unconditionally, because its reported
-/// score may come from the per-exit-port override series rather than the raw
-/// product judged here.
+/// the check that the AND is nonempty is kept as cheap defense in depth.
 ///
-/// **Exact against these totals is exact against the reported totals, for
-/// every non-module circuit.** Two enumerated circuits can trim to the same
-/// *reported* loop (a direct reference and its hoisted-reducer twin, AC4.3);
-/// [`dedup_trimmed_twins`] decides the representative BEFORE either
-/// candidate's mass reaches a partition total, so this pass's own totals
-/// already are the totals `rank_and_filter` will use -- a non-representative
-/// twin banks no mass, is never confirmed, and is never a survivor. A
-/// module-traversing circuit is the one remaining exception: it is kept
-/// unconditionally and banks no raw mass here regardless (its reported score
-/// may come from the per-exit-port override series, which this pass cannot
-/// judge), so a module-traversing duplicate still relies on
-/// `ltm_finding.rs`'s post-materialization `by_reported_cycle` dedup and the
-/// `subtract_reported_mass_from_totals` safety net.
+/// **Retention is exact against the reported series for every circuit,
+/// module-traversing ones included.** A module-traversing circuit's edge row
+/// whose target is the module instance is scored through `override_for`
+/// (`ltm_finding::ModuleOverrideCache`, the SAME cache `FoundLoop`
+/// materialization consults), which substitutes the per-exit-port override
+/// series -- the score the loop actually REPORTS -- for the raw composite row
+/// whenever a single exit pathway resolves; where it does not (an ambiguous
+/// entry/exit port, a pathless module), the raw composite row stands in for
+/// both retention and materialization alike, so the two phases can never
+/// judge a circuit against different numbers. Because that substitution can
+/// make the circuit active at steps its RAW composite window excludes (the
+/// composite and the override are different series), a module-traversing
+/// circuit is scored over the OVERRIDE'S OWN active window rather than the
+/// raw composite's -- exact, and far cheaper than the full saved-step range
+/// in practice -- see [`effective_scoring_window`]'s doc.
+///
+/// Two enumerated circuits can also trim to the same *reported* loop (a
+/// direct reference and its hoisted-reducer twin, AC4.3); [`dedup_trimmed_twins`]
+/// decides the representative BEFORE either candidate's mass reaches a
+/// partition total -- module-traversing circuits included, now that their
+/// reported (override) average is computable -- so this pass's own totals
+/// already are the totals `rank_and_filter` will use, and a non-representative
+/// twin banks no mass, is never confirmed, and is never a survivor. The one
+/// remaining boundary is a STITCHED cross-agg loop (a combination of petals
+/// assembled after this pass runs, not one of its circuits) colliding with a
+/// reported loop's trimmed identity; `ltm_finding.rs`'s post-materialization
+/// `by_reported_cycle` dedup and its `subtract_reported_mass_from_totals`
+/// safety net exist for exactly that case.
 ///
 /// Nothing per-circuit larger than O(1) is retained for non-survivors, so the
 /// pass is safe at [`MAX_DISCOVERY_ENUM_CIRCUITS`] scale.
@@ -825,16 +983,25 @@ pub(super) struct RetentionOutcome {
 /// loop-score rules: the loop's score there is NaN, excluded from the totals
 /// and unable to satisfy retention. Deadline expiry mid-pass returns `None`
 /// (caller falls back).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn retain_circuits(
     candidates: &EnumeratedCandidates,
     graph: &ActivityGraph,
     stock_partition_of_node: &[Option<usize>],
     is_module_node: &[bool],
     is_agg_node: &[bool],
+    override_for: &mut ModuleOverrideFn,
     deadline: Option<Instant>,
     clock: &mut dyn Clock,
 ) -> Option<RetentionOutcome> {
     let step_count = graph.step_count;
+    // Computed ONCE for the whole call (an O(n_nodes) scan, not O(circuits))
+    // and threaded through every scoring site below, so a module-free graph
+    // -- the overwhelming majority, and the whole of World3 -- never pays a
+    // per-circuit `effective_scoring_window` lookup or a per-row branch in
+    // `score_steps`; see that function's doc for the measured cost of
+    // getting this wrong.
+    let has_module_node = is_module_node.contains(&true);
 
     let mut partition_totals: HashMap<usize, Vec<f64>> = HashMap::new();
     let mut partition_circuit_counts: HashMap<usize, usize> = HashMap::new();
@@ -843,12 +1010,19 @@ pub(super) fn retain_circuits(
 
     let mut survivors: Vec<usize> = Vec::new();
     let mut to_confirm: Vec<usize> = Vec::new();
+    // Shared across `dedup_trimmed_twins` and both loops below, so the
+    // work-based deadline trigger sees this whole call's scoring as one
+    // continuous budget rather than resetting at each phase boundary.
+    let mut work = DeadlineWorkTracker::new();
 
     let dropped = dedup_trimmed_twins(
         candidates,
         graph,
+        has_module_node,
         is_module_node,
         is_agg_node,
+        override_for,
+        &mut work,
         &mut scratch,
         &mut nan_mask,
         deadline,
@@ -857,7 +1031,7 @@ pub(super) fn retain_circuits(
     let distinct_circuits = candidates.len() - dropped.iter().filter(|&&d| d).count();
 
     for (ci, &is_dropped) in dropped.iter().enumerate() {
-        if deadline_expired(ci, deadline, clock) {
+        if work.check(ci, deadline, clock) {
             return None;
         }
         if is_dropped {
@@ -868,31 +1042,43 @@ pub(super) fn retain_circuits(
         }
         let rows = candidates.circuit(ci);
         let partition = circuit_partition(rows, graph, stock_partition_of_node);
-        if circuit_traverses_module(rows, graph, is_module_node) {
-            // Kept, and contributing NO raw mass: what such a loop reports is
-            // the per-exit-port override series, and the module composite this
-            // product multiplies in max-abs-selects across ALL of the module's
-            // output ports, so the two can differ by any factor. Its reported
-            // mass joins the denominators after materialization instead. A
-            // module circuit always counts toward its partition's universe
-            // (unconditionally kept, unlike the raw-mass gate below): it WILL
-            // contribute nonzero reported mass once materialized.
-            if let Some(part) = partition {
-                *partition_circuit_counts.entry(part).or_insert(0) += 1;
-            }
-            survivors.push(ci);
-            continue;
-        }
-
         let (lo, hi) = graph.active_window(candidates.activity_of(ci));
         let Some(part) = partition else {
+            // Solo: "ever active" is decided by the RAW enumerated activity
+            // window regardless of any override -- the enumerator's own
+            // decision to emit this circuit at all (built from the raw
+            // composite series) is unaffected by a later per-exit-port
+            // substitution.
             if lo < hi {
                 survivors.push(ci);
             }
             continue;
         };
 
-        score_steps(rows, graph, lo, &mut scratch[lo..hi], &mut nan_mask[lo..hi]);
+        // A module-traversing circuit's raw activity window is a window over
+        // the COMPOSITE score, which can disagree with the override series
+        // `score_steps` may substitute for it: a step outside the composite's
+        // window can still carry real override mass. Widen to the OVERRIDE's
+        // own active window (exact -- see `effective_scoring_window`'s doc)
+        // rather than the full range, and only when `has_module_node` so a
+        // module-free graph never pays the per-circuit lookup.
+        let (score_lo, score_hi) = if has_module_node {
+            effective_scoring_window(rows, graph, is_module_node, override_for, (lo, hi))
+        } else {
+            (lo, hi)
+        };
+
+        score_steps(
+            rows,
+            graph,
+            score_lo,
+            has_module_node,
+            is_module_node,
+            override_for,
+            &mut scratch[score_lo..score_hi],
+            &mut nan_mask[score_lo..score_hi],
+        );
+        work.record(rows.len() as u64 * (score_hi - score_lo) as u64);
         let totals = partition_totals
             .entry(part)
             .or_insert_with(|| vec![0.0; step_count]);
@@ -904,9 +1090,11 @@ pub(super) fn retain_circuits(
         // circuit contributes nothing to any total and can satisfy no
         // threshold, so it must not inflate its partition's universe count
         // either: that count means "how many loops' mass is in this total",
-        // and a circuit that banked none is not one of them.
+        // and a circuit that banked none is not one of them. The SAME rule
+        // now decides a module-traversing circuit's membership too -- there
+        // is no separate unconditional-keep arm any more.
         let mut banked_mass = false;
-        for t in lo..hi {
+        for t in score_lo..score_hi {
             if nan_mask[t] {
                 continue;
             }
@@ -931,16 +1119,31 @@ pub(super) fn retain_circuits(
     }
 
     for (n, &ci) in to_confirm.iter().enumerate() {
-        if deadline_expired(n, deadline, clock) {
+        if work.check(n, deadline, clock) {
             return None;
         }
         let rows = candidates.circuit(ci);
         let part = circuit_partition(rows, graph, stock_partition_of_node)
             .expect("only partitioned circuits reach the confirm step");
         let (lo, hi) = graph.active_window(candidates.activity_of(ci));
-        score_steps(rows, graph, lo, &mut scratch[lo..hi], &mut nan_mask[lo..hi]);
+        let (score_lo, score_hi) = if has_module_node {
+            effective_scoring_window(rows, graph, is_module_node, override_for, (lo, hi))
+        } else {
+            (lo, hi)
+        };
+        score_steps(
+            rows,
+            graph,
+            score_lo,
+            has_module_node,
+            is_module_node,
+            override_for,
+            &mut scratch[score_lo..score_hi],
+            &mut nan_mask[score_lo..score_hi],
+        );
+        work.record(rows.len() as u64 * (score_hi - score_lo) as u64);
         let totals = &partition_totals[&part];
-        let keep = (lo..hi).any(|t| {
+        let keep = (score_lo..score_hi).any(|t| {
             !nan_mask[t] && totals[t] > 0.0 && scratch[t].abs() / totals[t] >= MIN_CONTRIBUTION
         });
         if keep {
@@ -994,10 +1197,15 @@ pub(super) fn trimmed_circuit_key(
 
 /// One circuit's mean `|score|` over the saved steps where its raw product is
 /// a number, computed over the FULL saved-step range -- the exact statistic
-/// `FoundLoop::avg_abs_score` computes for a materialized (non-module) loop,
-/// so a winner picked here by comparing this value is the same winner
-/// `ltm_finding.rs`'s post-materialization `by_reported_cycle` dedup would
-/// pick if it ever saw both circuits (it never does, once this drops one).
+/// `FoundLoop::avg_abs_score` computes for a materialized loop, so a winner
+/// picked here by comparing this value is the same winner `ltm_finding.rs`'s
+/// post-materialization `by_reported_cycle` dedup would pick if it ever saw
+/// both circuits (it never does, once this drops one). Module-traversing
+/// circuits are scored through `override_for` exactly like every other row
+/// (see `score_steps`), so their average is now the REPORTED average -- the
+/// per-exit-port override series' magnitude, not the raw composite's -- which
+/// is what makes them eligible to compete for representative status here at
+/// all (AC4.3 for module twins).
 ///
 /// Deliberately NOT windowed to the circuit's `active_window`: outside that
 /// window a step is either NaN (excluded from both the sum and the count) or
@@ -1009,10 +1217,22 @@ pub(super) fn trimmed_circuit_key(
 fn raw_avg_abs_score(
     rows: &[u32],
     graph: &ActivityGraph,
+    has_module_node: bool,
+    is_module_node: &[bool],
+    override_for: &mut ModuleOverrideFn,
     scratch: &mut [f64],
     nan_mask: &mut [bool],
 ) -> f64 {
-    score_steps(rows, graph, 0, scratch, nan_mask);
+    score_steps(
+        rows,
+        graph,
+        0,
+        has_module_node,
+        is_module_node,
+        override_for,
+        scratch,
+        nan_mask,
+    );
     let mut sum = 0.0f64;
     let mut valid = 0usize;
     for (i, &is_nan) in nan_mask.iter().enumerate() {
@@ -1035,14 +1255,15 @@ fn raw_avg_abs_score(
 /// 1. **Cheap short-circuit**: if the graph has no agg node at all (the
 ///    overwhelming majority of models, including every purely-scalar one),
 ///    nothing can collide and no circuit is touched.
-/// 2. **Group the agg-bearing circuits** (excluding module-traversing ones,
-///    which never participate -- see the parent fn's doc) by their trimmed
-///    key, scoring each with [`raw_avg_abs_score`]. This population is
-///    bounded by the model's synthetic agg count, not by the universe size.
-/// 3. **Test every non-agg, non-module circuit's OWN identity** (its full
-///    node sequence IS its trimmed key) against those keys. This still costs
-///    one node-sequence materialization per non-agg circuit -- O(total edge
-///    rows), the same order `circuit_partition`/`circuit_traverses_module`
+/// 2. **Group the agg-bearing circuits** by their trimmed key, scoring each
+///    with [`raw_avg_abs_score`] -- module-traversing circuits included, now
+///    that their REPORTED (override) average is computable and comparable to
+///    a non-module twin's. This population is bounded by the model's
+///    synthetic agg count, not by the universe size.
+/// 3. **Test every non-agg circuit's OWN identity** (its full node sequence
+///    IS its trimmed key) against those keys. This still costs one
+///    node-sequence materialization per non-agg circuit -- O(total edge
+///    rows), the same order `circuit_partition`/`effective_scoring_window`
 ///    already pay -- but the expensive part, scoring, runs only on an actual
 ///    match, which is exactly the (rare) direct/agg-twin collision this
 ///    exists to catch.
@@ -1059,8 +1280,11 @@ fn raw_avg_abs_score(
 fn dedup_trimmed_twins(
     candidates: &EnumeratedCandidates,
     graph: &ActivityGraph,
+    has_module_node: bool,
     is_module_node: &[bool],
     is_agg_node: &[bool],
+    override_for: &mut ModuleOverrideFn,
+    work: &mut DeadlineWorkTracker,
     scratch: &mut [f64],
     nan_mask: &mut [bool],
     deadline: Option<Instant>,
@@ -1075,13 +1299,10 @@ fn dedup_trimmed_twins(
     let mut groups: HashMap<Vec<u32>, Vec<(usize, f64)>> = HashMap::new();
 
     for ci in 0..candidates.len() {
-        if deadline_expired(ci, deadline, clock) {
+        if work.check(ci, deadline, clock) {
             return None;
         }
         let rows = candidates.circuit(ci);
-        if circuit_traverses_module(rows, graph, is_module_node) {
-            continue;
-        }
         let has_agg = rows
             .iter()
             .any(|&row| is_agg_node[graph.edge_source(row) as usize]);
@@ -1089,7 +1310,19 @@ fn dedup_trimmed_twins(
             continue;
         }
         let key = trimmed_circuit_key(rows, graph, is_agg_node);
-        let avg = raw_avg_abs_score(rows, graph, scratch, nan_mask);
+        let avg = raw_avg_abs_score(
+            rows,
+            graph,
+            has_module_node,
+            is_module_node,
+            override_for,
+            scratch,
+            nan_mask,
+        );
+        // `raw_avg_abs_score` scores the FULL step range regardless of any
+        // circuit's own activity window (see its doc), so that is the work
+        // it actually did.
+        work.record(rows.len() as u64 * graph.step_count as u64);
         groups.entry(key).or_default().push((ci, avg));
     }
 
@@ -1100,13 +1333,10 @@ fn dedup_trimmed_twins(
     }
 
     for ci in 0..candidates.len() {
-        if deadline_expired(ci, deadline, clock) {
+        if work.check(ci, deadline, clock) {
             return None;
         }
         let rows = candidates.circuit(ci);
-        if circuit_traverses_module(rows, graph, is_module_node) {
-            continue;
-        }
         let has_agg = rows
             .iter()
             .any(|&row| is_agg_node[graph.edge_source(row) as usize]);
@@ -1117,7 +1347,16 @@ fn dedup_trimmed_twins(
         let Some(members) = groups.get_mut(&key) else {
             continue; // no agg-bearing circuit shares this identity
         };
-        let avg = raw_avg_abs_score(rows, graph, scratch, nan_mask);
+        let avg = raw_avg_abs_score(
+            rows,
+            graph,
+            has_module_node,
+            is_module_node,
+            override_for,
+            scratch,
+            nan_mask,
+        );
+        work.record(rows.len() as u64 * graph.step_count as u64);
         members.push((ci, avg));
     }
 
@@ -1159,17 +1398,65 @@ fn circuit_partition(
         .find_map(|&row| stock_partition_of_node[graph.edge_from[row as usize] as usize])
 }
 
-/// Whether a circuit passes through a module-instance node -- in which case its
-/// reported score may come from the per-exit-port override series rather than
-/// the raw product of its links.
-fn circuit_traverses_module(rows: &[u32], graph: &ActivityGraph, is_module_node: &[bool]) -> bool {
-    rows.iter()
-        .any(|&row| is_module_node[graph.edge_from[row as usize] as usize])
+/// The scoring window `retain_circuits` should use for `rows`: `raw_window`
+/// (the circuit's own enumerated activity window) unchanged for a circuit
+/// that touches no module node or whose module row's override declines, or
+/// the OVERRIDE's own active window when one row substitutes.
+///
+/// Exact, not merely a safe superset: an elementary circuit repeats no node,
+/// so at most one row's target is a module instance. When that row's
+/// `override_for` call returns `Some((_, window))`, outside THAT window the
+/// override contributes exactly 0 or NaN at every step by construction (see
+/// `ModuleOverrideCache::series`'s doc), so the substituted circuit's product
+/// is 0 or NaN there too, regardless of what any other row does -- `window`
+/// alone bounds where the circuit's substituted score can be nonzero, and the
+/// RAW `raw_window` is not needed at all in that case (a step inside
+/// `raw_window` but outside `window` is still correctly zero, since the
+/// per-step multiply in `score_steps` reads the override's own value there).
+/// When the row declines (`None`), the module row falls back to its raw
+/// composite value, so `raw_window` -- computed from the raw composite AND
+/// across every row -- is exact for it as it is for every other circuit.
+///
+/// Costs one `override_for` lookup for a module-touching circuit (a
+/// memoized `HashMap` hit after the first), avoided entirely for a circuit
+/// that touches no module node at all (the common case even on a
+/// module-heavy model, since most circuits are internal to one part of the
+/// graph). Measured on World3 (150,827 circuits, ~430 of which touch a
+/// module): widening to the full saved-step range unconditionally regressed
+/// enumeration from ~0.4s to ~1.1s; this window is what keeps the exactness
+/// fix from costing that.
+fn effective_scoring_window(
+    rows: &[u32],
+    graph: &ActivityGraph,
+    is_module_node: &[bool],
+    override_for: &mut ModuleOverrideFn,
+    raw_window: (usize, usize),
+) -> (usize, usize) {
+    let len = rows.len();
+    for i in 0..len {
+        let to = graph.edge_source(rows[(i + 1) % len]);
+        if is_module_node[to as usize] {
+            let from = graph.edge_source(rows[i]);
+            let next = graph.edge_source(rows[(i + 2) % len]);
+            return match override_for(from, to, next) {
+                Some((_series, window)) => window,
+                None => raw_window,
+            };
+        }
+    }
+    raw_window
 }
 
-/// Add one loop's |score| mass into the external totals (used for stitched
-/// cross-agg loops, which are appended after the enumeration passes but must
-/// participate in the denominators like every other loop).
+/// Add one loop's REPORTED |score| mass into the external totals (used for
+/// stitched cross-agg loops, which are appended after the enumeration passes
+/// but must participate in the denominators like every other loop).
+///
+/// Scored through `override_for` exactly like an enumerated circuit (see
+/// `score_steps`), so a stitched loop that traverses a module instance banks
+/// the SAME per-exit-port override series its materialized `FoundLoop` will
+/// report -- there is no longer a separate module-traversing exclusion
+/// pushed onto the caller: every stitched sequence's mass belongs in the
+/// totals up front.
 ///
 /// Stitched sequences arrive as node paths, so this is the one place that
 /// resolves `(from, to)` pairs back to edge rows.
@@ -1177,6 +1464,8 @@ pub(super) fn accumulate_series_into_totals(
     path: &[u32],
     graph: &ActivityGraph,
     stock_partition_of_node: &[Option<usize>],
+    is_module_node: &[bool],
+    override_for: &mut ModuleOverrideFn,
     partition_totals: &mut HashMap<usize, Vec<f64>>,
 ) {
     let Some(part) = path_partition(path, stock_partition_of_node) else {
@@ -1186,7 +1475,20 @@ pub(super) fn accumulate_series_into_totals(
     let step_count = graph.step_count;
     let mut scratch = vec![0.0f64; step_count];
     let mut nan_mask = vec![false; step_count];
-    score_series(&rows, graph, &mut scratch, &mut nan_mask);
+    // Stitched loops are few (bounded by `MAX_CROSS_AGG_LOOPS`), so
+    // recomputing this per call rather than threading it in from the caller
+    // costs nothing measurable; see `score_steps`'s doc for why it matters at
+    // all on the circuit-count scale `retain_circuits` operates at.
+    let has_module_node = is_module_node.contains(&true);
+    score_series(
+        &rows,
+        graph,
+        has_module_node,
+        is_module_node,
+        override_for,
+        &mut scratch,
+        &mut nan_mask,
+    );
     let totals = partition_totals
         .entry(part)
         .or_insert_with(|| vec![0.0; step_count]);
@@ -1195,11 +1497,6 @@ pub(super) fn accumulate_series_into_totals(
             totals[t] += scratch[t].abs();
         }
     }
-}
-
-#[inline]
-fn deadline_expired(i: usize, deadline: Option<Instant>, clock: &mut dyn Clock) -> bool {
-    i.is_multiple_of(RETENTION_DEADLINE_CHECK_CIRCUITS) && expired(deadline, clock)
 }
 
 /// The engine-internal cycle partition of a node path: that of its first stock
@@ -1231,25 +1528,77 @@ fn path_edge_rows(path: &[u32], graph: &ActivityGraph) -> Vec<u32> {
 }
 
 /// One loop's signed per-step score series over every saved step.
-fn score_series(rows: &[u32], graph: &ActivityGraph, out: &mut [f64], nan_mask: &mut [bool]) {
-    score_steps(rows, graph, 0, out, nan_mask)
+fn score_series(
+    rows: &[u32],
+    graph: &ActivityGraph,
+    has_module_node: bool,
+    is_module_node: &[bool],
+    override_for: &mut ModuleOverrideFn,
+    out: &mut [f64],
+    nan_mask: &mut [bool],
+) {
+    score_steps(
+        rows,
+        graph,
+        0,
+        has_module_node,
+        is_module_node,
+        override_for,
+        out,
+        nan_mask,
+    )
 }
 
 /// One loop's signed per-step score series (product of link values) over the
 /// saved steps `lo..lo + out.len()`, with `nan_mask[i]` set when the product at
 /// that step is not a number.
 ///
-/// The product runs edge-outer / step-inner over the graph's contiguous score
-/// rows, so each row is a straight-line multiply the compiler vectorizes. Order
-/// within a step is the circuit's traversal order, matching the FoundLoop
-/// scoring pipeline link for link, so a survivor's totals and its materialized
-/// series agree bit for bit.
+/// Dispatches on `has_module_node` -- true exactly when the graph contains at
+/// least one module-instance node ANYWHERE, computed once per retention call
+/// rather than re-scanned per circuit or per row. A module-free model (the
+/// overwhelming majority of the corpus, and the whole of World3) takes
+/// [`score_steps_plain`] -- the exact tight, auto-vectorizable loop this
+/// function had before module override substitution existed, with no per-row
+/// branch, no `override_for` call, and no `Option<Rc<..>>` construction on the
+/// hot path. That distinction is not cosmetic: measured on World3 (150,827
+/// circuits, ~6.3M edge rows), routing every circuit through the general
+/// per-row-branching path even with the branch never taken regressed
+/// enumeration from ~0.4s to ~1.05s -- the extra indirection was enough to
+/// defeat the compiler's vectorization of the inner per-step multiply loop.
+/// [`score_steps_with_overrides`] is the general path, taken only when the
+/// graph actually has a module node somewhere (module-bearing circuits are
+/// still the minority even on a model like C-LEARN that uses SMOOTH/DELAY
+/// throughout, since most circuits never traverse one).
+#[allow(clippy::too_many_arguments)]
+fn score_steps(
+    rows: &[u32],
+    graph: &ActivityGraph,
+    lo: usize,
+    has_module_node: bool,
+    is_module_node: &[bool],
+    override_for: &mut ModuleOverrideFn,
+    out: &mut [f64],
+    nan_mask: &mut [bool],
+) {
+    if has_module_node {
+        score_steps_with_overrides(rows, graph, lo, is_module_node, override_for, out, nan_mask);
+    } else {
+        score_steps_plain(rows, graph, lo, out, nan_mask);
+    }
+}
+
+/// The module-free fast path [`score_steps`] dispatches to when the graph has
+/// no module-instance node anywhere: a straight-line, edge-outer/step-inner
+/// multiply against the graph's contiguous score rows that the compiler
+/// auto-vectorizes, byte-identical to `score_steps` before module override
+/// substitution existed (see that function's doc for why the distinction is
+/// load-bearing for performance, not just style).
 ///
 /// NaN needs no special case: it propagates through multiplication, so the mask
 /// is a property of the finished product. That is deliberately stronger than
 /// testing the links: an `Inf * 0` product is NaN with no NaN link anywhere, and
 /// treating it as a number would poison a whole partition total with NaN.
-fn score_steps(
+fn score_steps_plain(
     rows: &[u32],
     graph: &ActivityGraph,
     lo: usize,
@@ -1261,6 +1610,68 @@ fn score_steps(
     for &row in rows {
         let start = row as usize * graph.step_count + lo;
         let row_series = &graph.series[start..start + out.len()];
+        for (product, &value) in out.iter_mut().zip(row_series) {
+            *product *= value;
+        }
+    }
+    for (mask, product) in nan_mask.iter_mut().zip(out.iter()) {
+        *mask = product.is_nan();
+    }
+}
+
+/// The general, override-aware path [`score_steps`] dispatches to when the
+/// graph has at least one module-instance node: for a row whose target is NOT
+/// a module-instance node it is the same straight-line multiply
+/// [`score_steps_plain`] always takes; for a row whose target IS a
+/// module-instance node (`is_module_node[to]`), `override_for(from, module,
+/// next)` is consulted first -- `next` being the node the module hands off to
+/// next in THIS circuit's traversal order, the same "exit-port reader"
+/// `FoundLoop` materialization resolves -- and `Some` REPLACES the raw
+/// composite row with the returned per-exit-port override series for that one
+/// hop; `None` (an ambiguous entry/exit port, a pathless module, ...) leaves
+/// the raw composite row in place. Retention and materialization share the
+/// SAME `override_for` closure (one `ltm_finding::ModuleOverrideCache` per
+/// discovery call), so the two can never resolve a given hop to different
+/// series.
+///
+/// Order within a step is the circuit's traversal order, matching the
+/// FoundLoop scoring pipeline link for link, so a survivor's totals and its
+/// materialized series agree bit for bit.
+fn score_steps_with_overrides(
+    rows: &[u32],
+    graph: &ActivityGraph,
+    lo: usize,
+    is_module_node: &[bool],
+    override_for: &mut ModuleOverrideFn,
+    out: &mut [f64],
+    nan_mask: &mut [bool],
+) {
+    debug_assert_eq!(out.len(), nan_mask.len());
+    out.fill(1.0);
+    let len = rows.len();
+    for i in 0..len {
+        let row = rows[i];
+        // `to` is the target of `row`: by construction of an elementary
+        // circuit's edge-row sequence, that is the SOURCE of the next row,
+        // wrapping to row 0's source at the closing edge.
+        let to = graph.edge_source(rows[(i + 1) % len]);
+        let overridden = if is_module_node[to as usize] {
+            let from = graph.edge_source(row);
+            // The node `to` hands off to next along this circuit: the source
+            // of the row after `to`'s own outbound row -- i.e. two rows
+            // ahead of `row`, wrapping the same way.
+            let next = graph.edge_source(rows[(i + 2) % len]);
+            override_for(from, to, next)
+        } else {
+            None
+        };
+        let row_series: &[f64] = match &overridden {
+            Some((series, _window)) => &series[lo..lo + out.len()],
+            None => {
+                let start = row as usize * graph.step_count + lo;
+                &graph.series[start..start + out.len()]
+            }
+        };
         for (product, &value) in out.iter_mut().zip(row_series) {
             *product *= value;
         }

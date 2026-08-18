@@ -964,10 +964,14 @@ pub(super) fn survivor_node_sets(
         .collect()
 }
 
-/// Direct unit coverage of the retention pass's three arms: a loop below
+/// Direct unit coverage of the retention pass's arms: a loop below
 /// MIN_CONTRIBUTION of its partition's total at every step is dropped; a
-/// module-traversing loop is kept unconditionally; a Solo (no-stock) loop is
-/// kept iff ever active.
+/// module-traversing loop is scored on its REPORTED (override) series through
+/// the same bound/confirm gate as every other circuit and banks that series'
+/// mass into the totals, rather than being kept unconditionally; a Solo
+/// (no-stock) loop is kept iff ever active. The below-threshold module arm
+/// (a module circuit dropped because its OWN override series is small) is
+/// `a_module_circuit_below_threshold_via_its_override_series_is_dropped_by_retention`.
 #[test]
 fn retention_pass_drops_below_threshold_keeps_module_and_solo() {
     // Hand-built results: 2 steps (step 0 unused), edges laid out flat.
@@ -1022,6 +1026,7 @@ fn retention_pass_drops_below_threshold_keeps_module_and_solo() {
         &stock_partition,
         &no_modules,
         &no_agg_nodes,
+        &mut |_, _, _| None,
         None,
         &mut SystemClock,
     )
@@ -1043,9 +1048,24 @@ fn retention_pass_drops_below_threshold_keeps_module_and_solo() {
     let totals = &outcome.partition_totals[&0];
     assert!((totals[1] - (1.0 + 1e-8)).abs() < 1e-12);
 
-    // Same fixture with `c` marked as a module node: the tiny loop is kept
-    // unconditionally (its final score may use the override series).
+    // Same fixture with `c` marked as a module node, and an override series
+    // for the a->c row (the edge whose target is the module) well ABOVE its
+    // raw 1e-4 value (a real per-exit-port pathway score can be any
+    // magnitude, unrelated to the composite the raw row carries). Only that
+    // ONE row is replaced -- the circuit's OTHER row (c->a, whose target is
+    // not a module) keeps contributing its own raw value, exactly like any
+    // other link in the loop -- so the circuit's score is
+    // `override(a->c) * raw(c->a)`, not the override series alone. Picking
+    // `1e4` as the override, against the fixture's raw `c->a = 1e-4`, makes
+    // that product exactly `1.0`: well above MIN_CONTRIBUTION, and clean to
+    // assert against.
     let modules: Vec<bool> = search.idents.iter().map(|id| id.as_str() == "c").collect();
+    let c_id = search
+        .idents
+        .iter()
+        .position(|id| id.as_str() == "c")
+        .expect("c is a graph node") as u32;
+    let override_series = vec![0.0, 1e4]; // step 0 unused; step 1: 1e4 * raw(c->a) = 1e4 * 1e-4 = 1.0
     let no_agg_nodes = vec![false; search.idents.len()];
     let outcome = super::enum_gen::retain_circuits(
         &candidates,
@@ -1053,14 +1073,113 @@ fn retention_pass_drops_below_threshold_keeps_module_and_solo() {
         &stock_partition,
         &modules,
         &no_agg_nodes,
+        &mut |_from, module, _next| {
+            (module == c_id).then(|| (Rc::new(override_series.clone()), (0, override_series.len())))
+        },
         None,
         &mut SystemClock,
     )
     .unwrap();
-    assert_eq!(
-        outcome.survivors.len(),
-        3,
-        "module traversal bypasses retention"
+    let survivor_nodes = survivor_node_sets(&outcome, &candidates, &activity, &search);
+    assert!(
+        survivor_nodes.contains(&vec!["a".to_string(), "c".to_string()]),
+        "the module circuit's OVERRIDE-substituted score (1.0) clears \
+         MIN_CONTRIBUTION of the partition total, even though its raw \
+         product (1e-8) would not"
+    );
+    assert!(
+        survivor_nodes.contains(&vec!["a".to_string(), "b".to_string()])
+            && survivor_nodes.contains(&vec!["d".to_string(), "e".to_string()]),
+        "the module arm does not disturb the non-module and Solo survivors"
+    );
+    let totals = &outcome.partition_totals[&0];
+    assert!(
+        (totals[1] - (1.0 + 1.0)).abs() < 1e-9,
+        "the partition total banks the module circuit's OVERRIDE-substituted \
+         mass (1e4 * raw(c->a) = 1.0), not its raw composite product (1e-8): \
+         got {}",
+        totals[1]
+    );
+}
+
+/// A module-traversing circuit is not kept unconditionally any more: when its
+/// OWN override series is below `MIN_CONTRIBUTION` of the partition's total,
+/// retention drops it exactly as it would a non-module circuit -- this arm
+/// was unreachable before the override-aware scoring landed (every module
+/// circuit survived regardless of magnitude).
+#[test]
+fn a_module_circuit_below_threshold_via_its_override_series_is_dropped_by_retention() {
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new("b")), 0),
+        ((Ident::new("b"), Ident::new("a")), 1),
+        ((Ident::new("a"), Ident::new("c")), 2),
+        ((Ident::new("c"), Ident::new("a")), 3),
+    ];
+    let n_offsets = 4;
+    let step_count = 2;
+    let mut data = vec![0.0f64; n_offsets * step_count];
+    data[n_offsets] = 1.0; // a->b
+    data[n_offsets + 1] = 1.0; // b->a
+    // a<->c's own RAW row is deliberately large (were it scored raw, it
+    // would clear the threshold) -- the point of this fixture is that its
+    // OVERRIDE, not its raw row, decides retention.
+    data[n_offsets + 2] = 1.0; // a->c
+    data[n_offsets + 3] = 1.0; // c->a
+    let results = enum_results(n_offsets, step_count, data);
+    let stocks = stock_list(&["a"]);
+    let search = IndexedSearch::build(&link_offsets, &stocks);
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
+        .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
+    assert!(candidates.complete);
+    assert_eq!(candidates.len(), 2, "the two 2-cycles");
+
+    let stock_partition: Vec<Option<usize>> = search
+        .idents
+        .iter()
+        .map(|id| (id.as_str() == "a").then_some(0))
+        .collect();
+    let modules: Vec<bool> = search.idents.iter().map(|id| id.as_str() == "c").collect();
+    let c_id = search
+        .idents
+        .iter()
+        .position(|id| id.as_str() == "c")
+        .expect("c is a graph node") as u32;
+    // The override is tiny relative to the a<->b loop's mass, so its share
+    // never clears MIN_CONTRIBUTION even though the raw row (1.0 * 1.0) would.
+    let override_series = vec![0.0, 1e-8];
+    let no_agg_nodes = vec![false; search.idents.len()];
+    let outcome = super::enum_gen::retain_circuits(
+        &candidates,
+        &activity,
+        &stock_partition,
+        &modules,
+        &no_agg_nodes,
+        &mut |_from, module, _next| {
+            (module == c_id).then(|| (Rc::new(override_series.clone()), (0, override_series.len())))
+        },
+        None,
+        &mut SystemClock,
+    )
+    .unwrap();
+    let survivor_nodes = survivor_node_sets(&outcome, &candidates, &activity, &search);
+    assert!(
+        survivor_nodes.contains(&vec!["a".to_string(), "b".to_string()]),
+        "the dominant loop survives"
+    );
+    assert!(
+        !survivor_nodes.contains(&vec!["a".to_string(), "c".to_string()]),
+        "the module circuit's override share (1e-8 / ~1.00000001) is far \
+         below MIN_CONTRIBUTION and it is DROPPED -- before override-aware \
+         scoring, a module circuit was kept unconditionally regardless of \
+         magnitude"
+    );
+    let totals = &outcome.partition_totals[&0];
+    assert!(
+        (totals[1] - (1.0 + 1e-8)).abs() < 1e-12,
+        "the partition total banks the module circuit's OVERRIDE mass \
+         (1e-8), not its raw composite product (1.0): got {}",
+        totals[1]
     );
 }
 
@@ -1126,6 +1245,7 @@ fn retention_totals_and_survivors_match_hand_computed_products() {
         &stock_partition,
         &no_modules,
         &no_agg_nodes,
+        &mut |_, _, _| None,
         None,
         &mut SystemClock,
     )
@@ -1218,6 +1338,7 @@ fn retention_confirms_a_circuit_whose_running_bound_overstates_its_share() {
         &stock_partition,
         &no_modules,
         &no_agg_nodes,
+        &mut |_, _, _| None,
         None,
         &mut SystemClock,
     )
@@ -1274,6 +1395,7 @@ fn a_circuit_active_at_step_0_too_is_windowed_from_step_0() {
         &stock_partition,
         &no_modules,
         &no_agg_nodes,
+        &mut |_, _, _| None,
         None,
         &mut SystemClock,
     )
@@ -1331,6 +1453,7 @@ fn retention_counts_the_universe_circuits_per_partition() {
         &stock_partition,
         &no_modules,
         &no_agg_nodes,
+        &mut |_, _, _| None,
         None,
         &mut SystemClock,
     )
@@ -1406,6 +1529,7 @@ fn a_circuit_whose_product_always_underflows_to_zero_does_not_inflate_the_univer
         &stock_partition,
         &no_modules,
         &no_agg_nodes,
+        &mut |_, _, _| None,
         None,
         &mut SystemClock,
     )
@@ -1515,6 +1639,7 @@ fn an_inf_times_zero_product_is_excluded_from_totals_and_retention() {
         &stock_partition,
         &no_modules,
         &no_agg_nodes,
+        &mut |_, _, _| None,
         None,
         &mut SystemClock,
     )
@@ -2036,6 +2161,7 @@ fn retain_circuits_abandons_an_already_expired_deadline() {
             &stock_partition,
             &no_modules,
             &no_agg_nodes,
+            &mut |_, _, _| None,
             Some(deadline),
             &mut clock,
         )
@@ -2062,6 +2188,7 @@ fn retain_circuits_never_reads_the_clock_when_unbudgeted() {
             &stock_partition,
             &no_modules,
             &no_agg_nodes,
+            &mut |_, _, _| None,
             None,
             &mut clock,
         )
@@ -2069,6 +2196,90 @@ fn retain_circuits_never_reads_the_clock_when_unbudgeted() {
         "an unbudgeted retention always completes"
     );
     assert_eq!(clock.reads, 0);
+}
+
+/// The WORK-based deadline trigger (`RETENTION_DEADLINE_CHECK_EDGE_STEPS`)
+/// catches a deadline expiring mid-pass on a model the CIRCUIT-count trigger
+/// alone cannot bound: two circuits never reach `RETENTION_DEADLINE_CHECK_CIRCUITS`
+/// (4096) as a multiple after circuit 0, so without the work-based trigger
+/// this fixture's second circuit would score unchecked. Each circuit here is
+/// "long" in the sense that matters to the check -- `len * window`, not node
+/// count -- by being active over MANY saved steps.
+#[test]
+fn retain_circuits_work_trigger_catches_a_deadline_expiring_mid_pass() {
+    // Two independent 2-cycles (a<->b, c<->d), both active across every
+    // saved step from 1 on, so each circuit's own scoring work is
+    // `len(2) * window(step_count - 1)`.
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new("b")), 0),
+        ((Ident::new("b"), Ident::new("a")), 1),
+        ((Ident::new("c"), Ident::new("d")), 2),
+        ((Ident::new("d"), Ident::new("c")), 3),
+    ];
+    let n_offsets = 4;
+    let step_count = 200;
+    let mut data = vec![0.0f64; n_offsets * step_count];
+    for step in 1..step_count {
+        let base = step * n_offsets;
+        data[base] = 1.0; // a->b
+        data[base + 1] = 1.0; // b->a
+        data[base + 2] = 1.0; // c->d
+        data[base + 3] = 1.0; // d->c
+    }
+    let results = enum_results(n_offsets, step_count, data);
+    let stocks = stock_list(&["a", "c"]);
+    let search = IndexedSearch::build(&link_offsets, &stocks);
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
+        .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
+    assert!(candidates.complete);
+    assert_eq!(candidates.len(), 2, "the two independent 2-cycles");
+
+    let stock_partition: Vec<Option<usize>> = search
+        .idents
+        .iter()
+        .map(|id| match id.as_str() {
+            "a" => Some(0),
+            "c" => Some(1),
+            _ => None,
+        })
+        .collect();
+    let no_modules = vec![false; search.idents.len()];
+    let no_agg_nodes = vec![false; search.idents.len()];
+
+    // Each circuit's work is `2 * 199 = 398` edge-steps. An interval of 256
+    // sits strictly between one circuit's work and two, so the work-based
+    // trigger must fire when the SECOND circuit's check runs (having
+    // accumulated the first circuit's 398 edge-steps since the mandatory
+    // circuit-0 check) -- well before circuit-count could ever see two
+    // circuits as a multiple of `RETENTION_DEADLINE_CHECK_CIRCUITS` (4096).
+    let _interval_guard = super::enum_gen::RetentionDeadlineCheckEdgeStepsGuard::new(256);
+    // Read 1 (the mandatory circuit-0 check) is not yet expired, so circuit 0
+    // scores; read 2 (the work-triggered circuit-1 check) IS expired.
+    let mut clock = ScriptedClock::new(2);
+    let deadline = clock.deadline();
+    assert!(
+        super::enum_gen::retain_circuits(
+            &candidates,
+            &activity,
+            &stock_partition,
+            &no_modules,
+            &no_agg_nodes,
+            &mut |_, _, _| None,
+            Some(deadline),
+            &mut clock,
+        )
+        .is_none(),
+        "the work-based trigger must catch the deadline mid-pass, after \
+         circuit 0's edge-steps crossed the interval but before circuit 1 \
+         would otherwise have gone unchecked"
+    );
+    assert_eq!(
+        clock.reads, 2,
+        "two checks: the mandatory circuit-0 check (not yet expired) and the \
+         work-triggered circuit-1 check (expired) -- without the work-based \
+         trigger, only the first would ever run on a two-circuit universe"
+    );
 }
 
 /// The enumerator's two exactness claims -- min-root canonicalization (every

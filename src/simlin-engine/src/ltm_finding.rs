@@ -30,6 +30,7 @@
 //! decides only WHICH cycles are proposed, never what they are worth.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::common::{Canonical, Ident, Result};
@@ -72,14 +73,26 @@ type LinkOffsetMap = HashMap<(Ident<Canonical>, Ident<Canonical>), usize>;
 
 /// Memoized per-exit-port module-input recompute, within one discovery call.
 ///
-/// The key is everything `recompute_module_input_edge_series` reads that
+/// The key is everything `recompute_module_input_edge_series_for` reads that
 /// varies by loop edge -- the module-input source, the module instance, and
 /// the reader that identifies the exit port -- each stripped of any element
 /// subscript, exactly as the recompute strips them before its own lookups. An
 /// arrayed loop through a module therefore hits one entry per element rather
-/// than re-enumerating the sub-model's pathway map each time.
+/// than re-enumerating the sub-model's pathway map each time. The value is
+/// `Rc`-wrapped so [`ModuleOverrideCache::series`] can hand every caller --
+/// retention scores a great many more circuits than materialization ever
+/// built loops -- a cheap clone of the same allocation rather than a deep
+/// copy, paired with the series' own active window (computed once here
+/// alongside it; see `active_window_of`) so retention can bound a
+/// module-traversing circuit's scoring range by it instead of the full
+/// saved-step range.
 type ModuleSeriesCache =
-    HashMap<(Ident<Canonical>, Ident<Canonical>, Ident<Canonical>), Option<Vec<f64>>>;
+    HashMap<(Ident<Canonical>, Ident<Canonical>, Ident<Canonical>), ModuleOverrideEntry>;
+
+/// One [`ModuleOverrideCache`] lookup's answer: the override series (shared
+/// via `Rc`) and its own `[lo, hi)` active window, or `None` when no single
+/// exit pathway resolves.
+pub(crate) type ModuleOverrideEntry = Option<(Rc<Vec<f64>>, (usize, usize))>;
 
 /// Per-sub-model emitted LTM output-port set, keyed by the sub-model's
 /// canonical name. The discovery-mode per-exit-port recompute (GH #698) uses
@@ -1895,39 +1908,31 @@ fn discovery_module_exit_port(
 /// `enumerate_pathways_to_outputs_with_truncation` machinery the emission uses,
 /// over the SAME sorted output-port set, so the indices match the emitted
 /// `$⁚ltm⁚path⁚{entry}⁚{idx}` variables index-for-index.
-fn recompute_module_input_edge_series(
+///
+/// This is the ENGINE [`ModuleOverrideCache::series`] memoizes: it takes the
+/// already-resolved, already-subscript-stripped `(from, module, exit_reader)`
+/// triple directly rather than a `links`/`edge_idx` pair, because every step
+/// below -- the entry-port match, the exit-port resolution, the pathway
+/// recompute -- depends on nothing else. [`recompute_module_input_edge_series`]
+/// is the links-slice ADAPTER kept for call sites (and tests) that still hold
+/// a `Link` sequence; it strips and extracts the triple and delegates here.
+#[allow(clippy::too_many_arguments)]
+fn recompute_module_input_edge_series_for(
     causal_graph: &CausalGraph,
     results: &Results,
-    links: &[Link],
-    edge_idx: usize,
+    from_base: &Ident<Canonical>,
+    module_name: &Ident<Canonical>,
+    exit_reader: &Ident<Canonical>,
     step_count: usize,
     sub_model_output_ports: &SubModelOutputPorts,
 ) -> Option<Vec<f64>> {
-    use crate::ltm::{normalize_module_ref, strip_subscript};
+    use crate::ltm::normalize_module_ref;
     use crate::variable::Variable;
-
-    let n = links.len();
-    let link = &links[edge_idx];
-
-    // Discovery runs on the ELEMENT-LEVEL graph, so an arrayed loop's
-    // non-module nodes carry element subscripts (`s[nyc] -> m -> growth[nyc]`).
-    // Every name-sensitive lookup below compares against bare names
-    // (`ModuleInput.src`, the bare-keyed `variables()` map, the module
-    // instance node), so strip the subscript first -- mirroring the exhaustive
-    // twin `compute_module_link_overrides`, which `strip_subscript`s
-    // `link.from` / `link.to` / `next.from` / `next.to` (db/ltm/mod.rs) before
-    // the same matches. Without this the exact comparisons fail for EVERY
-    // arrayed module loop, the recompute declines, and the wrong-exit-port
-    // composite bug it exists to fix re-occurs (GH #698 / PR #705 r3353758167).
-    // A module instance node is itself unsubscripted in the element graph, but
-    // stripping is idempotent on a bare name, so it is harmless.
-    let from_base = Ident::<Canonical>::new(strip_subscript(link.from.as_str()));
-    let module_name = Ident::<Canonical>::new(strip_subscript(link.to.as_str()));
 
     // `m` must be a module instance with a recursively-built internal graph
     // (a DynamicModule / passthrough exposing pathways). Pathless modules and
     // non-modules keep the base link score.
-    let module_graph = causal_graph.module_graph(&module_name)?;
+    let module_graph = causal_graph.module_graph(module_name)?;
 
     // Entry port: `m`'s ModuleInput whose normalized src is `x` (== from_base).
     // When `x` feeds MORE THAN ONE input port of `m` (`x -> m.a` AND `x -> m.b`)
@@ -1939,30 +1944,21 @@ fn recompute_module_input_edge_series(
     // multi-match -> ambiguous semantics of `discovery_module_exit_port` and the
     // exhaustive twin `compute_module_link_overrides` (GH #698 / PR #705
     // r3353459409).
-    let module_var = causal_graph.variables().get(&module_name)?;
+    let module_var = causal_graph.variables().get(module_name)?;
     let Variable::Module { inputs, .. } = module_var else {
         return None;
     };
     let mut matching = inputs
         .iter()
-        .filter(|inp| normalize_module_ref(&inp.src) == from_base);
+        .filter(|inp| normalize_module_ref(&inp.src) == *from_base);
     let entry_port = matching.next()?.dst.clone();
     if matching.next().is_some() {
         // A second input port is also fed by `x`: ambiguous entry, fall back.
         return None;
     }
 
-    // Exit port from the next link `m → y`.
-    let next = &links[(edge_idx + 1) % n];
-    // The loop links are emitted in traversal order, so `next.from == m`; guard
-    // against a non-sequential list rather than reading a port off an unrelated
-    // edge. Strip the subscript so a subscripted `next.from` still matches the
-    // (bare) module node.
-    if Ident::<Canonical>::new(strip_subscript(next.from.as_str())) != module_name {
-        return None;
-    }
-    let y = Ident::<Canonical>::new(strip_subscript(next.to.as_str()));
-    let y_var = causal_graph.variables().get(&y)?;
+    // Exit port, resolved off the reader `y` supplied by the caller.
+    let y_var = causal_graph.variables().get(exit_reader)?;
     let exit_port = match y_var {
         // `y` is itself a module: m's output feeds y's input port(s). y's
         // ModuleInput src is the qualified `m·{port}`; the exit port is the
@@ -1976,7 +1972,7 @@ fn recompute_module_input_edge_series(
         Variable::Module { inputs: y_in, .. } => {
             let mut exit: Option<Ident<Canonical>> = None;
             for inp in y_in {
-                if normalize_module_ref(&inp.src) != module_name {
+                if normalize_module_ref(&inp.src) != *module_name {
                     continue;
                 }
                 let Some((_, port)) = inp.src.as_str().split_once('\u{00B7}') else {
@@ -1991,7 +1987,7 @@ fn recompute_module_input_edge_series(
             }
             exit
         }
-        _ => discovery_module_exit_port(&module_name, y_var),
+        _ => discovery_module_exit_port(module_name, y_var),
     }?;
 
     // Recompute the sub-model's pathway map over the same sorted output-port
@@ -2050,6 +2046,167 @@ fn recompute_module_input_edge_series(
         series = max_abs_score_series(series, Some(candidate));
     }
     series
+}
+
+/// Links-slice adapter over [`recompute_module_input_edge_series_for`], kept
+/// for callers (and tests) that hold a `Link` sequence rather than an
+/// already-resolved `(from, module, exit_reader)` triple. Production no
+/// longer calls this directly for a sequential edge -- see
+/// [`ModuleOverrideCache::series`] -- but it stays the exact reference
+/// behaviour for a NON-sequential edge (`next.from != links[i].to`, outside
+/// what the cache's key spells) and for any test exercising the recompute in
+/// isolation.
+fn recompute_module_input_edge_series(
+    causal_graph: &CausalGraph,
+    results: &Results,
+    links: &[Link],
+    edge_idx: usize,
+    step_count: usize,
+    sub_model_output_ports: &SubModelOutputPorts,
+) -> Option<Vec<f64>> {
+    use crate::ltm::strip_subscript;
+
+    let n = links.len();
+    let link = &links[edge_idx];
+
+    // Discovery runs on the ELEMENT-LEVEL graph, so an arrayed loop's
+    // non-module nodes carry element subscripts (`s[nyc] -> m -> growth[nyc]`).
+    // Every name-sensitive lookup in the engine compares against bare names
+    // (`ModuleInput.src`, the bare-keyed `variables()` map, the module
+    // instance node), so strip the subscript first -- mirroring the exhaustive
+    // twin `compute_module_link_overrides`, which `strip_subscript`s
+    // `link.from` / `link.to` / `next.from` / `next.to` (db/ltm/mod.rs) before
+    // the same matches. Without this the exact comparisons fail for EVERY
+    // arrayed module loop, the recompute declines, and the wrong-exit-port
+    // composite bug it exists to fix re-occurs (GH #698 / PR #705 r3353758167).
+    // A module instance node is itself unsubscripted in the element graph, but
+    // stripping is idempotent on a bare name, so it is harmless.
+    let from_base = Ident::<Canonical>::new(strip_subscript(link.from.as_str()));
+    let module_name = Ident::<Canonical>::new(strip_subscript(link.to.as_str()));
+
+    // Exit port from the next link `m → y`.
+    let next = &links[(edge_idx + 1) % n];
+    // The loop links are emitted in traversal order, so `next.from == m`; guard
+    // against a non-sequential list rather than reading a port off an unrelated
+    // edge. Strip the subscript so a subscripted `next.from` still matches the
+    // (bare) module node.
+    if Ident::<Canonical>::new(strip_subscript(next.from.as_str())) != module_name {
+        return None;
+    }
+    let y = Ident::<Canonical>::new(strip_subscript(next.to.as_str()));
+
+    recompute_module_input_edge_series_for(
+        causal_graph,
+        results,
+        &from_base,
+        &module_name,
+        &y,
+        step_count,
+        sub_model_output_ports,
+    )
+}
+
+/// Memoized per-exit-port module-input override series, shared by RETENTION
+/// (`ltm_finding_enum.rs`'s `retain_circuits`/`dedup_trimmed_twins`/
+/// `accumulate_series_into_totals`, via the `ModuleOverrideFn` closure
+/// [`Self::series`] backs) and `FoundLoop` MATERIALIZATION -- the same one
+/// instance, so the two phases can never resolve a module-traversing loop's
+/// score to different series.
+///
+/// Keyed by `(from, module, exit_reader)`, each stripped of its element
+/// subscript exactly as [`recompute_module_input_edge_series`] strips its own
+/// operands, so an arrayed loop's per-element instances share one cache entry
+/// rather than re-enumerating the sub-model's pathway map once per element.
+/// One instance per discovery call.
+pub(crate) struct ModuleOverrideCache<'a> {
+    causal_graph: &'a CausalGraph,
+    results: &'a Results,
+    sub_model_output_ports: &'a SubModelOutputPorts,
+    step_count: usize,
+    cache: ModuleSeriesCache,
+}
+
+impl<'a> ModuleOverrideCache<'a> {
+    pub(crate) fn new(
+        causal_graph: &'a CausalGraph,
+        results: &'a Results,
+        sub_model_output_ports: &'a SubModelOutputPorts,
+        step_count: usize,
+    ) -> Self {
+        ModuleOverrideCache {
+            causal_graph,
+            results,
+            sub_model_output_ports,
+            step_count,
+            cache: HashMap::new(),
+        }
+    }
+
+    /// The override series for the edge `from -> module` whose next hop reads
+    /// `exit_reader`, paired with that series' OWN active window (the [lo, hi)
+    /// range bounding every step where it is active per [`is_active`]) -- or
+    /// `None` when no single exit pathway resolves (see
+    /// [`recompute_module_input_edge_series_for`]'s doc for every decline
+    /// case). Idents need not be pre-stripped -- the lookup strips them itself,
+    /// so an arrayed loop's per-element edges share one entry regardless of
+    /// what the caller passes.
+    ///
+    /// The window is computed once here (linear scan over one series) rather
+    /// than once per circuit that substitutes this override: outside it the
+    /// override contributes exactly 0 or NaN at every step by construction,
+    /// so retention can score a module-traversing circuit against THIS
+    /// window instead of the full saved-step range and still miss no mass --
+    /// see `ltm_finding_enum::score_steps`'s doc for why blindly widening to
+    /// the full range was a measured 2.6x regression on World3.
+    pub(crate) fn series(
+        &mut self,
+        from: &Ident<Canonical>,
+        module: &Ident<Canonical>,
+        exit_reader: &Ident<Canonical>,
+    ) -> ModuleOverrideEntry {
+        use crate::ltm::strip_subscript;
+
+        let key = (
+            Ident::<Canonical>::new(strip_subscript(from.as_str())),
+            Ident::<Canonical>::new(strip_subscript(module.as_str())),
+            Ident::<Canonical>::new(strip_subscript(exit_reader.as_str())),
+        );
+        if let Some(cached) = self.cache.get(&key) {
+            return cached.clone();
+        }
+        let series = recompute_module_input_edge_series_for(
+            self.causal_graph,
+            self.results,
+            &key.0,
+            &key.1,
+            &key.2,
+            self.step_count,
+            self.sub_model_output_ports,
+        )
+        .map(|s| {
+            let window = active_window_of(&s);
+            (Rc::new(s), window)
+        });
+        self.cache.entry(key).or_insert(series).clone()
+    }
+}
+
+/// The `[lo, hi)` range bounding every step where `series` is active (per
+/// [`is_active`]) -- the flat-`Vec` twin of `ltm_finding_enum::ActivityGraph::
+/// active_window`'s contract, computed directly over values rather than a
+/// precomputed bitset. Fine to do with a linear scan here: it runs once per
+/// UNIQUE override series (memoized by [`ModuleOverrideCache`]), not once per
+/// circuit that substitutes it. Returns `(0, 0)` (an empty range) when the
+/// series is never active anywhere.
+fn active_window_of(series: &[f64]) -> (usize, usize) {
+    let Some(first) = series.iter().position(|&v| is_active(v)) else {
+        return (0, 0);
+    };
+    let last = series
+        .iter()
+        .rposition(|&v| is_active(v))
+        .expect("a first active step exists, so a last one does too");
+    (first, last + 1)
 }
 
 /// Recover the cross-element-through-aggregate loops (GH #696) hiding in a
@@ -2365,6 +2522,15 @@ pub(crate) fn discover_loops_with_deadlines(
     // the fallback sweep proposed, for `DiscoveryResult::fallback_candidates`.
     let mut fallback_candidates: Option<usize> = None;
 
+    // Shared by retention (below, via the `override_for` closure the enum
+    // module's `ModuleOverrideFn` names) and `FoundLoop` materialization
+    // (further down): ONE cache, so the two phases can never resolve a
+    // module-traversing loop's score to different series. Built regardless
+    // of whether the enumeration runs -- materialization needs it on the
+    // fallback path too.
+    let mut module_override_cache =
+        ModuleOverrideCache::new(causal_graph, results, sub_model_output_ports, step_count);
+
     // --- Primary candidate generation: union-graph circuit enumeration ---
     // (docs/design-plans/2026-08-17-ltm-discovery-exact.md).
     // Every loop with a nonzero score at some saved step has ALL its edges
@@ -2415,12 +2581,25 @@ pub(crate) fn discover_loops_with_deadlines(
                 .iter()
                 .map(|ident| crate::ltm_agg::is_synthetic_agg_name(ident.as_str()))
                 .collect();
+            // Adapts the enum module's node-id `ModuleOverrideFn` shape to
+            // `module_override_cache`'s ident-keyed lookup. Scoped to this
+            // block (rather than captured by `move`) so the mutable borrow it
+            // holds on the cache ends here, freeing the cache for
+            // materialization to borrow again, unaliased, below.
+            let mut override_for = |from_node: u32, module_node: u32, next_node: u32| {
+                module_override_cache.series(
+                    &search.idents[from_node as usize],
+                    &search.idents[module_node as usize],
+                    &search.idents[next_node as usize],
+                )
+            };
             if let Some(retention) = retain_circuits(
                 &candidates,
                 &activity,
                 &stock_partition_of_node,
                 &is_module_node,
                 &is_agg_node,
+                &mut override_for,
                 deadlines.enumeration,
                 clock,
             ) {
@@ -2477,10 +2656,7 @@ pub(crate) fn discover_loops_with_deadlines(
                     // Retention never saw this loop -- it is a COMBINATION of
                     // enumerated petals rather than one of them -- so nothing
                     // has counted it yet, and it is one more loop dividing its
-                    // partition's denominator. Counted before the module arm
-                    // below, because a module-traversing stitched loop's mass
-                    // joins the totals after materialization rather than here:
-                    // later, but it joins.
+                    // partition's denominator.
                     //
                     // The solo -> competing transition this `+1` can cause (a
                     // partition whose only other universe member is a
@@ -2492,38 +2668,25 @@ pub(crate) fn discover_loops_with_deadlines(
                     if let Some(part) = path_partition(seq, &stock_partition_of_node) {
                         *stats.loop_counts.entry(part).or_insert(0) += 1;
                     }
-                    if seq.iter().any(|&n| is_module_node[n as usize]) {
-                        // A module-traversing loop reports the per-exit-port
-                        // override series rather than the raw composite
-                        // product, so its mass joins the denominators after
-                        // materialization -- the same rule retention applies
-                        // to the enumerated circuits.
-                        //
-                        // NOT independently covered by an end-to-end fixture
-                        // (unlike the retention-side arm, pinned by
-                        // `ltm_finding_tests.rs`'s
-                        // `a_dropped_module_duplicate_leaves_the_denominator_untouched`
-                        // and its siblings): a module can only be built this
-                        // way today by reading a NAMED aux, and any such aux
-                        // sitting strictly between a synthetic agg and its
-                        // per-element consumers is, by construction, shared
-                        // across every element's petal -- which makes those
-                        // petals' `internal` node sets overlap
-                        // (`db::stitch_cross_agg_petals`'s disjointness test),
-                        // so `stitch_cross_agg_petals` never combines them and
-                        // no stitched sequence can ever reach a module this
-                        // way. A module that is only in ONE element's petal
-                        // (not shared) does not create the double-counting
-                        // risk this arm guards, since a lone petal never
-                        // stitches with itself. If a future module-instancing
-                        // shape reopens this path, add a fixture here rather
-                        // than trusting this argument to still hold.
-                        continue;
-                    }
+                    // Scored through the SAME `override_for` closure retention
+                    // used above, so a module-traversing stitched loop banks
+                    // its REPORTED (per-exit-port override) mass here, up
+                    // front -- no separate module arm, and no later
+                    // materialization-side correction needed for this class
+                    // of loop. `db::stitch_cross_agg_petals`'s disjointness
+                    // test means a module shared across every element's petal
+                    // can never actually appear in a stitched sequence today
+                    // (see the historical note on `ltm_finding_tests.rs`'s
+                    // `a_dropped_module_duplicate_leaves_the_denominator_untouched`),
+                    // but scoring unconditionally costs nothing when it
+                    // doesn't fire and is correct if that constraint ever
+                    // loosens.
                     accumulate_series_into_totals(
                         seq,
                         &activity,
                         &stock_partition_of_node,
+                        &is_module_node,
+                        &mut override_for,
                         &mut stats.totals,
                     );
                 }
@@ -2608,22 +2771,10 @@ pub(crate) fn discover_loops_with_deadlines(
         });
     }
 
-    // Convert paths to FoundLoop objects with scores. Each is paired with
-    // whether its path traverses a module instance -- the same predicate the
-    // enumeration retention pass uses, so the mass a module loop is denied
-    // there and the mass it is granted below are exactly complementary.
-    let mut found_loops: Vec<(FoundLoop, bool)> = Vec::new();
-
-    // The per-exit-port recompute below is keyed by
-    // (module-input source, module instance, exit-port reader) and nothing
-    // else, so within one discovery call the answer is memoizable. Without it
-    // every loop through a module re-enumerates the sub-model's pathway map
-    // once per link -- the same map, over the same sorted port set, every
-    // time.
-    let mut module_series_cache: ModuleSeriesCache = HashMap::new();
+    // Convert paths to FoundLoop objects with scores.
+    let mut found_loops: Vec<FoundLoop> = Vec::new();
 
     for path in &all_paths {
-        let traverses_module = path.iter().any(|n| causal_graph.module_graph(n).is_some());
         // Convert path to links using CausalGraph. These links carry the
         // un-trimmed per-element path -- they map to the synthetic
         // `$⁚ltm⁚link_score⁚...` variables emitted during compilation, so the
@@ -2658,8 +2809,13 @@ pub(crate) fn discover_loops_with_deadlines(
         // that port -- mirroring the exhaustive-mode override. The base offset
         // (the module *composite*, which max-abs-selects across ALL ports and so
         // can pick a wrong-signed port for a multi-output module) is used
-        // verbatim everywhere this returns `None`.
-        let link_override_series: Vec<Option<Vec<f64>>> = (0..links.len())
+        // verbatim everywhere this returns `None`. `module_override_cache` is
+        // the SAME instance retention consulted above (for the enumeration
+        // path), so a survivor's materialized score matches the mass it
+        // already banked -- and memoizes across every loop, so an arrayed
+        // loop through a module hits one cache entry per element rather than
+        // re-enumerating the sub-model's pathway map per link.
+        let link_override_series: Vec<Option<Rc<Vec<f64>>>> = (0..links.len())
             .map(|i| {
                 let n = links.len();
                 let next = &links[(i + 1) % n];
@@ -2668,19 +2824,18 @@ pub(crate) fn discover_loops_with_deadlines(
                 // work the recompute costs per link.
                 let module_name =
                     Ident::<Canonical>::new(crate::ltm::strip_subscript(links[i].to.as_str()));
-                // No module instance at `links[i].to` at all: the recompute's
-                // own gate (`module_graph(&module_name)?`) would decline for
-                // the identical reason, so answer `None` directly instead of
-                // re-stripping/re-interning the same names only to reach the
-                // same `?` immediately.
+                // No module instance at `links[i].to` at all: the cache's own
+                // gate (`module_graph(&module_name)?`, inside the engine it
+                // calls) would decline for the identical reason, so answer
+                // `None` directly instead of re-stripping/re-interning the
+                // same names only to reach the same `?` immediately.
                 causal_graph.module_graph(&module_name)?;
                 if next.from != links[i].to {
                     // A non-sequential link list has no exit port to read, and
                     // the recompute declines it; that case is outside what the
-                    // cache key spells, so it is answered uncached. (The
-                    // recompute's own guard for this is weaker -- it compares
-                    // stripped names further along -- so delegating here still
-                    // does real work, unlike the module-graph arm above.)
+                    // cache's key spells (it assumes a sequential edge), so it
+                    // is answered uncached via the links-slice adapter rather
+                    // than the cache.
                     return recompute_module_input_edge_series(
                         causal_graph,
                         results,
@@ -2688,25 +2843,16 @@ pub(crate) fn discover_loops_with_deadlines(
                         i,
                         step_count,
                         sub_model_output_ports,
-                    );
+                    )
+                    .map(Rc::new);
                 }
-                let key = (
-                    Ident::<Canonical>::new(crate::ltm::strip_subscript(links[i].from.as_str())),
-                    module_name,
-                    Ident::<Canonical>::new(crate::ltm::strip_subscript(next.to.as_str())),
-                );
-                if let Some(cached) = module_series_cache.get(&key) {
-                    return cached.clone();
-                }
-                let series = recompute_module_input_edge_series(
-                    causal_graph,
-                    results,
-                    &links,
-                    i,
-                    step_count,
-                    sub_model_output_ports,
-                );
-                module_series_cache.entry(key).or_insert(series).clone()
+                // Materialization scores the full saved-step range
+                // regardless (it never restricts to a window), so only the
+                // series itself is needed here -- the cached active window
+                // exists for retention's benefit, not this call site's.
+                module_override_cache
+                    .series(&links[i].from, &module_name, &next.to)
+                    .map(|(series, _window)| series)
             })
             .collect();
 
@@ -2799,19 +2945,16 @@ pub(crate) fn discover_loops_with_deadlines(
             slot_links: vec![],
         };
 
-        found_loops.push((
-            FoundLoop {
-                loop_info,
-                scores,
-                avg_abs_score,
-                // Filled in once partition denominators are known (rank_truncate_and_id).
-                rel_scores: Vec::new(),
-                // Filled in by attach_partition_metadata at the end of ranking.
-                partition: None,
-                polarity_confidence,
-            },
-            traverses_module,
-        ));
+        found_loops.push(FoundLoop {
+            loop_info,
+            scores,
+            avg_abs_score,
+            // Filled in once partition denominators are known (rank_truncate_and_id).
+            rel_scores: Vec::new(),
+            // Filled in by attach_partition_metadata at the end of ranking.
+            partition: None,
+            polarity_confidence,
+        });
     }
 
     // Two distinct discovered cycles can trim to the same *reported* loop: a
@@ -2824,11 +2967,10 @@ pub(crate) fn discover_loops_with_deadlines(
     // follows the dominant pathway. The kept loop's score series is that one
     // pathway's product at every step (no per-step path flipping).
     let mut by_reported_cycle: HashMap<Vec<String>, usize> = HashMap::new();
-    let mut deduped: Vec<(FoundLoop, bool)> = Vec::new();
-    let mut dropped: Vec<(FoundLoop, bool)> = Vec::new();
+    let mut deduped: Vec<FoundLoop> = Vec::new();
+    let mut dropped: Vec<FoundLoop> = Vec::new();
     for entry in found_loops {
         let nodes: Vec<String> = entry
-            .0
             .loop_info
             .links
             .iter()
@@ -2837,7 +2979,7 @@ pub(crate) fn discover_loops_with_deadlines(
         let key = crate::ltm::canonical_rotation(&nodes);
         match by_reported_cycle.get(&key) {
             Some(&idx) => {
-                if entry.0.avg_abs_score > deduped[idx].0.avg_abs_score {
+                if entry.avg_abs_score > deduped[idx].avg_abs_score {
                     dropped.push(std::mem::replace(&mut deduped[idx], entry));
                 } else {
                     dropped.push(entry);
@@ -2850,67 +2992,48 @@ pub(crate) fn discover_loops_with_deadlines(
         }
     }
 
-    // Correct the two classes of enumerated mass the totals bank under a
-    // series different from the one actually reported. Every other circuit's
-    // raw product stays in the totals untouched -- the totals remain the
-    // enumerated universe's raw mass (retention non-survivors included), just
-    // no longer carrying these two discrepancies.
+    // Subtract a dropped reported-cycle duplicate's mass back out of its
+    // partition's universe total.
     //
-    // Enumeration banks each circuit's RAW product as its partition's mass,
-    // which two classes of loop do not report. A module-traversing loop
-    // reports the per-exit-port override series (the composite the raw product
-    // uses max-abs-selects across ALL of the module's output ports, and so can
-    // carry an entirely different magnitude), so it contributed nothing then
-    // and contributes its materialized series now. And two circuits that trim
-    // to the same reported loop each banked mass, while only the surviving
-    // representative's score is reported, so the other's comes back out.
+    // On the enumeration path `stats.totals` already banks every retained
+    // loop's REPORTED mass up front: `retain_circuits` scores every
+    // non-Solo circuit -- module-traversing ones included -- through the
+    // SAME `ModuleOverrideCache` materialization just consulted above, and
+    // `accumulate_series_into_totals` does the same for stitched cross-agg
+    // loops. So a duplicate the dedup above discarded is mass that is
+    // definitely still in the totals (nothing upstream of `by_reported_cycle`
+    // ever excludes a circuit's own reported series from what it banks), and
+    // it needs to come back out: the kept representative reports that cycle,
+    // and left counted, a partition whose entire universe is one reported
+    // loop and its trimmed twin would read as COMPETING while its
+    // denominator is that loop's own mass -- the +/-1 relative score that
+    // follows by construction would outrank the loops that genuinely divide
+    // a denominator, which is the degeneracy the solo demotion exists to
+    // prevent.
     //
-    // Skipping this leaves a module-traversing loop's slice of the
-    // denominator holding a composite product nothing reports, and leaves a
-    // trimmed duplicate's mass in the denominator with no reported loop
-    // behind it either.
+    // This is a SAFETY NET, not the primary path: `retain_circuits`' own
+    // trimmed-key dedup (`ltm_finding_enum.rs`'s `dedup_trimmed_twins`) now
+    // decides the representative among ENUMERATED circuits -- module-
+    // traversing ones included -- before any mass reaches a partition total,
+    // and an edge row is a complete identity for a `(from, to)` pair, so two
+    // DISTINCT non-agg enumerated circuits can never share a node sequence
+    // either. So a hit here on the enumeration path should fire only for a
+    // STITCHED cross-agg loop (assembled from petals AFTER retention runs,
+    // never part of its grouping) colliding with another reported loop's
+    // trimmed identity. Kept as a runtime safety net rather than asserted
+    // away -- `subtract_reported_mass_from_totals`'s own `debug_assert!`
+    // (the partition must already carry a total) is what would catch this
+    // reasoning missing a case: if a future change makes it fire for a
+    // non-stitched duplicate, that failure is telling you `dedup_trimmed_twins`
+    // missed a collision class, not that this function is wrong.
     if let Some(stats) = universe.as_mut() {
-        for (fl, traverses_module) in &deduped {
-            if *traverses_module {
-                add_reported_mass_to_totals(fl, &partitions, step_count, &mut stats.totals);
-            }
-        }
-        for (fl, traverses_module) in &dropped {
-            if !*traverses_module {
-                // Safety net, not the primary path any more: `retain_circuits`'
-                // own trimmed-key dedup (`ltm_finding_enum.rs`'s
-                // `dedup_trimmed_twins`) now decides the representative among
-                // ENUMERATED non-module twins before either candidate's mass
-                // ever reaches a partition total, so this branch should no
-                // longer fire for one of those -- a non-module hit here now
-                // means one of the two things that dedup pass cannot see: a
-                // STITCHED cross-agg loop (added to `node_paths` after
-                // retention, never part of its grouping) colliding with
-                // another reported loop's trimmed identity, or a circuit from
-                // the fallback... which cannot reach here at all, since this
-                // whole block is gated on `universe.as_mut()`, `Some` only on
-                // the enumeration path. Kept rather than asserted away: a
-                // stitched collision has no dedicated fixture (see the
-                // "solo -> competing" boundary note above this loop), so a
-                // future case this reasoning misses would silently reintroduce
-                // AC4.3's inflated-denominator bug rather than surface loudly.
-                subtract_reported_mass_from_totals(fl, &partitions, &mut stats.totals);
-            }
-            // Whether or not it banked raw mass, a dropped duplicate is no
-            // longer one of the loops its partition's denominator describes:
-            // the kept representative reports that cycle, and the drop's mass
-            // is gone (subtracted just above, or never banked at all for a
-            // module-traversing one). Left counted, a partition whose entire
-            // universe is one reported loop and its trimmed twin would read as
-            // COMPETING while its denominator is that loop's own mass -- and
-            // the +/-1 relative score that follows by construction would
-            // outrank the loops that genuinely divide a denominator, which is
-            // the degeneracy the solo demotion exists to prevent.
+        for fl in &dropped {
+            subtract_reported_mass_from_totals(fl, &partitions, &mut stats.totals);
             subtract_reported_loop_from_counts(fl, &partitions, &mut stats.loop_counts);
         }
     }
 
-    let mut found_loops: Vec<FoundLoop> = deduped.into_iter().map(|(fl, _)| fl).collect();
+    let mut found_loops = deduped;
 
     let ranked = rank_and_filter(&mut found_loops, &partitions, universe.as_ref());
 
@@ -3013,43 +3136,21 @@ fn subtract_reported_loop_from_counts(
     }
 }
 
-/// Add a loop's REPORTED |score| series into its partition's universe total.
-///
-/// Used for the loops enumeration deliberately withheld mass from: a
-/// module-traversing loop's reported score comes from the per-exit-port
-/// override series, which the raw product the retention pass sees cannot
-/// stand in for. The partition may have no total yet -- every one of its
-/// circuits may traverse a module -- so the entry is created on demand.
-fn add_reported_mass_to_totals(
-    fl: &FoundLoop,
-    partitions: &CyclePartitions,
-    step_count: usize,
-    totals: &mut HashMap<usize, Vec<f64>>,
-) {
-    let Some(part) = loop_partition_slot(fl, partitions) else {
-        return;
-    };
-    let series = totals.entry(part).or_insert_with(|| vec![0.0; step_count]);
-    for (t, &(_, score)) in fl.scores.iter().enumerate() {
-        if !score.is_nan() {
-            series[t] += score.abs();
-        }
-    }
-}
-
 /// Remove a loop's |score| series from its partition's universe total.
 ///
 /// Used for a duplicate representative the reported-cycle dedup discarded: its
-/// mass was banked by the enumeration pass and no loop reports it. The
-/// partition necessarily has a total (this loop's own mass built it), and the
-/// result cannot go negative, since a float subtraction of a summand from a
-/// sum of non-negative terms is bounded below by zero -- except at a step
-/// whose running total is already `Inf` (a dominance inflection, kept by
-/// convention rather than excluded like a NaN summand), where the
-/// subtraction is skipped entirely: `Inf - Inf` is `NaN` whenever the dropped
-/// duplicate's own score is ALSO infinite there, and poisoning the total with
-/// NaN would be strictly worse than leaving one duplicate's mass in an
-/// already-divergent step.
+/// mass was banked -- by `retain_circuits` (module-traversing circuits
+/// included, via the same `ModuleOverrideCache` materialization uses) or by
+/// `accumulate_series_into_totals` for a stitched cross-agg loop -- and no
+/// loop reports it. The partition necessarily has a total (this loop's own
+/// mass built it), and the result cannot go negative, since a float
+/// subtraction of a summand from a sum of non-negative terms is bounded below
+/// by zero -- except at a step whose running total is already `Inf` (a
+/// dominance inflection, kept by convention rather than excluded like a NaN
+/// summand), where the subtraction is skipped entirely: `Inf - Inf` is `NaN`
+/// whenever the dropped duplicate's own score is ALSO infinite there, and
+/// poisoning the total with NaN would be strictly worse than leaving one
+/// duplicate's mass in an already-divergent step.
 ///
 /// The partition here is derived via `loop_partition_slot` (`partition_for_loop`
 /// over `loop_info.stocks`); the mass being removed was banked via

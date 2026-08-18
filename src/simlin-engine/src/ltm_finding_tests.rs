@@ -1762,6 +1762,7 @@ fn two_circuit_universe(weak_sibling: bool) -> UniverseStats {
         &stock_partition,
         &no_modules,
         &no_agg_nodes,
+        &mut |_, _, _| None,
         None,
         &mut SystemClock,
     )
@@ -3592,6 +3593,7 @@ fn retention_dedup_prevents_a_borderline_loop_from_being_dropped_by_an_inflated_
         &stock_partition,
         &no_modules,
         &is_agg_node,
+        &mut |_, _, _| None,
         None,
         &mut SystemClock,
     )
