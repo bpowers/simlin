@@ -9,6 +9,7 @@ import {
   initialSyncState,
   MAX_PENDING_SNAPSHOTS,
   optimisticVersionAfterSave,
+  parseNoticeMessage,
   parseWasmReply,
   readTraits,
   reconcileRevision,
@@ -30,7 +31,6 @@ describe('readTraits', () => {
         [TRAITS.revision]: 7,
         [TRAITS.height]: 480,
         [TRAITS.theme]: 'dark',
-        [TRAITS.notice]: 'hi',
         [TRAITS.readOnly]: true,
       }),
     );
@@ -39,7 +39,6 @@ describe('readTraits', () => {
       revision: 7,
       height: 480,
       theme: 'dark',
-      notice: 'hi',
       readOnly: true,
     });
   });
@@ -51,7 +50,6 @@ describe('readTraits', () => {
       revision: 0,
       height: DEFAULT_HEIGHT_PX,
       theme: 'auto',
-      notice: '',
       readOnly: false,
     });
   });
@@ -159,48 +157,117 @@ describe('parseWasmReply', () => {
   });
 });
 
+describe('parseNoticeMessage', () => {
+  it('parses a notice with and without a level', () => {
+    expect(parseNoticeMessage({ type: 'notice', text: 'Updated on disk' })).toEqual({
+      text: 'Updated on disk',
+      level: 'info',
+    });
+    expect(parseNoticeMessage({ type: 'notice', text: 'conflict', level: 'warn' })).toEqual({
+      text: 'conflict',
+      level: 'warn',
+    });
+    expect(parseNoticeMessage({ type: 'notice', text: 'x', level: 'loud' })).toEqual({ text: 'x', level: 'info' });
+  });
+
+  it('rejects everything else', () => {
+    expect(parseNoticeMessage({ type: 'wasm' })).toBeNull();
+    expect(parseNoticeMessage({ type: 'notice' })).toBeNull();
+    expect(parseNoticeMessage({ type: 'notice', text: '' })).toBeNull();
+    expect(parseNoticeMessage({ type: 'notice', text: 3 })).toBeNull();
+    expect(parseNoticeMessage(null)).toBeNull();
+    expect(parseNoticeMessage('notice')).toBeNull();
+  });
+});
+
 describe('revision reconciliation', () => {
-  it('same revision is a no-op', () => {
-    const s = initialSyncState(3);
+  it('same revision and content is a no-op', () => {
+    const s = initialSyncState(3, 'x');
     expect(reconcileRevision(s, { revision: 3, projectJson: 'x' })).toEqual({ state: s, action: 'none' });
   });
 
   it('an echo of our own snapshot is an ack that keeps the Editor', () => {
-    let s = initialSyncState(3);
+    let s = initialSyncState(3, 'seed');
     s = recordSentSnapshot(s, 'A');
     const r = reconcileRevision(s, { revision: 4, projectJson: 'A' });
     expect(r.action).toBe('ack');
-    expect(r.state).toEqual({ revision: 4, pendingSnapshots: [] });
+    expect(r.state).toEqual({ revision: 4, knownJson: 'A', pendingSnapshots: [] });
+    // Re-running on the same pair (the second change event of one message).
+    expect(reconcileRevision(r.state, { revision: 4, projectJson: 'A' }).action).toBe('none');
   });
 
-  it('an echo of an older pending snapshot drops it and everything before, keeps newer ones', () => {
-    let s = initialSyncState(0);
-    for (const j of ['A', 'B', 'C']) {
+  it('a burst [S1, S2, S3] acks one at a time in order', () => {
+    let s = initialSyncState(0, 'seed');
+    for (const j of ['S1', 'S2', 'S3']) {
       s = recordSentSnapshot(s, j);
     }
-    const r = reconcileRevision(s, { revision: 1, projectJson: 'B' });
-    expect(r.action).toBe('ack');
-    expect(r.state.pendingSnapshots).toEqual(['C']);
-    const r2 = reconcileRevision(r.state, { revision: 2, projectJson: 'C' });
+    const r1 = reconcileRevision(s, { revision: 1, projectJson: 'S1' });
+    expect(r1.action).toBe('ack');
+    expect(r1.state.pendingSnapshots).toEqual(['S2', 'S3']);
+    const r2 = reconcileRevision(r1.state, { revision: 2, projectJson: 'S2' });
     expect(r2.action).toBe('ack');
-    expect(r2.state.pendingSnapshots).toEqual([]);
+    expect(r2.state.pendingSnapshots).toEqual(['S3']);
+    const r3 = reconcileRevision(r2.state, { revision: 3, projectJson: 'S3' });
+    expect(r3.action).toBe('ack');
+    expect(r3.state).toEqual({ revision: 3, knownJson: 'S3', pendingSnapshots: [] });
+  });
+
+  it('an edit/undo/redo burst [A, B, A] acks all three (position, not value)', () => {
+    let s = initialSyncState(0, 'seed');
+    for (const j of ['A', 'B', 'A']) {
+      s = recordSentSnapshot(s, j);
+    }
+    const r1 = reconcileRevision(s, { revision: 1, projectJson: 'A' });
+    expect(r1.action).toBe('ack');
+    expect(r1.state.pendingSnapshots).toEqual(['B', 'A']);
+    const r2 = reconcileRevision(r1.state, { revision: 2, projectJson: 'B' });
+    expect(r2.action).toBe('ack');
+    expect(r2.state.pendingSnapshots).toEqual(['A']);
+    const r3 = reconcileRevision(r2.state, { revision: 3, projectJson: 'A' });
+    expect(r3.action).toBe('ack');
+    expect(r3.state.pendingSnapshots).toEqual([]);
   });
 
   it('a foreign snapshot remounts and discards every pending snapshot', () => {
-    let s = initialSyncState(0);
+    let s = initialSyncState(0, 'seed');
     s = recordSentSnapshot(s, 'A');
     const r = reconcileRevision(s, { revision: 1, projectJson: 'Z' });
-    expect(r).toEqual({ state: { revision: 1, pendingSnapshots: [] }, action: 'remount' });
+    expect(r).toEqual({ state: { revision: 1, knownJson: 'Z', pendingSnapshots: [] }, action: 'remount' });
+  });
+
+  it('a rejected snapshot (authoritative content re-pushed at an unchanged revision) remounts', () => {
+    let s = initialSyncState(3, 'seed');
+    s = recordSentSnapshot(s, 'A');
+    // The kernel had moved to different content the widget never saw...
+    const r = reconcileRevision(s, { revision: 3, projectJson: 'seed-authoritative' });
+    expect(r.action).toBe('remount');
+    expect(r.state).toEqual({ revision: 3, knownJson: 'seed-authoritative', pendingSnapshots: [] });
+    // ...or it re-sends exactly what the widget was seeded from: the trait
+    // had held our snapshot, so this still fired a change and still means
+    // "rejected, start again from here".
+    let s2 = initialSyncState(3, 'seed');
+    s2 = recordSentSnapshot(s2, 'A');
+    const r2 = reconcileRevision(s2, { revision: 3, projectJson: 'seed' });
+    expect(r2.action).toBe('remount');
+    expect(r2.state).toEqual({ revision: 3, knownJson: 'seed', pendingSnapshots: [] });
+    // Idempotent afterwards.
+    expect(reconcileRevision(r2.state, { revision: 3, projectJson: 'seed' }).action).toBe('none');
+  });
+
+  it('a revision bump with unchanged content still remounts (the Editor must learn the version)', () => {
+    const r = reconcileRevision(initialSyncState(3, 'seed'), { revision: 4, projectJson: 'seed' });
+    expect(r.action).toBe('remount');
+    expect(r.state.revision).toBe(4);
   });
 
   it('a revision that goes backwards (kernel restart / reseed) still remounts', () => {
-    const r = reconcileRevision(initialSyncState(5), { revision: 0, projectJson: 'fresh' });
+    const r = reconcileRevision(initialSyncState(5, 'x'), { revision: 0, projectJson: 'fresh' });
     expect(r.action).toBe('remount');
     expect(r.state.revision).toBe(0);
   });
 
   it('bounds the pending snapshot memory', () => {
-    let s = initialSyncState(0);
+    let s = initialSyncState(0, 'seed');
     for (let i = 0; i < MAX_PENDING_SNAPSHOTS + 5; i++) {
       s = recordSentSnapshot(s, `S${i}`);
     }

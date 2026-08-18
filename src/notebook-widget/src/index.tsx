@@ -27,7 +27,7 @@ import 'katex/dist/katex.min.css';
 
 import type { InitializeContext, RenderContext } from './anywidget-model';
 import { ensureEngine } from './engine-bootstrap';
-import { WidgetApp } from './WidgetApp';
+import { WIDGET_ROOT_CLASS, WidgetApp } from './WidgetApp';
 import styles from './widget.module.css';
 import { readTraits, wrapperStyle } from './widget-core';
 
@@ -44,7 +44,7 @@ function Placeholder({
   isError: boolean;
 }): React.ReactElement {
   return (
-    <div className={styles.host} style={wrapperStyle(height)}>
+    <div className={`${WIDGET_ROOT_CLASS} ${styles.host}`} style={wrapperStyle(height)}>
       <div className={isError ? `${styles.placeholder} ${styles.placeholderError}` : styles.placeholder} role="status">
         {text}
       </div>

@@ -74,6 +74,7 @@ interface HarnessWindow {
       wasmRequests: number;
       sent: unknown[];
       kernelPush(patch: Record<string, unknown>): void;
+      kernelSend(content: unknown): void;
       cleanup?: () => void;
     }>;
   };
@@ -87,7 +88,6 @@ function initialState(overrides: Record<string, unknown> = {}): Record<string, u
     selection: [],
     height: 520,
     theme: 'light',
-    notice: '',
     read_only: false,
     ...overrides,
   };
@@ -208,14 +208,27 @@ test.describe('notebook widget bundle', () => {
     const renamed = projectJson.replace('"name": "Population"', '"name": "People"');
     expect(renamed).not.toBe(projectJson);
     await page.evaluate((json) => {
-      (window as unknown as HarnessWindow).harness.models[1].kernelPush({
-        project_json: json,
-        revision: 1,
-        notice: 'Updated on disk',
-      });
+      const m = (window as unknown as HarnessWindow).harness.models[1];
+      m.kernelPush({ project_json: json, revision: 1 });
+      m.kernelSend({ type: 'notice', text: 'Updated on disk' });
     }, renamed);
     await expect(cell2.getByText('People', { exact: true }).first()).toBeVisible({ timeout: 30_000 });
     await expect(cell2.getByRole('status')).toHaveText('Updated on disk');
+
+    // The widget's global stylesheets are confined to the widget root: the
+    // notebook page's own root element sees none of the diagram tokens, the
+    // wrapper does.
+    const tokens = await page.evaluate(() => {
+      const wrapper = document.querySelector('#cell2 .simlin-notebook-widget') as HTMLElement;
+      return {
+        page: getComputedStyle(document.documentElement).getPropertyValue('--panel-width-sm').trim(),
+        body: getComputedStyle(document.body).getPropertyValue('--panel-width-sm').trim(),
+        wrapper: getComputedStyle(wrapper).getPropertyValue('--panel-width-sm').trim(),
+      };
+    });
+    expect(tokens.page).toBe('');
+    expect(tokens.body).toBe('');
+    expect(tokens.wrapper).toBe('359px');
     // Kept as a visual artifact of the run (gitignored), not an assertion.
     await page.screenshot({ path: path.join(here, '.output', 'two-cells.png'), fullPage: true });
 
@@ -244,7 +257,7 @@ test.describe('notebook widget bundle', () => {
         harness: { FakeAnyModel: new (state: Record<string, unknown>, url: string) => unknown };
       };
       const model = new w.harness.FakeAnyModel(
-        { project_json: '{}', revision: 0, height: 200, theme: 'light', notice: '', read_only: false },
+        { project_json: '{}', revision: 0, height: 200, theme: 'light', read_only: false },
         '/libsimlin-browser.wasm',
       ) as unknown as {
         send: (c: unknown) => void;

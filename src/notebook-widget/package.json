@@ -38,6 +38,7 @@
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-react": "^7.37.5",
     "jsdom": "^29.1.1",
+    "postcss": "^8.5.15",
     "prettier": "^3.8.1",
     "typescript": "npm:@typescript/typescript6@^6.0.2"
   }

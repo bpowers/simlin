@@ -17,18 +17,23 @@ import type { JsonProjectData } from '@simlin/diagram/Editor';
 
 import type { AnyModel } from './anywidget-model';
 import styles from './widget.module.css';
+import { WIDGET_ROOT_CLASS } from './widget-root-class';
 import {
   initialSyncState,
   optimisticVersionAfterSave,
+  parseNoticeMessage,
   readTraits,
   reconcileRevision,
   recordSentSnapshot,
   resolveTheme,
   TRAITS,
   wrapperStyle,
+  type Notice,
   type SyncState,
   type WidgetTraits,
 } from './widget-core';
+
+export { WIDGET_ROOT_CLASS };
 
 /** How long a kernel notice stays visible before it fades on its own. */
 export const NOTICE_TIMEOUT_MS = 5000;
@@ -43,28 +48,58 @@ interface EditorSeed {
   json: string;
   revision: number;
   // Bumped on every kernel-originated remount so a remount at an unchanged
-  // revision number (defensive) still gets a fresh Editor.
+  // revision number (a rejected snapshot re-seeding us) still gets a fresh
+  // Editor -- `revision` alone would not change the key.
   generation: number;
 }
 
 interface WidgetRefs {
   sync: SyncState;
+  // True while handleSave is inside its own synchronous model.set calls, so
+  // the change listeners can tell the widget's own writes from kernel pushes
+  // (Backbone fires change events synchronously from set()).
+  selfSet: boolean;
   selectionTimer: ReturnType<typeof setTimeout> | null;
   noticeTimer: ReturnType<typeof setTimeout> | null;
 }
 
 /**
- * The host chrome-theme signals, read at render time. Only what
- * `resolveTheme` needs; kept out of widget-core so that file stays DOM-free.
+ * The host chrome-theme signals `resolveTheme` needs. Read at mount and
+ * re-read whenever JupyterLab flips `body[data-jp-theme-light]` or the OS
+ * color scheme changes; kept out of widget-core so that file stays DOM-free.
  */
-function hostThemeSignals(): { jpThemeLight?: string; prefersDark: boolean } {
+interface HostThemeSignals {
+  jpThemeLight?: string;
+  prefersDark: boolean;
+}
+
+const DARK_SCHEME_QUERY = '(prefers-color-scheme: dark)';
+
+function matchDarkScheme(): MediaQueryList | null {
+  return typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia(DARK_SCHEME_QUERY)
+    : null;
+}
+
+function readHostThemeSignals(): HostThemeSignals {
   const body = typeof document !== 'undefined' ? document.body : null;
-  const jpThemeLight = body?.dataset.jpThemeLight;
-  const prefersDark =
-    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-      ? window.matchMedia('(prefers-color-scheme: dark)').matches
-      : false;
-  return { jpThemeLight, prefersDark };
+  return { jpThemeLight: body?.dataset.jpThemeLight, prefersDark: matchDarkScheme()?.matches ?? false };
+}
+
+/**
+ * Subscribe to both theme signals; returns the unsubscribe. `matchMedia` may
+ * be absent (some embedded webviews), in which case only the JupyterLab
+ * attribute is watched.
+ */
+function watchHostThemeSignals(onChange: () => void): () => void {
+  const observer = new MutationObserver(onChange);
+  observer.observe(document.body, { attributes: true, attributeFilter: ['data-jp-theme-light'] });
+  const mql = matchDarkScheme();
+  mql?.addEventListener('change', onChange);
+  return () => {
+    observer.disconnect();
+    mql?.removeEventListener('change', onChange);
+  };
 }
 
 export function WidgetApp({ model, name }: { model: AnyModel; name: string }): React.ReactElement {
@@ -76,21 +111,28 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
     revision: traits.revision,
     generation: 0,
   }));
-  const [noticeVisible, setNoticeVisible] = React.useState<boolean>(traits.notice !== '');
+  const [notice, setNotice] = React.useState<Notice | null>(null);
+  const [hostTheme, setHostTheme] = React.useState<HostThemeSignals>(readHostThemeSignals);
 
   const refs = React.useRef<WidgetRefs>({
-    sync: initialSyncState(traits.revision),
+    sync: initialSyncState(traits.revision, traits.projectJson),
+    selfSet: false,
     selectionTimer: null,
     noticeTimer: null,
   });
 
-  // Kernel pushes. Only the kernel sets `revision`, so its change event is
-  // never an echo of one of our own model.set calls, which makes it the one
-  // signal that decides remount-vs-keep (see reconcileRevision). The other
-  // traits just re-render.
+  // Kernel pushes. `revision` and `project_json` travel in ONE kernel message
+  // but surface as up to two change events (Backbone fires per changed key,
+  // and skips a key whose value did not change -- an accepted snapshot echoes
+  // the exact bytes we already hold, so only `change:revision` fires then).
+  // Both handlers therefore read the current pair and run the idempotent
+  // reconcile; the widget's own synchronous sets are skipped via `selfSet`.
   React.useEffect(() => {
     const r = refs.current;
-    const onRevision = (): void => {
+    const onKernelState = (): void => {
+      if (r.selfSet) {
+        return;
+      }
       const next = readModelTraits();
       const { state, action } = reconcileRevision(r.sync, {
         revision: next.revision,
@@ -105,34 +147,38 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
     const onOther = (): void => {
       setTraits(readModelTraits());
     };
-    const onNotice = (): void => {
-      const next = readModelTraits();
-      setTraits(next);
-      if (r.noticeTimer !== null) {
-        clearTimeout(r.noticeTimer);
-        r.noticeTimer = null;
-      }
-      if (next.notice === '') {
-        setNoticeVisible(false);
+    const onCustom = (...args: unknown[]): void => {
+      const parsed = parseNoticeMessage(args[0]);
+      if (parsed === null) {
         return;
       }
-      setNoticeVisible(true);
+      if (r.noticeTimer !== null) {
+        clearTimeout(r.noticeTimer);
+      }
+      setNotice(parsed);
       r.noticeTimer = setTimeout(() => {
         r.noticeTimer = null;
-        setNoticeVisible(false);
+        setNotice(null);
       }, NOTICE_TIMEOUT_MS);
     };
-    model.on(`change:${TRAITS.revision}`, onRevision);
+    const onHostTheme = (): void => {
+      setHostTheme(readHostThemeSignals());
+    };
+    model.on(`change:${TRAITS.revision}`, onKernelState);
+    model.on(`change:${TRAITS.projectJson}`, onKernelState);
     model.on(`change:${TRAITS.height}`, onOther);
     model.on(`change:${TRAITS.theme}`, onOther);
     model.on(`change:${TRAITS.readOnly}`, onOther);
-    model.on(`change:${TRAITS.notice}`, onNotice);
+    model.on('msg:custom', onCustom);
+    const unwatchTheme = watchHostThemeSignals(onHostTheme);
     return () => {
-      model.off(`change:${TRAITS.revision}`, onRevision);
+      model.off(`change:${TRAITS.revision}`, onKernelState);
+      model.off(`change:${TRAITS.projectJson}`, onKernelState);
       model.off(`change:${TRAITS.height}`, onOther);
       model.off(`change:${TRAITS.theme}`, onOther);
       model.off(`change:${TRAITS.readOnly}`, onOther);
-      model.off(`change:${TRAITS.notice}`, onNotice);
+      model.off('msg:custom', onCustom);
+      unwatchTheme();
       if (r.selectionTimer !== null) {
         clearTimeout(r.selectionTimer);
         r.selectionTimer = null;
@@ -146,15 +192,27 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
 
   // Editor autosave -> kernel. One coalesced sync message carries the whole
   // snapshot and the revision it was edited from; the kernel accepts it only
-  // if that base is still current (see the design plan, Section 3).
+  // if that base is still current. A snapshot equal to the trait's current
+  // value would produce NO comm message (ipywidgets sends only changed keys),
+  // so no echo would ever come back: return undefined so the controller does
+  // not advance its acknowledged version for a save that never happened.
   const handleSave = React.useCallback(
     async (project: JsonProjectData, currVersion: number): Promise<number | undefined> => {
       if (project.format !== 'json') {
         return undefined;
       }
-      refs.current.sync = recordSentSnapshot(refs.current.sync, project.data);
-      model.set(TRAITS.projectJson, project.data);
-      model.set(TRAITS.pendingBase, currVersion);
+      if (project.data === model.get(TRAITS.projectJson)) {
+        return undefined;
+      }
+      const r = refs.current;
+      r.sync = recordSentSnapshot(r.sync, project.data);
+      r.selfSet = true;
+      try {
+        model.set(TRAITS.projectJson, project.data);
+        model.set(TRAITS.pendingBase, currVersion);
+      } finally {
+        r.selfSet = false;
+      }
       model.save_changes();
       return optimisticVersionAfterSave(currVersion);
     },
@@ -176,13 +234,22 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
     [model],
   );
 
-  const theme = resolveTheme(traits.theme, hostThemeSignals());
+  const theme = resolveTheme(traits.theme, hostTheme);
 
   return (
-    <div className={styles.host} style={wrapperStyle(traits.height)} data-theme={theme} data-lm-suppress-shortcuts="">
-      {noticeVisible && traits.notice !== '' ? (
-        <div className={styles.notice} role="status" aria-live="polite">
-          {traits.notice}
+    <div
+      className={`${WIDGET_ROOT_CLASS} ${styles.host}`}
+      style={wrapperStyle(traits.height)}
+      data-theme={theme}
+      data-lm-suppress-shortcuts=""
+    >
+      {notice !== null ? (
+        <div
+          className={notice.level === 'warn' ? `${styles.notice} ${styles.noticeWarn}` : styles.notice}
+          role="status"
+          aria-live="polite"
+        >
+          {notice.text}
         </div>
       ) : null}
       <Editor

@@ -18,6 +18,9 @@ if (baseConfig) {
       AbortController: 'readonly',
       AbortSignal: 'readonly',
       Blob: 'readonly',
+      MediaQueryList: 'readonly',
+      getComputedStyle: 'readonly',
+      MutationObserver: 'readonly',
       Response: 'readonly',
     },
   };

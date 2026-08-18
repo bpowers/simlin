@@ -10,6 +10,7 @@ import {
   requestWasmModule,
   resetEngineBootstrapForTests,
   sharedWasmModule,
+  WASM_REPLY_TIMEOUT_MS,
 } from './engine-bootstrap';
 import { readyCalls, resetEngineMock } from './test-utils/engine-mock';
 import { FakeModel, defaultState } from './test-utils/fake-model';
@@ -47,6 +48,11 @@ describe('requestWasmModule', () => {
     expect(module).toBeInstanceOf(WebAssembly.Module);
     expect(compile).toHaveBeenCalledTimes(1);
     expect(model.listenerCount('msg:custom')).toBe(0);
+    // The timeout was cleared on success: nothing is left pending, and
+    // advancing past it neither throws nor re-sends.
+    expect(rs.getTimerCount()).toBe(0);
+    await rs.advanceTimersByTimeAsync(WASM_REPLY_TIMEOUT_MS + 1);
+    expect(model.sent).toEqual([{ type: 'wasm' }]);
   });
 
   it('rejects on a kernel error reply', async () => {
@@ -55,6 +61,7 @@ describe('requestWasmModule', () => {
     model.trigger('msg:custom', { type: 'wasm', error: 'no asset' }, []);
     await expect(p).rejects.toThrow(/no asset/);
     expect(model.listenerCount('msg:custom')).toBe(0);
+    expect(rs.getTimerCount()).toBe(0);
   });
 
   it('rejects after the timeout when the kernel never answers', async () => {

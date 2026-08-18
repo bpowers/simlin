@@ -89,6 +89,11 @@ export class FakeAnyModel {
     }
   }
 
+  // Kernel-side behaviour: a custom message with no buffers (notices).
+  kernelSend(content) {
+    this.trigger('msg:custom', content, []);
+  }
+
   // Kernel-side behaviour: push new state as one message (all keys set, then
   // events fire), which is how ipywidgets applies a state update.
   kernelPush(patch) {

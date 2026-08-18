@@ -26,6 +26,8 @@ interface MountRecord {
   // The controller-side "server version" this mount currently believes in,
   // advanced by onSave's return value exactly like ProjectController does.
   serverVersion: number;
+  // Every value onSave resolved with, in order.
+  saveResults: Array<number | undefined>;
 }
 
 export const mounts: MountRecord[] = [];
@@ -35,21 +37,28 @@ export function resetEditorMock(): void {
 
 export function Editor(props: EditorMockProps): React.ReactElement {
   const record = React.useMemo<MountRecord>(() => {
-    const r = { props, serverVersion: props.initialProjectVersion };
+    const r: MountRecord = { props, serverVersion: props.initialProjectVersion, saveResults: [] };
     mounts.push(r);
     return r;
   }, []);
   record.props = props;
-  const [saves, setSaves] = React.useState(0);
-  const save = async (): Promise<void> => {
+  const [, setSaves] = React.useState(0);
+  // Counted at click time (not from render state) so two clicks before a
+  // re-render still produce two distinct snapshots.
+  const clicks = React.useRef(0);
+  const save = async (json: string): Promise<void> => {
     // Mirror ProjectController.save: send the acknowledged version, adopt the
-    // returned one.
-    const json = JSON.stringify({ edited: saves + 1, from: props.initialProjectJson });
+    // returned one (a resolved-undefined leaves it untouched).
     const next = await props.onSave({ format: 'json', data: json }, record.serverVersion);
+    record.saveResults.push(next);
     if (next) {
       record.serverVersion = next;
     }
-    setSaves(saves + 1);
+    setSaves((n) => n + 1);
+  };
+  const nextEditedJson = (): string => {
+    clicks.current += 1;
+    return JSON.stringify({ edited: clicks.current, from: props.initialProjectJson });
   };
   return (
     <div
@@ -59,8 +68,11 @@ export function Editor(props: EditorMockProps): React.ReactElement {
       data-read-only={String(props.readOnlyMode ?? false)}
       data-server-version={record.serverVersion}
     >
-      <button type="button" onClick={() => void save()}>
+      <button type="button" onClick={() => void save(nextEditedJson())}>
         save
+      </button>
+      <button type="button" onClick={() => void save(props.initialProjectJson)}>
+        save-same
       </button>
       <button type="button" onClick={() => props.onSelectionChanged?.(['a', 'b'])}>
         select

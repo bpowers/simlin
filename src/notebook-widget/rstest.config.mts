@@ -9,7 +9,7 @@ const here = import.meta.dirname;
 
 export default defineConfig({
   testEnvironment: 'jsdom',
-  include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+  include: ['src/**/*.test.ts', 'src/**/*.test.tsx', 'build/**/*.test.ts'],
   setupFiles: ['./src/test-utils/setup-testing-library.ts'],
   resolve: {
     alias: {

@@ -81,7 +81,8 @@ describe('AFM lifecycle', () => {
     expect(el.childElementCount).toBe(0);
     // Every model listener the view added is gone.
     expect(model.listenerCount('change:revision')).toBe(0);
-    expect(model.listenerCount('change:notice')).toBe(0);
+    expect(model.listenerCount('change:project_json')).toBe(0);
+    expect(model.listenerCount('msg:custom')).toBe(0);
   });
 
   it('render shows the failure in the cell when the engine cannot be obtained', async () => {
@@ -177,31 +178,92 @@ describe('WidgetApp <-> model protocol', () => {
     fireEvent.click(screen.getByText('save'));
     await waitFor(() => expect(model.saveChangesCount).toBe(1));
     act(() => {
-      model.kernelPush({ project_json: '{"name":"kernel-wins"}', revision: 5, notice: 'conflict' });
+      model.kernelPush({ project_json: '{"name":"kernel-wins"}', revision: 5 });
+      model.trigger('msg:custom', { type: 'notice', text: 'conflict', level: 'warn' }, []);
     });
     expect(mounts).toHaveLength(2);
     expect(mounts[1].props.initialProjectVersion).toBe(5);
     expect(screen.getByRole('status').textContent).toBe('conflict');
   });
 
-  it('a notice shows, then auto-hides; clearing it kernel-side hides it immediately', async () => {
+  it('a rejection at an UNCHANGED revision (kernel re-pushes its authoritative JSON) remounts and re-seeds the version', async () => {
+    // The wedge: the widget's optimistic version drifted (say a kernel write
+    // failed and revision did not advance), so its next snapshot is stale.
+    // The kernel answers by re-pushing its authoritative project_json with
+    // the revision it still holds. Only project_json changes on the model.
+    const model = new FakeModel(defaultState({ revision: 3, project_json: '{"name":"kernel"}' }));
+    await mount(model);
+    fireEvent.click(screen.getByText('save'));
+    await waitFor(() => expect(model.saveChangesCount).toBe(1));
+    expect(model.lastSet('pending_base')).toBe(3);
+    // The Editor now believes 4 is acknowledged; the kernel never advanced.
+    act(() => {
+      model.kernelPush({ project_json: '{"name":"kernel"}', revision: 3 });
+    });
+    expect(mounts).toHaveLength(2);
+    expect(mounts[1].props.initialProjectJson).toBe('{"name":"kernel"}');
+    expect(mounts[1].props.initialProjectVersion).toBe(3);
+    // The next save goes out against the reseeded version, not the drifted one.
+    fireEvent.click(screen.getByText('save'));
+    await waitFor(() => expect(model.saveChangesCount).toBe(2));
+    expect(model.lastSet('pending_base')).toBe(3);
+  });
+
+  it('a save whose JSON equals the current trait sends nothing and does not advance the version', async () => {
+    const model = new FakeModel(defaultState({ revision: 3, project_json: 'SAME' }));
+    await mount(model);
+    fireEvent.click(screen.getByText('save-same'));
+    await waitFor(() => expect(mounts[0].saveResults).toHaveLength(1));
+    expect(mounts[0].saveResults[0]).toBeUndefined();
+    expect(model.sets).toEqual([]);
+    expect(model.saveChangesCount).toBe(0);
+    // And a real save afterwards still uses the seeded version.
+    fireEvent.click(screen.getByText('save'));
+    await waitFor(() => expect(model.saveChangesCount).toBe(1));
+    expect(model.lastSet('pending_base')).toBe(3);
+  });
+
+  it('a kernel push of both traits (two change events, either order) remounts exactly once', async () => {
+    const model = new FakeModel(defaultState({ revision: 3 }));
+    await mount(model);
+    act(() => {
+      model.kernelPush({ revision: 4, project_json: '{"name":"a"}' });
+    });
+    expect(mounts).toHaveLength(2);
+    act(() => {
+      model.kernelPush({ project_json: '{"name":"b"}', revision: 5 });
+    });
+    expect(mounts).toHaveLength(3);
+    expect(mounts[2].props.initialProjectVersion).toBe(5);
+  });
+
+  it('a notice custom message shows, restarts its timer on a repeat, then auto-hides', async () => {
     const model = new FakeModel(defaultState());
     await mount(model);
     expect(screen.queryByRole('status')).toBeNull();
     act(() => {
-      model.kernelPush({ notice: 'Updated on disk' });
+      model.trigger('msg:custom', { type: 'notice', text: 'Updated on disk' }, []);
     });
     expect(screen.getByRole('status').textContent).toBe('Updated on disk');
     act(() => {
-      rs.advanceTimersByTime(NOTICE_TIMEOUT_MS);
+      rs.advanceTimersByTime(NOTICE_TIMEOUT_MS - 1);
+    });
+    // The same text again (a second disk reload) is a new event: it shows and
+    // restarts the timer -- a trait could not have expressed this.
+    act(() => {
+      model.trigger('msg:custom', { type: 'notice', text: 'Updated on disk' }, []);
+    });
+    act(() => {
+      rs.advanceTimersByTime(NOTICE_TIMEOUT_MS - 1);
+    });
+    expect(screen.getByRole('status').textContent).toBe('Updated on disk');
+    act(() => {
+      rs.advanceTimersByTime(1);
     });
     expect(screen.queryByRole('status')).toBeNull();
+    // Non-notice custom messages are ignored.
     act(() => {
-      model.kernelPush({ notice: 'again' });
-    });
-    expect(screen.getByRole('status').textContent).toBe('again');
-    act(() => {
-      model.kernelPush({ notice: '' });
+      model.trigger('msg:custom', { type: 'wasm' }, []);
     });
     expect(screen.queryByRole('status')).toBeNull();
   });
@@ -219,12 +281,58 @@ describe('WidgetApp <-> model protocol', () => {
     expect(mounts).toHaveLength(1);
   });
 
-  it('theme auto follows the JupyterLab body attribute', async () => {
+  it('theme auto follows the JupyterLab body attribute, live', async () => {
     document.body.dataset.jpThemeLight = 'false';
     const model = new FakeModel(defaultState({ theme: 'auto' }));
-    const { el } = await mount(model);
-    expect(el.querySelector('[data-lm-suppress-shortcuts]')?.getAttribute('data-theme')).toBe('dark');
+    const { el, cleanup } = await mount(model);
+    const wrapper = el.querySelector('[data-lm-suppress-shortcuts]')!;
+    expect(wrapper.getAttribute('data-theme')).toBe('dark');
+    // JupyterLab switches theme after mount: MutationObserver callbacks are
+    // microtasks, so flush them inside act.
+    await act(async () => {
+      document.body.dataset.jpThemeLight = 'true';
+      await Promise.resolve();
+    });
+    expect(wrapper.getAttribute('data-theme')).toBe('light');
+    cleanup();
+    // After unmount, further flips must not touch a dead tree (no throw).
+    await act(async () => {
+      document.body.dataset.jpThemeLight = 'false';
+      await Promise.resolve();
+    });
     delete document.body.dataset.jpThemeLight;
+  });
+
+  it('theme auto follows the OS color scheme when JupyterLab gives no signal', async () => {
+    delete document.body.dataset.jpThemeLight;
+    let matches = false;
+    const listeners = new Set<() => void>();
+    const mql = {
+      get matches() {
+        return matches;
+      },
+      addEventListener: (_: string, cb: () => void) => listeners.add(cb),
+      removeEventListener: (_: string, cb: () => void) => listeners.delete(cb),
+    };
+    rs.stubGlobal(
+      'matchMedia',
+      rs.fn(() => mql),
+    );
+    const model = new FakeModel(defaultState({ theme: 'auto' }));
+    const { el, cleanup } = await mount(model);
+    const wrapper = el.querySelector('[data-lm-suppress-shortcuts]')!;
+    expect(wrapper.getAttribute('data-theme')).toBe('light');
+    expect(listeners.size).toBe(1);
+    act(() => {
+      matches = true;
+      for (const cb of listeners) {
+        cb();
+      }
+    });
+    expect(wrapper.getAttribute('data-theme')).toBe('dark');
+    cleanup();
+    expect(listeners.size).toBe(0);
+    rs.unstubAllGlobals();
   });
 
   it('selection changes are debounced into one selection trait sync', async () => {

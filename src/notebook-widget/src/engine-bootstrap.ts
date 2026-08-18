@@ -36,6 +36,12 @@ export const GLOBAL_KEY = '__simlinWidgetWasmModule';
  * `runtime.ready`), so a slow reply is normal; a kernel that never answers
  * (dead kernel, an old pysimlin without the handler) should surface as an
  * error in the cell rather than an eternal spinner.
+ *
+ * Only the ONE widget instance that issued the request runs this timer. Every
+ * other instance on the page awaits the shared promise under GLOBAL_KEY (see
+ * sharedWasmModule) with no timer of its own: it fails when, and only when,
+ * the requester's attempt fails -- and that failure evicts the shared entry,
+ * so the next render on any instance issues a fresh request.
  */
 export const WASM_REPLY_TIMEOUT_MS = 60_000;
 

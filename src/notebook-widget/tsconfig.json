@@ -19,6 +19,6 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "e2e/**/*.ts", "globals.d.ts", "rsbuild.config.ts", "rstest.config.mts"],
+  "include": ["src/**/*.ts", "src/**/*.tsx", "build/**/*.ts", "e2e/**/*.ts", "globals.d.ts", "rsbuild.config.ts", "rstest.config.mts"],
   "exclude": ["node_modules", "dist"]
 }

@@ -18,7 +18,6 @@ export const TRAITS = {
   selection: 'selection',
   height: 'height',
   theme: 'theme',
-  notice: 'notice',
   readOnly: 'read_only',
 } as const;
 
@@ -32,7 +31,6 @@ export interface WidgetTraits {
   revision: number;
   height: number;
   theme: Theme;
-  notice: string;
   readOnly: boolean;
 }
 
@@ -55,13 +53,11 @@ export function readTraits(get: (key: string) => unknown): WidgetTraits {
   const revisionRaw = get(TRAITS.revision);
   const revision = typeof revisionRaw === 'number' && Number.isInteger(revisionRaw) ? revisionRaw : 0;
   const projectRaw = get(TRAITS.projectJson);
-  const noticeRaw = get(TRAITS.notice);
   return {
     projectJson: typeof projectRaw === 'string' ? projectRaw : '',
     revision,
     height,
     theme,
-    notice: typeof noticeRaw === 'string' ? noticeRaw : '',
     readOnly: get(TRAITS.readOnly) === true,
   };
 }
@@ -142,14 +138,42 @@ export function parseWasmReply(msg: unknown, buffers: ReadonlyArray<unknown> | u
   return { kind: 'bytes', bytes };
 }
 
+// ---- notice messages ---------------------------------------------------------
+
+export type NoticeLevel = 'info' | 'warn';
+
+export interface Notice {
+  text: string;
+  level: NoticeLevel;
+}
+
+/**
+ * Interpret a `msg:custom` delivery as a kernel notice
+ * (`{type:'notice', text, level?}`): transient text the kernel wants shown
+ * over the diagram -- "Updated on disk", "Your change conflicted...". Not a
+ * trait, because a trait is state (a second identical notice would be
+ * silent) and a notice is an event. Anything else, including a notice with
+ * no usable text, is `null`.
+ */
+export function parseNoticeMessage(msg: unknown): Notice | null {
+  if (!isRecord(msg) || msg.type !== 'notice' || typeof msg.text !== 'string' || msg.text === '') {
+    return null;
+  }
+  return { text: msg.text, level: msg.level === 'warn' ? 'warn' : 'info' };
+}
+
 // ---- revision reconciliation -------------------------------------------------
 
 /**
- * What the shell remembers between kernel pushes: the last revision it saw and
- * the snapshots it has sent that the kernel has not echoed yet, oldest first.
+ * What the shell remembers between kernel pushes: the last (revision,
+ * project_json) it adopted from the kernel and the snapshots it has sent that
+ * the kernel has not echoed yet, oldest first.
  */
 export interface SyncState {
   revision: number;
+  // The project_json the current Editor mount was seeded from (or last acked
+  // with). Together with `revision` it identifies "nothing new" pushes.
+  knownJson: string;
   pendingSnapshots: ReadonlyArray<string>;
 }
 
@@ -162,15 +186,15 @@ export interface SyncState {
  */
 export const MAX_PENDING_SNAPSHOTS = 32;
 
-export function initialSyncState(revision: number): SyncState {
-  return { revision, pendingSnapshots: [] };
+export function initialSyncState(revision: number, knownJson: string): SyncState {
+  return { revision, knownJson, pendingSnapshots: [] };
 }
 
 /** Remember a snapshot the widget just sent to the kernel. */
 export function recordSentSnapshot(state: SyncState, json: string): SyncState {
   const pending = [...state.pendingSnapshots, json];
   return {
-    revision: state.revision,
+    ...state,
     pendingSnapshots:
       pending.length > MAX_PENDING_SNAPSHOTS ? pending.slice(pending.length - MAX_PENDING_SNAPSHOTS) : pending,
   };
@@ -180,37 +204,66 @@ export type ReconcileAction =
   // The push echoes a snapshot this widget sent: adopt the revision, keep the
   // live Editor (and its undo history) as is.
   | 'ack'
-  // Someone else (Python edit(), disk change, a rejected stale snapshot)
-  // produced this state: remount the Editor on the new snapshot.
+  // The kernel produced this state (Python edit(), disk change, a rejected
+  // stale snapshot re-seeding us, a revision bump we did not cause): remount
+  // the Editor on the pushed snapshot and revision.
   | 'remount'
-  // Nothing new (same revision as already known).
+  // Nothing new (same revision and content as already known).
   | 'none';
 
 /**
- * Decide how to treat a kernel push of (revision, project_json). Only the
- * kernel ever sets `revision`, so a change of it is never our own local
- * `model.set`. If the JSON matches one of the snapshots we sent, it is the
- * kernel accepting our edit -- that snapshot and every OLDER pending one are
- * dropped (the kernel applies snapshots in order, so an older one either was
- * already echoed or was rejected and superseded). Otherwise the state came
- * from elsewhere and every pending snapshot is dead: the kernel has moved on,
- * and it will reject them anyway.
+ * Decide how to treat the kernel-owned (revision, project_json) pair the
+ * shell reads after a `change:revision` or `change:project_json` event that
+ * it did not cause itself. The two traits arrive in ONE kernel message but
+ * fire two change events (or one, when only one value differs), so this is
+ * idempotent: re-running it on the same pair is `none`.
+ *
+ * Kernel obligations this relies on: an accepted widget snapshot is pushed
+ * back as the EXACT bytes the widget sent (with revision+1); a rejected
+ * snapshot is answered by re-pushing the kernel's authoritative project_json
+ * (revision unchanged). Hence:
+ * - content equal to a pending snapshot => the kernel accepted one of ours.
+ *   The OLDEST pending entry is dropped (the kernel accepts in order; the
+ *   entries can be equal strings -- an edit/undo/redo burst is [A, B, A] --
+ *   so matching by position, not by value, is what keeps every later echo
+ *   an ack instead of a spurious remount);
+ * - the known pair again while snapshots are pending: the kernel re-sent
+ *   what we were seeded from without advancing -- that is a REJECT of the
+ *   pending snapshot(s), re-seeding us (the frontend trait had held our own
+ *   bytes, so the kernel's authoritative value fired a change event). The
+ *   Editor has moved past that content locally and must be remounted on it,
+ *   which also resets the version it believes is acknowledged. With nothing
+ *   pending the same pair is simply the second change event of a push already
+ *   handled;
+ * - otherwise any change in content or revision came from the kernel and
+ *   the Editor must be remounted on it. Every pending snapshot is dead at
+ *   that point (the kernel has moved past them and will reject them, if it
+ *   has not already).
  */
 export function reconcileRevision(
   state: SyncState,
   incoming: { revision: number; projectJson: string },
 ): { state: SyncState; action: ReconcileAction } {
-  if (incoming.revision === state.revision) {
-    return { state, action: 'none' };
+  if (incoming.revision === state.revision && incoming.projectJson === state.knownJson) {
+    if (state.pendingSnapshots.length === 0) {
+      return { state, action: 'none' };
+    }
+    return { state: { ...state, pendingSnapshots: [] }, action: 'remount' };
   }
-  const idx = state.pendingSnapshots.lastIndexOf(incoming.projectJson);
-  if (idx >= 0) {
+  if (state.pendingSnapshots.includes(incoming.projectJson)) {
     return {
-      state: { revision: incoming.revision, pendingSnapshots: state.pendingSnapshots.slice(idx + 1) },
+      state: {
+        revision: incoming.revision,
+        knownJson: incoming.projectJson,
+        pendingSnapshots: state.pendingSnapshots.slice(1),
+      },
       action: 'ack',
     };
   }
-  return { state: { revision: incoming.revision, pendingSnapshots: [] }, action: 'remount' };
+  return {
+    state: { revision: incoming.revision, knownJson: incoming.projectJson, pendingSnapshots: [] },
+    action: 'remount',
+  };
 }
 
 /**

@@ -22,6 +22,9 @@
 import { defineConfig, rspack } from '@rsbuild/core';
 import { pluginReact } from '@rsbuild/plugin-react';
 
+import { scopeCssPlugin } from './build/scope-css';
+import { WIDGET_ROOT_CLASS } from './src/widget-root-class';
+
 // Which engine backend to bundle. 'direct' (default) runs libsimlin on the
 // main thread; 'worker' keeps @simlin/engine's Web Worker backend and is here
 // only so the two can be measured against each other (its worker chunk is a
@@ -87,6 +90,11 @@ export default defineConfig({
     // base, so the CommonJS-shaped css-loader output (plain strings, no URL
     // construction) is the correct form, not merely a workaround.
     cssLoader: { esModule: false },
+    // Global stylesheets (theme.css tokens, katex) are confined to the widget
+    // root so the notebook page is untouched; see build/scope-css.ts.
+    postcss: (_opts, { addPlugins }) => {
+      addPlugins(scopeCssPlugin(WIDGET_ROOT_CLASS));
+    },
     bundlerChain: (chain, { CHAIN_ID }) => {
       // katex.min.css declares every face three times (woff2, woff, ttf) and
       // browsers take the first supported source, which is always woff2 in
