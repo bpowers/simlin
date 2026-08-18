@@ -3,9 +3,10 @@ include LICENSE
 include pyproject.toml
 recursive-include simlin *.py *.pyi *.typed
 recursive-include simlin *.h
-# The notebook widget's staged assets ship in the sdist too, so a source
-# install (pip install pysimlin from PyPI on a platform without a wheel)
-# needs Rust but not node; setup.py refuses to build without them.
+# The notebook widget's staged assets ship in the sdist too, so building
+# from it needs no node (setup.py refuses to build without them). Note the
+# sdist is not otherwise self-contained -- the CFFI build reads simlin.h from
+# the libsimlin crate in the repo tree -- and releases publish wheels only.
 recursive-include simlin/_widget *.js *.wasm ASSETS.json README.md
 include scripts/stage_widget_assets.py
 recursive-include tests *.py

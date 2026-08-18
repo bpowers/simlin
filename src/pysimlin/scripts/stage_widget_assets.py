@@ -23,12 +23,12 @@ nothing and every platform wheel built from one staging carries byte-identical
 assets. ``setup.py`` reads the manifest to refuse building a wheel/sdist from
 missing, empty or inconsistent assets.
 
-Usage::
+Usage (flags combine):
 
-    stage_widget_assets.py  # pnpm build of the widget + deps, then stage
-    stage_widget_assets.py - -no - build  # stage from the existing build outputs
-    stage_widget_assets.py - -check  # verify what is staged; exit 1 on a problem
-    stage_widget_assets.py - -require - opt  # (with any of the above) the wasm must be wasm-opt'd
+- no flags: pnpm build of the widget and its deps, then stage
+- ``--no-build``: stage from the existing build outputs
+- ``--check``: verify what is staged; exit 1 on a problem
+- ``--require-opt``: the wasm must be wasm-opt'd (release builds)
 
 Only the standard library is used: ``setup.py`` imports the verification
 helpers from an isolated build environment where nothing else is guaranteed.
@@ -223,6 +223,42 @@ def verify_staged(
     if manifest.get("source_dirty"):
         v.warnings.append("assets were staged from a working tree with uncommitted changes")
     return v
+
+
+# Escape hatch for deliberately building a package without the widget (e.g.
+# measuring what the assets cost). Never set this in a release path.
+ALLOW_MISSING_ENV = "SIMLIN_ALLOW_MISSING_WIDGET_ASSETS"
+
+
+def packaging_guard(
+    dest: Path,
+    *,
+    command: str,
+    head_commit: str | None,
+    allow_missing: bool,
+) -> tuple[list[str], str | None]:
+    """Decide whether a packaging ``command`` (``bdist_wheel``/``sdist``) may run.
+
+    Returns ``(messages_to_print, refusal)``: ``refusal`` is ``None`` when the
+    command may proceed, else the text to abort with. ``allow_missing`` (the
+    ``SIMLIN_ALLOW_MISSING_WIDGET_ASSETS=1`` bypass) skips the check entirely
+    but still says so on stdout, so a package built without the widget is
+    never built silently. Pure: ``setup.py`` and its tests both call this.
+    """
+    if allow_missing:
+        return [f"warning: {ALLOW_MISSING_ENV}=1: {command} without checking widget assets"], None
+    v = verify_staged(dest, head_commit=head_commit)
+    messages = [f"warning: widget assets: {w}" for w in v.warnings]
+    if v.ok:
+        return messages, None
+    problems = "\n".join(f"  - {e}" for e in v.errors)
+    refusal = (
+        f"refusing to run {command}: the notebook widget assets are not staged:\n"
+        f"{problems}\n"
+        f"Run `python scripts/stage_widget_assets.py` (or `make assets`) first, "
+        f"or set {ALLOW_MISSING_ENV}=1 to build a package without the widget."
+    )
+    return messages, refusal
 
 
 def is_up_to_date(dest: Path, sources: dict[str, Path], manifest_text: str) -> bool:

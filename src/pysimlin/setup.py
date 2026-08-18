@@ -18,60 +18,34 @@ widget.
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 from setuptools import setup
+from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 from setuptools.command.sdist import sdist as _sdist
-
-try:
-    from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
-except ImportError:  # setuptools < 70.1 has no bdist_wheel of its own
-    from wheel.bdist_wheel import bdist_wheel as _bdist_wheel  # type: ignore[no-redef]
 
 HERE = Path(__file__).resolve().parent
 ASSET_DIR = HERE / "simlin" / "_widget"
-STAGING_SCRIPT = HERE / "scripts" / "stage_widget_assets.py"
 
-# Escape hatch for deliberately building a package without the widget
-# (e.g. measuring what the assets cost). Never set this in a release path.
-ALLOW_MISSING_ENV = "SIMLIN_ALLOW_MISSING_WIDGET_ASSETS"
-
-
-def _head_commit() -> str | None:
-    try:
-        proc = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=HERE, check=True, capture_output=True, text=True
-        )
-    except (OSError, subprocess.CalledProcessError):
-        # Not a git checkout (an sdist unpack): the manifest's commit is
-        # informational only there.
-        return None
-    return proc.stdout.strip()
+sys.path.insert(0, str(HERE / "scripts"))
+try:
+    from stage_widget_assets import ALLOW_MISSING_ENV, head_commit, packaging_guard
+finally:
+    sys.path.pop(0)
 
 
 def _require_widget_assets(command: str) -> None:
-    if os.environ.get(ALLOW_MISSING_ENV) == "1":
-        print(f"warning: {ALLOW_MISSING_ENV}=1: {command} without checking widget assets")
-        return
-    sys.path.insert(0, str(STAGING_SCRIPT.parent))
-    try:
-        import stage_widget_assets as staging
-    finally:
-        sys.path.pop(0)
-
-    verification = staging.verify_staged(ASSET_DIR, head_commit=_head_commit())
-    for warning in verification.warnings:
-        print(f"warning: widget assets: {warning}")
-    if not verification.ok:
-        problems = "\n".join(f"  - {e}" for e in verification.errors)
-        raise SystemExit(
-            f"refusing to run {command}: the notebook widget assets are not staged:\n"
-            f"{problems}\n"
-            f"Run `python {STAGING_SCRIPT.relative_to(HERE)}` (or `make assets`) first, "
-            f"or set {ALLOW_MISSING_ENV}=1 to build a package without the widget."
-        )
+    messages, refusal = packaging_guard(
+        ASSET_DIR,
+        command=command,
+        head_commit=head_commit(),
+        allow_missing=os.environ.get(ALLOW_MISSING_ENV) == "1",
+    )
+    for message in messages:
+        print(message)
+    if refusal is not None:
+        raise SystemExit(refusal)
 
 
 class bdist_wheel(_bdist_wheel):  # type: ignore[misc]

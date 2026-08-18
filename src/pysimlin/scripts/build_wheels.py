@@ -82,7 +82,7 @@ def build_libsimlin() -> Path:
     return lib_path
 
 
-def stage_widget_assets(build: bool) -> None:
+def stage_widget_assets(build: bool, require_opt: bool) -> None:
     """Put the notebook widget's JS module and engine wasm into
     ``simlin/_widget/`` so the wheel carries them.
 
@@ -90,12 +90,16 @@ def stage_widget_assets(build: bool) -> None:
     widget); ``False`` stages whatever those builds last produced. Either way
     the staging script writes ``ASSETS.json`` and ``setup.py`` refuses the
     wheel if anything is missing or inconsistent, so a wheel produced here can
-    never silently lack the widget.
+    never silently lack the widget. ``require_opt`` additionally fails the
+    build when the wasm was not wasm-opt'd (a raw wasm is what a
+    DISABLE_WASM_OPT development build leaves behind).
     """
     print("Staging notebook widget assets...")
     args = [sys.executable, str(STAGE_ASSETS)]
     if not build:
         args.append("--no-build")
+    if require_opt:
+        args.append("--require-opt")
     subprocess.run(args, cwd=REPO_ROOT, check=True)
 
 
@@ -164,13 +168,19 @@ def main(argv: list[str] | None = None) -> None:
         help="stage the notebook widget assets from the existing TypeScript build outputs "
         "instead of running the pnpm build first",
     )
+    parser.add_argument(
+        "--require-opt",
+        action="store_true",
+        help="fail unless the staged wasm was built with wasm-opt (release builds); "
+        "off by default so a development build without binaryen still produces a wheel",
+    )
     args = parser.parse_args(argv)
 
     print("Building simlin Python package...")
     print(f"Platform: {platform.system()} {platform.machine()}")
 
     lib_path = build_libsimlin()
-    stage_widget_assets(build=not args.no_asset_build)
+    stage_widget_assets(build=not args.no_asset_build, require_opt=args.require_opt)
     build_wheel(lib_path)
 
     print("Build complete!")

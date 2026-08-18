@@ -302,3 +302,135 @@ class TestStageAndCheck:
 
     def test_check_fails_on_an_empty_dest(self, staging: ModuleType, redirected: Path) -> None:
         assert staging.main(["--check", "--dest", str(redirected)]) == 1
+
+
+class TestPackagingGuard:
+    """The bdist_wheel/sdist decision ``setup.py`` executes."""
+
+    def test_staged_dir_may_proceed(self, staging: ModuleType, tmp_path: Path) -> None:
+        _write_staged(staging, tmp_path, GOOD)
+        messages, refusal = staging.packaging_guard(
+            tmp_path, command="bdist_wheel", head_commit="abc123", allow_missing=False
+        )
+        assert refusal is None
+        assert messages == []
+
+    def test_other_commit_proceeds_with_a_warning(
+        self, staging: ModuleType, tmp_path: Path
+    ) -> None:
+        _write_staged(staging, tmp_path, GOOD, source_commit="old")
+        messages, refusal = staging.packaging_guard(
+            tmp_path, command="sdist", head_commit="new", allow_missing=False
+        )
+        assert refusal is None
+        assert any("staged from commit old" in m for m in messages)
+
+    def test_empty_dir_is_refused(self, staging: ModuleType, tmp_path: Path) -> None:
+        _, refusal = staging.packaging_guard(
+            tmp_path, command="bdist_wheel", head_commit=None, allow_missing=False
+        )
+        assert refusal is not None
+        assert refusal.startswith("refusing to run bdist_wheel")
+        assert "widget.js is missing" in refusal
+        assert "make assets" in refusal
+        assert staging.ALLOW_MISSING_ENV in refusal
+
+    def test_mismatched_asset_is_refused(self, staging: ModuleType, tmp_path: Path) -> None:
+        _write_staged(staging, tmp_path, GOOD)
+        (tmp_path / "widget.js").write_bytes(b"export default { stale: true };\n")
+        _, refusal = staging.packaging_guard(
+            tmp_path, command="sdist", head_commit=None, allow_missing=False
+        )
+        assert refusal is not None
+        assert "does not match its ASSETS.json entry" in refusal
+
+    def test_bypass_proceeds_but_says_so(self, staging: ModuleType, tmp_path: Path) -> None:
+        messages, refusal = staging.packaging_guard(
+            tmp_path, command="bdist_wheel", head_commit=None, allow_missing=True
+        )
+        assert refusal is None
+        assert messages == [
+            f"warning: {staging.ALLOW_MISSING_ENV}=1: bdist_wheel without checking widget assets"
+        ]
+
+
+class TestSetupPyGuard:
+    """``setup.py`` itself: its ``bdist_wheel``/``sdist`` cmdclasses must call the
+    guard before running. Loaded with ``sys.argv = ['setup.py', '--name']`` so
+    ``setup()`` only answers a query, then the command classes are exercised
+    with the asset directory pointed at a temp dir. A base ``run`` that raises
+    ``_Ran`` shows the guard passed; a ``SystemExit`` shows it refused."""
+
+    class _Ran(Exception):
+        pass
+
+    @pytest.fixture
+    def setup_module(self, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+        # setuptools is a build-time dependency (in the dev extra), absent when
+        # the suite runs against an installed wheel; the pure guard is covered
+        # above regardless.
+        pytest.importorskip(
+            "setuptools", reason="setuptools (dev extra) is needed to load setup.py"
+        )
+        setup_py = SCRIPT.parent.parent / "setup.py"
+        monkeypatch.setattr(sys, "argv", ["setup.py", "--name"])
+        monkeypatch.chdir(setup_py.parent)
+        spec = importlib.util.spec_from_file_location("pysimlin_setup", setup_py)
+        assert spec is not None
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    @pytest.fixture
+    def commands(self, setup_module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> list[object]:
+        for name in ("bdist_wheel", "sdist"):
+            cls = getattr(setup_module, name)
+            monkeypatch.setattr(
+                cls.__mro__[1], "run", lambda self: (_ for _ in ()).throw(TestSetupPyGuard._Ran())
+            )
+        # Distribution-free instances: only ``run`` is exercised.
+        return [object.__new__(setup_module.bdist_wheel), object.__new__(setup_module.sdist)]
+
+    @pytest.mark.parametrize("index", [0, 1], ids=["bdist_wheel", "sdist"])
+    def test_refuses_without_assets(
+        self,
+        setup_module: ModuleType,
+        commands: list[object],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        index: int,
+    ) -> None:
+        monkeypatch.setattr(setup_module, "ASSET_DIR", tmp_path)
+        monkeypatch.delenv(setup_module.ALLOW_MISSING_ENV, raising=False)
+        with pytest.raises(SystemExit, match="refusing to run"):
+            commands[index].run()  # type: ignore[attr-defined]
+
+    @pytest.mark.parametrize("index", [0, 1], ids=["bdist_wheel", "sdist"])
+    def test_runs_with_staged_assets(
+        self,
+        setup_module: ModuleType,
+        staging: ModuleType,
+        commands: list[object],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        index: int,
+    ) -> None:
+        _write_staged(staging, tmp_path, GOOD)
+        monkeypatch.setattr(setup_module, "ASSET_DIR", tmp_path)
+        monkeypatch.delenv(setup_module.ALLOW_MISSING_ENV, raising=False)
+        with pytest.raises(TestSetupPyGuard._Ran):
+            commands[index].run()  # type: ignore[attr-defined]
+
+    def test_bypass_env_runs_without_assets(
+        self,
+        setup_module: ModuleType,
+        commands: list[object],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(setup_module, "ASSET_DIR", tmp_path)
+        monkeypatch.setenv(setup_module.ALLOW_MISSING_ENV, "1")
+        with pytest.raises(TestSetupPyGuard._Ran):
+            commands[0].run()  # type: ignore[attr-defined]

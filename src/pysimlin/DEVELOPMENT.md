@@ -118,7 +118,12 @@ without the widget assets.
 cd src/pysimlin
 uv run python scripts/build_wheels.py                    # everything from source
 uv run python scripts/build_wheels.py --no-asset-build   # reuse the last frontend build
+uv run python scripts/build_wheels.py --require-opt      # refuse a wasm that was not wasm-opt'd
 ```
+
+`--require-opt` is off by default so a development machine without binaryen
+still produces a wheel (with a `raw` wasm and a warning); the release workflow
+always passes it.
 
 This will:
 1. Build libsimlin.a for current platform (mimalloc feature)
