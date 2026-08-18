@@ -155,7 +155,7 @@ Protocol:
 
 - Keyboard: document keydown handler checks `composedPath()` includes the editor root and skips editable targets; each Editor instance only reacts when it (or its descendants) has focus-within or is the most recently focused editor.
 - Viewport assumptions: replace `100vw/100vh` clamps with container-relative units; nothing `position: fixed` inside the Editor tree (toast viewport becomes absolute within the editor root).
-- Host props: `homeLink?: boolean` (hide `<Link to="/">` when embedded in a non-router host), an explicit `height`/fill behaviour documented in `src/diagram/CLAUDE.md` Hosting Requirements.
+- Host props: `showHomeLink?: boolean` (default true; hides `<Link to="/">` when embedded in a non-router host), an explicit `height`/fill behaviour documented in `src/diagram/CLAUDE.md` Hosting Requirements.
 - These changes are covered by existing Editor tests plus new ones and must not change simlin-serve/app behaviour (they set the same defaults).
 
 ### 6. Read-only display
