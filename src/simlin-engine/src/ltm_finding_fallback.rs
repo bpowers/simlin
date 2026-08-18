@@ -44,7 +44,10 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 use std::time::Instant;
 
-use super::{Clock, DEADLINE_CHECK_INTERVAL, IndexedSearch, expired, tarjan_scc_ids};
+use super::{
+    Clock, DEADLINE_CHECK_INTERVAL, IndexedSearch, TarjanScratch, expired, is_active,
+    tarjan_scc_ids_into,
+};
 use crate::results::Results;
 
 /// Edge weight formulation for the fallback's shortest-path search.
@@ -60,9 +63,19 @@ use crate::results::Results;
 pub enum FallbackWeight {
     /// `w = max(0, -ln|s|)`: sub-unit links cost, super-unit links are free.
     ///
-    /// The clamp makes this an admissible optimistic bound on the true `-ln`
-    /// cost -- it never overstates a path -- which keeps the search biased
-    /// toward high-gain cycles while satisfying Dijkstra's precondition.
+    /// The clamp is what keeps Dijkstra's precondition: a super-unit link is a
+    /// NEGATIVE edge in raw `-ln` space, and clamping it to 0 discards its
+    /// gain rather than expressing it. So this weight is an UPPER bound on the
+    /// true `-ln` cost, not a lower one, and the cheapest cycle it finds is
+    /// the cheapest under the clamped weighting rather than the largest-gain
+    /// cycle in the model.
+    ///
+    /// The consequence is a zero-weight plateau: on a model with many
+    /// super-unit links -- World3 has 37-91 of its ~190-250 active links per
+    /// step above 1 -- a large share of the graph weighs exactly 0, so many
+    /// distinct cycles tie at weight 0 and the weight alone cannot rank them.
+    /// The hop-count tie-break in the search's ordering is what decides those
+    /// ties on something meaningful rather than on node-id order.
     ClampedLogAbs,
     /// `w = -ln(|s| / sum of |s| over the target's active in-edges)`: the LTM
     /// relative link score (reference doc 13.3, the link score normalized
@@ -81,20 +94,6 @@ pub enum FallbackWeight {
 impl FallbackWeight {
     /// The formulation production uses unless a caller pins another one.
     pub const DEFAULT: FallbackWeight = FallbackWeight::ClampedLogAbs;
-}
-
-/// Whether an edge carries signal at a saved step.
-///
-/// Identical to [`super::enum_gen::ActivityGraph`]'s rule, and the two must
-/// stay identical: a cycle the enumerator considers active and the fallback
-/// does not (or the reverse) would make `enumeration_complete` mean different
-/// things about the same model. Infinity is a real, divergent signal and stays
-/// active; only NaN (no `PREVIOUS` value, or an undefined partial) and an
-/// exact zero are inactive, and a loop through a zero link scores exactly zero
-/// at this step anyway.
-#[inline]
-fn is_active(value: f64) -> bool {
-    (value != 0.0 && value.is_finite()) || value.is_infinite()
 }
 
 /// The search weight of an edge whose |link score| is `abs_score` and whose
@@ -124,9 +123,13 @@ fn edge_weight(weight: FallbackWeight, abs_score: f64, in_sum: f64) -> f64 {
             if w.is_nan() {
                 0.0
             } else {
-                // A share can round marginally above 1 when it is the target's
-                // sole determinant, which would make the weight a tiny
-                // negative number and break Dijkstra's precondition.
+                // The share cannot exceed 1 -- a sole determinant sums to
+                // exactly its own |score|, so the ratio is exactly 1.0 and the
+                // weight is exactly `-ln(1) == 0.0` -- so this clamp is not
+                // guarding a negative weight. It normalizes the two spellings
+                // of zero: `-0.0` and `0.0` are equal but `total_cmp` orders
+                // them apart, and the heap's tie-break must not depend on
+                // which arm produced a zero.
                 w.max(0.0)
             }
         }
@@ -262,6 +265,10 @@ struct FallbackScratch {
     scc_ids: Vec<u32>,
     /// SCC id -> node count, for skipping seeds that are on no cycle.
     scc_sizes: Vec<u32>,
+    /// Working buffers for the per-step Tarjan run, kept across steps: the
+    /// pass runs once per saved step, so its six node-sized vectors would
+    /// otherwise be allocated and freed 401 times on World3.
+    scc_scratch: TarjanScratch,
     /// node -> shortest known distance from the current seed. Meaningful only
     /// while `reached_gen[node] == generation`.
     dist: Vec<f64>,
@@ -293,8 +300,9 @@ impl FallbackScratch {
             rev: vec![Vec::new(); n_nodes],
             in_sum: vec![0.0; n_nodes],
             scc_adj: vec![Vec::new(); n_nodes],
-            scc_ids: vec![0; n_nodes],
+            scc_ids: Vec::new(),
             scc_sizes: Vec::new(),
+            scc_scratch: TarjanScratch::default(),
             dist: vec![0.0; n_nodes],
             parent: vec![0; n_nodes],
             reached_gen: vec![0; n_nodes],
@@ -330,6 +338,13 @@ impl FallbackScratch {
         // and accumulating each target's determinant mass. The normalization
         // has to see the whole in-edge set before any weight can be computed,
         // which is why this cannot be a single pass.
+        //
+        // The mass is accumulated for every weight arm, not only the one that
+        // reads it. Gating it would make `in_sum` a denominator that is live
+        // for some arms and stale zero for others, so any arm added later that
+        // consulted it would divide by a zero nothing wrote -- a silent wrong
+        // weight rather than a compile error. One indexed add per active edge
+        // is not worth that coupling.
         for (from, edges) in search.adj.iter().enumerate() {
             for edge in edges {
                 if edge.to as usize == from {
@@ -368,9 +383,12 @@ impl FallbackScratch {
             proj.clear();
             proj.extend(row.iter().map(|e| e.node));
         }
-        let (ids, sizes) = tarjan_scc_ids(&self.scc_adj);
-        self.scc_ids = ids;
-        self.scc_sizes = sizes;
+        tarjan_scc_ids_into(
+            &self.scc_adj,
+            &mut self.scc_scratch,
+            &mut self.scc_ids,
+            &mut self.scc_sizes,
+        );
     }
 
     /// Whether `seed` lies on any cycle in the loaded step graph.

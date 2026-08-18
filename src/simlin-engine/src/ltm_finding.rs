@@ -1307,6 +1307,21 @@ struct IndexedEdge {
 /// pops) so one budget means the same responsiveness in either generator.
 const DEADLINE_CHECK_INTERVAL: u32 = 8192;
 
+/// Whether an edge carries signal at a saved step.
+///
+/// The single definition both candidate generators use. A cycle one generator
+/// considers active and the other does not would make `enumeration_complete`
+/// mean different things about the same model, so this rule is stated once and
+/// called from [`enum_gen::ActivityGraph::build`] and the fallback's per-step
+/// adjacency alike. Infinity is a real, divergent signal and stays active;
+/// only NaN (no `PREVIOUS` value yet, or an undefined partial) and an exact
+/// zero are inactive, and a loop through a zero link scores exactly zero at
+/// that step anyway.
+#[inline]
+fn is_active(value: f64) -> bool {
+    (value != 0.0 && value.is_finite()) || value.is_infinite()
+}
+
 /// Wall-clock source for discovery's deadline checks.
 ///
 /// Production reads `Instant::now()`. Tests substitute a scripted clock so
@@ -1429,9 +1444,9 @@ impl IndexedSearch {
             });
         }
 
-        // Stocks that never appeared as an edge endpoint still need ids (the
-        // DFS starts from every stock; a stock with no outbound edges simply
-        // has an empty adjacency list, matching the original behavior).
+        // Stocks that never appeared as an edge endpoint still need ids: the
+        // fallback seeds a search from every stock, and a stock with no
+        // outbound edges simply has an empty adjacency list.
         let stock_ids: Vec<u32> = stocks
             .iter()
             .map(|s| intern(s, &mut id_of, &mut idents))
@@ -1469,55 +1484,103 @@ impl IndexedSearch {
 /// each Dijkstra this way; `discovery_graph_stats` reports the same structure
 /// as a diagnostic.
 fn tarjan_scc_ids(adj: &[Vec<u32>]) -> (Vec<u32>, Vec<u32>) {
+    let mut scratch = TarjanScratch::default();
+    let mut comp_ids = Vec::new();
+    let mut comp_sizes = Vec::new();
+    tarjan_scc_ids_into(adj, &mut scratch, &mut comp_ids, &mut comp_sizes);
+    (comp_ids, comp_sizes)
+}
+
+/// Iterative frames mirroring `ltm::indexed::IndexedGraph::tarjan_scc`:
+/// Enter pushes a node onto Tarjan's stack; Resume continues iterating its
+/// successors and pops the SCC when this node is its own root.
+enum TarjanFrame {
+    Enter(u32),
+    Resume { v: u32, next_child: u32 },
+}
+
+/// Reusable working buffers for [`tarjan_scc_ids_into`].
+///
+/// Tarjan needs six node-sized or stack-sized vectors, and the fallback runs
+/// one SCC pass per saved step -- 401 of them on World3 -- so allocating them
+/// per call costs more than the traversal does. A caller that runs the pass
+/// repeatedly over the same node universe keeps one of these and hands it back
+/// each time; [`tarjan_scc_ids`] allocates a throwaway for the one-shot
+/// callers.
+#[derive(Default)]
+struct TarjanScratch {
+    indices: Vec<i32>,
+    lowlinks: Vec<i32>,
+    on_stack: Vec<bool>,
+    stack: Vec<u32>,
+    frames: Vec<TarjanFrame>,
+}
+
+/// [`tarjan_scc_ids`] writing into caller-owned outputs and working buffers.
+///
+/// `comp_ids` is resized to `adj.len()` and fully overwritten; `comp_sizes` is
+/// cleared and refilled. Both are `Vec`s rather than slices so the caller need
+/// not know the node count up front, and so a shrinking graph reuses the same
+/// allocation.
+fn tarjan_scc_ids_into(
+    adj: &[Vec<u32>],
+    scratch: &mut TarjanScratch,
+    comp_ids: &mut Vec<u32>,
+    comp_sizes: &mut Vec<u32>,
+) {
     const UNVISITED: i32 = -1;
     let n = adj.len();
-    let mut indices: Vec<i32> = vec![UNVISITED; n];
-    let mut lowlinks: Vec<i32> = vec![0; n];
-    let mut on_stack: Vec<bool> = vec![false; n];
-    let mut stack: Vec<u32> = Vec::new();
-    let mut comp_ids: Vec<u32> = vec![0; n];
-    let mut comp_sizes: Vec<u32> = Vec::new();
+    let TarjanScratch {
+        indices,
+        lowlinks,
+        on_stack,
+        stack,
+        frames,
+    } = scratch;
+    indices.clear();
+    indices.resize(n, UNVISITED);
+    lowlinks.clear();
+    lowlinks.resize(n, 0);
+    on_stack.clear();
+    on_stack.resize(n, false);
+    stack.clear();
+    comp_ids.clear();
+    comp_ids.resize(n, 0);
+    comp_sizes.clear();
     let mut next_index: i32 = 0;
-
-    // Iterative frames mirroring `ltm::indexed::IndexedGraph::tarjan_scc`:
-    // Enter pushes a node onto Tarjan's stack; Resume continues iterating its
-    // successors and pops the SCC when this node is its own root.
-    enum Frame {
-        Enter(u32),
-        Resume { v: u32, next_child: u32 },
-    }
 
     for start in 0..n as u32 {
         if indices[start as usize] != UNVISITED {
             continue;
         }
-        let mut frames: Vec<Frame> = vec![Frame::Enter(start)];
+        frames.clear();
+        frames.push(TarjanFrame::Enter(start));
         while let Some(frame) = frames.pop() {
             match frame {
-                Frame::Enter(v) => {
+                TarjanFrame::Enter(v) => {
                     indices[v as usize] = next_index;
                     lowlinks[v as usize] = next_index;
                     next_index += 1;
                     stack.push(v);
                     on_stack[v as usize] = true;
-                    frames.push(Frame::Resume { v, next_child: 0 });
+                    frames.push(TarjanFrame::Resume { v, next_child: 0 });
                 }
-                Frame::Resume { v, next_child } => {
+                TarjanFrame::Resume { v, next_child } => {
                     let succs = &adj[v as usize];
                     if (next_child as usize) < succs.len() {
                         let w = succs[next_child as usize];
-                        frames.push(Frame::Resume {
+                        frames.push(TarjanFrame::Resume {
                             v,
                             next_child: next_child + 1,
                         });
                         if indices[w as usize] == UNVISITED {
-                            frames.push(Frame::Enter(w));
+                            frames.push(TarjanFrame::Enter(w));
                         } else if on_stack[w as usize] && indices[w as usize] < lowlinks[v as usize]
                         {
                             lowlinks[v as usize] = indices[w as usize];
                         }
                     } else {
-                        if let Some(Frame::Resume { v: parent, .. }) = frames.last()
+                        if let Some(TarjanFrame::Resume { v: parent, .. }) = frames.last()
                             && lowlinks[v as usize] < lowlinks[*parent as usize]
                         {
                             lowlinks[*parent as usize] = lowlinks[v as usize];
@@ -1541,8 +1604,6 @@ fn tarjan_scc_ids(adj: &[Vec<u32>]) -> (Vec<u32>, Vec<u32>) {
             }
         }
     }
-
-    (comp_ids, comp_sizes)
 }
 
 /// Per-sampled-timestep statistics about the discovery runtime graph.
@@ -1961,10 +2022,12 @@ fn recompute_module_input_edge_series(
 /// petals combine. Returns the stitched sequences plus whether the model-wide
 /// loop budget clipped the enumeration.
 ///
-/// A candidate path touching zero or two-plus distinct aggs is not a petal and
-/// `collect_agg_petals` drops it, so callers may pass their whole candidate
-/// set; the enumeration path pre-filters only to avoid materializing node
-/// paths for a universe-sized set.
+/// A candidate path touching zero or two-plus agg OCCURRENCES is not a petal
+/// and `collect_agg_petals` drops it, so callers may pass their whole
+/// candidate set; the enumeration path pre-filters only to avoid materializing
+/// node paths for a universe-sized set. Occurrences rather than distinct aggs
+/// -- the two coincide for an elementary cycle, which never repeats a node,
+/// and every candidate either generator emits is elementary.
 fn stitch_cross_agg_node_paths(
     search: &IndexedSearch,
     candidate_paths: &[Vec<u32>],
@@ -2029,6 +2092,20 @@ pub(crate) struct Deadlines {
     pub(crate) fallback: Option<Instant>,
 }
 
+/// Split a caller's wall-clock `limit` into the two phase deadlines, measured
+/// from `started`.
+///
+/// The enumeration path gets [`ENUM_BUDGET_FRACTION`] of the budget and the
+/// fallback gets what remains of the whole of it -- so the two deadlines are
+/// `started + fraction * limit` and `started + limit`, and the fallback's is
+/// the caller's own expiry rather than a second slice.
+fn split_budget(started: Instant, limit: Duration) -> Deadlines {
+    Deadlines {
+        enumeration: Some(started + limit.mul_f64(ENUM_BUDGET_FRACTION)),
+        fallback: Some(started + limit),
+    }
+}
+
 /// Run loop discovery using a pre-built `CausalGraph`.
 ///
 /// This is the implementation shared by `discover_loops` (which builds
@@ -2049,16 +2126,23 @@ pub(crate) struct Deadlines {
 /// empty map to disable the recompute (every module-input edge then keeps its
 /// composite base score, the pre-GH-#698 behavior).
 ///
-/// `budget` optionally bounds the wall-clock time spent generating candidates.
-/// It is split by [`ENUM_BUDGET_FRACTION`] between the enumeration path and
-/// the fallback sweep, and every phase of both checks it at a bounded interval
-/// -- so even a model whose enumeration would run for hours (GH #647) returns
-/// within roughly the budget, having spent the remainder on a fallback sweep
-/// that yields real loops. `DiscoveryResult::truncated` records whether the
-/// fallback ran out of time; `enumeration_complete` records which generator
-/// produced the candidates. A `None` budget runs to completion and never reads
-/// the clock. Note the budget covers only candidate generation and scoring --
-/// the caller's compilation and simulation time are outside it.
+/// `budget` optionally bounds the wall-clock time spent GENERATING
+/// candidates: the activity-graph build, the enumeration, retention, and the
+/// fallback sweep. It is split by [`ENUM_BUDGET_FRACTION`] between the
+/// enumeration path and the fallback, and every phase of both checks it at a
+/// bounded interval -- so even a model whose enumeration would run for hours
+/// (GH #647) stops generating within roughly the budget, having spent the
+/// remainder on a fallback sweep that yields real loops.
+///
+/// What follows candidate generation is NOT inside the budget: materializing
+/// each candidate into a `FoundLoop` and `rank_and_filter` both run to
+/// completion afterwards, so a run can exceed the budget by that tail (115 ms
+/// of World3's 409 ms) and still report `truncated == false`. The budget is a
+/// bound on the unbounded phases, not a wall-clock guarantee for the call.
+/// `DiscoveryResult::truncated` records whether the fallback ran out of time;
+/// `enumeration_complete` records which generator produced the candidates. A
+/// `None` budget runs to completion and never reads the clock. The caller's
+/// compilation and simulation time are outside the budget too.
 // Each argument is a distinct backend-independent structural input the
 // discovery sweep needs; they are not naturally groupable into one struct
 // without obscuring the call sites, so the arity lint is suppressed here.
@@ -2116,13 +2200,7 @@ pub fn discover_loops_with_candidate_gen(
 ) -> Result<DiscoveryResult> {
     // Captured lazily so an unbudgeted run never reads the clock.
     let deadlines = match budget {
-        Some(limit) => {
-            let started = Instant::now();
-            Deadlines {
-                enumeration: Some(started + limit.mul_f64(ENUM_BUDGET_FRACTION)),
-                fallback: Some(started + limit),
-            }
-        }
+        Some(limit) => split_budget(Instant::now(), limit),
         None => Deadlines {
             enumeration: None,
             fallback: None,
@@ -2166,6 +2244,12 @@ pub(crate) fn discover_loops_with_deadlines(
     candidate_gen: CandidateGen,
     clock: &mut dyn Clock,
 ) -> Result<DiscoveryResult> {
+    // An empty candidate universe is trivially complete, but only the
+    // enumeration path may SAY so: `enumeration_complete` names the generator
+    // that ran, and a `FallbackOnly` caller (the evaluation harness, the
+    // semantic tests) asserts the enumeration never claims to have run.
+    let enumeration_ran = matches!(candidate_gen, CandidateGen::Auto);
+
     let link_offsets = parse_link_offsets(results, ltm_vars, dims, expansion);
     if link_offsets.is_empty() {
         return Ok(DiscoveryResult {
@@ -2173,7 +2257,7 @@ pub(crate) fn discover_loops_with_deadlines(
             partitions: Vec::new(),
             truncated: false,
             agg_recovery_truncated: false,
-            enumeration_complete: true,
+            enumeration_complete: enumeration_ran,
         });
     }
 
@@ -2189,7 +2273,7 @@ pub(crate) fn discover_loops_with_deadlines(
             partitions: Vec::new(),
             truncated: false,
             agg_recovery_truncated: false,
-            enumeration_complete: true,
+            enumeration_complete: enumeration_ran,
         });
     }
 
@@ -2236,7 +2320,7 @@ pub(crate) fn discover_loops_with_deadlines(
     // reported-cycle dedup discards has its raw mass subtracted back out.
     // Every other circuit -- retention non-survivors included -- keeps its
     // raw enumerated product in the totals unmodified.
-    if candidate_gen == CandidateGen::Auto
+    if enumeration_ran
         && let Some(activity) = ActivityGraph::build(&search, results, deadlines.enumeration, clock)
     {
         let candidates = enumerate_active_circuits(&activity, deadlines.enumeration, clock);
@@ -3337,8 +3421,8 @@ fn assign_loop_ids(loops: &mut [FoundLoop]) {
 /// sorted variable set (the historical key -- single-direction loops keep
 /// their existing numbering), and the secondary component is the canonical
 /// cyclic rotation of the directed edge sequence, which differs between two
-/// sibling cycles so the stable-sort fallback no longer leaks the discovery
-/// DFS's (process-order-dependent) emission order into the assigned ids.
+/// sibling cycles so the stable-sort fallback cannot leak the generator's
+/// emission order into the assigned ids.
 fn loop_sort_key(loop_info: &Loop) -> (String, Vec<String>) {
     let mut vars: Vec<String> = loop_info
         .links

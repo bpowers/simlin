@@ -4491,6 +4491,33 @@ fn each_enumeration_budget_arm_reports_incomplete() {
     }
 }
 
+// --- Budget split (AC4.4) -------------------------------------------------
+
+/// The enumeration path gets a documented fraction of the caller's budget and
+/// the fallback gets the caller's own expiry -- not a second slice of what is
+/// left, which would cap discovery below the budget the caller asked for.
+#[test]
+fn a_budget_splits_into_an_enumeration_share_and_the_callers_expiry() {
+    let started = Instant::now();
+    let limit = Duration::from_millis(400);
+    let deadlines = super::split_budget(started, limit);
+    assert_eq!(
+        deadlines.enumeration,
+        Some(started + limit.mul_f64(super::ENUM_BUDGET_FRACTION))
+    );
+    assert_eq!(deadlines.fallback, Some(started + limit));
+}
+
+/// A zero budget is still a budget: both phases are already expired, so
+/// discovery returns immediately rather than treating "no time" as "no limit".
+#[test]
+fn a_zero_budget_expires_both_phases_at_the_start_instant() {
+    let started = Instant::now();
+    let deadlines = super::split_budget(started, Duration::ZERO);
+    assert_eq!(deadlines.enumeration, Some(started));
+    assert_eq!(deadlines.fallback, Some(started));
+}
+
 // --- Per-phase deadline awareness (AC2.2) ---------------------------------
 //
 // Discovery's enumeration path has three phases, and a caller's wall-clock
