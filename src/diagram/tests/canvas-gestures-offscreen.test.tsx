@@ -95,6 +95,34 @@ describe('mount offscreen re-center (issue #52)', () => {
     expect(Math.abs(cx + viewBox.x - 500)).toBeGreaterThan(50);
   });
 
+  it('is skipped when the host carried the viewport in (recenterOffscreenOnMount=false), and runs otherwise', () => {
+    // A remounting host (the notebook widget on a kernel push) hands the new
+    // Editor the user's live framing; a diagram the user panned offscreen must
+    // stay where they put it. Same offscreen fixture as the first test, with
+    // the opt-out: no centering commit, only the resize handler's quarter shift
+    // from the pushed offset.
+    const elements = [makeAux(1, 'a', 0, 0), makeStock(2, 'b', 120, 60)];
+    const carried = renderCanvas({ elements, recenterOffscreenOnMount: false });
+    carried.setViewport({ x: -5000, y: -5000 });
+    carried.clearMountCalls();
+    carried.resize(1000, 1000);
+    for (const [viewBox] of carried.callbacks.onViewBoxChange.mock.calls) {
+      // Every commit leaves the diagram far offscreen: never a re-center.
+      expect(Math.abs(60 + viewBox.x - 500)).toBeGreaterThan(1000);
+    }
+    carried.unmount();
+
+    // Control: the identical mount with the flag explicitly true re-centers,
+    // which is what proves the skip above came from the flag.
+    const data = renderCanvas({ elements, recenterOffscreenOnMount: true });
+    data.setViewport({ x: -5000, y: -5000 });
+    data.clearMountCalls();
+    data.resize(1000, 1000);
+    const { viewBox } = lastViewBoxCall(data.callbacks.onViewBoxChange);
+    expect(Math.abs(60 + viewBox.x - 500)).toBeLessThan(40);
+    data.unmount();
+  });
+
   it('runs at most once per mount: a later external offscreen pan is not auto-centered', () => {
     const elements = [makeAux(1, 'a', 400, 400)];
     const h = renderCanvas({ elements });

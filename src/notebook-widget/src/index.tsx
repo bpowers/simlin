@@ -27,24 +27,33 @@ import 'katex/dist/katex.min.css';
 
 import type { InitializeContext, RenderContext } from './anywidget-model';
 import { ensureEngine } from './engine-bootstrap';
-import { WIDGET_ROOT_CLASS, WidgetApp } from './WidgetApp';
+import { WIDGET_ROOT_CLASS, WidgetApp, readHostThemeSignals } from './WidgetApp';
 import styles from './widget.module.css';
-import { readTraits, wrapperStyle } from './widget-core';
+import { readTraits, resolveTheme, wrapperStyle, type Theme } from './widget-core';
 
 /** The `name` the Editor uses for downloads; the widget has one project. */
 const PROJECT_NAME = 'model';
 
 function Placeholder({
   height,
+  theme,
   text,
   isError,
 }: {
   height: number;
+  theme: Theme;
   text: string;
   isError: boolean;
 }): React.ReactElement {
+  // The wrapper paints the themed page background (wrapperStyle), so the
+  // placeholder resolves the theme the same way WidgetApp will: a dark
+  // notebook must not get a light box for the seconds the engine takes to load.
   return (
-    <div className={`${WIDGET_ROOT_CLASS} ${styles.host}`} style={wrapperStyle(height)}>
+    <div
+      className={`${WIDGET_ROOT_CLASS} ${styles.host}`}
+      style={wrapperStyle(height)}
+      data-theme={resolveTheme(theme, readHostThemeSignals())}
+    >
       <div className={isError ? `${styles.placeholder} ${styles.placeholderError}` : styles.placeholder} role="status">
         {text}
       </div>
@@ -67,8 +76,10 @@ async function render({ model, el, signal }: RenderContext): Promise<() => void>
     mount.remove();
   };
 
-  const initialHeight = readTraits((key) => model.get(key)).height;
-  root.render(<Placeholder height={initialHeight} text="Loading the Simlin engine..." isError={false} />);
+  const { height: initialHeight, theme: initialTheme } = readTraits((key) => model.get(key));
+  root.render(
+    <Placeholder height={initialHeight} theme={initialTheme} text="Loading the Simlin engine..." isError={false} />,
+  );
 
   try {
     await ensureEngine(model);
@@ -78,7 +89,14 @@ async function render({ model, el, signal }: RenderContext): Promise<() => void>
       return () => undefined;
     }
     const message = err instanceof Error ? err.message : String(err);
-    root.render(<Placeholder height={initialHeight} text={`Simlin widget failed to start: ${message}`} isError />);
+    root.render(
+      <Placeholder
+        height={initialHeight}
+        theme={initialTheme}
+        text={`Simlin widget failed to start: ${message}`}
+        isError
+      />,
+    );
     return cleanup;
   }
   if (signal?.aborted) {

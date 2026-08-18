@@ -15,6 +15,11 @@ import * as React from 'react';
 
 export type JsonProjectData = { format: 'json'; data: string };
 
+export interface Viewport {
+  viewBox: { x: number; y: number; width: number; height: number };
+  zoom: number;
+}
+
 export interface EditorMockProps {
   inputFormat: 'json';
   initialProjectJson: string;
@@ -27,6 +32,10 @@ export interface EditorMockProps {
   // portal, and whether the drawer shows its Exit link to "/".
   portalContainer?: HTMLElement;
   showHomeLink?: boolean;
+  // The viewport contract (see the real Editor): the host reads the committed
+  // viewport and hands it back to the next mount.
+  initialViewport?: Viewport;
+  onViewportChange?: (modelName: string, viewport: Viewport) => void;
 }
 
 interface MountRecord {
@@ -98,6 +107,19 @@ export function Editor(props: EditorMockProps): React.ReactElement {
     void save();
   };
 
+  // A settled pan/zoom of the viewed model: the real Editor reports the
+  // committed viewport (never per frame) and does NOT save it. `zoom` follows
+  // the number of pans so consecutive pans report distinct viewports; the
+  // "pan-child" button reports one for a drilled-into module instead.
+  const pans = React.useRef(0);
+  const pan = (modelName: string): void => {
+    pans.current += 1;
+    record.props.onViewportChange?.(modelName, {
+      viewBox: { x: -10 * pans.current, y: 5 * pans.current, width: 800, height: 400 },
+      zoom: 1 + pans.current / 4,
+    });
+  };
+
   return (
     <div
       data-testid="editor-mock"
@@ -111,6 +133,12 @@ export function Editor(props: EditorMockProps): React.ReactElement {
       </button>
       <button type="button" onClick={() => props.onSelectionChanged?.(['a', 'b'])}>
         select
+      </button>
+      <button type="button" onClick={() => pan('main')}>
+        pan
+      </button>
+      <button type="button" onClick={() => pan('child')}>
+        pan-child
       </button>
     </div>
   );

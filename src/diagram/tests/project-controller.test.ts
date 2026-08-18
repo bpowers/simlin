@@ -127,6 +127,96 @@ describe('ProjectController open lifecycle', () => {
   });
 });
 
+describe('ProjectController initialViewport (a host-carried viewport for the opened view)', () => {
+  const carried = { viewBox: { x: -120, y: 35.5, width: 800, height: 450 }, zoom: 1.75 };
+
+  it('opens the root view at the carried viewport: in the FIRST published snapshot, then round-tripped view-only', async () => {
+    const engine = makeFakeEngine();
+    const { config, saves } = makeControllerConfig({ engine, format: 'json' });
+    const controller = new ProjectController({ ...config, initialViewport: carried });
+
+    // The very first snapshot that carries a project already shows the carried
+    // viewport (the canvas must never render or fit the stored one). Earlier
+    // notifications (the error-cache refresh) carry no project yet.
+    const seen: Array<{ viewBox: unknown; zoom: number }> = [];
+    controller.subscribe(() => {
+      const view = controller.getView();
+      if (view) {
+        seen.push({ viewBox: view.viewBox, zoom: view.zoom });
+      }
+    });
+    await controller.openInitialProject();
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen[0]).toEqual({ viewBox: carried.viewBox, zoom: carried.zoom });
+    expect(controller.getView()).toMatchObject({ viewBox: carried.viewBox, zoom: carried.zoom });
+
+    // The engine's copy of the view was brought in line through the same
+    // upsertView the pan path uses...
+    const viewPatches = engine.appliedPatches.filter((p) =>
+      p.models?.some((m) => m.ops.some((op) => op.type === 'upsertView')),
+    );
+    expect(viewPatches).toHaveLength(1);
+    const op = viewPatches[0].models![0].ops[0] as {
+      type: 'upsertView';
+      payload: { view: { viewBox: unknown; zoom: number } };
+    };
+    expect(op.payload.view.viewBox).toEqual(carried.viewBox);
+    expect(op.payload.view.zoom).toBe(carried.zoom);
+    // ...as a VIEW-ONLY update: no undo entry, no generation bump, no save.
+    await flushTimers();
+    expect(controller.canUndo()).toBe(false);
+    expect(controller.getSnapshot().projectGeneration).toBe(0);
+    expect(saves).toHaveLength(0);
+    await controller.dispose();
+  });
+
+  it('without an override the stored viewport is opened and no view patch is applied', async () => {
+    const engine = makeFakeEngine();
+    const { config } = makeControllerConfig({ engine, format: 'json' });
+    const controller = new ProjectController(config);
+    await controller.openInitialProject();
+    expect(controller.getView()).toMatchObject({ viewBox: { x: 0, y: 0, width: 0, height: 0 }, zoom: 1 });
+    expect(engine.appliedPatches).toHaveLength(0);
+    await controller.dispose();
+  });
+
+  it('an unusable override (non-finite coordinate, non-positive zoom) is ignored, silently', async () => {
+    for (const bad of [
+      { viewBox: { x: Number.NaN, y: 0, width: 800, height: 450 }, zoom: 1 },
+      { viewBox: { x: 0, y: 0, width: Number.POSITIVE_INFINITY, height: 450 }, zoom: 1 },
+      { viewBox: { x: 0, y: 0, width: 800, height: 450 }, zoom: 0 },
+      { viewBox: { x: 0, y: 0, width: 800, height: 450 }, zoom: -2 },
+      { viewBox: { x: 0, y: 0, width: 800, height: 450 }, zoom: Number.NaN },
+    ]) {
+      const engine = makeFakeEngine();
+      const { config, errors } = makeControllerConfig({ engine, format: 'json' });
+      const controller = new ProjectController({ ...config, initialViewport: bad });
+      await controller.openInitialProject();
+      expect(controller.getView()).toMatchObject({ viewBox: { x: 0, y: 0, width: 0, height: 0 }, zoom: 1 });
+      expect(engine.appliedPatches).toHaveLength(0);
+      expect(errors).toEqual([]);
+      await controller.dispose();
+    }
+  });
+
+  it('a root model without a view opens as usual (nothing to override)', async () => {
+    const json = JSON.stringify({
+      name: 'noview',
+      simSpecs: { startTime: 0, endTime: 10, dt: '1' },
+      models: [{ name: 'main', stocks: [], flows: [], auxiliaries: [], views: [] }],
+    });
+    const engine = makeFakeEngine({ json });
+    const { config, errors } = makeControllerConfig({ engine, format: 'json', initialData: json });
+    const controller = new ProjectController({ ...config, initialViewport: carried });
+    await controller.openInitialProject();
+    expect(controller.getSnapshot().project).toBeDefined();
+    expect(controller.getView()).toBeUndefined();
+    expect(engine.appliedPatches).toHaveLength(0);
+    expect(errors).toEqual([]);
+    await controller.dispose();
+  });
+});
+
 describe('ProjectController applyPatch pipeline', () => {
   async function openController(engineOpts = {}): Promise<{
     controller: ProjectController;

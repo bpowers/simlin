@@ -9,6 +9,7 @@ import { AuxRadius } from './default';
 import { ClickDragThresholdPx } from './pointer-utils';
 
 import { CommonLabelProps, LabelPadding, lineSpacing } from './CommonLabel';
+import { CanvasRenderContext } from './canvas-render-context';
 
 // Font properties applied as inline styles on <text> elements rather than
 // relying on CSS <style> blocks alone.  resvg-wasm >= 0.4 doesn't apply
@@ -16,11 +17,24 @@ import { CommonLabelProps, LabelPadding, lineSpacing } from './CommonLabel';
 // Single quotes avoid &quot; encoding issues from React's renderToString,
 // which resvg-wasm >= 0.4 doesn't decode when parsing inline CSS.
 const textStyle: React.CSSProperties = {
-  fill: '#000000',
   fontSize: '12px',
   fontFamily: "'Roboto Light', 'Roboto', 'Open Sans', 'Arial', sans-serif",
   fontWeight: 300,
   whiteSpace: 'nowrap',
+};
+
+// The export path (renderSvgToString / StaticDiagram) additionally pins the
+// fill inline: a standalone SVG has no theme.css to resolve a token against and
+// resvg applies no class-based text styling, and the Rust renderer emits this
+// exact declaration (tests/svg-rendering.test.ts pins byte parity). The
+// interactive path deliberately declares NO inline fill: an inline value would
+// beat every stylesheet rule, and the fill there is the stylesheets' job --
+// `.canvas text { fill: var(--color-black) }` (Canvas.module.css) themes it
+// with the other canvas primitives, and each element's `.selected text
+// { fill: var(--color-selected) }` colours the label of a selected element.
+const exportTextStyle: React.CSSProperties = {
+  fill: '#000000',
+  ...textStyle,
 };
 
 interface LabelLayout {
@@ -217,12 +231,19 @@ export const Label = React.memo(function Label(props: LabelPropsFull): React.Rea
   const { textX, textY, x, lines, reverseBaseline, align } = labelLayout(props);
   const linesCount = lines.length;
 
+  const { embedded, labelFilterId } = React.useContext(CanvasRenderContext);
+  const style: React.CSSProperties = {
+    ...(embedded ? exportTextStyle : textStyle),
+    textAnchor: align,
+    filter: `url(#${labelFilterId})`,
+  };
+
   return (
     <g>
       <text
         x={textX}
         y={textY}
-        style={{ ...textStyle, textAnchor: align, filter: 'url(#labelBackground)' }}
+        style={style}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}

@@ -173,6 +173,65 @@ async function waitForFile(file: string, predicate: (text: string) => boolean): 
   return latest;
 }
 
+/**
+ * The position of a diagram element RELATIVE TO ITS CANVAS, once it has
+ * stopped moving (a pan may still be coasting). Relative, because bounding
+ * boxes are viewport coordinates and running a cell scrolls the notebook.
+ */
+async function settledOffset(target: Locator, canvas: Locator): Promise<{ x: number; y: number }> {
+  const read = async (): Promise<{ x: number; y: number } | null> => {
+    const [box, frame] = await Promise.all([target.boundingBox(), canvas.boundingBox()]);
+    return box === null || frame === null ? null : { x: box.x - frame.x, y: box.y - frame.y };
+  };
+  let previous = await read();
+  await expect
+    .poll(
+      async () => {
+        const next = await read();
+        const settled =
+          previous !== null &&
+          next !== null &&
+          Math.abs(next.x - previous.x) < 0.01 &&
+          Math.abs(next.y - previous.y) < 0.01;
+        previous = next;
+        return settled;
+      },
+      { timeout: 10_000, intervals: [250], message: 'waiting for the element to stop moving' },
+    )
+    .toBe(true);
+  if (previous === null) {
+    throw new Error('the element has no bounding box');
+  }
+  return previous;
+}
+
+/**
+ * Shift-drag on empty canvas pans the diagram (Canvas: `e.shiftKey` selects
+ * pan over rubber-band selection). Two legs so the gesture is a clear drag,
+ * and no flick at the end so it settles without a momentum coast.
+ */
+async function shiftPan(
+  page: Page,
+  canvas: Locator,
+  from: { x: number; y: number },
+  by: { dx: number; dy: number },
+): Promise<void> {
+  const box = await canvas.boundingBox();
+  if (box === null) {
+    throw new Error('the Editor canvas has no bounding box');
+  }
+  const startX = box.x + from.x;
+  const startY = box.y + from.y;
+  await page.keyboard.down('Shift');
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  await page.mouse.move(startX + by.dx / 2, startY + by.dy / 2, { steps: 8 });
+  await page.mouse.move(startX + by.dx, startY + by.dy, { steps: 8 });
+  await page.waitForTimeout(150);
+  await page.mouse.up();
+  await page.keyboard.up('Shift');
+}
+
 test('pysimlin-widget.AC4.2: JupyterLab notebook edits a model file through the Editor and follows changes to it', async ({
   page,
 }) => {
@@ -254,6 +313,23 @@ test('pysimlin-widget.AC4.2: JupyterLab notebook edits a model file through the 
   const selection = await cellOutput(await runCell(page, 2), 'SEL');
   expect(selection).toContain("('new_variable',)");
 
+  // --- a pan is not lost to a Python edit -------------------------------
+  // A pan alone is never saved (only the next edit's save carries the
+  // viewport), and a Python edit remounts the Editor on the kernel's bytes;
+  // the widget carries the live viewport across that remount, so the stock
+  // stays exactly where the user put it. Press on empty canvas (the top-left
+  // corner: clear of the search bar top-right, the tool dial bottom-left, the
+  // teacup's centred elements and the variable added at 120,120), then verify
+  // the stock actually moved on screen and record where it settled.
+  const stock = canvas.locator('g.simlin-stock', { hasText: /teacup\s*temperature/i }).first();
+  const beforePan = await settledOffset(stock, canvas);
+  await shiftPan(page, canvas, { x: 40, y: 40 }, { dx: 90, dy: 60 });
+  const afterPan = await settledOffset(stock, canvas);
+  expect(Math.hypot(afterPan.x - beforePan.x, afterPan.y - beforePan.y)).toBeGreaterThan(40);
+  // The pan by itself wrote nothing (the file still has exactly the two
+  // Editor edits) -- which is precisely why it would be lost without the carry.
+  expect(fs.readFileSync(modelPath, 'utf8')).toBe(withEquation);
+
   // --- a Python edit reaches the Editor ---------------------------------
   const notice = widget.getByRole('status');
   const afterPython = await cellOutput(await runCell(page, 3), 'REV');
@@ -263,6 +339,14 @@ test('pysimlin-widget.AC4.2: JupyterLab notebook edits a model file through the 
   // layout, whose label breaks long names across lines (so the label's
   // text content may run the words together).
   await expect(canvas.locator('g.simlin-aux', { hasText: /from\s*python/ })).toBeVisible();
+  // The remounted Editor opened on the carried viewport: the stock is where
+  // the pan left it, to the pixel.
+  const afterPythonPos = await settledOffset(
+    canvas.locator('g.simlin-stock', { hasText: /teacup\s*temperature/i }).first(),
+    canvas,
+  );
+  expect(Math.abs(afterPythonPos.x - afterPan.x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(afterPythonPos.y - afterPan.y)).toBeLessThanOrEqual(1);
 
   // --- an external write to the file reaches the Editor and the kernel --
   const script = [
@@ -323,6 +407,13 @@ test('a model built from scratch in memory displays with a laid-out diagram and 
   await expect(canvas.locator('g.simlin-stock', { hasText: /population/i })).toBeVisible();
   await expect(canvas.locator('g.simlin-aux', { hasText: /birth\s*rate/i })).toBeVisible();
 
+  // A laid-out-on-display model has no stored viewport yet (0/0/0/0 until a
+  // browser edit saves one), so the canvas fits it on mount; that fitted
+  // framing is what the user is looking at, and a remount must not re-centre
+  // on the grown diagram under them. Record where the stock is.
+  const stock = canvas.locator('g.simlin-stock', { hasText: /population/i }).first();
+  const beforePython = await settledOffset(stock, canvas);
+
   // An in-memory model that has a diagram keeps it in step: the Python
   // edit's variable gets an element and the notice names the source.
   const notice = widget.getByRole('status');
@@ -330,6 +421,14 @@ test('a model built from scratch in memory displays with a laid-out diagram and 
   expect(revisionIn(afterPython)).toBe(3);
   await expect(notice).toHaveText('Updated from Python');
   await expect(canvas.locator('g.simlin-aux', { hasText: /from\s*python/ })).toBeVisible();
+  // ...and the diagram did not shift: the widget carried the fitted viewport
+  // across the remount instead of letting the mount fit re-centre it.
+  const afterPythonPos = await settledOffset(
+    canvas.locator('g.simlin-stock', { hasText: /population/i }).first(),
+    canvas,
+  );
+  expect(Math.abs(afterPythonPos.x - beforePython.x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(afterPythonPos.y - beforePython.y)).toBeLessThanOrEqual(1);
 
   await expect(page.locator('.jp-OutputArea-output[data-mime-type="application/vnd.jupyter.error"]')).toHaveCount(0);
   await expect(page.locator('.jp-OutputArea-output[data-mime-type="application/vnd.jupyter.stderr"]')).toHaveCount(0);

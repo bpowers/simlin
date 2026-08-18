@@ -18,7 +18,7 @@ import './reset.css';
 import './theme.css';
 
 export { Editor } from './Editor';
-export type { ProtobufProjectData, JsonProjectData, ProjectData } from './Editor';
+export type { ProtobufProjectData, JsonProjectData, ProjectData, Viewport } from './Editor';
 export { ErrorBoundary } from './ErrorBoundary';
 export { renderSvgToString } from './render-common';
 

@@ -155,9 +155,117 @@ export function resolveTheme(theme: Theme, host: { jpThemeLight?: string; prefer
   return host.prefersDark ? 'dark' : 'light';
 }
 
-/** Inline style for the wrapper the Editor's chrome anchors to. */
-export function wrapperStyle(heightPx: number): { position: 'relative'; height: string; width: string } {
-  return { position: 'relative', height: `${heightPx}px`, width: '100%' };
+/**
+ * Inline style for the wrapper the Editor's chrome anchors to. It paints the
+ * editor's page-background token itself (the same ground `src/app` gives the
+ * Editor): the Editor root and canvas are transparent, so without it the
+ * canvas shows whatever the notebook cell is -- white under a forced
+ * `theme="dark"` in a light JupyterLab, with dark chrome and light-on-dark
+ * primitives floating on it. The token is defined on this very element (the
+ * scoped theme.css puts `:root` on the widget root class) and flips with its
+ * `data-theme`, so the ground always matches the theme the wrapper resolved.
+ */
+export function wrapperStyle(heightPx: number): {
+  position: 'relative';
+  height: string;
+  width: string;
+  background: string;
+} {
+  return { position: 'relative', height: `${heightPx}px`, width: '100%', background: 'var(--color-background)' };
+}
+
+// ---- viewport carried across a remount --------------------------------------
+
+/**
+ * A view's viewport as the Editor reports (`onViewportChange`) and accepts
+ * (`initialViewport`) it: the pan offset + pixel size of the canvas and the
+ * zoom factor. Structurally the Editor's `Viewport`.
+ */
+export interface Viewport {
+  readonly viewBox: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  readonly zoom: number;
+}
+
+/** The Editor's last committed viewport, with the model it belongs to. */
+export interface LiveViewport extends Viewport {
+  readonly modelName: string;
+}
+
+/**
+ * The viewport STORED for the root model's first view in an engine-native
+ * project JSON text, with the reader's defaults (`stockFlowViewFromJson`):
+ * a missing viewBox is 0/0/0/0 (the writer omits a zero-size box), a missing
+ * zoom is 1. `undefined` when the text has no parsable root view at all.
+ */
+export function storedViewport(projectJson: string): Viewport | undefined {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(projectJson);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(doc) || !Array.isArray(doc.models)) {
+    return undefined;
+  }
+  const root = doc.models.find((m: unknown) => isRecord(m) && m.name === EDITOR_ROOT_MODEL);
+  if (!isRecord(root) || !Array.isArray(root.views) || !isRecord(root.views[0])) {
+    return undefined;
+  }
+  const view = root.views[0];
+  const box = isRecord(view.viewBox) ? view.viewBox : {};
+  const num = (v: unknown, fallback: number): number => (typeof v === 'number' && Number.isFinite(v) ? v : fallback);
+  return {
+    viewBox: { x: num(box.x, 0), y: num(box.y, 0), width: num(box.width, 0), height: num(box.height, 0) },
+    zoom: num(view.zoom, 1),
+  };
+}
+
+function sameViewport(a: Viewport, b: Viewport): boolean {
+  return (
+    a.zoom === b.zoom &&
+    a.viewBox.x === b.viewBox.x &&
+    a.viewBox.y === b.viewBox.y &&
+    a.viewBox.width === b.viewBox.width &&
+    a.viewBox.height === b.viewBox.height
+  );
+}
+
+/**
+ * The viewport the NEXT Editor mount should open with when a kernel push
+ * remounts it: the outgoing Editor's live viewport, so a pan or zoom the user
+ * made -- which a pan alone never persists (only the next edit's save carries
+ * it) -- survives a Python `edit()` or a disk reload instead of silently
+ * resetting to the stored one; and so a project whose stored viewBox is still
+ * the unset 0/0/0/0 (a converted model that has never been edited in the
+ * browser) keeps the framing the canvas fitted on first display instead of
+ * re-centring on the now-larger content every time the kernel adds a variable.
+ *
+ * Carried only when the kernel change did not itself move the viewport: the
+ * incoming project's stored viewport equals the outgoing project's stored one
+ * (`outgoingJson`, the seed the live Editor was mounted from), or the incoming
+ * one is unset. When the kernel moved it (a Python edit that set the view's
+ * viewBox/zoom), the kernel's wins: `undefined`. Nothing is carried when the
+ * live viewport belongs to a model other than the root (the user had drilled
+ * into a module; the remount opens the root, whose framing that is not).
+ */
+export function viewportToCarry(
+  live: LiveViewport | null,
+  outgoingJson: string,
+  incomingJson: string,
+): Viewport | undefined {
+  if (live === null || live.modelName !== EDITOR_ROOT_MODEL) {
+    return undefined;
+  }
+  const carried: Viewport = { viewBox: { ...live.viewBox }, zoom: live.zoom };
+  const incoming = storedViewport(incomingJson);
+  if (incoming === undefined || incoming.viewBox.width <= 0 || incoming.viewBox.height <= 0) {
+    return carried;
+  }
+  const outgoing = storedViewport(outgoingJson);
+  if (outgoing !== undefined && sameViewport(outgoing, incoming)) {
+    return carried;
+  }
+  return undefined;
 }
 
 // ---- wasm reply parsing ------------------------------------------------------

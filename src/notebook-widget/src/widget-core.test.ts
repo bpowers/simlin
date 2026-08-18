@@ -26,6 +26,8 @@ import {
   versionAfterReply,
   withEditorView,
   wrapperStyle,
+  storedViewport,
+  viewportToCarry,
 } from './widget-core';
 
 function getterFor(state: Record<string, unknown>): (key: string) => unknown {
@@ -177,8 +179,125 @@ describe('resolveTheme', () => {
 });
 
 describe('wrapperStyle', () => {
-  it('anchors the Editor chrome to an explicit height and full width', () => {
-    expect(wrapperStyle(520)).toEqual({ position: 'relative', height: '520px', width: '100%' });
+  it('anchors the Editor chrome to an explicit height and full width, on the themed page background', () => {
+    // The background is the theme.css page-background token, defined on the
+    // wrapper itself and flipped by its data-theme: a forced dark theme in a
+    // light notebook must not leave the transparent canvas white.
+    expect(wrapperStyle(520)).toEqual({
+      position: 'relative',
+      height: '520px',
+      width: '100%',
+      background: 'var(--color-background)',
+    });
+  });
+});
+
+describe('storedViewport', () => {
+  const project = (view: Record<string, unknown> | undefined, name = 'main'): string =>
+    JSON.stringify({
+      name: 'p',
+      models: [
+        { name: 'other', views: [{ viewBox: { x: 9, y: 9, width: 9, height: 9 } }] },
+        { name, ...(view === undefined ? {} : { views: [view] }) },
+      ],
+    });
+
+  it('reads the root view viewBox and zoom', () => {
+    expect(storedViewport(project({ viewBox: { x: -1.5, y: 2, width: 800, height: 450 }, zoom: 1.25 }))).toEqual({
+      viewBox: { x: -1.5, y: 2, width: 800, height: 450 },
+      zoom: 1.25,
+    });
+  });
+
+  it("applies the reader's defaults: an omitted viewBox is 0/0/0/0 (the writer omits a zero-size box), an omitted zoom is 1", () => {
+    expect(storedViewport(project({ elements: [] }))).toEqual({
+      viewBox: { x: 0, y: 0, width: 0, height: 0 },
+      zoom: 1,
+    });
+    expect(storedViewport(project({ viewBox: { x: 3, y: 4, width: 5, height: 6 } }))).toEqual({
+      viewBox: { x: 3, y: 4, width: 5, height: 6 },
+      zoom: 1,
+    });
+    // Non-numeric / non-finite fields fall back field by field.
+    expect(storedViewport(project({ viewBox: { x: 'a', y: null, width: 5 }, zoom: 'big' }))).toEqual({
+      viewBox: { x: 0, y: 0, width: 5, height: 0 },
+      zoom: 1,
+    });
+  });
+
+  it.each([
+    ['not JSON', 'nope'],
+    ['no models list', '{"name":"p"}'],
+    ['no root model', '{"name":"p","models":[{"name":"other","views":[{}]}]}'],
+    ['root model without views', project(undefined)],
+    ['root model with an empty views list', JSON.stringify({ models: [{ name: 'main', views: [] }] })],
+    ['a non-object first view', JSON.stringify({ models: [{ name: 'main', views: [3] }] })],
+  ])('is undefined when there is no parsable root view: %s', (_label, json) => {
+    expect(storedViewport(json)).toBeUndefined();
+  });
+});
+
+describe('viewportToCarry', () => {
+  const stored = (
+    viewBox: Record<string, number> | undefined,
+    zoom?: number,
+    extra: Record<string, unknown> = {},
+  ): string =>
+    JSON.stringify({
+      name: 'p',
+      models: [
+        {
+          name: 'main',
+          views: [
+            { elements: [], ...(viewBox === undefined ? {} : { viewBox }), ...(zoom === undefined ? {} : { zoom }) },
+          ],
+          ...extra,
+        },
+      ],
+    });
+  const box = { x: 10, y: 20, width: 800, height: 400 };
+  const live = { modelName: 'main', viewBox: { x: -120, y: 35, width: 800, height: 400 }, zoom: 1.5 };
+  const carried = { viewBox: live.viewBox, zoom: live.zoom };
+
+  it('carries the live root viewport when the kernel change left the stored viewport unchanged', () => {
+    // A Python edit that added a variable: same viewBox/zoom, different content.
+    expect(viewportToCarry(live, stored(box, 1), stored(box, 1, { auxiliaries: [{ name: 'a' }] }))).toEqual(carried);
+    // Both unset (a converted model never edited in the browser).
+    expect(viewportToCarry(live, stored(undefined), stored(undefined, undefined, { auxiliaries: [] }))).toEqual(
+      carried,
+    );
+    // Both unset, one spelled out as zeros.
+    expect(viewportToCarry(live, stored(undefined), stored({ x: 0, y: 0, width: 0, height: 0 }, 1))).toEqual(carried);
+  });
+
+  it('carries the live viewport when the incoming stored viewport is unset, whatever the outgoing stored one was', () => {
+    // A disk reload from a file with no viewBox while the browser had one.
+    expect(viewportToCarry(live, stored(box, 2), stored(undefined))).toEqual(carried);
+    expect(viewportToCarry(live, stored(box, 2), stored({ x: 5, y: 5, width: 0, height: 300 }))).toEqual(carried);
+    // An incoming text with no parsable root view (the Editor will report it;
+    // the carried viewport is harmless there and right if a view is repaired).
+    expect(viewportToCarry(live, stored(box, 2), '{"name":"p"}')).toEqual(carried);
+  });
+
+  it("adopts the kernel's viewport (carries nothing) when the kernel change moved the stored one", () => {
+    expect(viewportToCarry(live, stored(box, 1), stored({ ...box, x: 11 }, 1))).toBeUndefined();
+    expect(viewportToCarry(live, stored(box, 1), stored(box, 2))).toBeUndefined();
+    // Outgoing unset, incoming set: the kernel laid the view out and framed it.
+    expect(viewportToCarry(live, stored(undefined), stored(box, 1))).toBeUndefined();
+    // Outgoing unparsable, incoming set: nothing to compare against.
+    expect(viewportToCarry(live, '{"name":"p"}', stored(box, 1))).toBeUndefined();
+  });
+
+  it('carries nothing before the Editor has reported a viewport, or when the live one belongs to a module', () => {
+    expect(viewportToCarry(null, stored(box, 1), stored(box, 1))).toBeUndefined();
+    expect(viewportToCarry({ ...live, modelName: 'child' }, stored(box, 1), stored(box, 1))).toBeUndefined();
+  });
+
+  it('returns a copy, not the live record', () => {
+    const result = viewportToCarry(live, stored(box, 1), stored(box, 1));
+    expect(result).toEqual(carried);
+    expect(result).not.toBe(live);
+    expect(result?.viewBox).not.toBe(live.viewBox);
   });
 });
 
