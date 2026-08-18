@@ -5,9 +5,8 @@
 //! End-to-end tests for [`simlin_mcp::access::FileSystemAccess`].
 //!
 //! These tests exercise the full open/save/create cycle the binary's
-//! stateless implementation must support, plus the `.mdl` rejection
-//! that preserves the canonical "Vensim .mdl files are read-only" error
-//! message the existing `@simlin/mcp` clients see today.
+//! stateless implementation must support, including the in-place Vensim
+//! `.mdl` write and its lossiness-warning channel.
 
 use std::io;
 
@@ -51,7 +50,8 @@ async fn open_then_save_native_json_is_byte_stable() {
     let new_version = access
         .save(&path, &opened.project, opened.source_format, None)
         .await
-        .unwrap();
+        .unwrap()
+        .version;
     assert_eq!(new_version, 0, "stateless impl always returns version 0");
 
     // Round-trip must preserve the project structure (name, models).
@@ -74,46 +74,94 @@ async fn open_missing_file_returns_not_found() {
     }
 }
 
+/// `.mdl` opens as `SourceFormat::Mdl` and saves back in place as Vensim
+/// text; a Vensim-expressible model round-trips with no warnings.
 #[tokio::test]
-async fn save_to_mdl_path_returns_canonical_error() {
+async fn open_then_save_mdl_rewrites_vensim_text_in_place() {
     let dir = tempfile::tempdir().unwrap();
-    let mdl_path = dir.path().join("readonly.mdl");
-
-    // Build a minimal datamodel::Project to attempt to save.
-    let json_value = minimal_native_json();
-    let json_project: ejson::Project = serde_json::from_value(json_value).unwrap();
-    let project: datamodel::Project = json_project.into();
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test/test-models/samples/teacup/teacup.mdl"
+    );
+    let path = dir.path().join("teacup.mdl");
+    std::fs::copy(fixture, &path).unwrap();
 
     let access = FileSystemAccess::new();
-    let result = access
-        .save(&mdl_path, &project, SourceFormat::Xmile, None)
-        .await;
+    let opened = access.open(&path).await.unwrap();
+    assert_eq!(opened.source_format, SourceFormat::Mdl);
+    let var_count = opened.project.models[0].variables.len();
 
-    match result {
-        Err(AccessError::WriteError(e)) => {
-            assert_eq!(
-                e.kind(),
-                io::ErrorKind::Unsupported,
-                "expected Unsupported io::ErrorKind for .mdl write rejection"
-            );
-            let msg = e.to_string();
-            // Backwards-compat: the exact message is what existing
-            // @simlin/mcp clients render verbatim to users.
-            assert!(
-                msg.contains(
-                    "Vensim .mdl files are read-only. Use ReadModel to inspect a .mdl file, \
-                     then CreateModel to start a new .sd.json file you can edit."
-                ),
-                "expected the canonical .mdl rejection message, got: {msg}"
-            );
-        }
-        Err(other) => panic!("expected AccessError::WriteError, got: {other:?}"),
-        Ok(_) => panic!("expected AccessError::WriteError for .mdl path, got Ok"),
-    }
-
+    let outcome = access
+        .save(&path, &opened.project, opened.source_format, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome.version, 0,
+        "stateless impl always returns version 0"
+    );
     assert!(
-        !mdl_path.exists(),
-        "rejected .mdl write must not create the file"
+        outcome.warnings.is_empty(),
+        "teacup.mdl is fully Vensim-expressible: {:?}",
+        outcome.warnings
+    );
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with("{UTF-8}"), "save must write MDL text");
+    assert!(
+        text.contains("Sketch information"),
+        "sketch must be written"
+    );
+
+    let reopened = access.open(&path).await.unwrap();
+    assert_eq!(reopened.source_format, SourceFormat::Mdl);
+    assert_eq!(reopened.project.models[0].variables.len(), var_count);
+}
+
+/// Saving a project that holds constructs Vensim cannot express (the
+/// XMILE teacup's non-negative flags) to `.mdl` still writes -- in the
+/// closest representable form -- and reports each degradation on
+/// `SaveOutcome::warnings` rather than failing.
+#[tokio::test]
+async fn save_mdl_reports_lossiness_as_warnings_and_still_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test/test-models/samples/teacup/teacup.stmx"
+    );
+    let source = dir.path().join("teacup.stmx");
+    std::fs::copy(fixture, &source).unwrap();
+
+    let access = FileSystemAccess::new();
+    let opened = access.open(&source).await.unwrap();
+    let has_non_negative = opened.project.models[0].variables.iter().any(|v| match v {
+        datamodel::Variable::Flow(f) => f.compat.non_negative,
+        datamodel::Variable::Stock(s) => s.compat.non_negative,
+        _ => false,
+    });
+    assert!(
+        has_non_negative,
+        "fixture must carry a non-negative flag, or this test cannot see it degrade"
+    );
+
+    let target = dir.path().join("teacup.mdl");
+    let outcome = access
+        .save(&target, &opened.project, SourceFormat::Mdl, None)
+        .await
+        .expect("a lossy MDL export must still succeed");
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|w| w.message.starts_with("MDL export:")),
+        "the dropped non-negative flag must be reported: {:?}",
+        outcome.warnings
+    );
+
+    let reopened = access.open(&target).await.unwrap();
+    assert_eq!(reopened.source_format, SourceFormat::Mdl);
+    assert_eq!(
+        reopened.project.models[0].variables.len(),
+        opened.project.models[0].variables.len()
     );
 }
 

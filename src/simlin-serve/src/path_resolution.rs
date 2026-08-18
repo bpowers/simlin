@@ -6,7 +6,7 @@
 
 //! Shared path-resolution primitives.
 //!
-//! Four concerns recur across the HTTP handlers, the MCP `RegistryAccess`
+//! Three concerns recur across the HTTP handlers, the MCP `RegistryAccess`
 //! impl, the watcher, and the scanner:
 //!
 //! 1. **Reading an existing path safely** — the leaf must exist; canonicalize
@@ -30,49 +30,19 @@
 //!    ancestor and re-attach the lexical remainder — produces the
 //!    registry's canonical key for both write-side and observe-side
 //!    consumers, so they share [`resolve_canonical_path`].
-//! 4. **Resolving the registry's canonical key for `.mdl`** — when a
-//!    sibling `.sd.json` exists on disk it becomes the canonical entry
-//!    for both reads and writes. The sidecar's canonical form must
-//!    itself descend from the registry root: a symlink sidecar
-//!    pointing outside the tree falls back to the `.mdl`. Implemented
-//!    by [`apply_sidecar_preference`].
+//!
+//! Every project file is its own registry entry keyed by its own canonical
+//! path; there is no per-format aliasing (a `.mdl` is read from and written
+//! to the `.mdl`), so no fourth rule maps one path onto another.
 //!
 //! Centralizing these here removes the class of bug "consumer X forgot to
 //! apply the rule consumer Y enforces": the rules are implemented once and
-//! every consumer calls the same function. Trivial helpers
-//! ([`sidecar_for_mdl`], [`is_mdl_extension`], [`to_forward_slash`]) live
-//! here for the same reason — different consumers had drifted on case
-//! folding and string-rendering, producing the same shape of bug.
+//! every consumer calls the same function. The trivial helper
+//! [`to_forward_slash`] lives here for the same reason — different
+//! consumers had drifted on string-rendering, producing the same shape of
+//! bug.
 
 use std::path::{MAIN_SEPARATOR, Path, PathBuf};
-
-/// Sibling `.sd.json` for a `.mdl` path: `/dir/foo.mdl` → `/dir/foo.sd.json`.
-///
-/// Lossy conversion of the file stem to UTF-8 is intentional: filenames that
-/// are not valid UTF-8 produce an empty stem, so the resulting sidecar path
-/// is `<parent>/.sd.json`. That is fine because such paths cannot be created
-/// by callers in practice (the registry rejects them upstream) and the
-/// callers that do reach here use the result only to test on-disk existence.
-pub fn sidecar_for_mdl(mdl_path: &Path) -> PathBuf {
-    let parent = mdl_path.parent().unwrap_or_else(|| Path::new(""));
-    let stem = mdl_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    parent.join(format!("{stem}.sd.json"))
-}
-
-/// Case-insensitive check for the `.mdl` extension.
-///
-/// Used by the consumers that distinguish "is this an `.mdl`?" from "what
-/// is the on-disk format here?" — for the latter the heavier
-/// [`crate::registry::ProjectFormat`]-yielding dispatcher is correct, but
-/// the sidecar-preference rule only cares whether the input is an `.mdl`
-/// at all. Centralising here ensures every consumer agrees on case
-/// folding.
-pub fn is_mdl_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.eq_ignore_ascii_case("mdl"))
-        .unwrap_or(false)
-}
 
 /// Render a relative `Path` as a forward-slash string for the WebSocket /
 /// HTTP wire format.
@@ -139,83 +109,6 @@ pub enum ResolutionError {
     /// `canonicalize()` on either the path or the root itself failed for a
     /// reason other than non-existence (e.g. EACCES on a parent dir).
     IoError(std::io::Error),
-}
-
-/// Result of [`apply_sidecar_preference`]. `path` is what the consumer
-/// should use as the registry key going forward; `redirected_to_sidecar`
-/// is true when the input was a `.mdl` whose sibling `.sd.json` was
-/// resolved to in its place.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedKey {
-    /// The canonical path consumers should use as the registry key. Either
-    /// the input (when no redirect happened) or the canonicalized sidecar.
-    pub path: PathBuf,
-    /// True iff the input was a `.mdl` whose sibling `.sd.json` exists on
-    /// disk (and resolved cleanly inside the root); false in every other
-    /// case.
-    pub redirected_to_sidecar: bool,
-}
-
-/// Apply the `.mdl` sidecar-preference rule to `canonical_input`,
-/// returning the canonical registry key the consumer should use.
-///
-/// The contract:
-///
-/// - Non-`.mdl` inputs return as-is, with `redirected_to_sidecar =
-///   false`.
-/// - `.mdl` inputs without a sibling `.sd.json` return as-is.
-/// - `.mdl` inputs whose sibling `.sd.json` exists *and* canonicalizes
-///   to a path inside `root_canonical` return the sidecar's canonical
-///   path with `redirected_to_sidecar = true`.
-/// - `.mdl` inputs whose sibling sidecar exists but cannot be
-///   canonicalized (TOCTOU vanish, EACCES) or whose canonical form is
-///   outside the registry root fall back to the input. Returning the
-///   `.mdl` is the safe choice: the in-place .mdl is already known to
-///   live under the root (see [`resolve_existing_within_root`]'s
-///   contract), and silently using an out-of-root sidecar would let a
-///   malicious or misconfigured symlink redirect reads and writes
-///   outside the watched tree.
-///
-/// This is the single point where the sidecar-preference rule is
-/// implemented; every consumer (HTTP `get_project` / `save_project`,
-/// MCP `open` / `save`, and the watcher's `.mdl`-with-sidecar skip) is
-/// expected to call through here so a future contributor cannot
-/// re-introduce the divergent rule that produced ~5 P1 review bugs in
-/// PR #476.
-///
-/// `canonical_input` MUST already be a canonicalized absolute path
-/// inside `root_canonical`. The caller is expected to have run
-/// [`resolve_existing_within_root`] (or equivalent) first; the sidecar
-/// step is an *additional* rule on top of the boundary check.
-pub fn apply_sidecar_preference(canonical_input: &Path, root_canonical: &Path) -> ResolvedKey {
-    if !is_mdl_extension(canonical_input) {
-        return ResolvedKey {
-            path: canonical_input.to_path_buf(),
-            redirected_to_sidecar: false,
-        };
-    }
-    let sidecar = sidecar_for_mdl(canonical_input);
-    if !sidecar.is_file() {
-        return ResolvedKey {
-            path: canonical_input.to_path_buf(),
-            redirected_to_sidecar: false,
-        };
-    }
-    match sidecar.canonicalize() {
-        Ok(canonical_sidecar) if canonical_sidecar.starts_with(root_canonical) => ResolvedKey {
-            path: canonical_sidecar,
-            redirected_to_sidecar: true,
-        },
-        // Any failure mode (TOCTOU vanish, EACCES, sidecar canonicalizing
-        // outside the root) falls back to the .mdl. The latter case is
-        // the "malicious symlink sidecar" defence — without this fall-back
-        // a save handler would happily write the user's content to the
-        // canonical sidecar destination outside the watched tree.
-        Ok(_) | Err(_) => ResolvedKey {
-            path: canonical_input.to_path_buf(),
-            redirected_to_sidecar: false,
-        },
-    }
 }
 
 /// Canonicalize `abs_path` and confirm it descends from `root_canonical`.
@@ -358,65 +251,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn sidecar_for_mdl_swaps_extension_to_sd_json() {
-        assert_eq!(
-            sidecar_for_mdl(Path::new("/tmp/foo/bar.mdl")),
-            PathBuf::from("/tmp/foo/bar.sd.json")
-        );
-    }
-
-    #[test]
-    fn sidecar_for_mdl_preserves_parent_directory_chain() {
-        // Multi-level paths must keep their parent intact; only the leaf
-        // file changes.
-        assert_eq!(
-            sidecar_for_mdl(Path::new("a/b/c/model.mdl")),
-            PathBuf::from("a/b/c/model.sd.json")
-        );
-    }
-
-    #[test]
-    fn sidecar_for_mdl_handles_dotted_stem() {
-        // `foo.bar.mdl` -> stem `foo.bar`, so the sidecar is
-        // `foo.bar.sd.json`. This matches the rest of the pipeline's
-        // file_stem-based logic.
-        assert_eq!(
-            sidecar_for_mdl(Path::new("/tmp/foo.bar.mdl")),
-            PathBuf::from("/tmp/foo.bar.sd.json")
-        );
-    }
-
-    #[test]
-    fn is_mdl_extension_matches_lowercase() {
-        assert!(is_mdl_extension(Path::new("/tmp/x.mdl")));
-    }
-
-    #[test]
-    fn is_mdl_extension_matches_uppercase_and_mixed() {
-        // The watcher and HTTP handlers see paths produced by
-        // canonicalize() (which preserves case on case-sensitive
-        // filesystems and lower-cases on case-insensitive ones), so an
-        // uppercase `.MDL` from a case-preserving fs must classify
-        // identically. This is the exact bug shape the centralisation
-        // is designed to prevent.
-        assert!(is_mdl_extension(Path::new("/tmp/X.MDL")));
-        assert!(is_mdl_extension(Path::new("/tmp/x.Mdl")));
-    }
-
-    #[test]
-    fn is_mdl_extension_rejects_other_extensions() {
-        assert!(!is_mdl_extension(Path::new("/tmp/x.stmx")));
-        assert!(!is_mdl_extension(Path::new("/tmp/x.sd.json")));
-        assert!(!is_mdl_extension(Path::new("/tmp/x.xmile")));
-        assert!(!is_mdl_extension(Path::new("/tmp/x.txt")));
-    }
-
-    #[test]
-    fn is_mdl_extension_rejects_no_extension() {
-        assert!(!is_mdl_extension(Path::new("/tmp/no_extension")));
-    }
-
-    #[test]
     fn to_forward_slash_is_identity_for_unix_relative_paths() {
         assert_eq!(to_forward_slash(Path::new("a/b/c.stmx")), "a/b/c.stmx");
     }
@@ -424,101 +258,6 @@ mod tests {
     #[test]
     fn to_forward_slash_handles_simple_filename() {
         assert_eq!(to_forward_slash(Path::new("model.stmx")), "model.stmx");
-    }
-
-    #[test]
-    fn sidecar_preference_returns_input_for_non_mdl() {
-        // .stmx, .xmile, .sd.json, .xml, etc. — none of them apply the
-        // sidecar redirect; they return the input unchanged. Pure
-        // function: no filesystem involvement here.
-        let temp = TempDir::new().expect("tempdir");
-        let root = temp.path().canonicalize().expect("canon root");
-        let input = root.join("model.stmx");
-
-        let resolved = apply_sidecar_preference(&input, &root);
-        assert_eq!(resolved.path, input);
-        assert!(!resolved.redirected_to_sidecar);
-    }
-
-    #[test]
-    fn sidecar_preference_returns_input_when_mdl_has_no_sidecar() {
-        let temp = TempDir::new().expect("tempdir");
-        let root = temp.path().canonicalize().expect("canon root");
-        let mdl = root.join("model.mdl");
-        fs::write(&mdl, b"{UTF-8}\n\n").expect("write mdl");
-        // No sidecar file; preference should return the .mdl unchanged.
-
-        let resolved = apply_sidecar_preference(&mdl, &root);
-        assert_eq!(resolved.path, mdl);
-        assert!(!resolved.redirected_to_sidecar);
-    }
-
-    #[test]
-    fn sidecar_preference_routes_to_sidecar_when_present() {
-        let temp = TempDir::new().expect("tempdir");
-        let root = temp.path().canonicalize().expect("canon root");
-        let mdl = root.join("model.mdl");
-        let sidecar = root.join("model.sd.json");
-        fs::write(&mdl, b"{UTF-8}\n\n").expect("write mdl");
-        fs::write(&sidecar, b"{}").expect("write sidecar");
-
-        let resolved = apply_sidecar_preference(&mdl, &root);
-        assert_eq!(
-            resolved.path, sidecar,
-            "sidecar canonical path must be returned"
-        );
-        assert!(resolved.redirected_to_sidecar);
-    }
-
-    #[test]
-    fn sidecar_preference_handles_uppercase_mdl_extension() {
-        // Case-insensitive .mdl matching is the rule the centralization
-        // pins; an uppercase .MDL with a sidecar must redirect just like
-        // a lowercase .mdl. Without this every consumer's case-folding
-        // policy would have to agree independently — the bug shape we
-        // are eliminating.
-        let temp = TempDir::new().expect("tempdir");
-        let root = temp.path().canonicalize().expect("canon root");
-        let mdl = root.join("model.MDL");
-        let sidecar = root.join("model.sd.json");
-        fs::write(&mdl, b"{UTF-8}\n\n").expect("write mdl");
-        fs::write(&sidecar, b"{}").expect("write sidecar");
-
-        let resolved = apply_sidecar_preference(&mdl, &root);
-        assert_eq!(resolved.path, sidecar);
-        assert!(resolved.redirected_to_sidecar);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn sidecar_preference_falls_back_when_sidecar_symlinks_outside_root() {
-        // A sidecar that is a symlink whose target lives outside the
-        // registry root must NOT redirect — neither HTTP nor MCP wants
-        // to read or write content outside the watched tree. Falling
-        // back to the .mdl preserves a usable state without leaking
-        // out-of-tree content.
-        let temp = TempDir::new().expect("tempdir");
-        let outer = temp.path().canonicalize().expect("canon outer");
-        let inner = outer.join("inner");
-        fs::create_dir(&inner).expect("mkdir inner");
-
-        let mdl = inner.join("model.mdl");
-        fs::write(&mdl, b"{UTF-8}\n\n").expect("write mdl");
-
-        let outside_target = outer.join("escaped.sd.json");
-        fs::write(&outside_target, b"{}").expect("write outside target");
-        let sidecar = inner.join("model.sd.json");
-        std::os::unix::fs::symlink(&outside_target, &sidecar).expect("symlink");
-
-        let resolved = apply_sidecar_preference(&mdl, &inner);
-        assert_eq!(
-            resolved.path, mdl,
-            "out-of-root symlink sidecar must fall back to the .mdl"
-        );
-        assert!(
-            !resolved.redirected_to_sidecar,
-            "redirect flag must be false when fallback fires"
-        );
     }
 
     #[test]

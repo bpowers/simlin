@@ -26,7 +26,7 @@ pub mod test_support;
 pub mod tools;
 pub mod types;
 
-pub use access::{OpenedProject, ProjectAccess};
+pub use access::{OpenedProject, ProjectAccess, SaveOutcome};
 pub use errors::AccessError;
 pub use fs_access::FileSystemAccess;
 pub use server::{ResourceContent, SimlinMcpServer};

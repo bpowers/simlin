@@ -230,17 +230,27 @@ async fn read_model_missing_file_returns_is_error_true_with_structured_content()
     let _ = server.cancel().await;
 }
 
+/// `.mdl` edits go through the tool surface like any other format: the
+/// call succeeds (`is_error` unset), the structured snapshot carries the
+/// edited model, and the file on disk is regenerated Vensim text holding
+/// the new variable.
 #[tokio::test]
-async fn edit_model_mdl_rejection_returns_is_error_true_with_structured_content() {
-    let mdl_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../test/sdeverywhere/models/elmcount/elmcount.mdl"
-    );
+async fn edit_model_on_mdl_succeeds_and_rewrites_the_file_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let mdl_path = dir.path().join("teacup.mdl");
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/test-models/samples/teacup/teacup.mdl"
+        ),
+        &mdl_path,
+    )
+    .expect("copy teacup.mdl fixture");
 
     let (client, server) = spawn_server_pair().await;
 
     let arguments = serde_json::json!({
-        "projectPath": mdl_path,
+        "projectPath": mdl_path.to_str().unwrap(),
         "operations": [{"upsertAuxiliary": {"name": "x", "equation": "1"}}]
     });
     let arguments_obj = match arguments {
@@ -258,21 +268,29 @@ async fn edit_model_mdl_rejection_returns_is_error_true_with_structured_content(
         .await
         .expect("call_tool must return a CallToolResult, not a transport error");
 
-    assert_eq!(
+    assert_ne!(
         result.is_error,
         Some(true),
-        ".mdl rejection must set is_error: true"
+        ".mdl edit must succeed: {:?}",
+        result.structured_content
     );
     let structured = result
         .structured_content
-        .expect(".mdl rejection must include structured content");
-    let err_str = structured
-        .get("error")
-        .and_then(|v| v.as_str())
-        .expect("structured content must carry an error string");
+        .expect("successful edit must include structured content");
+    let auxes = structured["model"]["auxiliaries"]
+        .as_array()
+        .expect("snapshot must carry the model's auxiliaries");
     assert!(
-        err_str.contains(".mdl"),
-        ".mdl rejection error must mention .mdl format: {err_str}"
+        auxes.iter().any(|a| a["name"] == "x"),
+        "snapshot must contain the new aux: {auxes:?}"
+    );
+
+    let text = std::fs::read_to_string(&mdl_path).unwrap();
+    assert!(text.starts_with("{UTF-8}"), "file must still be MDL text");
+    assert!(
+        text.lines()
+            .any(|l| l.trim_start().starts_with("x=") || l.trim_start().starts_with("x =")),
+        "new aux must be written into the .mdl: {text}"
     );
 
     let _ = client.cancel().await;

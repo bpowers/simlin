@@ -3,8 +3,8 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 //! Integration tests for `GET /api/projects/{*path}`. Verifies AC3.1 (read),
-//! AC3.3 (read), `.mdl` sidecar preference, path traversal rejection, 404,
-//! symlink escape, and malformed sidecar handling.
+//! AC3.3 (read), `.mdl` and same-stem `.sd.json` independence, path
+//! traversal rejection, 404, symlink escape, and malformed-file handling.
 
 use std::fs;
 use std::path::PathBuf;
@@ -139,34 +139,44 @@ async fn ac3_3_reads_mdl_via_native_parser() {
     assert!(!json_str.is_empty(), "json field should be non-empty");
 }
 
+/// A `.mdl` and a same-stem `.sd.json` (the on-disk trace of an earlier
+/// release's sidecar write) are two independent projects: each GET serves
+/// the file it names, in that file's format.
 #[tokio::test]
-async fn mdl_sidecar_preferred_when_present() {
+async fn mdl_and_same_stem_sd_json_are_independent_projects() {
     let dir = TempDir::new().unwrap();
     copy_fixture("teacup.mdl", dir.path());
-
-    // Sibling `.sd.json` becomes source-of-truth once it exists.
-    let sidecar = r#"{"name":"sidecar-marker","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
-    fs::write(dir.path().join("teacup.sd.json"), sidecar).unwrap();
+    let sd_json = r#"{"name":"sd-json-marker","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
+    fs::write(dir.path().join("teacup.sd.json"), sd_json).unwrap();
 
     let canonical = dir.path().canonicalize().unwrap();
     let state = build_state(canonical);
 
-    let (status, body) = fetch(state, "/api/projects/teacup.mdl").await;
+    let (status, body) = fetch(state.clone(), "/api/projects/teacup.mdl").await;
     assert_eq!(status, StatusCode::OK);
     let value = parse_body(&body);
-
     assert_eq!(
         value["source_format"].as_str(),
-        Some("sd_json"),
-        "the sidecar overrides the .mdl source format"
+        Some("mdl"),
+        "the .mdl is served as mdl regardless of the neighbouring .sd.json"
     );
-    let json_str = value["json"].as_str().expect("json field is a string");
-    let inner: Value = serde_json::from_str(json_str).expect("inner json parses");
-    assert_eq!(
+    let inner: Value = serde_json::from_str(value["json"].as_str().unwrap()).unwrap();
+    assert_ne!(
         inner["name"].as_str(),
-        Some("sidecar-marker"),
-        "the response body should reflect the sidecar contents, not the parsed mdl"
+        Some("sd-json-marker"),
+        "the .mdl response must come from the .mdl, not the .sd.json"
     );
+    assert!(
+        !inner["models"][0]["stocks"].as_array().unwrap().is_empty(),
+        "the parsed teacup.mdl has a stock; the .sd.json has none"
+    );
+
+    let (status, body) = fetch(state, "/api/projects/teacup.sd.json").await;
+    assert_eq!(status, StatusCode::OK);
+    let value = parse_body(&body);
+    assert_eq!(value["source_format"].as_str(), Some("sd_json"));
+    let inner: Value = serde_json::from_str(value["json"].as_str().unwrap()).unwrap();
+    assert_eq!(inner["name"].as_str(), Some("sd-json-marker"));
 }
 
 #[tokio::test]
@@ -271,24 +281,23 @@ async fn symlink_escape_returns_403() {
     );
 }
 
-// When a `.mdl` file has a sibling `.sd.json` sidecar that contains
-// invalid JSON, the handler must return 400 Bad Request (not 500).
+// A `.sd.json` holding invalid JSON yields 400 Bad Request (not 500) on
+// its own path, and has no bearing on a same-stem `.mdl`, which is its own
+// project and still serves.
 #[tokio::test]
-async fn malformed_sidecar_returns_400() {
+async fn malformed_sd_json_returns_400_without_affecting_a_same_stem_mdl() {
     let dir = TempDir::new().unwrap();
     copy_fixture("teacup.mdl", dir.path());
-
-    // Sidecar exists but is not valid JSON.
     fs::write(dir.path().join("teacup.sd.json"), "not actually json").unwrap();
 
     let canonical = dir.path().canonicalize().unwrap();
     let state = build_state(canonical);
 
-    let (status, body) = fetch(state, "/api/projects/teacup.mdl").await;
+    let (status, body) = fetch(state.clone(), "/api/projects/teacup.sd.json").await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "malformed sidecar JSON must yield 400; body: {}",
+        "malformed JSON must yield 400; body: {}",
         String::from_utf8_lossy(&body)
     );
     let value = parse_body(&body);
@@ -297,26 +306,32 @@ async fn malformed_sidecar_returns_400() {
         !error_msg.is_empty(),
         "error body should carry a non-empty message"
     );
+
+    let (status, body) = fetch(state, "/api/projects/teacup.mdl").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the .mdl is unaffected by a broken same-stem .sd.json; body: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(parse_body(&body)["source_format"].as_str(), Some("mdl"));
 }
 
-// When a `.mdl` sidecar is syntactically valid JSON but not a Project
-// shape, the deserializer will fail and the handler must return 400.
+// A `.sd.json` that is syntactically valid JSON but not a Project shape
+// fails deserialization and yields 400 on its own path.
 #[tokio::test]
-async fn sidecar_with_wrong_shape_returns_400() {
+async fn wrong_shape_sd_json_returns_400() {
     let dir = TempDir::new().unwrap();
-    copy_fixture("teacup.mdl", dir.path());
-
-    // Valid JSON but missing the required Project fields.
     fs::write(dir.path().join("teacup.sd.json"), r#"{"foo":"bar"}"#).unwrap();
 
     let canonical = dir.path().canonicalize().unwrap();
     let state = build_state(canonical);
 
-    let (status, body) = fetch(state, "/api/projects/teacup.mdl").await;
+    let (status, body) = fetch(state, "/api/projects/teacup.sd.json").await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "wrong-shape sidecar JSON must yield 400; body: {}",
+        "wrong-shape JSON must yield 400; body: {}",
         String::from_utf8_lossy(&body)
     );
 }

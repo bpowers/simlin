@@ -25,14 +25,6 @@ type EditorHostProps = Readonly<{
   // Other sources (`user`/`agent`) are silent — the user already knows
   // their own save happened.
   liveSource?: ChangeSource;
-  // Invoked when a `.mdl` save creates a sidecar so the parent can update
-  // its selectedPath state and refresh the project list. Optional because
-  // not every host needs to track the redirect (e.g. tests that only
-  // verify the wire format).
-  //
-  // Server-side counterpart: handlers.rs redirect_to_sidecar call, which
-  // moves the registry entry from the .mdl key to the new sidecar key.
-  onPathRedirect?: (newPath: string) => void;
   // Invoked when a save returns 409 Conflict and EditorHost has refetched
   // the latest server state. Lets the parent reset any external editor
   // state to the new authoritative payload. When omitted, EditorHost
@@ -74,6 +66,14 @@ type EditorHostState = {
   // either by the auto-dismiss timer or when a different path/source
   // takes over.
   diskNoticeVisible: boolean;
+  // Non-fatal warnings the server attached to the most recent successful
+  // save: the on-disk writer's lossiness diagnostics (today only Vensim
+  // `.mdl` produces any -- a construct Vensim cannot express was written
+  // in its closest form). They describe the file as it now stands, so they
+  // stay visible until the next save replaces them (an edit that removes
+  // the construct clears the notice) or the path changes. Empty when the
+  // last save was clean or nothing has been saved yet.
+  saveWarnings: ReadonlyArray<ServerValidationError>;
 };
 
 const INITIAL_STATE: EditorHostState = {
@@ -84,6 +84,7 @@ const INITIAL_STATE: EditorHostState = {
   loadGeneration: 0,
   serverVersion: 0,
   diskNoticeVisible: false,
+  saveWarnings: [],
 };
 
 // How long the disk-update toast lingers before auto-dismissing. Long
@@ -227,6 +228,8 @@ export function EditorHost(props: EditorHostProps): React.ReactElement | null {
         if (loadKey !== r.currentLoadKey) {
           return;
         }
+        // A fresh payload replaces the model the last save's warnings
+        // described (path switch, disk-driven refetch), so they go too.
         setState((prevState) => ({
           loadedPath: path,
           payload,
@@ -234,6 +237,7 @@ export function EditorHost(props: EditorHostProps): React.ReactElement | null {
           pending: false,
           loadGeneration: prevState.loadGeneration + 1,
           serverVersion: payload.version,
+          saveWarnings: [],
         }));
       } catch (err) {
         if (loadKey !== r.currentLoadKey) {
@@ -277,6 +281,7 @@ export function EditorHost(props: EditorHostProps): React.ReactElement | null {
         pending: false,
         loadGeneration: prevState.loadGeneration + 1,
         serverVersion: latestPayload.version,
+        saveWarnings: [],
       }));
     },
     [setState],
@@ -304,18 +309,16 @@ export function EditorHost(props: EditorHostProps): React.ReactElement | null {
       const loadKey = r.currentLoadKey;
       try {
         const result = await saveProject(path, project.data, currVersion);
-        if (result.path !== path) {
-          latest.current.props.onPathRedirect?.(result.path);
-        }
         // Track the post-save server version so the WS echo of our own
         // save (which arrives with the same version) does not trigger a
         // refetch. `setState` here only matters for the WS gate; the
         // Editor's controller advances its own `serverVersion` (the
         // last server-acknowledged save version) via `result.version`.
         // Skip the gate update when the user navigated away during the
-        // POST: the version belongs to a path we no longer display.
+        // POST: the version belongs to a path we no longer display, and
+        // so do the writer's warnings.
         if (loadKey === r.currentLoadKey && latest.current.props.path === path) {
-          setState({ serverVersion: result.version });
+          setState({ serverVersion: result.version, saveWarnings: result.warnings ?? [] });
         }
         return result.version;
       } catch (err) {
@@ -471,7 +474,7 @@ export function EditorHost(props: EditorHostProps): React.ReactElement | null {
   });
 
   const { path } = props;
-  const { payload, error, loadedPath, loadGeneration, diskNoticeVisible } = state;
+  const { payload, error, loadedPath, loadGeneration, diskNoticeVisible, saveWarnings } = state;
 
   if (!path) {
     return null;
@@ -489,13 +492,16 @@ export function EditorHost(props: EditorHostProps): React.ReactElement | null {
     return <div className="serve-editor-host serve-editor-host--loading">Loading {path}…</div>;
   }
 
-  const showMdlBanner = payload.source_format === 'mdl';
-
   return (
     <div className="serve-editor-host">
-      {showMdlBanner ? (
-        <div className="serve-mdl-banner" role="note">
-          Vensim MDL — saves will be written to a <code>.sd.json</code> sidecar.
+      {saveWarnings.length > 0 ? (
+        <div className="serve-save-warnings" role="note">
+          <p>Saved, but the file format could not hold everything in this model:</p>
+          <ul>
+            {saveWarnings.map((w, i) => (
+              <li key={`${i}-${w.message}`}>{w.message}</li>
+            ))}
+          </ul>
         </div>
       ) : null}
       {diskNoticeVisible ? (

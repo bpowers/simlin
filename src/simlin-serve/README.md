@@ -112,16 +112,28 @@ picked up at app launch, not hot-reloaded.
 
 ## Supported file formats
 
-| Format       | Extensions                | Read                | Edit                                          |
-| ------------ | ------------------------- | ------------------- | --------------------------------------------- |
-| XMILE        | `.stmx`, `.xmile`, `.xml` | yes                 | yes (in-place)                                |
-| Simlin JSON  | `.sd.json`                | yes                 | yes (in-place)                                |
-| Vensim MDL   | `.mdl`                    | yes (via xmutil)    | yes (writes a `.sd.json` sidecar; `.mdl` untouched) |
+| Format       | Extensions                | Read | Edit                                          |
+| ------------ | ------------------------- | ---- | --------------------------------------------- |
+| XMILE        | `.stmx`, `.xmile`, `.xml` | yes  | yes (in-place)                                |
+| Simlin JSON  | `.sd.json`                | yes  | yes (in-place)                                |
+| Vensim MDL   | `.mdl`                    | yes  | yes (in-place; regenerated Vensim text including the sketch) |
 
-The `.mdl` sidecar pattern preserves the source-of-truth Vensim file
-verbatim while letting Simlin's editors persist structural changes
-into a JSON twin. Subsequent reads prefer the sidecar when both files
-are present.
+Every file is edited in place in its own format. Vensim cannot express a
+few Simlin constructs (a non-negative stock or flow, a discrete or
+extrapolating lookup, the ROUND builtin, ...); saving such a model to
+`.mdl` still succeeds, writes the closest Vensim form, and reports each
+degradation -- in the editor's save notice, in the HTTP save response's
+`warnings`, and in the MCP `EditModel` result's `warnings`. The first save
+also normalizes a hand-written Vensim file: it is regenerated from the
+parsed model, so anything the parser does not keep (free-standing
+comments, custom `:GRAPH`/`:TABLE` blocks, formatting) is not carried
+over.
+
+A `.mdl` sitting next to a same-stem `.sd.json` (the trace of an earlier
+release that saved `.mdl` edits into a JSON "sidecar") is two independent
+projects: the `.mdl` holds the Vensim source and the `.sd.json` holds the
+edits saved back then. `simlin-serve` names each such pair once at
+startup; delete the `.sd.json` when its edits are no longer needed.
 
 ## MCP tool surface
 
@@ -310,10 +322,6 @@ it doesn't, and the design choices behind each layer — see
 
 ## Limitations (V1)
 
-- **Vensim `.mdl` writes are sidecar-only.** Edits to a `.mdl`-backed
-  model land in a sibling `.sd.json` file. True `.mdl` round-trip is
-  future work; for now treat the `.mdl` as an immutable import
-  source and let `.sd.json` be the editable twin.
 - **macOS Intel (`darwin-x64`) binaries are not yet published.** The
   shipped `darwin-arm64` binary cannot run on Intel hardware — Rosetta
   only translates x86_64 binaries onto Apple Silicon, never the
