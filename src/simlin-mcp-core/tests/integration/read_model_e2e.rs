@@ -52,6 +52,49 @@ async fn read_model_returns_clean_xmile_snapshot() {
         value.get("aggRecoveryTruncated").is_none(),
         "a false agg_recovery_truncated must be elided from the wire shape"
     );
+    // The completeness counters. `enumerationComplete` is ALWAYS on the wire
+    // (unlike `aggRecoveryTruncated` above): its interesting value is `false`,
+    // so a client that cannot see the field cannot tell an exact analysis from
+    // a sampled one. On a fixture this small discovery is exact, so the
+    // universe count is present too and nothing is capped away.
+    assert!(output.enumeration_complete);
+    assert_eq!(
+        value.get("enumerationComplete"),
+        Some(&serde_json::Value::Bool(true)),
+        "enumerationComplete must always appear on the wire shape"
+    );
+    assert_eq!(output.retained_loops, output.loop_dominance.len());
+    assert_eq!(
+        value["retainedLoops"].as_u64(),
+        Some(output.loop_dominance.len() as u64),
+        "retainedLoops must always appear on the wire shape"
+    );
+    let universe = output
+        .universe_loops
+        .expect("an exact run names a universe");
+    assert!(universe >= output.loop_dominance.len());
+    assert_eq!(value["universeLoops"].as_u64(), Some(universe as u64));
+
+    // The other arm of `universeLoops`: elided when discovery SAMPLED. Neither
+    // MCP tool takes a discovery budget (both analyse user-opened models with
+    // no time limit), so no fixture reachable from here can trip the fallback
+    // -- the `None` is set on the output this call produced rather than
+    // hand-built around it, and that it is the value production supplies on
+    // the fallback path is pinned in the engine by
+    // `ltm_finding_tests::the_fallback_reports_no_universe`.
+    let mut sampled = output;
+    sampled.universe_loops = None;
+    sampled.enumeration_complete = false;
+    let sampled_value = serde_json::to_value(&sampled).unwrap();
+    assert!(
+        sampled_value.get("universeLoops").is_none(),
+        "a sampled analysis must not put a universe count on the wire"
+    );
+    assert_eq!(
+        sampled_value.get("enumerationComplete"),
+        Some(&serde_json::Value::Bool(false)),
+        "a false enumerationComplete stays on the wire -- it is the whole signal"
+    );
     // The polarityConfidence field is present on each loopDominance entry.
     let first_loop = &value["loopDominance"][0];
     assert!(

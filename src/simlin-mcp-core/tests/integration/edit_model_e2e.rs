@@ -108,6 +108,75 @@ async fn upsert_stock_writes_back_to_disk() {
     );
 }
 
+/// AC6.1: `EditModel` reports the same discovery-completeness counters
+/// `ReadModel` does, so a client editing a model in a loop is not left
+/// guessing whether the `loopDominance` it just got back is exhaustive.
+///
+/// The edit builds a reinforcing population loop from nothing, which is small
+/// enough that discovery ENUMERATES its whole universe -- the exact arm. The
+/// sampled arm (`enumerationComplete == false`, `universeLoops` elided) is not
+/// reachable from either MCP tool, neither of which takes a discovery budget;
+/// its wire shape is pinned in `read_model_e2e.rs` and the engine behaviour
+/// behind it in `ltm_finding_tests::the_fallback_reports_no_universe`.
+#[tokio::test]
+async fn edit_reports_discovery_completeness_counters() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
+
+    let input = EditModelInput {
+        project_path: path.to_str().unwrap().to_string(),
+        model_name: None,
+        dry_run: None,
+        sim_specs: None,
+        operations: Some(vec![
+            EditOperation::UpsertStock(UpsertStockInput {
+                name: "population".into(),
+                initial_equation: "100".into(),
+                units: None,
+                documentation: None,
+                inflows: Some(vec!["births".into()]),
+                outflows: None,
+                arrayed_equation: None,
+            }),
+            EditOperation::UpsertFlow(UpsertFlowInput {
+                name: "births".into(),
+                equation: "population * 0.1".into(),
+                units: None,
+                documentation: None,
+                graphical_function: None,
+                arrayed_equation: None,
+            }),
+        ]),
+    };
+
+    let output = edit_model(&TestFileSystemAccess, input).await.unwrap();
+    assert!(
+        !output.loop_dominance.is_empty(),
+        "the edited model has a reinforcing loop"
+    );
+    assert!(
+        output.enumeration_complete,
+        "a two-variable loop is enumerated exactly"
+    );
+    assert_eq!(output.retained_loops, output.loop_dominance.len());
+    let universe = output
+        .universe_loops
+        .expect("an exact run names its universe");
+    assert!(universe >= output.loop_dominance.len());
+
+    let value = serde_json::to_value(&output).unwrap();
+    assert_eq!(
+        value.get("enumerationComplete"),
+        Some(&serde_json::Value::Bool(true)),
+        "enumerationComplete must always appear on the wire shape"
+    );
+    assert_eq!(
+        value["retainedLoops"].as_u64(),
+        Some(output.retained_loops as u64)
+    );
+    assert_eq!(value["universeLoops"].as_u64(), Some(universe as u64));
+}
+
 #[tokio::test]
 async fn edit_with_compilation_error_surfaces_validation_failure() {
     let dir = tempfile::tempdir().unwrap();

@@ -210,6 +210,24 @@ pub struct EditModelOutput {
     /// elided when false to preserve the stable wire shape.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub agg_recovery_truncated: bool,
+    /// True when loop discovery ENUMERATED every loop that could ever score
+    /// and `loopDominance` is the exact selection from that set; false when a
+    /// budget cut the enumeration short and a shortest-path search SAMPLED
+    /// the model's loops instead. See `ReadModelOutput::enumeration_complete`
+    /// for why this one is always serialized where `aggRecoveryTruncated` is
+    /// elided: here the interesting value is `false`, and a reader that
+    /// cannot see the field cannot tell an exact analysis from a sample.
+    pub enumeration_complete: bool,
+    /// How many loops passed discovery's importance filter before the report
+    /// cap truncated `loopDominance`; above `loopDominance.len()` when the cap
+    /// bound. Always serialized -- see `ReadModelOutput::retained_loops`.
+    pub retained_loops: usize,
+    /// How many ever-simultaneously-active loops the enumerated candidate
+    /// universe held. Elided when `enumerationComplete` is false, since a
+    /// sample has no universe to report -- see
+    /// `ReadModelOutput::universe_loops`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub universe_loops: Option<usize>,
     /// Non-fatal diagnostics scoped to the edited model (the LTM auto-flip
     /// advisory and synthetic-fragment compile-failure warnings, GH #662).
     /// Empty (and elided from JSON) when there are none.
@@ -389,6 +407,9 @@ pub async fn edit_model<A: ProjectAccess>(
     }
 
     let agg_recovery_truncated = analysis.agg_recovery_truncated;
+    let enumeration_complete = analysis.enumeration_complete;
+    let retained_loops = analysis.retained_loops;
+    let universe_loops = analysis.universe_loops;
     let partitions: Vec<PartitionOutput> = analysis.partitions.iter().map(Into::into).collect();
     let loop_dominance: Vec<LoopDominanceSummary> = analysis
         .loop_dominance
@@ -410,6 +431,9 @@ pub async fn edit_model<A: ProjectAccess>(
         partitions,
         dominant_loops_by_period,
         agg_recovery_truncated,
+        enumeration_complete,
+        retained_loops,
+        universe_loops,
         warnings,
         analysis_error: analysis.analysis_error,
         dry_run,

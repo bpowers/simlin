@@ -63,6 +63,36 @@ pub struct ReadModelOutput {
     /// elided when false to preserve the stable wire shape.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub agg_recovery_truncated: bool,
+    /// True when loop discovery ENUMERATED every loop that could ever score
+    /// and `loopDominance` is the exact selection from that set; false when a
+    /// budget cut the enumeration short and a shortest-path search SAMPLED
+    /// the model's loops instead, so a loop absent from `loopDominance` is
+    /// not evidence the model lacks it.
+    ///
+    /// ALWAYS serialized, unlike `aggRecoveryTruncated` above: there the
+    /// interesting value is `true` and eliding the common `false` keeps the
+    /// wire shape stable, while here the interesting value is `false` and a
+    /// reader that cannot see the field cannot tell an exact analysis from a
+    /// sampled one -- silently reading a sample as exhaustive is exactly the
+    /// mistake this field exists to prevent.
+    pub enumeration_complete: bool,
+    /// How many loops passed discovery's importance filter before the report
+    /// cap truncated `loopDominance`. Above `loopDominance.len()` when the cap
+    /// bound, which is the only signal that the list is a ranked prefix.
+    ///
+    /// Always serialized, and not optional: every count this can carry is a
+    /// real statement, `0` ("no loop cleared the filter") included, so there
+    /// is no value whose absence would mean anything a `0` does not.
+    pub retained_loops: usize,
+    /// How many ever-simultaneously-active loops the enumerated candidate
+    /// universe held -- the population each loop's importance is a share of.
+    ///
+    /// Elided when `enumerationComplete` is false, because a SAMPLE has no
+    /// universe to report -- which is a different claim from a universe of
+    /// zero, and the reason this one field is optional where the two above
+    /// are not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub universe_loops: Option<usize>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<ErrorOutput>,
     /// Non-fatal diagnostics scoped to the requested model: the LTM auto-flip
@@ -127,6 +157,9 @@ pub async fn read_model<A: ProjectAccess>(
             .map_err(|e| AccessError::ParseError(anyhow::anyhow!("analysis failed: {e}")))?;
 
     let agg_recovery_truncated = analysis.agg_recovery_truncated;
+    let enumeration_complete = analysis.enumeration_complete;
+    let retained_loops = analysis.retained_loops;
+    let universe_loops = analysis.universe_loops;
     let partitions: Vec<PartitionOutput> = analysis.partitions.iter().map(Into::into).collect();
     let loop_dominance: Vec<LoopDominanceSummary> = analysis
         .loop_dominance
@@ -147,6 +180,9 @@ pub async fn read_model<A: ProjectAccess>(
         partitions,
         dominant_loops_by_period,
         agg_recovery_truncated,
+        enumeration_complete,
+        retained_loops,
+        universe_loops,
         errors,
         warnings,
         analysis_error: analysis.analysis_error,
