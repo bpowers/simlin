@@ -986,8 +986,9 @@ hoisted-reducer duplicate pathway.
 
 ### Materialization and the two total corrections
 
-Cross-agg stitching (GH #696) collects its petals from the FULL enumerated set
-rather than from the retention survivors -- a petal can fail retention while the
+Cross-agg stitching (GH #696, via `stitch_cross_agg_node_paths` -- the one
+helper both generators' node paths go through) collects its petals from the
+FULL enumerated set rather than from the retention survivors -- a petal can fail retention while the
 stitched combination passes -- and its stitched sequences join the candidate set
 (deduped against the survivors by canonical rotation). Survivors plus stitched sequences are then
 materialized into `FoundLoop`s: links from the causal graph, the per-exit-port
@@ -1752,7 +1753,10 @@ When `ltm_discovery_mode = true`, element-level discovery proceeds as:
    unreachable to either. Discovery
    recovers these by stitching, exactly as exhaustive mode does (GH #696):
    after candidate generation, `discover_loops_with_graph` treats each
-   single-agg candidate path as a *petal* and feeds them to the SHARED
+   single-agg candidate path as a *petal* and feeds them through
+   `stitch_cross_agg_node_paths` -- the one helper BOTH generators' node paths
+   go through, so a reducer model's recovered loops differ between them only
+   by the petals each found -- to the SHARED
    combinatorial core
    `stitch_cross_agg_petals` (`src/db/ltm/loops.rs`) -- the same petal priority,
    pairwise-disjoint-internal-node rule, `MAX_AGG_PETALS` cap,
