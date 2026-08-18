@@ -76,13 +76,13 @@ anywidget runs `render` once per VIEW; two views of the same model (`display(w)`
 
 ## Size
 
-Measured 2026-08-17 (rsbuild 2.1.5 production build, `gzip -9`; wasm-opt version 125 with build.sh's `-O3`):
+Measured 2026-08-18 (rsbuild 2.1.5 production build, `gzip -9`; wasm-opt version 125 with build.sh's `-O3` flags), in KiB (bytes / 1024). Regenerate with `ls -l` / `gzip -9 -c ... | wc -c` on `dist/widget.js`, `src/engine/core/libsimlin-browser.wasm.raw` and a `wasm-opt` run of it; the KaTeX font share is the total length of the woff2 `data:` URIs in the bundle.
 
-| Artifact                                                                                                                     | raw                            | gzip     |
-| ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------ | -------- |
-| `dist/widget.js`                                                                                                             | 1,570 KB                       | 617 KB   |
-| of which inlined KaTeX woff2 faces (20 files, base64)                                                                        | ~350 KB (260 KB of font bytes) | ~262 KB  |
-| `libsimlin-browser.wasm`, wasm-opt'd (mode stamp `opt`)                                                                      | 5,298 KB                       | 1,769 KB |
-| `libsimlin-browser.wasm`, unoptimized (`DISABLE_WASM_OPT=1`, what the pre-commit hook leaves in the engine's core directory) | 6,592 KB                       | 1,578 KB |
+| Artifact                                                                                                                     | raw       | gzip      |
+| ---------------------------------------------------------------------------------------------------------------------------- | --------- | --------- |
+| `dist/widget.js`                                                                                                             | 1,539 KiB | 605 KiB   |
+| of which inlined KaTeX woff2 faces (20 files, base64 data URIs)                                                              | ~339 KiB  | ~262 KiB  |
+| `libsimlin-browser.wasm`, wasm-opt'd (mode stamp `opt`)                                                                      | 5,262 KiB | 1,758 KiB |
+| `libsimlin-browser.wasm`, unoptimized (`DISABLE_WASM_OPT=1`, what the pre-commit hook leaves in the engine's core directory) | 6,532 KiB | 1,568 KiB |
 
 The wasm-opt'd blob is 20% smaller raw but 12% LARGER gzipped: cargo already builds wasm32 at `opt-level = "z"` (`.cargo/config.toml`), whose output is repetitive and compresses well, while `wasm-opt -O3` trades that regularity for speed (inlining, unrolling) -- fewer bytes, higher entropy. Which number matters depends on the channel: the widget comm carries the raw bytes (websocket frames are not compressed by default), so the wasm-opt'd blob is the one to ship; the wheel is a zip, where the difference is a wash. Roboto is deliberately NOT bundled: the Editor's stylesheets fall back through `Roboto, Helvetica, Arial, sans-serif`, hosts that have Roboto (JupyterLab does not by default) use it, and shipping the four woff2 subsets simlin-serve self-hosts would add ~60 KB for a font the notebook chrome does not use.

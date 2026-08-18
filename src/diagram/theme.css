@@ -204,13 +204,16 @@
  *
  * StaticDiagram (the non-interactive thumbnail/export renderer) wraps its
  * canvas SVG in a [data-theme="dark"] element, so the canvas primitives below
- * (Stock/Flow/Cloud/Connector/Module/group/etc.) retheme there today. The
- * editor-chrome and component-library tokens below also carry dark values so
- * that a future dark editor (root CLAUDE.md lists dark mode as a supported,
- * best-effort target) themes correctly instead of rendering white boxes with
- * invisible text. Nothing in the shipping app sets data-theme="dark" on the
- * chrome yet, so these chrome overrides are inert in the current light-only UI
- * -- they are infrastructure, not a switch being flipped here.
+ * (Stock/Flow/Cloud/Connector/Module/group/etc.) retheme there. The
+ * editor-chrome and component-library tokens below carry dark values too, and
+ * they are live wherever a host sets data-theme="dark" on an ancestor of the
+ * Editor: the notebook widget does (its `theme` trait, `auto` following
+ * JupyterLab's theme / prefers-color-scheme, lands on its wrapper, and its
+ * portaled surfaces render inside that wrapper). The web app and simlin-serve
+ * are light-only and never set it, so the chrome overrides are inert there.
+ * Every chrome/component token needs a dark value here for that reason: a
+ * token missing from this block renders a white box with invisible text in a
+ * dark notebook.
  */
 [data-theme="dark"],
 :host([data-theme="dark"]) {

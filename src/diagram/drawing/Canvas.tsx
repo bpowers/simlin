@@ -671,13 +671,15 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   };
 
   // Move focus onto the canvas after a click. An <svg> can't take focus, so
-  // the focus target is the container div (tabindex=-1, no focus ring). Focus
-  // must land INSIDE the editor, never merely leave the previous element: a
-  // text field the user was typing in still blurs (its blur commits), and the
-  // key events that follow carry the editor in their path, so the Editor's
-  // keyboard scoping resolves them to this instance directly and hosts that
-  // gate their own shortcuts on the event target (a notebook) see them land in
-  // the editor's subtree. Blurring alone would leave focus on <body>.
+  // the focus target is the container div that svgRef points at (tabindex=-1;
+  // Canvas.module.css suppresses its focus ring). Focus must land INSIDE the
+  // editor, never merely leave the previous element: a text field the user
+  // was typing in still blurs (its blur commits), and the key events that
+  // follow carry the editor in their path, so the Editor's keyboard scoping
+  // resolves them to this instance directly and hosts that gate their own
+  // shortcuts on the event target (JupyterLab's data-lm-suppress-shortcuts,
+  // checked with closest()) see them land in the editor's subtree; focus left
+  // on <body> would instead route the key by the last-active instance.
   // preventScroll: a host page (notebook) may scroll; focusing must not jump it.
   // No fallback for a missing container: this runs from pointer handlers on a
   // rendered canvas, where svgRef is always attached.
