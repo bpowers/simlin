@@ -22,11 +22,11 @@ Message-type x state table covered here (each row is a test):
                                             project untouched
     snapshot  | write fails after apply  -> traits (exact json, base+1), saved +
                                             warn notice, project dirty
-    snapshot  | handler raises anywhere  -> rejected + warn notice (exactly one
-                                            reply, always); if it raised AFTER
-                                            applying, the real pair is pushed
-                                            before rejected so the browser
-                                            re-seeds on it
+    snapshot  | handler raises anywhere  -> exactly one reply, always: raised
+                                            BEFORE applying -> rejected + warn
+                                            notice; raised AFTER applying -> an
+                                            accept (sent bytes pushed at base+1,
+                                            saved) + warn notice
     snapshot  | malformed base/json      -> RuntimeWarning, rejected + warn notice
     oversize  | well-formed              -> RuntimeWarning on the kernel's stderr (a
                                             comm handler runs outside any cell, so
@@ -57,6 +57,7 @@ import os
 import shutil
 import warnings
 import weakref
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -345,6 +346,29 @@ class TestSeedHasAView:
         on_disk = json.loads(path.read_text())
         assert len(on_disk["models"][0].get("views") or []) == 1
         assert [(e.source, e.revision) for e in events.events] == [("edit", 1)]
+
+    def test_empty_view_over_variables_is_laid_out(self, assets: WidgetAssets) -> None:
+        # An empty view over a model that HAS variables is a blank editor
+        # too (a JSON project written before its variables existed, or a
+        # sidecar-era file): the display lays it out.  An empty view over an
+        # empty model is left alone -- there is nothing to place.
+        project = Project.new()
+        model = project.get_model()
+        project.auto_layout("main")  # an empty stock_flow view, revision 1
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="rate", equation="0.1"))
+        # (in-memory + a view -> the edit kept it in step, so unplace it
+        # again to build the fixture the arm is about)
+        doc = json.loads(project.serialize_json())
+        doc["models"][0]["views"][0]["elements"] = []
+        scratch = Project._from_bytes(json.dumps(doc).encode(), simlin.FileFormat.NATIVE_JSON)
+        scratch_model = scratch.get_model()
+        assert self._views(scratch.serialize_json().decode())[0]["elements"] == []
+        revision = scratch.revision
+        w = _widget(scratch_model, assets)
+        views = self._views(w.project_json)
+        assert {e["name"] for e in views[0]["elements"] if "name" in e} == {"rate"}
+        assert w.revision == revision + 1
 
     def test_model_with_a_view_is_seeded_as_is(self, model: Model, assets: WidgetAssets) -> None:
         before = _project(model).serialize_json().decode("utf-8")
@@ -730,7 +754,7 @@ class TestExactlyOneReply:
             patch.upsert(Aux(name="from_python", equation="1"))
         assert [kind for kind, _, _ in _sent(w)] == ["update", "custom"]
 
-    def test_a_failure_while_pushing_still_replies_rejected(
+    def test_a_failure_while_pushing_still_replies_saved(
         self, model: Model, model_path: Path, assets: WidgetAssets, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         w = _widget(model, assets)
@@ -743,28 +767,35 @@ class TestExactlyOneReply:
         _drain(w)
         with pytest.warns(RuntimeWarning, match="push exploded"):
             _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
-        # The change was applied (the file has it) and the browser still gets
-        # exactly one reply -- rejected, at the kernel's real revision -- so
-        # its save queue never hangs.  With ``_push`` itself broken the
-        # re-push before ``rejected`` fails too (and warns); the reply is
-        # still owed and still sent.
+        # The change was applied (the file has it), so the reply is ``saved``
+        # at base+1 even though the state push itself is what failed: the
+        # browser adopts (sent bytes, base+1) from ``saved`` on its own, and a
+        # ``rejected`` here would leave it one revision behind for good.
         assert model.revision == 1
         assert simlin.load(model_path).get_variable("x") is not None
         replies = [
             c for k, c, _ in _sent(w) if k == "custom" and c["type"] in ("saved", "rejected")
         ]
-        assert replies == [{"type": "rejected", "revision": 1}]
+        assert replies == [{"type": "saved", "revision": 1}]
 
-    def test_a_failure_after_apply_pushes_the_real_state_before_rejected(
+    def test_a_failure_after_apply_is_an_accept_with_the_sent_bytes(
         self, model: Model, model_path: Path, assets: WidgetAssets
     ) -> None:
         # The snapshot applied (revision moved, file written) and the handler
-        # failed AFTER that, before the browser was told.  On ``rejected`` the
-        # browser re-seeds from the traits, so the traits must carry the
-        # kernel's real state first -- otherwise the browser keeps editing
-        # from revision 0 and every later save is rejected as stale.
+        # failed AFTER that, before the browser was told.  This is an accept
+        # (obligation 5's logic): push the EXACT bytes received at base+1 and
+        # reply ``saved``.  A ``rejected`` would wedge the view: in the steady
+        # state the kernel's re-serialization equals the sent bytes byte for
+        # byte (same engine on both sides), so a re-push classifies as the
+        # browser's own ack and the following ``rejected`` re-seeds onto the
+        # pair it already holds -- the browser's acknowledged base stays one
+        # behind and every later save is stale.  Pinned with the engine's own
+        # bytes so the fixture IS that steady state.
         w = _widget(model, assets)
-        text = _snapshot_with(model_path, "x")
+        scratch = simlin.load(model_path)
+        with scratch.edit() as (current, patch):
+            patch.upsert(replace(current["room temperature"], equation="60"))
+        text = _project(scratch).serialize_json().decode("utf-8")
 
         def boom(*args: object, **kwargs: object) -> None:
             raise RuntimeError("reply planning exploded")
@@ -775,22 +806,50 @@ class TestExactlyOneReply:
             with pytest.warns(RuntimeWarning, match="reply planning exploded"):
                 _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
         assert model.revision == 1
+        assert _project(model).serialize_json().decode("utf-8") == text  # steady state
         sent = _sent(w)
         assert [k for k, _, _ in sent] == ["update", "custom", "custom"]
-        assert sent[0][1] == {
-            "project_json": _project(model).serialize_json().decode("utf-8"),
-            "revision": 1,
-        }
-        assert sent[1][1] == {"type": "rejected", "revision": 1}
+        assert sent[0][1] == {"project_json": text, "revision": 1}
+        assert sent[1][1] == {"type": "saved", "revision": 1}
         assert sent[2][1]["type"] == "notice"
-        # And the browser's next save from that pushed state is accepted.
+        assert sent[2][1]["level"] == "warn"
+        # The browser chains from the acknowledged base as after any accept.
         _drain(w)
         _from_browser(w, {"type": "snapshot", "base": 1, "json": _snapshot_with(model_path, "y")})
         assert model.revision == 2
         assert _sent(w)[-1] == ("custom", {"type": "saved", "revision": 2}, None)
 
+    def test_a_failure_before_apply_pushes_the_real_state_before_rejected(
+        self, model: Model, model_path: Path, assets: WidgetAssets
+    ) -> None:
+        # The handler failed BEFORE anything was applied (nothing moved): the
+        # reply is ``rejected`` at the current revision; the re-push of the
+        # project's pair is a no-op (unchanged traits send nothing).
+        w = _widget(model, assets)
+        text = _snapshot_with(model_path, "x")
+
+        def boom(*args: object, **kwargs: object) -> bool:
+            raise RuntimeError("apply exploded")
+
+        _drain(w)
+        with pytest.MonkeyPatch.context() as broken:
+            broken.setattr(_project(model), "_apply_snapshot", boom)
+            with pytest.warns(RuntimeWarning, match="apply exploded"):
+                _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
+        assert model.revision == 0
+        sent = _sent(w)
+        assert [k for k, _, _ in sent] == ["custom", "custom"]
+        assert sent[0][1] == {"type": "rejected", "revision": 0}
+        # Nothing was applied, so a later foreign change at revision 1 is
+        # pushed (no stale own-revision marker).
+        _drain(w)
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="from_python", equation="1"))
+        assert [k for k, _, _ in _sent(w)] == ["update", "custom"]
+
     @pytest.mark.parametrize(
-        "arm", ["accept", "stale", "unparsable", "write-failure", "handler-bug"]
+        "arm",
+        ["accept", "stale", "unparsable", "write-failure", "handler-bug", "bug-after-apply"],
     )
     def test_every_arm_replies_exactly_once_with_an_int_revision(
         self,
@@ -820,6 +879,12 @@ class TestExactlyOneReply:
                 raise RuntimeError("bug")
 
             monkeypatch.setattr(_project(model), "_apply_snapshot", boom)
+        elif arm == "bug-after-apply":
+
+            def boom_after(*args: object, **kwargs: object) -> None:
+                raise RuntimeError("bug after apply")
+
+            monkeypatch.setattr("simlin.widget.plan_snapshot_reply", boom_after)
         _drain(w)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")

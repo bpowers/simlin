@@ -320,9 +320,11 @@ is the two-minute Colab start; Colab itself is not yet verified -- if the
 editor does not appear there, set `SIMLIN_WIDGET_ASSET=inline` before
 `import simlin` and please report which worked). Static renderers get the
 SVG diagram in the same output. Displaying a model that has no diagram yet
-(one built from scratch with `edit()`) lays it out first -- a committed
-change like `project.auto_layout()`, so `revision` advances and a
-file-backed project writes the layout.
+(one built from scratch with `edit()`, or a sketch-less `.mdl`) lays it out
+first -- a committed change like `project.auto_layout()`, so `revision`
+advances and a file-backed project WRITES THE FILE with the layout, even
+for a `read_only=True` display: a Vensim `.mdl` without a sketch is
+regenerated with one the first time it is shown.
 
 <!-- pysimlin-test: skip -->
 ```python

@@ -506,37 +506,73 @@ class ModelWidget(anywidget.AnyWidget):
         save only on ``saved``/``rejected`` and runs one save at a time, so
         a snapshot whose reply never comes hangs every later save of that
         view; hence the belt-and-braces: any exception anywhere in the
-        handling -- including a bug in this class -- ends in ``rejected``."""
+        handling -- including a bug in this class -- still ends in exactly
+        one reply.  Which reply follows obligation 5's logic: if the
+        snapshot was applied before the failure (the revision moved), it is
+        an ACCEPT -- the sent bytes are pushed at ``base + 1`` (best effort)
+        and ``saved`` is sent -- because a ``rejected`` would wedge the view:
+        the browser's re-seed on a reject lands on the pair it already holds
+        (in the steady state the kernel's bytes equal the sent bytes) and its
+        acknowledged base stays one behind for good.  If nothing was applied
+        it is a reject at the current revision."""
+        applied: list[bool] = [False]
         try:
-            self._apply_and_reply(request)
+            self._apply_and_reply(request, applied)
         except Exception as exc:  # the reply is owed regardless
             warnings.warn(
                 f"simlin: ModelWidget failed while handling a snapshot: {exc!r}",
                 RuntimeWarning,
                 stacklevel=2,
             )
-            with self._state_lock:
-                self._own_revisions.discard(request.base + 1)
-            # The failure may have come AFTER the snapshot was applied (the
-            # revision moved, the file was written) but before the browser
-            # was told: on ``rejected`` the browser re-seeds from the traits,
-            # so they must carry the kernel's real state first, otherwise it
-            # keeps editing from the old revision and every later save is
-            # rejected as stale.  Unchanged traits send nothing (ipywidgets
-            # skips an empty update), so this is a no-op when nothing moved.
-            try:
-                self._push_from_project()
-            except Exception as push_exc:
-                warnings.warn(
-                    f"simlin: ModelWidget could not re-push its project after a failed "
-                    f"snapshot: {push_exc!r}",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-            self.send(core.rejected_message(int(self._project.revision)))
-            self._notice(f"Your edit could not be applied: {exc}.", "warn")
+            if applied[0]:
+                self._reply_after_failure_applied(request, exc)
+            else:
+                self._reply_after_failure_unapplied(request, exc)
 
-    def _apply_and_reply(self, request: SnapshotRequest) -> None:
+    def _reply_after_failure_applied(self, request: SnapshotRequest, exc: Exception) -> None:
+        """The accept arm of a handler failure: the change is real (revision
+        ``base + 1``, file written or ``dirty``), so the browser is told
+        exactly what an ordinary accept tells it.  ``base + 1`` stays in
+        ``_own_revisions`` -- the project's notification for it is ours."""
+        revision = request.base + 1
+        try:
+            self._push(request.json, revision)
+        except Exception as push_exc:
+            warnings.warn(
+                f"simlin: ModelWidget could not push its accepted snapshot: {push_exc!r}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        self.send(core.saved_message(revision))
+        self._notice(
+            f"Your edit was applied, but the editor could not be told cleanly: {exc}.", "warn"
+        )
+
+    def _reply_after_failure_unapplied(self, request: SnapshotRequest, exc: Exception) -> None:
+        """The reject arm of a handler failure: nothing moved.  The project's
+        real pair is re-pushed first (unchanged traits send nothing, so this
+        is a no-op unless some other change landed meanwhile) and the
+        snapshot is rejected at the current revision."""
+        with self._state_lock:
+            self._own_revisions.discard(request.base + 1)
+        try:
+            self._push_from_project()
+        except Exception as push_exc:
+            warnings.warn(
+                f"simlin: ModelWidget could not re-push its project after a failed "
+                f"snapshot: {push_exc!r}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        self.send(core.rejected_message(int(self._project.revision)))
+        self._notice(f"Your edit could not be applied: {exc}.", "warn")
+
+    def _apply_and_reply(self, request: SnapshotRequest, applied_out: list[bool]) -> None:
+        """Apply ``request`` and send its reply.  ``applied_out[0]`` is set to
+        ``True`` the moment the snapshot is known to be applied (the
+        ``_apply_snapshot`` call returned ``True`` or raised
+        ``SimlinWriteError``), so a failure anywhere after that point can be
+        answered as the accept it is (see ``_handle_snapshot``)."""
         project = self._project
         # The revision this snapshot produces if applied.  Remembered before
         # the call because, without a dispatcher, the project's notification
@@ -549,6 +585,7 @@ class ModelWidget(anywidget.AnyWidget):
             applied = project._apply_snapshot(request.json.encode("utf-8"), request.base)
         except SimlinWriteError as exc:  # applied in memory; only the file lags
             applied = True
+            applied_out[0] = True
             error = str(exc.__cause__ or exc)
             warnings.warn(
                 f"simlin: a widget edit was applied but could not be written: {error}",
@@ -561,6 +598,8 @@ class ModelWidget(anywidget.AnyWidget):
             warnings.warn(
                 f"simlin: a widget edit could not be applied: {exc}", RuntimeWarning, stacklevel=3
             )
+        else:
+            applied_out[0] = applied
         if not applied:
             with self._state_lock:
                 self._own_revisions.discard(request.base + 1)

@@ -162,6 +162,9 @@ def _models_with_variable_ops(patch_json: bytes) -> list[str]:
     return list(names)
 
 
+_VARIABLE_KEYS = ("stocks", "flows", "auxiliaries", "modules")
+
+
 def _models_with_views(project_json: bytes) -> set[str]:
     """Names of the models in an engine-native JSON project that carry at
     least one diagram view (an empty ``stock_flow`` view counts: it is a
@@ -171,6 +174,25 @@ def _models_with_views(project_json: bytes) -> set[str]:
     names: set[str] = set()
     for model in doc.get("models") or []:
         if isinstance(model, dict) and model.get("views"):
+            names.add(model.get("name") or "main")
+    return names
+
+
+def _models_needing_a_layout_for_display(project_json: bytes) -> set[str]:
+    """Names of the models an interactive display must lay out first: those
+    with no view, and those whose first view places nothing although the
+    model has variables (a project written before its variables existed) --
+    both mount as a blank editor.  An empty view over an empty model is not
+    among them: there is nothing to place."""
+    doc = json.loads(project_json)
+    names: set[str] = set()
+    for model in doc.get("models") or []:
+        if not isinstance(model, dict):
+            continue
+        views = model.get("views") or []
+        has_variables = any(model.get(key) for key in _VARIABLE_KEYS)
+        first = views[0] if views and isinstance(views[0], dict) else None
+        if not views or (has_variables and first is not None and not first.get("elements")):
             names.add(model.get("name") or "main")
     return names
 
@@ -711,9 +733,12 @@ class Project:
 
     def _models_with_views_locked(self) -> set[str]:
         """Which models currently have a diagram; caller holds ``_file_lock``.
-        Answered from a serialization because the FFI has no view query and
-        the answer is only needed after a variable-changing edit or before a
-        display, never in a hot loop."""
+        Answered from a serialization because the FFI has no view query.
+        That is O(model) per in-memory variable-changing edit -- accepted:
+        the edit itself already parsed and re-laid out comparable state, a
+        display asks once, and a JSON serialization of even C-LEARN is
+        milliseconds; a view-query FFI would be the fix if this ever shows
+        in a profile."""
         return _models_with_views(self.serialize_json())
 
     def _sync_diagram_for_patch(self, patch_json: bytes) -> None:
@@ -1363,12 +1388,16 @@ class Project:
 
         What an interactive display needs before it seeds an editor: the
         editor mounts the model's first view and shows a blank canvas without
-        one.  A model that already has a view (even an empty one) is left
-        exactly as it is and ``False`` is returned; otherwise this is
-        :meth:`auto_layout` -- a committed change (revision bump, autosave,
-        subscribers notified with ``source == "edit"``) -- and ``True``.
-        The check and the layout happen under ``_file_lock`` so a concurrent
-        edit cannot slip between them.
+        one -- or with an empty one over a model that has variables.  A model
+        whose view already places its variables (or that has an empty view
+        and no variables) is left exactly as it is and ``False`` is returned;
+        otherwise this is :meth:`auto_layout` -- a committed change (revision
+        bump, autosave when file-backed, subscribers notified with ``source ==
+        "edit"``) -- and ``True``.  Note that for a file-backed project this
+        WRITES THE FILE on display, ``read_only`` widget or not: a sketch-less
+        ``.mdl`` is regenerated with a sketch the first time it is shown.  The
+        check and the layout happen under ``_file_lock`` so a concurrent edit
+        cannot slip between them.
 
         Raises:
             SimlinRuntimeError: If the model doesn't exist or layout fails
@@ -1377,7 +1406,8 @@ class Project:
                 memory but could not be written; :attr:`dirty` stays set.
         """
         with self._file_lock:
-            if (model_name or "main") in self._models_with_views_locked():
+            needing = _models_needing_a_layout_for_display(self.serialize_json())
+            if (model_name or "main") not in needing:
                 return False
             revision, write_error = self._auto_layout_locked(model_name)
         self._notify(ChangeEvent("edit", revision))

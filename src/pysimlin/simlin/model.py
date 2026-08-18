@@ -387,10 +387,12 @@ class Model:
         widget or to set its options.
 
         A model with no diagram view yet (one built from scratch through
-        :meth:`edit`) is laid out first -- the same committed change as
-        ``project.auto_layout()``: ``revision`` advances and a file-backed
-        project writes the layout -- because the editor mounts the model's
-        first view.  A model that has a view is shown as it is.
+        :meth:`edit`, a sketch-less ``.mdl``) is laid out first -- the same
+        committed change as ``project.auto_layout()``: ``revision`` advances
+        and a file-backed project writes the file, ``read_only`` or not --
+        because the editor mounts the model's first view (see the README's
+        "Interactive Editing in Notebooks").  A model whose view already
+        places its variables is shown as it is.
 
         Args:
             height: Editor height in CSS pixels.
