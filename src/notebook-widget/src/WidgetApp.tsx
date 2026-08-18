@@ -67,6 +67,11 @@ interface WidgetRefs {
   seed: EditorSeedPair;
   // At most one snapshot in flight (see handleSave); null between saves.
   inFlight: (InFlightSnapshot & { resolve: (version: number | undefined) => void }) | null;
+  // Replies the kernel still owes for snapshots whose slot was freed by a
+  // remount (see onKernelState). Kernel replies arrive in order, so the next
+  // `staleRepliesOwed` save replies belong to those snapshots, not to
+  // whatever the new Editor has in flight: each is consumed and ignored.
+  staleRepliesOwed: number;
   selectionTimer: ReturnType<typeof setTimeout> | null;
   noticeTimer: ReturnType<typeof setTimeout> | null;
 }
@@ -110,6 +115,37 @@ function watchHostThemeSignals(onChange: () => void): () => void {
   };
 }
 
+/**
+ * Keep JupyterLab's notebook shortcuts off every element that takes focus
+ * inside the widget. Lumino resolves a keydown by walking from the FOCUSED
+ * element upward and, at each step, first stopping if that element carries
+ * `data-lm-suppress-shortcuts` and otherwise matching it against every
+ * keybinding selector; the notebook's command-mode bindings (`d d` deletes
+ * the cell, `a`/`b` insert one, `x` cuts) use the selector
+ * `.jp-Notebook.jp-mod-commandMode:not(.jp-mod-readWrite) :focus`
+ * (JupyterLab 4.6, schemas/@jupyterlab/notebook-extension/tracker.json --
+ * text fields are exempt not by the selector but because the Notebook
+ * toggles jp-mod-readWrite while an editable element is active), which
+ * matches the focused element ITSELF -- the Editor root, the canvas
+ * container, a button, a <select> -- before the walk ever reaches the
+ * wrapper's attribute. So the attribute must sit on the focused element, and
+ * focus always precedes a keydown: stamping the target of every focus event
+ * inside the widget (the Editor's own elements and the overlay surfaces it
+ * portals into the wrapper alike) is the one place that covers them all
+ * without threading a host attribute through every focusable component.
+ * React never removes an attribute it did not render, so the stamp persists.
+ * Stopping key propagation at the wrapper would NOT do: Lumino
+ * listens on the document in the capture phase, before any element handler,
+ * and the Editor's own shortcut listener is a document-level bubble handler
+ * that a stop would silence.
+ */
+function stampShortcutSuppression(event: React.FocusEvent<HTMLElement>): void {
+  const target = event.target;
+  if (target instanceof Element && !target.hasAttribute('data-lm-suppress-shortcuts')) {
+    target.setAttribute('data-lm-suppress-shortcuts', '');
+  }
+}
+
 export function WidgetApp({ model, name }: { model: AnyModel; name: string }): React.ReactElement {
   const readModelTraits = React.useCallback((): WidgetTraits => readTraits((key) => model.get(key)), [model]);
 
@@ -121,11 +157,22 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
   }));
   const [notice, setNotice] = React.useState<Notice | null>(null);
   const [hostTheme, setHostTheme] = React.useState<HostThemeSignals>(readHostThemeSignals);
+  // The wrapper element, once mounted: it is the Editor's portalContainer, so
+  // the drawer/dialogs/menus/listbox render INSIDE the widget box (where the
+  // scoped theme tokens, data-theme and data-lm-suppress-shortcuts live --
+  // portaled to document.body they would sit outside the widget root class
+  // and every var(--*) would be undefined) and position against it rather
+  // than the viewport (JupyterLab's windowed notebook translates its viewport
+  // with a transform, which would displace fixed-position boxes). The Editor
+  // is rendered only once the wrapper exists so it never mounts in the
+  // viewport mode first.
+  const [wrapper, setWrapper] = React.useState<HTMLDivElement | null>(null);
 
   const refs = React.useRef<WidgetRefs>({
     disposed: false,
     seed: { revision: traits.revision, projectJson: traits.projectJson },
     inFlight: null,
+    staleRepliesOwed: 0,
     selectionTimer: null,
     noticeTimer: null,
   });
@@ -176,6 +223,21 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
         return;
       }
       if (action === 'remount') {
+        // The Editor that sent any in-flight snapshot is about to be replaced:
+        // resolve its save undefined now (nothing may wait on a reply for a
+        // mount that no longer exists) and free the slot, otherwise the NEW
+        // Editor's first save would be refused as "one already in flight" and
+        // that edit would sit unsaved until a later edit. The kernel still
+        // owes exactly one reply for the freed snapshot; it is marked stale
+        // so onCustom consumes and ignores it -- it must neither remount
+        // (the push already did) nor adopt its (revision, json) as the seed,
+        // which would step the seed back behind the state we just remounted on.
+        if (r.inFlight !== null) {
+          const flight = r.inFlight;
+          r.inFlight = null;
+          r.staleRepliesOwed += 1;
+          flight.resolve(undefined);
+        }
         remountFrom(incoming);
       }
     };
@@ -185,6 +247,13 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
     const onCustom = (...args: unknown[]): void => {
       const reply = parseSaveReply(args[0]);
       if (reply !== null) {
+        if (r.staleRepliesOwed > 0) {
+          // The reply for a snapshot whose Editor a kernel push already
+          // replaced (see onKernelState); replies arrive in order, so this
+          // one is that snapshot's, whatever the new Editor has in flight.
+          r.staleRepliesOwed -= 1;
+          return;
+        }
         const flight = r.inFlight;
         if (flight === null) {
           // A reply for a snapshot this view no longer tracks (another view of
@@ -330,10 +399,12 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
 
   return (
     <div
+      ref={setWrapper}
       className={`${WIDGET_ROOT_CLASS} ${styles.host}`}
       style={wrapperStyle(traits.height)}
       data-theme={theme}
       data-lm-suppress-shortcuts=""
+      onFocusCapture={stampShortcutSuppression}
     >
       {notice !== null ? (
         <div
@@ -344,16 +415,22 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
           {notice.text}
         </div>
       ) : null}
-      <Editor
-        key={`${seed.revision}#${seed.generation}`}
-        inputFormat="json"
-        initialProjectJson={seed.projectJson}
-        initialProjectVersion={seed.revision}
-        name={name}
-        readOnlyMode={traits.readOnly}
-        onSave={handleSave}
-        onSelectionChanged={handleSelectionChanged}
-      />
+      {wrapper !== null ? (
+        <Editor
+          key={`${seed.revision}#${seed.generation}`}
+          inputFormat="json"
+          initialProjectJson={seed.projectJson}
+          initialProjectVersion={seed.revision}
+          name={name}
+          readOnlyMode={traits.readOnly}
+          onSave={handleSave}
+          onSelectionChanged={handleSelectionChanged}
+          portalContainer={wrapper}
+          // The notebook page has no "/" to go home to; the drawer's Exit
+          // link would pushState the notebook page away.
+          showHomeLink={false}
+        />
+      ) : null}
     </div>
   );
 }

@@ -15,6 +15,8 @@ if (baseConfig) {
       ...baseConfig.languageOptions.globals,
       WebAssembly: 'readonly',
       HTMLElement: 'readonly',
+      Element: 'readonly',
+      HTMLDivElement: 'readonly',
       AbortController: 'readonly',
       AbortSignal: 'readonly',
       Blob: 'readonly',
@@ -27,6 +29,9 @@ if (baseConfig) {
       Node: 'readonly',
       Response: 'readonly',
       TextEncoder: 'readonly',
+      atob: 'readonly',
+      // Build-time constant defined by rsbuild.config.ts (see globals.d.ts).
+      SIMLIN_WIDGET_WASM_SHA256: 'readonly',
     },
   };
 }

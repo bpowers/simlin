@@ -7,6 +7,7 @@ import * as React from 'react';
 import clsx from 'clsx';
 import TextField from './components/TextField';
 import Autocomplete, { type AutocompleteRenderInputParams } from './components/Autocomplete';
+import { PortalContainerContext } from './components/portal-container';
 import Snackbar from './components/Snackbar';
 import { ClearIcon, EditIcon } from './components/icons';
 import SpeedDial, { CloseReason, SpeedDialAction, SpeedDialIcon } from './components/SpeedDial';
@@ -282,6 +283,17 @@ interface EditorPropsBase {
   // no route to go to, and the link would pushState on the host page. No
   // router is required to mount the Editor either way.
   showHomeLink?: boolean;
+  // Where the Editor's overlay surfaces (the model-properties drawer, dialogs,
+  // menus, the autocomplete listbox) render. Default: document.body, where
+  // they are viewport-level (position: fixed) -- right for hosts that own the
+  // page. A host that gives the Editor one box on a page it does not own (a
+  // notebook cell) passes that box: the surfaces render inside it and
+  // position against it (drawer from its left edge, dialogs centred in it),
+  // so the host's tokens / data-theme / shortcut-scoping attributes on the box
+  // reach them and a transformed page ancestor cannot displace them. The
+  // element must be positioned (it is the surfaces' containing block). See
+  // components/portal-container.ts.
+  portalContainer?: HTMLElement;
 }
 
 export type EditorProps = EditorPropsBase & ProjectInputProps;
@@ -713,6 +725,43 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     const root = rootRef.current;
     if (root) {
       markActiveEditorRoot(root);
+    }
+  }, []);
+
+  // A pointer press anywhere inside the editor moves focus INTO it. Capture
+  // phase runs before the browser's own mousedown default action, so a press
+  // on a focusable target (a text field, a button) still ends with focus on
+  // that target; a press whose default is prevented (the Canvas prevents it
+  // on every pointerdown, so element clicks and drags never focus anything)
+  // leaves focus on the root -- inside the editor, never on the host page or
+  // <body>. Without this, clicking a variable in a notebook cell left focus on
+  // the notebook cell and the notebook's own shortcuts (`d d` deletes the
+  // CELL) fired instead of the Editor's; the mechanism is host-agnostic
+  // (see the keyboard scoping contract in CLAUDE.md). Only when focus is not
+  // already inside the editor: a press inside an editable while it is focused
+  // must not blur it (its blur commits), and moving focus root-ward for
+  // nothing would drop the caret.
+  const handlePointerDownCapture = React.useCallback((e: React.PointerEvent<HTMLDivElement>): void => {
+    handleActivity();
+    const root = rootRef.current;
+    if (!root) {
+      return;
+    }
+    const active = document.activeElement;
+    // Portaled surfaces (drawer, dialog, menu, listbox) are not DOM
+    // descendants of the root, so root.contains() says no for a press inside
+    // one; React routes the press through this tree, and the DOM path of the
+    // press tells whether the focused element is the pressed element or one
+    // of its ancestors -- the drawer panel is focused and the user presses a
+    // field inside it -- in which case focus is left where it is (the panel's
+    // own focus management owns it). <body>/<html> are on every path and
+    // count as focus nowhere.
+    const path = e.nativeEvent.composedPath();
+    const focusInsideEditor = active !== null && root.contains(active);
+    const focusIsPressedOrAncestor =
+      active !== null && active !== document.body && active !== document.documentElement && path.includes(active);
+    if (!focusInsideEditor && !focusIsPressedOrAncestor) {
+      root.focus({ preventScroll: true });
     }
   }, []);
 
@@ -2653,23 +2702,25 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   // <body>, so the key event that follows carries the root in its path. Not in
   // the tab order; the outline is suppressed in Editor.module.css.
   return (
-    <div
-      ref={rootRef}
-      className={classNames}
-      tabIndex={-1}
-      {...{ [EDITOR_ROOT_ATTRIBUTE]: '' }}
-      onPointerDownCapture={handleActivity}
-      onFocusCapture={handleActivity}
-    >
-      {getDrawer()}
-      {getDetails(sharedModelBannerInfo.visible)}
-      {getSearchBar()}
-      {getSharedModelBanner(sharedModelBannerInfo)}
-      {getCanvas()}
-      {getSnackbar()}
-      {getEditorControls()}
-      {getMetaActionsBar()}
-      {getSnapshot()}
-    </div>
+    <PortalContainerContext.Provider value={props.portalContainer ?? null}>
+      <div
+        ref={rootRef}
+        className={classNames}
+        tabIndex={-1}
+        {...{ [EDITOR_ROOT_ATTRIBUTE]: '' }}
+        onPointerDownCapture={handlePointerDownCapture}
+        onFocusCapture={handleActivity}
+      >
+        {getDrawer()}
+        {getDetails(sharedModelBannerInfo.visible)}
+        {getSearchBar()}
+        {getSharedModelBanner(sharedModelBannerInfo)}
+        {getCanvas()}
+        {getSnackbar()}
+        {getEditorControls()}
+        {getMetaActionsBar()}
+        {getSnapshot()}
+      </div>
+    </PortalContainerContext.Provider>
   );
 });

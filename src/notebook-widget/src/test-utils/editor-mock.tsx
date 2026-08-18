@@ -23,6 +23,10 @@ export interface EditorMockProps {
   readOnlyMode?: boolean;
   onSave: (project: JsonProjectData, currVersion: number) => Promise<number | undefined>;
   onSelectionChanged?: (idents: string[]) => void;
+  // Host-embedding props (see the real Editor): where overlay surfaces
+  // portal, and whether the drawer shows its Exit link to "/".
+  portalContainer?: HTMLElement;
+  showHomeLink?: boolean;
 }
 
 interface MountRecord {

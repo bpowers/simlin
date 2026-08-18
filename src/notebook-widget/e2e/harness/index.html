@@ -22,8 +22,15 @@
       // Mimic anywidget's loader (load.ts): the module text is fetched by the
       // widget manager and imported through a fresh blob: URL, so
       // import.meta.url is useless and no relative asset can resolve.
-      async function loadWidgetModule() {
-        const src = await (await fetch('/widget.js')).text();
+      // `inlineWasmBase64`: pysimlin's SIMLIN_WIDGET_ASSET=inline mode
+      // (`_widget_core.inline_esm`) prepends the artifact as a base64 global
+      // to the module text on its own line; the harness reproduces that
+      // exact contract when asked.
+      async function loadWidgetModule(inlineWasmBase64) {
+        let src = await (await fetch('/widget.js')).text();
+        if (inlineWasmBase64 !== undefined) {
+          src = `globalThis.__simlinWidgetInlineWasm = "${inlineWasmBase64}";\n${src}`;
+        }
         const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
         try {
           return await import(url);

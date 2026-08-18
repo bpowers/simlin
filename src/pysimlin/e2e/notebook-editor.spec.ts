@@ -108,8 +108,35 @@ function activeCells(page: Page): Locator {
   return page.locator('.jp-NotebookPanel:not(.lm-mod-hidden) .jp-Notebook .jp-Cell');
 }
 
+/**
+ * Wait until the visible notebook has a live kernel. On a cold server (the
+ * first notebook opened after Lab's caches were rebuilt) Lab can still be
+ * starting the session when the page shows its cells; a Shift+Enter then
+ * opens the "Select Kernel" dialog instead of running the cell. The toolbar's
+ * kernel-name button is no signal (it shows the preferred name before a
+ * session exists); the execution indicator reports `data-status="idle"` only
+ * once a kernel is connected. A "Select Kernel" dialog left open is accepted
+ * so the default kernel starts.
+ */
+async function waitForKernel(page: Page): Promise<void> {
+  const dialogSelect = page.locator('.jp-Dialog button.jp-mod-accept', { hasText: /^select$/i });
+  const indicator = page.locator('.jp-NotebookPanel:not(.lm-mod-hidden) .jp-Notebook-ExecutionIndicator');
+  await expect
+    .poll(
+      async () => {
+        if (await dialogSelect.isVisible()) {
+          await dialogSelect.click();
+        }
+        return indicator.first().getAttribute('data-status');
+      },
+      { timeout: 90_000, message: 'waiting for the notebook kernel to connect' },
+    )
+    .toMatch(/^(idle|busy)$/);
+}
+
 /** Click into cell `index`'s editor and run it with Shift+Enter. */
 async function runCell(page: Page, index: number): Promise<Locator> {
+  await waitForKernel(page);
   const cell = activeCells(page).nth(index);
   await cell.locator('.jp-InputArea-editor').click();
   await page.keyboard.press('Shift+Enter');
@@ -307,4 +334,91 @@ test('a model built from scratch in memory displays with a laid-out diagram and 
   await expect(page.locator('.jp-OutputArea-output[data-mime-type="application/vnd.jupyter.error"]')).toHaveCount(0);
   await expect(page.locator('.jp-OutputArea-output[data-mime-type="application/vnd.jupyter.stderr"]')).toHaveCount(0);
   expect(consoleErrors).toEqual([]);
+});
+
+// AC2.6 in a real JupyterLab: keys typed with the Editor focused act on the
+// Editor and never on the notebook. Two mechanisms are under test, and only
+// a real Lab can exercise them: (1) a pointer press anywhere inside the
+// widget -- a variable's circle included, whose pointerdown is
+// preventDefault()ed by the canvas -- must move focus INTO the widget,
+// otherwise focus stays on the notebook cell and Lab's command-mode keys
+// (`x`, `d d`, `a`) act on cells while Delete reaches no Editor; (2) Lumino
+// matches its keybinding selectors (`.jp-Notebook.jp-mod-commandMode:not(.jp-mod-readWrite) :focus`)
+// against the focused element BEFORE walking up to any ancestor carrying
+// `data-lm-suppress-shortcuts`, so the attribute has to be on the focused
+// element itself, not only on the wrapper.
+test('pysimlin-widget.AC2.6: keys with the Editor focused act on the Editor, not the notebook', async ({ page }) => {
+  const baseUrl = required(ENV.url);
+  const token = required(ENV.token);
+  const rootDir = required(ENV.rootDir);
+  const model = 'keys.xmile';
+  const modelPath = path.join(rootDir, model);
+  fs.copyFileSync(FIXTURE, modelPath);
+  const notebook = 'keys.ipynb';
+  const cellSources = [['import simlin', `m = simlin.open("${model}")`, 'm'], ['print(1)'], ['print(2)']];
+  fs.writeFileSync(path.join(rootDir, notebook), notebookJson(cellSources));
+
+  await page.goto(`${baseUrl}lab/tree/${notebook}?token=${token}`);
+  // Lab restores the workspace, so notebooks from earlier tests are open in
+  // other (hidden) tabs: scope to the visible notebook panel.
+  const panel = page.locator('.jp-NotebookPanel:not(.lm-mod-hidden)');
+  const cells = panel.locator('.jp-Notebook .jp-Cell');
+  await expect(cells).toHaveCount(cellSources.length, { timeout: 90_000 });
+  const displayCell = await runCell(page, 0);
+  const widget = displayCell.locator('.simlin-notebook-widget');
+  const canvas = widget.locator('svg.simlin-canvas');
+  await expect(canvas).toBeVisible({ timeout: 90_000 });
+
+  const focusInWidget = (): Promise<{ inWidget: boolean; suppressed: boolean; tag: string }> =>
+    page.evaluate(() => {
+      const a = document.activeElement;
+      return {
+        inWidget: a !== null && a.closest('.simlin-notebook-widget') !== null,
+        suppressed: a !== null && a.hasAttribute('data-lm-suppress-shortcuts'),
+        tag: a === null ? 'none' : a.tagName,
+      };
+    });
+
+  // A click on a variable's circle (a preventDefault()ed canvas press)
+  // selects it and moves focus into the widget, onto an element Lumino will
+  // not match its notebook shortcuts against.
+  const auxes = canvas.locator('g.simlin-aux');
+  const auxCount = await auxes.count();
+  expect(auxCount).toBeGreaterThan(0);
+  const target = auxes.filter({ hasText: /room/i }).first();
+  await target.locator('circle').first().click();
+  await expect(target).toHaveClass(/simlin-selected/);
+  expect(await focusInWidget()).toMatchObject({ inWidget: true, suppressed: true });
+
+  // Lab command-mode keys do nothing to the notebook: `d d` would delete the
+  // active cell, `x` cut it, `a` insert one above.
+  await page.keyboard.press('d');
+  await page.keyboard.press('d');
+  await page.keyboard.press('x');
+  await page.keyboard.press('a');
+  // Give Lab a moment to have acted, then assert it did not.
+  await page.waitForTimeout(500);
+  await expect(cells).toHaveCount(cellSources.length);
+  await expect(canvas).toBeVisible();
+
+  // The Editor's own key acts: Delete removes the selected variable and the
+  // file follows.
+  await page.keyboard.press('Delete');
+  await expect(auxes).toHaveCount(auxCount - 1);
+  await expect(target).toHaveCount(0);
+  await waitForFile(modelPath, (text) => !/name="Room Temperature"/.test(text));
+
+  // Focus is still inside the widget after the edit; a Lab key still does
+  // nothing to the notebook.
+  expect(await focusInWidget()).toMatchObject({ inWidget: true, suppressed: true });
+  await page.keyboard.press('b');
+  await page.waitForTimeout(500);
+  await expect(cells).toHaveCount(cellSources.length);
+
+  // And a click on the notebook outside the widget hands the keys back to Lab:
+  // `b` in command mode inserts a cell below.
+  await cells.nth(2).locator('.jp-InputArea-editor').click();
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('b');
+  await expect(cells).toHaveCount(cellSources.length + 1);
 });

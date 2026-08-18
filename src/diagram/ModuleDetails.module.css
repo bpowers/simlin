@@ -3,14 +3,12 @@
  * Version 2.0, that can be found in the LICENSE file. */
 
 .card {
-  /* Clamp to the editor root on narrow screens so the panel never overflows
-     the left edge or dominates the canvas (it is anchored right:8px). */
-  width: min(var(--panel-width-sm), calc(100% - 16px));
+  /* Sized by the details slot (Editor.module.css .varDetails); overflow-y:
+     auto lets it shrink to the slot's height cap and scroll, min-height: 0 is
+     belt and braces. See VariableDetails.module.css. */
+  min-height: 0;
   /* Match .searchBar: see VariableDetails.module.css */
   box-sizing: border-box;
-  /* Against the positioned editor root, not the viewport, so an embedded
-     editor's panel never outgrows the box it lives in. */
-  max-height: calc(100% - 18px);
   overflow-y: auto;
   scrollbar-gutter: stable;
   border-radius: 4px;
@@ -19,18 +17,6 @@
      legible when the surface flips dark. */
   color: var(--color-text-primary);
   box-shadow: var(--shadow-1);
-}
-
-@media (min-width: 900px) and (max-width: 1199.95px) {
-  .card {
-    width: min(var(--panel-width-md), calc(100% - 16px));
-  }
-}
-
-@media (min-width: 1200px) {
-  .card {
-    width: min(var(--panel-width-lg), calc(100% - 16px));
-  }
 }
 
 /* Reserve the top band so the module's header/title clears the 48px

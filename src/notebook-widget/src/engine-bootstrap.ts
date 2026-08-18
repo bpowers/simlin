@@ -21,6 +21,31 @@
  * `{type:'wasm'}` and the kernel answers with a custom message carrying the
  * artifact as a binary buffer. Both caches drop a rejected promise so a later
  * render (possibly under a different, healthy widget/kernel) can retry.
+ *
+ * `SIMLIN_WIDGET_ASSET=inline` (pysimlin `_widget_core.inline_esm`) prepends
+ * `globalThis.__simlinWidgetInlineWasm = "<base64 wasm>";` to the module
+ * text, so the artifact is already on the page when this module evaluates
+ * (Colab may not deliver binary comm buffers). It is read ONCE, at module
+ * evaluation -- the same synchronous script that set it, so a later instance
+ * from another build overwriting the global cannot hand this instance the
+ * wrong bytes -- and cleared, and it fills the page-wide cache instead of a
+ * comm request; anything unusable in it falls back to the comm request, which
+ * the kernel answers in every asset mode.
+ *
+ * The page-wide key carries the identity of the engine artifact this bundle
+ * was built against ({@link WASM_IDENTITY}), so instances from two different
+ * builds on one page -- two notebooks with two kernels running different
+ * pysimlin versions, or a redisplay after an upgrade beside an old output --
+ * each compile their own engine instead of the second silently running the
+ * first one's wasm against a JS side built for another ABI. The identity is
+ * the sha256 of libsimlin-browser.wasm at build time (rsbuild.config.ts bakes
+ * it in; the staging script ships that same file beside widget.js), which is
+ * why an instance can key the cache without ever seeing the bytes: a cache
+ * hit means "a bundle built against this exact artifact already compiled it".
+ * A widget cannot verify what the kernel actually sent against this identity;
+ * the kernel does not carry the wasm's hash in its reply (it is in the wheel's
+ * ASSETS.json), so a mismatched wheel -- widget.js from one build, wasm from
+ * another -- is a packaging error the build/staging checks own, not this key.
  */
 
 import { ready } from '@simlin/engine';
@@ -28,7 +53,54 @@ import { ready } from '@simlin/engine';
 import type { AnyModel } from './anywidget-model';
 import { parseWasmReply, WASM_REQUEST } from './widget-core';
 
-export const GLOBAL_KEY = '__simlinWidgetWasmModule';
+/**
+ * The engine artifact identity baked into this bundle (see the module doc);
+ * `unversioned` outside a bundle (unit tests), where no artifact exists.
+ */
+export const WASM_IDENTITY: string =
+  typeof SIMLIN_WIDGET_WASM_SHA256 === 'string' && SIMLIN_WIDGET_WASM_SHA256 !== ''
+    ? SIMLIN_WIDGET_WASM_SHA256
+    : 'unversioned';
+
+/** The globalThis property caching the compiled module for `identity`. */
+export function wasmCacheKey(identity: string): string {
+  return `__simlinWidgetWasmModule:${identity}`;
+}
+
+export const GLOBAL_KEY = wasmCacheKey(WASM_IDENTITY);
+
+/** The global pysimlin's `inline` asset mode defines (`_widget_core.INLINE_WASM_GLOBAL`). */
+export const INLINE_WASM_GLOBAL = '__simlinWidgetInlineWasm';
+
+/**
+ * Read and clear the inline-wasm global. Null when absent or not a
+ * non-empty string; the string is base64 of the artifact (a plain string,
+ * not a data: URL -- the contract in `inline_esm`).
+ */
+export function takeInlineWasm(): string | null {
+  const g = globalThis as Record<string, unknown>;
+  const value = g[INLINE_WASM_GLOBAL];
+  if (typeof value !== 'string' || value === '') {
+    return null;
+  }
+  delete g[INLINE_WASM_GLOBAL];
+  return value;
+}
+
+/** Base64 text -> the bytes, as a standalone ArrayBuffer for WebAssembly.compile. */
+export function decodeBase64(text: string): ArrayBuffer {
+  const binary = atob(text);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+// Captured at module evaluation (see the module doc); consumed by the first
+// sharedWasmModule call on this instance, then dropped so the ~9 MB string is
+// not retained.
+let inlineWasmBase64: string | null = takeInlineWasm();
 
 /**
  * How long to wait for the kernel's wasm reply. anywidget queues comm
@@ -45,7 +117,30 @@ export const GLOBAL_KEY = '__simlinWidgetWasmModule';
  */
 export const WASM_REPLY_TIMEOUT_MS = 60_000;
 
-type GlobalCache = { [GLOBAL_KEY]?: Promise<WebAssembly.Module> };
+type GlobalCache = Record<string, Promise<WebAssembly.Module> | undefined>;
+
+/**
+ * What the cell says when the wasm never arrives. The one case a user is
+ * likely to hit is a static export: `jupyter nbconvert --to html --execute`
+ * stores the widget state by default and the exported page then shows the
+ * widget itself, whose kernel request nobody answers, instead of the SVG the
+ * output also carries -- so the message names that case and its fix first.
+ * The widget cannot tell a missing kernel from a slow one: anywidget's model
+ * proxy exposes neither the comm nor its liveness (`widget_manager` is on
+ * the proxy but flagged as an over-wide surface to be narrowed, and its
+ * shape differs per host), and `send` on a comm-less model is a silent
+ * no-op. So the export case is not detected early; it is explained when the
+ * timeout fires.
+ */
+export function wasmTimeoutMessage(timeoutMs: number): string {
+  const seconds = Math.round(timeoutMs / 1000);
+  return (
+    `the kernel did not send the Simlin engine within ${seconds} s. ` +
+    'If this page is a static export (nbconvert, a saved HTML page), there is no kernel to send it: ' +
+    're-export with --ExecutePreprocessor.store_widget_state=False so the diagram is embedded as an image instead. ' +
+    'If a kernel is running, it may be busy, or its pysimlin install may be missing the widget assets.'
+  );
+}
 
 let enginePromise: Promise<void> | null = null;
 
@@ -86,7 +181,7 @@ export function requestWasmModule(
         return;
       }
       finish();
-      reject(new Error(`timed out after ${timeoutMs}ms waiting for the kernel to send the Simlin engine`));
+      reject(new Error(wasmTimeoutMessage(timeoutMs)));
     }, timeoutMs);
     model.on('msg:custom', onCustom);
     model.send(WASM_REQUEST);
@@ -94,19 +189,48 @@ export function requestWasmModule(
 }
 
 /**
- * The page-wide compiled module, requesting it through `model` if no widget
- * on this page has yet.
+ * Compile the inline artifact this module was loaded with, or reject when
+ * there is none or it is unusable (bad base64, not a wasm module).
+ */
+async function compileInlineWasm(
+  compile: (bytes: ArrayBuffer) => Promise<WebAssembly.Module>,
+): Promise<WebAssembly.Module> {
+  const base64 = inlineWasmBase64;
+  inlineWasmBase64 = null;
+  if (base64 === null) {
+    throw new Error('no inline wasm');
+  }
+  return compile(decodeBase64(base64));
+}
+
+/**
+ * The page-wide compiled module: the inline artifact if this module was
+ * loaded with one, else requested through `model` -- unless a widget on this
+ * page (built against the same artifact) has already compiled it.
  */
 export function sharedWasmModule(
   model: AnyModel,
   request: (model: AnyModel) => Promise<WebAssembly.Module> = requestWasmModule,
+  compile: (bytes: ArrayBuffer) => Promise<WebAssembly.Module> = (bytes) => WebAssembly.compile(bytes),
 ): Promise<WebAssembly.Module> {
   const cache = globalThis as unknown as GlobalCache;
   const existing = cache[GLOBAL_KEY];
   if (existing !== undefined) {
+    // Another instance already compiled it; drop this instance's copy of the
+    // inline payload rather than keep ~9 MB of base64 alive for nothing.
+    inlineWasmBase64 = null;
     return existing;
   }
-  const created = request(model).catch((err: unknown) => {
+  const source =
+    inlineWasmBase64 !== null
+      ? compileInlineWasm(compile).catch((err: unknown) => {
+          // The kernel answers wasm requests in every asset mode, so a
+          // broken inline payload costs a round trip, not the widget.
+          console.warn('simlin widget: inline wasm unusable, requesting it from the kernel instead', err);
+          return request(model);
+        })
+      : request(model);
+  const created = source.catch((err: unknown) => {
     if (cache[GLOBAL_KEY] === created) {
       delete cache[GLOBAL_KEY];
     }
@@ -137,8 +261,19 @@ export function ensureEngine(model: AnyModel): Promise<void> {
   return started;
 }
 
-/** Test seam: forget both caches. */
-export function resetEngineBootstrapForTests(): void {
+/** Test seam: whether this module still holds an inline payload. */
+export function inlineWasmHeldForTests(): boolean {
+  return inlineWasmBase64 !== null;
+}
+
+/**
+ * Test seam: forget the per-module memo and (unless `keepPageCache`) the
+ * page-wide cache, and set the inline artifact this module "was loaded with".
+ */
+export function resetEngineBootstrapForTests(opts: { inlineWasm?: string | null; keepPageCache?: boolean } = {}): void {
   enginePromise = null;
-  delete (globalThis as unknown as GlobalCache)[GLOBAL_KEY];
+  inlineWasmBase64 = opts.inlineWasm ?? null;
+  if (!opts.keepPageCache) {
+    delete (globalThis as unknown as GlobalCache)[GLOBAL_KEY];
+  }
 }

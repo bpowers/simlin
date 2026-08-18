@@ -17,6 +17,7 @@
  * Colab / VS Code hosts (Phase 4's JupyterLab journey covers that).
  */
 
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -65,7 +66,7 @@ async function serveHarness(page: Page): Promise<void> {
 
 interface HarnessWindow {
   harness: {
-    loadWidgetModule(): Promise<unknown>;
+    loadWidgetModule(inlineWasmBase64?: string): Promise<unknown>;
     mount(mod: unknown, el: HTMLElement, state: Record<string, unknown>): Promise<number>;
     models: Array<{
       state: Record<string, unknown>;
@@ -112,6 +113,24 @@ async function mountWidget(page: Page, cellId: string, state: Record<string, unk
   );
 }
 
+// The drawer sheet slides in with a transform transition; wait until its
+// left edge has settled at the widget box's left edge before measuring.
+async function settleDrawer(page: Page, cellSelector: string): Promise<void> {
+  await expect
+    .poll(
+      () =>
+        page.evaluate((sel) => {
+          const wrapper = document.querySelector(`${sel} .simlin-notebook-widget`) as HTMLElement;
+          const panel = document.querySelector(`${sel} .simlin-notebook-widget [role="dialog"]`) as HTMLElement;
+          return Math.abs(
+            panel.getBoundingClientRect().left - (wrapper.getBoundingClientRect().left + wrapper.clientLeft),
+          );
+        }, cellSelector),
+      { timeout: 5_000 },
+    )
+    .toBeLessThan(1.5);
+}
+
 test.describe('notebook widget bundle', () => {
   test('loads from a blob: URL, boots the engine from comm bytes, edits, and saves a snapshot', async ({ page }) => {
     const consoleErrors: string[] = [];
@@ -146,6 +165,16 @@ test.describe('notebook widget bundle', () => {
     // Exactly one wasm request went to the kernel.
     const wasmRequests = await page.evaluate(() => (window as unknown as HarnessWindow).harness.models[0].wasmRequests);
     expect(wasmRequests).toBe(1);
+    // The compiled module is cached page-wide under a key carrying the sha256
+    // of the wasm this bundle was built against (rsbuild.config.ts bakes it
+    // in), so bundles from different builds never share a compiled engine.
+    const wasmSha256 = createHash('sha256')
+      .update(fs.readFileSync(files['/libsimlin-browser.wasm'].path))
+      .digest('hex');
+    const cacheKeys = await page.evaluate(() =>
+      Object.keys(globalThis).filter((k) => k.startsWith('__simlinWidgetWasmModule')),
+    );
+    expect(cacheKeys).toEqual([`__simlinWidgetWasmModule:${wasmSha256}`]);
 
     // Add a variable through the UI: open the tool dial, pick "Variable",
     // click on empty canvas, accept the default name with Enter.
@@ -260,6 +289,222 @@ test.describe('notebook widget bundle', () => {
       w.harness.models[0].cleanup?.();
     });
     await expect(cell.locator('[data-lm-suppress-shortcuts]')).toHaveCount(0);
+  });
+
+  // Layout claims need a real layout engine: jsdom cannot tell a max-height
+  // that resolves to `none` from one that caps, which is exactly how the
+  // details card once grew past a short host box while a stylesheet-text
+  // test stayed green. So the box-fitting contract of the right-hand panel
+  // (src/diagram/CLAUDE.md, Hosting Requirements) is asserted here, on the
+  // built bundle in a 400px cell.
+  test('the details panel fits a short host box: it scrolls inside the box and aligns with the search bar', async ({
+    page,
+  }) => {
+    await serveHarness(page);
+    await mountWidget(page, 'cell1', initialState({ height: 400 }));
+    const cell = page.locator('#cell1');
+    await expect(cell.locator('svg.simlin-canvas')).toBeVisible({ timeout: 60_000 });
+
+    // A click (press + release, no drag) on the stock opens its details panel.
+    const stock = cell.locator('g.simlin-stock rect').first();
+    const stockBox = await stock.boundingBox();
+    if (stockBox === null) {
+      throw new Error('stock has no bounding box');
+    }
+    await page.mouse.click(stockBox.x + stockBox.width / 2, stockBox.y + stockBox.height / 2);
+    const deleteButton = cell.getByRole('button', { name: 'Delete', exact: true });
+    await expect(deleteButton).toBeAttached();
+
+    const layout = await page.evaluate(() => {
+      const rect = (el: Element): { top: number; bottom: number; left: number; right: number } => {
+        const b = el.getBoundingClientRect();
+        return { top: b.top, bottom: b.bottom, left: b.left, right: b.right };
+      };
+      const root = document.querySelector('#cell1 [data-simlin-editor-root]');
+      const searchBar = document.querySelector('#cell1 [class*="searchBar"]');
+      // The details slot's only child is the card (Delete is inside it).
+      const deleteBtn = Array.from(document.querySelectorAll('#cell1 button')).find(
+        (b) => b.textContent?.trim() === 'Delete',
+      );
+      const card = deleteBtn?.closest('[class*="varDetails"] > *');
+      if (!root || !searchBar || !deleteBtn || !card) {
+        throw new Error('missing editor root, search bar, or details card');
+      }
+      return {
+        root: rect(root),
+        searchBar: rect(searchBar),
+        card: rect(card),
+        cardScrollHeight: card.scrollHeight,
+        cardClientHeight: card.clientHeight,
+        cardOverflowY: getComputedStyle(card).overflowY,
+      };
+    });
+    // The card is capped by the box and scrolls its content instead of
+    // growing past the editor's (overflow: hidden) bottom edge -- and it is
+    // the card that scrolls (overflow-y auto), not the editor root.
+    expect(layout.cardScrollHeight).toBeGreaterThan(layout.cardClientHeight);
+    expect(['auto', 'scroll']).toContain(layout.cardOverflowY);
+    expect(layout.card.bottom).toBeLessThanOrEqual(layout.root.bottom);
+    expect(layout.card.top).toBeGreaterThanOrEqual(layout.root.top);
+    // Edge-aligned with the search bar that overlays its top (same width
+    // clamp, same right anchor).
+    expect(layout.card.left).toBeCloseTo(layout.searchBar.left, 0);
+    expect(layout.card.right).toBeCloseTo(layout.searchBar.right, 0);
+    // The panel's bottom controls are reachable: scrolling the card brings
+    // Delete inside the box.
+    await deleteButton.scrollIntoViewIfNeeded();
+    const deleteBox = await deleteButton.boundingBox();
+    if (deleteBox === null) {
+      throw new Error('Delete has no bounding box');
+    }
+    expect(deleteBox.y + deleteBox.height).toBeLessThanOrEqual(layout.root.bottom);
+    expect(deleteBox.y).toBeGreaterThanOrEqual(layout.root.top);
+    await expect(deleteButton).toBeVisible();
+    const scrolled = await page.evaluate(() => {
+      const root = document.querySelector('#cell1 [data-simlin-editor-root]') as HTMLElement;
+      const deleteBtn = Array.from(document.querySelectorAll('#cell1 button')).find(
+        (b) => b.textContent?.trim() === 'Delete',
+      );
+      const card = deleteBtn?.closest('[class*="varDetails"] > *') as HTMLElement;
+      return { cardScrollTop: card.scrollTop, rootScrollTop: root.scrollTop };
+    });
+    expect(scrolled.cardScrollTop).toBeGreaterThan(0);
+    expect(scrolled.rootScrollTop).toBe(0);
+  });
+
+  // The Editor's overlay surfaces (the hamburger drawer here) render INSIDE the
+  // widget box: portaled to document.body they would sit outside the widget
+  // root class, where every scoped `var(--*)` is undefined (a transparent
+  // sheet over the diagram) and JupyterLab's shortcut-suppression attribute
+  // cannot reach them. Computed styles need a real engine, so this lives here.
+  test("the model drawer renders inside the widget box with the widget's tokens, contained to the box, and without an Exit link", async ({
+    page,
+  }) => {
+    await serveHarness(page);
+    await mountWidget(page, 'cell1', initialState({ height: 400 }));
+    const cell = page.locator('#cell1');
+    await expect(cell.locator('svg.simlin-canvas')).toBeVisible({ timeout: 60_000 });
+
+    await cell.getByRole('button', { name: /^menu$/i }).click();
+    const drawer = cell.locator('.simlin-notebook-widget [role="dialog"]');
+    await expect(drawer).toBeVisible();
+    await expect(drawer.getByRole('button', { name: /download model/i })).toBeVisible();
+    // No Exit link: the notebook page has no "/" to navigate to.
+    await expect(drawer.locator('a[href="/"]')).toHaveCount(0);
+    await expect(drawer.getByRole('link', { name: /exit/i })).toHaveCount(0);
+    // The sheet slides in (a 225ms transform transition); measure once settled.
+    await settleDrawer(page, '#cell1');
+
+    const styles = await page.evaluate(() => {
+      const wrapper = document.querySelector('#cell1 .simlin-notebook-widget') as HTMLElement;
+      const panel = document.querySelector('#cell1 .simlin-notebook-widget [role="dialog"]') as HTMLElement;
+      const backdrop = panel.previousElementSibling as HTMLElement;
+      const cs = getComputedStyle(panel);
+      const rect = (el: Element): { top: number; bottom: number; left: number; right: number } => {
+        const b = el.getBoundingClientRect();
+        return { top: b.top, bottom: b.bottom, left: b.left, right: b.right };
+      };
+      return {
+        insideWrapper: wrapper.contains(panel) && panel.parentElement === wrapper,
+        insideEditorRoot: panel.closest('[data-simlin-editor-root]') !== null,
+        background: cs.backgroundColor,
+        fontFamily: cs.fontFamily,
+        position: cs.position,
+        backdropPosition: getComputedStyle(backdrop).position,
+        panel: rect(panel),
+        backdrop: rect(backdrop),
+        // The wrapper's padding box (inside its 1px border): the containing
+        // block the contained surfaces position against.
+        wrapper: {
+          top: wrapper.getBoundingClientRect().top + wrapper.clientTop,
+          left: wrapper.getBoundingClientRect().left + wrapper.clientLeft,
+          right: wrapper.getBoundingClientRect().left + wrapper.clientLeft + wrapper.clientWidth,
+          bottom: wrapper.getBoundingClientRect().top + wrapper.clientTop + wrapper.clientHeight,
+        },
+      };
+    });
+    expect(styles.insideWrapper).toBe(true);
+    expect(styles.insideEditorRoot).toBe(false);
+    // The scoped tokens resolve: an opaque surface, the Editor's font stack.
+    expect(styles.background).not.toBe('rgba(0, 0, 0, 0)');
+    expect(styles.background).not.toBe('transparent');
+    expect(styles.fontFamily).toContain('Roboto');
+    // Contained: absolute inside the box, the sheet spans the box's height
+    // from its left edge and the backdrop covers exactly the box.
+    expect(styles.position).toBe('absolute');
+    expect(styles.backdropPosition).toBe('absolute');
+    expect(styles.panel.left).toBeCloseTo(styles.wrapper.left, 0);
+    expect(styles.panel.top).toBeGreaterThanOrEqual(styles.wrapper.top);
+    expect(styles.panel.bottom).toBeLessThanOrEqual(styles.wrapper.bottom);
+    expect(styles.panel.bottom - styles.panel.top).toBeGreaterThan(300);
+    expect(styles.backdrop.top).toBeGreaterThanOrEqual(styles.wrapper.top);
+    expect(styles.backdrop.bottom).toBeLessThanOrEqual(styles.wrapper.bottom);
+    expect(styles.backdrop.right).toBeLessThanOrEqual(styles.wrapper.right);
+    // Close returns to the diagram.
+    await drawer.getByRole('button', { name: /^close$/i }).click();
+    await expect(drawer).toBeHidden();
+
+    // A narrow cell (a phone, or a split view): the sheet leaves a 48px strip
+    // of backdrop for tap-to-dismiss and stays inside the box.
+    await page.evaluate(() => {
+      document.getElementById('cell2')!.style.width = '320px';
+    });
+    await mountWidget(page, 'cell2', initialState({ height: 400 }));
+    const cell2 = page.locator('#cell2');
+    await expect(cell2.locator('svg.simlin-canvas')).toBeVisible({ timeout: 60_000 });
+    await cell2.getByRole('button', { name: /^menu$/i }).click();
+    const drawer2 = cell2.locator('.simlin-notebook-widget [role="dialog"]');
+    await expect(drawer2).toBeVisible();
+    await settleDrawer(page, '#cell2');
+    const narrow = await page.evaluate(() => {
+      const wrapper = document.querySelector('#cell2 .simlin-notebook-widget') as HTMLElement;
+      const panel = document.querySelector('#cell2 .simlin-notebook-widget [role="dialog"]') as HTMLElement;
+      const close = Array.from(panel.querySelectorAll('button')).find((b) => b.getAttribute('aria-label') === 'Close')!;
+      return {
+        wrapperClientWidth: wrapper.clientWidth,
+        wrapperRight: wrapper.getBoundingClientRect().right,
+        panelWidth: panel.getBoundingClientRect().width,
+        panelRight: panel.getBoundingClientRect().right,
+        closeRight: close.getBoundingClientRect().right,
+      };
+    });
+    expect(narrow.wrapperClientWidth).toBeLessThan(375 + 48);
+    expect(narrow.panelWidth).toBeCloseTo(narrow.wrapperClientWidth - 48, 0);
+    expect(narrow.panelRight).toBeLessThanOrEqual(narrow.wrapperRight);
+    expect(narrow.closeRight).toBeLessThanOrEqual(narrow.panelRight);
+    // Kept as a visual artifact of the run (gitignored), not an assertion.
+    await page.screenshot({ path: path.join(here, '.output', 'drawer-contained.png'), fullPage: true });
+  });
+
+  test('SIMLIN_WIDGET_ASSET=inline: the module compiles the engine from the inline global and never asks the kernel', async ({
+    page,
+  }) => {
+    await serveHarness(page);
+    const wasmBase64 = fs.readFileSync(files['/libsimlin-browser.wasm'].path).toString('base64');
+    const idx = await page.evaluate(
+      async ({ state, wasmBase64 }) => {
+        const w = window as unknown as HarnessWindow;
+        const mod = await w.harness.loadWidgetModule(wasmBase64);
+        return w.harness.mount(mod, document.getElementById('cell1')!, state);
+      },
+      { state: initialState({ height: 300 }), wasmBase64 },
+    );
+    expect(idx).toBe(0);
+    const cell = page.locator('#cell1');
+    await expect(cell.locator('svg.simlin-canvas')).toBeVisible({ timeout: 60_000 });
+    await expect(cell.getByText('Population', { exact: true }).first()).toBeVisible();
+    const after = await page.evaluate(() => {
+      const m = (window as unknown as HarnessWindow).harness.models[0];
+      return {
+        wasmRequests: m.wasmRequests,
+        sent: m.sent,
+        // Consumed by the module: not left on the page.
+        inlineGlobal: (globalThis as Record<string, unknown>).__simlinWidgetInlineWasm,
+      };
+    });
+    expect(after.wasmRequests).toBe(0);
+    expect(after.sent).toEqual([]);
+    expect(after.inlineGlobal).toBeUndefined();
   });
 
   test('a kernel that cannot supply the engine shows the error in the cell and a later widget retries', async ({

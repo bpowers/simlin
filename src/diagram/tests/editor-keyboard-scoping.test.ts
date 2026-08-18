@@ -386,6 +386,79 @@ describe('Editor keyboard scoping across instances', () => {
     expect(undoRedoCalls).toEqual([{ controller: a.controller, kind: 'undo' }]);
   });
 
+  // A pointer press inside an instance also moves FOCUS into it (onto the
+  // root) when focus was elsewhere -- on the host page or <body>. The Canvas
+  // prevents the default focus change on every pointerdown, so without this a
+  // click on a variable left focus wherever it was: on a notebook cell, whose
+  // shortcuts then took the keys the user meant for the Editor.
+  it('a press inside an instance moves focus onto its root when focus was outside every editor', () => {
+    const a = mountEditor();
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    outside.focus();
+    expect(document.activeElement).toBe(outside);
+
+    pressInside(a);
+    expect(document.activeElement).toBe(a.root);
+    outside.remove();
+  });
+
+  it('a press inside an instance leaves focus alone when it is already inside that instance (an editable keeps its caret)', () => {
+    const a = mountEditor();
+    const field = document.createElement('input');
+    a.root.appendChild(field);
+    field.focus();
+    expect(document.activeElement).toBe(field);
+
+    // A press on the canvas while typing: focus stays where it is here (the
+    // Canvas's own click-settle focus is what later blurs and commits it).
+    pressInside(a);
+    expect(document.activeElement).toBe(field);
+    // A press ON the focused editable itself, likewise.
+    act(() => {
+      fireEvent.pointerDown(field);
+    });
+    expect(document.activeElement).toBe(field);
+    field.remove();
+  });
+
+  it('a press inside a portaled surface whose focus is on that surface (or an ancestor of the pressed element) leaves focus alone', () => {
+    const a = mountEditor();
+    // Open the model-properties drawer: it portals to document.body (not a
+    // DOM descendant of the root) and focuses its panel on open.
+    act(() => {
+      fireEvent.click(a.result.getByLabelText(/^menu$/i));
+    });
+    const panel = document.querySelector('[role="dialog"]') as HTMLElement;
+    expect(panel).not.toBeNull();
+    expect(a.root.contains(panel)).toBe(false);
+    act(() => {
+      panel.focus();
+    });
+    expect(document.activeElement).toBe(panel);
+    // A press on a control inside the panel: the focused element is an
+    // ancestor of the pressed one, so the root does not steal focus.
+    const download = a.result.getByRole('button', { name: /download model/i });
+    act(() => {
+      fireEvent.pointerDown(download);
+    });
+    expect(document.activeElement).toBe(panel);
+    // A press on the focused panel itself, likewise.
+    act(() => {
+      fireEvent.pointerDown(panel);
+    });
+    expect(document.activeElement).toBe(panel);
+  });
+
+  it('a press inside B moves focus from A to B', () => {
+    const a = mountEditor();
+    const b = mountEditor();
+    pressInside(a);
+    expect(document.activeElement).toBe(a.root);
+    pressInside(b);
+    expect(document.activeElement).toBe(b.root);
+  });
+
   it('a single Editor still handles a key on <body> after a press inside it (the app/serve hosts)', async () => {
     const a = mountEditor();
     select(a, 9);
