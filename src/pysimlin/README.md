@@ -290,12 +290,17 @@ print(model.reload())   # False
 
 ### Interactive Editing in Notebooks
 
-In JupyterLab, Notebook 7, VS Code, or Colab, a model displayed as a cell's
-value is the Simlin diagram editor, live. `pip install pysimlin` is all it
-needs: the editor and its engine ship inside the wheel as an
-[anywidget](https://anywidget.dev), so there is no extension to install and
-no sidecar process. Static renderers (nbconvert, GitHub) get the SVG
-diagram in the same output.
+A model displayed as a cell's value is the Simlin diagram editor, live.
+`pip install pysimlin` is all it needs: the editor and its engine ship
+inside the wheel as an [anywidget](https://anywidget.dev), so there is no
+extension to install and no sidecar process. It is verified on JupyterLab 4
+(an automated browser journey runs on every commit) and expected to work
+wherever anywidget does -- Notebook 7, VS Code, Google Colab, marimo --
+with the checklist and the honest status of each host in
+[`docs/notebook-hosts.md`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/docs/notebook-hosts.md)
+([`examples/colab_quickstart.ipynb`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/examples/colab_quickstart.ipynb)
+is the two-minute Colab start). Static renderers get the SVG diagram in the
+same output.
 
 <!-- pysimlin-test: skip -->
 ```python
@@ -333,43 +338,40 @@ print(model.selection)   # () until something is selected in a displayed editor
 `read_only=True` the editor shows the diagram without accepting edits;
 `theme` is `"auto"` (follow the notebook), `"light"`, or `"dark"`.
 
-Host by host -- what is verified where, what to check, and the notes for
-Colab, VS Code, and marimo -- is
-[`docs/notebook-hosts.md`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/docs/notebook-hosts.md);
-[`examples/colab_quickstart.ipynb`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/examples/colab_quickstart.ipynb)
-is the two-minute Colab start.
+Practical notes:
 
-Each display creates a kernel-side widget that stays subscribed to the
-model until it is closed (`widget.close()`, or `simlin.ModelWidget.close_all()`);
-re-running a display cell leaves the previous one alive, which is harmless
-but worth knowing in long sessions. The SVG in the same output is for
-static renderers -- nbconvert, GitHub, a viewer without a kernel; JupyterLab
-itself shows "model not found" in place of a widget when a notebook is
-reopened without a running kernel or saved widget state. nbconvert shows
-the SVG whenever the notebook carries no saved widget state; `jupyter
-nbconvert --execute` stores that state by default and then exports the
-widget itself (with its 1.5 MB module embedded, loading ipywidgets from a
-CDN when opened), so pass `--ExecutePreprocessor.store_widget_state=False`
-to get the diagram instead. Hosts that save
-widget state into the notebook file (Colab does by default; JupyterLab does
-not) store the widget's JS module, about 1.5 MB, per displayed widget. If
-that size is a concern, or the front-end cannot receive binary comm
-messages, set `SIMLIN_WIDGET_ASSET` **before** `import simlin`: `inline`
-embeds the engine wasm into the module (works everywhere, largest output),
-or an `http(s)://` URL loads the module from a server you run.
-
-Very large models display but cannot be edited from the notebook editor:
-each edit travels browser-to-kernel as the whole project in JSON, and the
-notebook server drops websocket messages above 10 MiB (tornado's
-`websocket_max_message_size`) by closing the connection. The editor
-therefore refuses to send an edit whose snapshot exceeds 8 MiB
-(`model.widget(max_snapshot_bytes=...)` sets the cap) and says "Edit not
-saved: the model is too large for the notebook connection ..." instead of
-hanging; displaying such a model emits a `RuntimeWarning` up front. For
-scale, C-LEARN (911 variables) is 1.3 MiB. Editing from Python is
-unaffected. To edit models that large in the editor, raise both limits:
-`jupyter lab --ServerApp.tornado_settings='{"websocket_max_message_size": 104857600}'`
-and `max_snapshot_bytes` at or below about 80% of that.
+- **Widget lifetime.** Each display creates a kernel-side widget that stays
+  subscribed to the model until it is closed (`widget.close()`, or
+  `simlin.ModelWidget.close_all()`); re-running a display cell leaves the
+  previous one alive, which is harmless but worth knowing in long sessions.
+- **Reopening a notebook.** JupyterLab shows "model not found" in place of
+  a widget when a notebook is reopened without a running kernel or saved
+  widget state; re-run the display cell. Hosts that save widget state into
+  the notebook file (Colab does by default; JupyterLab does not) store the
+  widget's JS module, about 1.5 MB, per displayed widget.
+- **Static export.** The SVG in the same output is what nbconvert, GitHub,
+  or a viewer without a kernel shows -- whenever the notebook carries no
+  saved widget state. `jupyter nbconvert --execute` stores that state by
+  default and then exports the widget itself (module embedded, ipywidgets
+  loaded from a CDN when opened); pass
+  `--ExecutePreprocessor.store_widget_state=False` to get the diagram.
+- **Asset delivery.** If the saved-state size is a concern, or the
+  front-end cannot receive binary comm messages, set `SIMLIN_WIDGET_ASSET`
+  **before** `import simlin`: `inline` embeds the engine wasm into the
+  module (works everywhere, largest output), or an `http(s)://` URL loads
+  the module from a server you run.
+- **Very large models** display but cannot be edited from the editor: each
+  edit travels browser-to-kernel as the whole project in JSON, and the
+  notebook server drops websocket messages above 10 MiB (tornado's
+  `websocket_max_message_size`) by closing the connection. The editor
+  therefore refuses to send an edit whose snapshot exceeds 8 MiB
+  (`model.widget(max_snapshot_bytes=...)` sets the cap) with the notice
+  "Edit not saved: the model is too large for the notebook connection ..."
+  instead of hanging, and displaying such a model emits a `RuntimeWarning`
+  up front. For scale, C-LEARN (911 variables) is 1.3 MiB. Editing from
+  Python is unaffected. To edit models that large in the editor, raise
+  both limits: `jupyter lab --ServerApp.tornado_settings='{"websocket_max_message_size": 104857600}'`
+  and `max_snapshot_bytes` at or below about 80% of that.
 
 ### Running Simulations
 
