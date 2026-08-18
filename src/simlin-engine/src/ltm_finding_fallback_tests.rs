@@ -6,9 +6,8 @@
 //! keep the production file under the per-file line cap (mounted via `#[path]`).
 
 use std::collections::HashMap;
-use std::time::Duration;
 
-use super::super::LinkOffset;
+use super::super::{LinkOffset, ScriptedClock};
 use super::*;
 use crate::common::{Canonical, Ident};
 use crate::results::{Method, Specs};
@@ -629,42 +628,6 @@ fn opposite_direction_three_cycles_are_both_kept() {
 }
 
 // --- Deadline -------------------------------------------------------------
-
-/// A clock whose expiry is scripted by read index rather than by real time, so
-/// mid-sweep truncation is deterministic instead of racing a `Duration`.
-struct ScriptedClock {
-    base: Instant,
-    /// Reads at index >= this one return a time far past any deadline below.
-    expire_at_read: usize,
-    reads: usize,
-}
-
-impl ScriptedClock {
-    fn new(expire_at_read: usize) -> Self {
-        ScriptedClock {
-            base: Instant::now(),
-            expire_at_read,
-            reads: 0,
-        }
-    }
-
-    /// A deadline this clock is before until `expire_at_read` reads have gone by.
-    fn deadline(&self) -> Instant {
-        self.base + Duration::from_secs(1)
-    }
-}
-
-impl Clock for ScriptedClock {
-    fn now(&mut self) -> Instant {
-        let index = self.reads;
-        self.reads += 1;
-        if index + 1 >= self.expire_at_read {
-            self.base + Duration::from_secs(3600)
-        } else {
-            self.base
-        }
-    }
-}
 
 /// Two steps, a different cycle live in each -- so which step the sweep got
 /// through is observable in the output.

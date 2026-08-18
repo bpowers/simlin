@@ -40,7 +40,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use super::{DEADLINE_CHECK_INTERVAL, IndexedSearch, MIN_CONTRIBUTION};
+use super::{Clock, DEADLINE_CHECK_INTERVAL, IndexedSearch, MIN_CONTRIBUTION, expired};
 use crate::results::Results;
 
 /// Maximum elementary circuits the union-graph enumerator may emit before
@@ -81,6 +81,26 @@ pub(super) const MAX_DISCOVERY_ENUM_VISITS: u64 = 100_000_000;
 /// is 80 MB of `u32` -- and it equally bounds the retention pass, whose work is
 /// linear in emitted rows.
 pub(super) const MAX_DISCOVERY_ENUM_EDGE_ROWS: u64 = 20_000_000;
+
+/// How many recorded values [`ActivityGraph::build`] may copy between
+/// wall-clock deadline checks.
+///
+/// The build's work is `union edges x step_count` slab reads, and either
+/// factor alone can be the large one: World3 is ~430 edges over 401 saved
+/// steps, while a two-variable goal-seeking model saved at 200k steps is 6
+/// edges over 200,001. Counting VALUES rather than edges keeps one check
+/// interval the same amount of work in both shapes -- the stride in edges is
+/// derived from the step count, so the inner per-step loop stays check-free.
+/// The first check happens before the first edge is copied, so an
+/// already-expired deadline costs no work at all.
+const ACTIVITY_BUILD_DEADLINE_CHECK_VALUES: usize = 1 << 16;
+
+/// How many circuits [`retain_circuits`] scores between wall-clock deadline
+/// checks. A circuit's scoring pass is O(active steps), so a few thousand of
+/// them is the same order of work as the other phases' intervals; the first
+/// check is at circuit 0, so an already-expired deadline is caught before any
+/// scoring.
+const RETENTION_DEADLINE_CHECK_CIRCUITS: usize = 4096;
 
 /// The three enumeration budgets: circuits, edge-visits, emitted edge rows.
 type EnumBudgets = (usize, u64, u64);
@@ -132,6 +152,54 @@ impl Drop for EnumBudgetGuard {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of [`enum_deadline_visit_interval`], scoped by an
+    /// active [`EnumDeadlineVisitIntervalGuard`] -- lets a two-triangle
+    /// fixture exercise the in-search deadline check instead of needing a
+    /// graph deep enough to reach 8192 edge visits
+    /// (docs/dev/rust.md#test-time-budgets).
+    static ENUM_DEADLINE_VISIT_INTERVAL_OVERRIDE: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// How many edge visits [`enumerate_active_circuits`] may make between
+/// wall-clock deadline checks. Must stay a power of two: the test is a single
+/// mask.
+fn enum_deadline_visit_interval() -> u64 {
+    #[cfg(test)]
+    {
+        if let Some(interval) = ENUM_DEADLINE_VISIT_INTERVAL_OVERRIDE.with(|c| c.get()) {
+            debug_assert!(interval.is_power_of_two());
+            return interval;
+        }
+    }
+    DEADLINE_CHECK_INTERVAL as u64
+}
+
+/// RAII guard (test-only) overriding [`enum_deadline_visit_interval`] for the
+/// current thread; restores the previous value on drop so a panicking test
+/// does not leak the override to the next test on the same thread.
+#[cfg(test)]
+pub(crate) struct EnumDeadlineVisitIntervalGuard {
+    prev: Option<u64>,
+}
+
+#[cfg(test)]
+impl EnumDeadlineVisitIntervalGuard {
+    pub(crate) fn new(interval: u64) -> Self {
+        let prev = ENUM_DEADLINE_VISIT_INTERVAL_OVERRIDE.with(|c| c.replace(Some(interval)));
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for EnumDeadlineVisitIntervalGuard {
+    fn drop(&mut self) {
+        ENUM_DEADLINE_VISIT_INTERVAL_OVERRIDE.with(|c| c.set(self.prev));
+    }
+}
+
 /// The union-of-active-edges graph: the discovery edge set restricted to
 /// non-self edges whose recorded |score| is nonzero (finite) at >= 1 saved
 /// step in `1..step_count`, each edge carrying a word-packed activity bitset
@@ -174,10 +242,25 @@ pub(super) struct ActivityGraph {
 impl ActivityGraph {
     /// Scan the results slab once and build the union graph, its activity
     /// bitsets, and its contiguous score rows.
-    pub(super) fn build(search: &IndexedSearch, results: &Results) -> ActivityGraph {
+    ///
+    /// Returns `None` when `deadline` passes part way: the build is the first
+    /// phase of the enumeration path and can itself be the expensive one on a
+    /// model saved at many steps, so a caller whose budget is already spent
+    /// has to be able to abandon it and go straight to the fallback rather
+    /// than copy a slab it will discard. The clock is read at most once per
+    /// [`ACTIVITY_BUILD_DEADLINE_CHECK_VALUES`] values copied, and an
+    /// unbudgeted build never reads it at all.
+    pub(super) fn build(
+        search: &IndexedSearch,
+        results: &Results,
+        deadline: Option<Instant>,
+        clock: &mut dyn Clock,
+    ) -> Option<ActivityGraph> {
         let n_nodes = search.node_count();
         let step_count = results.step_count;
         let words = step_count.div_ceil(64).max(1);
+        let check_stride = (ACTIVITY_BUILD_DEADLINE_CHECK_VALUES / step_count.max(1)).max(1);
+        let mut edges_scanned = 0usize;
 
         let mut adj: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n_nodes];
         let mut radj: Vec<Vec<u32>> = vec![Vec::new(); n_nodes];
@@ -190,6 +273,10 @@ impl ActivityGraph {
 
         for (from, edges) in search.adj.iter().enumerate() {
             for edge in edges {
+                if edges_scanned.is_multiple_of(check_stride) && expired(deadline, clock) {
+                    return None;
+                }
+                edges_scanned += 1;
                 if edge.to as usize == from {
                     // A self-edge can never be part of an elementary cycle of
                     // length >= 2 (such a cycle never repeats a node), and a
@@ -223,7 +310,7 @@ impl ActivityGraph {
         }
 
         let scc_of = tarjan_scc_of(&adj, n_nodes);
-        ActivityGraph {
+        Some(ActivityGraph {
             adj,
             radj,
             bits,
@@ -232,7 +319,7 @@ impl ActivityGraph {
             step_count,
             edge_from,
             scc_of,
-        }
+        })
     }
 
     #[inline]
@@ -507,8 +594,10 @@ impl EnumeratedCandidates {
 pub(super) fn enumerate_active_circuits(
     graph: &ActivityGraph,
     deadline: Option<Instant>,
+    clock: &mut dyn Clock,
 ) -> EnumeratedCandidates {
     let (max_circuits, max_visits, max_edge_rows) = enum_budgets();
+    let visit_interval = enum_deadline_visit_interval();
     let n_nodes = graph.adj.len();
     let words = graph.words;
 
@@ -544,10 +633,7 @@ pub(super) fn enumerate_active_circuits(
             if let Some(&(to, row)) = graph.adj[v as usize].get(ei) {
                 frames[depth - 1].1 += 1;
                 visits += 1;
-                if visits & (DEADLINE_CHECK_INTERVAL as u64 - 1) == 0
-                    && let Some(d) = deadline
-                    && Instant::now() >= d
-                {
+                if visits & (visit_interval - 1) == 0 && expired(deadline, clock) {
                     break 'dfs;
                 }
                 if visits > max_visits {
@@ -675,6 +761,7 @@ pub(super) fn retain_circuits(
     stock_partition_of_node: &[Option<usize>],
     is_module_node: &[bool],
     deadline: Option<Instant>,
+    clock: &mut dyn Clock,
 ) -> Option<RetentionOutcome> {
     let step_count = graph.step_count;
 
@@ -687,7 +774,7 @@ pub(super) fn retain_circuits(
     let mut to_confirm: Vec<usize> = Vec::new();
 
     for ci in 0..candidates.len() {
-        if deadline_expired(ci, deadline) {
+        if deadline_expired(ci, deadline, clock) {
             return None;
         }
         let rows = candidates.circuit(ci);
@@ -737,7 +824,7 @@ pub(super) fn retain_circuits(
     }
 
     for (n, &ci) in to_confirm.iter().enumerate() {
-        if deadline_expired(n, deadline) {
+        if deadline_expired(n, deadline, clock) {
             return None;
         }
         let rows = candidates.circuit(ci);
@@ -818,8 +905,8 @@ pub(super) fn accumulate_series_into_totals(
 }
 
 #[inline]
-fn deadline_expired(i: usize, deadline: Option<Instant>) -> bool {
-    i.is_multiple_of(4096) && deadline.is_some_and(|d| Instant::now() >= d)
+fn deadline_expired(i: usize, deadline: Option<Instant>, clock: &mut dyn Clock) -> bool {
+    i.is_multiple_of(RETENTION_DEADLINE_CHECK_CIRCUITS) && expired(deadline, clock)
 }
 
 /// Resolve a node path's consecutive-pair (wrapping) edge rows. Every pair is a

@@ -1623,6 +1623,81 @@ struct StepEdge {
 /// under 0.1% of visits.
 const DEADLINE_CHECK_INTERVAL: u32 = 8192;
 
+/// Wall-clock source for discovery's deadline checks.
+///
+/// Production reads `Instant::now()`. Tests substitute a scripted clock so
+/// that expiry is a deterministic fact about a phase's structure rather than
+/// a race against a real `Duration` -- a budget test that has to pick a
+/// duration small enough to trip and large enough to make progress is flaky
+/// on a loaded machine and slow on an idle one. Every deadline-aware phase
+/// (`ActivityGraph::build`, `enumerate_active_circuits`, `retain_circuits`,
+/// the fallback sweep) reads the clock only through this trait, so "an
+/// unbudgeted call never reads the clock" is a testable claim rather than an
+/// inspection of the source.
+pub(crate) trait Clock {
+    fn now(&mut self) -> Instant;
+}
+
+/// The production clock.
+pub(crate) struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&mut self) -> Instant {
+        Instant::now()
+    }
+}
+
+/// `true` when `deadline` is set and has passed. An unbudgeted phase
+/// (`deadline == None`) never reads the clock at all.
+#[inline]
+fn expired(deadline: Option<Instant>, clock: &mut dyn Clock) -> bool {
+    match deadline {
+        Some(d) => clock.now() >= d,
+        None => false,
+    }
+}
+
+/// A test clock whose expiry is scripted by read index rather than by real
+/// time, so a phase's mid-work truncation is deterministic instead of racing
+/// a `Duration`. It also counts its reads, which is how the
+/// never-reads-the-clock claim is pinned.
+#[cfg(test)]
+pub(crate) struct ScriptedClock {
+    base: Instant,
+    /// Reads at index >= this one return a time far past [`Self::deadline`].
+    expire_at_read: usize,
+    pub(crate) reads: usize,
+}
+
+#[cfg(test)]
+impl ScriptedClock {
+    pub(crate) fn new(expire_at_read: usize) -> Self {
+        ScriptedClock {
+            base: Instant::now(),
+            expire_at_read,
+            reads: 0,
+        }
+    }
+
+    /// A deadline this clock is before until `expire_at_read` reads have gone by.
+    pub(crate) fn deadline(&self) -> Instant {
+        self.base + Duration::from_secs(1)
+    }
+}
+
+#[cfg(test)]
+impl Clock for ScriptedClock {
+    fn now(&mut self) -> Instant {
+        let index = self.reads;
+        self.reads += 1;
+        if index + 1 >= self.expire_at_read {
+            self.base + Duration::from_secs(3600)
+        } else {
+            self.base
+        }
+    }
+}
+
 /// Total node-expansion budget for one (stock, timestep) search, divided by
 /// the size of the stock's strongly-connected component to give the per-node
 /// expansion cap: `per_node_cap = max(1, EXPANSION_BUDGET_PER_SEARCH / |SCC|)`.
@@ -2723,9 +2798,11 @@ pub fn discover_loops_with_candidate_gen(
     // totals are the mass the REPORTED loops carry, which the corrections
     // below maintain where a loop's reported score is not the raw product the
     // enumeration pass banked.
-    if candidate_gen == CandidateGen::Auto {
-        let activity = ActivityGraph::build(&search, results);
-        let candidates = enumerate_active_circuits(&activity, deadline);
+    let clock: &mut dyn Clock = &mut SystemClock;
+    if candidate_gen == CandidateGen::Auto
+        && let Some(activity) = ActivityGraph::build(&search, results, deadline, clock)
+    {
+        let candidates = enumerate_active_circuits(&activity, deadline, clock);
         if candidates.complete {
             // Per-node metadata for the streaming retention passes.
             let stock_partition_of_node: Vec<Option<usize>> = search
@@ -2744,6 +2821,7 @@ pub fn discover_loops_with_candidate_gen(
                 &stock_partition_of_node,
                 &is_module_node,
                 deadline,
+                clock,
             ) {
                 // The universe's denominators and the universe's circuit
                 // counts are two views of one enumerated set, built in one

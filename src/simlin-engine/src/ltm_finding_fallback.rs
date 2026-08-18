@@ -44,7 +44,7 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 use std::time::Instant;
 
-use super::{DEADLINE_CHECK_INTERVAL, IndexedSearch, tarjan_scc_ids};
+use super::{Clock, DEADLINE_CHECK_INTERVAL, IndexedSearch, SystemClock, expired, tarjan_scc_ids};
 use crate::results::Results;
 
 /// Edge weight formulation for the fallback's shortest-path search.
@@ -131,36 +131,6 @@ fn edge_weight(weight: FallbackWeight, abs_score: f64, in_sum: f64) -> f64 {
             }
         }
         FallbackWeight::HopCount => 1.0,
-    }
-}
-
-/// Wall-clock source for the sweep's deadline checks.
-///
-/// Production reads `Instant::now()`. Tests substitute a scripted clock so
-/// that mid-sweep expiry is a deterministic fact about the sweep's structure
-/// rather than a race against a real `Duration` -- a budget test that has to
-/// pick a duration small enough to trip and large enough to make progress is
-/// flaky on a loaded machine and slow on an idle one.
-pub(super) trait Clock {
-    fn now(&mut self) -> Instant;
-}
-
-/// The production clock.
-pub(super) struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now(&mut self) -> Instant {
-        Instant::now()
-    }
-}
-
-/// `true` when `deadline` is set and has passed. An unbudgeted sweep
-/// (`deadline == None`) never reads the clock at all.
-#[inline]
-fn expired(deadline: Option<Instant>, clock: &mut dyn Clock) -> bool {
-    match deadline {
-        Some(d) => clock.now() >= d,
-        None => false,
     }
 }
 

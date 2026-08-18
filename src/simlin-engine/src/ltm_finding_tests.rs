@@ -4190,8 +4190,9 @@ fn retention_pass_drops_below_threshold_keeps_module_and_solo() {
     let results = enum_results(n_offsets, step_count, data);
     let stocks = stock_list(&["a"]);
     let search = IndexedSearch::build(&link_offsets, &stocks);
-    let activity = super::enum_gen::ActivityGraph::build(&search, &results);
-    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None);
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
+        .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
     assert!(candidates.complete);
     assert_eq!(candidates.len(), 3, "three 2-cycles");
 
@@ -4208,6 +4209,7 @@ fn retention_pass_drops_below_threshold_keeps_module_and_solo() {
         &stock_partition,
         &no_modules,
         None,
+        &mut SystemClock,
     )
     .unwrap();
     let survivor_nodes = survivor_node_sets(&outcome, &candidates, &activity, &search);
@@ -4230,9 +4232,15 @@ fn retention_pass_drops_below_threshold_keeps_module_and_solo() {
     // Same fixture with `c` marked as a module node: the tiny loop is kept
     // unconditionally (its final score may use the override series).
     let modules: Vec<bool> = search.idents.iter().map(|id| id.as_str() == "c").collect();
-    let outcome =
-        super::enum_gen::retain_circuits(&candidates, &activity, &stock_partition, &modules, None)
-            .unwrap();
+    let outcome = super::enum_gen::retain_circuits(
+        &candidates,
+        &activity,
+        &stock_partition,
+        &modules,
+        None,
+        &mut SystemClock,
+    )
+    .unwrap();
     assert_eq!(
         outcome.survivors.len(),
         3,
@@ -4283,8 +4291,9 @@ fn retention_totals_and_survivors_match_hand_computed_products() {
     }
     let results = enum_results(n_offsets, step_count, data);
     let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
-    let activity = super::enum_gen::ActivityGraph::build(&search, &results);
-    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None);
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
+        .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
     assert!(candidates.complete);
     assert_eq!(candidates.len(), 3);
 
@@ -4300,6 +4309,7 @@ fn retention_totals_and_survivors_match_hand_computed_products() {
         &stock_partition,
         &no_modules,
         None,
+        &mut SystemClock,
     )
     .unwrap();
 
@@ -4357,8 +4367,9 @@ fn retention_confirms_a_circuit_whose_running_bound_overstates_its_share() {
     data[n_offsets + 3] = 1.0; // b->a  (product 1.0)
     let results = enum_results(n_offsets, step_count, data);
     let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
-    let activity = super::enum_gen::ActivityGraph::build(&search, &results);
-    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None);
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
+        .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
     assert!(candidates.complete);
     assert_eq!(
         activity
@@ -4382,6 +4393,7 @@ fn retention_confirms_a_circuit_whose_running_bound_overstates_its_share() {
         &stock_partition,
         &no_modules,
         None,
+        &mut SystemClock,
     )
     .unwrap();
     assert_eq!(
@@ -4418,8 +4430,9 @@ fn retention_counts_the_universe_circuits_per_partition() {
     data[n_offsets + 5] = 0.5;
     let results = enum_results(n_offsets, step_count, data);
     let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
-    let activity = super::enum_gen::ActivityGraph::build(&search, &results);
-    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None);
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
+        .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
     let stock_partition: Vec<Option<usize>> = search
         .idents
         .iter()
@@ -4432,6 +4445,7 @@ fn retention_counts_the_universe_circuits_per_partition() {
         &stock_partition,
         &no_modules,
         None,
+        &mut SystemClock,
     )
     .unwrap();
     assert_eq!(
@@ -4482,8 +4496,9 @@ fn an_inf_times_zero_product_is_excluded_from_totals_and_retention() {
     }
     let results = enum_results(n_offsets, step_count, data);
     let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
-    let activity = super::enum_gen::ActivityGraph::build(&search, &results);
-    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None);
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
+        .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
     assert!(candidates.complete);
     assert_eq!(candidates.len(), 2, "the triangle and the 2-cycle");
 
@@ -4499,6 +4514,7 @@ fn an_inf_times_zero_product_is_excluded_from_totals_and_retention() {
         &stock_partition,
         &no_modules,
         None,
+        &mut SystemClock,
     )
     .unwrap();
 
@@ -4527,7 +4543,7 @@ fn an_inf_times_zero_product_is_excluded_from_totals_and_retention() {
 #[test]
 fn enumerator_emits_each_active_cycle_exactly_once() {
     let (activity, _search) = two_triangles_and_a_self_edge();
-    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None);
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
     assert!(candidates.complete);
     assert_eq!(
         candidates.len(),
@@ -4545,6 +4561,16 @@ fn enumerator_emits_each_active_cycle_exactly_once() {
 /// Two disjoint triangles (a->b->c->a, u->v->w->u) plus an active self-edge
 /// z->z, all active at step 1. Six union edges, two circuits, six edge rows.
 fn two_triangles_and_a_self_edge() -> (super::enum_gen::ActivityGraph, IndexedSearch) {
+    let (search, results) = two_triangles_search_and_results();
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
+        .expect("an unbudgeted build never abandons");
+    (activity, search)
+}
+
+/// The topology and recorded series behind [`two_triangles_and_a_self_edge`],
+/// before the activity graph is built -- what the deadline tests below need,
+/// since the build is itself one of the phases under test.
+fn two_triangles_search_and_results() -> (IndexedSearch, Results) {
     let link_offsets: Vec<LinkOffset> = vec![
         ((Ident::new("a"), Ident::new("b")), 0),
         ((Ident::new("b"), Ident::new("c")), 1),
@@ -4562,24 +4588,20 @@ fn two_triangles_and_a_self_edge() -> (super::enum_gen::ActivityGraph, IndexedSe
     }
     let results = enum_results(n_offsets, step_count, data);
     let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
-    let activity = super::enum_gen::ActivityGraph::build(&search, &results);
-    (activity, search)
+    (search, results)
 }
 
 /// Every enumeration budget reports an incomplete enumeration when it trips:
 /// the circuit count, the edge-visit count, and -- AC3.3, the memory bound --
-/// the total emitted edge rows.
-///
-/// The fourth stop condition, an expired wall-clock deadline, is deliberately
-/// not covered here: the clock is read only every `DEADLINE_CHECK_INTERVAL`
-/// visits, so a fixture small enough for this test's time budget never reaches
-/// a check. It needs a fixture sized to the interval, which the discovery
-/// deadline tests own.
+/// the total emitted edge rows. The fourth stop condition, an expired
+/// wall-clock deadline, is the arm
+/// `enumerate_active_circuits_abandons_an_already_expired_deadline` below
+/// covers.
 #[test]
 fn each_enumeration_budget_arm_reports_incomplete() {
     let (activity, _search) = two_triangles_and_a_self_edge();
     assert!(
-        super::enum_gen::enumerate_active_circuits(&activity, None).complete,
+        super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock).complete,
         "the fixture completes when nothing is overridden"
     );
 
@@ -4589,12 +4611,141 @@ fn each_enumeration_budget_arm_reports_incomplete() {
         ("edge-row budget", usize::MAX, u64::MAX, 1u64),
     ] {
         let _guard = EnumBudgetGuard::new(circuits, visits, edge_rows);
-        let truncated = super::enum_gen::enumerate_active_circuits(&activity, None);
+        let truncated =
+            super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
         assert!(
             !truncated.complete,
             "a tripped {arm} must report an incomplete enumeration"
         );
     }
+}
+
+// --- Per-phase deadline awareness (AC2.2) ---------------------------------
+//
+// Discovery's enumeration path has three phases, and a caller's wall-clock
+// budget has to bind in each of them: a budget that only the LAST phase
+// honoured would be spent entirely inside the first two on the model that
+// needs it most. Each phase gets one arm here for an already-expired deadline
+// and one for the unbudgeted case, where reading the clock at all is the
+// defect (a per-value clock read would swamp the work it guards). The fourth
+// phase, the fallback sweep, owns the same pair in
+// `ltm_finding_fallback_tests.rs`.
+
+/// The stock-partition / module-node metadata `retain_circuits` takes, for the
+/// two-triangle fixture: `a` is the only stock and there are no modules.
+fn two_triangle_retention_metadata(search: &IndexedSearch) -> (Vec<Option<usize>>, Vec<bool>) {
+    let stock_partition: Vec<Option<usize>> = search
+        .idents
+        .iter()
+        .map(|id| (id.as_str() == "a").then_some(0))
+        .collect();
+    let no_modules = vec![false; search.idents.len()];
+    (stock_partition, no_modules)
+}
+
+#[test]
+fn activity_graph_build_abandons_an_already_expired_deadline() {
+    let (search, results) = two_triangles_search_and_results();
+    let mut clock = ScriptedClock::new(1);
+    let deadline = clock.deadline();
+    assert!(
+        super::enum_gen::ActivityGraph::build(&search, &results, Some(deadline), &mut clock)
+            .is_none(),
+        "a caller whose budget is already spent must not copy the score slab \
+         it is about to discard"
+    );
+    assert_eq!(
+        clock.reads, 1,
+        "the check runs before the first edge is copied"
+    );
+}
+
+#[test]
+fn activity_graph_build_never_reads_the_clock_when_unbudgeted() {
+    let (search, results) = two_triangles_search_and_results();
+    let mut clock = ScriptedClock::new(1);
+    assert!(
+        super::enum_gen::ActivityGraph::build(&search, &results, None, &mut clock).is_some(),
+        "an unbudgeted build always completes"
+    );
+    assert_eq!(clock.reads, 0);
+}
+
+#[test]
+fn enumerate_active_circuits_abandons_an_already_expired_deadline() {
+    // The enumerator amortizes its clock reads over `DEADLINE_CHECK_INTERVAL`
+    // edge visits, which a two-triangle fixture never reaches; the override
+    // makes every visit a check so the arm is exercised on a tiny graph
+    // (docs/dev/rust.md#test-time-budgets).
+    let _guard = super::enum_gen::EnumDeadlineVisitIntervalGuard::new(1);
+    let (activity, _search) = two_triangles_and_a_self_edge();
+    let mut clock = ScriptedClock::new(1);
+    let deadline = clock.deadline();
+    let candidates =
+        super::enum_gen::enumerate_active_circuits(&activity, Some(deadline), &mut clock);
+    assert!(
+        !candidates.complete,
+        "an expired deadline mid-search reports an incomplete enumeration, so \
+         the caller discards the partial set and falls back"
+    );
+    assert_eq!(clock.reads, 1, "the first visit is a check");
+}
+
+#[test]
+fn enumerate_active_circuits_never_reads_the_clock_when_unbudgeted() {
+    let _guard = super::enum_gen::EnumDeadlineVisitIntervalGuard::new(1);
+    let (activity, _search) = two_triangles_and_a_self_edge();
+    let mut clock = ScriptedClock::new(1);
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut clock);
+    assert!(candidates.complete);
+    assert_eq!(clock.reads, 0);
+}
+
+#[test]
+fn retain_circuits_abandons_an_already_expired_deadline() {
+    let (activity, search) = two_triangles_and_a_self_edge();
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
+    let (stock_partition, no_modules) = two_triangle_retention_metadata(&search);
+    let mut clock = ScriptedClock::new(1);
+    let deadline = clock.deadline();
+    assert!(
+        super::enum_gen::retain_circuits(
+            &candidates,
+            &activity,
+            &stock_partition,
+            &no_modules,
+            Some(deadline),
+            &mut clock,
+        )
+        .is_none(),
+        "retention over a full universe can outlast the budget on its own, so \
+         it must be able to abandon and let the fallback run"
+    );
+    assert_eq!(
+        clock.reads, 1,
+        "the check runs before the first circuit is scored"
+    );
+}
+
+#[test]
+fn retain_circuits_never_reads_the_clock_when_unbudgeted() {
+    let (activity, search) = two_triangles_and_a_self_edge();
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
+    let (stock_partition, no_modules) = two_triangle_retention_metadata(&search);
+    let mut clock = ScriptedClock::new(1);
+    assert!(
+        super::enum_gen::retain_circuits(
+            &candidates,
+            &activity,
+            &stock_partition,
+            &no_modules,
+            None,
+            &mut clock,
+        )
+        .is_some(),
+        "an unbudgeted retention always completes"
+    );
+    assert_eq!(clock.reads, 0);
 }
 
 /// The enumerator's two exactness claims -- min-root canonicalization (every
@@ -4630,8 +4781,11 @@ fn enumerator_matches_brute_force_active_cycles_on_synthetic_graphs() {
     for seed in [1u64, 7, 42, 1000, 999_983] {
         let results = synthetic_results(link_offsets.len(), 12, seed);
         let search = IndexedSearch::build(&link_offsets, &stocks);
-        let activity = super::enum_gen::ActivityGraph::build(&search, &results);
-        let candidates = super::enum_gen::enumerate_active_circuits(&activity, None);
+        let activity =
+            super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
+                .expect("an unbudgeted build never abandons");
+        let candidates =
+            super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
         assert!(candidates.complete, "seed {seed} must enumerate fully");
 
         let mut enumerated: Vec<Vec<String>> = (0..candidates.len())
