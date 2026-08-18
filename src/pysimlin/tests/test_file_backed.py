@@ -1249,6 +1249,37 @@ class TestSnapshotEdgeCases:
         assert pairs
         assert all(r == added for r, added in pairs), pairs
 
+    def test_snapshot_write_failure_is_a_distinct_error_after_applying(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The widget must tell "applied but unwritten" (the browser's edit
+        # stands; reply saved + warn) from "not applied" (reply rejected).
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        project = Project.open(path, watch=False)
+        events = _Events()
+        project.on_change(events)
+        scratch = simlin.load(path)
+        _add_aux(scratch, "unsaved")
+        snapshot = scratch.project.serialize_json()  # type: ignore[union-attr]
+
+        def fail(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("simlin.project.atomic_write", fail)
+        with pytest.raises(simlin.SimlinWriteError, match="disk full") as excinfo:
+            project._apply_snapshot(snapshot, base_revision=0)
+        assert isinstance(excinfo.value.__cause__, OSError)
+        assert excinfo.value.revision == 1
+        assert project.revision == 1
+        assert project.dirty is True
+        assert events.events == [ChangeEvent("widget", 1)]
+        assert project.get_model().get_variable("unsaved") is not None
+        # A parse failure is NOT a SimlinWriteError: nothing was applied.
+        with pytest.raises(SimlinRuntimeError) as parse_exc:
+            project._apply_snapshot(b"{", base_revision=1)
+        assert not isinstance(parse_exc.value, simlin.SimlinWriteError)
+        assert project.revision == 1
+
     def test_m9_unparsable_snapshot_leaves_revision_unchanged(self, tmp_path: Path) -> None:
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
         before = path.read_bytes()

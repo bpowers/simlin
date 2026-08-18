@@ -197,15 +197,16 @@ def notice_message(text: str, level: NoticeLevel = "info") -> dict[str, Any]:
 class SnapshotOutcome:
     """What the shell observed after handing a snapshot to the project.
 
-    ``accepted`` is :meth:`Project._apply_snapshot`'s return value when it
-    returned; ``error`` is the exception text when it raised instead (a
-    parse failure leaves the project unchanged; a write failure leaves the
-    change applied in memory with ``dirty`` set).  ``revision`` is the
-    project's revision afterwards (what a rejection reports; an accept's
-    revision is ``base + 1`` by contract).
+    ``applied`` says whether the project took the change: ``True`` when
+    :meth:`Project._apply_snapshot` returned ``True``, AND when it raised
+    after applying (a write failure: the change is real in memory, the
+    revision advanced by one, ``dirty`` is set) -- ``False`` for a stale
+    base or a parse failure, which leave the project untouched.  ``error``
+    is the exception text when it raised.  ``revision`` is the project's
+    revision afterwards.
     """
 
-    accepted: bool
+    applied: bool
     revision: int
     error: str | None = None
 
@@ -213,66 +214,61 @@ class SnapshotOutcome:
 @dataclass(frozen=True)
 class SnapshotPlan:
     """What the shell must do in reply to a snapshot, in order: push the
-    trait pair (``"from-project"`` = read the project's current pair at
-    that moment), then send ``messages``."""
+    trait pair (``None`` = do not touch the traits), then send ``messages``
+    -- exactly one of which is the ``saved``/``rejected`` reply."""
 
-    push: tuple[str, int] | Literal["from-project"]
+    push: tuple[str, int] | None
     messages: tuple[dict[str, Any], ...]
 
 
 def plan_snapshot_reply(request: SnapshotRequest, outcome: SnapshotOutcome) -> SnapshotPlan:
-    """Decide the reply to a snapshot.
+    """Decide the reply to a snapshot.  Every arm sends exactly one reply
+    (``saved`` or ``rejected``): the browser resolves its save on the reply
+    and runs one save at a time, so a snapshot without its reply would hang
+    every later save of that view.
 
     Arms (each pinned by ``tests/test_widget.py``):
 
-    - accepted: the traits become ``(the exact JSON received, base + 1)`` --
-      the same bytes so the browser can recognise its own snapshot by string
-      equality and keep its live editor -- then ``saved``.
-    - stale base (returned ``False``): ``rejected`` plus a warning notice;
-      the browser remounts from the authoritative traits.  The pair is
-      re-pushed from the project first: normally the traits already hold the
-      state that made the base stale (its own notification pushed it) and
-      the assignment is a silent no-op, but the browser's remount is
-      idempotent on the pair, so re-asserting it costs nothing and covers a
-      notification still queued behind this message.
-    - raised: the project may or may not have taken the change (a write
-      failure applies it and leaves it dirty; a parse failure does not), so
-      the traits are likewise re-pushed from the project, then ``rejected``
-      plus a warning notice carrying the error.
+    - applied, no error: the traits become ``(the exact JSON received,
+      base + 1)`` -- the same bytes so the browser can recognise its own
+      snapshot by string equality and keep its live editor -- then
+      ``saved``.  An accept bumps the revision by exactly one under the
+      project's lock, so the pair is derived from the request rather than
+      read back: a concurrent change landing after the accept is announced
+      by its own notification.
+    - applied, write failed: the change is real (revision base + 1, dirty),
+      so the browser is told the same ``saved`` -- its acknowledged version
+      must match the kernel's or every later save would be rejected as
+      stale -- plus a warning notice naming the error and ``model.save()``.
+    - not applied (stale base, or the snapshot did not parse): the traits
+      are NOT touched (they already hold the authoritative state; a
+      notification still queued behind this message pushes it), then
+      ``rejected`` plus a warning notice.
     """
-    if outcome.error is not None:
-        return SnapshotPlan(
-            push="from-project",
-            messages=(
-                rejected_message(outcome.revision),
-                notice_message(
-                    f"Your edit could not be saved: {outcome.error}. If the model is now "
-                    f"marked dirty, call model.save() to retry the write.",
-                    "warn",
-                ),
-            ),
-        )
-    if outcome.accepted:
-        # An accept bumps the revision by exactly one under the project's
-        # lock (tests/test_file_backed.py pins it), so the pair is derived
-        # from the request rather than read back: a concurrent change
-        # landing after the accept is announced by its own notification.
+    if outcome.applied:
         accepted_revision = request.base + 1
-        return SnapshotPlan(
-            push=(request.json, accepted_revision),
-            messages=(saved_message(accepted_revision),),
+        messages: list[dict[str, Any]] = [saved_message(accepted_revision)]
+        if outcome.error is not None:
+            messages.append(
+                notice_message(
+                    f"Your edit was applied but could not be written to the file: "
+                    f"{outcome.error}. The model is marked dirty; call model.save() to "
+                    f"retry the write.",
+                    "warn",
+                )
+            )
+        return SnapshotPlan(push=(request.json, accepted_revision), messages=tuple(messages))
+    if outcome.error is not None:
+        text = f"Your edit could not be applied: {outcome.error}."
+    else:
+        text = (
+            f"Your edit was based on an older version of the model (revision "
+            f"{request.base}; the model is at {outcome.revision}); the editor was "
+            f"reloaded from the current model."
         )
     return SnapshotPlan(
-        push="from-project",
-        messages=(
-            rejected_message(outcome.revision),
-            notice_message(
-                f"Your edit was based on an older version of the model (revision "
-                f"{request.base}; the model is at {outcome.revision}); the editor was "
-                f"reloaded from the current model.",
-                "warn",
-            ),
-        ),
+        push=None,
+        messages=(rejected_message(outcome.revision), notice_message(text, "warn")),
     )
 
 

@@ -312,7 +312,9 @@ the same model:
   appears in the other.
 - An edit made against a version the kernel has since moved past is
   rejected with a notice and never written; the editor reloads from the
-  current model.
+  current model. If an edit is applied but the file cannot be written
+  (disk full, permissions), the editor keeps it, a notice says so, and
+  `model.dirty` is set until `model.save()` succeeds.
 - `model.selection` is the tuple of variable names selected in the editor,
   so a cell can ask what the human is looking at:
 

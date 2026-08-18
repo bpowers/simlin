@@ -73,7 +73,7 @@ from ._widget_core import (
     parse_incoming,
     plan_snapshot_reply,
 )
-from .errors import SimlinAssetError
+from .errors import SimlinAssetError, SimlinError, SimlinWriteError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -347,34 +347,54 @@ class ModelWidget(anywidget.AnyWidget):
         self.send(core.wasm_reply(), buffers=[data])
 
     def _handle_snapshot(self, request: SnapshotRequest) -> None:
-        project = self._project
-        self._own_revision = request.base + 1
+        """Every snapshot gets exactly one reply.  The browser resolves its
+        save only on ``saved``/``rejected`` and runs one save at a time, so
+        a snapshot whose reply never comes hangs every later save of that
+        view; hence the belt-and-braces: any exception anywhere in the
+        handling -- including a bug in this class -- ends in ``rejected``."""
         try:
-            accepted = project._apply_snapshot(request.json.encode("utf-8"), request.base)
-        except Exception as exc:  # the browser must hear about a failed save
-            outcome = SnapshotOutcome(accepted=False, revision=project.revision, error=str(exc))
+            self._apply_and_reply(request)
+        except Exception as exc:  # the reply is owed regardless
             warnings.warn(
-                f"simlin: a widget edit could not be saved: {exc}",
+                f"simlin: ModelWidget failed while handling a snapshot: {exc!r}",
                 RuntimeWarning,
                 stacklevel=2,
             )
-        else:
-            outcome = SnapshotOutcome(accepted=accepted, revision=project.revision)
-        applied = outcome.accepted or (
-            outcome.error is not None and project.revision == request.base + 1
-        )
-        if not applied:
-            # The marker only stands for a revision this snapshot produced:
-            # an accept, or a failed write that still applied the change in
-            # memory (the revision moved by exactly one).  A rejection
-            # produced nothing, and a notification for base + 1 (if one is
-            # still queued) belongs to someone else's change: it must be
-            # delivered, not skipped as ours.
             self._own_revision = None
+            self.send(core.rejected_message(int(self._project.revision)))
+            self._notice(f"Your edit could not be applied: {exc}.", "warn")
+
+    def _apply_and_reply(self, request: SnapshotRequest) -> None:
+        project = self._project
+        # The revision this snapshot produces if applied.  Set before the
+        # call because, without a dispatcher, the project's notification
+        # fires inside ``_apply_snapshot``; cleared below if nothing was
+        # produced so someone else's change at that revision is not skipped.
+        self._own_revision = request.base + 1
+        error: str | None = None
+        try:
+            applied = project._apply_snapshot(request.json.encode("utf-8"), request.base)
+        except SimlinWriteError as exc:  # applied in memory; only the file lags
+            applied = True
+            error = str(exc.__cause__ or exc)
+            warnings.warn(
+                f"simlin: a widget edit was applied but could not be written: {error}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        except SimlinError as exc:  # the snapshot did not parse; nothing changed
+            applied = False
+            error = str(exc)
+            warnings.warn(
+                f"simlin: a widget edit could not be applied: {exc}", RuntimeWarning, stacklevel=3
+            )
+        if not applied:
+            self._own_revision = None
+        outcome = SnapshotOutcome(applied=applied, revision=int(project.revision), error=error)
         plan = plan_snapshot_reply(request, outcome)
-        if plan.push == "from-project":
-            self._push_from_project()
-        else:
+        if plan.push is not None:
+            # hold_sync exits (state message sent) before the reply goes out,
+            # so the browser sees the state before ``saved``.
             self._push(*plan.push)
         for message in plan.messages:
             self.send(message)

@@ -16,10 +16,14 @@ Message-type x state table covered here (each row is a test):
     snapshot  | base current, write ok   -> traits (exact json, base+1) in ONE
                                             update, then saved
     snapshot  | base current, same bytes -> update carries only revision
-    snapshot  | base stale               -> rejected + warn notice, file untouched
-    snapshot  | unparsable json          -> rejected + warn notice, project untouched
-    snapshot  | write fails after apply  -> traits from project, rejected + warn
-                                            notice, project dirty
+    snapshot  | base stale               -> no trait writes, rejected + warn notice,
+                                            file untouched
+    snapshot  | unparsable json          -> no trait writes, rejected + warn notice,
+                                            project untouched
+    snapshot  | write fails after apply  -> traits (exact json, base+1), saved +
+                                            warn notice, project dirty
+    snapshot  | handler raises anywhere  -> rejected + warn notice (exactly one
+                                            reply, always)
     snapshot  | malformed message        -> RuntimeWarning, nothing sent
     other     | unknown type             -> RuntimeWarning, nothing sent
 
@@ -35,6 +39,7 @@ from __future__ import annotations
 import gc
 import json
 import shutil
+import warnings
 import weakref
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -400,8 +405,8 @@ class TestSnapshotReject:
         assert model.revision == 1
         assert model.get_variable("stale") is None
         sent = _sent(w)
-        # The traits already held revision 1 (pushed by the edit), so no
-        # update goes out; the browser remounts from them.
+        # No trait writes on a reject: the traits already hold revision 1
+        # (pushed by the edit); only the reply and its notice go out.
         assert [kind for kind, _, _ in sent] == ["custom", "custom"]
         assert sent[0][1] == {"type": "rejected", "revision": 1}
         notice = sent[1][1]
@@ -410,12 +415,13 @@ class TestSnapshotReject:
         assert "older version" in notice["text"]
         assert w.revision == 1
 
-    def test_reject_reasserts_the_pair_when_its_notification_is_still_queued(
+    def test_reject_touches_no_trait_even_with_its_notification_still_queued(
         self, model: Model, model_path: Path, assets: WidgetAssets
     ) -> None:
         # A kernel edit whose notification is queued behind the browser's
-        # message (a dispatcher that has not run yet): the reject must not
-        # leave the browser on revision 0 until the queue drains.
+        # message (a dispatcher that has not run yet): the reject itself
+        # writes no trait; the queued notification pushes the pair when the
+        # loop runs, and the browser remounts then.
         queue: list[Callable[[], None]] = []
         w = _widget(model, assets, dispatch=queue.append)
         with model.edit() as (_, patch):
@@ -426,19 +432,21 @@ class TestSnapshotReject:
         _drain(w)
         _from_browser(w, {"type": "snapshot", "base": 0, "json": stale})
         sent = _sent(w)
-        assert sent[0][0] == "update"
-        assert sent[0][1]["revision"] == 1
-        assert sent[1][1] == {"type": "rejected", "revision": 1}
-        assert sent[2][1]["type"] == "notice"
-        assert w.revision == 1
+        assert [kind for kind, _, _ in sent] == ["custom", "custom"]
+        assert sent[0][1] == {"type": "rejected", "revision": 1}
+        assert w.revision == 0
         _drain(w)
         for fn in queue:
             fn()
-        # The queued edit notification finds the traits already current:
-        # only its notice goes out.
-        assert _sent(w) == [
-            ("custom", {"type": "notice", "text": "Updated from Python", "level": "info"}, None)
-        ]
+        sent = _sent(w)
+        assert sent[0][0] == "update"
+        assert sent[0][1]["revision"] == 1
+        assert sent[1] == (
+            "custom",
+            {"type": "notice", "text": "Updated from Python", "level": "info"},
+            None,
+        )
+        assert w.revision == 1
 
     def test_unparsable_snapshot_is_rejected_with_the_error(
         self, model: Model, model_path: Path, assets: WidgetAssets
@@ -446,7 +454,7 @@ class TestSnapshotReject:
         w = _widget(model, assets)
         before = model_path.read_bytes()
         _drain(w)
-        with pytest.warns(RuntimeWarning, match="could not be saved"):
+        with pytest.warns(RuntimeWarning, match="could not be applied"):
             _from_browser(w, {"type": "snapshot", "base": 0, "json": "{not json"})
         assert model.revision == 0
         assert model_path.read_bytes() == before
@@ -454,9 +462,9 @@ class TestSnapshotReject:
         assert [kind for kind, _, _ in sent] == ["custom", "custom"]
         assert sent[0][1] == {"type": "rejected", "revision": 0}
         assert sent[1][1]["level"] == "warn"
-        assert "could not be saved" in sent[1][1]["text"]
+        assert "could not be applied" in sent[1][1]["text"]
 
-    def test_write_failure_after_apply_reports_and_leaves_project_dirty(
+    def test_write_failure_after_apply_is_saved_plus_warning_and_leaves_project_dirty(
         self,
         model: Model,
         model_path: Path,
@@ -484,20 +492,28 @@ class TestSnapshotReject:
         assert model.get_variable("unsaved") is not None
         assert model_path.read_bytes() == before
         assert events.events == [ChangeEvent("widget", 1)]
-        # ...and the browser is told: pair re-asserted from the project
-        # (exactly once -- the own notification did not push a second time),
-        # then rejected and a warning naming the error.
-        sent = _sent(w)
-        assert [kind for kind, _, _ in sent] == ["update", "custom", "custom"]
-        assert sent[0][1]["revision"] == 1
-        assert json.loads(sent[0][1]["project_json"]) == json.loads(
-            _project(model).serialize_json()
-        )
-        assert sent[1][1] == {"type": "rejected", "revision": 1}
-        assert sent[2][1]["level"] == "warn"
-        assert "disk full" in sent[2][1]["text"]
-        assert "model.save()" in sent[2][1]["text"]
-        # Recovery is the documented one.
+        # ...and the browser is told exactly what an accept says -- its
+        # acknowledged version must match the kernel's or every later save
+        # would be stale -- plus a warning naming the error and the fix.
+        assert _sent(w) == [
+            ("update", {"project_json": text, "revision": 1}, None),
+            ("custom", {"type": "saved", "revision": 1}, None),
+            (
+                "custom",
+                {
+                    "type": "notice",
+                    "text": (
+                        "Your edit was applied but could not be written to the file: "
+                        "disk full. The model is marked dirty; call model.save() to "
+                        "retry the write."
+                    ),
+                    "level": "warn",
+                },
+                None,
+            ),
+        ]
+        # The next edit chains on the acknowledged base and is written once
+        # the disk is back.
         monkeypatch.undo()
         model.save()
         assert model.dirty is False
@@ -527,6 +543,111 @@ class TestSnapshotReject:
             fn()
         # The queued notification is for the revision this snapshot produced.
         assert _sent(w) == []
+
+
+class TestExactlyOneReply:
+    """MUST: every snapshot gets exactly one ``saved``/``rejected`` with an
+    integer revision, whatever happens while handling it."""
+
+    def test_a_bug_in_the_handler_still_replies_rejected(
+        self, model: Model, model_path: Path, assets: WidgetAssets, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        w = _widget(model, assets)
+
+        def boom(*args: object, **kwargs: object) -> bool:
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(_project(model), "_apply_snapshot", boom)
+        text = _snapshot_with(model_path, "x")
+        _drain(w)
+        with pytest.warns(RuntimeWarning, match="unexpected"):
+            _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
+        sent = _sent(w)
+        assert [kind for kind, _, _ in sent] == ["custom", "custom"]
+        assert sent[0][1] == {"type": "rejected", "revision": 0}
+        assert sent[1][1]["type"] == "notice"
+        assert "unexpected" in sent[1][1]["text"]
+        # The failed attempt left no own-revision marker behind: a later
+        # foreign change at revision 1 is pushed, not skipped.
+        _drain(w)
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="from_python", equation="1"))
+        assert [kind for kind, _, _ in _sent(w)] == ["update", "custom"]
+
+    def test_a_failure_while_pushing_still_replies_rejected(
+        self, model: Model, model_path: Path, assets: WidgetAssets, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        w = _widget(model, assets)
+        text = _snapshot_with(model_path, "x")
+
+        def boom(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("push exploded")
+
+        monkeypatch.setattr(w, "_push", boom)
+        _drain(w)
+        with pytest.warns(RuntimeWarning, match="push exploded"):
+            _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
+        # The change was applied (the file has it) and the browser still gets
+        # exactly one reply -- rejected, at the kernel's real revision -- so
+        # its save queue never hangs; its next save is stale and re-seeds.
+        assert model.revision == 1
+        assert simlin.load(model_path).get_variable("x") is not None
+        replies = [
+            c for k, c, _ in _sent(w) if k == "custom" and c["type"] in ("saved", "rejected")
+        ]
+        assert replies == [{"type": "rejected", "revision": 1}]
+
+    @pytest.mark.parametrize(
+        "arm", ["accept", "stale", "unparsable", "write-failure", "handler-bug"]
+    )
+    def test_every_arm_replies_exactly_once_with_an_int_revision(
+        self,
+        model: Model,
+        model_path: Path,
+        assets: WidgetAssets,
+        monkeypatch: pytest.MonkeyPatch,
+        arm: str,
+    ) -> None:
+        w = _widget(model, assets)
+        base = 0
+        text = _snapshot_with(model_path, "x")
+        if arm == "stale":
+            with model.edit() as (_, patch):
+                patch.upsert(Aux(name="kernel_side", equation="1"))
+        elif arm == "unparsable":
+            text = "{"
+        elif arm == "write-failure":
+
+            def fail(*args: object, **kwargs: object) -> None:
+                raise OSError("disk full")
+
+            monkeypatch.setattr("simlin.project.atomic_write", fail)
+        elif arm == "handler-bug":
+
+            def boom(*args: object, **kwargs: object) -> bool:
+                raise RuntimeError("bug")
+
+            monkeypatch.setattr(_project(model), "_apply_snapshot", boom)
+        _drain(w)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            _from_browser(w, {"type": "snapshot", "base": base, "json": text})
+        replies = [
+            c for k, c, _ in _sent(w) if k == "custom" and c["type"] in ("saved", "rejected")
+        ]
+        assert len(replies) == 1
+        assert type(replies[0]["revision"]) is int
+        assert replies[0]["revision"] == model.revision
+
+    def test_state_update_leaves_before_saved(
+        self, model: Model, model_path: Path, assets: WidgetAssets
+    ) -> None:
+        w = _widget(model, assets)
+        text = _snapshot_with(model_path, "x")
+        _drain(w)
+        _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
+        kinds = [(k, c.get("type") if k == "custom" else None) for k, c, _ in _sent(w)]
+        assert kinds == [("update", None), ("custom", "saved")]
 
 
 class TestMalformed:
@@ -732,7 +853,7 @@ class TestTwoWidgets:
         # sends a snapshot from revision 0, which is rejected.  The revision
         # b's snapshot WOULD have produced is also 1 -- but b produced
         # nothing, so when the queue drains b must still treat a's change as
-        # foreign (its notice goes out; the pair was already re-asserted).
+        # foreign: the pair is pushed and its notice goes out.
         queue: list[Callable[[], None]] = []
         a = _widget(model, assets)
         b = _widget(model, assets, dispatch=queue.append)
@@ -741,17 +862,19 @@ class TestTwoWidgets:
         _drain(b)
         _from_browser(b, {"type": "snapshot", "base": 0, "json": _snapshot_with(model_path, "b")})
         assert [c["type"] for k, c, _ in _sent(b) if k == "custom"] == ["rejected", "notice"]
-        assert b.revision == 1
+        assert b.revision == 0  # a reject writes no trait
         _drain(b)
         for fn in queue:
             fn()
-        assert _sent(b) == [
-            (
-                "custom",
-                {"type": "notice", "text": "Updated in another view", "level": "info"},
-                None,
-            )
-        ]
+        sent = _sent(b)
+        assert sent[0][0] == "update"
+        assert sent[0][1]["revision"] == 1
+        assert sent[1] == (
+            "custom",
+            {"type": "notice", "text": "Updated in another view", "level": "info"},
+            None,
+        )
+        assert b.revision == 1
 
     def test_stale_snapshot_from_the_other_view_is_rejected(
         self, model: Model, model_path: Path, assets: WidgetAssets

@@ -103,45 +103,61 @@ class TestParseIncoming:
 class TestPlanSnapshotReply:
     request = SnapshotRequest(base=4, json='{"the":"snapshot"}')
 
-    def test_accepted_pushes_exact_json_at_base_plus_one_then_saved(self) -> None:
+    def test_applied_pushes_exact_json_at_base_plus_one_then_saved(self) -> None:
         # The revision read back (here deliberately further along, as if a
         # concurrent change landed) is not what the accept pushes: the
         # accept produced exactly base + 1.
-        plan = plan_snapshot_reply(self.request, SnapshotOutcome(accepted=True, revision=6))
+        plan = plan_snapshot_reply(self.request, SnapshotOutcome(applied=True, revision=6))
         assert plan.push == ('{"the":"snapshot"}', 5)
         assert plan.messages == ({"type": "saved", "revision": 5},)
 
-    def test_stale_reasserts_project_state_then_rejects_with_notice(self) -> None:
-        plan = plan_snapshot_reply(self.request, SnapshotOutcome(accepted=False, revision=7))
-        assert plan.push == "from-project"
+    def test_applied_but_unwritten_is_saved_plus_a_warning(self) -> None:
+        plan = plan_snapshot_reply(
+            self.request, SnapshotOutcome(applied=True, revision=5, error="disk full")
+        )
+        assert plan.push == ('{"the":"snapshot"}', 5)
+        assert plan.messages[0] == {"type": "saved", "revision": 5}
+        notice = plan.messages[1]
+        assert notice["type"] == "notice"
+        assert notice["level"] == "warn"
+        assert "disk full" in notice["text"]
+        assert "model.save()" in notice["text"]
         assert len(plan.messages) == 2
+
+    def test_stale_touches_no_trait_and_rejects_with_notice(self) -> None:
+        plan = plan_snapshot_reply(self.request, SnapshotOutcome(applied=False, revision=7))
+        assert plan.push is None
         assert plan.messages[0] == {"type": "rejected", "revision": 7}
         notice = plan.messages[1]
         assert notice["type"] == "notice"
         assert notice["level"] == "warn"
         assert "revision 4" in notice["text"]
         assert "at 7" in notice["text"]
+        assert len(plan.messages) == 2
 
-    def test_raised_reasserts_project_state_then_rejects_with_the_error(self) -> None:
+    def test_unapplied_error_touches_no_trait_and_rejects_with_the_error(self) -> None:
         plan = plan_snapshot_reply(
-            self.request, SnapshotOutcome(accepted=False, revision=5, error="disk full")
+            self.request, SnapshotOutcome(applied=False, revision=4, error="bad json")
         )
-        assert plan.push == "from-project"
-        assert plan.messages[0] == {"type": "rejected", "revision": 5}
-        notice = plan.messages[1]
-        assert notice["type"] == "notice"
-        assert notice["level"] == "warn"
-        assert "disk full" in notice["text"]
-        assert "model.save()" in notice["text"]
+        assert plan.push is None
+        assert plan.messages[0] == {"type": "rejected", "revision": 4}
+        assert plan.messages[1]["level"] == "warn"
+        assert "bad json" in plan.messages[1]["text"]
 
-    def test_error_wins_over_accepted_flag(self) -> None:
-        # The shell always reports accepted=False with an error, but the
-        # decision must not depend on that: a raise is a failure regardless.
-        plan = plan_snapshot_reply(
-            self.request, SnapshotOutcome(accepted=True, revision=5, error="boom")
-        )
-        assert plan.push == "from-project"
-        assert plan.messages[0]["type"] == "rejected"
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            SnapshotOutcome(applied=True, revision=5),
+            SnapshotOutcome(applied=True, revision=5, error="disk full"),
+            SnapshotOutcome(applied=False, revision=7),
+            SnapshotOutcome(applied=False, revision=4, error="bad json"),
+        ],
+    )
+    def test_every_arm_sends_exactly_one_integer_reply(self, outcome: SnapshotOutcome) -> None:
+        plan = plan_snapshot_reply(self.request, outcome)
+        replies = [m for m in plan.messages if m["type"] in ("saved", "rejected")]
+        assert len(replies) == 1
+        assert type(replies[0]["revision"]) is int
 
 
 class TestIsOwnChange:

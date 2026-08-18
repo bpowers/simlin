@@ -39,6 +39,7 @@ from .errors import (
     SimlinError,
     SimlinImportError,
     SimlinRuntimeError,
+    SimlinWriteError,
 )
 from .model import VARTYPE_AUX, VARTYPE_FLOW, VARTYPE_MODULE, VARTYPE_STOCK, Model
 from .project import JSON_FORMAT_SDAI, JSON_FORMAT_SIMLIN, Project
@@ -206,6 +207,7 @@ __all__ = [
     "SimlinError",
     "SimlinImportError",
     "SimlinRuntimeError",
+    "SimlinWriteError",
     "SpreadFlow",
     "Stock",
     "TimeSpec",
