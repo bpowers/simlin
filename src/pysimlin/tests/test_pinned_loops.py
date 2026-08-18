@@ -2,9 +2,9 @@
 
 A pinned loop is named by its variable set via the edit/patch API
 (`patch.set_loop_name`). The LTM engine then ALWAYS scores it -- even in
-discovery mode, where the heuristic search emits no per-loop score at all. The
-pinned loop appears in `model.loops` / `run.loops`, and its score is readable
-by its `pin{n}` id through `Sim.get_relative_loop_score`.
+discovery mode, where post-simulation discovery emits no per-loop score at
+all. The pinned loop appears in `model.loops` / `run.loops`, and its score is
+readable by its `pin{n}` id through `Sim.get_relative_loop_score`.
 """
 
 from __future__ import annotations

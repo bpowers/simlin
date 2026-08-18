@@ -247,25 +247,72 @@ Single streaming pass with a confirm step:
 
 ### Fallback (`ltm_finding_fallback.rs`)
 
+The shipped design (`FallbackConfig { weight, seeds, closures, tie_break }`, default
+`ClampedLogAbs` / `StocksAndStocklessSccs` / `EveryEdge` / `Hops` -- settled by the
+sweeps in "Measured" below, not by the argument that motivated the starting point):
+
 - Per saved step `t in 1..step_count`: build the step's active adjacency from
-  `IndexedSearch` (edges with finite nonzero |score|; Inf edges have weight 0 under the
-  clamped formulation), compute per-step SCCs, and for each seed stock inside a
-  non-trivial SCC run Dijkstra restricted to that SCC.
-- Weight function `FallbackWeight`:
-  - `ClampedLogAbs`: `w = max(0, -ln|s|)` -- the user's starting point; sub-unit links
-    cost, super-unit links are free (an admissible optimistic bound).
-  - `RelativeLinkScore`: `w = -ln(|s| / sum_{x->z}|s_x|)` -- the LTM "relative link
-    score" (reference doc 13.3), always >= 0; per-target normalization.
-  - `HopCount`: `w = 1` -- SILS-style control.
-- Cycle recovery: after Dijkstra from seed `s`, every in-edge `(u -> s)` with `u`
-  reached closes a simple cycle `path(s..u) + (u -> s)`. All such cycles are emitted
-  (deg_in(stock) is small); the minimum-weight one is the step's "strongest through s".
-  Optionally, `k`-best via re-running with the best cycle's closing edge removed
-  (bounded, off by default; the harness decides).
-- Dedup by canonical rotation across steps and stocks; emitted node paths flow into the
-  unchanged materialization/stitching pipeline. Deadline checked between Dijkstras;
-  expiry mid-sweep keeps everything found so far and sets `truncated`.
-- Cost: `T * S * E log V` -- World3 ~401 * 15 * 430 log 258 ~ 2e7 heap operations.
+  `IndexedSearch` (edges with finite nonzero |score|; an Inf edge weighs 0 under every
+  arm), compute per-step SCCs, and for each seed run Dijkstra restricted to its SCC.
+- Seeds (`FallbackSeeds`): `Stocks` (every SD feedback loop contains one); the default
+  `StocksAndStocklessSccs` additionally seeds one representative per non-trivial
+  stockless SCC, closing AC1.3's gap (a cycle whose state hides in a module level or a
+  `PREVIOUS` lag between auxes); `AllSccNodes` seeds the whole cyclic core and stays
+  selectable but unused -- measured slower per unit of recall than the default.
+- Weight function `FallbackWeight` -- every arm must be non-negative because Dijkstra's
+  optimality proof needs it, and a super-unit link (gain > 1) is a NEGATIVE edge in raw
+  `-ln` space with no feasible Johnson potentials, so each arm handles it differently:
+  - `ClampedLogAbs` (default): `w = max(0, -ln|s|)`. The clamp is an UPPER bound on the
+    true `-ln` cost, not a lower one: it DISCARDS a super-unit link's gain rather than
+    expressing it, making every such hop free and creating a zero-weight plateau (a
+    third of a real graph's active links, on these models) that the tie-break resolves.
+  - `RelativeLinkScore`: `w = -ln(|s| / sum_{x->z}|s_x|)`, the LTM "relative link score"
+    (reference doc 13.3); a share is at most 1, so it is non-negative without clamping.
+  - `HopCount`: `w = 1` -- the score-blind control every other arm has to beat.
+  - `ShiftedLogAbs`: `w = ln(step max finite |s|) - ln|s|`, keeping the gain the clamp
+    discards by shifting instead of clamping. Measured and REJECTED (see "Measured"):
+    on these models the per-hop shift dwarfs the product term and the arm degenerates
+    into a hop count. Stays selectable as a documented negative result.
+- Tie-break (`FallbackTieBreak`, default `Hops`): orders two routes of equal weight.
+  `Hops` (fewer first) is a statement about the model -- among equally-weighted routes
+  under the clamp's zero-weight plateau, the shorter one is the loop a modeller means;
+  `NodeId` is the measurement control. Both search orderings sort on `(weight, hops)` so
+  the tie-break composes with every weight arm.
+- Closures (`FallbackClosures`) -- which cycles a completed search closes:
+  - `SeedInEdges`: only the seed's own in-edges close, giving the minimum-weight
+    elementary cycle through the seed. One forward Dijkstra per (seed, step); cheap and
+    narrow, since one shortest-path tree holds one route per node.
+  - `EveryEdge` (default): a REVERSE Dijkstra also runs to the seed, and every edge
+    `u -> w` inside the seed's SCC whose source the forward tree reached and whose
+    target the reverse tree reached closes `path(seed..u) + (u -> w) + path(w..seed)` --
+    the minimum-weight cycle through BOTH the seed and that edge, the strength-weighted
+    analogue of edge coverage. A closure whose two tree halves share a node is not
+    elementary and is SKIPPED rather than spliced (a spliced walk is no longer the
+    minimum through its edge). This is the lever that earns its cost: it is what raises
+    recall from a small fraction of the exact top-K to the numbers in "Measured".
+- Dedup: emitted cycles are deduped by a rotation-independent fingerprint over the
+  cycle's directed edge set (a bucket hit is resolved by an exact rotation comparison),
+  so the dedup is exact and free for the common case (after the first few saved steps
+  nearly every candidate is a duplicate).
+- Candidate bound: `MAX_FALLBACK_PATHS` (200,000, checked at every dedup insert) caps
+  how many distinct cycles one sweep may accumulate; a trip stops the sweep and reports
+  `truncated`, the same signal a deadline expiry gives, since both mean the sweep did
+  not get to sample everything it would have.
+- Deadline sites: the clock is read at three bounded places -- once at the top of each
+  step, once before each seed's searches, and once per fixed pop interval inside a
+  search (so one seed whose component is most of the graph cannot overrun the budget on
+  its own). An unbudgeted sweep reads the clock nowhere.
+- What the sweep drops is CHARACTERIZABLE, not an artifact of sampling density: a cycle
+  is reachable iff at some step, for some seed on it and some edge on it, it is the
+  MINIMUM-WEIGHT cycle through both -- so the recall ceiling is an optimality
+  restriction (which cycle wins the competition for a given seed/edge/step), not a
+  question of how much of the graph got visited. On the `ClampedLogAbs` zero-weight
+  plateau many cycles tie at the minimum for a given (seed, edge); the sweep emits ONE
+  per pair (the tie-break's choice) rather than the whole tied set, which is the
+  unmeasured lever a future k-best-under-ties extension would pull.
+- Cost: `steps * seeds * E log V` -- World3 ~401 * 15 * 430 log 258 ~ 2e7 heap
+  operations under `SeedInEdges`; `EveryEdge` adds a second search plus one path check
+  per edge per (seed, step).
 
 ### Budget split
 
@@ -277,18 +324,28 @@ circuit batch, the fallback per Dijkstra). An unbudgeted call never reads the cl
 
 ### Ranking (`rank_and_filter`)
 
-- Universe denominators (external totals) as today, corrected for module override mass
-  and reported-cycle dedup.
-- Competing classification: enumeration path -> a partition is competing iff its
-  universe circuit count >= 2; fallback path -> over the discovered set (as today).
-- Coverage-aware cap: after retention, mark as **anchored** every loop that is, at some
-  step, the |relative-score| maximum within a competing partition (k = 1). If the
-  anchored set fits, fill remaining slots by the existing competitive-first mean-relative
-  order; if it does not fit (pathological), anchors are ranked by mean-relative and the
-  cap applies to them alone. Raise k while the anchored set still fits (bounded by a
-  small constant, e.g. 3). Presentation order is unchanged (competitive-first,
-  mean-relative, magnitude tie-break, content key), only membership changes; ids stay
-  content-derived.
+- Universe denominators: `rank_and_filter` takes `universe: Option<&UniverseStats>` --
+  `Some` on the enumeration path (the full enumerated universe's per-partition raw mass
+  and circuit counts), `None` on the fallback path (a sample has no universe, so the
+  discovered set is measured against itself). Corrected for module override mass and
+  reported-cycle dedup.
+- Competing classification: on the enumeration path a partition is competing iff its
+  UNIVERSE circuit count (`UniverseStats.loop_counts`) is >= 2 -- a retention
+  non-survivor still holds mass in the denominator, so it still makes the partition a
+  place where loops compete; on the fallback path, over the discovered set, since a
+  sample has no universe to ask about.
+- Coverage-aware cap (`select_reported`): after retention, mark as **anchored** every
+  loop that is, at some step, the |relative-score| maximum within a competing partition
+  (`k = 1`, unconditional -- this is the AC5.1 guarantee and is exempt from the bound
+  below). If the k=1 anchor set alone overflows the cap (pathological), the cap applies
+  to the anchors alone, ranked by mean-relative. Otherwise `k` may rise, bounded by
+  `MAX_ANCHOR_K`, but ONLY while the enlarged anchor set stays at or under
+  `ANCHOR_SHARE_OF_CAP` (one half) of the cap -- so escalation can grow the coverage
+  guarantee's depth but can never crowd the ordinary ranking below half of a capped
+  report (World3 pre-bound: `k` escalated to `MAX_ANCHOR_K` and 140 of 200 slots were
+  anchors; see "Measured"). Remaining slots are filled by the existing competitive-first
+  mean-relative order. Presentation order is unchanged (competitive-first, mean-relative,
+  magnitude tie-break, content key), only membership changes; ids stay content-derived.
 
 ### Observability
 
@@ -505,73 +562,109 @@ usable degradation for a sparse runtime graph and an explicit sample for a
 dense one, which is what `enumeration_complete == false` is there to say.
 
 After Phase 3b (release, Apple M-series under Asahi,
-`examples/ltm_fallback_eval` over the same simulated results, same reference
-and same statistics as the Phase 3 tables above). The fallback is configured
-on three axes -- weight, seed policy, and which cycles a completed pair of
-searches closes -- and the tables sweep them. Labels are
-`weight | seeds | closures`, where `log`/`rel`/`hop` are
-`ClampedLogAbs`/`RelativeLinkScore`/`HopCount`, `stock`/`+stockless`/`all-scc`
-are `Stocks`/`StocksAndStocklessSccs`/`AllSccNodes`, and
-`in-edge`/`every-edge` are `SeedInEdges`/`EveryEdge`.
+`examples/ltm_fallback_eval` over the same simulated results). The fallback is
+configured on four axes -- weight, seed policy, which cycles a completed pair
+of searches closes, and the tie-break -- and the tables sweep them. Labels are
+`weight | seeds | closures`, where `log`/`rel`/`hop`/`shift` are
+`ClampedLogAbs`/`RelativeLinkScore`/`HopCount`/`ShiftedLogAbs`,
+`stock`/`+stockless`/`all-scc` are `Stocks`/`StocksAndStocklessSccs`/`AllSccNodes`,
+and `in-edge`/`every-edge` are `SeedInEdges`/`EveryEdge`; a trailing
+`| node-id tie` switches `FallbackTieBreak` to `NodeId` (default `Hops`).
+`candidates` is the sweep's own proposed-cycle count before retention or the
+cap (`DiscoveryResult::fallback_candidates`), printed next to `loops` (the
+REPORTED count after retention and the cap) so the two are never conflated: a
+strategy's candidate volume and what survives to the report are different
+numbers, and a low recall can be a statement about either.
 
-World3-03 (401 saved steps, 15 stocks, exact run 0.40 s, 200 reported loops;
-399 of 400 steps carry an active exact loop, with 42 distinct step-dominant
-loops):
+Step-dominant coverage is counted per (COMPETING GROUP, saved step) pair, not
+per step -- a correction to how this harness itself measured the statistic
+(review finding, 2026-08-18): a GLOBAL argmax over the exact reported loops
+measures nothing, since a loop alone in its partition -- or the sole retention
+SURVIVOR of one, once the reported list is capped -- has `|rel_scores[t]| == 1`
+at every active step by construction, so it wins any global argmax it is
+active for regardless of raw magnitude; on both models here a global argmax
+named a non-competing loop at literally every step, which is why the earlier
+"step-dominant covered" numbers below were an artifact of the harness rather
+than a measurement. A group is "competing" iff at least two REPORTED exact
+loops share its partition; within a competing group, at each saved step where
+some member is active, the pair `(group, step)` is covered iff the fallback
+reported that group's step-max loop.
 
-| weight \| seeds \| closures | time (s) | loops | recall@1 | recall@10 | recall@50 | recall@100 | recall@200 | step-dominant covered |
-|---|---|---|---|---|---|---|---|---|
-| log \| stock \| in-edge | 0.021 | 59 | 0.00 (0/1) | 0.10 (1/10) | 0.06 (3/50) | 0.03 (3/100) | 0.04 (7/200) | 0.10 (41/399) |
-| rel \| stock \| in-edge | 0.020 | 48 | 0.00 (0/1) | 0.10 (1/10) | 0.06 (3/50) | 0.03 (3/100) | 0.03 (6/200) | 0.10 (41/399) |
-| hop \| stock \| in-edge | 0.012 | 23 | 0.00 (0/1) | 0.00 (0/10) | 0.00 (0/50) | 0.00 (0/100) | 0.01 (3/200) | 0.02 (7/399) |
-| log \| stock \| every-edge | 0.141 | 200 | 0.00 (0/1) | 0.30 (3/10) | 0.18 (9/50) | 0.10 (10/100) | 0.12 (23/200) | 0.14 (55/399) |
-| rel \| stock \| every-edge | 0.133 | 200 | 0.00 (0/1) | 0.10 (1/10) | 0.12 (6/50) | 0.07 (7/100) | 0.10 (21/200) | 0.14 (55/399) |
-| hop \| stock \| every-edge | 0.086 | 147 | 0.00 (0/1) | 0.10 (1/10) | 0.06 (3/50) | 0.03 (3/100) | 0.04 (8/200) | 0.12 (46/399) |
-| log \| +stockless \| in-edge | 0.021 | 59 | 0.00 (0/1) | 0.10 (1/10) | 0.06 (3/50) | 0.03 (3/100) | 0.04 (7/200) | 0.10 (41/399) |
-| log \| +stockless \| every-edge | 0.141 | 200 | 0.00 (0/1) | 0.30 (3/10) | 0.18 (9/50) | 0.10 (10/100) | 0.12 (23/200) | 0.14 (55/399) |
-| log \| all-scc \| in-edge | 0.151 | 170 | 0.00 (0/1) | 0.10 (1/10) | 0.10 (5/50) | 0.06 (6/100) | 0.07 (14/200) | 0.13 (52/399) |
-| log \| all-scc \| every-edge | 1.031 | 200 | 0.00 (0/1) | 0.30 (3/10) | 0.26 (13/50) | 0.15 (15/100) | 0.16 (32/200) | 0.14 (56/399) |
+World3-03 (401 saved steps, 15 stocks, exact run 0.409 s, 200 reported loops;
+399 competing (group, step) pairs, with 50 distinct dominant loops across
+them):
+
+| weight \| seeds \| closures | time (s) | candidates | loops | recall@1 | recall@10 | recall@50 | recall@100 | recall@200 | step-dominant pairs covered |
+|---|---|---|---|---|---|---|---|---|---|
+| log \| stock \| in-edge | 0.022 | 90 | 59 | 0.00 (0/1) | 0.10 (1/10) | 0.06 (3/50) | 0.03 (3/100) | 0.04 (8/200) | 0.09 (34/399) |
+| rel \| stock \| in-edge | 0.021 | 68 | 48 | 0.00 (0/1) | 0.10 (1/10) | 0.06 (3/50) | 0.03 (3/100) | 0.04 (7/200) | 0.09 (34/399) |
+| hop \| stock \| in-edge | 0.012 | 25 | 23 | 0.00 (0/1) | 0.00 (0/10) | 0.00 (0/50) | 0.00 (0/100) | 0.01 (3/200) | 0.02 (6/399) |
+| shift \| stock \| in-edge | 0.021 | 34 | 34 | 0.00 (0/1) | 0.00 (0/10) | 0.00 (0/50) | 0.00 (0/100) | 0.01 (3/200) | 0.02 (6/399) |
+| log \| stock \| every-edge | 0.141 | 2150 | 200 | 0.00 (0/1) | 0.30 (3/10) | 0.18 (9/50) | 0.10 (10/100) | 0.15 (31/200) | 0.13 (50/399) |
+| rel \| stock \| every-edge | 0.133 | 1925 | 200 | 0.00 (0/1) | 0.10 (1/10) | 0.12 (6/50) | 0.07 (7/100) | 0.13 (26/200) | 0.12 (48/399) |
+| hop \| stock \| every-edge | 0.084 | 478 | 147 | 0.00 (0/1) | 0.10 (1/10) | 0.06 (3/50) | 0.03 (3/100) | 0.05 (10/200) | 0.10 (39/399) |
+| shift \| stock \| every-edge | 0.092 | 801 | 200 | 0.00 (0/1) | 0.10 (1/10) | 0.10 (5/50) | 0.05 (5/100) | 0.07 (15/200) | 0.10 (41/399) |
+| log \| +stockless \| in-edge | 0.022 | 90 | 59 | 0.00 (0/1) | 0.10 (1/10) | 0.06 (3/50) | 0.03 (3/100) | 0.04 (8/200) | 0.09 (34/399) |
+| log \| +stockless \| every-edge | 0.141 | 2150 | 200 | 0.00 (0/1) | 0.30 (3/10) | 0.18 (9/50) | 0.10 (10/100) | 0.15 (31/200) | 0.13 (50/399) |
+| shift \| +stockless \| every-edge | 0.096 | 801 | 200 | 0.00 (0/1) | 0.10 (1/10) | 0.10 (5/50) | 0.05 (5/100) | 0.07 (15/200) | 0.10 (41/399) |
+| log \| +stockless \| every-edge \| node-id tie | 0.141 | 2160 | 200 | 0.00 (0/1) | 0.30 (3/10) | 0.18 (9/50) | 0.10 (10/100) | 0.15 (31/200) | 0.13 (50/399) |
+| shift \| +stockless \| every-edge \| node-id tie | 0.093 | 801 | 200 | 0.00 (0/1) | 0.10 (1/10) | 0.10 (5/50) | 0.05 (5/100) | 0.07 (15/200) | 0.10 (41/399) |
+| log \| all-scc \| in-edge | 0.159 | 331 | 170 | 0.00 (0/1) | 0.10 (1/10) | 0.10 (5/50) | 0.06 (6/100) | 0.07 (15/200) | 0.11 (45/399) |
+| log \| all-scc \| every-edge | 1.027 | 4066 | 200 | 0.00 (0/1) | 0.30 (3/10) | 0.26 (13/50) | 0.15 (15/100) | 0.20 (39/200) | 0.13 (51/399) |
 
 C-LEARN v77 (251 saved steps, 116 stocks, exact run 0.037 s, 153 reported
-loops; every step carries an active exact loop, with 2 distinct step-dominant
-loops -- the last recall column is over the 153 loops that exist):
+loops; 750 competing (group, step) pairs across several partitions, with 44
+distinct dominant loops across them -- the recall@153 column is over the 153
+loops that exist):
 
-| weight \| seeds \| closures | time (s) | loops | recall@1 | recall@10 | recall@50 | recall@100 | recall@153 | step-dominant covered |
-|---|---|---|---|---|---|---|---|---|
-| log \| stock \| in-edge | 0.063 | 97 | 1.00 (1/1) | 0.70 (7/10) | 0.76 (38/50) | 0.67 (67/100) | 0.63 (97/153) | 1.00 (250/250) |
-| rel \| stock \| in-edge | 0.062 | 97 | 1.00 (1/1) | 0.70 (7/10) | 0.76 (38/50) | 0.67 (67/100) | 0.63 (97/153) | 1.00 (250/250) |
-| hop \| stock \| in-edge | 0.059 | 72 | 1.00 (1/1) | 0.70 (7/10) | 0.64 (32/50) | 0.47 (47/100) | 0.47 (72/153) | 1.00 (250/250) |
-| log \| stock \| every-edge | 0.148 | 150 | 1.00 (1/1) | 1.00 (10/10) | 1.00 (50/50) | 1.00 (100/100) | 0.98 (150/153) | 1.00 (250/250) |
-| rel \| stock \| every-edge | 0.147 | 146 | 1.00 (1/1) | 1.00 (10/10) | 1.00 (50/50) | 0.96 (96/100) | 0.95 (146/153) | 1.00 (250/250) |
-| hop \| stock \| every-edge | 0.133 | 139 | 1.00 (1/1) | 1.00 (10/10) | 0.94 (47/50) | 0.90 (90/100) | 0.90 (138/153) | 1.00 (250/250) |
-| log \| +stockless \| in-edge | 0.064 | 97 | 1.00 (1/1) | 0.70 (7/10) | 0.76 (38/50) | 0.67 (67/100) | 0.63 (97/153) | 1.00 (250/250) |
-| log \| +stockless \| every-edge | 0.150 | 150 | 1.00 (1/1) | 1.00 (10/10) | 1.00 (50/50) | 1.00 (100/100) | 0.98 (150/153) | 1.00 (250/250) |
-| log \| all-scc \| in-edge | 0.103 | 138 | 1.00 (1/1) | 0.70 (7/10) | 0.94 (47/50) | 0.94 (94/100) | 0.90 (138/153) | 1.00 (250/250) |
-| log \| all-scc \| every-edge | 0.488 | 153 | 1.00 (1/1) | 1.00 (10/10) | 1.00 (50/50) | 1.00 (100/100) | 1.00 (153/153) | 1.00 (250/250) |
+| weight \| seeds \| closures | time (s) | candidates | loops | recall@1 | recall@10 | recall@50 | recall@100 | recall@153 | step-dominant pairs covered |
+|---|---|---|---|---|---|---|---|---|---|
+| log \| stock \| in-edge | 0.063 | 100 | 97 | 1.00 (1/1) | 0.70 (7/10) | 0.76 (38/50) | 0.67 (67/100) | 0.63 (97/153) | 0.84 (628/750) |
+| rel \| stock \| in-edge | 0.062 | 100 | 97 | 1.00 (1/1) | 0.70 (7/10) | 0.76 (38/50) | 0.67 (67/100) | 0.63 (97/153) | 0.84 (628/750) |
+| hop \| stock \| in-edge | 0.059 | 75 | 72 | 1.00 (1/1) | 0.70 (7/10) | 0.64 (32/50) | 0.47 (47/100) | 0.47 (72/153) | 0.84 (627/750) |
+| shift \| stock \| in-edge | 0.062 | 75 | 72 | 1.00 (1/1) | 0.70 (7/10) | 0.64 (32/50) | 0.47 (47/100) | 0.47 (72/153) | 0.84 (628/750) |
+| log \| stock \| every-edge | 0.146 | 159 | 150 | 1.00 (1/1) | 1.00 (10/10) | 1.00 (50/50) | 1.00 (100/100) | 0.98 (150/153) | 1.00 (750/750) |
+| rel \| stock \| every-edge | 0.146 | 155 | 146 | 1.00 (1/1) | 1.00 (10/10) | 1.00 (50/50) | 0.96 (96/100) | 0.95 (146/153) | 1.00 (750/750) |
+| hop \| stock \| every-edge | 0.130 | 147 | 139 | 1.00 (1/1) | 1.00 (10/10) | 0.94 (47/50) | 0.90 (90/100) | 0.90 (138/153) | 0.98 (734/750) |
+| shift \| stock \| every-edge | 0.139 | 147 | 139 | 1.00 (1/1) | 1.00 (10/10) | 0.94 (47/50) | 0.90 (90/100) | 0.90 (138/153) | 0.98 (734/750) |
+| log \| +stockless \| in-edge | 0.064 | 100 | 97 | 1.00 (1/1) | 0.70 (7/10) | 0.76 (38/50) | 0.67 (67/100) | 0.63 (97/153) | 0.84 (628/750) |
+| log \| +stockless \| every-edge | 0.148 | 159 | 150 | 1.00 (1/1) | 1.00 (10/10) | 1.00 (50/50) | 1.00 (100/100) | 0.98 (150/153) | 1.00 (750/750) |
+| shift \| +stockless \| every-edge | 0.139 | 147 | 139 | 1.00 (1/1) | 1.00 (10/10) | 0.94 (47/50) | 0.90 (90/100) | 0.90 (138/153) | 0.98 (734/750) |
+| log \| +stockless \| every-edge \| node-id tie | 0.147 | 159 | 150 | 1.00 (1/1) | 1.00 (10/10) | 1.00 (50/50) | 1.00 (100/100) | 0.98 (150/153) | 1.00 (750/750) |
+| shift \| +stockless \| every-edge \| node-id tie | 0.140 | 147 | 139 | 1.00 (1/1) | 1.00 (10/10) | 0.94 (47/50) | 0.90 (90/100) | 0.90 (138/153) | 0.98 (734/750) |
+| log \| all-scc \| in-edge | 0.105 | 141 | 138 | 1.00 (1/1) | 0.70 (7/10) | 0.94 (47/50) | 0.94 (94/100) | 0.90 (138/153) | 0.86 (644/750) |
+| log \| all-scc \| every-edge | 0.484 | 162 | 153 | 1.00 (1/1) | 1.00 (10/10) | 1.00 (50/50) | 1.00 (100/100) | 1.00 (153/153) | 1.00 (750/750) |
 
 The chosen default is
 `FallbackConfig { weight: ClampedLogAbs, seeds: StocksAndStocklessSccs,
-closures: EveryEdge }`. Under it `examples/ltm_discovery_bench` reports a
-0.142 s fallback on World3 against a 0.398 s exact run and 0.148 s on C-LEARN
-against 0.037 s -- inside the constraint that the fallback cost at most half
-the exact World3 run and at most 0.2 s on either model. AC3.1 is unaffected:
-the `Auto` path still enumerates in 0.398 s and 0.037 s, complete on both.
+closures: EveryEdge, tie_break: Hops }`. Under it `examples/ltm_discovery_bench`
+reports a 0.142 s fallback on World3 against a 0.406 s exact run and 0.147 s on
+C-LEARN against 0.037 s -- inside the constraint that the fallback cost at
+most half the exact World3 run and at most 0.2 s on either model. AC3.1 is
+unaffected: the `Auto` path still enumerates in 0.406 s and 0.037 s, complete
+on both.
 
 Reading the axes:
 
-- **Weight.** `ClampedLogAbs` weakly dominates the other two on every column
-  at BOTH closure settings, so the Phase 3 weight conclusion does not depend
-  on the closure choice. `HopCount`, the score-blind control, stays worst
-  everywhere, which is the result that says the score weighting is doing work
-  at all.
-- **Closures.** Closing on every edge is the lever. It is not a bigger sample
-  of the same kind: the in-edge family emits the minimum-weight cycle through
-  the SEED, and one shortest-path tree holds one route per node, so parallel
-  routes to the same node are unreachable however many seeds or steps are
-  swept; the every-edge family emits, for each edge both trees reach, the
-  minimum-weight cycle through the seed AND that edge -- the strength-weighted
-  analogue of edge coverage. World3's recall of the exact top-200 goes 7 -> 23
-  and its step-dominant coverage 41 -> 55 of 399; C-LEARN's goes 97 -> 150 of
-  153, with recall@1, @10, @50 and @100 all exactly 1.00.
+- **Weight.** `ClampedLogAbs` weakly dominates `RelativeLinkScore` on every
+  column at BOTH closure settings (World3 every-edge: 31 vs 26 of the exact
+  top-200, 50 vs 48 pairs covered; C-LEARN every-edge: 150 vs 146 loops, 1.00
+  vs 0.96 at recall@100), so the weight conclusion does not depend on the
+  closure choice. `HopCount`, the score-blind control, stays worst or
+  tied-worst everywhere, which is the result that says the score weighting is
+  doing work at all.
+- **Closures.** Closing on every edge is still the lever, and a bigger one
+  than the earlier (three-axis) measurement showed: it is not a bigger sample
+  of the same kind -- the in-edge family emits the minimum-weight cycle
+  through the SEED, and one shortest-path tree holds one route per node, so
+  parallel routes to the same node are unreachable however many seeds or
+  steps are swept; the every-edge family emits, for each edge both trees
+  reach, the minimum-weight cycle through the seed AND that edge -- the
+  strength-weighted analogue of edge coverage. World3's recall of the exact
+  top-200 goes 8 -> 31 and its step-dominant coverage 34 -> 50 of 399
+  (candidate volume goes 90 -> 2,150); C-LEARN's goes 97 -> 150 of 153, with
+  recall@1, @10, @50 and @100 all exactly 1.00 and step-dominant coverage
+  628 -> 750 of 750 (perfect).
 - **Seeds.** `StocksAndStocklessSccs` is measurement-neutral on both models --
   every column matches `Stocks`, which is evidence that neither carries a
   non-trivial SCC holding no stock -- and it closes AC1.3's gap by
@@ -580,41 +673,47 @@ Reading the axes:
   representative per stockless component reaches it. What is NOT measured here
   is its cost on a model that does carry such components; that cost is bounded
   at one extra search pair per component per saved step. `AllSccNodes` did not
-  earn its place: with every-edge closures it costs 1.031 s on World3 -- 2.5x
-  the exact enumeration it stands in for -- for recall@200 of 32 against 23,
-  and with in-edge closures it costs 0.151 s for 14, worse per unit time than
-  stock-seeded every-edge's 23 at 0.141 s. It stays selectable and unused.
-- **The hop tie-break is the default and is measurement-neutral.** It is an
-  axis (`FallbackTieBreak::{Hops, NodeId}`), and both arms were measured at
-  the chosen seeds/closures with both contending weights: every recall column
-  and every step-dominant count is identical between them on both models
-  (World3 23/200 and 55/399 under `ClampedLogAbs` either way; C-LEARN 150/153
+  earn its place: with every-edge closures it costs 1.027 s on World3 -- 2.5x
+  the exact enumeration it stands in for, and 4,066 candidates against 2,150 --
+  for recall@200 of 39 against 31, and with in-edge closures it costs 0.159 s
+  for 15 against 8, worse per unit time than stock-seeded every-edge's 31 at
+  0.141 s. It stays selectable and unused.
+- **The hop tie-break is the default and is measurement-neutral.** Both arms
+  (`FallbackTieBreak::{Hops, NodeId}`) were measured at the chosen
+  seeds/closures with both contending weights: every recall column and every
+  step-dominant count is identical between them on both models (World3 31/200
+  and 50/399 under `ClampedLogAbs` either way; C-LEARN 150/153 and 750/750
   either way). What `Hops` buys is inside the zero-weight plateau
   `ClampedLogAbs` creates -- with a third of a real graph's active links
   weighing exactly 0, many cycles tie, and the tie-break decides among them on
   cycle length rather than on node numbering -- which is a statement about
   the model rather than about interning order, at no measured cost.
-- **`ShiftedLogAbs` was measured and rejected.** `w = ln(max active |s|) -
-  ln|s|` keeps the relative gain among super-unit links that the clamp
+- **`ShiftedLogAbs` was measured and rejected.** `w = ln(step max finite |s|)
+  - ln|s|` keeps the relative gain among super-unit links that the clamp
   discards (an edge of gain 1000 costs less than one of gain 2), which is the
   distinction World3's long high-gain dominant loops turn on -- so it was the
   obvious hypothesis for the clamp's low recall. Measured at the chosen
-  seeds/closures it is WORSE: World3 recall@200 10 against 23 and
-  step-dominant 48 against 55; C-LEARN 138/153 against 150/153, where its
-  rows are identical to `HopCount`'s. The mechanism is visible in the sum:
+  seeds/closures it is WORSE: World3 recall@200 15 against 31 and
+  step-dominant 41 against 50 of 399; C-LEARN 138/153 against 150/153 and
+  734/750 against 750/750, where its rows are IDENTICAL to `HopCount`'s on
+  C-LEARN (72/139/138/734 either way). The mechanism is visible in the sum:
   `Sigma w = L * ln(max) - ln(product)`, and on these models `ln(max)` per hop
   (max |s| ~1e4-1e6 on World3, up to 1e14 on C-LEARN) dwarfs any product
-  term, so the shifted arm degenerates into a hop count. It stays selectable
-  as a documented negative result.
+  term, so the shifted arm degenerates toward a hop count (identically on
+  C-LEARN; close to it on World3's every-edge closures, where it still beats
+  `HopCount` -- 15 vs 10 at recall@200 -- but trails `ClampedLogAbs` by the
+  same margin `HopCount` does). It stays selectable as a documented negative
+  result.
 
 **k-best via edge penalty was considered and not adopted.** World3's chosen
 strategy already reports the full 200-loop cap while spending 0.141 s of a
 ~0.2 s budget, so a second penalized round does not fit inside the stated
-constraint. It is also no longer the obvious next lever: because the reported
-list is AT the cap, recall@200 is no longer bounded above by that list's
-length (the caveat the Phase 3 tables carried), so 23 of 200 is a genuine
-overlap measurement -- roughly 85x what a uniform 200-cycle sample of World3's
-150,827-cycle universe would be expected to hit.
+constraint. It is also not the obvious next lever: because the reported list
+is AT the cap, recall@200 is no longer bounded above by that list's length
+(the caveat the Phase 3 tables carried), so 31 of 200 is a genuine overlap
+measurement -- roughly 117x what a uniform 200-cycle sample of World3's
+150,827-cycle universe would be expected to hit (`200 * 200 / 150827 ~ 0.27`
+expected by chance).
 
 ---
 
@@ -694,5 +793,30 @@ The audit's independent re-implementation reproduces the engine's selection
 exactly on both models (200/200 and 153/153 reported-list overlap), so the
 anchoring, the escalation bound and the tie rule are checked against a second
 implementation written from this document rather than only against the Rust.
+
+After the anchor-share review fix (review finding, 2026-08-18; release, Apple
+M-series under Asahi, `examples/ltm_discovery_bench` and the regenerated
+audits): 140 of 200 World3 slots anchored left only 60 (30%) for the ordinary
+mean-relative ranking -- a coverage guarantee crowding the ranking claim down
+far past what AC5.1 asks for (its guarantee is `k = 1`; everything past it is
+a bonus, not a requirement). `select_reported` now bounds escalation past
+`k = 1` to `ANCHOR_SHARE_OF_CAP` (one half) of the cap: on World3, `k = 2`'s
+anchor set (96) fits within `200 * 0.5 = 100` but `k = 3`'s (140) does not, so
+escalation stops at `k = 2`, anchoring 96 of the 200 slots and leaving 104 to
+the mean-relative ranking. That moves 25 of the reported 200 relative to a
+plain (non-anchored) mean-relative truncation -- down from 49 under the
+unbounded rule this replaces, confirmed by re-measuring the OLD rule
+side-by-side against the same ranked list (which reproduces this section's
+original 49-loop figure exactly, the cross-check that the two measurements are
+comparable) -- so 175 loops are reported under both the share-bounded and the
+plain rankings, and
+the presentation order is still the same competitive-first mean-relative
+ranking under every variant. C-LEARN's cap does not bind, so `k`-escalation
+never runs there and its report is unaffected by the bound (unchanged loop for
+loop, as above). The audit's independent re-implementation (updated with the
+same `ANCHOR_SHARE_OF_CAP` rule) still reproduces the engine's selection
+exactly on both models (200/200 and 153/153 reported-list overlap), and the
+100% step-dominant coverage figure above is unchanged: the `k = 1` guarantee
+the cap has to hold is exempt from the share bound by construction.
 
 (Phase 6 still to fill in.)

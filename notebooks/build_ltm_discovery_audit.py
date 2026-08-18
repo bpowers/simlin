@@ -221,6 +221,7 @@ DUMP_PATH = Path({str(dump)!r})
 MIN_CONTRIBUTION = 0.001
 MAX_LOOPS = 200
 MAX_ANCHOR_K = 3
+ANCHOR_SHARE_OF_CAP = 0.5
 
 print(f"pysimlin  {{simlin.__version__}}")
 print(f"python    {{sys.version.split()[0]}} on {{platform.platform()}}")
@@ -607,7 +608,8 @@ Now the same pipeline the engine runs, over the full enumerated set:
    its cycle partition by construction (a partition IS a stock-to-stock SCC), so
    "first" is "the". A cycle with no stock gets its own Solo group.
 3. **Universe totals**: per partition, per step, the sum of `|score|` over ALL
-   enumerated cycles. This is the denominator the engine calls `external_totals`.
+   enumerated cycles. This is the denominator the engine's `UniverseStats.totals`
+   carries (passed to `rank_and_filter` as `universe: Option<&UniverseStats>`).
 4. **Retention**: keep a cycle iff at some step its `|score|` is at least
    `MIN_CONTRIBUTION` (0.1%) of its partition's total there. Solo cycles are their
    own denominator and are kept whenever they are ever active.
@@ -619,10 +621,13 @@ Now the same pipeline the engine runs, over the full enumerated set:
    so it still makes that partition a place where loops compete -- which is why the
    classification asks the universe rather than the survivor set.
 6. **Select** under `MAX_LOOPS`, coverage-aware: within every competing group, each
-   step's largest-`|relative score|` survivor is ANCHORED and keeps its slot, `k`
-   rising past 1 while the whole anchor set still fits (bounded by `MAX_ANCHOR_K`);
-   remaining slots go to the ranking in order. Membership is the only thing this
-   changes -- the reported list is still presented in the ranking's order.
+   step's largest-`|relative score|` survivor is ANCHORED and keeps its slot
+   (`k = 1`, unconditional); `k` rises past 1, bounded by `MAX_ANCHOR_K`, but only
+   while the ENLARGED anchor set stays at or under `ANCHOR_SHARE_OF_CAP` (one half)
+   of the cap, so anchoring can grow coverage without ever crowding the ordinary
+   ranking below half of a capped report. Remaining slots go to the ranking in
+   order. Membership is the only thing this changes -- the reported list is still
+   presented in the ranking's order.
 """
     )
 
@@ -800,9 +805,14 @@ def select_reported(rows, cap):
     if count_at(1) > cap:
         # Pathological: anchors alone overflow, so the cap applies to them.
         return [i for i, d in enumerate(depth) if d == 1][:cap]
+    # k=1 is the unconditional guarantee, exempt from the share bound; k may
+    # rise past it only while the resulting anchor set stays at or under
+    # ANCHOR_SHARE_OF_CAP of the cap, so anchoring can never crowd the
+    # ordinary mean-relative ranking below half of a capped report.
+    anchor_cap = cap * ANCHOR_SHARE_OF_CAP
     k = 1
     for kk in range(2, MAX_ANCHOR_K + 1):
-        if count_at(kk) > cap:
+        if count_at(kk) > anchor_cap:
             break
         k = kk
     keep = [d != 0 and d <= k for d in depth]
