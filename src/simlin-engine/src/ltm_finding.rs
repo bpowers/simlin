@@ -49,6 +49,20 @@ use enum_gen::{
     ActivityGraph, accumulate_series_into_totals, enumerate_active_circuits, retain_circuits,
 };
 
+// Shortest-path fallback: the candidate generator that runs when the
+// enumeration cannot complete within its budgets or the caller's deadline
+// (docs/design-plans/2026-08-17-ltm-discovery-exact.md). A sibling file
+// mounted here purely for the per-file line cap.
+//
+// The `allow` holds only until `discover_loops_with_candidate_gen` calls the
+// sweep; the module lands with its own unit tests first so the Dijkstra and
+// the weight formulations are pinned independently of the wiring.
+#[allow(dead_code)]
+#[path = "ltm_finding_fallback.rs"]
+mod fallback;
+#[allow(unused_imports)]
+pub use fallback::FallbackWeight;
+
 // --- Types ---
 
 /// A parsed link score offset: ((from_variable, to_variable), offset_in_results).
