@@ -3665,7 +3665,7 @@ fn discover_share_of_total_feedback(elems: &[&str]) -> DiscoveryResult {
 
 // ===========================================================================
 // Union-graph circuit enumeration (the primary candidate generator; design:
-// docs/design-plans/2026-08-10-ltm-discovery-union-enumeration.md).
+// docs/design-plans/2026-08-17-ltm-discovery-exact.md).
 // ===========================================================================
 
 /// Build a scalar stock/flow/aux datamodel project for enumeration tests.

@@ -9,13 +9,13 @@
 //! Candidate loops are generated in one of two ways:
 //!
 //! - **Union-graph circuit enumeration** (the primary path; `ltm_finding_enum.rs`,
-//!   design: docs/design-plans/2026-08-10-ltm-discovery-union-enumeration.md):
-//!   because discovery runs after the simulation, the set of edges that ever
-//!   carried a nonzero score is observable, and every scorable loop is an
-//!   ever-simultaneously-active elementary cycle of that union graph.
-//!   Enumerating exactly those cycles (activity-bitset pruning) yields a
-//!   provably complete candidate set whenever the enumeration budgets hold --
-//!   `DiscoveryResult::enumeration_complete` reports it.
+//!   design: docs/design-plans/2026-08-17-ltm-discovery-exact.md): because
+//!   discovery runs after the simulation, the set of edges that ever carried a
+//!   nonzero score is observable, and every scorable loop is an
+//!   ever-simultaneously-active elementary cycle of that union graph, spanning
+//!   at least two variables. Enumerating exactly those cycles (activity-bitset
+//!   pruning) yields a provably complete candidate set whenever the enumeration
+//!   budgets hold -- `DiscoveryResult::enumeration_complete` reports it.
 //! - **Per-step strongest-first DFS** (the fallback, from Appendix I of
 //!   Eberlein & Schoenberg, "Finding the Loops That Matter", 2020): a DFS
 //!   guided by link score magnitudes with a per-node expansion cap, run at
@@ -39,8 +39,8 @@ use crate::project::Project;
 use crate::results::Results;
 
 // Union-graph circuit enumeration: discovery's primary candidate generator
-// (docs/design-plans/2026-08-10-ltm-discovery-union-enumeration.md). A
-// sibling file mounted here purely for the per-file line cap.
+// (docs/design-plans/2026-08-17-ltm-discovery-exact.md). A sibling file
+// mounted here purely for the per-file line cap.
 #[path = "ltm_finding_enum.rs"]
 mod enum_gen;
 #[cfg(test)]
@@ -2694,13 +2694,21 @@ pub fn discover_loops_with_candidate_gen(
     let mut external_totals: Option<HashMap<usize, Vec<f64>>> = None;
 
     // --- Primary candidate generation: union-graph circuit enumeration ---
-    // (docs/design-plans/2026-08-10-ltm-discovery-union-enumeration.md).
+    // (docs/design-plans/2026-08-17-ltm-discovery-exact.md).
     // Every loop with a nonzero score at some saved step has ALL its edges
     // active at that step (score is a product), so the ever-simultaneously-
     // active elementary cycles of the union graph are exactly the scorable
     // loop universe. Enumerating them once replaces the per-step sampling
     // DFS with a provably complete candidate set whenever the enumeration
     // budgets hold.
+    //
+    // The enumerated set is also the population every downstream statistic is
+    // measured against: retention judges a circuit's peak share of its
+    // partition's whole-universe mass, and `rank_and_filter` normalizes
+    // relative scores against the same totals via `external_totals`. Those
+    // totals are the mass the REPORTED loops carry, which the corrections
+    // below maintain where a loop's reported score is not the raw product the
+    // enumeration pass banked.
     if candidate_gen == CandidateGen::Auto {
         let activity = ActivityGraph::build(&search, results);
         let candidates = enumerate_active_circuits(&activity, deadline);

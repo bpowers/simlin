@@ -386,4 +386,27 @@ Reported-200 share of universe partition mass per step on World3: min 0.006, med
 0.59, max 0.92. Super-unit active links per step: World3 37-91 of ~190-250; C-LEARN
 288-602 of ~1300-2400.
 
-(To be filled in by Phases 1, 3, 4, 6.)
+After Phase 1 (release, Apple M-series under Asahi, `examples/ltm_discovery_bench`):
+
+| Model | Enumeration total | Circuits | Survivors | Reported | `enumeration_complete` |
+|---|---|---|---|---|---|
+| C-LEARN v77 | 0.036 s | 162 | 153 | 153 | true |
+| World3-03 | 0.40 s | 150,827 | 2,979 | 200 | true |
+
+World3 phase breakdown at 0.40 s: activity-graph build 0.4 ms, enumerate 143 ms,
+retain 137 ms, cross-agg stitch 0.4 ms, `FoundLoop` materialization + dedup 87 ms,
+rank 28 ms, remainder (`parse_link_offsets`, `IndexedSearch::build`, cycle
+partitions) ~5 ms. C-LEARN at 36 ms is dominated by the phases *before* candidate
+generation: 6 ms activity-graph build over 3,014 union edges, ~27 ms
+`parse_link_offsets` + topology build over its ~26k LTM variables, and under 2.5 ms
+in enumeration, retention, materialization and ranking combined.
+
+C-LEARN's reported count falls from 200 to 153 because 48 of the old 200 were
+single-variable `PREVIOUS`-latch self-loops, which are no longer loops (AC1.1); the
+`MAX_LOOPS` cap no longer binds there.
+
+World3's universe is ~150k circuits, not the ~330k quoted in earlier notes: 330k is
+its elementary-cycle count WITHOUT the ever-simultaneously-active constraint, which
+the enumerator never materializes.
+
+(Phases 3, 4 and 6 still to fill in.)
