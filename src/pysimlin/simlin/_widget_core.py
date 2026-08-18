@@ -106,9 +106,10 @@ def missing_asset_message(name: str, directory: str) -> str:
     return (
         f"the notebook widget asset {name!r} is missing from {directory}. In a released "
         f"pysimlin wheel this means the install is broken (reinstall pysimlin); in a source "
-        f"checkout build it with `pnpm --filter @simlin/notebook-widget build`, which "
-        f"copies {WIDGET_JS} and {WASM_FILE} into simlin/{ASSET_PACKAGE_DIR}/. "
-        f"Set {ASSET_ENV}=<http(s) url> to load the module from a dev server instead."
+        f"checkout build the widget (`pnpm --filter @simlin/notebook-widget build`) then "
+        f"stage the assets into simlin/{ASSET_PACKAGE_DIR}/ (see simlin/{ASSET_PACKAGE_DIR}/"
+        f"README.md). Set {ASSET_ENV}=<http(s) url> to load the module from a dev server "
+        f"instead."
     )
 
 

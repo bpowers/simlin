@@ -15,10 +15,12 @@ pysimlin wheel; neither is committed to git:
 `importlib.resources`) once at import; a missing file does not break
 `import simlin` -- creating or displaying a widget raises `SimlinAssetError`
 naming the file and how to produce it. To populate this directory from a
-source checkout run the widget package's build (`pnpm --filter
-@simlin/notebook-widget build`), which copies both files here; the release
-workflow does the same once on the host before building wheels
-(`scripts/release-pysimlin.sh`).
+source checkout, build the widget package (`pnpm --filter
+@simlin/notebook-widget build` -> `src/notebook-widget/dist/widget.js`) and
+the engine (`pnpm -C src/engine build` -> `src/engine/core/libsimlin-browser.wasm`,
+wasm-opt'd), then stage both files here; the release workflow stages them
+once on the host before building wheels so every platform wheel carries
+identical assets.
 
 `pyproject.toml` (`[tool.setuptools.package-data]`) and `MANIFEST.in` include
 this directory's `*.js`, `*.wasm`, and this README.

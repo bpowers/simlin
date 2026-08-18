@@ -15,7 +15,6 @@ from simlin._widget_core import (
     ASSET_ENV,
     INLINE_WASM_GLOBAL,
     WASM_FILE,
-    WIDGET_JS,
     AssetMode,
     SnapshotOutcome,
     SnapshotRequest,
@@ -68,7 +67,7 @@ class TestAssetMode:
         assert "reinstall" in text
         assert "pnpm" in text
         assert ASSET_ENV in text
-        assert WIDGET_JS in text
+        assert "README.md" in text  # where the staging step is described
 
 
 class TestParseIncoming:
