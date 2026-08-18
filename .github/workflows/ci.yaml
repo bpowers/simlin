@@ -378,6 +378,17 @@ jobs:
       - name: Run the JupyterLab journey
         run: make -C src/pysimlin e2e
 
+      # The example notebook, executed headless in a real kernel (nbconvert
+      # comes with jupyterlab): every cell must run clean and the display
+      # cell must produce the widget view with its SVG fallback. The
+      # script-style run in tests/test_examples.py cannot see the display
+      # path; this can.
+      - name: Execute the example notebook headless
+        working-directory: src/pysimlin
+        run: >
+          uv run jupyter nbconvert --to notebook --execute
+          --output "$RUNNER_TEMP/notebook_editor.ipynb" examples/notebook_editor.ipynb
+
       # Screenshots, the trace, and the jupyter server log are what a failed
       # journey needs to be understood.
       - name: Upload journey output
