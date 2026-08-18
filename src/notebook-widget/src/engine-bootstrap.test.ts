@@ -71,7 +71,11 @@ describe('requestWasmModule', () => {
   it('rejects after the timeout when the kernel never answers', async () => {
     const model = new FakeModel(defaultState());
     const p = requestWasmModule(model, { timeoutMs: 1000 });
-    const assertion = expect(p).rejects.toThrow(/timed out after 1000ms/);
+    // The message explains the likely cause (a static export with no kernel)
+    // and its fix, since the widget cannot detect that case up front.
+    const assertion = expect(p).rejects.toThrow(
+      /did not send the Simlin engine within 1 s.*static export.*store_widget_state=False/,
+    );
     await rs.advanceTimersByTimeAsync(1000);
     await assertion;
     expect(model.listenerCount('msg:custom')).toBe(0);

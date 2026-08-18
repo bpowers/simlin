@@ -119,6 +119,29 @@ export const WASM_REPLY_TIMEOUT_MS = 60_000;
 
 type GlobalCache = Record<string, Promise<WebAssembly.Module> | undefined>;
 
+/**
+ * What the cell says when the wasm never arrives. The one case a user is
+ * likely to hit is a static export: `jupyter nbconvert --to html --execute`
+ * stores the widget state by default and the exported page then shows the
+ * widget itself, whose kernel request nobody answers, instead of the SVG the
+ * output also carries -- so the message names that case and its fix first.
+ * The widget cannot tell a missing kernel from a slow one: anywidget's model
+ * proxy exposes neither the comm nor its liveness (`widget_manager` is on
+ * the proxy but flagged as an over-wide surface to be narrowed, and its
+ * shape differs per host), and `send` on a comm-less model is a silent
+ * no-op. So the export case is not detected early; it is explained when the
+ * timeout fires.
+ */
+export function wasmTimeoutMessage(timeoutMs: number): string {
+  const seconds = Math.round(timeoutMs / 1000);
+  return (
+    `the kernel did not send the Simlin engine within ${seconds} s. ` +
+    'If this page is a static export (nbconvert, a saved HTML page), there is no kernel to send it: ' +
+    're-export with --ExecutePreprocessor.store_widget_state=False so the diagram is embedded as an image instead. ' +
+    'If a kernel is running, it may be busy, or its pysimlin install may be missing the widget assets.'
+  );
+}
+
 let enginePromise: Promise<void> | null = null;
 
 /**
@@ -158,7 +181,7 @@ export function requestWasmModule(
         return;
       }
       finish();
-      reject(new Error(`timed out after ${timeoutMs}ms waiting for the kernel to send the Simlin engine`));
+      reject(new Error(wasmTimeoutMessage(timeoutMs)));
     }, timeoutMs);
     model.on('msg:custom', onCustom);
     model.send(WASM_REQUEST);
