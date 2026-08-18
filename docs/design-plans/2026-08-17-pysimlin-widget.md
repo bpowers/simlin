@@ -29,11 +29,11 @@ Each criterion names success and failure behaviour. Test names use the prefix `p
 - AC2.1 Displaying `m` in a notebook renders the `@simlin/diagram` `Editor` in the cell output at the requested height; the same output carries an SVG fallback so static renderers (nbconvert, GitHub) show the diagram.
 - AC2.2 An edit made in the widget (e.g. adding an auxiliary, changing an equation, moving an element) is written to `m.path` in its format before the next cell executes; `m.revision` has advanced; `m.run()` in the next cell reflects it.
 - AC2.3 `m.edit()` in a cell, or an external write to `m.path`, updates the displayed widget without re-executing the display cell (the Editor remounts on the new revision, showing a brief "updated on disk" notice for external sources).
-- AC2.4 Two displays of the same model in different cells stay consistent: an edit in one appears in the other; the engine WASM is instantiated once per page and shared.
+- AC2.4 Two displays of the same model in different cells stay consistent: an edit in one appears in the other; the engine WASM is compiled once per page and shared (each widget instantiates its own engine from the shared compiled module).
 - AC2.5 A snapshot the widget sends against a stale revision (kernel advanced in between) is rejected: the widget is re-seeded from the kernel's snapshot with a visible notice, and the file is never written from the stale snapshot.
 - AC2.6 Widget keyboard shortcuts (Delete/Backspace/Undo) act only on the focused widget's editor and never fire when typing in its equation editor, and never trigger JupyterLab notebook shortcuts (`data-lm-suppress-shortcuts` set on the widget root).
 - AC2.7 `m.selection` reflects the variables currently selected in the widget (so an agent-driven cell can ask "what is the human looking at").
-- AC2.8 Verified interactively in Colab and VS Code notebooks (manual checklist recorded in the PR; the automated journey runs on JupyterLab).
+- AC2.8 Per-host checklists for Colab, VS Code (local and Remote-SSH), Notebook 7 and marimo are written in `src/pysimlin/docs/notebook-hosts.md`; the automated journey establishes JupyterLab 4, and every other host stays marked UNVERIFIED there until someone runs its checklist and records the result.
 
 **AC3 -- read-only rendering (DoD 3)**
 - AC3.1 `m.diagram()` returns an object whose `_repr_svg_` is the engine's SVG for the model; models with no view render via a transient auto layout.
@@ -58,16 +58,19 @@ Each criterion names success and failure behaviour. Test names use the prefix `p
 |        |            -> revision++ -> notify                      |
 |        v                                                          |
 |  ModelWidget (anywidget.AnyWidget)                                |
-|     traits: project_json, revision, selection, height, theme;    |
-|             custom msgs: wasm bytes, snapshot/saved/rejected     |
+|     traits: project_json, revision, selection, height, theme,    |
+|             read_only, max_snapshot_bytes (kernel-owned state)   |
+|     custom msgs: wasm bytes, snapshot -> saved/rejected, notice, |
+|             oversize                                              |
 +-------------------^-----------------------------|----------------+
                     | comm (ipywidgets protocol)  |
 +-------------------|-----------------------------v----------------+
 |  widget.js (ESM)  |  anywidget render(el, model)                  |
-|     page-global engine cache (wasm compiled once per page)        |
-|     <Editor inputFormat="json" key=revision onSave=...>            |
-|        onSave(whole project json, rev) -> model.set + save_changes |
-|        change:revision from kernel -> remount with new snapshot    |
+|     page-global compiled-wasm cache (compiled once per page)      |
+|     <Editor inputFormat="json" key=(revision,json) onSave=...>     |
+|        onSave(whole project json, base) -> send snapshot,          |
+|          resolve on saved/rejected (one in flight)                 |
+|        kernel trait push -> own-ack keeps, else remount            |
 +-------------------------------------------------------------------+
                     file on disk (.stmx/.xmile/.mdl/.sd.json)
       <- Claude Code edits it / simlin MCP edit_model / git checkout
@@ -108,7 +111,7 @@ class Model:
     path / revision / dirty / save() / reload()  # proxies to .project
     selection: tuple[str, ...]                   # last selection reported by a widget
     def diagram(self) -> Diagram                 # _repr_svg_ object
-    def widget(self, *, height: int = 600, theme: str = "auto") -> ModelWidget
+    def widget(self, *, height: int = 600, theme: str = "auto", read_only: bool = False, max_snapshot_bytes: int = MAX_SNAPSHOT_BYTES) -> ModelWidget
     def _repr_mimebundle_(self, **kw)            # widget view + image/svg+xml fallback
 
 def open(path, *, autosave=True, watch=True) -> Model
@@ -117,7 +120,7 @@ def load(path_or_bytes) -> Model                 # unchanged semantics; suffix t
 
 `ChangeEvent(source: "edit"|"widget"|"disk"|"reload", revision: int)`.
 
-Sync state machine (functional core, `simlin/_sync.py`): pure functions over `(revision, last_written_hash, pending_widget_rev)` deciding, for each incoming event (widget snapshot with rev, disk hash observed, local edit), one of `accept -> write`, `reject-stale -> reseed widget`, `ignore-echo`, `reload -> push`. The imperative shell (`Project`, the poll thread, `ModelWidget`) only executes those decisions. Locking: the existing `Project._lock` guards the handle; the poll thread takes it briefly around `_replace_from_bytes`; callbacks fire outside the lock. Trait updates from the poll thread go through the kernel's IO loop when available (ipykernel >= 7.1 tolerates direct sets; older kernels get `add_callback`).
+Sync state machine (functional core, `simlin/_sync.py`): pure functions over `(revision, last_written_hash, pending_widget_rev)` deciding, for each incoming event (widget snapshot with rev, disk hash observed, local edit), one of `accept -> write`, `reject-stale -> reseed widget`, `ignore-echo`, `reload -> push`. The imperative shell (`Project`, the poll thread, `ModelWidget`) only executes those decisions. Locking: the existing `Project._lock` guards the handle; the poll thread takes it briefly around `_replace_from_bytes`; callbacks fire outside the lock. Trait updates and comm sends from the poll thread are always marshalled onto the kernel's IO loop (`shell.kernel.io_loop.add_callback`) when running under ipykernel; outside a kernel (plain IPython, tests) callbacks run directly.
 
 Format dispatch is a single table shared by `open()`, `load()`, `save()`, matching simlin-serve's `format_for_path` plus `.mdl` write and content sniffing for `.json`. XMILE and MDL are regenerated (not byte-preserved) on save, as everywhere else in the repo.
 
@@ -151,17 +154,17 @@ Everything that is a request or a reply travels as a custom message, never as a 
 
 - Entry exports anywidget AFM `{ initialize, render }` (default export). `render` mounts React 19 into `el` (light DOM; theme tokens applied via `data-theme` on the wrapper; `data-lm-suppress-shortcuts` set on the wrapper), imports `@simlin/diagram/theme.css` and component CSS but NOT `reset.css`.
 - Sizing: wrapper `position:relative; height: <height>px; width:100%`; Editor chrome anchors to it.
-- Engine injection: uses `@simlin/engine` with a loader that accepts wasm bytes (`initWasm(bytes)`), running the engine on the main thread (DirectBackend) unless the spike (Phase 0) shows an inline-blob worker fits comfortably in a single-file bundle. Simulation for the widget's sparklines is small; heavy simulation runs in the kernel.
-- Build: rsbuild config modelled on `config/rsbuild/rsbuild.component.config.js` (single chunk, ESM `library.type: 'module'`, CSS injected into JS, KaTeX fonts inlined as data URIs, Roboto NOT bundled -- widget uses `Roboto, system-ui` so hosts that have it use it). Output copied to `src/pysimlin/simlin/_widget/`. Size budget: `widget.js` <= 2.5 MB pre-gzip; wasm shipped separately (~2 MB after wasm-opt, gz ~1.6 MB) and delivered over the comm.
+- Engine injection: uses `@simlin/engine`'s `wasm.supplied` flavour -- no bundled artifact; the widget calls `ready(module)` with the `WebAssembly.Module` compiled once per page from the bytes the kernel sends -- running the engine on the main thread (DirectBackend). The Phase 0 spike showed an inline-blob worker is achievable but needs a two-stage build; DirectBackend was chosen because the widget's own simulations are small and heavy simulation runs in the kernel.
+- Build: rsbuild config modelled on `config/rsbuild/rsbuild.component.config.js` (single chunk, ESM `library.type: 'module'`, CSS injected into JS, KaTeX fonts inlined as data URIs, Roboto NOT bundled -- widget uses `Roboto, system-ui` so hosts that have it use it). Output copied to `src/pysimlin/simlin/_widget/`. Size budget: `widget.js` <= 2.5 MB pre-gzip (measured ~1.57 MB / 0.62 MB gz); wasm shipped separately (~5.4 MB after wasm-opt -O3, ~1.8 MB gz -- wasm-opt trades the opt-level=z size for speed) and delivered over the comm.
 
-### 5. `@simlin/diagram` embeddability fixes (Editor)
+### 4b. `@simlin/diagram` embeddability fixes (Editor)
 
 - Keyboard: document keydown handler checks `composedPath()` includes the editor root and skips editable targets; each Editor instance only reacts when it (or its descendants) has focus-within or is the most recently focused editor.
 - Viewport assumptions: replace `100vw/100vh` clamps with container-relative units; nothing `position: fixed` inside the Editor tree (toast viewport becomes absolute within the editor root).
 - Host props: `showHomeLink?: boolean` (default true; hides `<Link to="/">` when embedded in a non-router host), an explicit `height`/fill behaviour documented in `src/diagram/CLAUDE.md` Hosting Requirements.
 - These changes are covered by existing Editor tests plus new ones and must not change simlin-serve/app behaviour (they set the same defaults).
 
-### 6. Read-only display
+### 5. Read-only display
 
 `Model.diagram()` returns a small `Diagram` object with `_repr_svg_` (engine SVG). `_repr_mimebundle_` on `Model` returns the widget's mimebundle merged with `image/svg+xml` so static renderers fall back to the picture. `simlin.load()`-based (in-memory) models get the same.
 
@@ -204,8 +207,9 @@ Phases are sequenced so each lands independently useful and green. Phase 0 is a 
 
 ## Additional Considerations
 
-- Out of scope / follow-ups (explicit): simlin-serve and simlin-mcp-core still treat `.mdl` as read-only with an `.sd.json` sidecar; aligning them with in-place `.mdl` writing is a separate change in a different subsystem (estimate: small, one dispatcher + writer branch + tests) and should be sequenced right after Phase 1 lands the FFI. Result overlays/LTM in the widget; a CDN asset mode (`@simlin/notebook-widget` on npm) to keep `_esm` out of `.ipynb` files in Colab; multi-peer merge (CRDT design doc).
-- Colab specifics: each output is a sandboxed iframe -- portals are clipped to the cell; wasm over the comm has to be verified there (Phase 5); widget state is saved into the `.ipynb` by default, so `_esm` (~2 MB) + `project_json` are persisted per displayed widget -- documented, with the CDN mode as the future mitigation.
+- `.mdl` is written in place by pysimlin, simlin-serve and simlin-mcp-core alike (one format table, export warnings on every surface); the only sidecar remnant is serve's startup warning for a legacy `<name>.mdl` + `<name>.sd.json` pair, which are listed as two independent projects.
+- Out of scope / follow-ups (explicit): result overlays/LTM in the widget; a CDN asset mode (`@simlin/notebook-widget` on npm) to keep `_esm` out of `.ipynb` files in Colab; multi-peer merge (CRDT design doc); running the non-JupyterLab host checklists.
+- Colab specifics: each output is a sandboxed iframe -- portals are clipped to the cell; wasm over the comm has to be verified there (Phase 5); widget state is saved into the `.ipynb` by default, so `_esm` (~1.5 MB) + `project_json` are persisted per displayed widget -- documented, with the CDN mode as the future mitigation.
 - Frontend->kernel message cap: tornado's default 10 MiB websocket max applies to the snapshot (an oversize frame closes the socket with 1009 and never reaches the kernel); the `oversize` message / `max_snapshot_bytes` trait above turn that into a visible refusal, measured on the wire size. Every model in `test/` is far below the cap (C-LEARN v77, 911 variables: about 1.4 MiB on the wire).
 - Security: the kernel writes only to the path it opened; no arbitrary-path handler exists (unlike 2021).
 - Threading: trait sets from the poll thread are marshalled to the kernel IO loop where present.
