@@ -34,6 +34,9 @@ React components for model visualization and editing. General-purpose SD model e
 ### `src/app` (TypeScript)
 Full-featured SD application. Browse, create, import models; login/logout.
 
+### `src/notebook-widget` (TypeScript)
+anywidget front-end module for pysimlin's `ModelWidget`: hosts `@simlin/diagram`'s `Editor` in a notebook cell as one self-contained ES module (`dist/widget.js`, shipped in the pysimlin wheel). Runs the engine on the main thread from wasm bytes the kernel sends over the widget comm; syncs whole-project snapshots against a kernel-owned revision.
+
 ### `src/server` (TypeScript)
 Express.js backend. Firebase Auth (`authn.ts`), Firestore persistence (`models/db-firestore.ts`) in protobuf form.
 
@@ -98,7 +101,7 @@ simlin-cli  simlin-mcp  simlin-serve
 @simlin/diagram
   ^       ^         ^
   |       |         |
-@simlin/app   @simlin/server   @simlin/serve-web   simlin-site
+@simlin/app   @simlin/server   @simlin/serve-web   simlin-site   @simlin/notebook-widget
 ```
 
 - `@simlin/engine` -> (none)
@@ -107,6 +110,7 @@ simlin-cli  simlin-mcp  simlin-serve
 - `@simlin/app` -> `@simlin/core`, `@simlin/diagram`, `@simlin/engine`
 - `@simlin/server` -> `@simlin/core`, `@simlin/diagram`, `@simlin/engine`
 - `@simlin/serve-web` -> `@simlin/core`, `@simlin/diagram`, `@simlin/engine`
+- `@simlin/notebook-widget` -> `@simlin/diagram`, `@simlin/engine`
 - `simlin-site` -> `@simlin/diagram` (embeds live model diagrams on the website)
 
 ## Test Models

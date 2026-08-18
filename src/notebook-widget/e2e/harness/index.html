@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>simlin notebook widget harness</title>
+    <style>
+      body { margin: 0; font-family: sans-serif; }
+      .cell { margin: 8px; }
+    </style>
+  </head>
+  <body>
+    <div id="cell1" class="cell"></div>
+    <div id="cell2" class="cell"></div>
+    <script type="module">
+      import { FakeAnyModel } from './harness/fake-anywidget-model.js';
+
+      // Mimic anywidget's loader (load.ts): the module text is fetched by the
+      // widget manager and imported through a fresh blob: URL, so
+      // import.meta.url is useless and no relative asset can resolve.
+      async function loadWidgetModule() {
+        const src = await (await fetch('/widget.js')).text();
+        const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+        try {
+          return await import(url);
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      }
+
+      window.harness = {
+        FakeAnyModel,
+        loadWidgetModule,
+        models: [],
+        // Create a model, run the AFM lifecycle into `el`, return its index.
+        async mount(mod, el, state) {
+          const model = new FakeAnyModel(state, '/libsimlin-browser.wasm');
+          window.harness.models.push(model);
+          const widget = mod.default;
+          await widget.initialize({ model });
+          const cleanup = await widget.render({ model, el });
+          model.cleanup = cleanup;
+          return window.harness.models.length - 1;
+        },
+      };
+    </script>
+  </body>
+</html>
