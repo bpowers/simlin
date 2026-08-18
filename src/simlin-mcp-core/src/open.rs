@@ -99,6 +99,28 @@ fn ensure_variable_uids(project: &mut simlin_engine::datamodel::Project) {
     }
 }
 
+/// The [`SourceFormat`] a path's extension commits to, or `None` for the
+/// extensions (`.json`, `.sd.json`, anything else) whose format is decided
+/// by content.
+///
+/// This is the single extension dispatcher for the MCP surface: `open_project`
+/// uses it to pick a parser and `create_model` uses it to pick the writer for
+/// a fresh file, so a `.mdl` created through `CreateModel` is written as
+/// Vensim text that `ReadModel` can parse back rather than JSON under a
+/// misleading extension.
+pub fn format_for_extension(path: &Path) -> Option<SourceFormat> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "stmx" | "xmile" | "xml" => Some(SourceFormat::Xmile),
+        "mdl" => Some(SourceFormat::Mdl),
+        _ => None,
+    }
+}
+
 /// Open a project from file contents.  XMILE and Vensim formats are
 /// detected by extension; JSON files use content-based detection
 /// (top-level `models` key = native, `variables` key = SD-AI).
@@ -111,27 +133,24 @@ pub fn open_project(
     path: &Path,
     contents: &str,
 ) -> Result<(simlin_engine::datamodel::Project, SourceFormat), AccessError> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    let (mut project, format) = match ext.as_str() {
-        "stmx" | "xmile" | "xml" => {
+    let (mut project, format) = match format_for_extension(path) {
+        Some(SourceFormat::Xmile) => {
             let mut reader = BufReader::new(contents.as_bytes());
             let project = simlin_engine::open_xmile(&mut reader).map_err(|e| {
                 AccessError::ParseError(anyhow::anyhow!("failed to parse XMILE: {e:?}"))
             })?;
             (project, SourceFormat::Xmile)
         }
-        "mdl" => {
+        Some(SourceFormat::Mdl) => {
             let project = simlin_engine::open_vensim(contents).map_err(|e| {
                 AccessError::ParseError(anyhow::anyhow!("failed to parse Vensim: {e:?}"))
             })?;
-            (project, SourceFormat::Xmile)
+            (project, SourceFormat::Mdl)
         }
-        _ => {
+        Some(SourceFormat::NativeJson | SourceFormat::SdaiJson) => {
+            unreachable!("format_for_extension never commits to a JSON format")
+        }
+        None => {
             let v: serde_json::Value = serde_json::from_str(contents)
                 .context("failed to parse JSON")
                 .map_err(AccessError::ParseError)?;
@@ -241,6 +260,47 @@ mod tests {
         let (project, format) = open_project(path, &contents).unwrap();
         assert_eq!(format, SourceFormat::Xmile);
         assert!(!project.models.is_empty());
+    }
+
+    // ---- Vensim detection ----
+
+    #[test]
+    fn open_project_detects_mdl_as_its_own_format() {
+        // `.mdl` must round-trip through the MDL writer, not the XMILE one,
+        // so the opener has to report the format the saver needs.
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/test-models/samples/teacup/teacup.mdl"
+        ));
+        let contents = std::fs::read_to_string(path).unwrap();
+        let (project, format) = open_project(path, &contents).unwrap();
+        assert_eq!(format, SourceFormat::Mdl);
+        assert!(!project.models.is_empty());
+    }
+
+    /// The extension table has three arms (XMILE-family, Vensim, and
+    /// content-detected) and is case-insensitive; every arm is pinned here
+    /// because `create_model` and `open_project` both dispatch on it.
+    #[test]
+    fn format_for_extension_covers_every_arm_case_insensitively() {
+        let cases: &[(&str, Option<SourceFormat>)] = &[
+            ("m.stmx", Some(SourceFormat::Xmile)),
+            ("m.STMX", Some(SourceFormat::Xmile)),
+            ("m.xmile", Some(SourceFormat::Xmile)),
+            ("m.xml", Some(SourceFormat::Xmile)),
+            ("m.mdl", Some(SourceFormat::Mdl)),
+            ("m.MDL", Some(SourceFormat::Mdl)),
+            ("m.sd.json", None),
+            ("m.json", None),
+            ("m", None),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(
+                format_for_extension(std::path::Path::new(name)),
+                *expected,
+                "format_for_extension({name})"
+            );
+        }
     }
 
     // ---- Issue 1: ensure_variable_uids assigns UIDs on open ----

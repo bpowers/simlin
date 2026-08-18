@@ -47,7 +47,7 @@ npx @simlin/mcp@latest
 |-------------------------|---------------------------|------|------|
 | XMILE                   | `.stmx`, `.xmile`, `.xml` | Yes | Yes |
 | JSON (Simlin and SD-AI) | `.sd.json`, `.json`       | Yes | Yes |
-| Vensim                  | `.mdl`                    | Yes | No (import only) |
+| Vensim                  | `.mdl`                    | Yes | Yes (rewritten in place; constructs Vensim cannot express are reported as warnings) |
 
 ## Skill resources
 

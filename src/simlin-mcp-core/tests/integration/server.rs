@@ -17,7 +17,7 @@ use std::path::Path;
 use rmcp::model::ReadResourceRequestParams;
 use rmcp::{ServerHandler, ServiceError, ServiceExt};
 use simlin_engine::datamodel;
-use simlin_mcp_core::access::{OpenedProject, ProjectAccess};
+use simlin_mcp_core::access::{OpenedProject, ProjectAccess, SaveOutcome};
 use simlin_mcp_core::errors::AccessError;
 use simlin_mcp_core::server::{ResourceContent, SimlinMcpServer};
 use simlin_mcp_core::types::SourceFormat;
@@ -37,7 +37,7 @@ impl ProjectAccess for MockAccess {
         _project: &datamodel::Project,
         _format: SourceFormat,
         _expected_version: Option<u64>,
-    ) -> Result<u64, AccessError> {
+    ) -> Result<SaveOutcome, AccessError> {
         unreachable!("server tests do not invoke tools")
     }
 

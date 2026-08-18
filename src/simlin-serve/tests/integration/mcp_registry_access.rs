@@ -179,7 +179,8 @@ async fn mcp_save_increments_version_and_updates_doc() {
     let new_version = access
         .save(&abs, &edited, opened.source_format, Some(0))
         .await
-        .expect("save");
+        .expect("save")
+        .version;
     assert_eq!(new_version, 1);
 
     // Re-opening sees the new version and the new equation.
@@ -220,7 +221,8 @@ async fn mcp_save_broadcasts_project_changed_with_agent_source() {
     let new_version = access
         .save(&abs, &edited, opened.source_format, Some(0))
         .await
-        .expect("save");
+        .expect("save")
+        .version;
     assert_eq!(new_version, 1);
 
     let event = await_event(&mut rx, |_msg| true).await;
@@ -290,7 +292,8 @@ async fn browser_save_and_mcp_save_are_both_observable_in_the_loro_doc() {
     let mcp_version = access
         .save(&abs, &edited, opened.source_format, None)
         .await
-        .expect("mcp save");
+        .expect("mcp save")
+        .version;
     assert_eq!(mcp_version, 2);
 
     // 3) Final state: both edits are present.
@@ -336,7 +339,8 @@ async fn mcp_save_first_then_browser_save_both_observable_in_loro_doc() {
     let mcp_version = access
         .save(&abs, &mcp_edited, opened.source_format, Some(0))
         .await
-        .expect("mcp save");
+        .expect("mcp save")
+        .version;
     assert_eq!(mcp_version, 1);
 
     // 2) Browser save: rename the project to "via-browser-second".
@@ -638,7 +642,8 @@ async fn mcp_save_for_mdl_writes_sidecar_and_leaves_mdl_unchanged() {
     let new_version = access
         .save(&mdl_abs, &edited, opened.source_format, Some(0))
         .await
-        .expect("mcp save mdl");
+        .expect("mcp save mdl")
+        .version;
     assert_eq!(new_version, 1);
 
     // The original .mdl must be byte-untouched.

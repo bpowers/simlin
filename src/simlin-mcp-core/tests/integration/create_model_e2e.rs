@@ -9,9 +9,11 @@
 
 use std::io;
 
+use simlin_mcp_core::access::ProjectAccess;
 use simlin_mcp_core::errors::AccessError;
 use simlin_mcp_core::test_support::TestFileSystemAccess;
 use simlin_mcp_core::tools::create_model::{CreateModelInput, create_model};
+use simlin_mcp_core::types::SourceFormat;
 
 #[tokio::test]
 async fn create_model_with_default_specs_writes_parseable_file() {
@@ -83,5 +85,42 @@ async fn create_model_refuses_to_overwrite_existing_file() {
         }
         Err(other) => panic!("expected WriteError, got: {other:?}"),
         Ok(_) => panic!("expected WriteError, got Ok"),
+    }
+}
+
+/// The extension decides the on-disk format, and the reader dispatches on
+/// the same extension, so a file created under any supported extension must
+/// open again in that format.  Rows come from `SourceFormat`'s
+/// extension-committed variants (XMILE-family and Vensim) plus the JSON
+/// default; a `.stmx` holding JSON would open as an XMILE parse error.
+#[tokio::test]
+async fn create_model_writes_the_format_the_extension_implies() {
+    let dir = tempfile::tempdir().unwrap();
+    // Vensim has no project-name field, so only the other two formats can
+    // carry the stem-derived name through the reopen.
+    let cases = [
+        ("pop.stmx", SourceFormat::Xmile, true),
+        ("pop.mdl", SourceFormat::Mdl, false),
+        ("pop.sd.json", SourceFormat::NativeJson, true),
+    ];
+    for (name, expected, name_round_trips) in cases {
+        let path = dir.path().join(name);
+        let input = CreateModelInput {
+            project_path: path.to_str().unwrap().to_string(),
+            sim_specs: None,
+        };
+        create_model(&TestFileSystemAccess, input)
+            .await
+            .unwrap_or_else(|e| panic!("create {name}: {e}"));
+
+        let reopened = TestFileSystemAccess
+            .open(&path)
+            .await
+            .unwrap_or_else(|e| panic!("reopen {name}: {e}"));
+        assert_eq!(reopened.source_format, expected, "{name}");
+        if name_round_trips {
+            assert_eq!(reopened.project.name, "pop", "{name}");
+        }
+        assert_eq!(reopened.project.models.len(), 1, "{name}");
     }
 }

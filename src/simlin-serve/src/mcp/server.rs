@@ -376,7 +376,7 @@ mod tests {
             _project: &datamodel::Project,
             _format: SourceFormat,
             _expected_version: Option<u64>,
-        ) -> Result<u64, AccessError> {
+        ) -> Result<simlin_mcp_core::access::SaveOutcome, AccessError> {
             unreachable!("server unit tests do not invoke save")
         }
         async fn create(

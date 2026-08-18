@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use simlin_engine::datamodel;
-use simlin_mcp_core::access::{OpenedProject, ProjectAccess};
+use simlin_mcp_core::access::{OpenedProject, ProjectAccess, SaveOutcome};
 use simlin_mcp_core::errors::AccessError;
 use simlin_mcp_core::types::{ErrorOutput, SourceFormat};
 
@@ -255,7 +255,7 @@ impl ProjectAccess for RegistryAccess {
         project: &datamodel::Project,
         _format: SourceFormat,
         expected_version: Option<u64>,
-    ) -> Result<u64, AccessError> {
+    ) -> Result<SaveOutcome, AccessError> {
         let (canonical, root_canonical) = canonicalize_within_root(&self.state, abs_path)?;
 
         // Sidecar-preference: when the caller passes a `.mdl` path that
@@ -511,7 +511,10 @@ impl ProjectAccess for RegistryAccess {
             &merged_project,
         );
 
-        Ok(new_version)
+        Ok(SaveOutcome {
+            version: new_version,
+            warnings: Vec::new(),
+        })
     }
 
     async fn create(

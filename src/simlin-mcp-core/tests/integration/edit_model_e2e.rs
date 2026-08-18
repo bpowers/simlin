@@ -6,17 +6,21 @@
 //
 //! End-to-end test for `edit_model` against a filesystem-backed
 //! `ProjectAccess` impl.  These tests exercise the validation gate
-//! (post-edit diagnostics surface as `AccessError::Validation`) and
-//! the `.mdl` read-only rejection.
+//! (post-edit diagnostics surface as `AccessError::Validation`) and the
+//! in-place Vensim `.mdl` write path (regenerated MDL text with the sketch,
+//! export lossiness surfaced as warnings).
 
 use std::path::Path;
 
+use simlin_engine::datamodel;
+use simlin_mcp_core::access::ProjectAccess;
 use simlin_mcp_core::errors::AccessError;
 use simlin_mcp_core::test_support::{TestFileSystemAccess, chain_scc_project_json};
 use simlin_mcp_core::tools::edit_model::{
     EditModelInput, EditOperation, UpsertAuxiliaryInput, UpsertFlowInput, UpsertStockInput,
     edit_model,
 };
+use simlin_mcp_core::types::SourceFormat;
 
 fn broken_project_json() -> serde_json::Value {
     serde_json::json!({
@@ -216,45 +220,224 @@ async fn edit_with_compilation_error_surfaces_validation_failure() {
     );
 }
 
-/// The `.mdl` write rejection sits at the top of `edit_model`, ahead of the
-/// `dry_run` read -- both rows must reject, so the guard cannot be moved
-/// below the dry-run branch without one of them turning red. Its message is
-/// rendered verbatim by existing `@simlin/mcp` clients, so it is pinned
-/// exactly (no wrapping prefix).
+const TEACUP_MDL: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../test/test-models/samples/teacup/teacup.mdl"
+);
+
+fn copy_teacup_mdl(dir: &Path) -> std::path::PathBuf {
+    let dest = dir.join("teacup.mdl");
+    std::fs::copy(TEACUP_MDL, &dest).expect("copy teacup.mdl fixture");
+    dest
+}
+
+fn variable_names(project: &datamodel::Project) -> Vec<String> {
+    let mut names: Vec<String> = project.models[0]
+        .variables
+        .iter()
+        .map(|v| v.get_ident().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+fn view_element_names(project: &datamodel::Project) -> Vec<String> {
+    let mut names: Vec<String> = project.models[0]
+        .views
+        .iter()
+        .flat_map(|v| match v {
+            datamodel::View::StockFlow(sf) => sf.elements.iter(),
+        })
+        .filter_map(|e| match e {
+            datamodel::ViewElement::Aux(a) => Some(a.name.clone()),
+            datamodel::ViewElement::Stock(st) => Some(st.name.clone()),
+            datamodel::ViewElement::Flow(f) => Some(f.name.clone()),
+            _ => None,
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+fn upsert_aux(name: &str, equation: &str) -> EditOperation {
+    EditOperation::UpsertAuxiliary(UpsertAuxiliaryInput {
+        name: name.into(),
+        equation: equation.into(),
+        units: None,
+        documentation: None,
+        graphical_function: None,
+        arrayed_equation: None,
+    })
+}
+
+/// A `.mdl` is a first-class read/write format: an edit rewrites the file
+/// in place as Vensim text (no sidecar, no rejection) with the sketch
+/// carried through, and reopening it yields the original variables plus the
+/// new one, with the diagram elements -- including one for the new
+/// variable -- intact.  This is the MCP counterpart of pysimlin's
+/// `test_ac1_2_mdl_edit_rewrites_file_in_mdl_with_sketch`.
 #[tokio::test]
-async fn mdl_files_are_rejected_regardless_of_dry_run() {
-    let mdl_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../test/sdeverywhere/models/elmcount/elmcount.mdl"
+async fn mdl_edit_rewrites_the_file_in_place_and_reopens_with_views_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = copy_teacup_mdl(dir.path());
+
+    let before = TestFileSystemAccess.open(&path).await.expect("open mdl");
+    assert_eq!(before.source_format, SourceFormat::Mdl);
+    let vars_before = variable_names(&before.project);
+    let elements_before = view_element_names(&before.project);
+    assert!(
+        !elements_before.is_empty(),
+        "fixture must carry a sketch, or this test cannot see it survive"
     );
 
-    for dry_run in [None, Some(true)] {
-        let input = EditModelInput {
-            project_path: mdl_path.into(),
-            model_name: None,
-            dry_run,
-            sim_specs: None,
-            operations: Some(vec![EditOperation::UpsertAuxiliary(UpsertAuxiliaryInput {
-                name: "new_var".into(),
-                equation: "1".into(),
-                units: None,
-                documentation: None,
-                graphical_function: None,
-                arrayed_equation: None,
-            })]),
-        };
+    let input = EditModelInput {
+        project_path: path.to_str().unwrap().to_string(),
+        model_name: None,
+        dry_run: None,
+        sim_specs: None,
+        operations: Some(vec![upsert_aux("new aux", "room_temperature * 2")]),
+    };
+    let output = edit_model(&TestFileSystemAccess, input)
+        .await
+        .expect("edit mdl");
+    assert!(!output.dry_run);
+    assert!(
+        !output
+            .warnings
+            .iter()
+            .any(|w| w.message.starts_with("MDL export:")),
+        "a Vensim-expressible edit must not report export lossiness: {:?}",
+        output.warnings
+    );
 
-        let err_msg = match edit_model(&TestFileSystemAccess, input).await {
-            Err(e) => e.to_string(),
-            Ok(_) => panic!("expected error rejecting .mdl file (dry_run={dry_run:?}), got Ok"),
-        };
-        assert_eq!(
-            err_msg,
-            "Vensim .mdl files are read-only. Use ReadModel to inspect a .mdl file, \
-             then CreateModel to start a new .sd.json file you can edit.",
-            "canonical .mdl rejection message must be exact (no prefix), dry_run={dry_run:?}"
+    // The bytes on disk are Vensim text, not JSON or XMILE: display names
+    // and the sketch banner both appear.
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.starts_with("{UTF-8}"),
+        "file must be MDL text: {text:.60}"
+    );
+    assert!(
+        text.lines().any(|l| l.trim_start().starts_with("new aux")),
+        "new variable must be written under its Vensim display name"
+    );
+    assert!(
+        text.contains("Sketch information"),
+        "sketch must be preserved"
+    );
+
+    let after = TestFileSystemAccess.open(&path).await.expect("reopen mdl");
+    assert_eq!(after.source_format, SourceFormat::Mdl);
+    let mut expected_vars = vars_before.clone();
+    expected_vars.push("new_aux".to_string());
+    expected_vars.sort();
+    assert_eq!(variable_names(&after.project), expected_vars);
+
+    let elements_after = view_element_names(&after.project);
+    for name in &elements_before {
+        assert!(
+            elements_after.contains(name),
+            "view element '{name}' must survive the rewrite; got {elements_after:?}"
         );
     }
+    assert!(
+        elements_after
+            .iter()
+            .any(|n| n == "new_aux" || n == "new aux"),
+        "the new variable must get a sketch element: {elements_after:?}"
+    );
+}
+
+/// The MDL writer's lossiness channel reaches the tool result: an edit that
+/// introduces a construct Vensim cannot express (a discrete graphical
+/// function, emitted continuous) still saves, and the result's `warnings`
+/// names the degradation with the `MDL export:` prefix so the agent can
+/// tell it apart from a model diagnostic.
+#[tokio::test]
+async fn mdl_edit_surfaces_export_lossiness_as_warnings_and_still_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = copy_teacup_mdl(dir.path());
+
+    let input = EditModelInput {
+        project_path: path.to_str().unwrap().to_string(),
+        model_name: None,
+        dry_run: None,
+        sim_specs: None,
+        operations: Some(vec![EditOperation::UpsertAuxiliary(UpsertAuxiliaryInput {
+            name: "stepped".into(),
+            equation: "teacup_temperature".into(),
+            units: None,
+            documentation: None,
+            graphical_function: Some(simlin_engine::json::GraphicalFunction {
+                points: vec![[0.0, 0.0], [100.0, 1.0], [200.0, 2.0]],
+                y_points: vec![],
+                kind: "discrete".into(),
+                x_scale: None,
+                y_scale: None,
+            }),
+            arrayed_equation: None,
+        })]),
+    };
+    let output = edit_model(&TestFileSystemAccess, input)
+        .await
+        .expect("edit mdl");
+
+    let export_warnings: Vec<_> = output
+        .warnings
+        .iter()
+        .filter(|w| w.message.starts_with("MDL export:"))
+        .collect();
+    assert!(
+        export_warnings
+            .iter()
+            .any(|w| w.message.contains("stepped") && w.message.contains("discrete")),
+        "the discrete-GF degradation must be reported against its variable: {:?}",
+        output.warnings
+    );
+    for w in &export_warnings {
+        assert_eq!(w.code, "generic");
+        assert_eq!(w.kind, "model");
+        assert!(w.model_name.is_some(), "export warnings are model-scoped");
+    }
+
+    // The write went through despite the warning, and the file reparses.
+    let after = TestFileSystemAccess.open(&path).await.expect("reopen mdl");
+    assert!(variable_names(&after.project).contains(&"stepped".to_string()));
+}
+
+/// A dry run on a `.mdl` previews without writing, and because nothing was
+/// serialised it carries no export warnings even for a lossy edit -- the
+/// warnings describe what landed on disk, not what would.
+#[tokio::test]
+async fn mdl_dry_run_leaves_the_file_alone_and_reports_no_export_warnings() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = copy_teacup_mdl(dir.path());
+    let original = std::fs::read(&path).unwrap();
+
+    let input = EditModelInput {
+        project_path: path.to_str().unwrap().to_string(),
+        model_name: None,
+        dry_run: Some(true),
+        sim_specs: None,
+        operations: Some(vec![upsert_aux("preview only", "1")]),
+    };
+    let output = edit_model(&TestFileSystemAccess, input)
+        .await
+        .expect("dry run");
+    assert!(output.dry_run);
+    assert!(
+        !output
+            .warnings
+            .iter()
+            .any(|w| w.message.starts_with("MDL export:")),
+        "dry run must not report export warnings: {:?}",
+        output.warnings
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        original,
+        "dry run must not touch the .mdl"
+    );
 }
 
 #[tokio::test]

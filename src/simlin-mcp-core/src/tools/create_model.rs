@@ -20,13 +20,17 @@ use simlin_engine::json as ejson;
 
 use crate::access::ProjectAccess;
 use crate::errors::AccessError;
+use crate::open::format_for_extension;
 use crate::types::{SourceFormat, build_empty_project_with_specs};
 
 /// Input for the `CreateModel` tool.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateModelInput {
-    /// Path where the new `.sd.json` file should be created.
+    /// Path where the new model file should be created.  The extension
+    /// picks the on-disk format: `.stmx`/`.xmile`/`.xml` write XMILE, `.mdl`
+    /// writes Vensim, and anything else (`.sd.json` is conventional) writes
+    /// Simlin JSON.
     pub project_path: String,
 
     /// Optional simulation specifications.  If omitted, defaults are
@@ -45,16 +49,21 @@ pub struct CreateModelOutput {
 }
 
 /// Derive the project name from the filename stem, stripping the
-/// `.sd.json` double-extension when present.
+/// `.sd.json` double-extension when present and any single extension
+/// (`.json`, `.stmx`, `.mdl`, ...) otherwise.
 fn project_name_from_path(path: &Path) -> String {
-    path.file_name()
+    let from_sd_json = path
+        .file_name()
         .and_then(|n| n.to_str())
-        .map(|n| {
-            n.strip_suffix(".sd.json")
-                .unwrap_or_else(|| n.strip_suffix(".json").unwrap_or(n))
-                .to_string()
-        })
-        .unwrap_or_else(|| "project".to_string())
+        .and_then(|n| n.strip_suffix(".sd.json"));
+    match from_sd_json {
+        Some(stem) => stem.to_string(),
+        None => path
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| "project".to_string()),
+    }
 }
 
 /// Sim-spec defaults shared with the HTTP `POST /api/projects/new`
@@ -75,8 +84,10 @@ fn default_sim_specs_for_create() -> ejson::SimSpecs {
 /// CreateModel always produces a single `main` model with the requested
 /// (or default) sim-specs and no variables.  The `ProjectAccess::create`
 /// impl is responsible for refusing to overwrite an existing project
-/// and for writing in the SourceFormat we tell it (NativeJson — the
-/// default for `.sd.json` files).
+/// and for writing in the SourceFormat we tell it, which follows the
+/// path's extension (`format_for_extension`) so the file `ReadModel`
+/// later parses by extension holds the matching format; JSON is the
+/// default for `.sd.json` and any other extension.
 ///
 /// The empty project body is built via
 /// [`crate::types::build_empty_project_with_specs`], the same helper the
@@ -96,13 +107,38 @@ pub async fn create_model<A: ProjectAccess>(
     let mut project = build_empty_project_with_specs(sim_specs.clone());
     project.name = project_name;
 
-    access
-        .create(path, &project, SourceFormat::NativeJson)
-        .await?;
+    let format = format_for_extension(path).unwrap_or(SourceFormat::NativeJson);
+    access.create(path, &project, format).await?;
 
     Ok(CreateModelOutput {
         project_path: input.project_path,
         sim_specs,
         model_name,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The name is derived from the file name in three shapes: the
+    /// `.sd.json` double extension, a single extension of any kind, and a
+    /// bare name.
+    #[test]
+    fn project_name_from_path_strips_each_extension_shape() {
+        let cases = [
+            ("dir/pop.sd.json", "pop"),
+            ("dir/pop.json", "pop"),
+            ("dir/pop.stmx", "pop"),
+            ("dir/pop.mdl", "pop"),
+            ("dir/pop", "pop"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                project_name_from_path(Path::new(input)),
+                expected,
+                "project_name_from_path({input})"
+            );
+        }
+    }
 }

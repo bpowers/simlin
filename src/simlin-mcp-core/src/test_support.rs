@@ -14,8 +14,8 @@
 /// at each import that the fixture and production are one thing. Never
 /// replace it with an independent implementation: a hand-maintained test
 /// double drifts from `fs_access::FileSystemAccess` at exactly the points
-/// where the real one is non-trivial (the `.mdl` write rejection, the SD-AI
-/// `relationships` regeneration on save), leaving every e2e test that writes
+/// where the real one is non-trivial (the MDL lossiness-warning channel, the
+/// SD-AI `relationships` regeneration on save), leaving every e2e test that writes
 /// a file exercising a simpler function than the one that ships.
 pub use crate::fs_access::FileSystemAccess as TestFileSystemAccess;
 

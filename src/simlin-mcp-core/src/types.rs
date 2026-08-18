@@ -15,14 +15,50 @@ use serde::Serialize;
 use simlin_engine::{datamodel, json as ejson};
 
 /// Identifies how a model file was parsed so write-back can use the same
-/// format.  `Xmile` covers `.stmx`, `.xmile`, `.xml`, and (read-only)
-/// `.mdl` Vensim files; the JSON variants are distinguished by content
-/// rather than extension (`models` vs `variables` at the top level).
+/// format.  `Xmile` covers `.stmx`, `.xmile`, and `.xml`; `Mdl` is a Vensim
+/// `.mdl` file, read by the engine's MDL parser and written back in place by
+/// its MDL writer (`simlin_engine::to_mdl_with_warnings`); the JSON variants
+/// are distinguished by content rather than extension (`models` vs
+/// `variables` at the top level).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceFormat {
     Xmile,
+    Mdl,
     NativeJson,
     SdaiJson,
+}
+
+/// Convert the MDL writer's lossiness warnings into the wire `ErrorOutput`
+/// shape so they ride the same `warnings` field as the engine's other
+/// non-fatal diagnostics.
+///
+/// An `ExportWarning` carries only a message naming the affected variable,
+/// dimension, or group; there is no engine `ErrorCode` for lossiness, so
+/// each rides the `generic` code (the same choice libsimlin makes for
+/// `simlin_project_serialize_mdl`, so pysimlin and MCP report the same
+/// thing).  The message is prefixed with `MDL export:` so an agent can tell a
+/// degraded-on-disk construct from a model diagnostic.  The warning is scoped
+/// to the project's single non-macro model, which is the only model an MDL
+/// file can hold.
+pub fn mdl_export_warnings_to_outputs(
+    project: &datamodel::Project,
+    warnings: &[simlin_engine::mdl::ExportWarning],
+) -> Vec<ErrorOutput> {
+    let model_name = project
+        .models
+        .iter()
+        .find(|m| m.macro_spec.is_none())
+        .map(|m| m.name.clone());
+    warnings
+        .iter()
+        .map(|w| ErrorOutput {
+            code: simlin_engine::common::ErrorCode::Generic.to_string(),
+            message: format!("MDL export: {}", w.message),
+            model_name: model_name.clone(),
+            variable_name: None,
+            kind: "model".to_string(),
+        })
+        .collect()
 }
 
 /// Sim-spec defaults used by [`build_empty_project`].
@@ -370,6 +406,34 @@ mod tests {
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["polarityConfidence"].as_f64().unwrap(), 0.994);
         assert_eq!(json["polarity"].as_str().unwrap(), "mostly_reinforcing");
+    }
+
+    /// The MDL lossiness channel rides the same `ErrorOutput` shape as every
+    /// other non-fatal diagnostic: `generic` code (no engine code exists for
+    /// lossiness), model-scoped to the single non-macro model, and a message
+    /// an agent can attribute to the on-disk export rather than the model.
+    #[test]
+    fn mdl_export_warnings_map_to_generic_model_scoped_outputs() {
+        let mut project = build_empty_project();
+        project.models[0].name = "cooling".to_string();
+        let warnings = vec![
+            simlin_engine::mdl::ExportWarning {
+                message: "flow 'heat loss' is non-negative; Vensim cannot express this".to_string(),
+            },
+            simlin_engine::mdl::ExportWarning {
+                message: "graphical function for 'demand' uses discrete interpolation".to_string(),
+            },
+        ];
+        let outputs = mdl_export_warnings_to_outputs(&project, &warnings);
+        assert_eq!(outputs.len(), 2);
+        for (out, w) in outputs.iter().zip(&warnings) {
+            assert_eq!(out.code, "generic");
+            assert_eq!(out.kind, "model");
+            assert_eq!(out.model_name.as_deref(), Some("cooling"));
+            assert_eq!(out.variable_name, None);
+            assert_eq!(out.message, format!("MDL export: {}", w.message));
+        }
+        assert!(mdl_export_warnings_to_outputs(&project, &[]).is_empty());
     }
 
     #[test]
