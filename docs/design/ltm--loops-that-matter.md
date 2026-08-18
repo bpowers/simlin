@@ -1127,7 +1127,8 @@ Over the materialized loops:
 3. **Retention filter**, peak semantics: keep a loop if at ANY single step its
    |score| is >= `MIN_CONTRIBUTION` (0.1%) of its group's total there. This runs
    BEFORE any cap (GH #310), so a loop dominant in a small partition but
-   globally low-magnitude is no longer lost to a truncate-before-filter.
+   globally low-magnitude survives even though a truncate-before-filter
+   would drop it.
    `DiscoveryResult::retained_loops` reports how many survived, read before the
    cap.
 4. **Competing-vs-solo classification.** On the enumeration path a partition is

@@ -347,8 +347,8 @@ fn main() {
     // A compiled fragment is NOT the same as a usable score, in two directions
     // the static view cannot see: a score can compile and still read a constant
     // 0 supplied by a helper fragment that failed beneath it, and a perfectly
-    // correct score can simply be 0 along this trajectory. `load_step_scores`
-    // drops an edge whose score is 0 at a step, so "is this column ever
+    // correct score can simply be 0 along this trajectory. Discovery's activity
+    // rule (`ltm_finding::is_active`) drops an edge whose score is 0 at a step, so "is this column ever
     // non-zero" is the honest question.
     //
     // The edge set comes from `ltm_finding::link_score_offsets` -- the SAME
@@ -433,7 +433,7 @@ fn main() {
         for ((from, to), offset) in offsets {
             let key = (from.as_str().to_string(), to.as_str().to_string());
             rt.covered.insert(key.clone());
-            // The SAME predicate `load_step_scores` applies: NaN maps to zero,
+            // The SAME predicate as `ltm_finding::is_active` applies: NaN maps to zero,
             // everything else is kept by magnitude -- so an INFINITE score is
             // live to discovery, and rejecting non-finite values here would call
             // a discovery-visible edge dead.
@@ -496,7 +496,7 @@ fn main() {
         // DEFECT state answers "is this edge broken" and is the headline: a
         // score that fails to compile keeps its slot with no bytecode and reads
         // a constant 0, which is a bug. RUNTIME state answers "does discovery
-        // see anything here", which is what `load_step_scores` actually keys
+        // see anything here", which is what `ltm_finding::is_active` actually keys
         // on -- but an identically-zero column is NOT evidence of a defect,
         // because an edge whose influence really is zero is correctly scored
         // zero. Folding the two would relabel every genuinely-inert edge as

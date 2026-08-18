@@ -240,8 +240,8 @@ rank_and_filter (universe denominators; universe competing; coverage-aware cap; 
 - Emits circuits as **edge-row sequences** (`Vec<u32>` of `ActivityGraph` edge rows,
   closing edge included). Node paths are derived (`from` of each row) only where a
   consumer needs them (stitching, materialization).
-- **No singleton circuits**: the closing test `to == root` is skipped at depth 1.
-  An elementary cycle never repeats a node, so a self-edge can never be part of a
+- **No singleton circuits**: self-edges are dropped from the union graph at build time,
+  which makes a length-1 closure unreachable. An elementary cycle never repeats a node, so a self-edge can never be part of a
   longer cycle; self-edges are therefore never traversed at all and can be dropped
   from the union graph at build time. A one-variable "loop" is not a feedback loop in
   the SD sense (the exhaustive enumerator's `circuit.len() > 1` contract), and both

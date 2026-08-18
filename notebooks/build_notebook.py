@@ -272,10 +272,12 @@ print(f"2100: {results['temperature_change_from_preindustrial[deterministic]'].i
 md("""
 ## 4. Which loops matter? Ask the engine
 
-In discovery mode the engine runs the LTM strongest-path search (Eberlein & Schoenberg 2020) over
-the link scores at every saved timestep: a Dijkstra-like DFS from every stock, following the
-highest-|score| links, collecting the feedback loops that are actually *doing something* at each
-instant. `model.analyze()` is the explicit, timeout-guarded entry point.
+In discovery mode the engine finds loops after the run from the recorded link scores: it
+enumerates every elementary cycle whose links are simultaneously non-zero at some saved
+timestep (falling back to a bounded shortest-path search when that universe is too large, and
+reporting which via `enumeration_complete`), so the loops that are actually *doing something*
+at each instant are all candidates. `model.analyze()` is the explicit, timeout-guarded entry
+point.
 
 Two things come back: the discovered loops, and the **cycle partitions** they live in -- groups of
 stocks connected by feedback, the unit within which loop shares are normalized and therefore
@@ -444,16 +446,16 @@ Two findings, both worth dwelling on:
 
 * **Every active loop on the expert's list was discovered exactly** -- same variable set, found
   *three separate times* (once per scenario element), ranked among 153 loops. The domain expert
-  and the structure-blind strongest-path search converge on the same eight cycles, which is about
+  and the structure-blind behavior-driven discovery converge on the same eight cycles, which is about
   as strong a cross-validation as an analysis method can offer. (The converse does not hold:
   discovery also surfaced loops the curated list ignores -- the per-gas uptake loops, deep-ocean
-  carbon chains, sub-loops of the core -- which is what the heuristic is *for*.)
-* **Permafrost carbon release is absent from discovery -- necessarily.** The strongest-path
-  search drops zero-score links at every timestep, and (as the next cell shows) the permafrost
-  flux never moves in this scenario, so no search at any timestep can traverse it. A dormant loop
+  carbon chains, sub-loops of the core -- which is what discovery is *for*.)
+* **Permafrost carbon release is absent from discovery -- necessarily.** Discovery only
+  considers links whose score is non-zero at some saved timestep, and (as the next cell shows)
+  the permafrost flux never moves in this scenario, so no cycle through it is ever active. A dormant loop
   is structurally invisible to behavior-driven discovery; **pinning is the only way to put one
   under observation**. Discovery and pinning are complements, not alternatives -- precisely the
-  papers' argument for shipping `LOOPSCORE` alongside the heuristic.
+  papers' argument for shipping `LOOPSCORE` alongside discovery.
 
 Now simulate with LTM instrumentation and pull each pinned loop's score series:
 """)
@@ -860,7 +862,7 @@ specific and fixable -- several were fixed in the engine while this notebook was
   design avoids (silently returning an empty loop list) is exactly the kind of thing that erodes
   trust in analysis tooling.
 * **Pinning is the right interaction model for big models** -- the papers were right to insist on
-  it (`LOOPSCORE`): discovery is heuristic and scenario-dependent, while the questions a
+  it (`LOOPSCORE`): discovery is behavior-driven and scenario-dependent, while the questions a
   practitioner brings ("track *ocean carbon uptake*") are stable. Declaring loops by variable set
   and getting back named, per-scenario-element score series is exactly the workflow the original
   papers sketch, and it held up against a real model. Nothing further to add here: pinning

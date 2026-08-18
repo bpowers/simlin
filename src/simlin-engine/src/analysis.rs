@@ -83,8 +83,11 @@ pub struct ModelAnalysis {
     /// enumeration and it completed: the loop candidates were provably the
     /// full ever-simultaneously-active cycle universe of the recorded link
     /// scores, so `loop_dominance` is the exact retention/ranking selection
-    /// rather than a heuristic sample. When false the shortest-path fallback
-    /// generated the candidates and `loop_dominance` is a sample. See
+    /// rather than a heuristic sample. When false, either the shortest-path
+    /// fallback generated the candidates and `loop_dominance` is a sample, or
+    /// discovery never ran at all (`analysis_error` is set, or the model has
+    /// no LTM results) and `loop_dominance` is empty -- the two are told apart
+    /// by `analysis_error` and by whether any loops are present. See
     /// [`crate::ltm_finding::DiscoveryResult::enumeration_complete`].
     pub enumeration_complete: bool,
     /// How many discovered loops passed discovery's retention filter, before

@@ -152,8 +152,8 @@ print(f"run.loops: {len(ltm.loops)}")
 md(
     """
 That warning is the single most useful thing the API does here. C-LEARN's causal graph
-is far too large for exhaustive loop enumeration, so LTM silently switches to the
-strongest-path *discovery* heuristic -- and in discovery mode `run.loops` is empty by
+is far too large for compile-time exhaustive loop enumeration, so LTM silently switches
+to post-simulation *discovery* -- and in discovery mode `run.loops` is empty by
 construction. Without the warning, "no feedback loops" and "too big to enumerate them"
 look identical.
 
@@ -174,7 +174,8 @@ md(
     """
 ## 2. Loop discovery
 
-`Model.analyze()` runs the strongest-path heuristic. The result carries the loops, their
+`Model.analyze()` runs post-simulation discovery over the recorded link scores. The
+result carries the loops, their
 per-step importance series, and -- crucially -- the **cycle partitions**.
 
 A partition is a set of stocks connected by feedback. Loop importance is normalized
@@ -546,9 +547,10 @@ md(
     """
 ## 5. Audit: do the discovery numbers survive an independent check?
 
-Section 3's conclusions rest entirely on the strongest-path heuristic. Discovery is an
-approximation -- it searches for the strongest paths rather than enumerating every
-circuit -- so before believing it, I want the same loops scored by a different code path.
+Section 3's conclusions rest entirely on discovery's post-simulation scoring. Discovery
+enumerates the loop universe from the recorded link scores and reports whether that
+enumeration completed (`enumeration_complete`), but its scores come from one code path --
+so before believing them, I want the same loops scored by a different one.
 
 Simlin has one: **pinning**. `set_loop_name` tells the engine to always instrument and
 score a named cycle, using the exhaustive per-loop scoring machinery rather than the
@@ -687,11 +689,11 @@ pd.concat(frames).set_index(["year", "loop"])
 md(
     """
 **The two paths agree to floating-point noise.** The exhaustive per-loop scoring
-machinery and the strongest-path discovery heuristic, which share almost none of their
-code, produce the same relative shares at every one of 251 timesteps.
+machinery and post-simulation discovery, which share almost none of their code,
+produce the same relative shares at every one of 251 timesteps.
 
 This is the strongest positive result in the notebook. Section 3's dominance story is not
-an artifact of the heuristic.
+an artifact of the discovery code path.
 """
 )
 

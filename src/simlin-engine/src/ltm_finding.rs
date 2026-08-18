@@ -2468,6 +2468,14 @@ pub(crate) fn discover_loops_with_deadlines(
                     // below, because a module-traversing stitched loop's mass
                     // joins the totals after materialization rather than here:
                     // later, but it joins.
+                    //
+                    // The solo -> competing transition this `+1` can cause (a
+                    // partition whose only other universe member is a
+                    // stitched loop) has no fixture: a stitch needs two or
+                    // more pairwise-disjoint petals, each itself an
+                    // enumerated circuit already counted, so with a symmetric
+                    // reducer the partition is competing before any stitch.
+                    // Named here as uncovered rather than implied covered.
                     if let Some(part) = path_partition(seq, &stock_partition_of_node) {
                         *stats.loop_counts.entry(part).or_insert(0) += 1;
                     }

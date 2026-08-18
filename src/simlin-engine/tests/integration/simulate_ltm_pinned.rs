@@ -7,8 +7,8 @@
 //!
 //! A pinned loop names a feedback loop by its variable set; the engine then
 //! ALWAYS emits that loop's `loop_score` -- in both exhaustive and (the
-//! headline capability) discovery mode, where the heuristic search emits no
-//! per-loop score at all. The VM is the correctness oracle: a pinned loop's
+//! headline capability) discovery mode, where post-simulation discovery emits
+//! no per-loop score variables at all. The VM is the correctness oracle: a pinned loop's
 //! loop_score must equal the product of its links' scores.
 
 use simlin_engine::datamodel;
