@@ -924,64 +924,33 @@ escalation stops at k = 2 -- and confirm C-LEARN's cap does not bind (0
 survivors without a slot).
 
 After the round-2 review's module-retention-exactness fix (release, Apple
-M-series under Asahi, `examples/ltm_discovery_bench`): retention no longer
-keeps a module-traversing circuit unconditionally -- it is scored through the
-same per-exit-port `ModuleOverrideCache` materialization uses and goes
-through the identical bound/confirm gate as every other circuit, bounded by
-the OVERRIDE's own active window rather than the raw composite's (exact,
-never wider than necessary; see `ltm_finding_enum::effective_scoring_window`).
-Survivors, universe size, and reported counts are BIT-IDENTICAL to the
-numbers above on both models (World3 150,827 -> 2,979 -> 200, C-LEARN
-162 -> 153 -> 153), confirming the fix changes nothing about WHICH loops are
-reported -- only how their membership is decided.
+M-series under Asahi, `examples/ltm_discovery_bench`, examples built through
+the production `causal_graph_from_element_edges_with_modules` constructor):
+retention no longer keeps a module-traversing circuit unconditionally -- it
+is scored through the same per-exit-port `ModuleOverrideCache`
+materialization uses and goes through the identical bound/confirm gate as
+every other circuit. Survivors, universe size and reported counts are
+bit-identical to the numbers above on both models (World3 150,827 -> 2,979
+-> 200, C-LEARN 162 -> 153 -> 153): the fix changes how membership is
+decided, not which loops are reported.
 
 | Model | Discovery time (before) | Discovery time (after) | Universe / survivors / reported |
 |---|---|---|---|
-| C-LEARN v77 | 0.037 s | 0.037 s | 162 / 153 / 153 (unchanged) |
-| World3-03 | 0.404 s | 1.106 s | 150,827 / 2,979 / 200 (unchanged) |
+| C-LEARN v77 | 0.037 s | 0.038 s | 162 / 153 / 153 (unchanged) |
+| World3-03 | 0.404 s | 0.569 s | 150,827 / 2,979 / 200 (unchanged) |
 
-C-LEARN's time is unaffected because its universe is small (162 circuits)
-enough that even module-touching circuits' full-range scoring is swallowed by
-the phases that dominate its 37 ms (topology build, activity-graph build).
-World3's regressed because its module-touching population is NOT small:
-SMOOTH/SMOOTH3/DELAY3 appear in the model at 12 of its 258 union-graph nodes,
-and those 12 nodes sit on 147,163 of the 150,827 enumerated circuits
-(97.6%) -- nearly the whole universe touches at least one of them. Each such
-circuit's exact score now requires the actual per-exit-port override product,
-not a proxy, so `retain_circuits`' bound step (which must be exact, not
-merely bounded, to decide retention soundly) does `sum(circuit_len *
-window)` work over that population -- measured at ~2.5 billion scalar
-multiplies, against a 401-step, ~258-node union graph. That is real,
-unavoidable work for an EXACT verdict on this model's structure, not
-overhead from the fix's own bookkeeping (`has_module_node`-gated dispatch
-keeps a module-free graph's cost bit-for-bit what it was before this fix
-existed, and `effective_scoring_window` is the exact -- not merely a safe
-superset -- bound: measured against a naive "widen every module circuit to
-the full saved-step range" implementation, it made no difference on World3
-specifically because these SMOOTH/DELAY pathways are themselves active
-across nearly the whole 401-step run (`(2, 401)`-`(4, 401)` windows measured
-for all 36 distinct override series), so the tight bound and the naive one
-coincide on this model; it is not a wasted optimization in general, since
-a module pathway that only "wakes up" partway into a run -- e.g. behind a
-threshold or a delayed startup condition -- would see a real reduction.
-
-**This puts World3 over AC3.1's 1.0 s target** (1.106 s measured, 3 dB over,
-with the enumeration path itself -- not the fallback split, not retention's
-non-module circuits -- as the sole driver). It is deliberately reported here
-undisguised rather than silently reworded: the target was set before
-retention was exact for module circuits, and the 700ms difference is the
-disclosed price of that exactness on a model whose central averaging/delay
-variables sit on nearly its whole loop structure. Two considerations bear on
-whether this needs a further fix rather than a raised target: World3 is
-reproducibly the densest model in the repo corpus by a wide margin (its
-150,827-circuit universe against C-LEARN's 162), so this is a worst-case
-measurement, not a typical one; and no algorithmic lever was found within
-this fix's scope that reduces the ~2.5B-multiply count without weakening
-retention's exactness for module circuits (a cheaper proxy bound would need
-the raw composite and the override to be comparably bounded, which they are
-not by construction -- the whole reason the override exists is that the two
-can differ by any factor). Left for the next round: either accept 1.106 s as
-the new measured number and revise AC3.1, or scope a follow-up that
-specifically targets the module-touching circuit population (e.g. a
-cheaper first-pass proxy sound enough to defer full override scoring for
-circuits it can prove will not clear `MIN_CONTRIBUTION`).
+AC3.1 still holds (World3 0.569 s < 1.0 s, C-LEARN 0.038 s < 0.2 s). The
+World3 cost is the exact override scoring of its module-touching population:
+SMOOTH/DELAY macros sit at 12 of the 258 union-graph nodes and on 147,163
+of the 150,827 circuits (97.6%), so nearly every circuit takes the
+substitution path (`score_steps_with_overrides`) instead of the plain tight
+loop. Two choices keep that to +0.17 s rather than the +0.7 s a first
+version measured: a module-free graph is dispatched to the plain loop
+without any per-circuit lookup, and a module circuit is scored over the
+INTERSECTION of its own activity window and the override's window
+(`effective_scoring_window`) -- both are exact bounds (an override is one
+pathway of the composite the raw row carries, so it is nonzero only where
+the composite is; the argument is written on the function), and on World3
+the circuit's own window (~79 of 401 steps on average) is the binding one
+because the SMOOTH/DELAY pathways themselves are active for nearly the whole
+run. Scoring over the override window alone had measured 1.1 s.

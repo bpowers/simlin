@@ -1057,11 +1057,11 @@ pub(super) fn retain_circuits(
 
         // A module-traversing circuit's raw activity window is a window over
         // the COMPOSITE score, which can disagree with the override series
-        // `score_steps` may substitute for it: a step outside the composite's
-        // window can still carry real override mass. Widen to the OVERRIDE's
-        // own active window (exact -- see `effective_scoring_window`'s doc)
-        // rather than the full range, and only when `has_module_node` so a
-        // module-free graph never pays the per-circuit lookup.
+        // `score_steps` may substitute for it. The circuit's own window stays
+        // exact under substitution and the override's window is exact on its
+        // own, so score over their intersection (see
+        // `effective_scoring_window`'s doc) -- and only look it up when
+        // `has_module_node`, so a module-free graph never pays per circuit.
         let (score_lo, score_hi) = if has_module_node {
             effective_scoring_window(rows, graph, is_module_node, override_for, (lo, hi))
         } else {
@@ -1399,32 +1399,38 @@ fn circuit_partition(
 }
 
 /// The scoring window `retain_circuits` should use for `rows`: `raw_window`
-/// (the circuit's own enumerated activity window) unchanged for a circuit
-/// that touches no module node or whose module row's override declines, or
-/// the OVERRIDE's own active window when one row substitutes.
+/// (the circuit's own enumerated activity window) for a circuit that touches
+/// no module node or whose module row's override declines, and the
+/// INTERSECTION of `raw_window` with the override's own active window when a
+/// row substitutes.
 ///
-/// Exact, not merely a safe superset: an elementary circuit repeats no node,
-/// so at most one row's target is a module instance. When that row's
-/// `override_for` call returns `Some((_, window))`, outside THAT window the
-/// override contributes exactly 0 or NaN at every step by construction (see
-/// `ModuleOverrideCache::series`'s doc), so the substituted circuit's product
-/// is 0 or NaN there too, regardless of what any other row does -- `window`
-/// alone bounds where the circuit's substituted score can be nonzero, and the
-/// RAW `raw_window` is not needed at all in that case (a step inside
-/// `raw_window` but outside `window` is still correctly zero, since the
-/// per-step multiply in `score_steps` reads the override's own value there).
-/// When the row declines (`None`), the module row falls back to its raw
-/// composite value, so `raw_window` -- computed from the raw composite AND
-/// across every row -- is exact for it as it is for every other circuit.
+/// Both windows are exact bounds on where the substituted product can be
+/// nonzero, so their intersection is too:
 ///
-/// Costs one `override_for` lookup for a module-touching circuit (a
-/// memoized `HashMap` hit after the first), avoided entirely for a circuit
-/// that touches no module node at all (the common case even on a
-/// module-heavy model, since most circuits are internal to one part of the
-/// graph). Measured on World3 (150,827 circuits, ~430 of which touch a
-/// module): widening to the full saved-step range unconditionally regressed
-/// enumeration from ~0.4s to ~1.1s; this window is what keeps the exactness
-/// fix from costing that.
+/// - `raw_window` stays valid under substitution. The substituted row carries
+///   the module COMPOSITE in the raw rows, and an override series is one
+///   pathway of that composite (the composite max-abs-folds every pathway), so
+///   the override is nonzero only where the composite is. Every other row is
+///   unchanged. Outside `raw_window` some raw row is therefore exactly 0 or
+///   NaN at the step: a non-substituted row zeroes/poisons the product
+///   regardless of the substitution; the composite row being 0 means the
+///   override is 0 there too. The one exception is a composite that is NaN
+///   where its override pathway is finite (the NaN-shadowing of the max-abs
+///   fold), which is ALREADY the activity graph's own documented boundary --
+///   the activity bit is computed from the composite -- so no new loss.
+/// - The override's window is valid on its own: outside it the override
+///   contributes exactly 0 or NaN by construction (see
+///   `ModuleOverrideCache::series`'s doc), so the substituted product is 0 or
+///   NaN there whatever the other rows do.
+///
+/// An elementary circuit repeats no node, so at most one row's target is a
+/// module instance and one lookup decides the window (a memoized `HashMap`
+/// hit after the first). Circuits touching no module node never look up.
+/// The intersection matters for cost, not just tightness: on World3 most
+/// circuits pass through a SMOOTH/DELAY module whose pathway is active for
+/// nearly the whole run, so the override window alone is ~5x wider than the
+/// circuit's own ~79-step activity window; scoring over the override window
+/// alone regressed discovery from ~0.4 s to ~1.1 s.
 fn effective_scoring_window(
     rows: &[u32],
     graph: &ActivityGraph,
@@ -1439,7 +1445,13 @@ fn effective_scoring_window(
             let from = graph.edge_source(rows[i]);
             let next = graph.edge_source(rows[(i + 2) % len]);
             return match override_for(from, to, next) {
-                Some((_series, window)) => window,
+                Some((_series, (olo, ohi))) => {
+                    let (rlo, rhi) = raw_window;
+                    // Intersection; an empty range means the substituted
+                    // product is 0/NaN everywhere, and `score_steps` handles
+                    // `lo >= hi` as "no mass".
+                    (rlo.max(olo), rhi.min(ohi).max(rlo.max(olo)))
+                }
                 None => raw_window,
             };
         }
