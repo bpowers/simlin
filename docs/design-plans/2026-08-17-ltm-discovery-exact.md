@@ -409,4 +409,27 @@ World3's universe is ~150k circuits, not the ~330k quoted in earlier notes: 330k
 its elementary-cycle count WITHOUT the ever-simultaneously-active constraint, which
 the enumerator never materializes.
 
+After Phase 2 (release, Apple M-series under Asahi,
+`examples/ltm_discovery_bench`, both generators over the same simulated
+results):
+
+| Model | Generator | Discovery time | Loops | `enumeration_complete` |
+|---|---|---|---|---|
+| C-LEARN v77 | `Auto` (enumeration) | 0.038 s | 153 | true |
+| C-LEARN v77 | fallback `ClampedLogAbs` | 0.072 s | 97 | false |
+| C-LEARN v77 | fallback `RelativeLinkScore` | 0.068 s | 97 | false |
+| C-LEARN v77 | fallback `HopCount` | 0.065 s | 72 | false |
+| World3-03 | `Auto` (enumeration) | 0.409 s | 200 | true |
+| World3-03 | fallback `ClampedLogAbs` | 0.020 s | 59 | false |
+| World3-03 | fallback `RelativeLinkScore` | 0.020 s | 48 | false |
+| World3-03 | fallback `HopCount` | 0.010 s | 23 | false |
+
+AC3.1 holds (World3 0.409 s < 1.0 s, C-LEARN 0.038 s < 0.2 s, both complete).
+The loop COUNTS above are not yet a recall measurement: a fallback run reports
+fewer loops partly because it proposes fewer candidates and partly because its
+retention denominators are its own discovered set rather than the universe.
+Phase 3's harness measures recall of the exact top-K, which is what settles
+the default weight; the fallback columns here establish only that every
+formulation is fast enough to be a usable fallback on both models.
+
 (Phases 3, 4 and 6 still to fill in.)
