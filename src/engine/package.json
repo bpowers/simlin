@@ -30,9 +30,9 @@
       "node": "./lib/internal/wasm.node.js"
     },
     "./internal/backend-factory": {
-      "types": "./lib/backend-factory.node.d.ts",
+      "types": "./lib/backend-factory.direct.d.ts",
       "module": "./lib.browser/backend-factory.browser.js",
-      "node": "./lib/backend-factory.node.js"
+      "node": "./lib/backend-factory.direct.js"
     },
     "./*": {
       "types": "./lib/*.d.ts",

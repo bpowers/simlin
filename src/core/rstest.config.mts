@@ -22,7 +22,7 @@ export default defineConfig({
       // Pin the node flavor explicitly, exactly as jest's moduleNameMapper did.
       // Trailing `$` means exact match, so these must precede the prefix entry.
       '@simlin/engine/internal/wasm$': path.join(engineLib, 'internal/wasm.node.js'),
-      '@simlin/engine/internal/backend-factory$': path.join(engineLib, 'backend-factory.node.js'),
+      '@simlin/engine/internal/backend-factory$': path.join(engineLib, 'backend-factory.direct.js'),
       '@simlin/engine$': path.join(engineLib, 'index.js'),
       '@simlin/engine': engineLib,
     },

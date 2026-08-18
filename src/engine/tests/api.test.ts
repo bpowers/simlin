@@ -796,6 +796,23 @@ describe('High-Level API', () => {
     });
   });
 
+  describe('ready() with a precompiled WebAssembly.Module', () => {
+    it('initializes the engine from the module without recompiling', async () => {
+      const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
+      const wasmBuffer = fs.readFileSync(wasmPath);
+      const module = await WebAssembly.compile(
+        wasmBuffer.buffer.slice(wasmBuffer.byteOffset, wasmBuffer.byteOffset + wasmBuffer.byteLength) as ArrayBuffer,
+      );
+      await resetWasm();
+      await ready(module);
+      const project = await Project.open(loadTestXmile());
+      expect(await project.modelCount()).toBeGreaterThan(0);
+      await project.dispose();
+      // Restore the suite's shared engine setup for the tests that follow.
+      await loadWasm();
+    });
+  });
+
   describe('Project.open* factory methods', () => {
     it('should load from XMILE data and access mainModel', async () => {
       const project = await openTestProject();

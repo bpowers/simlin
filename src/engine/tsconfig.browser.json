@@ -4,15 +4,17 @@
     "outDir": "lib.browser",
     "tsBuildInfoFile": "./tsconfig.browser.tsbuildinfo",
     "module": "esnext",
-    // wasm.browser.ts sniffs for Node at runtime (`typeof process !== 'undefined'`),
-    // so this program needs @types/node even though it never targets Node. Tests
-    // are excluded here, so the test runner's types are not needed.
-    "types": ["node"],
+    // Nothing in the browser program touches Node globals (wasm.node.ts is
+    // excluded below), and tests are excluded, so no ambient type packages.
+    // backend-factory.direct.ts and internal/wasm.supplied.ts are platform-neutral
+    // and deliberately compile into lib.browser too: single-file browser bundles
+    // (src/notebook-widget) alias the two platform specifiers to them.
+    "types": [],
     "paths": {
       "@simlin/engine/internal/wasm": ["./src/internal/wasm.browser.ts"],
       "@simlin/engine/internal/backend-factory": ["./src/backend-factory.browser.ts"],
       "@simlin/engine/*": ["./src/*"]
     }
   },
-  "exclude": ["lib", "lib.browser", "src/internal/wasm.node.ts", "src/backend-factory.node.ts", "tests", "eslint.config.js"]
+  "exclude": ["lib", "lib.browser", "src/internal/wasm.node.ts", "tests", "eslint.config.js"]
 }
