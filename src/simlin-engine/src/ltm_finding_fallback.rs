@@ -1099,15 +1099,29 @@ fn order_hops(tie_break: FallbackTieBreak, hops: u32) -> u32 {
 /// every-edge closure family (`FallbackClosures::EveryEdge`, the default)
 /// proposes roughly one candidate per active edge per (seed, step) before
 /// dedup thins it -- on a sufficiently dense or long-running model that grows
-/// without limit. This is the memory and latency backstop: 200,000 cycles at a
-/// few dozen `u32` node ids each is a few tens of MB, trivial next to the
-/// enumerator's own [`MAX_DISCOVERY_ENUM_EDGE_ROWS`]-scale budgets, and it is
-/// sized with real headroom over what the corpus actually produces --
-/// `examples/ltm_discovery_bench` measured 2,150 deduped candidates on
-/// World3-03 (the densest runtime graph in the repo corpus) and 159 on
-/// C-LEARN v77, both under [`FallbackConfig::DEFAULT`]'s `EveryEdge` closures,
-/// ~90x below this bound. A trip is therefore a signal about a genuinely
-/// pathological graph, not something the shipped corpus is expected to reach.
+/// without limit.
+///
+/// This bounds MATERIALIZATION memory, not the candidate list's own footprint
+/// (which really is a few tens of MB even at the old 200,000 bound -- a few
+/// dozen `u32` node ids per cycle). Every one of `sweep`'s candidates is
+/// materialized into a `FoundLoop` carrying a `step_count`-long `Vec<(f64,
+/// f64)>` score series BEFORE retention has a chance to drop any of them
+/// (`ltm_finding.rs`'s materialization loop runs over `all_paths` in full),
+/// so the bound that actually matters is candidates x steps x 16 bytes: at
+/// 20,000 candidates and a 401-step model (World3's shape) that is
+/// `20,000 * 401 * 16 B ~ 128 MB`, a bounded, tolerable spike; the former
+/// 200,000 put the same arithmetic at ~1.3 GB, the same multi-GB-cliff shape
+/// AC3.3's enumeration-side `MAX_DISCOVERY_ENUM_EDGE_ROWS` exists to prevent,
+/// just on the fallback's own candidate count instead of the enumerator's
+/// edge-row count.
+///
+/// It is still sized with real headroom over what the corpus actually
+/// produces -- `examples/ltm_discovery_bench` measured 2,150 deduped
+/// candidates on World3-03 (the densest runtime graph in the repo corpus) and
+/// 159 on C-LEARN v77, both under [`FallbackConfig::DEFAULT`]'s `EveryEdge`
+/// closures, ~9x below this bound (was ~90x below the old 200,000). A trip is
+/// therefore still a signal about a genuinely pathological graph, not
+/// something the shipped corpus is expected to reach.
 ///
 /// A budget trip is reported the same way a deadline expiry is: `truncated`,
 /// with whatever was found so far kept (each candidate is a real, fully
@@ -1115,7 +1129,7 @@ fn order_hops(tie_break: FallbackTieBreak, hops: u32) -> u32 {
 /// before it could claim to have sampled every seed and step, so the result is
 /// a smaller candidate set rather than an invalid one, exactly as a
 /// wall-clock-truncated sweep already reads.
-const MAX_FALLBACK_PATHS: usize = 200_000;
+const MAX_FALLBACK_PATHS: usize = 20_000;
 
 #[cfg(test)]
 thread_local! {

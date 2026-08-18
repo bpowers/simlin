@@ -340,10 +340,15 @@ sweeps in "Measured" below, not by the argument that motivated the starting poin
   cycle's directed edge set (a bucket hit is resolved by an exact rotation comparison),
   so the dedup is exact and free for the common case (after the first few saved steps
   nearly every candidate is a duplicate).
-- Candidate bound: `MAX_FALLBACK_PATHS` (200,000, checked at every dedup insert) caps
+- Candidate bound: `MAX_FALLBACK_PATHS` (20,000, checked at every dedup insert) caps
   how many distinct cycles one sweep may accumulate; a trip stops the sweep and reports
   `truncated`, the same signal a deadline expiry gives, since both mean the sweep did
-  not get to sample everything it would have.
+  not get to sample everything it would have. The bound is sized against
+  MATERIALIZATION memory, not the candidate list itself: every candidate the sweep
+  proposes is later materialized into a `FoundLoop` carrying a step-count-long series
+  before retention gets a chance to drop it, so the real cost is `candidates x steps x
+  16 B` -- `20,000 x 401 ~ 130 MB` on a World3-shaped model, with World3's own default
+  sweep proposing 2,150 candidates (~9x headroom under the bound).
 - Deadline sites: the clock is read at three bounded places -- once at the top of each
   step, once before each seed's searches, and once per fixed pop interval inside a
   search (so one seed whose component is most of the graph cannot overrun the budget on
@@ -917,3 +922,66 @@ audits also re-measure the cap's shape on World3 -- anchors at k<=1: 50,
 k<=2: 96, k<=3: 140, against a `200 * ANCHOR_SHARE_OF_CAP = 100` bound, so
 escalation stops at k = 2 -- and confirm C-LEARN's cap does not bind (0
 survivors without a slot).
+
+After the round-2 review's module-retention-exactness fix (release, Apple
+M-series under Asahi, `examples/ltm_discovery_bench`): retention no longer
+keeps a module-traversing circuit unconditionally -- it is scored through the
+same per-exit-port `ModuleOverrideCache` materialization uses and goes
+through the identical bound/confirm gate as every other circuit, bounded by
+the OVERRIDE's own active window rather than the raw composite's (exact,
+never wider than necessary; see `ltm_finding_enum::effective_scoring_window`).
+Survivors, universe size, and reported counts are BIT-IDENTICAL to the
+numbers above on both models (World3 150,827 -> 2,979 -> 200, C-LEARN
+162 -> 153 -> 153), confirming the fix changes nothing about WHICH loops are
+reported -- only how their membership is decided.
+
+| Model | Discovery time (before) | Discovery time (after) | Universe / survivors / reported |
+|---|---|---|---|
+| C-LEARN v77 | 0.037 s | 0.037 s | 162 / 153 / 153 (unchanged) |
+| World3-03 | 0.404 s | 1.106 s | 150,827 / 2,979 / 200 (unchanged) |
+
+C-LEARN's time is unaffected because its universe is small (162 circuits)
+enough that even module-touching circuits' full-range scoring is swallowed by
+the phases that dominate its 37 ms (topology build, activity-graph build).
+World3's regressed because its module-touching population is NOT small:
+SMOOTH/SMOOTH3/DELAY3 appear in the model at 12 of its 258 union-graph nodes,
+and those 12 nodes sit on 147,163 of the 150,827 enumerated circuits
+(97.6%) -- nearly the whole universe touches at least one of them. Each such
+circuit's exact score now requires the actual per-exit-port override product,
+not a proxy, so `retain_circuits`' bound step (which must be exact, not
+merely bounded, to decide retention soundly) does `sum(circuit_len *
+window)` work over that population -- measured at ~2.5 billion scalar
+multiplies, against a 401-step, ~258-node union graph. That is real,
+unavoidable work for an EXACT verdict on this model's structure, not
+overhead from the fix's own bookkeeping (`has_module_node`-gated dispatch
+keeps a module-free graph's cost bit-for-bit what it was before this fix
+existed, and `effective_scoring_window` is the exact -- not merely a safe
+superset -- bound: measured against a naive "widen every module circuit to
+the full saved-step range" implementation, it made no difference on World3
+specifically because these SMOOTH/DELAY pathways are themselves active
+across nearly the whole 401-step run (`(2, 401)`-`(4, 401)` windows measured
+for all 36 distinct override series), so the tight bound and the naive one
+coincide on this model; it is not a wasted optimization in general, since
+a module pathway that only "wakes up" partway into a run -- e.g. behind a
+threshold or a delayed startup condition -- would see a real reduction.
+
+**This puts World3 over AC3.1's 1.0 s target** (1.106 s measured, 3 dB over,
+with the enumeration path itself -- not the fallback split, not retention's
+non-module circuits -- as the sole driver). It is deliberately reported here
+undisguised rather than silently reworded: the target was set before
+retention was exact for module circuits, and the 700ms difference is the
+disclosed price of that exactness on a model whose central averaging/delay
+variables sit on nearly its whole loop structure. Two considerations bear on
+whether this needs a further fix rather than a raised target: World3 is
+reproducibly the densest model in the repo corpus by a wide margin (its
+150,827-circuit universe against C-LEARN's 162), so this is a worst-case
+measurement, not a typical one; and no algorithmic lever was found within
+this fix's scope that reduces the ~2.5B-multiply count without weakening
+retention's exactness for module circuits (a cheaper proxy bound would need
+the raw composite and the override to be comparably bounded, which they are
+not by construction -- the whole reason the override exists is that the two
+can differ by any factor). Left for the next round: either accept 1.106 s as
+the new measured number and revise AC3.1, or scope a follow-up that
+specifically targets the module-touching circuit population (e.g. a
+cheaper first-pass proxy sound enough to defer full override scoring for
+circuits it can prove will not clear `MIN_CONTRIBUTION`).
