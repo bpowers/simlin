@@ -693,27 +693,49 @@ pub(crate) fn write_tag_start(writer: &mut Writer<XmlWriter>, tag_name: &str) ->
     write_tag_start_with_attrs(writer, tag_name, &[])
 }
 
-/// Write an attribute value as XMILE-escaped text: a raw newline or tab
-/// becomes the identifier escape (`\n` / `\t`).
+/// Write an attribute value as XMILE-escaped text: a raw newline becomes
+/// the identifier escape `\n`.
 ///
 /// XMILE section 4.1 requires user-specified text (names, documentation,
 /// display objects) to spell non-printable characters with these escapes
 /// rather than character references, and section 3.2.2.1 defines them for
-/// identifiers. The datamodel stores names in that already-escaped form
+/// identifiers. The datamodel stores NAMES in that already-escaped form
 /// (Stella files read as `hares killed\nper lynx`, two characters), so an
-/// existing backslash is written verbatim; only raw control characters are
-/// converted. Without this an XML parser's attribute-value normalization
-/// turns a raw newline into a space on read, silently losing the break.
+/// existing backslash is written verbatim; only a raw newline is converted.
+/// Without this an XML parser's attribute-value normalization turns a raw
+/// newline into a space on read, silently losing the break.
+///
+/// Only the newline is escaped. A raw tab is left to that same
+/// normalization (it reads back as a space, which canonicalizes to `_`
+/// exactly as the JSON reader folds it), because neither the Rust nor the
+/// TS canonicalizer decodes a `\t` escape -- writing one would change the
+/// identifier on read.
+///
+/// The two FREE-TEXT attributes (`simlin:macro-invocation primary-doc`,
+/// `simlin:loop-metadata description`) keep raw newlines in the datamodel;
+/// their readers pair with this via [`decode_free_text_attribute`] so a
+/// multi-line doc round-trips instead of reading back as a literal
+/// backslash-n. Identifier-carrying attributes need no decode: the stored
+/// form IS the escape.
 ///
 /// Every attribute the writer emits goes through here so the rule cannot be
 /// bypassed by a new call site that pushes onto `BytesStart` directly.
 pub(crate) fn push_attribute(elem: &mut BytesStart<'_>, key: &str, value: &str) {
-    if value.contains(['\n', '\t']) {
-        let escaped = value.replace('\n', "\\n").replace('\t', "\\t");
+    if value.contains('\n') {
+        let escaped = value.replace('\n', "\\n");
         elem.push_attribute((key, escaped.as_str()));
     } else {
         elem.push_attribute((key, value));
     }
+}
+
+/// Decode a free-text attribute (documentation, description) read from
+/// XMILE back to the datamodel's raw-newline form: the inverse of the
+/// newline escaping [`push_attribute`] applies on write. Apply ONLY to
+/// attributes whose datamodel field holds raw newlines -- names keep the
+/// escape as their stored form and must not go through here.
+pub(crate) fn decode_free_text_attribute(value: &str) -> String {
+    value.replace("\\n", "\n")
 }
 
 pub(crate) fn write_tag_start_with_attrs(
@@ -1962,7 +1984,9 @@ fn test_xmile_roundtrips_loop_metadata() {
                     uids: vec![1, 2, 3],
                     deleted: false,
                     name: "growth loop".to_string(),
-                    description: "a reinforcing loop".to_string(),
+                    // Free text in an attribute: the raw newline is written
+                    // as the XMILE escape and must decode back on read.
+                    description: "a reinforcing loop\nspanning two lines".to_string(),
                 },
                 LoopMetadata {
                     uids: vec![4, 5],
@@ -1979,6 +2003,10 @@ fn test_xmile_roundtrips_loop_metadata() {
     };
 
     let xml = project_to_xmile(&project).unwrap();
+    assert!(
+        xml.contains(r#"description="a reinforcing loop\nspanning two lines""#),
+        "{xml}"
+    );
     let roundtripped = project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap();
 
     assert_eq!(
@@ -1989,7 +2017,7 @@ fn test_xmile_roundtrips_loop_metadata() {
     let lm0 = &roundtripped.models[0].loop_metadata[0];
     assert_eq!(lm0.uids, vec![1, 2, 3]);
     assert_eq!(lm0.name, "growth loop");
-    assert_eq!(lm0.description, "a reinforcing loop");
+    assert_eq!(lm0.description, "a reinforcing loop\nspanning two lines");
     assert!(!lm0.deleted);
 
     let lm1 = &roundtripped.models[0].loop_metadata[1];
@@ -2617,6 +2645,50 @@ mod macro_tests {
         );
     }
 
+    /// The invocation's `primary-doc` is FREE TEXT carried in an attribute:
+    /// the datamodel keeps raw newlines in documentation, the writer spells
+    /// them as the XMILE `\n` escape (spec 4.1), and the reader must decode
+    /// that escape back -- otherwise a multi-line doc reads back as a literal
+    /// backslash-n and every re-save doubles it.
+    #[test]
+    fn multi_output_invocation_multi_line_primary_doc_round_trips() {
+        let mut project = multi_output_macro_project();
+        let main = project
+            .models
+            .iter_mut()
+            .find(|m| m.name == "main")
+            .unwrap();
+        let doc = "first line\nsecond line";
+        for v in &mut main.variables {
+            if let Variable::Aux(a) = v
+                && a.ident == "total"
+            {
+                a.documentation = doc.to_string();
+            }
+        }
+
+        let xml = project_to_xmile(&project).expect("must serialize");
+        assert!(
+            xml.contains(r#"primary-doc="first line\nsecond line""#),
+            "the doc is written as the XMILE escape; got:\n{xml}"
+        );
+        let rt = project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("must re-import");
+        let main = rt.models.iter().find(|m| m.name == "main").unwrap();
+        let total = main
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "total")
+            .expect("total survives");
+        let Variable::Aux(total) = total else {
+            panic!("total is an aux");
+        };
+        assert_eq!(total.documentation, doc, "raw newline restored on read");
+
+        let xml2 = project_to_xmile(&rt).expect("must re-serialize");
+        let rt2 = project_from_reader(&mut BufReader::new(xml2.as_bytes())).unwrap();
+        assert_eq!(project_to_xmile(&rt2).unwrap(), xml2, "byte-stable");
+    }
+
     /// macros.AC4.4: a multi-output `:`-form `.mdl` survives a cross-format
     /// conversion `.mdl` -> datamodel -> `.xmile` -> datamodel.
     #[test]
@@ -2999,21 +3071,22 @@ mod attribute_escape_tests {
         String::from_utf8(writer.into_inner().into_inner()).unwrap()
     }
 
-    /// Enumerates the arms of `push_attribute`: a raw newline and a raw tab
-    /// become identifier escapes; the stored (already-escaped) form is
-    /// written verbatim -- doubling its backslash would turn a line break
-    /// into a literal backslash-n on read; a value with neither passes
-    /// through untouched.
+    /// Enumerates the arms of `push_attribute`: a raw newline becomes the
+    /// identifier escape; the stored (already-escaped) form is written
+    /// verbatim -- doubling its backslash would turn a line break into a
+    /// literal backslash-n on read; a raw tab and a plain value pass through
+    /// untouched.
     #[test]
     fn raw_control_characters_become_xmile_escapes() {
         assert_eq!(
             write_empty_tag(&[("name", "from\npython")]),
             r#"<aux name="from\npython"/>"#
         );
-        assert_eq!(
-            write_empty_tag(&[("name", "a\tb")]),
-            r#"<aux name="a\tb"/>"#
-        );
+        // A raw tab is left to XML attribute normalization (it becomes a
+        // space, which canonicalizes to `_` exactly as the JSON reader would
+        // fold it): neither the Rust nor the TS canonicalizer knows a `\t`
+        // escape, so writing one would change the identifier on read.
+        assert_eq!(write_empty_tag(&[("name", "a\tb")]), "<aux name=\"a\tb\"/>");
         assert_eq!(
             write_empty_tag(&[("name", "hares killed\\nper lynx")]),
             r#"<aux name="hares killed\nper lynx"/>"#

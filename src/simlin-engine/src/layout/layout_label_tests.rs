@@ -10,7 +10,9 @@
 //! label wins over the optimizer, even when a newly-added connector now runs
 //! through it. These tests enumerate the arms of that decision:
 //!
-//! - untouched element (aux, stock, flow, module): preserved
+//! - untouched element (aux, stock, flow, module): preserved, both when the
+//!   patch adds an element (settle path) and when it adds only a connector or
+//!   only deletes (the no-new-elements early-return path)
 //! - renamed element: preserved (a rename keeps the element's geometry)
 //! - flow rebuilt for an attach-offset change (orientation unchanged): preserved
 //! - flow rebuilt for an orientation flip: re-chosen
@@ -141,7 +143,77 @@ fn find_flow<'a>(view: &'a datamodel::StockFlow, ident: &str) -> &'a view_elemen
         .unwrap_or_else(|| panic!("flow '{ident}' not in view"))
 }
 
-/// simple_model plus one new aux that reads an existing stock and feeds an
+/// simple_model plus a module instance (`climate`, an instance of a second
+/// model in the project) that `death_rate` reads, so every named element kind
+/// -- stock, flow, aux, module -- is present in the old view.
+fn project_with_module() -> datamodel::Project {
+    let mut model = simple_model();
+    model
+        .variables
+        .push(datamodel::Variable::Module(datamodel::Module {
+            ident: "climate".to_string(),
+            model_name: "climate_model".to_string(),
+            documentation: String::new(),
+            units: None,
+            references: Vec::new(),
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+    for var in &mut model.variables {
+        if let datamodel::Variable::Aux(a) = var
+            && a.ident == "death_rate"
+        {
+            a.equation = datamodel::Equation::Scalar("0.01 * climate.severity".to_string());
+        }
+    }
+    let submodel = datamodel::Model {
+        name: "climate_model".to_string(),
+        sim_specs: None,
+        variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+            ident: "severity".to_string(),
+            equation: datamodel::Equation::Scalar("1".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat {
+                visibility: datamodel::Visibility::Public,
+                ..datamodel::Compat::default()
+            },
+            ai_state: None,
+            uid: None,
+        })],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let mut project = test_project(model);
+    project.models.push(submodel);
+    project
+}
+
+fn assert_element_kinds(view: &datamodel::StockFlow) {
+    let has = |pred: fn(&ViewElement) -> bool| view.elements.iter().any(pred);
+    assert!(
+        has(|e| matches!(e, ViewElement::Stock(_))),
+        "fixture has a stock"
+    );
+    assert!(
+        has(|e| matches!(e, ViewElement::Flow(_))),
+        "fixture has a flow"
+    );
+    assert!(
+        has(|e| matches!(e, ViewElement::Aux(_))),
+        "fixture has an aux"
+    );
+    assert!(
+        has(|e| matches!(e, ViewElement::Module(_))),
+        "fixture has a module"
+    );
+}
+
+/// The project plus one new aux that reads an existing stock and feeds an
 /// existing flow, so the new connectors touch existing elements from several
 /// directions -- the case where re-optimizing existing labels would move them.
 fn add_dependent_aux(
@@ -191,8 +263,9 @@ fn add_dependent_aux(
 
 #[test]
 fn incremental_layout_preserves_untouched_label_sides() {
-    let project = test_project(simple_model());
+    let project = project_with_module();
     let base_view = generate_layout(&project, TEST_MODEL, None).expect("initial layout");
+    assert_element_kinds(&base_view);
     let (patched, patch) = add_dependent_aux(&project);
 
     // Any side an optimizer would not choose is impossible to know a priori,
@@ -219,6 +292,105 @@ fn incremental_layout_preserves_untouched_label_sides() {
             "new aux must be laid out"
         );
     }
+}
+
+/// Both patches below produce NO new element, so incremental_layout takes
+/// its early-return path (diff_connectors + label placement without a
+/// settlement step): an equation edit that adds a connector between two
+/// existing elements, and a deletion of a leaf aux.
+fn connector_only_patch(
+    project: &datamodel::Project,
+) -> (datamodel::Project, crate::patch::ModelPatch) {
+    let mut patched = project.clone();
+    let model = patched.get_model_mut(TEST_MODEL).unwrap();
+    let mut updated = None;
+    for var in &mut model.variables {
+        if let datamodel::Variable::Aux(a) = var
+            && a.ident == "birth_rate"
+        {
+            // birth_rate now reads death_rate: one new connector, no new element.
+            a.equation = datamodel::Equation::Scalar("0.03 + death_rate".to_string());
+            updated = Some(a.clone());
+        }
+    }
+    let patch = crate::patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![crate::patch::ModelOperation::UpsertAux(
+            updated.expect("birth_rate in fixture"),
+        )],
+    };
+    (patched, patch)
+}
+
+fn delete_only_patch(
+    project: &datamodel::Project,
+) -> (datamodel::Project, crate::patch::ModelPatch) {
+    let mut patched = project.clone();
+    let model = patched.get_model_mut(TEST_MODEL).unwrap();
+    model.variables.retain(|v| v.get_ident() != "birth_rate");
+    for var in &mut model.variables {
+        if let datamodel::Variable::Flow(f) = var
+            && f.ident == "births"
+        {
+            f.equation = datamodel::Equation::Scalar("population * 0.03".to_string());
+        }
+    }
+    let patch = crate::patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![crate::patch::ModelOperation::DeleteVariable {
+            ident: "birth_rate".to_string(),
+        }],
+    };
+    (patched, patch)
+}
+
+#[test]
+fn early_return_path_preserves_untouched_label_sides() {
+    let project = project_with_module();
+    let base_view = generate_layout(&project, TEST_MODEL, None).expect("initial layout");
+    assert_element_kinds(&base_view);
+
+    let cases: [(&str, (datamodel::Project, crate::patch::ModelPatch)); 2] = [
+        ("connector-only", connector_only_patch(&project)),
+        ("delete-only", delete_only_patch(&project)),
+    ];
+    for (label, (patched, patch)) in &cases {
+        for side in ALL_SIDES {
+            let mut old_view = base_view.clone();
+            set_all_label_sides(&mut old_view, side);
+            let before = named_geometry(&old_view);
+            let new_view = incremental_layout(&old_view, patched, TEST_MODEL, patch, None)
+                .expect("incremental layout");
+            let after = named_geometry(&new_view);
+            let survivors: Vec<&String> = patched
+                .get_model(TEST_MODEL)
+                .unwrap()
+                .variables
+                .iter()
+                .map(|v| v.get_ident())
+                .filter_map(|ident| before.get_key_value(ident).map(|(k, _)| k))
+                .collect();
+            assert_eq!(
+                survivors.len(),
+                after.len(),
+                "{label}: no element is created by a no-new-element patch"
+            );
+            for ident in survivors {
+                assert_eq!(
+                    after.get(ident),
+                    before.get(ident),
+                    "{label}: untouched element '{ident}' changed with old side {side:?}"
+                );
+            }
+        }
+    }
+    let (_, connector_patch) = &cases[0].1;
+    let connector_view =
+        incremental_layout(&base_view, &cases[0].1.0, TEST_MODEL, connector_patch, None).unwrap();
+    assert!(
+        connector_view.elements.len() > base_view.elements.len(),
+        "fixture: the connector-only patch really adds a link"
+    );
 }
 
 #[test]
