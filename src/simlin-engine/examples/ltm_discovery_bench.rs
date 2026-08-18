@@ -142,11 +142,15 @@ fn main() {
             // readable off one run rather than re-derived.
             println!(
                 "  {label}: {elapsed:>7.3}s | loops {:>4} | retained {:>5} | universe {:>7} | \
-                 enumeration_complete {} | truncated {} | agg_trunc {}",
+                 fallback_candidates {:>7} | enumeration_complete {} | truncated {} | \
+                 agg_trunc {}",
                 found.loops.len(),
                 found.retained_loops,
                 found
                     .universe_loops
+                    .map_or_else(|| "--".to_string(), |n| n.to_string()),
+                found
+                    .fallback_candidates
                     .map_or_else(|| "--".to_string(), |n| n.to_string()),
                 found.enumeration_complete,
                 found.truncated,

@@ -1596,6 +1596,52 @@ fn an_unbudgeted_sweep_never_reads_the_clock() {
     );
 }
 
+// --- Candidate budget -------------------------------------------------------
+
+/// A tiny cap trips mid-seed: [`CycleDedup::insert_if_new`] refuses every
+/// candidate once `paths` reaches the cap, so of `three_way_fixture`'s three
+/// cycles through `s` only the first found (the cheapest, under
+/// `ClampedLogAbs`'s minimum-first closing order) survives. The sweep only
+/// notices AFTER the seed's closings loop has tried all three -- the check is
+/// once per seed, not once per candidate -- so the reported `truncated` and
+/// `paths` are the observable trip rather than an early return mid closing.
+#[test]
+fn a_tiny_candidate_budget_trips_and_keeps_only_what_fit() {
+    let _guard = MaxFallbackPathsGuard::new(1);
+    let (search, results) = three_way_fixture();
+    let out = sweep(
+        &search,
+        &results,
+        in_edge_closures(FallbackWeight::ClampedLogAbs),
+        None,
+        &mut SystemClock,
+    );
+    assert!(out.truncated);
+    assert_eq!(out.steps_processed, 0, "the only step never finished");
+    assert_eq!(named(&search, &out.paths), vec![vec!["s", "b", "c"]]);
+}
+
+/// The not-tripped control for the test above: a cap comfortably above the
+/// fixture's candidate count changes nothing about the sweep's output.
+#[test]
+fn a_candidate_budget_with_headroom_leaves_the_sweep_untouched() {
+    let _guard = MaxFallbackPathsGuard::new(4);
+    let (search, results) = three_way_fixture();
+    let out = sweep(
+        &search,
+        &results,
+        in_edge_closures(FallbackWeight::ClampedLogAbs),
+        None,
+        &mut SystemClock,
+    );
+    assert!(!out.truncated);
+    assert_eq!(out.steps_processed, 1);
+    assert_eq!(
+        named(&search, &out.paths),
+        vec![vec!["s", "b", "c"], vec!["s", "d", "e"], vec!["s", "a"]],
+    );
+}
+
 // --- Determinism ----------------------------------------------------------
 
 #[test]

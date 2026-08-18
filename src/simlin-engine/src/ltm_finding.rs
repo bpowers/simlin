@@ -323,6 +323,20 @@ pub struct DiscoveryResult {
     /// enumerated circuits, so they join the candidate set without being
     /// counted here.
     pub universe_loops: Option<usize>,
+    /// On the fallback path, the number of distinct elementary cycles the
+    /// shortest-path sweep proposed (`fallback::FallbackOutcome::paths.len()`),
+    /// after dedup but before retention or the cap, itself bounded at
+    /// `fallback::MAX_FALLBACK_PATHS`.
+    ///
+    /// `Some` exactly when the fallback ran -- the mirror of `universe_loops`
+    /// being `Some` exactly when the enumeration ran, so a caller never has to
+    /// ask `enumeration_complete` twice to know which candidate-count field to
+    /// read. Reported by `examples/ltm_discovery_bench` and
+    /// `examples/ltm_fallback_eval` alongside the enumeration's `universe_loops`
+    /// so the two generators' candidate VOLUMES are directly comparable, not
+    /// only their final reported counts (which retention and the cap both
+    /// shrink).
+    pub fallback_candidates: Option<usize>,
 }
 
 /// Parse link score variable names from results offsets, expanding A2A
@@ -2290,6 +2304,8 @@ pub(crate) fn discover_loops_with_deadlines(
             // may say so, keeping `universe_loops.is_some()` equal to
             // `enumeration_complete` on every path out of this function.
             universe_loops: enumeration_ran.then_some(0),
+            // Neither generator ran.
+            fallback_candidates: None,
         });
     }
 
@@ -2309,6 +2325,8 @@ pub(crate) fn discover_loops_with_deadlines(
             retained_loops: 0,
             // An empty universe, on the enumeration path only (see above).
             universe_loops: enumeration_ran.then_some(0),
+            // Neither generator ran.
+            fallback_candidates: None,
         });
     }
 
@@ -2338,6 +2356,9 @@ pub(crate) fn discover_loops_with_deadlines(
     // measures against the discovered set instead -- a sample has no universe
     // to offer).
     let mut universe: Option<UniverseStats> = None;
+    // Set alongside `enumeration_complete == false`: how many distinct cycles
+    // the fallback sweep proposed, for `DiscoveryResult::fallback_candidates`.
+    let mut fallback_candidates: Option<usize> = None;
 
     // --- Primary candidate generation: union-graph circuit enumeration ---
     // (docs/design-plans/2026-08-17-ltm-discovery-exact.md).
@@ -2350,8 +2371,9 @@ pub(crate) fn discover_loops_with_deadlines(
     // The enumerated set is also the population every downstream statistic is
     // measured against: retention judges a circuit's peak share of its
     // partition's whole-universe mass, and `rank_and_filter` normalizes
-    // relative scores against the same totals via `external_totals`. Those
-    // totals are the FULL enumerated universe's raw mass (retention
+    // relative scores against the same totals via its `universe` parameter
+    // (`UniverseStats::totals`). Those totals are the FULL enumerated
+    // universe's raw mass (retention
     // non-survivors included, GH #310) -- NOT the mass reported loops carry --
     // corrected below so that each distinct reported cycle contributes its
     // mass exactly once and by the series it reports: a module-traversing
@@ -2517,6 +2539,10 @@ pub(crate) fn discover_loops_with_deadlines(
             outcome.truncated || outcome.steps_processed == step_count.saturating_sub(1),
             "an untruncated sweep covers every saved step after step 0"
         );
+        // Before stitching: a stitched loop is a COMBINATION of proposed
+        // cycles rather than one of them, mirroring `universe_loops` counting
+        // only the enumerated circuits and not the stitched additions.
+        fallback_candidates = Some(outcome.paths.len());
 
         // Stitch cross-element-through-aggregate loops (GH #696) through the
         // SAME helper the enumeration path uses. Both generators emit only
@@ -2550,6 +2576,7 @@ pub(crate) fn discover_loops_with_deadlines(
             enumeration_complete,
             retained_loops: 0,
             universe_loops,
+            fallback_candidates,
         });
     }
 
@@ -2850,6 +2877,7 @@ pub(crate) fn discover_loops_with_deadlines(
         enumeration_complete,
         retained_loops: ranked.retained_loops,
         universe_loops,
+        fallback_candidates,
     })
 }
 
@@ -2872,12 +2900,31 @@ fn loop_partition_slot(fl: &FoundLoop, partitions: &CyclePartitions) -> Option<u
 /// discovered loop is measured against.
 ///
 /// The two fields are two views of ONE population, keyed by engine-internal
-/// cycle partition: `totals[p]` is the mass that `loop_counts[p]` loops
-/// contributed. That population is the full enumerated universe (retention
-/// non-survivors included -- their mass is in the denominator whether or not
-/// they are reported), plus the stitched cross-agg loops that join the
-/// candidate set after retention, minus the reported-cycle duplicates whose
-/// mass is taken back out.
+/// cycle partition, but the correspondence between them is NOT exact:
+/// `loop_counts[p]` counts every enumerated circuit that resolves to
+/// partition `p`, while `totals[p]` sums only the mass those circuits banked
+/// at enumeration time, and a circuit can be counted while banking less than
+/// its full share -- or none at all. A module-traversing circuit is kept
+/// unconditionally but contributes NO raw mass here (its reported score is
+/// the per-exit-port override series, added only after materialization, and
+/// not at all if it never produces a reported loop -- e.g. its synthetic-agg
+/// nodes trim it to fewer than two links). A circuit whose activity window
+/// somehow ends up empty (guarded defensively even though the enumerator is
+/// supposed never to emit one) is likewise counted with zero mass. Nothing
+/// here removes a circuit from `loop_counts` once it is counted, so the
+/// mismatch runs only one way: `loop_counts[p]` can overstate the population
+/// `totals[p]` actually reflects, never understate it. That is the
+/// conservative direction for the competing-vs-solo classification (see
+/// [`rank_and_filter`]) -- it can inflate a partition to COMPETING that a
+/// mass-only accounting would call closer to solo, but it can never hide a
+/// genuinely competing partition as solo, which is the degeneracy the
+/// classification exists to prevent.
+///
+/// That population is the full enumerated universe (retention non-survivors
+/// included -- their mass is in the denominator whether or not they are
+/// reported), plus the stitched cross-agg loops that join the candidate set
+/// after retention, minus the reported-cycle duplicates whose mass is taken
+/// back out.
 ///
 /// Only the enumeration path has a universe to describe. The fallback samples
 /// the runtime graph, so it passes `None` and `rank_and_filter` measures
@@ -2885,11 +2932,14 @@ fn loop_partition_slot(fl: &FoundLoop, partitions: &CyclePartitions) -> Option<u
 struct UniverseStats {
     /// Per-partition per-step `Sum_j |score_j[t]|` over the whole population
     /// (`NaN` summands excluded, `Inf` kept -- `ltm_post::denom_summand`'s
-    /// rule).
+    /// rule). Not every circuit `loop_counts` counts contributed to this sum
+    /// -- see the struct doc's boundary note.
     totals: HashMap<usize, Vec<f64>>,
-    /// Per-partition count of the loops whose mass `totals` sums. Two or more
-    /// means the partition is COMPETING: its loops divide a denominator none
-    /// of them owns outright (see [`rank_and_filter`]).
+    /// Per-partition count of circuits in the enumerated universe that
+    /// resolve to it. Two or more means the partition is COMPETING: its loops
+    /// divide a denominator none of them owns outright (see
+    /// [`rank_and_filter`]). Counts every such circuit, whether or not it
+    /// banked mass into `totals` -- see the struct doc's boundary note.
     loop_counts: HashMap<usize, usize>,
 }
 
@@ -3463,12 +3513,28 @@ fn signed_relative_scores(fl: &FoundLoop, totals: &[f64]) -> Vec<f64> {
 /// `k = 1` is the guarantee: every step's dominant loop in a competing group
 /// is reported, so a dominance-over-time reading never names the wrong loop
 /// for a step. Raising `k` covers the runners-up -- what a reader needs to see
-/// a handover coming -- and is taken only while the whole anchor set still
-/// fits under the cap, so it never costs the guarantee. The bound exists
-/// because the value of the k-th place falls off quickly while its cost in
-/// slots does not: a competing group can anchor up to `k` loops at EVERY step,
-/// and past the top few the "runner-up" is just another loop.
+/// a handover coming -- and is taken only while the whole anchor set still fits
+/// within [`ANCHOR_SHARE_OF_CAP`] of the cap, so escalation never crowds out
+/// the ordinary mean-relative ranking. The bound exists because the value of
+/// the k-th place falls off quickly while its cost in slots does not: a
+/// competing group can anchor up to `k` loops at EVERY step, and past the top
+/// few the "runner-up" is just another loop.
 const MAX_ANCHOR_K: usize = 3;
+
+/// The largest share of the `MAX_LOOPS` cap [`select_reported`] lets the
+/// anchor set claim before it stops escalating `k` (AC5.1).
+///
+/// The `k = 1` guarantee is unconditional and exempt from this bound -- it is
+/// what AC5.1 promises, and a model whose k=1 anchors alone exceed the cap is
+/// the separate pathological arm below. This bound decides only whether `k`
+/// may RISE past 1, and it exists because escalation without a limit degrades
+/// into the cap's failure mode from the other direction: on World3, before
+/// this bound, `k` escalated to `MAX_ANCHOR_K` and 140 of the 200 reported
+/// slots ended up anchors, crowding the mean-relative ranking down to a
+/// remainder few readers would call representative. Capping the anchor
+/// share at one HALF guarantees the ranking still fills at least half of
+/// every capped report, whatever the model.
+const ANCHOR_SHARE_OF_CAP: f64 = 0.5;
 
 /// One ranked loop, as the coverage-aware cap sees it.
 ///
@@ -3562,8 +3628,12 @@ fn anchor_ranks(rows: &[SelectionRow<'_>]) -> Vec<usize> {
 ///
 /// 1. No cap pressure -- everything is reported.
 /// 2. Otherwise every step's dominant loop within a competing group is an
-///    ANCHOR and keeps its slot ([`anchor_ranks`], `k = 1`). `k` then rises
-///    while the enlarged anchor set still fits, bounded by [`MAX_ANCHOR_K`].
+///    ANCHOR and keeps its slot ([`anchor_ranks`], `k = 1`) -- unconditionally,
+///    even if that alone claims more than [`ANCHOR_SHARE_OF_CAP`] of the cap.
+///    `k` then rises, bounded by [`MAX_ANCHOR_K`], but only while the ENLARGED
+///    anchor set stays at or under [`ANCHOR_SHARE_OF_CAP`] of the cap -- so
+///    escalation can grow the guarantee's coverage but can never crowd the
+///    ordinary ranking down to a sliver of the report.
 /// 3. Remaining slots are filled in the existing ranking order.
 /// 4. If even the `k = 1` anchors outnumber the cap -- a report that cannot
 ///    cover every step whatever it names -- the cap applies to the anchors
@@ -3592,11 +3662,15 @@ fn select_reported(rows: &[SelectionRow<'_>], cap: usize) -> Vec<usize> {
             .take(cap)
             .collect();
     }
-    // The anchor set grows monotonically with k, so the first k that does not
-    // fit is where the escalation stops.
+    // `k = 1` is the unconditional guarantee, exempt from the share bound
+    // (only escalation PAST it is bounded). The anchor set grows monotonically
+    // with k, so the first k whose anchor set would exceed the share is where
+    // escalation stops; a boundary count exactly AT the share ("at or under")
+    // is still taken.
+    let anchor_cap = cap as f64 * ANCHOR_SHARE_OF_CAP;
     let mut depth = 1;
     for k in 2..=MAX_ANCHOR_K {
-        if count_at(k) > cap {
+        if count_at(k) as f64 > anchor_cap {
             break;
         }
         depth = k;

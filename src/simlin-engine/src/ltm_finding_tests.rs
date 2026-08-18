@@ -2027,15 +2027,62 @@ fn an_uncapped_selection_is_the_plain_mean_relative_ranking() {
     );
 }
 
-/// AC5.1 arm (ii): while the anchor set still fits, `k` rises -- each step's
-/// SECOND-strongest loop is anchored too.
+/// AC5.1 arm (ii): `k` rises from 1 to 2 -- each of two steps' SECOND-strongest
+/// loop is anchored too -- because the resulting anchor set (4 loops) sits
+/// exactly AT [`ANCHOR_SHARE_OF_CAP`] of the cap (8 * 0.5 = 4): "at or under"
+/// takes the boundary.
 ///
-/// The fixture separates escalation from ordinary fill: `l5` is the step-9
-/// runner-up and ranks LAST by mean relative score, so a k=1-only selection
-/// (two anchors plus two slots filled in ranking order) reports `l3` and not
-/// `l5`.
+/// Two dominance pairs (`l1`/`l2` at step 0, `l3`/`l4` at step 1) plus five
+/// low, non-anchoring fillers (`f1`..`f5`, strictly ranked by magnitude and
+/// never top-2 at either step) separate escalation from ordinary fill: with
+/// `k = 1` alone only `l1` and `l3` would anchor, leaving the runners-up
+/// `l2`/`l4` to compete with the fillers on mean-relative score alone --
+/// which they would still win (see the sibling non-escalating test for a
+/// fixture where they do not), so this fixture's `cap = 8` is chosen wide
+/// enough that escalating to `k = 2` is what determines the LAST reported
+/// slot: with escalation, `f5` (the weakest filler) is dropped in favor of
+/// nothing new -- the four anchors plus `f1`..`f4` exactly fill the cap.
 #[test]
-fn the_anchor_rank_rises_while_the_selection_still_fits() {
+fn the_anchor_rank_rises_while_it_stays_within_the_anchor_share() {
+    let mut loops = vec![
+        cap_fixture_loop("l1", &[100.0, 0.0]),
+        cap_fixture_loop("l2", &[50.0, 0.0]),
+        cap_fixture_loop("l3", &[0.0, 100.0]),
+        cap_fixture_loop("l4", &[0.0, 50.0]),
+        cap_fixture_loop("f1", &[10.0, 10.0]),
+        cap_fixture_loop("f2", &[8.0, 8.0]),
+        cap_fixture_loop("f3", &[6.0, 6.0]),
+        cap_fixture_loop("f4", &[4.0, 4.0]),
+        cap_fixture_loop("f5", &[2.0, 2.0]),
+    ];
+    let partitions = single_partition(&["stock_a"]);
+
+    let _guard = MaxLoopsGuard::new(8);
+    rank_and_filter(&mut loops, &partitions, None);
+
+    assert_eq!(
+        reported_names(&loops),
+        vec!["l1", "l3", "l2", "l4", "f1", "f2", "f3", "f4"],
+        "k=2 anchors {{l1,l2,l3,l4}} (count 4, exactly half the cap of 8) and \
+         the remaining four slots go to the fillers in mean-relative order; \
+         f5, the weakest filler, is dropped"
+    );
+}
+
+/// AC5.1's new arm: the `k = 1` anchors alone already claim MORE than
+/// [`ANCHOR_SHARE_OF_CAP`] of the cap, so escalation to `k = 2` never even
+/// starts -- `count_at(2)` is a superset of `count_at(1)` and so exceeds the
+/// share bound too, but the code never has to check that: the loop's first
+/// candidate, `k = 2`, already fails.
+///
+/// This is the SAME fixture the (now superseded) unbounded-escalation
+/// behavior used to read as "k rises to 2, {{l1,l2,l4,l5}} exactly fills the
+/// cap" -- `l1`/`l3` anchor one step each (`count_at(1) == 2`, over half of
+/// `cap = 4`), so under the new rule `k` stays at 1 and the last slot goes to
+/// whichever non-anchor ranks highest by mean relative score (`l2`), not to
+/// `l4`'s own step-runner-up anchor.
+#[test]
+fn k_one_anchors_alone_over_half_the_cap_do_not_escalate() {
     let steady = |v: f64| -> Vec<f64> { vec![v; 10] };
     let spike = |v: f64| -> Vec<f64> {
         let mut s = vec![0.0; 10];
@@ -2056,9 +2103,11 @@ fn the_anchor_rank_rises_while_the_selection_still_fits() {
 
     assert_eq!(
         reported_names(&loops),
-        vec!["l1", "l2", "l4", "l5"],
-        "k=2 anchors {{l1,l2}} over steps 0-8 and {{l4,l5}} at step 9 and \
-         exactly fills the cap; k=3 would need five slots, so it is not taken"
+        vec!["l1", "l2", "l3", "l4"],
+        "k=1 anchors {{l1,l4}} (count 2, already over half the cap of 4) so \
+         k never escalates to 2; the two remaining slots go to l2 and l3 in \
+         mean-relative order, and l5 -- l4's own step-9 runner-up, which the \
+         pre-share-bound rule anchored at k=2 -- is dropped"
     );
 }
 
@@ -3359,6 +3408,241 @@ fn a_trimmed_duplicate_circuit_leaves_no_mass_in_the_denominator() {
         "the fixture must have active steps"
     );
 }
+
+/// AC5.2's dedup `-1` boundary: a partition whose UNIVERSE is exactly one
+/// reported loop plus its trimmed hoisted-reducer twin classifies Solo, not
+/// Competing.
+///
+/// `share[Region] = pop[Region] / SUM(pop[*])` over `{a, b}` gives `pop[a]`'s
+/// partition exactly two enumerated circuits when only `growth[a]` feeds back
+/// through `share[a]` -- a direct `pop[a] -> share[a]` numerator reference and
+/// the `pop[a] -> $ltm:agg -> share[a]` reducer reference (AC4.3) -- that trim
+/// to the SAME reported loop, so after the dedup `-1` correction the
+/// partition's universe count is 1, not 2. `growth[b]` is deliberately a flat
+/// constant, decoupled from `share`/`total` entirely: `pop[b]` still feeds the
+/// shared `SUM(pop[*])` (so `share[a]` is a genuinely time-varying ratio
+/// rather than the degenerate "one element, ratio always 1" case, which the
+/// link-score guard's "target didn't change" arm would zero out completely),
+/// but nothing closes a cycle back through `pop[b]` -- it never joins `pop[a]`'s
+/// SCC, so it cannot inflate that partition's count.
+///
+/// The magnitude of `pop[a]`'s own relative score cannot tell Solo from
+/// Competing apart: `subtract_reported_loop_from_counts` (the `-1`) touches
+/// only `loop_counts`, not `totals` -- the mass correction
+/// (`subtract_reported_mass_from_totals`) is the SEPARATE fix AC4.3 already
+/// pins -- so `pop[a]`'s relative score reads exactly `+-1` at every active
+/// step whether or not the `-1` correction runs. What the correction decides
+/// is RANK ORDER: `cmp_relative_importance` puts every competing loop ahead
+/// of every solo one regardless of `mean_rel`, so the only way to observe the
+/// classification is to put a genuinely competing loop with a real (non-1.0)
+/// mean relative score into the SAME discovery result and check which side of
+/// it `pop[a]`'s loop lands on. The `population`/`births`/`deaths` structure
+/// (`two_loop_logistic_project`'s pair, inlined here) is that competing loop:
+/// unrelated to `pop`/`share`/`growth`, so the two partitions are independent
+/// and the comparison is between real classifications rather than one
+/// partition swallowing the other. Without the `-1` correction, `pop[a]`'s
+/// wrongly-Competing loop (mean_rel exactly 1.0, the maximum possible) would
+/// rank ahead of both logistic loops instead of behind them.
+fn discover_solo_trimmed_duplicate_and_a_competing_loop() -> DiscoveryResult {
+    use crate::datamodel::{self, Equation, Variable};
+
+    let project = datamodel::Project {
+        name: "solo_dedup_boundary".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                // --- pop[a]'s solo-after-dedup partition; pop[b] a decoupled
+                // sibling that keeps SUM(pop[*]) genuinely time-varying
+                // without joining pop[a]'s cycle. ---
+                Variable::Stock(datamodel::Stock {
+                    ident: "pop".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("a".to_string(), "100".to_string(), None, None),
+                            ("b".to_string(), "50".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["growth".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "share".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "pop[Region] / SUM(pop[*])".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "growth".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("a".to_string(), "share[a] * 10 + 1".to_string(), None, None),
+                            // Flat and decoupled from share/total: pop[b]
+                            // still varies (keeping SUM(pop[*]) non-constant)
+                            // but never closes a cycle back through itself.
+                            ("b".to_string(), "5".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // --- The genuinely competing, unrelated partition. ---
+                enum_stock("population", "100", &["births"], &["deaths"]),
+                enum_flow("births", "population * 0.1"),
+                enum_flow("deaths", "population * population * 0.0001"),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    discover_project(&project, CandidateGen::Auto)
+}
+
+#[test]
+fn a_solo_trimmed_duplicate_ranks_behind_a_competing_loop_despite_a_perfect_relative_score() {
+    let result = discover_solo_trimmed_duplicate_and_a_competing_loop();
+
+    // One loop per element/structure: pop[a]'s dedup pair trims to one
+    // reported loop, and the logistic pair contributes its births and
+    // deaths loops.
+    assert_eq!(
+        result.loops.len(),
+        3,
+        "one solo pop[a] loop plus the two competing logistic loops; got {:?}",
+        result
+            .loops
+            .iter()
+            .map(|l| l
+                .loop_info
+                .links
+                .iter()
+                .map(|k| k.from.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
+
+    // Identify each reported loop by whether any of its links touch the
+    // logistic structure -- not by `links[0].from` alone, since which node a
+    // reported cycle starts its link list at is a rotation detail, not a
+    // naming guarantee (`pop[a]`'s loop is reported starting from
+    // `share[a]`, not `pop`).
+    let is_logistic = |links: &[Link]| {
+        links
+            .iter()
+            .any(|l| ["births", "deaths", "population"].contains(&l.from.as_str()))
+    };
+    let (logistic, other): (Vec<usize>, Vec<usize>) =
+        (0..result.loops.len()).partition(|&i| is_logistic(&result.loops[i].loop_info.links));
+    assert_eq!(
+        logistic.len(),
+        2,
+        "both logistic loops must be reported; got {:?}",
+        result
+            .loops
+            .iter()
+            .map(|l| l
+                .loop_info
+                .links
+                .iter()
+                .map(|k| k.from.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        other.len(),
+        1,
+        "exactly one non-logistic (pop[a]) loop must be reported"
+    );
+    let pop_pos = other[0];
+    assert!(
+        logistic.iter().all(|&i| i < pop_pos),
+        "both competing logistic loops must rank ahead of pop[a]'s solo \
+         loop despite its mean relative score being the maximum possible \
+         (1.0, by construction): logistic at {logistic:?}, pop[a] at {pop_pos}"
+    );
+
+    // The magnitude check AC4.3 already pins (the mass correction, not the
+    // count correction): pop[a]'s own relative score is exactly 1.0 at every
+    // active step regardless of the `-1` fix, which is exactly why rank
+    // order -- not magnitude -- is the observable this test needs.
+    let pop_loop = &result.loops[pop_pos];
+    assert!(
+        pop_loop
+            .rel_scores
+            .iter()
+            .all(|&r| r == 0.0 || (r.abs() - 1.0).abs() < 1e-9),
+        "pop[a]'s relative score must be exactly +-1 at every active step: {:?}",
+        pop_loop.rel_scores
+    );
+}
+
+// AC5.2's dedup `+1` boundary -- a partition whose only OTHER universe member
+// is a stitched cross-agg loop, so adding it alone is what makes an
+// otherwise-solo partition competing -- is left UNCOVERED here; no natural
+// fixture in this suite isolates it, and building one is more than this nit
+// is worth. The reducer shape that produces a stitched loop
+// (`discover_reducer_feedback`, above) is symmetric: EVERY element of the
+// shared reducer gets its own single-petal circuit by construction
+// (`growth[r] = SUM(pop[*]) * 0.05` fans the agg's output back to every
+// element), so a partition that can receive a stitched second member always
+// already has >= 2 native petal circuits BEFORE stitching -- the `+1` only
+// ever pushes an already-competing partition further, never a solo one
+// across the line. Isolating the transition needs one element whose own
+// petal has no parent-level stock (so `circuit_partition` -- and therefore
+// `loop_counts` -- does not count it) sharing the SAME agg node as a genuine
+// stock-backed element, so the stitched combination is the first thing to
+// add that stock's partition to `loop_counts` a second time. An arrayed
+// reducer's elements are homogeneous by construction (one flow equation per
+// element, replicated), so a mixed stock/stockless element pair sharing one
+// `SUM(...)` is not a shape this fixture family can express without a
+// disproportionate new construction (most likely a per-element module
+// instantiation where only one element's instance carries state). The `+1`
+// addition itself is NOT unexercised, though: every reducer test above
+// (`discovery_recovers_cross_agg_loops_end_to_end`,
+// `a_trimmed_duplicate_circuit_leaves_no_mass_in_the_denominator`) drives it
+// on an already-competing partition, which is what a stitched loop's mass
+// (not just its count) landing anywhere but the partition's own total would
+// break.
 
 /// `share[d] = pop[d] / SUM(pop[*])` feeding growth back into `pop[d]`: the
 /// only shape that makes ONE reported loop out of TWO enumerated circuits,

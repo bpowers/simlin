@@ -913,7 +913,13 @@ impl FallbackScratch {
 
     /// Every elementary cycle through the seed that the last
     /// [`FallbackScratch::dijkstra_from`] can express, as
-    /// `(total weight, closing source)`, cheapest first.
+    /// `(total weight, hop count, closing source)`, cheapest first.
+    ///
+    /// The hop count is the ordering tie-break component ([`order_hops`]),
+    /// carried here so the sort below can apply it without re-deriving it from
+    /// `self.hops`; only the weight and the closing source are semantically
+    /// new information, since a caller reconstructs the actual path from the
+    /// source via [`FallbackScratch::write_forward_path`].
     ///
     /// An in-edge `u -> seed` whose source the search reached closes the tree
     /// path `seed..u`, and that closure is elementary because the tree path is
@@ -1010,6 +1016,17 @@ impl FallbackScratch {
                         break;
                     }
                     cycle.push(cursor);
+                    if cycle.len() - forward_len > self.rev_parent.len() {
+                        // The reverse-tree parent chain of a reached node
+                        // terminates at the seed for the same reason the
+                        // forward tree's does (`write_forward_path`): a
+                        // parent is always a settled node, settled strictly
+                        // earlier, so more steps than the node universe
+                        // cannot happen without cycling.
+                        unreachable!(
+                            "fallback reverse-tree parent chain does not terminate at the seed"
+                        );
+                    }
                     cursor = self.rev_parent[cursor as usize];
                 }
                 if !elementary {
@@ -1072,6 +1089,78 @@ fn order_hops(tie_break: FallbackTieBreak, hops: u32) -> u32 {
     }
 }
 
+/// Maximum distinct elementary cycles one fallback sweep may accumulate across
+/// every (step, seed) before it stops early and reports `truncated`.
+///
+/// Nothing else bounds the sweep's candidate volume: `sweep` has no per-step
+/// or per-seed cap, `Model.analyze()` defaults to `timeout=None`, and the
+/// every-edge closure family (`FallbackClosures::EveryEdge`, the default)
+/// proposes roughly one candidate per active edge per (seed, step) before
+/// dedup thins it -- on a sufficiently dense or long-running model that grows
+/// without limit. This is the memory and latency backstop: 200,000 cycles at a
+/// few dozen `u32` node ids each is a few tens of MB, trivial next to the
+/// enumerator's own [`MAX_DISCOVERY_ENUM_EDGE_ROWS`]-scale budgets, and it is
+/// sized with real headroom over what the corpus actually produces --
+/// `examples/ltm_discovery_bench` measured 2,150 deduped candidates on
+/// World3-03 (the densest runtime graph in the repo corpus) and 159 on
+/// C-LEARN v77, both under [`FallbackConfig::DEFAULT`]'s `EveryEdge` closures,
+/// ~90x below this bound. A trip is therefore a signal about a genuinely
+/// pathological graph, not something the shipped corpus is expected to reach.
+///
+/// A budget trip is reported the same way a deadline expiry is: `truncated`,
+/// with whatever was found so far kept (each candidate is a real, fully
+/// traversed cycle). That is the honest signal here too -- the sweep stopped
+/// before it could claim to have sampled every seed and step, so the result is
+/// a smaller candidate set rather than an invalid one, exactly as a
+/// wall-clock-truncated sweep already reads.
+const MAX_FALLBACK_PATHS: usize = 200_000;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of [`MAX_FALLBACK_PATHS`], scoped by an active
+    /// [`MaxFallbackPathsGuard`] -- lets a tiny fixture trip the candidate
+    /// budget without materializing anywhere near 200,000 cycles
+    /// (docs/dev/rust.md#test-time-budgets).
+    static MAX_FALLBACK_PATHS_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The candidate-cycle budget for the current sweep. Returns
+/// [`MAX_FALLBACK_PATHS`] unless a test has installed a
+/// [`MaxFallbackPathsGuard`] override.
+fn max_fallback_paths() -> usize {
+    #[cfg(test)]
+    {
+        if let Some(n) = MAX_FALLBACK_PATHS_OVERRIDE.with(|c| c.get()) {
+            return n;
+        }
+    }
+    MAX_FALLBACK_PATHS
+}
+
+/// RAII guard (test-only) overriding [`max_fallback_paths`] for the current
+/// thread; restores the previous value on drop so a panicking test does not
+/// leak the override to the next test on the same thread.
+#[cfg(test)]
+struct MaxFallbackPathsGuard {
+    prev: Option<usize>,
+}
+
+#[cfg(test)]
+impl MaxFallbackPathsGuard {
+    fn new(cap: usize) -> Self {
+        let prev = MAX_FALLBACK_PATHS_OVERRIDE.with(|c| c.replace(Some(cap)));
+        MaxFallbackPathsGuard { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for MaxFallbackPathsGuard {
+    fn drop(&mut self) {
+        MAX_FALLBACK_PATHS_OVERRIDE.with(|c| c.set(self.prev));
+    }
+}
+
 /// Rotation-independent duplicate detection over the emitted cycles.
 ///
 /// An elementary cycle is determined by its SET of directed edges -- every
@@ -1086,16 +1175,39 @@ fn order_hops(tie_break: FallbackTieBreak, hops: u32) -> u32 {
 /// The fingerprint is a filter and not the identity: a bucket hit is resolved
 /// by comparing the candidate against the stored cycles under rotation, so the
 /// dedup stays exact rather than probabilistic.
-#[derive(Default)]
+///
+/// `cap` bounds `paths`' final length (see [`MAX_FALLBACK_PATHS`]): once it is
+/// reached, `insert_if_new` refuses every further candidate -- cheaply, before
+/// any fingerprinting or allocation -- and the caller (`sweep`) is the one
+/// that turns "no more room" into `truncated`. `CycleDedup::default()` sets no
+/// cap (`usize::MAX`), which is what the unit tests below use when they are
+/// testing dedup semantics rather than the budget.
 struct CycleDedup {
     /// fingerprint -> the indices into `paths` of the cycles carrying it.
     buckets: HashMap<u64, Vec<u32>>,
+    cap: usize,
+}
+
+impl Default for CycleDedup {
+    fn default() -> Self {
+        CycleDedup::new(usize::MAX)
+    }
 }
 
 impl CycleDedup {
-    /// Append `cycle` to `paths` unless a rotation of it is already there.
-    /// Returns whether it was new.
+    fn new(cap: usize) -> Self {
+        CycleDedup {
+            buckets: HashMap::new(),
+            cap,
+        }
+    }
+
+    /// Append `cycle` to `paths` unless a rotation of it is already there or
+    /// `paths` is already at `cap`. Returns whether it was newly inserted.
     fn insert_if_new(&mut self, cycle: &[u32], paths: &mut Vec<Vec<u32>>) -> bool {
+        if paths.len() >= self.cap {
+            return false;
+        }
         let bucket = self.buckets.entry(cycle_fingerprint(cycle)).or_default();
         if bucket
             .iter()
@@ -1187,6 +1299,14 @@ pub(super) struct FallbackOutcome {
 /// [`FallbackClosures::EveryEdge`]). That schedule is what makes "expiry loses
 /// at most one step's tail" true, and it is what the budget tests are
 /// calibrated against. An unbudgeted sweep reads it nowhere.
+///
+/// The candidate count is separately bounded at [`MAX_FALLBACK_PATHS`]
+/// (checked at every dedup insert, so growth stops the instant the budget is
+/// spent rather than after materializing more work). A trip is reported
+/// exactly like a deadline expiry -- `truncated`, with everything already
+/// found kept -- since both mean the same thing to a caller: the sweep did
+/// not get to sample everything it would have, so what came back is a smaller
+/// candidate set, not a wrong one.
 pub(super) fn sweep(
     search: &IndexedSearch,
     results: &Results,
@@ -1195,11 +1315,12 @@ pub(super) fn sweep(
     clock: &mut dyn Clock,
 ) -> FallbackOutcome {
     let mut scratch = FallbackScratch::new(search, config.tie_break);
+    let cap = max_fallback_paths();
     // Dedup on the node-id cycle rather than on names. Within one
     // `IndexedSearch` the id <-> name map is a bijection, so these are the same
     // equivalence classes a name-keyed dedup would give, without allocating a
     // name vector per cycle.
-    let mut dedup = CycleDedup::default();
+    let mut dedup = CycleDedup::new(cap);
     let mut paths: Vec<Vec<u32>> = Vec::new();
     let mut closings: Vec<(f64, u32, u32)> = Vec::new();
     let mut cycle_buf: Vec<u32> = Vec::new();
@@ -1246,6 +1367,15 @@ pub(super) fn sweep(
                 }
             }
             if !completed {
+                truncated = true;
+                break 'steps;
+            }
+            if paths.len() >= cap {
+                // The candidate budget is spent: `dedup` is already refusing
+                // every further insert, so stopping here loses no candidate
+                // that a later seed or step would otherwise have contributed
+                // -- it only stops paying for searches whose results cannot
+                // be kept.
                 truncated = true;
                 break 'steps;
             }
