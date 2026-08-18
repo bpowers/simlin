@@ -61,6 +61,52 @@ This plan finishes that transition and hardens it:
 Out of scope: unifying compile-time exhaustive mode with post-sim discovery; a
 TypeScript/WASM discovery surface; changing link/loop score definitions.
 
+**Status (all phases landed).** Which test pins which acceptance criterion:
+
+| AC | Pinned by |
+|---|---|
+| AC1.1 | `a_previous_self_latch_is_not_reported_as_a_loop` (which also asserts `links.len() >= 2` over every reported loop, under both generators); enumerator-level by `enumerator_matches_brute_force_active_cycles_on_synthetic_graphs`, whose oracle emits no singleton either, and by `a_self_edge_inside_a_real_cycle_is_never_traversed` on the fallback side |
+| AC1.2 | The deletion itself: `rg` over `src/` finds none of the named items. Phase 6 re-ran the sweep over `docs/` too (AC7.3) |
+| AC1.3 | `a_stockless_two_node_cycle_is_found_by_both_generators_and_ranks_last`, plus `the_seed_policy_decides_whether_a_stockless_cycle_is_reachable` for the seed-policy half |
+| AC2.1 | `enumeration_and_fallback_agree_on_a_simple_model`, `enumeration_budget_trip_falls_back_to_the_shortest_path_sweep` |
+| AC2.2 | Per phase: `activity_graph_build_abandons_an_already_expired_deadline`, `enumerate_active_circuits_abandons_an_already_expired_deadline` (+ `..._at_production_interval`, `..._catches_a_deadline_that_expires_mid_search`), `retain_circuits_abandons_an_already_expired_deadline`, `an_already_expired_deadline_yields_no_paths`; partial results by `an_expired_enumeration_deadline_still_yields_the_fallbacks_loops` and `a_deadline_expiring_after_the_first_step_keeps_that_steps_cycles`; the never-reads-the-clock half by the three `..._never_reads_the_clock_when_unbudgeted` tests and `an_unbudgeted_sweep_never_reads_the_clock`; end to end by libsimlin `discover_loops_tiny_budget_truncates` and pysimlin `test_tiny_timeout_truncates` |
+| AC2.3 | `dijkstra_min_cycle_matches_brute_force_on_random_graphs`, `emitted_cycles_are_elementary_and_simultaneously_active`, `every_edge_closures_are_minimum_weight_cycles_through_their_edge`, plus one test per weight arm (`clamped_log_abs_charges_sub_unit_links_and_frees_super_unit_ones`, `relative_link_score_normalizes_against_the_targets_in_edges`, `hop_count_charges_one_per_hop_regardless_of_score`, `shifted_log_abs_ranks_super_unit_links_by_gain`, and the two `..._inf_arms_keep_dijkstra_well_defined`) |
+| AC2.4 | `a_diamond_is_enumerated_whole_and_recovered_by_the_fallback` + `every_edge_closures_recover_both_arms_of_a_diamond` (the closure family that reaches the second arm), `a_module_loop_is_recovered_and_scored_alike_by_both_generators`, `discovery_recovers_cross_agg_loops_end_to_end`, `a_cycle_active_at_only_one_step_is_found_by_both_generators`; the stockless arm is AC1.3's pair |
+| AC3.1 | `examples/ltm_discovery_bench`, recorded in "Measured" (not a test: it is a wall-clock claim about a release build) |
+| AC3.2 | `retention_totals_and_survivors_match_hand_computed_products`, `retention_confirms_a_circuit_whose_running_bound_overstates_its_share`, `an_inf_times_zero_product_is_excluded_from_totals_and_retention`, and the notebook audit's independent survivor count and 0.000e+00 score differences |
+| AC3.3 | `each_enumeration_budget_arm_reports_incomplete` (one arm per budget, edge rows included), driven by `EnumBudgetGuard` |
+| AC4.1 | `an_inf_times_zero_product_is_excluded_from_totals_and_retention` |
+| AC4.2 | `a_module_loop_contributes_its_override_mass_to_the_denominator` |
+| AC4.3 | `a_trimmed_duplicate_circuit_leaves_no_mass_in_the_denominator`, `a_dropped_module_duplicate_leaves_the_denominator_untouched`, `a_solo_trimmed_duplicate_ranks_behind_a_competing_loop_despite_a_perfect_relative_score` (the count half) |
+| AC4.4 | `a_budget_splits_into_an_enumeration_share_and_the_callers_expiry`, `a_zero_budget_expires_both_phases_at_the_start_instant`, `an_expired_enumeration_deadline_still_yields_the_fallbacks_loops` |
+| AC5.1 | `the_cap_keeps_each_steps_dominant_loop`, `the_anchor_rank_rises_while_it_stays_within_the_anchor_share`, `k_one_anchors_alone_over_half_the_cap_do_not_escalate`, `more_anchors_than_the_cap_keeps_the_top_ranked_anchors`, `solo_loops_never_anchor_and_are_still_dropped_first`, `a_tie_for_a_steps_maximum_anchors_the_earlier_ranked_loop`, `a_step_with_no_active_loop_anchors_nobody`, `each_normalization_group_anchors_its_own_step_maximum`, `an_uncapped_selection_is_the_plain_mean_relative_ranking`, `anchor_selection_is_deterministic_under_permutation`; the corpus half by the regenerated World3 audit's 399/399 |
+| AC5.2 | `a_universe_with_two_circuits_makes_its_lone_survivor_competing`, `a_universe_with_one_circuit_leaves_its_survivor_solo`, `the_fallback_path_classifies_competing_over_the_discovered_set`, `solo_group_loops_are_never_competing_under_universe_counts` |
+| AC6.1 | libsimlin `discover_loops_reports_enumeration_completeness`, pysimlin `test_completeness_counters` / `test_tiny_timeout_reports_a_sampled_analysis`, mcp-core `read_model_returns_clean_xmile_snapshot` and `edit_reports_discovery_completeness_counters` |
+| AC7.1 | `notebooks/build_ltm_discovery_audit.py` + `verify_ltm_discovery_audit.py` (both models PASS); `docs/audits/` is gone and only this plan's own AC text names it |
+| AC7.2 | `examples/ltm_fallback_eval`, tables in "Measured" |
+| AC7.3 | Phase 6's rewrite of `docs/design/ltm--loops-that-matter.md`, `src/simlin-engine/CLAUDE.md`, `docs/README.md`, and tech-debt #24/#28 (#29's stale "discovery is heuristic" framing too), plus the residual-hit sweep |
+
+Two arms are deliberately NOT covered by a test, each with its reason recorded
+next to the code:
+
+- **The stitched-module accumulate skip** (`ltm_finding.rs`, the `continue` that
+  keeps a module-traversing STITCHED sequence from banking raw mass): no
+  compiling model can reach it today. A module reachable this way must sit
+  between a synthetic agg and its per-element consumers, which makes it shared
+  across every element's petal, which makes those petals' internal node sets
+  overlap -- and `db::stitch_cross_agg_petals` only combines pairwise-disjoint
+  petals, so no stitched sequence can contain it. The retention-side twin of the
+  same rule IS pinned (`a_dropped_module_duplicate_leaves_the_denominator_untouched`).
+- **The stitched `+1` universe count at the solo-to-competing boundary**: the
+  reducer shape that produces stitched loops is symmetric, so a partition that
+  can receive a stitched member already holds >= 2 native petal circuits before
+  stitching; isolating the transition needs a mixed stockless/stock-backed
+  element pair sharing one reducer, which an arrayed reducer cannot express
+  without a disproportionate fixture. The `+1` itself runs in every reducer test
+  (`discovery_recovers_cross_agg_loops_end_to_end`,
+  `a_trimmed_duplicate_circuit_leaves_no_mass_in_the_denominator`), on
+  already-competing partitions.
+
 ## Acceptance Criteria
 
 Prefix: `ltm-discovery-exact`. Each criterion names the observable behaviour and, where
@@ -433,6 +479,22 @@ with rationale or propose a change. Tests: AC7.3.
   always-non-negative alternative. The harness arbitrates.
 - **Sub-save-step activity** remains invisible to both generators (shared with the
   literature's per-step method); documented, not fixed here.
+- **Stockless cycles** (DoD item 1, re-evaluated after Phase 5). A 2+-node cycle
+  carrying no stock is a real feedback loop -- a `PREVIOUS` lag between two auxes IS
+  state, and a module-internal loop hidden behind a passthrough IS feedback -- so it
+  stays reported, in a `NormGroup::Solo` group ranked after every competing loop
+  (AC1.3). The re-measurement says the rule costs nothing on the corpus and buys
+  correctness on the models that need it: `examples/ltm_discovery_bench` now prints,
+  per generator, how many reported loops have an empty `loop_info.stocks` and how many
+  have `partition == None`, and on BOTH models under BOTH generators the answer is
+  **0 of 153** (C-LEARN v77) and **0 of 200** (World3-03) -- neither model carries a
+  non-trivial SCC holding no stock, which is also why `StocksAndStocklessSccs` measured
+  identical to `Stocks` on every column of the Phase 3b sweep. So there is nothing to
+  weigh: keeping stockless cycles changes neither model's report, and dropping them
+  would trade a class of genuine loops for no measured gain. The engine-level pin stays
+  the fixture test (`a_stockless_two_node_cycle_is_found_by_both_generators_and_ranks_last`),
+  since the corpus cannot pin what it does not contain; the bench print is what keeps
+  the "costs nothing" half of the claim honest as the corpus changes.
 - **Determinism**: enumeration order is content-pure (node ids from insertion order of
   parsed offsets, which is sorted); the fallback's emitted set is order-independent
   after canonical-rotation dedup; ranking ties break on content keys.
@@ -819,4 +881,39 @@ exactly on both models (200/200 and 153/153 reported-list overlap), and the
 100% step-dominant coverage figure above is unchanged: the `k = 1` guarantee
 the cap has to hold is exempt from the share bound by construction.
 
-(Phase 6 still to fill in.)
+After Phase 6 (release, Apple M-series under Asahi,
+`examples/ltm_discovery_bench`, `CandidateGen::Auto` and the default fallback
+configuration over the same simulated results -- the final numbers for this
+branch):
+
+| Model | Generator | Discovery time | Reported | Retained | Candidate set | `enumeration_complete` |
+|---|---|---|---|---|---|---|
+| C-LEARN v77 | `Auto` (enumeration) | 0.037 s | 153 | 153 | universe 162 | true |
+| C-LEARN v77 | fallback (default config) | 0.151 s | 150 | 150 | candidates 159 | false |
+| World3-03 | `Auto` (enumeration) | 0.404 s | 200 | 2,979 | universe 150,827 | true |
+| World3-03 | fallback (default config) | 0.143 s | 200 | 660 | candidates 2,150 | false |
+
+AC3.1 holds (World3 0.404 s < 1.0 s, C-LEARN 0.037 s < 0.2 s, both complete,
+neither truncated, neither agg-recovery-truncated). Around the exact runs sit
+C-LEARN's LTM compile (2.31 s) and LTM simulation (2.61 s), which is the
+standing shape of the cost on a large arrayed model: discovery is the cheap
+part.
+
+Stockless composition, printed by the same bench run (DoD item 1): **0**
+reported loops with an empty `loop_info.stocks` and **0** with
+`partition == None`, on BOTH models under BOTH generators (0 of 153 and 0 of
+200 on the exact path; likewise on every fallback row). See "Stockless cycles"
+under Additional Considerations for the conclusion.
+
+The regenerated audits (`notebooks/build_ltm_discovery_audit.py` then
+`verify_ltm_discovery_audit.py`, both PASS against this build) reproduce every
+number in the "Audit numbers" table above unchanged: World3 150,827 cycles ->
+2,979 survivors -> 200 reported, C-LEARN 162 -> 153 -> 153; 0 engine loops
+absent from the independent universe on either model; reported-list overlap
+200/200 and 153/153, identical as SETS; max relative difference in raw loop
+scores 0.000e+00 and max absolute difference in relative scores 0.000e+00 on
+both; step-dominant coverage within competing groups 399/399 and 750/750. The
+audits also re-measure the cap's shape on World3 -- anchors at k<=1: 50,
+k<=2: 96, k<=3: 140, against a `200 * ANCHOR_SHARE_OF_CAP = 100` bound, so
+escalation stops at k = 2 -- and confirm C-LEARN's cap does not bind (0
+survivors without a slot).
