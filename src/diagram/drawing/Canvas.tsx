@@ -225,6 +225,14 @@ export interface CanvasProps {
   // editor a label double-click opens -- which would otherwise LOOK editable
   // while the eventual onRenameVariable commit silently no-ops (issue #935).
   readOnly?: boolean;
+  // Whether the mount-time offscreen re-center (issue #52) may run for this
+  // mount. Default true. A host that opened the view at a viewport it carried
+  // from a previous mount (the Editor's `initialViewport`: the user's own
+  // pan, or the fit the previous mount already applied) passes false: that
+  // framing is what the user is looking at, so a diagram they panned
+  // offscreen must not be yanked back by the remount. A viewport that came
+  // from data keeps the safety net.
+  recenterOffscreenOnMount?: boolean;
   project: Project;
   model: Model;
   view: StockFlowView;
@@ -2734,14 +2742,15 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   // This runs at most once per mount (the `offscreenChecked` latch): it must not
   // fight a later user pan or an external viewport change, and module drill-in
   // (same Canvas instance -- see the latch's comment) manages its own viewport.
-  // "Idle" here matches the resize handler's convention (`!liveViewport`): while
+  // A host that carried the viewport in from a previous mount opts out
+  // (`recenterOffscreenOnMount === false`, see the prop). "Idle" here matches the resize handler's convention (`!liveViewport`): while
   // a gesture owns the live viewport the check waits, so it never yanks the view
   // out from under an in-flight pan/pinch/coast. The commit goes through
   // `onViewBoxChange` directly -- the same view-only, non-undo path the idle
   // resize uses -- so the host persists it once with no history entry. Zoom is
   // deliberately left unchanged (scope kept tight to re-centering).
   React.useEffect(() => {
-    if (r.offscreenChecked || props.embedded || liveViewport) {
+    if (r.offscreenChecked || props.embedded || props.recenterOffscreenOnMount === false || liveViewport) {
       return;
     }
     if (!svgSize || svgSize.width <= 0 || svgSize.height <= 0) {

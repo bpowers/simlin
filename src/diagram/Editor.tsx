@@ -1599,6 +1599,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       <Canvas
         embedded={!!embedded}
         readOnly={readOnly}
+        // A carried viewport (a remounting host handing back the user's live
+        // framing) is not the offscreen-recovery case: never yank it back.
+        recenterOffscreenOnMount={latest.current.props.initialViewport === undefined}
         project={project}
         model={model}
         view={view}

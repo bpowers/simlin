@@ -442,6 +442,8 @@ export interface HarnessOptions {
   selectedTool?: CanvasProps['selectedTool'];
   embedded?: boolean;
   readOnly?: boolean;
+  /** Forwarded to the Canvas prop of the same name (default: unset = true). */
+  recenterOffscreenOnMount?: boolean;
   variables?: ReadonlyMap<string, Variable>;
   /**
    * The zoom the view MOUNTS with (default 1). Lets a test model a stored view
@@ -527,6 +529,7 @@ export function renderCanvas(opts: HarnessOptions): CanvasHarness {
   const buildProps = (): CanvasProps => ({
     embedded: opts.embedded ?? false,
     readOnly: opts.readOnly,
+    recenterOffscreenOnMount: opts.recenterOffscreenOnMount,
     project,
     model,
     view: currentView,

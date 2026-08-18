@@ -27,9 +27,15 @@ import { mapSet } from '@simlin/core/common';
 import * as ProjectControllerModule from '../project-controller';
 import { ProjectController, type ProjectSnapshot, type Viewport } from '../project-controller';
 
+// Capture the Canvas props: the offscreen-recenter opt-out is decided here
+// from `initialViewport` and asserted below.
+let capturedCanvasProps: { recenterOffscreenOnMount?: boolean } | undefined;
 rs.mock('../drawing/Canvas', () => ({
   __esModule: true,
-  Canvas: () => null,
+  Canvas: (p: { recenterOffscreenOnMount?: boolean }) => {
+    capturedCanvasProps = p;
+    return null;
+  },
   inCreationUid: -2,
 }));
 
@@ -258,5 +264,30 @@ describe('Editor initialViewport (controller-config wiring)', () => {
     const [withViewport, without] = captureConfigs([makeProps({ initialViewport: viewport }), makeProps()]);
     expect(withViewport.initialViewport).toEqual(viewport);
     expect(without.initialViewport).toBeUndefined();
+  });
+
+  it('a carried viewport turns the Canvas offscreen re-center off; a stored one keeps it (issue #52 safety net)', () => {
+    rs.spyOn(ProjectController.prototype, 'getSnapshot').mockImplementation(() => makeSnapshot(baseProject()));
+    rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
+    rs.spyOn(ProjectController.prototype, 'subscribe').mockReturnValue(() => {});
+
+    capturedCanvasProps = undefined;
+    act(() => {
+      render(
+        React.createElement(
+          Editor,
+          makeProps({ initialViewport: { viewBox: { x: -5000, y: -5000, width: 800, height: 600 }, zoom: 1 } }),
+        ),
+      );
+    });
+    expect(capturedCanvasProps?.recenterOffscreenOnMount).toBe(false);
+
+    capturedCanvasProps = undefined;
+    act(() => {
+      render(React.createElement(Editor, makeProps()));
+    });
+    expect(capturedCanvasProps?.recenterOffscreenOnMount).toBe(true);
   });
 });

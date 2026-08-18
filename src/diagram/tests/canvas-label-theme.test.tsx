@@ -51,8 +51,8 @@ describe('Canvas labels: theming by render mode', () => {
     // No inline fill: the token-based stylesheet rule is what applies...
     expect(text.style.fill).toBe('');
     expect(window.getComputedStyle(text).fill).toBe('var(--color-black)');
-    // ...and the element's selected rule can override it (an inline fill would
-    // have beaten it, which is how selected labels once stayed black).
+    // ...and the element's selected rule overrides it (an inline fill would
+    // beat this rule and leave a selected element's label black).
     h.setProps({ selection: new Set([1]) });
     expect(window.getComputedStyle(h.query('g.aux.selected text')!).fill).toBe('var(--color-selected)');
     // The font pins the export path needs stay inline in both modes.
