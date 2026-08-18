@@ -2,14 +2,17 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Wall-clock comparison of LTM discovery's two candidate generators --
-//! union-graph circuit enumeration (the production default) vs. the per-step
-//! strongest-first DFS (the fallback) -- on real models.
+//! Wall-clock comparison of LTM discovery's candidate generators --
+//! union-graph circuit enumeration (the production default) against the
+//! shortest-path fallback under each of its weight formulations -- on real
+//! models.
 //!
 //! For each model (positional args; defaults to C-LEARN v77 and WRLD3-03):
 //! compile with LTM discovery, simulate once, then run
 //! `discover_loops_with_candidate_gen` under each generator and report loop
-//! counts, the completeness/saturation flags, and per-phase timing.
+//! counts, the completeness/truncation flags, and per-phase timing. This is
+//! the timing instrument; recall of the exact enumeration is a separate
+//! question and a separate harness.
 //!
 //! Usage:
 //!   cargo run --release --example ltm_discovery_bench [model.mdl ...]
@@ -22,7 +25,7 @@ use simlin_engine::db::{
     model_element_causal_edges, model_ltm_variables, project_datamodel_dims,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::ltm_finding::CandidateGen;
+use simlin_engine::ltm_finding::{CandidateGen, FallbackWeight};
 use simlin_engine::{canonicalize, open_vensim, open_xmile};
 
 fn main() {
@@ -99,10 +102,22 @@ fn main() {
             stocks.len()
         );
 
-        for (label, generator) in [
-            ("enumeration (Auto)", CandidateGen::Auto),
-            ("per-step DFS      ", CandidateGen::DfsOnly),
-        ] {
+        let generators = [
+            ("enumeration (Auto)      ", CandidateGen::Auto),
+            (
+                "fallback ClampedLogAbs  ",
+                CandidateGen::FallbackOnly(FallbackWeight::ClampedLogAbs),
+            ),
+            (
+                "fallback RelativeLink   ",
+                CandidateGen::FallbackOnly(FallbackWeight::RelativeLinkScore),
+            ),
+            (
+                "fallback HopCount       ",
+                CandidateGen::FallbackOnly(FallbackWeight::HopCount),
+            ),
+        ];
+        for (label, generator) in generators {
             let t0 = Instant::now();
             let found = simlin_engine::ltm_finding::discover_loops_with_candidate_gen(
                 &results,
@@ -118,10 +133,9 @@ fn main() {
             .unwrap();
             let elapsed = t0.elapsed().as_secs_f64();
             println!(
-                "  {label}: {elapsed:>7.3}s | loops {:>4} | enumeration_complete {} | cap_saturated {} | truncated {} | agg_trunc {}",
+                "  {label}: {elapsed:>7.3}s | loops {:>4} | enumeration_complete {} | truncated {} | agg_trunc {}",
                 found.loops.len(),
                 found.enumeration_complete,
-                found.expansion_cap_saturated,
                 found.truncated,
                 found.agg_recovery_truncated,
             );

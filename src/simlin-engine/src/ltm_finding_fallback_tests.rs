@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use super::super::{LinkOffset, ScriptedClock};
+use super::super::{LinkOffset, ScriptedClock, SystemClock};
 use super::*;
 use crate::common::{Canonical, Ident};
 use crate::results::{Method, Specs};
@@ -407,7 +407,13 @@ fn three_way_fixture() -> (IndexedSearch, Results) {
 #[test]
 fn clamped_log_abs_prefers_the_super_unit_path() {
     let (search, results) = three_way_fixture();
-    let out = sweep(&search, &results, FallbackWeight::ClampedLogAbs, None);
+    let out = sweep(
+        &search,
+        &results,
+        FallbackWeight::ClampedLogAbs,
+        None,
+        &mut SystemClock,
+    );
     // Every cycle through the stock is proposed; the minimum comes first.
     assert_eq!(
         named(&search, &out.paths),
@@ -418,7 +424,13 @@ fn clamped_log_abs_prefers_the_super_unit_path() {
 #[test]
 fn hop_count_prefers_the_shortest_path() {
     let (search, results) = three_way_fixture();
-    let out = sweep(&search, &results, FallbackWeight::HopCount, None);
+    let out = sweep(
+        &search,
+        &results,
+        FallbackWeight::HopCount,
+        None,
+        &mut SystemClock,
+    );
     assert_eq!(
         named(&search, &out.paths),
         vec![vec!["s", "a"], vec!["s", "b", "c"], vec!["s", "d", "e"],],
@@ -428,7 +440,13 @@ fn hop_count_prefers_the_shortest_path() {
 #[test]
 fn relative_link_score_prefers_the_largest_share_of_the_stocks_in_edges() {
     let (search, results) = three_way_fixture();
-    let out = sweep(&search, &results, FallbackWeight::RelativeLinkScore, None);
+    let out = sweep(
+        &search,
+        &results,
+        FallbackWeight::RelativeLinkScore,
+        None,
+        &mut SystemClock,
+    );
     assert_eq!(
         named(&search, &out.paths),
         vec![vec!["s", "d", "e"], vec!["s", "b", "c"], vec!["s", "a"],],
@@ -489,7 +507,13 @@ fn emitted_cycles_are_elementary_and_simultaneously_active() {
         ("f", "s", vec![1.0, 1.0, 1.0]),
     ];
     let (search, results) = fixture(&edges, &["s"]);
-    let out = sweep(&search, &results, FallbackWeight::DEFAULT, None);
+    let out = sweep(
+        &search,
+        &results,
+        FallbackWeight::DEFAULT,
+        None,
+        &mut SystemClock,
+    );
     assert!(!out.truncated);
     assert_eq!(out.steps_processed, 3);
 
@@ -542,7 +566,13 @@ fn a_stock_with_only_a_self_edge_yields_no_cycle() {
     // enumerator does not emit one either -- the two generators must agree on
     // what a loop is.
     let (search, results) = fixture(&[("s", "s", vec![2.0])], &["s"]);
-    let out = sweep(&search, &results, FallbackWeight::DEFAULT, None);
+    let out = sweep(
+        &search,
+        &results,
+        FallbackWeight::DEFAULT,
+        None,
+        &mut SystemClock,
+    );
     assert!(out.paths.is_empty());
     assert!(!out.truncated);
 }
@@ -557,7 +587,13 @@ fn a_self_edge_inside_a_real_cycle_is_never_traversed() {
         ],
         &["s"],
     );
-    let out = sweep(&search, &results, FallbackWeight::DEFAULT, None);
+    let out = sweep(
+        &search,
+        &results,
+        FallbackWeight::DEFAULT,
+        None,
+        &mut SystemClock,
+    );
     assert_eq!(named(&search, &out.paths), vec![vec!["s", "a"]]);
     // The self edge is not in the step graph at all, so nothing can walk it.
     let mut scratch = FallbackScratch::new(&search);
@@ -575,7 +611,13 @@ fn the_same_cycle_seen_from_two_stocks_is_emitted_once() {
         &[("s1", "s2", vec![1.0]), ("s2", "s1", vec![1.0])],
         &["s1", "s2"],
     );
-    let out = sweep(&search, &results, FallbackWeight::DEFAULT, None);
+    let out = sweep(
+        &search,
+        &results,
+        FallbackWeight::DEFAULT,
+        None,
+        &mut SystemClock,
+    );
     assert_eq!(named(&search, &out.paths), vec![vec!["s1", "s2"]]);
 }
 
@@ -588,7 +630,13 @@ fn the_same_cycle_seen_at_two_steps_is_emitted_once() {
         ],
         &["s"],
     );
-    let out = sweep(&search, &results, FallbackWeight::DEFAULT, None);
+    let out = sweep(
+        &search,
+        &results,
+        FallbackWeight::DEFAULT,
+        None,
+        &mut SystemClock,
+    );
     assert_eq!(out.steps_processed, 3);
     assert_eq!(named(&search, &out.paths), vec![vec!["s", "a"]]);
 }
@@ -613,7 +661,13 @@ fn opposite_direction_three_cycles_are_both_kept() {
         ],
         &["a"],
     );
-    let out = sweep(&search, &results, FallbackWeight::DEFAULT, None);
+    let out = sweep(
+        &search,
+        &results,
+        FallbackWeight::DEFAULT,
+        None,
+        &mut SystemClock,
+    );
     let paths = named(&search, &out.paths);
     assert!(
         paths.contains(&vec!["a".into(), "c".into(), "b".into()]),
@@ -648,7 +702,7 @@ fn an_already_expired_deadline_yields_no_paths() {
     let (search, results) = two_step_fixture();
     let mut clock = ScriptedClock::new(1);
     let deadline = clock.deadline();
-    let out = sweep_with_clock(
+    let out = sweep(
         &search,
         &results,
         FallbackWeight::DEFAULT,
@@ -669,7 +723,7 @@ fn a_deadline_expiring_after_the_first_step_keeps_that_steps_cycles() {
     let (search, results) = two_step_fixture();
     let mut clock = ScriptedClock::new(3);
     let deadline = clock.deadline();
-    let out = sweep_with_clock(
+    let out = sweep(
         &search,
         &results,
         FallbackWeight::DEFAULT,
@@ -703,7 +757,7 @@ fn a_deadline_expiring_between_seed_stocks_completes_no_step() {
     );
     let mut clock = ScriptedClock::new(3);
     let deadline = clock.deadline();
-    let out = sweep_with_clock(
+    let out = sweep(
         &search,
         &results,
         FallbackWeight::DEFAULT,
@@ -734,7 +788,7 @@ fn a_deadline_expiring_inside_a_search_keeps_what_it_can_already_close() {
     let (search, results) = two_step_fixture();
     let mut clock = ScriptedClock::new(4);
     let deadline = clock.deadline();
-    let out = sweep_with_clock(
+    let out = sweep(
         &search,
         &results,
         FallbackWeight::DEFAULT,
@@ -756,7 +810,7 @@ fn an_unbudgeted_sweep_never_reads_the_clock() {
     // Scripted to expire on its very first read: if the sweep ever consulted
     // it, the run would truncate immediately.
     let mut clock = ScriptedClock::new(1);
-    let out = sweep_with_clock(&search, &results, FallbackWeight::DEFAULT, None, &mut clock);
+    let out = sweep(&search, &results, FallbackWeight::DEFAULT, None, &mut clock);
     assert_eq!(clock.reads, 0);
     assert!(!out.truncated);
     assert_eq!(out.steps_processed, 2);
@@ -776,8 +830,8 @@ fn sweep_output_is_content_pure() {
         FallbackWeight::RelativeLinkScore,
         FallbackWeight::HopCount,
     ] {
-        let first = sweep(&search, &results, arm, None);
-        let second = sweep(&search, &results, arm, None);
+        let first = sweep(&search, &results, arm, None, &mut SystemClock);
+        let second = sweep(&search, &results, arm, None, &mut SystemClock);
         assert_eq!(first.paths, second.paths, "{arm:?} is order-unstable");
         assert_eq!(first.steps_processed, second.steps_processed);
         assert_eq!(first.truncated, second.truncated);
@@ -787,7 +841,13 @@ fn sweep_output_is_content_pure() {
 #[test]
 fn an_empty_graph_sweeps_to_nothing() {
     let (search, results) = fixture(&[], &["s"]);
-    let out = sweep(&search, &results, FallbackWeight::DEFAULT, None);
+    let out = sweep(
+        &search,
+        &results,
+        FallbackWeight::DEFAULT,
+        None,
+        &mut SystemClock,
+    );
     assert!(out.paths.is_empty());
     assert!(!out.truncated);
     assert_eq!(out.steps_processed, 0);

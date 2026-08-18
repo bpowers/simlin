@@ -44,7 +44,7 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 use std::time::Instant;
 
-use super::{Clock, DEADLINE_CHECK_INTERVAL, IndexedSearch, SystemClock, expired, tarjan_scc_ids};
+use super::{Clock, DEADLINE_CHECK_INTERVAL, IndexedSearch, expired, tarjan_scc_ids};
 use crate::results::Results;
 
 /// Edge weight formulation for the fallback's shortest-path search.
@@ -535,23 +535,13 @@ pub(super) struct FallbackOutcome {
 ///
 /// Step 0 is skipped: its link scores are NaN by construction (no `PREVIOUS`
 /// value exists yet), the same `1..step_count` window the enumerator uses.
-pub(super) fn sweep(
-    search: &IndexedSearch,
-    results: &Results,
-    weight: FallbackWeight,
-    deadline: Option<Instant>,
-) -> FallbackOutcome {
-    sweep_with_clock(search, results, weight, deadline, &mut SystemClock)
-}
-
-/// [`sweep`] against an injectable clock.
 ///
 /// The clock is read at exactly three places, all of them bounded: once at the
 /// top of each step, once before each seed stock's search, and once per
 /// [`deadline_pop_interval`] pops inside a search. That schedule is what makes
 /// "expiry loses at most one step's tail" true, and it is what the budget
-/// tests are calibrated against.
-pub(super) fn sweep_with_clock(
+/// tests are calibrated against. An unbudgeted sweep reads it nowhere.
+pub(super) fn sweep(
     search: &IndexedSearch,
     results: &Results,
     weight: FallbackWeight,

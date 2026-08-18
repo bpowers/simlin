@@ -574,7 +574,6 @@ fn world3_full_run_enumeration_is_complete() {
         "World3's ~150k-circuit ever-simultaneously-active universe is well \
          inside the enumeration budgets; a fallback here is a regression"
     );
-    assert!(!found.expansion_cap_saturated);
     assert_eq!(
         found.loops.len(),
         200,

@@ -6,26 +6,10 @@
 //! production file under the per-file line cap (mounted via `#[path]`).
 
 use super::*;
-use crate::common::canonicalize;
-
-/// Helper to build edges from tuples
-fn edges(tuples: &[(&str, &str, f64)]) -> Vec<(Ident<Canonical>, Ident<Canonical>, f64)> {
-    tuples
-        .iter()
-        .map(|(from, to, score)| (Ident::new(from), Ident::new(to), *score))
-        .collect()
-}
 
 /// Helper to build stock list from names
 fn stock_list(names: &[&str]) -> Vec<Ident<Canonical>> {
     names.iter().map(|n| Ident::new(n)).collect()
-}
-
-/// Helper to extract sorted node set from a path for comparison
-fn sorted_node_set(path: &[Ident<Canonical>]) -> Vec<String> {
-    let mut set: Vec<String> = path.iter().map(|id| id.as_str().to_string()).collect();
-    set.sort();
-    set
 }
 
 // --- collapse_synthetic_links ---
@@ -177,449 +161,6 @@ fn collapse_folds_two_disagreeing_structural_paths_to_unknown() {
     let edge = find_edge(&out, "a", "c").expect("a -> c composite");
     assert_eq!(edge.polarity, LinkPolarity::Unknown);
     assert!(edge.score.is_none());
-}
-
-// --- Test 1: SearchGraph construction ---
-
-#[test]
-fn test_search_graph_construction() {
-    let graph = SearchGraph::from_edges(
-        edges(&[
-            ("a", "b", 10.0),
-            ("a", "d", 100.0),
-            ("b", "c", 10.0),
-            ("c", "a", 10.0),
-            ("d", "c", 0.1),
-            ("d", "b", 100.0),
-        ]),
-        stock_list(&["a", "b", "c", "d"]),
-    );
-
-    // Verify adjacency list exists for all source nodes
-    assert!(graph.adj.contains_key(&*canonicalize("a")));
-    assert!(graph.adj.contains_key(&*canonicalize("b")));
-    assert!(graph.adj.contains_key(&*canonicalize("c")));
-    assert!(graph.adj.contains_key(&*canonicalize("d")));
-
-    // Verify edges are sorted by |score| descending
-    let a_edges = &graph.adj[&*canonicalize("a")];
-    assert_eq!(a_edges.len(), 2);
-    assert_eq!(a_edges[0].to.as_str(), "d"); // score 100
-    assert_eq!(a_edges[1].to.as_str(), "b"); // score 10
-
-    let d_edges = &graph.adj[&*canonicalize("d")];
-    assert_eq!(d_edges.len(), 2);
-    assert_eq!(d_edges[0].to.as_str(), "b"); // score 100
-    assert_eq!(d_edges[1].to.as_str(), "c"); // score 0.1
-
-    // Verify stocks
-    assert_eq!(graph.stocks.len(), 4);
-}
-
-// --- Test 2: Trivial loop ---
-
-#[test]
-fn test_trivial_loop() {
-    // Single stock with a flow forming one loop: stock -> flow -> stock
-    let graph = SearchGraph::from_edges(
-        edges(&[("stock", "flow", 1.0), ("flow", "stock", 1.0)]),
-        stock_list(&["stock"]),
-    );
-
-    let loops = graph.find_strongest_loops();
-    assert_eq!(loops.len(), 1, "Should find exactly one loop");
-
-    let loop_nodes = sorted_node_set(&loops[0]);
-    assert_eq!(loop_nodes, vec!["flow", "stock"]);
-}
-
-// --- Test 3: Figure 7 from the paper ---
-
-#[test]
-fn test_figure_7_paper() {
-    // Edges from the paper's Figure 7:
-    // a->b:10, a->d:100, b->c:10, c->a:10, d->c:0.1, d->b:100
-    // All nodes are stocks for this test.
-    let graph = SearchGraph::from_edges(
-        edges(&[
-            ("a", "b", 10.0),
-            ("a", "d", 100.0),
-            ("b", "c", 10.0),
-            ("c", "a", 10.0),
-            ("d", "c", 0.1),
-            ("d", "b", 100.0),
-        ]),
-        stock_list(&["a", "b", "c", "d"]),
-    );
-
-    let loops = graph.find_strongest_loops();
-
-    // The paper's Figure 7 demonstrates the original heuristic's failure
-    // mode: with `best_score` pruning, the strong path a->d sets scores
-    // that prune the weaker a->b entry, missing the a->b->c->a loop when
-    // searching from stock a (the paper recovers it via per-stock reset).
-    // With expansion-cap-bounded search, all three loops are found
-    // exhaustively -- the small-graph case is strictly more complete.
-    assert_eq!(
-        loops.len(),
-        3,
-        "Figure 7: should find all 3 loops, found {}",
-        loops.len()
-    );
-
-    let mut loop_sets: Vec<Vec<String>> = loops.iter().map(|l| sorted_node_set(l)).collect();
-    loop_sets.sort();
-    assert_eq!(
-        loop_sets,
-        vec![
-            vec!["a", "b", "c"],
-            vec!["a", "b", "c", "d"],
-            vec!["a", "c", "d"],
-        ],
-    );
-}
-
-// --- Test 4: per-stock search isolation ---
-
-#[test]
-fn test_per_stock_search_isolation() {
-    // Graph:
-    //   a -> x (score 1000)
-    //   x -> a (score 1000)  -- strong loop through a
-    //   b -> x (score 1)     -- weak path from b
-    //   x -> b (score 1)     -- weak path back
-    //
-    // Per-stock state isolation (the paper's per-stock `best_score`
-    // reset, here per-stock expansion-count reset): one stock's search
-    // must not limit loops reachable from another stock.
-    //
-    // TARGET=a: finds [a, x] (strong loop)
-    // TARGET=b: fresh expansion counts, finds [b, x] (weak loop)
-    let graph = SearchGraph::from_edges(
-        edges(&[
-            ("a", "x", 1000.0),
-            ("x", "a", 1000.0),
-            ("x", "b", 1.0),
-            ("b", "x", 1.0),
-        ]),
-        stock_list(&["a", "b"]),
-    );
-
-    let loops = graph.find_strongest_loops();
-
-    assert_eq!(
-        loops.len(),
-        2,
-        "Per-stock isolation should find both loops, found {}",
-        loops.len()
-    );
-
-    let mut loop_sets: Vec<Vec<String>> = loops.iter().map(|l| sorted_node_set(l)).collect();
-    loop_sets.sort();
-    assert_eq!(loop_sets, vec![vec!["a", "x"], vec!["b", "x"]]);
-}
-
-// --- Test 5: Loop deduplication ---
-
-#[test]
-fn test_loop_deduplication() {
-    // Stock a and stock b both participate in the same loop (a -> b -> a);
-    // the canonical-rotation dedup must report it only once even though
-    // both per-stock searches traverse it.
-    let graph = SearchGraph::from_edges(
-        edges(&[("a", "b", 1.0), ("b", "a", 1.0)]),
-        stock_list(&["a", "b"]),
-    );
-
-    let loops = graph.find_strongest_loops();
-
-    // Even though both stocks can reach the loop, deduplication should ensure
-    // it appears only once
-    assert_eq!(loops.len(), 1, "Same loop should appear only once");
-
-    let loop_nodes = sorted_node_set(&loops[0]);
-    assert_eq!(loop_nodes, vec!["a", "b"]);
-}
-
-/// Issue #308 regression test for `add_loop_if_unique`:
-/// the discovery DFS must keep both directions of a directed
-/// 3-cycle as distinct loops when they share a node set.
-///
-/// We exercise the helper directly so the dedup-key property is
-/// pinned independently of which paths the DFS happens to surface.
-/// Calling `add_loop_if_unique` with the two paths is a precise
-/// check that the dedup key distinguishes them.
-#[test]
-fn add_loop_if_unique_keeps_distinct_directed_three_cycles() {
-    let mut found_loops: Vec<Vec<Ident<Canonical>>> = Vec::new();
-    let mut seen: HashSet<Vec<String>> = HashSet::new();
-
-    let forward: Vec<Ident<Canonical>> = vec![Ident::new("a"), Ident::new("b"), Ident::new("c")];
-    let reverse: Vec<Ident<Canonical>> = vec![Ident::new("a"), Ident::new("c"), Ident::new("b")];
-
-    SearchGraph::add_loop_if_unique(&forward, &mut found_loops, &mut seen);
-    SearchGraph::add_loop_if_unique(&reverse, &mut found_loops, &mut seen);
-
-    assert_eq!(
-        found_loops.len(),
-        2,
-        "opposite-direction 3-cycles must be retained as distinct loops"
-    );
-    assert_eq!(found_loops[0], forward);
-    assert_eq!(found_loops[1], reverse);
-
-    // Calling again with a rotation of one of the existing cycles
-    // must still dedup (rotations of the same directed cycle
-    // canonicalize to the same key).
-    let forward_rotation: Vec<Ident<Canonical>> =
-        vec![Ident::new("b"), Ident::new("c"), Ident::new("a")];
-    SearchGraph::add_loop_if_unique(&forward_rotation, &mut found_loops, &mut seen);
-    assert_eq!(
-        found_loops.len(),
-        2,
-        "a rotation of an already-seen directed cycle must be deduped"
-    );
-}
-
-// --- Test 6: Empty graph ---
-
-#[test]
-fn test_no_edges() {
-    // Graph with stocks but no edges
-    let graph = SearchGraph::from_edges(vec![], stock_list(&["a", "b"]));
-    let loops = graph.find_strongest_loops();
-    assert!(loops.is_empty(), "Graph with no edges should have no loops");
-}
-
-// --- Test 7: Zero-score edges ---
-
-#[test]
-fn test_zero_score_edges() {
-    // A link with score 0 means the causal connection is inactive at this
-    // timestep: any loop through it has loop score exactly 0 here, so it
-    // is not a "loop that matters" at this step. Zero-score edges are
-    // therefore excluded from the per-step search graph (GH #647) -- on
-    // real models they are the overwhelming majority of edges, and
-    // traversing them is what made discovery wander the whole graph.
-    let graph = SearchGraph::from_edges(
-        edges(&[
-            ("a", "b", 0.0), // zero-score link: inactive at this step
-            ("b", "a", 10.0),
-        ]),
-        stock_list(&["a"]),
-    );
-
-    let loops = graph.find_strongest_loops();
-
-    assert!(
-        loops.is_empty(),
-        "a loop with a zero-score link is inactive at this step and not discovered here"
-    );
-}
-
-/// The flip side of `test_zero_score_edges`: a loop inactive at one step
-/// (zero-score link) is discovered at the step where all its links carry
-/// nonzero scores. Discovery runs at every sampled timestep, so per-step
-/// exclusion of inactive edges loses no loop that is ever simultaneously
-/// active at a sampled step. (Loops whose links are only ever active at
-/// different steps are missed -- GH #699.)
-#[test]
-fn test_inactive_loop_found_at_active_step() {
-    let mut offsets = HashMap::new();
-    offsets.insert(Ident::new("$⁚ltm⁚link_score⁚a→b"), 0usize);
-    offsets.insert(Ident::new("$⁚ltm⁚link_score⁚b→a"), 1usize);
-    let data = vec![
-        f64::NAN,
-        f64::NAN, // step 0 (skipped)
-        0.0,
-        10.0, // step 1: a->b inactive; loop not discoverable here
-        0.5,
-        10.0, // step 2: both links active; loop discovered
-    ];
-    let results = Results {
-        offsets,
-        data: data.into_boxed_slice(),
-        step_size: 2,
-        step_count: 3,
-        specs: crate::results::Specs {
-            start: 0.0,
-            stop: 2.0,
-            dt: 1.0,
-            save_step: 1.0,
-            method: crate::results::Method::Euler,
-            n_chunks: 3,
-        },
-        is_vensim: false,
-    };
-    let link_offsets = parse_link_offsets(&results, &[], &[], &LinkExpansionContext::default());
-    let stocks = stock_list(&["a"]);
-    let paths = indexed_all_paths(&results, &link_offsets, &stocks);
-    assert_eq!(
-        paths_as_strings(&paths),
-        vec![vec!["a".to_string(), "b".to_string()]],
-        "the loop must be discovered at the step where it is active"
-    );
-}
-
-// --- Test 8: NaN handling ---
-
-#[test]
-fn test_nan_handling() {
-    // NaN scores are treated as 0 -- the link is inactive at this step,
-    // so the loop through it is not discovered here (see
-    // `test_zero_score_edges`).
-    let graph = SearchGraph::from_edges(
-        edges(&[("a", "b", f64::NAN), ("b", "a", 10.0)]),
-        stock_list(&["a"]),
-    );
-
-    let loops = graph.find_strongest_loops();
-
-    assert!(
-        loops.is_empty(),
-        "NaN is treated as 0: the loop through it is inactive at this step"
-    );
-}
-
-// --- GH #647: SCC restriction and bounded re-expansion ---
-
-/// A large acyclic appendage hanging off a small cyclic core must not
-/// affect which loops are found: the DFS is restricted to each stock's
-/// SCC, and the appendage (reachable from the core, but with no path
-/// back) is outside every SCC.
-#[test]
-fn test_scc_restriction_preserves_core_loops() {
-    // Cyclic core: a -> b -> c -> a, plus the shortcut b -> a.
-    let mut typed_edges: Vec<(Ident<Canonical>, Ident<Canonical>, f64)> = edges(&[
-        ("a", "b", 2.0),
-        ("b", "c", 3.0),
-        ("c", "a", 4.0),
-        ("b", "a", 5.0),
-    ]);
-    // Acyclic appendage reachable from the core: c -> t0 -> t1 -> ... -> t9.
-    typed_edges.push((Ident::new("c"), Ident::new("t0"), 1.0));
-    for i in 0..9 {
-        typed_edges.push((
-            Ident::new(&format!("t{i}")),
-            Ident::new(&format!("t{}", i + 1)),
-            1.0,
-        ));
-    }
-
-    let graph = SearchGraph::from_edges(typed_edges, stock_list(&["a"]));
-    let loops = graph.find_strongest_loops();
-
-    let mut loop_sets: Vec<Vec<String>> = loops.iter().map(|l| sorted_node_set(l)).collect();
-    loop_sets.sort();
-    assert_eq!(
-        loop_sets,
-        vec![vec!["a", "b"], vec!["a", "b", "c"]],
-        "both core loops are found; the acyclic tail changes nothing"
-    );
-}
-
-/// A chain of "diamonds" with tied scores has exponentially many equal-
-/// score paths; without bounded re-expansion the DFS re-walks each
-/// diamond's subtree once per arriving path (2^k for k diamonds). The
-/// expansion cap bounds the work while the loop through the chain is
-/// still found.
-#[test]
-fn test_tied_score_diamond_chain_completes() {
-    // stock -> d0 -> {x0, y0} -> d1 -> {x1, y1} -> d2 -> ... -> d24 -> stock
-    // All scores 1.0 (the exact-tie case that defeats strict-less-than
-    // pruning). 24 diamonds = 2^24 = ~16.7M equal-score paths; without the
-    // cap this test would not complete in any reasonable time.
-    let n_diamonds = 24;
-    let mut names: Vec<String> = vec!["stock".to_string()];
-    let mut edge_list: Vec<(String, String, f64)> = Vec::new();
-    edge_list.push(("stock".to_string(), "d0".to_string(), 1.0));
-    for i in 0..n_diamonds {
-        let d = format!("d{i}");
-        let x = format!("x{i}");
-        let y = format!("y{i}");
-        let next = if i + 1 == n_diamonds {
-            "stock".to_string()
-        } else {
-            format!("d{}", i + 1)
-        };
-        edge_list.push((d.clone(), x.clone(), 1.0));
-        edge_list.push((d.clone(), y.clone(), 1.0));
-        edge_list.push((x.clone(), next.clone(), 1.0));
-        edge_list.push((y.clone(), next.clone(), 1.0));
-        names.push(d);
-        names.push(x);
-        names.push(y);
-    }
-
-    let typed_edges: Vec<(Ident<Canonical>, Ident<Canonical>, f64)> = edge_list
-        .iter()
-        .map(|(f, t, s)| (Ident::new(f), Ident::new(t), *s))
-        .collect();
-    let graph = SearchGraph::from_edges(typed_edges, stock_list(&["stock"]));
-
-    let loops = graph.find_strongest_loops();
-    // At least one loop through the diamond chain is found (each found
-    // loop picks one arm per diamond), and the search completes -- which
-    // is the property under test.
-    assert!(
-        !loops.is_empty(),
-        "the loop through the diamond chain must be found"
-    );
-    for l in &loops {
-        // Each loop visits the stock, every diamond head, and one arm per
-        // diamond: 1 + 2 * n_diamonds nodes.
-        assert_eq!(
-            l.len(),
-            2 * n_diamonds + 1,
-            "each loop traverses stock, every diamond head, and one arm per diamond"
-        );
-    }
-}
-
-// --- Additional edge case tests ---
-
-#[test]
-fn test_self_loop_found() {
-    // A self-loop (a -> a): check(a,1) sets visiting={a}, pushes a,
-    // then explores edge a->a: check(a, score) finds a IS visiting
-    // AND a=TARGET -> loop [a] is recorded.
-    let graph = SearchGraph::from_edges(edges(&[("a", "a", 5.0)]), stock_list(&["a"]));
-
-    let loops = graph.find_strongest_loops();
-    assert_eq!(loops.len(), 1, "Self-loop should be found");
-    assert_eq!(loops[0].len(), 1);
-    assert_eq!(loops[0][0].as_str(), "a");
-}
-
-#[test]
-fn test_two_separate_loops() {
-    // Two disconnected loops: a<->b and c<->d. Each lives in its own SCC,
-    // and each stock's search is confined to its own component, so both
-    // are found independently.
-    let graph = SearchGraph::from_edges(
-        edges(&[
-            ("a", "b", 1.0),
-            ("b", "a", 1.0),
-            ("c", "d", 1.0),
-            ("d", "c", 1.0),
-        ]),
-        stock_list(&["a", "c"]),
-    );
-
-    let loops = graph.find_strongest_loops();
-    assert_eq!(loops.len(), 2, "Should find two separate loops");
-}
-
-#[test]
-fn test_stocks_without_outbound_edges() {
-    // A stock that has no outbound edges shouldn't cause errors
-    let graph = SearchGraph::from_edges(
-        edges(&[("a", "b", 1.0), ("b", "a", 1.0)]),
-        stock_list(&["a", "c"]), // c has no edges
-    );
-
-    let loops = graph.find_strongest_loops();
-    assert_eq!(loops.len(), 1, "Should find the a-b loop, c is harmless");
 }
 
 #[test]
@@ -1658,128 +1199,6 @@ fn test_rank_and_filter_retains_briefly_dominant_loop() {
     );
 }
 
-/// AC7.5: SearchGraph built from element-level LinkOffset entries reads the
-/// correct weight value from the correct result slot for each element.
-///
-/// A2A expansion maps `birth_rate→births` (with dimension Region = [nyc,
-/// boston, chicago]) to three element-level `LinkOffset` entries:
-///   `birth_rate[nyc]→births[nyc]`        at base_offset
-///   `birth_rate[boston]→births[boston]`  at base_offset + 1
-///   `birth_rate[chicago]→births[chicago]` at base_offset + 2
-///
-/// This test verifies that `SearchGraph::from_results` reads the value
-/// stored at `base_offset + element_index` for each element-level edge,
-/// not the value at `base_offset` for all of them. If the offset mapping
-/// were wrong, each edge would carry the same weight (the value at
-/// `base_offset`), and the assertions on per-element weights would fail.
-#[test]
-fn test_search_graph_from_results_element_level_weights() {
-    let base_offset = 10usize;
-
-    // Build a Results object: step_size large enough to hold all offsets.
-    // One timestep (step=0); distinct values at base_offset/+1/+2 so we
-    // can confirm each element-level edge reads its own result slot.
-    //   nyc=0.8, boston=0.3, chicago=0.5
-    let step_size = 20;
-    let step_count = 1;
-    let mut data = vec![0.0f64; step_size * step_count];
-    data[base_offset] = 0.8; // birth_rate[nyc]    -> births[nyc]    (element 0)
-    data[base_offset + 1] = 0.3; // birth_rate[boston] -> births[boston] (element 1)
-    data[base_offset + 2] = 0.5; // birth_rate[chicago]-> births[chicago](element 2)
-
-    let results = Results {
-        offsets: HashMap::new(), // from_results does not use offsets
-        data: data.into_boxed_slice(),
-        step_size,
-        step_count,
-        specs: crate::results::Specs {
-            start: 0.0,
-            stop: 0.0,
-            dt: 1.0,
-            save_step: 1.0,
-            method: crate::results::Method::Euler,
-            n_chunks: 1,
-        },
-        is_vensim: false,
-    };
-
-    // Element-level LinkOffset entries produced by expand_a2a_link_offsets
-    // for an A2A link score with three dimension elements.
-    let link_offsets: Vec<LinkOffset> = vec![
-        (
-            (Ident::new("birth_rate[nyc]"), Ident::new("births[nyc]")),
-            base_offset,
-        ),
-        (
-            (
-                Ident::new("birth_rate[boston]"),
-                Ident::new("births[boston]"),
-            ),
-            base_offset + 1,
-        ),
-        (
-            (
-                Ident::new("birth_rate[chicago]"),
-                Ident::new("births[chicago]"),
-            ),
-            base_offset + 2,
-        ),
-    ];
-
-    let stocks = vec![Ident::new("population[nyc]")];
-    let graph = SearchGraph::from_results(&results, 0, &link_offsets, &stocks);
-
-    // Each element-level edge must carry the value stored at its own slot.
-    // The SearchGraph adjacency list is keyed by the canonical "from" ident.
-    let nyc_key = canonicalize("birth_rate[nyc]");
-    let boston_key = canonicalize("birth_rate[boston]");
-    let chicago_key = canonicalize("birth_rate[chicago]");
-
-    let nyc_edges = graph.adj.get(&*nyc_key);
-    assert!(
-        nyc_edges.is_some(),
-        "birth_rate[nyc] should have an outbound edge"
-    );
-    let nyc_score = nyc_edges.unwrap()[0].score;
-    assert!(
-        (nyc_score - 0.8).abs() < 1e-10,
-        "birth_rate[nyc]->births[nyc] should have weight 0.8 (slot base_offset), got {nyc_score}"
-    );
-
-    let boston_edges = graph.adj.get(&*boston_key);
-    assert!(
-        boston_edges.is_some(),
-        "birth_rate[boston] should have an outbound edge"
-    );
-    let boston_score = boston_edges.unwrap()[0].score;
-    assert!(
-        (boston_score - 0.3).abs() < 1e-10,
-        "birth_rate[boston]->births[boston] should have weight 0.3 (slot base+1), got {boston_score}"
-    );
-
-    let chicago_edges = graph.adj.get(&*chicago_key);
-    assert!(
-        chicago_edges.is_some(),
-        "birth_rate[chicago] should have an outbound edge"
-    );
-    let chicago_score = chicago_edges.unwrap()[0].score;
-    assert!(
-        (chicago_score - 0.5).abs() < 1e-10,
-        "birth_rate[chicago]->births[chicago] should have weight 0.5 (slot base+2), got {chicago_score}"
-    );
-
-    // If all offsets pointed to base_offset+0 (wrong), all weights would
-    // be 0.8. Distinct values (0.8, 0.3, 0.5) make this bug visible.
-    assert!(
-        (nyc_score - boston_score).abs() > 1e-10,
-        "nyc and boston weights must differ; both being {nyc_score} indicates an offset bug"
-    );
-    assert!(
-        (boston_score - chicago_score).abs() > 1e-10,
-        "boston and chicago weights must differ; both being {boston_score} indicates an offset bug"
-    );
-}
-
 #[test]
 fn test_rank_and_filter_element_level_partitions() {
     // Element-level partitions: population[nyc] and population[boston]
@@ -2288,68 +1707,12 @@ fn test_rank_and_filter_no_scores_still_attaches_partitions() {
     assert_eq!(partition_meta[1].loop_count, 1);
 }
 
-// --- IndexedSearch vs. SearchGraph equivalence oracle ---
-//
-// `discover_loops_with_graph` was optimized from a per-timestep
-// `SearchGraph` rebuild (Ident-keyed HashMaps, full-string hashing in the
-// DFS) to a once-built `IndexedSearch` over dense integer ids. The two
-// must discover *exactly* the same loop paths in the same first-seen order.
-// These tests lock that equivalence in by running both paths over a range
-// of synthetic graphs and comparing the resulting `all_paths` verbatim.
-
-/// The original cross-step discovery loop, reproduced over the retained
-/// `SearchGraph` reference implementation. Returns the deduped `all_paths`
-/// in first-seen order, exactly as the pre-optimization
-/// `discover_loops_with_graph` body did.
-fn reference_all_paths(
-    results: &Results,
-    link_offsets: &[LinkOffset],
-    stocks: &[Ident<Canonical>],
-) -> Vec<Vec<Ident<Canonical>>> {
-    let mut all_paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
-    let mut seen_sets: HashSet<Vec<String>> = HashSet::new();
-    for step in 1..results.step_count {
-        let graph = SearchGraph::from_results(results, step, link_offsets, stocks);
-        for path in graph.find_strongest_loops() {
-            let path_strings: Vec<String> = path.iter().map(|id| id.as_str().to_string()).collect();
-            let key = crate::ltm::canonical_rotation(&path_strings);
-            if seen_sets.insert(key) {
-                all_paths.push(path);
-            }
-        }
-    }
-    all_paths
-}
-
-/// The optimized discovery loop in isolation (the integer-indexed path
-/// inside `discover_loops_with_graph`), returning the same `all_paths`.
-fn indexed_all_paths(
-    results: &Results,
-    link_offsets: &[LinkOffset],
-    stocks: &[Ident<Canonical>],
-) -> Vec<Vec<Ident<Canonical>>> {
-    let mut all_paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
-    let mut seen_sets: HashSet<Vec<u32>> = HashSet::new();
-    let search = IndexedSearch::build(link_offsets, stocks);
-    let mut scratch = DfsScratch::new(&search);
-    for step in 1..results.step_count {
-        search.load_step_scores(results, step, &mut scratch);
-        search.discover_step(&mut scratch, &mut seen_sets, &mut all_paths);
-    }
-    all_paths
-}
-
-fn paths_as_strings(paths: &[Vec<Ident<Canonical>>]) -> Vec<Vec<String>> {
-    paths
-        .iter()
-        .map(|p| p.iter().map(|id| id.as_str().to_string()).collect())
-        .collect()
-}
+// --- Synthetic-graph fixtures ---
 
 /// Build a multi-step `Results` whose per-edge scores follow a deterministic
-/// pseudo-random sequence, so the per-timestep edge sort order (and thus the
-/// DFS traversal/pruning) varies across steps -- exercising the tie-breaking
-/// and score-dependent branches in both implementations.
+/// pseudo-random sequence, so each step's active edge set and its weights
+/// differ -- which is what makes a synthetic corpus exercise the
+/// activity-window and tie-breaking branches rather than one fixed graph.
 fn synthetic_results(n_offsets: usize, step_count: usize, seed: u64) -> Results {
     let step_size = n_offsets;
     let mut data = vec![0.0f64; step_size * step_count];
@@ -2395,103 +1758,6 @@ fn synthetic_results(n_offsets: usize, step_count: usize, seed: u64) -> Results 
             n_chunks: step_count,
         },
         is_vensim: false,
-    }
-}
-
-#[test]
-fn indexed_search_matches_reference_on_synthetic_graphs() {
-    // A fully-connected-ish 5-node graph plus a couple of disconnected
-    // nodes, several stocks, parallel edges, and a self-loop -- the shapes
-    // the unit tests above exercise individually, combined and stressed
-    // over many timesteps with varying scores.
-    let names = ["a", "b", "c", "d", "e", "f", "g"];
-    let mut edge_pairs: Vec<(&str, &str)> = Vec::new();
-    for &from in &names[..5] {
-        for &to in &names[..5] {
-            edge_pairs.push((from, to)); // includes self-loops
-        }
-    }
-    // A node ("g") that is only ever an edge target (no outbound edges)
-    // and a duplicate (parallel) edge to stress tie-breaking / dedup.
-    edge_pairs.push(("a", "g"));
-    edge_pairs.push(("a", "b")); // parallel to the existing a->b
-
-    let link_offsets: Vec<LinkOffset> = edge_pairs
-        .iter()
-        .enumerate()
-        .map(|(i, (from, to))| ((Ident::new(from), Ident::new(to)), i))
-        .collect();
-
-    // Stocks include a node with no incident edges ("f") to mirror the
-    // `test_stocks_without_outbound_edges` shape.
-    let stocks: Vec<Ident<Canonical>> =
-        ["a", "c", "e", "f"].iter().map(|s| Ident::new(s)).collect();
-
-    // Run several independent seeds so the per-step sort order (and the
-    // resulting traversal/pruning) varies widely.
-    for seed in [1u64, 7, 42, 1000, 999_983] {
-        let results = synthetic_results(link_offsets.len(), 40, seed);
-        let reference = reference_all_paths(&results, &link_offsets, &stocks);
-        let indexed = indexed_all_paths(&results, &link_offsets, &stocks);
-        // Guard against a vacuous pass: a future fixture edit that produced
-        // no loops would make the equality below trivially true.
-        assert!(
-            !reference.is_empty(),
-            "synthetic fixture must produce loops (seed {seed})"
-        );
-        assert_eq!(
-            paths_as_strings(&indexed),
-            paths_as_strings(&reference),
-            "IndexedSearch must discover the identical loop paths in the \
-                 identical first-seen order as the SearchGraph reference \
-                 (seed {seed})"
-        );
-    }
-}
-
-#[test]
-fn indexed_search_matches_reference_element_level_names() {
-    // Long element-level identifiers (the C-LEARN-style names whose string
-    // hashing the optimization eliminates) over a denser graph.
-    let names = [
-        "population[nyc]",
-        "births[nyc]",
-        "deaths[nyc]",
-        "population[boston]",
-        "births[boston]",
-        "migration_pressure[chicago]",
-    ];
-    let mut edge_pairs: Vec<(&str, &str)> = Vec::new();
-    for &from in &names {
-        for &to in &names {
-            if from != to {
-                edge_pairs.push((from, to));
-            }
-        }
-    }
-    let link_offsets: Vec<LinkOffset> = edge_pairs
-        .iter()
-        .enumerate()
-        .map(|(i, (from, to))| ((Ident::new(from), Ident::new(to)), i))
-        .collect();
-    let stocks: Vec<Ident<Canonical>> = ["population[nyc]", "population[boston]"]
-        .iter()
-        .map(|s| Ident::new(s))
-        .collect();
-
-    for seed in [3u64, 17, 55, 12_345] {
-        let results = synthetic_results(link_offsets.len(), 30, seed);
-        let reference = reference_all_paths(&results, &link_offsets, &stocks);
-        let indexed = indexed_all_paths(&results, &link_offsets, &stocks);
-        assert!(
-            !reference.is_empty(),
-            "element-level fixture must produce loops (seed {seed})"
-        );
-        assert_eq!(
-            paths_as_strings(&indexed),
-            paths_as_strings(&reference),
-            "element-level discovery must match the reference (seed {seed})"
-        );
     }
 }
 
@@ -2632,94 +1898,6 @@ fn discovery_graph_stats_reports_structure_and_scores() {
     assert_eq!(s2.stocks_in_nonzero_core, 0);
 }
 
-// --- Mid-step deadline enforcement (the in-DFS budget check) ---
-
-/// Build an IndexedSearch over `a -> b -> c -> a` (single stock `a`) with
-/// every per-step edge score populated as 1.0, plus a scratch ready for
-/// `discover_step`. Bypasses `load_step_scores` so no `Results` is needed.
-fn cycle_search_and_scratch() -> (IndexedSearch, DfsScratch) {
-    let link_offsets: Vec<LinkOffset> = vec![
-        ((Ident::new("a"), Ident::new("b")), 0),
-        ((Ident::new("b"), Ident::new("c")), 1),
-        ((Ident::new("c"), Ident::new("a")), 2),
-    ];
-    let stocks = stock_list(&["a"]);
-    let search = IndexedSearch::build(&link_offsets, &stocks);
-    let mut scratch = DfsScratch::new(&search);
-    for (node, edges) in search.adj.iter().enumerate() {
-        scratch.step_adj[node] = edges
-            .iter()
-            .map(|e| StepEdge {
-                to: e.to,
-                score: 1.0,
-            })
-            .collect();
-    }
-    (search, scratch)
-}
-
-#[test]
-fn dfs_deadline_expires_mid_step() {
-    // On dense element-level graphs a SINGLE timestep's DFS can run for
-    // hours (GH #647), so the budget must be enforced inside the DFS, not
-    // only between timesteps. With an already-passed deadline and the
-    // visit counter seeded so the very first visit performs the
-    // (interval-amortized) clock check, the DFS must flag expiry and bail
-    // without recording the cycle. The counter seeding stands in for the
-    // thousands of visits a large graph would need to reach the check
-    // naturally -- per the test-budget policy, tests must not build
-    // fixtures big enough to trip production thresholds for real.
-    let (search, mut scratch) = cycle_search_and_scratch();
-    scratch.deadline = Some(Instant::now());
-    scratch.visit_count = DEADLINE_CHECK_INTERVAL - 1;
-
-    let mut seen: HashSet<Vec<u32>> = HashSet::new();
-    let mut paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
-    search.discover_step(&mut scratch, &mut seen, &mut paths);
-
-    assert!(
-        scratch.deadline_expired,
-        "an expired deadline must be detected inside the step's DFS"
-    );
-    assert!(
-        paths.is_empty(),
-        "the DFS must unwind without recording loops once the deadline expired"
-    );
-}
-
-#[test]
-fn dfs_unexpired_deadline_still_finds_loops() {
-    // The deadline machinery must not suppress discovery: with no deadline
-    // the cycle is found, and with a far-future deadline (clock check
-    // exercised via the seeded counter) it is found too.
-    let (search, mut scratch) = cycle_search_and_scratch();
-    let mut seen: HashSet<Vec<u32>> = HashSet::new();
-    let mut paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
-    search.discover_step(&mut scratch, &mut seen, &mut paths);
-    assert!(!scratch.deadline_expired);
-    assert_eq!(
-        paths_as_strings(&paths),
-        vec![vec!["a".to_string(), "b".to_string(), "c".to_string()]],
-        "the a -> b -> c cycle must be discovered on an unbudgeted run"
-    );
-
-    let (search2, mut scratch2) = cycle_search_and_scratch();
-    scratch2.deadline = Some(Instant::now() + Duration::from_secs(3600));
-    scratch2.visit_count = DEADLINE_CHECK_INTERVAL - 1;
-    let mut seen2: HashSet<Vec<u32>> = HashSet::new();
-    let mut paths2: Vec<Vec<Ident<Canonical>>> = Vec::new();
-    search2.discover_step(&mut scratch2, &mut seen2, &mut paths2);
-    assert!(
-        !scratch2.deadline_expired,
-        "a far-future deadline must not be reported as expired"
-    );
-    assert_eq!(
-        paths_as_strings(&paths2),
-        vec![vec!["a".to_string(), "b".to_string(), "c".to_string()]],
-        "the cycle must still be discovered when the deadline check fires but has not passed"
-    );
-}
-
 /// Compile an arrayed reducer-in-feedback model with LTM discovery enabled,
 /// simulate it, and run the full discovery pipeline. Uses the bare
 /// `causal_graph_from_element_edges` constructor (no module sub-graphs);
@@ -2731,7 +1909,7 @@ fn dfs_unexpired_deadline_still_finds_loops() {
 ///
 /// `growth[r] = SUM(pop[*]) * 0.05` over `elems`: one scalar synthetic agg,
 /// one petal per element, so the cross-agg recovery (GH #696) is exercised.
-fn discover_reducer_feedback(elems: &[&str]) -> DiscoveryResult {
+fn discover_reducer_feedback(elems: &[&str], candidate_gen: CandidateGen) -> DiscoveryResult {
     use crate::datamodel::{self, Equation, Variable};
     use salsa::Setter;
 
@@ -2825,7 +2003,7 @@ fn discover_reducer_feedback(elems: &[&str]) -> DiscoveryResult {
 
     // These fixtures contain no modules, so the per-exit-port recompute
     // never fires; an empty output-port map is correct.
-    discover_loops_with_graph(
+    discover_loops_with_candidate_gen(
         &results,
         &causal_graph,
         &stocks,
@@ -2834,46 +2012,57 @@ fn discover_reducer_feedback(elems: &[&str]) -> DiscoveryResult {
         &expansion,
         &SubModelOutputPorts::new(),
         None,
+        candidate_gen,
     )
     .unwrap()
 }
 
-/// GH #696: discovery stitches the per-element petals into cross-element
-/// loops. On the 3-element reducer-in-feedback model it recovers all 7
-/// (3 single-petal + 3 pair + 1 triple), and the flag is not raised when
-/// well under budget.
+/// GH #696 / AC2.4: discovery stitches the per-element petals into
+/// cross-element loops, and BOTH generators do it identically -- on the
+/// 3-element reducer-in-feedback model each recovers all 7 (3 single-petal +
+/// 3 pair + 1 triple), and the flag is not raised when well under budget.
+///
+/// The agreement is the point: the petals themselves are what the generators
+/// find differently, while the stitching that turns them into cross-element
+/// loops is one shared helper, so a divergence here would mean the two had
+/// grown separate combinatorics.
 #[test]
 fn discovery_recovers_cross_agg_loops_end_to_end() {
-    let result = discover_reducer_feedback(&["a", "b", "c"]);
-    assert_eq!(
-        result.loops.len(),
-        7,
-        "discovery must recover 3 single + 3 pair + 1 triple loops; got {:?}",
-        result
+    for candidate_gen in [
+        CandidateGen::Auto,
+        CandidateGen::FallbackOnly(FallbackWeight::DEFAULT),
+    ] {
+        let result = discover_reducer_feedback(&["a", "b", "c"], candidate_gen);
+        assert_eq!(
+            result.loops.len(),
+            7,
+            "{candidate_gen:?} must recover 3 single + 3 pair + 1 triple loops; got {:?}",
+            result
+                .loops
+                .iter()
+                .map(|l| l
+                    .loop_info
+                    .links
+                    .iter()
+                    .map(|k| k.from.as_str())
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !result.agg_recovery_truncated,
+            "a 3-petal model is well under the production budget"
+        );
+        // Loops of three distinct sizes appear (single-petal, pair, triple).
+        let sizes: HashSet<usize> = result
             .loops
             .iter()
-            .map(|l| l
-                .loop_info
-                .links
-                .iter()
-                .map(|k| k.from.as_str())
-                .collect::<Vec<_>>())
-            .collect::<Vec<_>>()
-    );
-    assert!(
-        !result.agg_recovery_truncated,
-        "a 3-petal model is well under the production budget"
-    );
-    // Loops of three distinct sizes appear (single-petal, pair, triple).
-    let sizes: HashSet<usize> = result
-        .loops
-        .iter()
-        .map(|l| l.loop_info.links.len())
-        .collect();
-    assert!(
-        sizes.contains(&2) && sizes.contains(&4) && sizes.contains(&6),
-        "expected loop link-counts 2/4/6; got {sizes:?}"
-    );
+            .map(|l| l.loop_info.links.len())
+            .collect();
+        assert!(
+            sizes.contains(&2) && sizes.contains(&4) && sizes.contains(&6),
+            "{candidate_gen:?}: expected loop link-counts 2/4/6; got {sizes:?}"
+        );
+    }
 }
 
 /// The cross-agg loop-count budget clips discovery's recovery and raises
@@ -2882,10 +2071,10 @@ fn discovery_recovers_cross_agg_loops_end_to_end() {
 #[test]
 fn discovery_cross_agg_recovery_respects_budget() {
     // Budget of 1 lets at most one stitched cross-agg loop through; the
-    // 3 single-petal elementary loops are emitted by the DFS regardless
+    // 3 single-petal elementary loops are candidates in their own right
     // (they are not stitched), so we expect 3 petals + 1 stitched = 4.
     let _guard = crate::db::AggLoopBudgetGuard::new(1);
-    let result = discover_reducer_feedback(&["a", "b", "c"]);
+    let result = discover_reducer_feedback(&["a", "b", "c"], CandidateGen::Auto);
     assert!(
         result.agg_recovery_truncated,
         "a budget of 1 must clip the 4 stitched loops and flag truncation"
@@ -3259,7 +2448,7 @@ fn reported_mass_share_per_step(result: &DiscoveryResult) -> Vec<f64> {
 /// against a total that includes a score nothing reports.
 #[test]
 fn a_module_loop_contributes_its_override_mass_to_the_denominator() {
-    let (result, results) = discover_multi_output_module_feedback();
+    let (result, results) = discover_multi_output_module_feedback(CandidateGen::Auto);
 
     assert_eq!(
         result.loops.len(),
@@ -3327,6 +2516,43 @@ fn a_module_loop_contributes_its_override_mass_to_the_denominator() {
     );
 }
 
+/// AC2.4's module row: both generators reach the module loop and the
+/// module-free loop, and both score the module loop off the SAME per-exit-port
+/// override series.
+///
+/// The scoring is downstream of candidate generation, so this is really a
+/// claim about the materialization pipeline being shared -- but it is the
+/// claim worth pinning, because a generator that reached the loop by a
+/// different node path would score it off the module composite instead and the
+/// polarity could flip (GH #698).
+#[test]
+fn a_module_loop_is_recovered_and_scored_alike_by_both_generators() {
+    let (auto, _) = discover_multi_output_module_feedback(CandidateGen::Auto);
+    let (fallback, _) =
+        discover_multi_output_module_feedback(CandidateGen::FallbackOnly(FallbackWeight::DEFAULT));
+    assert!(auto.enumeration_complete);
+    assert!(!fallback.enumeration_complete);
+
+    fn module_loop(r: &DiscoveryResult) -> &FoundLoop {
+        r.loops
+            .iter()
+            .find(|l| l.loop_info.links.iter().any(|k| k.to.as_str() == "m"))
+            .expect("one reported loop runs through the module instance")
+    }
+    assert_eq!(auto.loops.len(), 2);
+    assert_eq!(
+        fallback.loops.len(),
+        2,
+        "the stock's two in-edges close both cycles from a single Dijkstra tree"
+    );
+    assert_eq!(
+        module_loop(&auto).scores,
+        module_loop(&fallback).scores,
+        "the module loop's per-exit-port override series does not depend on \
+         which generator proposed the cycle"
+    );
+}
+
 /// A stock whose growth runs through a sub-model with TWO output ports of
 /// different magnitudes: `pos` shares its change with a second input, so the
 /// `input_val -> pos` pathway carries less than the whole change, while
@@ -3334,7 +2560,9 @@ fn a_module_loop_contributes_its_override_mass_to_the_denominator() {
 /// composite therefore selects `neg`, while the loop -- which reads `pos` --
 /// is scored on the `pos` pathway. A second, module-free loop through the same
 /// stock puts both in one cycle partition.
-fn discover_multi_output_module_feedback() -> (DiscoveryResult, Results) {
+fn discover_multi_output_module_feedback(
+    candidate_gen: CandidateGen,
+) -> (DiscoveryResult, Results) {
     use crate::datamodel::{self, Equation};
     use salsa::Setter;
 
@@ -3470,7 +2698,7 @@ fn discover_multi_output_module_feedback() -> (DiscoveryResult, Results) {
     let expansion = crate::analysis::build_link_expansion_context(&db, source_model, sp);
     let ports = crate::analysis::build_sub_model_output_ports(&db, sp);
 
-    let result = discover_loops_with_graph(
+    let result = discover_loops_with_candidate_gen(
         &results,
         &causal_graph,
         &stocks,
@@ -3479,6 +2707,7 @@ fn discover_multi_output_module_feedback() -> (DiscoveryResult, Results) {
         &expansion,
         &ports,
         None,
+        candidate_gen,
     )
     .unwrap();
     (result, results)
@@ -3818,24 +3047,32 @@ fn discover_with(
     .unwrap()
 }
 
-/// The classic logistic model both candidate generators handle exhaustively:
-/// enumeration and the DFS must report the identical loop set with identical
-/// scores, and the enumeration path must declare itself complete.
+/// AC2.1: on the classic logistic model both candidate generators reach every
+/// loop, and when they do their answers are IDENTICAL -- same loop set, same
+/// per-step scores, and same relative scores.
+///
+/// The relative-score equality is the load-bearing part and it holds only
+/// because this model's discovered set IS its universe: the enumeration path
+/// normalizes against full-universe denominators while the fallback path
+/// normalizes against the loops it found, so any loop the fallback missed
+/// would show up as a relative-score difference rather than as a missing loop.
 #[test]
-fn enumeration_and_dfs_agree_on_a_simple_model() {
+fn enumeration_and_fallback_agree_on_a_simple_model() {
     let project = enum_test_project(vec![
         enum_stock("population", "100", &["births"], &["deaths"]),
         enum_flow("births", "population * 0.1"),
         enum_flow("deaths", "population * population * 0.0001"),
     ]);
     let auto = discover_project(&project, CandidateGen::Auto);
-    let dfs = discover_project(&project, CandidateGen::DfsOnly);
+    let fallback = discover_project(
+        &project,
+        CandidateGen::FallbackOnly(FallbackWeight::DEFAULT),
+    );
 
     assert!(auto.enumeration_complete, "tiny model must enumerate fully");
-    assert!(!auto.expansion_cap_saturated);
     assert!(
-        !dfs.enumeration_complete,
-        "DfsOnly must not claim enumeration"
+        !fallback.enumeration_complete,
+        "a pinned fallback never claims the enumeration's completeness"
     );
 
     // Identical loop sets, keyed by each loop's sorted link-from set.
@@ -3859,7 +3096,7 @@ fn enumeration_and_dfs_agree_on_a_simple_model() {
     };
     assert_eq!(
         key(&auto),
-        key(&dfs),
+        key(&fallback),
         "loop sets must match across generators"
     );
     assert_eq!(auto.loops.len(), 2);
@@ -3867,7 +3104,7 @@ fn enumeration_and_dfs_agree_on_a_simple_model() {
     // Scores agree loop-for-loop (match by id: both paths assign
     // content-derived ids, so equal loop sets get equal ids).
     for al in &auto.loops {
-        let dl = dfs
+        let dl = fallback
             .loops
             .iter()
             .find(|l| l.loop_info.id == al.loop_info.id)
@@ -3903,7 +3140,10 @@ fn a_previous_self_latch_is_not_reported_as_a_loop() {
         ),
     ]);
     let auto = discover_project(&project, CandidateGen::Auto);
-    let dfs = discover_project(&project, CandidateGen::DfsOnly);
+    let fallback = discover_project(
+        &project,
+        CandidateGen::FallbackOnly(FallbackWeight::DEFAULT),
+    );
 
     assert!(auto.enumeration_complete);
     let node_sets = |r: &DiscoveryResult| -> Vec<Vec<String>> {
@@ -3928,17 +3168,17 @@ fn a_previous_self_latch_is_not_reported_as_a_loop() {
     );
     assert_eq!(
         node_sets(&auto),
-        node_sets(&dfs),
+        node_sets(&fallback),
         "both generators agree a self-latch is not a loop"
     );
     // AC1.1: no reported loop is a single link, under either generator.
-    for r in [&auto, &dfs] {
+    for r in [&auto, &fallback] {
         assert!(r.loops.iter().all(|l| l.loop_info.links.len() >= 2));
     }
 }
 
 /// Self-filtering: a cycle whose links are never simultaneously nonzero has
-/// loop score exactly 0 at every step, and enumeration must not report it --
+/// loop score exactly 0 at every step, and neither generator may report it --
 /// pinned by overwriting one loop's two link-score series with disjoint
 /// activity windows post-simulation.
 #[test]
@@ -3970,9 +3210,13 @@ fn staggered_activity_cycle_is_not_reported_by_either_generator() {
     }
 
     let auto = discover_with(&results, &ctx, CandidateGen::Auto);
-    let dfs = discover_with(&results, &ctx, CandidateGen::DfsOnly);
+    let fallback = discover_with(
+        &results,
+        &ctx,
+        CandidateGen::FallbackOnly(FallbackWeight::DEFAULT),
+    );
     assert!(auto.enumeration_complete);
-    for r in [&auto, &dfs] {
+    for r in [&auto, &fallback] {
         assert_eq!(
             r.loops.len(),
             1,
@@ -3989,16 +3233,20 @@ fn staggered_activity_cycle_is_not_reported_by_either_generator() {
     }
 }
 
-/// A tripped enumeration budget falls back to the per-step DFS: the result is
-/// exactly the DfsOnly result, with `enumeration_complete == false`.
+/// A tripped enumeration budget falls back to the shortest-path sweep under
+/// the DEFAULT weight: the result is exactly what pinning the fallback gives,
+/// with `enumeration_complete == false`.
 #[test]
-fn enumeration_budget_trip_falls_back_to_dfs() {
+fn enumeration_budget_trip_falls_back_to_the_shortest_path_sweep() {
     let project = enum_test_project(vec![
         enum_stock("population", "100", &["births"], &["deaths"]),
         enum_flow("births", "population * 0.1"),
         enum_flow("deaths", "population * population * 0.0001"),
     ]);
-    let dfs = discover_project(&project, CandidateGen::DfsOnly);
+    let pinned = discover_project(
+        &project,
+        CandidateGen::FallbackOnly(FallbackWeight::DEFAULT),
+    );
 
     let _guard = EnumBudgetGuard::new(1, u64::MAX, u64::MAX);
     let auto = discover_project(&project, CandidateGen::Auto);
@@ -4006,20 +3254,26 @@ fn enumeration_budget_trip_falls_back_to_dfs() {
         !auto.enumeration_complete,
         "a 1-circuit budget cannot complete a 2-loop model"
     );
-    assert_eq!(auto.loops.len(), dfs.loops.len());
-    for (a, d) in auto.loops.iter().zip(dfs.loops.iter()) {
+    assert_eq!(auto.loops.len(), pinned.loops.len());
+    for (a, d) in auto.loops.iter().zip(pinned.loops.iter()) {
         assert_eq!(a.loop_info.id, d.loop_info.id);
         assert_eq!(a.scores, d.scores);
     }
 }
 
-/// The DFS fallback's per-node expansion cap, when it binds, must raise
-/// `expansion_cap_saturated` -- the World3 audit found the production cap
-/// saturating on 100% of searches with no observable trace. A diamond (two
-/// parallel paths sharing entry and exit auxes) with a 1-expansion budget
-/// forces the second path's re-arrival at the shared exit to be refused.
+/// AC2.4's counter-row: a diamond -- two parallel paths sharing an entry stock
+/// and an exit aux -- is where the two generators legitimately DIFFER, and the
+/// difference is a property of the fallback's shape rather than a defect.
+///
+/// The enumerator emits both loops. The fallback runs one Dijkstra per (stock,
+/// step) and a shortest-path tree holds ONE path per node, so of two parallel
+/// routes to the shared exit only the cheaper is expressible, and the stock's
+/// single in-edge closes exactly one cycle. Here `x` carries the larger share
+/// of `z`'s change at every step, so it is that arm's loop that survives --
+/// deterministically, not by traversal accident, which is the whole reason the
+/// fallback is preferable to a work-capped sampler.
 #[test]
-fn dfs_expansion_cap_saturation_is_flagged() {
+fn a_diamond_is_enumerated_whole_and_sampled_by_the_fallback() {
     let project = enum_test_project(vec![
         enum_stock("s", "100", &["f"], &[]),
         enum_aux("x", "s * 0.5"),
@@ -4027,31 +3281,228 @@ fn dfs_expansion_cap_saturation_is_flagged() {
         enum_aux("z", "x + y"),
         enum_flow("f", "z * 0.1"),
     ]);
+    let node_sets = |r: &DiscoveryResult| -> Vec<Vec<String>> {
+        let mut sets: Vec<Vec<String>> = r
+            .loops
+            .iter()
+            .map(|l| {
+                let mut nodes: Vec<String> = l
+                    .loop_info
+                    .links
+                    .iter()
+                    .map(|k| k.from.as_str().to_string())
+                    .collect();
+                nodes.sort();
+                nodes
+            })
+            .collect();
+        sets.sort();
+        sets
+    };
 
-    // Unconstrained: both diamond loops found, no saturation.
-    let free = discover_project(&project, CandidateGen::DfsOnly);
-    assert_eq!(free.loops.len(), 2);
-    assert!(!free.expansion_cap_saturated);
-
-    // Cap of 1 expansion per node: the second path's re-arrival at `z` is
-    // refused, so one loop is lost AND the flag fires.
-    let _guard = DfsExpansionBudgetGuard::new(1);
-    let capped = discover_project(&project, CandidateGen::DfsOnly);
-    assert!(
-        capped.expansion_cap_saturated,
-        "the refused expansion must be observable"
-    );
-    assert!(
-        capped.loops.len() < 2,
-        "a binding cap loses a loop (that is what the flag reports)"
-    );
-
-    // Enumeration under the same conditions is immune: the cap is a DFS
-    // mechanism, and the enumerator finds both loops.
     let auto = discover_project(&project, CandidateGen::Auto);
     assert!(auto.enumeration_complete);
-    assert!(!auto.expansion_cap_saturated);
-    assert_eq!(auto.loops.len(), 2);
+    assert_eq!(
+        node_sets(&auto),
+        vec![
+            vec![
+                "f".to_string(),
+                "s".to_string(),
+                "x".to_string(),
+                "z".to_string()
+            ],
+            vec![
+                "f".to_string(),
+                "s".to_string(),
+                "y".to_string(),
+                "z".to_string()
+            ],
+        ],
+        "the enumerator finds both arms of the diamond"
+    );
+
+    let fallback = discover_project(
+        &project,
+        CandidateGen::FallbackOnly(FallbackWeight::DEFAULT),
+    );
+    assert!(!fallback.enumeration_complete);
+    assert_eq!(
+        node_sets(&fallback),
+        vec![vec![
+            "f".to_string(),
+            "s".to_string(),
+            "x".to_string(),
+            "z".to_string()
+        ]],
+        "one tree, one path per node: the fallback recovers the cheaper arm \
+         (`x`, which explains more of `z`) and not its sibling"
+    );
+}
+
+/// AC1.3: a feedback loop with NO stock -- two auxes reading each other one
+/// step back -- is a real loop and enumeration reports it, in a Solo
+/// normalization group, ranked after every competing loop.
+///
+/// It is the shape a stock-seeded generator structurally cannot reach, which
+/// is why the same fixture pins the fallback's silence: this is not a bug in
+/// the fallback but the boundary of what "seed from every stock" can see, and
+/// it is exactly why the enumeration is the primary path rather than an
+/// optimization of the old one.
+#[test]
+fn a_stockless_two_node_cycle_is_enumeration_only_and_ranks_after_competing_loops() {
+    let project = enum_test_project(vec![
+        enum_stock("population", "100", &["births"], &["deaths"]),
+        enum_flow("births", "population * 0.1"),
+        enum_flow("deaths", "population * population * 0.0001"),
+        // State held in a PREVIOUS lag rather than in a stock: `lag_a` and
+        // `lag_b` each read the other's previous value, so the cycle is real
+        // and scorable while touching no stock at all.
+        enum_aux("lag_a", "PREVIOUS(lag_b, 0) * 0.5 + population * 0.01"),
+        enum_aux("lag_b", "PREVIOUS(lag_a, 0) * 0.5 + 1"),
+    ]);
+    let node_sets = |r: &DiscoveryResult| -> Vec<Vec<String>> {
+        r.loops
+            .iter()
+            .map(|l| {
+                let mut nodes: Vec<String> = l
+                    .loop_info
+                    .links
+                    .iter()
+                    .map(|k| k.from.as_str().to_string())
+                    .collect();
+                nodes.sort();
+                nodes
+            })
+            .collect()
+    };
+
+    let auto = discover_project(&project, CandidateGen::Auto);
+    assert!(auto.enumeration_complete);
+    let stockless = vec!["lag_a".to_string(), "lag_b".to_string()];
+    let auto_sets = node_sets(&auto);
+    assert!(
+        auto_sets.contains(&stockless),
+        "the stockless lag cycle must be reported; got {auto_sets:?}"
+    );
+
+    // Solo: no stock resolves to a cycle partition, so it is its own
+    // denominator and carries no partition index -- and the competitive-first
+    // ranking puts it after the two population loops, which really do compete.
+    let position = auto_sets
+        .iter()
+        .position(|s| *s == stockless)
+        .expect("just asserted present");
+    assert_eq!(
+        auto.loops[position].partition, None,
+        "a loop touching no stock resolves to no parent-level partition"
+    );
+    assert_eq!(
+        position,
+        auto_sets.len() - 1,
+        "the Solo loop ranks after every competing loop; got {auto_sets:?}"
+    );
+
+    let fallback = discover_project(
+        &project,
+        CandidateGen::FallbackOnly(FallbackWeight::DEFAULT),
+    );
+    assert!(
+        !node_sets(&fallback).contains(&stockless),
+        "the fallback seeds from stocks, so a cycle through none of them is \
+         unreachable to it -- the difference the enumeration exists to close"
+    );
+}
+
+/// AC2.2: the budget SPLIT is what keeps a spent enumeration from spending the
+/// whole budget. With the enumeration deadline already past, discovery still
+/// runs the fallback and returns real loops; and when the fallback's own
+/// deadline then expires mid-sweep, the loops found before it are kept and
+/// `truncated` says the report is partial.
+///
+/// Driven through the deadline + clock seam rather than a `Duration`, so
+/// "expired during enumeration, alive during the fallback, then expired part
+/// way through the sweep" is a stated fact rather than a race.
+#[test]
+fn an_expired_enumeration_deadline_still_yields_the_fallbacks_loops() {
+    let project = enum_test_project(vec![
+        enum_stock("population", "100", &["births"], &["deaths"]),
+        enum_flow("births", "population * 0.1"),
+        enum_flow("deaths", "population * population * 0.0001"),
+    ]);
+    let (results, ctx) = ltm_simulate(&project);
+    let discover = |deadlines: Deadlines, clock: &mut dyn Clock| {
+        discover_loops_with_deadlines(
+            &results,
+            &ctx.causal_graph,
+            &ctx.stocks,
+            &ctx.ltm_vars,
+            &ctx.dims,
+            &ctx.expansion,
+            &SubModelOutputPorts::new(),
+            deadlines,
+            CandidateGen::Auto,
+            clock,
+        )
+        .unwrap()
+    };
+
+    // Arm 1: the enumeration deadline is spent, the fallback has all the time
+    // it needs. Discovery is a sample, but a COMPLETE one over every step.
+    let mut clock = ScriptedClock::new(usize::MAX);
+    let spent = clock.deadline() - Duration::from_secs(3600);
+    let found = discover(
+        Deadlines {
+            enumeration: Some(spent),
+            fallback: None,
+        },
+        &mut clock,
+    );
+    assert!(
+        !found.enumeration_complete,
+        "the enumeration was abandoned before it could complete"
+    );
+    assert!(
+        !found.truncated,
+        "an unbudgeted fallback covers every saved step"
+    );
+    assert_eq!(
+        found.loops.len(),
+        2,
+        "the fallback still recovers both population loops"
+    );
+
+    // Arm 2: the fallback then expires part way. Everything it had already
+    // closed survives -- partial results, not nothing -- and `truncated` says
+    // so.
+    //
+    // Read schedule: 1 abandons `ActivityGraph::build`; 2 is step 1's
+    // top-of-step check, and step 1 costs nothing more because its link scores
+    // are startup-degenerate (`PREVIOUS` has no prior value yet), leaving the
+    // stock on no cycle and its search skipped without a read; 3 and 4 are
+    // step 2's top-of-step and pre-search checks, and step 2 is where the
+    // loops are found. So read 5 -- step 3's top-of-step check -- is the first
+    // expiry that leaves work already done.
+    let mut clock = ScriptedClock::new(5);
+    let live = clock.deadline();
+    let spent = live - Duration::from_secs(3600);
+    let found = discover(
+        Deadlines {
+            enumeration: Some(spent),
+            fallback: Some(live),
+        },
+        &mut clock,
+    );
+    assert_eq!(
+        clock.reads, 5,
+        "the read schedule this test is calibrated to"
+    );
+    assert!(!found.enumeration_complete);
+    assert!(found.truncated, "the fallback ran out of time mid-sweep");
+    assert!(
+        !found.loops.is_empty(),
+        "a fallback that processed at least one step reports the loops it \
+         closed there, not nothing"
+    );
 }
 
 /// External (full-universe) denominators shrink relative scores relative to
@@ -4535,6 +3986,127 @@ fn an_inf_times_zero_product_is_excluded_from_totals_and_retention() {
         survivors,
         vec![vec!["a".to_string(), "d".to_string()]],
         "X cannot satisfy retention: NaN at step 2, and Inf/Inf = NaN at 1 and 3"
+    );
+}
+
+/// The canonical rotations of a set of node-id paths, as name lists -- the
+/// directed-cycle identity both generators dedup on, rendered readably.
+fn canonical_name_cycles(search: &IndexedSearch, paths: &[Vec<u32>]) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = paths
+        .iter()
+        .map(|path| {
+            let names: Vec<String> = path
+                .iter()
+                .map(|&n| search.idents[n as usize].as_str().to_string())
+                .collect();
+            crate::ltm::canonical_rotation(&names)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Issue #308 at the enumeration level: two directed 3-cycles over the same
+/// node set in OPPOSITE directions are different loops -- different polarities,
+/// different scores -- and the canonical-rotation identity keeps them apart.
+///
+/// The fallback's arm of the same claim is
+/// `fallback::tests::opposite_direction_three_cycles_are_both_kept`; it needs a
+/// per-step weight flip to surface both, since one Dijkstra tree expresses one
+/// path per node, while the enumerator emits both from one graph.
+#[test]
+fn the_enumerator_keeps_opposite_direction_three_cycles_distinct() {
+    // Every ordered pair over {a, b, c}: three 2-cycles and both 3-cycles.
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new("b")), 0),
+        ((Ident::new("a"), Ident::new("c")), 1),
+        ((Ident::new("b"), Ident::new("a")), 2),
+        ((Ident::new("b"), Ident::new("c")), 3),
+        ((Ident::new("c"), Ident::new("a")), 4),
+        ((Ident::new("c"), Ident::new("b")), 5),
+    ];
+    let n_offsets = 6;
+    let step_count = 2;
+    let mut data = vec![0.0f64; n_offsets * step_count];
+    for slot in data.iter_mut().skip(n_offsets) {
+        *slot = 1.0;
+    }
+    let results = enum_results(n_offsets, step_count, data);
+    let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
+        .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
+    assert!(candidates.complete);
+
+    let paths: Vec<Vec<u32>> = (0..candidates.len())
+        .map(|ci| activity.circuit_nodes(candidates.circuit(ci)))
+        .collect();
+    let cycles = canonical_name_cycles(&search, &paths);
+    assert_eq!(
+        cycles,
+        vec![
+            vec!["a".to_string(), "b".to_string()],
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            vec!["a".to_string(), "c".to_string()],
+            vec!["a".to_string(), "c".to_string(), "b".to_string()],
+            vec!["b".to_string(), "c".to_string()],
+        ],
+        "both directed 3-cycles survive alongside the three 2-cycles"
+    );
+}
+
+/// A loop whose links are simultaneously nonzero at exactly ONE saved step is
+/// found -- by both generators -- at that step.
+///
+/// This is the complement of the activity rule: an inactive link means the
+/// loop's score is exactly 0 there, so a generator that only ever looked at
+/// one step would miss the loop, and one that ignored activity would report
+/// loops that score 0 everywhere. Loops whose links are only ever active at
+/// DIFFERENT steps stay undiscoverable to both (GH #699), which
+/// `staggered_activity_cycle_is_not_reported_by_either_generator` pins.
+#[test]
+fn a_cycle_active_at_only_one_step_is_found_by_both_generators() {
+    // a <-> b, with a->b inactive at step 1 and active at step 2.
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new("b")), 0),
+        ((Ident::new("b"), Ident::new("a")), 1),
+    ];
+    let n_offsets = 2;
+    let step_count = 3;
+    let mut data = vec![0.0f64; n_offsets * step_count];
+    data[n_offsets] = 0.0; // a->b at step 1: inactive
+    data[n_offsets + 1] = 10.0; // b->a at step 1
+    data[2 * n_offsets] = 0.5; // a->b at step 2: active
+    data[2 * n_offsets + 1] = 10.0; // b->a at step 2
+    let results = enum_results(n_offsets, step_count, data);
+    let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
+
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
+        .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
+    assert!(candidates.complete);
+    let enumerated: Vec<Vec<u32>> = (0..candidates.len())
+        .map(|ci| activity.circuit_nodes(candidates.circuit(ci)))
+        .collect();
+    assert_eq!(
+        canonical_name_cycles(&search, &enumerated),
+        vec![vec!["a".to_string(), "b".to_string()]],
+        "the enumerator's activity AND is nonempty at step 2, so the cycle is \
+         emitted"
+    );
+
+    let outcome = super::fallback::sweep(
+        &search,
+        &results,
+        FallbackWeight::DEFAULT,
+        None,
+        &mut SystemClock,
+    );
+    assert!(!outcome.truncated);
+    assert_eq!(
+        canonical_name_cycles(&search, &outcome.paths),
+        vec![vec!["a".to_string(), "b".to_string()]],
+        "the fallback closes the cycle at the step where both links are active"
     );
 }
 

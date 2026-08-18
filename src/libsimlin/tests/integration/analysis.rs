@@ -2338,10 +2338,17 @@ fn discover_loops_tiny_budget_truncates() {
     unsafe {
         // A goal-seeking (balancing) model over many saved timesteps. Values
         // stay bounded (population converges toward the goal), and the large
-        // step count makes the per-timestep discovery sweep reliably take well
-        // over a millisecond -- so a 1ms budget trips the per-step elapsed
-        // check and reports truncation. The budget is checked at the top of
-        // each step, so the sweep stops promptly rather than hanging.
+        // step count makes candidate generation reliably take well over a
+        // millisecond -- so a 1ms budget truncates rather than hanging.
+        //
+        // What the budget buys is split: the enumeration path gets half of it
+        // and copying 200k steps of per-edge score rows exceeds that on its
+        // own, so it is abandoned; the shortest-path fallback then runs on the
+        // remainder and stops at the top of the first saved step it cannot
+        // afford. `truncated` is therefore the FALLBACK's verdict, and it is
+        // reachable only because the split leaves the fallback time to reach
+        // it -- an undivided budget would have been spent entirely inside the
+        // abandoned enumeration and the caller would get nothing at all.
         let test_project = TestProject::new("main")
             .with_sim_time(0.0, 200_000.0, 1.0)
             .stock("population", "10", &["adjustment"], &[], None)

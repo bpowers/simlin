@@ -234,9 +234,12 @@ class TestAnalyzeTruncation:
     """A tiny timeout truncates discovery without hanging."""
 
     def test_tiny_timeout_truncates(self, large_horizon_model: simlin.Model) -> None:
-        # A 1ms timeout on a model with a very long time horizon makes the
-        # per-timestep discovery sweep exceed the budget, so the result is
-        # marked truncated.  The contract is the flag plus a prompt return.
+        # A 1ms timeout on a model with a very long time horizon exceeds the
+        # budget in candidate generation, so the result is marked truncated.
+        # The engine splits the budget: the exact enumeration is abandoned
+        # part way and the shortest-path fallback runs on the remainder,
+        # stopping at the first saved step it cannot afford.  The contract
+        # here is the flag plus a prompt return.
         analysis = large_horizon_model.analyze(timeout=0.001)
         assert analysis.truncated
 
@@ -250,8 +253,8 @@ def large_horizon_model() -> simlin.Model:
     """Build a large-horizon balancing model in memory for truncation tests.
 
     A goal-seeking model over 200k saved timesteps keeps values bounded while
-    making the per-timestep discovery sweep reliably exceed a 1ms budget, so a
-    tiny timeout truncates deterministically.
+    making candidate generation reliably exceed a 1ms budget, so a tiny
+    timeout truncates deterministically.
     """
     from simlin.types import Aux, Flow, Stock
 
