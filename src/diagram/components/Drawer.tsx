@@ -40,10 +40,12 @@ export default function Drawer(props: DrawerProps): React.ReactElement {
       if (document.activeElement !== panelRef.current) {
         previousActiveElement.current = document.activeElement;
       }
-      panelRef.current?.focus();
+      // preventScroll: in contained mode the sheet lives inside a host box on
+      // a page that may be scrolled (a notebook); focusing must not jump it.
+      panelRef.current?.focus({ preventScroll: true });
     } else {
       if (previousActiveElement.current instanceof HTMLElement) {
-        previousActiveElement.current.focus();
+        previousActiveElement.current.focus({ preventScroll: true });
       }
       previousActiveElement.current = null;
     }
@@ -72,10 +74,10 @@ export default function Drawer(props: DrawerProps): React.ReactElement {
 
         if (event.shiftKey && document.activeElement === firstElement) {
           event.preventDefault();
-          lastElement.focus();
+          lastElement.focus({ preventScroll: true });
         } else if (!event.shiftKey && document.activeElement === lastElement) {
           event.preventDefault();
-          firstElement.focus();
+          firstElement.focus({ preventScroll: true });
         }
       }
     };

@@ -8,6 +8,7 @@ import {
   ensureEngine,
   GLOBAL_KEY,
   INLINE_WASM_GLOBAL,
+  inlineWasmHeldForTests,
   takeInlineWasm,
   requestWasmModule,
   resetEngineBootstrapForTests,
@@ -208,11 +209,16 @@ describe('inline wasm (SIMLIN_WIDGET_ASSET=inline)', () => {
     expect(readyCalls[0]).toBeInstanceOf(WebAssembly.Module);
     // Cached page-wide under the same identity key as a comm-delivered module.
     await expect((globalThis as Record<string, unknown>)[GLOBAL_KEY]).resolves.toBeInstanceOf(WebAssembly.Module);
-    // A second instance (module-level memo cleared, page cache kept) reuses it.
-    resetEngineBootstrapForTests({ keepPageCache: true });
+    // A second instance (module-level memo cleared, page cache kept) reuses it
+    // and drops its own inline copy without decoding it.
+    const compileSpy = rs.spyOn(WebAssembly, 'compile');
+    resetEngineBootstrapForTests({ keepPageCache: true, inlineWasm: base64 });
     const model2 = new FakeModel(defaultState());
     await ensureEngine(model2);
     expect(model2.sent).toEqual([]);
+    expect(compileSpy).not.toHaveBeenCalled();
+    expect(inlineWasmHeldForTests()).toBe(false);
+    compileSpy.mockRestore();
   });
 
   it('unusable inline bytes fall back to the comm request (the kernel answers in every mode)', async () => {

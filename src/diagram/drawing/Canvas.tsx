@@ -678,7 +678,8 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   // follow carry the editor in their path, so the Editor's keyboard scoping
   // resolves them to this instance directly and hosts that gate their own
   // shortcuts on the event target (JupyterLab's data-lm-suppress-shortcuts,
-  // checked with closest()) see them land in the editor's subtree; focus left
+  // walked up from the focused element) see them land in the editor's
+  // subtree; focus left
   // on <body> would instead route the key by the last-active instance.
   // preventScroll: a host page (notebook) may scroll; focusing must not jump it.
   // No fallback for a missing container: both callers -- clearPointerState

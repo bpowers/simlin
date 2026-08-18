@@ -121,17 +121,20 @@ function watchHostThemeSignals(onChange: () => void): () => void {
  * element upward and, at each step, first stopping if that element carries
  * `data-lm-suppress-shortcuts` and otherwise matching it against every
  * keybinding selector; the notebook's command-mode bindings (`d d` deletes
- * the cell, `a`/`b` insert one, `x` cuts) use `.jp-Notebook.jp-mod-commandMode
- * :focus:not(:read-write)`, which matches the focused element ITSELF -- the
- * Editor root, the canvas container, a button, a <select> -- before the walk
- * ever reaches the wrapper's attribute. So the attribute must sit on the
- * focused element, and focus always precedes a keydown: stamping the target
- * of every focus event inside the widget (the Editor's own elements and the
- * overlay surfaces it portals into the wrapper alike) is the one place that
- * covers them all without threading a host attribute through every focusable
- * component. React never removes an attribute it did not render, so the stamp
- * persists. Text fields (`:read-write`) never matched, so stamping them is
- * harmless. Stopping key propagation at the wrapper would NOT do: Lumino
+ * the cell, `a`/`b` insert one, `x` cuts) use the selector
+ * `.jp-Notebook.jp-mod-commandMode:not(.jp-mod-readWrite) :focus`
+ * (JupyterLab 4.6, schemas/@jupyterlab/notebook-extension/tracker.json --
+ * text fields are exempt not by the selector but because the Notebook
+ * toggles jp-mod-readWrite while an editable element is active), which
+ * matches the focused element ITSELF -- the Editor root, the canvas
+ * container, a button, a <select> -- before the walk ever reaches the
+ * wrapper's attribute. So the attribute must sit on the focused element, and
+ * focus always precedes a keydown: stamping the target of every focus event
+ * inside the widget (the Editor's own elements and the overlay surfaces it
+ * portals into the wrapper alike) is the one place that covers them all
+ * without threading a host attribute through every focusable component.
+ * React never removes an attribute it did not render, so the stamp persists.
+ * Stopping key propagation at the wrapper would NOT do: Lumino
  * listens on the document in the capture phase, before any element handler,
  * and the Editor's own shortcut listener is a document-level bubble handler
  * that a stop would silence.

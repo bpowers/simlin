@@ -216,6 +216,9 @@ export function sharedWasmModule(
   const cache = globalThis as unknown as GlobalCache;
   const existing = cache[GLOBAL_KEY];
   if (existing !== undefined) {
+    // Another instance already compiled it; drop this instance's copy of the
+    // inline payload rather than keep ~9 MB of base64 alive for nothing.
+    inlineWasmBase64 = null;
     return existing;
   }
   const source =
@@ -256,6 +259,11 @@ export function ensureEngine(model: AnyModel): Promise<void> {
     });
   enginePromise = started;
   return started;
+}
+
+/** Test seam: whether this module still holds an inline payload. */
+export function inlineWasmHeldForTests(): boolean {
+  return inlineWasmBase64 !== null;
 }
 
 /**

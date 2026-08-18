@@ -37,6 +37,60 @@ const ControlledDrawer = React.forwardRef<ControlledDrawerHandle, { children?: R
 );
 
 describe('Drawer', () => {
+  test('every focus move the drawer makes uses preventScroll (a contained sheet lives in a scrolled host page)', async () => {
+    // Every focus() the drawer issues -- panel on open, restore on close, the
+    // Tab wrap of the focus trap -- must not scroll the page: in contained
+    // mode the sheet sits inside a host box on a page (a notebook) that may
+    // be scrolled to it. jsdom does no scrolling, so record the options.
+    const calls: Array<{ el: string; opts: FocusOptions | undefined }> = [];
+    const original = HTMLElement.prototype.focus;
+    HTMLElement.prototype.focus = function (this: HTMLElement, opts?: FocusOptions) {
+      calls.push({ el: this.getAttribute('data-testid') ?? this.getAttribute('role') ?? this.tagName, opts });
+      return original.call(this, opts);
+    };
+    try {
+      const outside = document.createElement('button');
+      outside.setAttribute('data-testid', 'outside');
+      document.body.appendChild(outside);
+      outside.focus();
+      calls.length = 0;
+      const ref = React.createRef<ControlledDrawerHandle>();
+      render(
+        <ControlledDrawer ref={ref}>
+          <button data-testid="first">first</button>
+          <button data-testid="last">last</button>
+        </ControlledDrawer>,
+      );
+      act(() => {
+        ref.current!.setOpen(true);
+      });
+      await waitFor(() => expect(document.activeElement).toBe(document.querySelector('[role="dialog"]')));
+      // Focus trap: Shift+Tab from the first wraps to the last, Tab from the
+      // last wraps to the first.
+      const first = document.querySelector('[data-testid="first"]') as HTMLElement;
+      const last = document.querySelector('[data-testid="last"]') as HTMLElement;
+      // The test's own move (not the drawer's): mark it so it can be dropped.
+      first.focus({ preventScroll: false });
+      fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+      expect(document.activeElement).toBe(last);
+      fireEvent.keyDown(document, { key: 'Tab' });
+      expect(document.activeElement).toBe(first);
+      act(() => {
+        ref.current!.setOpen(false);
+      });
+      await waitFor(() => expect(document.activeElement).toBe(outside));
+      const drawerCalls = calls.filter((c) => c.opts?.preventScroll !== false);
+      // panel (open), last + first (trap wraps), outside (restore on close)
+      expect(drawerCalls.map((c) => c.el)).toEqual(['dialog', 'last', 'first', 'outside']);
+      for (const c of drawerCalls) {
+        expect(c.opts).toEqual({ preventScroll: true });
+      }
+      outside.remove();
+    } finally {
+      HTMLElement.prototype.focus = original;
+    }
+  });
+
   test('renders children when open', () => {
     render(
       <Drawer open={true} onClose={() => {}}>

@@ -236,7 +236,7 @@ test('pysimlin-widget.AC4.2: JupyterLab notebook edits a model file through the 
 // preventDefault()ed by the canvas -- must move focus INTO the widget,
 // otherwise focus stays on the notebook cell and Lab's command-mode keys
 // (`x`, `d d`, `a`) act on cells while Delete reaches no Editor; (2) Lumino
-// matches its keybinding selectors (`.jp-Notebook.jp-mod-commandMode :focus`)
+// matches its keybinding selectors (`.jp-Notebook.jp-mod-commandMode:not(.jp-mod-readWrite) :focus`)
 // against the focused element BEFORE walking up to any ancestor carrying
 // `data-lm-suppress-shortcuts`, so the attribute has to be on the focused
 // element itself, not only on the wrapper.

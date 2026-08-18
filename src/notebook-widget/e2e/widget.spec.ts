@@ -336,11 +336,14 @@ test.describe('notebook widget bundle', () => {
         card: rect(card),
         cardScrollHeight: card.scrollHeight,
         cardClientHeight: card.clientHeight,
+        cardOverflowY: getComputedStyle(card).overflowY,
       };
     });
     // The card is capped by the box and scrolls its content instead of
-    // growing past the editor's (overflow: hidden) bottom edge.
+    // growing past the editor's (overflow: hidden) bottom edge -- and it is
+    // the card that scrolls (overflow-y auto), not the editor root.
     expect(layout.cardScrollHeight).toBeGreaterThan(layout.cardClientHeight);
+    expect(['auto', 'scroll']).toContain(layout.cardOverflowY);
     expect(layout.card.bottom).toBeLessThanOrEqual(layout.root.bottom);
     expect(layout.card.top).toBeGreaterThanOrEqual(layout.root.top);
     // Edge-aligned with the search bar that overlays its top (same width
@@ -357,6 +360,16 @@ test.describe('notebook widget bundle', () => {
     expect(deleteBox.y + deleteBox.height).toBeLessThanOrEqual(layout.root.bottom);
     expect(deleteBox.y).toBeGreaterThanOrEqual(layout.root.top);
     await expect(deleteButton).toBeVisible();
+    const scrolled = await page.evaluate(() => {
+      const root = document.querySelector('#cell1 [data-simlin-editor-root]') as HTMLElement;
+      const deleteBtn = Array.from(document.querySelectorAll('#cell1 button')).find(
+        (b) => b.textContent?.trim() === 'Delete',
+      );
+      const card = deleteBtn?.closest('[class*="varDetails"] > *') as HTMLElement;
+      return { cardScrollTop: card.scrollTop, rootScrollTop: root.scrollTop };
+    });
+    expect(scrolled.cardScrollTop).toBeGreaterThan(0);
+    expect(scrolled.rootScrollTop).toBe(0);
   });
 
   // The Editor's overlay surfaces (the hamburger drawer here) render INSIDE the

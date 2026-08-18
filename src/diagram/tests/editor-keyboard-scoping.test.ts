@@ -422,6 +422,34 @@ describe('Editor keyboard scoping across instances', () => {
     field.remove();
   });
 
+  it('a press inside a portaled surface whose focus is on that surface (or an ancestor of the pressed element) leaves focus alone', () => {
+    const a = mountEditor();
+    // Open the model-properties drawer: it portals to document.body (not a
+    // DOM descendant of the root) and focuses its panel on open.
+    act(() => {
+      fireEvent.click(a.result.getByLabelText(/^menu$/i));
+    });
+    const panel = document.querySelector('[role="dialog"]') as HTMLElement;
+    expect(panel).not.toBeNull();
+    expect(a.root.contains(panel)).toBe(false);
+    act(() => {
+      panel.focus();
+    });
+    expect(document.activeElement).toBe(panel);
+    // A press on a control inside the panel: the focused element is an
+    // ancestor of the pressed one, so the root does not steal focus.
+    const download = a.result.getByRole('button', { name: /download model/i });
+    act(() => {
+      fireEvent.pointerDown(download);
+    });
+    expect(document.activeElement).toBe(panel);
+    // A press on the focused panel itself, likewise.
+    act(() => {
+      fireEvent.pointerDown(panel);
+    });
+    expect(document.activeElement).toBe(panel);
+  });
+
   it('a press inside B moves focus from A to B', () => {
     const a = mountEditor();
     const b = mountEditor();

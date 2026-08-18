@@ -748,15 +748,19 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       return;
     }
     const active = document.activeElement;
-    // Portaled surfaces are not DOM descendants of the root; a press inside
-    // one whose focus already sits inside it (a dialog's button) is left alone
-    // -- e.currentTarget.contains would say no for those, so check the event
-    // path, which React routes through this tree.
+    // Portaled surfaces (drawer, dialog, menu, listbox) are not DOM
+    // descendants of the root, so root.contains() says no for a press inside
+    // one; React routes the press through this tree, and the DOM path of the
+    // press tells whether the focused element is the pressed element or one
+    // of its ancestors -- the drawer panel is focused and the user presses a
+    // field inside it -- in which case focus is left where it is (the panel's
+    // own focus management owns it). <body>/<html> are on every path and
+    // count as focus nowhere.
     const path = e.nativeEvent.composedPath();
     const focusInsideEditor = active !== null && root.contains(active);
-    const focusInsidePressedSurface =
+    const focusIsPressedOrAncestor =
       active !== null && active !== document.body && active !== document.documentElement && path.includes(active);
-    if (!focusInsideEditor && !focusInsidePressedSurface) {
+    if (!focusInsideEditor && !focusIsPressedOrAncestor) {
       root.focus({ preventScroll: true });
     }
   }, []);

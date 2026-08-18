@@ -1,8 +1,10 @@
 .card {
   /* Sized by the details slot it fills (Editor.module.css .varDetails carries
      the panel width and the height cap; see the comment there for why they
-     cannot live here). As a flex item it must opt out of min-height: auto to
-     shrink to the slot's cap and scroll instead of overflowing it. */
+     cannot live here). Belt and braces: a flex item whose overflow is not
+     visible already has an automatic minimum size of 0, so overflow-y: auto
+     below is what lets it shrink to the slot's cap and scroll; the explicit
+     min-height keeps that true if the overflow rule ever changes. */
   min-height: 0;
   /* Match .searchBar: both must compute as border-box so their edges align
      regardless of whether the global reset is present in the host bundle. */

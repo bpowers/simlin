@@ -1,7 +1,7 @@
 .card {
-  /* Sized by the details slot (Editor.module.css .varDetails); min-height: 0
-     lets a long error list shrink to the slot's height cap and scroll. See
-     VariableDetails.module.css. */
+  /* Sized by the details slot (Editor.module.css .varDetails); overflow-y:
+     auto lets a long error list shrink to the slot's height cap and scroll,
+     min-height: 0 is belt and braces. See VariableDetails.module.css. */
   min-height: 0;
   /* Match .searchBar: see VariableDetails.module.css */
   box-sizing: border-box;
