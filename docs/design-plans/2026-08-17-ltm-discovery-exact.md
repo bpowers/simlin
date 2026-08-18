@@ -73,9 +73,9 @@ useful, the failure case that must NOT happen.
   `ModelAnalysis::expansion_cap_saturated`, `SearchGraph`, `DfsScratch`,
   `EXPANSION_BUDGET_PER_SEARCH`, `dfs_expansion_budget`, `DfsExpansionBudgetGuard`,
   `IndexedSearch::{load_step_scores,discover_step,dfs,record_loop}` no longer exist.
-  `rg` over `src/` and `docs/` (excluding `docs/reference/`, which transcribes the
-  external papers, and `docs/design-plans/`, which are historical) finds no reference
-  to the strongest-path DFS as current implementation.
+  `rg` over `src/` finds no reference to the strongest-path DFS as current
+  implementation; the `docs/` sweep (excluding `docs/reference/`, which transcribes the
+  external papers, and `docs/design-plans/`, which are historical) is Phase 6's (AC7.3).
 - **AC1.3** A 2+-node cycle with no stock (module-level state or a PREVIOUS lag across
   auxes) is still reported, in a Solo normalization group, ranked after competing loops.
 - **AC2.1** With the enumerator disabled (`CandidateGen::FallbackOnly(_)` or an
@@ -95,8 +95,12 @@ useful, the failure case that must NOT happen.
   every emitted cycle is elementary and closes through the seed stock, and the fallback
   never emits a cycle with a zero/NaN link at the step it was found.
 - **AC2.4** The fallback finds every loop the enumeration finds on the tests' small
-  fixtures (logistic, diamond, cross-agg, module) -- discovery's semantic tests are
-  parametrized over `Auto` and `FallbackOnly(default weight)`.
+  fixtures whose cycles are distinguishable by a shortest-path tree (logistic, cross-agg,
+  module); discovery's semantic tests are parametrized over `Auto` and
+  `FallbackOnly(default weight)`. Where the fallback structurally differs, the difference
+  is pinned with its mechanism: a diamond whose two arms hold constant shares yields one
+  tree path per (seed, step) and so one arm (until the every-edge closure family below
+  is measured), and a stockless cycle is unreachable from stock seeds (AC1.3).
 - **AC3.1** `examples/ltm_discovery_bench` (release) reports World3 total discovery time
   under 1.0 s and C-LEARN under 0.2 s, with `enumeration_complete == true` on both;
   the numbers are recorded in this document's "Measured" section.
@@ -432,4 +436,112 @@ Phase 3's harness measures recall of the exact top-K, which is what settles
 the default weight; the fallback columns here establish only that every
 formulation is fast enough to be a usable fallback on both models.
 
-(Phases 3, 4 and 6 still to fill in.)
+
+After Phase 3 (release, Apple M-series under Asahi,
+`examples/ltm_fallback_eval`, both generators over the same simulated
+results). Recall is measured against the `Auto` run's REPORTED loop list --
+the retention survivors ranked competitive-first by mean relative score and
+capped at `MAX_LOOPS` -- so "recall@K" is the share of the exact top-K that
+appears in the fallback's reported list. Step-dominant coverage sweeps every
+saved step `t in 1..step_count` with an active exact loop, takes the exact
+loop with the largest `|rel_scores[t]|`, and asks whether the fallback
+reported it.
+
+World3-03 (401 saved steps, 15 stocks, exact run 0.41 s, 200 reported loops;
+399 of 400 steps carry an active loop, with 42 distinct step-dominant loops):
+
+| weight | time (s) | loops | recall@1 | recall@10 | recall@50 | recall@100 | recall@200 | step-dominant covered |
+|---|---|---|---|---|---|---|---|---|
+| `ClampedLogAbs` | 0.020 | 59 | 0.00 (0/1) | 0.10 (1/10) | 0.06 (3/50) | 0.03 (3/100) | 0.04 (7/200) | 0.10 (41/399) |
+| `RelativeLinkScore` | 0.020 | 48 | 0.00 (0/1) | 0.10 (1/10) | 0.06 (3/50) | 0.03 (3/100) | 0.03 (6/200) | 0.10 (41/399) |
+| `HopCount` | 0.011 | 23 | 0.00 (0/1) | 0.00 (0/10) | 0.00 (0/50) | 0.00 (0/100) | 0.01 (3/200) | 0.02 (7/399) |
+
+C-LEARN v77 (251 saved steps, 116 stocks, exact run 0.037 s, 153 reported
+loops; every step carries an active loop, with 2 distinct step-dominant
+loops):
+
+| weight | time (s) | loops | recall@1 | recall@10 | recall@50 | recall@100 | recall@153 | step-dominant covered |
+|---|---|---|---|---|---|---|---|---|
+| `ClampedLogAbs` | 0.069 | 97 | 1.00 (1/1) | 0.70 (7/10) | 0.76 (38/50) | 0.67 (67/100) | 0.63 (97/153) | 1.00 (250/250) |
+| `RelativeLinkScore` | 0.069 | 97 | 1.00 (1/1) | 0.70 (7/10) | 0.76 (38/50) | 0.67 (67/100) | 0.63 (97/153) | 1.00 (250/250) |
+| `HopCount` | 0.066 | 72 | 1.00 (1/1) | 0.70 (7/10) | 0.64 (32/50) | 0.47 (47/100) | 0.47 (72/153) | 1.00 (250/250) |
+
+`ClampedLogAbs` is the measured best and stays `FallbackWeight::DEFAULT`: it
+weakly dominates `RelativeLinkScore` on every World3 column (7 vs 6 of the
+exact top-200, 59 vs 48 loops proposed) and ties it exactly on C-LEARN, where
+the two report the identical 97 loops. `HopCount` -- the score-blind control
+-- is worse than both everywhere, which is the result that says the score
+weighting is doing work at all.
+
+Two things these numbers do NOT establish, and both make them a lower bound
+on generator recall rather than a measurement of it:
+
+- **Every recall@K is bounded above by `min(loops, K)/K`.** World3's fallback
+  reports 59 loops against a 200-loop reference, so recall@200 could not have
+  exceeded 0.30 whatever it found. A low recall here is partly a statement
+  about the reported list's LENGTH, which the fallback's own retention filter
+  and cap decide, and not only about which cycles the search proposed.
+- **Both sides' retention denominators are their own candidate sets.** The
+  enumeration path normalizes against the universe; the fallback normalizes
+  against whatever it discovered. Two loops with identical raw scores can
+  therefore be retained on one path and dropped on the other. That is also
+  why no "share of universe partition mass the fallback holds" statistic is
+  reported: the two paths' partition totals are different denominators, so
+  the ratio would compare incomparable quantities.
+
+Recall against the full retention-survivor set (2,979 on World3, which the
+public API's cap hides) is the notebook audit's job rather than this
+harness's.
+
+The gap between the two models is the design's own thesis restated as a
+measurement: C-LEARN's runtime graph holds 162 ever-simultaneously-active
+cycles, so a per-(stock, step) shortest-path sample recovers most of what
+matters and never misses a dominant loop; World3's holds 150,827, and the
+same sample recovers almost none of the exact ranking. The fallback is a
+usable degradation for a sparse runtime graph and an explicit sample for a
+dense one, which is what `enumeration_complete == false` is there to say.
+
+---
+
+### Audit numbers (`notebooks/build_ltm_discovery_audit.py`)
+
+An independent pure-Python re-implementation of the enumerator, the scoring,
+the retention filter and the ranking -- written from this document rather than
+translated from the Rust -- reproduces the engine exactly on both models:
+
+| | World3-03 | C-LEARN v77 |
+|---|---|---|
+| union-graph edges (self-edges dropped) | 258 of 428 | 2,965 of 21,042 |
+| non-trivial union SCCs | one, 135 nodes | three of 65, twelve of 2 |
+| elementary cycles ever simultaneously active | 150,827 | 162 |
+| enumeration time (pure Python) | 9.3 s | < 0.1 s |
+| retention survivors (>= 0.1% peak share) | 2,979 | 153 |
+| engine reported loops | 200 (cap binds) | 153 (cap does not bind) |
+| engine loops absent from the independent universe | 0 | 0 |
+| reported-list overlap with the independent ranking | 200/200 | 153/153 |
+| max relative difference, raw loop scores | 0.000e+00 | 0.000e+00 |
+| max absolute difference, relative loop scores | 0.000e+00 | 0.000e+00 |
+| step-dominant coverage, competing groups | 382/399 (95.7%) | 750/750 (100%) |
+
+The universe count, the survivor count and the reported set all match the
+engine bit for bit, and both score series are bit-identical -- so AC3.2's
+"survivors and their scores are bit-identical" holds against an external
+oracle and not only against a golden.
+
+Two findings that scope Phase 4:
+
+- **World3's step-dominant gap is 17 steps of 399.** At each of those steps
+  the loop with the largest `|relative score|` within its competing partition
+  was enumerated, was retained, and was then dropped by the `MAX_LOOPS` cap.
+  That is exactly the number AC5.1's coverage-aware cap has to drive to 0,
+  and it is now measurable before and after.
+- **A GLOBAL argmax over relative score measures nothing.** A loop alone in
+  its normalization group is its own denominator, so its relative score is
+  `+/-1` at every active step by construction. On World3 the global argmax is
+  a non-competing loop at 399 of 399 steps (giving a global coverage of
+  0/399), and on C-LEARN at 250 of 250. Any coverage statistic -- including
+  the one Phase 4's cap is judged by -- has to be taken WITHIN a competing
+  group, which is what AC5.1 already says and what the audit now demonstrates
+  the necessity of.
+
+(Phases 4 and 6 still to fill in.)

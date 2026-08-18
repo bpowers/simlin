@@ -6,8 +6,8 @@ Discovery-mode LTM is a three-stage pipeline: candidate generation (find cycles
 worth scoring), exact scoring (per-step product of recorded link scores), and
 filter/rank (`MIN_CONTRIBUTION` retention, competitive-first ranking,
 `MAX_LOOPS` cap). Only candidate generation is lossy, and a ground-truth audit
-(2026-08-10, see `docs/audits/clearn_ltm_discovery.ipynb` and
-`wrld3_ltm_discovery_audit.ipynb`) showed it has two regimes:
+(2026-08-10; the audits are regenerable via
+`notebooks/build_ltm_discovery_audit.py --model clearn|wrld3`) showed it has two regimes:
 
 - C-LEARN: the per-step strongest-first DFS is effectively exhaustive (all 162
   ever-active cycles found; the 9 unreported ones are correctly dropped by

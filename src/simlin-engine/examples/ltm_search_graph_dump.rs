@@ -17,9 +17,32 @@
 //!     "model": "<path>",
 //!     "step_count": N,           // saved steps
 //!     "stocks": ["...", ...],    // the fallback's seed nodes, engine order
+//!     "partitions": [["stock", ...], ...],  // cycle partitions, engine order
 //!     "edges": [{"from": "...", "to": "...", "scores": [f64; N]}, ...],
-//!     "discovered": [{"id": "...", "nodes": ["...", ...]}, ...]
+//!     "enumeration_complete": bool,
+//!     "truncated": bool,
+//!     "agg_recovery_truncated": bool,
+//!     "discovered": [{"id": "...", "nodes": [...], "scores": [f64; N],
+//!                     "rel_scores": [f64; N], "partition": usize|null}, ...]
 //!   }
+//!
+//! `partitions` is the FULL cycle-partition list (`CausalGraph::
+//! compute_cycle_partitions`), not the result-scoped `DiscoveryResult::
+//! partitions` -- an external enumeration has to place every cycle it finds,
+//! including the ones the engine never reported, so it needs the whole
+//! stock-to-partition map rather than the subset the reported loops touched.
+//! A discovered loop's `partition` is its index into this list (`null` for a
+//! loop whose stocks resolve to no parent-level partition), so the audit's
+//! grouping and the engine's are the same grouping.
+//!
+//! `scores` is the engine's signed raw loop-score series and `rel_scores` its
+//! signed partition-relative series -- the statistic ranking and dominance are
+//! read from -- so an external re-derivation can be differenced against both
+//! step by step. The pair is what makes the module-override case checkable
+//! rather than assumed: for a loop through a module instance the reported
+//! `scores` are the per-exit-port override series and NOT the raw product of
+//! the `edges` rows, so a consumer can detect that from the data instead of
+//! having to know which nodes the engine treats as modules.
 //!
 //! Environment:
 //!   LTM_DUMP_MODEL   override the model path (default: C-LEARN v77)
@@ -90,6 +113,13 @@ fn main() {
         &expansion,
     );
 
+    // The engine's own cycle partitions -- the grouping every relative score
+    // is normalized within. Computed here (not re-derived in the consumer)
+    // for the same reason the edge set is: a second implementation of the
+    // grouping would let the audit and the engine disagree about the
+    // denominator while appearing to agree about everything else.
+    let cycle_partitions = causal_graph.compute_cycle_partitions();
+
     // Run production discovery on the same inputs for cross-checking.
     let sub_model_ports =
         simlin_engine::analysis::build_sub_model_output_ports(&db, source_project);
@@ -127,11 +157,26 @@ fn main() {
             // trimmed by the engine); the audit trims synthetics from its own
             // enumeration before matching.
             let nodes: Vec<&str> = l.loop_info.links.iter().map(|k| k.from.as_str()).collect();
+            // `partition` is result-scoped (an index into
+            // `DiscoveryResult::partitions`); re-key it onto the full
+            // partition list below so the audit and the engine agree on what
+            // partition 3 means.
+            let partition = l.partition.map(|p| {
+                let stocks = &found.partitions[p].stocks;
+                cycle_partitions
+                    .stock_partition
+                    .get(&simlin_engine::common::Ident::new(&stocks[0]))
+                    .copied()
+                    .expect("a reported partition's stocks are cycle-partition members")
+            });
             serde_json::json!({
                 "id": l.loop_info.id,
                 "polarity": format!("{:?}", l.loop_info.polarity),
                 "avg_abs_score": l.avg_abs_score,
                 "nodes": nodes,
+                "scores": l.scores.iter().map(|&(_, s)| s).collect::<Vec<_>>(),
+                "rel_scores": l.rel_scores,
+                "partition": partition,
             })
         })
         .collect();
@@ -140,7 +185,15 @@ fn main() {
         "model": path,
         "step_count": results.step_count,
         "stocks": stocks.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        "partitions": cycle_partitions
+            .partitions
+            .iter()
+            .map(|p| p.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
         "edges": edges,
+        "enumeration_complete": found.enumeration_complete,
+        "truncated": found.truncated,
+        "agg_recovery_truncated": found.agg_recovery_truncated,
         "discovered": discovered,
     });
 
