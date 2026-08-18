@@ -644,7 +644,17 @@ pub(super) fn enumerate_active_circuits(
             if let Some(&(to, row)) = graph.adj[v as usize].get(ei) {
                 frames[depth - 1].1 += 1;
                 visits += 1;
-                if visits & (visit_interval - 1) == 0 && expired(deadline, clock) {
+                // `visits == 1` catches an ALREADY-expired deadline on the
+                // very first visit regardless of graph size: without it, a
+                // deadline that expired before this call even started would
+                // go undetected on any graph whose total visit count never
+                // reaches a `visit_interval` multiple -- true of almost every
+                // real model at the production interval (`DEADLINE_CHECK_INTERVAL`
+                // = 8192), so the whole enumeration would run to completion
+                // on a budget that was already spent. The periodic
+                // `visits & (visit_interval - 1) == 0` arm is what catches a
+                // deadline that expires mid-search, after the first visit.
+                if (visits == 1 || visits & (visit_interval - 1) == 0) && expired(deadline, clock) {
                     break 'dfs;
                 }
                 if visits > max_visits {

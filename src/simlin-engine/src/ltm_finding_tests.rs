@@ -4037,21 +4037,27 @@ fn retention_totals_and_survivors_match_hand_computed_products() {
 /// pass that trusted the bound would keep it.
 #[test]
 fn retention_confirms_a_circuit_whose_running_bound_overstates_its_share() {
-    // `a`'s out-edges are walked in offset order, so the tiny a<->c loop is
-    // emitted before the dominant a<->b one.
+    // `link_offsets` here is sorted by `(from, to)` name -- the shape
+    // `parse_link_offsets` actually produces (it sorts before returning, GH
+    // #310 review) -- rather than hand-ordered to suit the fixture: the tiny
+    // loop's partner is named `b` and the dominant loop's `c` so that sorted
+    // order and "tiny loop first" coincide, exactly as they would for any
+    // production-derived `link_offsets`. `a`'s out-edges are then walked in
+    // that same order, so the tiny a<->b loop is emitted before the dominant
+    // a<->c one.
     let link_offsets: Vec<LinkOffset> = vec![
-        ((Ident::new("a"), Ident::new("c")), 0),
-        ((Ident::new("c"), Ident::new("a")), 1),
-        ((Ident::new("a"), Ident::new("b")), 2),
-        ((Ident::new("b"), Ident::new("a")), 3),
+        ((Ident::new("a"), Ident::new("b")), 0),
+        ((Ident::new("a"), Ident::new("c")), 1),
+        ((Ident::new("b"), Ident::new("a")), 2),
+        ((Ident::new("c"), Ident::new("a")), 3),
     ];
     let n_offsets = 4;
     let step_count = 2;
     let mut data = vec![0.0f64; n_offsets * step_count];
-    data[n_offsets] = 1e-4; // a->c
-    data[n_offsets + 1] = 1e-4; // c->a  (product 1e-8)
-    data[n_offsets + 2] = 1.0; // a->b
-    data[n_offsets + 3] = 1.0; // b->a  (product 1.0)
+    data[n_offsets] = 1e-4; // a->b
+    data[n_offsets + 1] = 1.0; // a->c
+    data[n_offsets + 2] = 1e-4; // b->a  (a<->b product 1e-8)
+    data[n_offsets + 3] = 1.0; // c->a  (a<->c product 1.0)
     let results = enum_results(n_offsets, step_count, data);
     let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
     let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
@@ -4064,7 +4070,7 @@ fn retention_confirms_a_circuit_whose_running_bound_overstates_its_share() {
             .iter()
             .map(|&n| search.idents[n as usize].as_str().to_string())
             .collect::<Vec<_>>(),
-        vec!["a".to_string(), "c".to_string()],
+        vec!["a".to_string(), "b".to_string()],
         "the fixture only bites if the negligible circuit is emitted first"
     );
 
@@ -4085,8 +4091,65 @@ fn retention_confirms_a_circuit_whose_running_bound_overstates_its_share() {
     .unwrap();
     assert_eq!(
         survivor_node_sets(&outcome, &candidates, &activity, &search),
-        vec![vec!["a".to_string(), "b".to_string()]],
+        vec![vec!["a".to_string(), "c".to_string()]],
         "the confirm step drops the circuit its running bound admitted"
+    );
+}
+
+/// Defense in depth for the `head & !1u64` step-0 mask and `active_window`'s
+/// `lo == 0` case (see the `bits` field doc on `ActivityGraph`): production
+/// never sets bit 0 (every link score's `TIME = INITIAL_TIME` guard arm is
+/// the literal `0` there), so this fixture makes an edge genuinely active AT
+/// step 0 too -- a shape no real run produces, but one the enumerator does
+/// not assume away. Correctness requires two things simultaneously: the mask
+/// must still require activity at some step >= 1 for the circuit to be
+/// emitted at all (bit-0-only activity is not a scorable loop), and once the
+/// circuit IS emitted, `active_window` must start its window at step 0
+/// rather than silently excluding a genuinely active first step from
+/// retention's totals.
+#[test]
+fn a_circuit_active_at_step_0_too_is_windowed_from_step_0() {
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new("b")), 0),
+        ((Ident::new("b"), Ident::new("a")), 1),
+    ];
+    let n_offsets = 2;
+    let step_count = 2;
+    // Both edges active at BOTH steps, unlike a real run's step 0.
+    let data = vec![
+        2.0, 3.0, // step 0: a->b = 2, b->a = 3
+        4.0, 5.0, // step 1: a->b = 4, b->a = 5
+    ];
+    let results = enum_results(n_offsets, step_count, data);
+    let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
+        .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
+    assert!(candidates.complete);
+    assert_eq!(candidates.len(), 1, "the a<->b 2-cycle");
+
+    let stock_partition: Vec<Option<usize>> = search
+        .idents
+        .iter()
+        .map(|id| (id.as_str() == "a").then_some(0))
+        .collect();
+    let no_modules = vec![false; search.idents.len()];
+    let outcome = super::enum_gen::retain_circuits(
+        &candidates,
+        &activity,
+        &stock_partition,
+        &no_modules,
+        None,
+        &mut SystemClock,
+    )
+    .unwrap();
+    assert_eq!(outcome.survivors, vec![0], "the only circuit, ever active");
+    assert_eq!(
+        outcome.partition_totals[&0],
+        vec![6.0, 20.0],
+        "step 0's mass (2*3=6) must reach the partition total alongside \
+         step 1's (4*5=20), proving `active_window` started at step 0 \
+         (`lo == 0`) rather than at step 1"
     );
 }
 
@@ -4484,7 +4547,11 @@ fn enumerate_active_circuits_abandons_an_already_expired_deadline() {
     // The enumerator amortizes its clock reads over `DEADLINE_CHECK_INTERVAL`
     // edge visits, which a two-triangle fixture never reaches; the override
     // makes every visit a check so the arm is exercised on a tiny graph
-    // (docs/dev/rust.md#test-time-budgets).
+    // (docs/dev/rust.md#test-time-budgets). With `visit_interval == 1` every
+    // visit is BOTH the first visit and an interval multiple, so this pins
+    // the same first-visit catch as the override-free test below -- kept
+    // because it additionally exercises `visit_interval == 1` as a boundary
+    // value of the periodic mask itself.
     let _guard = super::enum_gen::EnumDeadlineVisitIntervalGuard::new(1);
     let (activity, _search) = two_triangles_and_a_self_edge();
     let mut clock = ScriptedClock::new(1);
@@ -4497,6 +4564,62 @@ fn enumerate_active_circuits_abandons_an_already_expired_deadline() {
          the caller discards the partial set and falls back"
     );
     assert_eq!(clock.reads, 1, "the first visit is a check");
+}
+
+/// The first-visit arm at the PRODUCTION `DEADLINE_CHECK_INTERVAL` (8192, no
+/// override): an already-expired deadline must be caught even though the
+/// two-triangle fixture's whole enumeration (6 edge visits) never reaches an
+/// interval multiple. Before the first-visit check existed, this deadline
+/// went undetected on any graph below the interval -- true of nearly every
+/// real model -- and the enumeration ran to completion on a budget that was
+/// already spent.
+#[test]
+fn enumerate_active_circuits_catches_an_already_expired_deadline_at_production_interval() {
+    let (activity, _search) = two_triangles_and_a_self_edge();
+    let mut clock = ScriptedClock::new(1);
+    let deadline = clock.deadline();
+    let candidates =
+        super::enum_gen::enumerate_active_circuits(&activity, Some(deadline), &mut clock);
+    assert!(
+        !candidates.complete,
+        "an already-expired deadline must be caught on the very first visit, \
+         regardless of the graph's total visit count relative to \
+         DEADLINE_CHECK_INTERVAL"
+    );
+    assert_eq!(clock.reads, 1, "the first visit is a check");
+}
+
+/// The PERIODIC arm, distinct from the first-visit one: a deadline that is
+/// still live at visit 1 but expires before the next interval-multiple visit
+/// is caught there, not on the first visit. `expire_at_read == 2` keeps the
+/// clock live through the first-visit check (read 1) and expired by the
+/// interval check (read 2); `visit_interval == 4` puts that check at visit 4
+/// -- the first edge of the SECOND root's (`u`'s) triangle -- so the first
+/// triangle (`a, b, c`) is fully enumerated before the cutoff.
+#[test]
+fn enumerate_active_circuits_catches_a_deadline_that_expires_mid_search() {
+    let _guard = super::enum_gen::EnumDeadlineVisitIntervalGuard::new(4);
+    let (activity, _search) = two_triangles_and_a_self_edge();
+    let mut clock = ScriptedClock::new(2);
+    let deadline = clock.deadline();
+    let candidates =
+        super::enum_gen::enumerate_active_circuits(&activity, Some(deadline), &mut clock);
+    assert!(
+        !candidates.complete,
+        "the deadline expiring mid-search must still report an incomplete \
+         enumeration"
+    );
+    assert_eq!(
+        candidates.len(),
+        1,
+        "the a/b/c triangle completes before the cutoff; u/v/w's does not \
+         start"
+    );
+    assert_eq!(
+        clock.reads, 2,
+        "one check at visit 1 (not yet expired) and one at visit 4, the next \
+         interval multiple (expired)"
+    );
 }
 
 #[test]
