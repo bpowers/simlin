@@ -19,9 +19,11 @@
 // until `releaseKernel()`, which delivers them in order -- a long-running cell.
 // The kernel handler applies the protocol: a `snapshot` whose base equals the
 // current revision is accepted (traits pushed in one hold_sync, then a
-// `saved` reply), otherwise `rejected`.
+// `saved` reply), otherwise `rejected`; an `oversize` report gets the warn
+// notice pysimlin sends (`_widget_core.oversize_notice`) and nothing else.
 
 import type { AnyModel } from '../anywidget-model';
+import { MAX_SNAPSHOT_BYTES, formatSize } from '../widget-core';
 
 type Listener = (...args: unknown[]) => void;
 
@@ -246,6 +248,17 @@ export class FakeModel implements AnyModel {
       this.kernel.projectJson = json;
       this.kernelPush({ project_json: json, revision: this.kernel.revision });
       this.kernelSend({ type: 'saved', revision: this.kernel.revision });
+      return;
+    }
+    if (msg.content.type === 'oversize') {
+      const bytes = msg.content.bytes as number;
+      const limit =
+        typeof this.state.max_snapshot_bytes === 'number' ? this.state.max_snapshot_bytes : MAX_SNAPSHOT_BYTES;
+      this.kernelSend({
+        type: 'notice',
+        level: 'warn',
+        text: `Edit not saved: the model is too large for the notebook connection (${formatSize(bytes)} > ${formatSize(limit)} limit); edit it from Python instead.`,
+      });
     }
     // `wasm` and unknown types are left to the individual test.
   }
@@ -259,6 +272,7 @@ export function defaultState(overrides: Record<string, unknown> = {}): Record<st
     height: 400,
     theme: 'light',
     read_only: false,
+    max_snapshot_bytes: MAX_SNAPSHOT_BYTES,
     ...overrides,
   };
 }

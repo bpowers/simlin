@@ -26,6 +26,7 @@ if (baseConfig) {
       MutationRecord: 'readonly',
       Node: 'readonly',
       Response: 'readonly',
+      TextEncoder: 'readonly',
     },
   };
 }

@@ -14,6 +14,7 @@ import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 
 import widget from './index';
 import { GLOBAL_KEY, resetEngineBootstrapForTests } from './engine-bootstrap';
+import { formatSize } from './widget-core';
 import { NOTICE_TIMEOUT_MS, SELECTION_DEBOUNCE_MS } from './WidgetApp';
 import { localJson, mounts, resetEditorMock } from './test-utils/editor-mock';
 import { readyCalls, resetEngineMock } from './test-utils/engine-mock';
@@ -372,6 +373,60 @@ describe('WidgetApp <-> model protocol', () => {
       model.releaseKernel();
     });
     await expect(first).resolves.toBe(4);
+  });
+
+  it('an edit whose snapshot exceeds max_snapshot_bytes is refused up front: oversize report, toast, unsaved, no hang', async () => {
+    // A tiny cap stands in for a huge model. The kernel would never see a
+    // snapshot above tornado's limit (the server closes the socket), so the
+    // widget must not send one: it reports `oversize`, resolves the save
+    // unsaved, and tells the user -- instead of waiting forever.
+    const model = new FakeModel(defaultState({ revision: 3, max_snapshot_bytes: 16 }));
+    await mount(model);
+    fireEvent.click(screen.getByText('edit'));
+    await waitFor(() => expect(mounts[0].saveResults).toEqual([undefined]));
+    // The reported size is the WIRE size: the snapshot JSON-escaped, which
+    // is what the frame carries (every quote in it costs an extra byte).
+    const bytes = new TextEncoder().encode(JSON.stringify(localJson(SEED, 1))).byteLength;
+    expect(bytes).toBeGreaterThan(new TextEncoder().encode(localJson(SEED, 1)).byteLength);
+    expect(bytes).toBeGreaterThan(16);
+    expect(model.snapshotsDelivered()).toEqual([]);
+    expect(model.sent).toEqual([{ type: 'oversize', bytes }]);
+    // The toast is the widget's own; the kernel's echoed notice has the same
+    // text, so the two collapse into one visible message.
+    const text = `Edit not saved: the model is too large for the notebook connection (${formatSize(bytes)} > 0 KiB limit); edit it from Python instead.`;
+    expect(screen.getByRole('status').textContent).toBe(text);
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+    // Nothing moved kernel-side, no remount, the Editor keeps its local
+    // edit and its acknowledged version.
+    expect(model.kernel.revision).toBe(3);
+    expect(model.sets).toEqual([]);
+    expect(mounts).toHaveLength(1);
+    expect(mounts[0].serverVersion).toBe(3);
+    // A later edit is refused the same way (no in-flight slot was left behind).
+    fireEvent.click(screen.getByText('edit'));
+    await waitFor(() => expect(mounts[0].saveResults).toEqual([undefined, undefined]));
+    expect(model.sent.filter((m) => (m as { type: string }).type === 'oversize')).toHaveLength(2);
+    // The kernel raises the cap (a redisplay with max_snapshot_bytes=...):
+    // the next edit goes out as a normal snapshot against the same base and
+    // is accepted -- the cap is read live, not captured at mount.
+    act(() => {
+      model.kernelPush({ max_snapshot_bytes: 1024 * 1024 });
+    });
+    fireEvent.click(screen.getByText('edit'));
+    await waitFor(() => expect(mounts[0].saveResults).toEqual([undefined, undefined, 4]));
+    expect(model.snapshotsDelivered()).toEqual([{ base: 3, json: localJson(SEED, 3) }]);
+    expect(mounts).toHaveLength(1);
+  });
+
+  it('a snapshot exactly at max_snapshot_bytes (wire size) is sent', async () => {
+    const json = localJson(SEED, 1);
+    const bytes = new TextEncoder().encode(JSON.stringify(json)).byteLength;
+    const model = new FakeModel(defaultState({ revision: 3, max_snapshot_bytes: bytes }));
+    await mount(model);
+    fireEvent.click(screen.getByText('edit'));
+    await waitFor(() => expect(mounts[0].saveResults).toEqual([4]));
+    expect(model.snapshotsDelivered()).toEqual([{ base: 3, json }]);
+    expect(screen.queryByRole('status')).toBeNull();
   });
 
   it('a notice custom message shows, restarts its timer on a repeat, then auto-hides', async () => {

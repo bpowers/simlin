@@ -25,7 +25,19 @@ Message-type x state table covered here (each row is a test):
     snapshot  | handler raises anywhere  -> rejected + warn notice (exactly one
                                             reply, always)
     snapshot  | malformed base/json      -> RuntimeWarning, rejected + warn notice
-    other     | unknown type             -> RuntimeWarning, nothing sent
+    oversize  | well-formed              -> RuntimeWarning on the kernel's stderr (a
+                                            comm handler runs outside any cell, so
+                                            JupyterLab shows it in the Log Console)
+                                            + the same warn notice the browser
+                                            toasted; no reply, project untouched
+    other     | unknown type / bad bytes -> RuntimeWarning, nothing sent
+
+Snapshot size (kernel -> browser direction has no limit; the browser refuses
+to send edits above ``max_snapshot_bytes``, measured on the JSON-escaped
+text as it rides in the message): a seed above the cap warns once, in the
+caller's frame (the user's cell); a push that crosses it warns once per
+widget; the trait is a positive integer defaulting to ``MAX_SNAPSHOT_BYTES``
+and ``Model.widget()`` passes an override through.
 
 Change-source x delivery table (kernel -> browser):
 
@@ -52,6 +64,7 @@ from comm.base_comm import BaseComm
 
 import simlin
 from simlin import Aux, ChangeEvent, Model, Project, SimlinAssetError
+from simlin._widget_core import MAX_SNAPSHOT_BYTES, snapshot_wire_size
 from simlin.widget import ModelWidget, WidgetAssets, resolve_assets
 
 if TYPE_CHECKING:
@@ -697,6 +710,8 @@ class TestMalformed:
         [
             {"type": "saved", "revision": 1},
             "hello",
+            {"type": "oversize"},
+            {"type": "oversize", "bytes": "big"},
         ],
     )
     def test_ignored_with_a_warning(
@@ -708,6 +723,168 @@ class TestMalformed:
             _from_browser(w, content)
         assert _sent(w) == []
         assert model.revision == 0
+
+
+# ── snapshot size ───────────────────────────────────────────────────────
+
+
+class TestSnapshotSize:
+    def test_default_cap_is_the_trait_and_is_seeded_to_the_browser(
+        self, model: Model, assets: WidgetAssets
+    ) -> None:
+        w = _widget(model, assets)
+        assert w.max_snapshot_bytes == MAX_SNAPSHOT_BYTES
+        opened = [d for t, d, _ in _comm(w).messages if t == "comm_open"]
+        assert opened[0] is not None
+        assert opened[0]["state"]["max_snapshot_bytes"] == MAX_SNAPSHOT_BYTES
+
+    def test_widget_method_passes_the_cap_through(
+        self, model: Model, use_assets: WidgetAssets
+    ) -> None:
+        assert model.widget().max_snapshot_bytes == MAX_SNAPSHOT_BYTES
+        assert (
+            model.widget(max_snapshot_bytes=64 * 1024 * 1024).max_snapshot_bytes == 64 * 1024 * 1024
+        )
+
+    def test_seeding_a_project_above_the_cap_warns_once(
+        self, model: Model, assets: WidgetAssets
+    ) -> None:
+        # A tiny cap stands in for a huge model (repo rule: never build a
+        # fixture large enough to trip a production threshold). The cap is
+        # compared against the snapshot's WIRE size (JSON-escaped), the same
+        # measure the browser applies, not the raw text length.
+        raw = _project(model).serialize_json().decode("utf-8")
+        size = snapshot_wire_size(raw)
+        assert size > len(raw.encode("utf-8"))  # the model has quotes to escape
+        with pytest.warns(RuntimeWarning, match="will not be saved") as record:
+            w = _widget(model, assets, max_snapshot_bytes=size - 1)
+        assert len(record) == 1
+        text = str(record[0].message)
+        assert "websocket_max_message_size" in text
+        assert "max_snapshot_bytes" in text
+        # Attributed to the caller outside pysimlin -- this test's frame --
+        # so in a notebook it lands in the display cell's output.
+        assert record[0].filename == __file__
+        # The project still displays: the seed went out in full.
+        assert w.project_json == _project(model).serialize_json().decode("utf-8")
+        # A push after that (a Python edit) does not warn again for this widget.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with model.edit() as (_, patch):
+                patch.upsert(Aux(name="grows", equation="1"))
+
+    def test_seeding_at_the_cap_does_not_warn_and_a_push_across_it_warns_once(
+        self, model: Model, assets: WidgetAssets
+    ) -> None:
+        size = snapshot_wire_size(_project(model).serialize_json().decode("utf-8"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            w = _widget(model, assets, max_snapshot_bytes=size)
+        _drain(w)
+        with (
+            pytest.warns(RuntimeWarning, match="will not be saved") as record,
+            model.edit() as (_, patch),
+        ):
+            patch.upsert(Aux(name="grows", equation="1"))
+        assert len(record) == 1
+        assert record[0].filename == __file__
+        # The push itself is unaffected: the browser gets the full pair.
+        sent = _sent(w)
+        assert sent[0][0] == "update"
+        assert sent[0][1]["revision"] == 1
+        assert "grows" in sent[0][1]["project_json"]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with model.edit() as (_, patch):
+                patch.upsert(Aux(name="grows_more", equation="2"))
+
+    def test_display_path_warning_is_attributed_to_the_caller_too(
+        self, model: Model, use_assets: WidgetAssets, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Model._repr_mimebundle_ -> Model.widget -> ModelWidget: deeper than
+        # the direct construction above, and the warning must still name the
+        # user's frame, not model.py.
+        with pytest.warns(RuntimeWarning, match="will not be saved") as record:
+            model.widget(max_snapshot_bytes=16)
+        assert record[0].filename == __file__
+        # A bare display passes no cap: route the display's widget() call
+        # through a cap the fixture model trips (the constant is never
+        # lowered; only the argument this display would pass).
+        original_widget = Model.widget
+
+        def small_cap_widget(self: Model, **kwargs: Any) -> ModelWidget:
+            return original_widget(self, max_snapshot_bytes=16, **kwargs)
+
+        monkeypatch.setattr(Model, "widget", small_cap_widget)
+        with pytest.warns(RuntimeWarning, match="will not be saved") as record:
+            model._repr_mimebundle_()
+        assert record[0].filename == __file__
+
+    @pytest.mark.parametrize("bad", [0, -1, 1.5, "4096"])
+    def test_cap_must_be_a_positive_integer(
+        self, model: Model, assets: WidgetAssets, bad: object
+    ) -> None:
+        with pytest.raises(traitlets.TraitError):
+            _widget(model, assets, max_snapshot_bytes=bad)
+
+    def test_cap_rejects_bool(self, model: Model, assets: WidgetAssets) -> None:
+        # bool is an int in Python; True is never a byte count. The trait
+        # class refuses it (see ModelWidget.max_snapshot_bytes).
+        with pytest.raises(traitlets.TraitError):
+            _widget(model, assets, max_snapshot_bytes=True)
+
+    def test_seeding_below_the_default_cap_is_silent(
+        self, model: Model, assets: WidgetAssets
+    ) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _widget(model, assets)
+
+    def test_browser_oversize_report_warns_and_notices_without_a_reply(
+        self, model: Model, model_path: Path, assets: WidgetAssets
+    ) -> None:
+        w = _widget(model, assets)
+        before = model_path.read_bytes()
+        _drain(w)
+        with pytest.warns(RuntimeWarning, match="was not saved") as record:
+            _from_browser(w, {"type": "oversize", "bytes": 9_000_000})
+        assert len(record) == 1
+        assert "from Python" in str(record[0].message)
+        # One warn notice naming both sizes; no saved/rejected (nothing was
+        # in flight on the browser side) and no trait writes.
+        assert _sent(w) == [
+            (
+                "custom",
+                {
+                    "type": "notice",
+                    "level": "warn",
+                    "text": (
+                        "Edit not saved: the model is too large for the notebook connection "
+                        "(8.6 MiB > 8 MiB limit); edit it from Python instead."
+                    ),
+                },
+                None,
+            )
+        ]
+        assert model.revision == 0
+        assert model_path.read_bytes() == before
+
+    def test_oversize_notice_reports_the_widgets_own_cap(
+        self, model: Model, assets: WidgetAssets
+    ) -> None:
+        w = _widget(model, assets, max_snapshot_bytes=64 * 1024 * 1024)
+        _drain(w)
+        with pytest.warns(RuntimeWarning, match="64 MiB"):
+            _from_browser(w, {"type": "oversize", "bytes": 65 * 1024 * 1024})
+        assert "65 MiB > 64 MiB limit" in _sent(w)[0][1]["text"]
+
+    def test_small_caps_read_in_kib(self, model: Model, assets: WidgetAssets) -> None:
+        with pytest.warns(RuntimeWarning, match="will not be saved"):  # the seed, above 16 B
+            w = _widget(model, assets, max_snapshot_bytes=16)
+        _drain(w)
+        with pytest.warns(RuntimeWarning, match="1 KiB"):
+            _from_browser(w, {"type": "oversize", "bytes": 1024})
+        assert "(1 KiB > 0 KiB limit)" in _sent(w)[0][1]["text"]
 
 
 # ── kernel-originated changes ───────────────────────────────────────────

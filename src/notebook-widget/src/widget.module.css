@@ -28,11 +28,19 @@
   color: var(--color-error, #c62828);
 }
 
+/* Bottom-centre, above the Editor's own snackbar viewport (bottom: 8px, 40px
+   toasts) so a kernel notice and an Editor error toast stack rather than
+   overlap, and above the tool dial FAB (bottom-left, 56px tall, top edge at
+   72px) so a notice that wraps to two lines in a narrow cell clears it; the
+   search bar and details drawer own the top of the box, so anywhere along
+   the top edge would cover "Find in Model". */
 .notice {
   position: absolute;
-  top: 8px;
+  bottom: 80px;
   left: 50%;
   transform: translateX(-50%);
+  max-width: calc(100% - 32px);
+  text-align: center;
   z-index: 20;
   padding: 6px 12px;
   border-radius: 4px;

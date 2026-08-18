@@ -102,6 +102,15 @@ class FileWatcher:
     where inotify delivers nothing; and it adds no native wheel to
     ``pip install pysimlin``.
 
+    Why one thread per watched file rather than one shared poll thread:
+    an idle watcher is a ``stat`` plus a wake-up every ``interval``,
+    around a millisecond of CPU per second for twenty of them at the
+    default half-second interval (a kernel with twenty open models sits at
+    roughly 0.1% of a core), so sharing a thread would save nothing
+    measurable while coupling every project's lifetime, interval, and
+    error handling to a global.  Revisit only if a host shows hundreds of
+    concurrently watched files.
+
     Each tick stats the file and, when its ``(mtime, size, inode)``
     signature changed, reads the bytes and calls
     ``handler(watcher, data, hash)``.  The very first tick always reads and
