@@ -261,6 +261,13 @@
   overflow: hidden;
 }
 
+/* The root is focusable (tabindex=-1) purely so focus settles inside the
+   editor after a click on non-focusable chrome; it is not an interactive
+   control, so it never draws a focus ring. */
+.editor:focus {
+  outline: none;
+}
+
 .editorBg {
   width: 100%;
   height: 100%;

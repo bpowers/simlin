@@ -659,9 +659,21 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     return screenToCanvasPoint(x, y, zoom);
   };
 
+  // Move focus onto the canvas after a click. An <svg> can't take focus, so
+  // the focus target is the container div (tabindex=-1, no focus ring). Doing
+  // this rather than merely blurring the active element still takes focus away
+  // from a text field the user was typing in (its blur commits as before), but
+  // keeps focus -- and so the key events that follow -- INSIDE the editor
+  // rather than on <body>. The Editor's keyboard scoping resolves such events
+  // to this instance directly, and hosts that gate their own shortcuts on the
+  // event target (a notebook) see them land in the editor's subtree.
+  // preventScroll: a host page (notebook) may scroll; focusing must not jump it.
   const focusCanvas = (): void => {
-    // an SVG element can't actually be focused.  Instead, blur any _other_
-    // focused element.
+    const container = svgRef.current;
+    if (container && typeof container.focus === 'function') {
+      container.focus({ preventScroll: true });
+      return;
+    }
     if (typeof document !== 'undefined' && document && document.activeElement) {
       const activeElement = document.activeElement;
       if ('blur' in activeElement && typeof activeElement.blur === 'function') {
@@ -2855,7 +2867,12 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   // pointer callbacks resolve connector ends / persist the dragged-link arc).
 
   return (
-    <div style={{ height: '100%', width: '100%' }} ref={svgRef} className={`${styles.canvas} simlin-canvas`}>
+    <div
+      style={{ height: '100%', width: '100%' }}
+      ref={svgRef}
+      className={`${styles.canvas} ${styles.canvasContainer} simlin-canvas`}
+      tabIndex={-1}
+    >
       <svg
         viewBox={viewBox}
         preserveAspectRatio="xMinYMin"

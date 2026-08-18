@@ -243,3 +243,34 @@ describe('Canvas gestures: pointercancel mid-gesture (checklist 16)', () => {
     expect(h.callbacks.onMoveSelection.mock.calls[0][0]).toEqual({ x: -60, y: -60 });
   });
 });
+
+describe('Canvas gestures: focus after a click', () => {
+  // The <svg> itself cannot take focus, so after a click the Canvas moves focus
+  // onto its container div instead of merely blurring whatever was focused. This
+  // keeps focus (and thus the key events that follow) inside the editor -- the
+  // Editor's shortcut scoping and hosts that suppress their own shortcuts by
+  // event target (a notebook) both depend on it -- while still taking focus away
+  // from a text field the user was typing in.
+  it('a click on the empty canvas moves focus from an outside field onto the canvas container', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    input.focus();
+    expect(document.activeElement).toBe(input);
+
+    pointerDown(h.svg, 500, 500);
+    pointerUp(h.svg, 500, 500);
+
+    const canvasContainer = h.query('.simlin-canvas');
+    expect(document.activeElement).toBe(canvasContainer);
+    expect(canvasContainer?.getAttribute('tabindex')).toBe('-1');
+    input.remove();
+  });
+
+  it('a click on an element likewise settles focus on the canvas container', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    pointerDown(h.svg, 100, 100);
+    pointerUp(h.svg, 100, 100);
+    expect(document.activeElement).toBe(h.query('.simlin-canvas'));
+  });
+});

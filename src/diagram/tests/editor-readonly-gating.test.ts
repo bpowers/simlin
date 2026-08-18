@@ -280,11 +280,16 @@ describe('Editor readOnlyMode capability gate', () => {
     rs.restoreAllMocks();
   });
 
+  // The document-level shortcut listener only acts for the instance that most
+  // recently saw pointer/focus activity inside it (editor-key-scope.ts); these
+  // tests select through the Canvas contract rather than real pointer events,
+  // so press inside the root once, as the user's canvas click would have.
   function renderEditor(props: EditorProps = makeProps()): RenderResult {
     let result!: RenderResult;
     act(() => {
       result = render(React.createElement(Editor, props));
     });
+    fireEvent.pointerDown(result.container.firstElementChild as HTMLElement);
     return result;
   }
 
@@ -551,11 +556,14 @@ describe('Editor readOnlyMode flips (both directions)', () => {
     rs.restoreAllMocks();
   });
 
+  // Presses inside the root once so the document-level shortcut listener
+  // treats this as the active instance (see the note on the other renderEditor).
   function renderEditor(props: EditorProps): RenderResult {
     let result!: RenderResult;
     act(() => {
       result = render(React.createElement(Editor, props));
     });
+    fireEvent.pointerDown(result.container.firstElementChild as HTMLElement);
     return result;
   }
 
