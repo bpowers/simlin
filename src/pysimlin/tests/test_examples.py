@@ -11,6 +11,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -41,6 +42,16 @@ def test_example_runs(script: Path) -> None:
 NOTEBOOKS = sorted(EXAMPLES_DIR.glob("*.ipynb"))
 
 
+def _is_magic_cell(cell: dict[str, Any]) -> bool:
+    """A code cell whose first non-blank line is an IPython line/cell magic
+    (``%pip``, ``%%time``) or a shell escape (``!pip``): not Python."""
+    for line in "".join(cell["source"]).splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped.startswith(("%", "!"))
+    return False
+
+
 @pytest.mark.parametrize("notebook", NOTEBOOKS, ids=[n.stem for n in NOTEBOOKS])
 def test_example_notebook_is_clean_and_runs(notebook: Path) -> None:
     """Example notebooks are committed without outputs (so diffs stay
@@ -49,8 +60,14 @@ def test_example_notebook_is_clean_and_runs(notebook: Path) -> None:
     Executing the cells as one script -- rather than through nbclient and a
     kernel -- keeps this inside the dev extra; a bare ``m`` expression cell
     is then a no-op instead of a display, and the interactive rendering is
-    covered by the JupyterLab journey (``make e2e``), which also executes
-    the notebook headless in CI.
+    covered by the JupyterLab journey (``make e2e``) and ``make
+    export-check``, which execute ``notebook_editor.ipynb`` headless in CI.
+
+    Cells that are IPython magics or shell escapes (``%pip install ...`` in
+    the Colab quickstart) are not Python and are left out of the script:
+    they need a network and a kernel, and installing the released pysimlin
+    over the checkout under test would be wrong anyway.  Every other cell
+    of every example notebook must run against this checkout.
     """
     nb = json.loads(notebook.read_text(encoding="utf-8"))
     assert nb["nbformat"] == 4, f"{notebook.name}: expected nbformat 4"
@@ -61,7 +78,9 @@ def test_example_notebook_is_clean_and_runs(notebook: Path) -> None:
         assert cell["execution_count"] is None, (
             f"{notebook.name}: commit notebooks without execution counts"
         )
-    script = "\n\n".join("".join(cell["source"]) for cell in code_cells)
+    python_cells = [cell for cell in code_cells if not _is_magic_cell(cell)]
+    assert python_cells, f"{notebook.name}: no Python code cells"
+    script = "\n\n".join("".join(cell["source"]) for cell in python_cells)
     result = subprocess.run(
         [sys.executable, "-c", script],
         cwd=str(EXAMPLES_DIR),
@@ -75,3 +94,19 @@ def test_example_notebook_is_clean_and_runs(notebook: Path) -> None:
         f"--- stderr ---\n{result.stderr}"
     )
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("%pip install --quiet pysimlin", True),
+        ("\n  !pip install pysimlin\n", True),
+        ("%%time\nimport simlin", True),
+        ("import simlin  # % in a comment", False),
+        ("x = 5 % 2", False),
+        ("", False),
+        ("   \n", False),
+    ],
+)
+def test_is_magic_cell(source: str, expected: bool) -> None:
+    assert _is_magic_cell({"source": source.splitlines(keepends=True)}) is expected

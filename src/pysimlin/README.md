@@ -123,8 +123,11 @@ Complete, runnable programs live in
   opens a model file in a notebook, edits it in the interactive editor and
   from Python, and follows a change made by another tool -- the workflow for
   collaborating on a model with Claude Code.
+- [`colab_quickstart.ipynb`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/examples/colab_quickstart.ipynb)
+  is the same in Google Colab: `pip install`, build and open a model,
+  display the editor, simulate.
 
-All of them run in CI on every commit.
+All of them run in CI on every commit (the Colab notebook's `%pip` cell excepted).
 
 ## API Reference
 
@@ -329,6 +332,12 @@ print(model.selection)   # () until something is selected in a displayed editor
 `on_change` subscribers see editor saves as `source == "widget"`. With
 `read_only=True` the editor shows the diagram without accepting edits;
 `theme` is `"auto"` (follow the notebook), `"light"`, or `"dark"`.
+
+Host by host -- what is verified where, what to check, and the notes for
+Colab, VS Code, and marimo -- is
+[`docs/notebook-hosts.md`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/docs/notebook-hosts.md);
+[`examples/colab_quickstart.ipynb`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/examples/colab_quickstart.ipynb)
+is the two-minute Colab start.
 
 Each display creates a kernel-side widget that stays subscribed to the
 model until it is closed (`widget.close()`, or `simlin.ModelWidget.close_all()`);
