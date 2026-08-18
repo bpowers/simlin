@@ -422,12 +422,11 @@ fn discovery_arms_race_3party() {
     // Discovery mode
     let found = discover_loops_from_path(model_path);
 
-    // With per-stock reset, discovery finds all 8 loops: each stock
-    // starts with fresh per-node expansion budgets, so pairwise and
-    // three-way reinforcing loops are not starved by expansions consumed
-    // during earlier stocks' self-loop searches, and the
-    // canonical-rotation dedup retains both directions of the three-way
-    // loop as distinct paths.
+    // Discovery finds all 8: the union-graph enumeration emits every
+    // ever-simultaneously-active elementary cycle, so no loop can be
+    // starved by work spent on another, and the canonical-rotation dedup
+    // retains both directions of the three-way loop as distinct paths
+    // (issue #308).
     assert_eq!(
         found.len(),
         8,

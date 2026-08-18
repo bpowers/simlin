@@ -9,10 +9,16 @@
 //!
 //! For each model (positional args; defaults to C-LEARN v77 and WRLD3-03):
 //! compile with LTM discovery, simulate once, then run
-//! `discover_loops_with_candidate_gen` under each generator and report loop
-//! counts, the completeness/truncation flags, and per-phase timing. This is
-//! the timing instrument; recall of the exact enumeration is a separate
-//! question and a separate harness.
+//! `discover_loops_with_candidate_gen` under each generator and report the
+//! wall clock, the candidate/retained/reported counts, and the
+//! completeness/truncation flags. It also reports the STOCKLESS share of each
+//! run's reported loops -- loops whose stock list is empty, and loops with no
+//! parent-level cycle partition (`NormGroup::Solo`) -- because "keep stockless
+//! multi-node cycles" is a standing design decision
+//! (docs/design/ltm--loops-that-matter.md, "Stockless cycles") that only a
+//! measurement on real models can keep honest. This is the timing and
+//! composition instrument; recall of the exact enumeration is a separate
+//! question and a separate harness (`ltm_fallback_eval`).
 //!
 //! Usage:
 //!   cargo run --release --example ltm_discovery_bench [model.mdl ...]
@@ -156,7 +162,52 @@ fn main() {
                 found.truncated,
                 found.agg_recovery_truncated,
             );
+            report_stockless(&found);
         }
         println!();
+    }
+}
+
+/// Report the stockless composition of a discovery result.
+///
+/// Two counts, deliberately separate because they answer different questions:
+/// a loop with an empty stock list has no state a modeller can point at in the
+/// parent model (its state hides in a module level or in a `PREVIOUS` lag),
+/// while a loop with `partition == None` is one whose stocks resolve to no
+/// parent-level cycle partition -- so it normalizes against itself
+/// (`NormGroup::Solo`) and its relative score is +/-1 by construction. Every
+/// stockless loop is Solo, but a loop CAN carry stocks and still be Solo (a
+/// pure module-internal loop whose stocks are namespaced inside the module).
+///
+/// A few examples are printed with their link count and node cycle so the
+/// numbers can be judged rather than only counted.
+fn report_stockless(found: &simlin_engine::ltm_finding::DiscoveryResult) {
+    let stockless: Vec<&simlin_engine::ltm_finding::FoundLoop> = found
+        .loops
+        .iter()
+        .filter(|fl| fl.loop_info.stocks.is_empty())
+        .collect();
+    let solo = found
+        .loops
+        .iter()
+        .filter(|fl| fl.partition.is_none())
+        .count();
+    println!(
+        "      stockless {:>4} | no partition (Solo) {:>4} of {} reported",
+        stockless.len(),
+        solo,
+        found.loops.len()
+    );
+    for fl in stockless.iter().take(5) {
+        let nodes: Vec<&str> = fl.loop_info.links.iter().map(|l| l.from.as_str()).collect();
+        println!(
+            "        {} ({} links): {}",
+            fl.loop_info.id,
+            fl.loop_info.links.len(),
+            nodes.join(" -> ")
+        );
+    }
+    if stockless.len() > 5 {
+        println!("        ... {} more", stockless.len() - 5);
     }
 }

@@ -234,11 +234,13 @@ impl FallbackConfig {
     /// space against the exact enumeration on World3 and C-LEARN, and this is
     /// the best point in it subject to the fallback staying under half the
     /// exact run's time. Closing on every edge is what earns its place --
-    /// World3's recall of the exact top-200 goes from 7 to 23 and C-LEARN's
-    /// from 97 of 153 to 150, for 0.14 s and 0.15 s against exact runs of
-    /// 0.40 s and (C-LEARN's own budget) 0.2 s. Seeding every node of the
+    /// World3's recall of the exact top-200 goes from 8 to 31 (and its
+    /// step-dominant coverage from 34 to 50 of 399 competing (group, step)
+    /// pairs) and C-LEARN's from 97 of 153 to 150 (750 of 750 pairs), for
+    /// 0.14 s and 0.15 s against exact runs of 0.40 s and (C-LEARN's own
+    /// budget) 0.2 s. Seeding every node of the
     /// cyclic core instead recovers a little more and costs 1.03 s on World3,
-    /// so it does not; the design doc's "Measured" section holds the table.
+    /// so it does not; the design plan's "Measured" section holds the table.
     pub const DEFAULT: FallbackConfig = FallbackConfig {
         weight: FallbackWeight::DEFAULT,
         seeds: FallbackSeeds::StocksAndStocklessSccs,

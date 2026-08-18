@@ -152,8 +152,8 @@ fn default_weight_is_clamped_log_abs() {
 /// best, and each axis is pinned to the row that settled it.
 ///
 /// The measurement, on World3 and C-LEARN against the exact enumeration:
-/// closing on every edge lifts World3's recall of the exact top-200 from 7 to
-/// 23 and C-LEARN's from 97 of 153 to 150, at 0.14 s and 0.15 s against a
+/// closing on every edge lifts World3's recall of the exact top-200 from 8 to
+/// 31 and C-LEARN's from 97 of 153 to 150, at 0.14 s and 0.15 s against a
 /// 0.40 s exact World3 run; seeding every node of the cyclic core reaches a
 /// little more still and costs 1.03 s on World3, which is more than the exact
 /// enumeration it stands in for, so it stays available and unused.
