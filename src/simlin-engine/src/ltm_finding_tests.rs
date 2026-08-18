@@ -3559,7 +3559,7 @@ fn enumeration_budget_trip_falls_back_to_dfs() {
     ]);
     let dfs = discover_project(&project, CandidateGen::DfsOnly);
 
-    let _guard = EnumBudgetGuard::new(1, u64::MAX);
+    let _guard = EnumBudgetGuard::new(1, u64::MAX, u64::MAX);
     let auto = discover_project(&project, CandidateGen::Auto);
     assert!(
         !auto.enumeration_complete,
@@ -3657,6 +3657,60 @@ fn external_totals_are_used_for_partition_denominators() {
     assert_eq!(loops[0].rel_scores, vec![0.25, 0.25]);
 }
 
+/// Hand-built `Results` for the enumerator / retention unit tests: one result
+/// slot per link offset (so `offset == slot`), `step_count` saved steps, values
+/// supplied row-major as `data[step * n_offsets + offset]`.
+///
+/// Step 0 is whatever the caller left there, and every fixture below leaves it
+/// zero: link scores are `PREVIOUS`-based, so a real run's step 0 is
+/// startup-degenerate and carries no signal (measured on World3 and C-LEARN --
+/// every union edge's step-0 value is exactly 0).
+fn enum_results(n_offsets: usize, step_count: usize, data: Vec<f64>) -> Results {
+    assert_eq!(
+        data.len(),
+        n_offsets * step_count,
+        "fixture data is row-major"
+    );
+    Results {
+        offsets: HashMap::new(),
+        data: data.into_boxed_slice(),
+        step_size: n_offsets,
+        step_count,
+        specs: crate::results::Specs {
+            start: 0.0,
+            stop: (step_count - 1) as f64,
+            dt: 1.0,
+            save_step: 1.0,
+            method: crate::results::Method::Euler,
+            n_chunks: step_count,
+        },
+        is_vensim: false,
+    }
+}
+
+/// The sorted node-name sets of the retention survivors, for readable
+/// assertions about which circuits were kept.
+fn survivor_node_sets(
+    outcome: &super::enum_gen::RetentionOutcome,
+    candidates: &super::enum_gen::EnumeratedCandidates,
+    activity: &super::enum_gen::ActivityGraph,
+    search: &IndexedSearch,
+) -> Vec<Vec<String>> {
+    outcome
+        .survivors
+        .iter()
+        .map(|&ci| {
+            let mut names: Vec<String> = activity
+                .circuit_nodes(candidates.circuit(ci))
+                .iter()
+                .map(|&n| search.idents[n as usize].as_str().to_string())
+                .collect();
+            names.sort();
+            names
+        })
+        .collect()
+}
+
 /// Direct unit coverage of the retention pass's three arms: a loop below
 /// MIN_CONTRIBUTION of its partition's total at every step is dropped; a
 /// module-traversing loop is kept unconditionally; a Solo (no-stock) loop is
@@ -3682,37 +3736,23 @@ fn retention_pass_drops_below_threshold_keeps_module_and_solo() {
         ((Ident::new("d"), Ident::new("e")), 4),
         ((Ident::new("e"), Ident::new("d")), 5),
     ];
-    let step_size = 6;
+    let n_offsets = 6;
     let step_count = 2;
-    let mut data = vec![0.0f64; step_size * step_count];
+    let mut data = vec![0.0f64; n_offsets * step_count];
     // step 1 values:
-    data[step_size] = 1.0; // a->b
-    data[step_size + 1] = 1.0; // b->a
-    data[step_size + 2] = 1e-4; // a->c
-    data[step_size + 3] = 1e-4; // c->a  (product 1e-8)
-    data[step_size + 4] = 0.5; // d->e
-    data[step_size + 5] = 0.5; // e->d
-    let results = Results {
-        offsets: HashMap::new(),
-        data: data.into_boxed_slice(),
-        step_size,
-        step_count,
-        specs: crate::results::Specs {
-            start: 0.0,
-            stop: 1.0,
-            dt: 1.0,
-            save_step: 1.0,
-            method: crate::results::Method::Euler,
-            n_chunks: 1,
-        },
-        is_vensim: false,
-    };
+    data[n_offsets] = 1.0; // a->b
+    data[n_offsets + 1] = 1.0; // b->a
+    data[n_offsets + 2] = 1e-4; // a->c
+    data[n_offsets + 3] = 1e-4; // c->a  (product 1e-8)
+    data[n_offsets + 4] = 0.5; // d->e
+    data[n_offsets + 5] = 0.5; // e->d
+    let results = enum_results(n_offsets, step_count, data);
     let stocks = stock_list(&["a"]);
     let search = IndexedSearch::build(&link_offsets, &stocks);
     let activity = super::enum_gen::ActivityGraph::build(&search, &results);
     let candidates = super::enum_gen::enumerate_active_circuits(&activity, None);
     assert!(candidates.complete);
-    assert_eq!(candidates.circuits.len(), 3, "three 2-cycles");
+    assert_eq!(candidates.len(), 3, "three 2-cycles");
 
     // Node metadata: `a` is a stock in partition 0; no modules.
     let stock_partition: Vec<Option<usize>> = search
@@ -3722,26 +3762,14 @@ fn retention_pass_drops_below_threshold_keeps_module_and_solo() {
         .collect();
     let no_modules = vec![false; search.idents.len()];
     let outcome = super::enum_gen::retain_circuits(
-        &candidates.circuits,
+        &candidates,
         &activity,
-        &results,
         &stock_partition,
         &no_modules,
         None,
     )
     .unwrap();
-    let survivor_nodes: Vec<Vec<String>> = outcome
-        .survivors
-        .iter()
-        .map(|&ci| {
-            let mut v: Vec<String> = candidates.circuits[ci]
-                .iter()
-                .map(|&n| search.idents[n as usize].as_str().to_string())
-                .collect();
-            v.sort();
-            v
-        })
-        .collect();
+    let survivor_nodes = survivor_node_sets(&outcome, &candidates, &activity, &search);
     assert!(
         survivor_nodes.contains(&vec!["a".to_string(), "b".to_string()]),
         "the dominant loop survives"
@@ -3761,15 +3789,9 @@ fn retention_pass_drops_below_threshold_keeps_module_and_solo() {
     // Same fixture with `c` marked as a module node: the tiny loop is kept
     // unconditionally (its final score may use the override series).
     let modules: Vec<bool> = search.idents.iter().map(|id| id.as_str() == "c").collect();
-    let outcome = super::enum_gen::retain_circuits(
-        &candidates.circuits,
-        &activity,
-        &results,
-        &stock_partition,
-        &modules,
-        None,
-    )
-    .unwrap();
+    let outcome =
+        super::enum_gen::retain_circuits(&candidates, &activity, &stock_partition, &modules, None)
+            .unwrap();
     assert_eq!(
         outcome.survivors.len(),
         3,
@@ -3777,13 +3799,192 @@ fn retention_pass_drops_below_threshold_keeps_module_and_solo() {
     );
 }
 
+/// Retention's totals and survivors are exactly the hand-computed products,
+/// on a fixture that carries every value class the scoring pass distinguishes:
+/// an ordinary finite loop, a loop with a zero link and a NaN link, and a loop
+/// too small to retain.
+///
+/// The expected totals are written as the same left-to-right accumulation the
+/// pass performs and compared for EXACT equality, so this pins bit-identity
+/// rather than approximate agreement -- the contiguous score rows and the
+/// activity-window restriction must not perturb a single ULP relative to
+/// multiplying the raw slab entries in traversal order.
+#[test]
+fn retention_totals_and_survivors_match_hand_computed_products() {
+    // a is the only stock, so all three 2-cycles share partition 0.
+    //   A = a<->b: 2 * 3 = 6 at steps 1..3
+    //   B = a<->c: a->c is 1 at step 1, exactly 0 at step 2, NaN at step 3,
+    //              so B is active only at step 1, where it scores 1 * 4 = 4
+    //   C = a<->d: 1e-4 * 1e-4 = 1e-8 at steps 1..3 -- never 0.1% of the total
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new("b")), 0),
+        ((Ident::new("b"), Ident::new("a")), 1),
+        ((Ident::new("a"), Ident::new("c")), 2),
+        ((Ident::new("c"), Ident::new("a")), 3),
+        ((Ident::new("a"), Ident::new("d")), 4),
+        ((Ident::new("d"), Ident::new("a")), 5),
+    ];
+    let n_offsets = 6;
+    let step_count = 4;
+    let mut data = vec![0.0f64; n_offsets * step_count];
+    for step in 1..step_count {
+        let base = step * n_offsets;
+        data[base] = 2.0; // a->b
+        data[base + 1] = 3.0; // b->a
+        data[base + 2] = match step {
+            1 => 1.0,
+            2 => 0.0,
+            _ => f64::NAN,
+        }; // a->c
+        data[base + 3] = 4.0; // c->a
+        data[base + 4] = 1e-4; // a->d
+        data[base + 5] = 1e-4; // d->a
+    }
+    let results = enum_results(n_offsets, step_count, data);
+    let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results);
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None);
+    assert!(candidates.complete);
+    assert_eq!(candidates.len(), 3);
+
+    let stock_partition: Vec<Option<usize>> = search
+        .idents
+        .iter()
+        .map(|id| (id.as_str() == "a").then_some(0))
+        .collect();
+    let no_modules = vec![false; search.idents.len()];
+    let outcome = super::enum_gen::retain_circuits(
+        &candidates,
+        &activity,
+        &stock_partition,
+        &no_modules,
+        None,
+    )
+    .unwrap();
+
+    // Circuits are emitted min-root-first in adjacency order, so partition 0's
+    // totals accumulate A, then B, then C.
+    let totals = &outcome.partition_totals[&0];
+    assert_eq!(totals[0], 0.0, "step 0 carries no signal");
+    assert_eq!(totals[1], ((0.0f64 + 6.0) + 4.0) + 1e-8);
+    assert_eq!(
+        totals[2],
+        (0.0f64 + 6.0) + 1e-8,
+        "B's zero link adds nothing"
+    );
+    assert_eq!(totals[3], (0.0f64 + 6.0) + 1e-8, "B's NaN step is excluded");
+
+    let mut survivors = survivor_node_sets(&outcome, &candidates, &activity, &search);
+    survivors.sort();
+    assert_eq!(
+        survivors,
+        vec![
+            vec!["a".to_string(), "b".to_string()],
+            vec!["a".to_string(), "c".to_string()],
+        ],
+        "A (0.6 of the total) and B (0.4 at step 1) are retained; C peaks at \
+         1e-9 of the total and is not"
+    );
+}
+
+/// AC4.1: a circuit whose running product overflows to `Inf` and then meets a
+/// `0` link has a NaN score at that step with no NaN link anywhere.
+///
+/// Testing the LINKS for NaN -- which is what a short-circuiting product does
+/// -- calls that step a number, and `Inf * 0` then enters the partition total
+/// as `NaN.abs()`, poisoning the denominator for every sibling loop at that
+/// step for the rest of the run. Testing the finished PRODUCT is what makes
+/// the step behave like any other NaN: no mass, no retention, and the
+/// partition's other loops keep a finite relative score there.
+#[test]
+fn an_inf_times_zero_product_is_excluded_from_totals_and_retention() {
+    // X = a->b->c->a, whose first two links multiply to +Inf, and whose third
+    //     is exactly 0 at step 2 (so X is active at steps 1 and 3, and step 2
+    //     falls inside its activity window).
+    // Y = a<->d, a finite sibling in the same partition.
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new("b")), 0),
+        ((Ident::new("b"), Ident::new("c")), 1),
+        ((Ident::new("c"), Ident::new("a")), 2),
+        ((Ident::new("a"), Ident::new("d")), 3),
+        ((Ident::new("d"), Ident::new("a")), 4),
+    ];
+    let n_offsets = 5;
+    let step_count = 4;
+    let mut data = vec![0.0f64; n_offsets * step_count];
+    for step in 1..step_count {
+        let base = step * n_offsets;
+        data[base] = 1e300; // a->b
+        data[base + 1] = 1e300; // b->c  (product overflows to +Inf)
+        data[base + 2] = if step == 2 { 0.0 } else { 1.0 }; // c->a
+        data[base + 3] = 5.0; // a->d
+        data[base + 4] = 1.0; // d->a
+    }
+    let results = enum_results(n_offsets, step_count, data);
+    let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results);
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None);
+    assert!(candidates.complete);
+    assert_eq!(candidates.len(), 2, "the triangle and the 2-cycle");
+
+    let stock_partition: Vec<Option<usize>> = search
+        .idents
+        .iter()
+        .map(|id| (id.as_str() == "a").then_some(0))
+        .collect();
+    let no_modules = vec![false; search.idents.len()];
+    let outcome = super::enum_gen::retain_circuits(
+        &candidates,
+        &activity,
+        &stock_partition,
+        &no_modules,
+        None,
+    )
+    .unwrap();
+
+    let totals = &outcome.partition_totals[&0];
+    assert_eq!(
+        totals[2], 5.0,
+        "the Inf*0 step contributes nothing, so the total is Y's mass alone"
+    );
+    assert!(
+        totals[1].is_infinite() && totals[3].is_infinite(),
+        "an Inf score is real divergent signal and stays in the total"
+    );
+    // Y's relative score at the poisoned step is finite and well-defined.
+    assert_eq!(5.0 / totals[2], 1.0);
+
+    let survivors = survivor_node_sets(&outcome, &candidates, &activity, &search);
+    assert_eq!(
+        survivors,
+        vec![vec!["a".to_string(), "d".to_string()]],
+        "X cannot satisfy retention: NaN at step 2, and Inf/Inf = NaN at 1 and 3"
+    );
+}
+
 /// Enumerator unit: min-root canonical emission (each cycle exactly once,
-/// path starting at its minimum node id), self-edge exclusion, and the
-/// visit-budget trip reporting incomplete.
+/// path starting at its minimum node id) and self-edge exclusion.
 #[test]
 fn enumerator_emits_each_active_cycle_exactly_once() {
-    // Triangle a->b->c->a, its reverse a->c'->b'->a via distinct nodes
-    // (u->v->w->u), and a self-loop z->z; all active at step 1.
+    let (activity, _search) = two_triangles_and_a_self_edge();
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None);
+    assert!(candidates.complete);
+    assert_eq!(
+        candidates.len(),
+        2,
+        "two triangles; the active z->z self-edge yields no circuit"
+    );
+    for i in 0..candidates.len() {
+        let nodes = activity.circuit_nodes(candidates.circuit(i));
+        assert_eq!(nodes.len(), 3, "both circuits are triangles");
+        let min = nodes.iter().min().unwrap();
+        assert_eq!(nodes[0], *min, "canonical min-root rotation");
+    }
+}
+
+/// Two disjoint triangles (a->b->c->a, u->v->w->u) plus an active self-edge
+/// z->z, all active at step 1. Six union edges, two circuits, six edge rows.
+fn two_triangles_and_a_self_edge() -> (super::enum_gen::ActivityGraph, IndexedSearch) {
     let link_offsets: Vec<LinkOffset> = vec![
         ((Ident::new("a"), Ident::new("b")), 0),
         ((Ident::new("b"), Ident::new("c")), 1),
@@ -3793,44 +3994,223 @@ fn enumerator_emits_each_active_cycle_exactly_once() {
         ((Ident::new("w"), Ident::new("u")), 5),
         ((Ident::new("z"), Ident::new("z")), 6),
     ];
-    let step_size = 7;
+    let n_offsets = 7;
     let step_count = 2;
-    let mut data = vec![0.0f64; step_size * step_count];
-    for i in 0..7 {
-        data[step_size + i] = 1.0;
+    let mut data = vec![0.0f64; n_offsets * step_count];
+    for slot in data.iter_mut().skip(n_offsets).take(n_offsets) {
+        *slot = 1.0;
     }
-    let results = Results {
-        offsets: HashMap::new(),
-        data: data.into_boxed_slice(),
-        step_size,
-        step_count,
-        specs: crate::results::Specs {
-            start: 0.0,
-            stop: 1.0,
-            dt: 1.0,
-            save_step: 1.0,
-            method: crate::results::Method::Euler,
-            n_chunks: 1,
-        },
-        is_vensim: false,
-    };
+    let results = enum_results(n_offsets, step_count, data);
     let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
     let activity = super::enum_gen::ActivityGraph::build(&search, &results);
-    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None);
-    assert!(candidates.complete);
-    assert_eq!(
-        candidates.circuits.len(),
-        2,
-        "two triangles; the active z->z self-edge yields no circuit"
+    (activity, search)
+}
+
+/// Every enumeration budget reports an incomplete enumeration when it trips:
+/// the circuit count, the edge-visit count, and -- AC3.3, the memory bound --
+/// the total emitted edge rows.
+///
+/// The fourth stop condition, an expired wall-clock deadline, is deliberately
+/// not covered here: the clock is read only every `DEADLINE_CHECK_INTERVAL`
+/// visits, so a fixture small enough for this test's time budget never reaches
+/// a check. It needs a fixture sized to the interval, which the discovery
+/// deadline tests own.
+#[test]
+fn each_enumeration_budget_arm_reports_incomplete() {
+    let (activity, _search) = two_triangles_and_a_self_edge();
+    assert!(
+        super::enum_gen::enumerate_active_circuits(&activity, None).complete,
+        "the fixture completes when nothing is overridden"
     );
-    for c in &candidates.circuits {
-        assert_eq!(c.len(), 3, "both circuits are triangles");
-        let min = c.iter().min().unwrap();
-        assert_eq!(c[0], *min, "canonical min-root rotation");
+
+    for (arm, circuits, visits, edge_rows) in [
+        ("circuit budget", 1usize, u64::MAX, u64::MAX),
+        ("visit budget", usize::MAX, 1u64, u64::MAX),
+        ("edge-row budget", usize::MAX, u64::MAX, 1u64),
+    ] {
+        let _guard = EnumBudgetGuard::new(circuits, visits, edge_rows);
+        let truncated = super::enum_gen::enumerate_active_circuits(&activity, None);
+        assert!(
+            !truncated.complete,
+            "a tripped {arm} must report an incomplete enumeration"
+        );
+    }
+}
+
+/// The enumerator's two exactness claims -- min-root canonicalization (every
+/// cycle emitted exactly once) and the per-root induced-SCC restriction
+/// (Johnson's `A_k`, which refuses branches that provably cannot return to the
+/// root) -- are properties no single fixture can establish, since both are
+/// about circuits that must NOT be missed or duplicated.
+///
+/// Compare against a brute-force reference on pseudorandom graphs: every
+/// elementary cycle, walked with no pruning of any kind from every start node,
+/// filtered to those simultaneously active at some saved step. The reference
+/// shares no code with the enumerator, so it arbitrates both claims at once.
+#[test]
+fn enumerator_matches_brute_force_active_cycles_on_synthetic_graphs() {
+    // A dense 6-node core plus a sink-only node. No parallel edges: the union
+    // graph gives one row per (from, to) pair, which is what
+    // `parse_link_offsets` guarantees in production.
+    let names = ["a", "b", "c", "d", "e", "f"];
+    let mut edge_pairs: Vec<(&str, &str)> = Vec::new();
+    for &from in &names {
+        for &to in &names {
+            edge_pairs.push((from, to)); // self-edges included, and dropped
+        }
+    }
+    edge_pairs.push(("a", "g")); // a node with no outbound edges
+    let link_offsets: Vec<LinkOffset> = edge_pairs
+        .iter()
+        .enumerate()
+        .map(|(i, (from, to))| ((Ident::new(from), Ident::new(to)), i))
+        .collect();
+    let stocks = stock_list(&["a", "c", "e"]);
+
+    for seed in [1u64, 7, 42, 1000, 999_983] {
+        let results = synthetic_results(link_offsets.len(), 12, seed);
+        let search = IndexedSearch::build(&link_offsets, &stocks);
+        let activity = super::enum_gen::ActivityGraph::build(&search, &results);
+        let candidates = super::enum_gen::enumerate_active_circuits(&activity, None);
+        assert!(candidates.complete, "seed {seed} must enumerate fully");
+
+        let mut enumerated: Vec<Vec<String>> = (0..candidates.len())
+            .map(|ci| {
+                let nodes: Vec<String> = activity
+                    .circuit_nodes(candidates.circuit(ci))
+                    .iter()
+                    .map(|&n| search.idents[n as usize].as_str().to_string())
+                    .collect();
+                crate::ltm::canonical_rotation(&nodes)
+            })
+            .collect();
+        let before_dedup = enumerated.len();
+        enumerated.sort();
+        enumerated.dedup();
+        assert_eq!(
+            enumerated.len(),
+            before_dedup,
+            "seed {seed}: every cycle must be emitted exactly once"
+        );
+
+        let mut expected = brute_force_active_cycles(&results, &link_offsets);
+        expected.sort();
+        assert!(
+            !expected.is_empty(),
+            "seed {seed} fixture must produce cycles"
+        );
+        assert_eq!(
+            enumerated, expected,
+            "seed {seed}: the enumerated set must be the active-cycle universe"
+        );
+    }
+}
+
+/// Every elementary cycle (length >= 2) of the union edge set that is
+/// simultaneously active at some saved step in `1..step_count`, derived
+/// straight from the raw offsets and walked with no pruning: from every start
+/// node, extend every simple path and emit on return to the start.
+///
+/// Deliberately independent of the enumerator -- no min-root restriction, no
+/// SCC restriction, no running activity AND -- so it can arbitrate both.
+fn brute_force_active_cycles(results: &Results, link_offsets: &[LinkOffset]) -> Vec<Vec<String>> {
+    let step_count = results.step_count;
+    let mut nodes: Vec<String> = Vec::new();
+    let mut id_of: HashMap<String, usize> = HashMap::new();
+    let mut intern = |name: &str, nodes: &mut Vec<String>| -> usize {
+        *id_of.entry(name.to_string()).or_insert_with(|| {
+            nodes.push(name.to_string());
+            nodes.len() - 1
+        })
+    };
+
+    // Union edges: non-self pairs active at >= 1 step in 1..step_count.
+    let mut edges: Vec<(usize, usize, Vec<bool>)> = Vec::new();
+    for ((from, to), offset) in link_offsets {
+        if from == to {
+            continue;
+        }
+        let mut active = vec![false; step_count];
+        let mut any = false;
+        for (step, slot) in active.iter_mut().enumerate().skip(1) {
+            let value = results.data[step * results.step_size + offset];
+            if value != 0.0 && value.is_finite() || value.is_infinite() {
+                *slot = true;
+                any = true;
+            }
+        }
+        if any {
+            let f = intern(from.as_str(), &mut nodes);
+            let t = intern(to.as_str(), &mut nodes);
+            edges.push((f, t, active));
+        }
+    }
+    let n = nodes.len();
+    let mut adj: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
+    for (i, (from, to, _)) in edges.iter().enumerate() {
+        adj[*from].push((*to, i));
     }
 
-    // A 1-visit budget cannot finish and must say so.
-    let _guard = EnumBudgetGuard::new(usize::MAX, 1);
-    let truncated = super::enum_gen::enumerate_active_circuits(&activity, None);
-    assert!(!truncated.complete);
+    let mut found: Vec<Vec<String>> = Vec::new();
+    let mut on_path = vec![false; n];
+    let mut path: Vec<usize> = Vec::new();
+    let mut used: Vec<usize> = Vec::new();
+    for start in 0..n {
+        walk_simple_cycles(
+            start,
+            start,
+            &adj,
+            &edges,
+            step_count,
+            &mut on_path,
+            &mut path,
+            &mut used,
+            &mut nodes.clone(),
+            &mut found,
+        );
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// Recursive helper for [`brute_force_active_cycles`]: extend the simple path
+/// ending at `at`, emitting whenever it closes back on `start` with at least
+/// two nodes and at least one step where every used edge is active.
+#[allow(clippy::too_many_arguments)]
+fn walk_simple_cycles(
+    start: usize,
+    at: usize,
+    adj: &[Vec<(usize, usize)>],
+    edges: &[(usize, usize, Vec<bool>)],
+    step_count: usize,
+    on_path: &mut [bool],
+    path: &mut Vec<usize>,
+    used: &mut Vec<usize>,
+    nodes: &mut [String],
+    found: &mut Vec<Vec<String>>,
+) {
+    on_path[at] = true;
+    path.push(at);
+    for &(to, edge) in &adj[at] {
+        if to == start {
+            if path.len() >= 2 {
+                used.push(edge);
+                let active = (1..step_count).any(|t| used.iter().all(|&e| edges[e].2[t]));
+                if active {
+                    let names: Vec<String> = path.iter().map(|&n| nodes[n].clone()).collect();
+                    found.push(crate::ltm::canonical_rotation(&names));
+                }
+                used.pop();
+            }
+        } else if !on_path[to] {
+            used.push(edge);
+            walk_simple_cycles(
+                start, to, adj, edges, step_count, on_path, path, used, nodes, found,
+            );
+            used.pop();
+        }
+    }
+    path.pop();
+    on_path[at] = false;
 }

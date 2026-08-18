@@ -2706,9 +2706,8 @@ pub fn discover_loops_with_candidate_gen(
                 .map(|ident| causal_graph.module_graph(ident).is_some())
                 .collect();
             if let Some(retention) = retain_circuits(
-                &candidates.circuits,
+                &candidates,
                 &activity,
-                results,
                 &stock_partition_of_node,
                 &is_module_node,
                 deadline,
@@ -2717,9 +2716,33 @@ pub fn discover_loops_with_candidate_gen(
                 // same combinatorial core the DFS path uses below (GH #696).
                 // Stitching must see pre-retention circuits: a petal can fail
                 // retention while a stitched combination passes.
+                //
+                // Only a circuit visiting EXACTLY ONE synthetic agg node can be
+                // a petal, and `collect_agg_petals` needs node paths rather than
+                // the edge rows the enumerator emits, so the node paths are
+                // materialized for those circuits alone -- on a model carrying
+                // no agg node at all (every scalar model) that is none of them.
+                // Pre-filtering changes nothing `collect_agg_petals` would keep:
+                // it drops the same circuits itself, in the same order.
+                let is_agg_node: Vec<bool> = search
+                    .idents
+                    .iter()
+                    .map(|ident| crate::ltm_agg::is_synthetic_agg_name(ident.as_str()))
+                    .collect();
+                let petal_circuits: Vec<Vec<u32>> = if is_agg_node.contains(&true) {
+                    (0..candidates.len())
+                        .filter_map(|ci| {
+                            let nodes = activity.circuit_nodes(candidates.circuit(ci));
+                            let aggs = nodes.iter().filter(|&&n| is_agg_node[n as usize]).count();
+                            (aggs == 1).then_some(nodes)
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let (stitched, stitch_truncated) = {
                     let petals_by_agg =
-                        crate::db::collect_agg_petals(&candidates.circuits, |id: &u32| {
+                        crate::db::collect_agg_petals(&petal_circuits, |id: &u32| {
                             search.idents[*id as usize].as_str()
                         });
                     let mut sorted: Vec<(&str, Vec<crate::db::StitchPetal<u32>>)> =
@@ -2743,7 +2766,6 @@ pub fn discover_loops_with_candidate_gen(
                     accumulate_series_into_totals(
                         seq,
                         &activity,
-                        results,
                         &stock_partition_of_node,
                         &mut totals,
                     );
@@ -2758,7 +2780,7 @@ pub fn discover_loops_with_candidate_gen(
                     retention
                         .survivors
                         .iter()
-                        .map(|&ci| to_ident_path(&candidates.circuits[ci])),
+                        .map(|&ci| to_ident_path(&activity.circuit_nodes(candidates.circuit(ci)))),
                 );
                 all_paths.extend(stitched.iter().map(|seq| to_ident_path(seq)));
                 external_totals = Some(totals);

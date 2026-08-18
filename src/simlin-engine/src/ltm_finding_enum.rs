@@ -4,7 +4,7 @@
 
 //! Union-graph elementary-circuit enumeration: discovery mode's primary
 //! candidate generator (design:
-//! docs/design-plans/2026-08-10-ltm-discovery-union-enumeration.md).
+//! docs/design-plans/2026-08-17-ltm-discovery-exact.md).
 //!
 //! Mounted as a child of [`crate::ltm_finding`] via `#[path]` purely for the
 //! per-file line cap; everything here is `pub(super)` implementation detail of
@@ -30,6 +30,12 @@
 //! ([`crate::ltm::indexed`]) and `CausalGraph::order_variable_cycle` states as
 //! `vars.len() < 2`. Self-edges are therefore dropped from the union graph at
 //! build time rather than traversed and filtered later.
+//!
+//! Circuits are emitted as **edge-row sequences**, not node paths: a row
+//! indexes both the edge's activity bitset and its contiguous per-step score
+//! series, so retention scores a circuit without a single `(from, to)` lookup
+//! and without striding the results slab. Node paths are derived only where a
+//! consumer needs one ([`ActivityGraph::circuit_nodes`]).
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -45,12 +51,13 @@ use crate::results::Results;
 /// per-loop `loop_score` synthetic-variable emission (the 65,536 VM
 /// result-slot ceiling) and the `build_element_level_loops` materialization
 /// cliff, neither of which applies here -- an enumerated circuit is a compact
-/// `Vec<u32>` node path (World3's ever-simultaneously-active universe of
-/// ~150k circuits is ~30 MB; the ~330k figure is its cycle count WITHOUT the
-/// activity constraint, which this enumerator never materializes), and only
-/// retention survivors are materialized as `FoundLoop`s. The binding
-/// costs are the O(circuits x mean-length x steps) retention passes and the
-/// circuit storage itself, both linear in this budget.
+/// run of `u32` edge rows (World3's ever-simultaneously-active universe of
+/// ~150k circuits is ~25 MB of rows plus ~8 MB of activity bitsets; the ~330k
+/// figure sometimes quoted is its cycle count WITHOUT the activity constraint,
+/// which this enumerator never materializes), and only retention survivors are
+/// materialized as `FoundLoop`s. The binding costs are the
+/// O(edge-rows x active-steps) retention pass and the circuit storage itself,
+/// bounded by this constant together with [`MAX_DISCOVERY_ENUM_EDGE_ROWS`].
 pub(super) const MAX_DISCOVERY_ENUM_CIRCUITS: usize = 1_000_000;
 
 /// Maximum DFS edge-visits during enumeration.
@@ -65,24 +72,41 @@ pub(super) const MAX_DISCOVERY_ENUM_CIRCUITS: usize = 1_000_000;
 /// enumeration well under this bound.
 pub(super) const MAX_DISCOVERY_ENUM_VISITS: u64 = 100_000_000;
 
+/// Maximum total edge rows the enumerator may emit.
+///
+/// The circuit count bounds neither memory nor retention cost on its own: both
+/// scale with `circuits x mean circuit length`, and mean length is a property
+/// of the graph, not of the budget (World3's is ~42, so its ~150k circuits
+/// carry ~6.3M rows). This is the memory bound the design promises -- 20M rows
+/// is 80 MB of `u32` -- and it equally bounds the retention pass, whose work is
+/// linear in emitted rows.
+pub(super) const MAX_DISCOVERY_ENUM_EDGE_ROWS: u64 = 20_000_000;
+
+/// The three enumeration budgets: circuits, edge-visits, emitted edge rows.
+type EnumBudgets = (usize, u64, u64);
+
 #[cfg(test)]
 thread_local! {
     /// Test-only overrides, scoped by [`EnumBudgetGuard`] -- tiny fixtures
     /// exercise the budget-trip fallback instead of graphs large enough to
     /// trip the production constants (docs/dev/rust.md#test-time-budgets).
-    static ENUM_BUDGET_OVERRIDE: std::cell::Cell<Option<(usize, u64)>> =
+    static ENUM_BUDGET_OVERRIDE: std::cell::Cell<Option<EnumBudgets>> =
         const { std::cell::Cell::new(None) };
 }
 
-/// The effective (circuit, visit) budgets for enumeration.
-pub(super) fn enum_budgets() -> (usize, u64) {
+/// The effective (circuit, visit, edge-row) budgets for enumeration.
+pub(super) fn enum_budgets() -> EnumBudgets {
     #[cfg(test)]
     {
         if let Some(b) = ENUM_BUDGET_OVERRIDE.with(|c| c.get()) {
             return b;
         }
     }
-    (MAX_DISCOVERY_ENUM_CIRCUITS, MAX_DISCOVERY_ENUM_VISITS)
+    (
+        MAX_DISCOVERY_ENUM_CIRCUITS,
+        MAX_DISCOVERY_ENUM_VISITS,
+        MAX_DISCOVERY_ENUM_EDGE_ROWS,
+    )
 }
 
 /// RAII guard (test-only) overriding [`enum_budgets`] for the current thread.
@@ -90,13 +114,13 @@ pub(super) fn enum_budgets() -> (usize, u64) {
 /// override to the next test on the same thread.
 #[cfg(test)]
 pub(crate) struct EnumBudgetGuard {
-    prev: Option<(usize, u64)>,
+    prev: Option<EnumBudgets>,
 }
 
 #[cfg(test)]
 impl EnumBudgetGuard {
-    pub(crate) fn new(circuits: usize, visits: u64) -> Self {
-        let prev = ENUM_BUDGET_OVERRIDE.with(|c| c.replace(Some((circuits, visits))));
+    pub(crate) fn new(circuits: usize, visits: u64, edge_rows: u64) -> Self {
+        let prev = ENUM_BUDGET_OVERRIDE.with(|c| c.replace(Some((circuits, visits, edge_rows))));
         Self { prev }
     }
 }
@@ -110,38 +134,59 @@ impl Drop for EnumBudgetGuard {
 
 /// The union-of-active-edges graph: the discovery edge set restricted to
 /// non-self edges whose recorded |score| is nonzero (finite) at >= 1 saved
-/// step, each edge carrying a word-packed activity bitset over steps
-/// `1..step_count`.
+/// step in `1..step_count`, each edge carrying a word-packed activity bitset
+/// and a contiguous copy of its signed per-step score series.
 ///
-/// Node ids are [`IndexedSearch`]'s (the enumerated circuits index straight
-/// into its `idents`); edges here are unique per `(from, to)` because
-/// `parse_link_offsets` dedupes and sorts its output.
+/// Node ids are [`IndexedSearch`]'s (the enumerated circuits' node paths index
+/// straight into its `idents`); edges here are unique per `(from, to)` because
+/// `parse_link_offsets` dedupes and sorts its output, so an edge row is a
+/// complete identity for a `(from, to)` pair.
 pub(super) struct ActivityGraph {
     /// Per-node outbound edges: `(to, edge_row)`, in `IndexedSearch` order.
-    pub adj: Vec<Vec<(u32, u32)>>,
-    /// Flat per-edge activity bitsets: edge_row * words .. +words. Bit `t-1`
-    /// is set when the edge's |score| at saved step `t` is finite nonzero
-    /// (step 0 is skipped: scores there are NaN by construction, matching the
-    /// per-step DFS's `1..step_count` sweep).
+    adj: Vec<Vec<(u32, u32)>>,
+    /// Per-node inbound neighbours, for the per-root induced-SCC computation.
+    radj: Vec<Vec<u32>>,
+    /// Flat per-edge activity bitsets: `edge_row * words .. +words`. Bit `t` is
+    /// set when the edge's score at saved step `t` is finite nonzero, or
+    /// infinite (a real divergent signal the totals keep; only NaN and exact 0
+    /// are inactive, matching `load_step_scores`' NaN->0-then-drop rule).
+    ///
+    /// Bit 0 is carried but never satisfies the enumerator's activity test:
+    /// step 0's link scores are startup-degenerate (`PREVIOUS` has no prior
+    /// value), so a cycle active only there is not a scorable loop. Carrying it
+    /// anyway is what keeps windowed scoring exact -- were step 0 ever active,
+    /// its mass would still reach the partition totals.
     bits: Vec<u64>,
     /// Words per edge bitset.
     words: usize,
-    /// Per-edge-row result-slab offset (for the retention scoring passes).
-    pub offsets: Vec<usize>,
+    /// Flat per-edge signed score series: `edge_row * step_count .. +step_count`.
+    /// Copied once from the results slab so every scoring pass reads
+    /// contiguously instead of striding by `step_size`.
+    series: Vec<f64>,
+    /// Number of saved steps (the stride of [`Self::series`]).
+    step_count: usize,
+    /// Per-edge-row source node, so a circuit's node path is O(1) per row.
+    edge_from: Vec<u32>,
     /// Per-node strongly-connected-component id of the union graph.
-    pub scc_of: Vec<u32>,
+    scc_of: Vec<u32>,
 }
 
 impl ActivityGraph {
-    /// Scan the results slab once and build the union graph + bitsets.
+    /// Scan the results slab once and build the union graph, its activity
+    /// bitsets, and its contiguous score rows.
     pub(super) fn build(search: &IndexedSearch, results: &Results) -> ActivityGraph {
         let n_nodes = search.node_count();
         let step_count = results.step_count;
-        let words = step_count.saturating_sub(1).div_ceil(64).max(1);
+        let words = step_count.div_ceil(64).max(1);
 
         let mut adj: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n_nodes];
+        let mut radj: Vec<Vec<u32>> = vec![Vec::new(); n_nodes];
         let mut bits: Vec<u64> = Vec::new();
-        let mut offsets: Vec<usize> = Vec::new();
+        let mut series: Vec<f64> = Vec::new();
+        let mut edge_from: Vec<u32> = Vec::new();
+
+        let mut edge_bits = vec![0u64; words];
+        let mut edge_series = vec![0.0f64; step_count];
 
         for (from, edges) in search.adj.iter().enumerate() {
             for edge in edges {
@@ -153,24 +198,26 @@ impl ActivityGraph {
                     // SCC structure, and the scoring rows alike.
                     continue;
                 }
-                let mut edge_bits = vec![0u64; words];
+                edge_bits.iter_mut().for_each(|w| *w = 0);
                 let mut any = false;
-                for step in 1..step_count {
+                for step in 0..step_count {
                     let value = results.data[step * results.step_size + edge.offset];
+                    edge_series[step] = value;
                     if value != 0.0 && value.is_finite() || value.is_infinite() {
-                        // Inf is "active" -- it is a real (divergent) signal
-                        // the totals keep; only NaN and exact 0 are inactive,
-                        // matching `load_step_scores`' NaN->0-then-drop rule.
-                        let t = step - 1;
-                        edge_bits[t / 64] |= 1u64 << (t % 64);
-                        any = true;
+                        edge_bits[step / 64] |= 1u64 << (step % 64);
+                        // Membership in the union graph is decided over
+                        // `1..step_count` only, so a step-0-only edge is
+                        // excluded exactly as the per-step DFS excludes it.
+                        any |= step >= 1;
                     }
                 }
                 if any {
-                    let row = offsets.len() as u32;
+                    let row = edge_from.len() as u32;
                     adj[from].push((edge.to, row));
+                    radj[edge.to as usize].push(from as u32);
                     bits.extend_from_slice(&edge_bits);
-                    offsets.push(edge.offset);
+                    series.extend_from_slice(&edge_series);
+                    edge_from.push(from as u32);
                 }
             }
         }
@@ -178,9 +225,12 @@ impl ActivityGraph {
         let scc_of = tarjan_scc_of(&adj, n_nodes);
         ActivityGraph {
             adj,
+            radj,
             bits,
             words,
-            offsets,
+            series,
+            step_count,
+            edge_from,
             scc_of,
         }
     }
@@ -189,6 +239,47 @@ impl ActivityGraph {
     fn edge_bits(&self, row: u32) -> &[u64] {
         let start = row as usize * self.words;
         &self.bits[start..start + self.words]
+    }
+
+    /// The edge row for `(from, to)`, or `None` when the pair is not a union
+    /// edge. The scan is over one node's out-edges, which stay small on real
+    /// models; nothing on the enumerated path needs it (rows are carried), only
+    /// the stitched cross-agg sequences, which arrive as node paths.
+    fn edge_row(&self, from: u32, to: u32) -> Option<u32> {
+        self.adj
+            .get(from as usize)?
+            .iter()
+            .find(|(t, _)| *t == to)
+            .map(|(_, row)| *row)
+    }
+
+    /// The node path of a circuit given its edge rows: node `i` is the source
+    /// of row `i`, and the closing row's target is node 0.
+    pub(super) fn circuit_nodes(&self, rows: &[u32]) -> Vec<u32> {
+        rows.iter()
+            .map(|&row| self.edge_from[row as usize])
+            .collect()
+    }
+
+    /// The half-open saved-step range `[lo, hi)` spanning every step at which
+    /// the circuit whose activity AND is `and_bits` can be nonzero.
+    ///
+    /// Outside it at least one link is exactly 0 or NaN, so the circuit's score
+    /// is 0 or NaN there: it adds no mass to a partition total and can satisfy
+    /// no retention threshold, whichever it is. Restricting scoring to this
+    /// window is therefore exact, and on World3 it is a 5x reduction (a mean
+    /// window of 79 steps out of 401).
+    fn active_window(&self, and_bits: &[u64]) -> (usize, usize) {
+        let Some(first) = and_bits.iter().position(|w| *w != 0) else {
+            return (0, 0);
+        };
+        let last = and_bits
+            .iter()
+            .rposition(|w| *w != 0)
+            .expect("a nonzero word exists");
+        let lo = first * 64 + and_bits[first].trailing_zeros() as usize;
+        let hi = last * 64 + (63 - and_bits[last].leading_zeros() as usize) + 1;
+        (lo, hi.min(self.step_count))
     }
 }
 
@@ -254,73 +345,203 @@ fn tarjan_scc_of(adj: &[Vec<(u32, u32)>], n_nodes: usize) -> Vec<u32> {
     scc_of
 }
 
+/// The per-root explorable node set: Johnson's `A_k`, the strongly-connected
+/// component containing `root` in the subgraph induced by the union-SCC nodes
+/// with id `>= root`.
+///
+/// Every elementary cycle whose minimum node is `root` lies entirely inside
+/// that component, so restricting the search to it is exact -- and it is what
+/// stops the min-root search from wandering down branches that provably cannot
+/// return to the root (two thirds of World3's 20M descents).
+///
+/// Membership is stamped with a per-root generation counter rather than
+/// cleared, so a root costs only the nodes and edges it actually reaches.
+struct RootScc {
+    generation: u32,
+    /// `reaches_from[v] == generation` iff `v` is reachable from the root.
+    reaches_from: Vec<u32>,
+    /// `reaches_to[v] == generation` iff `v` both reaches and is reachable from
+    /// the root -- i.e. `v` is in the root's induced SCC.
+    reaches_to: Vec<u32>,
+    stack: Vec<u32>,
+}
+
+impl RootScc {
+    fn new(n_nodes: usize) -> Self {
+        RootScc {
+            generation: 0,
+            reaches_from: vec![0; n_nodes],
+            reaches_to: vec![0; n_nodes],
+            stack: Vec::new(),
+        }
+    }
+
+    /// Recompute the explorable set for `root`. Returns `false` when the
+    /// component is trivial (fewer than two nodes), so no cycle is rooted here.
+    fn recompute(&mut self, graph: &ActivityGraph, root: u32) -> bool {
+        self.generation += 1;
+        let generation = self.generation;
+        let root_scc = graph.scc_of[root as usize];
+        // Only nodes at or above the root, inside the root's union SCC, can be
+        // on a cycle through it: min-root canonicalization supplies the first
+        // bound, the SCC of the whole union graph the second.
+        let admits = |v: u32| v >= root && graph.scc_of[v as usize] == root_scc;
+
+        self.reaches_from[root as usize] = generation;
+        self.stack.push(root);
+        while let Some(v) = self.stack.pop() {
+            for &(to, _) in &graph.adj[v as usize] {
+                if admits(to) && self.reaches_from[to as usize] != generation {
+                    self.reaches_from[to as usize] = generation;
+                    self.stack.push(to);
+                }
+            }
+        }
+
+        // Intersecting "reachable from root" with "reaches root" is exactly the
+        // root's strongly-connected component of the induced subgraph.
+        let mut size = 0usize;
+        self.reaches_to[root as usize] = generation;
+        self.stack.push(root);
+        while let Some(v) = self.stack.pop() {
+            size += 1;
+            for &from in &graph.radj[v as usize] {
+                if admits(from)
+                    && self.reaches_from[from as usize] == generation
+                    && self.reaches_to[from as usize] != generation
+                {
+                    self.reaches_to[from as usize] = generation;
+                    self.stack.push(from);
+                }
+            }
+        }
+        size >= 2
+    }
+
+    #[inline]
+    fn contains(&self, node: u32) -> bool {
+        self.reaches_to[node as usize] == self.generation
+    }
+}
+
 /// The outcome of a union-graph enumeration attempt.
+///
+/// Circuits are stored compressed-row style: one flat `rows` array holding
+/// every circuit's edge rows back to back, plus per-circuit bounds. That keeps
+/// the emitted set to a handful of amortized-growth allocations instead of one
+/// `Vec` per circuit, and makes [`MAX_DISCOVERY_ENUM_EDGE_ROWS`] a direct bound
+/// on its memory.
 pub(super) struct EnumeratedCandidates {
-    /// Elementary circuits as node-id paths, each starting at its minimum
-    /// node id (the canonical rotation, by construction of the min-root
-    /// search). Every path holds at least two nodes: the union graph carries
-    /// no self-edges.
-    pub circuits: Vec<Vec<u32>>,
-    /// `true` iff every branch was explored within the circuit/visit budgets
-    /// and the deadline -- the emitted set is then provably the complete
+    /// Every circuit's edge rows, concatenated in emission order.
+    rows: Vec<u32>,
+    /// Circuit `i` occupies `rows[starts[i]..starts[i + 1]]`; `starts[0] == 0`.
+    starts: Vec<usize>,
+    /// Flat per-circuit activity AND: circuit `i` occupies
+    /// `activity[i * words .. +words]`, the AND of its edges' activity bitsets
+    /// as of the emission point -- exactly the steps at which the whole circuit
+    /// is simultaneously active.
+    activity: Vec<u64>,
+    /// Words per activity bitset (matches the graph's).
+    words: usize,
+    /// `true` iff every branch was explored within the circuit/visit/edge-row
+    /// budgets and the deadline -- the emitted set is then provably the complete
     /// ever-simultaneously-active cycle universe of the recorded series.
     pub complete: bool,
 }
 
+impl EnumeratedCandidates {
+    fn new(words: usize) -> Self {
+        EnumeratedCandidates {
+            rows: Vec::new(),
+            starts: vec![0],
+            activity: Vec::new(),
+            words,
+            complete: true,
+        }
+    }
+
+    /// Append a circuit given the edge rows of its open path plus the row that
+    /// closes it, and the activity AND covering all of them.
+    fn push(&mut self, open_rows: &[u32], closing_row: u32, and_bits: &[u64]) {
+        debug_assert_eq!(and_bits.len(), self.words);
+        self.rows.extend_from_slice(open_rows);
+        self.rows.push(closing_row);
+        self.starts.push(self.rows.len());
+        self.activity.extend_from_slice(and_bits);
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.starts.len() - 1
+    }
+
+    /// The edge rows of circuit `i`, closing edge included.
+    pub(super) fn circuit(&self, i: usize) -> &[u32] {
+        &self.rows[self.starts[i]..self.starts[i + 1]]
+    }
+
+    /// The steps at which circuit `i` is simultaneously active, word-packed.
+    pub(super) fn activity_of(&self, i: usize) -> &[u64] {
+        &self.activity[i * self.words..][..self.words]
+    }
+
+    /// Total emitted edge rows -- the quantity [`MAX_DISCOVERY_ENUM_EDGE_ROWS`]
+    /// bounds.
+    fn total_rows(&self) -> usize {
+        self.rows.len()
+    }
+}
+
 /// Enumerate every elementary cycle of the union graph all of whose edges are
-/// simultaneously active at >= 1 saved step.
+/// simultaneously active at >= 1 saved step in `1..step_count`.
 ///
 /// Min-root Tiernan-style search: for each root `s` (ascending node id), walk
-/// simple paths over nodes `> s` within `s`'s SCC, maintaining the running AND
-/// of the path's edge-activity bitsets; a branch whose AND empties is pruned
-/// (no extension can ever score nonzero), and a cycle is emitted only when the
-/// AND including the closing edge is nonempty. Each cycle is emitted exactly
-/// once, rooted at its minimum node id.
+/// simple paths inside `s`'s induced-subgraph SCC (see [`RootScc`]),
+/// maintaining the running AND of the path's edge-activity bitsets; a branch
+/// whose AND empties is pruned (no extension can ever score nonzero), and a
+/// cycle is emitted only when the AND including the closing edge is nonempty.
+/// Each cycle is emitted exactly once, rooted at its minimum node id.
 ///
 /// Returns `complete == false` (with the partial circuit list, which the
-/// caller discards in favor of the DFS fallback) when the circuit budget, the
-/// visit budget, or `deadline` trips.
+/// caller discards in favor of the fallback) when the circuit budget, the
+/// visit budget, the edge-row budget, or `deadline` trips.
 pub(super) fn enumerate_active_circuits(
     graph: &ActivityGraph,
     deadline: Option<Instant>,
 ) -> EnumeratedCandidates {
-    let (max_circuits, max_visits) = enum_budgets();
+    let (max_circuits, max_visits, max_edge_rows) = enum_budgets();
     let n_nodes = graph.adj.len();
     let words = graph.words;
 
-    let mut circuits: Vec<Vec<u32>> = Vec::new();
+    let mut out = EnumeratedCandidates::new(words);
     let mut visits: u64 = 0;
 
     // Per-DFS state, reused across roots.
     let mut on_path = vec![false; n_nodes];
-    // path[d] is the node at depth d; and_stack[d] is the AND of the edge
-    // bitsets along path[0..=d] (depth 0 carries the all-ones "empty path"
-    // mask so the first edge ANDs against full).
-    let mut path: Vec<u32> = Vec::new();
-    let mut and_stack: Vec<u64> = Vec::new();
-    // Work stack of (node, next-edge-index) frames, paralleling `path`.
+    // `frames[d]` is (node at depth d, its next-edge index); `edge_path[d]` is
+    // the row of the edge from depth `d` to depth `d + 1`; `and_stack[d]` (a
+    // `words`-wide slice) is the AND of the edge bitsets along the path down to
+    // depth `d`, with depth 0 carrying the all-ones "empty path" mask so the
+    // first edge ANDs against full.
     let mut frames: Vec<(u32, usize)> = Vec::new();
+    let mut edge_path: Vec<u32> = Vec::new();
+    let mut and_stack: Vec<u64> = Vec::new();
 
-    let full_mask = vec![u64::MAX; words];
+    let mut explorable = RootScc::new(n_nodes);
 
     for root in 0..n_nodes as u32 {
-        let root_scc = graph.scc_of[root as usize];
-        // A root with no outbound union edges cannot start a cycle.
-        if graph.adj[root as usize].is_empty() {
+        if !explorable.recompute(graph, root) {
             continue;
         }
 
-        debug_assert!(path.is_empty() && frames.is_empty() && and_stack.is_empty());
-        path.push(root);
+        debug_assert!(frames.is_empty() && edge_path.is_empty() && and_stack.is_empty());
         on_path[root as usize] = true;
-        and_stack.extend_from_slice(&full_mask);
+        and_stack.resize(words, u64::MAX);
         frames.push((root, 0));
 
         'dfs: while !frames.is_empty() {
-            let depth = frames.len(); // path.len() == depth
+            let depth = frames.len();
             let (v, ei) = frames[depth - 1];
-            let vu = v as usize;
-            if let Some(&(to, row)) = graph.adj[vu].get(ei) {
+            if let Some(&(to, row)) = graph.adj[v as usize].get(ei) {
                 frames[depth - 1].1 += 1;
                 visits += 1;
                 if visits & (DEADLINE_CHECK_INTERVAL as u64 - 1) == 0
@@ -333,98 +554,71 @@ pub(super) fn enumerate_active_circuits(
                     break 'dfs;
                 }
 
-                // Only nodes >= root (min-root canonicalization) inside the
-                // root's SCC can be on a cycle through the root.
-                if to < root || graph.scc_of[to as usize] != root_scc {
+                // Nodes outside the root's induced SCC can never close a cycle
+                // through it, and a node already on the path would repeat.
+                if !explorable.contains(to) || (to != root && on_path[to as usize]) {
                     continue;
                 }
 
-                // Running AND of path activity with this edge.
-                let base = (depth - 1) * words;
+                // Running AND of the path's activity with this edge, written
+                // straight onto `and_stack` (truncated again unless we descend),
+                // so no per-visit allocation is needed at any bitset width.
+                let base = and_stack.len() - words;
                 let ebits = graph.edge_bits(row);
-                let mut nonzero = false;
-                // Compute into a small stack buffer first; only push on descent.
-                let mut new_and = [0u64; 8];
-                let use_heap = words > 8;
-                let mut heap_and: Vec<u64> = Vec::new();
-                if use_heap {
-                    heap_and.resize(words, 0);
-                }
-                for w in 0..words {
-                    let v_ = and_stack[base + w] & ebits[w];
-                    if use_heap {
-                        heap_and[w] = v_;
-                    } else {
-                        new_and[w] = v_;
-                    }
-                    nonzero |= v_ != 0;
+                and_stack.reserve(words);
+                // Step 0 is startup-degenerate, so it never makes a circuit
+                // scorable -- mask its bit out of the emptiness test while
+                // still carrying it, so windowed scoring stays exact.
+                let head = and_stack[base] & ebits[0];
+                let mut nonzero = head & !1u64 != 0;
+                and_stack.push(head);
+                for w in 1..words {
+                    let word = and_stack[base + w] & ebits[w];
+                    nonzero |= word != 0;
+                    and_stack.push(word);
                 }
                 if !nonzero {
                     // No step at which the whole path-plus-edge is active;
                     // neither this cycle closure nor any extension can score.
+                    and_stack.truncate(base + words);
                     continue;
                 }
 
                 if to == root {
-                    circuits.push(path.clone());
-                    if circuits.len() >= max_circuits {
+                    out.push(&edge_path, row, &and_stack[base + words..]);
+                    and_stack.truncate(base + words);
+                    if out.len() >= max_circuits || out.total_rows() as u64 > max_edge_rows {
                         break 'dfs;
                     }
-                } else if !on_path[to as usize] {
-                    path.push(to);
+                } else {
                     on_path[to as usize] = true;
-                    if use_heap {
-                        and_stack.extend_from_slice(&heap_and);
-                    } else {
-                        and_stack.extend_from_slice(&new_and[..words]);
-                    }
+                    edge_path.push(row);
                     frames.push((to, 0));
                 }
             } else {
-                frames.pop();
-                let popped = path.pop().expect("path/frame parity");
+                let (popped, _) = frames.pop().expect("frame stack is non-empty");
                 on_path[popped as usize] = false;
+                edge_path.pop();
                 and_stack.truncate(and_stack.len() - words);
             }
         }
 
-        // A budget/deadline break leaves partial state; report incomplete.
+        // A budget/deadline break leaves partial state; report incomplete. The
+        // caller discards the partial list (it is root-order-biased and its
+        // totals are not the universe), so no unwinding is needed.
         if !frames.is_empty() {
-            for &n in &path {
-                on_path[n as usize] = false;
-            }
-            path.clear();
-            frames.clear();
-            and_stack.clear();
-            return EnumeratedCandidates {
-                circuits,
-                complete: false,
-            };
+            out.complete = false;
+            return out;
         }
     }
 
-    EnumeratedCandidates {
-        circuits,
-        complete: true,
-    }
-}
-
-/// Per-circuit metadata the retention passes derive once.
-struct CircuitMeta {
-    /// Result-slab offsets of the circuit's edges, in path order.
-    edge_offsets: Vec<usize>,
-    /// `NormGroup`-determining partition: engine-internal cycle-partition
-    /// index of the circuit's stocks, or `None` (Solo) when no stock resolves.
-    partition: Option<usize>,
-    /// Whether the circuit traverses a module-instance node (its final score
-    /// may use the per-exit-port override series, so retention keeps it
-    /// unconditionally rather than judging it by the raw product).
-    traverses_module: bool,
+    out
 }
 
 /// The retention decision over the full enumerated universe.
 pub(super) struct RetentionOutcome {
-    /// Indices into the enumerated circuit list that survive retention.
+    /// Indices into the enumerated circuit list that survive retention,
+    /// ascending.
     pub survivors: Vec<usize>,
     /// Per-engine-internal-partition per-step totals `Sum_j |score_j[t]|`
     /// over ALL enumerated circuits (NaN summands excluded, Inf kept),
@@ -444,59 +638,40 @@ pub(super) struct RetentionOutcome {
 /// retained for non-survivors, so the pass is safe at
 /// [`MAX_DISCOVERY_ENUM_CIRCUITS`] scale.
 ///
-/// NaN link values follow the engine's loop-score rules: the loop's score at
-/// that step is NaN, excluded from the totals and unable to satisfy retention
-/// there. Deadline expiry mid-pass returns `None` (caller falls back to the
-/// DFS).
+/// A step whose product is not a number -- a NaN link, or the `Inf * 0` a
+/// finite-overflow-then-zero circuit produces -- follows the engine's
+/// loop-score rules: the loop's score there is NaN, excluded from the totals
+/// and unable to satisfy retention. Deadline expiry mid-pass returns `None`
+/// (caller falls back).
 pub(super) fn retain_circuits(
-    circuits: &[Vec<u32>],
+    candidates: &EnumeratedCandidates,
     graph: &ActivityGraph,
-    results: &Results,
     stock_partition_of_node: &[Option<usize>],
     is_module_node: &[bool],
     deadline: Option<Instant>,
 ) -> Option<RetentionOutcome> {
-    let step_count = results.step_count;
+    let step_count = graph.step_count;
 
-    // Edge lookup: (from, to) -> edge row. Built from the union adjacency.
-    let mut edge_row: HashMap<(u32, u32), u32> = HashMap::new();
-    for (from, edges) in graph.adj.iter().enumerate() {
-        for &(to, row) in edges {
-            edge_row.insert((from as u32, to), row);
-        }
-    }
-
-    let metas: Vec<CircuitMeta> = circuits
-        .iter()
-        .map(|path| {
-            let edge_offsets = path_edge_offsets(path, &edge_row, graph);
-            let partition = path
-                .iter()
-                .find_map(|&n| stock_partition_of_node[n as usize]);
-            let traverses_module = path.iter().any(|&n| is_module_node[n as usize]);
-            CircuitMeta {
-                edge_offsets,
-                partition,
-                traverses_module,
-            }
-        })
-        .collect();
-
-    // Pass 1: per-partition totals (Solo circuits are their own denominator,
-    // so they need no shared accumulation).
     let mut partition_totals: HashMap<usize, Vec<f64>> = HashMap::new();
     let mut scratch = vec![0.0f64; step_count];
     let mut nan_mask = vec![false; step_count];
-    for (ci, meta) in metas.iter().enumerate() {
+
+    // Pass 1: per-partition totals (Solo circuits are their own denominator,
+    // so they need no shared accumulation).
+    for ci in 0..candidates.len() {
         if deadline_expired(ci, deadline) {
             return None;
         }
-        let Some(part) = meta.partition else { continue };
-        score_series(&meta.edge_offsets, results, &mut scratch, &mut nan_mask);
+        let rows = candidates.circuit(ci);
+        let Some(part) = circuit_partition(rows, graph, stock_partition_of_node) else {
+            continue;
+        };
+        let (lo, hi) = graph.active_window(candidates.activity_of(ci));
+        score_steps(rows, graph, lo, &mut scratch[lo..hi], &mut nan_mask[lo..hi]);
         let totals = partition_totals
             .entry(part)
             .or_insert_with(|| vec![0.0; step_count]);
-        for t in 0..step_count {
+        for t in lo..hi {
             if !nan_mask[t] {
                 totals[t] += scratch[t].abs();
             }
@@ -505,19 +680,21 @@ pub(super) fn retain_circuits(
 
     // Pass 2: retention.
     let mut survivors: Vec<usize> = Vec::new();
-    for (ci, meta) in metas.iter().enumerate() {
+    for ci in 0..candidates.len() {
         if deadline_expired(ci, deadline) {
             return None;
         }
-        if meta.traverses_module {
+        let rows = candidates.circuit(ci);
+        if circuit_traverses_module(rows, graph, is_module_node) {
             survivors.push(ci);
             continue;
         }
-        score_series(&meta.edge_offsets, results, &mut scratch, &mut nan_mask);
-        let keep = match meta.partition {
+        let (lo, hi) = graph.active_window(candidates.activity_of(ci));
+        score_steps(rows, graph, lo, &mut scratch[lo..hi], &mut nan_mask[lo..hi]);
+        let keep = match circuit_partition(rows, graph, stock_partition_of_node) {
             Some(part) => {
                 let totals = &partition_totals[&part];
-                (0..step_count).any(|t| {
+                (lo..hi).any(|t| {
                     !nan_mask[t]
                         && totals[t] > 0.0
                         && scratch[t].abs() / totals[t] >= MIN_CONTRIBUTION
@@ -525,7 +702,7 @@ pub(super) fn retain_circuits(
             }
             // Solo: relative score is +/-1 whenever active, which passes the
             // retention threshold; "ever active" is the whole test.
-            None => (0..step_count).any(|t| !nan_mask[t] && scratch[t] != 0.0),
+            None => (lo..hi).any(|t| !nan_mask[t] && scratch[t] != 0.0),
         };
         if keep {
             survivors.push(ci);
@@ -538,13 +715,37 @@ pub(super) fn retain_circuits(
     })
 }
 
+/// The engine-internal cycle partition of a circuit: that of its first stock
+/// node in traversal order, or `None` (Solo) when no node resolves to one.
+///
+/// Every stock of a cycle shares its partition by construction (a cycle
+/// partition IS a stock-to-stock SCC), so "first" is "the" partition.
+fn circuit_partition(
+    rows: &[u32],
+    graph: &ActivityGraph,
+    stock_partition_of_node: &[Option<usize>],
+) -> Option<usize> {
+    rows.iter()
+        .find_map(|&row| stock_partition_of_node[graph.edge_from[row as usize] as usize])
+}
+
+/// Whether a circuit passes through a module-instance node -- in which case its
+/// reported score may come from the per-exit-port override series rather than
+/// the raw product of its links.
+fn circuit_traverses_module(rows: &[u32], graph: &ActivityGraph, is_module_node: &[bool]) -> bool {
+    rows.iter()
+        .any(|&row| is_module_node[graph.edge_from[row as usize] as usize])
+}
+
 /// Add one loop's |score| mass into the external totals (used for stitched
 /// cross-agg loops, which are appended after the enumeration passes but must
 /// participate in the denominators like every other loop).
+///
+/// Stitched sequences arrive as node paths, so this is the one place that
+/// resolves `(from, to)` pairs back to edge rows.
 pub(super) fn accumulate_series_into_totals(
     path: &[u32],
     graph: &ActivityGraph,
-    results: &Results,
     stock_partition_of_node: &[Option<usize>],
     partition_totals: &mut HashMap<usize, Vec<f64>>,
 ) {
@@ -554,17 +755,11 @@ pub(super) fn accumulate_series_into_totals(
     else {
         return;
     };
-    let mut edge_row: HashMap<(u32, u32), u32> = HashMap::new();
-    for (from, edges) in graph.adj.iter().enumerate() {
-        for &(to, row) in edges {
-            edge_row.insert((from as u32, to), row);
-        }
-    }
-    let offsets = path_edge_offsets(path, &edge_row, graph);
-    let step_count = results.step_count;
+    let rows = path_edge_rows(path, graph);
+    let step_count = graph.step_count;
     let mut scratch = vec![0.0f64; step_count];
     let mut nan_mask = vec![false; step_count];
-    score_series(&offsets, results, &mut scratch, &mut nan_mask);
+    score_series(&rows, graph, &mut scratch, &mut nan_mask);
     let totals = partition_totals
         .entry(part)
         .or_insert_with(|| vec![0.0; step_count]);
@@ -580,44 +775,55 @@ fn deadline_expired(i: usize, deadline: Option<Instant>) -> bool {
     i.is_multiple_of(4096) && deadline.is_some_and(|d| Instant::now() >= d)
 }
 
-/// Resolve a node path's consecutive-pair (wrapping) edge offsets. Every pair
-/// is a union-graph edge by construction of the enumerator and the stitcher
-/// (stitched sequences concatenate petals whose hops are all real edges).
-fn path_edge_offsets(
-    path: &[u32],
-    edge_row: &HashMap<(u32, u32), u32>,
-    graph: &ActivityGraph,
-) -> Vec<usize> {
+/// Resolve a node path's consecutive-pair (wrapping) edge rows. Every pair is a
+/// union-graph edge by construction of the stitcher (stitched sequences
+/// concatenate petals whose hops are all real edges).
+fn path_edge_rows(path: &[u32], graph: &ActivityGraph) -> Vec<u32> {
     (0..path.len())
         .map(|i| {
-            let key = (path[i], path[(i + 1) % path.len()]);
-            let row = edge_row
-                .get(&key)
-                .expect("enumerated/stitched path edge must exist in the union graph");
-            graph.offsets[*row as usize]
+            graph
+                .edge_row(path[i], path[(i + 1) % path.len()])
+                .expect("stitched path edge must exist in the union graph")
         })
         .collect()
 }
 
-/// One loop's signed per-step score series (product of link values), with
-/// `nan_mask[t]` set when any link value is NaN at `t` -- mirroring the
-/// FoundLoop scoring rules exactly (NaN poisons the step; 0 and Inf multiply
-/// through).
-fn score_series(edge_offsets: &[usize], results: &Results, out: &mut [f64], nan_mask: &mut [bool]) {
-    let step_size = results.step_size;
-    for t in 0..out.len() {
-        let base = t * step_size;
-        let mut prod = 1.0f64;
-        let mut has_nan = false;
-        for &off in edge_offsets {
-            let v = results.data[base + off];
-            if v.is_nan() {
-                has_nan = true;
-                break;
-            }
-            prod *= v;
+/// One loop's signed per-step score series over every saved step.
+fn score_series(rows: &[u32], graph: &ActivityGraph, out: &mut [f64], nan_mask: &mut [bool]) {
+    score_steps(rows, graph, 0, out, nan_mask)
+}
+
+/// One loop's signed per-step score series (product of link values) over the
+/// saved steps `lo..lo + out.len()`, with `nan_mask[i]` set when the product at
+/// that step is not a number.
+///
+/// The product runs edge-outer / step-inner over the graph's contiguous score
+/// rows, so each row is a straight-line multiply the compiler vectorizes. Order
+/// within a step is the circuit's traversal order, matching the FoundLoop
+/// scoring pipeline link for link, so a survivor's totals and its materialized
+/// series agree bit for bit.
+///
+/// NaN needs no special case: it propagates through multiplication, so the mask
+/// is a property of the finished product. That is deliberately stronger than
+/// testing the links: an `Inf * 0` product is NaN with no NaN link anywhere, and
+/// treating it as a number would poison a whole partition total with NaN.
+fn score_steps(
+    rows: &[u32],
+    graph: &ActivityGraph,
+    lo: usize,
+    out: &mut [f64],
+    nan_mask: &mut [bool],
+) {
+    debug_assert_eq!(out.len(), nan_mask.len());
+    out.fill(1.0);
+    for &row in rows {
+        let start = row as usize * graph.step_count + lo;
+        let row_series = &graph.series[start..start + out.len()];
+        for (product, &value) in out.iter_mut().zip(row_series) {
+            *product *= value;
         }
-        out[t] = if has_nan { f64::NAN } else { prod };
-        nan_mask[t] = has_nan;
+    }
+    for (mask, product) in nan_mask.iter_mut().zip(out.iter()) {
+        *mask = product.is_nan();
     }
 }
