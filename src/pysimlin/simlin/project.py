@@ -60,7 +60,13 @@ from ._ffi import (
     render_svg as _ffi_render_svg,
 )
 from ._ffi import (
+    replace_contents as _ffi_replace_contents,
+)
+from ._ffi import (
     serialize_json as _ffi_serialize_json,
+)
+from ._ffi import (
+    serialize_mdl as _ffi_serialize_mdl,
 )
 from ._formats import FileFormat, resolve_read_format, resolve_write_format
 from ._sync import ChangeEvent, SyncState
@@ -171,58 +177,6 @@ def _disk_handler(project_ref: weakref.ref[Project]) -> Callable[[bytes, str], b
         return True
 
     return handler
-
-
-# The three engine entry points below are provided by ``simlin._ffi`` once
-# the matching libsimlin functions land (branch ``pw/ffi``):
-#   _ffi.replace_contents(dst_project_ptr, src_project_ptr) -> None
-#   _ffi.serialize_mdl(project_ptr) -> tuple[bytes, list[ErrorDetail]]
-#   _ffi.diagram_sync(project_ptr, model_name, patch_json=None) -> None
-# They are resolved lazily so that ``import simlin`` and every non-file
-# feature work before that merge; each raises SimlinRuntimeError with a
-# clear message if called too early.  After the merge these collapse into
-# ordinary top-level imports.
-
-
-def _replace_contents(dst_ptr: Any, src_ptr: Any) -> None:
-    from . import _ffi
-
-    fn = getattr(_ffi, "replace_contents", None)
-    if fn is None:
-        raise SimlinRuntimeError(
-            "in-place reload requires simlin._ffi.replace_contents, which this build "
-            "of the engine does not provide"
-        )
-    fn(dst_ptr, src_ptr)
-
-
-def _serialize_mdl(project_ptr: Any) -> tuple[bytes, list[ErrorDetail]]:
-    from . import _ffi
-
-    fn = getattr(_ffi, "serialize_mdl", None)
-    if fn is None:
-        raise SimlinRuntimeError(
-            "Vensim .mdl export requires simlin._ffi.serialize_mdl, which this build "
-            "of the engine does not provide"
-        )
-    result: tuple[bytes, list[ErrorDetail]] = fn(project_ptr)
-    return result
-
-
-def _diagram_sync_incremental(project_ptr: Any, model_name: str, patch_json: bytes) -> None:
-    """Incremental layout after ``patch_json`` was applied to ``model_name``.
-
-    Calls ``simlin_project_diagram_sync`` with the patch: existing element
-    positions are kept and only new/removed elements change (a model with
-    no view yet gets a full layout).  This is what ``_ffi.diagram_sync``
-    does when handed a patch; until that wrapper accepts one, the C call is
-    made here.
-    """
-    c_name = string_to_c(model_name)
-    c_patch = ffi.new("char[]", patch_json)
-    err_ptr = ffi.new("SimlinError **")
-    lib.simlin_project_diagram_sync(project_ptr, c_name, c_patch, err_ptr)
-    check_out_error(err_ptr, f"Incremental layout for model '{model_name}'")
 
 
 class Project:
@@ -653,7 +607,7 @@ class Project:
             try:
                 with self._lock:
                     self._check_alive()
-                    _diagram_sync_incremental(self._ptr, model_name, patch_json)
+                    _ffi_diagram_sync(self._ptr, model_name, patch_json)
             except SimlinRuntimeError as exc:
                 warnings.warn(
                     f"simlin: diagram layout for model {model_name!r} failed after "
@@ -744,7 +698,7 @@ class Project:
         with self._lock:
             self._check_alive()
             with replacement._lock:
-                _replace_contents(self._ptr, replacement._ptr)
+                _ffi_replace_contents(self._ptr, replacement._ptr)
 
     def _load_disk_bytes(self, path: Path, data: bytes, digest: str) -> int | None:
         """Shared tail of :meth:`reload` and the poll thread after the sync
@@ -1107,7 +1061,7 @@ class Project:
         """
         with self._lock:
             self._check_alive()
-            data, issues = _serialize_mdl(self._ptr)
+            data, issues = _ffi_serialize_mdl(self._ptr)
         for issue in issues:
             warnings.warn(
                 f"simlin: Vensim export: {issue.message}"

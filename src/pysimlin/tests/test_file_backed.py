@@ -4,9 +4,6 @@ revision/dirty tracking, change notification, and the disk watcher.
 Test names follow the design's acceptance criteria
 (``pysimlin-widget.AC1.n`` / ``AC3.n``) where one applies.
 
-Tests that need the engine's in-place reload (``_ffi.replace_contents``) or
-Vensim writer (``_ffi.serialize_mdl``) are gated on those functions being
-present; they run unchanged once libsimlin provides them.
 """
 
 from __future__ import annotations
@@ -35,24 +32,12 @@ from simlin import (
     SimlinRuntimeError,
     Stock,
 )
-from simlin import _ffi as simlin_ffi
 from simlin._disk import content_hash
 
 from .conftest import get_repo_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-HAS_REPLACE_CONTENTS = hasattr(simlin_ffi, "replace_contents")
-HAS_SERIALIZE_MDL = hasattr(simlin_ffi, "serialize_mdl")
-needs_replace_contents = pytest.mark.skipif(
-    not HAS_REPLACE_CONTENTS,
-    reason="waiting for libsimlin simlin_project_replace_from_json / _ffi.replace_contents",
-)
-needs_serialize_mdl = pytest.mark.skipif(
-    not HAS_SERIALIZE_MDL,
-    reason="waiting for libsimlin simlin_project_serialize_mdl / _ffi.serialize_mdl",
-)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SDAI_FIXTURE = get_repo_root() / "test" / "sd-ai-simple.sd.json"
@@ -251,7 +236,6 @@ class TestEditAutosave:
         _add_aux(model)
         assert simlin.open(path, watch=False).get_variable("new_aux") is not None
 
-    @needs_serialize_mdl
     def test_ac1_2_mdl_edit_rewrites_file_in_mdl_with_sketch(self, tmp_path: Path) -> None:
         path = _copy(FIXTURES / "teacup.mdl", tmp_path)
         model = simlin.open(path, watch=False)
@@ -504,7 +488,6 @@ class TestInMemoryAndSaveAs:
         _add_aux(model)
         assert simlin.open(target, watch=False).get_variable("new_aux") is not None
 
-    @needs_serialize_mdl
     def test_ac1_6_save_as_mdl(self, tmp_path: Path) -> None:
         model = simlin.load(FIXTURES / "teacup.stmx")
         target = tmp_path / "teacup_out.mdl"
@@ -717,7 +700,6 @@ class TestWatcherWiring:
         finally:
             model.project.watch(False)  # type: ignore[union-attr]
 
-    @needs_replace_contents
     def test_ac1_4_external_write_reloads_in_place(self, tmp_path: Path) -> None:
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
         model = simlin.open(path, watch=False)
@@ -743,7 +725,21 @@ class TestWatcherWiring:
         finally:
             model.project.watch(False)  # type: ignore[union-attr]
 
-    @needs_replace_contents
+    def test_ac1_4_reload_invalidates_every_model_handle(self, tmp_path: Path) -> None:
+        # Several handles to the same model (get_model() called more than
+        # once) must all drop their cached base_case, not just the one that
+        # happens to trigger the reload.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        project = Project.open(path, watch=False)
+        handles = [project.get_model() for _ in range(3)]
+        runs = [h.base_case for h in handles]
+        writer = simlin.open(path, watch=False)
+        writer.project.set_sim_specs(stop=writer.time_spec.stop / 2)  # type: ignore[union-attr]
+        assert handles[0].reload() is True
+        for handle, before in zip(handles, runs, strict=True):
+            assert handle.base_case is not before
+            assert handle.base_case.results.index[-1] == writer.time_spec.stop
+
     def test_ac1_4_unparsable_content_keeps_last_known_good(self, tmp_path: Path) -> None:
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
         model = simlin.open(path, watch=False)
@@ -766,7 +762,6 @@ class TestWatcherWiring:
         finally:
             model.project.watch(False)  # type: ignore[union-attr]
 
-    @needs_replace_contents
     def test_ac1_4_reload_reads_external_change_and_is_then_idempotent(
         self, tmp_path: Path
     ) -> None:
@@ -781,7 +776,6 @@ class TestWatcherWiring:
         assert model.reload() is False
         assert model.revision == 1
 
-    @needs_replace_contents
     def test_reload_over_dirty_discards_local_changes(self, tmp_path: Path) -> None:
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
         model = simlin.open(path, autosave=False, watch=False)
@@ -791,7 +785,6 @@ class TestWatcherWiring:
         assert model.dirty is False
         assert model.revision == 2
 
-    @needs_replace_contents
     def test_reload_unparsable_raises_and_keeps_project(self, tmp_path: Path) -> None:
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
         model = simlin.open(path, watch=False)
@@ -802,7 +795,6 @@ class TestWatcherWiring:
         assert set(model.get_var_names()) == names
         assert model.revision == 0
 
-    @needs_replace_contents
     def test_ac1_4_poll_thread_delivers_within_interval(self, tmp_path: Path) -> None:
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
         model = simlin.open(path, watch=False)
@@ -820,7 +812,6 @@ class TestWatcherWiring:
         finally:
             project.watch(False)
 
-    @needs_replace_contents
     def test_widget_snapshot_accept_and_reject(self, tmp_path: Path) -> None:
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
         model = simlin.open(path, watch=False)
