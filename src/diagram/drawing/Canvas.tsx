@@ -681,8 +681,10 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   // checked with closest()) see them land in the editor's subtree; focus left
   // on <body> would instead route the key by the last-active instance.
   // preventScroll: a host page (notebook) may scroll; focusing must not jump it.
-  // No fallback for a missing container: this runs from pointer handlers on a
-  // rendered canvas, where svgRef is always attached.
+  // No fallback for a missing container: both callers -- clearPointerState
+  // (pointer release / click settle) and the name-edit commit/cancel path,
+  // which is reached from the keyboard too -- run on a rendered canvas, where
+  // svgRef is always attached.
   const focusCanvas = (): void => {
     svgRef.current?.focus({ preventScroll: true });
   };

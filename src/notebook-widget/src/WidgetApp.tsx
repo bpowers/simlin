@@ -115,6 +115,34 @@ function watchHostThemeSignals(onChange: () => void): () => void {
   };
 }
 
+/**
+ * Keep JupyterLab's notebook shortcuts off every element that takes focus
+ * inside the widget. Lumino resolves a keydown by walking from the FOCUSED
+ * element upward and, at each step, first stopping if that element carries
+ * `data-lm-suppress-shortcuts` and otherwise matching it against every
+ * keybinding selector; the notebook's command-mode bindings (`d d` deletes
+ * the cell, `a`/`b` insert one, `x` cuts) use `.jp-Notebook.jp-mod-commandMode
+ * :focus:not(:read-write)`, which matches the focused element ITSELF -- the
+ * Editor root, the canvas container, a button, a <select> -- before the walk
+ * ever reaches the wrapper's attribute. So the attribute must sit on the
+ * focused element, and focus always precedes a keydown: stamping the target
+ * of every focus event inside the widget (the Editor's own elements and the
+ * overlay surfaces it portals into the wrapper alike) is the one place that
+ * covers them all without threading a host attribute through every focusable
+ * component. React never removes an attribute it did not render, so the stamp
+ * persists. Text fields (`:read-write`) never matched, so stamping them is
+ * harmless. Stopping key propagation at the wrapper would NOT do: Lumino
+ * listens on the document in the capture phase, before any element handler,
+ * and the Editor's own shortcut listener is a document-level bubble handler
+ * that a stop would silence.
+ */
+function stampShortcutSuppression(event: React.FocusEvent<HTMLElement>): void {
+  const target = event.target;
+  if (target instanceof Element && !target.hasAttribute('data-lm-suppress-shortcuts')) {
+    target.setAttribute('data-lm-suppress-shortcuts', '');
+  }
+}
+
 export function WidgetApp({ model, name }: { model: AnyModel; name: string }): React.ReactElement {
   const readModelTraits = React.useCallback((): WidgetTraits => readTraits((key) => model.get(key)), [model]);
 
@@ -373,6 +401,7 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
       style={wrapperStyle(traits.height)}
       data-theme={theme}
       data-lm-suppress-shortcuts=""
+      onFocusCapture={stampShortcutSuppression}
     >
       {notice !== null ? (
         <div

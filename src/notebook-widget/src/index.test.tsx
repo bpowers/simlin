@@ -530,6 +530,31 @@ describe('WidgetApp <-> model protocol', () => {
     expect(screen.queryByRole('status')).toBeNull();
   });
 
+  it('every element that takes focus inside the widget carries data-lm-suppress-shortcuts (Lumino matches the focused target before walking up)', async () => {
+    const model = new FakeModel(defaultState());
+    const { el } = await mount(model);
+    const wrapper = el.querySelector('[data-lm-suppress-shortcuts]') as HTMLElement;
+    expect(wrapper.classList.contains('simlin-notebook-widget')).toBe(true);
+    // A control inside the Editor tree that did not carry the attribute
+    // itself gets it the moment it is focused -- before any keydown can be
+    // dispatched at it.
+    const edit = screen.getByText('edit');
+    expect(edit.hasAttribute('data-lm-suppress-shortcuts')).toBe(false);
+    act(() => {
+      edit.focus();
+    });
+    expect(document.activeElement).toBe(edit);
+    expect(edit.hasAttribute('data-lm-suppress-shortcuts')).toBe(true);
+    // Elements outside the widget are untouched.
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    act(() => {
+      outside.focus();
+    });
+    expect(outside.hasAttribute('data-lm-suppress-shortcuts')).toBe(false);
+    outside.remove();
+  });
+
   it('a notice custom message shows, restarts its timer on a repeat, then auto-hides', async () => {
     const model = new FakeModel(defaultState());
     await mount(model);

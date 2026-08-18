@@ -728,6 +728,39 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     }
   }, []);
 
+  // A pointer press anywhere inside the editor moves focus INTO it. Capture
+  // phase runs before the browser's own mousedown default action, so a press
+  // on a focusable target (a text field, a button) still ends with focus on
+  // that target; a press whose default is prevented (the Canvas prevents it
+  // on every pointerdown, so element clicks and drags never focus anything)
+  // leaves focus on the root -- inside the editor, never on the host page or
+  // <body>. Without this, clicking a variable in a notebook cell left focus on
+  // the notebook cell and the notebook's own shortcuts (`d d` deletes the
+  // CELL) fired instead of the Editor's; the mechanism is host-agnostic
+  // (see the keyboard scoping contract in CLAUDE.md). Only when focus is not
+  // already inside the editor: a press inside an editable while it is focused
+  // must not blur it (its blur commits), and moving focus root-ward for
+  // nothing would drop the caret.
+  const handlePointerDownCapture = React.useCallback((e: React.PointerEvent<HTMLDivElement>): void => {
+    handleActivity();
+    const root = rootRef.current;
+    if (!root) {
+      return;
+    }
+    const active = document.activeElement;
+    // Portaled surfaces are not DOM descendants of the root; a press inside
+    // one whose focus already sits inside it (a dialog's button) is left alone
+    // -- e.currentTarget.contains would say no for those, so check the event
+    // path, which React routes through this tree.
+    const path = e.nativeEvent.composedPath();
+    const focusInsideEditor = active !== null && root.contains(active);
+    const focusInsidePressedSurface =
+      active !== null && active !== document.body && active !== document.documentElement && path.includes(active);
+    if (!focusInsideEditor && !focusInsidePressedSurface) {
+      root.focus({ preventScroll: true });
+    }
+  }, []);
+
   const isUndoEnabled = (): boolean => {
     return latest.current.state.controllerSnapshot.canUndo;
   };
@@ -2671,7 +2704,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         className={classNames}
         tabIndex={-1}
         {...{ [EDITOR_ROOT_ATTRIBUTE]: '' }}
-        onPointerDownCapture={handleActivity}
+        onPointerDownCapture={handlePointerDownCapture}
         onFocusCapture={handleActivity}
       >
         {getDrawer()}

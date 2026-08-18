@@ -386,6 +386,51 @@ describe('Editor keyboard scoping across instances', () => {
     expect(undoRedoCalls).toEqual([{ controller: a.controller, kind: 'undo' }]);
   });
 
+  // A pointer press inside an instance also moves FOCUS into it (onto the
+  // root) when focus was elsewhere -- on the host page or <body>. The Canvas
+  // prevents the default focus change on every pointerdown, so without this a
+  // click on a variable left focus wherever it was: on a notebook cell, whose
+  // shortcuts then took the keys the user meant for the Editor.
+  it('a press inside an instance moves focus onto its root when focus was outside every editor', () => {
+    const a = mountEditor();
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    outside.focus();
+    expect(document.activeElement).toBe(outside);
+
+    pressInside(a);
+    expect(document.activeElement).toBe(a.root);
+    outside.remove();
+  });
+
+  it('a press inside an instance leaves focus alone when it is already inside that instance (an editable keeps its caret)', () => {
+    const a = mountEditor();
+    const field = document.createElement('input');
+    a.root.appendChild(field);
+    field.focus();
+    expect(document.activeElement).toBe(field);
+
+    // A press on the canvas while typing: focus stays where it is here (the
+    // Canvas's own click-settle focus is what later blurs and commits it).
+    pressInside(a);
+    expect(document.activeElement).toBe(field);
+    // A press ON the focused editable itself, likewise.
+    act(() => {
+      fireEvent.pointerDown(field);
+    });
+    expect(document.activeElement).toBe(field);
+    field.remove();
+  });
+
+  it('a press inside B moves focus from A to B', () => {
+    const a = mountEditor();
+    const b = mountEditor();
+    pressInside(a);
+    expect(document.activeElement).toBe(a.root);
+    pressInside(b);
+    expect(document.activeElement).toBe(b.root);
+  });
+
   it('a single Editor still handles a key on <body> after a press inside it (the app/serve hosts)', async () => {
     const a = mountEditor();
     select(a, 9);
