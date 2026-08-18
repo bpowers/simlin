@@ -220,6 +220,7 @@ DUMP_PATH = Path({str(dump)!r})
 # reported-vs-recomputed disagreement in section 5, not as a silent pass.
 MIN_CONTRIBUTION = 0.001
 MAX_LOOPS = 200
+MAX_ANCHOR_K = 3
 
 print(f"pysimlin  {{simlin.__version__}}")
 print(f"python    {{sys.version.split()[0]}} on {{platform.platform()}}")
@@ -610,10 +611,18 @@ Now the same pipeline the engine runs, over the full enumerated set:
 4. **Retention**: keep a cycle iff at some step its `|score|` is at least
    `MIN_CONTRIBUTION` (0.1%) of its partition's total there. Solo cycles are their
    own denominator and are kept whenever they are ever active.
-5. **Rank** competitive-first: cycles sharing their group with another survivor come
-   first, by mean relative contribution over their active steps; Solo-group and
-   alone-in-partition cycles (whose relative score is `+/-1` by construction, carrying
-   no discriminative information) come last. Then cap at `MAX_LOOPS`.
+5. **Rank** competitive-first: cycles whose partition holds at least two loops of
+   the UNIVERSE come first, by mean relative contribution over their active steps;
+   Solo-group cycles and cycles alone in their partition's universe (whose relative
+   score is `+/-1` by construction, carrying no discriminative information) come
+   last. A retention non-survivor still holds mass in its partition's denominator,
+   so it still makes that partition a place where loops compete -- which is why the
+   classification asks the universe rather than the survivor set.
+6. **Select** under `MAX_LOOPS`, coverage-aware: within every competing group, each
+   step's largest-`|relative score|` survivor is ANCHORED and keeps its slot, `k`
+   rising past 1 while the whole anchor set still fits (bounded by `MAX_ANCHOR_K`);
+   remaining slots go to the ranking in order. Membership is the only thing this
+   changes -- the reported list is still presented in the ranking's order.
 """
     )
 
@@ -710,6 +719,12 @@ def canonical(c: int) -> tuple[str, ...]:
     return names[k:] + names[:k]
 
 
+# How many loops divide each partition's denominator, over the whole
+# UNIVERSE -- a retention non-survivor still holds mass there, so it still
+# makes its partition a place where loops compete.
+universe_counts = {int(p): int((cyc_part == p).sum())
+                   for p in np.unique(cyc_part) if p >= 0}
+
 ranked = []
 for c in survivors:
     c = int(c)
@@ -723,11 +738,15 @@ for c in survivors:
     valid = ~np.isnan(s)
     avg_abs = float(np.abs(s[valid]).mean()) if valid.any() else 0.0
     key = canonical(c)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r_signed = np.where(tot == 0.0, 0.0, s / np.where(tot == 0.0, 1.0, tot))
     ranked.append({
         "cycle": c,
         "mean_rel": float(mean_rel),
-        "competing": len(group_members[g]) >= 2,
+        "competing": g[0] == "P" and universe_counts.get(g[1], 0) >= 2,
         "avg_abs": avg_abs,
+        "group": g,
+        "rel_abs": np.nan_to_num(np.abs(r_signed), nan=0.0),
         "content_key": ("_".join(sorted(set(key))), key),
         "key": key,
     })
@@ -742,16 +761,76 @@ ranked.sort(key=lambda r: (
     -r["avg_abs"],
     r["content_key"],
 ))
-py_top = [r["key"] for r in ranked[:MAX_LOOPS]]
+
+
+def anchor_depths(rows):
+    # Smallest k at which each ranked row is some step's top-k in its group,
+    # 0 for a row that never is. A step no member is active at anchors
+    # nobody: the mass there belongs to loops outside the retained set, so no
+    # retained loop dominated it. Solo groups never anchor -- their relative
+    # score is +/-1 at every active step by construction.
+    depth = [0] * len(rows)
+    groups = {}
+    for i, r in enumerate(rows):
+        if r["competing"]:
+            groups.setdefault(r["group"], []).append(i)
+    for members in groups.values():
+        sub = np.stack([rows[i]["rel_abs"] for i in members])
+        # Stable sort, so a tie for a place goes to the earlier-ranked row.
+        order = np.argsort(-sub, axis=0, kind="stable")
+        for t in range(sub.shape[1]):
+            place = 0
+            for slot in range(min(MAX_ANCHOR_K, len(members))):
+                row = int(order[slot, t])
+                if sub[row, t] <= 0.0:
+                    break
+                place += 1
+                i = members[row]
+                if depth[i] == 0 or depth[i] > place:
+                    depth[i] = place
+    return depth
+
+
+def select_reported(rows, cap):
+    # The engine's coverage-aware cap, as positions into `rows`.
+    if len(rows) <= cap:
+        return list(range(len(rows)))
+    depth = anchor_depths(rows)
+    count_at = lambda k: sum(1 for d in depth if d != 0 and d <= k)
+    if count_at(1) > cap:
+        # Pathological: anchors alone overflow, so the cap applies to them.
+        return [i for i, d in enumerate(depth) if d == 1][:cap]
+    k = 1
+    for kk in range(2, MAX_ANCHOR_K + 1):
+        if count_at(kk) > cap:
+            break
+        k = kk
+    keep = [d != 0 and d <= k for d in depth]
+    chosen = sum(keep)
+    for i in range(len(keep)):
+        if chosen >= cap:
+            break
+        if not keep[i]:
+            keep[i] = True
+            chosen += 1
+    return [i for i, v in enumerate(keep) if v]
+
+
+selected = select_reported(ranked, MAX_LOOPS)
+py_top = [ranked[i]["key"] for i in selected]
 py_top_set = set(py_top)
 cycle_of_key = {r["key"]: r["cycle"] for r in ranked}
+depths = anchor_depths(ranked)
 
 print(f"retention survivors: {len(survivors)} of {n_cyc} "
       f"({100 * len(survivors) / max(n_cyc, 1):.1f}% of the universe)")
-print(f"survivors that compete (group holds >= 2): "
+print(f"survivors that compete (universe holds >= 2 loops in the partition): "
       f"{sum(1 for r in ranked if r['competing'])}")
 print(f"cap binds: {len(survivors) > MAX_LOOPS} "
       f"({max(0, len(survivors) - MAX_LOOPS)} survivors have no slot)")
+print("anchored survivors by k: "
+      + ", ".join(f"k<={k}: {sum(1 for d in depths if d != 0 and d <= k)}"
+                  for k in range(1, MAX_ANCHOR_K + 1)))
 pd.DataFrame([
     {"rank": i, "mean rel": r["mean_rel"], "competing": r["competing"],
      "len": len(r["key"]),

@@ -1707,6 +1707,593 @@ fn test_rank_and_filter_no_scores_still_attaches_partitions() {
     assert_eq!(partition_meta[1].loop_count, 1);
 }
 
+// --- Universe-based competing classification (AC5.2) ---
+
+/// The universe statistics of a two-circuit partition, derived through the
+/// production retention pass (`ActivityGraph` -> `enumerate_active_circuits`
+/// -> `retain_circuits`) rather than hand-built: `a <-> b` carries the mass
+/// and `a <-> c` is the sub-threshold sibling retention drops, so the universe
+/// holds two circuits and exactly one survives.
+///
+/// `weak_sibling` decides whether that second circuit is active at all, which
+/// is the only difference between a partition whose universe holds two loops
+/// and one whose universe holds one -- the two arms of AC5.2.
+fn two_circuit_universe(weak_sibling: bool) -> UniverseStats {
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new("b")), 0),
+        ((Ident::new("b"), Ident::new("a")), 1),
+        ((Ident::new("a"), Ident::new("c")), 2),
+        ((Ident::new("c"), Ident::new("a")), 3),
+    ];
+    let n_offsets = 4;
+    let step_count = 2;
+    let mut data = vec![0.0f64; n_offsets * step_count];
+    data[n_offsets] = 1.0;
+    data[n_offsets + 1] = 1.0;
+    if weak_sibling {
+        // Product 1e-8 against a total of ~1: far below MIN_CONTRIBUTION, so
+        // this circuit is in the universe and out of the survivor set.
+        data[n_offsets + 2] = 1e-4;
+        data[n_offsets + 3] = 1e-4;
+    }
+    let results = enum_results(n_offsets, step_count, data);
+    let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
+        .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
+    let stock_partition: Vec<Option<usize>> = search
+        .idents
+        .iter()
+        .map(|id| (id.as_str() == "a").then_some(0))
+        .collect();
+    let no_modules = vec![false; search.idents.len()];
+    let outcome = super::enum_gen::retain_circuits(
+        &candidates,
+        &activity,
+        &stock_partition,
+        &no_modules,
+        None,
+        &mut SystemClock,
+    )
+    .expect("an unbudgeted retention pass never abandons");
+    UniverseStats {
+        totals: outcome.partition_totals,
+        loop_counts: outcome.partition_circuit_counts,
+    }
+}
+
+/// The one retention survivor of the `two_circuit_universe` fixture, as the
+/// `FoundLoop` materialization would build it: zero at step 0 (every link
+/// score's `TIME = INITIAL_TIME` arm) and the product 1.0 at step 1.
+fn universe_survivor_loop() -> FoundLoop {
+    make_found_loop_with_scores(
+        &[("a", "b"), ("b", "a")],
+        &["a"],
+        LoopPolarity::Reinforcing,
+        0.5,
+        vec![(0.0, 0.0), (1.0, 1.0)],
+    )
+}
+
+/// A loop whose stock resolves to no partition (a `NormGroup::Solo` group):
+/// its own denominator, so its relative score is 1.0 at every active step by
+/// construction, and its raw magnitude dwarfs the survivor's.
+fn solo_group_loop(prefix: &str) -> FoundLoop {
+    let x = format!("{prefix}_x");
+    let y = format!("{prefix}_y");
+    make_found_loop_with_scores(
+        &[(x.as_str(), y.as_str()), (y.as_str(), x.as_str())],
+        &["unpartitioned_stock"],
+        LoopPolarity::Reinforcing,
+        100.0,
+        vec![(0.0, 100.0), (1.0, 100.0)],
+    )
+}
+
+/// AC5.2 arm (a): a partition whose UNIVERSE holds two ever-active circuits is
+/// competing even though only one of them survived retention.
+///
+/// The survivor's relative score is genuinely below 1.0 -- the dropped
+/// sibling's mass is in the denominator whether or not any loop reports it --
+/// so the "its relative score is +/-1 by construction, therefore it carries no
+/// information" reasoning behind the solo demotion does not apply to it, and
+/// it must not be demoted below a loop for which that reasoning DOES hold.
+#[test]
+fn a_universe_with_two_circuits_makes_its_lone_survivor_competing() {
+    let mut loops = vec![universe_survivor_loop(), solo_group_loop("solo")];
+    let partitions = single_partition(&["a"]);
+    let universe = two_circuit_universe(true);
+    assert_eq!(
+        universe.loop_counts.get(&0).copied(),
+        Some(2),
+        "the fixture's universe must hold two partition-0 circuits"
+    );
+
+    rank_and_filter(&mut loops, &partitions, Some(&universe));
+
+    assert_eq!(loops.len(), 2);
+    assert_eq!(
+        loops[0].loop_info.links[0].from.as_str(),
+        "a",
+        "the competing survivor ranks before the solo loop; got {:?}",
+        loops
+            .iter()
+            .map(|l| l.loop_info.links[0].from.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        loops[0].rel_scores[1] < 1.0,
+        "its relative score is measured against the whole universe's mass, \
+         so it is strictly below 1.0; got {}",
+        loops[0].rel_scores[1]
+    );
+}
+
+/// AC5.2 arm (b): a loop ALONE in its partition's universe is solo -- its
+/// relative score is +/-1 by construction, exactly as for a `NormGroup::Solo`
+/// loop, so it sorts among the solos and the magnitude tie-break orders it.
+#[test]
+fn a_universe_with_one_circuit_leaves_its_survivor_solo() {
+    let mut loops = vec![universe_survivor_loop(), solo_group_loop("solo")];
+    let partitions = single_partition(&["a"]);
+    let universe = two_circuit_universe(false);
+    assert_eq!(
+        universe.loop_counts.get(&0).copied(),
+        Some(1),
+        "the fixture's universe must hold one partition-0 circuit"
+    );
+
+    rank_and_filter(&mut loops, &partitions, Some(&universe));
+
+    assert_eq!(loops.len(), 2);
+    assert_eq!(
+        loops
+            .iter()
+            .find(|l| l.loop_info.links[0].from.as_str() == "a")
+            .map(|l| l.rel_scores[1]),
+        Some(1.0),
+        "alone in its universe, the loop IS its own denominator"
+    );
+    assert_eq!(
+        loops[0].loop_info.links[0].from.as_str(),
+        "solo_x",
+        "both loops are solo at mean_rel 1.0, so the raw-magnitude tie-break \
+         puts the bigger one first; got {:?}",
+        loops
+            .iter()
+            .map(|l| l.loop_info.links[0].from.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// AC5.2 arm (c): with no universe (the fallback path), competing is over the
+/// DISCOVERED set -- a sample has no universe to ask about, and the loops it
+/// found are the only population there is.
+#[test]
+fn the_fallback_path_classifies_competing_over_the_discovered_set() {
+    let partitions = single_partition(&["a"]);
+
+    // One discovered loop in partition 0: nothing else divides its
+    // denominator, so it is solo and the magnitude tie-break applies.
+    let mut alone = vec![universe_survivor_loop(), solo_group_loop("solo")];
+    rank_and_filter(&mut alone, &partitions, None);
+    assert_eq!(
+        alone[0].loop_info.links[0].from.as_str(),
+        "solo_x",
+        "a lone discovered partition loop is solo on the fallback path"
+    );
+
+    // A second discovered loop in the same partition: now they compete.
+    let sibling = make_found_loop_with_scores(
+        &[("a", "d"), ("d", "a")],
+        &["a"],
+        LoopPolarity::Reinforcing,
+        0.25,
+        vec![(0.0, 0.0), (1.0, 0.5)],
+    );
+    let mut competing = vec![universe_survivor_loop(), sibling, solo_group_loop("solo")];
+    rank_and_filter(&mut competing, &partitions, None);
+    let order: Vec<&str> = competing
+        .iter()
+        .map(|l| l.loop_info.links[0].from.as_str())
+        .collect();
+    assert_eq!(
+        order,
+        vec!["a", "a", "solo_x"],
+        "two discovered loops sharing a partition rank before the solo loop"
+    );
+}
+
+/// AC5.2 arm (d): a `NormGroup::Solo` loop is never competing, whatever the
+/// universe counts say. Its group is keyed by its own index, so no partition
+/// count can apply to it -- and its relative score really is +/-1 by
+/// construction, which is what the demotion is about.
+#[test]
+fn solo_group_loops_are_never_competing_under_universe_counts() {
+    let mut loops = vec![
+        solo_group_loop("aaa"),
+        universe_survivor_loop(),
+        solo_group_loop("zzz"),
+    ];
+    let partitions = single_partition(&["a"]);
+    let universe = two_circuit_universe(true);
+
+    rank_and_filter(&mut loops, &partitions, Some(&universe));
+
+    let order: Vec<&str> = loops
+        .iter()
+        .map(|l| l.loop_info.links[0].from.as_str())
+        .collect();
+    assert_eq!(
+        order,
+        vec!["a", "aaa_x", "zzz_x"],
+        "the competing partition loop ranks first and both Solo-group loops \
+         stay demoted behind it"
+    );
+}
+
+// --- Coverage-aware cap (AC5.1) ---
+
+/// A partition-`stock_a` loop carrying the given per-step score series, named
+/// so that the content-key tie-break follows the `name` argument's order.
+fn cap_fixture_loop(name: &str, scores: &[f64]) -> FoundLoop {
+    let from = format!("{name}_x");
+    let to = format!("{name}_y");
+    let series: Vec<(f64, f64)> = scores
+        .iter()
+        .enumerate()
+        .map(|(t, &s)| (t as f64, s))
+        .collect();
+    let avg = scores.iter().map(|s| s.abs()).sum::<f64>() / scores.len() as f64;
+    make_found_loop_with_scores(
+        &[(from.as_str(), to.as_str()), (to.as_str(), from.as_str())],
+        &["stock_a"],
+        LoopPolarity::Reinforcing,
+        avg,
+        series,
+    )
+}
+
+/// The loop names in the reported order, for readable assertions.
+fn reported_names(loops: &[FoundLoop]) -> Vec<String> {
+    loops
+        .iter()
+        .map(|l| {
+            l.loop_info.links[0]
+                .from
+                .as_str()
+                .trim_end_matches("_x")
+                .to_string()
+        })
+        .collect()
+}
+
+/// A four-loop competing partition over ten steps whose LAST-ranked loop by
+/// mean relative score is the one that dominates the final step.
+///
+/// Steps 0-8: `l1` 10, `l2` 5, `l3` 2, `l4` 0 (total 17, `l1` dominant at
+/// 0.59). Step 9: `l4` spikes to 18 against a total of 35, taking 0.51 of the
+/// partition while `l1` holds 0.29. Mean relative scores rank
+/// `l1` (0.56) > `l2` (0.28) > `l3` (0.11) > `l4` (0.05).
+fn briefly_dominant_fixture() -> Vec<FoundLoop> {
+    let steady = |v: f64| -> Vec<f64> { vec![v; 10] };
+    let mut spike = vec![0.0; 10];
+    spike[9] = 18.0;
+    vec![
+        cap_fixture_loop("l1", &steady(10.0)),
+        cap_fixture_loop("l2", &steady(5.0)),
+        cap_fixture_loop("l3", &steady(2.0)),
+        cap_fixture_loop("l4", &spike),
+    ]
+}
+
+/// AC5.1 arm (i): under cap pressure the loop that DOMINATES some step keeps
+/// its slot even though it ranks last by mean relative score, and the reported
+/// order is still the mean-relative one.
+///
+/// Without this the report names `l1` and `l2` for every step, so a reader
+/// asking "what drove step 9" is told about a loop holding 29% of the
+/// partition while the loop holding 51% of it is not in the list at all.
+#[test]
+fn the_cap_keeps_each_steps_dominant_loop() {
+    let mut loops = briefly_dominant_fixture();
+    let partitions = single_partition(&["stock_a"]);
+
+    let _guard = MaxLoopsGuard::new(2);
+    rank_and_filter(&mut loops, &partitions, None);
+
+    assert_eq!(
+        reported_names(&loops),
+        vec!["l1", "l4"],
+        "the two anchors fill the cap, presented in mean-relative order \
+         (plain truncation would have reported l1 and l2)"
+    );
+}
+
+/// AC5.1 arm (vi): with no cap pressure the selection is the whole retained
+/// set in the unchanged mean-relative order -- anchoring adds membership only
+/// where the cap binds.
+#[test]
+fn an_uncapped_selection_is_the_plain_mean_relative_ranking() {
+    let mut loops = briefly_dominant_fixture();
+    let partitions = single_partition(&["stock_a"]);
+
+    rank_and_filter(&mut loops, &partitions, None);
+
+    assert_eq!(
+        reported_names(&loops),
+        vec!["l1", "l2", "l3", "l4"],
+        "every retained loop is reported, ranked by mean relative score"
+    );
+}
+
+/// AC5.1 arm (ii): while the anchor set still fits, `k` rises -- each step's
+/// SECOND-strongest loop is anchored too.
+///
+/// The fixture separates escalation from ordinary fill: `l5` is the step-9
+/// runner-up and ranks LAST by mean relative score, so a k=1-only selection
+/// (two anchors plus two slots filled in ranking order) reports `l3` and not
+/// `l5`.
+#[test]
+fn the_anchor_rank_rises_while_the_selection_still_fits() {
+    let steady = |v: f64| -> Vec<f64> { vec![v; 10] };
+    let spike = |v: f64| -> Vec<f64> {
+        let mut s = vec![0.0; 10];
+        s[9] = v;
+        s
+    };
+    let mut loops = vec![
+        cap_fixture_loop("l1", &steady(10.0)),
+        cap_fixture_loop("l2", &steady(5.0)),
+        cap_fixture_loop("l3", &steady(2.0)),
+        cap_fixture_loop("l4", &spike(18.0)),
+        cap_fixture_loop("l5", &spike(12.0)),
+    ];
+    let partitions = single_partition(&["stock_a"]);
+
+    let _guard = MaxLoopsGuard::new(4);
+    rank_and_filter(&mut loops, &partitions, None);
+
+    assert_eq!(
+        reported_names(&loops),
+        vec!["l1", "l2", "l4", "l5"],
+        "k=2 anchors {{l1,l2}} over steps 0-8 and {{l4,l5}} at step 9 and \
+         exactly fills the cap; k=3 would need five slots, so it is not taken"
+    );
+}
+
+/// AC5.1's pathological arm (iii): when the k=1 anchors alone outnumber the
+/// cap, the cap applies to the ANCHORS -- they are kept in the existing
+/// ranking order and everything else is dropped, the top-ranked loop included.
+///
+/// Three loops each dominate one of the three steps while `lb`, which
+/// dominates none, has the highest mean relative score. Reporting `lb` would
+/// cost a step its dominant loop, so under this pressure the coverage claim
+/// wins over the ranking claim -- and the report cannot cover every step
+/// either way, which is what makes the arm pathological rather than merely
+/// tight.
+#[test]
+fn more_anchors_than_the_cap_keeps_the_top_ranked_anchors() {
+    let mut loops = vec![
+        cap_fixture_loop("la", &[10.0, 0.0, 0.0]),
+        cap_fixture_loop("lb", &[4.0, 4.0, 4.0]),
+        cap_fixture_loop("lc", &[0.0, 10.0, 0.0]),
+        cap_fixture_loop("ld", &[0.0, 0.0, 10.0]),
+    ];
+    let partitions = single_partition(&["stock_a"]);
+
+    let _guard = MaxLoopsGuard::new(2);
+    rank_and_filter(&mut loops, &partitions, None);
+
+    assert_eq!(
+        reported_names(&loops),
+        vec!["la", "lc"],
+        "the three anchors are ranked among themselves and the first two \
+         kept; lb, the highest mean-relative loop and no step's dominant one, \
+         is dropped"
+    );
+}
+
+/// AC5.1 arm (iv): a solo loop never anchors. Its relative score is 1.0 at
+/// every active step by construction, so it is every step's "dominant" loop in
+/// its own group and anchoring it would guarantee a slot to the one class of
+/// loop that carries no information -- inverting the demotion.
+#[test]
+fn solo_loops_never_anchor_and_are_still_dropped_first() {
+    let mut loops = vec![
+        cap_fixture_loop("l1", &[10.0, 10.0, 10.0]),
+        cap_fixture_loop("l2", &[3.0, 3.0, 3.0]),
+        make_found_loop_with_scores(
+            &[("solo_x", "solo_y"), ("solo_y", "solo_x")],
+            &["unpartitioned_stock"],
+            LoopPolarity::Reinforcing,
+            100.0,
+            vec![(0.0, 100.0), (1.0, 100.0), (2.0, 100.0)],
+        ),
+    ];
+    let partitions = single_partition(&["stock_a"]);
+
+    let _guard = MaxLoopsGuard::new(2);
+    rank_and_filter(&mut loops, &partitions, None);
+
+    assert_eq!(
+        reported_names(&loops),
+        vec!["l1", "l2"],
+        "the competing pair fills the cap; were the solo loop anchored it \
+         would have taken l2's slot at k=1"
+    );
+}
+
+/// AC5.1 arm (v): the selected set, its order, and its ids are invariant under
+/// input permutation when anchoring decides membership -- the anchor scan
+/// visits groups through a `HashMap`, so this is what says the iteration order
+/// cannot reach the answer.
+#[test]
+fn anchor_selection_is_deterministic_under_permutation() {
+    let partitions = single_partition(&["stock_a"]);
+    let project = |loops: &[FoundLoop]| -> Vec<(String, String, Vec<f64>)> {
+        loops
+            .iter()
+            .map(|l| {
+                (
+                    l.loop_info.links[0].from.as_str().to_string(),
+                    l.loop_info.id.clone(),
+                    l.rel_scores.clone(),
+                )
+            })
+            .collect()
+    };
+
+    let mut forward = briefly_dominant_fixture();
+    let mut reversed = briefly_dominant_fixture();
+    reversed.reverse();
+
+    let _guard = MaxLoopsGuard::new(2);
+    rank_and_filter(&mut forward, &partitions, None);
+    rank_and_filter(&mut reversed, &partitions, None);
+
+    assert_eq!(reported_names(&forward), vec!["l1", "l4"]);
+    assert_eq!(
+        project(&forward),
+        project(&reversed),
+        "permuted input must yield the identical selection, order and ids"
+    );
+}
+
+/// AC5.1 arm (vii): a tie for a step's maximum anchors exactly one loop -- the
+/// one earlier in the ranking -- so a tie never spends two slots on one step.
+///
+/// Tested on [`select_reported`] directly because an exact float tie between
+/// two DIFFERENT loops' relative scores is the one input a fixture cannot
+/// arrange through `rank_and_filter` without also tying their mean relative
+/// scores and raw magnitudes, which would move the ranking the tie rule is
+/// defined against. The rows are the same triple `rank_truncate_and_id`
+/// builds -- (group, competing, `rel_scores`) -- and the end-to-end arms are
+/// pinned by the `rank_and_filter` tests above.
+#[test]
+fn a_tie_for_a_steps_maximum_anchors_the_earlier_ranked_loop() {
+    let group = NormGroup::Partition(0);
+    let tied_a = [0.4, 0.0];
+    let tied_b = [0.4, 0.0];
+    let late = [0.2, 1.0];
+    let rows = vec![
+        SelectionRow {
+            group,
+            competing: true,
+            rel: &tied_a,
+        },
+        SelectionRow {
+            group,
+            competing: true,
+            rel: &tied_b,
+        },
+        SelectionRow {
+            group,
+            competing: true,
+            rel: &late,
+        },
+    ];
+
+    assert_eq!(
+        anchor_ranks(&rows),
+        vec![1, 2, 1],
+        "row 0 holds step 0's maximum and row 1 is only its runner-up, \
+         despite carrying the identical score"
+    );
+    assert_eq!(
+        select_reported(&rows, 2),
+        vec![0, 2],
+        "the two k=1 anchors fill the cap; the tied runner-up is dropped"
+    );
+}
+
+/// A step no retained loop is active at anchors nobody: the partition's mass
+/// there, if any, belongs to loops outside the retained set, so no retained
+/// loop dominated it. Anchoring the ranking's head by default would hand a
+/// guaranteed slot to a loop on the evidence of a step it demonstrably did not
+/// drive -- which is what `steady` is here to catch, since it leads on mean
+/// relative score while dominating no step at all.
+#[test]
+fn a_step_with_no_active_loop_anchors_nobody() {
+    let group = NormGroup::Partition(0);
+    // Step 2 is dead for every loop: two score exactly zero there and the
+    // third's score is undefined (a NaN link somewhere in its product).
+    let steady = [0.4, 0.4, f64::NAN];
+    let early = [0.6, 0.0, 0.0];
+    let late = [0.0, 0.6, 0.0];
+    let rows = vec![
+        SelectionRow {
+            group,
+            competing: true,
+            rel: &steady,
+        },
+        SelectionRow {
+            group,
+            competing: true,
+            rel: &early,
+        },
+        SelectionRow {
+            group,
+            competing: true,
+            rel: &late,
+        },
+    ];
+
+    assert_eq!(
+        anchor_ranks(&rows),
+        vec![2, 1, 1],
+        "the two step-dominant loops anchor at k=1 and the steady leader only \
+         at k=2; the dead step adds nothing"
+    );
+    assert_eq!(
+        select_reported(&rows, 2),
+        vec![1, 2],
+        "the two genuine anchors fit the cap exactly, so the steady leader is \
+         dropped rather than the selection overflowing into its pathological \
+         arm"
+    );
+}
+
+/// Loops in DIFFERENT normalization groups never compete for the same step's
+/// anchor: dominance is a share of one denominator, and comparing shares of
+/// two different denominators is the cross-partition comparison the papers
+/// warn against (ref section 8). Each group anchors its own maximum.
+#[test]
+fn each_normalization_group_anchors_its_own_step_maximum() {
+    let big = [0.6, 0.6];
+    let small = [0.4, 0.4];
+    let other = [0.55, 0.55];
+    let rows = vec![
+        SelectionRow {
+            group: NormGroup::Partition(0),
+            competing: true,
+            rel: &big,
+        },
+        SelectionRow {
+            group: NormGroup::Partition(0),
+            competing: true,
+            rel: &small,
+        },
+        SelectionRow {
+            group: NormGroup::Partition(1),
+            competing: true,
+            rel: &other,
+        },
+    ];
+
+    assert_eq!(
+        anchor_ranks(&rows),
+        vec![1, 2, 1],
+        "partition 1's only loop anchors at k=1 despite scoring below \
+         partition 0's runner-up"
+    );
+    assert_eq!(
+        select_reported(&rows, 2),
+        vec![0, 2],
+        "one anchor per group fills the cap"
+    );
+}
+
 // --- Synthetic-graph fixtures ---
 
 /// Build a multi-step `Results` whose per-edge scores follow a deterministic
@@ -3788,11 +4375,14 @@ fn external_totals_are_used_for_partition_denominators() {
     rank_and_filter(&mut loops, &partitions, None);
     assert_eq!(loops[0].rel_scores, vec![1.0, 1.0]);
 
-    // With external totals carrying the full universe's mass (say 4.0 per
+    // With universe totals carrying the full universe's mass (say 4.0 per
     // step, three unreported sibling loops' worth), rel == 0.25.
-    let external: HashMap<usize, Vec<f64>> = [(0usize, vec![4.0, 4.0])].into_iter().collect();
+    let universe = UniverseStats {
+        totals: [(0usize, vec![4.0, 4.0])].into_iter().collect(),
+        loop_counts: [(0usize, 4usize)].into_iter().collect(),
+    };
     let mut loops = vec![make_loop()];
-    rank_and_filter(&mut loops, &partitions, Some(&external));
+    rank_and_filter(&mut loops, &partitions, Some(&universe));
     assert_eq!(loops[0].rel_scores, vec![0.25, 0.25]);
 }
 

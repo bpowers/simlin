@@ -636,20 +636,21 @@ translated from the Rust -- reproduces the engine exactly on both models:
 | reported-list overlap with the independent ranking | 200/200 | 153/153 |
 | max relative difference, raw loop scores | 0.000e+00 | 0.000e+00 |
 | max absolute difference, relative loop scores | 0.000e+00 | 0.000e+00 |
-| step-dominant coverage, competing groups | 382/399 (95.7%) | 750/750 (100%) |
+| step-dominant coverage, competing groups | 399/399 (100%) | 750/750 (100%) |
 
 The universe count, the survivor count and the reported set all match the
 engine bit for bit, and both score series are bit-identical -- so AC3.2's
 "survivors and their scores are bit-identical" holds against an external
 oracle and not only against a golden.
 
-Two findings that scope Phase 4:
+Two findings about the coverage statistic, one of which the cap answers:
 
-- **World3's step-dominant gap is 17 steps of 399.** At each of those steps
-  the loop with the largest `|relative score|` within its competing partition
-  was enumerated, was retained, and was then dropped by the `MAX_LOOPS` cap.
-  That is exactly the number AC5.1's coverage-aware cap has to drive to 0,
-  and it is now measurable before and after.
+- **The step-dominant coverage the cap has to hold is 100%, and holds it.**
+  Before the coverage-aware cap World3 missed 17 of 399 steps: at each, the
+  loop with the largest `|relative score|` within its competing partition was
+  enumerated, was retained, and was then dropped by `MAX_LOOPS`. Those 17 are
+  the measurement AC5.1's anchoring drives to 0 (see "After Phase 4" below),
+  and the audit re-measures it on every regeneration.
 - **A GLOBAL argmax over relative score measures nothing.** A loop alone in
   its normalization group is its own denominator, so its relative score is
   `+/-1` at every active step by construction. On World3 the global argmax is
@@ -659,4 +660,39 @@ Two findings that scope Phase 4:
   group, which is what AC5.1 already says and what the audit now demonstrates
   the necessity of.
 
-(Phases 4 and 6 still to fill in.)
+After Phase 4 (release, Apple M-series under Asahi,
+`examples/ltm_discovery_bench` and the regenerated audits):
+
+| Model | Discovery time | Reported | Step-dominant coverage (competing groups) | Reported loops changed |
+|---|---|---|---|---|
+| C-LEARN v77 | 0.037 s | 153 | 750/750 (100%) | 0 of 153 |
+| World3-03 | 0.407 s | 200 | 399/399 (100%) | 49 of 200 |
+
+AC3.1 still holds (World3 0.407 s < 1.0 s, C-LEARN 0.037 s < 0.2 s, both
+complete). The rank phase on World3 is 32.0 ms of the 407, of which the
+coverage-aware selection is 3.5 ms -- one scan over 2,979 survivors x 401
+steps. C-LEARN's whole rank phase is 0.44 ms and its selection returns
+immediately: 153 loops is under the cap, so nothing is selected against.
+
+What the cap does on World3, in slots: 50 survivors are some step's dominant
+loop in their competing partition (`k = 1`), 96 are within a step's top two,
+and 140 within a step's top three -- all three fit under `MAX_LOOPS`, so the
+escalation runs to `MAX_ANCHOR_K` and 140 of the 200 slots are anchors, with
+the remaining 60 filled by the mean-relative ranking. That is what moves 49 of
+the reported 200: 151 loops are reported by both selections, 20 of them at a
+different rank, and the presentation order is the same competitive-first
+mean-relative ranking either way. C-LEARN's cap does not bind, so its report
+is unchanged loop for loop.
+
+Universe-based competing classification (AC5.2) reclassifies little on these
+two models -- 2,967 of World3's 2,979 survivors and 141 of C-LEARN's 153
+compete -- because both models' partitions are large. Its effect is on the
+models the enumeration prunes hardest, where a partition can hold one survivor
+and many sub-threshold siblings whose mass is still in its denominator.
+
+The audit's independent re-implementation reproduces the engine's selection
+exactly on both models (200/200 and 153/153 reported-list overlap), so the
+anchoring, the escalation bound and the tie rule are checked against a second
+implementation written from this document rather than only against the Rust.
+
+(Phase 6 still to fill in.)

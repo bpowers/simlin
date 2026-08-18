@@ -48,7 +48,8 @@ mod enum_gen;
 #[cfg(test)]
 pub(crate) use enum_gen::EnumBudgetGuard;
 use enum_gen::{
-    ActivityGraph, accumulate_series_into_totals, enumerate_active_circuits, retain_circuits,
+    ActivityGraph, accumulate_series_into_totals, enumerate_active_circuits, path_partition,
+    retain_circuits,
 };
 
 // Shortest-path fallback: the candidate generator that runs when the
@@ -2296,10 +2297,11 @@ pub(crate) fn discover_loops_with_deadlines(
     let mut truncated = false;
     let mut enumeration_complete = false;
     let mut agg_recovery_truncated = false;
-    // Full-universe per-partition denominators from the enumeration path
-    // (`None` on the fallback path, where `rank_and_filter` computes totals
-    // over the discovered set instead -- a sample has no universe to offer).
-    let mut external_totals: Option<HashMap<usize, Vec<f64>>> = None;
+    // Full-universe per-partition denominators and loop counts from the
+    // enumeration path (`None` on the fallback path, where `rank_and_filter`
+    // measures against the discovered set instead -- a sample has no universe
+    // to offer).
+    let mut universe: Option<UniverseStats> = None;
 
     // --- Primary candidate generation: union-graph circuit enumeration ---
     // (docs/design-plans/2026-08-17-ltm-discovery-exact.md).
@@ -2346,21 +2348,6 @@ pub(crate) fn discover_loops_with_deadlines(
                 deadlines.enumeration,
                 clock,
             ) {
-                // The universe's denominators and the universe's circuit
-                // counts are two views of one enumerated set, built in one
-                // pass: a partition carrying mass with no circuit counted
-                // against it would mean the two had drifted apart, and every
-                // relative score normalized against that partition would be
-                // measured against a population nothing described.
-                debug_assert!(
-                    retention.partition_totals.keys().all(|part| retention
-                        .partition_circuit_counts
-                        .get(part)
-                        .is_some_and(|&n| n > 0)),
-                    "each partition carrying enumerated mass must carry the \
-                     count of circuits that produced it"
-                );
-
                 // Cross-agg stitching over the FULL enumerated set (GH #696).
                 // Stitching must see pre-retention circuits: a petal can fail
                 // retention while a stitched combination passes.
@@ -2411,8 +2398,21 @@ pub(crate) fn discover_loops_with_deadlines(
                 // Stitched loops join the candidate set like any other loop:
                 // their mass joins the denominators and they are materialized
                 // below.
-                let mut totals = retention.partition_totals;
+                let mut stats = UniverseStats {
+                    totals: retention.partition_totals,
+                    loop_counts: retention.partition_circuit_counts,
+                };
                 for seq in &stitched {
+                    // Retention never saw this loop -- it is a COMBINATION of
+                    // enumerated petals rather than one of them -- so nothing
+                    // has counted it yet, and it is one more loop dividing its
+                    // partition's denominator. Counted before the module arm
+                    // below, because a module-traversing stitched loop's mass
+                    // joins the totals after materialization rather than here:
+                    // later, but it joins.
+                    if let Some(part) = path_partition(seq, &stock_partition_of_node) {
+                        *stats.loop_counts.entry(part).or_insert(0) += 1;
+                    }
                     if seq.iter().any(|&n| is_module_node[n as usize]) {
                         // A module-traversing loop reports the per-exit-port
                         // override series rather than the raw composite
@@ -2445,13 +2445,13 @@ pub(crate) fn discover_loops_with_deadlines(
                         seq,
                         &activity,
                         &stock_partition_of_node,
-                        &mut totals,
+                        &mut stats.totals,
                     );
                 }
 
                 node_paths = survivors;
                 node_paths.extend(stitched);
-                external_totals = Some(totals);
+                universe = Some(stats);
                 enumeration_complete = true;
             }
         }
@@ -2771,22 +2771,33 @@ pub(crate) fn discover_loops_with_deadlines(
     // denominator holding a composite product nothing reports, and leaves a
     // trimmed duplicate's mass in the denominator with no reported loop
     // behind it either.
-    if let Some(totals) = external_totals.as_mut() {
+    if let Some(stats) = universe.as_mut() {
         for (fl, traverses_module) in &deduped {
             if *traverses_module {
-                add_reported_mass_to_totals(fl, &partitions, step_count, totals);
+                add_reported_mass_to_totals(fl, &partitions, step_count, &mut stats.totals);
             }
         }
         for (fl, traverses_module) in &dropped {
             if !*traverses_module {
-                subtract_reported_mass_from_totals(fl, &partitions, totals);
+                subtract_reported_mass_from_totals(fl, &partitions, &mut stats.totals);
             }
+            // Whether or not it banked raw mass, a dropped duplicate is no
+            // longer one of the loops its partition's denominator describes:
+            // the kept representative reports that cycle, and the drop's mass
+            // is gone (subtracted just above, or never banked at all for a
+            // module-traversing one). Left counted, a partition whose entire
+            // universe is one reported loop and its trimmed twin would read as
+            // COMPETING while its denominator is that loop's own mass -- and
+            // the +/-1 relative score that follows by construction would
+            // outrank the loops that genuinely divide a denominator, which is
+            // the degeneracy the solo demotion exists to prevent.
+            subtract_reported_loop_from_counts(fl, &partitions, &mut stats.loop_counts);
         }
     }
 
     let mut found_loops: Vec<FoundLoop> = deduped.into_iter().map(|(fl, _)| fl).collect();
 
-    let partition_meta = rank_and_filter(&mut found_loops, &partitions, external_totals.as_ref());
+    let partition_meta = rank_and_filter(&mut found_loops, &partitions, universe.as_ref());
 
     Ok(DiscoveryResult {
         loops: found_loops,
@@ -2810,6 +2821,56 @@ fn loop_partition_slot(fl: &FoundLoop, partitions: &CyclePartitions) -> Option<u
         .first()
         .copied()
         .flatten()
+}
+
+/// The enumerated universe's per-partition statistics: the population every
+/// discovered loop is measured against.
+///
+/// The two fields are two views of ONE population, keyed by engine-internal
+/// cycle partition: `totals[p]` is the mass that `loop_counts[p]` loops
+/// contributed. That population is the full enumerated universe (retention
+/// non-survivors included -- their mass is in the denominator whether or not
+/// they are reported), plus the stitched cross-agg loops that join the
+/// candidate set after retention, minus the reported-cycle duplicates whose
+/// mass is taken back out.
+///
+/// Only the enumeration path has a universe to describe. The fallback samples
+/// the runtime graph, so it passes `None` and `rank_and_filter` measures
+/// against the discovered set instead.
+struct UniverseStats {
+    /// Per-partition per-step `Sum_j |score_j[t]|` over the whole population
+    /// (`NaN` summands excluded, `Inf` kept -- `ltm_post::denom_summand`'s
+    /// rule).
+    totals: HashMap<usize, Vec<f64>>,
+    /// Per-partition count of the loops whose mass `totals` sums. Two or more
+    /// means the partition is COMPETING: its loops divide a denominator none
+    /// of them owns outright (see [`rank_and_filter`]).
+    loop_counts: HashMap<usize, usize>,
+}
+
+/// Drop a loop from its partition's universe count.
+///
+/// The count's meaning is "how many loops' mass is in this partition's total",
+/// so a loop whose mass is not (or is no longer) there must not be counted.
+/// The partition necessarily has an entry: retention counted this circuit when
+/// it banked (or deliberately withheld) its mass, through the same
+/// `CyclePartitions` this resolves against.
+fn subtract_reported_loop_from_counts(
+    fl: &FoundLoop,
+    partitions: &CyclePartitions,
+    loop_counts: &mut HashMap<usize, usize>,
+) {
+    let Some(part) = loop_partition_slot(fl, partitions) else {
+        return;
+    };
+    match loop_counts.get_mut(&part) {
+        Some(count) if *count > 0 => *count -= 1,
+        _ => debug_assert!(
+            false,
+            "a dropped duplicate's partition ({part}) must carry a nonzero \
+             loop count: retention counted this circuit when it saw it"
+        ),
+    }
 }
 
 /// Add a loop's REPORTED |score| series into its partition's universe total.
@@ -2957,6 +3018,12 @@ fn mean_relative_contribution(fl: &FoundLoop, totals: &[f64]) -> f64 {
 struct RelativeImportance {
     mean_rel: f64,
     competing: bool,
+    /// The loop's normalization group. Not part of the ORDER -- the ranking
+    /// compares loops across groups -- but the coverage-aware cap needs to
+    /// know which loops divide one denominator, since being "the dominant loop
+    /// at step t" is a statement within a group and nowhere else
+    /// ([`select_reported`]).
+    group: NormGroup,
     /// The loop's raw `avg_abs_score`, the tie-break BETWEEN equal
     /// `mean_rel` values. Solo loops all carry `mean_rel == 1.0` by
     /// construction, so without this the order among them -- and therefore
@@ -3077,25 +3144,34 @@ fn cmp_relative_importance(a: &RelativeImportance, b: &RelativeImportance) -> st
 /// compares each loop's score to the total within its partition regardless of
 /// granularity.
 ///
-/// **External denominators (the enumeration path).** `external_totals`, when
-/// provided, carries the per-engine-internal-partition per-step
-/// `Σ|score_j[t]|` computed over the FULL enumerated loop universe (retention
-/// non-survivors included), and it replaces the internally-computed totals
-/// for every `NormGroup::Partition` group. Relative scores are then
-/// normalized against the whole universe's mass -- matching exhaustive-mode
-/// semantics, where the enumerated set IS the universe -- instead of against
-/// only the loops in `found_loops`. Solo groups keep their own-series totals
-/// either way. The competing-vs-solo classification is deliberately still
-/// computed over `found_loops` (on the enumeration path: retention
-/// survivors): classifying against the full universe would let never-active
-/// or sub-threshold phantom co-members flip a genuinely-solo loop to
-/// "competing" with mean relative score ~1.0 (its denominator gains no mass
-/// from them), vaulting zero-information loops over real competing ones --
-/// exactly the degeneracy the solo demotion exists to prevent.
+/// **The universe (the enumeration path).** [`UniverseStats`], when provided,
+/// describes the whole enumerated loop population per engine-internal
+/// partition, and both of its fields replace a discovered-set statistic:
+///
+/// - `totals` replaces the internally-computed denominators for every
+///   `NormGroup::Partition` group, so relative scores are normalized against
+///   the whole universe's mass (retention non-survivors included) -- matching
+///   exhaustive-mode semantics, where the enumerated set IS the universe --
+///   instead of against only the loops in `found_loops`. Solo groups keep
+///   their own-series totals either way.
+/// - `loop_counts` decides competing-vs-solo: a partition is competing iff the
+///   universe holds at least two loops there, however many survived retention
+///   or the cap. That is sound precisely because it counts the loops whose
+///   mass is IN the denominator: every enumerated circuit is ever-active by
+///   construction, so a "co-member" cannot be a phantom that leaves the
+///   survivor's relative score at ±1 while flipping it to competing -- the
+///   degeneracy the solo demotion exists to prevent. A survivor sharing its
+///   partition with a sub-threshold sibling has a relative score strictly
+///   below 1, which is real information, and demoting it below loops whose ±1
+///   is pure construction would bury it.
+///
+/// The fallback path passes `None` and both statistics come from the
+/// discovered set: a sample has no universe to describe, and the loops it
+/// found are the only population there is.
 fn rank_and_filter(
     found_loops: &mut Vec<FoundLoop>,
     partitions: &CyclePartitions,
-    external_totals: Option<&HashMap<usize, Vec<f64>>>,
+    universe: Option<&UniverseStats>,
 ) -> Vec<DiscoveredPartition> {
     let step_count = found_loops.first().map_or(0, |l| l.scores.len());
     debug_assert!(
@@ -3130,19 +3206,42 @@ fn rank_and_filter(
         .collect();
 
     // Group loops by normalization group over the FULL discovered set
-    // (before retention or cap).  Drives both the relative-score
-    // denominators below and the competing-vs-solo classification: a loop is
-    // "competing" iff its group holds at least one other discovered loop,
-    // the same population its denominator sums over -- so "solo" means
-    // exactly "its relative score is ±1 by construction" (a Solo-group loop
-    // is solo by definition).
+    // (before retention or cap).  Drives the relative-score denominators
+    // below, and -- on the fallback path -- the competing-vs-solo
+    // classification too.
     let mut partition_groups: HashMap<NormGroup, Vec<usize>> = HashMap::new();
     for (i, &group) in loop_groups.iter().enumerate() {
         partition_groups.entry(group).or_default().push(i);
     }
+    // "Competing" means at least two loops divide this group's denominator,
+    // so that a loop's relative score is a real share rather than ±1 by
+    // construction (see [`RelativeImportance`]). Three arms, one per
+    // (group kind, generator) the classification can face:
     let competing: Vec<bool> = loop_groups
         .iter()
-        .map(|p| partition_groups[p].len() >= 2)
+        .map(|&group| match (group, universe) {
+            // Enumeration path, resolved partition: the universe's count of
+            // the loops whose mass is in this partition's denominator. A
+            // retention non-survivor still holds mass there, so a survivor
+            // alone in the REPORTED set is genuinely sharing.
+            (NormGroup::Partition(p), Some(stats)) => {
+                let count = stats.loop_counts.get(&p).copied().unwrap_or(0);
+                debug_assert!(
+                    count >= partition_groups[&group].len(),
+                    "partition {p}'s universe count ({count}) cannot be below \
+                     the number of discovered loops normalizing against it \
+                     ({}): every discovered loop's mass is in that total",
+                    partition_groups[&group].len()
+                );
+                count >= 2
+            }
+            // Fallback path: a sample has no universe to ask about, so the
+            // discovered set is the only population there is.
+            (NormGroup::Partition(_), None) => partition_groups[&group].len() >= 2,
+            // A Solo group holds exactly one loop by construction (it is keyed
+            // by that loop's index), so it is never competing on either path.
+            (NormGroup::Solo(_), _) => false,
+        })
         .collect();
 
     // Per-group per-timestep totals: Σ|score_j[t]| over the group's loops,
@@ -3158,8 +3257,8 @@ fn rank_and_filter(
     let mut partition_totals: HashMap<NormGroup, Vec<f64>> = HashMap::new();
     if step_count > 0 {
         for (&group, indices) in &partition_groups {
-            if let (NormGroup::Partition(p), Some(external)) = (group, external_totals)
-                && let Some(totals) = external.get(&p)
+            if let (NormGroup::Partition(p), Some(stats)) = (group, universe)
+                && let Some(totals) = stats.totals.get(&p)
             {
                 debug_assert_eq!(totals.len(), step_count);
                 partition_totals.insert(group, totals.clone());
@@ -3294,16 +3393,184 @@ fn signed_relative_scores(fl: &FoundLoop, totals: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+/// The deepest per-step rank a loop can hold and still be anchored (AC5.1).
+///
+/// `k = 1` is the guarantee: every step's dominant loop in a competing group
+/// is reported, so a dominance-over-time reading never names the wrong loop
+/// for a step. Raising `k` covers the runners-up -- what a reader needs to see
+/// a handover coming -- and is taken only while the whole anchor set still
+/// fits under the cap, so it never costs the guarantee. The bound exists
+/// because the value of the k-th place falls off quickly while its cost in
+/// slots does not: a competing group can anchor up to `k` loops at EVERY step,
+/// and past the top few the "runner-up" is just another loop.
+const MAX_ANCHOR_K: usize = 3;
+
+/// One ranked loop, as the coverage-aware cap sees it.
+///
+/// `rel` is the loop's signed per-step relative score series
+/// ([`signed_relative_scores`]); the selection reads magnitudes and treats a
+/// `NaN` as absent (a `NaN` score is an undefined contribution, exactly as in
+/// [`mean_relative_contribution`]).
+struct SelectionRow<'a> {
+    group: NormGroup,
+    competing: bool,
+    rel: &'a [f64],
+}
+
+impl SelectionRow<'_> {
+    /// The loop's contribution magnitude at step `t`: `0.0` where it is
+    /// undefined, absent, or genuinely zero -- all three mean "this loop is
+    /// not what happened here".
+    fn weight(&self, t: usize) -> f64 {
+        match self.rel.get(t) {
+            Some(v) if !v.is_nan() => v.abs(),
+            _ => 0.0,
+        }
+    }
+}
+
+/// For each ranked loop, the smallest `k` at which it is one of some step's
+/// top-`k` loops within its competing group, or `0` for a loop that never is.
+///
+/// Only competing groups anchor: a solo loop's relative score is `±1` at every
+/// active step by construction, so it is trivially its group's per-step
+/// maximum and anchoring it would guarantee a slot to the one class of loop
+/// that carries no information.
+///
+/// A step where no member of the group carries any weight is skipped rather
+/// than anchoring an arbitrary zero: the partition's mass at that step, if
+/// any, belongs to loops outside the retained set, and no retained loop
+/// dominates it. Ties break toward the loop earlier in the ranking, which the
+/// ascending member order makes automatic -- an equal value never displaces
+/// the row already holding the place.
+fn anchor_ranks(rows: &[SelectionRow<'_>]) -> Vec<usize> {
+    let mut anchor_k = vec![0usize; rows.len()];
+    let mut groups: HashMap<NormGroup, Vec<usize>> = HashMap::new();
+    for (r, row) in rows.iter().enumerate() {
+        if row.competing {
+            groups.entry(row.group).or_default().push(r);
+        }
+    }
+    // Group iteration order is unobservable: every group writes only to its
+    // own members' slots, and the groups partition the rows.
+    let mut top: Vec<(f64, usize)> = Vec::with_capacity(MAX_ANCHOR_K + 1);
+    for members in groups.values() {
+        let steps = members
+            .iter()
+            .map(|&r| rows[r].rel.len())
+            .max()
+            .unwrap_or(0);
+        for t in 0..steps {
+            top.clear();
+            for &r in members {
+                let w = rows[r].weight(t);
+                if w <= 0.0 {
+                    continue;
+                }
+                let place = top.iter().position(|&(held, _)| w > held);
+                let place = place.unwrap_or(top.len());
+                if place < MAX_ANCHOR_K {
+                    top.insert(place, (w, r));
+                    top.truncate(MAX_ANCHOR_K);
+                }
+            }
+            for (place, &(_, r)) in top.iter().enumerate() {
+                let k = place + 1;
+                if anchor_k[r] == 0 || anchor_k[r] > k {
+                    anchor_k[r] = k;
+                }
+            }
+        }
+    }
+    anchor_k
+}
+
+/// Choose which of the ranked loops are reported, as positions into `rows`
+/// (ascending, so the caller's presentation order is unchanged).
+///
+/// `rows` is the retained set in the final ranking order (position 0 is the
+/// highest-ranked loop). Membership, and only membership, is what this
+/// decides: the reported list is still ordered competitive-first by mean
+/// relative score, and ids are still assigned over whatever it returns.
+///
+/// Selection (AC5.1):
+///
+/// 1. No cap pressure -- everything is reported.
+/// 2. Otherwise every step's dominant loop within a competing group is an
+///    ANCHOR and keeps its slot ([`anchor_ranks`], `k = 1`). `k` then rises
+///    while the enlarged anchor set still fits, bounded by [`MAX_ANCHOR_K`].
+/// 3. Remaining slots are filled in the existing ranking order.
+/// 4. If even the `k = 1` anchors outnumber the cap -- a report that cannot
+///    cover every step whatever it names -- the cap applies to the anchors
+///    alone, in ranking order. The coverage claim wins over the ranking claim
+///    there, because a loop that dominates no step is a worse answer to "what
+///    drove this step" than a loop that dominates a different one.
+fn select_reported(rows: &[SelectionRow<'_>], cap: usize) -> Vec<usize> {
+    if rows.len() <= cap {
+        return (0..rows.len()).collect();
+    }
+    let anchor_k = anchor_ranks(rows);
+    let count_at = |k: usize| -> usize {
+        anchor_k
+            .iter()
+            .filter(|&&depth| depth != 0 && depth <= k)
+            .count()
+    };
+    if count_at(1) > cap {
+        // Pathological: anchors alone overflow. `anchor_k` is indexed by
+        // ranking position, so filtering it in order already ranks them.
+        return anchor_k
+            .iter()
+            .enumerate()
+            .filter(|&(_, &depth)| depth == 1)
+            .map(|(r, _)| r)
+            .take(cap)
+            .collect();
+    }
+    // The anchor set grows monotonically with k, so the first k that does not
+    // fit is where the escalation stops.
+    let mut depth = 1;
+    for k in 2..=MAX_ANCHOR_K {
+        if count_at(k) > cap {
+            break;
+        }
+        depth = k;
+    }
+    let mut selected = vec![false; rows.len()];
+    let mut chosen = 0usize;
+    for (r, &at) in anchor_k.iter().enumerate() {
+        if at != 0 && at <= depth {
+            selected[r] = true;
+            chosen += 1;
+        }
+    }
+    for slot in selected.iter_mut() {
+        if chosen >= cap {
+            break;
+        }
+        if !*slot {
+            *slot = true;
+            chosen += 1;
+        }
+    }
+    selected
+        .iter()
+        .enumerate()
+        .filter(|&(_, &keep)| keep)
+        .map(|(r, _)| r)
+        .collect()
+}
+
 /// Rank the retained loops competitive-first by partition-relative importance
-/// (see [`cmp_relative_importance`]), truncate to the (possibly
-/// test-overridden) cap, assign IDs, and leave the loops in the ranking order
+/// (see [`cmp_relative_importance`]), apply the coverage-aware cap
+/// ([`select_reported`]), assign IDs, and leave the loops in the ranking order
 /// callers consume.
 ///
 /// `loop_groups[i]` is the normalization group of `found_loops[i]` (its
 /// cycle partition, or its own Solo group when unresolved -- GH #750),
-/// `competing[i]` whether that group holds at least one other discovered
-/// loop, and `partition_totals` the per-group per-timestep denominator --
-/// all as built by `rank_and_filter` over the full discovered set.
+/// `competing[i]` whether at least two loops divide that group's denominator,
+/// and `partition_totals` the per-group per-timestep denominator -- all as
+/// built by `rank_and_filter` over the full discovered set.
 fn rank_truncate_and_id(
     found_loops: &mut Vec<FoundLoop>,
     loop_groups: &[NormGroup],
@@ -3333,6 +3600,7 @@ fn rank_truncate_and_id(
                 RelativeImportance {
                     mean_rel,
                     competing: competing[idx],
+                    group: loop_groups[idx],
                     avg_abs: fl.avg_abs_score,
                     key,
                 },
@@ -3342,7 +3610,30 @@ fn rank_truncate_and_id(
         .collect();
 
     keyed.sort_by(|a, b| cmp_relative_importance(&a.0, &b.0));
-    keyed.truncate(max_loops());
+
+    // Membership under the cap is coverage-aware (AC5.1): each step's dominant
+    // loop within a competing group keeps its slot even when the mean-relative
+    // ranking would drop it. Order is untouched -- `select_reported` answers in
+    // ascending ranking position and `retain` visits in that order.
+    let selected = {
+        let rows: Vec<SelectionRow<'_>> = keyed
+            .iter()
+            .map(|(imp, fl)| SelectionRow {
+                group: imp.group,
+                competing: imp.competing,
+                rel: &fl.rel_scores,
+            })
+            .collect();
+        select_reported(&rows, max_loops())
+    };
+    if selected.len() < keyed.len() {
+        let mut keep = vec![false; keyed.len()];
+        for &r in &selected {
+            keep[r] = true;
+        }
+        let mut keep_iter = keep.into_iter();
+        keyed.retain(|_| keep_iter.next().unwrap_or(false));
+    }
 
     // Assign deterministic, content-derived IDs WITHOUT disturbing the
     // relative-importance ordering callers consume. `assign_loop_ids` reorders

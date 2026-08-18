@@ -954,10 +954,7 @@ pub(super) fn accumulate_series_into_totals(
     stock_partition_of_node: &[Option<usize>],
     partition_totals: &mut HashMap<usize, Vec<f64>>,
 ) {
-    let Some(part) = path
-        .iter()
-        .find_map(|&n| stock_partition_of_node[n as usize])
-    else {
+    let Some(part) = path_partition(path, stock_partition_of_node) else {
         return;
     };
     let rows = path_edge_rows(path, graph);
@@ -978,6 +975,21 @@ pub(super) fn accumulate_series_into_totals(
 #[inline]
 fn deadline_expired(i: usize, deadline: Option<Instant>, clock: &mut dyn Clock) -> bool {
     i.is_multiple_of(RETENTION_DEADLINE_CHECK_CIRCUITS) && expired(deadline, clock)
+}
+
+/// The engine-internal cycle partition of a node path: that of its first stock
+/// node in traversal order, or `None` (Solo) when no node resolves to one.
+///
+/// The node-path twin of [`circuit_partition`], which answers the same question
+/// off a circuit's edge rows. Both the mass a path contributes and the count of
+/// loops that mass came from must land on the same key, so the two callers ask
+/// through this one function rather than each spelling the `find_map`.
+pub(super) fn path_partition(
+    path: &[u32],
+    stock_partition_of_node: &[Option<usize>],
+) -> Option<usize> {
+    path.iter()
+        .find_map(|&n| stock_partition_of_node[n as usize])
 }
 
 /// Resolve a node path's consecutive-pair (wrapping) edge rows. Every pair is a
