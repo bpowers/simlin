@@ -336,7 +336,12 @@ re-running a display cell leaves the previous one alive, which is harmless
 but worth knowing in long sessions. The SVG in the same output is for
 static renderers -- nbconvert, GitHub, a viewer without a kernel; JupyterLab
 itself shows "model not found" in place of a widget when a notebook is
-reopened without a running kernel or saved widget state. Hosts that save
+reopened without a running kernel or saved widget state. nbconvert shows
+the SVG whenever the notebook carries no saved widget state; `jupyter
+nbconvert --execute` stores that state by default and then exports the
+widget itself (with its 1.5 MB module embedded, loading ipywidgets from a
+CDN when opened), so pass `--ExecutePreprocessor.store_widget_state=False`
+to get the diagram instead. Hosts that save
 widget state into the notebook file (Colab does by default; JupyterLab does
 not) store the widget's JS module, about 1.5 MB, per displayed widget. If
 that size is a concern, or the front-end cannot receive binary comm

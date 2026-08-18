@@ -92,6 +92,7 @@ uv run mypy simlin                 # Type check (strict)
 make assets                        # Build + stage the notebook widget assets (widget.js + wasm)
 make check-assets                  # Verify the staged widget assets
 make e2e                           # JupyterLab notebook-editor journey (Playwright)
+make export-check                  # nbconvert the example notebook (widget view with state, SVG without)
 uv run python scripts/build_wheels.py   # Build the wheel (libsimlin + widget assets + CFFI)
 ```
 

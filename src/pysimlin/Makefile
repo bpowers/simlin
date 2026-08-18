@@ -1,4 +1,4 @@
-.PHONY: all build test clean install dev lint type-check assets check-assets e2e
+.PHONY: all build test clean install dev lint type-check assets check-assets e2e export-check
 
 # Build the libsimlin library. mimalloc: the engine compile path is
 # allocation-heavy and mimalloc roughly halves allocator time on native builds
@@ -47,6 +47,14 @@ e2e:
 	uv sync --inexact --extra dev --extra e2e
 	../../node_modules/.bin/tsc -p e2e/tsconfig.json
 	../../node_modules/.bin/playwright test -c e2e/playwright.config.ts
+
+# Static-export check of the example notebook: execute it headless with
+# nbconvert (from this venv, so the e2e extra is synced the same way) and
+# assert the display cell exports as the widget when the widget state is
+# stored and as the SVG diagram when it is not (scripts/check_notebook_export.py).
+export-check:
+	uv sync --inexact --extra dev --extra e2e
+	uv run python scripts/check_notebook_export.py examples/notebook_editor.ipynb --output-dir e2e/.output/export
 
 # Format code
 format:
